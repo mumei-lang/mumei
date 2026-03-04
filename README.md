@@ -349,5 +349,5 @@ my_app/
 - [ ] **Task 洗練**: 戻り値型推論、`task_group` 結果バインド、チャネル型 (`chan<T>`)
 - [ ] Rich Diagnostics: miette/ariadne ライブラリによるカラー表示・下線・サジェスト
 
-> 📖 **Toolchain roadmap**: [`docs/TOOLCHAIN.md`](docs/TOOLCHAIN.md) | **Development instructions**: [`INSTRUCTIONS.md`](INSTRUCTIONS.md)
+> 📖 **Toolchain roadmap**: [`docs/TOOLCHAIN.md`](docs/TOOLCHAIN.md) | **Development instructions**: [`instruction.md`](instruction.md)
 

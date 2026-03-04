@@ -124,7 +124,7 @@ npm run compile
 ### LSP Features (現フェーズで完了 — 深追いしない)
 
 > LSP は現在の機能で一旦完了。言語機能の充実を優先する。
-> 詳細: [`INSTRUCTIONS.md`](../INSTRUCTIONS.md)
+> 詳細: [`instruction.md`](../instruction.md) §11
 
 | Feature | Status |
 |---|---|

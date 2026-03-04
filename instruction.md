@@ -151,6 +151,91 @@ Mumei caches verification results per-atom in `.mumei_build_cache`:
 | `docs/ARCHITECTURE.md` | Compiler internals, pipeline, ModuleEnv, LinearityCtx |
 | `docs/STDLIB.md` | Standard library reference (all modules + atoms) |
 | `docs/CHANGELOG.md` | PR #16 change history |
-| `instruction.md` | This file — forging guidelines for developers and AI agents |
+| `docs/DIAGNOSTICS.md` | Span-based diagnostics design and implementation status |
+| `docs/FFI.md` | FFI extern block design and implementation status |
+| `docs/CONCURRENCY.md` | Structured concurrency (task/task_group) design and implementation status |
+| `instruction.md` | This file — forging guidelines, development phase, coding conventions |
+
+---
+
+## 11. Current Development Phase: Language Feature Enrichment
+
+### LSP Status: Frozen
+
+The LSP server (`mumei lsp`) has the following features implemented and is **considered complete for now**:
+
+- `textDocument/didOpen` / `textDocument/didChange` → parse error diagnostics
+- `textDocument/hover` → atom requires/ensures display
+- Z3 verification error diagnostics (with Span-based position info)
+- `shutdown` / `exit` handling
+
+**Deferred items** (to be addressed when time permits):
+- `textDocument/completion` (keyword/atom name completion)
+- `textDocument/definition` (jump to definition)
+- Counter-example highlighting in editors
+- VS Code Marketplace publishing
+
+Rationale: We are shifting focus from editor tooling to **language feature enrichment**.
+
+### Next Steps: Strengthening Mumei's Identity
+
+Mumei's differentiators:
+- **Rust-level safety** (Z3 formal verification) combined with
+- **Go-level simplicity** for concurrent programming
+
+#### Priority 1: `std.http` Implementation
+
+Build a demo showing "network communication is this simple in Mumei."
+
+**Design approach:**
+- Hide Rust's `reqwest` crate behind FFI (`extern "Rust"`)
+- Design a clean, Mumei-idiomatic API interface
+- Demonstrate concurrent HTTP requests using `task` / `task_group`
+
+**Target API:**
+```mumei
+import "std/http";
+
+// Simple GET
+let response = await http.get("https://api.example.com/users");
+
+// Concurrent requests
+task_group:all {
+    task { http.get("https://api.example.com/users") };
+    task { http.get("https://api.example.com/orders") };
+    task { http.get("https://api.example.com/products") }
+}
+```
+
+#### Priority 2: Task (Concurrency) Refinement
+
+Improve the practicality of `task` / `task_group` introduced in PR-C.
+
+**TODO:**
+- Task return type inference
+- Syntax for binding `task_group` results to variables
+- Task cancellation semantics design
+- Channel type (`chan<T>`) design
+
+#### Priority 3: FFI Bridge Completion
+
+Auto-register functions declared in `extern "Rust" { fn ...; }` as `trusted atom` in ModuleEnv.
+This enables the FFI backend for `std.http`.
+
+---
+
+## 12. Coding Conventions
+
+- Always run `cargo fmt` before committing.
+- When adding a new `Expr` variant, add match arms in **all** of these locations:
+  - `src/verification.rs`: `expr_to_z3`, `collect_callees`, `count_self_calls`, `collect_acquire_resources`
+  - `src/ast.rs`: `collect_from_expr`
+  - `src/codegen.rs`: `compile_expr`
+  - `src/transpiler/rust.rs`, `golang.rs`, `typescript.rs`: `format_expr_*`
+- When adding a new `Item` variant, add match arms in **all** of these locations:
+  - `src/main.rs`: `load_and_prepare`, `cmd_check`, `cmd_build`
+  - `src/resolver.rs`: `resolve_imports_recursive`, `register_imported_items`
+  - `src/lsp.rs`: `verify_source_for_lsp`
+- When using `#[allow(dead_code)]`, always add a NOTE comment explaining the reason.
 
 ---
