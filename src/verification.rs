@@ -33,7 +33,8 @@ impl ErrorDetail {
         }
     }
 
-    /// Span 付きで ErrorDetail を生成する
+    /// Span 付きで ErrorDetail を生成する（MumeiError に Span を持たせた際に使用予定）
+    #[allow(dead_code)]
     pub fn with_span(msg: impl Into<String>, span: Span) -> Self {
         ErrorDetail {
             message: msg.into(),
