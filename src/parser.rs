@@ -510,6 +510,7 @@ pub enum Item {
 ///     fn abs(x: i64) -> i64;
 /// }
 /// ```
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct ExternFn {
     /// 関数名（外部シンボル名）
@@ -530,6 +531,7 @@ pub struct ExternBlock {
     /// 関数シグネチャリスト
     pub functions: Vec<ExternFn>,
     /// ソース位置情報
+    #[allow(dead_code)]
     pub span: Span,
 }
 
