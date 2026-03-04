@@ -4,9 +4,7 @@ use regex::Regex;
 // --- 0. ソース位置情報 (Span) ---
 
 /// ソースコード内の位置情報。全 AST ノードに付与して診断メッセージの精度を向上させる。
-/// 現時点では全ノードに Span::default() が設定されており、実際の行・列追跡は後続PRで実装予定。
 #[derive(Debug, Clone, PartialEq)]
-#[allow(dead_code)]
 pub struct Span {
     /// ソースファイル名（空文字列は不明を表す）
     pub file: String,
@@ -30,8 +28,7 @@ impl Default for Span {
 }
 
 impl Span {
-    /// 既知の位置情報を持つ Span を生成する（後続PRでパーサが使用予定）
-    #[allow(dead_code)]
+    /// 既知の位置情報を持つ Span を生成する
     pub fn new(file: impl Into<String>, line: usize, col: usize, len: usize) -> Self {
         Span {
             file: file.into(),
@@ -40,6 +37,30 @@ impl Span {
             len,
         }
     }
+}
+
+/// ソース文字列内のバイトオフセットから (1-indexed line, 1-indexed col) を計算する。
+fn offset_to_line_col(source: &str, offset: usize) -> (usize, usize) {
+    let mut line = 1;
+    let mut col = 1;
+    for (i, c) in source.char_indices() {
+        if i >= offset {
+            break;
+        }
+        if c == '\n' {
+            line += 1;
+            col = 1;
+        } else {
+            col += 1;
+        }
+    }
+    (line, col)
+}
+
+/// ソース文字列内の regex マッチからSpanを生成するヘルパー。
+fn span_from_offset(source: &str, offset: usize, len: usize) -> Span {
+    let (line, col) = offset_to_line_col(source, offset);
+    Span::new("", line, col, len)
 }
 
 impl std::fmt::Display for Span {
@@ -88,7 +109,6 @@ pub struct ResourceDef {
     /// アクセスモード: exclusive（書き込み）または shared（読み取り）
     pub mode: ResourceMode,
     /// ソース位置情報
-    #[allow(dead_code)]
     pub span: Span,
 }
 
@@ -214,7 +234,6 @@ pub struct EnumDef {
     #[allow(dead_code)]
     pub is_recursive: bool,
     /// ソース位置情報
-    #[allow(dead_code)]
     pub span: Span,
 }
 
@@ -242,7 +261,6 @@ pub struct RefinedType {
     pub operand: String,
     pub predicate_raw: String,
     /// ソース位置情報
-    #[allow(dead_code)]
     pub span: Span,
 }
 
@@ -371,7 +389,6 @@ pub struct StructDef {
 #[derive(Debug, Clone)]
 pub struct ImportDecl {
     /// ソース位置情報
-    #[allow(dead_code)]
     pub span: Span,
     /// インポート対象のファイルパス（例: "./lib/math.mm")
     pub path: String,
@@ -422,7 +439,6 @@ pub struct TraitDef {
     /// 各要素は (法則名, 論理式の文字列) のペア。
     pub laws: Vec<(String, String)>,
     /// ソース位置情報
-    #[allow(dead_code)]
     pub span: Span,
 }
 
@@ -441,7 +457,6 @@ pub struct ImplDef {
     /// メソッド実装: (メソッド名, body 式の文字列)
     pub method_bodies: Vec<(String, String)>,
     /// ソース位置情報
-    #[allow(dead_code)]
     pub span: Span,
 }
 
@@ -597,8 +612,9 @@ pub fn parse_module(source: &str) -> Vec<Item> {
     for cap in import_re.captures_iter(source) {
         let path = cap[1].to_string();
         let alias = cap.get(2).map(|m| m.as_str().to_string());
+        let m = cap.get(0).unwrap();
         items.push(Item::Import(ImportDecl {
-            span: Span::default(),
+            span: span_from_offset(source, m.start(), m.end() - m.start()),
             path,
             alias,
         }));
@@ -608,12 +624,13 @@ pub fn parse_module(source: &str) -> Vec<Item> {
         let full_predicate = cap[3].trim().to_string();
         let tokens = tokenize(&full_predicate);
         let operand = tokens.first().cloned().unwrap_or_else(|| "v".to_string());
+        let m = cap.get(0).unwrap();
         items.push(Item::TypeDef(RefinedType {
             name: cap[1].to_string(),
             _base_type: cap[2].to_string(),
             operand,
             predicate_raw: full_predicate,
-            span: Span::default(),
+            span: span_from_offset(source, m.start(), m.end() - m.start()),
         }));
     }
 
@@ -653,12 +670,13 @@ pub fn parse_module(source: &str) -> Vec<Item> {
                 }
             })
             .collect();
+        let m = cap.get(0).unwrap();
         items.push(Item::StructDef(StructDef {
             name,
             type_params,
             fields,
             method_names: vec![],
-            span: Span::default(),
+            span: span_from_offset(source, m.start(), m.end() - m.start()),
         }));
     }
 
@@ -723,12 +741,13 @@ pub fn parse_module(source: &str) -> Vec<Item> {
                 }
             })
             .collect();
+        let m = cap.get(0).unwrap();
         items.push(Item::EnumDef(EnumDef {
             name,
             type_params,
             variants,
             is_recursive: any_recursive,
-            span: Span::default(),
+            span: span_from_offset(source, m.start(), m.end() - m.start()),
         }));
     }
 
@@ -795,11 +814,12 @@ pub fn parse_module(source: &str) -> Vec<Item> {
                 }
             }
         }
+        let m = cap.get(0).unwrap();
         items.push(Item::TraitDef(TraitDef {
             name,
             methods,
             laws,
-            span: Span::default(),
+            span: span_from_offset(source, m.start(), m.end() - m.start()),
         }));
     }
 
