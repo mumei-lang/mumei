@@ -134,7 +134,7 @@ fn resolve_imports_recursive(
             let resolved_path = resolve_path(&import_decl.path, base_dir)?;
             // 循環参照チェック
             if ctx.loading.contains(&resolved_path) {
-                return Err(MumeiError::VerificationError(
+                return Err(MumeiError::verification(
                     format!("Circular import detected: '{}'", resolved_path.display())
                 ));
             }
@@ -146,7 +146,7 @@ fn resolve_imports_recursive(
             ctx.loading.insert(resolved_path.clone());
             // ファイルを読み込みパース
             let source = fs::read_to_string(&resolved_path).map_err(|e| {
-                MumeiError::VerificationError(
+                MumeiError::verification(
                     format!("Failed to read imported module '{}': {}", import_decl.path, e)
                 )
             })?;
@@ -348,7 +348,7 @@ fn resolve_path(import_path: &str, base_dir: &Path) -> MumeiResult<PathBuf> {
     }
 
     // すべて失敗した場合はエラー
-    Err(MumeiError::VerificationError(
+    Err(MumeiError::verification(
         format!(
             "Cannot resolve import path '{}'\n  Searched:\n    - {}\n    - compiler binary directory\n    - current working directory\n    - MUMEI_STD_PATH environment variable",
             import_path,
@@ -383,7 +383,7 @@ pub fn resolve_manifest_dependencies(
             let entry = entry_candidates.iter().find(|p| p.exists());
             if let Some(entry_path) = entry {
                 let source = fs::read_to_string(entry_path).map_err(|e| {
-                    MumeiError::VerificationError(format!(
+                    MumeiError::verification(format!(
                         "Failed to read dependency '{}' at '{}': {}",
                         dep_name, entry_path.display(), e
                     ))
