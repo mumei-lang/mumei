@@ -2870,7 +2870,7 @@ fn expr_to_z3<'a>(
                             solver.assert(&held_bool);
                             if solver.check() != SatResult::Unsat {
                                 solver.pop(1);
-                                return Err(MumeiError::VerificationError(
+                                return Err(MumeiError::verification(
                                     format!(
                                         "Unsafe await: resource '{}' is held across an await point. \
                                          This can cause deadlock because the resource lock is not released \
