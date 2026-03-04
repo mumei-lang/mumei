@@ -1368,6 +1368,9 @@ fn parse_primary(tokens: &[String], pos: &mut usize) -> Expr {
             if *pos < tokens.len() && tokens[*pos] == "any" {
                 *pos += 1;
                 JoinSemantics::Any
+            } else if *pos < tokens.len() && tokens[*pos] == "all" {
+                *pos += 1;
+                JoinSemantics::All
             } else {
                 JoinSemantics::All
             }
