@@ -1,6 +1,6 @@
 use crate::parser::{
-    parse_expression, Atom, EnumDef, Expr, ImplDef, MatchArm, Op, Pattern, QuantifierType,
-    RefinedType, ResourceDef, ResourceMode, Span, StructDef, TraitDef, TrustLevel,
+    parse_expression, Atom, EnumDef, Expr, ImplDef, JoinSemantics, MatchArm, Op, Pattern,
+    QuantifierType, RefinedType, ResourceDef, ResourceMode, Span, StructDef, TraitDef, TrustLevel,
 };
 use serde_json::json;
 use std::collections::{HashMap, HashSet};

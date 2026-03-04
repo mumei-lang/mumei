@@ -196,6 +196,7 @@ fn resolve_imports_recursive(
                     Item::ImplDef(_) => {},
                     Item::ResourceDef(_) => {},
                     Item::Import(_) => {},
+                    Item::ExternBlock(_) => {},
                 }
             }
 
@@ -269,6 +270,9 @@ fn register_imported_items(items: &[Item], alias: Option<&str>, module_env: &mut
             }
             Item::Import(_) => {
                 // 再帰的に処理済み
+            }
+            Item::ExternBlock(_) => {
+                // ExternBlock は現在 ModuleEnv に登録不要（将来: trusted atom として登録）
             }
         }
     }

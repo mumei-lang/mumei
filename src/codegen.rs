@@ -612,6 +612,18 @@ fn compile_expr<'a>(
             compile_expr(context, builder, module, function, expr, variables, array_ptrs, module_env)
         },
 
+        // Task/TaskGroup: 現在は body をそのままコンパイル（将来: スケジューラ統合）
+        Expr::Task { body, .. } => {
+            compile_expr(context, builder, module, function, body, variables, array_ptrs, module_env)
+        },
+        Expr::TaskGroup { children, .. } => {
+            let mut last_val: BasicValueEnum = context.i64_type().const_int(0, false).into();
+            for child in children {
+                last_val = compile_expr(context, builder, module, function, child, variables, array_ptrs, module_env)?;
+            }
+            Ok(last_val)
+        },
+
         Expr::FieldAccess(inner_expr, field_name) => {
             // ネスト構造体のフィールドアクセスを再帰的に解決する。
             // v.x → 1段階、v.point.x → 2段階（再帰的に extract_value）

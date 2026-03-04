@@ -284,5 +284,13 @@ fn format_expr_go(expr: &Expr) -> String {
             let expr_str = format_expr_go(expr);
             format!("<-{}", expr_str)
         },
+        Expr::Task { body, .. } => {
+            let body_str = format_expr_go(body);
+            format!("func() int64 {{\n        ch := make(chan int64, 1)\n        go func() {{ ch <- func() int64 {{ {} }}() }}()\n        return <-ch\n    }}()", body_str)
+        },
+        Expr::TaskGroup { children, .. } => {
+            let tasks: Vec<String> = children.iter().map(format_expr_go).collect();
+            format!("/* task_group */ func() int64 {{ {} }}()", tasks.join("; "))
+        },
     }
 }
