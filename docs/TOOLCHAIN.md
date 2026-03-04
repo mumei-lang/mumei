@@ -121,15 +121,18 @@ npm run compile
 # Then "Run Extension" from VS Code (F5)
 ```
 
-### LSP Features
+### LSP Features (Frozen — not actively developed)
+
+> LSP is considered complete for the current phase. Focus is shifting to language feature enrichment.
+> See [`instruction.md`](../instruction.md) §11 for details.
 
 | Feature | Status |
 |---|---|
 | `textDocument/didOpen` / `didChange` | ✅ Parse error diagnostics |
 | `textDocument/hover` | ✅ Atom contract display (requires/ensures) |
-| Z3 verification diagnostics | ✅ Errors shown as diagnostics |
-| `textDocument/completion` | 🔜 Planned |
-| `textDocument/definition` | 🔜 Planned |
+| Z3 verification diagnostics | ✅ Errors shown as diagnostics (with Span) |
+| `textDocument/completion` | ⏸ Deferred |
+| `textDocument/definition` | ⏸ Deferred |
 
 ---
 
@@ -175,9 +178,18 @@ Inspects all tools with multi-path std library search (cwd → exe dir → `MUME
 
 ## Future Roadmap
 
+### Priority: Language Feature Enrichment
+
+- [ ] **`std.http`**: HTTP client via Rust `reqwest` FFI + concurrent requests with `task_group`
+- [ ] **Task Refinement**: return type inference, result binding syntax, task cancellation, channel type (`chan<T>`)
+- [ ] **FFI Bridge Completion**: `extern` declaration → auto-register as `trusted atom` → `std.http` backend
+
+### Deferred: Tooling
+
 - [ ] Remote package registry (central server for `mumei add <name>`)
 - [ ] VS Code Marketplace publishing
-- [ ] LSP completion + definition jump
-- [ ] Counter-example highlighting in editors
+- [ ] LSP completion + definition jump (⏸ Deferred)
+- [ ] Counter-example highlighting in editors (⏸ Deferred)
+- [ ] Rich Diagnostics (miette/ariadne)
 - [ ] `mumei inspect --ai` (structured JSON output for AI agents)
 - [ ] Z3 proof certificates in published packages
