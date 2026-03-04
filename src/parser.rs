@@ -1,13 +1,71 @@
-use regex::Regex;
 use crate::ast::TypeRef;
+use regex::Regex;
+
+// --- 0. ソース位置情報 (Span) ---
+
+/// ソースコード内の位置情報。全 AST ノードに付与して診断メッセージの精度を向上させる。
+#[derive(Debug, Clone, PartialEq)]
+pub struct Span {
+    /// ソースファイル名（空文字列は不明を表す）
+    pub file: String,
+    /// 行番号（1-indexed、0 は不明）
+    pub line: usize,
+    /// 列番号（1-indexed、0 は不明）
+    pub col: usize,
+    /// トークン長（0 は不明）
+    pub len: usize,
+}
+
+impl Default for Span {
+    fn default() -> Self {
+        Span {
+            file: String::new(),
+            line: 0,
+            col: 0,
+            len: 0,
+        }
+    }
+}
+
+impl Span {
+    /// 既知の位置情報を持つ Span を生成する
+    pub fn new(file: impl Into<String>, line: usize, col: usize, len: usize) -> Self {
+        Span {
+            file: file.into(),
+            line,
+            col,
+            len,
+        }
+    }
+}
+
+impl std::fmt::Display for Span {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.file.is_empty() {
+            write!(f, "<unknown>:{}:{}", self.line, self.col)
+        } else {
+            write!(f, "{}:{}:{}", self.file, self.line, self.col)
+        }
+    }
+}
 
 // --- 1. 数式の構造定義 (AST: Abstract Syntax Tree) ---
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Op {
-    Add, Sub, Mul, Div,
-    Eq, Neq, Gt, Lt, Ge, Le,
-    And, Or, Implies,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Eq,
+    Neq,
+    Gt,
+    Lt,
+    Ge,
+    Le,
+    And,
+    Or,
+    Implies,
 }
 
 // =============================================================================
@@ -26,6 +84,8 @@ pub struct ResourceDef {
     pub priority: i64,
     /// アクセスモード: exclusive（書き込み）または shared（読み取り）
     pub mode: ResourceMode,
+    /// ソース位置情報
+    pub span: Span,
 }
 
 /// リソースのアクセスモード
@@ -149,6 +209,8 @@ pub struct EnumDef {
     /// この Enum が再帰的データ型か（いずれかの Variant が自身を参照するか）
     #[allow(dead_code)]
     pub is_recursive: bool,
+    /// ソース位置情報
+    pub span: Span,
 }
 
 // --- 2. 量子化子、精緻型、および Item の定義 ---
@@ -171,9 +233,11 @@ pub struct Quantifier {
 #[derive(Debug, Clone)]
 pub struct RefinedType {
     pub name: String,
-    pub _base_type: String,   // i64, u64, f64 を保持
+    pub _base_type: String, // i64, u64, f64 を保持
     pub operand: String,
     pub predicate_raw: String,
+    /// ソース位置情報
+    pub span: Span,
 }
 
 #[derive(Debug, Clone)]
@@ -246,6 +310,8 @@ pub struct Atom {
     /// 2. 維持 (Preservation): invariant が成立する状態で body を実行した後も invariant が維持されることを証明
     /// 3. 再帰呼び出し時: 呼び出し先の invariant を仮定として使用（帰納法の仮定）
     pub invariant: Option<String>,
+    /// ソース位置情報
+    pub span: Span,
 }
 
 // =============================================================================
@@ -291,12 +357,16 @@ pub struct StructDef {
     /// 実際の Atom 定義は ModuleEnv.atoms に "Stack::push" のような FQN で登録される。
     #[allow(dead_code)]
     pub method_names: Vec<String>,
+    /// ソース位置情報
+    pub span: Span,
 }
 
 /// インポート宣言
 #[derive(Debug, Clone)]
 pub struct ImportDecl {
-    /// インポート対象のファイルパス（例: "./lib/math.mm"）
+    /// ソース位置情報
+    pub span: Span,
+    /// インポート対象のファイルパス（例: "./lib/math.mm")
     pub path: String,
     /// エイリアス（例: as math → Some("math")）
     pub alias: Option<String>,
@@ -344,6 +414,8 @@ pub struct TraitDef {
     /// 法則（Laws）: トレイトが満たすべき論理的性質。
     /// 各要素は (法則名, 論理式の文字列) のペア。
     pub laws: Vec<(String, String)>,
+    /// ソース位置情報
+    pub span: Span,
 }
 
 /// トレイト実装定義
@@ -360,6 +432,8 @@ pub struct ImplDef {
     pub target_type: String,
     /// メソッド実装: (メソッド名, body 式の文字列)
     pub method_bodies: Vec<(String, String)>,
+    /// ソース位置情報
+    pub span: Span,
 }
 
 #[derive(Debug, Clone)]
@@ -402,7 +476,8 @@ fn parse_type_params_from_str(input: &str) -> (Vec<String>, usize) {
         return (vec![], 0);
     }
     let inner = &input[1..end];
-    let params: Vec<String> = inner.split(',')
+    let params: Vec<String> = inner
+        .split(',')
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
@@ -437,8 +512,14 @@ fn split_type_args(input: &str) -> Vec<String> {
     let mut current = String::new();
     for c in input.chars() {
         match c {
-            '<' => { depth += 1; current.push(c); }
-            '>' => { depth -= 1; current.push(c); }
+            '<' => {
+                depth += 1;
+                current.push(c);
+            }
+            '>' => {
+                depth -= 1;
+                current.push(c);
+            }
             ',' if depth == 0 => {
                 let trimmed = current.trim().to_string();
                 if !trimmed.is_empty() {
@@ -446,7 +527,9 @@ fn split_type_args(input: &str) -> Vec<String> {
                 }
                 current.clear();
             }
-            _ => { current.push(c); }
+            _ => {
+                current.push(c);
+            }
         }
     }
     let trimmed = current.trim().to_string();
@@ -466,11 +549,15 @@ fn parse_type_params_with_bounds(input: &str) -> (Vec<String>, Vec<TypeParamBoun
     for raw in &raw_params {
         if let Some((param, bound_str)) = raw.split_once(':') {
             let param = param.trim().to_string();
-            let param_bounds: Vec<String> = bound_str.split('+')
+            let param_bounds: Vec<String> = bound_str
+                .split('+')
                 .map(|b| b.trim().to_string())
                 .filter(|b| !b.is_empty())
                 .collect();
-            bounds.push(TypeParamBound { param: param.clone(), bounds: param_bounds });
+            bounds.push(TypeParamBound {
+                param: param.clone(),
+                bounds: param_bounds,
+            });
             type_params.push(param);
         } else {
             type_params.push(raw.trim().to_string());
@@ -501,7 +588,11 @@ pub fn parse_module(source: &str) -> Vec<Item> {
     for cap in import_re.captures_iter(source) {
         let path = cap[1].to_string();
         let alias = cap.get(2).map(|m| m.as_str().to_string());
-        items.push(Item::Import(ImportDecl { path, alias }));
+        items.push(Item::Import(ImportDecl {
+            span: Span::default(),
+            path,
+            alias,
+        }));
     }
 
     for cap in type_re.captures_iter(source) {
@@ -513,13 +604,15 @@ pub fn parse_module(source: &str) -> Vec<Item> {
             _base_type: cap[2].to_string(),
             operand,
             predicate_raw: full_predicate,
+            span: Span::default(),
         }));
     }
 
     for cap in struct_re.captures_iter(source) {
         let name = cap[1].to_string();
         // Generics: 型パラメータ <T, U> のパース
-        let type_params = cap.get(2)
+        let type_params = cap
+            .get(2)
             .map(|m| {
                 let (params, _) = parse_type_params_from_str(m.as_str());
                 params
@@ -538,7 +631,10 @@ pub fn parse_module(source: &str) -> Vec<Item> {
                     (s.trim(), None)
                 };
                 let parts: Vec<&str> = field_part.splitn(2, ':').collect();
-                let type_name_str = parts.get(1).map(|t| t.trim().to_string()).unwrap_or_else(|| "i64".to_string());
+                let type_name_str = parts
+                    .get(1)
+                    .map(|t| t.trim().to_string())
+                    .unwrap_or_else(|| "i64".to_string());
                 let type_ref = parse_type_ref(&type_name_str);
                 StructField {
                     name: parts[0].trim().to_string(),
@@ -548,7 +644,13 @@ pub fn parse_module(source: &str) -> Vec<Item> {
                 }
             })
             .collect();
-        items.push(Item::StructDef(StructDef { name, type_params, fields, method_names: vec![] }));
+        items.push(Item::StructDef(StructDef {
+            name,
+            type_params,
+            fields,
+            method_names: vec![],
+            span: Span::default(),
+        }));
     }
 
     // enum 定義: enum Name { ... } または enum Name<T> { ... }
@@ -557,7 +659,8 @@ pub fn parse_module(source: &str) -> Vec<Item> {
     for cap in enum_re.captures_iter(source) {
         let name = cap[1].to_string();
         // Generics: 型パラメータ <T, U> のパース
-        let type_params = cap.get(2)
+        let type_params = cap
+            .get(2)
             .map(|m| {
                 let (params, _) = parse_type_params_from_str(m.as_str());
                 params
@@ -579,24 +682,45 @@ pub fn parse_module(source: &str) -> Vec<Item> {
                         .map(|f| {
                             let f = f.trim().to_string();
                             // "Self" を Enum 自身の名前に展開
-                            if f == "Self" { name.clone() } else { f }
+                            if f == "Self" {
+                                name.clone()
+                            } else {
+                                f
+                            }
                         })
                         .filter(|f| !f.is_empty())
                         .collect();
                     // TypeRef 版のフィールド型も生成
-                    let field_types: Vec<TypeRef> = fields.iter()
-                        .map(|f| parse_type_ref(f))
-                        .collect();
+                    let field_types: Vec<TypeRef> =
+                        fields.iter().map(|f| parse_type_ref(f)).collect();
                     // 再帰判定: フィールドに自身の Enum 名を含むか
                     let is_recursive = fields.iter().any(|f| f == &name);
-                    if is_recursive { any_recursive = true; }
-                    EnumVariant { name: variant_name, fields, field_types, is_recursive }
+                    if is_recursive {
+                        any_recursive = true;
+                    }
+                    EnumVariant {
+                        name: variant_name,
+                        fields,
+                        field_types,
+                        is_recursive,
+                    }
                 } else {
-                    EnumVariant { name: s.to_string(), fields: vec![], field_types: vec![], is_recursive: false }
+                    EnumVariant {
+                        name: s.to_string(),
+                        fields: vec![],
+                        field_types: vec![],
+                        is_recursive: false,
+                    }
                 }
             })
             .collect();
-        items.push(Item::EnumDef(EnumDef { name, type_params, variants, is_recursive: any_recursive }));
+        items.push(Item::EnumDef(EnumDef {
+            name,
+            type_params,
+            variants,
+            is_recursive: any_recursive,
+            span: Span::default(),
+        }));
     }
 
     // trait 定義: trait Name { fn method(a: Type) -> Type; law name: expr; }
@@ -609,7 +733,9 @@ pub fn parse_module(source: &str) -> Vec<Item> {
 
         for line in body.lines() {
             let line = line.trim();
-            if line.is_empty() { continue; }
+            if line.is_empty() {
+                continue;
+            }
 
             if line.starts_with("fn ") {
                 // fn leq(a: Self, b: Self) -> bool;
@@ -623,7 +749,9 @@ pub fn parse_module(source: &str) -> Vec<Item> {
                     let mut param_constraints: Vec<Option<String>> = Vec::new();
                     for p in params_str.split(',') {
                         let p = p.trim();
-                        if p.is_empty() { continue; }
+                        if p.is_empty() {
+                            continue;
+                        }
                         // "b: Self where v != 0" → type="Self", constraint=Some("v != 0")
                         if let Some((before_where, constraint)) = p.split_once("where") {
                             let type_str = if let Some((_, t)) = before_where.split_once(':') {
@@ -641,7 +769,12 @@ pub fn parse_module(source: &str) -> Vec<Item> {
                             param_constraints.push(None);
                         }
                     }
-                    methods.push(TraitMethod { name: method_name, param_types, return_type, param_constraints });
+                    methods.push(TraitMethod {
+                        name: method_name,
+                        param_types,
+                        return_type,
+                        param_constraints,
+                    });
                 }
             } else if line.starts_with("law ") {
                 // law reflexive: leq(x, x) == true;
@@ -653,7 +786,12 @@ pub fn parse_module(source: &str) -> Vec<Item> {
                 }
             }
         }
-        items.push(Item::TraitDef(TraitDef { name, methods, laws }));
+        items.push(Item::TraitDef(TraitDef {
+            name,
+            methods,
+            laws,
+            span: Span::default(),
+        }));
     }
 
     // impl 定義: impl TraitName for TypeName { fn method(params) -> Type { body } }
@@ -705,11 +843,18 @@ pub fn parse_module(source: &str) -> Vec<Item> {
             let method_body = body[fn_body_start..fn_body_end].trim().to_string();
             method_bodies.push((method_name, method_body));
         }
-        items.push(Item::ImplDef(ImplDef { trait_name, target_type, method_bodies }));
+        items.push(Item::ImplDef(ImplDef {
+            trait_name,
+            target_type,
+            method_bodies,
+            span: Span::default(),
+        }));
     }
 
     // resource 定義: resource name priority:<N> mode:exclusive|shared;
-    let resource_re = Regex::new(r"(?m)^resource\s+(\w+)\s+priority:\s*(-?\d+)\s+mode:\s*(exclusive|shared)\s*;").unwrap();
+    let resource_re =
+        Regex::new(r"(?m)^resource\s+(\w+)\s+priority:\s*(-?\d+)\s+mode:\s*(exclusive|shared)\s*;")
+            .unwrap();
     for cap in resource_re.captures_iter(source) {
         let name = cap[1].to_string();
         let priority = cap[2].parse::<i64>().unwrap_or(0);
@@ -717,14 +862,20 @@ pub fn parse_module(source: &str) -> Vec<Item> {
             "exclusive" => ResourceMode::Exclusive,
             _ => ResourceMode::Shared,
         };
-        items.push(Item::ResourceDef(ResourceDef { name, priority, mode }));
+        items.push(Item::ResourceDef(ResourceDef {
+            name,
+            priority,
+            mode,
+            span: Span::default(),
+        }));
     }
 
     // 修飾子付き atom のパース: "async atom", "trusted atom", "unverified atom",
     // "async trusted atom" 等の組み合わせを先に検出
     let modified_atom_re = Regex::new(r"(?:(?:async|trusted|unverified)\s+)+atom\s+\w+").unwrap();
     let modified_atom_indices: Vec<_> = modified_atom_re.find_iter(source).collect();
-    let mut modified_atom_starts: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut modified_atom_starts: std::collections::HashSet<usize> =
+        std::collections::HashSet::new();
     for mat in &modified_atom_indices {
         let start = mat.start();
         modified_atom_starts.insert(start);
@@ -735,13 +886,19 @@ pub fn parse_module(source: &str) -> Vec<Item> {
         let mut remaining = atom_source;
         loop {
             remaining = remaining.trim_start();
-            if remaining.starts_with("async") && remaining[5..].starts_with(|c: char| c.is_whitespace()) {
+            if remaining.starts_with("async")
+                && remaining[5..].starts_with(|c: char| c.is_whitespace())
+            {
                 is_async = true;
                 remaining = &remaining[5..];
-            } else if remaining.starts_with("trusted") && remaining[7..].starts_with(|c: char| c.is_whitespace()) {
+            } else if remaining.starts_with("trusted")
+                && remaining[7..].starts_with(|c: char| c.is_whitespace())
+            {
                 trust_level = TrustLevel::Trusted;
                 remaining = &remaining[7..];
-            } else if remaining.starts_with("unverified") && remaining[10..].starts_with(|c: char| c.is_whitespace()) {
+            } else if remaining.starts_with("unverified")
+                && remaining[10..].starts_with(|c: char| c.is_whitespace())
+            {
                 trust_level = TrustLevel::Unverified;
                 remaining = &remaining[10..];
             } else {
@@ -752,7 +909,8 @@ pub fn parse_module(source: &str) -> Vec<Item> {
         let atom_start_in_remaining = remaining.find("atom").unwrap_or(0);
         let atom_text = &remaining[atom_start_in_remaining..];
         // 次の atom の開始位置を探す
-        let next_atom_pos = atom_re.find(atom_text.get(5..).unwrap_or(""))
+        let next_atom_pos = atom_re
+            .find(atom_text.get(5..).unwrap_or(""))
             .map(|m| m.start() + 5)
             .unwrap_or(atom_text.len());
         let atom_slice = &atom_text[..next_atom_pos];
@@ -777,7 +935,11 @@ pub fn parse_module(source: &str) -> Vec<Item> {
         if prefix.contains("async") || prefix.contains("trusted") || prefix.contains("unverified") {
             continue;
         }
-        let end = if i + 1 < atom_indices.len() { atom_indices[i+1] } else { source.len() };
+        let end = if i + 1 < atom_indices.len() {
+            atom_indices[i + 1]
+        } else {
+            source.len()
+        };
         let atom_source = &source[start..end];
         items.push(Item::Atom(parse_atom(atom_source)));
     }
@@ -791,13 +953,16 @@ pub fn parse_atom(source: &str) -> Atom {
     let req_re = Regex::new(r"requires:\s*([^;]+);").unwrap();
     let ens_re = Regex::new(r"ensures:\s*([^;]+);").unwrap();
 
-    let forall_re = Regex::new(r"forall\(\s*(\w+)\s*,\s*([^,]+)\s*,\s*([^,]+)\s*,\s*([^)]+)\)").unwrap();
-    let exists_re = Regex::new(r"exists\(\s*(\w+)\s*,\s*([^,]+)\s*,\s*([^,]+)\s*,\s*([^)]+)\)").unwrap();
+    let forall_re =
+        Regex::new(r"forall\(\s*(\w+)\s*,\s*([^,]+)\s*,\s*([^,]+)\s*,\s*([^)]+)\)").unwrap();
+    let exists_re =
+        Regex::new(r"exists\(\s*(\w+)\s*,\s*([^,]+)\s*,\s*([^,]+)\s*,\s*([^)]+)\)").unwrap();
 
     let name_caps = name_re.captures(source).expect("Failed to parse atom name");
     let name = name_caps[1].to_string();
     // Generics: 型パラメータ <T: Trait, U> のパース（トレイト境界対応）
-    let (type_params, where_bounds) = name_caps.get(2)
+    let (type_params, where_bounds) = name_caps
+        .get(2)
         .map(|m| parse_type_params_with_bounds(m.as_str()))
         .unwrap_or_default();
     let params: Vec<Param> = name_caps[3]
@@ -826,16 +991,27 @@ pub fn parse_atom(source: &str) -> Atom {
                     is_ref_mut,
                 }
             } else {
-                Param { name: s_stripped.to_string(), type_name: None, type_ref: None, is_ref, is_ref_mut }
+                Param {
+                    name: s_stripped.to_string(),
+                    type_name: None,
+                    type_ref: None,
+                    is_ref,
+                    is_ref_mut,
+                }
             }
         })
         .collect();
 
-    let requires_raw = req_re.captures(source).map_or("true".to_string(), |c| c[1].trim().to_string());
-    let ensures = ens_re.captures(source).map_or("true".to_string(), |c| c[1].trim().to_string());
+    let requires_raw = req_re
+        .captures(source)
+        .map_or("true".to_string(), |c| c[1].trim().to_string());
+    let ensures = ens_re
+        .captures(source)
+        .map_or("true".to_string(), |c| c[1].trim().to_string());
 
     let body_marker = "body:";
-    let body_start_pos = source.find(body_marker).expect("Failed to find body:") + body_marker.len();
+    let body_start_pos =
+        source.find(body_marker).expect("Failed to find body:") + body_marker.len();
     let body_snippet = source[body_start_pos..].trim();
 
     let mut body_raw = String::new();
@@ -843,10 +1019,13 @@ pub fn parse_atom(source: &str) -> Atom {
         let mut brace_count = 0;
         for c in body_snippet.chars() {
             body_raw.push(c);
-            if c == '{' { brace_count += 1; }
-            else if c == '}' {
+            if c == '{' {
+                brace_count += 1;
+            } else if c == '}' {
                 brace_count -= 1;
-                if brace_count == 0 { break; }
+                if brace_count == 0 {
+                    break;
+                }
             }
         }
     } else {
@@ -855,18 +1034,32 @@ pub fn parse_atom(source: &str) -> Atom {
 
     let mut forall_constraints = Vec::new();
     for cap in forall_re.captures_iter(&requires_raw) {
-        forall_constraints.push(Quantifier { q_type: QuantifierType::ForAll, var: cap[1].to_string(), start: cap[2].trim().to_string(), end: cap[3].trim().to_string(), condition: cap[4].trim().to_string() });
+        forall_constraints.push(Quantifier {
+            q_type: QuantifierType::ForAll,
+            var: cap[1].to_string(),
+            start: cap[2].trim().to_string(),
+            end: cap[3].trim().to_string(),
+            condition: cap[4].trim().to_string(),
+        });
     }
     for cap in exists_re.captures_iter(&requires_raw) {
-        forall_constraints.push(Quantifier { q_type: QuantifierType::Exists, var: cap[1].to_string(), start: cap[2].trim().to_string(), end: cap[3].trim().to_string(), condition: cap[4].trim().to_string() });
+        forall_constraints.push(Quantifier {
+            q_type: QuantifierType::Exists,
+            var: cap[1].to_string(),
+            start: cap[2].trim().to_string(),
+            end: cap[3].trim().to_string(),
+            condition: cap[4].trim().to_string(),
+        });
     }
 
     // consume 句のパース: "consume x, y;" または "consume x;"
     // body: の前に出現する consume 宣言を検出
     let consume_re = Regex::new(r"consume\s+([^;]+);").unwrap();
-    let consumed_params: Vec<String> = consume_re.captures_iter(source)
+    let consumed_params: Vec<String> = consume_re
+        .captures_iter(source)
         .flat_map(|cap| {
-            cap[1].split(',')
+            cap[1]
+                .split(',')
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect::<Vec<_>>()
@@ -875,9 +1068,11 @@ pub fn parse_atom(source: &str) -> Atom {
 
     // resources 句のパース: "resources: [db, cache];" または "resources: db, cache;"
     let resources_re = Regex::new(r"resources:\s*\[?([^\];]+)\]?\s*;").unwrap();
-    let resources: Vec<String> = resources_re.captures_iter(source)
+    let resources: Vec<String> = resources_re
+        .captures_iter(source)
         .flat_map(|cap| {
-            cap[1].split(',')
+            cap[1]
+                .split(',')
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect::<Vec<_>>()
@@ -886,13 +1081,15 @@ pub fn parse_atom(source: &str) -> Atom {
 
     // max_unroll 句のパース: "max_unroll: 5;" — BMC 展開回数のオーバーライド
     let max_unroll_re = Regex::new(r"max_unroll:\s*(\d+)\s*;").unwrap();
-    let max_unroll = max_unroll_re.captures(source)
+    let max_unroll = max_unroll_re
+        .captures(source)
         .and_then(|cap| cap[1].parse::<usize>().ok());
 
     // invariant 句のパース: "invariant: <expr>;"
     // atom レベルの状態不変量。再帰呼び出しの帰納的検証に使用。
     let invariant_re = Regex::new(r"(?m)^invariant:\s*([^;]+);").unwrap();
-    let invariant = invariant_re.captures(source)
+    let invariant = invariant_re
+        .captures(source)
         .map(|cap| cap[1].trim().to_string());
 
     Atom {
@@ -900,7 +1097,9 @@ pub fn parse_atom(source: &str) -> Atom {
         type_params,
         where_bounds,
         params,
-        requires: forall_re.replace_all(&exists_re.replace_all(&requires_raw, "true"), "true").to_string(),
+        requires: forall_re
+            .replace_all(&exists_re.replace_all(&requires_raw, "true"), "true")
+            .to_string(),
         forall_constraints,
         ensures,
         body_expr: body_raw,
@@ -910,13 +1109,18 @@ pub fn parse_atom(source: &str) -> Atom {
         trust_level: TrustLevel::Verified,
         max_unroll,
         invariant,
+        span: Span::default(),
     }
 }
 
 pub fn tokenize(input: &str) -> Vec<String> {
     // 小数点(.)を含む数値リテラルを先にマッチし、残りの `.` はフィールドアクセス演算子として扱う
-    let re = Regex::new(r"(\d+\.\d+|\d+|[a-zA-Z_]\w*|==|!=|>=|<=|=>|&&|\|\||[+\-*/><()\[\]{};=,:.])").unwrap();
-    re.find_iter(input).map(|m| m.as_str().to_string()).collect()
+    let re =
+        Regex::new(r"(\d+\.\d+|\d+|[a-zA-Z_]\w*|==|!=|>=|<=|=>|&&|\|\||[+\-*/><()\[\]{};=,:.])")
+            .unwrap();
+    re.find_iter(input)
+        .map(|m| m.as_str().to_string())
+        .collect()
 }
 
 pub fn parse_expression(input: &str) -> Expr {
@@ -931,9 +1135,13 @@ fn parse_block_or_expr(tokens: &[String], pos: &mut usize) -> Expr {
         let mut stmts = Vec::new();
         while *pos < tokens.len() && tokens[*pos] != "}" {
             stmts.push(parse_statement(tokens, pos));
-            if *pos < tokens.len() && tokens[*pos] == ";" { *pos += 1; }
+            if *pos < tokens.len() && tokens[*pos] == ";" {
+                *pos += 1;
+            }
         }
-        if *pos < tokens.len() && tokens[*pos] == "}" { *pos += 1; }
+        if *pos < tokens.len() && tokens[*pos] == "}" {
+            *pos += 1;
+        }
         Expr::Block(stmts)
     } else {
         parse_implies(tokens, pos)
@@ -965,18 +1173,29 @@ fn parse_statement(tokens: &[String], pos: &mut usize) -> Expr {
         *pos += 1;
         let var = tokens[*pos].clone();
         *pos += 1;
-        if *pos < tokens.len() && tokens[*pos] == "=" { *pos += 1; }
+        if *pos < tokens.len() && tokens[*pos] == "=" {
+            *pos += 1;
+        }
         let value = parse_implies(tokens, pos);
-        Expr::Let { var, value: Box::new(value) }
+        Expr::Let {
+            var,
+            value: Box::new(value),
+        }
     } else if *pos + 1 < tokens.len()
-        && tokens[*pos].chars().next().map_or(false, |c| c.is_alphabetic() || c == '_')
+        && tokens[*pos]
+            .chars()
+            .next()
+            .map_or(false, |c| c.is_alphabetic() || c == '_')
         && tokens[*pos + 1] == "="
     {
         let var = tokens[*pos].clone();
         *pos += 1;
         *pos += 1;
         let value = parse_implies(tokens, pos);
-        Expr::Assign { var, value: Box::new(value) }
+        Expr::Assign {
+            var,
+            value: Box::new(value),
+        }
     } else {
         parse_implies(tokens, pos)
     }
@@ -1016,8 +1235,12 @@ fn parse_comparison(tokens: &[String], pos: &mut usize) -> Expr {
     let mut node = parse_add_sub(tokens, pos);
     if *pos < tokens.len() {
         let op = match tokens[*pos].as_str() {
-            ">" => Some(Op::Gt), "<" => Some(Op::Lt), "==" => Some(Op::Eq),
-            "!=" => Some(Op::Neq), ">=" => Some(Op::Ge), "<=" => Some(Op::Le),
+            ">" => Some(Op::Gt),
+            "<" => Some(Op::Lt),
+            "==" => Some(Op::Eq),
+            "!=" => Some(Op::Neq),
+            ">=" => Some(Op::Ge),
+            "<=" => Some(Op::Le),
             _ => None,
         };
         if let Some(operator) = op {
@@ -1032,7 +1255,11 @@ fn parse_comparison(tokens: &[String], pos: &mut usize) -> Expr {
 fn parse_add_sub(tokens: &[String], pos: &mut usize) -> Expr {
     let mut node = parse_mul_div(tokens, pos);
     while *pos < tokens.len() && (tokens[*pos] == "+" || tokens[*pos] == "-") {
-        let op = if tokens[*pos] == "+" { Op::Add } else { Op::Sub };
+        let op = if tokens[*pos] == "+" {
+            Op::Add
+        } else {
+            Op::Sub
+        };
         *pos += 1;
         let right = parse_mul_div(tokens, pos);
         node = Expr::BinaryOp(Box::new(node), op, Box::new(right));
@@ -1043,7 +1270,11 @@ fn parse_add_sub(tokens: &[String], pos: &mut usize) -> Expr {
 fn parse_mul_div(tokens: &[String], pos: &mut usize) -> Expr {
     let mut node = parse_primary(tokens, pos);
     while *pos < tokens.len() && (tokens[*pos] == "*" || tokens[*pos] == "/") {
-        let op = if tokens[*pos] == "*" { Op::Mul } else { Op::Div };
+        let op = if tokens[*pos] == "*" {
+            Op::Mul
+        } else {
+            Op::Div
+        };
         *pos += 1;
         let right = parse_primary(tokens, pos);
         node = Expr::BinaryOp(Box::new(node), op, Box::new(right));
@@ -1052,7 +1283,9 @@ fn parse_mul_div(tokens: &[String], pos: &mut usize) -> Expr {
 }
 
 fn parse_primary(tokens: &[String], pos: &mut usize) -> Expr {
-    if *pos >= tokens.len() { return Expr::Number(0); }
+    if *pos >= tokens.len() {
+        return Expr::Number(0);
+    }
     let token = &tokens[*pos];
 
     // acquire 式: acquire resource_name { body }
@@ -1066,21 +1299,28 @@ fn parse_primary(tokens: &[String], pos: &mut usize) -> Expr {
             "unknown".to_string()
         };
         let body = parse_block_or_expr(tokens, pos);
-        return Expr::Acquire { resource, body: Box::new(body) };
+        return Expr::Acquire {
+            resource,
+            body: Box::new(body),
+        };
     }
 
     // async 式: async { body }
     if token == "async" {
         *pos += 1;
         let body = parse_block_or_expr(tokens, pos);
-        return Expr::Async { body: Box::new(body) };
+        return Expr::Async {
+            body: Box::new(body),
+        };
     }
 
     // await 式: await expr
     if token == "await" {
         *pos += 1;
         let expr = parse_primary(tokens, pos);
-        return Expr::Await { expr: Box::new(expr) };
+        return Expr::Await {
+            expr: Box::new(expr),
+        };
     }
 
     // while, if 処理 (既存通り)
@@ -1090,19 +1330,28 @@ fn parse_primary(tokens: &[String], pos: &mut usize) -> Expr {
         if *pos < tokens.len() && tokens[*pos] == "invariant" {
             *pos += 1;
             // `invariant:` の `:` をスキップ（tokenizer が `:` を独立トークンとして分離するため）
-            if *pos < tokens.len() && tokens[*pos] == ":" { *pos += 1; }
+            if *pos < tokens.len() && tokens[*pos] == ":" {
+                *pos += 1;
+            }
             let inv = parse_implies(tokens, pos);
             // オプション: decreases 句（停止性証明用の減少式）
             let decreases = if *pos < tokens.len() && tokens[*pos] == "decreases" {
                 *pos += 1;
                 // `decreases:` の `:` もスキップ
-                if *pos < tokens.len() && tokens[*pos] == ":" { *pos += 1; }
+                if *pos < tokens.len() && tokens[*pos] == ":" {
+                    *pos += 1;
+                }
                 Some(Box::new(parse_implies(tokens, pos)))
             } else {
                 None
             };
             let body = parse_block_or_expr(tokens, pos);
-            return Expr::While { cond: Box::new(cond), invariant: Box::new(inv), decreases, body: Box::new(body) };
+            return Expr::While {
+                cond: Box::new(cond),
+                invariant: Box::new(inv),
+                decreases,
+                body: Box::new(body),
+            };
         }
         panic!("Mumei loops require an 'invariant'.");
     }
@@ -1114,7 +1363,11 @@ fn parse_primary(tokens: &[String], pos: &mut usize) -> Expr {
         if *pos < tokens.len() && tokens[*pos] == "else" {
             *pos += 1;
             let else_branch = parse_block_or_expr(tokens, pos);
-            return Expr::IfThenElse { cond: Box::new(cond), then_branch: Box::new(then_branch), else_branch: Box::new(else_branch) };
+            return Expr::IfThenElse {
+                cond: Box::new(cond),
+                then_branch: Box::new(then_branch),
+                else_branch: Box::new(else_branch),
+            };
         }
         panic!("Mumei requires an 'else' branch.");
     }
@@ -1151,23 +1404,40 @@ fn parse_primary(tokens: &[String], pos: &mut usize) -> Expr {
             // `=>` を含意演算子として消費しないよう parse_match_arm_body を使用。
             // これにより `0 => match x { ... }, 1 => ...` のネストが正しく解析される。
             let body = parse_match_arm_body(tokens, pos);
-            arms.push(MatchArm { pattern, guard, body: Box::new(body) });
+            arms.push(MatchArm {
+                pattern,
+                guard,
+                body: Box::new(body),
+            });
             // アーム間の "," をスキップ
-            if *pos < tokens.len() && tokens[*pos] == "," { *pos += 1; }
+            if *pos < tokens.len() && tokens[*pos] == "," {
+                *pos += 1;
+            }
         }
-        if *pos < tokens.len() && tokens[*pos] == "}" { *pos += 1; }
-        return Expr::Match { target: Box::new(target), arms };
+        if *pos < tokens.len() && tokens[*pos] == "}" {
+            *pos += 1;
+        }
+        return Expr::Match {
+            target: Box::new(target),
+            arms,
+        };
     }
 
     *pos += 1;
     let mut node = if token == "(" {
         let node = parse_implies(tokens, pos);
-        if *pos < tokens.len() && tokens[*pos] == ")" { *pos += 1; }
+        if *pos < tokens.len() && tokens[*pos] == ")" {
+            *pos += 1;
+        }
         node
     } else if let Ok(n) = token.parse::<i64>() {
         Expr::Number(n)
     } else if let Ok(f) = token.parse::<f64>() {
-        if token.contains('.') { Expr::Float(f) } else { Expr::Number(token.parse().unwrap()) }
+        if token.contains('.') {
+            Expr::Float(f)
+        } else {
+            Expr::Number(token.parse().unwrap())
+        }
     } else if *pos < tokens.len() && tokens[*pos] == "{" {
         // 構造体初期化: TypeName { field: expr, ... }
         // 大文字始まりの識別子の後に { が来たら構造体と判定
@@ -1177,13 +1447,22 @@ fn parse_primary(tokens: &[String], pos: &mut usize) -> Expr {
             while *pos < tokens.len() && tokens[*pos] != "}" {
                 let field_name = tokens[*pos].clone();
                 *pos += 1;
-                if *pos < tokens.len() && tokens[*pos] == ":" { *pos += 1; }
+                if *pos < tokens.len() && tokens[*pos] == ":" {
+                    *pos += 1;
+                }
                 let value = parse_implies(tokens, pos);
                 fields.push((field_name, value));
-                if *pos < tokens.len() && tokens[*pos] == "," { *pos += 1; }
+                if *pos < tokens.len() && tokens[*pos] == "," {
+                    *pos += 1;
+                }
             }
-            if *pos < tokens.len() && tokens[*pos] == "}" { *pos += 1; }
-            Expr::StructInit { type_name: token.clone(), fields }
+            if *pos < tokens.len() && tokens[*pos] == "}" {
+                *pos += 1;
+            }
+            Expr::StructInit {
+                type_name: token.clone(),
+                fields,
+            }
         } else {
             Expr::Variable(token.clone())
         }
@@ -1193,15 +1472,21 @@ fn parse_primary(tokens: &[String], pos: &mut usize) -> Expr {
         let mut args = Vec::new();
         while *pos < tokens.len() && tokens[*pos] != ")" {
             args.push(parse_implies(tokens, pos));
-            if *pos < tokens.len() && tokens[*pos] == "," { *pos += 1; }
+            if *pos < tokens.len() && tokens[*pos] == "," {
+                *pos += 1;
+            }
         }
-        if *pos < tokens.len() && tokens[*pos] == ")" { *pos += 1; }
+        if *pos < tokens.len() && tokens[*pos] == ")" {
+            *pos += 1;
+        }
         Expr::Call(token.clone(), args)
     } else if *pos < tokens.len() && tokens[*pos] == "[" {
         // 配列アクセス
         *pos += 1; // [
         let index = parse_implies(tokens, pos);
-        if *pos < tokens.len() && tokens[*pos] == "]" { *pos += 1; }
+        if *pos < tokens.len() && tokens[*pos] == "]" {
+            *pos += 1;
+        }
         Expr::ArrayAccess(token.clone(), Box::new(index))
     } else {
         Expr::Variable(token.clone())
@@ -1226,7 +1511,9 @@ fn parse_primary(tokens: &[String], pos: &mut usize) -> Expr {
 /// - 大文字始まり識別子（括弧なし） → Unit Variant パターン
 /// - 小文字始まり識別子 → 変数バインド
 fn parse_pattern(tokens: &[String], pos: &mut usize) -> Pattern {
-    if *pos >= tokens.len() { return Pattern::Wildcard; }
+    if *pos >= tokens.len() {
+        return Pattern::Wildcard;
+    }
 
     let token = &tokens[*pos];
 
@@ -1250,7 +1537,11 @@ fn parse_pattern(tokens: &[String], pos: &mut usize) -> Pattern {
     }
 
     // 識別子
-    if token.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_') {
+    if token
+        .chars()
+        .next()
+        .map_or(false, |c| c.is_alphabetic() || c == '_')
+    {
         let name = token.clone();
         *pos += 1;
 
@@ -1261,13 +1552,23 @@ fn parse_pattern(tokens: &[String], pos: &mut usize) -> Pattern {
                 let mut fields = Vec::new();
                 while *pos < tokens.len() && tokens[*pos] != ")" {
                     fields.push(parse_pattern(tokens, pos));
-                    if *pos < tokens.len() && tokens[*pos] == "," { *pos += 1; }
+                    if *pos < tokens.len() && tokens[*pos] == "," {
+                        *pos += 1;
+                    }
                 }
-                if *pos < tokens.len() && tokens[*pos] == ")" { *pos += 1; }
-                return Pattern::Variant { variant_name: name, fields };
+                if *pos < tokens.len() && tokens[*pos] == ")" {
+                    *pos += 1;
+                }
+                return Pattern::Variant {
+                    variant_name: name,
+                    fields,
+                };
             }
             // Unit variant（括弧なし）
-            return Pattern::Variant { variant_name: name, fields: vec![] };
+            return Pattern::Variant {
+                variant_name: name,
+                fields: vec![],
+            };
         }
 
         // 小文字始まり → 変数バインド
@@ -1345,9 +1646,16 @@ struct Pair<T, U> {
 }
 "#;
         let items = parse_module(source);
-        let struct_items: Vec<_> = items.iter().filter_map(|i| {
-            if let Item::StructDef(s) = i { Some(s) } else { None }
-        }).collect();
+        let struct_items: Vec<_> = items
+            .iter()
+            .filter_map(|i| {
+                if let Item::StructDef(s) = i {
+                    Some(s)
+                } else {
+                    None
+                }
+            })
+            .collect();
 
         assert_eq!(struct_items.len(), 1);
         let s = &struct_items[0];
@@ -1369,9 +1677,16 @@ enum Option<T> {
 }
 "#;
         let items = parse_module(source);
-        let enum_items: Vec<_> = items.iter().filter_map(|i| {
-            if let Item::EnumDef(e) = i { Some(e) } else { None }
-        }).collect();
+        let enum_items: Vec<_> = items
+            .iter()
+            .filter_map(|i| {
+                if let Item::EnumDef(e) = i {
+                    Some(e)
+                } else {
+                    None
+                }
+            })
+            .collect();
 
         assert_eq!(enum_items.len(), 1);
         let e = &enum_items[0];
@@ -1393,9 +1708,10 @@ ensures: true;
 body: x;
 "#;
         let items = parse_module(source);
-        let atom_items: Vec<_> = items.iter().filter_map(|i| {
-            if let Item::Atom(a) = i { Some(a) } else { None }
-        }).collect();
+        let atom_items: Vec<_> = items
+            .iter()
+            .filter_map(|i| if let Item::Atom(a) = i { Some(a) } else { None })
+            .collect();
 
         assert_eq!(atom_items.len(), 1);
         let a = &atom_items[0];
@@ -1416,9 +1732,16 @@ trait Comparable {
 }
 "#;
         let items = parse_module(source);
-        let traits: Vec<_> = items.iter().filter_map(|i| {
-            if let Item::TraitDef(t) = i { Some(t) } else { None }
-        }).collect();
+        let traits: Vec<_> = items
+            .iter()
+            .filter_map(|i| {
+                if let Item::TraitDef(t) = i {
+                    Some(t)
+                } else {
+                    None
+                }
+            })
+            .collect();
 
         assert_eq!(traits.len(), 1);
         let t = &traits[0];
@@ -1440,9 +1763,16 @@ impl Comparable for i64 {
 }
 "#;
         let items = parse_module(source);
-        let impls: Vec<_> = items.iter().filter_map(|i| {
-            if let Item::ImplDef(im) = i { Some(im) } else { None }
-        }).collect();
+        let impls: Vec<_> = items
+            .iter()
+            .filter_map(|i| {
+                if let Item::ImplDef(im) = i {
+                    Some(im)
+                } else {
+                    None
+                }
+            })
+            .collect();
 
         assert_eq!(impls.len(), 1);
         assert_eq!(impls[0].trait_name, "Comparable");
@@ -1461,9 +1791,10 @@ ensures: true;
 body: a;
 "#;
         let items = parse_module(source);
-        let atoms: Vec<_> = items.iter().filter_map(|i| {
-            if let Item::Atom(a) = i { Some(a) } else { None }
-        }).collect();
+        let atoms: Vec<_> = items
+            .iter()
+            .filter_map(|i| if let Item::Atom(a) = i { Some(a) } else { None })
+            .collect();
 
         assert_eq!(atoms.len(), 1);
         let a = &atoms[0];
@@ -1483,9 +1814,10 @@ ensures: true;
 body: a;
 "#;
         let items = parse_module(source);
-        let atoms: Vec<_> = items.iter().filter_map(|i| {
-            if let Item::Atom(a) = i { Some(a) } else { None }
-        }).collect();
+        let atoms: Vec<_> = items
+            .iter()
+            .filter_map(|i| if let Item::Atom(a) = i { Some(a) } else { None })
+            .collect();
 
         assert_eq!(atoms.len(), 1);
         let a = &atoms[0];
@@ -1516,23 +1848,38 @@ body: a + b;
 "#;
         let items = parse_module(source);
 
-        let structs: Vec<_> = items.iter().filter_map(|i| {
-            if let Item::StructDef(s) = i { Some(s) } else { None }
-        }).collect();
+        let structs: Vec<_> = items
+            .iter()
+            .filter_map(|i| {
+                if let Item::StructDef(s) = i {
+                    Some(s)
+                } else {
+                    None
+                }
+            })
+            .collect();
         assert_eq!(structs.len(), 1);
         assert_eq!(structs[0].name, "Point");
         assert!(structs[0].type_params.is_empty());
 
-        let enums: Vec<_> = items.iter().filter_map(|i| {
-            if let Item::EnumDef(e) = i { Some(e) } else { None }
-        }).collect();
+        let enums: Vec<_> = items
+            .iter()
+            .filter_map(|i| {
+                if let Item::EnumDef(e) = i {
+                    Some(e)
+                } else {
+                    None
+                }
+            })
+            .collect();
         assert_eq!(enums.len(), 1);
         assert_eq!(enums[0].name, "Color");
         assert!(enums[0].type_params.is_empty());
 
-        let atoms: Vec<_> = items.iter().filter_map(|i| {
-            if let Item::Atom(a) = i { Some(a) } else { None }
-        }).collect();
+        let atoms: Vec<_> = items
+            .iter()
+            .filter_map(|i| if let Item::Atom(a) = i { Some(a) } else { None })
+            .collect();
         assert_eq!(atoms.len(), 1);
         assert_eq!(atoms[0].name, "add");
         assert!(atoms[0].type_params.is_empty());
@@ -1549,9 +1896,16 @@ resource db_conn priority: 1 mode: exclusive;
 resource cache priority: 2 mode: shared;
 "#;
         let items = parse_module(source);
-        let resources: Vec<_> = items.iter().filter_map(|i| {
-            if let Item::ResourceDef(r) = i { Some(r) } else { None }
-        }).collect();
+        let resources: Vec<_> = items
+            .iter()
+            .filter_map(|i| {
+                if let Item::ResourceDef(r) = i {
+                    Some(r)
+                } else {
+                    None
+                }
+            })
+            .collect();
 
         assert_eq!(resources.len(), 2);
         assert_eq!(resources[0].name, "db_conn");
@@ -1572,9 +1926,10 @@ ensures: true;
 body: amount;
 "#;
         let items = parse_module(source);
-        let atoms: Vec<_> = items.iter().filter_map(|i| {
-            if let Item::Atom(a) = i { Some(a) } else { None }
-        }).collect();
+        let atoms: Vec<_> = items
+            .iter()
+            .filter_map(|i| if let Item::Atom(a) = i { Some(a) } else { None })
+            .collect();
 
         assert_eq!(atoms.len(), 1);
         let a = &atoms[0];
@@ -1622,9 +1977,10 @@ ensures: result >= 0;
 body: fd;
 "#;
         let items = parse_module(source);
-        let atoms: Vec<_> = items.iter().filter_map(|i| {
-            if let Item::Atom(a) = i { Some(a) } else { None }
-        }).collect();
+        let atoms: Vec<_> = items
+            .iter()
+            .filter_map(|i| if let Item::Atom(a) = i { Some(a) } else { None })
+            .collect();
 
         assert_eq!(atoms.len(), 1);
         assert_eq!(atoms[0].name, "ffi_read");
@@ -1641,9 +1997,10 @@ ensures: true;
 body: x;
 "#;
         let items = parse_module(source);
-        let atoms: Vec<_> = items.iter().filter_map(|i| {
-            if let Item::Atom(a) = i { Some(a) } else { None }
-        }).collect();
+        let atoms: Vec<_> = items
+            .iter()
+            .filter_map(|i| if let Item::Atom(a) = i { Some(a) } else { None })
+            .collect();
 
         assert_eq!(atoms.len(), 1);
         assert_eq!(atoms[0].name, "legacy_code");
@@ -1659,9 +2016,10 @@ ensures: result >= 0;
 body: url;
 "#;
         let items = parse_module(source);
-        let atoms: Vec<_> = items.iter().filter_map(|i| {
-            if let Item::Atom(a) = i { Some(a) } else { None }
-        }).collect();
+        let atoms: Vec<_> = items
+            .iter()
+            .filter_map(|i| if let Item::Atom(a) = i { Some(a) } else { None })
+            .collect();
 
         assert_eq!(atoms.len(), 1);
         assert_eq!(atoms[0].name, "fetch_external");
@@ -1679,9 +2037,10 @@ ensures: true;
 body: n;
 "#;
         let items = parse_module(source);
-        let atoms: Vec<_> = items.iter().filter_map(|i| {
-            if let Item::Atom(a) = i { Some(a) } else { None }
-        }).collect();
+        let atoms: Vec<_> = items
+            .iter()
+            .filter_map(|i| if let Item::Atom(a) = i { Some(a) } else { None })
+            .collect();
 
         assert_eq!(atoms.len(), 1);
         assert_eq!(atoms[0].max_unroll, Some(5));
@@ -1697,9 +2056,10 @@ ensures: result >= 0;
 body: state + 1;
 "#;
         let items = parse_module(source);
-        let atoms: Vec<_> = items.iter().filter_map(|i| {
-            if let Item::Atom(a) = i { Some(a) } else { None }
-        }).collect();
+        let atoms: Vec<_> = items
+            .iter()
+            .filter_map(|i| if let Item::Atom(a) = i { Some(a) } else { None })
+            .collect();
 
         assert_eq!(atoms.len(), 1);
         let a = &atoms[0];
@@ -1717,9 +2077,10 @@ ensures: result >= 0;
 body: v + r;
 "#;
         let items = parse_module(source);
-        let atoms: Vec<_> = items.iter().filter_map(|i| {
-            if let Item::Atom(a) = i { Some(a) } else { None }
-        }).collect();
+        let atoms: Vec<_> = items
+            .iter()
+            .filter_map(|i| if let Item::Atom(a) = i { Some(a) } else { None })
+            .collect();
 
         assert_eq!(atoms.len(), 1);
         let a = &atoms[0];
@@ -1738,12 +2099,10 @@ body: v + r;
     fn test_parse_await_expression() {
         let expr = parse_expression("await x");
         match expr {
-            Expr::Await { expr } => {
-                match *expr {
-                    Expr::Variable(ref name) => assert_eq!(name, "x"),
-                    _ => panic!("Expected Variable in await expr"),
-                }
-            }
+            Expr::Await { expr } => match *expr {
+                Expr::Variable(ref name) => assert_eq!(name, "x"),
+                _ => panic!("Expected Variable in await expr"),
+            },
             _ => panic!("Expected Await expression, got {:?}", expr),
         }
     }
