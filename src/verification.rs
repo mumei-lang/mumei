@@ -33,8 +33,7 @@ impl ErrorDetail {
         }
     }
 
-    /// Span 付きで ErrorDetail を生成する（MumeiError に Span を持たせた際に使用予定）
-    #[allow(dead_code)]
+    /// Span 付きで ErrorDetail を生成する
     pub fn with_span(msg: impl Into<String>, span: Span) -> Self {
         ErrorDetail {
             message: msg.into(),
@@ -60,22 +59,45 @@ impl fmt::Display for ErrorDetail {
 
 #[derive(Debug)]
 pub enum MumeiError {
-    VerificationError(String),
-    CodegenError(String),
-    TypeError(String),
+    VerificationError { msg: String, span: Span },
+    CodegenError { msg: String, span: Span },
+    TypeError { msg: String, span: Span },
 }
 
 impl MumeiError {
-    /// Span 付きの ErrorDetail を取得する
+    /// Span なしで VerificationError を生成（位置不明のエラー）
+    pub fn verification(msg: impl Into<String>) -> Self {
+        MumeiError::VerificationError { msg: msg.into(), span: Span::default() }
+    }
+    /// Span 付きで VerificationError を生成
+    pub fn verification_at(msg: impl Into<String>, span: Span) -> Self {
+        MumeiError::VerificationError { msg: msg.into(), span }
+    }
+    /// Span なしで CodegenError を生成
+    pub fn codegen(msg: impl Into<String>) -> Self {
+        MumeiError::CodegenError { msg: msg.into(), span: Span::default() }
+    }
+    /// Span なしで TypeError を生成
+    pub fn type_error(msg: impl Into<String>) -> Self {
+        MumeiError::TypeError { msg: msg.into(), span: Span::default() }
+    }
+    /// Span 付きで TypeError を生成
+    pub fn type_error_at(msg: impl Into<String>, span: Span) -> Self {
+        MumeiError::TypeError { msg: msg.into(), span }
+    }
+
+    /// ErrorDetail を取得する（Span 情報を保持）
     pub fn to_detail(&self) -> ErrorDetail {
         match self {
-            MumeiError::VerificationError(msg) => {
-                ErrorDetail::from_message(format!("Verification Error: {}", msg))
+            MumeiError::VerificationError { msg, span } => {
+                ErrorDetail::with_span(format!("Verification Error: {}", msg), span.clone())
             }
-            MumeiError::CodegenError(msg) => {
-                ErrorDetail::from_message(format!("Codegen Error: {}", msg))
+            MumeiError::CodegenError { msg, span } => {
+                ErrorDetail::with_span(format!("Codegen Error: {}", msg), span.clone())
             }
-            MumeiError::TypeError(msg) => ErrorDetail::from_message(format!("Type Error: {}", msg)),
+            MumeiError::TypeError { msg, span } => {
+                ErrorDetail::with_span(format!("Type Error: {}", msg), span.clone())
+            }
         }
     }
 }
@@ -83,22 +105,22 @@ impl MumeiError {
 impl fmt::Display for MumeiError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            MumeiError::VerificationError(msg) => write!(f, "Verification Error: {}", msg),
-            MumeiError::CodegenError(msg) => write!(f, "Codegen Error: {}", msg),
-            MumeiError::TypeError(msg) => write!(f, "Type Error: {}", msg),
+            MumeiError::VerificationError { msg, .. } => write!(f, "Verification Error: {}", msg),
+            MumeiError::CodegenError { msg, .. } => write!(f, "Codegen Error: {}", msg),
+            MumeiError::TypeError { msg, .. } => write!(f, "Type Error: {}", msg),
         }
     }
 }
 
 impl From<String> for MumeiError {
     fn from(s: String) -> Self {
-        MumeiError::VerificationError(s)
+        MumeiError::verification(s)
     }
 }
 
 impl From<&str> for MumeiError {
     fn from(s: &str) -> Self {
-        MumeiError::VerificationError(s.to_string())
+        MumeiError::verification(s)
     }
 }
 
@@ -683,7 +705,7 @@ fn split_args(input: &str) -> Vec<String> {
 /// ∀x. law_expr が成立するかを検証する。
 pub fn verify_impl(impl_def: &ImplDef, module_env: &ModuleEnv) -> MumeiResult<()> {
     let trait_def = module_env.get_trait(&impl_def.trait_name).ok_or_else(|| {
-        MumeiError::TypeError(format!(
+        MumeiError::type_error(format!(
             "Trait '{}' not found for impl on '{}'",
             impl_def.trait_name, impl_def.target_type
         ))
@@ -696,7 +718,7 @@ pub fn verify_impl(impl_def: &ImplDef, module_env: &ModuleEnv) -> MumeiResult<()
             .iter()
             .any(|(name, _)| name == &method.name)
         {
-            return Err(MumeiError::TypeError(format!(
+            return Err(MumeiError::type_error(format!(
                 "impl {} for {}: missing method '{}'",
                 impl_def.trait_name, impl_def.target_type, method.name
             )));
@@ -795,7 +817,7 @@ pub fn verify_impl(impl_def: &ImplDef, module_env: &ModuleEnv) -> MumeiResult<()
                             "  (could not retrieve model)".to_string()
                         };
                         solver.pop(1);
-                        return Err(MumeiError::VerificationError(
+                        return Err(MumeiError::verification(
                             format!(
                                 "impl {} for {}: law '{}' is not satisfied\n  Law: {}\n  Expanded: {}\n{}",
                                 impl_def.trait_name, impl_def.target_type,
@@ -891,9 +913,10 @@ fn verify_resource_hierarchy(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult
         if let Some(rdef) = module_env.resources.get(res_name) {
             resource_priorities.push((rdef.name.clone(), rdef.priority));
         } else {
-            return Err(MumeiError::TypeError(
+            return Err(MumeiError::type_error_at(
                 format!("Resource '{}' used in atom '{}' is not defined. Add: resource {} priority:<N> mode:exclusive|shared;",
-                    res_name, atom.name, res_name)
+                    res_name, atom.name, res_name),
+                atom.span.clone()
             ));
         }
     }
@@ -928,14 +951,15 @@ fn verify_resource_hierarchy(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult
             solver.assert(&pri_j.le(pri_i)); // 否定: Priority(r_j) <= Priority(r_i)
             if solver.check() == SatResult::Sat {
                 solver.pop(1);
-                return Err(MumeiError::VerificationError(
+                return Err(MumeiError::verification_at(
                     format!(
                         "Resource hierarchy violation in atom '{}': \
                          '{}' (priority={}) must have strictly lower priority than '{}' (priority={}). \
                          Reorder resources or adjust priorities to prevent potential deadlock.",
                         atom.name, name_i, resource_priorities[i].1,
                         name_j, resource_priorities[j].1
-                    )
+                    ),
+                    atom.span.clone()
                 ));
             }
             solver.pop(1);
@@ -949,11 +973,12 @@ fn verify_resource_hierarchy(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult
         if let Some(rdef) = module_env.resources.get(res_name) {
             if rdef.mode == ResourceMode::Exclusive {
                 if !exclusive_set.insert(res_name.clone()) {
-                    return Err(MumeiError::VerificationError(
+                    return Err(MumeiError::verification_at(
                         format!(
                             "Data race risk in atom '{}': exclusive resource '{}' is listed multiple times",
                             atom.name, res_name
-                        )
+                        ),
+                        atom.span.clone()
                     ));
                 }
             }
@@ -1070,11 +1095,12 @@ fn verify_bmc_resource_safety(atom: &Atom, module_env: &ModuleEnv) -> MumeiResul
         for res_name in &acquired_resources {
             if let Some(rdef) = module_env.resources.get(res_name) {
                 if let Err(e) = resource_ctx.acquire(res_name, rdef.priority) {
-                    return Err(MumeiError::VerificationError(
+                    return Err(MumeiError::verification_at(
                         format!(
                             "BMC (unroll step {}/{}, max_unroll={}): resource ordering violation in loop body: {}",
                             unroll_step, unroll_depth, unroll_depth, e
-                        )
+                        ),
+                        atom.span.clone()
                     ));
                 }
             }
@@ -1145,7 +1171,7 @@ fn verify_async_recursion_depth(atom: &Atom, module_env: &ModuleEnv) -> MumeiRes
         // 深度制限を超える場合は警告
         let max_depth = atom.max_unroll.unwrap_or(MAX_ASYNC_RECURSION_DEPTH);
         if self_call_count > max_depth {
-            return Err(MumeiError::VerificationError(format!(
+            return Err(MumeiError::verification_at(format!(
                 "Async recursion depth exceeded in atom '{}': {} self-calls detected \
                      (max_depth={}). Use max_unroll: {}; to increase the limit, or \
                      refactor to use iteration with invariant.",
@@ -1153,7 +1179,7 @@ fn verify_async_recursion_depth(atom: &Atom, module_env: &ModuleEnv) -> MumeiRes
                 self_call_count,
                 max_depth,
                 self_call_count + 1
-            )));
+            ), atom.span.clone()));
         }
 
         // 再帰呼び出し先の契約を信頼して展開（Compositional Verification）
@@ -1163,11 +1189,11 @@ fn verify_async_recursion_depth(atom: &Atom, module_env: &ModuleEnv) -> MumeiRes
         if let Some(callee) = module_env.get_atom(&atom.name) {
             if callee.ensures.trim() == "true" {
                 // ensures が trivial な場合、再帰の安全性を証明できない
-                return Err(MumeiError::VerificationError(format!(
+                return Err(MumeiError::verification_at(format!(
                     "Recursive async atom '{}' requires a non-trivial ensures clause \
                          for inductive verification. Add: ensures: <postcondition>;",
                     atom.name
-                )));
+                ), atom.span.clone()));
             }
         }
     }
@@ -1242,10 +1268,10 @@ fn verify_atom_invariant(
     let inv_z3 =
         expr_to_z3(&vc, &inv_ast, &mut env, None)?
             .as_bool()
-            .ok_or(MumeiError::TypeError(format!(
+            .ok_or(MumeiError::type_error_at(format!(
                 "Invariant for atom '{}' must be a boolean expression",
                 atom.name
-            )))?;
+            ), atom.span.clone()))?;
 
     // === Step 1: 導入 (Induction Base) ===
     // requires → invariant を証明する
@@ -1261,14 +1287,14 @@ fn verify_atom_invariant(
             // Unsat なら requires → invariant が証明された
             if solver.check() == SatResult::Sat {
                 solver.pop(1);
-                return Err(MumeiError::VerificationError(format!(
+                return Err(MumeiError::verification_at(format!(
                     "Invariant induction base failed for atom '{}': \
                          requires does not imply invariant.\n  \
                          Invariant: {}\n  \
                          Requires: {}\n  \
                          The invariant must hold whenever the precondition is satisfied.",
                     atom.name, invariant_raw, atom.requires
-                )));
+                ), atom.span.clone()));
             }
             solver.pop(1);
         }
@@ -1278,11 +1304,11 @@ fn verify_atom_invariant(
         solver.assert(&inv_z3.not());
         if solver.check() == SatResult::Sat {
             solver.pop(1);
-            return Err(MumeiError::VerificationError(format!(
+            return Err(MumeiError::verification_at(format!(
                 "Invariant induction base failed for atom '{}': \
                      invariant '{}' is not universally true (no requires constraint).",
                 atom.name, invariant_raw
-            )));
+            ), atom.span.clone()));
         }
         solver.pop(1);
     }
@@ -1313,7 +1339,7 @@ fn verify_atom_invariant(
         // （env が body の実行で更新されている可能性がある）
         let inv_after = expr_to_z3(&vc, &inv_ast, &mut env, None)?
             .as_bool()
-            .ok_or(MumeiError::TypeError("Invariant must be boolean".into()))?;
+            .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
 
         // invariant の維持を検証: ¬inv_after が Unsat なら維持されている
         solver.assert(&inv_after.not());
