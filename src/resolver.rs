@@ -432,10 +432,10 @@ pub fn resolve_manifest_dependencies(
                 let status = std::process::Command::new("git")
                     .args(&cmd_args)
                     .status()
-                    .map_err(|e| MumeiError::VerificationError(format!("git clone failed for '{}': {}", dep_name, e)))?;
+                    .map_err(|e| MumeiError::verification(format!("git clone failed for '{}': {}", dep_name, e)))?;
 
                 if !status.success() {
-                    return Err(MumeiError::VerificationError(format!(
+                    return Err(MumeiError::verification(format!(
                         "git clone failed for dependency '{}' ({})", dep_name, url
                     )));
                 }
@@ -461,7 +461,7 @@ pub fn resolve_manifest_dependencies(
             ];
             if let Some(entry_path) = entry_candidates.iter().find(|p| p.exists()) {
                 let source = fs::read_to_string(entry_path).map_err(|e| {
-                    MumeiError::VerificationError(format!(
+                    MumeiError::verification(format!(
                         "Failed to read dependency '{}' at '{}': {}",
                         dep_name, entry_path.display(), e
                     ))
@@ -496,7 +496,7 @@ pub fn resolve_manifest_dependencies(
                 ];
                 if let Some(entry_path) = entry_candidates.iter().find(|p| p.exists()) {
                     let source = fs::read_to_string(entry_path).map_err(|e| {
-                        MumeiError::VerificationError(format!(
+                        MumeiError::verification(format!(
                             "Failed to read dependency '{}' at '{}': {}",
                             dep_name, entry_path.display(), e
                         ))

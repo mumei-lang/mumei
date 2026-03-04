@@ -24,7 +24,8 @@ pub struct ErrorDetail {
 }
 
 impl ErrorDetail {
-    /// メッセージのみで ErrorDetail を生成する（後方互換性のため）
+    /// メッセージのみで ErrorDetail を生成する（Span 不明時のフォールバック用）
+    #[allow(dead_code)]
     pub fn from_message(msg: impl Into<String>) -> Self {
         ErrorDetail {
             message: msg.into(),
