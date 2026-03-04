@@ -510,6 +510,8 @@ pub enum Item {
 ///     fn abs(x: i64) -> i64;
 /// }
 /// ```
+// NOTE: ExternFn のフィールドは将来 trusted atom として ModuleEnv に
+// 自動登録する際に使用予定。現時点では読み取り側が未実装のため dead_code を抑制。
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct ExternFn {
@@ -530,7 +532,7 @@ pub struct ExternBlock {
     pub language: String,
     /// 関数シグネチャリスト
     pub functions: Vec<ExternFn>,
-    /// ソース位置情報
+    // NOTE: span は将来 ExternBlock のエラー報告で使用予定。
     #[allow(dead_code)]
     pub span: Span,
 }
