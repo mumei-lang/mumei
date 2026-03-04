@@ -820,9 +820,9 @@ pub fn verify_impl(impl_def: &ImplDef, module_env: &ModuleEnv) -> MumeiResult<()
                         solver.pop(1);
                         return Err(MumeiError::verification_at(
                             format!(
-                                "impl {} for {}: law '{}' is not satisfied\n  Law: {}\n  Expanded: {}\n{}",
+                                "impl {} for {}: law '{}' (defined in trait at {}) is not satisfied\n  Law: {}\n  Expanded: {}\n{}",
                                 impl_def.trait_name, impl_def.target_type,
-                                law_name, law_expr, substituted, counterexample
+                                law_name, trait_def.span, law_expr, substituted, counterexample
                             ),
                             impl_def.span.clone()
                         ));
@@ -953,6 +953,9 @@ fn verify_resource_hierarchy(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult
             solver.assert(&pri_j.le(pri_i)); // 否定: Priority(r_j) <= Priority(r_i)
             if solver.check() == SatResult::Sat {
                 solver.pop(1);
+                let error_span = module_env.resources.get(name_j)
+                    .map(|r| r.span.clone())
+                    .unwrap_or_else(|| atom.span.clone());
                 return Err(MumeiError::verification_at(
                     format!(
                         "Resource hierarchy violation in atom '{}': \
@@ -961,7 +964,7 @@ fn verify_resource_hierarchy(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult
                         atom.name, name_i, resource_priorities[i].1,
                         name_j, resource_priorities[j].1
                     ),
-                    atom.span.clone()
+                    error_span
                 ));
             }
             solver.pop(1);
