@@ -28,30 +28,49 @@ extern "Rust" {
 | `"Rust"` / `"C"` | 対象言語名 |
 | `fn name(params) -> RetType;` | 関数シグネチャ宣言 |
 
-### AST 表現
+### AST 表現（実装済み）
 
 ```rust
 pub struct ExternFn {
     pub name: String,
     pub param_types: Vec<String>,
     pub return_type: String,
+    pub span: Span,             // ソース位置情報
 }
 
 pub struct ExternBlock {
     pub language: String,
     pub functions: Vec<ExternFn>,
+    pub span: Span,             // ソース位置情報
 }
 ```
 
-## Bridge メカニズム
+`Item::ExternBlock(ExternBlock)` として `parse_module` の結果に含まれる。
+`main.rs`, `resolver.rs`, `lsp.rs` の全 match ブロックで処理済み。
 
-### trusted atom との連携
+## 実装状況
 
-`extern` ブロックで宣言された関数は、内部的に `trusted atom` として扱われます:
+| 項目 | ステータス |
+|---|---|
+| extern ブロック構文パース | ✅ 実装済み |
+| `ExternFn` / `ExternBlock` AST | ✅ 実装済み (Span 付き) |
+| `Item::ExternBlock` バリアント | ✅ 実装済み (全 match 網羅) |
+| パーサーテスト | ✅ 実装済み (`test_parse_extern_block`, `test_parse_extern_block_c`) |
+| trusted atom 自動登録 | ❌ 未実装 (将来: extern → ModuleEnv 自動登録) |
+| LLVM コード生成 | ❌ 未実装 (将来: extern 関数の declare + call) |
+
+## Bridge メカニズム（設計）
+
+### trusted atom との連携（将来実装予定）
+
+`extern` ブロックで宣言された関数は、将来的に `trusted atom` として自動登録される予定:
 
 1. **body 検証スキップ**: 外部実装のため、body の Z3 検証は行わない
 2. **コントラクト検証**: `requires` / `ensures` のコントラクトは呼び出し側で検証される
 3. **Taint 分析**: `trusted` 関数の戻り値には `__tainted_` マーカーが付与される
+
+> NOTE: 現時点では `ExternFn` のフィールドは読み取り側が未実装のため `#[allow(dead_code)]` を付与。
+> 将来 trusted atom として ModuleEnv に自動登録する際に使用予定。
 
 ### 使用例
 
