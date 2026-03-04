@@ -1075,6 +1075,14 @@ fn collect_acquire_resources(expr: &Expr) -> Vec<String> {
         Expr::Await { expr } => {
             resources.extend(collect_acquire_resources(expr));
         }
+        Expr::Task { body, .. } => {
+            resources.extend(collect_acquire_resources(body));
+        }
+        Expr::TaskGroup { children, .. } => {
+            for child in children {
+                resources.extend(collect_acquire_resources(child));
+            }
+        }
         _ => {}
     }
     resources
@@ -1185,6 +1193,10 @@ fn verify_async_recursion_depth(atom: &Atom, module_env: &ModuleEnv) -> MumeiRes
             }
             Expr::BinaryOp(l, _, r) => {
                 count_self_calls(l, atom_name) + count_self_calls(r, atom_name)
+            }
+            Expr::Task { body, .. } => count_self_calls(body, atom_name),
+            Expr::TaskGroup { children, .. } => {
+                children.iter().map(|c| count_self_calls(c, atom_name)).sum()
             }
             _ => 0,
         }
@@ -1466,6 +1478,14 @@ fn collect_callees(expr: &Expr) -> Vec<String> {
                 if let Some(guard) = &arm.guard {
                     callees.extend(collect_callees(guard));
                 }
+            }
+        }
+        Expr::Task { body, .. } => {
+            callees.extend(collect_callees(body));
+        }
+        Expr::TaskGroup { children, .. } => {
+            for child in children {
+                callees.extend(collect_callees(child));
             }
         }
         _ => {}
