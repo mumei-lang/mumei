@@ -88,6 +88,7 @@ pub struct ResourceDef {
     /// アクセスモード: exclusive（書き込み）または shared（読み取り）
     pub mode: ResourceMode,
     /// ソース位置情報
+    #[allow(dead_code)]
     pub span: Span,
 }
 
@@ -213,6 +214,7 @@ pub struct EnumDef {
     #[allow(dead_code)]
     pub is_recursive: bool,
     /// ソース位置情報
+    #[allow(dead_code)]
     pub span: Span,
 }
 
@@ -240,6 +242,7 @@ pub struct RefinedType {
     pub operand: String,
     pub predicate_raw: String,
     /// ソース位置情報
+    #[allow(dead_code)]
     pub span: Span,
 }
 
@@ -368,6 +371,7 @@ pub struct StructDef {
 #[derive(Debug, Clone)]
 pub struct ImportDecl {
     /// ソース位置情報
+    #[allow(dead_code)]
     pub span: Span,
     /// インポート対象のファイルパス（例: "./lib/math.mm")
     pub path: String,
@@ -418,6 +422,7 @@ pub struct TraitDef {
     /// 各要素は (法則名, 論理式の文字列) のペア。
     pub laws: Vec<(String, String)>,
     /// ソース位置情報
+    #[allow(dead_code)]
     pub span: Span,
 }
 
@@ -436,6 +441,7 @@ pub struct ImplDef {
     /// メソッド実装: (メソッド名, body 式の文字列)
     pub method_bodies: Vec<(String, String)>,
     /// ソース位置情報
+    #[allow(dead_code)]
     pub span: Span,
 }
 
