@@ -2333,7 +2333,7 @@ fn expr_to_z3<'a>(
         Expr::ArrayAccess(name, index_expr) => {
             let idx = expr_to_z3(vc, index_expr, env, solver_opt)?
                 .as_int()
-                .ok_or(MumeiError::TypeError("Index must be integer".into()))?;
+                .ok_or(MumeiError::type_error("Index must be integer"))?;
 
             // 配列名に紐づく長さシンボルを使った境界チェック
             if let Some(solver) = solver_opt {
@@ -2353,7 +2353,7 @@ fn expr_to_z3<'a>(
                 solver.assert(&safe.not());
                 if solver.check() == SatResult::Sat {
                     solver.pop(1);
-                    return Err(MumeiError::VerificationError(format!(
+                    return Err(MumeiError::verification(format!(
                         "Potential Out-of-Bounds on '{}' (index may be < 0 or >= len_{})",
                         name, name
                     )));
@@ -2448,8 +2448,8 @@ fn expr_to_z3<'a>(
                             solver.assert(&ri._eq(&Int::from_i64(ctx, 0)));
                             if solver.check() == SatResult::Sat {
                                 solver.pop(1);
-                                return Err(MumeiError::VerificationError(
-                                    "Potential division by zero.".into(),
+                                return Err(MumeiError::verification(
+                                    "Potential division by zero.",
                                 ));
                             }
                             solver.pop(1);
@@ -2462,7 +2462,7 @@ fn expr_to_z3<'a>(
                     Op::Le => Ok(li.le(&ri).into()),
                     Op::Eq => Ok(li._eq(&ri).into()),
                     Op::Neq => Ok(li._eq(&ri).not().into()),
-                    _ => Err(MumeiError::VerificationError(format!(
+                    _ => Err(MumeiError::verification(format!(
                         "Unsupported int operator {:?}",
                         op
                     ))),
@@ -2476,7 +2476,7 @@ fn expr_to_z3<'a>(
         } => {
             let c = expr_to_z3(vc, cond, env, solver_opt)?
                 .as_bool()
-                .ok_or(MumeiError::TypeError("If condition must be boolean".into()))?;
+                .ok_or(MumeiError::type_error("If condition must be boolean"))?;
             let t = expr_to_z3(vc, then_branch, env, solver_opt)?;
             let e = expr_to_z3(vc, else_branch, env, solver_opt)?;
             Ok(c.ite(&t, &e))
@@ -2509,15 +2509,15 @@ fn expr_to_z3<'a>(
             if let Some(solver) = solver_opt {
                 let inv = expr_to_z3(vc, invariant, env, None)?
                     .as_bool()
-                    .ok_or(MumeiError::TypeError("Invariant must be boolean".into()))?;
+                    .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
 
                 // Base case: 現在の env（let で初期化済み）で invariant が成立するか
                 solver.push();
                 solver.assert(&inv.not());
                 if solver.check() == SatResult::Sat {
                     solver.pop(1);
-                    return Err(MumeiError::VerificationError(
-                        "Invariant fails initially".into(),
+                    return Err(MumeiError::verification(
+                        "Invariant fails initially",
                     ));
                 }
                 solver.pop(1);
@@ -2525,8 +2525,8 @@ fn expr_to_z3<'a>(
                 // Inductive step: invariant && cond のもとで body 実行後も invariant が保たれるか
                 let c = expr_to_z3(vc, cond, env, None)?
                     .as_bool()
-                    .ok_or(MumeiError::TypeError(
-                        "While condition must be boolean".into(),
+                    .ok_or(MumeiError::type_error(
+                        "While condition must be boolean",
                     ))?;
 
                 // Invariant preservation: invariant && cond のもとで body 実行後も invariant が保たれるか
@@ -2540,13 +2540,13 @@ fn expr_to_z3<'a>(
 
                     let inv_after = expr_to_z3(vc, invariant, env, None)?
                         .as_bool()
-                        .ok_or(MumeiError::TypeError("Invariant must be boolean".into()))?;
+                        .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
 
                     solver.assert(&inv_after.not());
                     if solver.check() == SatResult::Sat {
                         solver.pop(1);
-                        return Err(MumeiError::VerificationError(
-                            "Invariant not preserved".into(),
+                        return Err(MumeiError::verification(
+                            "Invariant not preserved",
                         ));
                     }
                     solver.pop(1);
@@ -2559,7 +2559,7 @@ fn expr_to_z3<'a>(
 
                     // V_before: ループ本体実行前の減少式の値
                     let v_before = expr_to_z3(vc, dec_expr, env, None)?.as_int().ok_or(
-                        MumeiError::TypeError("decreases expression must be integer".into()),
+                        MumeiError::type_error("decreases expression must be integer"),
                     )?;
 
                     // A. 下界の証明: invariant && cond => V >= 0
@@ -2569,8 +2569,8 @@ fn expr_to_z3<'a>(
                     solver.assert(&v_before.lt(&Int::from_i64(ctx, 0)));
                     if solver.check() == SatResult::Sat {
                         solver.pop(1);
-                        return Err(MumeiError::VerificationError(
-                            "Termination check failed: decreases expression may be negative".into(),
+                        return Err(MumeiError::verification(
+                            "Termination check failed: decreases expression may be negative",
                         ));
                     }
                     solver.pop(1);
@@ -2582,15 +2582,15 @@ fn expr_to_z3<'a>(
                     expr_to_z3(vc, body, env, Some(solver))?;
 
                     let v_after = expr_to_z3(vc, dec_expr, env, None)?.as_int().ok_or(
-                        MumeiError::TypeError("decreases expression must be integer".into()),
+                        MumeiError::type_error("decreases expression must be integer"),
                     )?;
 
                     solver.assert(&v_after.ge(&v_before));
                     if solver.check() == SatResult::Sat {
                         solver.pop(1);
                         *env = env_snapshot;
-                        return Err(MumeiError::VerificationError(
-                            "Termination check failed: decreases expression does not strictly decrease".into()
+                        return Err(MumeiError::verification(
+                            "Termination check failed: decreases expression does not strictly decrease"
                         ));
                     }
                     solver.pop(1);
@@ -2600,11 +2600,11 @@ fn expr_to_z3<'a>(
 
             let inv = expr_to_z3(vc, invariant, env, None)?
                 .as_bool()
-                .ok_or(MumeiError::TypeError("Invariant must be boolean".into()))?;
+                .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
             let c_not = expr_to_z3(vc, cond, env, None)?
                 .as_bool()
-                .ok_or(MumeiError::TypeError(
-                    "While condition must be boolean".into(),
+                .ok_or(MumeiError::type_error(
+                    "While condition must be boolean",
                 ))?
                 .not();
             Ok(Bool::and(ctx, &[&inv, &c_not]).into())
@@ -2635,7 +2635,7 @@ fn expr_to_z3<'a>(
                                     solver.assert(&constraint_bool.not());
                                     if solver.check() == SatResult::Sat {
                                         solver.pop(1);
-                                        return Err(MumeiError::VerificationError(format!(
+                                        return Err(MumeiError::verification(format!(
                                             "Struct '{}' field '{}' constraint violated: {}",
                                             type_name, field_name, constraint_raw
                                         )));
@@ -2690,7 +2690,7 @@ fn expr_to_z3<'a>(
                     let full_cond = if let Some(guard) = &arm.guard {
                         let guard_z3 = expr_to_z3(vc, guard, env, None)?
                             .as_bool()
-                            .ok_or(MumeiError::TypeError("Guard must be boolean".into()))?;
+                            .ok_or(MumeiError::type_error("Guard must be boolean"))?;
                         Bool::and(ctx, &[&cond, &guard_z3])
                     } else {
                         cond
@@ -2721,7 +2721,7 @@ fn expr_to_z3<'a>(
                             "unknown value".to_string()
                         };
                         solver.pop(1);
-                        return Err(MumeiError::VerificationError(
+                        return Err(MumeiError::verification(
                             format!(
                                 "Match is not exhaustive: the following value is not covered by any arm:\n  Counter-example: {}",
                                 counterexample
@@ -2729,9 +2729,8 @@ fn expr_to_z3<'a>(
                         ));
                     }
                     solver.pop(1);
-                    return Err(MumeiError::VerificationError(
-                        "Match is not exhaustive: there exist values not covered by any arm."
-                            .into(),
+                    return Err(MumeiError::verification(
+                        "Match is not exhaustive: there exist values not covered by any arm.",
                     ));
                 }
             }
@@ -2764,7 +2763,7 @@ fn expr_to_z3<'a>(
                 let full_cond = if let Some(guard) = &arm.guard {
                     let guard_z3 = expr_to_z3(vc, guard, &mut arm_env, None)?
                         .as_bool()
-                        .ok_or(MumeiError::TypeError("Guard must be boolean".into()))?;
+                        .ok_or(MumeiError::type_error("Guard must be boolean"))?;
                     Bool::and(ctx, &[&arm_cond, &guard_z3])
                 } else {
                     arm_cond
@@ -2800,7 +2799,7 @@ fn expr_to_z3<'a>(
             }
 
             result
-                .ok_or_else(|| MumeiError::VerificationError("Match expression has no arms".into()))
+                .ok_or_else(|| MumeiError::verification("Match expression has no arms"))
         }
 
         // =================================================================
