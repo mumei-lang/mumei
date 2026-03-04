@@ -13,7 +13,9 @@ use z3::{Config, Context, SatResult, Solver};
 // --- エラー型の定義 ---
 
 /// エラーの詳細情報。ソース位置（Span）と修正提案（suggestion）を保持する。
+/// 後続PRで MumeiError から ErrorDetail への移行時に使用予定。
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ErrorDetail {
     /// エラーメッセージ
     pub message: String,
@@ -23,6 +25,7 @@ pub struct ErrorDetail {
     pub suggestion: Option<String>,
 }
 
+#[allow(dead_code)]
 impl ErrorDetail {
     /// メッセージのみで ErrorDetail を生成する（後方互換性のため）
     pub fn from_message(msg: impl Into<String>) -> Self {
@@ -64,6 +67,7 @@ pub enum MumeiError {
     TypeError(String),
 }
 
+#[allow(dead_code)]
 impl MumeiError {
     /// Span 付きの ErrorDetail を取得する（将来の拡張用）
     pub fn to_detail(&self) -> ErrorDetail {

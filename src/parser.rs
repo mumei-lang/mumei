@@ -4,7 +4,9 @@ use regex::Regex;
 // --- 0. ソース位置情報 (Span) ---
 
 /// ソースコード内の位置情報。全 AST ノードに付与して診断メッセージの精度を向上させる。
+/// 現時点では全ノードに Span::default() が設定されており、実際の行・列追跡は後続PRで実装予定。
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 pub struct Span {
     /// ソースファイル名（空文字列は不明を表す）
     pub file: String,
@@ -28,7 +30,8 @@ impl Default for Span {
 }
 
 impl Span {
-    /// 既知の位置情報を持つ Span を生成する
+    /// 既知の位置情報を持つ Span を生成する（後続PRでパーサが使用予定）
+    #[allow(dead_code)]
     pub fn new(file: impl Into<String>, line: usize, col: usize, len: usize) -> Self {
         Span {
             file: file.into(),
