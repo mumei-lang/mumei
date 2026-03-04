@@ -134,8 +134,9 @@ fn resolve_imports_recursive(
             let resolved_path = resolve_path(&import_decl.path, base_dir)?;
             // 循環参照チェック
             if ctx.loading.contains(&resolved_path) {
-                return Err(MumeiError::VerificationError(
-                    format!("Circular import detected: '{}'", resolved_path.display())
+                return Err(MumeiError::verification_at(
+                    format!("Circular import detected: '{}'", resolved_path.display()),
+                    import_decl.span.clone()
                 ));
             }
             // 既にロード済みならスキップ
@@ -146,8 +147,9 @@ fn resolve_imports_recursive(
             ctx.loading.insert(resolved_path.clone());
             // ファイルを読み込みパース
             let source = fs::read_to_string(&resolved_path).map_err(|e| {
-                MumeiError::VerificationError(
-                    format!("Failed to read imported module '{}': {}", import_decl.path, e)
+                MumeiError::verification_at(
+                    format!("Failed to read imported module '{}': {}", import_decl.path, e),
+                    import_decl.span.clone()
                 )
             })?;
 
@@ -348,7 +350,7 @@ fn resolve_path(import_path: &str, base_dir: &Path) -> MumeiResult<PathBuf> {
     }
 
     // すべて失敗した場合はエラー
-    Err(MumeiError::VerificationError(
+    Err(MumeiError::verification(
         format!(
             "Cannot resolve import path '{}'\n  Searched:\n    - {}\n    - compiler binary directory\n    - current working directory\n    - MUMEI_STD_PATH environment variable",
             import_path,
@@ -383,7 +385,7 @@ pub fn resolve_manifest_dependencies(
             let entry = entry_candidates.iter().find(|p| p.exists());
             if let Some(entry_path) = entry {
                 let source = fs::read_to_string(entry_path).map_err(|e| {
-                    MumeiError::VerificationError(format!(
+                    MumeiError::verification(format!(
                         "Failed to read dependency '{}' at '{}': {}",
                         dep_name, entry_path.display(), e
                     ))
@@ -432,10 +434,10 @@ pub fn resolve_manifest_dependencies(
                 let status = std::process::Command::new("git")
                     .args(&cmd_args)
                     .status()
-                    .map_err(|e| MumeiError::VerificationError(format!("git clone failed for '{}': {}", dep_name, e)))?;
+                    .map_err(|e| MumeiError::verification(format!("git clone failed for '{}': {}", dep_name, e)))?;
 
                 if !status.success() {
-                    return Err(MumeiError::VerificationError(format!(
+                    return Err(MumeiError::verification(format!(
                         "git clone failed for dependency '{}' ({})", dep_name, url
                     )));
                 }
@@ -461,7 +463,7 @@ pub fn resolve_manifest_dependencies(
             ];
             if let Some(entry_path) = entry_candidates.iter().find(|p| p.exists()) {
                 let source = fs::read_to_string(entry_path).map_err(|e| {
-                    MumeiError::VerificationError(format!(
+                    MumeiError::verification(format!(
                         "Failed to read dependency '{}' at '{}': {}",
                         dep_name, entry_path.display(), e
                     ))
@@ -496,7 +498,7 @@ pub fn resolve_manifest_dependencies(
                 ];
                 if let Some(entry_path) = entry_candidates.iter().find(|p| p.exists()) {
                     let source = fs::read_to_string(entry_path).map_err(|e| {
-                        MumeiError::VerificationError(format!(
+                        MumeiError::verification(format!(
                             "Failed to read dependency '{}' at '{}': {}",
                             dep_name, entry_path.display(), e
                         ))

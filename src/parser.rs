@@ -1,6 +1,78 @@
 use crate::ast::TypeRef;
 use regex::Regex;
 
+// --- 0. ソース位置情報 (Span) ---
+
+/// ソースコード内の位置情報。全 AST ノードに付与して診断メッセージの精度を向上させる。
+#[derive(Debug, Clone, PartialEq)]
+pub struct Span {
+    /// ソースファイル名（空文字列は不明を表す）
+    pub file: String,
+    /// 行番号（1-indexed、0 は不明）
+    pub line: usize,
+    /// 列番号（1-indexed、0 は不明）
+    pub col: usize,
+    /// トークン長（0 は不明）
+    pub len: usize,
+}
+
+impl Default for Span {
+    fn default() -> Self {
+        Span {
+            file: String::new(),
+            line: 0,
+            col: 0,
+            len: 0,
+        }
+    }
+}
+
+impl Span {
+    /// 既知の位置情報を持つ Span を生成する
+    pub fn new(file: impl Into<String>, line: usize, col: usize, len: usize) -> Self {
+        Span {
+            file: file.into(),
+            line,
+            col,
+            len,
+        }
+    }
+}
+
+/// ソース文字列内のバイトオフセットから (1-indexed line, 1-indexed col) を計算する。
+fn offset_to_line_col(source: &str, offset: usize) -> (usize, usize) {
+    let mut line = 1;
+    let mut col = 1;
+    for (i, c) in source.char_indices() {
+        if i >= offset {
+            break;
+        }
+        if c == '\n' {
+            line += 1;
+            col = 1;
+        } else {
+            col += 1;
+        }
+    }
+    (line, col)
+}
+
+/// ソース文字列内の regex マッチからSpanを生成するヘルパー。
+fn span_from_offset(source: &str, offset: usize, len: usize) -> Span {
+    let (line, col) = offset_to_line_col(source, offset);
+    Span::new("", line, col, len)
+}
+
+impl std::fmt::Display for Span {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.file.is_empty() {
+            write!(f, "<unknown>:{}:{}", self.line, self.col)
+        } else {
+            write!(f, "{}:{}:{}", self.file, self.line, self.col)
+        }
+    }
+}
+
 // --- 1. 数式の構造定義 (AST: Abstract Syntax Tree) ---
 
 #[derive(Debug, Clone, PartialEq)]
@@ -36,6 +108,8 @@ pub struct ResourceDef {
     pub priority: i64,
     /// アクセスモード: exclusive（書き込み）または shared（読み取り）
     pub mode: ResourceMode,
+    /// ソース位置情報
+    pub span: Span,
 }
 
 /// リソースのアクセスモード
@@ -183,6 +257,8 @@ pub struct EnumDef {
     /// この Enum が再帰的データ型か（いずれかの Variant が自身を参照するか）
     #[allow(dead_code)]
     pub is_recursive: bool,
+    /// ソース位置情報
+    pub span: Span,
 }
 
 // --- 2. 量子化子、精緻型、および Item の定義 ---
@@ -208,6 +284,8 @@ pub struct RefinedType {
     pub _base_type: String, // i64, u64, f64 を保持
     pub operand: String,
     pub predicate_raw: String,
+    /// ソース位置情報
+    pub span: Span,
 }
 
 #[derive(Debug, Clone)]
@@ -280,6 +358,8 @@ pub struct Atom {
     /// 2. 維持 (Preservation): invariant が成立する状態で body を実行した後も invariant が維持されることを証明
     /// 3. 再帰呼び出し時: 呼び出し先の invariant を仮定として使用（帰納法の仮定）
     pub invariant: Option<String>,
+    /// ソース位置情報
+    pub span: Span,
 }
 
 // =============================================================================
@@ -325,12 +405,16 @@ pub struct StructDef {
     /// 実際の Atom 定義は ModuleEnv.atoms に "Stack::push" のような FQN で登録される。
     #[allow(dead_code)]
     pub method_names: Vec<String>,
+    /// ソース位置情報
+    pub span: Span,
 }
 
 /// インポート宣言
 #[derive(Debug, Clone)]
 pub struct ImportDecl {
-    /// インポート対象のファイルパス（例: "./lib/math.mm"）
+    /// ソース位置情報
+    pub span: Span,
+    /// インポート対象のファイルパス（例: "./lib/math.mm")
     pub path: String,
     /// エイリアス（例: as math → Some("math")）
     pub alias: Option<String>,
@@ -378,6 +462,8 @@ pub struct TraitDef {
     /// 法則（Laws）: トレイトが満たすべき論理的性質。
     /// 各要素は (法則名, 論理式の文字列) のペア。
     pub laws: Vec<(String, String)>,
+    /// ソース位置情報
+    pub span: Span,
 }
 
 /// トレイト実装定義
@@ -394,6 +480,23 @@ pub struct ImplDef {
     pub target_type: String,
     /// メソッド実装: (メソッド名, body 式の文字列)
     pub method_bodies: Vec<(String, String)>,
+    /// ソース位置情報
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub enum Item {
+    Atom(Atom),
+    TypeDef(RefinedType),
+    StructDef(StructDef),
+    EnumDef(EnumDef),
+    Import(ImportDecl),
+    TraitDef(TraitDef),
+    ImplDef(ImplDef),
+    /// リソース定義: resource name priority mode;
+    ResourceDef(ResourceDef),
+    /// extern ブロック: extern "Lang" { fn ...; }
+    ExternBlock(ExternBlock),
 }
 
 // =============================================================================
@@ -418,30 +521,12 @@ pub struct ExternFn {
 }
 
 /// extern ブロック定義
-/// 外部言語（Rust, C）の関数シグネチャを宣言する。
-/// ここで宣言された関数は `trusted atom` として自動登録され、
-/// requires/ensures の契約のみで検証される（body は外部実装）。
 #[derive(Debug, Clone)]
 pub struct ExternBlock {
     /// 外部言語名（例: "Rust", "C"）
     pub language: String,
     /// 関数シグネチャリスト
     pub functions: Vec<ExternFn>,
-}
-
-#[derive(Debug, Clone)]
-pub enum Item {
-    Atom(Atom),
-    TypeDef(RefinedType),
-    StructDef(StructDef),
-    EnumDef(EnumDef),
-    Import(ImportDecl),
-    TraitDef(TraitDef),
-    ImplDef(ImplDef),
-    /// リソース定義: resource name priority mode;
-    ResourceDef(ResourceDef),
-    /// extern ブロック: extern "Lang" { fn ...; }
-    ExternBlock(ExternBlock),
 }
 
 // --- 3. Generics パースヘルパー ---
@@ -583,18 +668,25 @@ pub fn parse_module(source: &str) -> Vec<Item> {
     for cap in import_re.captures_iter(source) {
         let path = cap[1].to_string();
         let alias = cap.get(2).map(|m| m.as_str().to_string());
-        items.push(Item::Import(ImportDecl { path, alias }));
+        let m = cap.get(0).unwrap();
+        items.push(Item::Import(ImportDecl {
+            span: span_from_offset(source, m.start(), m.end() - m.start()),
+            path,
+            alias,
+        }));
     }
 
     for cap in type_re.captures_iter(source) {
         let full_predicate = cap[3].trim().to_string();
         let tokens = tokenize(&full_predicate);
         let operand = tokens.first().cloned().unwrap_or_else(|| "v".to_string());
+        let m = cap.get(0).unwrap();
         items.push(Item::TypeDef(RefinedType {
             name: cap[1].to_string(),
             _base_type: cap[2].to_string(),
             operand,
             predicate_raw: full_predicate,
+            span: span_from_offset(source, m.start(), m.end() - m.start()),
         }));
     }
 
@@ -634,11 +726,13 @@ pub fn parse_module(source: &str) -> Vec<Item> {
                 }
             })
             .collect();
+        let m = cap.get(0).unwrap();
         items.push(Item::StructDef(StructDef {
             name,
             type_params,
             fields,
             method_names: vec![],
+            span: span_from_offset(source, m.start(), m.end() - m.start()),
         }));
     }
 
@@ -703,11 +797,13 @@ pub fn parse_module(source: &str) -> Vec<Item> {
                 }
             })
             .collect();
+        let m = cap.get(0).unwrap();
         items.push(Item::EnumDef(EnumDef {
             name,
             type_params,
             variants,
             is_recursive: any_recursive,
+            span: span_from_offset(source, m.start(), m.end() - m.start()),
         }));
     }
 
@@ -774,10 +870,12 @@ pub fn parse_module(source: &str) -> Vec<Item> {
                 }
             }
         }
+        let m = cap.get(0).unwrap();
         items.push(Item::TraitDef(TraitDef {
             name,
             methods,
             laws,
+            span: span_from_offset(source, m.start(), m.end() - m.start()),
         }));
     }
 
@@ -830,10 +928,12 @@ pub fn parse_module(source: &str) -> Vec<Item> {
             let method_body = body[fn_body_start..fn_body_end].trim().to_string();
             method_bodies.push((method_name, method_body));
         }
+        let m = cap.get(0).unwrap();
         items.push(Item::ImplDef(ImplDef {
             trait_name,
             target_type,
             method_bodies,
+            span: span_from_offset(source, m.start(), block_end + 1 - m.start()),
         }));
     }
 
@@ -848,10 +948,12 @@ pub fn parse_module(source: &str) -> Vec<Item> {
             "exclusive" => ResourceMode::Exclusive,
             _ => ResourceMode::Shared,
         };
+        let m = cap.get(0).unwrap();
         items.push(Item::ResourceDef(ResourceDef {
             name,
             priority,
             mode,
+            span: span_from_offset(source, m.start(), m.end() - m.start()),
         }));
     }
 
@@ -1112,6 +1214,7 @@ pub fn parse_atom(source: &str) -> Atom {
         .captures(source)
         .map(|cap| cap[1].trim().to_string());
 
+    let atom_match = name_caps.get(0).unwrap();
     Atom {
         name,
         type_params,
@@ -1129,6 +1232,7 @@ pub fn parse_atom(source: &str) -> Atom {
         trust_level: TrustLevel::Verified,
         max_unroll,
         invariant,
+        span: span_from_offset(source, atom_match.start(), source.len()),
     }
 }
 

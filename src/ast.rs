@@ -15,12 +15,18 @@ pub struct TypeRef {
 impl TypeRef {
     /// 型引数なしの単純な型参照を作成する
     pub fn simple(name: &str) -> Self {
-        TypeRef { name: name.to_string(), type_args: vec![] }
+        TypeRef {
+            name: name.to_string(),
+            type_args: vec![],
+        }
     }
 
     /// 型引数付きの型参照を作成する
     pub fn generic(name: &str, args: Vec<TypeRef>) -> Self {
-        TypeRef { name: name.to_string(), type_args: args }
+        TypeRef {
+            name: name.to_string(),
+            type_args: args,
+        }
     }
 
     /// 表示用の正規化名を返す（例: "Stack<i64>"）
@@ -49,7 +55,9 @@ impl TypeRef {
             let mut result = replacement.clone();
             if !self.type_args.is_empty() {
                 // 例: T<U> のような場合（通常は発生しないが安全のため）
-                result.type_args = self.type_args.iter()
+                result.type_args = self
+                    .type_args
+                    .iter()
                     .map(|a| a.substitute(type_map))
                     .collect();
             }
@@ -58,7 +66,9 @@ impl TypeRef {
             // 型パラメータでない場合、型引数のみ再帰的に置換
             TypeRef {
                 name: self.name.clone(),
-                type_args: self.type_args.iter()
+                type_args: self
+                    .type_args
+                    .iter()
                     .map(|a| a.substitute(type_map))
                     .collect(),
             }
@@ -83,11 +93,10 @@ impl std::fmt::Display for TypeRef {
 // - コンパイル時に Stack<i64>, Stack<f64> など使用されている型ごとにコードを複製
 // - 実行時の型消去やオーバーヘッドがない
 
-use std::collections::{HashMap, HashSet};
 use crate::parser::{
-    Item, Atom, Param, StructDef, StructField, EnumDef, EnumVariant,
-    Expr, parse_type_ref,
+    parse_type_ref, Atom, EnumDef, EnumVariant, Expr, Item, Param, StructDef, StructField,
 };
+use std::collections::{HashMap, HashSet};
 
 /// 単相化コンテキスト: ジェネリック定義と使用インスタンスを管理する
 #[derive(Debug, Default)]
@@ -161,9 +170,10 @@ impl Monomorphizer {
         if !type_ref.type_args.is_empty() {
             // 型引数がすべて具体型（型パラメータでない）場合のみインスタンスとして登録
             let all_concrete = type_ref.type_args.iter().all(|a| !a.is_type_param());
-            if all_concrete && (self.generic_structs.contains_key(&type_ref.name)
-                || self.generic_enums.contains_key(&type_ref.name)
-                || self.generic_atoms.contains_key(&type_ref.name))
+            if all_concrete
+                && (self.generic_structs.contains_key(&type_ref.name)
+                    || self.generic_enums.contains_key(&type_ref.name)
+                    || self.generic_atoms.contains_key(&type_ref.name))
             {
                 self.instances.insert(type_ref.display_name());
             }
@@ -195,7 +205,11 @@ impl Monomorphizer {
                 self.collect_from_expr(l);
                 self.collect_from_expr(r);
             }
-            Expr::IfThenElse { cond, then_branch, else_branch } => {
+            Expr::IfThenElse {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
                 self.collect_from_expr(cond);
                 self.collect_from_expr(then_branch);
                 self.collect_from_expr(else_branch);
@@ -208,7 +222,12 @@ impl Monomorphizer {
             Expr::Let { value, .. } | Expr::Assign { value, .. } => {
                 self.collect_from_expr(value);
             }
-            Expr::While { cond, invariant, decreases, body } => {
+            Expr::While {
+                cond,
+                invariant,
+                decreases,
+                body,
+            } => {
                 self.collect_from_expr(cond);
                 self.collect_from_expr(invariant);
                 if let Some(dec) = decreases {
@@ -301,21 +320,26 @@ impl Monomorphizer {
         let type_map = self.build_type_map(&generic.type_params, &instance.type_args)?;
         let mono_name = instance.display_name();
 
-        let fields = generic.fields.iter().map(|f| {
-            let new_type_ref = f.type_ref.substitute(&type_map);
-            StructField {
-                name: f.name.clone(),
-                type_name: new_type_ref.display_name(),
-                type_ref: new_type_ref,
-                constraint: f.constraint.clone(),
-            }
-        }).collect();
+        let fields = generic
+            .fields
+            .iter()
+            .map(|f| {
+                let new_type_ref = f.type_ref.substitute(&type_map);
+                StructField {
+                    name: f.name.clone(),
+                    type_name: new_type_ref.display_name(),
+                    type_ref: new_type_ref,
+                    constraint: f.constraint.clone(),
+                }
+            })
+            .collect();
 
         Some(StructDef {
             name: mono_name,
             type_params: vec![], // 単相化後は型パラメータなし
             fields,
             method_names: vec![],
+            span: generic.span.clone(),
         })
     }
 
@@ -324,21 +348,26 @@ impl Monomorphizer {
         let type_map = self.build_type_map(&generic.type_params, &instance.type_args)?;
         let mono_name = instance.display_name();
 
-        let variants = generic.variants.iter().map(|v| {
-            let new_field_types: Vec<TypeRef> = v.field_types.iter()
-                .map(|ft| ft.substitute(&type_map))
-                .collect();
-            let new_fields: Vec<String> = new_field_types.iter()
-                .map(|ft| ft.display_name())
-                .collect();
-            let is_recursive = new_fields.iter().any(|f| f == &mono_name);
-            EnumVariant {
-                name: v.name.clone(),
-                fields: new_fields,
-                field_types: new_field_types,
-                is_recursive,
-            }
-        }).collect();
+        let variants = generic
+            .variants
+            .iter()
+            .map(|v| {
+                let new_field_types: Vec<TypeRef> = v
+                    .field_types
+                    .iter()
+                    .map(|ft| ft.substitute(&type_map))
+                    .collect();
+                let new_fields: Vec<String> =
+                    new_field_types.iter().map(|ft| ft.display_name()).collect();
+                let is_recursive = new_fields.iter().any(|f| f == &mono_name);
+                EnumVariant {
+                    name: v.name.clone(),
+                    fields: new_fields,
+                    field_types: new_field_types,
+                    is_recursive,
+                }
+            })
+            .collect();
 
         let any_recursive = generic.variants.iter().any(|v| v.is_recursive);
 
@@ -347,6 +376,7 @@ impl Monomorphizer {
             type_params: vec![],
             variants,
             is_recursive: any_recursive,
+            span: generic.span.clone(),
         })
     }
 
@@ -355,20 +385,24 @@ impl Monomorphizer {
         let type_map = self.build_type_map(&generic.type_params, &instance.type_args)?;
         let mono_name = instance.display_name();
 
-        let params = generic.params.iter().map(|p| {
-            if let Some(tref) = &p.type_ref {
-                let new_type_ref = tref.substitute(&type_map);
-                Param {
-                    name: p.name.clone(),
-                    type_name: Some(new_type_ref.display_name()),
-                    type_ref: Some(new_type_ref),
-                    is_ref: p.is_ref,
-                    is_ref_mut: p.is_ref_mut,
+        let params = generic
+            .params
+            .iter()
+            .map(|p| {
+                if let Some(tref) = &p.type_ref {
+                    let new_type_ref = tref.substitute(&type_map);
+                    Param {
+                        name: p.name.clone(),
+                        type_name: Some(new_type_ref.display_name()),
+                        type_ref: Some(new_type_ref),
+                        is_ref: p.is_ref,
+                        is_ref_mut: p.is_ref_mut,
+                    }
+                } else {
+                    p.clone()
                 }
-            } else {
-                p.clone()
-            }
-        }).collect();
+            })
+            .collect();
 
         Some(Atom {
             name: mono_name,
@@ -385,15 +419,21 @@ impl Monomorphizer {
             trust_level: generic.trust_level.clone(),
             max_unroll: generic.max_unroll,
             invariant: generic.invariant.clone(),
+            span: generic.span.clone(),
         })
     }
 
     /// 型パラメータ名と型引数の対応マップを構築する
-    fn build_type_map(&self, type_params: &[String], type_args: &[TypeRef]) -> Option<HashMap<String, TypeRef>> {
+    fn build_type_map(
+        &self,
+        type_params: &[String],
+        type_args: &[TypeRef],
+    ) -> Option<HashMap<String, TypeRef>> {
         if type_params.len() != type_args.len() {
             return None;
         }
-        let map: HashMap<String, TypeRef> = type_params.iter()
+        let map: HashMap<String, TypeRef> = type_params
+            .iter()
             .zip(type_args.iter())
             .map(|(param, arg)| (param.clone(), arg.clone()))
             .collect();
