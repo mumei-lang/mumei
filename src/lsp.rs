@@ -14,6 +14,7 @@
 //! - `textDocument/publishDiagnostics` — Z3 検証エラーのリアルタイム表示
 //! - `textDocument/definition` — 定義ジャンプ
 use crate::parser;
+use crate::verification;
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
 // =============================================================================
@@ -194,10 +195,15 @@ fn diagnose(uri: &str, source: &str) -> Vec<serde_json::Value> {
 
     // Phase 2: Z3 検証 diagnostics（file:// URI の場合のみ実行）
     if let Some(path) = uri_to_path(uri) {
-        if let Err(msg) = verify_source_for_lsp(&path, source) {
-            // エラーメッセージから Span 情報を活用（将来の拡張ポイント）
-            // 現在は atom の Span を検索して位置情報を提供する
-            let (line, col) = find_error_position(&items, &msg);
+        if let Err(e) = verify_source_for_lsp(&path, source) {
+            let detail = e.to_detail();
+            // ErrorDetail の Span から直接位置を取得（substring マッチ不要）
+            let (line, col) = if detail.span.line > 0 {
+                (detail.span.line.saturating_sub(1), detail.span.col.saturating_sub(1))
+            } else {
+                // Span が不明な場合、atom の Span にフォールバック
+                find_error_position(&items, &detail.message)
+            };
             diagnostics.push(serde_json::json!({
                 "range": {
                     "start": { "line": line, "character": col },
@@ -205,7 +211,7 @@ fn diagnose(uri: &str, source: &str) -> Vec<serde_json::Value> {
                 },
                 "severity": 1,
                 "source": "mumei-z3",
-                "message": msg
+                "message": format!("{}", detail)
             }));
         }
     }
@@ -215,9 +221,6 @@ fn diagnose(uri: &str, source: &str) -> Vec<serde_json::Value> {
 
 /// エラーメッセージから関連する atom の Span 情報を検索し、行・列を返す。
 /// マッチしない場合は (0, 0) にフォールバックする。
-///
-/// NOTE: 現時点ではパーサが全ノードに Span::default() (line=0) を設定しているため、
-/// この関数は常に (0, 0) を返す。パーサに実際の行・列追跡が実装された段階で有効になる。
 fn find_error_position(items: &[parser::Item], error_msg: &str) -> (usize, usize) {
     // エラーメッセージに atom 名が含まれている場合、その atom の Span を使用
     // TODO: contains() による部分文字列マッチは短い atom 名で誤マッチする可能性がある。
@@ -246,9 +249,10 @@ fn uri_to_path(uri: &str) -> Option<std::path::PathBuf> {
 
 /// ソースコードを in-process でパース → Z3 検証し、最初のエラーを返す。
 /// mumei.toml を上方探索してプロジェクトルートを決定し、依存パッケージも解決する。
-fn verify_source_for_lsp(path: &std::path::Path, source: &str) -> Result<(), String> {
-    use crate::verification;
-
+fn verify_source_for_lsp(
+    path: &std::path::Path,
+    source: &str,
+) -> Result<(), verification::MumeiError> {
     let items = crate::parser::parse_module(source);
     if items.is_empty() {
         return Ok(());
@@ -288,10 +292,7 @@ fn verify_source_for_lsp(path: &std::path::Path, source: &str) -> Result<(), Str
             if module_env.is_verified(&atom.name) {
                 continue;
             }
-            if let Err(e) = verification::verify_with_config(atom, output_dir, &module_env, 5000, 3)
-            {
-                return Err(format!("atom '{}': {}", atom.name, e));
-            }
+            verification::verify_with_config(atom, output_dir, &module_env, 5000, 3)?;
             module_env.mark_verified(&atom.name);
         }
     }

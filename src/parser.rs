@@ -872,11 +872,12 @@ pub fn parse_module(source: &str) -> Vec<Item> {
             let method_body = body[fn_body_start..fn_body_end].trim().to_string();
             method_bodies.push((method_name, method_body));
         }
+        let m = cap.get(0).unwrap();
         items.push(Item::ImplDef(ImplDef {
             trait_name,
             target_type,
             method_bodies,
-            span: Span::default(),
+            span: span_from_offset(source, m.start(), block_end + 1 - m.start()),
         }));
     }
 
@@ -891,11 +892,12 @@ pub fn parse_module(source: &str) -> Vec<Item> {
             "exclusive" => ResourceMode::Exclusive,
             _ => ResourceMode::Shared,
         };
+        let m = cap.get(0).unwrap();
         items.push(Item::ResourceDef(ResourceDef {
             name,
             priority,
             mode,
-            span: Span::default(),
+            span: span_from_offset(source, m.start(), m.end() - m.start()),
         }));
     }
 
@@ -1121,6 +1123,7 @@ pub fn parse_atom(source: &str) -> Atom {
         .captures(source)
         .map(|cap| cap[1].trim().to_string());
 
+    let atom_match = name_caps.get(0).unwrap();
     Atom {
         name,
         type_params,
@@ -1138,7 +1141,7 @@ pub fn parse_atom(source: &str) -> Atom {
         trust_level: TrustLevel::Verified,
         max_unroll,
         invariant,
-        span: Span::default(),
+        span: span_from_offset(source, atom_match.start(), source.len()),
     }
 }
 
