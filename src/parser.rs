@@ -108,7 +108,8 @@ pub struct ResourceDef {
     pub priority: i64,
     /// アクセスモード: exclusive（書き込み）または shared（読み取り）
     pub mode: ResourceMode,
-    /// ソース位置情報
+    /// ソース位置情報（将来 resource 関連エラーの位置表示に使用）
+    #[allow(dead_code)]
     pub span: Span,
 }
 
@@ -260,7 +261,8 @@ pub struct RefinedType {
     pub _base_type: String, // i64, u64, f64 を保持
     pub operand: String,
     pub predicate_raw: String,
-    /// ソース位置情報
+    /// ソース位置情報（将来 type 関連エラーの位置表示に使用）
+    #[allow(dead_code)]
     pub span: Span,
 }
 
@@ -388,7 +390,8 @@ pub struct StructDef {
 /// インポート宣言
 #[derive(Debug, Clone)]
 pub struct ImportDecl {
-    /// ソース位置情報
+    /// ソース位置情報（将来 import 関連エラーの位置表示に使用）
+    #[allow(dead_code)]
     pub span: Span,
     /// インポート対象のファイルパス（例: "./lib/math.mm")
     pub path: String,
@@ -438,7 +441,8 @@ pub struct TraitDef {
     /// 法則（Laws）: トレイトが満たすべき論理的性質。
     /// 各要素は (法則名, 論理式の文字列) のペア。
     pub laws: Vec<(String, String)>,
-    /// ソース位置情報
+    /// ソース位置情報（将来 trait 関連エラーの位置表示に使用）
+    #[allow(dead_code)]
     pub span: Span,
 }
 
@@ -456,7 +460,8 @@ pub struct ImplDef {
     pub target_type: String,
     /// メソッド実装: (メソッド名, body 式の文字列)
     pub method_bodies: Vec<(String, String)>,
-    /// ソース位置情報
+    /// ソース位置情報（将来 impl 関連エラーの位置表示に使用）
+    #[allow(dead_code)]
     pub span: Span,
 }
 
