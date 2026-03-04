@@ -283,6 +283,7 @@ fn verify_source_for_lsp(
             crate::parser::Item::ImplDef(i) => module_env.register_impl(i),
             crate::parser::Item::ResourceDef(r) => module_env.register_resource(r),
             crate::parser::Item::Import(_) => {}
+            crate::parser::Item::ExternBlock(_) => {}
         }
     }
 

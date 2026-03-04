@@ -228,6 +228,7 @@ fn load_and_prepare(input: &str) -> (Vec<Item>, verification::ModuleEnv, Vec<Imp
             Item::TraitDef(trait_def) => module_env.register_trait(trait_def),
             Item::ImplDef(impl_def) => module_env.register_impl(impl_def),
             Item::ResourceDef(resource_def) => module_env.register_resource(resource_def),
+            Item::ExternBlock(_) => {}
         }
     }
 
@@ -272,6 +273,9 @@ fn cmd_check(input: &str) {
                     parser::ResourceMode::Shared => "shared",
                 };
                 println!("  🔒 Resource: '{}' (priority={}, mode={})", r.name, r.priority, mode_str);
+            }
+            Item::ExternBlock(eb) => {
+                println!("  🔗 Extern \"{}\" ({} function(s))", eb.language, eb.functions.len());
             }
         }
     }
@@ -849,6 +853,11 @@ fn cmd_build(input: &str, output: &str) {
                 };
                 println!("  🔒 Registered Resource: '{}' (priority={}, mode={})",
                     resource_def.name, resource_def.priority, mode_str);
+            }
+
+            // --- extern ブロック ---
+            Item::ExternBlock(eb) => {
+                println!("  🔗 Extern \"{}\" ({} function(s))", eb.language, eb.functions.len());
             }
 
             // --- Atom の処理 ---
