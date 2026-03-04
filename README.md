@@ -336,6 +336,9 @@ my_app/
 - [ ] Remote package registry: Central registry for `mumei add <name>` without git URL
 - [ ] VS Code Marketplace publishing: Package and publish `editors/vscode/` as installable extension
 - [ ] LSP enhancements: `textDocument/completion` (keyword/atom name), `textDocument/definition` (jump to definition), counter-example highlighting
+- [ ] **Diagnostics-Driven Design**: Span情報を全ASTノードに付与し、Rich Diagnostics (miette/ariadne) による正確なエラー報告を実現 → [`docs/DIAGNOSTICS.md`](docs/DIAGNOSTICS.md)
+- [ ] **FFI-first + Bridge**: `extern "Rust" { fn ...; }` 構文による外部関数宣言、trusted atom としての自動登録、Rustクレート直接参照 → [`docs/FFI.md`](docs/FFI.md)
+- [ ] **Structured Concurrency**: `task { ... }` / `task_group { ... }` 構文、JoinSemantics (All/Any)、Z3による親タスク終了制約の形式検証 → [`docs/CONCURRENCY.md`](docs/CONCURRENCY.md)
 
 > 📖 **Toolchain roadmap**: [`docs/TOOLCHAIN.md`](docs/TOOLCHAIN.md)
 
