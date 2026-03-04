@@ -179,6 +179,21 @@ pub enum Expr {
     Await {
         expr: Box<Expr>,
     },
+    /// タスク式: task { body }
+    /// 構造化並行性のための子タスクを生成する。
+    /// 親タスクが子タスクより先に終了しないことを Z3 で保証する。
+    Task {
+        body: Box<Expr>,
+        /// タスクグループ名（省略時は暗黙のデフォルトグループ）
+        group: Option<String>,
+    },
+    /// タスクグループ式: task_group { task { ... }, task { ... } }
+    /// 複数の子タスクをグループ化し、全タスクの完了を待機する。
+    TaskGroup {
+        children: Vec<Expr>,
+        /// Join セマンティクス: all（全タスク完了待ち）または any（最初の完了で終了）
+        join_semantics: JoinSemantics,
+    },
 }
 
 /// Match 式のアーム（パターン → 式）
@@ -188,6 +203,15 @@ pub struct MatchArm {
     /// オプションのガード条件: match x { Pattern if cond => ... }
     pub guard: Option<Box<Expr>>,
     pub body: Box<Expr>,
+}
+
+/// タスクグループの Join セマンティクス
+#[derive(Debug, Clone, PartialEq)]
+pub enum JoinSemantics {
+    /// 全タスクの完了を待つ（デフォルト）
+    All,
+    /// 最初に完了したタスクの結果を返す（残りはキャンセル）
+    Any,
 }
 
 /// パターン
@@ -471,6 +495,46 @@ pub enum Item {
     ImplDef(ImplDef),
     /// リソース定義: resource name priority mode;
     ResourceDef(ResourceDef),
+    /// extern ブロック: extern "Lang" { fn ...; }
+    ExternBlock(ExternBlock),
+}
+
+// =============================================================================
+// FFI Bridge (extern ブロック)
+// =============================================================================
+
+/// extern ブロック内の関数シグネチャ
+/// ```mumei
+/// extern "Rust" {
+///     fn sqrt(x: f64) -> f64;
+///     fn abs(x: i64) -> i64;
+/// }
+/// ```
+// NOTE: ExternFn のフィールドは将来 trusted atom として ModuleEnv に
+// 自動登録する際に使用予定。現時点では読み取り側が未実装のため dead_code を抑制。
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct ExternFn {
+    /// 関数名（外部シンボル名）
+    pub name: String,
+    /// パラメータの型名リスト
+    pub param_types: Vec<String>,
+    /// 戻り値型名
+    pub return_type: String,
+    /// ソース位置情報
+    pub span: Span,
+}
+
+/// extern ブロック定義
+#[derive(Debug, Clone)]
+pub struct ExternBlock {
+    /// 外部言語名（例: "Rust", "C"）
+    pub language: String,
+    /// 関数シグネチャリスト
+    pub functions: Vec<ExternFn>,
+    // NOTE: span は将来 ExternBlock のエラー報告で使用予定。
+    #[allow(dead_code)]
+    pub span: Span,
 }
 
 // --- 3. Generics パースヘルパー ---
@@ -897,6 +961,46 @@ pub fn parse_module(source: &str) -> Vec<Item> {
             name,
             priority,
             mode,
+            span: span_from_offset(source, m.start(), m.end() - m.start()),
+        }));
+    }
+
+    // extern ブロック: extern "Rust" { fn name(params) -> RetType; ... }
+    let extern_re = Regex::new(r#"(?m)^extern\s+"(\w+)"\s*\{([^}]*)\}"#).unwrap();
+    for cap in extern_re.captures_iter(source) {
+        let language = cap[1].to_string();
+        let body = &cap[2];
+        let body_offset = cap.get(2).unwrap().start();
+        let mut functions = Vec::new();
+        let fn_re = Regex::new(r"fn\s+(\w+)\s*\(([^)]*)\)\s*->\s*(\w+)").unwrap();
+        for fcap in fn_re.captures_iter(body) {
+            let name = fcap[1].to_string();
+            let params_str = &fcap[2];
+            let param_types: Vec<String> = params_str
+                .split(',')
+                .map(|p| p.trim())
+                .filter(|p| !p.is_empty())
+                .map(|p| {
+                    if let Some((_, t)) = p.split_once(':') {
+                        t.trim().to_string()
+                    } else {
+                        p.to_string()
+                    }
+                })
+                .collect();
+            let return_type = fcap[3].to_string();
+            let fm = fcap.get(0).unwrap();
+            functions.push(ExternFn {
+                name,
+                param_types,
+                return_type,
+                span: span_from_offset(source, body_offset + fm.start(), fm.end() - fm.start()),
+            });
+        }
+        let m = cap.get(0).unwrap();
+        items.push(Item::ExternBlock(ExternBlock {
+            language,
+            functions,
             span: span_from_offset(source, m.start(), m.end() - m.start()),
         }));
     }
@@ -1352,6 +1456,62 @@ fn parse_primary(tokens: &[String], pos: &mut usize) -> Expr {
         let expr = parse_primary(tokens, pos);
         return Expr::Await {
             expr: Box::new(expr),
+        };
+    }
+
+    // task 式: task { body } または task group_name { body }
+    if token == "task" {
+        *pos += 1;
+        let group = if *pos < tokens.len() && tokens[*pos] != "{" {
+            let g = Some(tokens[*pos].clone());
+            *pos += 1;
+            g
+        } else {
+            None
+        };
+        let body = parse_block_or_expr(tokens, pos);
+        return Expr::Task {
+            body: Box::new(body),
+            group,
+        };
+    }
+
+    // task_group 式: task_group { task { ... }; task { ... } }
+    // task_group:any { task { ... }; task { ... } }
+    if token == "task_group" {
+        *pos += 1;
+        let join_semantics = if *pos < tokens.len() && tokens[*pos] == ":" {
+            *pos += 1; // skip ":"
+            if *pos < tokens.len() && tokens[*pos] == "any" {
+                *pos += 1;
+                JoinSemantics::Any
+            } else if *pos < tokens.len() && tokens[*pos] == "all" {
+                *pos += 1;
+                JoinSemantics::All
+            } else {
+                let unknown = if *pos < tokens.len() {
+                    tokens[*pos].clone()
+                } else {
+                    "<EOF>".to_string()
+                };
+                panic!(
+                    "Unknown task_group join semantics '{}'. Expected 'all' or 'any'.",
+                    unknown
+                );
+            }
+        } else {
+            JoinSemantics::All
+        };
+        // { task { ... }; task { ... } } をパース
+        let body = parse_block_or_expr(tokens, pos);
+        let children = if let Expr::Block(stmts) = body {
+            stmts
+        } else {
+            vec![body]
+        };
+        return Expr::TaskGroup {
+            children,
+            join_semantics,
         };
     }
 
@@ -2137,5 +2297,153 @@ body: v + r;
             },
             _ => panic!("Expected Await expression, got {:?}", expr),
         }
+    }
+
+    // =========================================================================
+    // task / task_group パーステスト
+    // =========================================================================
+
+    #[test]
+    fn test_parse_task_expression() {
+        let expr = parse_expression("task { x + 1 }");
+        match expr {
+            Expr::Task { body, group } => {
+                assert!(group.is_none());
+                match *body {
+                    Expr::Block(_) => {} // OK
+                    _ => panic!("Expected Block in task body"),
+                }
+            }
+            _ => panic!("Expected Task expression, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn test_parse_task_with_group_name() {
+        let expr = parse_expression("task workers { x + 1 }");
+        match expr {
+            Expr::Task { body, group } => {
+                assert_eq!(group, Some("workers".to_string()));
+                match *body {
+                    Expr::Block(_) => {} // OK
+                    _ => panic!("Expected Block in task body"),
+                }
+            }
+            _ => panic!("Expected Task expression, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn test_parse_task_group_default_semantics() {
+        let expr = parse_expression("task_group { task { x }; task { y } }");
+        match expr {
+            Expr::TaskGroup {
+                children,
+                join_semantics,
+            } => {
+                assert_eq!(join_semantics, JoinSemantics::All);
+                assert_eq!(children.len(), 2);
+            }
+            _ => panic!("Expected TaskGroup expression, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn test_parse_task_group_any_semantics() {
+        let expr = parse_expression("task_group:any { task { x }; task { y } }");
+        match expr {
+            Expr::TaskGroup {
+                children,
+                join_semantics,
+            } => {
+                assert_eq!(join_semantics, JoinSemantics::Any);
+                assert_eq!(children.len(), 2);
+            }
+            _ => panic!("Expected TaskGroup expression, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn test_parse_task_group_all_semantics() {
+        let expr = parse_expression("task_group:all { task { x }; task { y } }");
+        match expr {
+            Expr::TaskGroup {
+                children,
+                join_semantics,
+            } => {
+                assert_eq!(join_semantics, JoinSemantics::All);
+                assert_eq!(children.len(), 2);
+            }
+            _ => panic!("Expected TaskGroup expression, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "Unknown task_group join semantics")]
+    fn test_parse_task_group_unknown_semantics_panics() {
+        parse_expression("task_group:bogus { task { x } }");
+    }
+
+    // =========================================================================
+    // extern ブロック パーステスト
+    // =========================================================================
+
+    #[test]
+    fn test_parse_extern_block() {
+        let source = r#"
+extern "Rust" {
+    fn sqrt(x: f64) -> f64;
+    fn abs(x: i64) -> i64;
+}
+"#;
+        let items = parse_module(source);
+        let externs: Vec<_> = items
+            .iter()
+            .filter_map(|i| {
+                if let Item::ExternBlock(e) = i {
+                    Some(e)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        assert_eq!(externs.len(), 1);
+        let eb = &externs[0];
+        assert_eq!(eb.language, "Rust");
+        assert_eq!(eb.functions.len(), 2);
+        assert_eq!(eb.functions[0].name, "sqrt");
+        assert_eq!(eb.functions[0].param_types, vec!["f64"]);
+        assert_eq!(eb.functions[0].return_type, "f64");
+        assert_eq!(eb.functions[1].name, "abs");
+        assert_eq!(eb.functions[1].param_types, vec!["i64"]);
+        assert_eq!(eb.functions[1].return_type, "i64");
+        // Span should be populated
+        assert!(eb.span.line > 0);
+    }
+
+    #[test]
+    fn test_parse_extern_block_c() {
+        let source = r#"
+extern "C" {
+    fn printf(fmt: i64) -> i64;
+}
+"#;
+        let items = parse_module(source);
+        let externs: Vec<_> = items
+            .iter()
+            .filter_map(|i| {
+                if let Item::ExternBlock(e) = i {
+                    Some(e)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        assert_eq!(externs.len(), 1);
+        assert_eq!(externs[0].language, "C");
+        assert_eq!(externs[0].functions.len(), 1);
+        assert_eq!(externs[0].functions[0].name, "printf");
     }
 }

@@ -281,5 +281,13 @@ fn format_expr_ts(expr: &Expr) -> String {
             let expr_str = format_expr_ts(expr);
             format!("await {}", expr_str)
         },
+        Expr::Task { body, .. } => {
+            let body_str = format_expr_ts(body);
+            format!("(async () => {{ {} }})()", body_str)
+        },
+        Expr::TaskGroup { children, .. } => {
+            let tasks: Vec<String> = children.iter().map(format_expr_ts).collect();
+            format!("Promise.all([{}])", tasks.join(", "))
+        },
     }
 }

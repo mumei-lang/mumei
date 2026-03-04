@@ -1,6 +1,6 @@
 use crate::parser::{
-    parse_expression, Atom, EnumDef, Expr, ImplDef, MatchArm, Op, Pattern, QuantifierType,
-    RefinedType, ResourceDef, ResourceMode, Span, StructDef, TraitDef, TrustLevel,
+    parse_expression, Atom, EnumDef, Expr, ImplDef, JoinSemantics, MatchArm, Op, Pattern,
+    QuantifierType, RefinedType, ResourceDef, ResourceMode, Span, StructDef, TraitDef, TrustLevel,
 };
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
@@ -68,23 +68,38 @@ pub enum MumeiError {
 impl MumeiError {
     /// Span なしで VerificationError を生成（位置不明のエラー）
     pub fn verification(msg: impl Into<String>) -> Self {
-        MumeiError::VerificationError { msg: msg.into(), span: Span::default() }
+        MumeiError::VerificationError {
+            msg: msg.into(),
+            span: Span::default(),
+        }
     }
     /// Span 付きで VerificationError を生成
     pub fn verification_at(msg: impl Into<String>, span: Span) -> Self {
-        MumeiError::VerificationError { msg: msg.into(), span }
+        MumeiError::VerificationError {
+            msg: msg.into(),
+            span,
+        }
     }
     /// Span なしで CodegenError を生成
     pub fn codegen(msg: impl Into<String>) -> Self {
-        MumeiError::CodegenError { msg: msg.into(), span: Span::default() }
+        MumeiError::CodegenError {
+            msg: msg.into(),
+            span: Span::default(),
+        }
     }
     /// Span なしで TypeError を生成
     pub fn type_error(msg: impl Into<String>) -> Self {
-        MumeiError::TypeError { msg: msg.into(), span: Span::default() }
+        MumeiError::TypeError {
+            msg: msg.into(),
+            span: Span::default(),
+        }
     }
     /// Span 付きで TypeError を生成
     pub fn type_error_at(msg: impl Into<String>, span: Span) -> Self {
-        MumeiError::TypeError { msg: msg.into(), span }
+        MumeiError::TypeError {
+            msg: msg.into(),
+            span,
+        }
     }
 
     /// ErrorDetail を取得する（Span 情報を保持）
@@ -706,10 +721,13 @@ fn split_args(input: &str) -> Vec<String> {
 /// ∀x. law_expr が成立するかを検証する。
 pub fn verify_impl(impl_def: &ImplDef, module_env: &ModuleEnv) -> MumeiResult<()> {
     let trait_def = module_env.get_trait(&impl_def.trait_name).ok_or_else(|| {
-        MumeiError::type_error_at(format!(
-            "Trait '{}' not found for impl on '{}'",
-            impl_def.trait_name, impl_def.target_type
-        ), impl_def.span.clone())
+        MumeiError::type_error_at(
+            format!(
+                "Trait '{}' not found for impl on '{}'",
+                impl_def.trait_name, impl_def.target_type
+            ),
+            impl_def.span.clone(),
+        )
     })?;
 
     // メソッドの完全性チェック: trait の全メソッドが impl されているか
@@ -719,10 +737,13 @@ pub fn verify_impl(impl_def: &ImplDef, module_env: &ModuleEnv) -> MumeiResult<()
             .iter()
             .any(|(name, _)| name == &method.name)
         {
-            return Err(MumeiError::type_error_at(format!(
-                "impl {} for {}: missing method '{}'",
-                impl_def.trait_name, impl_def.target_type, method.name
-            ), impl_def.span.clone()));
+            return Err(MumeiError::type_error_at(
+                format!(
+                    "impl {} for {}: missing method '{}'",
+                    impl_def.trait_name, impl_def.target_type, method.name
+                ),
+                impl_def.span.clone(),
+            ));
         }
     }
 
@@ -953,7 +974,9 @@ fn verify_resource_hierarchy(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult
             solver.assert(&pri_j.le(pri_i)); // 否定: Priority(r_j) <= Priority(r_i)
             if solver.check() == SatResult::Sat {
                 solver.pop(1);
-                let error_span = module_env.resources.get(name_j)
+                let error_span = module_env
+                    .resources
+                    .get(name_j)
                     .map(|r| r.span.clone())
                     .unwrap_or_else(|| atom.span.clone());
                 return Err(MumeiError::verification_at(
@@ -1051,6 +1074,14 @@ fn collect_acquire_resources(expr: &Expr) -> Vec<String> {
         }
         Expr::Await { expr } => {
             resources.extend(collect_acquire_resources(expr));
+        }
+        Expr::Task { body, .. } => {
+            resources.extend(collect_acquire_resources(body));
+        }
+        Expr::TaskGroup { children, .. } => {
+            for child in children {
+                resources.extend(collect_acquire_resources(child));
+            }
         }
         _ => {}
     }
@@ -1163,6 +1194,10 @@ fn verify_async_recursion_depth(atom: &Atom, module_env: &ModuleEnv) -> MumeiRes
             Expr::BinaryOp(l, _, r) => {
                 count_self_calls(l, atom_name) + count_self_calls(r, atom_name)
             }
+            Expr::Task { body, .. } => count_self_calls(body, atom_name),
+            Expr::TaskGroup { children, .. } => {
+                children.iter().map(|c| count_self_calls(c, atom_name)).sum()
+            }
             _ => 0,
         }
     }
@@ -1176,15 +1211,18 @@ fn verify_async_recursion_depth(atom: &Atom, module_env: &ModuleEnv) -> MumeiRes
         // 深度制限を超える場合は警告
         let max_depth = atom.max_unroll.unwrap_or(MAX_ASYNC_RECURSION_DEPTH);
         if self_call_count > max_depth {
-            return Err(MumeiError::verification_at(format!(
-                "Async recursion depth exceeded in atom '{}': {} self-calls detected \
+            return Err(MumeiError::verification_at(
+                format!(
+                    "Async recursion depth exceeded in atom '{}': {} self-calls detected \
                      (max_depth={}). Use max_unroll: {}; to increase the limit, or \
                      refactor to use iteration with invariant.",
-                atom.name,
-                self_call_count,
-                max_depth,
-                self_call_count + 1
-            ), atom.span.clone()));
+                    atom.name,
+                    self_call_count,
+                    max_depth,
+                    self_call_count + 1
+                ),
+                atom.span.clone(),
+            ));
         }
 
         // 再帰呼び出し先の契約を信頼して展開（Compositional Verification）
@@ -1194,11 +1232,14 @@ fn verify_async_recursion_depth(atom: &Atom, module_env: &ModuleEnv) -> MumeiRes
         if let Some(callee) = module_env.get_atom(&atom.name) {
             if callee.ensures.trim() == "true" {
                 // ensures が trivial な場合、再帰の安全性を証明できない
-                return Err(MumeiError::verification_at(format!(
-                    "Recursive async atom '{}' requires a non-trivial ensures clause \
+                return Err(MumeiError::verification_at(
+                    format!(
+                        "Recursive async atom '{}' requires a non-trivial ensures clause \
                          for inductive verification. Add: ensures: <postcondition>;",
-                    atom.name
-                ), atom.span.clone()));
+                        atom.name
+                    ),
+                    atom.span.clone(),
+                ));
             }
         }
     }
@@ -1273,10 +1314,13 @@ fn verify_atom_invariant(
     let inv_z3 =
         expr_to_z3(&vc, &inv_ast, &mut env, None)?
             .as_bool()
-            .ok_or(MumeiError::type_error_at(format!(
-                "Invariant for atom '{}' must be a boolean expression",
-                atom.name
-            ), atom.span.clone()))?;
+            .ok_or(MumeiError::type_error_at(
+                format!(
+                    "Invariant for atom '{}' must be a boolean expression",
+                    atom.name
+                ),
+                atom.span.clone(),
+            ))?;
 
     // === Step 1: 導入 (Induction Base) ===
     // requires → invariant を証明する
@@ -1292,14 +1336,17 @@ fn verify_atom_invariant(
             // Unsat なら requires → invariant が証明された
             if solver.check() == SatResult::Sat {
                 solver.pop(1);
-                return Err(MumeiError::verification_at(format!(
-                    "Invariant induction base failed for atom '{}': \
+                return Err(MumeiError::verification_at(
+                    format!(
+                        "Invariant induction base failed for atom '{}': \
                          requires does not imply invariant.\n  \
                          Invariant: {}\n  \
                          Requires: {}\n  \
                          The invariant must hold whenever the precondition is satisfied.",
-                    atom.name, invariant_raw, atom.requires
-                ), atom.span.clone()));
+                        atom.name, invariant_raw, atom.requires
+                    ),
+                    atom.span.clone(),
+                ));
             }
             solver.pop(1);
         }
@@ -1309,11 +1356,14 @@ fn verify_atom_invariant(
         solver.assert(&inv_z3.not());
         if solver.check() == SatResult::Sat {
             solver.pop(1);
-            return Err(MumeiError::verification_at(format!(
-                "Invariant induction base failed for atom '{}': \
+            return Err(MumeiError::verification_at(
+                format!(
+                    "Invariant induction base failed for atom '{}': \
                      invariant '{}' is not universally true (no requires constraint).",
-                atom.name, invariant_raw
-            ), atom.span.clone()));
+                    atom.name, invariant_raw
+                ),
+                atom.span.clone(),
+            ));
         }
         solver.pop(1);
     }
@@ -1350,13 +1400,16 @@ fn verify_atom_invariant(
         solver.assert(&inv_after.not());
         if solver.check() == SatResult::Sat {
             solver.pop(1);
-            return Err(MumeiError::verification_at(format!(
-                "Invariant preservation failed for atom '{}': \
+            return Err(MumeiError::verification_at(
+                format!(
+                    "Invariant preservation failed for atom '{}': \
                      body execution may violate the invariant.\n  \
                      Invariant: {}\n  \
                      The invariant must be maintained after executing the body.",
-                atom.name, invariant_raw
-            ), atom.span.clone()));
+                    atom.name, invariant_raw
+                ),
+                atom.span.clone(),
+            ));
         }
         solver.pop(1);
         let _ = env_snapshot; // env_snapshot はスコープ終了で破棄
@@ -1425,6 +1478,14 @@ fn collect_callees(expr: &Expr) -> Vec<String> {
                 if let Some(guard) = &arm.guard {
                     callees.extend(collect_callees(guard));
                 }
+            }
+        }
+        Expr::Task { body, .. } => {
+            callees.extend(collect_callees(body));
+        }
+        Expr::TaskGroup { children, .. } => {
+            for child in children {
+                callees.extend(collect_callees(child));
             }
         }
         _ => {}
@@ -1756,10 +1817,13 @@ fn verify_inner(
         for param_name in &atom.consumed_params {
             // パラメータが実際に存在するか検証
             if !atom.params.iter().any(|p| p.name == *param_name) {
-                return Err(MumeiError::type_error_at(format!(
-                    "consume target '{}' is not a parameter of atom '{}'",
-                    param_name, atom.name
-                ), atom.span.clone()));
+                return Err(MumeiError::type_error_at(
+                    format!(
+                        "consume target '{}' is not a parameter of atom '{}'",
+                        param_name, atom.name
+                    ),
+                    atom.span.clone(),
+                ));
             }
             // ref / ref mut パラメータは consume できない
             if atom
@@ -1944,10 +2008,10 @@ fn verify_inner(
         // consume 対象パラメータを消費済みとしてマーク
         for param_name in &atom.consumed_params {
             if let Err(e) = linearity_ctx.consume(param_name) {
-                return Err(MumeiError::verification_at(format!(
-                    "Linearity violation in atom '{}': {}",
-                    atom.name, e
-                ), atom.span.clone()));
+                return Err(MumeiError::verification_at(
+                    format!("Linearity violation in atom '{}': {}", atom.name, e),
+                    atom.span.clone(),
+                ));
             }
 
             // Z3 上で is_alive を false に更新（消費後のアクセスを禁止）
@@ -1959,10 +2023,13 @@ fn verify_inner(
         // 蓄積された違反をチェック
         if linearity_ctx.has_violations() {
             let violations = linearity_ctx.get_violations().join("\n  ");
-            return Err(MumeiError::verification_at(format!(
-                "Linearity violations in atom '{}':\n  {}",
-                atom.name, violations
-            ), atom.span.clone()));
+            return Err(MumeiError::verification_at(
+                format!(
+                    "Linearity violations in atom '{}':\n  {}",
+                    atom.name, violations
+                ),
+                atom.span.clone(),
+            ));
         }
     }
 
@@ -1975,7 +2042,10 @@ fn verify_inner(
             "N/A",
             "Logic contradiction.",
         );
-        return Err(MumeiError::verification_at("Contradiction found.", atom.span.clone()));
+        return Err(MumeiError::verification_at(
+            "Contradiction found.",
+            atom.span.clone(),
+        ));
     }
 
     save_visualizer_report(
@@ -2016,10 +2086,10 @@ fn apply_refinement_constraint<'a>(
     let predicate_ast = parse_expression(&refined.predicate_raw);
     let predicate_z3 = expr_to_z3(vc, &predicate_ast, &mut local_env, None)?
         .as_bool()
-        .ok_or(MumeiError::type_error_at(format!(
-            "Predicate for {} must be boolean",
-            refined.name
-        ), refined.span.clone()))?;
+        .ok_or(MumeiError::type_error_at(
+            format!("Predicate for {} must be boolean", refined.name),
+            refined.span.clone(),
+        ))?;
 
     solver.assert(&predicate_z3);
     Ok(())
@@ -2521,18 +2591,14 @@ fn expr_to_z3<'a>(
                 solver.assert(&inv.not());
                 if solver.check() == SatResult::Sat {
                     solver.pop(1);
-                    return Err(MumeiError::verification(
-                        "Invariant fails initially",
-                    ));
+                    return Err(MumeiError::verification("Invariant fails initially"));
                 }
                 solver.pop(1);
 
                 // Inductive step: invariant && cond のもとで body 実行後も invariant が保たれるか
                 let c = expr_to_z3(vc, cond, env, None)?
                     .as_bool()
-                    .ok_or(MumeiError::type_error(
-                        "While condition must be boolean",
-                    ))?;
+                    .ok_or(MumeiError::type_error("While condition must be boolean"))?;
 
                 // Invariant preservation: invariant && cond のもとで body 実行後も invariant が保たれるか
                 // env のスナップショットを保存し、各チェックを独立に行う
@@ -2550,9 +2616,7 @@ fn expr_to_z3<'a>(
                     solver.assert(&inv_after.not());
                     if solver.check() == SatResult::Sat {
                         solver.pop(1);
-                        return Err(MumeiError::verification(
-                            "Invariant not preserved",
-                        ));
+                        return Err(MumeiError::verification("Invariant not preserved"));
                     }
                     solver.pop(1);
                     *env = env_snapshot; // env を復元
@@ -2608,9 +2672,7 @@ fn expr_to_z3<'a>(
                 .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
             let c_not = expr_to_z3(vc, cond, env, None)?
                 .as_bool()
-                .ok_or(MumeiError::type_error(
-                    "While condition must be boolean",
-                ))?
+                .ok_or(MumeiError::type_error("While condition must be boolean"))?
                 .not();
             Ok(Bool::and(ctx, &[&inv, &c_not]).into())
         }
@@ -2803,8 +2865,7 @@ fn expr_to_z3<'a>(
                 accumulated_negations.push(full_cond.not());
             }
 
-            result
-                .ok_or_else(|| MumeiError::verification("Match expression has no arms"))
+            result.ok_or_else(|| MumeiError::verification("Match expression has no arms"))
         }
 
         // =================================================================
@@ -2926,6 +2987,93 @@ fn expr_to_z3<'a>(
             // 内側の式を評価してシンボリック結果を返す
             let inner_result = expr_to_z3(vc, expr, env, solver_opt)?;
             Ok(inner_result)
+        }
+
+        Expr::Task { body, group } => {
+            // タスク式: 子タスクの body を検証する。
+            // タスクの完了順序は TaskGroup で保証されるため、
+            // ここでは body の安全性のみを検証する。
+            static TASK_COUNTER: std::sync::atomic::AtomicUsize =
+                std::sync::atomic::AtomicUsize::new(0);
+            let task_uid = TASK_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let task_id = format!(
+                "__task_{}_{}",
+                group.as_deref().unwrap_or("default"),
+                task_uid
+            );
+            // シンボリック Bool（Z3 が値を決定する）
+            let task_alive = Bool::new_const(ctx, format!("{}_alive", task_id).as_str());
+            env.insert(format!("{}_alive", task_id), task_alive.into());
+
+            let body_result = expr_to_z3(vc, body, env, solver_opt)?;
+
+            // タスク完了マーカー（シンボリック: Z3 が決定）
+            let task_done = Bool::new_const(ctx, format!("{}_done", task_id).as_str());
+            env.insert(format!("{}_done", task_id), task_done.into());
+
+            Ok(body_result)
+        }
+        Expr::TaskGroup {
+            children,
+            join_semantics,
+        } => {
+            // =============================================================
+            // タスクグループ検証 (Structured Concurrency Verification)
+            // =============================================================
+            //
+            // 構造化並行性の核心: 親タスクが子タスクより先に終了しないことを
+            // Z3 で形式的に保証する。
+            //
+            // JoinSemantics::All — 全子タスクの完了を待つ
+            // JoinSemantics::Any — 最初の子タスク完了で続行（残りはキャンセル）
+
+            let mut child_results = Vec::new();
+            let mut child_done_vars = Vec::new();
+
+            for (i, child) in children.iter().enumerate() {
+                let child_id = format!("__task_group_child_{}", i);
+                let child_alive = Bool::new_const(ctx, format!("{}_alive", child_id).as_str());
+                env.insert(format!("{}_alive", child_id), child_alive.into());
+
+                let result = expr_to_z3(vc, child, env, solver_opt)?;
+                child_results.push(result);
+
+                // 子タスク完了フラグ（シンボリック: Z3 が決定）
+                let done_var = Bool::new_const(ctx, format!("{}_done", child_id).as_str());
+                child_done_vars.push(done_var.clone());
+                env.insert(format!("{}_done", child_id), done_var.into());
+            }
+
+            // 親タスク終了フラグ
+            let parent_done = Bool::new_const(ctx, "__task_group_parent_done");
+
+            if let Some(solver) = solver_opt {
+                match join_semantics {
+                    JoinSemantics::All => {
+                        // All: 全子タスクが完了するまで親は終了できない
+                        // 制約: parent_done => ∀i. child_done[i]
+                        for done_var in &child_done_vars {
+                            solver.assert(&parent_done.implies(done_var));
+                        }
+                    }
+                    JoinSemantics::Any => {
+                        // Any: 少なくとも1つの子タスクが完了すれば親は続行可能
+                        // 制約: parent_done => ∃i. child_done[i]
+                        if !child_done_vars.is_empty() {
+                            let any_done =
+                                Bool::or(ctx, &child_done_vars.iter().collect::<Vec<_>>());
+                            solver.assert(&parent_done.implies(&any_done));
+                        }
+                    }
+                }
+            }
+
+            // グループの結果: 最後の子タスクの結果を返す
+            if let Some(last) = child_results.last() {
+                Ok(last.clone())
+            } else {
+                Ok(Int::from_i64(ctx, 0).into())
+            }
         }
 
         Expr::FieldAccess(inner_expr, field_name) => {

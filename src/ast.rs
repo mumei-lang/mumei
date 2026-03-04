@@ -259,6 +259,14 @@ impl Monomorphizer {
             Expr::Await { expr } => {
                 self.collect_from_expr(expr);
             }
+            Expr::Task { body, .. } => {
+                self.collect_from_expr(body);
+            }
+            Expr::TaskGroup { children, .. } => {
+                for child in children {
+                    self.collect_from_expr(child);
+                }
+            }
             Expr::Number(_) | Expr::Float(_) | Expr::Variable(_) => {}
         }
     }

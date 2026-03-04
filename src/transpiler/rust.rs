@@ -308,6 +308,14 @@ fn format_expr_rust(expr: &Expr) -> String {
             let expr_str = format_expr_rust(expr);
             format!("{}.await", expr_str)
         },
+        Expr::Task { body, .. } => {
+            let body_str = format_expr_rust(body);
+            format!("tokio::spawn(async {{ {} }})", body_str)
+        },
+        Expr::TaskGroup { children, .. } => {
+            let tasks: Vec<String> = children.iter().map(format_expr_rust).collect();
+            format!("tokio::join!({})", tasks.join(", "))
+        },
     }
 }
 
