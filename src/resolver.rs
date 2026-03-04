@@ -134,8 +134,9 @@ fn resolve_imports_recursive(
             let resolved_path = resolve_path(&import_decl.path, base_dir)?;
             // 循環参照チェック
             if ctx.loading.contains(&resolved_path) {
-                return Err(MumeiError::verification(
-                    format!("Circular import detected: '{}'", resolved_path.display())
+                return Err(MumeiError::verification_at(
+                    format!("Circular import detected: '{}'", resolved_path.display()),
+                    import_decl.span.clone()
                 ));
             }
             // 既にロード済みならスキップ
@@ -146,8 +147,9 @@ fn resolve_imports_recursive(
             ctx.loading.insert(resolved_path.clone());
             // ファイルを読み込みパース
             let source = fs::read_to_string(&resolved_path).map_err(|e| {
-                MumeiError::verification(
-                    format!("Failed to read imported module '{}': {}", import_decl.path, e)
+                MumeiError::verification_at(
+                    format!("Failed to read imported module '{}': {}", import_decl.path, e),
+                    import_decl.span.clone()
                 )
             })?;
 

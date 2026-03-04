@@ -706,10 +706,10 @@ fn split_args(input: &str) -> Vec<String> {
 /// ∀x. law_expr が成立するかを検証する。
 pub fn verify_impl(impl_def: &ImplDef, module_env: &ModuleEnv) -> MumeiResult<()> {
     let trait_def = module_env.get_trait(&impl_def.trait_name).ok_or_else(|| {
-        MumeiError::type_error(format!(
+        MumeiError::type_error_at(format!(
             "Trait '{}' not found for impl on '{}'",
             impl_def.trait_name, impl_def.target_type
-        ))
+        ), impl_def.span.clone())
     })?;
 
     // メソッドの完全性チェック: trait の全メソッドが impl されているか
@@ -719,10 +719,10 @@ pub fn verify_impl(impl_def: &ImplDef, module_env: &ModuleEnv) -> MumeiResult<()
             .iter()
             .any(|(name, _)| name == &method.name)
         {
-            return Err(MumeiError::type_error(format!(
+            return Err(MumeiError::type_error_at(format!(
                 "impl {} for {}: missing method '{}'",
                 impl_def.trait_name, impl_def.target_type, method.name
-            )));
+            ), impl_def.span.clone()));
         }
     }
 
@@ -818,12 +818,13 @@ pub fn verify_impl(impl_def: &ImplDef, module_env: &ModuleEnv) -> MumeiResult<()
                             "  (could not retrieve model)".to_string()
                         };
                         solver.pop(1);
-                        return Err(MumeiError::verification(
+                        return Err(MumeiError::verification_at(
                             format!(
                                 "impl {} for {}: law '{}' is not satisfied\n  Law: {}\n  Expanded: {}\n{}",
                                 impl_def.trait_name, impl_def.target_type,
                                 law_name, law_expr, substituted, counterexample
-                            )
+                            ),
+                            impl_def.span.clone()
                         ));
                     }
                     solver.pop(1);
@@ -2012,10 +2013,10 @@ fn apply_refinement_constraint<'a>(
     let predicate_ast = parse_expression(&refined.predicate_raw);
     let predicate_z3 = expr_to_z3(vc, &predicate_ast, &mut local_env, None)?
         .as_bool()
-        .ok_or(MumeiError::type_error(format!(
+        .ok_or(MumeiError::type_error_at(format!(
             "Predicate for {} must be boolean",
             refined.name
-        )))?;
+        ), refined.span.clone()))?;
 
     solver.assert(&predicate_z3);
     Ok(())
