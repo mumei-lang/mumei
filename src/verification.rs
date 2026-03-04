@@ -1345,13 +1345,13 @@ fn verify_atom_invariant(
         solver.assert(&inv_after.not());
         if solver.check() == SatResult::Sat {
             solver.pop(1);
-            return Err(MumeiError::VerificationError(format!(
+            return Err(MumeiError::verification_at(format!(
                 "Invariant preservation failed for atom '{}': \
                      body execution may violate the invariant.\n  \
                      Invariant: {}\n  \
                      The invariant must be maintained after executing the body.",
                 atom.name, invariant_raw
-            )));
+            ), atom.span.clone()));
         }
         solver.pop(1);
         let _ = env_snapshot; // env_snapshot はスコープ終了で破棄
@@ -1671,8 +1671,9 @@ fn verify_inner(
         let expr_ast = parse_expression(&q.condition);
         let condition_z3 = expr_to_z3(&vc, &expr_ast, &mut env, None)?
             .as_bool()
-            .ok_or(MumeiError::VerificationError(
-                "Condition must be boolean".into(),
+            .ok_or(MumeiError::verification_at(
+                "Condition must be boolean",
+                atom.span.clone(),
             ))?;
 
         let quantifier_expr = match q.q_type {
@@ -1750,10 +1751,10 @@ fn verify_inner(
         for param_name in &atom.consumed_params {
             // パラメータが実際に存在するか検証
             if !atom.params.iter().any(|p| p.name == *param_name) {
-                return Err(MumeiError::TypeError(format!(
+                return Err(MumeiError::type_error_at(format!(
                     "consume target '{}' is not a parameter of atom '{}'",
                     param_name, atom.name
-                )));
+                ), atom.span.clone()));
             }
             // ref / ref mut パラメータは consume できない
             if atom
@@ -1770,8 +1771,9 @@ fn verify_inner(
                 } else {
                     "ref"
                 };
-                return Err(MumeiError::TypeError(
-                    format!("Cannot consume {} parameter '{}' in atom '{}': {} parameters are borrowed, not owned", kind, param_name, atom.name, kind)
+                return Err(MumeiError::type_error_at(
+                    format!("Cannot consume {} parameter '{}' in atom '{}': {} parameters are borrowed, not owned", kind, param_name, atom.name, kind),
+                    atom.span.clone()
                 ));
             }
             // LinearityCtx に登録
@@ -1873,7 +1875,7 @@ fn verify_inner(
                             if solver.check() == SatResult::Sat {
                                 solver.pop(1);
                                 let other_kind = if other_p.is_ref_mut { "ref mut" } else { "ref" };
-                                return Err(MumeiError::VerificationError(
+                                return Err(MumeiError::verification_at(
                                     format!(
                                         "Aliasing violation in atom '{}': \
                                          'ref mut {}' and '{} {}' may reference the same data (type: {}). \
@@ -1883,7 +1885,8 @@ fn verify_inner(
                                          via requires.",
                                         atom.name, ref_mut_p.name, other_kind, other_p.name,
                                         ref_mut_p.type_name.as_deref().unwrap_or("unknown")
-                                    )
+                                    ),
+                                    atom.span.clone()
                                 ));
                             }
                             solver.pop(1);
@@ -1919,8 +1922,9 @@ fn verify_inner(
                     "N/A",
                     "Postcondition violated.",
                 );
-                return Err(MumeiError::VerificationError(
-                    "Postcondition (ensures) is not satisfied.".into(),
+                return Err(MumeiError::verification_at(
+                    "Postcondition (ensures) is not satisfied.",
+                    atom.span.clone(),
                 ));
             }
             solver.pop(1);
@@ -1935,10 +1939,10 @@ fn verify_inner(
         // consume 対象パラメータを消費済みとしてマーク
         for param_name in &atom.consumed_params {
             if let Err(e) = linearity_ctx.consume(param_name) {
-                return Err(MumeiError::VerificationError(format!(
+                return Err(MumeiError::verification_at(format!(
                     "Linearity violation in atom '{}': {}",
                     atom.name, e
-                )));
+                ), atom.span.clone()));
             }
 
             // Z3 上で is_alive を false に更新（消費後のアクセスを禁止）
@@ -1950,10 +1954,10 @@ fn verify_inner(
         // 蓄積された違反をチェック
         if linearity_ctx.has_violations() {
             let violations = linearity_ctx.get_violations().join("\n  ");
-            return Err(MumeiError::VerificationError(format!(
+            return Err(MumeiError::verification_at(format!(
                 "Linearity violations in atom '{}':\n  {}",
                 atom.name, violations
-            )));
+            ), atom.span.clone()));
         }
     }
 
@@ -1966,7 +1970,7 @@ fn verify_inner(
             "N/A",
             "Logic contradiction.",
         );
-        return Err(MumeiError::VerificationError("Contradiction found.".into()));
+        return Err(MumeiError::verification_at("Contradiction found.", atom.span.clone()));
     }
 
     save_visualizer_report(
@@ -2007,7 +2011,7 @@ fn apply_refinement_constraint<'a>(
     let predicate_ast = parse_expression(&refined.predicate_raw);
     let predicate_z3 = expr_to_z3(vc, &predicate_ast, &mut local_env, None)?
         .as_bool()
-        .ok_or(MumeiError::TypeError(format!(
+        .ok_or(MumeiError::type_error(format!(
             "Predicate for {} must be boolean",
             refined.name
         )))?;
@@ -2043,7 +2047,7 @@ fn expr_to_z3<'a>(
                 // のようなソート済み不変量を事後条件として記述・検証できる。
                 "forall" | "exists" => {
                     if args.len() != 4 {
-                        return Err(MumeiError::VerificationError(format!(
+                        return Err(MumeiError::verification(format!(
                             "{}() requires exactly 4 arguments: (var, start, end, condition)",
                             name
                         )));
@@ -2052,7 +2056,7 @@ fn expr_to_z3<'a>(
                     let var_name = match &args[0] {
                         Expr::Variable(v) => v.clone(),
                         _ => {
-                            return Err(MumeiError::VerificationError(format!(
+                            return Err(MumeiError::verification(format!(
                                 "{}(): first argument must be a variable name",
                                 name
                             )))
@@ -2061,12 +2065,12 @@ fn expr_to_z3<'a>(
 
                     // 第2引数: 範囲の開始
                     let start_z3 = expr_to_z3(vc, &args[1], env, None)?.as_int().ok_or(
-                        MumeiError::TypeError(format!("{}(): start must be integer", name)),
+                        MumeiError::type_error(format!("{}(): start must be integer", name)),
                     )?;
 
                     // 第3引数: 範囲の終了
                     let end_z3 = expr_to_z3(vc, &args[2], env, None)?.as_int().ok_or(
-                        MumeiError::TypeError(format!("{}(): end must be integer", name)),
+                        MumeiError::type_error(format!("{}(): end must be integer", name)),
                     )?;
 
                     // 束縛変数を一時的に env に追加して condition を評価
@@ -2077,7 +2081,7 @@ fn expr_to_z3<'a>(
                         Bool::and(ctx, &[&bound_var.ge(&start_z3), &bound_var.lt(&end_z3)]);
 
                     let condition_z3 = expr_to_z3(vc, &args[3], env, None)?.as_bool().ok_or(
-                        MumeiError::TypeError(format!("{}(): condition must be boolean", name)),
+                        MumeiError::type_error(format!("{}(): condition must be boolean", name)),
                     )?;
 
                     // 束縛変数を env から復元
@@ -2194,7 +2198,7 @@ fn expr_to_z3<'a>(
                                     solver.assert(&req_bool.not());
                                     if solver.check() == SatResult::Sat {
                                         solver.pop(1);
-                                        return Err(MumeiError::VerificationError(
+                                        return Err(MumeiError::verification(
                                             format!("Call to '{}': precondition (requires) not satisfied at call site", name)
                                         ));
                                     }
@@ -2318,7 +2322,7 @@ fn expr_to_z3<'a>(
 
                         Ok(result_z3)
                     } else {
-                        Err(MumeiError::VerificationError(format!(
+                        Err(MumeiError::verification(format!(
                             "Unknown function: {}",
                             name
                         )))
