@@ -121,15 +121,18 @@ npm run compile
 # Then "Run Extension" from VS Code (F5)
 ```
 
-### LSP Features
+### LSP Features (現フェーズで完了 — 深追いしない)
+
+> LSP は現在の機能で一旦完了。言語機能の充実を優先する。
+> 詳細: [`INSTRUCTIONS.md`](../INSTRUCTIONS.md)
 
 | Feature | Status |
 |---|---|
 | `textDocument/didOpen` / `didChange` | ✅ Parse error diagnostics |
 | `textDocument/hover` | ✅ Atom contract display (requires/ensures) |
-| Z3 verification diagnostics | ✅ Errors shown as diagnostics |
-| `textDocument/completion` | 🔜 Planned |
-| `textDocument/definition` | 🔜 Planned |
+| Z3 verification diagnostics | ✅ Errors shown as diagnostics (Span 付き) |
+| `textDocument/completion` | ⏸ 保留 (将来) |
+| `textDocument/definition` | ⏸ 保留 (将来) |
 
 ---
 
@@ -175,9 +178,18 @@ Inspects all tools with multi-path std library search (cwd → exe dir → `MUME
 
 ## Future Roadmap
 
+### 優先（言語機能の充実）
+
+- [ ] **`std.http`**: Rust `reqwest` FFI による HTTP クライアント + `task_group` 並行リクエスト
+- [ ] **Task 洗練**: 戻り値型推論、結果バインド構文、タスクキャンセル、チャネル型 (`chan<T>`)
+- [ ] **FFI Bridge 完成**: `extern` 宣言 → `trusted atom` 自動登録 → `std.http` バックエンド
+
+### 後回し（ツーリング）
+
 - [ ] Remote package registry (central server for `mumei add <name>`)
 - [ ] VS Code Marketplace publishing
-- [ ] LSP completion + definition jump
-- [ ] Counter-example highlighting in editors
+- [ ] LSP completion + definition jump (⏸ 保留)
+- [ ] Counter-example highlighting in editors (⏸ 保留)
+- [ ] Rich Diagnostics (miette/ariadne)
 - [ ] `mumei inspect --ai` (structured JSON output for AI agents)
 - [ ] Z3 proof certificates in published packages

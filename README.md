@@ -345,7 +345,9 @@ my_app/
 - [ ] **FFI Bridge (trusted atom 自動登録)**: extern 宣言から `trusted atom` への自動変換、Rust クレート直接参照（未実装）
 - [x] **Structured Concurrency (parser + Z3)**: `task { ... }` / `task_group { ... }` / `task_group:all` / `task_group:any` 構文、シンボリック Z3 join 制約、AST walker 全対応、多言語トランスパイル対応 → [`docs/CONCURRENCY.md`](docs/CONCURRENCY.md)
 - [ ] **Structured Concurrency (runtime)**: ランタイムスケジューラ、タスクキャンセル、チャネル型（未実装）
+- [ ] **`std.http`**: Rust `reqwest` を FFI で隠蔽した HTTP クライアント、`task_group` との並行リクエスト統合
+- [ ] **Task 洗練**: 戻り値型推論、`task_group` 結果バインド、チャネル型 (`chan<T>`)
 - [ ] Rich Diagnostics: miette/ariadne ライブラリによるカラー表示・下線・サジェスト
 
-> 📖 **Toolchain roadmap**: [`docs/TOOLCHAIN.md`](docs/TOOLCHAIN.md)
+> 📖 **Toolchain roadmap**: [`docs/TOOLCHAIN.md`](docs/TOOLCHAIN.md) | **Development instructions**: [`INSTRUCTIONS.md`](INSTRUCTIONS.md)
 
