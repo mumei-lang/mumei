@@ -12,7 +12,7 @@ use std::path::Path;
 
 /// LLVM Builder の Result を簡潔にアンラップするマクロ
 macro_rules! llvm {
-    ($e:expr) => { $e.map_err(|e| MumeiError::CodegenError(e.to_string()))? }
+    ($e:expr) => { $e.map_err(|e| MumeiError::codegen(e.to_string()))? }
 }
 
 /// Fat Pointer 配列の構造体型 { i64, i64* } を生成するヘルパー
@@ -78,7 +78,7 @@ pub fn compile(atom: &Atom, output_path: &Path, module_env: &ModuleEnv) -> Mumei
     llvm!(builder.build_return(Some(&result_val)));
 
     let path_with_ext = output_path.with_extension("ll");
-    module.print_to_file(&path_with_ext).map_err(|e| MumeiError::CodegenError(e.to_string()))?;
+    module.print_to_file(&path_with_ext).map_err(|e| MumeiError::codegen(e.to_string()))?;
 
     Ok(())
 }
@@ -100,7 +100,7 @@ fn compile_expr<'a>(
 
         Expr::Variable(name) => variables.get(name)
             .cloned()
-            .ok_or_else(|| MumeiError::CodegenError(format!("Undefined variable: {}", name))),
+            .ok_or_else(|| MumeiError::codegen(format!("Undefined variable: {}", name))),
 
         Expr::Call(name, args) => {
             match name.as_str() {
@@ -209,7 +209,7 @@ fn compile_expr<'a>(
                             Ok(result.into_int_value().into())
                         }
                     } else {
-                        Err(MumeiError::CodegenError(format!("Unknown function {}", name)))
+                        Err(MumeiError::codegen(format!("Unknown function {}", name)))
                     }
                 },
             }
@@ -255,7 +255,7 @@ fn compile_expr<'a>(
                 Ok(phi.as_basic_value())
             } else {
                 // 配列が Fat Pointer として登録されていない場合はエラー
-                Err(MumeiError::CodegenError(format!("Array '{}' not found as fat pointer parameter", name)))
+                Err(MumeiError::codegen(format!("Array '{}' not found as fat pointer parameter", name)))
             }
         },
 
@@ -283,7 +283,7 @@ fn compile_expr<'a>(
                         let cmp = llvm!(builder.build_float_compare(FloatPredicate::OEQ, l, r, "fcmp_tmp"));
                         Ok(llvm!(builder.build_int_z_extend(cmp, context.i64_type(), "fbool_tmp")).into())
                     },
-                    _ => Err(MumeiError::CodegenError(format!("Unsupported float operator {:?}", op))),
+                    _ => Err(MumeiError::codegen(format!("Unsupported float operator {:?}", op))),
                 }
             } else {
                 let l = lhs.into_int_value();
@@ -303,7 +303,7 @@ fn compile_expr<'a>(
                         let cmp = llvm!(builder.build_int_compare(pred, l, r, "cmp_tmp"));
                         Ok(llvm!(builder.build_int_z_extend(cmp, context.i64_type(), "bool_tmp")).into())
                     },
-                    _ => Err(MumeiError::CodegenError(format!("Unsupported int operator {:?}", op))),
+                    _ => Err(MumeiError::codegen(format!("Unsupported int operator {:?}", op))),
                 }
             }
         },
@@ -637,7 +637,7 @@ fn compile_expr<'a>(
                         }
                     }
                 }
-                Err(MumeiError::CodegenError(format!("Field '{}' not found on '{}'", field_name, var_name)))
+                Err(MumeiError::codegen(format!("Field '{}' not found on '{}'", field_name, var_name)))
             } else {
                 // ネストされたフィールドアクセス: 内側の式を再帰的に評価
                 // v.point.x → compile_expr(v.point) → extract_value(result, x_idx)
@@ -655,7 +655,7 @@ fn compile_expr<'a>(
                         Ok(extracted)
                     }
                 } else {
-                    Err(MumeiError::CodegenError(format!("Cannot access field '{}' on non-struct value", field_name)))
+                    Err(MumeiError::codegen(format!("Cannot access field '{}' on non-struct value", field_name)))
                 }
             }
         },

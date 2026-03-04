@@ -1,39 +1,127 @@
-use z3::ast::{Ast, Int, Bool, Array, Dynamic, Float};
-use z3::{Config, Context, Solver, SatResult};
-use crate::parser::{Atom, QuantifierType, Expr, Op, parse_expression, RefinedType, StructDef, EnumDef, Pattern, MatchArm, TraitDef, ImplDef, ResourceDef, ResourceMode, TrustLevel};
-use std::fs;
-use std::path::Path;
-use std::fmt;
+use crate::parser::{
+    parse_expression, Atom, EnumDef, Expr, ImplDef, MatchArm, Op, Pattern, QuantifierType,
+    RefinedType, ResourceDef, ResourceMode, Span, StructDef, TraitDef, TrustLevel,
+};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
+use std::fmt;
+use std::fs;
+use std::path::Path;
+use z3::ast::{Array, Ast, Bool, Dynamic, Float, Int};
+use z3::{Config, Context, SatResult, Solver};
 
 // --- エラー型の定義 ---
+
+/// エラーの詳細情報。ソース位置（Span）と修正提案（suggestion）を保持する。
+#[derive(Debug, Clone)]
+pub struct ErrorDetail {
+    /// エラーメッセージ
+    pub message: String,
+    /// エラーが発生したソース位置（不明の場合は Span::default()）
+    pub span: Span,
+    /// 修正提案（例: "型を i64 に変更してください"）
+    pub suggestion: Option<String>,
+}
+
+impl ErrorDetail {
+    /// メッセージのみで ErrorDetail を生成する（Span 不明時のフォールバック用）
+    #[allow(dead_code)]
+    pub fn from_message(msg: impl Into<String>) -> Self {
+        ErrorDetail {
+            message: msg.into(),
+            span: Span::default(),
+            suggestion: None,
+        }
+    }
+
+    /// Span 付きで ErrorDetail を生成する
+    pub fn with_span(msg: impl Into<String>, span: Span) -> Self {
+        ErrorDetail {
+            message: msg.into(),
+            span,
+            suggestion: None,
+        }
+    }
+}
+
+impl fmt::Display for ErrorDetail {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.span.line > 0 {
+            write!(f, "{}: {}", self.span, self.message)?;
+        } else {
+            write!(f, "{}", self.message)?;
+        }
+        if let Some(ref suggestion) = self.suggestion {
+            write!(f, " (hint: {})", suggestion)?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug)]
 pub enum MumeiError {
-    VerificationError(String),
-    CodegenError(String),
-    TypeError(String),
+    VerificationError { msg: String, span: Span },
+    CodegenError { msg: String, span: Span },
+    TypeError { msg: String, span: Span },
+}
+
+impl MumeiError {
+    /// Span なしで VerificationError を生成（位置不明のエラー）
+    pub fn verification(msg: impl Into<String>) -> Self {
+        MumeiError::VerificationError { msg: msg.into(), span: Span::default() }
+    }
+    /// Span 付きで VerificationError を生成
+    pub fn verification_at(msg: impl Into<String>, span: Span) -> Self {
+        MumeiError::VerificationError { msg: msg.into(), span }
+    }
+    /// Span なしで CodegenError を生成
+    pub fn codegen(msg: impl Into<String>) -> Self {
+        MumeiError::CodegenError { msg: msg.into(), span: Span::default() }
+    }
+    /// Span なしで TypeError を生成
+    pub fn type_error(msg: impl Into<String>) -> Self {
+        MumeiError::TypeError { msg: msg.into(), span: Span::default() }
+    }
+    /// Span 付きで TypeError を生成
+    pub fn type_error_at(msg: impl Into<String>, span: Span) -> Self {
+        MumeiError::TypeError { msg: msg.into(), span }
+    }
+
+    /// ErrorDetail を取得する（Span 情報を保持）
+    pub fn to_detail(&self) -> ErrorDetail {
+        match self {
+            MumeiError::VerificationError { msg, span } => {
+                ErrorDetail::with_span(format!("Verification Error: {}", msg), span.clone())
+            }
+            MumeiError::CodegenError { msg, span } => {
+                ErrorDetail::with_span(format!("Codegen Error: {}", msg), span.clone())
+            }
+            MumeiError::TypeError { msg, span } => {
+                ErrorDetail::with_span(format!("Type Error: {}", msg), span.clone())
+            }
+        }
+    }
 }
 
 impl fmt::Display for MumeiError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            MumeiError::VerificationError(msg) => write!(f, "Verification Error: {}", msg),
-            MumeiError::CodegenError(msg) => write!(f, "Codegen Error: {}", msg),
-            MumeiError::TypeError(msg) => write!(f, "Type Error: {}", msg),
+            MumeiError::VerificationError { msg, .. } => write!(f, "Verification Error: {}", msg),
+            MumeiError::CodegenError { msg, .. } => write!(f, "Codegen Error: {}", msg),
+            MumeiError::TypeError { msg, .. } => write!(f, "Type Error: {}", msg),
         }
     }
 }
 
 impl From<String> for MumeiError {
     fn from(s: String) -> Self {
-        MumeiError::VerificationError(s)
+        MumeiError::verification(s)
     }
 }
 
 impl From<&str> for MumeiError {
     fn from(s: &str) -> Self {
-        MumeiError::VerificationError(s.to_string())
+        MumeiError::verification(s)
     }
 }
 
@@ -102,7 +190,9 @@ impl LinearityCtx {
         // 借用中チェック: 借用されている変数は消費できない
         if let Some(&count) = self.borrow_count.get(name) {
             if count > 0 {
-                let borrower_names = self.borrowers.get(name)
+                let borrower_names = self
+                    .borrowers
+                    .get(name)
                     .map(|v| v.join(", "))
                     .unwrap_or_else(|| "unknown".to_string());
                 let msg = format!(
@@ -148,7 +238,8 @@ impl LinearityCtx {
 
         let count = self.borrow_count.entry(owner_name.to_string()).or_insert(0);
         *count += 1;
-        self.borrowers.entry(owner_name.to_string())
+        self.borrowers
+            .entry(owner_name.to_string())
             .or_insert_with(Vec::new)
             .push(borrower_name.to_string());
         Ok(())
@@ -172,7 +263,10 @@ impl LinearityCtx {
     #[allow(dead_code)]
     pub fn check_alive(&mut self, name: &str) -> Result<(), String> {
         if let Some(false) = self.alive.get(name) {
-            let msg = format!("Use-after-free detected: '{}' has been consumed and is no longer valid", name);
+            let msg = format!(
+                "Use-after-free detected: '{}' has been consumed and is no longer valid",
+                name
+            );
             self.violations.push(msg.clone());
             return Err(msg);
         }
@@ -230,11 +324,13 @@ impl ModuleEnv {
     }
 
     pub fn register_type(&mut self, refined_type: &RefinedType) {
-        self.types.insert(refined_type.name.clone(), refined_type.clone());
+        self.types
+            .insert(refined_type.name.clone(), refined_type.clone());
     }
 
     pub fn register_struct(&mut self, struct_def: &StructDef) {
-        self.structs.insert(struct_def.name.clone(), struct_def.clone());
+        self.structs
+            .insert(struct_def.name.clone(), struct_def.clone());
     }
 
     pub fn register_atom(&mut self, atom: &Atom) {
@@ -264,7 +360,9 @@ impl ModuleEnv {
 
     /// Variant 名から所属する Enum 定義を逆引きする
     pub fn find_enum_by_variant(&self, variant_name: &str) -> Option<&EnumDef> {
-        self.enums.values().find(|e| e.variants.iter().any(|v| v.name == variant_name))
+        self.enums
+            .values()
+            .find(|e| e.variants.iter().any(|v| v.name == variant_name))
     }
 
     /// 精緻型名からベース型名を解決する（例: "Nat" -> "i64", "Pos" -> "f64"）
@@ -276,7 +374,8 @@ impl ModuleEnv {
     }
 
     pub fn register_trait(&mut self, trait_def: &TraitDef) {
-        self.traits.insert(trait_def.name.clone(), trait_def.clone());
+        self.traits
+            .insert(trait_def.name.clone(), trait_def.clone());
     }
 
     pub fn register_impl(&mut self, impl_def: &ImplDef) {
@@ -290,7 +389,9 @@ impl ModuleEnv {
     /// 指定した型がトレイトを実装しているか確認する
     #[allow(dead_code)]
     pub fn find_impl(&self, trait_name: &str, target_type: &str) -> Option<&ImplDef> {
-        self.impls.iter().find(|i| i.trait_name == trait_name && i.target_type == target_type)
+        self.impls
+            .iter()
+            .find(|i| i.trait_name == trait_name && i.target_type == target_type)
     }
 
     /// 指定した型がトレイト境界を全て満たしているか検証する
@@ -298,7 +399,10 @@ impl ModuleEnv {
     pub fn check_trait_bounds(&self, type_name: &str, bounds: &[String]) -> Result<(), String> {
         for bound in bounds {
             if self.find_impl(bound, type_name).is_none() {
-                return Err(format!("Type '{}' does not implement trait '{}'", type_name, bound));
+                return Err(format!(
+                    "Type '{}' does not implement trait '{}'",
+                    type_name, bound
+                ));
             }
         }
         Ok(())
@@ -316,7 +420,8 @@ impl ModuleEnv {
 
     /// リソース定義を登録する
     pub fn register_resource(&mut self, resource_def: &ResourceDef) {
-        self.resources.insert(resource_def.name.clone(), resource_def.clone());
+        self.resources
+            .insert(resource_def.name.clone(), resource_def.clone());
     }
 
     /// リソース定義を取得する
@@ -333,7 +438,7 @@ impl ModuleEnv {
 /// 組み込みトレイトを ModuleEnv に自動登録する。
 /// Numeric（算術演算）、Ord（比較）、Eq（等価性）の3つを提供。
 pub fn register_builtin_traits(module_env: &mut ModuleEnv) {
-    use crate::parser::{TraitMethod, TraitDef as TD, ImplDef as ID};
+    use crate::parser::{ImplDef as ID, TraitDef as TD, TraitMethod};
 
     // --- trait Eq ---
     // fn eq(a: Self, b: Self) -> bool;
@@ -341,13 +446,17 @@ pub fn register_builtin_traits(module_env: &mut ModuleEnv) {
     // law symmetric: eq(a, b) => eq(b, a);
     module_env.register_trait(&TD {
         name: "Eq".to_string(),
-        methods: vec![
-            TraitMethod { name: "eq".to_string(), param_types: vec!["Self".into(), "Self".into()], return_type: "bool".into(), param_constraints: vec![None, None] },
-        ],
+        methods: vec![TraitMethod {
+            name: "eq".to_string(),
+            param_types: vec!["Self".into(), "Self".into()],
+            return_type: "bool".into(),
+            param_constraints: vec![None, None],
+        }],
         laws: vec![
             ("reflexive".into(), "eq(x, x) == true".into()),
             ("symmetric".into(), "eq(a, b) => eq(b, a)".into()),
         ],
+        span: Span::default(),
     });
 
     // --- trait Ord (extends Eq implicitly) ---
@@ -357,13 +466,20 @@ pub fn register_builtin_traits(module_env: &mut ModuleEnv) {
     // law transitive: leq(a, b) && leq(b, c) => leq(a, c);
     module_env.register_trait(&TD {
         name: "Ord".to_string(),
-        methods: vec![
-            TraitMethod { name: "leq".to_string(), param_types: vec!["Self".into(), "Self".into()], return_type: "bool".into(), param_constraints: vec![None, None] },
-        ],
+        methods: vec![TraitMethod {
+            name: "leq".to_string(),
+            param_types: vec!["Self".into(), "Self".into()],
+            return_type: "bool".into(),
+            param_constraints: vec![None, None],
+        }],
         laws: vec![
             ("reflexive".into(), "leq(x, x) == true".into()),
-            ("transitive".into(), "leq(a, b) && leq(b, c) => leq(a, c)".into()),
+            (
+                "transitive".into(),
+                "leq(a, b) && leq(b, c) => leq(a, c)".into(),
+            ),
         ],
+        span: Span::default(),
     });
 
     // --- trait Numeric (extends Ord implicitly) ---
@@ -375,13 +491,27 @@ pub fn register_builtin_traits(module_env: &mut ModuleEnv) {
     module_env.register_trait(&TD {
         name: "Numeric".to_string(),
         methods: vec![
-            TraitMethod { name: "add".to_string(), param_types: vec!["Self".into(), "Self".into()], return_type: "Self".into(), param_constraints: vec![None, None] },
-            TraitMethod { name: "sub".to_string(), param_types: vec!["Self".into(), "Self".into()], return_type: "Self".into(), param_constraints: vec![None, None] },
-            TraitMethod { name: "mul".to_string(), param_types: vec!["Self".into(), "Self".into()], return_type: "Self".into(), param_constraints: vec![None, None] },
+            TraitMethod {
+                name: "add".to_string(),
+                param_types: vec!["Self".into(), "Self".into()],
+                return_type: "Self".into(),
+                param_constraints: vec![None, None],
+            },
+            TraitMethod {
+                name: "sub".to_string(),
+                param_types: vec!["Self".into(), "Self".into()],
+                return_type: "Self".into(),
+                param_constraints: vec![None, None],
+            },
+            TraitMethod {
+                name: "mul".to_string(),
+                param_types: vec!["Self".into(), "Self".into()],
+                return_type: "Self".into(),
+                param_constraints: vec![None, None],
+            },
         ],
-        laws: vec![
-            ("commutative_add".into(), "add(a, b) == add(b, a)".into()),
-        ],
+        laws: vec![("commutative_add".into(), "add(a, b) == add(b, a)".into())],
+        span: Span::default(),
     });
 
     // --- 組み込み impl: i64, u64, f64 は Eq + Ord + Numeric を自動実装 ---
@@ -390,11 +520,13 @@ pub fn register_builtin_traits(module_env: &mut ModuleEnv) {
             trait_name: "Eq".into(),
             target_type: base_type.to_string(),
             method_bodies: vec![("eq".into(), "a == b".into())],
+            span: Span::default(),
         });
         module_env.register_impl(&ID {
             trait_name: "Ord".into(),
             target_type: base_type.to_string(),
             method_bodies: vec![("leq".into(), "a <= b".into())],
+            span: Span::default(),
         });
         module_env.register_impl(&ID {
             trait_name: "Numeric".into(),
@@ -404,6 +536,7 @@ pub fn register_builtin_traits(module_env: &mut ModuleEnv) {
                 ("sub".into(), "a - b".into()),
                 ("mul".into(), "a * b".into()),
             ],
+            span: Span::default(),
         });
     }
 }
@@ -458,7 +591,9 @@ fn substitute_method_calls(
                             '(' => depth += 1,
                             ')' => {
                                 depth -= 1;
-                                if depth == 0 { break; }
+                                if depth == 0 {
+                                    break;
+                                }
                             }
                             _ => {}
                         }
@@ -475,7 +610,11 @@ fn substitute_method_calls(
                         for (j, param_name) in param_names.iter().enumerate() {
                             if let Some(arg) = args.get(j) {
                                 // 単語境界を考慮した置換（部分一致を防ぐ）
-                                expanded = replace_word(&expanded, param_name, &format!("({})", arg.trim()));
+                                expanded = replace_word(
+                                    &expanded,
+                                    param_name,
+                                    &format!("({})", arg.trim()),
+                                );
                             }
                         }
                     }
@@ -496,7 +635,9 @@ fn substitute_method_calls(
         }
 
         result = new_result;
-        if !changed { break; }
+        if !changed {
+            break;
+        }
     }
 
     result
@@ -514,7 +655,9 @@ fn replace_word(source: &str, word: &str, replacement: &str) -> String {
         if i + word_chars.len() <= chars.len()
             && chars[i..i + word_chars.len()] == word_chars[..]
             && (i == 0 || !chars[i - 1].is_alphanumeric() && chars[i - 1] != '_')
-            && (i + word_chars.len() >= chars.len() || !chars[i + word_chars.len()].is_alphanumeric() && chars[i + word_chars.len()] != '_')
+            && (i + word_chars.len() >= chars.len()
+                || !chars[i + word_chars.len()].is_alphanumeric()
+                    && chars[i + word_chars.len()] != '_')
         {
             result.push_str(replacement);
             i += word_chars.len();
@@ -534,13 +677,21 @@ fn split_args(input: &str) -> Vec<String> {
     let mut current = String::new();
     for c in input.chars() {
         match c {
-            '(' => { depth += 1; current.push(c); }
-            ')' => { depth -= 1; current.push(c); }
+            '(' => {
+                depth += 1;
+                current.push(c);
+            }
+            ')' => {
+                depth -= 1;
+                current.push(c);
+            }
             ',' if depth == 0 => {
                 result.push(current.trim().to_string());
                 current.clear();
             }
-            _ => { current.push(c); }
+            _ => {
+                current.push(c);
+            }
         }
     }
     let trimmed = current.trim().to_string();
@@ -554,17 +705,24 @@ fn split_args(input: &str) -> Vec<String> {
 /// 各 law の論理式内のメソッド呼び出しを impl の具体的な body で置換し、
 /// ∀x. law_expr が成立するかを検証する。
 pub fn verify_impl(impl_def: &ImplDef, module_env: &ModuleEnv) -> MumeiResult<()> {
-    let trait_def = module_env.get_trait(&impl_def.trait_name)
-        .ok_or_else(|| MumeiError::TypeError(
-            format!("Trait '{}' not found for impl on '{}'", impl_def.trait_name, impl_def.target_type)
-        ))?;
+    let trait_def = module_env.get_trait(&impl_def.trait_name).ok_or_else(|| {
+        MumeiError::type_error_at(format!(
+            "Trait '{}' not found for impl on '{}'",
+            impl_def.trait_name, impl_def.target_type
+        ), impl_def.span.clone())
+    })?;
 
     // メソッドの完全性チェック: trait の全メソッドが impl されているか
     for method in &trait_def.methods {
-        if !impl_def.method_bodies.iter().any(|(name, _)| name == &method.name) {
-            return Err(MumeiError::TypeError(
-                format!("impl {} for {}: missing method '{}'", impl_def.trait_name, impl_def.target_type, method.name)
-            ));
+        if !impl_def
+            .method_bodies
+            .iter()
+            .any(|(name, _)| name == &method.name)
+        {
+            return Err(MumeiError::type_error_at(format!(
+                "impl {} for {}: missing method '{}'",
+                impl_def.trait_name, impl_def.target_type, method.name
+            ), impl_def.span.clone()));
         }
     }
 
@@ -575,14 +733,18 @@ pub fn verify_impl(impl_def: &ImplDef, module_env: &ModuleEnv) -> MumeiResult<()
     let solver = Solver::new(&ctx);
 
     // impl のメソッド body マップを構築（未解釈関数展開用）
-    let method_body_map: HashMap<String, String> = impl_def.method_bodies.iter()
+    let method_body_map: HashMap<String, String> = impl_def
+        .method_bodies
+        .iter()
         .map(|(name, body)| (name.clone(), body.clone()))
         .collect();
 
     // メソッドのパラメータ名マップを構築（trait 定義から取得）
     // law 式内の関数呼び出し `method(a, b)` を body 式に展開する際、
     // 仮引数名（a, b）を実引数に置換するために使用
-    let method_param_names: HashMap<String, Vec<String>> = trait_def.methods.iter()
+    let method_param_names: HashMap<String, Vec<String>> = trait_def
+        .methods
+        .iter()
         .map(|m| {
             // トレイトメソッドのパラメータ名は慣例的に a, b, c, ... を使用
             let param_names: Vec<String> = (0..m.param_types.len())
@@ -604,7 +766,11 @@ pub fn verify_impl(impl_def: &ImplDef, module_env: &ModuleEnv) -> MumeiResult<()
         // シンボリック変数で law を検証
         let int_sort = z3::Sort::int(&ctx);
         let arr = Array::new_const(&ctx, "arr", &int_sort, &int_sort);
-        let vc = VCtx { ctx: &ctx, arr: &arr, module_env };
+        let vc = VCtx {
+            ctx: &ctx,
+            arr: &arr,
+            module_env,
+        };
 
         let mut env: Env = HashMap::new();
         // law 内の自由変数をシンボリック整数として登録
@@ -652,12 +818,13 @@ pub fn verify_impl(impl_def: &ImplDef, module_env: &ModuleEnv) -> MumeiResult<()
                             "  (could not retrieve model)".to_string()
                         };
                         solver.pop(1);
-                        return Err(MumeiError::VerificationError(
+                        return Err(MumeiError::verification_at(
                             format!(
-                                "impl {} for {}: law '{}' is not satisfied\n  Law: {}\n  Expanded: {}\n{}",
+                                "impl {} for {}: law '{}' (defined in trait at {}) is not satisfied\n  Law: {}\n  Expanded: {}\n{}",
                                 impl_def.trait_name, impl_def.target_type,
-                                law_name, law_expr, substituted, counterexample
-                            )
+                                law_name, trait_def.span, law_expr, substituted, counterexample
+                            ),
+                            impl_def.span.clone()
                         ));
                     }
                     solver.pop(1);
@@ -748,9 +915,10 @@ fn verify_resource_hierarchy(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult
         if let Some(rdef) = module_env.resources.get(res_name) {
             resource_priorities.push((rdef.name.clone(), rdef.priority));
         } else {
-            return Err(MumeiError::TypeError(
+            return Err(MumeiError::type_error_at(
                 format!("Resource '{}' used in atom '{}' is not defined. Add: resource {} priority:<N> mode:exclusive|shared;",
-                    res_name, atom.name, res_name)
+                    res_name, atom.name, res_name),
+                atom.span.clone()
             ));
         }
     }
@@ -785,14 +953,18 @@ fn verify_resource_hierarchy(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult
             solver.assert(&pri_j.le(pri_i)); // 否定: Priority(r_j) <= Priority(r_i)
             if solver.check() == SatResult::Sat {
                 solver.pop(1);
-                return Err(MumeiError::VerificationError(
+                let error_span = module_env.resources.get(name_j)
+                    .map(|r| r.span.clone())
+                    .unwrap_or_else(|| atom.span.clone());
+                return Err(MumeiError::verification_at(
                     format!(
                         "Resource hierarchy violation in atom '{}': \
                          '{}' (priority={}) must have strictly lower priority than '{}' (priority={}). \
                          Reorder resources or adjust priorities to prevent potential deadlock.",
                         atom.name, name_i, resource_priorities[i].1,
                         name_j, resource_priorities[j].1
-                    )
+                    ),
+                    error_span
                 ));
             }
             solver.pop(1);
@@ -806,11 +978,12 @@ fn verify_resource_hierarchy(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult
         if let Some(rdef) = module_env.resources.get(res_name) {
             if rdef.mode == ResourceMode::Exclusive {
                 if !exclusive_set.insert(res_name.clone()) {
-                    return Err(MumeiError::VerificationError(
+                    return Err(MumeiError::verification_at(
                         format!(
                             "Data race risk in atom '{}': exclusive resource '{}' is listed multiple times",
                             atom.name, res_name
-                        )
+                        ),
+                        atom.span.clone()
                     ));
                 }
             }
@@ -862,7 +1035,11 @@ fn collect_acquire_resources(expr: &Expr) -> Vec<String> {
         Expr::While { body, .. } => {
             resources.extend(collect_acquire_resources(body));
         }
-        Expr::IfThenElse { then_branch, else_branch, .. } => {
+        Expr::IfThenElse {
+            then_branch,
+            else_branch,
+            ..
+        } => {
             resources.extend(collect_acquire_resources(then_branch));
             resources.extend(collect_acquire_resources(else_branch));
         }
@@ -897,13 +1074,13 @@ fn verify_bmc_resource_safety(atom: &Atom, module_env: &ModuleEnv) -> MumeiResul
     // While ループ内に acquire があるかチェック
     fn has_acquire_in_while(expr: &Expr) -> bool {
         match expr {
-            Expr::While { body, .. } => {
-                !collect_acquire_resources(body).is_empty()
-            }
+            Expr::While { body, .. } => !collect_acquire_resources(body).is_empty(),
             Expr::Block(stmts) => stmts.iter().any(has_acquire_in_while),
-            Expr::IfThenElse { then_branch, else_branch, .. } => {
-                has_acquire_in_while(then_branch) || has_acquire_in_while(else_branch)
-            }
+            Expr::IfThenElse {
+                then_branch,
+                else_branch,
+                ..
+            } => has_acquire_in_while(then_branch) || has_acquire_in_while(else_branch),
             _ => false,
         }
     }
@@ -923,11 +1100,12 @@ fn verify_bmc_resource_safety(atom: &Atom, module_env: &ModuleEnv) -> MumeiResul
         for res_name in &acquired_resources {
             if let Some(rdef) = module_env.resources.get(res_name) {
                 if let Err(e) = resource_ctx.acquire(res_name, rdef.priority) {
-                    return Err(MumeiError::VerificationError(
+                    return Err(MumeiError::verification_at(
                         format!(
                             "BMC (unroll step {}/{}, max_unroll={}): resource ordering violation in loop body: {}",
                             unroll_step, unroll_depth, unroll_depth, e
-                        )
+                        ),
+                        atom.span.clone()
                     ));
                 }
             }
@@ -957,22 +1135,34 @@ fn verify_async_recursion_depth(atom: &Atom, module_env: &ModuleEnv) -> MumeiRes
         match expr {
             Expr::Call(name, args) => {
                 let self_call = if name == atom_name { 1 } else { 0 };
-                self_call + args.iter().map(|a| count_self_calls(a, atom_name)).sum::<usize>()
+                self_call
+                    + args
+                        .iter()
+                        .map(|a| count_self_calls(a, atom_name))
+                        .sum::<usize>()
             }
             Expr::Block(stmts) => stmts.iter().map(|s| count_self_calls(s, atom_name)).sum(),
-            Expr::IfThenElse { cond, then_branch, else_branch } => {
+            Expr::IfThenElse {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
                 count_self_calls(cond, atom_name)
                     + count_self_calls(then_branch, atom_name)
                     + count_self_calls(else_branch, atom_name)
             }
-            Expr::Let { value, .. } | Expr::Assign { value, .. } => count_self_calls(value, atom_name),
+            Expr::Let { value, .. } | Expr::Assign { value, .. } => {
+                count_self_calls(value, atom_name)
+            }
             Expr::Async { body } => count_self_calls(body, atom_name),
             Expr::Await { expr } => count_self_calls(expr, atom_name),
             Expr::Acquire { body, .. } => count_self_calls(body, atom_name),
             Expr::While { cond, body, .. } => {
                 count_self_calls(cond, atom_name) + count_self_calls(body, atom_name)
             }
-            Expr::BinaryOp(l, _, r) => count_self_calls(l, atom_name) + count_self_calls(r, atom_name),
+            Expr::BinaryOp(l, _, r) => {
+                count_self_calls(l, atom_name) + count_self_calls(r, atom_name)
+            }
             _ => 0,
         }
     }
@@ -986,14 +1176,15 @@ fn verify_async_recursion_depth(atom: &Atom, module_env: &ModuleEnv) -> MumeiRes
         // 深度制限を超える場合は警告
         let max_depth = atom.max_unroll.unwrap_or(MAX_ASYNC_RECURSION_DEPTH);
         if self_call_count > max_depth {
-            return Err(MumeiError::VerificationError(
-                format!(
-                    "Async recursion depth exceeded in atom '{}': {} self-calls detected \
+            return Err(MumeiError::verification_at(format!(
+                "Async recursion depth exceeded in atom '{}': {} self-calls detected \
                      (max_depth={}). Use max_unroll: {}; to increase the limit, or \
                      refactor to use iteration with invariant.",
-                    atom.name, self_call_count, max_depth, self_call_count + 1
-                )
-            ));
+                atom.name,
+                self_call_count,
+                max_depth,
+                self_call_count + 1
+            ), atom.span.clone()));
         }
 
         // 再帰呼び出し先の契約を信頼して展開（Compositional Verification）
@@ -1003,13 +1194,11 @@ fn verify_async_recursion_depth(atom: &Atom, module_env: &ModuleEnv) -> MumeiRes
         if let Some(callee) = module_env.get_atom(&atom.name) {
             if callee.ensures.trim() == "true" {
                 // ensures が trivial な場合、再帰の安全性を証明できない
-                return Err(MumeiError::VerificationError(
-                    format!(
-                        "Recursive async atom '{}' requires a non-trivial ensures clause \
+                return Err(MumeiError::verification_at(format!(
+                    "Recursive async atom '{}' requires a non-trivial ensures clause \
                          for inductive verification. Add: ensures: <postcondition>;",
-                        atom.name
-                    )
-                ));
+                    atom.name
+                ), atom.span.clone()));
             }
         }
     }
@@ -1038,7 +1227,11 @@ fn verify_async_recursion_depth(atom: &Atom, module_env: &ModuleEnv) -> MumeiRes
 // 帰納的推論で証明できる。BMC の「有界」な保証を「完全」な保証に昇格させる。
 
 /// atom レベルの invariant を帰納的に検証する。
-fn verify_atom_invariant(atom: &Atom, invariant_raw: &str, module_env: &ModuleEnv) -> MumeiResult<()> {
+fn verify_atom_invariant(
+    atom: &Atom,
+    invariant_raw: &str,
+    module_env: &ModuleEnv,
+) -> MumeiResult<()> {
     let mut cfg = Config::new();
     cfg.set_timeout_msec(5000);
     let ctx = Context::new(&cfg);
@@ -1046,13 +1239,19 @@ fn verify_atom_invariant(atom: &Atom, invariant_raw: &str, module_env: &ModuleEn
 
     let int_sort = z3::Sort::int(&ctx);
     let arr = Array::new_const(&ctx, "arr", &int_sort, &int_sort);
-    let vc = VCtx { ctx: &ctx, arr: &arr, module_env };
+    let vc = VCtx {
+        ctx: &ctx,
+        arr: &arr,
+        module_env,
+    };
 
     let mut env: Env = HashMap::new();
 
     // パラメータをシンボリック変数として登録
     for param in &atom.params {
-        let base = param.type_name.as_deref()
+        let base = param
+            .type_name
+            .as_deref()
             .map(|t| module_env.resolve_base_type(t))
             .unwrap_or_else(|| "i64".to_string());
         let var: Dynamic = match base.as_str() {
@@ -1071,10 +1270,13 @@ fn verify_atom_invariant(atom: &Atom, invariant_raw: &str, module_env: &ModuleEn
 
     // invariant 式をパース
     let inv_ast = parse_expression(invariant_raw);
-    let inv_z3 = expr_to_z3(&vc, &inv_ast, &mut env, None)?
-        .as_bool().ok_or(MumeiError::TypeError(
-            format!("Invariant for atom '{}' must be a boolean expression", atom.name)
-        ))?;
+    let inv_z3 =
+        expr_to_z3(&vc, &inv_ast, &mut env, None)?
+            .as_bool()
+            .ok_or(MumeiError::type_error_at(format!(
+                "Invariant for atom '{}' must be a boolean expression",
+                atom.name
+            ), atom.span.clone()))?;
 
     // === Step 1: 導入 (Induction Base) ===
     // requires → invariant を証明する
@@ -1090,16 +1292,14 @@ fn verify_atom_invariant(atom: &Atom, invariant_raw: &str, module_env: &ModuleEn
             // Unsat なら requires → invariant が証明された
             if solver.check() == SatResult::Sat {
                 solver.pop(1);
-                return Err(MumeiError::VerificationError(
-                    format!(
-                        "Invariant induction base failed for atom '{}': \
+                return Err(MumeiError::verification_at(format!(
+                    "Invariant induction base failed for atom '{}': \
                          requires does not imply invariant.\n  \
                          Invariant: {}\n  \
                          Requires: {}\n  \
                          The invariant must hold whenever the precondition is satisfied.",
-                        atom.name, invariant_raw, atom.requires
-                    )
-                ));
+                    atom.name, invariant_raw, atom.requires
+                ), atom.span.clone()));
             }
             solver.pop(1);
         }
@@ -1109,13 +1309,11 @@ fn verify_atom_invariant(atom: &Atom, invariant_raw: &str, module_env: &ModuleEn
         solver.assert(&inv_z3.not());
         if solver.check() == SatResult::Sat {
             solver.pop(1);
-            return Err(MumeiError::VerificationError(
-                format!(
-                    "Invariant induction base failed for atom '{}': \
+            return Err(MumeiError::verification_at(format!(
+                "Invariant induction base failed for atom '{}': \
                      invariant '{}' is not universally true (no requires constraint).",
-                    atom.name, invariant_raw
-                )
-            ));
+                atom.name, invariant_raw
+            ), atom.span.clone()));
         }
         solver.pop(1);
     }
@@ -1145,21 +1343,20 @@ fn verify_atom_invariant(atom: &Atom, invariant_raw: &str, module_env: &ModuleEn
         // body 実行後の invariant を再評価
         // （env が body の実行で更新されている可能性がある）
         let inv_after = expr_to_z3(&vc, &inv_ast, &mut env, None)?
-            .as_bool().ok_or(MumeiError::TypeError("Invariant must be boolean".into()))?;
+            .as_bool()
+            .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
 
         // invariant の維持を検証: ¬inv_after が Unsat なら維持されている
         solver.assert(&inv_after.not());
         if solver.check() == SatResult::Sat {
             solver.pop(1);
-            return Err(MumeiError::VerificationError(
-                format!(
-                    "Invariant preservation failed for atom '{}': \
+            return Err(MumeiError::verification_at(format!(
+                "Invariant preservation failed for atom '{}': \
                      body execution may violate the invariant.\n  \
                      Invariant: {}\n  \
                      The invariant must be maintained after executing the body.",
-                    atom.name, invariant_raw
-                )
-            ));
+                atom.name, invariant_raw
+            ), atom.span.clone()));
         }
         solver.pop(1);
         let _ = env_snapshot; // env_snapshot はスコープ終了で破棄
@@ -1186,12 +1383,20 @@ fn collect_callees(expr: &Expr) -> Vec<String> {
     match expr {
         Expr::Call(name, args) => {
             callees.push(name.clone());
-            for arg in args { callees.extend(collect_callees(arg)); }
+            for arg in args {
+                callees.extend(collect_callees(arg));
+            }
         }
         Expr::Block(stmts) => {
-            for s in stmts { callees.extend(collect_callees(s)); }
+            for s in stmts {
+                callees.extend(collect_callees(s));
+            }
         }
-        Expr::IfThenElse { cond, then_branch, else_branch } => {
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
             callees.extend(collect_callees(cond));
             callees.extend(collect_callees(then_branch));
             callees.extend(collect_callees(else_branch));
@@ -1210,12 +1415,16 @@ fn collect_callees(expr: &Expr) -> Vec<String> {
         Expr::Async { body } | Expr::Acquire { body, .. } => {
             callees.extend(collect_callees(body));
         }
-        Expr::Await { expr } => { callees.extend(collect_callees(expr)); }
+        Expr::Await { expr } => {
+            callees.extend(collect_callees(expr));
+        }
         Expr::Match { target, arms } => {
             callees.extend(collect_callees(target));
             for arm in arms {
                 callees.extend(collect_callees(&arm.body));
-                if let Some(guard) = &arm.guard { callees.extend(collect_callees(guard)); }
+                if let Some(guard) = &arm.guard {
+                    callees.extend(collect_callees(guard));
+                }
             }
         }
         _ => {}
@@ -1344,9 +1553,8 @@ fn check_taint_propagation(atom: &Atom, env: &Env, module_env: &ModuleEnv) {
 
     if !tainted_sources.is_empty() {
         // env 内の __tainted_* マーカーを確認
-        let taint_markers: Vec<&String> = env.keys()
-            .filter(|k| k.starts_with("__tainted_"))
-            .collect();
+        let taint_markers: Vec<&String> =
+            env.keys().filter(|k| k.starts_with("__tainted_")).collect();
 
         if !taint_markers.is_empty() || !tainted_sources.is_empty() {
             eprintln!(
@@ -1361,7 +1569,13 @@ fn check_taint_propagation(atom: &Atom, env: &Env, module_env: &ModuleEnv) {
 /// mumei.toml の [proof]/[build] 設定を反映した verify
 /// timeout_ms: Z3 ソルバのタイムアウト（ミリ秒）
 /// global_max_unroll: BMC のグローバル展開深度
-pub fn verify_with_config(atom: &Atom, output_dir: &Path, module_env: &ModuleEnv, timeout_ms: u64, _global_max_unroll: usize) -> MumeiResult<()> {
+pub fn verify_with_config(
+    atom: &Atom,
+    output_dir: &Path,
+    module_env: &ModuleEnv,
+    timeout_ms: u64,
+    _global_max_unroll: usize,
+) -> MumeiResult<()> {
     verify_inner(atom, output_dir, module_env, timeout_ms)
 }
 
@@ -1369,25 +1583,45 @@ pub fn verify(atom: &Atom, output_dir: &Path, module_env: &ModuleEnv) -> MumeiRe
     verify_inner(atom, output_dir, module_env, 10000)
 }
 
-fn verify_inner(atom: &Atom, output_dir: &Path, module_env: &ModuleEnv, timeout_ms: u64) -> MumeiResult<()> {
+fn verify_inner(
+    atom: &Atom,
+    output_dir: &Path,
+    module_env: &ModuleEnv,
+    timeout_ms: u64,
+) -> MumeiResult<()> {
     // Phase 0: 信頼レベルチェック（Trust Boundary）
     match &atom.trust_level {
         TrustLevel::Trusted => {
             // trusted atom: body の検証をスキップし、契約（requires/ensures）のみ信頼する。
             // 呼び出し元は契約に基づいて Compositional Verification を行う。
-            save_visualizer_report(output_dir, "trusted", &atom.name, "N/A", "N/A",
-                "Trusted: body verification skipped, contract assumed correct.");
+            save_visualizer_report(
+                output_dir,
+                "trusted",
+                &atom.name,
+                "N/A",
+                "N/A",
+                "Trusted: body verification skipped, contract assumed correct.",
+            );
             return Ok(());
         }
         TrustLevel::Unverified => {
             // unverified atom: 警告を出すが、検証は続行する。
             // ensures が non-trivial な場合のみ検証を試みる。
-            eprintln!("  ⚠️  Warning: atom '{}' is marked as 'unverified'. \
-                       Verification results may be incomplete.", atom.name);
+            eprintln!(
+                "  ⚠️  Warning: atom '{}' is marked as 'unverified'. \
+                       Verification results may be incomplete.",
+                atom.name
+            );
             if atom.ensures.trim() == "true" && atom.requires.trim() == "true" {
                 // 契約が trivial な場合、検証する意味がないのでスキップ
-                save_visualizer_report(output_dir, "unverified", &atom.name, "N/A", "N/A",
-                    "Unverified: no contract to verify.");
+                save_visualizer_report(
+                    output_dir,
+                    "unverified",
+                    &atom.name,
+                    "N/A",
+                    "N/A",
+                    "Unverified: no contract to verify.",
+                );
                 return Ok(());
             }
         }
@@ -1420,7 +1654,11 @@ fn verify_inner(atom: &Atom, output_dir: &Path, module_env: &ModuleEnv, timeout_
 
     let int_sort = z3::Sort::int(&ctx);
     let arr = Array::new_const(&ctx, "arr", &int_sort, &int_sort);
-    let vc = VCtx { ctx: &ctx, arr: &arr, module_env };
+    let vc = VCtx {
+        ctx: &ctx,
+        arr: &arr,
+        module_env,
+    };
 
     let mut env: Env = HashMap::new();
 
@@ -1437,11 +1675,22 @@ fn verify_inner(atom: &Atom, output_dir: &Path, module_env: &ModuleEnv, timeout_
         let range_cond = Bool::and(&ctx, &[&i.ge(&start), &i.lt(&end)]);
         let expr_ast = parse_expression(&q.condition);
         let condition_z3 = expr_to_z3(&vc, &expr_ast, &mut env, None)?
-            .as_bool().ok_or(MumeiError::VerificationError("Condition must be boolean".into()))?;
+            .as_bool()
+            .ok_or(MumeiError::verification_at(
+                "Condition must be boolean",
+                atom.span.clone(),
+            ))?;
 
         let quantifier_expr = match q.q_type {
-            QuantifierType::ForAll => z3::ast::forall_const(&ctx, &[&i], &[], &range_cond.implies(&condition_z3)),
-            QuantifierType::Exists => z3::ast::exists_const(&ctx, &[&i], &[], &Bool::and(&ctx, &[&range_cond, &condition_z3])),
+            QuantifierType::ForAll => {
+                z3::ast::forall_const(&ctx, &[&i], &[], &range_cond.implies(&condition_z3))
+            }
+            QuantifierType::Exists => z3::ast::exists_const(
+                &ctx,
+                &[&i],
+                &[],
+                &Bool::and(&ctx, &[&range_cond, &condition_z3]),
+            ),
         };
         solver.assert(&quantifier_expr);
     }
@@ -1507,15 +1756,29 @@ fn verify_inner(atom: &Atom, output_dir: &Path, module_env: &ModuleEnv, timeout_
         for param_name in &atom.consumed_params {
             // パラメータが実際に存在するか検証
             if !atom.params.iter().any(|p| p.name == *param_name) {
-                return Err(MumeiError::TypeError(
-                    format!("consume target '{}' is not a parameter of atom '{}'", param_name, atom.name)
-                ));
+                return Err(MumeiError::type_error_at(format!(
+                    "consume target '{}' is not a parameter of atom '{}'",
+                    param_name, atom.name
+                ), atom.span.clone()));
             }
             // ref / ref mut パラメータは consume できない
-            if atom.params.iter().any(|p| p.name == *param_name && (p.is_ref || p.is_ref_mut)) {
-                let kind = if atom.params.iter().any(|p| p.name == *param_name && p.is_ref_mut) { "ref mut" } else { "ref" };
-                return Err(MumeiError::TypeError(
-                    format!("Cannot consume {} parameter '{}' in atom '{}': {} parameters are borrowed, not owned", kind, param_name, atom.name, kind)
+            if atom
+                .params
+                .iter()
+                .any(|p| p.name == *param_name && (p.is_ref || p.is_ref_mut))
+            {
+                let kind = if atom
+                    .params
+                    .iter()
+                    .any(|p| p.name == *param_name && p.is_ref_mut)
+                {
+                    "ref mut"
+                } else {
+                    "ref"
+                };
+                return Err(MumeiError::type_error_at(
+                    format!("Cannot consume {} parameter '{}' in atom '{}': {} parameters are borrowed, not owned", kind, param_name, atom.name, kind),
+                    atom.span.clone()
                 ));
             }
             // LinearityCtx に登録
@@ -1590,9 +1853,8 @@ fn verify_inner(atom: &Atom, output_dir: &Path, module_env: &ModuleEnv, timeout_
     //   p1.is_ref_mut ∧ p1.type == p2.type ∧ p1 ≠ p2
     //   → ¬(p2.is_ref ∨ p2.is_ref_mut)  // エイリアシング禁止
     {
-        let ref_mut_params: Vec<&crate::parser::Param> = atom.params.iter()
-            .filter(|p| p.is_ref_mut)
-            .collect();
+        let ref_mut_params: Vec<&crate::parser::Param> =
+            atom.params.iter().filter(|p| p.is_ref_mut).collect();
 
         for ref_mut_p in &ref_mut_params {
             for other_p in &atom.params {
@@ -1606,15 +1868,19 @@ fn verify_inner(atom: &Atom, output_dir: &Path, module_env: &ModuleEnv, timeout_
                     // Z3 で同一データへの参照でないことを検証
                     // パラメータが異なる値を持つことを確認
                     // （同じ値を持つ場合、エイリアシングが発生）
-                    if let (Some(ref_mut_val), Some(other_val)) = (env.get(&ref_mut_p.name), env.get(&other_p.name)) {
-                        if let (Some(rm_int), Some(ot_int)) = (ref_mut_val.as_int(), other_val.as_int()) {
+                    if let (Some(ref_mut_val), Some(other_val)) =
+                        (env.get(&ref_mut_p.name), env.get(&other_p.name))
+                    {
+                        if let (Some(rm_int), Some(ot_int)) =
+                            (ref_mut_val.as_int(), other_val.as_int())
+                        {
                             // ref_mut_val == other_val が SAT ならエイリアシングの可能性あり
                             solver.push();
                             solver.assert(&rm_int._eq(&ot_int));
                             if solver.check() == SatResult::Sat {
                                 solver.pop(1);
                                 let other_kind = if other_p.is_ref_mut { "ref mut" } else { "ref" };
-                                return Err(MumeiError::VerificationError(
+                                return Err(MumeiError::verification_at(
                                     format!(
                                         "Aliasing violation in atom '{}': \
                                          'ref mut {}' and '{} {}' may reference the same data (type: {}). \
@@ -1624,7 +1890,8 @@ fn verify_inner(atom: &Atom, output_dir: &Path, module_env: &ModuleEnv, timeout_
                                          via requires.",
                                         atom.name, ref_mut_p.name, other_kind, other_p.name,
                                         ref_mut_p.type_name.as_deref().unwrap_or("unknown")
-                                    )
+                                    ),
+                                    atom.span.clone()
                                 ));
                             }
                             solver.pop(1);
@@ -1652,8 +1919,18 @@ fn verify_inner(atom: &Atom, output_dir: &Path, module_env: &ModuleEnv, timeout_
             solver.assert(&ens_bool.not());
             if solver.check() == SatResult::Sat {
                 solver.pop(1);
-                save_visualizer_report(output_dir, "failed", &atom.name, "N/A", "N/A", "Postcondition violated.");
-                return Err(MumeiError::VerificationError("Postcondition (ensures) is not satisfied.".into()));
+                save_visualizer_report(
+                    output_dir,
+                    "failed",
+                    &atom.name,
+                    "N/A",
+                    "N/A",
+                    "Postcondition violated.",
+                );
+                return Err(MumeiError::verification_at(
+                    "Postcondition (ensures) is not satisfied.",
+                    atom.span.clone(),
+                ));
             }
             solver.pop(1);
         }
@@ -1667,9 +1944,10 @@ fn verify_inner(atom: &Atom, output_dir: &Path, module_env: &ModuleEnv, timeout_
         // consume 対象パラメータを消費済みとしてマーク
         for param_name in &atom.consumed_params {
             if let Err(e) = linearity_ctx.consume(param_name) {
-                return Err(MumeiError::VerificationError(
-                    format!("Linearity violation in atom '{}': {}", atom.name, e)
-                ));
+                return Err(MumeiError::verification_at(format!(
+                    "Linearity violation in atom '{}': {}",
+                    atom.name, e
+                ), atom.span.clone()));
             }
 
             // Z3 上で is_alive を false に更新（消費後のアクセスを禁止）
@@ -1681,18 +1959,33 @@ fn verify_inner(atom: &Atom, output_dir: &Path, module_env: &ModuleEnv, timeout_
         // 蓄積された違反をチェック
         if linearity_ctx.has_violations() {
             let violations = linearity_ctx.get_violations().join("\n  ");
-            return Err(MumeiError::VerificationError(
-                format!("Linearity violations in atom '{}':\n  {}", atom.name, violations)
-            ));
+            return Err(MumeiError::verification_at(format!(
+                "Linearity violations in atom '{}':\n  {}",
+                atom.name, violations
+            ), atom.span.clone()));
         }
     }
 
     if solver.check() == SatResult::Unsat {
-        save_visualizer_report(output_dir, "failed", &atom.name, "N/A", "N/A", "Logic contradiction.");
-        return Err(MumeiError::VerificationError("Contradiction found.".into()));
+        save_visualizer_report(
+            output_dir,
+            "failed",
+            &atom.name,
+            "N/A",
+            "N/A",
+            "Logic contradiction.",
+        );
+        return Err(MumeiError::verification_at("Contradiction found.", atom.span.clone()));
     }
 
-    save_visualizer_report(output_dir, "success", &atom.name, "N/A", "N/A", "Verified safe.");
+    save_visualizer_report(
+        output_dir,
+        "success",
+        &atom.name,
+        "N/A",
+        "N/A",
+        "Verified safe.",
+    );
     Ok(())
 }
 
@@ -1701,7 +1994,7 @@ fn apply_refinement_constraint<'a>(
     solver: &Solver<'a>,
     var_name: &str,
     refined: &RefinedType,
-    global_env: &mut Env<'a>
+    global_env: &mut Env<'a>,
 ) -> MumeiResult<()> {
     let ctx = vc.ctx;
     // Type System 2.0: ベース型に基づいて変数を生成
@@ -1711,7 +2004,7 @@ fn apply_refinement_constraint<'a>(
             let v = Int::new_const(ctx, var_name);
             solver.assert(&v.ge(&Int::from_i64(ctx, 0)));
             v.into()
-        },
+        }
         _ => Int::new_const(ctx, var_name).into(),
     };
 
@@ -1722,7 +2015,11 @@ fn apply_refinement_constraint<'a>(
 
     let predicate_ast = parse_expression(&refined.predicate_raw);
     let predicate_z3 = expr_to_z3(vc, &predicate_ast, &mut local_env, None)?
-        .as_bool().ok_or(MumeiError::TypeError(format!("Predicate for {} must be boolean", refined.name)))?;
+        .as_bool()
+        .ok_or(MumeiError::type_error_at(format!(
+            "Predicate for {} must be boolean",
+            refined.name
+        ), refined.span.clone()))?;
 
     solver.assert(&predicate_z3);
     Ok(())
@@ -1732,16 +2029,17 @@ fn expr_to_z3<'a>(
     vc: &VCtx<'a>,
     expr: &Expr,
     env: &mut Env<'a>,
-    solver_opt: Option<&Solver<'a>>
+    solver_opt: Option<&Solver<'a>>,
 ) -> DynResult<'a> {
     let ctx = vc.ctx;
     let arr = vc.arr;
     match expr {
         Expr::Number(n) => Ok(Int::from_i64(ctx, *n).into()),
         Expr::Float(f) => Ok(Float::from_f64(ctx, *f).into()),
-        Expr::Variable(name) => {
-            Ok(env.get(name).cloned().unwrap_or_else(|| Int::new_const(ctx, name.as_str()).into()))
-        },
+        Expr::Variable(name) => Ok(env
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| Int::new_const(ctx, name.as_str()).into())),
         Expr::Call(name, args) => {
             match name.as_str() {
                 // =============================================================
@@ -1754,43 +2052,42 @@ fn expr_to_z3<'a>(
                 // のようなソート済み不変量を事後条件として記述・検証できる。
                 "forall" | "exists" => {
                     if args.len() != 4 {
-                        return Err(MumeiError::VerificationError(
-                            format!("{}() requires exactly 4 arguments: (var, start, end, condition)", name)
-                        ));
+                        return Err(MumeiError::verification(format!(
+                            "{}() requires exactly 4 arguments: (var, start, end, condition)",
+                            name
+                        )));
                     }
                     // 第1引数: 束縛変数名
                     let var_name = match &args[0] {
                         Expr::Variable(v) => v.clone(),
-                        _ => return Err(MumeiError::VerificationError(
-                            format!("{}(): first argument must be a variable name", name)
-                        )),
+                        _ => {
+                            return Err(MumeiError::verification(format!(
+                                "{}(): first argument must be a variable name",
+                                name
+                            )))
+                        }
                     };
 
                     // 第2引数: 範囲の開始
-                    let start_z3 = expr_to_z3(vc, &args[1], env, None)?
-                        .as_int().ok_or(MumeiError::TypeError(
-                            format!("{}(): start must be integer", name)
-                        ))?;
+                    let start_z3 = expr_to_z3(vc, &args[1], env, None)?.as_int().ok_or(
+                        MumeiError::type_error(format!("{}(): start must be integer", name)),
+                    )?;
 
                     // 第3引数: 範囲の終了
-                    let end_z3 = expr_to_z3(vc, &args[2], env, None)?
-                        .as_int().ok_or(MumeiError::TypeError(
-                            format!("{}(): end must be integer", name)
-                        ))?;
+                    let end_z3 = expr_to_z3(vc, &args[2], env, None)?.as_int().ok_or(
+                        MumeiError::type_error(format!("{}(): end must be integer", name)),
+                    )?;
 
                     // 束縛変数を一時的に env に追加して condition を評価
                     let bound_var = Int::new_const(ctx, var_name.as_str());
                     let old_val = env.insert(var_name.clone(), bound_var.clone().into());
 
-                    let range_cond = Bool::and(ctx, &[
-                        &bound_var.ge(&start_z3),
-                        &bound_var.lt(&end_z3),
-                    ]);
+                    let range_cond =
+                        Bool::and(ctx, &[&bound_var.ge(&start_z3), &bound_var.lt(&end_z3)]);
 
-                    let condition_z3 = expr_to_z3(vc, &args[3], env, None)?
-                        .as_bool().ok_or(MumeiError::TypeError(
-                            format!("{}(): condition must be boolean", name)
-                        ))?;
+                    let condition_z3 = expr_to_z3(vc, &args[3], env, None)?.as_bool().ok_or(
+                        MumeiError::type_error(format!("{}(): condition must be boolean", name)),
+                    )?;
 
                     // 束縛変数を env から復元
                     if let Some(old) = old_val {
@@ -1801,20 +2098,36 @@ fn expr_to_z3<'a>(
 
                     let quantifier_expr = if name == "forall" {
                         // ∀ var ∈ [start, end). condition
-                        z3::ast::forall_const(ctx, &[&bound_var], &[], &range_cond.implies(&condition_z3))
+                        z3::ast::forall_const(
+                            ctx,
+                            &[&bound_var],
+                            &[],
+                            &range_cond.implies(&condition_z3),
+                        )
                     } else {
                         // ∃ var ∈ [start, end). condition
-                        z3::ast::exists_const(ctx, &[&bound_var], &[], &Bool::and(ctx, &[&range_cond, &condition_z3]))
+                        z3::ast::exists_const(
+                            ctx,
+                            &[&bound_var],
+                            &[],
+                            &Bool::and(ctx, &[&range_cond, &condition_z3]),
+                        )
                     };
 
                     Ok(quantifier_expr.into())
-                },
+                }
                 "len" => {
                     // len(arr_name) → 配列名に紐づくシンボリック長を返す
                     // len_<name> >= 0 の制約を自動付与
                     let arr_name = if !args.is_empty() {
-                        if let Expr::Variable(name) = &args[0] { name.clone() } else { "arr".to_string() }
-                    } else { "arr".to_string() };
+                        if let Expr::Variable(name) = &args[0] {
+                            name.clone()
+                        } else {
+                            "arr".to_string()
+                        }
+                    } else {
+                        "arr".to_string()
+                    };
                     let len_name = format!("len_{}", arr_name);
                     let len_var = Int::new_const(ctx, len_name.as_str());
                     if let Some(solver) = solver_opt {
@@ -1822,7 +2135,7 @@ fn expr_to_z3<'a>(
                     }
                     env.insert(len_name, len_var.clone().into());
                     Ok(len_var.into())
-                },
+                }
                 "sqrt" => {
                     // Z3 0.12 の Float には sqrt メソッドがないため、
                     // シンボリック変数として扱い、sqrt(x) >= 0 の制約を付与
@@ -1833,7 +2146,7 @@ fn expr_to_z3<'a>(
                         solver.assert(&result.ge(&zero));
                     }
                     Ok(result.into())
-                },
+                }
                 "cast_to_int" => {
                     // Z3 0.12 では Float->Int 直接変換がないため、シンボリック整数を返す
                     let _val = expr_to_z3(vc, &args[0], env, solver_opt)?;
@@ -1848,7 +2161,10 @@ fn expr_to_z3<'a>(
                     // "math.add" → "math::add" として ModuleEnv から解決する。
                     // これにより `math.add(x, y)` と `math::add(x, y)` の両方が動作する。
                     let fqn_name = name.replace('.', "::");
-                    let resolved_callee = vc.module_env.get_atom(name).cloned()
+                    let resolved_callee = vc
+                        .module_env
+                        .get_atom(name)
+                        .cloned()
                         .or_else(|| vc.module_env.get_atom(&fqn_name).cloned());
                     if let Some(callee) = resolved_callee {
                         // 引数を評価
@@ -1887,7 +2203,7 @@ fn expr_to_z3<'a>(
                                     solver.assert(&req_bool.not());
                                     if solver.check() == SatResult::Sat {
                                         solver.pop(1);
-                                        return Err(MumeiError::VerificationError(
+                                        return Err(MumeiError::verification(
                                             format!("Call to '{}': precondition (requires) not satisfied at call site", name)
                                         ));
                                     }
@@ -1897,13 +2213,16 @@ fn expr_to_z3<'a>(
                         }
 
                         // ensures からシンボリック結果を生成し、事後条件を事実として追加
-                        static CALL_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-                        let call_id = CALL_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        static CALL_COUNTER: std::sync::atomic::AtomicUsize =
+                            std::sync::atomic::AtomicUsize::new(0);
+                        let call_id =
+                            CALL_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         let result_name = format!("call_{}_{}", name, call_id);
 
                         // 戻り値型の推定: 呼び出し先パラメータに f64 型があれば Float、なければ Int
                         let has_float = callee.params.iter().any(|p| {
-                            p.type_name.as_deref()
+                            p.type_name
+                                .as_deref()
                                 .map(|t| vc.module_env.resolve_base_type(t) == "f64")
                                 .unwrap_or(false)
                         });
@@ -1948,11 +2267,17 @@ fn expr_to_z3<'a>(
                                     if var_name == "result" {
                                         // ensures: result == <expr> の場合
                                         // <expr> を call_env で評価し、result_z3 == eval(<expr>) を assert
-                                        if let Ok(rhs_val) = expr_to_z3(vc, right, &mut call_env, None) {
+                                        if let Ok(rhs_val) =
+                                            expr_to_z3(vc, right, &mut call_env, None)
+                                        {
                                             if let Some(solver) = solver_opt {
-                                                if let (Some(res_int), Some(rhs_int)) = (result_z3.as_int(), rhs_val.as_int()) {
+                                                if let (Some(res_int), Some(rhs_int)) =
+                                                    (result_z3.as_int(), rhs_val.as_int())
+                                                {
                                                     solver.assert(&res_int._eq(&rhs_int));
-                                                } else if let (Some(res_float), Some(rhs_float)) = (result_z3.as_float(), rhs_val.as_float()) {
+                                                } else if let (Some(res_float), Some(rhs_float)) =
+                                                    (result_z3.as_float(), rhs_val.as_float())
+                                                {
                                                     solver.assert(&res_float._eq(&rhs_float));
                                                 }
                                             }
@@ -1962,11 +2287,17 @@ fn expr_to_z3<'a>(
                                 // ensures: <expr> == result の逆順もサポート
                                 if let Expr::Variable(ref var_name) = right.as_ref() {
                                     if var_name == "result" {
-                                        if let Ok(lhs_val) = expr_to_z3(vc, left, &mut call_env, None) {
+                                        if let Ok(lhs_val) =
+                                            expr_to_z3(vc, left, &mut call_env, None)
+                                        {
                                             if let Some(solver) = solver_opt {
-                                                if let (Some(res_int), Some(lhs_int)) = (result_z3.as_int(), lhs_val.as_int()) {
+                                                if let (Some(res_int), Some(lhs_int)) =
+                                                    (result_z3.as_int(), lhs_val.as_int())
+                                                {
                                                     solver.assert(&res_int._eq(&lhs_int));
-                                                } else if let (Some(res_float), Some(lhs_float)) = (result_z3.as_float(), lhs_val.as_float()) {
+                                                } else if let (Some(res_float), Some(lhs_float)) =
+                                                    (result_z3.as_float(), lhs_val.as_float())
+                                                {
                                                     solver.assert(&res_float._eq(&lhs_float));
                                                 }
                                             }
@@ -1977,7 +2308,13 @@ fn expr_to_z3<'a>(
 
                             // 複合 ensures（&& で結合された複数条件）内の等式も伝播
                             // ensures: result >= 0 && result == n + 1 のような場合
-                            propagate_equality_from_ensures(vc, &ens_ast, &result_z3, &mut call_env, solver_opt)?;
+                            propagate_equality_from_ensures(
+                                vc,
+                                &ens_ast,
+                                &result_z3,
+                                &mut call_env,
+                                solver_opt,
+                            )?;
                         }
 
                         // Taint Analysis: 呼び出し先が unverified の場合、
@@ -1990,20 +2327,26 @@ fn expr_to_z3<'a>(
 
                         Ok(result_z3)
                     } else {
-                        Err(MumeiError::VerificationError(format!("Unknown function: {}", name)))
+                        Err(MumeiError::verification(format!(
+                            "Unknown function: {}",
+                            name
+                        )))
                     }
-                },
+                }
             }
-        },
+        }
         Expr::ArrayAccess(name, index_expr) => {
             let idx = expr_to_z3(vc, index_expr, env, solver_opt)?
-                .as_int().ok_or(MumeiError::TypeError("Index must be integer".into()))?;
+                .as_int()
+                .ok_or(MumeiError::type_error("Index must be integer"))?;
 
             // 配列名に紐づく長さシンボルを使った境界チェック
             if let Some(solver) = solver_opt {
                 let len_name = format!("len_{}", name);
                 let len = if let Some(existing) = env.get(&len_name) {
-                    existing.as_int().unwrap_or(Int::new_const(ctx, len_name.as_str()))
+                    existing
+                        .as_int()
+                        .unwrap_or(Int::new_const(ctx, len_name.as_str()))
                 } else {
                     let l = Int::new_const(ctx, len_name.as_str());
                     solver.assert(&l.ge(&Int::from_i64(ctx, 0)));
@@ -2015,12 +2358,15 @@ fn expr_to_z3<'a>(
                 solver.assert(&safe.not());
                 if solver.check() == SatResult::Sat {
                     solver.pop(1);
-                    return Err(MumeiError::VerificationError(format!("Potential Out-of-Bounds on '{}' (index may be < 0 or >= len_{})", name, name)));
+                    return Err(MumeiError::verification(format!(
+                        "Potential Out-of-Bounds on '{}' (index may be < 0 or >= len_{})",
+                        name, name
+                    )));
                 }
                 solver.pop(1);
             }
             Ok(arr.select(&idx).into())
-        },
+        }
         Expr::BinaryOp(left, op, right) => {
             let l = expr_to_z3(vc, left, env, solver_opt)?;
             let r = expr_to_z3(vc, right, env, solver_opt)?;
@@ -2032,16 +2378,17 @@ fn expr_to_z3<'a>(
                 let lf = l.as_float().unwrap_or(Float::from_f64(ctx, 0.0));
                 let rf = r.as_float().unwrap_or(Float::from_f64(ctx, 0.0));
                 match op {
-                    Op::Gt  => Ok(lf.gt(&rf).into()),
-                    Op::Lt  => Ok(lf.lt(&rf).into()),
-                    Op::Ge  => Ok(lf.ge(&rf).into()),
-                    Op::Le  => Ok(lf.le(&rf).into()),
-                    Op::Eq  => Ok(lf._eq(&rf).into()),
+                    Op::Gt => Ok(lf.gt(&rf).into()),
+                    Op::Lt => Ok(lf.lt(&rf).into()),
+                    Op::Ge => Ok(lf.ge(&rf).into()),
+                    Op::Le => Ok(lf.le(&rf).into()),
+                    Op::Eq => Ok(lf._eq(&rf).into()),
                     Op::Neq => Ok(lf._eq(&rf).not().into()),
                     Op::Add | Op::Sub | Op::Mul | Op::Div => {
                         // シンボリック Float + 符号伝播制約
                         // (z3 crate 0.12 は内部フィールドが非公開のため z3-sys 直接呼び出し不可)
-                        static FLOAT_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+                        static FLOAT_COUNTER: std::sync::atomic::AtomicUsize =
+                            std::sync::atomic::AtomicUsize::new(0);
                         let id = FLOAT_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         let result = Float::new_const(ctx, format!("float_arith_{}", id), 11, 53);
                         let zero = Float::from_f64(ctx, 0.0);
@@ -2052,26 +2399,26 @@ fn expr_to_z3<'a>(
                                     solver.assert(&both_pos.implies(&result.gt(&zero)));
                                     let both_neg = Bool::and(ctx, &[&lf.lt(&zero), &rf.lt(&zero)]);
                                     solver.assert(&both_neg.implies(&result.gt(&zero)));
-                                },
+                                }
                                 Op::Add => {
                                     let both_pos = Bool::and(ctx, &[&lf.gt(&zero), &rf.ge(&zero)]);
                                     solver.assert(&both_pos.implies(&result.gt(&zero)));
                                     let both_pos2 = Bool::and(ctx, &[&lf.ge(&zero), &rf.gt(&zero)]);
                                     solver.assert(&both_pos2.implies(&result.gt(&zero)));
-                                },
+                                }
                                 Op::Sub => {
                                     let a_gt_b = Bool::and(ctx, &[&lf.gt(&rf), &rf.ge(&zero)]);
                                     solver.assert(&a_gt_b.implies(&result.ge(&zero)));
-                                },
+                                }
                                 Op::Div => {
                                     let both_pos = Bool::and(ctx, &[&lf.gt(&zero), &rf.gt(&zero)]);
                                     solver.assert(&both_pos.implies(&result.gt(&zero)));
-                                },
+                                }
                                 _ => {}
                             }
                         }
                         Ok(result.into())
-                    },
+                    }
                     _ => Err("Invalid float op".into()),
                 }
             } else {
@@ -2081,17 +2428,17 @@ fn expr_to_z3<'a>(
                         let lb = l.as_bool().ok_or("Expected bool for &&")?;
                         let rb = r.as_bool().ok_or("Expected bool for &&")?;
                         return Ok(Bool::and(ctx, &[&lb, &rb]).into());
-                    },
+                    }
                     Op::Or => {
                         let lb = l.as_bool().ok_or("Expected bool for ||")?;
                         let rb = r.as_bool().ok_or("Expected bool for ||")?;
                         return Ok(Bool::or(ctx, &[&lb, &rb]).into());
-                    },
+                    }
                     Op::Implies => {
                         let lb = l.as_bool().ok_or("Expected bool for =>")?;
                         let rb = r.as_bool().ok_or("Expected bool for =>")?;
                         return Ok(lb.implies(&rb).into());
-                    },
+                    }
                     _ => {}
                 }
                 let li = l.as_int().ok_or("Expected int")?;
@@ -2106,63 +2453,86 @@ fn expr_to_z3<'a>(
                             solver.assert(&ri._eq(&Int::from_i64(ctx, 0)));
                             if solver.check() == SatResult::Sat {
                                 solver.pop(1);
-                                return Err(MumeiError::VerificationError("Potential division by zero.".into()));
+                                return Err(MumeiError::verification(
+                                    "Potential division by zero.",
+                                ));
                             }
                             solver.pop(1);
                         }
                         Ok((&li / &ri).into())
-                    },
-                    Op::Gt  => Ok(li.gt(&ri).into()),
-                    Op::Lt  => Ok(li.lt(&ri).into()),
-                    Op::Ge  => Ok(li.ge(&ri).into()),
-                    Op::Le  => Ok(li.le(&ri).into()),
-                    Op::Eq  => Ok(li._eq(&ri).into()),
+                    }
+                    Op::Gt => Ok(li.gt(&ri).into()),
+                    Op::Lt => Ok(li.lt(&ri).into()),
+                    Op::Ge => Ok(li.ge(&ri).into()),
+                    Op::Le => Ok(li.le(&ri).into()),
+                    Op::Eq => Ok(li._eq(&ri).into()),
                     Op::Neq => Ok(li._eq(&ri).not().into()),
-                    _ => Err(MumeiError::VerificationError(format!("Unsupported int operator {:?}", op))),
+                    _ => Err(MumeiError::verification(format!(
+                        "Unsupported int operator {:?}",
+                        op
+                    ))),
                 }
             }
-        },
-        Expr::IfThenElse { cond, then_branch, else_branch } => {
+        }
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
             let c = expr_to_z3(vc, cond, env, solver_opt)?
-                .as_bool().ok_or(MumeiError::TypeError("If condition must be boolean".into()))?;
+                .as_bool()
+                .ok_or(MumeiError::type_error("If condition must be boolean"))?;
             let t = expr_to_z3(vc, then_branch, env, solver_opt)?;
             let e = expr_to_z3(vc, else_branch, env, solver_opt)?;
             Ok(c.ite(&t, &e))
-        },
+        }
         Expr::Let { var, value } => {
             // Block 内の逐次実行では変数を env に残す（スコープ管理は Block 側で行う）
             let val = expr_to_z3(vc, value, env, solver_opt)?;
             env.insert(var.clone(), val.clone());
             Ok(val)
-        },
+        }
         Expr::Assign { var, value } => {
             let val = expr_to_z3(vc, value, env, solver_opt)?;
             env.insert(var.clone(), val.clone());
             Ok(val)
-        },
+        }
         Expr::Block(stmts) => {
             let mut last = Int::from_i64(ctx, 0).into();
-            for stmt in stmts { last = expr_to_z3(vc, stmt, env, solver_opt)?; }
+            for stmt in stmts {
+                last = expr_to_z3(vc, stmt, env, solver_opt)?;
+            }
             Ok(last)
-        },
-        Expr::While { cond, invariant, decreases, body } => {
+        }
+        Expr::While {
+            cond,
+            invariant,
+            decreases,
+            body,
+        } => {
             // Loop Invariant 検証ロジック
             if let Some(solver) = solver_opt {
                 let inv = expr_to_z3(vc, invariant, env, None)?
-                    .as_bool().ok_or(MumeiError::TypeError("Invariant must be boolean".into()))?;
+                    .as_bool()
+                    .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
 
                 // Base case: 現在の env（let で初期化済み）で invariant が成立するか
                 solver.push();
                 solver.assert(&inv.not());
                 if solver.check() == SatResult::Sat {
                     solver.pop(1);
-                    return Err(MumeiError::VerificationError("Invariant fails initially".into()));
+                    return Err(MumeiError::verification(
+                        "Invariant fails initially",
+                    ));
                 }
                 solver.pop(1);
 
                 // Inductive step: invariant && cond のもとで body 実行後も invariant が保たれるか
                 let c = expr_to_z3(vc, cond, env, None)?
-                    .as_bool().ok_or(MumeiError::TypeError("While condition must be boolean".into()))?;
+                    .as_bool()
+                    .ok_or(MumeiError::type_error(
+                        "While condition must be boolean",
+                    ))?;
 
                 // Invariant preservation: invariant && cond のもとで body 実行後も invariant が保たれるか
                 // env のスナップショットを保存し、各チェックを独立に行う
@@ -2174,12 +2544,15 @@ fn expr_to_z3<'a>(
                     expr_to_z3(vc, body, env, Some(solver))?;
 
                     let inv_after = expr_to_z3(vc, invariant, env, None)?
-                        .as_bool().ok_or(MumeiError::TypeError("Invariant must be boolean".into()))?;
+                        .as_bool()
+                        .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
 
                     solver.assert(&inv_after.not());
                     if solver.check() == SatResult::Sat {
                         solver.pop(1);
-                        return Err(MumeiError::VerificationError("Invariant not preserved".into()));
+                        return Err(MumeiError::verification(
+                            "Invariant not preserved",
+                        ));
                     }
                     solver.pop(1);
                     *env = env_snapshot; // env を復元
@@ -2190,8 +2563,9 @@ fn expr_to_z3<'a>(
                     let env_snapshot = env.clone();
 
                     // V_before: ループ本体実行前の減少式の値
-                    let v_before = expr_to_z3(vc, dec_expr, env, None)?
-                        .as_int().ok_or(MumeiError::TypeError("decreases expression must be integer".into()))?;
+                    let v_before = expr_to_z3(vc, dec_expr, env, None)?.as_int().ok_or(
+                        MumeiError::type_error("decreases expression must be integer"),
+                    )?;
 
                     // A. 下界の証明: invariant && cond => V >= 0
                     solver.push();
@@ -2200,8 +2574,8 @@ fn expr_to_z3<'a>(
                     solver.assert(&v_before.lt(&Int::from_i64(ctx, 0)));
                     if solver.check() == SatResult::Sat {
                         solver.pop(1);
-                        return Err(MumeiError::VerificationError(
-                            "Termination check failed: decreases expression may be negative".into()
+                        return Err(MumeiError::verification(
+                            "Termination check failed: decreases expression may be negative",
                         ));
                     }
                     solver.pop(1);
@@ -2212,15 +2586,16 @@ fn expr_to_z3<'a>(
                     solver.assert(&c);
                     expr_to_z3(vc, body, env, Some(solver))?;
 
-                    let v_after = expr_to_z3(vc, dec_expr, env, None)?
-                        .as_int().ok_or(MumeiError::TypeError("decreases expression must be integer".into()))?;
+                    let v_after = expr_to_z3(vc, dec_expr, env, None)?.as_int().ok_or(
+                        MumeiError::type_error("decreases expression must be integer"),
+                    )?;
 
                     solver.assert(&v_after.ge(&v_before));
                     if solver.check() == SatResult::Sat {
                         solver.pop(1);
                         *env = env_snapshot;
-                        return Err(MumeiError::VerificationError(
-                            "Termination check failed: decreases expression does not strictly decrease".into()
+                        return Err(MumeiError::verification(
+                            "Termination check failed: decreases expression does not strictly decrease"
                         ));
                     }
                     solver.pop(1);
@@ -2229,12 +2604,16 @@ fn expr_to_z3<'a>(
             }
 
             let inv = expr_to_z3(vc, invariant, env, None)?
-                .as_bool().ok_or(MumeiError::TypeError("Invariant must be boolean".into()))?;
+                .as_bool()
+                .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
             let c_not = expr_to_z3(vc, cond, env, None)?
-                .as_bool().ok_or(MumeiError::TypeError("While condition must be boolean".into()))?
+                .as_bool()
+                .ok_or(MumeiError::type_error(
+                    "While condition must be boolean",
+                ))?
                 .not();
             Ok(Bool::and(ctx, &[&inv, &c_not]).into())
-        },
+        }
         Expr::StructInit { type_name, fields } => {
             // 構造体の各フィールドを検証し、env に登録
             // フィールドに精緻型制約がある場合は solver で検証する
@@ -2253,16 +2632,18 @@ fn expr_to_z3<'a>(
                             let mut local_env = env.clone();
                             local_env.insert("v".to_string(), val.clone());
                             let constraint_ast = parse_expression(constraint_raw);
-                            let constraint_z3 = expr_to_z3(vc, &constraint_ast, &mut local_env, None)?;
+                            let constraint_z3 =
+                                expr_to_z3(vc, &constraint_ast, &mut local_env, None)?;
                             if let Some(constraint_bool) = constraint_z3.as_bool() {
                                 if let Some(solver) = solver_opt {
                                     solver.push();
                                     solver.assert(&constraint_bool.not());
                                     if solver.check() == SatResult::Sat {
                                         solver.pop(1);
-                                        return Err(MumeiError::VerificationError(
-                                            format!("Struct '{}' field '{}' constraint violated: {}", type_name, field_name, constraint_raw)
-                                        ));
+                                        return Err(MumeiError::verification(format!(
+                                            "Struct '{}' field '{}' constraint violated: {}",
+                                            type_name, field_name, constraint_raw
+                                        )));
                                     }
                                     solver.pop(1);
                                 }
@@ -2272,7 +2653,7 @@ fn expr_to_z3<'a>(
                 }
             }
             Ok(last)
-        },
+        }
         Expr::Match { target, arms } => {
             let target_z3 = expr_to_z3(vc, target, env, solver_opt)?;
 
@@ -2302,11 +2683,19 @@ fn expr_to_z3<'a>(
             if let Some(solver) = solver_opt {
                 let mut arm_conditions: Vec<Bool> = Vec::new();
                 for arm in arms {
-                    let cond = pattern_to_z3_condition(ctx, &arm.pattern, &target_z3, env, vc, solver_opt)?;
+                    let cond = pattern_to_z3_condition(
+                        ctx,
+                        &arm.pattern,
+                        &target_z3,
+                        env,
+                        vc,
+                        solver_opt,
+                    )?;
                     // ガード条件がある場合は AND で結合
                     let full_cond = if let Some(guard) = &arm.guard {
                         let guard_z3 = expr_to_z3(vc, guard, env, None)?
-                            .as_bool().ok_or(MumeiError::TypeError("Guard must be boolean".into()))?;
+                            .as_bool()
+                            .ok_or(MumeiError::type_error("Guard must be boolean"))?;
                         Bool::and(ctx, &[&cond, &guard_z3])
                     } else {
                         cond
@@ -2330,13 +2719,14 @@ fn expr_to_z3<'a>(
                     if solver.check() == SatResult::Sat {
                         let counterexample = if let Some(model) = solver.get_model() {
                             // ターゲット変数の具体的な値を取得
-                            let ce_str = format_counterexample(&model, &target_z3, arms, vc.module_env);
+                            let ce_str =
+                                format_counterexample(&model, &target_z3, arms, vc.module_env);
                             ce_str
                         } else {
                             "unknown value".to_string()
                         };
                         solver.pop(1);
-                        return Err(MumeiError::VerificationError(
+                        return Err(MumeiError::verification(
                             format!(
                                 "Match is not exhaustive: the following value is not covered by any arm:\n  Counter-example: {}",
                                 counterexample
@@ -2344,8 +2734,8 @@ fn expr_to_z3<'a>(
                         ));
                     }
                     solver.pop(1);
-                    return Err(MumeiError::VerificationError(
-                        "Match is not exhaustive: there exist values not covered by any arm.".into()
+                    return Err(MumeiError::verification(
+                        "Match is not exhaustive: there exist values not covered by any arm.",
                     ));
                 }
             }
@@ -2367,10 +2757,18 @@ fn expr_to_z3<'a>(
                 //    バインド変数を arm_env に登録する。
                 pattern_bind_variables(ctx, &arm.pattern, &target_z3, &mut arm_env, vc.module_env);
 
-                let arm_cond = pattern_to_z3_condition(ctx, &arm.pattern, &target_z3, &mut arm_env, vc, solver_opt)?;
+                let arm_cond = pattern_to_z3_condition(
+                    ctx,
+                    &arm.pattern,
+                    &target_z3,
+                    &mut arm_env,
+                    vc,
+                    solver_opt,
+                )?;
                 let full_cond = if let Some(guard) = &arm.guard {
                     let guard_z3 = expr_to_z3(vc, guard, &mut arm_env, None)?
-                        .as_bool().ok_or(MumeiError::TypeError("Guard must be boolean".into()))?;
+                        .as_bool()
+                        .ok_or(MumeiError::type_error("Guard must be boolean"))?;
                     Bool::and(ctx, &[&arm_cond, &guard_z3])
                 } else {
                     arm_cond
@@ -2379,7 +2777,9 @@ fn expr_to_z3<'a>(
                 // A. デフォルトアーム最適化: Wildcard/Variable パターンの場合、
                 //    先行アームの否定条件を solver に追加して body を検証
                 if let Some(solver) = solver_opt {
-                    if matches!(arm.pattern, Pattern::Wildcard | Pattern::Variable(_)) && !accumulated_negations.is_empty() {
+                    if matches!(arm.pattern, Pattern::Wildcard | Pattern::Variable(_))
+                        && !accumulated_negations.is_empty()
+                    {
                         let neg_refs: Vec<&Bool> = accumulated_negations.iter().collect();
                         let prior_negation = Bool::and(ctx, &neg_refs);
                         solver.push();
@@ -2403,8 +2803,9 @@ fn expr_to_z3<'a>(
                 accumulated_negations.push(full_cond.not());
             }
 
-            result.ok_or_else(|| MumeiError::VerificationError("Match expression has no arms".into()))
-        },
+            result
+                .ok_or_else(|| MumeiError::verification("Match expression has no arms"))
+        }
 
         // =================================================================
         // 非同期処理 + リソース管理の Z3 検証
@@ -2428,13 +2829,13 @@ fn expr_to_z3<'a>(
             env.insert(held_name, released.into());
 
             Ok(body_result)
-        },
+        }
         Expr::Async { body } => {
             // async ブロック: body を非同期コンテキストとして検証する。
             // Z3 上では通常の式として扱い、結果をシンボリック値として返す。
             // await ポイントでの所有権検証は Await 式で行う。
             expr_to_z3(vc, body, env, solver_opt)
-        },
+        }
         Expr::Await { expr } => {
             // =============================================================
             // await 跨ぎの安全性検証 (Await Safety Verification)
@@ -2455,13 +2856,16 @@ fn expr_to_z3<'a>(
             // env 内の __resource_held_* キーを走査し、Z3 で true かどうかを確認する。
             // acquire ブロック内で await を呼ぶパターンを検出する。
             if let Some(solver) = solver_opt {
-                let held_resources: Vec<String> = env.keys()
+                let held_resources: Vec<String> = env
+                    .keys()
                     .filter(|k| k.starts_with("__resource_held_"))
                     .cloned()
                     .collect();
 
                 for held_key in &held_resources {
-                    let resource_name = held_key.strip_prefix("__resource_held_").unwrap_or(held_key);
+                    let resource_name = held_key
+                        .strip_prefix("__resource_held_")
+                        .unwrap_or(held_key);
                     if let Some(held_val) = env.get(held_key) {
                         // Z3 で held_val == true が証明可能かチェック
                         // （acquire ブロック内なら held = true が assert されている）
@@ -2471,7 +2875,7 @@ fn expr_to_z3<'a>(
                             solver.assert(&held_bool);
                             if solver.check() != SatResult::Unsat {
                                 solver.pop(1);
-                                return Err(MumeiError::VerificationError(
+                                return Err(MumeiError::verification(
                                     format!(
                                         "Unsafe await: resource '{}' is held across an await point. \
                                          This can cause deadlock because the resource lock is not released \
@@ -2493,7 +2897,8 @@ fn expr_to_z3<'a>(
             // await 前に消費済みの変数を検出し、Z3 で __alive_ = false を確認する。
             // 消費済み変数が await 後にアクセスされる可能性がある場合、警告する。
             if let Some(solver) = solver_opt {
-                let consumed_vars: Vec<String> = env.keys()
+                let consumed_vars: Vec<String> = env
+                    .keys()
                     .filter(|k| k.starts_with("__alive_"))
                     .cloned()
                     .collect();
@@ -2521,7 +2926,7 @@ fn expr_to_z3<'a>(
             // 内側の式を評価してシンボリック結果を返す
             let inner_result = expr_to_z3(vc, expr, env, solver_opt)?;
             Ok(inner_result)
-        },
+        }
 
         Expr::FieldAccess(inner_expr, field_name) => {
             // ネスト構造体のフィールドアクセスを再帰的に解決する。
@@ -2593,7 +2998,14 @@ fn expr_to_z3<'a>(
 
                 // 内側の式の型を推定し、構造体定義からフィールドの型を取得
                 // フィールドの精緻型制約も再帰的に適用する
-                let nested_sym_name = format!("{}_{}", underscore_path.rsplit_once('_').map(|(prefix, _)| prefix).unwrap_or(&underscore_path), field_name);
+                let nested_sym_name = format!(
+                    "{}_{}",
+                    underscore_path
+                        .rsplit_once('_')
+                        .map(|(prefix, _)| prefix)
+                        .unwrap_or(&underscore_path),
+                    field_name
+                );
                 let sym = if let Some(val) = env.get(&nested_sym_name) {
                     return Ok(val.clone());
                 } else {
@@ -2608,7 +3020,7 @@ fn expr_to_z3<'a>(
                 let sym = Int::new_const(ctx, format!("field_{}", field_name));
                 Ok(sym.into())
             }
-        },
+        }
     }
 }
 
@@ -2635,21 +3047,28 @@ fn pattern_to_z3_condition<'a>(
     solver_opt: Option<&Solver<'a>>,
 ) -> MumeiResult<Bool<'a>> {
     match pattern {
-        Pattern::Wildcard | Pattern::Variable(_) => {
-            Ok(Bool::from_bool(ctx, true))
-        },
+        Pattern::Wildcard | Pattern::Variable(_) => Ok(Bool::from_bool(ctx, true)),
         Pattern::Literal(n) => {
-            let target_int = target.as_int().unwrap_or(Int::new_const(ctx, "__match_target"));
+            let target_int = target
+                .as_int()
+                .unwrap_or(Int::new_const(ctx, "__match_target"));
             let lit = Int::from_i64(ctx, *n);
             Ok(target_int._eq(&lit))
-        },
-        Pattern::Variant { variant_name, fields } => {
+        }
+        Pattern::Variant {
+            variant_name,
+            fields,
+        } => {
             if let Some(enum_def) = vc.module_env.find_enum_by_variant(variant_name) {
-                let variant_idx = enum_def.variants.iter()
+                let variant_idx = enum_def
+                    .variants
+                    .iter()
                     .position(|v| v.name == *variant_name)
                     .unwrap_or(0) as i64;
 
-                let tag = target.as_int().unwrap_or(Int::new_const(ctx, "__match_tag"));
+                let tag = target
+                    .as_int()
+                    .unwrap_or(Int::new_const(ctx, "__match_tag"));
                 let tag_match = tag._eq(&Int::from_i64(ctx, variant_idx));
 
                 let variant_def = &enum_def.variants[variant_idx as usize];
@@ -2690,18 +3109,29 @@ fn pattern_to_z3_condition<'a>(
                     }
 
                     // 再帰的にフィールドパターンの条件を生成
-                    let field_cond = pattern_to_z3_condition(ctx, field_pattern, &field_sym, env, vc, solver_opt)?;
+                    let field_cond = pattern_to_z3_condition(
+                        ctx,
+                        field_pattern,
+                        &field_sym,
+                        env,
+                        vc,
+                        solver_opt,
+                    )?;
                     field_conditions.push(field_cond);
                 }
 
                 let cond_refs: Vec<&Bool> = field_conditions.iter().collect();
                 Ok(Bool::and(ctx, &cond_refs))
             } else {
-                let tag = target.as_int().unwrap_or(Int::new_const(ctx, "__match_tag"));
-                let hash = variant_name.bytes().fold(0i64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as i64));
+                let tag = target
+                    .as_int()
+                    .unwrap_or(Int::new_const(ctx, "__match_tag"));
+                let hash = variant_name
+                    .bytes()
+                    .fold(0i64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as i64));
                 Ok(tag._eq(&Int::from_i64(ctx, hash)))
             }
-        },
+        }
     }
 }
 
@@ -2721,10 +3151,15 @@ fn pattern_bind_variables<'a>(
     match pattern {
         Pattern::Variable(name) => {
             env.insert(name.clone(), target.clone());
-        },
-        Pattern::Variant { variant_name, fields } => {
+        }
+        Pattern::Variant {
+            variant_name,
+            fields,
+        } => {
             if let Some(enum_def) = module_env.find_enum_by_variant(variant_name) {
-                if let Some(variant_def) = enum_def.variants.iter().find(|v| v.name == *variant_name) {
+                if let Some(variant_def) =
+                    enum_def.variants.iter().find(|v| v.name == *variant_name)
+                {
                     for (i, field_pattern) in fields.iter().enumerate() {
                         let proj_name = format!("__proj_{}_{}", variant_name, i);
                         let field_sym: Dynamic = if i < variant_def.fields.len() {
@@ -2747,18 +3182,24 @@ fn pattern_bind_variables<'a>(
                         match field_pattern {
                             Pattern::Variable(fname) => {
                                 env.insert(fname.clone(), field_sym.clone());
-                            },
+                            }
                             Pattern::Variant { .. } => {
                                 // ネストした Variant: 再帰的にバインド
-                                pattern_bind_variables(ctx, field_pattern, &field_sym, env, module_env);
-                            },
+                                pattern_bind_variables(
+                                    ctx,
+                                    field_pattern,
+                                    &field_sym,
+                                    env,
+                                    module_env,
+                                );
+                            }
                             _ => {}
                         }
                     }
                 }
             }
-        },
-        Pattern::Wildcard | Pattern::Literal(_) => {},
+        }
+        Pattern::Wildcard | Pattern::Literal(_) => {}
     }
 }
 
@@ -2819,7 +3260,10 @@ fn format_counterexample(
                 // フォールバック: module_env の全 Enum 定義を走査
                 for (enum_name, enum_def) in module_env.enums.iter() {
                     if let Some(variant) = enum_def.variants.get(tag_val as usize) {
-                        return format!("{}::{} (tag={}) -- missing from match arms", enum_name, variant.name, tag_val);
+                        return format!(
+                            "{}::{} (tag={}) -- missing from match arms",
+                            enum_name, variant.name, tag_val
+                        );
                     }
                 }
             }
@@ -2830,15 +3274,19 @@ fn format_counterexample(
         format!("value = {} -- no matching arm", target_str)
     } else {
         // 評価に失敗した場合、アームの情報からヒントを生成
-        let covered: Vec<String> = arms.iter().map(|arm| {
-            match &arm.pattern {
+        let covered: Vec<String> = arms
+            .iter()
+            .map(|arm| match &arm.pattern {
                 Pattern::Literal(n) => format!("{}", n),
                 Pattern::Variant { variant_name, .. } => variant_name.clone(),
                 Pattern::Variable(name) => format!("_{} (bind)", name),
                 Pattern::Wildcard => "_".to_string(),
-            }
-        }).collect();
-        format!("(could not evaluate; covered patterns: [{}])", covered.join(", "))
+            })
+            .collect();
+        format!(
+            "(could not evaluate; covered patterns: [{}])",
+            covered.join(", ")
+        )
     }
 }
 
@@ -2872,9 +3320,13 @@ fn propagate_equality_from_ensures<'a>(
             if is_result_left {
                 if let Ok(rhs_val) = expr_to_z3(vc, right, call_env, None) {
                     if let Some(solver) = solver_opt {
-                        if let (Some(res_int), Some(rhs_int)) = (result_z3.as_int(), rhs_val.as_int()) {
+                        if let (Some(res_int), Some(rhs_int)) =
+                            (result_z3.as_int(), rhs_val.as_int())
+                        {
                             solver.assert(&res_int._eq(&rhs_int));
-                        } else if let (Some(res_float), Some(rhs_float)) = (result_z3.as_float(), rhs_val.as_float()) {
+                        } else if let (Some(res_float), Some(rhs_float)) =
+                            (result_z3.as_float(), rhs_val.as_float())
+                        {
                             solver.assert(&res_float._eq(&rhs_float));
                         }
                     }
@@ -2882,9 +3334,13 @@ fn propagate_equality_from_ensures<'a>(
             } else if is_result_right {
                 if let Ok(lhs_val) = expr_to_z3(vc, left, call_env, None) {
                     if let Some(solver) = solver_opt {
-                        if let (Some(res_int), Some(lhs_int)) = (result_z3.as_int(), lhs_val.as_int()) {
+                        if let (Some(res_int), Some(lhs_int)) =
+                            (result_z3.as_int(), lhs_val.as_int())
+                        {
                             solver.assert(&res_int._eq(&lhs_int));
-                        } else if let (Some(res_float), Some(lhs_float)) = (result_z3.as_float(), lhs_val.as_float()) {
+                        } else if let (Some(res_float), Some(lhs_float)) =
+                            (result_z3.as_float(), lhs_val.as_float())
+                        {
                             solver.assert(&res_float._eq(&lhs_float));
                         }
                     }
@@ -2898,8 +3354,16 @@ fn propagate_equality_from_ensures<'a>(
     Ok(())
 }
 
-fn save_visualizer_report(output_dir: &Path, status: &str, name: &str, a: &str, b: &str, reason: &str) {
-    let report = json!({ "status": status, "atom": name, "input_a": a, "input_b": b, "reason": reason });
+fn save_visualizer_report(
+    output_dir: &Path,
+    status: &str,
+    name: &str,
+    a: &str,
+    b: &str,
+    reason: &str,
+) {
+    let report =
+        json!({ "status": status, "atom": name, "input_a": a, "input_b": b, "reason": reason });
     let _ = fs::create_dir_all(output_dir);
     let _ = fs::write(output_dir.join("report.json"), report.to_string());
 }

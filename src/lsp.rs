@@ -13,9 +13,10 @@
 //! - `textDocument/completion` — キーワード・atom 名補完
 //! - `textDocument/publishDiagnostics` — Z3 検証エラーのリアルタイム表示
 //! - `textDocument/definition` — 定義ジャンプ
+use crate::parser;
+use crate::verification;
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
-use crate::parser;
 // =============================================================================
 // メイン処理
 // =============================================================================
@@ -83,7 +84,9 @@ pub fn run() {
                     if let Some(td) = params.get("textDocument") {
                         let uri = td.get("uri").and_then(|u| u.as_str()).unwrap_or("");
                         // contentChanges[0].text (full sync mode)
-                        if let Some(changes) = params.get("contentChanges").and_then(|c| c.as_array()) {
+                        if let Some(changes) =
+                            params.get("contentChanges").and_then(|c| c.as_array())
+                        {
                             if let Some(change) = changes.first() {
                                 if let Some(text) = change.get("text").and_then(|t| t.as_str()) {
                                     documents.insert(uri.to_string(), text.to_string());
@@ -108,8 +111,16 @@ pub fn run() {
             "textDocument/hover" => {
                 // 簡易 hover: カーソル行付近の `atom <name>(...)` を探索し、契約を表示
                 let hover_result = if let Some(params) = json.get("params") {
-                    let uri = params.get("textDocument").and_then(|td| td.get("uri")).and_then(|u| u.as_str()).unwrap_or("");
-                    let line = params.get("position").and_then(|p| p.get("line")).and_then(|l| l.as_u64()).unwrap_or(0) as usize;
+                    let uri = params
+                        .get("textDocument")
+                        .and_then(|td| td.get("uri"))
+                        .and_then(|u| u.as_str())
+                        .unwrap_or("");
+                    let line = params
+                        .get("position")
+                        .and_then(|p| p.get("line"))
+                        .and_then(|l| l.as_u64())
+                        .unwrap_or(0) as usize;
                     if let Some(text) = documents.get(uri) {
                         build_hover(text, line)
                     } else {
@@ -147,7 +158,12 @@ pub fn run() {
             _ => {
                 // 未対応メソッド — リクエストなら MethodNotFound を返す
                 if let Some(id) = id {
-                    send_error(&mut writer, id, -32601, &format!("Method not found: {}", method));
+                    send_error(
+                        &mut writer,
+                        id,
+                        -32601,
+                        &format!("Method not found: {}", method),
+                    );
                 }
             }
         }
@@ -179,20 +195,48 @@ fn diagnose(uri: &str, source: &str) -> Vec<serde_json::Value> {
 
     // Phase 2: Z3 検証 diagnostics（file:// URI の場合のみ実行）
     if let Some(path) = uri_to_path(uri) {
-        if let Err(msg) = verify_source_for_lsp(&path, source) {
+        if let Err(e) = verify_source_for_lsp(&path, source) {
+            let detail = e.to_detail();
+            // ErrorDetail の Span から直接位置を取得（substring マッチ不要）
+            let (line, col) = if detail.span.line > 0 {
+                (detail.span.line.saturating_sub(1), detail.span.col.saturating_sub(1))
+            } else {
+                // Span が不明な場合、atom の Span にフォールバック
+                find_error_position(&items, &detail.message)
+            };
             diagnostics.push(serde_json::json!({
                 "range": {
-                    "start": { "line": 0, "character": 0 },
-                    "end": { "line": 0, "character": 1 }
+                    "start": { "line": line, "character": col },
+                    "end": { "line": line, "character": col + 1 }
                 },
                 "severity": 1,
                 "source": "mumei-z3",
-                "message": msg
+                "message": format!("{}", detail)
             }));
         }
     }
 
     diagnostics
+}
+
+/// エラーメッセージから関連する atom の Span 情報を検索し、行・列を返す。
+/// マッチしない場合は (0, 0) にフォールバックする。
+fn find_error_position(items: &[parser::Item], error_msg: &str) -> (usize, usize) {
+    // エラーメッセージに atom 名が含まれている場合、その atom の Span を使用
+    // TODO: contains() による部分文字列マッチは短い atom 名で誤マッチする可能性がある。
+    //       将来的には ErrorDetail.span を直接使用するか、ワード境界チェックを追加すべき。
+    for item in items {
+        if let parser::Item::Atom(atom) = item {
+            if error_msg.contains(&atom.name) && atom.span.line > 0 {
+                // LSP は 0-indexed なので 1-indexed の Span から変換
+                return (
+                    atom.span.line.saturating_sub(1),
+                    atom.span.col.saturating_sub(1),
+                );
+            }
+        }
+    }
+    (0, 0)
 }
 
 fn uri_to_path(uri: &str) -> Option<std::path::PathBuf> {
@@ -205,9 +249,10 @@ fn uri_to_path(uri: &str) -> Option<std::path::PathBuf> {
 
 /// ソースコードを in-process でパース → Z3 検証し、最初のエラーを返す。
 /// mumei.toml を上方探索してプロジェクトルートを決定し、依存パッケージも解決する。
-fn verify_source_for_lsp(path: &std::path::Path, source: &str) -> Result<(), String> {
-    use crate::verification;
-
+fn verify_source_for_lsp(
+    path: &std::path::Path,
+    source: &str,
+) -> Result<(), verification::MumeiError> {
     let items = crate::parser::parse_module(source);
     if items.is_empty() {
         return Ok(());
@@ -222,7 +267,8 @@ fn verify_source_for_lsp(path: &std::path::Path, source: &str) -> Result<(), Str
 
     // mumei.toml があれば依存パッケージも解決（ジャンプ先の定義が利用可能になる）
     if let Some((proj_dir, manifest)) = crate::manifest::find_and_load() {
-        let _ = crate::resolver::resolve_manifest_dependencies(&manifest, &proj_dir, &mut module_env);
+        let _ =
+            crate::resolver::resolve_manifest_dependencies(&manifest, &proj_dir, &mut module_env);
     }
 
     let _ = crate::resolver::resolve_imports(&items, base_dir, &mut module_env);
@@ -246,9 +292,7 @@ fn verify_source_for_lsp(path: &std::path::Path, source: &str) -> Result<(), Str
             if module_env.is_verified(&atom.name) {
                 continue;
             }
-            if let Err(e) = verification::verify_with_config(atom, output_dir, &module_env, 5000, 3) {
-                return Err(format!("atom '{}': {}", atom.name, e));
-            }
+            verification::verify_with_config(atom, output_dir, &module_env, 5000, 3)?;
             module_env.mark_verified(&atom.name);
         }
     }
@@ -265,7 +309,9 @@ fn build_hover(source: &str, line: usize) -> Option<String> {
     // 1) その行に atom 名が書かれているケース: `atom name(`
     let atom_name = if let Some(idx) = target_line.find("atom ") {
         let rest = &target_line[idx + 5..];
-        rest.split(|c: char| c == '(' || c.is_whitespace()).next().map(|s| s.trim().to_string())
+        rest.split(|c: char| c == '(' || c.is_whitespace())
+            .next()
+            .map(|s| s.trim().to_string())
     } else {
         None
     };
@@ -299,14 +345,16 @@ fn read_message(reader: &mut impl BufRead) -> Result<String, String> {
     let mut content_length: usize = 0;
     loop {
         let mut header_line = String::new();
-        reader.read_line(&mut header_line)
+        reader
+            .read_line(&mut header_line)
             .map_err(|e| format!("Failed to read header: {}", e))?;
         let trimmed = header_line.trim();
         if trimmed.is_empty() {
             break; // ヘッダ終了（空行）
         }
         if let Some(len_str) = trimmed.strip_prefix("Content-Length: ") {
-            content_length = len_str.parse::<usize>()
+            content_length = len_str
+                .parse::<usize>()
                 .map_err(|e| format!("Invalid Content-Length: {}", e))?;
         }
         // Content-Type 等は無視
@@ -316,10 +364,10 @@ fn read_message(reader: &mut impl BufRead) -> Result<String, String> {
     }
     // ボディを読み取り
     let mut body = vec![0u8; content_length];
-    reader.read_exact(&mut body)
+    reader
+        .read_exact(&mut body)
         .map_err(|e| format!("Failed to read body: {}", e))?;
-    String::from_utf8(body)
-        .map_err(|e| format!("Invalid UTF-8 in body: {}", e))
+    String::from_utf8(body).map_err(|e| format!("Invalid UTF-8 in body: {}", e))
 }
 /// JSON-RPC レスポンスを送信
 fn send_response(writer: &mut impl Write, id: serde_json::Value, result: serde_json::Value) {
