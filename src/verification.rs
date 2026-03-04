@@ -2993,14 +2993,22 @@ fn expr_to_z3<'a>(
             // タスク式: 子タスクの body を検証する。
             // タスクの完了順序は TaskGroup で保証されるため、
             // ここでは body の安全性のみを検証する。
-            let task_id = format!("__task_{}", group.as_deref().unwrap_or("default"));
-            let task_alive = Bool::from_bool(ctx, true);
+            static TASK_COUNTER: std::sync::atomic::AtomicUsize =
+                std::sync::atomic::AtomicUsize::new(0);
+            let task_uid = TASK_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let task_id = format!(
+                "__task_{}_{}",
+                group.as_deref().unwrap_or("default"),
+                task_uid
+            );
+            // シンボリック Bool（Z3 が値を決定する）
+            let task_alive = Bool::new_const(ctx, format!("{}_alive", task_id).as_str());
             env.insert(format!("{}_alive", task_id), task_alive.into());
 
             let body_result = expr_to_z3(vc, body, env, solver_opt)?;
 
-            // タスク完了マーカーを設定（TaskGroup の join 検証で使用）
-            let task_done = Bool::from_bool(ctx, true);
+            // タスク完了マーカー（シンボリック: Z3 が決定）
+            let task_done = Bool::new_const(ctx, format!("{}_done", task_id).as_str());
             env.insert(format!("{}_done", task_id), task_done.into());
 
             Ok(body_result)
@@ -3024,7 +3032,7 @@ fn expr_to_z3<'a>(
 
             for (i, child) in children.iter().enumerate() {
                 let child_id = format!("__task_group_child_{}", i);
-                let child_alive = Bool::from_bool(ctx, true);
+                let child_alive = Bool::new_const(ctx, format!("{}_alive", child_id).as_str());
                 env.insert(format!("{}_alive", child_id), child_alive.into());
 
                 let result = expr_to_z3(vc, child, env, solver_opt)?;
