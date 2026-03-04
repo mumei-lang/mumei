@@ -215,8 +215,13 @@ fn diagnose(uri: &str, source: &str) -> Vec<serde_json::Value> {
 
 /// エラーメッセージから関連する atom の Span 情報を検索し、行・列を返す。
 /// マッチしない場合は (0, 0) にフォールバックする。
+///
+/// NOTE: 現時点ではパーサが全ノードに Span::default() (line=0) を設定しているため、
+/// この関数は常に (0, 0) を返す。パーサに実際の行・列追跡が実装された段階で有効になる。
 fn find_error_position(items: &[parser::Item], error_msg: &str) -> (usize, usize) {
     // エラーメッセージに atom 名が含まれている場合、その atom の Span を使用
+    // TODO: contains() による部分文字列マッチは短い atom 名で誤マッチする可能性がある。
+    //       将来的には ErrorDetail.span を直接使用するか、ワード境界チェックを追加すべき。
     for item in items {
         if let parser::Item::Atom(atom) = item {
             if error_msg.contains(&atom.name) && atom.span.line > 0 {
