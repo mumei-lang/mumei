@@ -745,3 +745,155 @@ fn save_cache(cache_path: &Path, cache: &VerificationCache) {
         let _ = fs::write(cache_path, json);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::{self, TrustLevel};
+
+    /// P1-A: ExternBlock → trusted atom 自動登録テスト
+    #[test]
+    fn test_register_extern_block_as_trusted_atoms() {
+        let source = r#"
+extern "Rust" {
+    fn json_parse(input: String) -> String;
+    fn json_stringify(obj: String) -> String;
+}
+"#;
+        let items = parser::parse_module(source);
+        let mut module_env = ModuleEnv::new();
+
+        register_imported_items(&items, None, &mut module_env);
+
+        // extern 関数が trusted atom として登録されていること
+        let json_parse = module_env.get_atom("json_parse");
+        assert!(
+            json_parse.is_some(),
+            "json_parse should be registered as atom"
+        );
+        let atom = json_parse.unwrap();
+        assert_eq!(atom.trust_level, TrustLevel::Trusted);
+        assert_eq!(atom.params.len(), 1);
+        assert_eq!(atom.params[0].type_name, Some("String".to_string()));
+
+        let json_stringify = module_env.get_atom("json_stringify");
+        assert!(
+            json_stringify.is_some(),
+            "json_stringify should be registered as atom"
+        );
+        assert_eq!(json_stringify.unwrap().trust_level, TrustLevel::Trusted);
+    }
+
+    /// P1-A: ExternBlock with alias → FQN 登録テスト
+    #[test]
+    fn test_register_extern_block_with_alias() {
+        let source = r#"
+extern "Rust" {
+    fn http_get(url: String) -> String;
+}
+"#;
+        let items = parser::parse_module(source);
+        let mut module_env = ModuleEnv::new();
+
+        register_imported_items(&items, Some("http"), &mut module_env);
+
+        // 基本名でも FQN でもアクセスできること
+        assert!(
+            module_env.get_atom("http_get").is_some(),
+            "base name should be registered"
+        );
+        assert!(
+            module_env.get_atom("http::http_get").is_some(),
+            "FQN should be registered"
+        );
+
+        // FQN 版も trusted であること
+        let fqn_atom = module_env.get_atom("http::http_get").unwrap();
+        assert_eq!(fqn_atom.trust_level, TrustLevel::Trusted);
+    }
+
+    /// P1-A: ExternBlock の複数パラメータテスト
+    #[test]
+    fn test_extern_block_multi_param() {
+        let source = r#"
+extern "Rust" {
+    fn http_post(url: String, body: String) -> String;
+}
+"#;
+        let items = parser::parse_module(source);
+        let mut module_env = ModuleEnv::new();
+
+        register_imported_items(&items, None, &mut module_env);
+
+        let atom = module_env.get_atom("http_post").unwrap();
+        assert_eq!(atom.params.len(), 2);
+        assert_eq!(atom.params[0].name, "arg0");
+        assert_eq!(atom.params[0].type_name, Some("String".to_string()));
+        assert_eq!(atom.params[1].name, "arg1");
+        assert_eq!(atom.params[1].type_name, Some("String".to_string()));
+        assert_eq!(atom.requires, "true");
+        assert_eq!(atom.ensures, "true");
+        assert!(atom.body_expr.is_empty());
+    }
+
+    /// P1-A: C 言語 ExternBlock テスト
+    #[test]
+    fn test_register_extern_block_c_language() {
+        let source = r#"
+extern "C" {
+    fn printf(fmt: i64) -> i64;
+}
+"#;
+        let items = parser::parse_module(source);
+        let mut module_env = ModuleEnv::new();
+
+        register_imported_items(&items, None, &mut module_env);
+
+        let atom = module_env.get_atom("printf");
+        assert!(atom.is_some(), "C extern function should be registered");
+        assert_eq!(atom.unwrap().trust_level, TrustLevel::Trusted);
+    }
+
+    /// P1-A: 通常 atom + ExternBlock 混合テスト
+    #[test]
+    fn test_register_mixed_items_with_extern() {
+        let source = r#"
+atom add(x: i64, y: i64) -> i64
+  requires: true;
+  ensures: result == x + y;
+  body: x + y;
+
+extern "Rust" {
+    fn ffi_helper(n: i64) -> i64;
+}
+"#;
+        let items = parser::parse_module(source);
+        let mut module_env = ModuleEnv::new();
+
+        register_imported_items(&items, None, &mut module_env);
+
+        // 通常 atom が登録されていること
+        let add = module_env.get_atom("add");
+        assert!(add.is_some(), "regular atom should be registered");
+        assert_eq!(add.unwrap().trust_level, TrustLevel::Verified);
+
+        // extern atom が trusted で登録されていること
+        let ffi = module_env.get_atom("ffi_helper");
+        assert!(ffi.is_some(), "extern atom should be registered");
+        assert_eq!(ffi.unwrap().trust_level, TrustLevel::Trusted);
+    }
+
+    /// compute_hash のテスト
+    #[test]
+    fn test_compute_hash_deterministic() {
+        let hash1 = compute_hash("hello world");
+        let hash2 = compute_hash("hello world");
+        assert_eq!(hash1, hash2, "same input should produce same hash");
+
+        let hash3 = compute_hash("different");
+        assert_ne!(
+            hash1, hash3,
+            "different input should produce different hash"
+        );
+    }
+}

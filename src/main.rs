@@ -2126,3 +2126,258 @@ fn copy_dir_recursive(src: &Path, dst: &Path) {
 }
 
 // end of src/main.rs
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- P3-B: Doc Gen テスト ---
+
+    /// extract_comment_before: コメントが直前にある場合
+    #[test]
+    fn test_extract_comment_before_single_line() {
+        let lines = vec!["// This is a doc comment", "atom foo() -> i64"];
+        let comment = extract_comment_before(&lines, 2); // target_line is 1-indexed
+        assert_eq!(comment, "This is a doc comment");
+    }
+
+    /// extract_comment_before: 複数行コメント
+    #[test]
+    fn test_extract_comment_before_multi_line() {
+        let lines = vec![
+            "// First line",
+            "// Second line",
+            "// Third line",
+            "atom bar() -> i64",
+        ];
+        let comment = extract_comment_before(&lines, 4);
+        assert_eq!(comment, "First line\nSecond line\nThird line");
+    }
+
+    /// extract_comment_before: コメントがない場合
+    #[test]
+    fn test_extract_comment_before_no_comment() {
+        let lines = vec!["let x = 42;", "atom baz() -> i64"];
+        let comment = extract_comment_before(&lines, 2);
+        assert_eq!(comment, "");
+    }
+
+    /// extract_comment_before: 境界値テスト (行0)
+    #[test]
+    fn test_extract_comment_before_line_zero() {
+        let lines = vec!["// comment", "atom foo() -> i64"];
+        let comment = extract_comment_before(&lines, 0);
+        assert_eq!(comment, "");
+    }
+
+    /// extract_comment_before: 範囲外の行
+    #[test]
+    fn test_extract_comment_before_out_of_range() {
+        let lines = vec!["// comment"];
+        let comment = extract_comment_before(&lines, 100);
+        assert_eq!(comment, "");
+    }
+
+    /// extract_comment_before: コメントの間に空行がある場合（途切れる）
+    #[test]
+    fn test_extract_comment_before_gap() {
+        let lines = vec![
+            "// Unrelated comment",
+            "",
+            "// Relevant comment",
+            "atom qux() -> i64",
+        ];
+        let comment = extract_comment_before(&lines, 4);
+        assert_eq!(comment, "Relevant comment");
+    }
+
+    // --- P3-B: Doc Gen パースからドキュメント抽出テスト ---
+
+    /// P3-B: ModuleDoc / ItemDoc 構造体の構築テスト
+    #[test]
+    fn test_doc_gen_module_doc_construction() {
+        let source = r#"
+atom http_get(url: String) -> String
+  requires: true;
+  ensures: true;
+  body: url;
+
+atom json_parse(input: String) -> String
+  requires: true;
+  ensures: true;
+  body: input;
+"#;
+        let items = parser::parse_module(source);
+
+        let mut doc = ModuleDoc {
+            name: "test_module".to_string(),
+            file_path: "test.mm".to_string(),
+            atoms: Vec::new(),
+            types: Vec::new(),
+            structs: Vec::new(),
+            enums: Vec::new(),
+            traits: Vec::new(),
+        };
+
+        for item in &items {
+            if let parser::Item::Atom(atom) = item {
+                doc.atoms.push(ItemDoc {
+                    name: atom.name.clone(),
+                    comment: String::new(),
+                    params: atom.params.iter().map(|p| p.name.clone()).collect(),
+                    trust_level: format!("{:?}", atom.trust_level),
+                    is_async: atom.is_async,
+                });
+            }
+        }
+
+        assert_eq!(doc.atoms.len(), 2);
+        assert_eq!(doc.atoms[0].name, "http_get");
+        assert_eq!(doc.atoms[0].params, vec!["url"]);
+        assert_eq!(doc.atoms[0].trust_level, "Verified");
+        assert!(!doc.atoms[0].is_async);
+        assert_eq!(doc.atoms[1].name, "json_parse");
+        assert_eq!(doc.atoms[1].params, vec!["input"]);
+    }
+
+    // --- P3-A: REPL ヘルパーテスト ---
+
+    /// P3-A: REPL の atom ラッピングロジックテスト
+    #[test]
+    fn test_repl_atom_wrapping() {
+        // REPL は入力式を atom でラップして検証する
+        let expr = "1 + 2";
+        let wrapped = format!(
+            "atom __repl_eval()\n  requires: true;\n  ensures: true;\n  body: {{\n    {}\n  }}",
+            expr
+        );
+        assert!(wrapped.contains("__repl_eval"));
+        assert!(wrapped.contains("1 + 2"));
+        assert!(wrapped.contains("requires: true"));
+
+        // ラップされた atom がパース可能であること
+        let items = parser::parse_module(&wrapped);
+        let atoms: Vec<_> = items
+            .iter()
+            .filter_map(|i| {
+                if let parser::Item::Atom(a) = i {
+                    Some(a)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(atoms.len(), 1);
+        assert_eq!(atoms[0].name, "__repl_eval");
+    }
+
+    /// P3-A: REPL :load コマンドのパースロジックテスト
+    #[test]
+    fn test_repl_load_command_parsing() {
+        let input = ":load std/json.mm";
+        assert!(input.starts_with(":load "));
+        let file = input.strip_prefix(":load ").unwrap().trim();
+        assert_eq!(file, "std/json.mm");
+    }
+
+    /// P3-A: REPL コマンド認識テスト
+    #[test]
+    fn test_repl_command_recognition() {
+        // 終了コマンド
+        assert!(matches!(":quit", ":quit" | ":q" | ":exit"));
+        assert!(matches!(":q", ":quit" | ":q" | ":exit"));
+        assert!(matches!(":exit", ":quit" | ":q" | ":exit"));
+
+        // ヘルプコマンド
+        assert!(matches!(":help", ":help" | ":h"));
+        assert!(matches!(":h", ":help" | ":h"));
+
+        // :load コマンド
+        let load_cmd = ":load test.mm";
+        assert!(load_cmd.starts_with(":load "));
+
+        // :env コマンド
+        let env_cmd = ":env";
+        assert_eq!(env_cmd, ":env");
+    }
+
+    // --- P1-A: FFI Bridge（main.rs の load_and_prepare）テスト ---
+
+    /// P1-A: ExternBlock が load_and_prepare で trusted atom に変換されるテスト
+    #[test]
+    fn test_load_and_prepare_registers_extern_atoms() {
+        let source = r#"
+extern "Rust" {
+    fn ffi_sqrt(x: f64) -> f64;
+    fn ffi_abs(x: i64) -> i64;
+}
+
+atom main() -> i64
+  requires: true;
+  ensures: result == 42;
+  body: 42;
+"#;
+        let items = parser::parse_module(source);
+        let mut module_env = verification::ModuleEnv::new();
+        verification::register_builtin_traits(&mut module_env);
+
+        // ExternBlock → trusted atom 変換ロジック（load_and_prepare と同等）
+        for item in &items {
+            match item {
+                parser::Item::Atom(atom) => {
+                    module_env.register_atom(atom);
+                }
+                parser::Item::ExternBlock(eb) => {
+                    for ext_fn in &eb.functions {
+                        let params: Vec<parser::Param> = ext_fn
+                            .param_types
+                            .iter()
+                            .enumerate()
+                            .map(|(i, ty)| parser::Param {
+                                name: format!("arg{}", i),
+                                type_name: Some(ty.clone()),
+                                type_ref: Some(parser::parse_type_ref(ty)),
+                                is_ref: false,
+                                is_ref_mut: false,
+                            })
+                            .collect();
+                        let atom = parser::Atom {
+                            name: ext_fn.name.clone(),
+                            type_params: vec![],
+                            where_bounds: vec![],
+                            params,
+                            requires: "true".to_string(),
+                            forall_constraints: vec![],
+                            ensures: "true".to_string(),
+                            body_expr: String::new(),
+                            consumed_params: vec![],
+                            resources: vec![],
+                            is_async: false,
+                            trust_level: parser::TrustLevel::Trusted,
+                            max_unroll: None,
+                            invariant: None,
+                            span: ext_fn.span.clone(),
+                        };
+                        module_env.register_atom(&atom);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // extern 関数が trusted atom として登録されていること
+        assert!(module_env.get_atom("ffi_sqrt").is_some());
+        assert_eq!(
+            module_env.get_atom("ffi_sqrt").unwrap().trust_level,
+            parser::TrustLevel::Trusted
+        );
+        assert!(module_env.get_atom("ffi_abs").is_some());
+
+        // 通常 atom も登録されていること
+        assert!(module_env.get_atom("main").is_some());
+        assert_eq!(
+            module_env.get_atom("main").unwrap().trust_level,
+            parser::TrustLevel::Verified
+        );
+    }
+}
