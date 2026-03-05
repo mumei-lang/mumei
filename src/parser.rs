@@ -4,7 +4,7 @@ use regex::Regex;
 // --- 0. ソース位置情報 (Span) ---
 
 /// ソースコード内の位置情報。全 AST ノードに付与して診断メッセージの精度を向上させる。
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Span {
     /// ソースファイル名（空文字列は不明を表す）
     pub file: String,
@@ -14,17 +14,6 @@ pub struct Span {
     pub col: usize,
     /// トークン長（0 は不明）
     pub len: usize,
-}
-
-impl Default for Span {
-    fn default() -> Self {
-        Span {
-            file: String::new(),
-            line: 0,
-            col: 0,
-            len: 0,
-        }
-    }
 }
 
 impl Span {
@@ -1108,10 +1097,10 @@ pub fn parse_atom(source: &str) -> Atom {
             // ref mut / ref 修飾子の検出:
             // "ref mut v: Vector<T>" → is_ref=false, is_ref_mut=true
             // "ref v: Vector<T>" → is_ref=true, is_ref_mut=false
-            let (is_ref, is_ref_mut, s_stripped) = if s.starts_with("ref mut ") {
-                (false, true, s[8..].trim())
-            } else if s.starts_with("ref ") {
-                (true, false, s[4..].trim())
+            let (is_ref, is_ref_mut, s_stripped) = if let Some(rest) = s.strip_prefix("ref mut ") {
+                (false, true, rest.trim())
+            } else if let Some(rest) = s.strip_prefix("ref ") {
+                (true, false, rest.trim())
             } else {
                 (false, false, s)
             };

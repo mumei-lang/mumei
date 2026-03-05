@@ -59,6 +59,7 @@ impl fmt::Display for ErrorDetail {
 }
 
 #[derive(Debug)]
+#[allow(clippy::enum_variant_names)]
 pub enum MumeiError {
     VerificationError { msg: String, span: Span },
     CodegenError { msg: String, span: Span },
@@ -255,7 +256,7 @@ impl LinearityCtx {
         *count += 1;
         self.borrowers
             .entry(owner_name.to_string())
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(borrower_name.to_string());
         Ok(())
     }
@@ -999,16 +1000,14 @@ fn verify_resource_hierarchy(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult
     let mut exclusive_set: HashSet<String> = HashSet::new();
     for res_name in &atom.resources {
         if let Some(rdef) = module_env.resources.get(res_name) {
-            if rdef.mode == ResourceMode::Exclusive {
-                if !exclusive_set.insert(res_name.clone()) {
-                    return Err(MumeiError::verification_at(
-                        format!(
-                            "Data race risk in atom '{}': exclusive resource '{}' is listed multiple times",
-                            atom.name, res_name
-                        ),
-                        atom.span.clone()
-                    ));
-                }
+            if rdef.mode == ResourceMode::Exclusive && !exclusive_set.insert(res_name.clone()) {
+                return Err(MumeiError::verification_at(
+                    format!(
+                        "Data race risk in atom '{}': exclusive resource '{}' is listed multiple times",
+                        atom.name, res_name
+                    ),
+                    atom.span.clone()
+                ));
             }
         }
     }
@@ -1195,9 +1194,10 @@ fn verify_async_recursion_depth(atom: &Atom, module_env: &ModuleEnv) -> MumeiRes
                 count_self_calls(l, atom_name) + count_self_calls(r, atom_name)
             }
             Expr::Task { body, .. } => count_self_calls(body, atom_name),
-            Expr::TaskGroup { children, .. } => {
-                children.iter().map(|c| count_self_calls(c, atom_name)).sum()
-            }
+            Expr::TaskGroup { children, .. } => children
+                .iter()
+                .map(|c| count_self_calls(c, atom_name))
+                .sum(),
             _ => 0,
         }
     }
@@ -1519,7 +1519,7 @@ fn detect_call_cycle(atom_name: &str, module_env: &ModuleEnv) -> Option<Vec<Stri
             let body_ast = parse_expression(&callee_atom.body_expr);
             let callees = collect_callees(&body_ast);
             for callee_name in &callees {
-                if let Some(_) = module_env.get_atom(callee_name) {
+                if module_env.get_atom(callee_name).is_some() {
                     if callee_name == target && !path.is_empty() {
                         path.push(callee_name.clone());
                         return true;
@@ -1540,7 +1540,7 @@ fn detect_call_cycle(atom_name: &str, module_env: &ModuleEnv) -> Option<Vec<Stri
         let body_ast = parse_expression(&atom.body_expr);
         let callees = collect_callees(&body_ast);
         for callee_name in &callees {
-            if let Some(_) = module_env.get_atom(callee_name) {
+            if module_env.get_atom(callee_name).is_some() {
                 visited.clear();
                 path.clear();
                 path.push(atom_name.to_string());
@@ -1798,6 +1798,7 @@ fn verify_inner(
     }
 
     // 2c. 全パラメータに対して配列長シンボルを事前生成
+    #[allow(clippy::map_entry)]
     for param in &atom.params {
         let len_name = format!("len_{}", param.name);
         if !env.contains_key(&len_name) {
@@ -2435,7 +2436,7 @@ fn expr_to_z3<'a>(
                 }
                 solver.pop(1);
             }
-            Ok(arr.select(&idx).into())
+            Ok(arr.select(&idx))
         }
         Expr::BinaryOp(left, op, right) => {
             let l = expr_to_z3(vc, left, env, solver_opt)?;
@@ -2781,9 +2782,7 @@ fn expr_to_z3<'a>(
                     if solver.check() == SatResult::Sat {
                         let counterexample = if let Some(model) = solver.get_model() {
                             // ターゲット変数の具体的な値を取得
-                            let ce_str =
-                                format_counterexample(&model, &target_z3, arms, vc.module_env);
-                            ce_str
+                            format_counterexample(&model, &target_z3, arms, vc.module_env)
                         } else {
                             "unknown value".to_string()
                         };

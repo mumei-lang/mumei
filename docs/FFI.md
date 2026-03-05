@@ -108,10 +108,39 @@ fn\s+(\w+)\s*\(([^)]*)\)\s*->\s*(\w+)
 
 ## 将来の拡展
 
-1. **SIMD/HTTP バックエンド**: LLVM IR コード生成で Rust FFI 呼び出しを生成
-2. **std 階層化**: `std.core` / `std.net` / `std.math` モジュール階層への再編成
-3. **リンク指示**: `#[link(name = "libm")]` 相当のリンカ指示構文
-4. **型マッピング**: Mumei 型と外部言語型の自動マッピング
+> 詳細: [`docs/ROADMAP.md`](ROADMAP.md) Phase P1-A
+
+### 🥇 Priority 1: FFI Bridge Completion (Roadmap P1-A)
+
+std.http / std.json の前提条件として、FFI Bridge の完成が最優先事項です。
+
+**実装計画**:
+
+1. **ExternBlock → trusted atom 自動変換**
+   - `ExternFn` のシグネチャから `Atom` を生成
+   - `TrustLevel::Trusted` を設定（body 検証スキップ）
+   - `ModuleEnv.atoms` に自動登録
+
+2. **LLVM declare 生成**
+   - extern 関数を LLVM IR の `declare` として出力
+   - 型マッピング: Mumei 型 → LLVM 型
+
+3. **呼び出し側コード生成**
+   - ModuleEnv に登録された extern atom への call 生成
+   - ABI 互換性の確保 (extern "C" / extern "Rust")
+
+**変更対象ファイル**:
+- `src/main.rs` — `load_and_prepare()` で ExternBlock → atom 変換
+- `src/verification.rs` — extern atom の trusted 検証
+- `src/codegen.rs` — LLVM `declare` + `call` 生成
+
+### その他の拡張
+
+1. **std.http バックエンド** (Roadmap P1-C): reqwest を FFI で隠蔽した HTTP クライアント
+2. **std.json バックエンド** (Roadmap P1-B): serde_json を FFI で隠蔽した JSON 操作
+3. **std 階層化**: `std.core` / `std.net` / `std.math` モジュール階層への再編成
+4. **リンク指示**: `#[link(name = "libm")]` 相当のリンカ指示構文
+5. **型マッピング**: Mumei 型と外部言語型の自動マッピング
 
 ## 関連ファイル
 

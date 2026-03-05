@@ -53,8 +53,7 @@ pub fn save(registry: &Registry) -> Result<(), String> {
     }
     let json = serde_json::to_string_pretty(registry)
         .map_err(|e| format!("Failed to serialize registry: {}", e))?;
-    fs::write(&path, json)
-        .map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
+    fs::write(&path, json).map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
     Ok(())
 }
 /// パッケージ名とバージョン（省略時は latest）でパスを解決する。
@@ -65,7 +64,11 @@ pub fn resolve(name: &str, version: Option<&str>) -> Option<PathBuf> {
     let ver = version.unwrap_or(&entry.latest);
     let ver_entry = entry.versions.get(ver)?;
     let p = PathBuf::from(&ver_entry.path);
-    if p.exists() { Some(p) } else { None }
+    if p.exists() {
+        Some(p)
+    } else {
+        None
+    }
 }
 /// パッケージを登録する。同じ name+version が既にあれば上書き。
 pub fn register(
@@ -83,10 +86,13 @@ pub fn register(
         atom_count,
         verified,
     };
-    let pkg = registry.packages.entry(name.to_string()).or_insert_with(|| PackageEntry {
-        versions: HashMap::new(),
-        latest: version.to_string(),
-    });
+    let pkg = registry
+        .packages
+        .entry(name.to_string())
+        .or_insert_with(|| PackageEntry {
+            versions: HashMap::new(),
+            latest: version.to_string(),
+        });
     pkg.versions.insert(version.to_string(), ver_entry);
     pkg.latest = version.to_string();
     save(&registry)

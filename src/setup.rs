@@ -18,10 +18,10 @@
 //! │       └── include/
 //! └── env                  # source ~/.mumei/env で環境変数設定
 //! ```
+use crate::manifest;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command as Cmd;
-use crate::manifest;
 // =============================================================================
 // バージョン定数
 // =============================================================================
@@ -73,24 +73,30 @@ impl Platform {
         let os = match std::env::consts::OS {
             "macos" => Os::MacOS,
             "linux" => Os::Linux,
-            other => return Err(SetupError::UnsupportedPlatform(
-                format!("Unsupported OS: {}. mumei setup supports macOS and Linux.", other)
-            )),
+            other => {
+                return Err(SetupError::UnsupportedPlatform(format!(
+                    "Unsupported OS: {}. mumei setup supports macOS and Linux.",
+                    other
+                )))
+            }
         };
         let arch = match std::env::consts::ARCH {
             "x86_64" => Arch::X86_64,
             "aarch64" => Arch::Aarch64,
-            other => return Err(SetupError::UnsupportedPlatform(
-                format!("Unsupported architecture: {}. mumei setup supports x86_64 and aarch64.", other)
-            )),
+            other => {
+                return Err(SetupError::UnsupportedPlatform(format!(
+                    "Unsupported architecture: {}. mumei setup supports x86_64 and aarch64.",
+                    other
+                )))
+            }
         };
         Ok(Platform { os, arch })
     }
     fn z3_archive_name(&self) -> String {
         match (self.os, self.arch) {
             (Os::MacOS, Arch::Aarch64) => format!("z3-{}-arm64-osx-13.7.1", Z3_VERSION),
-            (Os::MacOS, Arch::X86_64)  => format!("z3-{}-x64-osx-13.7.1", Z3_VERSION),
-            (Os::Linux, Arch::X86_64)  => format!("z3-{}-x64-glibc-2.35", Z3_VERSION),
+            (Os::MacOS, Arch::X86_64) => format!("z3-{}-x64-osx-13.7.1", Z3_VERSION),
+            (Os::Linux, Arch::X86_64) => format!("z3-{}-x64-glibc-2.35", Z3_VERSION),
             (Os::Linux, Arch::Aarch64) => format!("z3-{}-arm64-glibc-2.35", Z3_VERSION),
         }
     }
@@ -103,9 +109,13 @@ impl Platform {
     }
     fn llvm_archive_name(&self) -> String {
         match (self.os, self.arch) {
-            (Os::MacOS, Arch::Aarch64) => format!("clang+llvm-{}-arm64-apple-darwin24.2.0", LLVM_VERSION),
-            (Os::MacOS, Arch::X86_64)  => format!("clang+llvm-{}-x86_64-apple-darwin", LLVM_VERSION),
-            (Os::Linux, Arch::X86_64)  => format!("clang+llvm-{}-x86_64-linux-gnu-ubuntu-18.04", LLVM_VERSION),
+            (Os::MacOS, Arch::Aarch64) => {
+                format!("clang+llvm-{}-arm64-apple-darwin24.2.0", LLVM_VERSION)
+            }
+            (Os::MacOS, Arch::X86_64) => format!("clang+llvm-{}-x86_64-apple-darwin", LLVM_VERSION),
+            (Os::Linux, Arch::X86_64) => {
+                format!("clang+llvm-{}-x86_64-linux-gnu-ubuntu-18.04", LLVM_VERSION)
+            }
             (Os::Linux, Arch::Aarch64) => format!("clang+llvm-{}-aarch64-linux-gnu", LLVM_VERSION),
         }
     }
@@ -129,8 +139,14 @@ pub fn run(force: bool) {
     // プラットフォーム検出
     let platform = match Platform::detect() {
         Ok(p) => {
-            let os_str = match p.os { Os::MacOS => "macOS", Os::Linux => "Linux" };
-            let arch_str = match p.arch { Arch::X86_64 => "x86_64", Arch::Aarch64 => "aarch64" };
+            let os_str = match p.os {
+                Os::MacOS => "macOS",
+                Os::Linux => "Linux",
+            };
+            let arch_str = match p.arch {
+                Arch::X86_64 => "x86_64",
+                Arch::Aarch64 => "aarch64",
+            };
             println!("  📋 Platform: {} {}", os_str, arch_str);
             p
         }
@@ -175,7 +191,12 @@ pub fn run(force: bool) {
     println!("   Run: source ~/.mumei/env");
 }
 
-fn install_z3(platform: &Platform, toolchains_dir: &Path, z3_dir: &Path, force: bool) -> Result<(), SetupError> {
+fn install_z3(
+    platform: &Platform,
+    toolchains_dir: &Path,
+    z3_dir: &Path,
+    force: bool,
+) -> Result<(), SetupError> {
     if z3_dir.exists() {
         if !force {
             println!("  ✅ Z3 {}: already installed", Z3_VERSION);
@@ -193,48 +214,81 @@ fn install_z3(platform: &Platform, toolchains_dir: &Path, z3_dir: &Path, force: 
 
     let extracted = toolchains_dir.join(platform.z3_archive_name());
     if !extracted.exists() {
-        return Err(SetupError::Io(format!("Expected extracted directory not found: {}", extracted.display())));
+        return Err(SetupError::Io(format!(
+            "Expected extracted directory not found: {}",
+            extracted.display()
+        )));
     }
 
-    fs::rename(&extracted, z3_dir)
-        .map_err(|e| SetupError::Io(format!("Failed to move {} -> {}: {}", extracted.display(), z3_dir.display(), e)))?;
+    fs::rename(&extracted, z3_dir).map_err(|e| {
+        SetupError::Io(format!(
+            "Failed to move {} -> {}: {}",
+            extracted.display(),
+            z3_dir.display(),
+            e
+        ))
+    })?;
 
     let _ = fs::remove_file(&archive_path);
     println!("  ✅ Z3 {}: installed to {}", Z3_VERSION, z3_dir.display());
     Ok(())
 }
 
-fn install_llvm(platform: &Platform, toolchains_dir: &Path, llvm_dir: &Path, force: bool) -> Result<(), SetupError> {
+fn install_llvm(
+    platform: &Platform,
+    toolchains_dir: &Path,
+    llvm_dir: &Path,
+    force: bool,
+) -> Result<(), SetupError> {
     if llvm_dir.exists() {
         if !force {
             println!("  ✅ LLVM {}: already installed", LLVM_VERSION);
             return Ok(());
         }
-        fs::remove_dir_all(llvm_dir)
-            .map_err(|e| SetupError::Io(format!("Failed to remove {}: {}", llvm_dir.display(), e)))?;
+        fs::remove_dir_all(llvm_dir).map_err(|e| {
+            SetupError::Io(format!("Failed to remove {}: {}", llvm_dir.display(), e))
+        })?;
     }
 
     println!("  📦 Downloading LLVM {}...", LLVM_VERSION);
     println!("     URL: {}", platform.llvm_download_url());
     println!("     ⚠️  This is a large download (~hundreds of MB)");
 
-    let archive_path = download_with_curl(&platform.llvm_download_url(), toolchains_dir, "llvm.tar.xz")?;
+    let archive_path =
+        download_with_curl(&platform.llvm_download_url(), toolchains_dir, "llvm.tar.xz")?;
     extract_tar_xz(&archive_path, toolchains_dir)?;
 
     let extracted = toolchains_dir.join(platform.llvm_archive_name());
     if !extracted.exists() {
-        return Err(SetupError::Io(format!("Expected extracted directory not found: {}", extracted.display())));
+        return Err(SetupError::Io(format!(
+            "Expected extracted directory not found: {}",
+            extracted.display()
+        )));
     }
 
-    fs::rename(&extracted, llvm_dir)
-        .map_err(|e| SetupError::Io(format!("Failed to move {} -> {}: {}", extracted.display(), llvm_dir.display(), e)))?;
+    fs::rename(&extracted, llvm_dir).map_err(|e| {
+        SetupError::Io(format!(
+            "Failed to move {} -> {}: {}",
+            extracted.display(),
+            llvm_dir.display(),
+            e
+        ))
+    })?;
 
     let _ = fs::remove_file(&archive_path);
-    println!("  ✅ LLVM {}: installed to {}", LLVM_VERSION, llvm_dir.display());
+    println!(
+        "  ✅ LLVM {}: installed to {}",
+        LLVM_VERSION,
+        llvm_dir.display()
+    );
     Ok(())
 }
 
-fn generate_env_script(mumei_home: &Path, z3_dir: &Path, llvm_dir: &Path) -> Result<(), SetupError> {
+fn generate_env_script(
+    mumei_home: &Path,
+    z3_dir: &Path,
+    llvm_dir: &Path,
+) -> Result<(), SetupError> {
     fs::create_dir_all(mumei_home)
         .map_err(|e| SetupError::Io(format!("Failed to create {}: {}", mumei_home.display(), e)))?;
 
@@ -256,8 +310,14 @@ fn generate_env_script(mumei_home: &Path, z3_dir: &Path, llvm_dir: &Path) -> Res
     lines.push("# LLVM".to_string());
     lines.push(format!("export LLVM_SYS_170_PREFIX=\"{}\"", llvm));
     lines.push(format!("export PATH=\"{}/bin:$PATH\"", llvm));
-    lines.push(format!("export LDFLAGS=\"-L{}/lib -L{}/lib $LDFLAGS\"", llvm, z3));
-    lines.push(format!("export CPPFLAGS=\"-I{}/include -I{}/include $CPPFLAGS\"", llvm, z3));
+    lines.push(format!(
+        "export LDFLAGS=\"-L{}/lib -L{}/lib $LDFLAGS\"",
+        llvm, z3
+    ));
+    lines.push(format!(
+        "export CPPFLAGS=\"-I{}/include -I{}/include $CPPFLAGS\"",
+        llvm, z3
+    ));
     lines.push(String::new());
 
     let content = lines.join("\n");
@@ -318,7 +378,10 @@ fn download_with_curl(url: &str, dest_dir: &Path, filename: &str) -> Result<Path
         .map_err(|e| SetupError::Command(format!("Failed to run curl: {}", e)))?;
 
     if !status.success() {
-        return Err(SetupError::Command(format!("curl failed with exit code: {:?}", status.code())));
+        return Err(SetupError::Command(format!(
+            "curl failed with exit code: {:?}",
+            status.code()
+        )));
     }
 
     Ok(dest)
@@ -334,7 +397,10 @@ fn extract_zip(archive: &Path, dest_dir: &Path) -> Result<(), SetupError> {
         .map_err(|e| SetupError::Command(format!("Failed to run unzip: {}", e)))?;
 
     if !status.success() {
-        return Err(SetupError::Command(format!("unzip failed with exit code: {:?}", status.code())));
+        return Err(SetupError::Command(format!(
+            "unzip failed with exit code: {:?}",
+            status.code()
+        )));
     }
     Ok(())
 }
@@ -349,7 +415,10 @@ fn extract_tar_xz(archive: &Path, dest_dir: &Path) -> Result<(), SetupError> {
         .map_err(|e| SetupError::Command(format!("Failed to run tar: {}", e)))?;
 
     if !status.success() {
-        return Err(SetupError::Command(format!("tar failed with exit code: {:?}", status.code())));
+        return Err(SetupError::Command(format!(
+            "tar failed with exit code: {:?}",
+            status.code()
+        )));
     }
     Ok(())
 }

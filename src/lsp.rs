@@ -199,7 +199,10 @@ fn diagnose(uri: &str, source: &str) -> Vec<serde_json::Value> {
             let detail = e.to_detail();
             // ErrorDetail の Span から直接位置を取得（substring マッチ不要）
             let (line, col) = if detail.span.line > 0 {
-                (detail.span.line.saturating_sub(1), detail.span.col.saturating_sub(1))
+                (
+                    detail.span.line.saturating_sub(1),
+                    detail.span.col.saturating_sub(1),
+                )
             } else {
                 // Span が不明な場合、atom の Span にフォールバック
                 find_error_position(&items, &detail.message)
@@ -240,11 +243,7 @@ fn find_error_position(items: &[parser::Item], error_msg: &str) -> (usize, usize
 }
 
 fn uri_to_path(uri: &str) -> Option<std::path::PathBuf> {
-    if let Some(rest) = uri.strip_prefix("file://") {
-        Some(std::path::PathBuf::from(rest))
-    } else {
-        None
-    }
+    uri.strip_prefix("file://").map(std::path::PathBuf::from)
 }
 
 /// ソースコードを in-process でパース → Z3 検証し、最初のエラーを返す。
