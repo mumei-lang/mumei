@@ -5,7 +5,7 @@ initialize:
     description: "Install LLVM 17, libclang, and Z3 solver"
 
 maintenance:
-  - command: "cd /home/ubuntu/repos/mumei && export LLVM_SYS_170_PREFIX=/usr/lib/llvm-17 && export LIBCLANG_PATH=/usr/lib/llvm-17/lib && cargo fetch"
+  - command: "export LLVM_SYS_170_PREFIX=/usr/lib/llvm-17 && export LIBCLANG_PATH=/usr/lib/llvm-17/lib && cargo fetch"
     description: "Fetch Rust dependencies for Mumei"
 
 env:
