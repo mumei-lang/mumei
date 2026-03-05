@@ -1,0 +1,13 @@
+# Mumei language toolchain environment setup
+
+initialize:
+  - command: "sudo apt-get update && sudo apt-get install -y llvm-17 llvm-17-dev libclang-17-dev clang-17 z3"
+    description: "Install LLVM 17, libclang, and Z3 solver"
+
+maintenance:
+  - command: "cd /home/ubuntu/repos/mumei && export LLVM_SYS_170_PREFIX=/usr/lib/llvm-17 && export LIBCLANG_PATH=/usr/lib/llvm-17/lib && cargo fetch"
+    description: "Fetch Rust dependencies for Mumei"
+
+env:
+  LLVM_SYS_170_PREFIX: /usr/lib/llvm-17
+  LIBCLANG_PATH: /usr/lib/llvm-17/lib
