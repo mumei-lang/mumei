@@ -15,11 +15,11 @@
 //! キャッシュファイル (.mumei_cache) にはソースハッシュと検証結果を永続化し、
 //! ソースが変更されていなければ再パース・再検証をスキップする。
 
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use sha2::{Sha256, Digest};
-use serde::{Serialize, Deserialize};
 
 use crate::parser::{self, Item};
 use crate::verification::{ModuleEnv, MumeiError, MumeiResult};
@@ -66,7 +66,11 @@ impl ResolverContext {
 /// items 内の Import 宣言を処理し、依存モジュールの定義を ModuleEnv に登録する。
 /// base_dir はインポート元ファイルの親ディレクトリ。
 /// キャッシュファイルが存在し、ソースハッシュが一致する場合は再パースをスキップする。
-pub fn resolve_imports(items: &[Item], base_dir: &Path, module_env: &mut ModuleEnv) -> MumeiResult<()> {
+pub fn resolve_imports(
+    items: &[Item],
+    base_dir: &Path,
+    module_env: &mut ModuleEnv,
+) -> MumeiResult<()> {
     let cache_path = base_dir.join(".mumei_cache");
     let mut cache = load_cache(&cache_path);
     let mut ctx = ResolverContext::new();
@@ -106,7 +110,13 @@ pub fn resolve_prelude(base_dir: &Path, module_env: &mut ModuleEnv) -> MumeiResu
     let mut cache = load_cache(&cache_path);
     let mut ctx = ResolverContext::new();
     ctx.loading.insert(prelude_path.clone());
-    resolve_imports_recursive(&prelude_items, prelude_base_dir, &mut ctx, &mut cache, module_env)?;
+    resolve_imports_recursive(
+        &prelude_items,
+        prelude_base_dir,
+        &mut ctx,
+        &mut cache,
+        module_env,
+    )?;
     save_cache(&cache_path, &cache);
 
     // prelude の定義を ModuleEnv に登録（alias なし = グローバルスコープ）
@@ -136,7 +146,7 @@ fn resolve_imports_recursive(
             if ctx.loading.contains(&resolved_path) {
                 return Err(MumeiError::verification_at(
                     format!("Circular import detected: '{}'", resolved_path.display()),
-                    import_decl.span.clone()
+                    import_decl.span.clone(),
                 ));
             }
             // 既にロード済みならスキップ
@@ -148,8 +158,11 @@ fn resolve_imports_recursive(
             // ファイルを読み込みパース
             let source = fs::read_to_string(&resolved_path).map_err(|e| {
                 MumeiError::verification_at(
-                    format!("Failed to read imported module '{}': {}", import_decl.path, e),
-                    import_decl.span.clone()
+                    format!(
+                        "Failed to read imported module '{}': {}",
+                        import_decl.path, e
+                    ),
+                    import_decl.span.clone(),
                 )
             })?;
 
@@ -191,23 +204,26 @@ fn resolve_imports_recursive(
                     }
                     Item::TypeDef(t) => type_names.push(t.name.clone()),
                     Item::StructDef(s) => struct_names.push(s.name.clone()),
-                    Item::EnumDef(_) => {},
-                    Item::TraitDef(_) => {},
-                    Item::ImplDef(_) => {},
-                    Item::ResourceDef(_) => {},
-                    Item::Import(_) => {},
-                    Item::ExternBlock(_) => {},
+                    Item::EnumDef(_) => {}
+                    Item::TraitDef(_) => {}
+                    Item::ImplDef(_) => {}
+                    Item::ResourceDef(_) => {}
+                    Item::Import(_) => {}
+                    Item::ExternBlock(_) => {}
                 }
             }
 
             // キャッシュを更新
-            cache.entries.insert(path_key, CacheEntry {
-                source_hash,
-                verified_atoms,
-                type_names,
-                struct_names,
-                atom_hashes: HashMap::new(),
-            });
+            cache.entries.insert(
+                path_key,
+                CacheEntry {
+                    source_hash,
+                    verified_atoms,
+                    type_names,
+                    struct_names,
+                    atom_hashes: HashMap::new(),
+                },
+            );
 
             // ロード完了
             ctx.loading.remove(&resolved_path);
@@ -271,8 +287,46 @@ fn register_imported_items(items: &[Item], alias: Option<&str>, module_env: &mut
             Item::Import(_) => {
                 // 再帰的に処理済み
             }
-            Item::ExternBlock(_) => {
-                // ExternBlock は現在 ModuleEnv に登録不要（将来: trusted atom として登録）
+            Item::ExternBlock(extern_block) => {
+                // ExternBlock 内の関数を trusted atom として ModuleEnv に登録
+                for ext_fn in &extern_block.functions {
+                    let params: Vec<crate::parser::Param> = ext_fn
+                        .param_types
+                        .iter()
+                        .enumerate()
+                        .map(|(i, ty)| crate::parser::Param {
+                            name: format!("arg{}", i),
+                            type_name: Some(ty.clone()),
+                            type_ref: Some(crate::parser::parse_type_ref(ty)),
+                            is_ref: false,
+                            is_ref_mut: false,
+                        })
+                        .collect();
+
+                    let atom = crate::parser::Atom {
+                        name: ext_fn.name.clone(),
+                        type_params: vec![],
+                        where_bounds: vec![],
+                        params,
+                        requires: "true".to_string(),
+                        forall_constraints: vec![],
+                        ensures: "true".to_string(),
+                        body_expr: String::new(),
+                        consumed_params: vec![],
+                        resources: vec![],
+                        is_async: false,
+                        trust_level: crate::parser::TrustLevel::Trusted,
+                        max_unroll: None,
+                        invariant: None,
+                        span: ext_fn.span.clone(),
+                    };
+                    module_env.register_atom(&atom);
+                    if let Some(prefix) = alias {
+                        let mut fqn_atom = atom.clone();
+                        fqn_atom.name = format!("{}::{}", prefix, ext_fn.name);
+                        module_env.register_atom(&fqn_atom);
+                    }
+                }
             }
         }
     }
@@ -340,7 +394,8 @@ fn resolve_path(import_path: &str, base_dir: &Path) -> MumeiResult<PathBuf> {
     if let Ok(std_path) = std::env::var("MUMEI_STD_PATH") {
         let std_base = Path::new(&std_path);
         // "std/option" → std_base/option.mm として解決
-        let relative = import_str.strip_prefix("std/")
+        let relative = import_str
+            .strip_prefix("std/")
             .or_else(|| import_str.strip_prefix("std\\"))
             .unwrap_or(import_str);
         let mut rel_path = PathBuf::from(relative);
@@ -391,7 +446,9 @@ pub fn resolve_manifest_dependencies(
                 let source = fs::read_to_string(entry_path).map_err(|e| {
                     MumeiError::verification(format!(
                         "Failed to read dependency '{}' at '{}': {}",
-                        dep_name, entry_path.display(), e
+                        dep_name,
+                        entry_path.display(),
+                        e
                     ))
                 })?;
                 let items = parser::parse_module(&source);
@@ -409,9 +466,17 @@ pub fn resolve_manifest_dependencies(
                         module_env.mark_verified(&fqn);
                     }
                 }
-                println!("  📦 Dependency '{}': loaded from {}", dep_name, entry_path.display());
+                println!(
+                    "  📦 Dependency '{}': loaded from {}",
+                    dep_name,
+                    entry_path.display()
+                );
             } else {
-                eprintln!("  ⚠️  Dependency '{}': no entry file found in '{}'", dep_name, abs_path.display());
+                eprintln!(
+                    "  ⚠️  Dependency '{}': no entry file found in '{}'",
+                    dep_name,
+                    abs_path.display()
+                );
             }
         }
         // Git 依存（git フィールドがある場合は registry より優先）
@@ -423,9 +488,19 @@ pub fn resolve_manifest_dependencies(
             if !clone_dir.exists() {
                 // git clone
                 let ref_arg = if let Some(t) = tag {
-                    vec!["--branch".to_string(), t.to_string(), "--depth".to_string(), "1".to_string()]
+                    vec![
+                        "--branch".to_string(),
+                        t.to_string(),
+                        "--depth".to_string(),
+                        "1".to_string(),
+                    ]
                 } else if let Some(b) = branch {
-                    vec!["--branch".to_string(), b.to_string(), "--depth".to_string(), "1".to_string()]
+                    vec![
+                        "--branch".to_string(),
+                        b.to_string(),
+                        "--depth".to_string(),
+                        "1".to_string(),
+                    ]
                 } else {
                     vec!["--depth".to_string(), "1".to_string()]
                 };
@@ -438,11 +513,17 @@ pub fn resolve_manifest_dependencies(
                 let status = std::process::Command::new("git")
                     .args(&cmd_args)
                     .status()
-                    .map_err(|e| MumeiError::verification(format!("git clone failed for '{}': {}", dep_name, e)))?;
+                    .map_err(|e| {
+                        MumeiError::verification(format!(
+                            "git clone failed for '{}': {}",
+                            dep_name, e
+                        ))
+                    })?;
 
                 if !status.success() {
                     return Err(MumeiError::verification(format!(
-                        "git clone failed for dependency '{}' ({})", dep_name, url
+                        "git clone failed for dependency '{}' ({})",
+                        dep_name, url
                     )));
                 }
 
@@ -469,7 +550,9 @@ pub fn resolve_manifest_dependencies(
                 let source = fs::read_to_string(entry_path).map_err(|e| {
                     MumeiError::verification(format!(
                         "Failed to read dependency '{}' at '{}': {}",
-                        dep_name, entry_path.display(), e
+                        dep_name,
+                        entry_path.display(),
+                        e
                     ))
                 })?;
                 let items = parser::parse_module(&source);
@@ -488,11 +571,15 @@ pub fn resolve_manifest_dependencies(
                     }
                 }
             } else {
-                eprintln!("  ⚠️  Dependency '{}': no entry file found in cloned repo", dep_name);
+                eprintln!(
+                    "  ⚠️  Dependency '{}': no entry file found in cloned repo",
+                    dep_name
+                );
             }
         }
         // 名前依存（registry.json から解決 — path でも git でもない場合）
-        else if dep.version().is_some() || matches!(dep, crate::manifest::Dependency::Version(_)) {
+        else if dep.version().is_some() || matches!(dep, crate::manifest::Dependency::Version(_))
+        {
             let version = dep.version();
             if let Some(pkg_dir) = crate::registry::resolve(dep_name, version) {
                 let entry_candidates: Vec<PathBuf> = vec![
@@ -504,7 +591,9 @@ pub fn resolve_manifest_dependencies(
                     let source = fs::read_to_string(entry_path).map_err(|e| {
                         MumeiError::verification(format!(
                             "Failed to read dependency '{}' at '{}': {}",
-                            dep_name, entry_path.display(), e
+                            dep_name,
+                            entry_path.display(),
+                            e
                         ))
                     })?;
                     let items = parser::parse_module(&source);
@@ -512,7 +601,13 @@ pub fn resolve_manifest_dependencies(
                     let cache_path = dep_base_dir.join(".mumei_cache");
                     let mut cache = load_cache(&cache_path);
                     let mut ctx = ResolverContext::new();
-                    resolve_imports_recursive(&items, dep_base_dir, &mut ctx, &mut cache, module_env)?;
+                    resolve_imports_recursive(
+                        &items,
+                        dep_base_dir,
+                        &mut ctx,
+                        &mut cache,
+                        module_env,
+                    )?;
                     save_cache(&cache_path, &cache);
                     register_imported_items(&items, Some(dep_name), module_env);
                     for item in &items {
@@ -522,9 +617,17 @@ pub fn resolve_manifest_dependencies(
                             module_env.mark_verified(&fqn);
                         }
                     }
-                    println!("  📦 Dependency '{}': loaded from registry ({})", dep_name, pkg_dir.display());
+                    println!(
+                        "  📦 Dependency '{}': loaded from registry ({})",
+                        dep_name,
+                        pkg_dir.display()
+                    );
                 } else {
-                    eprintln!("  ⚠️  Dependency '{}': found in registry but no entry file in '{}'", dep_name, pkg_dir.display());
+                    eprintln!(
+                        "  ⚠️  Dependency '{}': found in registry but no entry file in '{}'",
+                        dep_name,
+                        pkg_dir.display()
+                    );
                 }
             } else {
                 eprintln!("  ⚠️  Dependency '{}': not found in local registry. Run `mumei publish` in the dependency project first.", dep_name);

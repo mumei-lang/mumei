@@ -6,9 +6,9 @@
 
 | Priority | Theme | Goal | Status |
 |---|---|---|---|
-| 🥇 P1 | Network-First Standard Library | API スクリプティング言語としての実用性 | 🔧 In Progress |
-| 🥈 P2 | Runtime Portability | どこでも動く配布基盤 | 📋 Planned |
-| 🥉 P3 | CLI Developer Experience | 世界最高の CLI 開発体験 | 📋 Planned |
+| 🥇 P1 | Network-First Standard Library | API スクリプティング言語としての実用性 | ✅ Implemented |
+| 🥈 P2 | Runtime Portability | どこでも動く配布基盤 | ✅ Implemented |
+| 🥉 P3 | CLI Developer Experience | 世界最高の CLI 開発体験 | ✅ Implemented |
 
 ---
 

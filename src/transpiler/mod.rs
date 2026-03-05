@@ -1,8 +1,8 @@
-pub mod rust;
 pub mod golang;
+pub mod rust;
 pub mod typescript;
 
-use crate::parser::{Atom, ImportDecl, EnumDef, StructDef, TraitDef, ImplDef};
+use crate::parser::{Atom, EnumDef, ImplDef, ImportDecl, StructDef, TraitDef};
 
 #[derive(Copy, Clone)]
 pub enum TargetLanguage {
@@ -56,7 +56,11 @@ pub fn transpile_impl(impl_def: &ImplDef, lang: TargetLanguage) -> String {
 }
 
 /// import 宣言からバンドルファイルのヘッダー（mod/use, package/import, import/export）を生成する
-pub fn transpile_module_header(imports: &[ImportDecl], module_name: &str, lang: TargetLanguage) -> String {
+pub fn transpile_module_header(
+    imports: &[ImportDecl],
+    module_name: &str,
+    lang: TargetLanguage,
+) -> String {
     match lang {
         TargetLanguage::Rust => rust::transpile_module_header_rust(imports, module_name),
         TargetLanguage::Go => golang::transpile_module_header_go(imports, module_name),

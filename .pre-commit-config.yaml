@@ -23,7 +23,7 @@ repos:
         pass_filenames: false
       - id: cargo-test
         name: cargo test (parser)
-        entry: cargo test --lib
+        entry: cargo test
         language: system
         types: [rust]
         pass_filenames: false

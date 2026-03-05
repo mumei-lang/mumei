@@ -245,41 +245,94 @@ struct BoundedArray { len: i64 where v >= 0, cap: i64 where v > 0 }
 
 ---
 
-## Planned: std/json.mm (Roadmap P1-B)
-
-> 詳細: [`docs/ROADMAP.md`](ROADMAP.md) Phase P1-B
+## std/json.mm — JSON Operations
 
 ```mumei
 import "std/json" as json;
 ```
 
-文字列とオブジェクトの相互変換。`serde_json` をバックエンドに使用。
+JSON 文字列の解析・生成を行う FFI バックエンド標準ライブラリ。
+Rust の `serde_json` を隠蔽し、ハンドルベースの API を提供。
 
-| Atom | Description | Status |
-|---|---|---|
-| `json.parse(str)` | JSON 文字列 → 構造化データ | ❌ Planned |
-| `json.stringify(data)` | 構造化データ → JSON 文字列 | ❌ Planned |
-| `json.get_string(data, key)` | 文字列フィールド取得 | ❌ Planned |
-| `json.get_int(data, key)` | 整数フィールド取得 | ❌ Planned |
+### Parse / Stringify
+
+| Atom | Requires | Ensures | Description |
+|---|---|---|---|
+| `json::parse(input)` | `true` | `result >= 0` | JSON 文字列をパースしハンドルを返す |
+| `json::stringify(handle)` | `handle >= 0` | `true` | JSON ハンドルを文字列に変換 |
+
+### Value Access
+
+| Atom | Requires | Ensures | Description |
+|---|---|---|---|
+| `json::get(handle, key)` | `handle >= 0` | `result >= 0` | オブジェクトからキーで値を取得 |
+| `json::get_int(handle, key)` | `handle >= 0` | `true` | 整数値を取得 |
+| `json::get_str(handle, key)` | `handle >= 0` | `true` | 文字列値を取得 |
+| `json::get_bool(handle, key)` | `handle >= 0` | `result in {0,1}` | ブール値を取得 |
+
+### Array Operations
+
+| Atom | Requires | Ensures | Description |
+|---|---|---|---|
+| `json::array_len(handle)` | `handle >= 0` | `result >= 0` | 配列の長さを取得 |
+| `json::array_get(handle, index)` | `handle >= 0 && index >= 0` | `result >= 0` | 配列の要素を取得 |
+| `json::array_new()` | `true` | `result >= 0` | 空の配列を生成 |
+| `json::array_push(handle, value)` | `handle >= 0` | `result >= 0` | 配列に値を追加 |
+
+### Type Checks
+
+| Atom | Requires | Ensures | Description |
+|---|---|---|---|
+| `json::is_null(handle)` | `handle >= 0` | `result in {0,1}` | null 判定 |
+| `json::is_object(handle)` | `handle >= 0` | `result in {0,1}` | オブジェクト判定 |
+| `json::is_array(handle)` | `handle >= 0` | `result in {0,1}` | 配列判定 |
+
+### Value Construction
+
+| Atom | Requires | Ensures | Description |
+|---|---|---|---|
+| `json::object_new()` | `true` | `result >= 0` | 空のオブジェクトを生成 |
+| `json::object_set(handle, key, value)` | `handle >= 0` | `result >= 0` | オブジェクトにキーと値を設定 |
+| `json::from_int(value)` | `true` | `result >= 0` | 整数から JSON 値を生成 |
+| `json::from_str(value)` | `true` | `result >= 0` | 文字列から JSON 値を生成 |
+| `json::from_bool(value)` | `value in {0,1}` | `result >= 0` | ブール値から JSON 値を生成 |
 
 ---
 
-## Planned: std/http.mm (Roadmap P1-C)
-
-> 詳細: [`docs/ROADMAP.md`](ROADMAP.md) Phase P1-C
+## std/http.mm — HTTP Client
 
 ```mumei
 import "std/http" as http;
 ```
 
-Rust `reqwest` を FFI で隠蔽した HTTP クライアント。
+Rust `reqwest` を FFI で隠蔽した HTTP クライアント。ハンドルベースの API を提供。
+`task_group` と組み合わせて並行リクエストが可能。
 
-| Atom | Description | Status |
-|---|---|---|
-| `http.get(url)` | HTTP GET リクエスト | ❌ Planned |
-| `http.post(url, body)` | HTTP POST リクエスト | ❌ Planned |
-| `http.status(response)` | ステータスコード取得 | ❌ Planned |
-| `http.body(response)` | レスポンスボディ取得 | ❌ Planned |
+### Requests
+
+| Atom | Requires | Ensures | Description |
+|---|---|---|---|
+| `http::get(url)` | `true` | `result >= 0` | HTTP GET リクエスト |
+| `http::post(url, body)` | `true` | `result >= 0` | HTTP POST リクエスト |
+| `http::put(url, body)` | `true` | `result >= 0` | HTTP PUT リクエスト |
+| `http::delete(url)` | `true` | `result >= 0` | HTTP DELETE リクエスト |
+
+### Response
+
+| Atom | Requires | Ensures | Description |
+|---|---|---|---|
+| `http::status(handle)` | `handle >= 0` | `result >= 0` | ステータスコード取得 (200, 404, etc.) |
+| `http::body(handle)` | `handle >= 0` | `result >= 0` | レスポンスボディ（文字列ハンドル）|
+| `http::body_json(handle)` | `handle >= 0` | `result >= 0` | レスポンスを JSON パースして取得 |
+| `http::is_ok(handle)` | `handle >= 0` | `result in {0,1}` | 成功 (2xx) 判定 |
+| `http::is_error(handle)` | `handle >= 0` | `result in {0,1}` | エラー判定 |
+
+### Headers
+
+| Atom | Requires | Ensures | Description |
+|---|---|---|---|
+| `http::header_get(handle, name)` | `handle >= 0` | `result >= 0` | ヘッダー値を取得 |
+| `http::header_set(handle, name, value)` | `handle >= 0` | `result >= 0` | ヘッダーを設定 |
 
 ---
 

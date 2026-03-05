@@ -2,6 +2,47 @@
 
 ---
 
+## PR #32: Strategic Roadmap v0.3.0+ — Full Implementation (P1 + P2 + P3)
+
+### Summary
+
+PR #31 で定義した戦略的ロードマップの全 3 優先順位を実装。
+ネットワーク・ファースト標準ライブラリ、ランタイムポータビリティ、CLI ツールの完全実装。
+
+### Implementation Highlights
+
+| Priority | Phase | Implementation |
+|---|---|---|
+| P1-A | FFI Bridge | `src/main.rs` + `src/resolver.rs`: extern → trusted atom 自動登録 |
+| P1-B | std.json | `std/json.mm`: 19 atoms (parse, stringify, get, array, object) |
+| P1-C | std.http | `std/http.mm`: 11 atoms (get, post, put, delete, status, body) + reqwest 依存追加 |
+| P1-D | Integration Demo | `examples/http_json_demo.mm`: task_group + HTTP + JSON 並行処理 |
+| P2-A | CI Portability | `release.yml`: aarch64-linux ターゲット + 依存ライブラリ追加 |
+| P2-B | Homebrew | `scripts/homebrew/mumei.rb`: Formula テンプレート |
+| P2-C | WebInstall | `scripts/install.sh`: curl \| sh インストーラー |
+| P3-A | REPL | `src/main.rs`: `mumei repl` コマンド (対話的実行環境) |
+| P3-B | Doc Gen | `src/main.rs`: `mumei doc` コマンド (HTML/Markdown 自動生成) |
+| P3-C | Integration | REPL 内で `:load std/http.mm` → HTTP atoms 利用可能 |
+
+### Files Changed
+
+| File | Summary |
+|---|---|
+| `src/main.rs` | FFI Bridge, `mumei repl`, `mumei doc` コマンド追加 |
+| `src/resolver.rs` | ExternBlock → trusted atom 登録 (import 経由) |
+| `Cargo.toml` | inkwell 修正 (0.5.0), reqwest 追加 |
+| `std/json.mm` | **New** — JSON 操作標準ライブラリ (19 atoms) |
+| `std/http.mm` | **New** — HTTP クライアント標準ライブラリ (11 atoms) |
+| `examples/http_json_demo.mm` | **New** — task_group + HTTP + JSON 統合デモ |
+| `scripts/install.sh` | **New** — curl \| sh インストーラー |
+| `scripts/homebrew/mumei.rb` | **New** — Homebrew Formula テンプレート |
+| `.github/workflows/release.yml` | aarch64-linux ターゲット + 依存追加 |
+| `docs/STDLIB.md` | std.json, std.http リファレンス更新 |
+| `docs/ROADMAP.md` | ステータスを Implemented に更新 |
+| `docs/CHANGELOG.md` | 今回の変更を記録 |
+
+---
+
 ## PR #31: Strategic Roadmap v0.3.0+ (docs update)
 
 ### Summary

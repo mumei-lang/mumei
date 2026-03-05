@@ -1,20 +1,23 @@
 mod ast;
-mod parser;
-mod verification;
 mod codegen;
-mod transpiler;
-mod resolver;
+mod lsp;
 #[allow(dead_code)]
 mod manifest;
-mod setup;
-mod lsp;
+mod parser;
 mod registry;
+mod resolver;
+mod setup;
+mod transpiler;
+mod verification;
 
+use crate::parser::{ImportDecl, Item};
+use crate::transpiler::{
+    transpile, transpile_enum, transpile_impl, transpile_module_header, transpile_struct,
+    transpile_trait, TargetLanguage,
+};
 use clap::{Parser, Subcommand};
 use std::fs;
 use std::path::Path;
-use crate::transpiler::{TargetLanguage, transpile, transpile_enum, transpile_struct, transpile_trait, transpile_impl, transpile_module_header};
-use crate::parser::{Item, ImportDecl};
 
 // =============================================================================
 // CLI: mumei build / verify / check / init / setup / inspect
@@ -95,6 +98,19 @@ enum Command {
     },
     /// Start Language Server Protocol server (stdio mode)
     Lsp,
+    /// Interactive REPL (Read-Eval-Print Loop)
+    Repl,
+    /// Generate documentation from source comments
+    Doc {
+        /// Input .mm file or directory
+        input: String,
+        /// Output directory for generated docs
+        #[arg(short, long, default_value = "docs_out")]
+        output: String,
+        /// Output format: html or markdown
+        #[arg(long, default_value = "html")]
+        format: String,
+    },
 }
 
 fn main() {
@@ -128,6 +144,16 @@ fn main() {
         Some(Command::Lsp) => {
             lsp::run();
         }
+        Some(Command::Repl) => {
+            cmd_repl();
+        }
+        Some(Command::Doc {
+            input,
+            output,
+            format,
+        }) => {
+            cmd_doc(&input, &output, &format);
+        }
         None => {
             // 後方互換: `mumei input.mm -o dist/katana` → build として実行
             if let Some(ref input) = cli.input {
@@ -141,6 +167,8 @@ fn main() {
                 eprintln!("  setup   Download & configure Z3 + LLVM toolchain");
                 eprintln!("  add     Add a dependency to mumei.toml");
                 eprintln!("  lsp     Start Language Server Protocol server");
+                eprintln!("  repl    Interactive REPL (Read-Eval-Print Loop)");
+                eprintln!("  doc     Generate documentation from source comments");
                 eprintln!("  inspect Inspect development environment");
                 eprintln!("Run `mumei --help` for full usage.");
                 std::process::exit(1);
@@ -166,13 +194,13 @@ fn check_z3_available() {
     use std::process::Command as Cmd;
     if Cmd::new("z3").arg("--version").output().is_err() {
         eprintln!("❌ Error: Z3 solver not found.");
-        eprintln!("");
+        eprintln!();
         eprintln!("   Mumei requires Z3 for formal verification.");
         eprintln!("   Install it with one of:");
         eprintln!("     macOS:  brew install z3");
         eprintln!("     Ubuntu: sudo apt-get install libz3-dev");
         eprintln!("     Auto:   mumei setup");
-        eprintln!("");
+        eprintln!();
         eprintln!("   After installing, run `mumei inspect` to verify.");
         std::process::exit(1);
     }
@@ -211,7 +239,10 @@ fn load_and_prepare(input: &str) -> (Vec<Item>, verification::ModuleEnv, Vec<Imp
     mono.collect(&items);
     let items = if mono.has_generics() {
         let mono_items = mono.monomorphize(&items);
-        println!("  🔬 Monomorphization: {} generic instance(s) expanded.", mono.instances().len());
+        println!(
+            "  🔬 Monomorphization: {} generic instance(s) expanded.",
+            mono.instances().len()
+        );
         mono_items
     } else {
         items
@@ -228,7 +259,47 @@ fn load_and_prepare(input: &str) -> (Vec<Item>, verification::ModuleEnv, Vec<Imp
             Item::TraitDef(trait_def) => module_env.register_trait(trait_def),
             Item::ImplDef(impl_def) => module_env.register_impl(impl_def),
             Item::ResourceDef(resource_def) => module_env.register_resource(resource_def),
-            Item::ExternBlock(_) => {}
+            Item::ExternBlock(extern_block) => {
+                for ext_fn in &extern_block.functions {
+                    // ExternFn → trusted Atom に変換して ModuleEnv に登録
+                    let params: Vec<parser::Param> = ext_fn
+                        .param_types
+                        .iter()
+                        .enumerate()
+                        .map(|(i, ty)| parser::Param {
+                            name: format!("arg{}", i),
+                            type_name: Some(ty.clone()),
+                            type_ref: Some(parser::parse_type_ref(ty)),
+                            is_ref: false,
+                            is_ref_mut: false,
+                        })
+                        .collect();
+
+                    let atom = parser::Atom {
+                        name: ext_fn.name.clone(),
+                        type_params: vec![],
+                        where_bounds: vec![],
+                        params,
+                        requires: "true".to_string(),
+                        forall_constraints: vec![],
+                        ensures: "true".to_string(),
+                        body_expr: String::new(),
+                        consumed_params: vec![],
+                        resources: vec![],
+                        is_async: false,
+                        trust_level: parser::TrustLevel::Trusted,
+                        max_unroll: None,
+                        invariant: None,
+                        span: ext_fn.span.clone(),
+                    };
+                    module_env.register_atom(&atom);
+                }
+                println!(
+                    "  🔗 FFI Bridge: registered {} extern function(s) from \"{}\" block",
+                    extern_block.functions.len(),
+                    extern_block.language
+                );
+            }
         }
     }
 
@@ -254,17 +325,33 @@ fn cmd_check(input: &str) {
                 let alias_str = decl.alias.as_deref().unwrap_or("(none)");
                 println!("  📦 Import: '{}' as '{}'", decl.path, alias_str);
             }
-            Item::TypeDef(t) => { type_count += 1; println!("  ✨ Type: '{}' ({})", t.name, t._base_type); }
-            Item::StructDef(s) => { struct_count += 1; println!("  🏗️  Struct: '{}'", s.name); }
-            Item::EnumDef(e) => { enum_count += 1; println!("  🔷 Enum: '{}'", e.name); }
-            Item::TraitDef(t) => { trait_count += 1; println!("  📜 Trait: '{}'", t.name); }
-            Item::ImplDef(i) => { println!("  🔧 Impl: {} for {}", i.trait_name, i.target_type); }
+            Item::TypeDef(t) => {
+                type_count += 1;
+                println!("  ✨ Type: '{}' ({})", t.name, t._base_type);
+            }
+            Item::StructDef(s) => {
+                struct_count += 1;
+                println!("  🏗️  Struct: '{}'", s.name);
+            }
+            Item::EnumDef(e) => {
+                enum_count += 1;
+                println!("  🔷 Enum: '{}'", e.name);
+            }
+            Item::TraitDef(t) => {
+                trait_count += 1;
+                println!("  📜 Trait: '{}'", t.name);
+            }
+            Item::ImplDef(i) => {
+                println!("  🔧 Impl: {} for {}", i.trait_name, i.target_type);
+            }
             Item::Atom(a) => {
                 atom_count += 1;
                 let async_marker = if a.is_async { " (async)" } else { "" };
                 let res_marker = if !a.resources.is_empty() {
                     format!(" [resources: {}]", a.resources.join(", "))
-                } else { String::new() };
+                } else {
+                    String::new()
+                };
                 println!("  ✨ Atom: '{}'{}{}", a.name, async_marker, res_marker);
             }
             Item::ResourceDef(r) => {
@@ -272,15 +359,24 @@ fn cmd_check(input: &str) {
                     parser::ResourceMode::Exclusive => "exclusive",
                     parser::ResourceMode::Shared => "shared",
                 };
-                println!("  🔒 Resource: '{}' (priority={}, mode={})", r.name, r.priority, mode_str);
+                println!(
+                    "  🔒 Resource: '{}' (priority={}, mode={})",
+                    r.name, r.priority, mode_str
+                );
             }
             Item::ExternBlock(eb) => {
-                println!("  🔗 Extern \"{}\" ({} function(s))", eb.language, eb.functions.len());
+                println!(
+                    "  🔗 Extern \"{}\" ({} function(s))",
+                    eb.language,
+                    eb.functions.len()
+                );
             }
         }
     }
-    println!("✅ Check passed: {} types, {} structs, {} enums, {} traits, {} atoms",
-        type_count, struct_count, enum_count, trait_count, atom_count);
+    println!(
+        "✅ Check passed: {} types, {} structs, {} enums, {} traits, {} atoms",
+        type_count, struct_count, enum_count, trait_count, atom_count
+    );
 }
 
 // =============================================================================
@@ -306,7 +402,10 @@ fn cmd_verify(input: &str) {
     for item in &items {
         match item {
             Item::ImplDef(impl_def) => {
-                println!("  🔧 Verifying impl {} for {}...", impl_def.trait_name, impl_def.target_type);
+                println!(
+                    "  🔧 Verifying impl {} for {}...",
+                    impl_def.trait_name, impl_def.target_type
+                );
                 match verification::verify_impl(impl_def, &module_env) {
                     Ok(_) => {
                         println!("    ✅ Laws verified");
@@ -320,7 +419,10 @@ fn cmd_verify(input: &str) {
             }
             Item::Atom(atom) => {
                 if module_env.is_verified(&atom.name) {
-                    println!("  ⚖️  '{}': skipped (imported, contract-trusted)", atom.name);
+                    println!(
+                        "  ⚖️  '{}': skipped (imported, contract-trusted)",
+                        atom.name
+                    );
                 } else {
                     // Incremental Build: atom のハッシュを計算してキャッシュと比較
                     let atom_hash = resolver::compute_atom_hash(atom);
@@ -357,13 +459,19 @@ fn cmd_verify(input: &str) {
     // Incremental Build: キャッシュを保存
     resolver::save_build_cache(base_dir, &new_cache);
 
-    println!("");
+    println!();
     if failed > 0 {
-        eprintln!("❌ Verification: {} passed, {} failed, {} skipped (cached)", verified, failed, skipped);
+        eprintln!(
+            "❌ Verification: {} passed, {} failed, {} skipped (cached)",
+            verified, failed, skipped
+        );
         std::process::exit(1);
     }
     if skipped > 0 {
-        println!("✅ Verification passed: {} verified, {} skipped (unchanged) ⚡", verified, skipped);
+        println!(
+            "✅ Verification passed: {} verified, {} skipped (unchanged) ⚡",
+            verified, skipped
+        );
     } else {
         println!("✅ Verification passed: {} item(s) verified", verified);
     }
@@ -388,7 +496,8 @@ fn cmd_init(name: &str) {
     let _ = fs::create_dir_all(project_dir.join("dist"));
 
     // mumei.toml
-    let toml_content = format!(r#"[package]
+    let toml_content = format!(
+        r#"[package]
 name = "{}"
 version = "0.1.0"
 # authors = ["Your Name"]
@@ -405,7 +514,9 @@ max_unroll = 3
 [proof]
 cache = true
 timeout_ms = 10000
-"#, name);
+"#,
+        name
+    );
     fs::write(project_dir.join("mumei.toml"), toml_content).unwrap();
 
     // .gitignore
@@ -429,7 +540,8 @@ Thumbs.db
     fs::write(project_dir.join(".gitignore"), gitignore_content).unwrap();
 
     // src/main.mm — 充実したテンプレート（検証成功例 + 標準ライブラリ使用例）
-    let main_content = format!(r#"// =============================================================
+    let main_content = format!(
+        r#"// =============================================================
 // {} — Mumei Project
 // =============================================================
 //
@@ -499,18 +611,20 @@ ensures:
 body: {{
     top - 1
 }};
-"#, name);
+"#,
+        name
+    );
     fs::write(project_dir.join("src/main.mm"), main_content).unwrap();
 
     println!("🗡️  Created new Mumei project '{}'", name);
-    println!("");
+    println!();
     println!("  {}/", name);
     println!("  ├── mumei.toml");
     println!("  ├── .gitignore");
     println!("  ├── dist/");
     println!("  └── src/");
     println!("      └── main.mm");
-    println!("");
+    println!();
     println!("Get started:");
     println!("  cd {}", name);
     println!("  mumei build src/main.mm -o dist/output");
@@ -558,12 +672,14 @@ fn cmd_inspect() {
     }
 
     // --- 3. LLVM ---
-    let llvm_found = ["llc-17", "llc"].iter().any(|cmd| {
-        Cmd::new(cmd).arg("--version").output().is_ok()
-    });
+    let llvm_found = ["llc-17", "llc"]
+        .iter()
+        .any(|cmd| Cmd::new(cmd).arg("--version").output().is_ok());
     if llvm_found {
         // Try to get version
-        let version_output = Cmd::new("llc-17").arg("--version").output()
+        let version_output = Cmd::new("llc-17")
+            .arg("--version")
+            .output()
             .or_else(|_| Cmd::new("llc").arg("--version").output());
         if let Ok(output) = version_output {
             let version = String::from_utf8_lossy(&output.stdout);
@@ -620,8 +736,15 @@ fn cmd_inspect() {
 
     // --- 7. std library ---
     // resolver と同じ探索順序: cwd → exe隣 → MUMEI_STD_PATH
-    let std_modules = ["prelude.mm", "option.mm", "result.mm", "list.mm",
-                       "stack.mm", "alloc.mm", "container/bounded_array.mm"];
+    let std_modules = [
+        "prelude.mm",
+        "option.mm",
+        "result.mm",
+        "list.mm",
+        "stack.mm",
+        "alloc.mm",
+        "container/bounded_array.mm",
+    ];
     let mut std_base_dir: Option<std::path::PathBuf> = None;
 
     if Path::new("std/prelude.mm").exists() {
@@ -661,15 +784,30 @@ fn cmd_inspect() {
     }
 
     if std_missing.is_empty() {
-        let location = std_base_dir.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "?".to_string());
-        println!("  ✅ std library: {}/{} modules found ({})", std_found, std_modules.len(), location);
+        let location = std_base_dir
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "?".to_string());
+        println!(
+            "  ✅ std library: {}/{} modules found ({})",
+            std_found,
+            std_modules.len(),
+            location
+        );
         ok_count += 1;
     } else {
         let hint = if std_base_dir.is_none() {
             " (set MUMEI_STD_PATH or place std/ next to mumei binary)"
-        } else { "" };
-        println!("  ⚠️  std library: {}/{} modules found (missing: {}){}",
-            std_found, std_modules.len(), std_missing.join(", "), hint);
+        } else {
+            ""
+        };
+        println!(
+            "  ⚠️  std library: {}/{} modules found (missing: {}){}",
+            std_found,
+            std_modules.len(),
+            std_missing.join(", "),
+            hint
+        );
         warn_count += 1;
     }
 
@@ -680,8 +818,14 @@ fn cmd_inspect() {
             Ok(m) => {
                 println!("  ✅ mumei.toml: {} v{}", m.package.name, m.package.version);
                 if !m.dependencies.is_empty() {
-                    println!("     dependencies: {}", m.dependencies.keys()
-                        .map(|k| k.as_str()).collect::<Vec<_>>().join(", "));
+                    println!(
+                        "     dependencies: {}",
+                        m.dependencies
+                            .keys()
+                            .map(|k| k.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
                 }
                 if !m.build.targets.is_empty() {
                     println!("     targets: {}", m.build.targets.join(", "));
@@ -725,11 +869,17 @@ fn cmd_inspect() {
     // --- Summary ---
     println!();
     if fail_count > 0 {
-        println!("❌ Inspect: {} ok, {} warnings, {} errors", ok_count, warn_count, fail_count);
+        println!(
+            "❌ Inspect: {} ok, {} warnings, {} errors",
+            ok_count, warn_count, fail_count
+        );
         println!("   Fix the errors above to use Mumei.");
         std::process::exit(1);
     } else if warn_count > 0 {
-        println!("✅ Inspect: {} ok, {} warnings — Mumei is ready (optional tools missing)", ok_count, warn_count);
+        println!(
+            "✅ Inspect: {} ok, {} warnings — Mumei is ready (optional tools missing)",
+            ok_count, warn_count
+        );
     } else {
         println!("✅ Inspect: {} ok — all tools available", ok_count);
     }
@@ -746,17 +896,26 @@ fn cmd_build(input: &str, output: &str) {
     // mumei.toml の自動検出と設定適用
     let manifest_config = manifest::find_and_load();
     let (build_cfg, proof_cfg) = if let Some((ref _proj_dir, ref m)) = manifest_config {
-        println!("  📄 Using mumei.toml: {} v{}", m.package.name, m.package.version);
+        println!(
+            "  📄 Using mumei.toml: {} v{}",
+            m.package.name, m.package.version
+        );
         (m.build.clone(), m.proof.clone())
     } else {
-        (manifest::BuildConfig::default(), manifest::ProofConfig::default())
+        (
+            manifest::BuildConfig::default(),
+            manifest::ProofConfig::default(),
+        )
     };
 
     let (items, mut module_env, imports) = load_and_prepare(input);
 
     let output_path = Path::new(output);
     let output_dir = output_path.parent().unwrap_or(Path::new("."));
-    let file_stem = output_path.file_stem().and_then(|s| s.to_str()).unwrap_or(output);
+    let file_stem = output_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(output);
     let input_path = Path::new(input);
     let build_base_dir = input_path.parent().unwrap_or(Path::new("."));
 
@@ -771,15 +930,30 @@ fn cmd_build(input: &str, output: &str) {
     // [build] targets から有効なトランスパイル言語を決定
     let enable_rust = build_cfg.targets.iter().any(|t| t == "rust");
     let enable_go = build_cfg.targets.iter().any(|t| t == "go");
-    let enable_ts = build_cfg.targets.iter().any(|t| t == "typescript" || t == "ts");
+    let enable_ts = build_cfg
+        .targets
+        .iter()
+        .any(|t| t == "typescript" || t == "ts");
     let skip_verify = !build_cfg.verify;
 
     let mut atom_count = 0;
 
     // Transpiler バンドル初期化（有効な言語のみ）
-    let mut rust_bundle = if enable_rust { transpile_module_header(&imports, file_stem, TargetLanguage::Rust) } else { String::new() };
-    let mut go_bundle = if enable_go { transpile_module_header(&imports, file_stem, TargetLanguage::Go) } else { String::new() };
-    let mut ts_bundle = if enable_ts { transpile_module_header(&imports, file_stem, TargetLanguage::TypeScript) } else { String::new() };
+    let mut rust_bundle = if enable_rust {
+        transpile_module_header(&imports, file_stem, TargetLanguage::Rust)
+    } else {
+        String::new()
+    };
+    let mut go_bundle = if enable_go {
+        transpile_module_header(&imports, file_stem, TargetLanguage::Go)
+    } else {
+        String::new()
+    };
+    let mut ts_bundle = if enable_ts {
+        transpile_module_header(&imports, file_stem, TargetLanguage::TypeScript)
+    } else {
+        String::new()
+    };
 
     for item in &items {
         match item {
@@ -791,48 +965,99 @@ fn cmd_build(input: &str, output: &str) {
 
             // --- 精緻型の登録 ---
             Item::TypeDef(refined_type) => {
-                println!("  ✨ Registered Refined Type: '{}' ({})", refined_type.name, refined_type._base_type);
+                println!(
+                    "  ✨ Registered Refined Type: '{}' ({})",
+                    refined_type.name, refined_type._base_type
+                );
             }
 
             // --- 構造体定義の登録 + トランスパイル ---
             Item::StructDef(struct_def) => {
-                let field_names: Vec<&str> = struct_def.fields.iter().map(|f| f.name.as_str()).collect();
-                println!("  🏗️  Registered Struct: '{}' (fields: {})", struct_def.name, field_names.join(", "));
+                let field_names: Vec<&str> =
+                    struct_def.fields.iter().map(|f| f.name.as_str()).collect();
+                println!(
+                    "  🏗️  Registered Struct: '{}' (fields: {})",
+                    struct_def.name,
+                    field_names.join(", ")
+                );
                 // 構造体定義をトランスパイル出力に含める（有効な言語のみ）
-                if enable_rust { rust_bundle.push_str(&transpile_struct(struct_def, TargetLanguage::Rust)); rust_bundle.push_str("\n\n"); }
-                if enable_go { go_bundle.push_str(&transpile_struct(struct_def, TargetLanguage::Go)); go_bundle.push_str("\n\n"); }
-                if enable_ts { ts_bundle.push_str(&transpile_struct(struct_def, TargetLanguage::TypeScript)); ts_bundle.push_str("\n\n"); }
+                if enable_rust {
+                    rust_bundle.push_str(&transpile_struct(struct_def, TargetLanguage::Rust));
+                    rust_bundle.push_str("\n\n");
+                }
+                if enable_go {
+                    go_bundle.push_str(&transpile_struct(struct_def, TargetLanguage::Go));
+                    go_bundle.push_str("\n\n");
+                }
+                if enable_ts {
+                    ts_bundle.push_str(&transpile_struct(struct_def, TargetLanguage::TypeScript));
+                    ts_bundle.push_str("\n\n");
+                }
             }
 
             // --- Enum 定義の登録 + トランスパイル ---
             Item::EnumDef(enum_def) => {
-                let variant_names: Vec<&str> = enum_def.variants.iter().map(|v| v.name.as_str()).collect();
-                println!("  🔷 Registered Enum: '{}' (variants: {})", enum_def.name, variant_names.join(", "));
-                if enable_rust { rust_bundle.push_str(&transpile_enum(enum_def, TargetLanguage::Rust)); rust_bundle.push_str("\n\n"); }
-                if enable_go { go_bundle.push_str(&transpile_enum(enum_def, TargetLanguage::Go)); go_bundle.push_str("\n\n"); }
-                if enable_ts { ts_bundle.push_str(&transpile_enum(enum_def, TargetLanguage::TypeScript)); ts_bundle.push_str("\n\n"); }
+                let variant_names: Vec<&str> =
+                    enum_def.variants.iter().map(|v| v.name.as_str()).collect();
+                println!(
+                    "  🔷 Registered Enum: '{}' (variants: {})",
+                    enum_def.name,
+                    variant_names.join(", ")
+                );
+                if enable_rust {
+                    rust_bundle.push_str(&transpile_enum(enum_def, TargetLanguage::Rust));
+                    rust_bundle.push_str("\n\n");
+                }
+                if enable_go {
+                    go_bundle.push_str(&transpile_enum(enum_def, TargetLanguage::Go));
+                    go_bundle.push_str("\n\n");
+                }
+                if enable_ts {
+                    ts_bundle.push_str(&transpile_enum(enum_def, TargetLanguage::TypeScript));
+                    ts_bundle.push_str("\n\n");
+                }
             }
 
             // --- トレイト定義 + トランスパイル ---
             Item::TraitDef(trait_def) => {
-                let method_names: Vec<&str> = trait_def.methods.iter().map(|m| m.name.as_str()).collect();
+                let method_names: Vec<&str> =
+                    trait_def.methods.iter().map(|m| m.name.as_str()).collect();
                 let law_names: Vec<&str> = trait_def.laws.iter().map(|(n, _)| n.as_str()).collect();
-                println!("  📜 Registered Trait: '{}' (methods: {}, laws: {})",
-                    trait_def.name, method_names.join(", "), law_names.join(", "));
-                if enable_rust { rust_bundle.push_str(&transpile_trait(trait_def, TargetLanguage::Rust)); rust_bundle.push_str("\n\n"); }
-                if enable_go { go_bundle.push_str(&transpile_trait(trait_def, TargetLanguage::Go)); go_bundle.push_str("\n\n"); }
-                if enable_ts { ts_bundle.push_str(&transpile_trait(trait_def, TargetLanguage::TypeScript)); ts_bundle.push_str("\n\n"); }
+                println!(
+                    "  📜 Registered Trait: '{}' (methods: {}, laws: {})",
+                    trait_def.name,
+                    method_names.join(", "),
+                    law_names.join(", ")
+                );
+                if enable_rust {
+                    rust_bundle.push_str(&transpile_trait(trait_def, TargetLanguage::Rust));
+                    rust_bundle.push_str("\n\n");
+                }
+                if enable_go {
+                    go_bundle.push_str(&transpile_trait(trait_def, TargetLanguage::Go));
+                    go_bundle.push_str("\n\n");
+                }
+                if enable_ts {
+                    ts_bundle.push_str(&transpile_trait(trait_def, TargetLanguage::TypeScript));
+                    ts_bundle.push_str("\n\n");
+                }
             }
 
             // --- トレイト実装の登録 + 法則検証 + トランスパイル ---
             Item::ImplDef(impl_def) => {
-                println!("  🔧 Registered Impl: {} for {}", impl_def.trait_name, impl_def.target_type);
+                println!(
+                    "  🔧 Registered Impl: {} for {}",
+                    impl_def.trait_name, impl_def.target_type
+                );
                 // impl が trait の全 law を満たしているか Z3 で検証
                 if skip_verify {
                     println!("    ⚖️  Laws verification skipped (verify=false in mumei.toml)");
                 } else {
                     match verification::verify_impl(impl_def, &module_env) {
-                        Ok(_) => println!("    ✅ Laws verified for impl {} for {}", impl_def.trait_name, impl_def.target_type),
+                        Ok(_) => println!(
+                            "    ✅ Laws verified for impl {} for {}",
+                            impl_def.trait_name, impl_def.target_type
+                        ),
                         Err(e) => {
                             eprintln!("    ❌ Law verification failed: {}", e);
                             std::process::exit(1);
@@ -840,9 +1065,18 @@ fn cmd_build(input: &str, output: &str) {
                     }
                 }
                 // impl 定義をトランスパイル出力に含める（有効な言語のみ）
-                if enable_rust { rust_bundle.push_str(&transpile_impl(impl_def, TargetLanguage::Rust)); rust_bundle.push_str("\n\n"); }
-                if enable_go { go_bundle.push_str(&transpile_impl(impl_def, TargetLanguage::Go)); go_bundle.push_str("\n\n"); }
-                if enable_ts { ts_bundle.push_str(&transpile_impl(impl_def, TargetLanguage::TypeScript)); ts_bundle.push_str("\n\n"); }
+                if enable_rust {
+                    rust_bundle.push_str(&transpile_impl(impl_def, TargetLanguage::Rust));
+                    rust_bundle.push_str("\n\n");
+                }
+                if enable_go {
+                    go_bundle.push_str(&transpile_impl(impl_def, TargetLanguage::Go));
+                    go_bundle.push_str("\n\n");
+                }
+                if enable_ts {
+                    ts_bundle.push_str(&transpile_impl(impl_def, TargetLanguage::TypeScript));
+                    ts_bundle.push_str("\n\n");
+                }
             }
 
             // --- リソース定義の登録 ---
@@ -851,13 +1085,19 @@ fn cmd_build(input: &str, output: &str) {
                     parser::ResourceMode::Exclusive => "exclusive",
                     parser::ResourceMode::Shared => "shared",
                 };
-                println!("  🔒 Registered Resource: '{}' (priority={}, mode={})",
-                    resource_def.name, resource_def.priority, mode_str);
+                println!(
+                    "  🔒 Registered Resource: '{}' (priority={}, mode={})",
+                    resource_def.name, resource_def.priority, mode_str
+                );
             }
 
             // --- extern ブロック ---
             Item::ExternBlock(eb) => {
-                println!("  🔗 Extern \"{}\" ({} function(s))", eb.language, eb.functions.len());
+                println!(
+                    "  🔗 Extern \"{}\" ({} function(s))",
+                    eb.language,
+                    eb.functions.len()
+                );
             }
 
             // --- Atom の処理 ---
@@ -866,8 +1106,13 @@ fn cmd_build(input: &str, output: &str) {
                 let async_marker = if atom.is_async { " (async)" } else { "" };
                 let res_marker = if !atom.resources.is_empty() {
                     format!(" [resources: {}]", atom.resources.join(", "))
-                } else { String::new() };
-                println!("  ✨ [1/4] Polishing Syntax: Atom '{}'{}{} identified.", atom.name, async_marker, res_marker);
+                } else {
+                    String::new()
+                };
+                println!(
+                    "  ✨ [1/4] Polishing Syntax: Atom '{}'{}{} identified.",
+                    atom.name, async_marker, res_marker
+                );
 
                 // --- 2. Verification (形式検証: Z3 + StdLib) ---
                 if skip_verify {
@@ -881,18 +1126,27 @@ fn cmd_build(input: &str, output: &str) {
                     let atom_hash = resolver::compute_atom_hash(atom);
                     build_cache_new.insert(atom.name.clone(), atom_hash.clone());
 
-                    let cache_hit = build_cache.get(&atom.name)
+                    let cache_hit = build_cache
+                        .get(&atom.name)
                         .map_or(false, |cached| *cached == atom_hash);
 
                     if cache_hit {
                         println!("  ⚖️  [2/4] Verification: Skipped (unchanged, cached) ⏩");
                         module_env.mark_verified(&atom.name);
                     } else {
-                        match verification::verify_with_config(atom, output_dir, &module_env, proof_cfg.timeout_ms, build_cfg.max_unroll) {
+                        match verification::verify_with_config(
+                            atom,
+                            output_dir,
+                            &module_env,
+                            proof_cfg.timeout_ms,
+                            build_cfg.max_unroll,
+                        ) {
                             Ok(_) => {
-                                println!("  ⚖️  [2/4] Verification: Passed. Logic verified with Z3.");
+                                println!(
+                                    "  ⚖️  [2/4] Verification: Passed. Logic verified with Z3."
+                                );
                                 module_env.mark_verified(&atom.name);
-                            },
+                            }
                             Err(e) => {
                                 eprintln!("  ❌ [2/4] Verification: Failed! Flaw detected: {}", e);
                                 build_cache_new.remove(&atom.name);
@@ -906,7 +1160,10 @@ fn cmd_build(input: &str, output: &str) {
                 // 各 Atom ごとに .ll ファイルを生成（またはモジュールを統合する拡張も可能）
                 let atom_output_path = output_dir.join(format!("{}_{}", file_stem, atom.name));
                 match codegen::compile(atom, &atom_output_path, &module_env) {
-                    Ok(_) => println!("  ⚙️  [3/4] Tempering: Done. Compiled '{}' to LLVM IR.", atom.name),
+                    Ok(_) => println!(
+                        "  ⚙️  [3/4] Tempering: Done. Compiled '{}' to LLVM IR.",
+                        atom.name
+                    ),
                     Err(e) => {
                         eprintln!("  ❌ [3/4] Tempering: Failed! Codegen error: {}", e);
                         std::process::exit(1);
@@ -915,9 +1172,18 @@ fn cmd_build(input: &str, output: &str) {
 
                 // --- 4. Transpile (多言語エクスポート) ---
                 // バンドル用に各言語のコードを生成（有効な言語のみ）
-                if enable_rust { rust_bundle.push_str(&transpile(atom, TargetLanguage::Rust)); rust_bundle.push_str("\n\n"); }
-                if enable_go { go_bundle.push_str(&transpile(atom, TargetLanguage::Go)); go_bundle.push_str("\n\n"); }
-                if enable_ts { ts_bundle.push_str(&transpile(atom, TargetLanguage::TypeScript)); ts_bundle.push_str("\n\n"); }
+                if enable_rust {
+                    rust_bundle.push_str(&transpile(atom, TargetLanguage::Rust));
+                    rust_bundle.push_str("\n\n");
+                }
+                if enable_go {
+                    go_bundle.push_str(&transpile(atom, TargetLanguage::Go));
+                    go_bundle.push_str("\n\n");
+                }
+                if enable_ts {
+                    ts_bundle.push_str(&transpile(atom, TargetLanguage::TypeScript));
+                    ts_bundle.push_str("\n\n");
+                }
             }
         }
     }
@@ -934,7 +1200,9 @@ fn cmd_build(input: &str, output: &str) {
         ];
 
         for (code, ext, enabled) in files {
-            if !enabled { continue; }
+            if !enabled {
+                continue;
+            }
             let out_filename = format!("{}.{}", file_stem, ext);
             let out_full_path = output_dir.join(&out_filename);
             if let Err(e) = fs::write(&out_full_path, code) {
@@ -987,7 +1255,8 @@ fn cmd_add(dep: &str) {
             std::process::exit(1);
         }
         // パッケージ名はディレクトリ名から推定
-        let pkg_name = dep_path.file_name()
+        let pkg_name = dep_path
+            .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("unknown")
             .replace('-', "_");
@@ -996,7 +1265,8 @@ fn cmd_add(dep: &str) {
         (pkg_name, toml_line)
     } else if dep.contains("github.com") || dep.contains("gitlab.com") {
         // Git URL 依存
-        let pkg_name = dep.split('/')
+        let pkg_name = dep
+            .split('/')
             .last()
             .unwrap_or("unknown")
             .trim_end_matches(".git")
@@ -1007,7 +1277,10 @@ fn cmd_add(dep: &str) {
     } else {
         // パッケージ名のみ（レジストリ依存 — 将来対応）
         let toml_line = format!("{} = \"*\"", dep);
-        println!("📦 Adding dependency: {} (registry lookup not yet implemented)", dep);
+        println!(
+            "📦 Adding dependency: {} (registry lookup not yet implemented)",
+            dep
+        );
         (dep.to_string(), toml_line)
     };
 
@@ -1096,7 +1369,10 @@ fn cmd_publish(proof_only: bool) {
     }
 
     if failed > 0 {
-        eprintln!("❌ Publish aborted: {} atom(s) failed verification. Fix errors and retry.", failed);
+        eprintln!(
+            "❌ Publish aborted: {} atom(s) failed verification. Fix errors and retry.",
+            failed
+        );
         std::process::exit(1);
     }
 
@@ -1149,12 +1425,691 @@ fn cmd_publish(proof_only: bool) {
         eprintln!("  ⚠️  Registry update warning: {}", e);
     }
 
-    println!("");
-    println!("🎉 Published {} v{} to local registry", pkg_name, pkg_version);
-    println!("   Other projects can now use: {} = \"{}\"", pkg_name, pkg_version);
+    println!();
+    println!(
+        "🎉 Published {} v{} to local registry",
+        pkg_name, pkg_version
+    );
+    println!(
+        "   Other projects can now use: {} = \"{}\"",
+        pkg_name, pkg_version
+    );
 }
 
-/// ディレクトリを再帰的にコピーする
+// =============================================================================
+// mumei repl — Interactive REPL (Read-Eval-Print Loop)
+// =============================================================================
+
+fn cmd_repl() {
+    println!("🗡️  Mumei REPL v{}", env!("CARGO_PKG_VERSION"));
+    println!("  Type expressions or atom definitions to evaluate.");
+    println!("  Commands: :help, :check <expr>, :verify <expr>, :load <file>, :quit");
+    println!();
+
+    let mut module_env = verification::ModuleEnv::new();
+    verification::register_builtin_traits(&mut module_env);
+
+    // std/prelude を自動ロード
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Err(e) = resolver::resolve_prelude(&cwd, &mut module_env) {
+            eprintln!("  ⚠️  Prelude load warning: {}", e);
+        }
+    }
+
+    let stdin = std::io::stdin();
+    let mut line_buf = String::new();
+
+    loop {
+        eprint!("mumei> ");
+        line_buf.clear();
+        match stdin.read_line(&mut line_buf) {
+            Ok(0) => break, // EOF
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("  ❌ Read error: {}", e);
+                break;
+            }
+        }
+
+        let input = line_buf.trim();
+        if input.is_empty() {
+            continue;
+        }
+
+        match input {
+            ":quit" | ":q" | ":exit" => {
+                println!("Goodbye! 🗡️");
+                break;
+            }
+            ":help" | ":h" => {
+                println!("  :check <expr>  — Parse and type-check an expression");
+                println!("  :verify <expr> — Formally verify an expression with Z3");
+                println!("  :load <file>   — Load and register a .mm file");
+                println!("  :env           — Show registered atoms and types");
+                println!("  :quit          — Exit the REPL");
+            }
+            _ if input.starts_with(":load ") => {
+                let file = input.strip_prefix(":load ").unwrap().trim();
+                println!("  Loading '{}'...", file);
+                let source = match fs::read_to_string(file) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("  ❌ Failed to read '{}': {}", file, e);
+                        continue;
+                    }
+                };
+                let items = parser::parse_module(&source);
+                let mut count = 0;
+                for item in &items {
+                    match item {
+                        parser::Item::Atom(atom) => {
+                            module_env.register_atom(atom);
+                            count += 1;
+                        }
+                        parser::Item::TypeDef(t) => module_env.register_type(t),
+                        parser::Item::StructDef(s) => module_env.register_struct(s),
+                        parser::Item::EnumDef(e) => module_env.register_enum(e),
+                        parser::Item::TraitDef(t) => module_env.register_trait(t),
+                        parser::Item::ImplDef(i) => module_env.register_impl(i),
+                        parser::Item::ResourceDef(r) => module_env.register_resource(r),
+                        parser::Item::ExternBlock(eb) => {
+                            for ext_fn in &eb.functions {
+                                let params: Vec<parser::Param> = ext_fn
+                                    .param_types
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, ty)| parser::Param {
+                                        name: format!("arg{}", i),
+                                        type_name: Some(ty.clone()),
+                                        type_ref: Some(parser::parse_type_ref(ty)),
+                                        is_ref: false,
+                                        is_ref_mut: false,
+                                    })
+                                    .collect();
+                                let atom = parser::Atom {
+                                    name: ext_fn.name.clone(),
+                                    type_params: vec![],
+                                    where_bounds: vec![],
+                                    params,
+                                    requires: "true".to_string(),
+                                    forall_constraints: vec![],
+                                    ensures: "true".to_string(),
+                                    body_expr: String::new(),
+                                    consumed_params: vec![],
+                                    resources: vec![],
+                                    is_async: false,
+                                    trust_level: parser::TrustLevel::Trusted,
+                                    max_unroll: None,
+                                    invariant: None,
+                                    span: ext_fn.span.clone(),
+                                };
+                                module_env.register_atom(&atom);
+                                count += 1;
+                            }
+                        }
+                        parser::Item::Import(_) => {}
+                    }
+                }
+                println!("  ✅ Loaded {} definition(s) from '{}'", count, file);
+            }
+            ":env" => {
+                println!("  --- Registered Atoms ({}) ---", module_env.atoms.len());
+                let mut names: Vec<&String> = module_env.atoms.keys().collect();
+                names.sort();
+                for name in names {
+                    if let Some(atom) = module_env.atoms.get(name) {
+                        let params_str: Vec<String> = atom
+                            .params
+                            .iter()
+                            .map(|p| {
+                                format!("{}: {}", p.name, p.type_name.as_deref().unwrap_or("?"))
+                            })
+                            .collect();
+                        println!(
+                            "    {} atom {}({}) [{:?}]",
+                            if atom.is_async { "async" } else { "" },
+                            name,
+                            params_str.join(", "),
+                            atom.trust_level
+                        );
+                    }
+                }
+                println!("  --- Registered Types ({}) ---", module_env.types.len());
+                for name in module_env.types.keys() {
+                    println!("    type {}", name);
+                }
+                println!(
+                    "  --- Registered Structs ({}) ---",
+                    module_env.structs.len()
+                );
+                for name in module_env.structs.keys() {
+                    println!("    struct {}", name);
+                }
+                println!("  --- Registered Enums ({}) ---", module_env.enums.len());
+                for name in module_env.enums.keys() {
+                    println!("    enum {}", name);
+                }
+            }
+            _ if input.starts_with(":check ") || input.starts_with(":verify ") => {
+                let is_verify = input.starts_with(":verify ");
+                let expr_str = if is_verify {
+                    input.strip_prefix(":verify ").unwrap()
+                } else {
+                    input.strip_prefix(":check ").unwrap()
+                };
+
+                // 式をパースして簡易検証
+                let wrapped = format!(
+                    "atom __repl_eval()\n  requires: true;\n  ensures: true;\n  body: {{\n    {}\n  }}",
+                    expr_str
+                );
+                let items = parser::parse_module(&wrapped);
+                if items.is_empty() {
+                    eprintln!("  ❌ Parse error");
+                    continue;
+                }
+                for item in &items {
+                    if let parser::Item::Atom(atom) = item {
+                        println!("  ✅ Parsed: atom {}()", atom.name);
+                        if is_verify {
+                            match verification::verify(atom, Path::new("."), &module_env) {
+                                Ok(()) => println!("  ✅ Verification passed"),
+                                Err(e) => eprintln!("  ❌ Verification failed: {}", e),
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {
+                // atom 定義またはその他の宣言として解釈
+                let items = parser::parse_module(input);
+                if items.is_empty() {
+                    eprintln!("  ❌ Could not parse input. Try :help for commands.");
+                    continue;
+                }
+                for item in &items {
+                    match item {
+                        parser::Item::Atom(atom) => {
+                            module_env.register_atom(atom);
+                            println!("  ✅ Registered atom '{}'", atom.name);
+                        }
+                        parser::Item::TypeDef(t) => {
+                            module_env.register_type(t);
+                            println!("  ✅ Registered type '{}'", t.name);
+                        }
+                        parser::Item::StructDef(s) => {
+                            module_env.register_struct(s);
+                            println!("  ✅ Registered struct '{}'", s.name);
+                        }
+                        parser::Item::EnumDef(e) => {
+                            module_env.register_enum(e);
+                            println!("  ✅ Registered enum '{}'", e.name);
+                        }
+                        _ => {
+                            println!("  ✅ Processed");
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// =============================================================================
+// mumei doc — Generate documentation from source comments
+// =============================================================================
+
+fn cmd_doc(input: &str, output_dir: &str, format: &str) {
+    println!(
+        "🗡️  Mumei doc: generating {} documentation for '{}'...",
+        format, input
+    );
+
+    let input_path = Path::new(input);
+    let out_path = Path::new(output_dir);
+    let _ = fs::create_dir_all(out_path);
+
+    // 対象ファイルを収集
+    let files: Vec<std::path::PathBuf> = if input_path.is_dir() {
+        // ディレクトリの場合、再帰的に .mm ファイルを収集
+        collect_mm_files(input_path)
+    } else {
+        vec![input_path.to_path_buf()]
+    };
+
+    if files.is_empty() {
+        eprintln!("  ❌ No .mm files found in '{}'", input);
+        std::process::exit(1);
+    }
+
+    println!("  📄 Found {} file(s)", files.len());
+
+    let mut all_docs: Vec<ModuleDoc> = Vec::new();
+
+    for file in &files {
+        let source = match fs::read_to_string(file) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("  ⚠️  Skipping '{}': {}", file.display(), e);
+                continue;
+            }
+        };
+
+        let items = parser::parse_module(&source);
+        let module_name = file
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let mut doc = ModuleDoc {
+            name: module_name,
+            file_path: file.display().to_string(),
+            atoms: Vec::new(),
+            types: Vec::new(),
+            structs: Vec::new(),
+            enums: Vec::new(),
+            traits: Vec::new(),
+        };
+
+        // ソース行からコメントを抽出
+        let lines: Vec<&str> = source.lines().collect();
+
+        for item in &items {
+            match item {
+                parser::Item::Atom(atom) => {
+                    let comment = extract_comment_before(&lines, atom.span.line);
+                    doc.atoms.push(ItemDoc {
+                        name: atom.name.clone(),
+                        comment,
+                        params: atom
+                            .params
+                            .iter()
+                            .map(|p| {
+                                format!("{}: {}", p.name, p.type_name.as_deref().unwrap_or("?"))
+                            })
+                            .collect(),
+                        trust_level: format!("{:?}", atom.trust_level),
+                        is_async: atom.is_async,
+                    });
+                }
+                parser::Item::TypeDef(t) => {
+                    let comment = extract_comment_before(&lines, t.span.line);
+                    doc.types.push(TypeDoc {
+                        name: t.name.clone(),
+                        comment,
+                    });
+                }
+                parser::Item::StructDef(s) => {
+                    let comment = extract_comment_before(&lines, s.span.line);
+                    doc.structs.push(TypeDoc {
+                        name: s.name.clone(),
+                        comment,
+                    });
+                }
+                parser::Item::EnumDef(e) => {
+                    let comment = extract_comment_before(&lines, e.span.line);
+                    doc.enums.push(TypeDoc {
+                        name: e.name.clone(),
+                        comment,
+                    });
+                }
+                parser::Item::TraitDef(t) => {
+                    let comment = extract_comment_before(&lines, t.span.line);
+                    doc.traits.push(TypeDoc {
+                        name: t.name.clone(),
+                        comment,
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        all_docs.push(doc);
+    }
+
+    // ドキュメント出力
+    match format {
+        "html" => generate_html_docs(&all_docs, out_path),
+        "markdown" | "md" => generate_markdown_docs(&all_docs, out_path),
+        _ => {
+            eprintln!(
+                "  ❌ Unknown format '{}'. Use 'html' or 'markdown'.",
+                format
+            );
+            std::process::exit(1);
+        }
+    }
+
+    println!("  ✅ Documentation generated in '{}'", out_path.display());
+}
+
+// --- doc ヘルパー構造体 ---
+
+struct ModuleDoc {
+    name: String,
+    file_path: String,
+    atoms: Vec<ItemDoc>,
+    types: Vec<TypeDoc>,
+    structs: Vec<TypeDoc>,
+    enums: Vec<TypeDoc>,
+    traits: Vec<TypeDoc>,
+}
+
+struct ItemDoc {
+    name: String,
+    comment: String,
+    params: Vec<String>,
+    trust_level: String,
+    is_async: bool,
+}
+
+struct TypeDoc {
+    name: String,
+    comment: String,
+}
+
+/// ソース行から指定行の直前にあるコメント群を抽出する
+fn extract_comment_before(lines: &[&str], target_line: usize) -> String {
+    if target_line == 0 || target_line > lines.len() {
+        return String::new();
+    }
+    let mut comments = Vec::new();
+    let mut i = target_line.saturating_sub(1); // 0-indexed
+                                               // 上に向かってコメント行を収集
+    loop {
+        if i == 0 && !lines[0].trim().starts_with("//") {
+            break;
+        }
+        if i > 0 {
+            let prev = i - 1;
+            let line = lines[prev].trim();
+            if line.starts_with("//") {
+                comments.push(line.trim_start_matches("//").trim().to_string());
+                i = prev;
+            } else {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+    comments.reverse();
+    comments.join("\n")
+}
+
+/// .mm ファイルを再帰的に収集
+fn collect_mm_files(dir: &Path) -> Vec<std::path::PathBuf> {
+    let mut result = Vec::new();
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                result.extend(collect_mm_files(&path));
+            } else if path.extension().map_or(false, |ext| ext == "mm") {
+                result.push(path);
+            }
+        }
+    }
+    result
+}
+
+/// HTML ドキュメントを生成
+fn generate_html_docs(docs: &[ModuleDoc], out_dir: &Path) {
+    // index.html
+    let mut index = String::from(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mumei Documentation</title>
+<style>
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 20px; background: #1a1a2e; color: #e0e0e0; }
+.container { max-width: 900px; margin: 0 auto; }
+h1 { color: #e94560; border-bottom: 2px solid #e94560; padding-bottom: 10px; }
+h2 { color: #0f3460; background: #16213e; padding: 8px 16px; border-radius: 4px; color: #e94560; }
+h3 { color: #c0c0c0; }
+a { color: #e94560; text-decoration: none; }
+a:hover { text-decoration: underline; }
+.module-list { list-style: none; padding: 0; }
+.module-list li { margin: 8px 0; padding: 8px 16px; background: #16213e; border-radius: 4px; }
+.atom { background: #16213e; padding: 12px 16px; margin: 8px 0; border-radius: 6px; border-left: 3px solid #e94560; }
+.atom .name { color: #e94560; font-weight: bold; font-size: 1.1em; }
+.atom .params { color: #a0a0a0; font-family: monospace; }
+.atom .comment { color: #c0c0c0; margin-top: 6px; }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 3px; font-size: 0.8em; margin-left: 8px; }
+.badge.trusted { background: #0f3460; color: #e94560; }
+.badge.verified { background: #1a4040; color: #4ecdc4; }
+.badge.async { background: #3d1a60; color: #c084fc; }
+.type-def { background: #16213e; padding: 8px 16px; margin: 8px 0; border-radius: 6px; border-left: 3px solid #4ecdc4; }
+</style>
+</head>
+<body>
+<div class="container">
+<h1>&#x1F5E1; Mumei Documentation</h1>
+<p>Auto-generated from source comments.</p>
+<h2>Modules</h2>
+<ul class="module-list">
+"#,
+    );
+
+    for doc in docs {
+        index.push_str(&format!(
+            "<li><a href=\"{}.html\">{}</a> — {}</li>\n",
+            doc.name, doc.name, doc.file_path
+        ));
+    }
+    index.push_str("</ul>\n</div>\n</body>\n</html>\n");
+    let _ = fs::write(out_dir.join("index.html"), &index);
+
+    // 各モジュールのページ
+    for doc in docs {
+        let mut page = format!(
+            r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{name} — Mumei Documentation</title>
+<style>
+body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 20px; background: #1a1a2e; color: #e0e0e0; }}
+.container {{ max-width: 900px; margin: 0 auto; }}
+h1 {{ color: #e94560; border-bottom: 2px solid #e94560; padding-bottom: 10px; }}
+h2 {{ color: #e94560; background: #16213e; padding: 8px 16px; border-radius: 4px; }}
+a {{ color: #e94560; text-decoration: none; }}
+a:hover {{ text-decoration: underline; }}
+.atom {{ background: #16213e; padding: 12px 16px; margin: 8px 0; border-radius: 6px; border-left: 3px solid #e94560; }}
+.atom .name {{ color: #e94560; font-weight: bold; font-size: 1.1em; }}
+.atom .params {{ color: #a0a0a0; font-family: monospace; }}
+.atom .comment {{ color: #c0c0c0; margin-top: 6px; }}
+.badge {{ display: inline-block; padding: 2px 8px; border-radius: 3px; font-size: 0.8em; margin-left: 8px; }}
+.badge.trusted {{ background: #0f3460; color: #e94560; }}
+.badge.verified {{ background: #1a4040; color: #4ecdc4; }}
+.badge.async {{ background: #3d1a60; color: #c084fc; }}
+.type-def {{ background: #16213e; padding: 8px 16px; margin: 8px 0; border-radius: 6px; border-left: 3px solid #4ecdc4; }}
+</style>
+</head>
+<body>
+<div class="container">
+<p><a href="index.html">&larr; Back to index</a></p>
+<h1>{name}</h1>
+<p>Source: <code>{path}</code></p>
+"#,
+            name = doc.name,
+            path = doc.file_path,
+        );
+
+        // Atoms
+        if !doc.atoms.is_empty() {
+            page.push_str("<h2>Atoms</h2>\n");
+            for atom in &doc.atoms {
+                page.push_str("<div class=\"atom\">\n");
+                page.push_str(&format!("  <span class=\"name\">{}</span>", atom.name));
+                if atom.is_async {
+                    page.push_str("<span class=\"badge async\">async</span>");
+                }
+                if atom.trust_level == "Trusted" {
+                    page.push_str("<span class=\"badge trusted\">trusted</span>");
+                } else if atom.trust_level == "Verified" {
+                    page.push_str("<span class=\"badge verified\">verified</span>");
+                }
+                page.push_str(&format!(
+                    "\n  <div class=\"params\">({})</div>\n",
+                    atom.params.join(", ")
+                ));
+                if !atom.comment.is_empty() {
+                    page.push_str(&format!(
+                        "  <div class=\"comment\">{}</div>\n",
+                        atom.comment.replace('\n', "<br>")
+                    ));
+                }
+                page.push_str("</div>\n");
+            }
+        }
+
+        // Types
+        if !doc.types.is_empty() {
+            page.push_str("<h2>Types</h2>\n");
+            for t in &doc.types {
+                page.push_str(&format!(
+                    "<div class=\"type-def\"><strong>{}</strong>",
+                    t.name
+                ));
+                if !t.comment.is_empty() {
+                    page.push_str(&format!("<br>{}", t.comment.replace('\n', "<br>")));
+                }
+                page.push_str("</div>\n");
+            }
+        }
+
+        // Structs
+        if !doc.structs.is_empty() {
+            page.push_str("<h2>Structs</h2>\n");
+            for s in &doc.structs {
+                page.push_str(&format!(
+                    "<div class=\"type-def\"><strong>struct {}</strong>",
+                    s.name
+                ));
+                if !s.comment.is_empty() {
+                    page.push_str(&format!("<br>{}", s.comment.replace('\n', "<br>")));
+                }
+                page.push_str("</div>\n");
+            }
+        }
+
+        // Enums
+        if !doc.enums.is_empty() {
+            page.push_str("<h2>Enums</h2>\n");
+            for e in &doc.enums {
+                page.push_str(&format!(
+                    "<div class=\"type-def\"><strong>enum {}</strong>",
+                    e.name
+                ));
+                if !e.comment.is_empty() {
+                    page.push_str(&format!("<br>{}", e.comment.replace('\n', "<br>")));
+                }
+                page.push_str("</div>\n");
+            }
+        }
+
+        // Traits
+        if !doc.traits.is_empty() {
+            page.push_str("<h2>Traits</h2>\n");
+            for t in &doc.traits {
+                page.push_str(&format!(
+                    "<div class=\"type-def\"><strong>trait {}</strong>",
+                    t.name
+                ));
+                if !t.comment.is_empty() {
+                    page.push_str(&format!("<br>{}", t.comment.replace('\n', "<br>")));
+                }
+                page.push_str("</div>\n");
+            }
+        }
+
+        page.push_str("</div>\n</body>\n</html>\n");
+        let _ = fs::write(out_dir.join(format!("{}.html", doc.name)), &page);
+    }
+}
+
+/// Markdown ドキュメントを生成
+fn generate_markdown_docs(docs: &[ModuleDoc], out_dir: &Path) {
+    for doc in docs {
+        let mut md = format!("# {}\n\nSource: `{}`\n\n", doc.name, doc.file_path);
+
+        if !doc.atoms.is_empty() {
+            md.push_str("## Atoms\n\n");
+            for atom in &doc.atoms {
+                let badges = [
+                    if atom.is_async { Some("`async`") } else { None },
+                    if atom.trust_level == "Trusted" {
+                        Some("`trusted`")
+                    } else {
+                        None
+                    },
+                ]
+                .iter()
+                .flatten()
+                .copied()
+                .collect::<Vec<_>>()
+                .join(" ");
+
+                md.push_str(&format!(
+                    "### `{}({})` {}\n\n",
+                    atom.name,
+                    atom.params.join(", "),
+                    badges
+                ));
+                if !atom.comment.is_empty() {
+                    md.push_str(&format!("{}\n\n", atom.comment));
+                }
+            }
+        }
+
+        if !doc.types.is_empty() {
+            md.push_str("## Types\n\n");
+            for t in &doc.types {
+                md.push_str(&format!("### `{}`\n\n", t.name));
+                if !t.comment.is_empty() {
+                    md.push_str(&format!("{}\n\n", t.comment));
+                }
+            }
+        }
+
+        if !doc.structs.is_empty() {
+            md.push_str("## Structs\n\n");
+            for s in &doc.structs {
+                md.push_str(&format!("### `struct {}`\n\n", s.name));
+                if !s.comment.is_empty() {
+                    md.push_str(&format!("{}\n\n", s.comment));
+                }
+            }
+        }
+
+        if !doc.enums.is_empty() {
+            md.push_str("## Enums\n\n");
+            for e in &doc.enums {
+                md.push_str(&format!("### `enum {}`\n\n", e.name));
+                if !e.comment.is_empty() {
+                    md.push_str(&format!("{}\n\n", e.comment));
+                }
+            }
+        }
+
+        if !doc.traits.is_empty() {
+            md.push_str("## Traits\n\n");
+            for t in &doc.traits {
+                md.push_str(&format!("### `trait {}`\n\n", t.name));
+                if !t.comment.is_empty() {
+                    md.push_str(&format!("{}\n\n", t.comment));
+                }
+            }
+        }
+
+        let _ = fs::write(out_dir.join(format!("{}.md", doc.name)), &md);
+    }
+}
+
 fn copy_dir_recursive(src: &Path, dst: &Path) {
     let _ = fs::create_dir_all(dst);
     if let Ok(entries) = fs::read_dir(src) {
