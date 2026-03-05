@@ -127,9 +127,9 @@ main() {
             shell_rc="$HOME/.bashrc"
         fi
 
-        if [ -n "$shell_rc" ] && [ -f "$shell_rc" ]; then
+        if [ -n "$shell_rc" ] && [ -f "$shell_rc" ] && [ -t 1 ]; then
             echo -n "Add to $shell_rc automatically? [y/N] "
-            read -r answer
+            read -r answer < /dev/tty || answer=""
             if [ "$answer" = "y" ] || [ "$answer" = "Y" ]; then
                 echo "" >> "$shell_rc"
                 echo "# Mumei" >> "$shell_rc"
