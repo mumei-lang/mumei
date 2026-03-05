@@ -31,13 +31,9 @@ class Mumei < Formula
   end
 
   on_linux do
-    if Hardware::CPU.arm?
-      url "https://github.com/mumei-lang/mumei/releases/download/v#{version}/mumei-aarch64-unknown-linux-gnu.tar.gz"
-      # sha256 "UPDATE_WITH_ACTUAL_SHA256"
-    else
-      url "https://github.com/mumei-lang/mumei/releases/download/v#{version}/mumei-x86_64-unknown-linux-gnu.tar.gz"
-      # sha256 "UPDATE_WITH_ACTUAL_SHA256"
-    end
+    # Note: aarch64 Linux is not yet supported (no CI cross-compilation target)
+    url "https://github.com/mumei-lang/mumei/releases/download/v#{version}/mumei-x86_64-unknown-linux-gnu.tar.gz"
+    # sha256 "UPDATE_WITH_ACTUAL_SHA256"
   end
 
   depends_on "z3"

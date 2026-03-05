@@ -38,7 +38,11 @@ detect_platform() {
 
     case "$arch" in
         x86_64|amd64)   arch="x86_64" ;;
-        arm64|aarch64)  arch="aarch64" ;;
+        arm64|aarch64)
+            if [ "$os" = "unknown-linux-gnu" ]; then
+                err "aarch64 Linux is not yet supported. Pre-built binaries are available for x86_64 Linux, x86_64/aarch64 macOS. See https://github.com/mumei-lang/mumei/releases"
+            fi
+            arch="aarch64" ;;
         *)              err "Unsupported architecture: $arch" ;;
     esac
 
