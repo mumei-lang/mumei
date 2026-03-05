@@ -1853,6 +1853,14 @@ fn collect_mm_files(dir: &Path) -> Vec<std::path::PathBuf> {
     result
 }
 
+/// HTML 特殊文字をエスケープする
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
 /// HTML ドキュメントを生成
 fn generate_html_docs(docs: &[ModuleDoc], out_dir: &Path) {
     // index.html
@@ -1896,7 +1904,9 @@ a:hover { text-decoration: underline; }
     for doc in docs {
         index.push_str(&format!(
             "<li><a href=\"{}.html\">{}</a> — {}</li>\n",
-            doc.name, doc.name, doc.file_path
+            html_escape(&doc.name),
+            html_escape(&doc.name),
+            html_escape(&doc.file_path)
         ));
     }
     index.push_str("</ul>\n</div>\n</body>\n</html>\n");
@@ -1935,8 +1945,8 @@ a:hover {{ text-decoration: underline; }}
 <h1>{name}</h1>
 <p>Source: <code>{path}</code></p>
 "#,
-            name = doc.name,
-            path = doc.file_path,
+            name = html_escape(&doc.name),
+            path = html_escape(&doc.file_path),
         );
 
         // Atoms
@@ -1944,7 +1954,10 @@ a:hover {{ text-decoration: underline; }}
             page.push_str("<h2>Atoms</h2>\n");
             for atom in &doc.atoms {
                 page.push_str("<div class=\"atom\">\n");
-                page.push_str(&format!("  <span class=\"name\">{}</span>", atom.name));
+                page.push_str(&format!(
+                    "  <span class=\"name\">{}</span>",
+                    html_escape(&atom.name)
+                ));
                 if atom.is_async {
                     page.push_str("<span class=\"badge async\">async</span>");
                 }
@@ -1953,14 +1966,16 @@ a:hover {{ text-decoration: underline; }}
                 } else if atom.trust_level == "Verified" {
                     page.push_str("<span class=\"badge verified\">verified</span>");
                 }
+                let escaped_params: Vec<String> =
+                    atom.params.iter().map(|p| html_escape(p)).collect();
                 page.push_str(&format!(
                     "\n  <div class=\"params\">({})</div>\n",
-                    atom.params.join(", ")
+                    escaped_params.join(", ")
                 ));
                 if !atom.comment.is_empty() {
                     page.push_str(&format!(
                         "  <div class=\"comment\">{}</div>\n",
-                        atom.comment.replace('\n', "<br>")
+                        html_escape(&atom.comment).replace('\n', "<br>")
                     ));
                 }
                 page.push_str("</div>\n");
@@ -1973,10 +1988,13 @@ a:hover {{ text-decoration: underline; }}
             for t in &doc.types {
                 page.push_str(&format!(
                     "<div class=\"type-def\"><strong>{}</strong>",
-                    t.name
+                    html_escape(&t.name)
                 ));
                 if !t.comment.is_empty() {
-                    page.push_str(&format!("<br>{}", t.comment.replace('\n', "<br>")));
+                    page.push_str(&format!(
+                        "<br>{}",
+                        html_escape(&t.comment).replace('\n', "<br>")
+                    ));
                 }
                 page.push_str("</div>\n");
             }
@@ -1988,10 +2006,13 @@ a:hover {{ text-decoration: underline; }}
             for s in &doc.structs {
                 page.push_str(&format!(
                     "<div class=\"type-def\"><strong>struct {}</strong>",
-                    s.name
+                    html_escape(&s.name)
                 ));
                 if !s.comment.is_empty() {
-                    page.push_str(&format!("<br>{}", s.comment.replace('\n', "<br>")));
+                    page.push_str(&format!(
+                        "<br>{}",
+                        html_escape(&s.comment).replace('\n', "<br>")
+                    ));
                 }
                 page.push_str("</div>\n");
             }
@@ -2003,10 +2024,13 @@ a:hover {{ text-decoration: underline; }}
             for e in &doc.enums {
                 page.push_str(&format!(
                     "<div class=\"type-def\"><strong>enum {}</strong>",
-                    e.name
+                    html_escape(&e.name)
                 ));
                 if !e.comment.is_empty() {
-                    page.push_str(&format!("<br>{}", e.comment.replace('\n', "<br>")));
+                    page.push_str(&format!(
+                        "<br>{}",
+                        html_escape(&e.comment).replace('\n', "<br>")
+                    ));
                 }
                 page.push_str("</div>\n");
             }
@@ -2018,10 +2042,13 @@ a:hover {{ text-decoration: underline; }}
             for t in &doc.traits {
                 page.push_str(&format!(
                     "<div class=\"type-def\"><strong>trait {}</strong>",
-                    t.name
+                    html_escape(&t.name)
                 ));
                 if !t.comment.is_empty() {
-                    page.push_str(&format!("<br>{}", t.comment.replace('\n', "<br>")));
+                    page.push_str(&format!(
+                        "<br>{}",
+                        html_escape(&t.comment).replace('\n', "<br>")
+                    ));
                 }
                 page.push_str("</div>\n");
             }
