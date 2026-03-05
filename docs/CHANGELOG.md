@@ -1,6 +1,40 @@
-# 📝 Changelog — PR #16 (feature/alloc → develop)
+# 📝 Changelog
 
-## Summary
+---
+
+## PR #31: Strategic Roadmap v0.3.0+ (docs update)
+
+### Summary
+
+Mumei を「実験的言語」から「実用ツール」へ昇華させる 3 つの戦略的ロードマップを定義。
+全関連ドキュメントを更新し、優先順位・依存関係・タイムラインを明確化。
+
+### 3 Strategic Priorities
+
+| Priority | Theme | Key Deliverable |
+|---|---|---|
+| 🥇 P1 | Network-First Standard Library | FFI Bridge + std.json + std.http |
+| 🥈 P2 | Runtime Portability | Static linking + Homebrew + WebInstall |
+| 🥉 P3 | CLI Developer Experience | mumei repl + mumei doc |
+
+### Files Changed
+
+| File | Summary |
+|---|---|
+| `docs/ROADMAP.md` | **New** — 詳細な戦略的ロードマップ (Phase A–D, 依存関係, Success Metrics, Timeline) |
+| `README.md` | Roadmap セクションに std.json, Runtime Portability, REPL, doc gen 追加 |
+| `instruction.md` | §11 を Strategic Roadmap v0.3.0+ に書き換え (3 priorities) |
+| `docs/TOOLCHAIN.md` | Future Roadmap を 3 プライオリティのテーブル形式に更新 |
+| `docs/FFI.md` | 将来の拡張に FFI Bridge Completion の実装計画を追加 |
+| `docs/CONCURRENCY.md` | 将来の拡張に std.http 統合デモ + Task 洗練項目追加 |
+| `docs/STDLIB.md` | Planned: std/json.mm + std/http.mm セクション追加 |
+| `docs/CHANGELOG.md` | 今回の変更を記録 |
+
+---
+
+## PR #16 (feature/alloc → develop)
+
+### Summary
 
 This PR implements dynamic memory management, ownership system, borrowing, and completes the remaining roadmap items (except LSP) for the Mumei language.
 

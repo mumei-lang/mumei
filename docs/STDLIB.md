@@ -245,6 +245,44 @@ struct BoundedArray { len: i64 where v >= 0, cap: i64 where v > 0 }
 
 ---
 
+## Planned: std/json.mm (Roadmap P1-B)
+
+> 詳細: [`docs/ROADMAP.md`](ROADMAP.md) Phase P1-B
+
+```mumei
+import "std/json" as json;
+```
+
+文字列とオブジェクトの相互変換。`serde_json` をバックエンドに使用。
+
+| Atom | Description | Status |
+|---|---|---|
+| `json.parse(str)` | JSON 文字列 → 構造化データ | ❌ Planned |
+| `json.stringify(data)` | 構造化データ → JSON 文字列 | ❌ Planned |
+| `json.get_string(data, key)` | 文字列フィールド取得 | ❌ Planned |
+| `json.get_int(data, key)` | 整数フィールド取得 | ❌ Planned |
+
+---
+
+## Planned: std/http.mm (Roadmap P1-C)
+
+> 詳細: [`docs/ROADMAP.md`](ROADMAP.md) Phase P1-C
+
+```mumei
+import "std/http" as http;
+```
+
+Rust `reqwest` を FFI で隠蔽した HTTP クライアント。
+
+| Atom | Description | Status |
+|---|---|---|
+| `http.get(url)` | HTTP GET リクエスト | ❌ Planned |
+| `http.post(url, body)` | HTTP POST リクエスト | ❌ Planned |
+| `http.status(response)` | ステータスコード取得 | ❌ Planned |
+| `http.body(response)` | レスポンスボディ取得 | ❌ Planned |
+
+---
+
 ## Path Resolution
 
 The resolver searches for `std/` imports in order:

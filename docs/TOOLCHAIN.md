@@ -178,11 +178,32 @@ Inspects all tools with multi-path std library search (cwd → exe dir → `MUME
 
 ## Future Roadmap
 
-### Priority: Language Feature Enrichment
+> 詳細: [`docs/ROADMAP.md`](ROADMAP.md)
 
-- [ ] **`std.http`**: HTTP client via Rust `reqwest` FFI + concurrent requests with `task_group`
-- [ ] **Task Refinement**: return type inference, result binding syntax, task cancellation, channel type (`chan<T>`)
-- [ ] **FFI Bridge Completion**: `extern` declaration → auto-register as `trusted atom` → `std.http` backend
+### 🥇 Priority 1: Network-First Standard Library
+
+| Phase | Item | Description | Status |
+|---|---|---|---|
+| P1-A | **FFI Bridge Completion** | `extern` → `trusted atom` auto-registration in ModuleEnv | ❌ Planned |
+| P1-B | **`std.json`** | `json.parse` / `json.stringify` / `json.get_*` (serde_json backend) | ❌ Planned |
+| P1-C | **`std.http`** | `http.get(url)` / `http.post(url, body)` (reqwest FFI backend) | ❌ Planned |
+| P1-D | **Integration Demo** | `task_group:all` + concurrent HTTP + JSON example | ❌ Planned |
+
+### 🥈 Priority 2: Runtime Portability
+
+| Phase | Item | Description | Status |
+|---|---|---|---|
+| P2-A | **Static Linking** | musl target for fully static Linux binaries + Windows support | ❌ Planned |
+| P2-B | **Homebrew Tap** | `brew install mumei-lang/mumei` one-command install | ❌ Planned |
+| P2-C | **WebInstall** | `curl -fsSL https://mumei-lang.github.io/install.sh \| sh` | ❌ Planned |
+
+### 🥉 Priority 3: CLI Developer Experience
+
+| Phase | Item | Description | Status |
+|---|---|---|---|
+| P3-A | **`mumei repl`** | Interactive REPL (parse → verify → eval loop) | ❌ Planned |
+| P3-B | **`mumei doc`** | rustdoc-style HTML doc generation from `///` comments | ❌ Planned |
+| P3-C | **REPL + HTTP** | Try HTTP requests interactively in REPL | ❌ Planned |
 
 ### Deferred: Tooling
 
@@ -193,3 +214,4 @@ Inspects all tools with multi-path std library search (cwd → exe dir → `MUME
 - [ ] Rich Diagnostics (miette/ariadne)
 - [ ] `mumei inspect --ai` (structured JSON output for AI agents)
 - [ ] Z3 proof certificates in published packages
+- [ ] Task Refinement: return type inference, result binding, cancellation, channel type (`chan<T>`)

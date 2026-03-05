@@ -148,17 +148,21 @@ Mumei caches verification results per-atom in `.mumei_build_cache`:
 | Document | Purpose |
 | --- | --- |
 | `README.md` | Language overview, features, quickstart |
+| `docs/ROADMAP.md` | **Strategic roadmap v0.3.0+** — 3 priorities, phases, dependencies, timeline |
 | `docs/ARCHITECTURE.md` | Compiler internals, pipeline, ModuleEnv, LinearityCtx |
-| `docs/STDLIB.md` | Standard library reference (all modules + atoms) |
-| `docs/CHANGELOG.md` | PR #16 change history |
+| `docs/STDLIB.md` | Standard library reference (all modules + atoms + planned std.json/std.http) |
+| `docs/CHANGELOG.md` | Change history (PR #16, PR #31) |
 | `docs/DIAGNOSTICS.md` | Span-based diagnostics design and implementation status |
-| `docs/FFI.md` | FFI extern block design and implementation status |
-| `docs/CONCURRENCY.md` | Structured concurrency (task/task_group) design and implementation status |
+| `docs/FFI.md` | FFI extern block design, implementation status, and bridge completion plan |
+| `docs/CONCURRENCY.md` | Structured concurrency (task/task_group) design, implementation status, and std.http integration plan |
+| `docs/TOOLCHAIN.md` | CLI commands, distribution, and future roadmap (3 priorities) |
 | `instruction.md` | This file — forging guidelines, development phase, coding conventions |
 
 ---
 
-## 11. Current Development Phase: Language Feature Enrichment
+## 11. Current Development Phase: Strategic Roadmap v0.3.0+
+
+> 詳細: [`docs/ROADMAP.md`](docs/ROADMAP.md)
 
 ### LSP Status: Frozen
 
@@ -175,31 +179,37 @@ The LSP server (`mumei lsp`) has the following features implemented and is **con
 - Counter-example highlighting in editors
 - VS Code Marketplace publishing
 
-Rationale: We are shifting focus from editor tooling to **language feature enrichment**.
+Rationale: We are shifting focus from editor tooling to **strategic language evolution**.
 
-### Next Steps: Strengthening Mumei's Identity
+### Strategic Vision: From Experimental to Practical
 
 Mumei's differentiators:
 - **Rust-level safety** (Z3 formal verification) combined with
 - **Go-level simplicity** for concurrent programming
 
-#### Priority 1: `std.http` Implementation
+Three strategic priorities to transform Mumei from an experimental language into a practical tool:
 
-Build a demo showing "network communication is this simple in Mumei."
+#### 🥇 Priority 1: Network-First Standard Library (std.http + std.json)
 
-**Design approach:**
-- Hide Rust's `reqwest` crate behind FFI (`extern "Rust"`)
-- Design a clean, Mumei-idiomatic API interface
-- Demonstrate concurrent HTTP requests using `task` / `task_group`
+**Goal**: Build a compelling demo: "API scripting is this simple and safe in Mumei."
+
+**Phases**:
+1. **P1-A: FFI Bridge Completion** — extern → trusted atom auto-registration in ModuleEnv (prerequisite for all FFI-backed stdlib)
+2. **P1-B: std.json** — `json.parse(str)` / `json.stringify(obj)` / `json.get_string()` / `json.get_int()` (serde_json backend)
+3. **P1-C: std.http** — `http.get(url)` / `http.post(url, body)` → Response (reqwest FFI backend)
+4. **P1-D: Integration Demo** — `task_group:all` + concurrent HTTP requests example
 
 **Target API:**
 ```mumei
-import "std/http";
+import "std/http" as http;
+import "std/json" as json;
 
-// Simple GET
+// Simple GET — extreme simplicity
 let response = await http.get("https://api.example.com/users");
+let data = json.parse(http.body(response));
+let name = json.get_string(data, "name");
 
-// Concurrent requests
+// Concurrent requests — Mumei's killer feature
 task_group:all {
     task { http.get("https://api.example.com/users") };
     task { http.get("https://api.example.com/orders") };
@@ -207,7 +217,25 @@ task_group:all {
 }
 ```
 
-#### Priority 2: Task (Concurrency) Refinement
+#### 🥈 Priority 2: Runtime Portability
+
+**Goal**: "Install in 30 seconds, run anywhere."
+
+**Phases**:
+1. **P2-A: Static Linking** — musl target for fully static Linux binaries + Windows support
+2. **P2-B: Homebrew Tap** — `brew install mumei-lang/mumei`
+3. **P2-C: WebInstall** — `curl -fsSL https://mumei-lang.github.io/install.sh | sh`
+
+#### 🥉 Priority 3: CLI Developer Experience
+
+**Goal**: "Best-in-class CLI development experience, no IDE required."
+
+**Phases**:
+1. **P3-A: mumei repl** — Interactive REPL with incremental definition, verification feedback
+2. **P3-B: mumei doc** — rustdoc-style HTML documentation generation from `///` comments
+3. **P3-C: REPL + HTTP Integration** — Try HTTP requests interactively in REPL
+
+#### Task (Concurrency) Refinement (embedded in P1-D)
 
 Improve the practicality of `task` / `task_group` introduced in PR-C.
 
@@ -216,11 +244,6 @@ Improve the practicality of `task` / `task_group` introduced in PR-C.
 - Syntax for binding `task_group` results to variables
 - Task cancellation semantics design
 - Channel type (`chan<T>`) design
-
-#### Priority 3: FFI Bridge Completion
-
-Auto-register functions declared in `extern "Rust" { fn ...; }` as `trusted atom` in ModuleEnv.
-This enables the FFI backend for `std.http`.
 
 ---
 

@@ -346,8 +346,11 @@ my_app/
 - [x] **Structured Concurrency (parser + Z3)**: `task { ... }` / `task_group { ... }` / `task_group:all` / `task_group:any` 構文、シンボリック Z3 join 制約、AST walker 全対応、多言語トランスパイル対応 → [`docs/CONCURRENCY.md`](docs/CONCURRENCY.md)
 - [ ] **Structured Concurrency (runtime)**: ランタイムスケジューラ、タスクキャンセル、チャネル型（未実装）
 - [ ] **`std.http`**: Rust `reqwest` を FFI で隠蔽した HTTP クライアント、`task_group` との並行リクエスト統合
+- [ ] **`std.json`**: 文字列とオブジェクトの相互変換、serde_json バックエンド、型安全な JSON 操作
 - [ ] **Task 洗練**: 戻り値型推論、`task_group` 結果バインド、チャネル型 (`chan<T>`)
 - [ ] Rich Diagnostics: miette/ariadne ライブラリによるカラー表示・下線・サジェスト
+- [ ] **Runtime Portability**: musl 静的リンク、Homebrew Tap、WebInstall (`curl | sh`)
+- [ ] **`mumei repl`**: 対話的実行環境（parse → verify → eval ループ）
+- [ ] **`mumei doc`**: ソースコメントから HTML ドキュメント自動生成（rustdoc 風）
 
-> 📖 **Toolchain roadmap**: [`docs/TOOLCHAIN.md`](docs/TOOLCHAIN.md) | **Development instructions**: [`instruction.md`](instruction.md)
-
+> 📖 **Strategic roadmap**: [`docs/ROADMAP.md`](docs/ROADMAP.md) | **Toolchain**: [`docs/TOOLCHAIN.md`](docs/TOOLCHAIN.md) | **Development instructions**: [`instruction.md`](instruction.md)
