@@ -15,11 +15,11 @@
 //! キャッシュファイル (.mumei_cache) にはソースハッシュと検証結果を永続化し、
 //! ソースが変更されていなければ再パース・再検証をスキップする。
 
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use sha2::{Sha256, Digest};
-use serde::{Serialize, Deserialize};
 
 use crate::parser::{self, Item};
 use crate::verification::{ModuleEnv, MumeiError, MumeiResult};
@@ -66,7 +66,11 @@ impl ResolverContext {
 /// items 内の Import 宣言を処理し、依存モジュールの定義を ModuleEnv に登録する。
 /// base_dir はインポート元ファイルの親ディレクトリ。
 /// キャッシュファイルが存在し、ソースハッシュが一致する場合は再パースをスキップする。
-pub fn resolve_imports(items: &[Item], base_dir: &Path, module_env: &mut ModuleEnv) -> MumeiResult<()> {
+pub fn resolve_imports(
+    items: &[Item],
+    base_dir: &Path,
+    module_env: &mut ModuleEnv,
+) -> MumeiResult<()> {
     let cache_path = base_dir.join(".mumei_cache");
     let mut cache = load_cache(&cache_path);
     let mut ctx = ResolverContext::new();
@@ -106,7 +110,13 @@ pub fn resolve_prelude(base_dir: &Path, module_env: &mut ModuleEnv) -> MumeiResu
     let mut cache = load_cache(&cache_path);
     let mut ctx = ResolverContext::new();
     ctx.loading.insert(prelude_path.clone());
-    resolve_imports_recursive(&prelude_items, prelude_base_dir, &mut ctx, &mut cache, module_env)?;
+    resolve_imports_recursive(
+        &prelude_items,
+        prelude_base_dir,
+        &mut ctx,
+        &mut cache,
+        module_env,
+    )?;
     save_cache(&cache_path, &cache);
 
     // prelude の定義を ModuleEnv に登録（alias なし = グローバルスコープ）
@@ -134,8 +144,9 @@ fn resolve_imports_recursive(
             let resolved_path = resolve_path(&import_decl.path, base_dir)?;
             // 循環参照チェック
             if ctx.loading.contains(&resolved_path) {
-                return Err(MumeiError::VerificationError(
-                    format!("Circular import detected: '{}'", resolved_path.display())
+                return Err(MumeiError::verification_at(
+                    format!("Circular import detected: '{}'", resolved_path.display()),
+                    import_decl.span.clone(),
                 ));
             }
             // 既にロード済みならスキップ
@@ -146,8 +157,12 @@ fn resolve_imports_recursive(
             ctx.loading.insert(resolved_path.clone());
             // ファイルを読み込みパース
             let source = fs::read_to_string(&resolved_path).map_err(|e| {
-                MumeiError::VerificationError(
-                    format!("Failed to read imported module '{}': {}", import_decl.path, e)
+                MumeiError::verification_at(
+                    format!(
+                        "Failed to read imported module '{}': {}",
+                        import_decl.path, e
+                    ),
+                    import_decl.span.clone(),
                 )
             })?;
 
@@ -189,22 +204,26 @@ fn resolve_imports_recursive(
                     }
                     Item::TypeDef(t) => type_names.push(t.name.clone()),
                     Item::StructDef(s) => struct_names.push(s.name.clone()),
-                    Item::EnumDef(_) => {},
-                    Item::TraitDef(_) => {},
-                    Item::ImplDef(_) => {},
-                    Item::ResourceDef(_) => {},
-                    Item::Import(_) => {},
+                    Item::EnumDef(_) => {}
+                    Item::TraitDef(_) => {}
+                    Item::ImplDef(_) => {}
+                    Item::ResourceDef(_) => {}
+                    Item::Import(_) => {}
+                    Item::ExternBlock(_) => {}
                 }
             }
 
             // キャッシュを更新
-            cache.entries.insert(path_key, CacheEntry {
-                source_hash,
-                verified_atoms,
-                type_names,
-                struct_names,
-                atom_hashes: HashMap::new(),
-            });
+            cache.entries.insert(
+                path_key,
+                CacheEntry {
+                    source_hash,
+                    verified_atoms,
+                    type_names,
+                    struct_names,
+                    atom_hashes: HashMap::new(),
+                },
+            );
 
             // ロード完了
             ctx.loading.remove(&resolved_path);
@@ -267,6 +286,47 @@ fn register_imported_items(items: &[Item], alias: Option<&str>, module_env: &mut
             }
             Item::Import(_) => {
                 // 再帰的に処理済み
+            }
+            Item::ExternBlock(extern_block) => {
+                // ExternBlock 内の関数を trusted atom として ModuleEnv に登録
+                for ext_fn in &extern_block.functions {
+                    let params: Vec<crate::parser::Param> = ext_fn
+                        .param_types
+                        .iter()
+                        .enumerate()
+                        .map(|(i, ty)| crate::parser::Param {
+                            name: format!("arg{}", i),
+                            type_name: Some(ty.clone()),
+                            type_ref: Some(crate::parser::parse_type_ref(ty)),
+                            is_ref: false,
+                            is_ref_mut: false,
+                        })
+                        .collect();
+
+                    let atom = crate::parser::Atom {
+                        name: ext_fn.name.clone(),
+                        type_params: vec![],
+                        where_bounds: vec![],
+                        params,
+                        requires: "true".to_string(),
+                        forall_constraints: vec![],
+                        ensures: "true".to_string(),
+                        body_expr: String::new(),
+                        consumed_params: vec![],
+                        resources: vec![],
+                        is_async: false,
+                        trust_level: crate::parser::TrustLevel::Trusted,
+                        max_unroll: None,
+                        invariant: None,
+                        span: ext_fn.span.clone(),
+                    };
+                    module_env.register_atom(&atom);
+                    if let Some(prefix) = alias {
+                        let mut fqn_atom = atom.clone();
+                        fqn_atom.name = format!("{}::{}", prefix, ext_fn.name);
+                        module_env.register_atom(&fqn_atom);
+                    }
+                }
             }
         }
     }
@@ -334,7 +394,8 @@ fn resolve_path(import_path: &str, base_dir: &Path) -> MumeiResult<PathBuf> {
     if let Ok(std_path) = std::env::var("MUMEI_STD_PATH") {
         let std_base = Path::new(&std_path);
         // "std/option" → std_base/option.mm として解決
-        let relative = import_str.strip_prefix("std/")
+        let relative = import_str
+            .strip_prefix("std/")
             .or_else(|| import_str.strip_prefix("std\\"))
             .unwrap_or(import_str);
         let mut rel_path = PathBuf::from(relative);
@@ -348,7 +409,7 @@ fn resolve_path(import_path: &str, base_dir: &Path) -> MumeiResult<PathBuf> {
     }
 
     // すべて失敗した場合はエラー
-    Err(MumeiError::VerificationError(
+    Err(MumeiError::verification(
         format!(
             "Cannot resolve import path '{}'\n  Searched:\n    - {}\n    - compiler binary directory\n    - current working directory\n    - MUMEI_STD_PATH environment variable",
             import_path,
@@ -383,9 +444,11 @@ pub fn resolve_manifest_dependencies(
             let entry = entry_candidates.iter().find(|p| p.exists());
             if let Some(entry_path) = entry {
                 let source = fs::read_to_string(entry_path).map_err(|e| {
-                    MumeiError::VerificationError(format!(
+                    MumeiError::verification(format!(
                         "Failed to read dependency '{}' at '{}': {}",
-                        dep_name, entry_path.display(), e
+                        dep_name,
+                        entry_path.display(),
+                        e
                     ))
                 })?;
                 let items = parser::parse_module(&source);
@@ -403,9 +466,17 @@ pub fn resolve_manifest_dependencies(
                         module_env.mark_verified(&fqn);
                     }
                 }
-                println!("  📦 Dependency '{}': loaded from {}", dep_name, entry_path.display());
+                println!(
+                    "  📦 Dependency '{}': loaded from {}",
+                    dep_name,
+                    entry_path.display()
+                );
             } else {
-                eprintln!("  ⚠️  Dependency '{}': no entry file found in '{}'", dep_name, abs_path.display());
+                eprintln!(
+                    "  ⚠️  Dependency '{}': no entry file found in '{}'",
+                    dep_name,
+                    abs_path.display()
+                );
             }
         }
         // Git 依存（git フィールドがある場合は registry より優先）
@@ -417,9 +488,19 @@ pub fn resolve_manifest_dependencies(
             if !clone_dir.exists() {
                 // git clone
                 let ref_arg = if let Some(t) = tag {
-                    vec!["--branch".to_string(), t.to_string(), "--depth".to_string(), "1".to_string()]
+                    vec![
+                        "--branch".to_string(),
+                        t.to_string(),
+                        "--depth".to_string(),
+                        "1".to_string(),
+                    ]
                 } else if let Some(b) = branch {
-                    vec!["--branch".to_string(), b.to_string(), "--depth".to_string(), "1".to_string()]
+                    vec![
+                        "--branch".to_string(),
+                        b.to_string(),
+                        "--depth".to_string(),
+                        "1".to_string(),
+                    ]
                 } else {
                     vec!["--depth".to_string(), "1".to_string()]
                 };
@@ -432,11 +513,17 @@ pub fn resolve_manifest_dependencies(
                 let status = std::process::Command::new("git")
                     .args(&cmd_args)
                     .status()
-                    .map_err(|e| MumeiError::VerificationError(format!("git clone failed for '{}': {}", dep_name, e)))?;
+                    .map_err(|e| {
+                        MumeiError::verification(format!(
+                            "git clone failed for '{}': {}",
+                            dep_name, e
+                        ))
+                    })?;
 
                 if !status.success() {
-                    return Err(MumeiError::VerificationError(format!(
-                        "git clone failed for dependency '{}' ({})", dep_name, url
+                    return Err(MumeiError::verification(format!(
+                        "git clone failed for dependency '{}' ({})",
+                        dep_name, url
                     )));
                 }
 
@@ -461,9 +548,11 @@ pub fn resolve_manifest_dependencies(
             ];
             if let Some(entry_path) = entry_candidates.iter().find(|p| p.exists()) {
                 let source = fs::read_to_string(entry_path).map_err(|e| {
-                    MumeiError::VerificationError(format!(
+                    MumeiError::verification(format!(
                         "Failed to read dependency '{}' at '{}': {}",
-                        dep_name, entry_path.display(), e
+                        dep_name,
+                        entry_path.display(),
+                        e
                     ))
                 })?;
                 let items = parser::parse_module(&source);
@@ -482,11 +571,15 @@ pub fn resolve_manifest_dependencies(
                     }
                 }
             } else {
-                eprintln!("  ⚠️  Dependency '{}': no entry file found in cloned repo", dep_name);
+                eprintln!(
+                    "  ⚠️  Dependency '{}': no entry file found in cloned repo",
+                    dep_name
+                );
             }
         }
         // 名前依存（registry.json から解決 — path でも git でもない場合）
-        else if dep.version().is_some() || matches!(dep, crate::manifest::Dependency::Version(_)) {
+        else if dep.version().is_some() || matches!(dep, crate::manifest::Dependency::Version(_))
+        {
             let version = dep.version();
             if let Some(pkg_dir) = crate::registry::resolve(dep_name, version) {
                 let entry_candidates: Vec<PathBuf> = vec![
@@ -496,9 +589,11 @@ pub fn resolve_manifest_dependencies(
                 ];
                 if let Some(entry_path) = entry_candidates.iter().find(|p| p.exists()) {
                     let source = fs::read_to_string(entry_path).map_err(|e| {
-                        MumeiError::VerificationError(format!(
+                        MumeiError::verification(format!(
                             "Failed to read dependency '{}' at '{}': {}",
-                            dep_name, entry_path.display(), e
+                            dep_name,
+                            entry_path.display(),
+                            e
                         ))
                     })?;
                     let items = parser::parse_module(&source);
@@ -506,7 +601,13 @@ pub fn resolve_manifest_dependencies(
                     let cache_path = dep_base_dir.join(".mumei_cache");
                     let mut cache = load_cache(&cache_path);
                     let mut ctx = ResolverContext::new();
-                    resolve_imports_recursive(&items, dep_base_dir, &mut ctx, &mut cache, module_env)?;
+                    resolve_imports_recursive(
+                        &items,
+                        dep_base_dir,
+                        &mut ctx,
+                        &mut cache,
+                        module_env,
+                    )?;
                     save_cache(&cache_path, &cache);
                     register_imported_items(&items, Some(dep_name), module_env);
                     for item in &items {
@@ -516,9 +617,17 @@ pub fn resolve_manifest_dependencies(
                             module_env.mark_verified(&fqn);
                         }
                     }
-                    println!("  📦 Dependency '{}': loaded from registry ({})", dep_name, pkg_dir.display());
+                    println!(
+                        "  📦 Dependency '{}': loaded from registry ({})",
+                        dep_name,
+                        pkg_dir.display()
+                    );
                 } else {
-                    eprintln!("  ⚠️  Dependency '{}': found in registry but no entry file in '{}'", dep_name, pkg_dir.display());
+                    eprintln!(
+                        "  ⚠️  Dependency '{}': found in registry but no entry file in '{}'",
+                        dep_name,
+                        pkg_dir.display()
+                    );
                 }
             } else {
                 eprintln!("  ⚠️  Dependency '{}': not found in local registry. Run `mumei publish` in the dependency project first.", dep_name);
@@ -634,5 +743,157 @@ fn load_cache(cache_path: &Path) -> VerificationCache {
 fn save_cache(cache_path: &Path, cache: &VerificationCache) {
     if let Ok(json) = serde_json::to_string_pretty(cache) {
         let _ = fs::write(cache_path, json);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::{self, TrustLevel};
+
+    /// P1-A: ExternBlock → trusted atom 自動登録テスト
+    #[test]
+    fn test_register_extern_block_as_trusted_atoms() {
+        let source = r#"
+extern "Rust" {
+    fn json_parse(input: String) -> String;
+    fn json_stringify(obj: String) -> String;
+}
+"#;
+        let items = parser::parse_module(source);
+        let mut module_env = ModuleEnv::new();
+
+        register_imported_items(&items, None, &mut module_env);
+
+        // extern 関数が trusted atom として登録されていること
+        let json_parse = module_env.get_atom("json_parse");
+        assert!(
+            json_parse.is_some(),
+            "json_parse should be registered as atom"
+        );
+        let atom = json_parse.unwrap();
+        assert_eq!(atom.trust_level, TrustLevel::Trusted);
+        assert_eq!(atom.params.len(), 1);
+        assert_eq!(atom.params[0].type_name, Some("String".to_string()));
+
+        let json_stringify = module_env.get_atom("json_stringify");
+        assert!(
+            json_stringify.is_some(),
+            "json_stringify should be registered as atom"
+        );
+        assert_eq!(json_stringify.unwrap().trust_level, TrustLevel::Trusted);
+    }
+
+    /// P1-A: ExternBlock with alias → FQN 登録テスト
+    #[test]
+    fn test_register_extern_block_with_alias() {
+        let source = r#"
+extern "Rust" {
+    fn http_get(url: String) -> String;
+}
+"#;
+        let items = parser::parse_module(source);
+        let mut module_env = ModuleEnv::new();
+
+        register_imported_items(&items, Some("http"), &mut module_env);
+
+        // 基本名でも FQN でもアクセスできること
+        assert!(
+            module_env.get_atom("http_get").is_some(),
+            "base name should be registered"
+        );
+        assert!(
+            module_env.get_atom("http::http_get").is_some(),
+            "FQN should be registered"
+        );
+
+        // FQN 版も trusted であること
+        let fqn_atom = module_env.get_atom("http::http_get").unwrap();
+        assert_eq!(fqn_atom.trust_level, TrustLevel::Trusted);
+    }
+
+    /// P1-A: ExternBlock の複数パラメータテスト
+    #[test]
+    fn test_extern_block_multi_param() {
+        let source = r#"
+extern "Rust" {
+    fn http_post(url: String, body: String) -> String;
+}
+"#;
+        let items = parser::parse_module(source);
+        let mut module_env = ModuleEnv::new();
+
+        register_imported_items(&items, None, &mut module_env);
+
+        let atom = module_env.get_atom("http_post").unwrap();
+        assert_eq!(atom.params.len(), 2);
+        assert_eq!(atom.params[0].name, "arg0");
+        assert_eq!(atom.params[0].type_name, Some("String".to_string()));
+        assert_eq!(atom.params[1].name, "arg1");
+        assert_eq!(atom.params[1].type_name, Some("String".to_string()));
+        assert_eq!(atom.requires, "true");
+        assert_eq!(atom.ensures, "true");
+        assert!(atom.body_expr.is_empty());
+    }
+
+    /// P1-A: C 言語 ExternBlock テスト
+    #[test]
+    fn test_register_extern_block_c_language() {
+        let source = r#"
+extern "C" {
+    fn printf(fmt: i64) -> i64;
+}
+"#;
+        let items = parser::parse_module(source);
+        let mut module_env = ModuleEnv::new();
+
+        register_imported_items(&items, None, &mut module_env);
+
+        let atom = module_env.get_atom("printf");
+        assert!(atom.is_some(), "C extern function should be registered");
+        assert_eq!(atom.unwrap().trust_level, TrustLevel::Trusted);
+    }
+
+    /// P1-A: 通常 atom + ExternBlock 混合テスト
+    #[test]
+    fn test_register_mixed_items_with_extern() {
+        let source = r#"
+atom add(x: i64, y: i64) -> i64
+  requires: true;
+  ensures: result == x + y;
+  body: x + y;
+
+extern "Rust" {
+    fn ffi_helper(n: i64) -> i64;
+}
+"#;
+        let items = parser::parse_module(source);
+        let mut module_env = ModuleEnv::new();
+
+        register_imported_items(&items, None, &mut module_env);
+
+        // 通常 atom が登録されていること
+        let add = module_env.get_atom("add");
+        assert!(add.is_some(), "regular atom should be registered");
+        assert_eq!(add.unwrap().trust_level, TrustLevel::Verified);
+
+        // extern atom が trusted で登録されていること
+        let ffi = module_env.get_atom("ffi_helper");
+        assert!(ffi.is_some(), "extern atom should be registered");
+        assert_eq!(ffi.unwrap().trust_level, TrustLevel::Trusted);
+    }
+
+    /// compute_hash のテスト
+    #[test]
+    fn test_compute_hash_deterministic() {
+        let hash1 = compute_hash("hello world");
+        let hash2 = compute_hash("hello world");
+        assert_eq!(hash1, hash2, "same input should produce same hash");
+
+        let hash3 = compute_hash("different");
+        assert_ne!(
+            hash1, hash3,
+            "different input should produce different hash"
+        );
     }
 }

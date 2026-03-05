@@ -34,9 +34,13 @@ Only atoms that pass formal verification are compiled to LLVM IR and transpiled 
 - **BoundedArray** — push/pop with overflow/underflow prevention, sorted operations
 - **Dynamic Memory** — `Vector<T>`, `HashMap<K, V>` with field constraints
 
+### FFI & Concurrency
+- **FFI extern blocks** — `extern "Rust" { fn sqrt(x: f64) -> f64; }` with Span tracking
+- **Structured Concurrency** — `task { ... }` / `task_group:all { ... }` / `task_group:any { ... }` with Z3 join constraints
+
 ### Output
-- **Multi-target Transpiler** — Rust + Go + TypeScript
-- **LLVM IR Codegen** — Pattern Matrix, StructType, malloc/free
+- **Multi-target Transpiler** — Rust + Go + TypeScript (including Task/TaskGroup)
+- **LLVM IR Codegen** — Pattern Matrix, StructType, malloc/free, Task/TaskGroup
 
 ---
 
@@ -199,8 +203,8 @@ my_app/
 ```
 ├── src/
 │   ├── main.rs            # CLI orchestrator (build/verify/check/init/add/publish/setup/inspect/lsp)
-│   ├── parser.rs          # AST, tokenizer, parser
-│   ├── ast.rs             # TypeRef, Monomorphizer
+│   ├── parser.rs          # AST (Span, Expr, Task/TaskGroup, ExternBlock), tokenizer, parser
+│   ├── ast.rs             # TypeRef, Monomorphizer (Task/TaskGroup traversal)
 │   ├── resolver.rs        # Import resolution, dependency resolution, circular detection
 │   ├── verification.rs    # Z3 verification, ModuleEnv, forall/exists
 │   ├── codegen.rs         # LLVM IR generation
@@ -336,6 +340,17 @@ my_app/
 - [ ] Remote package registry: Central registry for `mumei add <name>` without git URL
 - [ ] VS Code Marketplace publishing: Package and publish `editors/vscode/` as installable extension
 - [ ] LSP enhancements: `textDocument/completion` (keyword/atom name), `textDocument/definition` (jump to definition), counter-example highlighting
+- [x] **Diagnostics-Driven Design**: `Span` (file/line/col/len) を全 AST ノードに付与、`ErrorDetail` + `MumeiError` に Span 統合、LSP diagnostics に位置情報反映 → [`docs/DIAGNOSTICS.md`](docs/DIAGNOSTICS.md)
+- [x] **FFI extern syntax**: `extern "Rust" { fn sqrt(x: f64) -> f64; }` 構文のパース、`ExternFn`/`ExternBlock` AST + Span 付き → [`docs/FFI.md`](docs/FFI.md)
+- [ ] **FFI Bridge (trusted atom 自動登録)**: extern 宣言から `trusted atom` への自動変換、Rust クレート直接参照（未実装）
+- [x] **Structured Concurrency (parser + Z3)**: `task { ... }` / `task_group { ... }` / `task_group:all` / `task_group:any` 構文、シンボリック Z3 join 制約、AST walker 全対応、多言語トランスパイル対応 → [`docs/CONCURRENCY.md`](docs/CONCURRENCY.md)
+- [ ] **Structured Concurrency (runtime)**: ランタイムスケジューラ、タスクキャンセル、チャネル型（未実装）
+- [ ] **`std.http`**: Rust `reqwest` を FFI で隠蔽した HTTP クライアント、`task_group` との並行リクエスト統合
+- [ ] **`std.json`**: 文字列とオブジェクトの相互変換、serde_json バックエンド、型安全な JSON 操作
+- [ ] **Task 洗練**: 戻り値型推論、`task_group` 結果バインド、チャネル型 (`chan<T>`)
+- [ ] Rich Diagnostics: miette/ariadne ライブラリによるカラー表示・下線・サジェスト
+- [ ] **Runtime Portability**: musl 静的リンク、Homebrew Tap、WebInstall (`curl | sh`)
+- [ ] **`mumei repl`**: 対話的実行環境（parse → verify → eval ループ）
+- [ ] **`mumei doc`**: ソースコメントから HTML ドキュメント自動生成（rustdoc 風）
 
-> 📖 **Toolchain roadmap**: [`docs/TOOLCHAIN.md`](docs/TOOLCHAIN.md)
-
+> 📖 **Strategic roadmap**: [`docs/ROADMAP.md`](docs/ROADMAP.md) | **Toolchain**: [`docs/TOOLCHAIN.md`](docs/TOOLCHAIN.md) | **Development instructions**: [`instruction.md`](instruction.md)

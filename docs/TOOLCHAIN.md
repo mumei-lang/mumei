@@ -121,15 +121,18 @@ npm run compile
 # Then "Run Extension" from VS Code (F5)
 ```
 
-### LSP Features
+### LSP Features (Frozen — not actively developed)
+
+> LSP is considered complete for the current phase. Focus is shifting to language feature enrichment.
+> See [`instruction.md`](../instruction.md) §11 for details.
 
 | Feature | Status |
 |---|---|
 | `textDocument/didOpen` / `didChange` | ✅ Parse error diagnostics |
 | `textDocument/hover` | ✅ Atom contract display (requires/ensures) |
-| Z3 verification diagnostics | ✅ Errors shown as diagnostics |
-| `textDocument/completion` | 🔜 Planned |
-| `textDocument/definition` | 🔜 Planned |
+| Z3 verification diagnostics | ✅ Errors shown as diagnostics (with Span) |
+| `textDocument/completion` | ⏸ Deferred |
+| `textDocument/definition` | ⏸ Deferred |
 
 ---
 
@@ -175,9 +178,40 @@ Inspects all tools with multi-path std library search (cwd → exe dir → `MUME
 
 ## Future Roadmap
 
+> 詳細: [`docs/ROADMAP.md`](ROADMAP.md)
+
+### 🥇 Priority 1: Network-First Standard Library
+
+| Phase | Item | Description | Status |
+|---|---|---|---|
+| P1-A | **FFI Bridge Completion** | `extern` → `trusted atom` auto-registration in ModuleEnv | ❌ Planned |
+| P1-B | **`std.json`** | `json.parse` / `json.stringify` / `json.get_*` (serde_json backend) | ❌ Planned |
+| P1-C | **`std.http`** | `http.get(url)` / `http.post(url, body)` (reqwest FFI backend) | ❌ Planned |
+| P1-D | **Integration Demo** | `task_group:all` + concurrent HTTP + JSON example | ❌ Planned |
+
+### 🥈 Priority 2: Runtime Portability
+
+| Phase | Item | Description | Status |
+|---|---|---|---|
+| P2-A | **Static Linking** | musl target for fully static Linux binaries + Windows support | ❌ Planned |
+| P2-B | **Homebrew Tap** | `brew install mumei-lang/mumei` one-command install | ❌ Planned |
+| P2-C | **WebInstall** | `curl -fsSL https://mumei-lang.github.io/install.sh \| sh` | ❌ Planned |
+
+### 🥉 Priority 3: CLI Developer Experience
+
+| Phase | Item | Description | Status |
+|---|---|---|---|
+| P3-A | **`mumei repl`** | Interactive REPL (parse → verify → eval loop) | ❌ Planned |
+| P3-B | **`mumei doc`** | rustdoc-style HTML doc generation from `///` comments | ❌ Planned |
+| P3-C | **REPL + HTTP** | Try HTTP requests interactively in REPL | ❌ Planned |
+
+### Deferred: Tooling
+
 - [ ] Remote package registry (central server for `mumei add <name>`)
 - [ ] VS Code Marketplace publishing
-- [ ] LSP completion + definition jump
-- [ ] Counter-example highlighting in editors
+- [ ] LSP completion + definition jump (⏸ Deferred)
+- [ ] Counter-example highlighting in editors (⏸ Deferred)
+- [ ] Rich Diagnostics (miette/ariadne)
 - [ ] `mumei inspect --ai` (structured JSON output for AI agents)
 - [ ] Z3 proof certificates in published packages
+- [ ] Task Refinement: return type inference, result binding, cancellation, channel type (`chan<T>`)

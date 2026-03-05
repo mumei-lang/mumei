@@ -101,7 +101,11 @@ impl Default for ProofConfig {
 // デフォルト値ヘルパー
 // =============================================================================
 fn default_targets() -> Vec<String> {
-    vec!["rust".to_string(), "go".to_string(), "typescript".to_string()]
+    vec![
+        "rust".to_string(),
+        "go".to_string(),
+        "typescript".to_string(),
+    ]
 }
 fn default_true() -> bool {
     true
@@ -117,8 +121,7 @@ fn default_timeout() -> u64 {
 // =============================================================================
 /// 指定パスの mumei.toml を読み込んでパースする
 pub fn load(path: &Path) -> Result<Manifest, ManifestError> {
-    let content = fs::read_to_string(path)
-        .map_err(|e| ManifestError::Io(path.to_path_buf(), e))?;
+    let content = fs::read_to_string(path).map_err(|e| ManifestError::Io(path.to_path_buf(), e))?;
     let manifest: Manifest = toml::from_str(&content)
         .map_err(|e| ManifestError::Parse(path.to_path_buf(), e.to_string()))?;
     Ok(manifest)
@@ -162,16 +165,13 @@ impl Dependency {
         }
     }
     /// Git 依存かどうか — (url, tag, rev, branch) を返す
+    #[allow(clippy::type_complexity)]
     pub fn as_git(&self) -> Option<(&str, Option<&str>, Option<&str>, Option<&str>)> {
         match self {
-            Dependency::Detailed(d) => {
-                d.git.as_deref().map(|url| (
-                    url,
-                    d.tag.as_deref(),
-                    d.rev.as_deref(),
-                    d.branch.as_deref(),
-                ))
-            }
+            Dependency::Detailed(d) => d
+                .git
+                .as_deref()
+                .map(|url| (url, d.tag.as_deref(), d.rev.as_deref(), d.branch.as_deref())),
             _ => None,
         }
     }
@@ -195,7 +195,9 @@ impl std::fmt::Display for ManifestError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ManifestError::Io(path, e) => write!(f, "Cannot read '{}': {}", path.display(), e),
-            ManifestError::Parse(path, e) => write!(f, "Parse error in '{}': {}", path.display(), e),
+            ManifestError::Parse(path, e) => {
+                write!(f, "Parse error in '{}': {}", path.display(), e)
+            }
         }
     }
 }

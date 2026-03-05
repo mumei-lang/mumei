@@ -148,9 +148,117 @@ Mumei caches verification results per-atom in `.mumei_build_cache`:
 | Document | Purpose |
 | --- | --- |
 | `README.md` | Language overview, features, quickstart |
+| `docs/ROADMAP.md` | **Strategic roadmap v0.3.0+** — 3 priorities, phases, dependencies, timeline |
 | `docs/ARCHITECTURE.md` | Compiler internals, pipeline, ModuleEnv, LinearityCtx |
-| `docs/STDLIB.md` | Standard library reference (all modules + atoms) |
-| `docs/CHANGELOG.md` | PR #16 change history |
-| `instruction.md` | This file — forging guidelines for developers and AI agents |
+| `docs/STDLIB.md` | Standard library reference (all modules + atoms + planned std.json/std.http) |
+| `docs/CHANGELOG.md` | Change history (PR #16, PR #31) |
+| `docs/DIAGNOSTICS.md` | Span-based diagnostics design and implementation status |
+| `docs/FFI.md` | FFI extern block design, implementation status, and bridge completion plan |
+| `docs/CONCURRENCY.md` | Structured concurrency (task/task_group) design, implementation status, and std.http integration plan |
+| `docs/TOOLCHAIN.md` | CLI commands, distribution, and future roadmap (3 priorities) |
+| `instruction.md` | This file — forging guidelines, development phase, coding conventions |
+
+---
+
+## 11. Current Development Phase: Strategic Roadmap v0.3.0+
+
+> 詳細: [`docs/ROADMAP.md`](docs/ROADMAP.md)
+
+### LSP Status: Frozen
+
+The LSP server (`mumei lsp`) has the following features implemented and is **considered complete for now**:
+
+- `textDocument/didOpen` / `textDocument/didChange` → parse error diagnostics
+- `textDocument/hover` → atom requires/ensures display
+- Z3 verification error diagnostics (with Span-based position info)
+- `shutdown` / `exit` handling
+
+**Deferred items** (to be addressed when time permits):
+- `textDocument/completion` (keyword/atom name completion)
+- `textDocument/definition` (jump to definition)
+- Counter-example highlighting in editors
+- VS Code Marketplace publishing
+
+Rationale: We are shifting focus from editor tooling to **strategic language evolution**.
+
+### Strategic Vision: From Experimental to Practical
+
+Mumei's differentiators:
+- **Rust-level safety** (Z3 formal verification) combined with
+- **Go-level simplicity** for concurrent programming
+
+Three strategic priorities to transform Mumei from an experimental language into a practical tool:
+
+#### 🥇 Priority 1: Network-First Standard Library (std.http + std.json)
+
+**Goal**: Build a compelling demo: "API scripting is this simple and safe in Mumei."
+
+**Phases**:
+1. **P1-A: FFI Bridge Completion** — extern → trusted atom auto-registration in ModuleEnv (prerequisite for all FFI-backed stdlib)
+2. **P1-B: std.json** — `json.parse(str)` / `json.stringify(obj)` / `json.get_string()` / `json.get_int()` (serde_json backend)
+3. **P1-C: std.http** — `http.get(url)` / `http.post(url, body)` → Response (reqwest FFI backend)
+4. **P1-D: Integration Demo** — `task_group:all` + concurrent HTTP requests example
+
+**Target API:**
+```mumei
+import "std/http" as http;
+import "std/json" as json;
+
+// Simple GET — extreme simplicity
+let response = await http.get("https://api.example.com/users");
+let data = json.parse(http.body(response));
+let name = json.get_string(data, "name");
+
+// Concurrent requests — Mumei's killer feature
+task_group:all {
+    task { http.get("https://api.example.com/users") };
+    task { http.get("https://api.example.com/orders") };
+    task { http.get("https://api.example.com/products") }
+}
+```
+
+#### 🥈 Priority 2: Runtime Portability
+
+**Goal**: "Install in 30 seconds, run anywhere."
+
+**Phases**:
+1. **P2-A: Static Linking** — musl target for fully static Linux binaries + Windows support
+2. **P2-B: Homebrew Tap** — `brew install mumei-lang/mumei`
+3. **P2-C: WebInstall** — `curl -fsSL https://mumei-lang.github.io/install.sh | sh`
+
+#### 🥉 Priority 3: CLI Developer Experience
+
+**Goal**: "Best-in-class CLI development experience, no IDE required."
+
+**Phases**:
+1. **P3-A: mumei repl** — Interactive REPL with incremental definition, verification feedback
+2. **P3-B: mumei doc** — rustdoc-style HTML documentation generation from `///` comments
+3. **P3-C: REPL + HTTP Integration** — Try HTTP requests interactively in REPL
+
+#### Task (Concurrency) Refinement (embedded in P1-D)
+
+Improve the practicality of `task` / `task_group` introduced in PR-C.
+
+**TODO:**
+- Task return type inference
+- Syntax for binding `task_group` results to variables
+- Task cancellation semantics design
+- Channel type (`chan<T>`) design
+
+---
+
+## 12. Coding Conventions
+
+- Always run `cargo fmt` before committing.
+- When adding a new `Expr` variant, add match arms in **all** of these locations:
+  - `src/verification.rs`: `expr_to_z3`, `collect_callees`, `count_self_calls`, `collect_acquire_resources`
+  - `src/ast.rs`: `collect_from_expr`
+  - `src/codegen.rs`: `compile_expr`
+  - `src/transpiler/rust.rs`, `golang.rs`, `typescript.rs`: `format_expr_*`
+- When adding a new `Item` variant, add match arms in **all** of these locations:
+  - `src/main.rs`: `load_and_prepare`, `cmd_check`, `cmd_build`
+  - `src/resolver.rs`: `resolve_imports_recursive`, `register_imported_items`
+  - `src/lsp.rs`: `verify_source_for_lsp`
+- When using `#[allow(dead_code)]`, always add a NOTE comment explaining the reason.
 
 ---
