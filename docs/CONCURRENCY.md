@@ -1,15 +1,15 @@
 # Structured Concurrency Design Document
 
-> Mumei の構造化並行性と Z3 検証戦略
+> Mumei's structured concurrency and Z3 verification strategy.
 
-## 概要
+## Overview
 
-Mumei は **構造化並行性 (Structured Concurrency)** を採用し、
-タスクのライフサイクルを型システムと Z3 ソルバで形式的に保証します。
-親タスクが子タスクより先に終了しないことをコンパイル時に検証することで、
-ダングリングタスクやリソースリークを防止します。
+Mumei adopts **Structured Concurrency**, formally guaranteeing task lifecycle
+properties through the type system and Z3 solver.
+By verifying at compile time that parent tasks do not terminate before child tasks,
+dangling tasks and resource leaks are prevented.
 
-## 既存の非同期基盤
+## Existing Async Foundation
 
 ### async atom
 
@@ -29,63 +29,63 @@ acquire db_conn {
 }
 ```
 
-### リソース定義
+### Resource Definitions
 
 ```mumei
 resource db_conn priority: 1 mode: exclusive;
 resource cache   priority: 2 mode: shared;
 ```
 
-## Task 構文 (PR-C)
+## Task Syntax
 
-### task 式
+### task Expression
 
-子タスクを生成する。親タスクのスコープ内で実行され、
-構造化並行性により親が先に終了しないことが保証される。
+Spawns a child task. Executes within the parent task's scope,
+with structured concurrency guaranteeing the parent does not terminate first.
 
 ```mumei
 task {
-    // 子タスクの body
+    // child task body
     compute_heavy_work(data)
 }
 
-// グループ名を指定
+// specify group name
 task workers {
     process_item(item)
 }
 ```
 
-### AST 表現
+### AST Representation
 
 ```rust
 Expr::Task {
     body: Box<Expr>,
-    group: Option<String>,  // タスクグループ名（省略時はデフォルト）
+    group: Option<String>,  // task group name (default if omitted)
 }
 ```
 
-## TaskGroup 構文 (PR-C)
+## TaskGroup Syntax
 
-### task_group 式
+### task_group Expression
 
-複数の子タスクをグループ化し、Join セマンティクスに従って完了を待機する。
+Groups multiple child tasks and waits for completion according to Join semantics.
 
 ```mumei
-// 全タスクの完了を待つ（デフォルト: All）
+// Wait for all tasks to complete (default: All)
 task_group {
     task { fetch_users() };
     task { fetch_orders() };
     task { fetch_products() }
 }
 
-// 最初の完了で続行（Any）
+// Continue on first completion (Any)
 task_group:any {
     task { primary_server() };
     task { fallback_server() }
 }
 ```
 
-### AST 表現
+### AST Representation
 
 ```rust
 Expr::TaskGroup {
@@ -94,94 +94,94 @@ Expr::TaskGroup {
 }
 
 pub enum JoinSemantics {
-    All,  // 全タスクの完了を待つ（デフォルト）
-    Any,  // 最初に完了したタスクの結果を返す
+    All,  // Wait for all tasks to complete (default)
+    Any,  // Return the result of the first completed task
 }
 ```
 
-## Z3 検証戦略
+## Z3 Verification Strategy
 
-### 構造化並行性の保証
+### Structured Concurrency Guarantees
 
-Z3 ソルバにより以下の安全性プロパティをコンパイル時に検証します:
+The Z3 solver verifies the following safety properties at compile time:
 
-#### 1. 親タスク終了制約
+#### 1. Parent Task Termination Constraint
 
-**制約**: 親タスクが子タスクより先に終了しない
+**Constraint**: Parent task must not terminate before child tasks.
 
 ```
-JoinSemantics::All の場合:
+JoinSemantics::All:
   parent_done => ∀i. child_done[i]
-  （親の完了は全子タスクの完了を前提とする）
+  (parent completion requires all child tasks to complete)
 
-JoinSemantics::Any の場合:
+JoinSemantics::Any:
   parent_done => ∃i. child_done[i]
-  （親の完了は少なくとも1つの子タスク完了を前提とする）
+  (parent completion requires at least one child task to complete)
 ```
 
-#### 2. リソース保持検証 (既存)
+#### 2. Resource Hold Verification (existing)
 
-`await` ポイントでリソースを保持していないことを検証:
-
-```
-acquire ブロック内で await を呼ぶ → デッドロックリスク → エラー
-```
-
-#### 3. 所有権一貫性 (既存)
-
-`await` 前に消費済みの変数が `await` 後にアクセスされないことを検証。
-
-### 検証フロー
+Verifies that resources are not held across `await` points:
 
 ```
-1. task { body } をパース
-2. body の安全性を再帰的に Z3 で検証
-3. TaskGroup 内の各子タスクを検証
-4. Join セマンティクスに応じた終了制約を Z3 solver に assert
-5. 制約充足性チェック → 違反時はコンパイルエラー
+await inside acquire block → deadlock risk → error
 ```
 
-## 実装状況
+#### 3. Ownership Consistency (existing)
 
-| 項目 | ステータス |
+Verifies that consumed variables before `await` are not accessed after `await`.
+
+### Verification Flow
+
+```
+1. Parse task { body }
+2. Recursively verify body safety with Z3
+3. Verify each child task within TaskGroup
+4. Assert termination constraints to Z3 solver based on Join semantics
+5. Check constraint satisfaction → compile error on violation
+```
+
+## Implementation Status
+
+| Item | Status |
 |---|---|
-| `Expr::Task` / `Expr::TaskGroup` AST | ✅ 実装済み |
-| `JoinSemantics` enum (All/Any) | ✅ 実装済み |
-| `task` / `task_group` パース | ✅ 実装済み (`:all` / `:any` 対応、不正トークン検出) |
-| Z3 join 制約 (シンボリック Bool) | ✅ 実装済み (parent_done ⇒ child_done) |
-| AST walker 全対応 | ✅ 実装済み (collect_callees, count_self_calls, collect_acquire_resources, collect_from_expr) |
-| LLVM codegen | ✅ 実装済み (body を同期的にコンパイル) |
-| Rust transpile | ✅ 実装済み (tokio::spawn / tokio::join!) |
-| Go transpile | ✅ 実装済み (goroutine + channel) |
-| TypeScript transpile | ✅ 実装済み (async/Promise.all) |
-| パーサーテスト | ✅ 実装済み (6 テスト: task, task_group, :all, :any, unknown panic) |
-| ユニーク ID (Task) | ✅ 実装済み (TASK_COUNTER で env キー衝突防止) |
-| ランタイムスケジューラ | ❌ 未実装 |
-| タスクキャンセル | ❌ 未実装 |
-| チャネル型 | ❌ 未実装 |
+| `Expr::Task` / `Expr::TaskGroup` AST | ✅ Implemented |
+| `JoinSemantics` enum (All/Any) | ✅ Implemented |
+| `task` / `task_group` parsing | ✅ Implemented (`:all` / `:any` support, invalid token detection) |
+| Z3 join constraints (symbolic Bool) | ✅ Implemented (parent_done ⇒ child_done) |
+| Full AST walker support | ✅ Implemented (collect_callees, count_self_calls, collect_acquire_resources, collect_from_expr) |
+| LLVM codegen | ✅ Implemented (body compiled synchronously) |
+| Rust transpile | ✅ Implemented (tokio::spawn / tokio::join!) |
+| Go transpile | ✅ Implemented (goroutine + channel) |
+| TypeScript transpile | ✅ Implemented (async/Promise.all) |
+| Parser tests | ✅ Implemented (6 tests: task, task_group, :all, :any, unknown panic) |
+| Unique ID (Task) | ✅ Implemented (TASK_COUNTER prevents env key collision) |
+| Runtime scheduler | ❌ Not implemented |
+| Task cancellation | ❌ Not implemented |
+| Channel types | ❌ Not implemented |
 
-## 安全性保証の一覧
+## Safety Guarantees
 
-| プロパティ | 検証方法 | ステータス |
+| Property | Verification Method | Status |
 |---|---|---|
-| デッドロック防止 | リソース階層 (priority) の Z3 検証 | ✅ 実装済み |
-| await 跨ぎリソース保持 | acquire ブロック内 await 検出 | ✅ 実装済み |
-| 非同期再帰深度 | BMC 展開上限チェック | ✅ 実装済み |
-| 親タスク終了制約 | TaskGroup join semantics の Z3 検証 | ✅ 実装済み |
-| タスクキャンセル安全性 | Any セマンティクスでの残タスククリーンアップ | ❌ 将来 |
+| Deadlock prevention | Z3 verification of resource hierarchy (priority) | ✅ Implemented |
+| Resource hold across await | Detect await inside acquire block | ✅ Implemented |
+| Async recursion depth | BMC unroll limit check | ✅ Implemented |
+| Parent task termination constraint | Z3 verification of TaskGroup join semantics | ✅ Implemented |
+| Task cancellation safety | Remaining task cleanup on Any completion | ❌ Future |
 
-## 将来の拡展
+## Future Extensions
 
-> 詳細: [`docs/ROADMAP.md`](ROADMAP.md)
+> Details: [`docs/ROADMAP.md`](ROADMAP.md)
 
-### Roadmap P1-D 関連: std.http との統合
+### Roadmap P1-D: std.http Integration
 
-`task_group:all` + HTTP 並行リクエストの統合デモが P1-D で計画されています:
+Integration demo with `task_group:all` + parallel HTTP requests is planned in P1-D:
 
 ```mumei
 import "std/http" as http;
 
-// Concurrent API requests — task_group の実用例
+// Concurrent API requests — practical task_group usage
 task_group:all {
     task { http.get("https://api.example.com/users") };
     task { http.get("https://api.example.com/orders") };
@@ -189,23 +189,23 @@ task_group:all {
 }
 ```
 
-### Task 洗練 (Concurrency Refinement)
+### Concurrency Refinements
 
-1. **ランタイムスケジューラ**: プリエンプティブなタスクスケジューリング
-2. **チャネル型**: タスク間通信のための型安全チャネル (`chan<T>`)
-3. **タスクキャンセル**: `Any` 完了時の残タスクの安全なキャンセル処理
-4. **タイムアウト**: タスクグループへのタイムアウト指定
-5. **LLVM コード生成**: タスクスケジューリングコードの LLVM coroutine 変換
-6. **TaskGroup ユニーク ID**: 複数 TaskGroup の Z3 変数名衝突防止（TASK_GROUP_COUNTER）
-7. **戻り値型推論**: Task の body から戻り値型を自動推論
-8. **結果バインド構文**: `task_group` の結果を変数にバインドする構文
+1. **Runtime scheduler**: Preemptive task scheduling
+2. **Channel types**: Type-safe channels for inter-task communication (`chan<T>`)
+3. **Task cancellation**: Safe cancellation of remaining tasks on `Any` completion
+4. **Timeouts**: Timeout specification for task groups
+5. **LLVM codegen**: LLVM coroutine transformation for task scheduling code
+6. **TaskGroup unique ID**: Prevent Z3 variable name collision across multiple TaskGroups (TASK_GROUP_COUNTER)
+7. **Return type inference**: Auto-infer return type from Task body
+8. **Result binding syntax**: Syntax to bind `task_group` results to variables
 
-## 関連ファイル
+## Related Files
 
-- `src/parser.rs` — `Task`, `TaskGroup`, `JoinSemantics` 定義 + パース処理 + テスト
-- `src/verification.rs` — Z3 による構造化並行性検証 (シンボリック Bool、join 制約)
-- `src/ast.rs` — `collect_from_expr` で Task/TaskGroup 内のジェネリクス走査
-- `src/codegen.rs` — Task/TaskGroup の LLVM IR 生成 (同期コンパイル)
+- `src/parser.rs` — `Task`, `TaskGroup`, `JoinSemantics` definitions + parsing + tests
+- `src/verification.rs` — Z3 structured concurrency verification (symbolic Bool, join constraints)
+- `src/ast.rs` — `collect_from_expr` traverses generics within Task/TaskGroup
+- `src/codegen.rs` — Task/TaskGroup LLVM IR generation (synchronous compilation)
 - `src/transpiler/rust.rs` — `tokio::spawn` / `tokio::join!`
-- `src/transpiler/golang.rs` — goroutine + channel パターン
+- `src/transpiler/golang.rs` — goroutine + channel pattern
 - `src/transpiler/typescript.rs` — `async` IIFE / `Promise.all`
