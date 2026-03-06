@@ -1123,9 +1123,45 @@ pub fn parse_module(source: &str) -> Vec<Item> {
     items
 }
 
+/// ネストした括弧を考慮してパラメータリストをカンマで分割する。
+/// atom_ref(i64, i64) -> i64 のようなネストした () を正しく扱う。
+fn split_params(input: &str) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut depth = 0;
+    let mut current = String::new();
+    for c in input.chars() {
+        match c {
+            '(' => {
+                depth += 1;
+                current.push(c);
+            }
+            ')' => {
+                depth -= 1;
+                current.push(c);
+            }
+            ',' if depth == 0 => {
+                let trimmed = current.trim().to_string();
+                if !trimmed.is_empty() {
+                    result.push(trimmed);
+                }
+                current.clear();
+            }
+            _ => {
+                current.push(c);
+            }
+        }
+    }
+    let trimmed = current.trim().to_string();
+    if !trimmed.is_empty() {
+        result.push(trimmed);
+    }
+    result
+}
+
 pub fn parse_atom(source: &str) -> Atom {
-    // Generics 対応: atom name<T, U>(params) の形式もパース
-    let name_re = Regex::new(r"atom\s+(\w+)\s*(<[^>]*>)?\s*\(([^)]*)\)").unwrap();
+    // atom name を抽出（Generics 対応: atom name<T, U>(...)）
+    // パラメータリストはネストした括弧を考慮して深度追跡で抽出する
+    let name_re = Regex::new(r"atom\s+(\w+)\s*(<[^>]*>)?\s*\(").unwrap();
     let req_re = Regex::new(r"requires:\s*([^;]+);").unwrap();
     let ens_re = Regex::new(r"ensures:\s*([^;]+);").unwrap();
 
@@ -1141,8 +1177,30 @@ pub fn parse_atom(source: &str) -> Atom {
         .get(2)
         .map(|m| parse_type_params_with_bounds(m.as_str()))
         .unwrap_or_default();
-    let params: Vec<Param> = name_caps[3]
-        .split(',')
+
+    // パラメータリストの抽出: regex マッチの末尾（開き括弧の直後）から
+    // ネストした括弧を考慮して対応する閉じ括弧を探す
+    let params_start = name_caps.get(0).unwrap().end(); // "(" の直後
+    let after_open = &source[params_start..];
+    let mut depth = 1;
+    let mut params_end = 0;
+    for (i, c) in after_open.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    params_end = i;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let params_str = &after_open[..params_end];
+
+    let params: Vec<Param> = split_params(params_str)
+        .iter()
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
         .map(|s| {
@@ -2609,11 +2667,40 @@ atom apply(x: i64, f: atom_ref(i64) -> i64)
         assert_eq!(atoms[0].params.len(), 2);
         assert_eq!(atoms[0].params[0].name, "x");
         assert_eq!(atoms[0].params[1].name, "f");
-        // f の型名は "atom_ref(i64) -> i64" を含む
-        assert!(atoms[0].params[1]
-            .type_name
-            .as_ref()
-            .map_or(false, |t| t.contains("atom_ref")));
+        // f の型名は完全な "atom_ref(i64) -> i64" であること
+        assert_eq!(
+            atoms[0].params[1].type_name.as_deref(),
+            Some("atom_ref(i64) -> i64")
+        );
+        // TypeRef が正しい関数型としてパースされていること
+        let type_ref = atoms[0].params[1].type_ref.as_ref().unwrap();
+        assert!(type_ref.is_fn_type());
+        assert_eq!(type_ref.type_args.len(), 2); // 1 param + 1 return
+    }
+
+    #[test]
+    fn test_parse_atom_with_multi_param_fn_type() {
+        let source = r#"
+atom fold_two(a: i64, b: i64, f: atom_ref(i64, i64) -> i64)
+    requires: a >= 0;
+    ensures: result >= 0;
+    body: call(f, a, b);
+"#;
+        let items = parse_module(source);
+        let atoms: Vec<_> = items
+            .iter()
+            .filter_map(|i| if let Item::Atom(a) = i { Some(a) } else { None })
+            .collect();
+        assert_eq!(atoms.len(), 1);
+        assert_eq!(atoms[0].params.len(), 3);
+        assert_eq!(atoms[0].params[2].name, "f");
+        assert_eq!(
+            atoms[0].params[2].type_name.as_deref(),
+            Some("atom_ref(i64, i64) -> i64")
+        );
+        let type_ref = atoms[0].params[2].type_ref.as_ref().unwrap();
+        assert!(type_ref.is_fn_type());
+        assert_eq!(type_ref.type_args.len(), 3); // 2 params + 1 return
     }
 
     #[test]
