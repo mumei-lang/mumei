@@ -102,6 +102,8 @@ pub enum MumeiError {
         span: SourceSpan,
         #[help]
         help: Option<String>,
+        /// LSP 用: 元の parser::Span（line/col）を保持する
+        original_span: Span,
     },
     #[error("Codegen Error: {msg}")]
     #[diagnostic(code(mumei::codegen))]
@@ -113,6 +115,8 @@ pub enum MumeiError {
         span: SourceSpan,
         #[help]
         help: Option<String>,
+        /// LSP 用: 元の parser::Span（line/col）を保持する
+        original_span: Span,
     },
     #[error("Type Error: {msg}")]
     #[diagnostic(code(mumei::type_error))]
@@ -124,6 +128,8 @@ pub enum MumeiError {
         span: SourceSpan,
         #[help]
         help: Option<String>,
+        /// LSP 用: 元の parser::Span（line/col）を保持する
+        original_span: Span,
     },
 }
 
@@ -135,6 +141,7 @@ impl MumeiError {
             src: miette::NamedSource::new("<unknown>", String::new()),
             span: SourceSpan::from((0, 0)),
             help: None,
+            original_span: Span::default(),
         }
     }
     /// Span 付きで VerificationError を生成
@@ -151,6 +158,7 @@ impl MumeiError {
             ),
             span: SourceSpan::from((0, 0)),
             help: None,
+            original_span: span,
         }
     }
     /// ソースコード付きで VerificationError を生成（リッチ出力対応）
@@ -174,6 +182,7 @@ impl MumeiError {
             ),
             span: source_span,
             help,
+            original_span: span.clone(),
         }
     }
     /// Span なしで CodegenError を生成
@@ -183,6 +192,7 @@ impl MumeiError {
             src: miette::NamedSource::new("<unknown>", String::new()),
             span: SourceSpan::from((0, 0)),
             help: None,
+            original_span: Span::default(),
         }
     }
     /// ソースコード付きで CodegenError を生成（リッチ出力対応）
@@ -206,6 +216,7 @@ impl MumeiError {
             ),
             span: source_span,
             help,
+            original_span: span.clone(),
         }
     }
     /// Span なしで TypeError を生成
@@ -215,6 +226,7 @@ impl MumeiError {
             src: miette::NamedSource::new("<unknown>", String::new()),
             span: SourceSpan::from((0, 0)),
             help: None,
+            original_span: Span::default(),
         }
     }
     /// Span 付きで TypeError を生成
@@ -231,6 +243,7 @@ impl MumeiError {
             ),
             span: SourceSpan::from((0, 0)),
             help: None,
+            original_span: span,
         }
     }
     /// ソースコード付きで TypeError を生成（リッチ出力対応）
@@ -254,53 +267,87 @@ impl MumeiError {
             ),
             span: source_span,
             help,
+            original_span: span.clone(),
         }
     }
 
     /// ErrorDetail を取得する（Span 情報を保持）
     pub fn to_detail(&self) -> ErrorDetail {
         match self {
-            MumeiError::VerificationError { msg, .. } => {
-                ErrorDetail::from_message(format!("Verification Error: {}", msg))
-            }
-            MumeiError::CodegenError { msg, .. } => {
-                ErrorDetail::from_message(format!("Codegen Error: {}", msg))
-            }
-            MumeiError::TypeError { msg, .. } => {
-                ErrorDetail::from_message(format!("Type Error: {}", msg))
-            }
+            MumeiError::VerificationError {
+                msg,
+                original_span,
+                ..
+            } => ErrorDetail::with_span(
+                format!("Verification Error: {}", msg),
+                original_span.clone(),
+            ),
+            MumeiError::CodegenError {
+                msg,
+                original_span,
+                ..
+            } => ErrorDetail::with_span(
+                format!("Codegen Error: {}", msg),
+                original_span.clone(),
+            ),
+            MumeiError::TypeError {
+                msg,
+                original_span,
+                ..
+            } => ErrorDetail::with_span(
+                format!("Type Error: {}", msg),
+                original_span.clone(),
+            ),
         }
     }
 
     /// ソースコードを設定してリッチ出力を有効にする
-    pub fn with_source(self, source: &str, original_span: &Span) -> Self {
-        let source_span = span_to_source_span(source, original_span);
+    pub fn with_source(self, source: &str, src_span: &Span) -> Self {
+        let source_span = span_to_source_span(source, src_span);
         let named_src = miette::NamedSource::new(
-            if original_span.file.is_empty() {
+            if src_span.file.is_empty() {
                 "<unknown>"
             } else {
-                &original_span.file
+                &src_span.file
             },
             source.to_string(),
         );
         match self {
-            MumeiError::VerificationError { msg, help, .. } => MumeiError::VerificationError {
+            MumeiError::VerificationError {
+                msg,
+                help,
+                original_span,
+                ..
+            } => MumeiError::VerificationError {
                 msg,
                 src: named_src,
                 span: source_span,
                 help,
+                original_span,
             },
-            MumeiError::CodegenError { msg, help, .. } => MumeiError::CodegenError {
+            MumeiError::CodegenError {
+                msg,
+                help,
+                original_span,
+                ..
+            } => MumeiError::CodegenError {
                 msg,
                 src: named_src,
                 span: source_span,
                 help,
+                original_span,
             },
-            MumeiError::TypeError { msg, help, .. } => MumeiError::TypeError {
+            MumeiError::TypeError {
+                msg,
+                help,
+                original_span,
+                ..
+            } => MumeiError::TypeError {
                 msg,
                 src: named_src,
                 span: source_span,
                 help,
+                original_span,
             },
         }
     }
@@ -309,23 +356,44 @@ impl MumeiError {
     pub fn with_help(self, help_msg: impl Into<String>) -> Self {
         let help = Some(help_msg.into());
         match self {
-            MumeiError::VerificationError { msg, src, span, .. } => MumeiError::VerificationError {
+            MumeiError::VerificationError {
+                msg,
+                src,
+                span,
+                original_span,
+                ..
+            } => MumeiError::VerificationError {
                 msg,
                 src,
                 span,
                 help,
+                original_span,
             },
-            MumeiError::CodegenError { msg, src, span, .. } => MumeiError::CodegenError {
+            MumeiError::CodegenError {
+                msg,
+                src,
+                span,
+                original_span,
+                ..
+            } => MumeiError::CodegenError {
                 msg,
                 src,
                 span,
                 help,
+                original_span,
             },
-            MumeiError::TypeError { msg, src, span, .. } => MumeiError::TypeError {
+            MumeiError::TypeError {
+                msg,
+                src,
+                span,
+                original_span,
+                ..
+            } => MumeiError::TypeError {
                 msg,
                 src,
                 span,
                 help,
+                original_span,
             },
         }
     }
