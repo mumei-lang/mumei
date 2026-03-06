@@ -3479,8 +3479,11 @@ fn expr_to_z3<'a>(
                 }
             }
 
-            // callee が atom_ref でない場合（動的関数ポインタ）:
-            // シンボリック結果を返す
+            // callee が atom_ref でない場合（動的関数ポインタ / パラメトリック関数型）:
+            // 具体的な atom の契約を展開できないため、シンボリック結果を返す。
+            // NOTE: これにより ensures の検証が失敗する可能性がある。
+            // パラメトリックな関数型パラメータ（f: atom_ref(T) -> R）を持つ atom は
+            // trusted として宣言するか、Phase B の call_with_contract を待つ必要がある。
             let mut arg_vals = Vec::new();
             for arg in args {
                 arg_vals.push(expr_to_z3(vc, arg, env, solver_opt)?);

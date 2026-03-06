@@ -65,13 +65,18 @@ atom increment(x: i64)
     ensures: result == x + 1;
     body: x + 1;
 
-atom apply_twice(x: i64, f: atom_ref(i64) -> i64)
+// Atoms with parametric function-type parameters use `trusted`
+// because f's contract is unknown at verification time (Phase B will resolve).
+trusted atom apply_twice(x: i64, f: atom_ref(i64) -> i64)
     requires: x >= 0;
     ensures: result >= 0;
     body: call(f, call(f, x));
 
 // Usage: apply_twice(5, atom_ref(increment)) → 7
+// At this call site, increment's contract IS propagated via atom_ref.
 ```
+
+> **Known limitation (Phase A):** When `call(f, x)` is used with a function-type *parameter* `f` (not a literal `atom_ref(name)`), the verifier cannot resolve `f`'s contract — it returns an unconstrained symbolic value. Such atoms must be marked `trusted`. Direct `call(atom_ref(concrete_name), x)` works fully with contract propagation. Phase B (`call_with_contract`) will resolve this.
 
 ### Standard Library (Verified)
 - **Option / Result** — `map`, `map_apply`, `and_then_apply`, `or_else`, `filter`, `wrap_err`
@@ -381,7 +386,7 @@ my_app/
 - [x] **LSP server (`mumei lsp`)**: JSON-RPC stdio server with `textDocument/hover` (atom contract display), `publishDiagnostics` (parse errors + Z3 verification errors)
 - [x] **VS Code Extension**: `editors/vscode/` — LSP client package, language configuration for `.mm` files
 - [x] **GitHub Actions Release**: `.github/workflows/release.yml` — cross-platform binary builds (macOS x86_64/aarch64, Linux x86_64) with std library bundled
-- [x] Higher-order functions Phase A: `atom_ref` + `call` (Phase B/C は今後)
+- [x] Higher-order functions Phase A: `atom_ref` + `call` — direct `atom_ref(name)` contract propagation works; parametric `f: atom_ref(T) -> R` parameters require `trusted` (Phase B will add `call_with_contract`)
 - [x] **`mumei publish`**: Local registry (`~/.mumei/packages/`) publishing with proof caching — `mumei publish` verifies all atoms, copies to `~/.mumei/packages/<name>/<version>/`, registers in `~/.mumei/registry.json`; `--proof-only` flag for cache-only publish
 - [x] **Registry-based dependency resolution**: `math = "0.1.0"` in `mumei.toml` resolves via `~/.mumei/registry.json` → `~/.mumei/packages/` (priority: path → registry → git)
 - [ ] Remote package registry: Central registry for `mumei add <name>` without git URL
