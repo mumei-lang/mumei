@@ -159,10 +159,10 @@ jobs:
       - name: Generate Homebrew Formula
         env:
           VERSION: ${{ github.ref_name }}
-          SHA_MACOS_ARM: ${{ steps.sha256.outputs.mumei-aarch64-apple-darwin_sha256 }}
-          SHA_MACOS_X86: ${{ steps.sha256.outputs.mumei-x86_64-apple-darwin_sha256 }}
-          SHA_LINUX_ARM: ${{ steps.sha256.outputs.mumei-aarch64-unknown-linux-gnu_sha256 }}
-          SHA_LINUX_X86: ${{ steps.sha256.outputs.mumei-x86_64-unknown-linux-gnu_sha256 }}
+          SHA_MACOS_ARM: ${{ steps.sha256.outputs['mumei-aarch64-apple-darwin_sha256'] }}
+          SHA_MACOS_X86: ${{ steps.sha256.outputs['mumei-x86_64-apple-darwin_sha256'] }}
+          SHA_LINUX_ARM: ${{ steps.sha256.outputs['mumei-aarch64-unknown-linux-gnu_sha256'] }}
+          SHA_LINUX_X86: ${{ steps.sha256.outputs['mumei-x86_64-unknown-linux-gnu_sha256'] }}
         run: |
           TAG="${VERSION}"
           VER="${VERSION#v}"
