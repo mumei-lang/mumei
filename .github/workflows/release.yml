@@ -118,11 +118,66 @@ jobs:
           cat > gh-pages-dist/index.html <<'HTMLEOF'
           <!DOCTYPE html>
           <html lang="en">
-          <head><meta charset="utf-8"><title>Mumei Installer</title></head>
+          <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>Mumei — Quick Start</title>
+            <style>
+              :root { --bg: #0d1117; --fg: #c9d1d9; --accent: #58a6ff; --code-bg: #161b22; --border: #30363d; }
+              * { margin: 0; padding: 0; box-sizing: border-box; }
+              body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; background: var(--bg); color: var(--fg); line-height: 1.6; padding: 2rem 1rem; max-width: 720px; margin: 0 auto; }
+              h1 { color: #f0f6fc; font-size: 2rem; margin-bottom: 0.25rem; }
+              h1 span { font-weight: 300; color: var(--fg); }
+              .tagline { color: #8b949e; margin-bottom: 2rem; }
+              h2 { color: #f0f6fc; font-size: 1.25rem; margin: 2rem 0 0.75rem; border-bottom: 1px solid var(--border); padding-bottom: 0.5rem; }
+              pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 6px; padding: 1rem; overflow-x: auto; margin: 0.75rem 0; position: relative; }
+              code { font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace; font-size: 0.875rem; }
+              .copy-btn { position: absolute; top: 0.5rem; right: 0.5rem; background: var(--border); color: var(--fg); border: none; border-radius: 4px; padding: 0.25rem 0.5rem; cursor: pointer; font-size: 0.75rem; }
+              .copy-btn:hover { background: #484f58; }
+              a { color: var(--accent); text-decoration: none; }
+              a:hover { text-decoration: underline; }
+              .steps { display: flex; flex-direction: column; gap: 0.5rem; margin: 1rem 0; }
+              .step { display: flex; gap: 0.75rem; align-items: baseline; }
+              .step-num { background: var(--accent); color: var(--bg); border-radius: 50%; width: 1.5rem; height: 1.5rem; display: flex; align-items: center; justify-content: center; font-size: 0.75rem; font-weight: 700; flex-shrink: 0; }
+              .or { color: #8b949e; text-align: center; margin: 0.5rem 0; font-size: 0.875rem; }
+              .footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--border); color: #8b949e; font-size: 0.875rem; }
+            </style>
+          </head>
           <body>
-          <h1>Mumei Installer</h1>
-          <pre><code>curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash</code></pre>
-          <p>See <a href="https://github.com/mumei-lang/mumei">GitHub</a> for more info.</p>
+            <h1>Mumei <span>(無銘)</span></h1>
+            <p class="tagline">Mathematical Proof-Driven Programming Language — verified by Z3, compiled to LLVM IR, transpiled to Rust/Go/TypeScript.</p>
+
+            <h2>Install</h2>
+            <pre><code id="cmd-curl">curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash</code><button class="copy-btn" onclick="navigator.clipboard.writeText(document.getElementById('cmd-curl').textContent)">Copy</button></pre>
+            <p class="or">or</p>
+            <pre><code id="cmd-brew">brew install mumei-lang/mumei/mumei</code><button class="copy-btn" onclick="navigator.clipboard.writeText(document.getElementById('cmd-brew').textContent)">Copy</button></pre>
+            <p style="color:#8b949e; font-size:0.875rem; margin-top:0.5rem;">No Rust toolchain required. Detects OS/arch automatically.</p>
+
+            <h2>Quick Start</h2>
+            <div class="steps">
+              <div class="step"><span class="step-num">1</span><span>Create a project</span></div>
+            </div>
+            <pre><code>mumei init my_app && cd my_app</code></pre>
+            <div class="steps">
+              <div class="step"><span class="step-num">2</span><span>Build (verify + codegen + transpile)</span></div>
+            </div>
+            <pre><code>mumei build src/main.mm -o dist/output</code></pre>
+            <div class="steps">
+              <div class="step"><span class="step-num">3</span><span>Check your environment</span></div>
+            </div>
+            <pre><code>mumei inspect</code></pre>
+
+            <h2>Links</h2>
+            <ul style="list-style:none; padding:0;">
+              <li><a href="https://github.com/mumei-lang/mumei">GitHub Repository</a></li>
+              <li><a href="https://github.com/mumei-lang/mumei/releases">Releases & Pre-built Binaries</a></li>
+              <li><a href="https://github.com/mumei-lang/mumei/blob/develop/docs/LANGUAGE.md">Language Reference</a></li>
+              <li><a href="https://github.com/mumei-lang/mumei/blob/develop/docs/STDLIB.md">Standard Library</a></li>
+            </ul>
+
+            <div class="footer">
+              <p>MIT License &middot; <a href="https://github.com/mumei-lang/mumei">mumei-lang/mumei</a></p>
+            </div>
           </body>
           </html>
           HTMLEOF
