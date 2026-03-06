@@ -156,6 +156,9 @@ atom list_reverse(list: i64)
 // f は atom_ref で渡された二項関数 (acc, elem) -> acc'。
 // 契約は call 時に自動展開される。
 // NOTE: f の契約はパラメトリックなため trusted（Phase B で解決予定）
+// WARNING: body 内の arr[i] は配列パラメータが必要だが、この atom には
+// 配列パラメータがないため codegen 時にエラーになる。
+// mumei build std/list.mm を単独実行しないこと。Phase B で配列パラメータを追加予定。
 trusted atom fold_left(n: i64, init: i64, f: atom_ref(i64, i64) -> i64)
 requires: n >= 0;
 ensures: result >= 0;
