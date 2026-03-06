@@ -871,17 +871,11 @@ fn compile_expr<'a>(
                     .iter()
                     .map(|p| resolve_param_type(context, p.type_name.as_deref(), module_env).into())
                     .collect();
-                let has_float = callee_atom.params.iter().any(|p| {
-                    p.type_name
-                        .as_deref()
-                        .map(|t| module_env.resolve_base_type(t) == "f64")
-                        .unwrap_or(false)
-                });
-                let fn_type = if has_float {
-                    context.f64_type().fn_type(&callee_param_types, false)
-                } else {
-                    context.i64_type().fn_type(&callee_param_types, false)
-                };
+                // 戻り値は常に i64: compile() 関数 (line 61) が全 atom を i64 戻り値で
+                // コンパイルするため、forward declaration も i64 に統一する。
+                // f64 パラメータは param_types で正しく処理されるが、戻り値型の不一致は
+                // LLVM IR リンク時に未定義動作を引き起こす。
+                let fn_type = context.i64_type().fn_type(&callee_param_types, false);
                 module.add_function(name, fn_type, Some(inkwell::module::Linkage::External))
             } else {
                 return Err(MumeiError::codegen(format!(

@@ -87,9 +87,16 @@ pub fn span_to_source_span(source: &str, span: &Span) -> SourceSpan {
     if !found {
         return SourceSpan::from((0, 0));
     }
-    // col は 1-indexed
+    // col は 1-indexed (character-based), line_start は byte offset なので
+    // 行頭から col_offset 文字分のバイト数を計算する（マルチバイト UTF-8 対応）
     let col_offset = if span.col > 0 { span.col - 1 } else { 0 };
-    let offset = line_start + col_offset;
+    let line_str = &source[line_start..];
+    let offset = line_start
+        + line_str
+            .char_indices()
+            .nth(col_offset)
+            .map(|(i, _)| i)
+            .unwrap_or(col_offset);
     let len = if span.len > 0 { span.len } else { 1 };
     // Clamp to source length to avoid out-of-bounds
     let offset = offset.min(source.len());
@@ -298,16 +305,30 @@ impl MumeiError {
     }
 
     /// ソースコードを設定してリッチ出力を有効にする
-    pub fn with_source(self, source: &str, src_span: &Span) -> Self {
-        let source_span = span_to_source_span(source, src_span);
-        let named_src = miette::NamedSource::new(
-            if src_span.file.is_empty() {
-                "<unknown>"
-            } else {
-                &src_span.file
-            },
-            source.to_string(),
-        );
+    /// エラー自身が意味のある original_span を持つ場合はそちらを優先し、
+    /// そうでなければ fallback_span（atom 定義の span 等）を使用する。
+    pub fn with_source(self, source: &str, fallback_span: &Span) -> Self {
+        // Use the error's own original_span if it has meaningful location info,
+        // otherwise fall back to the provided span (e.g., atom definition)
+        let effective_span = match &self {
+            MumeiError::VerificationError { original_span, .. }
+            | MumeiError::CodegenError { original_span, .. }
+            | MumeiError::TypeError { original_span, .. }
+                if original_span.line > 0 =>
+            {
+                original_span.clone()
+            }
+            _ => fallback_span.clone(),
+        };
+        let source_span = span_to_source_span(source, &effective_span);
+        let file_name = if !effective_span.file.is_empty() {
+            &effective_span.file
+        } else if !fallback_span.file.is_empty() {
+            &fallback_span.file
+        } else {
+            "<unknown>"
+        };
+        let named_src = miette::NamedSource::new(file_name, source.to_string());
         match self {
             MumeiError::VerificationError {
                 msg,
@@ -1783,9 +1804,7 @@ fn collect_callees(expr: &Expr) -> Vec<String> {
             callees.push(name.clone());
         }
         Expr::CallRef { callee, args } => {
-            if let Expr::AtomRef { name } = callee.as_ref() {
-                callees.push(name.clone());
-            }
+            // Only recurse into callee — AtomRef branch already pushes the name
             callees.extend(collect_callees(callee));
             for arg in args {
                 callees.extend(collect_callees(arg));
