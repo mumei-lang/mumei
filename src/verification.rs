@@ -2,6 +2,7 @@ use crate::parser::{
     parse_expression, Atom, EnumDef, Expr, ImplDef, JoinSemantics, MatchArm, Op, Pattern,
     QuantifierType, RefinedType, ResourceDef, ResourceMode, Span, StructDef, TraitDef, TrustLevel,
 };
+use miette::SourceSpan;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -35,6 +36,7 @@ impl ErrorDetail {
     }
 
     /// Span 付きで ErrorDetail を生成する
+    #[allow(dead_code)]
     pub fn with_span(msg: impl Into<String>, span: Span) -> Self {
         ErrorDetail {
             message: msg.into(),
@@ -58,12 +60,63 @@ impl fmt::Display for ErrorDetail {
     }
 }
 
-#[derive(Debug)]
+/// ソースコードの Span（line/col/len）からバイトオフセットを計算して miette::SourceSpan を返す。
+/// line は 1-indexed なので 0-indexed に変換してから計算する。
+pub fn span_to_source_span(source: &str, span: &Span) -> SourceSpan {
+    if span.line == 0 {
+        return SourceSpan::from((0, 0));
+    }
+    let mut offset = 0usize;
+    for (i, line) in source.lines().enumerate() {
+        if i + 1 == span.line {
+            // col は 1-indexed
+            let col_offset = if span.col > 0 { span.col - 1 } else { 0 };
+            offset += col_offset;
+            break;
+        }
+        // +1 for the newline character
+        offset += line.len() + 1;
+    }
+    let len = if span.len > 0 { span.len } else { 1 };
+    SourceSpan::from((offset, len))
+}
+
+#[derive(thiserror::Error, miette::Diagnostic, Debug)]
 #[allow(clippy::enum_variant_names)]
 pub enum MumeiError {
-    VerificationError { msg: String, span: Span },
-    CodegenError { msg: String, span: Span },
-    TypeError { msg: String, span: Span },
+    #[error("Verification Error: {msg}")]
+    #[diagnostic(code(mumei::verification))]
+    VerificationError {
+        msg: String,
+        #[source_code]
+        src: miette::NamedSource<String>,
+        #[label("verification failed here")]
+        span: SourceSpan,
+        #[help]
+        help: Option<String>,
+    },
+    #[error("Codegen Error: {msg}")]
+    #[diagnostic(code(mumei::codegen))]
+    CodegenError {
+        msg: String,
+        #[source_code]
+        src: miette::NamedSource<String>,
+        #[label("codegen failed here")]
+        span: SourceSpan,
+        #[help]
+        help: Option<String>,
+    },
+    #[error("Type Error: {msg}")]
+    #[diagnostic(code(mumei::type_error))]
+    TypeError {
+        msg: String,
+        #[source_code]
+        src: miette::NamedSource<String>,
+        #[label("type mismatch here")]
+        span: SourceSpan,
+        #[help]
+        help: Option<String>,
+    },
 }
 
 impl MumeiError {
@@ -71,60 +124,201 @@ impl MumeiError {
     pub fn verification(msg: impl Into<String>) -> Self {
         MumeiError::VerificationError {
             msg: msg.into(),
-            span: Span::default(),
+            src: miette::NamedSource::new("<unknown>", String::new()),
+            span: SourceSpan::from((0, 0)),
+            help: None,
         }
     }
     /// Span 付きで VerificationError を生成
     pub fn verification_at(msg: impl Into<String>, span: Span) -> Self {
         MumeiError::VerificationError {
             msg: msg.into(),
-            span,
+            src: miette::NamedSource::new(
+                if span.file.is_empty() {
+                    "<unknown>"
+                } else {
+                    &span.file
+                },
+                String::new(),
+            ),
+            span: SourceSpan::from((0, 0)),
+            help: None,
+        }
+    }
+    /// ソースコード付きで VerificationError を生成（リッチ出力対応）
+    #[allow(dead_code)]
+    pub fn verification_with_source(
+        msg: impl Into<String>,
+        span: &Span,
+        source: &str,
+        help: Option<String>,
+    ) -> Self {
+        let source_span = span_to_source_span(source, span);
+        MumeiError::VerificationError {
+            msg: msg.into(),
+            src: miette::NamedSource::new(
+                if span.file.is_empty() {
+                    "<unknown>"
+                } else {
+                    &span.file
+                },
+                source.to_string(),
+            ),
+            span: source_span,
+            help,
         }
     }
     /// Span なしで CodegenError を生成
     pub fn codegen(msg: impl Into<String>) -> Self {
         MumeiError::CodegenError {
             msg: msg.into(),
-            span: Span::default(),
+            src: miette::NamedSource::new("<unknown>", String::new()),
+            span: SourceSpan::from((0, 0)),
+            help: None,
+        }
+    }
+    /// ソースコード付きで CodegenError を生成（リッチ出力対応）
+    #[allow(dead_code)]
+    pub fn codegen_with_source(
+        msg: impl Into<String>,
+        span: &Span,
+        source: &str,
+        help: Option<String>,
+    ) -> Self {
+        let source_span = span_to_source_span(source, span);
+        MumeiError::CodegenError {
+            msg: msg.into(),
+            src: miette::NamedSource::new(
+                if span.file.is_empty() {
+                    "<unknown>"
+                } else {
+                    &span.file
+                },
+                source.to_string(),
+            ),
+            span: source_span,
+            help,
         }
     }
     /// Span なしで TypeError を生成
     pub fn type_error(msg: impl Into<String>) -> Self {
         MumeiError::TypeError {
             msg: msg.into(),
-            span: Span::default(),
+            src: miette::NamedSource::new("<unknown>", String::new()),
+            span: SourceSpan::from((0, 0)),
+            help: None,
         }
     }
     /// Span 付きで TypeError を生成
     pub fn type_error_at(msg: impl Into<String>, span: Span) -> Self {
         MumeiError::TypeError {
             msg: msg.into(),
-            span,
+            src: miette::NamedSource::new(
+                if span.file.is_empty() {
+                    "<unknown>"
+                } else {
+                    &span.file
+                },
+                String::new(),
+            ),
+            span: SourceSpan::from((0, 0)),
+            help: None,
+        }
+    }
+    /// ソースコード付きで TypeError を生成（リッチ出力対応）
+    #[allow(dead_code)]
+    pub fn type_error_with_source(
+        msg: impl Into<String>,
+        span: &Span,
+        source: &str,
+        help: Option<String>,
+    ) -> Self {
+        let source_span = span_to_source_span(source, span);
+        MumeiError::TypeError {
+            msg: msg.into(),
+            src: miette::NamedSource::new(
+                if span.file.is_empty() {
+                    "<unknown>"
+                } else {
+                    &span.file
+                },
+                source.to_string(),
+            ),
+            span: source_span,
+            help,
         }
     }
 
     /// ErrorDetail を取得する（Span 情報を保持）
     pub fn to_detail(&self) -> ErrorDetail {
         match self {
-            MumeiError::VerificationError { msg, span } => {
-                ErrorDetail::with_span(format!("Verification Error: {}", msg), span.clone())
+            MumeiError::VerificationError { msg, .. } => {
+                ErrorDetail::from_message(format!("Verification Error: {}", msg))
             }
-            MumeiError::CodegenError { msg, span } => {
-                ErrorDetail::with_span(format!("Codegen Error: {}", msg), span.clone())
+            MumeiError::CodegenError { msg, .. } => {
+                ErrorDetail::from_message(format!("Codegen Error: {}", msg))
             }
-            MumeiError::TypeError { msg, span } => {
-                ErrorDetail::with_span(format!("Type Error: {}", msg), span.clone())
+            MumeiError::TypeError { msg, .. } => {
+                ErrorDetail::from_message(format!("Type Error: {}", msg))
             }
         }
     }
-}
 
-impl fmt::Display for MumeiError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    /// ソースコードを設定してリッチ出力を有効にする
+    pub fn with_source(self, source: &str, original_span: &Span) -> Self {
+        let source_span = span_to_source_span(source, original_span);
+        let named_src = miette::NamedSource::new(
+            if original_span.file.is_empty() {
+                "<unknown>"
+            } else {
+                &original_span.file
+            },
+            source.to_string(),
+        );
         match self {
-            MumeiError::VerificationError { msg, .. } => write!(f, "Verification Error: {}", msg),
-            MumeiError::CodegenError { msg, .. } => write!(f, "Codegen Error: {}", msg),
-            MumeiError::TypeError { msg, .. } => write!(f, "Type Error: {}", msg),
+            MumeiError::VerificationError { msg, help, .. } => MumeiError::VerificationError {
+                msg,
+                src: named_src,
+                span: source_span,
+                help,
+            },
+            MumeiError::CodegenError { msg, help, .. } => MumeiError::CodegenError {
+                msg,
+                src: named_src,
+                span: source_span,
+                help,
+            },
+            MumeiError::TypeError { msg, help, .. } => MumeiError::TypeError {
+                msg,
+                src: named_src,
+                span: source_span,
+                help,
+            },
+        }
+    }
+
+    /// ヘルプメッセージを設定する
+    pub fn with_help(self, help_msg: impl Into<String>) -> Self {
+        let help = Some(help_msg.into());
+        match self {
+            MumeiError::VerificationError { msg, src, span, .. } => MumeiError::VerificationError {
+                msg,
+                src,
+                span,
+                help,
+            },
+            MumeiError::CodegenError { msg, src, span, .. } => MumeiError::CodegenError {
+                msg,
+                src,
+                span,
+                help,
+            },
+            MumeiError::TypeError { msg, src, span, .. } => MumeiError::TypeError {
+                msg,
+                src,
+                span,
+                help,
+            },
         }
     }
 }
@@ -1995,7 +2189,7 @@ fn verify_inner(
                 return Err(MumeiError::verification_at(
                     "Postcondition (ensures) is not satisfied.",
                     atom.span.clone(),
-                ));
+                ).with_help("ensures の条件を確認してください。body の返り値が事後条件を満たすか検討してください"));
             }
             solver.pop(1);
         }
@@ -2087,10 +2281,16 @@ fn apply_refinement_constraint<'a>(
     let predicate_ast = parse_expression(&refined.predicate_raw);
     let predicate_z3 = expr_to_z3(vc, &predicate_ast, &mut local_env, None)?
         .as_bool()
-        .ok_or(MumeiError::type_error_at(
-            format!("Predicate for {} must be boolean", refined.name),
-            refined.span.clone(),
-        ))?;
+        .ok_or(
+            MumeiError::type_error_at(
+                format!("Predicate for {} must be boolean", refined.name),
+                refined.span.clone(),
+            )
+            .with_help(format!(
+                "型 '{}' の制約が boolean 式である必要があります",
+                refined.name
+            )),
+        )?;
 
     solver.assert(&predicate_z3);
     Ok(())
@@ -2276,7 +2476,7 @@ fn expr_to_z3<'a>(
                                         solver.pop(1);
                                         return Err(MumeiError::verification(
                                             format!("Call to '{}': precondition (requires) not satisfied at call site", name)
-                                        ));
+                                        ).with_help("呼び出し元で事前条件を満たしていません。引数の制約を確認してください"));
                                     }
                                     solver.pop(1);
                                 }
@@ -2432,7 +2632,10 @@ fn expr_to_z3<'a>(
                     return Err(MumeiError::verification(format!(
                         "Potential Out-of-Bounds on '{}' (index may be < 0 or >= len_{})",
                         name, name
-                    )));
+                    ))
+                    .with_help(
+                        "requires にインデックスの範囲制約 (0 <= idx < len) を追加してください",
+                    ));
                 }
                 solver.pop(1);
             }
@@ -2526,7 +2729,8 @@ fn expr_to_z3<'a>(
                                 solver.pop(1);
                                 return Err(MumeiError::verification(
                                     "Potential division by zero.",
-                                ));
+                                )
+                                .with_help("requires に除数 != 0 の条件を追加してください"));
                             }
                             solver.pop(1);
                         }

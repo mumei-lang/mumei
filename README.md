@@ -10,6 +10,34 @@ Only atoms that pass formal verification are compiled to LLVM IR and transpiled 
 
 ---
 
+## 🔍 Friendly Error Messages
+
+Mumei uses [miette](https://crates.io/crates/miette) for rich, developer-friendly error diagnostics with colored output, source code highlighting, and actionable suggestions.
+
+**Before** (plain text):
+```
+❌ 'decrement': verification failed: Verification Error: Postcondition (ensures) is not satisfied.
+```
+
+**After** (miette rich diagnostics):
+```
+  × Verification Error: Postcondition (ensures) is not satisfied.
+   ╭─[examples/basic.mm:5:1]
+ 4 │   ensures: result > 0;
+ 5 │   body: x - 1;
+   ·   ──────────── verification failed here
+ 6 │
+   ╰────
+  help: ensures の条件を確認してください。body の返り値が事後条件を満たすか検討してください
+```
+
+Every verification error now includes:
+- **Source location** — exact file, line, and column with source code context
+- **Underline highlighting** — visual pointer to where the error occurred
+- **Actionable suggestions** — concrete help messages to guide fixes (e.g., "requires に除数 != 0 の条件を追加してください")
+
+---
+
 ## ✨ Features
 
 ### Core Language
