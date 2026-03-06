@@ -62,26 +62,34 @@ impl fmt::Display for ErrorDetail {
 
 /// ソースコードの Span（line/col/len）からバイトオフセットを計算して miette::SourceSpan を返す。
 /// line は 1-indexed なので 0-indexed に変換してから計算する。
+/// \n と \r\n の両方の改行を正しく処理する（実バイト位置で \n を検出）。
 pub fn span_to_source_span(source: &str, span: &Span) -> SourceSpan {
     if span.line == 0 {
         return SourceSpan::from((0, 0));
     }
-    let mut offset = 0usize;
-    let mut found = false;
-    for (i, line) in source.lines().enumerate() {
-        if i + 1 == span.line {
-            // col は 1-indexed
-            let col_offset = if span.col > 0 { span.col - 1 } else { 0 };
-            offset += col_offset;
-            found = true;
-            break;
+    // 実バイト位置で \n を数えて目的の行の先頭オフセットを求める。
+    // これにより \r\n (2 bytes) も \n (1 byte) も正しく扱える。
+    let mut current_line = 1usize;
+    let mut line_start = 0usize;
+    let mut found = span.line == 1;
+    if !found {
+        for (idx, ch) in source.char_indices() {
+            if ch == '\n' {
+                current_line += 1;
+                if current_line == span.line {
+                    line_start = idx + 1; // \n の次のバイトが行頭
+                    found = true;
+                    break;
+                }
+            }
         }
-        // +1 for the newline character
-        offset += line.len() + 1;
     }
     if !found {
         return SourceSpan::from((0, 0));
     }
+    // col は 1-indexed
+    let col_offset = if span.col > 0 { span.col - 1 } else { 0 };
+    let offset = line_start + col_offset;
     let len = if span.len > 0 { span.len } else { 1 };
     // Clamp to source length to avoid out-of-bounds
     let offset = offset.min(source.len());
