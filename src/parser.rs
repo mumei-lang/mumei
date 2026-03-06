@@ -183,6 +183,17 @@ pub enum Expr {
         /// Join セマンティクス: all（全タスク完了待ち）または any（最初の完了で終了）
         join_semantics: JoinSemantics,
     },
+    /// atom参照: atom_ref(atom_name)
+    /// atom を第一級の値として参照する。型は AtomRef<(ParamTypes...) -> ReturnType>
+    AtomRef {
+        name: String,
+    },
+    /// 参照された atom の呼び出し: call(atom_ref_expr, args...)
+    /// 契約（requires/ensures）は呼び出し先の atom から伝播される。
+    CallRef {
+        callee: Box<Expr>,
+        args: Vec<Expr>,
+    },
 }
 
 /// Match 式のアーム（パターン → 式）
@@ -561,9 +572,50 @@ fn parse_type_params_from_str(input: &str) -> (Vec<String>, usize) {
     (params, end + 1)
 }
 
-/// 型参照文字列（例: "Stack<i64>", "i64", "Map<String, List<i64>>"）を TypeRef にパースする。
+/// 型参照文字列（例: "Stack<i64>", "i64", "Map<String, List<i64>>", "atom_ref(i64) -> i64"）を TypeRef にパースする。
 pub fn parse_type_ref(input: &str) -> TypeRef {
     let input = input.trim();
+
+    // 関数型: "atom_ref(T1, T2) -> R" のパース
+    if let Some(after_paren) = input.strip_prefix("atom_ref(") {
+        // "atom_ref(" の後ろから ")" を探す（ネストした括弧を考慮）
+        let mut depth = 1;
+        let mut close_pos = 0;
+        for (i, c) in after_paren.char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close_pos = i;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let params_str = &after_paren[..close_pos];
+        let param_types: Vec<TypeRef> = if params_str.trim().is_empty() {
+            vec![]
+        } else {
+            split_type_args(params_str)
+                .iter()
+                .map(|a| parse_type_ref(a))
+                .collect()
+        };
+
+        // "->" の後ろに戻り値型がある場合
+        let rest = after_paren[close_pos + 1..].trim();
+        let return_type = if let Some(arrow_rest) = rest.strip_prefix("->") {
+            parse_type_ref(arrow_rest.trim())
+        } else {
+            // 戻り値型が省略された場合はデフォルトで i64
+            TypeRef::simple("i64")
+        };
+
+        return TypeRef::fn_type(param_types, return_type);
+    }
+
     if let Some(angle_pos) = input.find('<') {
         // ジェネリック型: "Stack<i64>" → name="Stack", type_args=[TypeRef("i64")]
         let name = input[..angle_pos].trim().to_string();
@@ -1412,6 +1464,51 @@ fn parse_primary(tokens: &[String], pos: &mut usize) -> Expr {
         return Expr::Number(0);
     }
     let token = &tokens[*pos];
+
+    // atom_ref 式: atom_ref(atom_name)
+    // atom を第一級の値として参照する
+    if token == "atom_ref" {
+        *pos += 1;
+        if *pos < tokens.len() && tokens[*pos] == "(" {
+            *pos += 1; // skip (
+            let name = if *pos < tokens.len() {
+                let n = tokens[*pos].clone();
+                *pos += 1;
+                n
+            } else {
+                panic!("atom_ref() requires an atom name");
+            };
+            if *pos < tokens.len() && tokens[*pos] == ")" {
+                *pos += 1; // skip )
+            }
+            return Expr::AtomRef { name };
+        }
+        panic!("atom_ref requires parentheses: atom_ref(name)");
+    }
+
+    // call 式: call(callee_expr, arg1, arg2, ...)
+    // atom_ref で参照された関数を呼び出す
+    if token == "call" {
+        *pos += 1;
+        if *pos < tokens.len() && tokens[*pos] == "(" {
+            *pos += 1; // skip (
+                       // 最初の引数は callee（atom_ref 式または変数）
+            let callee = parse_implies(tokens, pos);
+            let mut args = Vec::new();
+            while *pos < tokens.len() && tokens[*pos] == "," {
+                *pos += 1; // skip ,
+                args.push(parse_implies(tokens, pos));
+            }
+            if *pos < tokens.len() && tokens[*pos] == ")" {
+                *pos += 1; // skip )
+            }
+            return Expr::CallRef {
+                callee: Box::new(callee),
+                args,
+            };
+        }
+        panic!("call requires parentheses: call(callee, args...)");
+    }
 
     // acquire 式: acquire resource_name { body }
     if token == "acquire" {
@@ -2409,6 +2506,114 @@ extern "Rust" {
         assert_eq!(eb.functions[1].return_type, "i64");
         // Span should be populated
         assert!(eb.span.line > 0);
+    }
+
+    // =========================================================================
+    // atom_ref / call パーステスト (Phase 2: Higher-Order Functions)
+    // =========================================================================
+
+    #[test]
+    fn test_parse_atom_ref_expression() {
+        let expr = parse_expression("atom_ref(increment)");
+        match expr {
+            Expr::AtomRef { name } => {
+                assert_eq!(name, "increment");
+            }
+            _ => panic!("Expected AtomRef expression, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn test_parse_call_ref_expression() {
+        let expr = parse_expression("call(atom_ref(increment), x)");
+        match expr {
+            Expr::CallRef { callee, args } => {
+                match *callee {
+                    Expr::AtomRef { ref name } => assert_eq!(name, "increment"),
+                    _ => panic!("Expected AtomRef as callee, got {:?}", callee),
+                }
+                assert_eq!(args.len(), 1);
+                match &args[0] {
+                    Expr::Variable(v) => assert_eq!(v, "x"),
+                    _ => panic!("Expected Variable arg, got {:?}", args[0]),
+                }
+            }
+            _ => panic!("Expected CallRef expression, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn test_parse_call_ref_multiple_args() {
+        let expr = parse_expression("call(atom_ref(add), a, b)");
+        match expr {
+            Expr::CallRef { callee, args } => {
+                match *callee {
+                    Expr::AtomRef { ref name } => assert_eq!(name, "add"),
+                    _ => panic!("Expected AtomRef as callee"),
+                }
+                assert_eq!(args.len(), 2);
+            }
+            _ => panic!("Expected CallRef expression, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn test_parse_call_ref_variable_callee() {
+        let expr = parse_expression("call(f, x, y)");
+        match expr {
+            Expr::CallRef { callee, args } => {
+                match *callee {
+                    Expr::Variable(ref name) => assert_eq!(name, "f"),
+                    _ => panic!("Expected Variable as callee, got {:?}", callee),
+                }
+                assert_eq!(args.len(), 2);
+            }
+            _ => panic!("Expected CallRef expression, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn test_parse_type_ref_fn_type() {
+        let tr = parse_type_ref("atom_ref(i64) -> i64");
+        assert!(tr.is_fn_type());
+        assert_eq!(tr.name, "atom_ref");
+        assert_eq!(tr.type_args.len(), 2); // 1 param + 1 return
+        assert_eq!(tr.type_args[0].name, "i64");
+        assert_eq!(tr.type_args[1].name, "i64");
+        assert_eq!(tr.display_name(), "atom_ref(i64) -> i64");
+    }
+
+    #[test]
+    fn test_parse_type_ref_fn_type_multi_params() {
+        let tr = parse_type_ref("atom_ref(i64, i64) -> i64");
+        assert!(tr.is_fn_type());
+        assert_eq!(tr.type_args.len(), 3); // 2 params + 1 return
+        assert_eq!(tr.display_name(), "atom_ref(i64, i64) -> i64");
+    }
+
+    #[test]
+    fn test_parse_atom_with_fn_type_param() {
+        let source = r#"
+atom apply(x: i64, f: atom_ref(i64) -> i64)
+    requires: x >= 0;
+    ensures: result >= 0;
+    body: call(f, x);
+"#;
+        let items = parse_module(source);
+        let atoms: Vec<_> = items
+            .iter()
+            .filter_map(|i| if let Item::Atom(a) = i { Some(a) } else { None })
+            .collect();
+        assert_eq!(atoms.len(), 1);
+        assert_eq!(atoms[0].name, "apply");
+        assert_eq!(atoms[0].params.len(), 2);
+        assert_eq!(atoms[0].params[0].name, "x");
+        assert_eq!(atoms[0].params[1].name, "f");
+        // f の型名は "atom_ref(i64) -> i64" を含む
+        assert!(atoms[0].params[1]
+            .type_name
+            .as_ref()
+            .map_or(false, |t| t.contains("atom_ref")));
     }
 
     #[test]

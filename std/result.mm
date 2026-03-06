@@ -58,13 +58,26 @@ atom safe_divide(a: i64, b: i64)
 // =============================================================
 // 高階関数相当の操作（Map / AndThen）
 // =============================================================
-// NOTE: 将来的に真の高階関数を導入する場合のロードマップは
-//       std/option.mm の NOTE コメントを参照。
-//   Phase A: atom_ref（atom を値として参照）
-//   Phase B: call_with_contract（契約の Z3 展開）
+// NOTE: 高階関数のロードマップ:
+//   Phase A: [x] atom_ref + call（atom を値として参照、契約の自動展開）
+//   Phase B: call_with_contract（契約のより精密な Z3 展開）
 //   Phase C: ラムダ構文と検証
 
-// --- Map 相当: Ok の中身に変換を適用 ---
+// --- Map (Phase A): atom_ref による高階関数版 ---
+// res が Ok(tag=0) なら f を適用し、Err(tag=1) なら 1 を返す。
+// f は atom_ref で渡された関数。契約は call 時に自動展開される。
+atom result_map(res: i64, f: atom_ref(i64) -> i64)
+    requires: res >= 0 && res <= 1;
+    ensures: result >= 0;
+    body: {
+        match res {
+            0 => call(f, res),
+            _ => 1
+        }
+    }
+
+// --- Map 相当（ワークアラウンド版）: Ok の中身に変換を適用 ---
+// @deprecated: use result_map(res, atom_ref(f)) instead
 // res が Ok(tag=0) なら mapped_value を返し、Err(tag=1) なら default_val を返す。
 atom result_map_apply(res: i64, default_val: i64, mapped_value: i64)
     requires: res >= 0 && res <= 1;

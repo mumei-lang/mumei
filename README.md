@@ -54,8 +54,27 @@ Every verification error now includes:
 - **Trust Boundary** — `trusted` / `unverified` atoms with taint analysis
 - **BMC + Inductive Invariant** — bounded model checking upgradable to complete proof
 
+### Higher-Order Functions (Phase A)
+- **`atom_ref(name)`** — reference an atom as a first-class value (function pointer)
+- **`call(f, args...)`** — invoke a referenced atom with automatic contract propagation
+- **Function type parameters** — `f: atom_ref(i64) -> i64` in atom signatures
+
+```mumei
+atom increment(x: i64)
+    requires: x >= 0;
+    ensures: result == x + 1;
+    body: x + 1;
+
+atom apply_twice(x: i64, f: atom_ref(i64) -> i64)
+    requires: x >= 0;
+    ensures: result >= 0;
+    body: call(f, call(f, x));
+
+// Usage: apply_twice(5, atom_ref(increment)) → 7
+```
+
 ### Standard Library (Verified)
-- **Option / Result** — `map_apply`, `and_then_apply`, `or_else`, `filter`, `wrap_err`
+- **Option / Result** — `map`, `map_apply`, `and_then_apply`, `or_else`, `filter`, `wrap_err`
 - **List** — immutable ops (`head`/`tail`/`append`/`prepend`/`reverse`) + fold ops (`sum`/`count`/`min`/`max`/`all`/`any`)
 - **Sort Algorithms** — `insertion_sort`, `merge_sort`, `binary_search` with termination + invariant proofs
 - **Sorted Array Proofs** — `verified_insertion_sort` with `forall` in ensures: `arr[i] <= arr[i+1]`
@@ -362,7 +381,7 @@ my_app/
 - [x] **LSP server (`mumei lsp`)**: JSON-RPC stdio server with `textDocument/hover` (atom contract display), `publishDiagnostics` (parse errors + Z3 verification errors)
 - [x] **VS Code Extension**: `editors/vscode/` — LSP client package, language configuration for `.mm` files
 - [x] **GitHub Actions Release**: `.github/workflows/release.yml` — cross-platform binary builds (macOS x86_64/aarch64, Linux x86_64) with std library bundled
-- [ ] Higher-order functions: `atom_ref` → `call_with_contract` → lambda (Phase A/B/C)
+- [x] Higher-order functions Phase A: `atom_ref` + `call` (Phase B/C は今後)
 - [x] **`mumei publish`**: Local registry (`~/.mumei/packages/`) publishing with proof caching — `mumei publish` verifies all atoms, copies to `~/.mumei/packages/<name>/<version>/`, registers in `~/.mumei/registry.json`; `--proof-only` flag for cache-only publish
 - [x] **Registry-based dependency resolution**: `math = "0.1.0"` in `mumei.toml` resolves via `~/.mumei/registry.json` → `~/.mumei/packages/` (priority: path → registry → git)
 - [ ] Remote package registry: Central registry for `mumei add <name>` without git URL

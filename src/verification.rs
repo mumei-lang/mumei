@@ -3279,6 +3279,143 @@ fn expr_to_z3<'a>(
             }
         }
 
+        // =================================================================
+        // Higher-Order Functions (Phase A): atom_ref + call
+        // =================================================================
+        Expr::AtomRef { name } => {
+            // atom_ref(some_atom): ModuleEnv から atom 定義を取得し、
+            // シンボリック値を生成する。呼び出し先の atom の契約情報は
+            // CallRef 時に展開される。
+            if vc.module_env.get_atom(name).is_none() {
+                return Err(MumeiError::verification(format!(
+                    "atom_ref: unknown atom '{}'",
+                    name
+                )));
+            }
+            // atom_ref はシンボリックな関数参照として Int 値を生成
+            // （実行時は関数ポインタ、Z3 上はシンボリック識別子）
+            let ref_name = format!("__atom_ref_{}", name);
+            let ref_val = Int::new_const(ctx, ref_name.as_str());
+            env.insert(ref_name, ref_val.clone().into());
+            Ok(ref_val.into())
+        }
+        Expr::CallRef { callee, args } => {
+            // call(callee_expr, arg1, arg2, ...):
+            // callee が AtomRef の場合、参照先の atom の契約を展開して検証する。
+            // - requires を呼び出し元のコンテキストで検証
+            // - ensures を事実として solver に追加
+
+            // callee を評価
+            let _callee_val = expr_to_z3(vc, callee, env, solver_opt)?;
+
+            // callee が AtomRef の場合、参照先の atom 名を取得
+            let atom_name = if let Expr::AtomRef { name } = callee.as_ref() {
+                Some(name.clone())
+            } else if let Expr::Variable(var_name) = callee.as_ref() {
+                // 変数が atom_ref として束縛されている場合
+                // env から __atom_ref_ プレフィックスで探す
+                if env.contains_key(&format!("__atom_ref_{}", var_name)) {
+                    Some(var_name.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            if let Some(ref callee_name) = atom_name {
+                if let Some(callee_atom) = vc.module_env.get_atom(callee_name).cloned() {
+                    // 引数を Z3 で評価
+                    let mut arg_vals = Vec::new();
+                    for arg in args {
+                        arg_vals.push(expr_to_z3(vc, arg, env, solver_opt)?);
+                    }
+
+                    // 呼び出し先のパラメータ名に引数をマッピング
+                    let mut call_env = env.clone();
+                    for (i, param) in callee_atom.params.iter().enumerate() {
+                        if let Some(arg_val) = arg_vals.get(i) {
+                            call_env.insert(param.name.clone(), arg_val.clone());
+                        }
+                    }
+
+                    // requires を呼び出し元のコンテキストで検証
+                    if callee_atom.requires.trim() != "true" {
+                        let req_ast = parse_expression(&callee_atom.requires);
+                        let req_z3 = expr_to_z3(vc, &req_ast, &mut call_env, None)?;
+                        if let Some(req_bool) = req_z3.as_bool() {
+                            if let Some(solver) = solver_opt {
+                                solver.push();
+                                solver.assert(&req_bool.not());
+                                if solver.check() == SatResult::Sat {
+                                    solver.pop(1);
+                                    return Err(MumeiError::verification(format!(
+                                        "call(atom_ref({})): precondition '{}' may not hold at call site",
+                                        callee_name, callee_atom.requires
+                                    ))
+                                    .with_help(
+                                        "呼び出し元で事前条件を満たしていません。引数の制約を確認してください",
+                                    ));
+                                }
+                                solver.pop(1);
+                            }
+                        }
+                    }
+
+                    // ensures を事実として solver に追加（Equality Ensures Propagation）
+                    static CALL_REF_COUNTER: std::sync::atomic::AtomicUsize =
+                        std::sync::atomic::AtomicUsize::new(0);
+                    let call_id =
+                        CALL_REF_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let result_name = format!("call_ref_{}_{}", callee_name, call_id);
+                    let result_z3: Dynamic = Int::new_const(ctx, result_name.as_str()).into();
+
+                    if callee_atom.ensures.trim() != "true" {
+                        call_env.insert("result".to_string(), result_z3.clone());
+                        let ens_ast = parse_expression(&callee_atom.ensures);
+                        let ens_z3 = expr_to_z3(vc, &ens_ast, &mut call_env, None)?;
+                        if let Some(ens_bool) = ens_z3.as_bool() {
+                            if let Some(solver) = solver_opt {
+                                solver.assert(&ens_bool);
+                            }
+                        }
+
+                        // Equality ensures の特別処理
+                        if let Expr::BinaryOp(left, Op::Eq, right) = &ens_ast {
+                            if let Expr::Variable(ref var_name) = left.as_ref() {
+                                if var_name == "result" {
+                                    if let Ok(rhs_val) = expr_to_z3(vc, right, &mut call_env, None)
+                                    {
+                                        if let Some(solver) = solver_opt {
+                                            if let (Some(res_int), Some(rhs_int)) =
+                                                (result_z3.as_int(), rhs_val.as_int())
+                                            {
+                                                solver.assert(&res_int._eq(&rhs_int));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    return Ok(result_z3);
+                }
+            }
+
+            // callee が atom_ref でない場合（動的関数ポインタ）:
+            // シンボリック結果を返す
+            let mut arg_vals = Vec::new();
+            for arg in args {
+                arg_vals.push(expr_to_z3(vc, arg, env, solver_opt)?);
+            }
+            static DYNAMIC_CALL_COUNTER: std::sync::atomic::AtomicUsize =
+                std::sync::atomic::AtomicUsize::new(0);
+            let id = DYNAMIC_CALL_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let result = Int::new_const(ctx, format!("call_ref_dynamic_{}", id));
+            Ok(result.into())
+        }
+
         Expr::FieldAccess(inner_expr, field_name) => {
             // ネスト構造体のフィールドアクセスを再帰的に解決する。
             //

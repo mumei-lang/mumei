@@ -221,6 +221,18 @@ fn body_contains_float(expr: &Expr) -> bool {
 fn map_type_rust(type_name: Option<&str>) -> String {
     match type_name {
         Some(name) => {
+            // 関数型パラメータ: atom_ref(T1, T2) -> R → fn(T1, T2) -> R
+            if name.starts_with("atom_ref(") {
+                let tr = crate::parser::parse_type_ref(name);
+                if tr.is_fn_type() {
+                    let params: Vec<String> = tr.type_args[..tr.type_args.len() - 1]
+                        .iter()
+                        .map(|a| map_type_rust(Some(&a.name)))
+                        .collect();
+                    let ret = map_type_rust(Some(&tr.type_args.last().unwrap().name));
+                    return format!("fn({}) -> {}", params.join(", "), ret);
+                }
+            }
             let base = resolve_base_type(name);
             match base.as_str() {
                 "f64" => "f64".to_string(),
@@ -407,6 +419,17 @@ fn format_expr_rust(expr: &Expr) -> String {
         Expr::TaskGroup { children, .. } => {
             let tasks: Vec<String> = children.iter().map(format_expr_rust).collect();
             format!("tokio::join!({})", tasks.join(", "))
+        }
+        // Higher-order functions (Phase A): atom_ref + call
+        Expr::AtomRef { name } => {
+            // Rust では関数名がそのまま関数ポインタとして使える
+            name.clone()
+        }
+        Expr::CallRef { callee, args } => {
+            // Rust は関数ポインタの呼び出しが透過的
+            let callee_str = format_expr_rust(callee);
+            let args_str: Vec<String> = args.iter().map(format_expr_rust).collect();
+            format!("{}({})", callee_str, args_str.join(", "))
         }
     }
 }
