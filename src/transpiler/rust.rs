@@ -214,6 +214,10 @@ fn body_contains_float(expr: &Expr) -> bool {
         }
         Expr::Acquire { body, .. } | Expr::Async { body } => body_contains_float(body),
         Expr::Await { expr } => body_contains_float(expr),
+        Expr::AtomRef { .. } => false,
+        Expr::CallRef { callee, args } => {
+            body_contains_float(callee) || args.iter().any(body_contains_float)
+        }
         _ => false,
     }
 }

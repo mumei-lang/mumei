@@ -1348,6 +1348,13 @@ fn collect_acquire_resources(expr: &Expr) -> Vec<String> {
                 resources.extend(collect_acquire_resources(child));
             }
         }
+        Expr::AtomRef { .. } => {}
+        Expr::CallRef { callee, args } => {
+            resources.extend(collect_acquire_resources(callee));
+            for arg in args {
+                resources.extend(collect_acquire_resources(arg));
+            }
+        }
         _ => {}
     }
     resources

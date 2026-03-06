@@ -929,9 +929,22 @@ fn compile_expr<'a>(
 
             // 間接呼び出し: callee_val を関数ポインタに変換して indirect_call
             let callee_int = callee_val.into_int_value();
-            let param_types: Vec<BasicMetadataTypeEnum> =
-                arg_vals.iter().map(|_| context.i64_type().into()).collect();
-            let fn_type = context.i64_type().fn_type(&param_types, false);
+            let param_types: Vec<BasicMetadataTypeEnum> = arg_vals
+                .iter()
+                .map(|v| {
+                    if v.is_float_value() {
+                        context.f64_type().into()
+                    } else {
+                        context.i64_type().into()
+                    }
+                })
+                .collect();
+            let has_float_arg = arg_vals.iter().any(|v| v.is_float_value());
+            let fn_type = if has_float_arg {
+                context.f64_type().fn_type(&param_types, false)
+            } else {
+                context.i64_type().fn_type(&param_types, false)
+            };
             let fn_ptr = llvm!(builder.build_int_to_ptr(
                 callee_int,
                 context.ptr_type(inkwell::AddressSpace::default()),
