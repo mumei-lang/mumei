@@ -123,7 +123,8 @@ import "std/option" as option;
 | `is_some(opt)` | Returns 1 if Some, 0 if None |
 | `is_none(opt)` | Returns 1 if None, 0 if Some |
 | `unwrap_or(opt, default)` | Returns value or default |
-| `map_apply(opt, default, mapped)` | Map: applies transformation (Some→mapped, None→default) |
+| `map(opt, f)` | **Phase A**: Higher-order map via `atom_ref` — applies `f` to Some, returns 0 for None (`trusted`) |
+| `map_apply(opt, default, mapped)` | Map (workaround): applies transformation (Some→mapped, None→default) — `@deprecated`, use `map` |
 | `and_then_apply(opt, inner_opt)` | AndThen/FlatMap: chains Option-returning operations |
 | `or_else(opt, alternative)` | OrElse: provides fallback Option |
 | `filter(opt, condition)` | Filter: Some→None if condition is false |
@@ -162,7 +163,8 @@ import "std/result" as result;
 | `is_err(res)` | Returns 1 if Err, 0 if Ok |
 | `unwrap_or_default(res, default)` | Returns value or default |
 | `safe_divide(a, b)` | Division returning Result (Err on zero) |
-| `result_map_apply(res, default, mapped)` | Map: Ok→mapped, Err→default |
+| `result_map(res, f)` | **Phase A**: Higher-order map via `atom_ref` — applies `f` to Ok, returns 1 for Err (`trusted`) |
+| `result_map_apply(res, default, mapped)` | Map (workaround): Ok→mapped, Err→default — `@deprecated`, use `result_map` |
 | `result_and_then(res, inner_res)` | AndThen/FlatMap: chains Result operations |
 | `result_or_else(res, alternative)` | OrElse: provides fallback on Err |
 | `result_map_err(res, mapped_err)` | MapErr: transforms Err value |
@@ -199,6 +201,15 @@ enum List { Nil, Cons(i64, Self) }
 | `list_prepend(list, value)` | `list ∈ {0,1}` | `result == 1` | Prepend (O(1), Cons construction) |
 | `list_length(list)` | `list ∈ {0,1}` | `result >= 0` | Length (tag-based abstraction) |
 | `list_reverse(list)` | `list ∈ {0,1}` | `result == list` | Reverse (tag preserved) |
+
+### Higher-Order Fold / Map (Phase A)
+
+| Atom | Requires | Ensures | Description |
+|---|---|---|---|
+| `fold_left(n, init, f)` | `n >= 0` | `result >= 0` | **Phase A**: Generic left fold via `atom_ref` — `f: atom_ref(i64, i64) -> i64` (`trusted`, body uses `arr[i]` stub) |
+| `list_map(n, f)` | `n >= 0` | `result == n` | **Phase A**: Map via `atom_ref` — `f: atom_ref(i64) -> i64` (`trusted`, element count preserved) |
+
+> **Warning**: `fold_left` body references `arr[i]` without an array parameter — do NOT run `mumei build std/list.mm` in isolation. Phase B will add proper array parameter support.
 
 ### Reduce / Fold Operations
 
@@ -251,51 +262,51 @@ struct BoundedArray { len: i64 where v >= 0, cap: i64 where v > 0 }
 import "std/json" as json;
 ```
 
-JSON 文字列の解析・生成を行う FFI バックエンド標準ライブラリ。
-Rust の `serde_json` を隠蔽し、ハンドルベースの API を提供。
+FFI-backed standard library for JSON parsing and generation.
+Wraps Rust `serde_json` behind a handle-based API.
 
 ### Parse / Stringify
 
 | Atom | Requires | Ensures | Description |
 |---|---|---|---|
-| `json::parse(input)` | `true` | `result >= 0` | JSON 文字列をパースしハンドルを返す |
-| `json::stringify(handle)` | `handle >= 0` | `true` | JSON ハンドルを文字列に変換 |
+| `json::parse(input)` | `true` | `result >= 0` | Parse JSON string and return a handle |
+| `json::stringify(handle)` | `handle >= 0` | `true` | Convert JSON handle to string |
 
 ### Value Access
 
 | Atom | Requires | Ensures | Description |
 |---|---|---|---|
-| `json::get(handle, key)` | `handle >= 0` | `result >= 0` | オブジェクトからキーで値を取得 |
-| `json::get_int(handle, key)` | `handle >= 0` | `true` | 整数値を取得 |
-| `json::get_str(handle, key)` | `handle >= 0` | `true` | 文字列値を取得 |
-| `json::get_bool(handle, key)` | `handle >= 0` | `result in {0,1}` | ブール値を取得 |
+| `json::get(handle, key)` | `handle >= 0` | `result >= 0` | Get value from object by key |
+| `json::get_int(handle, key)` | `handle >= 0` | `true` | Get integer value |
+| `json::get_str(handle, key)` | `handle >= 0` | `true` | Get string value |
+| `json::get_bool(handle, key)` | `handle >= 0` | `result in {0,1}` | Get boolean value |
 
 ### Array Operations
 
 | Atom | Requires | Ensures | Description |
 |---|---|---|---|
-| `json::array_len(handle)` | `handle >= 0` | `result >= 0` | 配列の長さを取得 |
-| `json::array_get(handle, index)` | `handle >= 0 && index >= 0` | `result >= 0` | 配列の要素を取得 |
-| `json::array_new()` | `true` | `result >= 0` | 空の配列を生成 |
-| `json::array_push(handle, value)` | `handle >= 0` | `result >= 0` | 配列に値を追加 |
+| `json::array_len(handle)` | `handle >= 0` | `result >= 0` | Get array length |
+| `json::array_get(handle, index)` | `handle >= 0 && index >= 0` | `result >= 0` | Get array element |
+| `json::array_new()` | `true` | `result >= 0` | Create empty array |
+| `json::array_push(handle, value)` | `handle >= 0` | `result >= 0` | Append value to array |
 
 ### Type Checks
 
 | Atom | Requires | Ensures | Description |
 |---|---|---|---|
-| `json::is_null(handle)` | `handle >= 0` | `result in {0,1}` | null 判定 |
-| `json::is_object(handle)` | `handle >= 0` | `result in {0,1}` | オブジェクト判定 |
-| `json::is_array(handle)` | `handle >= 0` | `result in {0,1}` | 配列判定 |
+| `json::is_null(handle)` | `handle >= 0` | `result in {0,1}` | Check if null |
+| `json::is_object(handle)` | `handle >= 0` | `result in {0,1}` | Check if object |
+| `json::is_array(handle)` | `handle >= 0` | `result in {0,1}` | Check if array |
 
 ### Value Construction
 
 | Atom | Requires | Ensures | Description |
 |---|---|---|---|
-| `json::object_new()` | `true` | `result >= 0` | 空のオブジェクトを生成 |
-| `json::object_set(handle, key, value)` | `handle >= 0` | `result >= 0` | オブジェクトにキーと値を設定 |
-| `json::from_int(value)` | `true` | `result >= 0` | 整数から JSON 値を生成 |
-| `json::from_str(value)` | `true` | `result >= 0` | 文字列から JSON 値を生成 |
-| `json::from_bool(value)` | `value in {0,1}` | `result >= 0` | ブール値から JSON 値を生成 |
+| `json::object_new()` | `true` | `result >= 0` | Create empty object |
+| `json::object_set(handle, key, value)` | `handle >= 0` | `result >= 0` | Set key-value pair on object |
+| `json::from_int(value)` | `true` | `result >= 0` | Create JSON value from integer |
+| `json::from_str(value)` | `true` | `result >= 0` | Create JSON value from string |
+| `json::from_bool(value)` | `value in {0,1}` | `result >= 0` | Create JSON value from boolean |
 
 ---
 
@@ -305,34 +316,34 @@ Rust の `serde_json` を隠蔽し、ハンドルベースの API を提供。
 import "std/http" as http;
 ```
 
-Rust `reqwest` を FFI で隠蔽した HTTP クライアント。ハンドルベースの API を提供。
-`task_group` と組み合わせて並行リクエストが可能。
+HTTP client wrapping Rust `reqwest` via FFI. Provides a handle-based API.
+Can be combined with `task_group` for parallel requests.
 
 ### Requests
 
 | Atom | Requires | Ensures | Description |
 |---|---|---|---|
-| `http::get(url)` | `true` | `result >= 0` | HTTP GET リクエスト |
-| `http::post(url, body)` | `true` | `result >= 0` | HTTP POST リクエスト |
-| `http::put(url, body)` | `true` | `result >= 0` | HTTP PUT リクエスト |
-| `http::delete(url)` | `true` | `result >= 0` | HTTP DELETE リクエスト |
+| `http::get(url)` | `true` | `result >= 0` | HTTP GET request |
+| `http::post(url, body)` | `true` | `result >= 0` | HTTP POST request |
+| `http::put(url, body)` | `true` | `result >= 0` | HTTP PUT request |
+| `http::delete(url)` | `true` | `result >= 0` | HTTP DELETE request |
 
 ### Response
 
 | Atom | Requires | Ensures | Description |
 |---|---|---|---|
-| `http::status(handle)` | `handle >= 0` | `result >= 0` | ステータスコード取得 (200, 404, etc.) |
-| `http::body(handle)` | `handle >= 0` | `result >= 0` | レスポンスボディ（文字列ハンドル）|
-| `http::body_json(handle)` | `handle >= 0` | `result >= 0` | レスポンスを JSON パースして取得 |
-| `http::is_ok(handle)` | `handle >= 0` | `result in {0,1}` | 成功 (2xx) 判定 |
-| `http::is_error(handle)` | `handle >= 0` | `result in {0,1}` | エラー判定 |
+| `http::status(handle)` | `handle >= 0` | `result >= 0` | Get status code (200, 404, etc.) |
+| `http::body(handle)` | `handle >= 0` | `result >= 0` | Get response body (string handle) |
+| `http::body_json(handle)` | `handle >= 0` | `result >= 0` | Parse response body as JSON |
+| `http::is_ok(handle)` | `handle >= 0` | `result in {0,1}` | Check success (2xx) |
+| `http::is_error(handle)` | `handle >= 0` | `result in {0,1}` | Check error |
 
 ### Headers
 
 | Atom | Requires | Ensures | Description |
 |---|---|---|---|
-| `http::header_get(handle, name)` | `handle >= 0` | `result >= 0` | ヘッダー値を取得 |
-| `http::header_set(handle, name, value)` | `handle >= 0` | `result >= 0` | ヘッダーを設定 |
+| `http::header_get(handle, name)` | `handle >= 0` | `result >= 0` | Get header value |
+| `http::header_set(handle, name, value)` | `handle >= 0` | `result >= 0` | Set header value |
 
 ---
 

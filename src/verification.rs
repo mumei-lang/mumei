@@ -2,6 +2,7 @@ use crate::parser::{
     parse_expression, Atom, EnumDef, Expr, ImplDef, JoinSemantics, MatchArm, Op, Pattern,
     QuantifierType, RefinedType, ResourceDef, ResourceMode, Span, StructDef, TraitDef, TrustLevel,
 };
+use miette::SourceSpan;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -35,6 +36,7 @@ impl ErrorDetail {
     }
 
     /// Span 付きで ErrorDetail を生成する
+    #[allow(dead_code)]
     pub fn with_span(msg: impl Into<String>, span: Span) -> Self {
         ErrorDetail {
             message: msg.into(),
@@ -58,12 +60,92 @@ impl fmt::Display for ErrorDetail {
     }
 }
 
-#[derive(Debug)]
+/// ソースコードの Span（line/col/len）からバイトオフセットを計算して miette::SourceSpan を返す。
+/// line は 1-indexed なので 0-indexed に変換してから計算する。
+/// \n と \r\n の両方の改行を正しく処理する（実バイト位置で \n を検出）。
+pub fn span_to_source_span(source: &str, span: &Span) -> SourceSpan {
+    if span.line == 0 {
+        return SourceSpan::from((0, 0));
+    }
+    // 実バイト位置で \n を数えて目的の行の先頭オフセットを求める。
+    // これにより \r\n (2 bytes) も \n (1 byte) も正しく扱える。
+    let mut current_line = 1usize;
+    let mut line_start = 0usize;
+    let mut found = span.line == 1;
+    if !found {
+        for (idx, ch) in source.char_indices() {
+            if ch == '\n' {
+                current_line += 1;
+                if current_line == span.line {
+                    line_start = idx + 1; // \n の次のバイトが行頭
+                    found = true;
+                    break;
+                }
+            }
+        }
+    }
+    if !found {
+        return SourceSpan::from((0, 0));
+    }
+    // col は 1-indexed (character-based), line_start は byte offset なので
+    // 行頭から col_offset 文字分のバイト数を計算する（マルチバイト UTF-8 対応）
+    let col_offset = if span.col > 0 { span.col - 1 } else { 0 };
+    let line_str = &source[line_start..];
+    let offset = line_start
+        + line_str
+            .char_indices()
+            .nth(col_offset)
+            .map(|(i, _)| i)
+            .unwrap_or(col_offset);
+    let len = if span.len > 0 { span.len } else { 1 };
+    // Clamp to source length to avoid out-of-bounds
+    let offset = offset.min(source.len());
+    let len = len.min(source.len().saturating_sub(offset));
+    SourceSpan::from((offset, len))
+}
+
+#[derive(thiserror::Error, miette::Diagnostic, Debug)]
 #[allow(clippy::enum_variant_names)]
 pub enum MumeiError {
-    VerificationError { msg: String, span: Span },
-    CodegenError { msg: String, span: Span },
-    TypeError { msg: String, span: Span },
+    #[error("Verification Error: {msg}")]
+    #[diagnostic(code(mumei::verification))]
+    VerificationError {
+        msg: String,
+        #[source_code]
+        src: miette::NamedSource<String>,
+        #[label("verification failed here")]
+        span: SourceSpan,
+        #[help]
+        help: Option<String>,
+        /// LSP 用: 元の parser::Span（line/col）を保持する
+        original_span: Span,
+    },
+    #[error("Codegen Error: {msg}")]
+    #[diagnostic(code(mumei::codegen))]
+    CodegenError {
+        msg: String,
+        #[source_code]
+        src: miette::NamedSource<String>,
+        #[label("codegen failed here")]
+        span: SourceSpan,
+        #[help]
+        help: Option<String>,
+        /// LSP 用: 元の parser::Span（line/col）を保持する
+        original_span: Span,
+    },
+    #[error("Type Error: {msg}")]
+    #[diagnostic(code(mumei::type_error))]
+    TypeError {
+        msg: String,
+        #[source_code]
+        src: miette::NamedSource<String>,
+        #[label("type mismatch here")]
+        span: SourceSpan,
+        #[help]
+        help: Option<String>,
+        /// LSP 用: 元の parser::Span（line/col）を保持する
+        original_span: Span,
+    },
 }
 
 impl MumeiError {
@@ -71,60 +153,265 @@ impl MumeiError {
     pub fn verification(msg: impl Into<String>) -> Self {
         MumeiError::VerificationError {
             msg: msg.into(),
-            span: Span::default(),
+            src: miette::NamedSource::new("<unknown>", String::new()),
+            span: SourceSpan::from((0, 0)),
+            help: None,
+            original_span: Span::default(),
         }
     }
     /// Span 付きで VerificationError を生成
     pub fn verification_at(msg: impl Into<String>, span: Span) -> Self {
         MumeiError::VerificationError {
             msg: msg.into(),
-            span,
+            src: miette::NamedSource::new(
+                if span.file.is_empty() {
+                    "<unknown>"
+                } else {
+                    &span.file
+                },
+                String::new(),
+            ),
+            span: SourceSpan::from((0, 0)),
+            help: None,
+            original_span: span,
+        }
+    }
+    /// ソースコード付きで VerificationError を生成（リッチ出力対応）
+    #[allow(dead_code)]
+    pub fn verification_with_source(
+        msg: impl Into<String>,
+        span: &Span,
+        source: &str,
+        help: Option<String>,
+    ) -> Self {
+        let source_span = span_to_source_span(source, span);
+        MumeiError::VerificationError {
+            msg: msg.into(),
+            src: miette::NamedSource::new(
+                if span.file.is_empty() {
+                    "<unknown>"
+                } else {
+                    &span.file
+                },
+                source.to_string(),
+            ),
+            span: source_span,
+            help,
+            original_span: span.clone(),
         }
     }
     /// Span なしで CodegenError を生成
     pub fn codegen(msg: impl Into<String>) -> Self {
         MumeiError::CodegenError {
             msg: msg.into(),
-            span: Span::default(),
+            src: miette::NamedSource::new("<unknown>", String::new()),
+            span: SourceSpan::from((0, 0)),
+            help: None,
+            original_span: Span::default(),
+        }
+    }
+    /// ソースコード付きで CodegenError を生成（リッチ出力対応）
+    #[allow(dead_code)]
+    pub fn codegen_with_source(
+        msg: impl Into<String>,
+        span: &Span,
+        source: &str,
+        help: Option<String>,
+    ) -> Self {
+        let source_span = span_to_source_span(source, span);
+        MumeiError::CodegenError {
+            msg: msg.into(),
+            src: miette::NamedSource::new(
+                if span.file.is_empty() {
+                    "<unknown>"
+                } else {
+                    &span.file
+                },
+                source.to_string(),
+            ),
+            span: source_span,
+            help,
+            original_span: span.clone(),
         }
     }
     /// Span なしで TypeError を生成
     pub fn type_error(msg: impl Into<String>) -> Self {
         MumeiError::TypeError {
             msg: msg.into(),
-            span: Span::default(),
+            src: miette::NamedSource::new("<unknown>", String::new()),
+            span: SourceSpan::from((0, 0)),
+            help: None,
+            original_span: Span::default(),
         }
     }
     /// Span 付きで TypeError を生成
     pub fn type_error_at(msg: impl Into<String>, span: Span) -> Self {
         MumeiError::TypeError {
             msg: msg.into(),
-            span,
+            src: miette::NamedSource::new(
+                if span.file.is_empty() {
+                    "<unknown>"
+                } else {
+                    &span.file
+                },
+                String::new(),
+            ),
+            span: SourceSpan::from((0, 0)),
+            help: None,
+            original_span: span,
+        }
+    }
+    /// ソースコード付きで TypeError を生成（リッチ出力対応）
+    #[allow(dead_code)]
+    pub fn type_error_with_source(
+        msg: impl Into<String>,
+        span: &Span,
+        source: &str,
+        help: Option<String>,
+    ) -> Self {
+        let source_span = span_to_source_span(source, span);
+        MumeiError::TypeError {
+            msg: msg.into(),
+            src: miette::NamedSource::new(
+                if span.file.is_empty() {
+                    "<unknown>"
+                } else {
+                    &span.file
+                },
+                source.to_string(),
+            ),
+            span: source_span,
+            help,
+            original_span: span.clone(),
         }
     }
 
     /// ErrorDetail を取得する（Span 情報を保持）
     pub fn to_detail(&self) -> ErrorDetail {
         match self {
-            MumeiError::VerificationError { msg, span } => {
-                ErrorDetail::with_span(format!("Verification Error: {}", msg), span.clone())
-            }
-            MumeiError::CodegenError { msg, span } => {
-                ErrorDetail::with_span(format!("Codegen Error: {}", msg), span.clone())
-            }
-            MumeiError::TypeError { msg, span } => {
-                ErrorDetail::with_span(format!("Type Error: {}", msg), span.clone())
-            }
+            MumeiError::VerificationError {
+                msg, original_span, ..
+            } => ErrorDetail::with_span(
+                format!("Verification Error: {}", msg),
+                original_span.clone(),
+            ),
+            MumeiError::CodegenError {
+                msg, original_span, ..
+            } => ErrorDetail::with_span(format!("Codegen Error: {}", msg), original_span.clone()),
+            MumeiError::TypeError {
+                msg, original_span, ..
+            } => ErrorDetail::with_span(format!("Type Error: {}", msg), original_span.clone()),
         }
     }
-}
 
-impl fmt::Display for MumeiError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    /// ソースコードを設定してリッチ出力を有効にする
+    /// エラー自身が意味のある original_span を持つ場合はそちらを優先し、
+    /// そうでなければ fallback_span（atom 定義の span 等）を使用する。
+    pub fn with_source(self, source: &str, fallback_span: &Span) -> Self {
+        // Use the error's own original_span if it has meaningful location info,
+        // otherwise fall back to the provided span (e.g., atom definition)
+        let effective_span = match &self {
+            MumeiError::VerificationError { original_span, .. }
+            | MumeiError::CodegenError { original_span, .. }
+            | MumeiError::TypeError { original_span, .. }
+                if original_span.line > 0 =>
+            {
+                original_span.clone()
+            }
+            _ => fallback_span.clone(),
+        };
+        let source_span = span_to_source_span(source, &effective_span);
+        let file_name = if !effective_span.file.is_empty() {
+            &effective_span.file
+        } else if !fallback_span.file.is_empty() {
+            &fallback_span.file
+        } else {
+            "<unknown>"
+        };
+        let named_src = miette::NamedSource::new(file_name, source.to_string());
         match self {
-            MumeiError::VerificationError { msg, .. } => write!(f, "Verification Error: {}", msg),
-            MumeiError::CodegenError { msg, .. } => write!(f, "Codegen Error: {}", msg),
-            MumeiError::TypeError { msg, .. } => write!(f, "Type Error: {}", msg),
+            MumeiError::VerificationError {
+                msg,
+                help,
+                original_span,
+                ..
+            } => MumeiError::VerificationError {
+                msg,
+                src: named_src,
+                span: source_span,
+                help,
+                original_span,
+            },
+            MumeiError::CodegenError {
+                msg,
+                help,
+                original_span,
+                ..
+            } => MumeiError::CodegenError {
+                msg,
+                src: named_src,
+                span: source_span,
+                help,
+                original_span,
+            },
+            MumeiError::TypeError {
+                msg,
+                help,
+                original_span,
+                ..
+            } => MumeiError::TypeError {
+                msg,
+                src: named_src,
+                span: source_span,
+                help,
+                original_span,
+            },
+        }
+    }
+
+    /// ヘルプメッセージを設定する
+    pub fn with_help(self, help_msg: impl Into<String>) -> Self {
+        let help = Some(help_msg.into());
+        match self {
+            MumeiError::VerificationError {
+                msg,
+                src,
+                span,
+                original_span,
+                ..
+            } => MumeiError::VerificationError {
+                msg,
+                src,
+                span,
+                help,
+                original_span,
+            },
+            MumeiError::CodegenError {
+                msg,
+                src,
+                span,
+                original_span,
+                ..
+            } => MumeiError::CodegenError {
+                msg,
+                src,
+                span,
+                help,
+                original_span,
+            },
+            MumeiError::TypeError {
+                msg,
+                src,
+                span,
+                original_span,
+                ..
+            } => MumeiError::TypeError {
+                msg,
+                src,
+                span,
+                help,
+                original_span,
+            },
         }
     }
 }
@@ -1082,6 +1369,13 @@ fn collect_acquire_resources(expr: &Expr) -> Vec<String> {
                 resources.extend(collect_acquire_resources(child));
             }
         }
+        Expr::AtomRef { .. } => {}
+        Expr::CallRef { callee, args } => {
+            resources.extend(collect_acquire_resources(callee));
+            for arg in args {
+                resources.extend(collect_acquire_resources(arg));
+            }
+        }
         _ => {}
     }
     resources
@@ -1198,6 +1492,24 @@ fn verify_async_recursion_depth(atom: &Atom, module_env: &ModuleEnv) -> MumeiRes
                 .iter()
                 .map(|c| count_self_calls(c, atom_name))
                 .sum(),
+            Expr::AtomRef { .. } => 0,
+            Expr::CallRef { callee, args } => {
+                let self_call = if let Expr::AtomRef { name } = callee.as_ref() {
+                    if name == atom_name {
+                        1
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                };
+                self_call
+                    + count_self_calls(callee, atom_name)
+                    + args
+                        .iter()
+                        .map(|a| count_self_calls(a, atom_name))
+                        .sum::<usize>()
+            }
             _ => 0,
         }
     }
@@ -1486,6 +1798,16 @@ fn collect_callees(expr: &Expr) -> Vec<String> {
         Expr::TaskGroup { children, .. } => {
             for child in children {
                 callees.extend(collect_callees(child));
+            }
+        }
+        Expr::AtomRef { name } => {
+            callees.push(name.clone());
+        }
+        Expr::CallRef { callee, args } => {
+            // Only recurse into callee — AtomRef branch already pushes the name
+            callees.extend(collect_callees(callee));
+            for arg in args {
+                callees.extend(collect_callees(arg));
             }
         }
         _ => {}
@@ -1995,7 +2317,7 @@ fn verify_inner(
                 return Err(MumeiError::verification_at(
                     "Postcondition (ensures) is not satisfied.",
                     atom.span.clone(),
-                ));
+                ).with_help("ensures の条件を確認してください。body の返り値が事後条件を満たすか検討してください"));
             }
             solver.pop(1);
         }
@@ -2087,10 +2409,16 @@ fn apply_refinement_constraint<'a>(
     let predicate_ast = parse_expression(&refined.predicate_raw);
     let predicate_z3 = expr_to_z3(vc, &predicate_ast, &mut local_env, None)?
         .as_bool()
-        .ok_or(MumeiError::type_error_at(
-            format!("Predicate for {} must be boolean", refined.name),
-            refined.span.clone(),
-        ))?;
+        .ok_or(
+            MumeiError::type_error_at(
+                format!("Predicate for {} must be boolean", refined.name),
+                refined.span.clone(),
+            )
+            .with_help(format!(
+                "型 '{}' の制約が boolean 式である必要があります",
+                refined.name
+            )),
+        )?;
 
     solver.assert(&predicate_z3);
     Ok(())
@@ -2276,7 +2604,7 @@ fn expr_to_z3<'a>(
                                         solver.pop(1);
                                         return Err(MumeiError::verification(
                                             format!("Call to '{}': precondition (requires) not satisfied at call site", name)
-                                        ));
+                                        ).with_help("呼び出し元で事前条件を満たしていません。引数の制約を確認してください"));
                                     }
                                     solver.pop(1);
                                 }
@@ -2432,7 +2760,10 @@ fn expr_to_z3<'a>(
                     return Err(MumeiError::verification(format!(
                         "Potential Out-of-Bounds on '{}' (index may be < 0 or >= len_{})",
                         name, name
-                    )));
+                    ))
+                    .with_help(
+                        "requires にインデックスの範囲制約 (0 <= idx < len) を追加してください",
+                    ));
                 }
                 solver.pop(1);
             }
@@ -2526,7 +2857,8 @@ fn expr_to_z3<'a>(
                                 solver.pop(1);
                                 return Err(MumeiError::verification(
                                     "Potential division by zero.",
-                                ));
+                                )
+                                .with_help("requires に除数 != 0 の条件を追加してください"));
                             }
                             solver.pop(1);
                         }
@@ -3073,6 +3405,146 @@ fn expr_to_z3<'a>(
             } else {
                 Ok(Int::from_i64(ctx, 0).into())
             }
+        }
+
+        // =================================================================
+        // Higher-Order Functions (Phase A): atom_ref + call
+        // =================================================================
+        Expr::AtomRef { name } => {
+            // atom_ref(some_atom): ModuleEnv から atom 定義を取得し、
+            // シンボリック値を生成する。呼び出し先の atom の契約情報は
+            // CallRef 時に展開される。
+            if vc.module_env.get_atom(name).is_none() {
+                return Err(MumeiError::verification(format!(
+                    "atom_ref: unknown atom '{}'",
+                    name
+                )));
+            }
+            // atom_ref はシンボリックな関数参照として Int 値を生成
+            // （実行時は関数ポインタ、Z3 上はシンボリック識別子）
+            let ref_name = format!("__atom_ref_{}", name);
+            let ref_val = Int::new_const(ctx, ref_name.as_str());
+            env.insert(ref_name, ref_val.clone().into());
+            Ok(ref_val.into())
+        }
+        Expr::CallRef { callee, args } => {
+            // call(callee_expr, arg1, arg2, ...):
+            // callee が AtomRef の場合、参照先の atom の契約を展開して検証する。
+            // - requires を呼び出し元のコンテキストで検証
+            // - ensures を事実として solver に追加
+
+            // callee を評価
+            let _callee_val = expr_to_z3(vc, callee, env, solver_opt)?;
+
+            // callee が AtomRef の場合、参照先の atom 名を取得
+            let atom_name = if let Expr::AtomRef { name } = callee.as_ref() {
+                Some(name.clone())
+            } else if let Expr::Variable(var_name) = callee.as_ref() {
+                // 変数が atom_ref として束縛されている場合
+                // env から __atom_ref_ プレフィックスで探す
+                if env.contains_key(&format!("__atom_ref_{}", var_name)) {
+                    Some(var_name.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            if let Some(ref callee_name) = atom_name {
+                if let Some(callee_atom) = vc.module_env.get_atom(callee_name).cloned() {
+                    // 引数を Z3 で評価
+                    let mut arg_vals = Vec::new();
+                    for arg in args {
+                        arg_vals.push(expr_to_z3(vc, arg, env, solver_opt)?);
+                    }
+
+                    // 呼び出し先のパラメータ名に引数をマッピング
+                    let mut call_env = env.clone();
+                    for (i, param) in callee_atom.params.iter().enumerate() {
+                        if let Some(arg_val) = arg_vals.get(i) {
+                            call_env.insert(param.name.clone(), arg_val.clone());
+                        }
+                    }
+
+                    // requires を呼び出し元のコンテキストで検証
+                    if callee_atom.requires.trim() != "true" {
+                        let req_ast = parse_expression(&callee_atom.requires);
+                        let req_z3 = expr_to_z3(vc, &req_ast, &mut call_env, None)?;
+                        if let Some(req_bool) = req_z3.as_bool() {
+                            if let Some(solver) = solver_opt {
+                                solver.push();
+                                solver.assert(&req_bool.not());
+                                if solver.check() == SatResult::Sat {
+                                    solver.pop(1);
+                                    return Err(MumeiError::verification(format!(
+                                        "call(atom_ref({})): precondition '{}' may not hold at call site",
+                                        callee_name, callee_atom.requires
+                                    ))
+                                    .with_help(
+                                        "呼び出し元で事前条件を満たしていません。引数の制約を確認してください",
+                                    ));
+                                }
+                                solver.pop(1);
+                            }
+                        }
+                    }
+
+                    // ensures を事実として solver に追加（Equality Ensures Propagation）
+                    static CALL_REF_COUNTER: std::sync::atomic::AtomicUsize =
+                        std::sync::atomic::AtomicUsize::new(0);
+                    let call_id =
+                        CALL_REF_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let result_name = format!("call_ref_{}_{}", callee_name, call_id);
+                    let result_z3: Dynamic = Int::new_const(ctx, result_name.as_str()).into();
+
+                    if callee_atom.ensures.trim() != "true" {
+                        call_env.insert("result".to_string(), result_z3.clone());
+                        let ens_ast = parse_expression(&callee_atom.ensures);
+                        let ens_z3 = expr_to_z3(vc, &ens_ast, &mut call_env, None)?;
+                        if let Some(ens_bool) = ens_z3.as_bool() {
+                            if let Some(solver) = solver_opt {
+                                solver.assert(&ens_bool);
+                            }
+                        }
+
+                        // Equality ensures の特別処理
+                        if let Expr::BinaryOp(left, Op::Eq, right) = &ens_ast {
+                            if let Expr::Variable(ref var_name) = left.as_ref() {
+                                if var_name == "result" {
+                                    if let Ok(rhs_val) = expr_to_z3(vc, right, &mut call_env, None)
+                                    {
+                                        if let Some(solver) = solver_opt {
+                                            if let (Some(res_int), Some(rhs_int)) =
+                                                (result_z3.as_int(), rhs_val.as_int())
+                                            {
+                                                solver.assert(&res_int._eq(&rhs_int));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    return Ok(result_z3);
+                }
+            }
+
+            // callee が atom_ref でない場合（動的関数ポインタ / パラメトリック関数型）:
+            // 具体的な atom の契約を展開できないため、シンボリック結果を返す。
+            // NOTE: これにより ensures の検証が失敗する可能性がある。
+            // パラメトリックな関数型パラメータ（f: atom_ref(T) -> R）を持つ atom は
+            // trusted として宣言するか、Phase B の call_with_contract を待つ必要がある。
+            let mut arg_vals = Vec::new();
+            for arg in args {
+                arg_vals.push(expr_to_z3(vc, arg, env, solver_opt)?);
+            }
+            static DYNAMIC_CALL_COUNTER: std::sync::atomic::AtomicUsize =
+                std::sync::atomic::AtomicUsize::new(0);
+            let id = DYNAMIC_CALL_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let result = Int::new_const(ctx, format!("call_ref_dynamic_{}", id));
+            Ok(result.into())
         }
 
         Expr::FieldAccess(inner_expr, field_name) => {

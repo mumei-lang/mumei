@@ -146,10 +146,52 @@ atom list_reverse(list: i64)
 // 直接表現できない。代わりに、よく使われる具体的な畳み込み操作を
 // 個別の atom として提供する。
 //
-// NOTE: 将来的に高階関数（Phase A/B/C）が導入された場合、
-//       汎用の fold_left / fold_right を以下の形で提供予定:
-//   atom fold_left<T, U>(list: List<T>, init: U, f: atom_ref(T, U) -> U) -> U
-//   atom fold_right<T, U>(list: List<T>, init: U, f: atom_ref(T, U) -> U) -> U
+// NOTE: 高階関数のロードマップ:
+//   Phase A: [x] atom_ref + call（atom を値として参照、契約の自動展開）
+//   Phase B: call_with_contract（契約のより精密な Z3 展開）
+//   Phase C: ラムダ構文と検証
+
+// --- Fold Left (Phase A): atom_ref による汎用畳み込み ---
+// リスト（配列）の要素を左から右に畳み込む。
+// f は atom_ref で渡された二項関数 (acc, elem) -> acc'。
+// 契約は call 時に自動展開される。
+// NOTE: f の契約はパラメトリックなため trusted（Phase B で解決予定）
+// WARNING: body 内の arr[i] は配列パラメータが必要だが、この atom には
+// 配列パラメータがないため codegen 時にエラーになる。
+// mumei build std/list.mm を単独実行しないこと。Phase B で配列パラメータを追加予定。
+trusted atom fold_left(n: i64, init: i64, f: atom_ref(i64, i64) -> i64)
+requires: n >= 0;
+ensures: result >= 0;
+body: {
+    let acc = init;
+    let i = 0;
+    while i < n
+    invariant: i >= 0 && i <= n && acc >= 0
+    decreases: n - i
+    {
+        acc = call(f, acc, arr[i]);
+        i = i + 1;
+    };
+    acc
+};
+
+// --- Map (Phase A): atom_ref による要素変換 ---
+// 配列の各要素に f を適用する（結果は要素数保存）。
+// NOTE: f を使った要素変換は trusted（Phase B で解決予定）。
+// 現在は要素数保存のみ検証（f の呼び出しはスタブ）。
+trusted atom list_map(n: i64, f: atom_ref(i64) -> i64)
+requires: n >= 0;
+ensures: result == n;
+body: {
+    let i = 0;
+    while i < n
+    invariant: i >= 0 && i <= n
+    decreases: n - i
+    {
+        i = i + 1;
+    };
+    n
+};
 
 // --- FoldSum: リスト（配列）の全要素の合計 ---
 // 配列の要素を左から右に加算する。

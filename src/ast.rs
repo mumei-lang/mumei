@@ -29,9 +29,17 @@ impl TypeRef {
         }
     }
 
-    /// 表示用の正規化名を返す（例: "Stack<i64>"）
+    /// 表示用の正規化名を返す（例: "Stack<i64>", "atom_ref(i64) -> i64"）
     pub fn display_name(&self) -> String {
-        if self.type_args.is_empty() {
+        if self.is_fn_type() {
+            // 関数型: atom_ref(param_types...) -> return_type
+            let param_types: Vec<String> = self.type_args[..self.type_args.len() - 1]
+                .iter()
+                .map(|a| a.display_name())
+                .collect();
+            let return_type = self.type_args.last().unwrap().display_name();
+            format!("atom_ref({}) -> {}", param_types.join(", "), return_type)
+        } else if self.type_args.is_empty() {
             self.name.clone()
         } else {
             let args: Vec<String> = self.type_args.iter().map(|a| a.display_name()).collect();
@@ -45,6 +53,43 @@ impl TypeRef {
         self.type_args.is_empty()
             && self.name.len() == 1
             && self.name.chars().next().map_or(false, |c| c.is_uppercase())
+    }
+
+    /// 関数型を作成する: atom_ref(param_types...) -> return_type
+    /// TypeRef の構造を再利用し、name="atom_ref" で関数型を表現する。
+    /// type_args の最後の要素が戻り値型、それ以外がパラメータ型。
+    pub fn fn_type(param_types: Vec<TypeRef>, return_type: TypeRef) -> Self {
+        let mut type_args = param_types;
+        type_args.push(return_type);
+        TypeRef {
+            name: "atom_ref".to_string(),
+            type_args,
+        }
+    }
+
+    /// 関数型かどうかを判定する
+    pub fn is_fn_type(&self) -> bool {
+        self.name == "atom_ref" && !self.type_args.is_empty()
+    }
+
+    /// 関数型のパラメータ型を返す（最後の要素＝戻り値型を除く）
+    #[allow(dead_code)]
+    pub fn fn_param_types(&self) -> Option<Vec<&TypeRef>> {
+        if self.is_fn_type() && self.type_args.len() >= 2 {
+            Some(self.type_args[..self.type_args.len() - 1].iter().collect())
+        } else {
+            None
+        }
+    }
+
+    /// 関数型の戻り値型を返す（type_args の最後の要素）
+    #[allow(dead_code)]
+    pub fn fn_return_type(&self) -> Option<&TypeRef> {
+        if self.is_fn_type() {
+            self.type_args.last()
+        } else {
+            None
+        }
     }
 
     /// 型変数の置換: type_map に従って型パラメータを具体型に置き換える
@@ -268,6 +313,17 @@ impl Monomorphizer {
                 }
             }
             Expr::Number(_) | Expr::Float(_) | Expr::Variable(_) => {}
+            Expr::AtomRef { name } => {
+                // atom_ref(name) は呼び出し先の atom を参照するため、名前を収集
+                let tref = parse_type_ref(name);
+                self.collect_from_type_ref(&tref);
+            }
+            Expr::CallRef { callee, args } => {
+                self.collect_from_expr(callee);
+                for arg in args {
+                    self.collect_from_expr(arg);
+                }
+            }
         }
     }
 
