@@ -75,6 +75,9 @@ jobs:
           sudo ninja install
           echo "Z3_SYS_Z3_HEADER=/usr/local/z3-static/include/z3.h" >> $GITHUB_ENV
           echo "Z3_SYS_Z3_LIB_DIR=/usr/local/z3-static/lib" >> $GITHUB_ENV
+          # z3-sys build.rs only emits rustc-link-search with static-link-z3 feature;
+          # we must add the search path manually via RUSTFLAGS
+          echo "RUSTFLAGS=-L /usr/local/z3-static/lib" >> $GITHUB_ENV
       - name: Install system dependencies (macOS)
         if: runner.os == 'macOS'
         run: |
