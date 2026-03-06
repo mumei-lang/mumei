@@ -86,9 +86,27 @@ body: n;
 
 ## 🚀 Quickstart
 
-### Option A: Download pre-built binary (recommended)
+### Option A: One-liner install (recommended)
 
-Download from [GitHub Releases](https://github.com/mumei-lang/mumei/releases) — no Rust toolchain required.
+No Rust toolchain required — automatically detects your OS/architecture.
+
+```bash
+# ワンライナーインストール
+curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash
+
+# または Homebrew (macOS / Linux)
+brew install mumei-lang/mumei/mumei
+```
+
+You can also install a specific version:
+
+```bash
+curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash -s -- --version v0.2.0
+```
+
+### Option B: Download pre-built binary manually
+
+Download from [GitHub Releases](https://github.com/mumei-lang/mumei/releases):
 
 ```bash
 # Example: macOS aarch64
@@ -99,7 +117,7 @@ sudo mv std /usr/local/share/mumei-std
 export MUMEI_STD_PATH=/usr/local/share/mumei-std
 ```
 
-### Option B: Build from source
+### Option C: Build from source
 
 > **Note**: `cargo build --release` compiles the Mumei compiler itself (written in Rust) into a native binary at `target/release/mumei`. This is a one-time step — after building, you use the `mumei` command to work with `.mm` source files.
 
@@ -349,7 +367,7 @@ my_app/
 - [ ] **`std.json`**: 文字列とオブジェクトの相互変換、serde_json バックエンド、型安全な JSON 操作
 - [ ] **Task 洗練**: 戻り値型推論、`task_group` 結果バインド、チャネル型 (`chan<T>`)
 - [ ] Rich Diagnostics: miette/ariadne ライブラリによるカラー表示・下線・サジェスト
-- [ ] **Runtime Portability**: musl 静的リンク、Homebrew Tap、WebInstall (`curl | sh`)
+- [x] **Runtime Portability**: musl 静的リンク、Homebrew Tap、WebInstall (`curl | sh`)
 - [ ] **`mumei repl`**: 対話的実行環境（parse → verify → eval ループ）
 - [ ] **`mumei doc`**: ソースコメントから HTML ドキュメント自動生成（rustdoc 風）
 
