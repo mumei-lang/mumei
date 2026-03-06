@@ -378,7 +378,7 @@ P3-B (mumei doc)       (independent)
 
 | Metric | Target | Measurement |
 |---|---|---|
-| **API Script Demo** | `http.get` + `json.parse` が動作 | examples/http_demo.mm が通る |
+| **API Script Demo** | `http.get` + `json.parse` working | examples/http_demo.mm passes |
 | **Install Time** | < 30 seconds | `curl \| sh` from clean environment |
 | **REPL Responsiveness** | < 100ms per eval | Benchmark on standard hardware |
 | **Doc Coverage** | 100% of std library | `mumei doc std/` generates all pages |
@@ -391,16 +391,16 @@ P3-B (mumei doc)       (independent)
 
 | Phase | Duration | Milestone |
 |---|---|---|
-| P1-A: FFI Bridge | 1-2 weeks | extern → trusted atom 自動登録 |
+| P1-A: FFI Bridge | 1-2 weeks | extern → trusted atom auto-registration |
 | P1-B: std.json | 1 week | `json.parse` / `json.stringify` |
 | P1-C: std.http | 1-2 weeks | `http.get` / `http.post` |
-| P1-D: Demo | 1 week | 統合デモ + ドキュメント |
-| P2-A: Static Link | 1 week | musl ビルド + CI |
+| P1-D: Demo | 1 week | Integration demo + documentation |
+| P2-A: Static Link | 1 week | musl build + CI |
 | P2-B: Homebrew | 1 week | `brew install mumei` |
 | P2-C: WebInstall | 1 week | `curl \| sh` |
-| P3-A: REPL | 2 weeks | `mumei repl` 基本動作 |
-| P3-B: Doc Gen | 2-3 weeks | `mumei doc` HTML 生成 |
-| P3-C: Integration | 1 week | REPL + HTTP 統合 |
+| P3-A: REPL | 2 weeks | `mumei repl` basic functionality |
+| P3-B: Doc Gen | 2-3 weeks | `mumei doc` HTML generation |
+| P3-C: Integration | 1 week | REPL + HTTP integration |
 
 ---
 

@@ -1,15 +1,15 @@
 # Structured Concurrency Design Document
 
-> Mumei の構造化並行性と Z3 検証戦略
+> Mumei's structured concurrency and Z3 verification strategy.
 
-## 概要
+## Overview
 
-Mumei は **構造化並行性 (Structured Concurrency)** を採用し、
-タスクのライフサイクルを型システムと Z3 ソルバで形式的に保証します。
-親タスクが子タスクより先に終了しないことをコンパイル時に検証することで、
-ダングリングタスクやリソースリークを防止します。
+Mumei adopts **Structured Concurrency**, formally guaranteeing task lifecycle
+properties through the type system and Z3 solver.
+By verifying at compile time that parent tasks do not terminate before child tasks,
+dangling tasks and resource leaks are prevented.
 
-## 既存の非同期基盤
+## Existing Async Foundation
 
 ### async atom
 
@@ -29,7 +29,7 @@ acquire db_conn {
 }
 ```
 
-### リソース定義
+### Resource Definitions
 
 ```mumei
 resource db_conn priority: 1 mode: exclusive;
@@ -38,10 +38,10 @@ resource cache   priority: 2 mode: shared;
 
 ## Task 構文 (PR-C)
 
-### task 式
+### task Expression
 
-子タスクを生成する。親タスクのスコープ内で実行され、
-構造化並行性により親が先に終了しないことが保証される。
+Spawns a child task. Executes within the parent task's scope,
+with structured concurrency guaranteeing the parent does not terminate first.
 
 ```mumei
 task {
@@ -60,18 +60,18 @@ task workers {
 ```rust
 Expr::Task {
     body: Box<Expr>,
-    group: Option<String>,  // タスクグループ名（省略時はデフォルト）
+    group: Option<String>,  // task group name (default if omitted)
 }
 ```
 
 ## TaskGroup 構文 (PR-C)
 
-### task_group 式
+### task_group Expression
 
-複数の子タスクをグループ化し、Join セマンティクスに従って完了を待機する。
+Groups multiple child tasks and waits for completion according to Join semantics.
 
 ```mumei
-// 全タスクの完了を待つ（デフォルト: All）
+// Wait for all tasks to complete (default: All)
 task_group {
     task { fetch_users() };
     task { fetch_orders() };

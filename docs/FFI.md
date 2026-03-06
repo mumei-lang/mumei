@@ -1,17 +1,17 @@
 # FFI (Foreign Function Interface) Design Document
 
-> Mumei の FFI-first 設計と Bridge メカニズム
+> Mumei's FFI-first design and Bridge mechanism.
 
-## 概要
+## Overview
 
-Mumei は **FFI-first** の設計思想を採用し、Rust や C の既存エコシステムと
-安全に連携するための外部関数インターフェースを提供します。
-FFI 関数は `trusted atom` として自動登録され、コントラクト (requires/ensures) のみで
-検証されます (body は外部実装)。
+Mumei adopts an **FFI-first** design philosophy, providing a foreign function interface
+for safe interoperation with existing Rust and C ecosystems.
+FFI functions are auto-registered as `trusted atom`s and verified only via contracts
+(requires/ensures) — body is externally implemented.
 
-## extern ブロック構文
+## extern Block Syntax
 
-### 基本構文
+### Basic Syntax
 
 ```mumei
 extern "Rust" {
@@ -20,59 +20,59 @@ extern "Rust" {
 }
 ```
 
-### 構文要素
+### Syntax Elements
 
-| 要素 | 説明 |
+| Element | Description |
 |---|---|
-| `extern` | 外部関数ブロックの開始キーワード |
-| `"Rust"` / `"C"` | 対象言語名 |
-| `fn name(params) -> RetType;` | 関数シグネチャ宣言 |
+| `extern` | Keyword to start an external function block |
+| `"Rust"` / `"C"` | Target language name |
+| `fn name(params) -> RetType;` | Function signature declaration |
 
-### AST 表現（実装済み）
+### AST Representation (implemented)
 
 ```rust
 pub struct ExternFn {
     pub name: String,
     pub param_types: Vec<String>,
     pub return_type: String,
-    pub span: Span,             // ソース位置情報
+    pub span: Span,             // source location
 }
 
 pub struct ExternBlock {
     pub language: String,
     pub functions: Vec<ExternFn>,
-    pub span: Span,             // ソース位置情報
+    pub span: Span,             // source location
 }
 ```
 
-`Item::ExternBlock(ExternBlock)` として `parse_module` の結果に含まれる。
-`main.rs`, `resolver.rs`, `lsp.rs` の全 match ブロックで処理済み。
+Included as `Item::ExternBlock(ExternBlock)` in `parse_module` results.
+Handled in all match blocks in `main.rs`, `resolver.rs`, `lsp.rs`.
 
-## 実装状況
+## Implementation Status
 
-| 項目 | ステータス |
+| Item | Status |
 |---|---|
-| extern ブロック構文パース | ✅ 実装済み |
-| `ExternFn` / `ExternBlock` AST | ✅ 実装済み (Span 付き) |
-| `Item::ExternBlock` バリアント | ✅ 実装済み (全 match 網羅) |
-| パーサーテスト | ✅ 実装済み (`test_parse_extern_block`, `test_parse_extern_block_c`) |
-| trusted atom 自動登録 | ❌ 未実装 (将来: extern → ModuleEnv 自動登録) |
-| LLVM コード生成 | ❌ 未実装 (将来: extern 関数の declare + call) |
+| extern block syntax parsing | ✅ Implemented |
+| `ExternFn` / `ExternBlock` AST | ✅ Implemented (with Span) |
+| `Item::ExternBlock` variant | ✅ Implemented (all match arms) |
+| Parser tests | ✅ Implemented (`test_parse_extern_block`, `test_parse_extern_block_c`) |
+| trusted atom auto-registration | ✅ Implemented (PR #32: extern → ModuleEnv auto-registration) |
+| LLVM codegen | ❌ Not implemented (future: extern function declare + call) |
 
-## Bridge メカニズム（設計）
+## Bridge Mechanism (Design)
 
-### trusted atom との連携（将来実装予定）
+### Integration with trusted atom
 
-`extern` ブロックで宣言された関数は、将来的に `trusted atom` として自動登録される予定:
+Functions declared in `extern` blocks are auto-registered as `trusted atom`s:
 
-1. **body 検証スキップ**: 外部実装のため、body の Z3 検証は行わない
-2. **コントラクト検証**: `requires` / `ensures` のコントラクトは呼び出し側で検証される
-3. **Taint 分析**: `trusted` 関数の戻り値には `__tainted_` マーカーが付与される
+1. **Body verification skip**: External implementation, so Z3 body verification is skipped
+2. **Contract verification**: `requires` / `ensures` contracts are verified at call sites
+3. **Taint analysis**: `trusted` function return values are tagged with `__tainted_` markers
 
-> NOTE: 現時点では `ExternFn` のフィールドは読み取り側が未実装のため `#[allow(dead_code)]` を付与。
-> 将来 trusted atom として ModuleEnv に自動登録する際に使用予定。
+> NOTE: `ExternFn` fields were previously `#[allow(dead_code)]` but are now used
+> for trusted atom auto-registration in `load_and_prepare()`.
 
-### 使用例
+### Usage Example
 
 ```mumei
 extern "Rust" {
@@ -85,65 +85,65 @@ atom safe_sqrt(x: f64) -> f64
     body: sqrt(x);
 ```
 
-## 対応言語
+## Supported Languages
 
-| 言語 | ステータス | 説明 |
+| Language | Status | Description |
 |---|---|---|
-| Rust | 設計済み | Rust クレートの `extern "C"` シンボルを参照 |
-| C | 設計済み | C ライブラリの関数シンボルを参照 |
+| Rust | Designed | References `extern "C"` symbols from Rust crates |
+| C | Designed | References function symbols from C libraries |
 
-## パース処理
+## Parsing
 
-`parse_module()` 内で以下の正規表現により extern ブロックを検出:
+extern blocks are detected in `parse_module()` using the following regex:
 
 ```
 extern\s+"(\w+)"\s*\{([^}]*)\}
 ```
 
-各関数シグネチャは以下のパターンで抽出:
+Each function signature is extracted with:
 
 ```
 fn\s+(\w+)\s*\(([^)]*)\)\s*->\s*(\w+)
 ```
 
-## 将来の拡展
+## Future Extensions
 
-> 詳細: [`docs/ROADMAP.md`](ROADMAP.md) Phase P1-A
+> Details: [`docs/ROADMAP.md`](ROADMAP.md) Phase P1-A
 
 ### 🥇 Priority 1: FFI Bridge Completion (Roadmap P1-A)
 
-std.http / std.json の前提条件として、FFI Bridge の完成が最優先事項です。
+Completing the FFI Bridge is the top priority as a prerequisite for std.http / std.json.
 
-**実装計画**:
+**Implementation Plan**:
 
-1. **ExternBlock → trusted atom 自動変換**
-   - `ExternFn` のシグネチャから `Atom` を生成
-   - `TrustLevel::Trusted` を設定（body 検証スキップ）
-   - `ModuleEnv.atoms` に自動登録
+1. **ExternBlock → trusted atom auto-conversion** ✅ (PR #32)
+   - Generate `Atom` from `ExternFn` signature
+   - Set `TrustLevel::Trusted` (skip body verification)
+   - Auto-register in `ModuleEnv.atoms`
 
-2. **LLVM declare 生成**
-   - extern 関数を LLVM IR の `declare` として出力
-   - 型マッピング: Mumei 型 → LLVM 型
+2. **LLVM declare generation** (pending)
+   - Output extern functions as LLVM IR `declare`
+   - Type mapping: Mumei types → LLVM types
 
-3. **呼び出し側コード生成**
-   - ModuleEnv に登録された extern atom への call 生成
-   - ABI 互換性の確保 (extern "C" / extern "Rust")
+3. **Call-site code generation** (pending)
+   - Generate call to extern atoms registered in ModuleEnv
+   - Ensure ABI compatibility (extern "C" / extern "Rust")
 
-**変更対象ファイル**:
-- `src/main.rs` — `load_and_prepare()` で ExternBlock → atom 変換
-- `src/verification.rs` — extern atom の trusted 検証
-- `src/codegen.rs` — LLVM `declare` + `call` 生成
+**Files modified**:
+- `src/main.rs` — ExternBlock → atom conversion in `load_and_prepare()`
+- `src/verification.rs` — trusted verification for extern atoms
+- `src/codegen.rs` — LLVM `declare` + `call` generation (pending)
 
-### その他の拡張
+### Other Extensions
 
-1. **std.http バックエンド** (Roadmap P1-C): reqwest を FFI で隠蔽した HTTP クライアント
-2. **std.json バックエンド** (Roadmap P1-B): serde_json を FFI で隠蔽した JSON 操作
-3. **std 階層化**: `std.core` / `std.net` / `std.math` モジュール階層への再編成
-4. **リンク指示**: `#[link(name = "libm")]` 相当のリンカ指示構文
-5. **型マッピング**: Mumei 型と外部言語型の自動マッピング
+1. **std.http backend** (Roadmap P1-C): HTTP client wrapping reqwest via FFI
+2. **std.json backend** (Roadmap P1-B): JSON operations wrapping serde_json via FFI
+3. **std hierarchy**: Reorganize into `std.core` / `std.net` / `std.math` module hierarchy
+4. **Link directives**: `#[link(name = "libm")]` equivalent linker directive syntax
+5. **Type mapping**: Automatic mapping between Mumei types and foreign language types
 
-## 関連ファイル
+## Related Files
 
-- `src/parser.rs` — `ExternFn`, `ExternBlock` 構造体定義 + パース処理
-- `src/verification.rs` — `TrustLevel::Trusted` による検証スキップ
-- `src/codegen.rs` — LLVM IR での外部関数呼び出し生成 (将来)
+- `src/parser.rs` — `ExternFn`, `ExternBlock` struct definitions + parsing
+- `src/verification.rs` — Verification skip via `TrustLevel::Trusted`
+- `src/codegen.rs` — External function call generation in LLVM IR (pending)
