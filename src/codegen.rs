@@ -859,9 +859,33 @@ fn compile_expr<'a>(
         Expr::AtomRef { name } => {
             // atom_ref(name) → 関数ポインタとして LLVM IR を生成
             // module.get_function(name) で関数を取得し、ポインタ値として返す
-            let func = module.get_function(name).ok_or_else(|| {
-                MumeiError::codegen(format!("atom_ref: unknown function '{}'", name))
-            })?;
+            // 関数がまだモジュールに登録されていない場合は外部宣言として追加する
+            let func = if let Some(f) = module.get_function(name) {
+                f
+            } else if let Some(callee_atom) = module_env.get_atom(name) {
+                let callee_param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = callee_atom
+                    .params
+                    .iter()
+                    .map(|p| resolve_param_type(context, p.type_name.as_deref(), module_env).into())
+                    .collect();
+                let has_float = callee_atom.params.iter().any(|p| {
+                    p.type_name
+                        .as_deref()
+                        .map(|t| module_env.resolve_base_type(t) == "f64")
+                        .unwrap_or(false)
+                });
+                let fn_type = if has_float {
+                    context.f64_type().fn_type(&callee_param_types, false)
+                } else {
+                    context.i64_type().fn_type(&callee_param_types, false)
+                };
+                module.add_function(name, fn_type, Some(inkwell::module::Linkage::External))
+            } else {
+                return Err(MumeiError::codegen(format!(
+                    "atom_ref: unknown function '{}'",
+                    name
+                )));
+            };
             // 関数ポインタを i64 にキャストして返す（mumei は i64 ベース）
             let fn_ptr = func.as_global_value().as_pointer_value();
             let ptr_int = llvm!(builder.build_ptr_to_int(
