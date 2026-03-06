@@ -1,14 +1,14 @@
 # 🗺️ Strategic Roadmap — Mumei v0.3.0+
 
-> Mumei を「実験的言語」から「実用ツール」へ昇華させる 3 つの戦略的ロードマップ
+> Three strategic roadmap priorities to evolve Mumei from an experimental language to a practical tool.
 
 ## Overview
 
 | Priority | Theme | Goal | Status |
 |---|---|---|---|
-| 🥇 P1 | Network-First Standard Library | API スクリプティング言語としての実用性 | ✅ Implemented |
-| 🥈 P2 | Runtime Portability | どこでも動く配布基盤 | ✅ Implemented |
-| 🥉 P3 | CLI Developer Experience | 世界最高の CLI 開発体験 | ✅ Implemented |
+| 🥇 P1 | Network-First Standard Library | Practical utility as an API scripting language | ✅ Implemented |
+| 🥈 P2 | Runtime Portability | Run-anywhere distribution foundation | ✅ Implemented |
+| 🥉 P3 | CLI Developer Experience | World-class CLI developer experience | ✅ Implemented |
 
 ---
 
@@ -16,49 +16,49 @@
 
 ### Vision
 
-現代のプログラミングにおいて HTTP リクエストと JSON 操作は「標準装備」であるべきです。
-PR #29 の FFI 基盤を活用し、**「Rust のパワーを Mumei の皮で包む」** 実装を最優先します。
+HTTP requests and JSON operations should be "standard equipment" in modern programming.
+Leveraging the FFI foundation from PR #29, we prioritize **wrapping Rust's power in Mumei's skin**.
 
-**狙い**: 「API を叩いてデータを加工するスクリプト」を Mumei で書く動機を作ります。
+**Goal**: Create motivation to write "scripts that hit APIs and process data" in Mumei.
 
 ### Phase A: FFI Bridge Completion
 
-extern 宣言から trusted atom への自動変換を完成させます。
-これが std.http / std.json の **前提条件** です。
+Complete auto-conversion from extern declarations to trusted atoms.
+This is the **prerequisite** for std.http / std.json.
 
 **Current State**:
-- ✅ `extern "Rust" { fn sqrt(x: f64) -> f64; }` 構文パース済み
-- ✅ `ExternFn` / `ExternBlock` AST + Span 付き
-- ✅ `Item::ExternBlock` 全 match 網羅
-- ❌ extern → ModuleEnv 自動登録 (trusted atom)
-- ❌ LLVM コード生成 (extern 関数の declare + call)
+- ✅ `extern "Rust" { fn sqrt(x: f64) -> f64; }` syntax parsed
+- ✅ `ExternFn` / `ExternBlock` AST + Span
+- ✅ `Item::ExternBlock` all match arms covered
+- ✅ extern → ModuleEnv auto-registration (trusted atom) — implemented in PR #32
+- ❌ LLVM codegen (extern function declare + call)
 
 **Implementation Plan**:
 
 ```
-1. ExternBlock → trusted atom 自動変換
-   - ExternFn のシグネチャから Atom を生成
-   - TrustLevel::Trusted を設定（body 検証スキップ）
-   - ModuleEnv.atoms に自動登録
+1. ExternBlock → trusted atom auto-conversion
+   - Generate Atom from ExternFn signature
+   - Set TrustLevel::Trusted (skip body verification)
+   - Auto-register in ModuleEnv.atoms
 
-2. LLVM declare 生成
-   - extern 関数を LLVM IR の `declare` として出力
-   - 型マッピング: Mumei 型 → LLVM 型
+2. LLVM declare generation
+   - Output extern functions as LLVM IR `declare`
+   - Type mapping: Mumei types → LLVM types
 
-3. 呼び出し側コード生成
-   - ModuleEnv に登録された extern atom への call 生成
-   - ABI 互換性の確保 (extern "C" / extern "Rust")
+3. Call-site code generation
+   - Generate call to extern atoms registered in ModuleEnv
+   - Ensure ABI compatibility (extern "C" / extern "Rust")
 ```
 
 **Files to modify**:
-- `src/main.rs` — `load_and_prepare()` で ExternBlock → atom 変換
-- `src/verification.rs` — extern atom の trusted 検証
-- `src/codegen.rs` — LLVM `declare` + `call` 生成
-- `docs/FFI.md` — 実装ステータス更新
+- `src/main.rs` — ExternBlock → atom conversion in `load_and_prepare()`
+- `src/verification.rs` — trusted verification for extern atoms
+- `src/codegen.rs` — LLVM `declare` + `call` generation
+- `docs/FFI.md` — implementation status update
 
 ### Phase B: std.json
 
-文字列とオブジェクトの相互変換。Mumei の型推論と組み合わせて型安全に JSON を扱えるようにします。
+String/object conversion. Combine with Mumei's type inference for type-safe JSON handling.
 
 **Target API**:
 
@@ -76,23 +76,23 @@ let name = json.get_string(data, "name");
 let age = json.get_int(data, "age");
 ```
 
-**Backend**: `serde_json` (既に Cargo.toml に依存済み)
+**Backend**: `serde_json` (already a Cargo.toml dependency)
 
 **Files to create/modify**:
-- `std/json.mm` — JSON 操作の atom 定義
-- `src/parser.rs` — 文字列リテラル型の拡張（必要に応じて）
-- `docs/STDLIB.md` — std.json リファレンス追加
+- `std/json.mm` — JSON operation atom definitions
+- `src/parser.rs` — string literal type extension (if needed)
+- `docs/STDLIB.md` — std.json reference
 
 ### Phase C: std.http (Client)
 
-`reqwest` を FFI バックエンドに隠蔽した HTTP クライアント。
+HTTP client wrapping `reqwest` behind FFI backend.
 
 **Target API**:
 
 ```mumei
 import "std/http" as http;
 
-// Simple GET — 極限のシンプルさ
+// Simple GET — maximum simplicity
 let response = await http.get("https://api.example.com/users");
 let status = http.status(response);
 let body = http.body(response);
@@ -101,16 +101,16 @@ let body = http.body(response);
 let response = await http.post("https://api.example.com/users", payload);
 ```
 
-**Backend**: Rust `reqwest` crate (FFI 経由)
+**Backend**: Rust `reqwest` crate (via FFI)
 
 **Files to create/modify**:
-- `std/http.mm` — HTTP 操作の atom 定義
-- `Cargo.toml` — `reqwest` 依存追加
-- `docs/STDLIB.md` — std.http リファレンス追加
+- `std/http.mm` — HTTP operation atom definitions
+- `Cargo.toml` — `reqwest` dependency
+- `docs/STDLIB.md` — std.http reference
 
 ### Phase D: Integration Demo
 
-`task_group` との並行リクエスト統合デモ。
+Integration demo with `task_group` for parallel requests.
 
 ```mumei
 import "std/http" as http;
@@ -125,9 +125,9 @@ task_group:all {
 ```
 
 **Files to create**:
-- `examples/http_demo.mm` — HTTP デモ
-- `examples/json_demo.mm` — JSON デモ
-- `examples/concurrent_http.mm` — 並行 HTTP デモ
+- `examples/http_demo.mm` — HTTP demo
+- `examples/json_demo.mm` — JSON demo
+- `examples/concurrent_http.mm` — Parallel HTTP demo
 
 ---
 
@@ -135,53 +135,53 @@ task_group:all {
 
 ### Vision
 
-「どこでも動く」ことは普及の絶対条件です。
-導入のハードルをゼロに近づけ、GitHub Actions や CI/CD 環境での
-「ちょっとした自動化スクリプト」の座を狙います。
+"Running anywhere" is an absolute requirement for adoption.
+Reduce the installation barrier to near-zero and target the niche of
+"quick automation scripts" in GitHub Actions and CI/CD environments.
 
 ### Phase A: Static Linking Optimization
 
-依存する共有ライブラリを全て静的にリンクし、
-`mumei` 実行ファイル一つあればどこでも動く状態を完璧にします。
+Statically link all shared library dependencies so that a single `mumei`
+executable runs anywhere.
 
 **Current State**:
 - ✅ GitHub Actions release workflow (macOS x86_64/aarch64, Linux x86_64)
-- ✅ `mumei setup` で Z3/LLVM 自動ダウンロード
-- ❌ musl ターゲット (完全静的リンク)
-- ❌ Windows バイナリ
+- ✅ `mumei setup` for Z3/LLVM auto-download
+- ❌ musl target (fully static linking)
+- ❌ Windows binaries
 
 **Implementation Plan**:
 
 ```
-1. musl ターゲット追加
-   - x86_64-unknown-linux-musl ターゲット
-   - GitHub Actions に musl ビルドジョブ追加
+1. Add musl target
+   - x86_64-unknown-linux-musl target
+   - Add musl build job to GitHub Actions
 
-2. 依存ライブラリの静的リンク確認
-   - Z3: 静的リンク可能か検証
-   - LLVM: 静的リンク設定の確認
-   - 全ターゲットで ldd 検証
+2. Verify static linking of dependencies
+   - Z3: verify static linking feasibility
+   - LLVM: confirm static link settings
+   - Verify with ldd on all targets
 
-3. Windows サポート (stretch goal)
-   - x86_64-pc-windows-msvc ターゲット
-   - GitHub Actions に Windows ジョブ追加
+3. Windows support (stretch goal)
+   - x86_64-pc-windows-msvc target
+   - Add Windows job to GitHub Actions
 ```
 
 **Files to modify**:
-- `.github/workflows/release.yml` — musl/Windows ビルド追加
-- `Cargo.toml` — 静的リンク設定
-- `docs/TOOLCHAIN.md` — サポートプラットフォーム更新
+- `.github/workflows/release.yml` — add musl/Windows builds
+- `Cargo.toml` — static link settings
+- `docs/TOOLCHAIN.md` — update supported platforms
 
 ### Phase B: Homebrew Tap
 
-`brew install mumei-lang/mumei` で一発導入。
+One-command installation via `brew install mumei-lang/mumei`.
 
 **Implementation Plan**:
 
 ```
-1. mumei-lang/homebrew-mumei リポジトリ作成
-2. Formula 作成 (GitHub Releases からダウンロード)
-3. CI で Formula の自動更新 (release.yml 連携)
+1. Create mumei-lang/homebrew-mumei repository
+2. Create Formula (download from GitHub Releases)
+3. Auto-update Formula via CI (release.yml integration)
 ```
 
 **Formula example**:
@@ -209,18 +209,18 @@ curl -fsSL https://mumei-lang.github.io/install.sh | sh
 **Implementation Plan**:
 
 ```
-1. install.sh スクリプト作成
-   - OS/arch 自動検出
-   - GitHub Releases から最新バイナリをダウンロード
-   - PATH への追加案内
+1. Create install.sh script
+   - Auto-detect OS/arch
+   - Download latest binary from GitHub Releases
+   - Guide user to add to PATH
 
-2. GitHub Pages でホスティング
-3. README にインストール手順追加
+2. Host on GitHub Pages
+3. Add installation instructions to README
 ```
 
 **Files to create**:
-- `scripts/install.sh` — インストールスクリプト
-- `.github/workflows/release.yml` — install.sh の自動更新
+- `scripts/install.sh` — installer script
+- `.github/workflows/release.yml` — auto-update install.sh
 
 ---
 
@@ -228,14 +228,14 @@ curl -fsSL https://mumei-lang.github.io/install.sh | sh
 
 ### Vision
 
-LSP に注力しない分、「CLI 上での開発体験」を世界最高レベルにします。
-ドキュメントが充実している言語は、ユーザーが自走できるため、
-コミュニティが勝手に育ち始めます。
+Instead of focusing on LSP, we aim for world-class "CLI-based development experience".
+Languages with great documentation enable users to be self-sufficient,
+and communities grow organically.
 
 ### Phase A: mumei repl
 
-構文を試せる REPL (Read-Eval-Print Loop) を強化し、
-HTTP リクエストなどを試せるようにします。
+Enhanced REPL (Read-Eval-Print Loop) for experimenting with syntax
+and trying HTTP requests.
 
 **Target UX**:
 
@@ -264,31 +264,31 @@ mumei> :quit
 **Implementation Plan**:
 
 ```
-1. REPL ループ基盤
-   - rustyline (行編集 + 履歴) or 標準入力ベース
-   - parse → verify → eval のパイプライン
+1. REPL loop foundation
+   - rustyline (line editing + history) or stdin-based
+   - parse → verify → eval pipeline
 
-2. インクリメンタル定義
-   - ModuleEnv への逐次追加
-   - 定義の上書き対応
+2. Incremental definitions
+   - Append to ModuleEnv incrementally
+   - Support definition overwriting
 
-3. 特殊コマンド
-   - :help, :quit, :load, :env (現在の定義一覧)
-   - :type <expr> (型推論結果表示)
+3. Special commands
+   - :help, :quit, :load, :env (list current definitions)
+   - :type <expr> (display type inference result)
 
-4. HTTP/JSON 統合 (P1 完了後)
-   - REPL から http.get() を直接実行
+4. HTTP/JSON integration (after P1 completion)
+   - Execute http.get() directly from REPL
 ```
 
 **Files to create/modify**:
-- `src/repl.rs` — REPL エンジン
-- `src/main.rs` — `mumei repl` サブコマンド追加
-- `Cargo.toml` — `rustyline` 依存追加
+- `src/repl.rs` — REPL engine
+- `src/main.rs` — `mumei repl` subcommand
+- `Cargo.toml` — `rustyline` dependency
 
 ### Phase B: mumei doc
 
-ソースコード内のコメントから、Rust の `rustdoc` のように
-綺麗な HTML ドキュメントを生成する機能。
+Generate beautiful HTML documentation from source code comments,
+similar to Rust's `rustdoc`.
 
 **Target UX**:
 
@@ -321,32 +321,32 @@ atom inc(n: Nat)
 **Implementation Plan**:
 
 ```
-1. Doc comment パーサー
-   - /// コメントの抽出
-   - Markdown パース (簡易版)
+1. Doc comment parser
+   - Extract /// comments
+   - Markdown parsing (lightweight)
 
-2. HTML テンプレートエンジン
-   - atom / type / trait / struct / enum 各ページ
-   - インデックスページ (全定義の一覧)
-   - requires/ensures の可視化
+2. HTML template engine
+   - Pages for atom / type / trait / struct / enum
+   - Index page (all definitions)
+   - requires/ensures visualization
 
-3. CSS スタイリング
-   - ダークモード対応
-   - シンタックスハイライト
+3. CSS styling
+   - Dark mode support
+   - Syntax highlighting
 
-4. CLI 統合
+4. CLI integration
    - mumei doc <input> -o <output_dir>
-   - mumei doc --json (構造化出力)
+   - mumei doc --json (structured output)
 ```
 
 **Files to create/modify**:
-- `src/doc.rs` — ドキュメント生成エンジン
-- `src/main.rs` — `mumei doc` サブコマンド追加
-- `templates/` — HTML テンプレート
+- `src/doc.rs` — documentation generation engine
+- `src/main.rs` — `mumei doc` subcommand
+- `templates/` — HTML templates
 
 ### Phase C: REPL + HTTP Integration
 
-REPL から直接 HTTP リクエストを試せるデモ (P1 + P3A 完了後)。
+Demo for trying HTTP requests directly from REPL (after P1 + P3A completion).
 
 ```
 mumei> import "std/http" as http;
