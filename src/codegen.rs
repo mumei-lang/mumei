@@ -856,6 +856,9 @@ fn compile_expr<'a>(
         }
 
         // Higher-order functions (Phase A): atom_ref + call
+        // NOTE: 現在 higher_order_demo.mm でのみ E2E テスト済み。
+        // 相互再帰、クロスファイル atom_ref、複数間接呼び出しサイトの
+        // codegen エッジケースは追加テストが必要。
         Expr::AtomRef { name } => {
             // atom_ref(name) → 関数ポインタとして LLVM IR を生成
             // module.get_function(name) で関数を取得し、ポインタ値として返す
