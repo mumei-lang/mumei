@@ -62,26 +62,34 @@ impl fmt::Display for ErrorDetail {
 
 /// ソースコードの Span（line/col/len）からバイトオフセットを計算して miette::SourceSpan を返す。
 /// line は 1-indexed なので 0-indexed に変換してから計算する。
+/// \n と \r\n の両方の改行を正しく処理する（実バイト位置で \n を検出）。
 pub fn span_to_source_span(source: &str, span: &Span) -> SourceSpan {
     if span.line == 0 {
         return SourceSpan::from((0, 0));
     }
-    let mut offset = 0usize;
-    let mut found = false;
-    for (i, line) in source.lines().enumerate() {
-        if i + 1 == span.line {
-            // col は 1-indexed
-            let col_offset = if span.col > 0 { span.col - 1 } else { 0 };
-            offset += col_offset;
-            found = true;
-            break;
+    // 実バイト位置で \n を数えて目的の行の先頭オフセットを求める。
+    // これにより \r\n (2 bytes) も \n (1 byte) も正しく扱える。
+    let mut current_line = 1usize;
+    let mut line_start = 0usize;
+    let mut found = span.line == 1;
+    if !found {
+        for (idx, ch) in source.char_indices() {
+            if ch == '\n' {
+                current_line += 1;
+                if current_line == span.line {
+                    line_start = idx + 1; // \n の次のバイトが行頭
+                    found = true;
+                    break;
+                }
+            }
         }
-        // +1 for the newline character
-        offset += line.len() + 1;
     }
     if !found {
         return SourceSpan::from((0, 0));
     }
+    // col は 1-indexed
+    let col_offset = if span.col > 0 { span.col - 1 } else { 0 };
+    let offset = line_start + col_offset;
     let len = if span.len > 0 { span.len } else { 1 };
     // Clamp to source length to avoid out-of-bounds
     let offset = offset.min(source.len());
@@ -102,6 +110,8 @@ pub enum MumeiError {
         span: SourceSpan,
         #[help]
         help: Option<String>,
+        /// LSP 用: 元の parser::Span（line/col）を保持する
+        original_span: Span,
     },
     #[error("Codegen Error: {msg}")]
     #[diagnostic(code(mumei::codegen))]
@@ -113,6 +123,8 @@ pub enum MumeiError {
         span: SourceSpan,
         #[help]
         help: Option<String>,
+        /// LSP 用: 元の parser::Span（line/col）を保持する
+        original_span: Span,
     },
     #[error("Type Error: {msg}")]
     #[diagnostic(code(mumei::type_error))]
@@ -124,6 +136,8 @@ pub enum MumeiError {
         span: SourceSpan,
         #[help]
         help: Option<String>,
+        /// LSP 用: 元の parser::Span（line/col）を保持する
+        original_span: Span,
     },
 }
 
@@ -135,6 +149,7 @@ impl MumeiError {
             src: miette::NamedSource::new("<unknown>", String::new()),
             span: SourceSpan::from((0, 0)),
             help: None,
+            original_span: Span::default(),
         }
     }
     /// Span 付きで VerificationError を生成
@@ -151,6 +166,7 @@ impl MumeiError {
             ),
             span: SourceSpan::from((0, 0)),
             help: None,
+            original_span: span,
         }
     }
     /// ソースコード付きで VerificationError を生成（リッチ出力対応）
@@ -174,6 +190,7 @@ impl MumeiError {
             ),
             span: source_span,
             help,
+            original_span: span.clone(),
         }
     }
     /// Span なしで CodegenError を生成
@@ -183,6 +200,7 @@ impl MumeiError {
             src: miette::NamedSource::new("<unknown>", String::new()),
             span: SourceSpan::from((0, 0)),
             help: None,
+            original_span: Span::default(),
         }
     }
     /// ソースコード付きで CodegenError を生成（リッチ出力対応）
@@ -206,6 +224,7 @@ impl MumeiError {
             ),
             span: source_span,
             help,
+            original_span: span.clone(),
         }
     }
     /// Span なしで TypeError を生成
@@ -215,6 +234,7 @@ impl MumeiError {
             src: miette::NamedSource::new("<unknown>", String::new()),
             span: SourceSpan::from((0, 0)),
             help: None,
+            original_span: Span::default(),
         }
     }
     /// Span 付きで TypeError を生成
@@ -231,6 +251,7 @@ impl MumeiError {
             ),
             span: SourceSpan::from((0, 0)),
             help: None,
+            original_span: span,
         }
     }
     /// ソースコード付きで TypeError を生成（リッチ出力対応）
@@ -254,53 +275,87 @@ impl MumeiError {
             ),
             span: source_span,
             help,
+            original_span: span.clone(),
         }
     }
 
     /// ErrorDetail を取得する（Span 情報を保持）
     pub fn to_detail(&self) -> ErrorDetail {
         match self {
-            MumeiError::VerificationError { msg, .. } => {
-                ErrorDetail::from_message(format!("Verification Error: {}", msg))
-            }
-            MumeiError::CodegenError { msg, .. } => {
-                ErrorDetail::from_message(format!("Codegen Error: {}", msg))
-            }
-            MumeiError::TypeError { msg, .. } => {
-                ErrorDetail::from_message(format!("Type Error: {}", msg))
-            }
+            MumeiError::VerificationError {
+                msg,
+                original_span,
+                ..
+            } => ErrorDetail::with_span(
+                format!("Verification Error: {}", msg),
+                original_span.clone(),
+            ),
+            MumeiError::CodegenError {
+                msg,
+                original_span,
+                ..
+            } => ErrorDetail::with_span(
+                format!("Codegen Error: {}", msg),
+                original_span.clone(),
+            ),
+            MumeiError::TypeError {
+                msg,
+                original_span,
+                ..
+            } => ErrorDetail::with_span(
+                format!("Type Error: {}", msg),
+                original_span.clone(),
+            ),
         }
     }
 
     /// ソースコードを設定してリッチ出力を有効にする
-    pub fn with_source(self, source: &str, original_span: &Span) -> Self {
-        let source_span = span_to_source_span(source, original_span);
+    pub fn with_source(self, source: &str, src_span: &Span) -> Self {
+        let source_span = span_to_source_span(source, src_span);
         let named_src = miette::NamedSource::new(
-            if original_span.file.is_empty() {
+            if src_span.file.is_empty() {
                 "<unknown>"
             } else {
-                &original_span.file
+                &src_span.file
             },
             source.to_string(),
         );
         match self {
-            MumeiError::VerificationError { msg, help, .. } => MumeiError::VerificationError {
+            MumeiError::VerificationError {
+                msg,
+                help,
+                original_span,
+                ..
+            } => MumeiError::VerificationError {
                 msg,
                 src: named_src,
                 span: source_span,
                 help,
+                original_span,
             },
-            MumeiError::CodegenError { msg, help, .. } => MumeiError::CodegenError {
+            MumeiError::CodegenError {
+                msg,
+                help,
+                original_span,
+                ..
+            } => MumeiError::CodegenError {
                 msg,
                 src: named_src,
                 span: source_span,
                 help,
+                original_span,
             },
-            MumeiError::TypeError { msg, help, .. } => MumeiError::TypeError {
+            MumeiError::TypeError {
+                msg,
+                help,
+                original_span,
+                ..
+            } => MumeiError::TypeError {
                 msg,
                 src: named_src,
                 span: source_span,
                 help,
+                original_span,
             },
         }
     }
@@ -309,23 +364,44 @@ impl MumeiError {
     pub fn with_help(self, help_msg: impl Into<String>) -> Self {
         let help = Some(help_msg.into());
         match self {
-            MumeiError::VerificationError { msg, src, span, .. } => MumeiError::VerificationError {
+            MumeiError::VerificationError {
+                msg,
+                src,
+                span,
+                original_span,
+                ..
+            } => MumeiError::VerificationError {
                 msg,
                 src,
                 span,
                 help,
+                original_span,
             },
-            MumeiError::CodegenError { msg, src, span, .. } => MumeiError::CodegenError {
+            MumeiError::CodegenError {
+                msg,
+                src,
+                span,
+                original_span,
+                ..
+            } => MumeiError::CodegenError {
                 msg,
                 src,
                 span,
                 help,
+                original_span,
             },
-            MumeiError::TypeError { msg, src, span, .. } => MumeiError::TypeError {
+            MumeiError::TypeError {
+                msg,
+                src,
+                span,
+                original_span,
+                ..
+            } => MumeiError::TypeError {
                 msg,
                 src,
                 span,
                 help,
+                original_span,
             },
         }
     }
@@ -3411,8 +3487,11 @@ fn expr_to_z3<'a>(
                 }
             }
 
-            // callee が atom_ref でない場合（動的関数ポインタ）:
-            // シンボリック結果を返す
+            // callee が atom_ref でない場合（動的関数ポインタ / パラメトリック関数型）:
+            // 具体的な atom の契約を展開できないため、シンボリック結果を返す。
+            // NOTE: これにより ensures の検証が失敗する可能性がある。
+            // パラメトリックな関数型パラメータ（f: atom_ref(T) -> R）を持つ atom は
+            // trusted として宣言するか、Phase B の call_with_contract を待つ必要がある。
             let mut arg_vals = Vec::new();
             for arg in args {
                 arg_vals.push(expr_to_z3(vc, arg, env, solver_opt)?);

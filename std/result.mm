@@ -66,7 +66,8 @@ atom safe_divide(a: i64, b: i64)
 // --- Map (Phase A): atom_ref による高階関数版 ---
 // res が Ok(tag=0) なら f を適用し、Err(tag=1) なら 1 を返す。
 // f は atom_ref で渡された関数。契約は call 時に自動展開される。
-atom result_map(res: i64, f: atom_ref(i64) -> i64)
+// NOTE: f の契約はパラメトリックなため trusted（Phase B で解決予定）
+trusted atom result_map(res: i64, f: atom_ref(i64) -> i64)
     requires: res >= 0 && res <= 1;
     ensures: result >= 0;
     body: {

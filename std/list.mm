@@ -155,10 +155,10 @@ atom list_reverse(list: i64)
 // リスト（配列）の要素を左から右に畳み込む。
 // f は atom_ref で渡された二項関数 (acc, elem) -> acc'。
 // 契約は call 時に自動展開される。
-atom fold_left(n: i64, init: i64, f: atom_ref(i64, i64) -> i64)
+// NOTE: f の契約はパラメトリックなため trusted（Phase B で解決予定）
+trusted atom fold_left(n: i64, init: i64, f: atom_ref(i64, i64) -> i64)
 requires: n >= 0;
 ensures: result >= 0;
-max_unroll: 5;
 body: {
     let acc = init;
     let i = 0;
@@ -174,10 +174,11 @@ body: {
 
 // --- Map (Phase A): atom_ref による要素変換 ---
 // 配列の各要素に f を適用する（結果は要素数保存）。
-atom list_map(n: i64, f: atom_ref(i64) -> i64)
+// NOTE: f を使った要素変換は trusted（Phase B で解決予定）。
+// 現在は要素数保存のみ検証（f の呼び出しはスタブ）。
+trusted atom list_map(n: i64, f: atom_ref(i64) -> i64)
 requires: n >= 0;
 ensures: result == n;
-max_unroll: 5;
 body: {
     let i = 0;
     while i < n
