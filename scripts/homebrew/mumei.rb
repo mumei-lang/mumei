@@ -8,11 +8,15 @@
 # Or directly:
 #   brew install mumei-lang/mumei/mumei
 #
-# NOTE: This formula is a template. To publish:
-#   1. Create a separate repo: mumei-lang/homebrew-mumei
-#   2. Copy this file as Formula/mumei.rb
-#   3. Update the url/sha256 for each release version
-#   4. Users can then: brew tap mumei-lang/mumei && brew install mumei
+# NOTE: This formula is a template. The release workflow automatically
+# generates the actual Formula with correct sha256 values and creates
+# a PR to mumei-lang/homebrew-mumei.
+#
+# To set up the Homebrew Tap:
+#   1. Create a new repo: mumei-lang/homebrew-mumei
+#   2. Create a GitHub secret HOMEBREW_TAP_TOKEN with repo write access
+#   3. The release.yml workflow will auto-create PRs to update the Formula
+#   4. Users can then: brew install mumei-lang/mumei/mumei
 
 class Mumei < Formula
   desc "Mathematical Proof-Driven Programming Language — formally verified with Z3"
@@ -31,9 +35,13 @@ class Mumei < Formula
   end
 
   on_linux do
-    # Note: aarch64 Linux is not yet supported (no CI cross-compilation target)
-    url "https://github.com/mumei-lang/mumei/releases/download/v#{version}/mumei-x86_64-unknown-linux-gnu.tar.gz"
-    # sha256 "UPDATE_WITH_ACTUAL_SHA256"
+    if Hardware::CPU.arm?
+      url "https://github.com/mumei-lang/mumei/releases/download/v#{version}/mumei-aarch64-unknown-linux-gnu.tar.gz"
+      # sha256 "UPDATE_WITH_ACTUAL_SHA256"
+    else
+      url "https://github.com/mumei-lang/mumei/releases/download/v#{version}/mumei-x86_64-unknown-linux-gnu.tar.gz"
+      # sha256 "UPDATE_WITH_ACTUAL_SHA256"
+    end
   end
 
   depends_on "z3"
