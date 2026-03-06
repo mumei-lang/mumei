@@ -67,17 +67,25 @@ pub fn span_to_source_span(source: &str, span: &Span) -> SourceSpan {
         return SourceSpan::from((0, 0));
     }
     let mut offset = 0usize;
+    let mut found = false;
     for (i, line) in source.lines().enumerate() {
         if i + 1 == span.line {
             // col は 1-indexed
             let col_offset = if span.col > 0 { span.col - 1 } else { 0 };
             offset += col_offset;
+            found = true;
             break;
         }
         // +1 for the newline character
         offset += line.len() + 1;
     }
+    if !found {
+        return SourceSpan::from((0, 0));
+    }
     let len = if span.len > 0 { span.len } else { 1 };
+    // Clamp to source length to avoid out-of-bounds
+    let offset = offset.min(source.len());
+    let len = len.min(source.len().saturating_sub(offset));
     SourceSpan::from((offset, len))
 }
 
