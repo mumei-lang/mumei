@@ -133,6 +133,45 @@ body: {
 };
 ```
 ---
+## Higher-Order Functions (Phase A)
+
+### atom_ref — First-Class Function References
+
+Reference an atom as a value using `atom_ref(name)`. Invoke via `call(f, args...)`.
+
+```mumei
+atom increment(x: i64)
+    requires: x >= 0;
+    ensures: result == x + 1;
+    body: x + 1;
+
+// Direct atom_ref: contract IS propagated
+atom demo()
+    requires: true;
+    ensures: result >= 0;
+    body: call(atom_ref(increment), 5);
+```
+
+### Function Type Parameters
+
+Atoms can accept function-type parameters using `atom_ref(T) -> R` syntax:
+
+```mumei
+trusted atom apply(x: i64, f: atom_ref(i64) -> i64)
+    requires: x >= 0;
+    ensures: result >= 0;
+    body: call(f, x);
+
+// At call site, concrete atom's contract is propagated:
+atom demo_apply()
+    requires: true;
+    ensures: result >= 0;
+    body: apply(5, atom_ref(increment));
+```
+
+> **Phase A limitation**: When `call(f, x)` uses a function-type *parameter* `f` (not a literal `atom_ref(name)`), the verifier returns an unconstrained symbolic value. Such atoms must be marked `trusted`. Phase B will resolve this with `call_with_contract`.
+
+---
 ## Trust Boundary
 ```mumei
 trusted atom ffi_read(fd: i64)
