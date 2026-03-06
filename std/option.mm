@@ -67,19 +67,28 @@ atom unwrap_or(opt: i64, default_val: i64)
 //   let mapped = map_apply(opt, 1, transformed_value);
 //   // opt が Some なら transformed_value、None なら default_val
 //
-// NOTE: 将来的に真の高階関数（Map[U](f func(T) U) Option[U]）を導入する場合、
-//       以下の段階的アプローチを想定する:
-//   Phase A: atom を値として参照する構文（atom_ref）を追加。
-//            既存の atom を名前で渡せるようにする。
-//            例: let f = atom_ref(transform);
-//                let result = map(opt, f);
-//   Phase B: 呼び出し先の atom の契約を Z3 に展開する仕組み（call_with_contract）。
-//            渡された atom の requires/ensures を呼び出し元で検証する。
-//   Phase C: 無名関数（ラムダ）の構文と検証。
+// NOTE: 高階関数のロードマップ:
+//   Phase A: [x] atom_ref + call（atom を値として参照、契約の自動展開）
+//   Phase B: call_with_contract（契約のより精密な Z3 展開）
+//   Phase C: 無名関数（ラムダ）の構文と検証
 //            例: let result = map(opt, |x| x + 1);
-//            Expr::Lambda ノードの追加、Z3 未解釈関数によるモデル化が必要。
 
-// --- Map 相当: Option の中身に変換を適用 ---
+// --- Map (Phase A): atom_ref による高階関数版 ---
+// opt が Some(tag=1) なら f を適用し、None(tag=0) なら 0 を返す。
+// f は atom_ref で渡された関数。契約は call 時に自動展開される。
+// NOTE: f の契約はパラメトリックなため trusted（Phase B で解決予定）
+trusted atom map(opt: i64, f: atom_ref(i64) -> i64)
+    requires: opt >= 0 && opt <= 1;
+    ensures: result >= 0;
+    body: {
+        match opt {
+            0 => 0,
+            _ => call(f, opt)
+        }
+    }
+
+// --- Map 相当（ワークアラウンド版）: Option の中身に変換を適用 ---
+// @deprecated: use map(opt, atom_ref(f)) instead
 // opt が Some(tag=1) なら mapped_value を返し、None(tag=0) なら default_val を返す。
 // 呼び出し元が f(value) を事前に計算し mapped_value として渡す。
 // ensures: result は mapped_value または default_val のどちらか

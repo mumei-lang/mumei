@@ -84,6 +84,35 @@ examples/import_test/
 └── main.mm              # import "./lib/math_utils.mm" as math;
 ```
 ---
+## Higher-Order Functions Demo (`examples/higher_order_demo.mm`)
+
+Demonstrates `atom_ref` + `call` for first-class function references:
+
+```mumei
+atom increment(x: i64)
+    requires: x >= 0;
+    ensures: result == x + 1;
+    body: x + 1;
+
+// Parametric function-type parameter — must be trusted (Phase A limitation)
+trusted atom apply(x: i64, f: atom_ref(i64) -> i64)
+    requires: x >= 0;
+    ensures: result >= 0;
+    body: call(f, x);
+
+// At call site, increment's contract IS propagated via atom_ref
+atom demo_apply()
+    requires: true;
+    ensures: result >= 0;
+    body: apply(5, atom_ref(increment));
+```
+
+```bash
+mumei verify examples/higher_order_demo.mm   # Z3 verification
+mumei build examples/higher_order_demo.mm -o dist/higher_order_demo
+```
+
+---
 ## Negative Test Suite
 | File | Expected Error | Category |
 |---|---|---|

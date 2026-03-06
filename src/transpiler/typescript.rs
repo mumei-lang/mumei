@@ -38,6 +38,18 @@ pub fn transpile_module_header_ts(imports: &[ImportDecl]) -> String {
 fn map_type_ts(type_name: Option<&str>) -> String {
     match type_name {
         Some(name) => {
+            // 関数型パラメータ: atom_ref(T1, T2) -> R → (arg0: number, arg1: number) => number
+            if name.starts_with("atom_ref(") {
+                let tr = crate::parser::parse_type_ref(name);
+                if tr.is_fn_type() {
+                    let params: Vec<String> = tr.type_args[..tr.type_args.len() - 1]
+                        .iter()
+                        .enumerate()
+                        .map(|(i, _a)| format!("arg{}: number", i))
+                        .collect();
+                    return format!("({}) => number", params.join(", "));
+                }
+            }
             let base = resolve_base_type(name);
             match base.as_str() {
                 "f64" | "i64" | "u64" => "number".to_string(),
@@ -372,6 +384,16 @@ fn format_expr_ts(expr: &Expr) -> String {
         Expr::TaskGroup { children, .. } => {
             let tasks: Vec<String> = children.iter().map(format_expr_ts).collect();
             format!("Promise.all([{}])", tasks.join(", "))
+        }
+        // Higher-order functions (Phase A): atom_ref + call
+        Expr::AtomRef { name } => {
+            // TypeScript では関数名がそのまま第一級値
+            name.clone()
+        }
+        Expr::CallRef { callee, args } => {
+            let callee_str = format_expr_ts(callee);
+            let args_str: Vec<String> = args.iter().map(format_expr_ts).collect();
+            format!("{}({})", callee_str, args_str.join(", "))
         }
     }
 }

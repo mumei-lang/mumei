@@ -3,7 +3,8 @@ use crate::verification::{ModuleEnv, MumeiError, MumeiResult};
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Module;
-use inkwell::values::{AnyValue, BasicValueEnum, FunctionValue, PhiValue};
+use inkwell::types::BasicMetadataTypeEnum;
+use inkwell::values::{AnyValue, BasicMetadataValueEnum, BasicValueEnum, FunctionValue, PhiValue};
 use inkwell::AddressSpace;
 use inkwell::FloatPredicate;
 use inkwell::IntPredicate;
@@ -852,6 +853,112 @@ fn compile_expr<'a>(
                 )?;
             }
             Ok(last_val)
+        }
+
+        // Higher-order functions (Phase A): atom_ref + call
+        // NOTE: 現在 higher_order_demo.mm でのみ E2E テスト済み。
+        // 相互再帰、クロスファイル atom_ref、複数間接呼び出しサイトの
+        // codegen エッジケースは追加テストが必要。
+        Expr::AtomRef { name } => {
+            // atom_ref(name) → 関数ポインタとして LLVM IR を生成
+            // module.get_function(name) で関数を取得し、ポインタ値として返す
+            // 関数がまだモジュールに登録されていない場合は外部宣言として追加する
+            let func = if let Some(f) = module.get_function(name) {
+                f
+            } else if let Some(callee_atom) = module_env.get_atom(name) {
+                let callee_param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = callee_atom
+                    .params
+                    .iter()
+                    .map(|p| resolve_param_type(context, p.type_name.as_deref(), module_env).into())
+                    .collect();
+                // 戻り値は常に i64: compile() 関数 (line 61) が全 atom を i64 戻り値で
+                // コンパイルするため、forward declaration も i64 に統一する。
+                // f64 パラメータは param_types で正しく処理されるが、戻り値型の不一致は
+                // LLVM IR リンク時に未定義動作を引き起こす。
+                let fn_type = context.i64_type().fn_type(&callee_param_types, false);
+                module.add_function(name, fn_type, Some(inkwell::module::Linkage::External))
+            } else {
+                return Err(MumeiError::codegen(format!(
+                    "atom_ref: unknown function '{}'",
+                    name
+                )));
+            };
+            // 関数ポインタを i64 にキャストして返す（mumei は i64 ベース）
+            let fn_ptr = func.as_global_value().as_pointer_value();
+            let ptr_int = llvm!(builder.build_ptr_to_int(
+                fn_ptr,
+                context.i64_type(),
+                &format!("atom_ref_{}", name)
+            ));
+            Ok(ptr_int.into())
+        }
+        Expr::CallRef { callee, args } => {
+            // call(callee_expr, args...) → 関数ポインタ経由の間接呼び出し
+            let callee_val = compile_expr(
+                context, builder, module, function, callee, variables, array_ptrs, module_env,
+            )?;
+
+            // 引数をコンパイル
+            let mut arg_vals: Vec<BasicValueEnum> = Vec::new();
+            for arg in args {
+                let val = compile_expr(
+                    context, builder, module, function, arg, variables, array_ptrs, module_env,
+                )?;
+                arg_vals.push(val);
+            }
+
+            // callee が AtomRef の場合、直接関数呼び出しに最適化
+            if let Expr::AtomRef { name } = callee.as_ref() {
+                if let Some(callee_fn) = module.get_function(name) {
+                    let args_meta: Vec<BasicMetadataValueEnum> =
+                        arg_vals.iter().map(|v| (*v).into()).collect();
+                    let call_result = llvm!(builder.build_call(
+                        callee_fn,
+                        &args_meta,
+                        &format!("call_ref_{}", name)
+                    ));
+                    return Ok(call_result
+                        .try_as_basic_value()
+                        .left()
+                        .unwrap_or(context.i64_type().const_int(0, false).into()));
+                }
+            }
+
+            // 間接呼び出し: callee_val を関数ポインタに変換して indirect_call
+            let callee_int = callee_val.into_int_value();
+            let param_types: Vec<BasicMetadataTypeEnum> = arg_vals
+                .iter()
+                .map(|v| {
+                    if v.is_float_value() {
+                        context.f64_type().into()
+                    } else {
+                        context.i64_type().into()
+                    }
+                })
+                .collect();
+            let has_float_arg = arg_vals.iter().any(|v| v.is_float_value());
+            let fn_type = if has_float_arg {
+                context.f64_type().fn_type(&param_types, false)
+            } else {
+                context.i64_type().fn_type(&param_types, false)
+            };
+            let fn_ptr = llvm!(builder.build_int_to_ptr(
+                callee_int,
+                context.ptr_type(inkwell::AddressSpace::default()),
+                "call_ref_fn_ptr"
+            ));
+            let args_meta: Vec<BasicMetadataValueEnum> =
+                arg_vals.iter().map(|v| (*v).into()).collect();
+            let call_result = llvm!(builder.build_indirect_call(
+                fn_type,
+                fn_ptr,
+                &args_meta,
+                "call_ref_indirect"
+            ));
+            Ok(call_result
+                .try_as_basic_value()
+                .left()
+                .unwrap_or(context.i64_type().const_int(0, false).into()))
         }
 
         Expr::FieldAccess(inner_expr, field_name) => {

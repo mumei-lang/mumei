@@ -1,27 +1,26 @@
 # Diagnostics Design Document
 
-> Mumei の診断 (Diagnostics) 基盤設計
+> Diagnostics infrastructure design for the Mumei compiler.
 
-## 概要
+## Overview
 
-Mumei コンパイラは、開発者に対して正確で有用なエラーメッセージを提供するために、
-ソースコード上の位置情報 (Span) を全 AST ノードに付与する診断駆動設計を採用しています。
+The Mumei compiler adopts a diagnostics-driven design where source location information (`Span`) is attached to all AST nodes, providing accurate and actionable error messages to developers.
 
-## 実装状況
+## Implementation Status
 
-| 項目 | ステータス |
+| Item | Status |
 |---|---|
-| `Span` 構造体 | ✅ 実装済み (`src/parser.rs`) |
-| 全 AST Item 型に `span` フィールド | ✅ 実装済み (Atom, StructDef, EnumDef, TraitDef, ImplDef, ResourceDef, ImportDecl, RefinedType, ExternBlock, ExternFn) |
-| `MumeiError` に Span 統合 | ✅ 実装済み (`VerificationError { msg, span }` 等) |
-| `ErrorDetail` 構造体 | ✅ 実装済み (message + span + suggestion) |
-| `offset_to_line_col` ヘルパー | ✅ 実装済み (regex マッチから行・列を計算) |
-| LSP diagnostics に Span 反映 | ✅ 実装済み (`lsp.rs` の `find_error_position`) |
-| Rich Diagnostics (miette/ariadne) | ❌ 未実装 (将来) |
+| `Span` struct | ✅ Implemented (`src/parser.rs`) |
+| `span` field on all AST Item types | ✅ Implemented (Atom, StructDef, EnumDef, TraitDef, ImplDef, ResourceDef, ImportDecl, RefinedType, ExternBlock, ExternFn) |
+| `MumeiError` with Span integration | ✅ Implemented (`VerificationError { msg, span, original_span }` etc.) |
+| `ErrorDetail` struct | ✅ Implemented (message + span + suggestion) |
+| `offset_to_line_col` helper | ✅ Implemented (computes line/col from regex match offset) |
+| LSP diagnostics with Span | ✅ Implemented (`lsp.rs` `find_error_position`) |
+| Rich Diagnostics (miette) | ✅ Implemented (colored output, source highlighting, actionable suggestions via `miette` crate) |
 
-## Span 情報
+## Span Information
 
-### 構造
+### Structure
 
 ```rust
 #[derive(Debug, Clone, PartialEq)]
@@ -33,77 +32,112 @@ pub struct Span {
 }
 ```
 
-| フィールド | 説明 |
+| Field | Description |
 |---|---|
-| `file` | ソースファイルパス（空文字列は不明を表す） |
-| `line` | 行番号 (1-indexed、0 は不明) |
-| `col` | 列番号 (1-indexed、0 は不明) |
-| `len` | トークンの文字数（0 は不明） |
+| `file` | Source file path (empty string = unknown) |
+| `line` | Line number (1-indexed, 0 = unknown) |
+| `col` | Column number (1-indexed, 0 = unknown) |
+| `len` | Token length in characters (0 = unknown) |
 
-### 適用範囲
+### Coverage
 
-Span は以下の全 AST 型に付与済み:
+Span is attached to all AST types:
 
-- `Atom` — 関数定義
-- `StructDef`, `EnumDef` — 型定義
-- `TraitDef`, `ImplDef` — トレイト/実装定義
-- `ResourceDef` — リソース定義
-- `ImportDecl` — インポート宣言
-- `RefinedType` — 精緻型定義
-- `ExternBlock`, `ExternFn` — FFI 外部関数宣言
+- `Atom` — function definitions
+- `StructDef`, `EnumDef` — type definitions
+- `TraitDef`, `ImplDef` — trait/impl definitions
+- `ResourceDef` — resource definitions
+- `ImportDecl` — import declarations
+- `RefinedType` — refinement type definitions
+- `ExternBlock`, `ExternFn` — FFI external function declarations
 
-## エラー報告戦略
+## Error Reporting Strategy
 
-### 現在のエラー型（実装済み）
+### Error Type (miette::Diagnostic compatible)
 
 ```rust
+#[derive(thiserror::Error, miette::Diagnostic, Debug)]
 pub enum MumeiError {
-    VerificationError { msg: String, span: Span },
-    CodegenError { msg: String, span: Span },
-    TypeError { msg: String, span: Span },
-}
-
-pub struct ErrorDetail {
-    pub message: String,
-    pub span: Span,
-    pub suggestion: Option<String>,
+    #[error("Verification Error: {msg}")]
+    #[diagnostic(code(mumei::verification))]
+    VerificationError {
+        msg: String,
+        #[source_code]
+        src: miette::NamedSource<String>,
+        #[label("verification failed here")]
+        span: miette::SourceSpan,
+        #[help]
+        help: Option<String>,
+        /// Original parser::Span (line/col) preserved for LSP
+        original_span: Span,
+    },
+    // CodegenError, TypeError follow the same structure
 }
 ```
 
-コンストラクタ:
-- `MumeiError::verification(msg)` — Span なし（位置不明）
-- `MumeiError::verification_at(msg, span)` — Span 付き
-- `MumeiError::type_error_at(msg, span)` — 型エラー + Span
+Constructors:
+- `MumeiError::verification(msg)` — no Span (unknown location)
+- `MumeiError::verification_at(msg, span)` — with Span
+- `MumeiError::verification_with_source(msg, span, source, help)` — rich output with source code
+- `MumeiError::type_error_at(msg, span)` — type error + Span
+- `.with_source(source, span)` — attach source code to existing error
+- `.with_help(msg)` — attach help message
 
-### LSP での活用（実装済み）
+Helper functions:
+- `span_to_source_span(source, span)` — converts `Span` (line/col/len) to `miette::SourceSpan` (byte offset), handles both `\n` and `\r\n` line endings
 
-`lsp.rs` の `verify_source_for_lsp` が Z3 検証エラーを `ErrorDetail` に変換し、
-`publishDiagnostics` で正確な行・列を送信:
+### LSP Integration (implemented)
+
+`lsp.rs` `verify_source_for_lsp` converts Z3 verification errors to `ErrorDetail` and sends precise line/column positions via `publishDiagnostics`:
 
 ```
 textDocument/publishDiagnostics:
-  - range: ErrorDetail.span から 0-indexed に変換
-  - message: ErrorDetail の Display 出力
+  - range: converted from ErrorDetail.span (1-indexed → 0-indexed)
+  - message: ErrorDetail Display output
   - severity: 1 (Error)
 ```
 
-### 将来の Rich Diagnostics
+### Rich Diagnostics Output Examples (miette)
 
-段階的に以下の機能を導入予定:
+Examples of rich error output powered by miette:
 
-1. **miette / ariadne 統合**: カラー表示・下線・サジェスト付きターミナル出力
-2. **suggestion フィールド活用**: `ErrorDetail.suggestion` による修正提案の表示
-3. **マルチスパン**: 1つのエラーに対して複数の関連位置を表示
+```
+  × Verification Error: Postcondition (ensures) is not satisfied.
+   ╭─[examples/basic.mm:5:1]
+ 4 │   ensures: result > 0;
+ 5 │   body: x - 1;
+   ·   ──────────── verification failed here
+ 6 │
+   ╰────
+  help: Check the ensures condition. Verify that the body's return value satisfies the postcondition.
+```
 
-## 設計原則
+```
+  × Verification Error: Potential division by zero.
+  help: Add `divisor != 0` condition to requires.
+```
 
-1. **全ノードに位置情報**: パーサーが生成する全 AST ノードに Span を付与
-2. **伝播**: monomorphize (ジェネリクス展開) 時にも Span を保持・伝播
-3. **段階的導入**: Span → MumeiError 統合 → ErrorDetail → Rich Diagnostics
-4. **後方互換**: 既存のエラーメッセージは維持しつつ、段階的に改善
+```
+  × Verification Error: Call to 'foo': precondition (requires) not satisfied at call site
+  help: The precondition is not satisfied at the call site. Check the argument constraints.
+```
 
-## 関連ファイル
+### Future Extensions
 
-- `src/parser.rs` — `Span` 構造体定義、`offset_to_line_col`、`span_from_offset` ヘルパー
-- `src/verification.rs` — `MumeiError`、`ErrorDetail`、Span 付きエラー生成
-- `src/lsp.rs` — `find_error_position`、`verify_source_for_lsp`
+1. **Multi-span**: Display multiple related source locations for a single error
+2. **Snapshot tests**: Regression tests for miette output formatting
+3. **Enhanced LSP integration**: Leverage miette's structured information for LSP diagnostics
+
+## Design Principles
+
+1. **Position info on all nodes**: Parser attaches Span to every AST node
+2. **Propagation**: Span is preserved/propagated during monomorphization (generics expansion)
+3. **Incremental adoption**: Span → MumeiError integration → ErrorDetail → Rich Diagnostics (miette)
+4. **Backward compatibility**: Existing error messages maintained while incrementally improving
+5. **Suggestion-driven**: Concrete fix suggestions displayed via `#[help]` attribute
+
+## Related Files
+
+- `src/parser.rs` — `Span` struct definition, `offset_to_line_col`, `span_from_offset` helpers
+- `src/verification.rs` — `MumeiError`, `ErrorDetail`, `span_to_source_span`, Span-aware error constructors
+- `src/lsp.rs` — `find_error_position`, `verify_source_for_lsp`

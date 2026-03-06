@@ -46,3 +46,9 @@ toml = "0.8"
 
 # ディレクトリ操作: ~/.mumei/ のパス解決
 dirs = "5.0"
+
+# リッチ診断出力: カラー表示・ソースコードハイライト・サジェスト
+miette = { version = "7", features = ["fancy"] }
+
+# エラー型の ergonomic な derive マクロ
+thiserror = "2"

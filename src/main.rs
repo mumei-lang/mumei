@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)]
+
 mod ast;
 mod codegen;
 mod lsp;
@@ -114,6 +116,14 @@ enum Command {
 }
 
 fn main() {
+    // miette のリッチ出力を有効化（カラー・下線・サジェスト付き）
+    miette::set_hook(Box::new(|_| {
+        Box::new(
+            miette::GraphicalReportHandler::new().with_theme(miette::GraphicalTheme::unicode()),
+        )
+    }))
+    .ok();
+
     let cli = Cli::parse();
 
     match cli.command {
@@ -207,7 +217,8 @@ fn check_z3_available() {
 }
 
 /// parse → resolve → monomorphize → ModuleEnv に全定義を登録
-fn load_and_prepare(input: &str) -> (Vec<Item>, verification::ModuleEnv, Vec<ImportDecl>) {
+/// ソースコード文字列も返す（miette リッチ出力のため）
+fn load_and_prepare(input: &str) -> (Vec<Item>, verification::ModuleEnv, Vec<ImportDecl>, String) {
     let source = load_source(input);
     let items = parser::parse_module(&source);
 
@@ -303,7 +314,7 @@ fn load_and_prepare(input: &str) -> (Vec<Item>, verification::ModuleEnv, Vec<Imp
         }
     }
 
-    (items, module_env, imports)
+    (items, module_env, imports, source)
 }
 
 // =============================================================================
@@ -312,7 +323,7 @@ fn load_and_prepare(input: &str) -> (Vec<Item>, verification::ModuleEnv, Vec<Imp
 
 fn cmd_check(input: &str) {
     println!("🗡️  Mumei check: parsing and resolving '{}'...", input);
-    let (items, _module_env, _imports) = load_and_prepare(input);
+    let (items, _module_env, _imports, _source) = load_and_prepare(input);
 
     let mut type_count = 0;
     let mut struct_count = 0;
@@ -386,7 +397,7 @@ fn cmd_check(input: &str) {
 fn cmd_verify(input: &str) {
     check_z3_available();
     println!("🗡️  Mumei verify: verifying '{}'...", input);
-    let (items, mut module_env, _imports) = load_and_prepare(input);
+    let (items, mut module_env, _imports, source) = load_and_prepare(input);
 
     let output_dir = Path::new(".");
     let input_path = Path::new(input);
@@ -412,7 +423,12 @@ fn cmd_verify(input: &str) {
                         verified += 1;
                     }
                     Err(e) => {
-                        eprintln!("    ❌ Law verification failed: {}", e);
+                        // TODO: インポートされたファイルのエラー時、source はメインファイルの内容だが
+                        // impl_def.span はインポート元ファイルを指す場合がある。
+                        // 正しくは impl_def.span.file からソースを読み直す必要がある。
+                        // See: https://github.com/mumei-lang/mumei/pull/35
+                        let e = e.with_source(&source, &impl_def.span);
+                        eprintln!("{:?}", miette::Report::new(e));
                         failed += 1;
                     }
                 }
@@ -444,7 +460,10 @@ fn cmd_verify(input: &str) {
                             verified += 1;
                         }
                         Err(e) => {
-                            eprintln!("  ❌ '{}': verification failed: {}", atom.name, e);
+                            // TODO: インポートされた atom の場合、source と span のファイルが不一致になる。
+                            // atom.span.file からソースを読み直すべき。
+                            let e = e.with_source(&source, &atom.span);
+                            eprintln!("{:?}", miette::Report::new(e));
                             // 検証失敗した atom はキャッシュから除外
                             new_cache.remove(&atom.name);
                             failed += 1;
@@ -908,7 +927,7 @@ fn cmd_build(input: &str, output: &str) {
         )
     };
 
-    let (items, mut module_env, imports) = load_and_prepare(input);
+    let (items, mut module_env, imports, source) = load_and_prepare(input);
 
     let output_path = Path::new(output);
     let output_dir = output_path.parent().unwrap_or(Path::new("."));
@@ -1059,7 +1078,9 @@ fn cmd_build(input: &str, output: &str) {
                             impl_def.trait_name, impl_def.target_type
                         ),
                         Err(e) => {
-                            eprintln!("    ❌ Law verification failed: {}", e);
+                            // TODO: インポートされた impl の場合、source と span のファイルが不一致になる。
+                            let e = e.with_source(&source, &impl_def.span);
+                            eprintln!("{:?}", miette::Report::new(e));
                             std::process::exit(1);
                         }
                     }
@@ -1148,7 +1169,9 @@ fn cmd_build(input: &str, output: &str) {
                                 module_env.mark_verified(&atom.name);
                             }
                             Err(e) => {
-                                eprintln!("  ❌ [2/4] Verification: Failed! Flaw detected: {}", e);
+                                // TODO: インポートされた atom の場合、source と span のファイルが不一致になる。
+                                let e = e.with_source(&source, &atom.span);
+                                eprintln!("{:?}", miette::Report::new(e));
                                 build_cache_new.remove(&atom.name);
                                 std::process::exit(1);
                             }
@@ -1165,7 +1188,9 @@ fn cmd_build(input: &str, output: &str) {
                         atom.name
                     ),
                     Err(e) => {
-                        eprintln!("  ❌ [3/4] Tempering: Failed! Codegen error: {}", e);
+                        // TODO: インポートされた atom の場合、source と span のファイルが不一致になる。
+                        let e = e.with_source(&source, &atom.span);
+                        eprintln!("{:?}", miette::Report::new(e));
                         std::process::exit(1);
                     }
                 }
@@ -1342,7 +1367,7 @@ fn cmd_publish(proof_only: bool) {
 
     // 3. 全 atom を Z3 で検証（未検証パッケージの公開を禁止）
     println!("  🔍 Verifying all atoms before publish...");
-    let (items, mut module_env, _imports) = load_and_prepare(entry);
+    let (items, mut module_env, _imports, source) = load_and_prepare(entry);
 
     let output_dir = Path::new(".");
     let mut atom_count = 0;
@@ -1361,7 +1386,9 @@ fn cmd_publish(proof_only: bool) {
                     atom_count += 1;
                 }
                 Err(e) => {
-                    eprintln!("  ❌ '{}': verification failed: {}", atom.name, e);
+                    // TODO: インポートされた atom の場合、source と span のファイルが不一致になる。
+                    let e = e.with_source(&source, &atom.span);
+                    eprintln!("{:?}", miette::Report::new(e));
                     failed += 1;
                 }
             }

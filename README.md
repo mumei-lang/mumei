@@ -10,6 +10,34 @@ Only atoms that pass formal verification are compiled to LLVM IR and transpiled 
 
 ---
 
+## 🔍 Friendly Error Messages
+
+Mumei uses [miette](https://crates.io/crates/miette) for rich, developer-friendly error diagnostics with colored output, source code highlighting, and actionable suggestions.
+
+**Before** (plain text):
+```
+❌ 'decrement': verification failed: Verification Error: Postcondition (ensures) is not satisfied.
+```
+
+**After** (miette rich diagnostics):
+```
+  × Verification Error: Postcondition (ensures) is not satisfied.
+   ╭─[examples/basic.mm:5:1]
+ 4 │   ensures: result > 0;
+ 5 │   body: x - 1;
+   ·   ──────────── verification failed here
+ 6 │
+   ╰────
+  help: Check the ensures condition. Verify that the body's return value satisfies the postcondition.
+```
+
+Every verification error now includes:
+- **Source location** — exact file, line, and column with source code context
+- **Underline highlighting** — visual pointer to where the error occurred
+- **Actionable suggestions** — concrete help messages to guide fixes (e.g., "Add `divisor != 0` to requires")
+
+---
+
 ## ✨ Features
 
 ### Core Language
@@ -26,8 +54,32 @@ Only atoms that pass formal verification are compiled to LLVM IR and transpiled 
 - **Trust Boundary** — `trusted` / `unverified` atoms with taint analysis
 - **BMC + Inductive Invariant** — bounded model checking upgradable to complete proof
 
+### Higher-Order Functions (Phase A)
+- **`atom_ref(name)`** — reference an atom as a first-class value (function pointer)
+- **`call(f, args...)`** — invoke a referenced atom with automatic contract propagation
+- **Function type parameters** — `f: atom_ref(i64) -> i64` in atom signatures
+
+```mumei
+atom increment(x: i64)
+    requires: x >= 0;
+    ensures: result == x + 1;
+    body: x + 1;
+
+// Atoms with parametric function-type parameters use `trusted`
+// because f's contract is unknown at verification time (Phase B will resolve).
+trusted atom apply_twice(x: i64, f: atom_ref(i64) -> i64)
+    requires: x >= 0;
+    ensures: result >= 0;
+    body: call(f, call(f, x));
+
+// Usage: apply_twice(5, atom_ref(increment)) → 7
+// At this call site, increment's contract IS propagated via atom_ref.
+```
+
+> **Known limitation (Phase A):** When `call(f, x)` is used with a function-type *parameter* `f` (not a literal `atom_ref(name)`), the verifier cannot resolve `f`'s contract — it returns an unconstrained symbolic value. Such atoms must be marked `trusted`. Direct `call(atom_ref(concrete_name), x)` works fully with contract propagation. Phase B (`call_with_contract`) will resolve this.
+
 ### Standard Library (Verified)
-- **Option / Result** — `map_apply`, `and_then_apply`, `or_else`, `filter`, `wrap_err`
+- **Option / Result** — `map`, `map_apply`, `and_then_apply`, `or_else`, `filter`, `wrap_err`
 - **List** — immutable ops (`head`/`tail`/`append`/`prepend`/`reverse`) + fold ops (`sum`/`count`/`min`/`max`/`all`/`any`)
 - **Sort Algorithms** — `insertion_sort`, `merge_sort`, `binary_search` with termination + invariant proofs
 - **Sorted Array Proofs** — `verified_insertion_sort` with `forall` in ensures: `arr[i] <= arr[i+1]`
@@ -178,6 +230,7 @@ mumei build examples/call_test.mm -o dist/call_test
 mumei build examples/match_atm.mm -o dist/match_atm
 mumei build examples/match_evaluator.mm -o dist/match_evaluator
 mumei build examples/import_test/main.mm -o dist/import_test
+mumei build examples/higher_order_demo.mm -o dist/higher_order_demo
 
 # Standard library tests
 mumei build tests/test_std_import.mm -o dist/test_std
@@ -248,7 +301,7 @@ my_app/
 ├── .github/
 │   └── workflows/
 │       └── release.yml    # Cross-platform binary release (macOS/Linux)
-├── examples/              # call_test, match_atm, match_evaluator, import_test
+├── examples/              # call_test, match_atm, match_evaluator, import_test, higher_order_demo
 ├── tests/
 │   ├── test_std_import.mm
 │   ├── test_forall_ensures.mm
@@ -352,23 +405,23 @@ my_app/
 - [x] **LSP server (`mumei lsp`)**: JSON-RPC stdio server with `textDocument/hover` (atom contract display), `publishDiagnostics` (parse errors + Z3 verification errors)
 - [x] **VS Code Extension**: `editors/vscode/` — LSP client package, language configuration for `.mm` files
 - [x] **GitHub Actions Release**: `.github/workflows/release.yml` — cross-platform binary builds (macOS x86_64/aarch64, Linux x86_64) with std library bundled
-- [ ] Higher-order functions: `atom_ref` → `call_with_contract` → lambda (Phase A/B/C)
+- [x] Higher-order functions Phase A: `atom_ref` + `call` — direct `atom_ref(name)` contract propagation works; parametric `f: atom_ref(T) -> R` parameters require `trusted` (Phase B will add `call_with_contract`)
 - [x] **`mumei publish`**: Local registry (`~/.mumei/packages/`) publishing with proof caching — `mumei publish` verifies all atoms, copies to `~/.mumei/packages/<name>/<version>/`, registers in `~/.mumei/registry.json`; `--proof-only` flag for cache-only publish
 - [x] **Registry-based dependency resolution**: `math = "0.1.0"` in `mumei.toml` resolves via `~/.mumei/registry.json` → `~/.mumei/packages/` (priority: path → registry → git)
 - [ ] Remote package registry: Central registry for `mumei add <name>` without git URL
 - [ ] VS Code Marketplace publishing: Package and publish `editors/vscode/` as installable extension
 - [ ] LSP enhancements: `textDocument/completion` (keyword/atom name), `textDocument/definition` (jump to definition), counter-example highlighting
-- [x] **Diagnostics-Driven Design**: `Span` (file/line/col/len) を全 AST ノードに付与、`ErrorDetail` + `MumeiError` に Span 統合、LSP diagnostics に位置情報反映 → [`docs/DIAGNOSTICS.md`](docs/DIAGNOSTICS.md)
-- [x] **FFI extern syntax**: `extern "Rust" { fn sqrt(x: f64) -> f64; }` 構文のパース、`ExternFn`/`ExternBlock` AST + Span 付き → [`docs/FFI.md`](docs/FFI.md)
-- [ ] **FFI Bridge (trusted atom 自動登録)**: extern 宣言から `trusted atom` への自動変換、Rust クレート直接参照（未実装）
-- [x] **Structured Concurrency (parser + Z3)**: `task { ... }` / `task_group { ... }` / `task_group:all` / `task_group:any` 構文、シンボリック Z3 join 制約、AST walker 全対応、多言語トランスパイル対応 → [`docs/CONCURRENCY.md`](docs/CONCURRENCY.md)
-- [ ] **Structured Concurrency (runtime)**: ランタイムスケジューラ、タスクキャンセル、チャネル型（未実装）
-- [ ] **`std.http`**: Rust `reqwest` を FFI で隠蔽した HTTP クライアント、`task_group` との並行リクエスト統合
-- [ ] **`std.json`**: 文字列とオブジェクトの相互変換、serde_json バックエンド、型安全な JSON 操作
-- [ ] **Task 洗練**: 戻り値型推論、`task_group` 結果バインド、チャネル型 (`chan<T>`)
-- [ ] Rich Diagnostics: miette/ariadne ライブラリによるカラー表示・下線・サジェスト
-- [x] **Runtime Portability**: musl 静的リンク、Homebrew Tap、WebInstall (`curl | sh`)
-- [ ] **`mumei repl`**: 対話的実行環境（parse → verify → eval ループ）
-- [ ] **`mumei doc`**: ソースコメントから HTML ドキュメント自動生成（rustdoc 風）
+- [x] **Diagnostics-Driven Design**: `Span` (file/line/col/len) attached to all AST nodes, `ErrorDetail` + `MumeiError` with Span integration, LSP diagnostics with source positions → [`docs/DIAGNOSTICS.md`](docs/DIAGNOSTICS.md)
+- [x] **Rich Diagnostics (miette)**: Colored terminal output with source code highlighting, underline pointers, and actionable help suggestions via [miette](https://crates.io/crates/miette) — `MumeiError` derives `thiserror::Error` + `miette::Diagnostic`, `span_to_source_span()` for byte-offset conversion, `.with_source()` / `.with_help()` builder methods
+- [x] **FFI extern syntax**: `extern "Rust" { fn sqrt(x: f64) -> f64; }` parsing with `ExternFn`/`ExternBlock` AST + Span → [`docs/FFI.md`](docs/FFI.md)
+- [ ] **FFI Bridge (auto-registration)**: Auto-convert extern declarations to `trusted atom`, direct Rust crate references (not yet implemented)
+- [x] **Structured Concurrency (parser + Z3)**: `task { ... }` / `task_group { ... }` / `task_group:all` / `task_group:any` syntax, symbolic Z3 join constraints, full AST walker support, multi-language transpilation → [`docs/CONCURRENCY.md`](docs/CONCURRENCY.md)
+- [ ] **Structured Concurrency (runtime)**: Runtime scheduler, task cancellation, channel types (not yet implemented)
+- [ ] **`std.http`**: HTTP client wrapping Rust `reqwest` via FFI, parallel request integration with `task_group`
+- [ ] **`std.json`**: String/object conversion with serde_json backend, type-safe JSON operations
+- [ ] **Task refinements**: Return type inference, `task_group` result binding, channel types (`chan<T>`)
+- [ ] **Runtime Portability**: musl static linking, Homebrew Tap, WebInstall (`curl | sh`)
+- [ ] **`mumei repl`**: Interactive execution environment (parse → verify → eval loop)
+- [ ] **`mumei doc`**: Auto-generate HTML documentation from source comments (rustdoc-style)
 
 > 📖 **Strategic roadmap**: [`docs/ROADMAP.md`](docs/ROADMAP.md) | **Toolchain**: [`docs/TOOLCHAIN.md`](docs/TOOLCHAIN.md) | **Development instructions**: [`instruction.md`](instruction.md)

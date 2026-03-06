@@ -196,6 +196,18 @@ pub fn transpile_to_go(atom: &Atom) -> String {
 fn map_type_go(type_name: Option<&str>) -> String {
     match type_name {
         Some(name) => {
+            // 関数型パラメータ: atom_ref(T1, T2) -> R → func(T1, T2) R
+            if name.starts_with("atom_ref(") {
+                let tr = crate::parser::parse_type_ref(name);
+                if tr.is_fn_type() {
+                    let params: Vec<String> = tr.type_args[..tr.type_args.len() - 1]
+                        .iter()
+                        .map(|a| map_type_go(Some(&a.name)))
+                        .collect();
+                    let ret = map_type_go(Some(&tr.type_args.last().unwrap().name));
+                    return format!("func({}) {}", params.join(", "), ret);
+                }
+            }
             let base = resolve_base_type(name);
             match base.as_str() {
                 "f64" => "float64".to_string(),
@@ -375,6 +387,16 @@ fn format_expr_go(expr: &Expr) -> String {
         Expr::TaskGroup { children, .. } => {
             let tasks: Vec<String> = children.iter().map(format_expr_go).collect();
             format!("/* task_group */ func() int64 {{ {} }}()", tasks.join("; "))
+        }
+        // Higher-order functions (Phase A): atom_ref + call
+        Expr::AtomRef { name } => {
+            // Go では関数名がそのまま第一級値として使える
+            name.clone()
+        }
+        Expr::CallRef { callee, args } => {
+            let callee_str = format_expr_go(callee);
+            let args_str: Vec<String> = args.iter().map(format_expr_go).collect();
+            format!("{}({})", callee_str, args_str.join(", "))
         }
     }
 }
