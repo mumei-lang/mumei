@@ -283,29 +283,17 @@ impl MumeiError {
     pub fn to_detail(&self) -> ErrorDetail {
         match self {
             MumeiError::VerificationError {
-                msg,
-                original_span,
-                ..
+                msg, original_span, ..
             } => ErrorDetail::with_span(
                 format!("Verification Error: {}", msg),
                 original_span.clone(),
             ),
             MumeiError::CodegenError {
-                msg,
-                original_span,
-                ..
-            } => ErrorDetail::with_span(
-                format!("Codegen Error: {}", msg),
-                original_span.clone(),
-            ),
+                msg, original_span, ..
+            } => ErrorDetail::with_span(format!("Codegen Error: {}", msg), original_span.clone()),
             MumeiError::TypeError {
-                msg,
-                original_span,
-                ..
-            } => ErrorDetail::with_span(
-                format!("Type Error: {}", msg),
-                original_span.clone(),
-            ),
+                msg, original_span, ..
+            } => ErrorDetail::with_span(format!("Type Error: {}", msg), original_span.clone()),
         }
     }
 
@@ -1476,6 +1464,24 @@ fn verify_async_recursion_depth(atom: &Atom, module_env: &ModuleEnv) -> MumeiRes
                 .iter()
                 .map(|c| count_self_calls(c, atom_name))
                 .sum(),
+            Expr::AtomRef { .. } => 0,
+            Expr::CallRef { callee, args } => {
+                let self_call = if let Expr::AtomRef { name } = callee.as_ref() {
+                    if name == atom_name {
+                        1
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                };
+                self_call
+                    + count_self_calls(callee, atom_name)
+                    + args
+                        .iter()
+                        .map(|a| count_self_calls(a, atom_name))
+                        .sum::<usize>()
+            }
             _ => 0,
         }
     }
@@ -1764,6 +1770,18 @@ fn collect_callees(expr: &Expr) -> Vec<String> {
         Expr::TaskGroup { children, .. } => {
             for child in children {
                 callees.extend(collect_callees(child));
+            }
+        }
+        Expr::AtomRef { name } => {
+            callees.push(name.clone());
+        }
+        Expr::CallRef { callee, args } => {
+            if let Expr::AtomRef { name } = callee.as_ref() {
+                callees.push(name.clone());
+            }
+            callees.extend(collect_callees(callee));
+            for arg in args {
+                callees.extend(collect_callees(arg));
             }
         }
         _ => {}
