@@ -1476,6 +1476,22 @@ fn verify_async_recursion_depth(atom: &Atom, module_env: &ModuleEnv) -> MumeiRes
                 .iter()
                 .map(|c| count_self_calls(c, atom_name))
                 .sum(),
+            // Higher-order functions: atom_ref + call
+            Expr::AtomRef { .. } => 0, // 参照のみ、呼び出しではない
+            Expr::CallRef { callee, args } => {
+                // callee が atom_ref(self_name) なら自己呼び出しとしてカウント
+                let self_call = if let Expr::AtomRef { name } = callee.as_ref() {
+                    if name == atom_name { 1 } else { 0 }
+                } else {
+                    0
+                };
+                self_call
+                    + count_self_calls(callee, atom_name)
+                    + args
+                        .iter()
+                        .map(|a| count_self_calls(a, atom_name))
+                        .sum::<usize>()
+            }
             _ => 0,
         }
     }
@@ -1764,6 +1780,21 @@ fn collect_callees(expr: &Expr) -> Vec<String> {
         Expr::TaskGroup { children, .. } => {
             for child in children {
                 callees.extend(collect_callees(child));
+            }
+        }
+        // Higher-order functions: atom_ref + call
+        Expr::AtomRef { name } => {
+            // atom_ref(name) は name を呼び出し先として収集する
+            callees.push(name.clone());
+        }
+        Expr::CallRef { callee, args } => {
+            // callee が AtomRef の場合、参照先 atom 名を収集
+            if let Expr::AtomRef { name } = callee.as_ref() {
+                callees.push(name.clone());
+            }
+            callees.extend(collect_callees(callee));
+            for arg in args {
+                callees.extend(collect_callees(arg));
             }
         }
         _ => {}
