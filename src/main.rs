@@ -423,6 +423,10 @@ fn cmd_verify(input: &str) {
                         verified += 1;
                     }
                     Err(e) => {
+                        // TODO: インポートされたファイルのエラー時、source はメインファイルの内容だが
+                        // impl_def.span はインポート元ファイルを指す場合がある。
+                        // 正しくは impl_def.span.file からソースを読み直す必要がある。
+                        // See: https://github.com/mumei-lang/mumei/pull/35
                         let e = e.with_source(&source, &impl_def.span);
                         eprintln!("{:?}", miette::Report::new(e));
                         failed += 1;
@@ -456,6 +460,8 @@ fn cmd_verify(input: &str) {
                             verified += 1;
                         }
                         Err(e) => {
+                            // TODO: インポートされた atom の場合、source と span のファイルが不一致になる。
+                            // atom.span.file からソースを読み直すべき。
                             let e = e.with_source(&source, &atom.span);
                             eprintln!("{:?}", miette::Report::new(e));
                             // 検証失敗した atom はキャッシュから除外
@@ -1072,6 +1078,7 @@ fn cmd_build(input: &str, output: &str) {
                             impl_def.trait_name, impl_def.target_type
                         ),
                         Err(e) => {
+                            // TODO: インポートされた impl の場合、source と span のファイルが不一致になる。
                             let e = e.with_source(&source, &impl_def.span);
                             eprintln!("{:?}", miette::Report::new(e));
                             std::process::exit(1);
@@ -1162,6 +1169,7 @@ fn cmd_build(input: &str, output: &str) {
                                 module_env.mark_verified(&atom.name);
                             }
                             Err(e) => {
+                                // TODO: インポートされた atom の場合、source と span のファイルが不一致になる。
                                 let e = e.with_source(&source, &atom.span);
                                 eprintln!("{:?}", miette::Report::new(e));
                                 build_cache_new.remove(&atom.name);
@@ -1180,6 +1188,7 @@ fn cmd_build(input: &str, output: &str) {
                         atom.name
                     ),
                     Err(e) => {
+                        // TODO: インポートされた atom の場合、source と span のファイルが不一致になる。
                         let e = e.with_source(&source, &atom.span);
                         eprintln!("{:?}", miette::Report::new(e));
                         std::process::exit(1);
@@ -1377,6 +1386,7 @@ fn cmd_publish(proof_only: bool) {
                     atom_count += 1;
                 }
                 Err(e) => {
+                    // TODO: インポートされた atom の場合、source と span のファイルが不一致になる。
                     let e = e.with_source(&source, &atom.span);
                     eprintln!("{:?}", miette::Report::new(e));
                     failed += 1;
