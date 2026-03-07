@@ -22,7 +22,12 @@ HISTORY_FILE = Path(__file__).parent.absolute() / "visualizer" / "report_history
 
 
 def _sync_to_visualizer(report_file: Path, root_dir: Path) -> None:
-    """Copy report.json to visualizer/ and append to history."""
+    """Copy report.json to visualizer/ and append to history.
+
+    NOTE: Nearly identical logic exists in self_healing.py (sync_to_visualizer).
+    If you change this, update self_healing.py as well (or extract into a shared
+    module in the future).
+    """
     if not VISUALIZER_SYNC:
         return
     if not report_file.exists():
@@ -32,19 +37,31 @@ def _sync_to_visualizer(report_file: Path, root_dir: Path) -> None:
     vis_dir.mkdir(exist_ok=True)
     shutil.copy(report_file, vis_dir / "report.json")
 
-    # Append to history
+    # Append to history (with file lock to prevent corruption when
+    # mcp_server.py and self_healing.py run concurrently)
     import datetime
+    import fcntl
+
     entry = json.loads(report_file.read_text(encoding="utf-8"))
     entry["timestamp"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
-    history = []
-    if HISTORY_FILE.exists():
+    lock_file = HISTORY_FILE.parent / ".report_history.lock"
+    lock_file.parent.mkdir(exist_ok=True)
+    with open(lock_file, "w") as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
         try:
-            history = json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
             history = []
-    history.append(entry)
-    HISTORY_FILE.write_text(json.dumps(history, indent=2, ensure_ascii=False), encoding="utf-8")
+            if HISTORY_FILE.exists():
+                try:
+                    history = json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
+                except (json.JSONDecodeError, OSError):
+                    history = []
+            history.append(entry)
+            HISTORY_FILE.write_text(
+                json.dumps(history, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+        finally:
+            fcntl.flock(lf, fcntl.LOCK_UN)
 
 @mcp.tool()
 def forge_blade(source_code: str, output_name: str = "katana") -> str:

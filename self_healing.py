@@ -42,7 +42,12 @@ HISTORY_FILE = ROOT_DIR / "visualizer" / "report_history.json"
 
 
 def sync_to_visualizer(report_path: str) -> None:
-    """Copy report.json to visualizer/ and append to history."""
+    """Copy report.json to visualizer/ and append to history.
+
+    NOTE: Nearly identical logic exists in mcp_server.py (_sync_to_visualizer).
+    If you change this, update mcp_server.py as well (or extract into a shared
+    module in the future).
+    """
     if not VISUALIZER_SYNC:
         return
     report_file = Path(report_path)
@@ -53,20 +58,30 @@ def sync_to_visualizer(report_path: str) -> None:
     vis_dir.mkdir(exist_ok=True)
     shutil.copy(report_file, vis_dir / "report.json")
 
-    # Append to history
+    # Append to history (with file lock to prevent corruption when
+    # mcp_server.py and self_healing.py run concurrently)
+    import fcntl
+
     entry = json.loads(report_file.read_text(encoding="utf-8"))
     entry["timestamp"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
-    history = []
-    if HISTORY_FILE.exists():
+    lock_file = HISTORY_FILE.parent / ".report_history.lock"
+    lock_file.parent.mkdir(exist_ok=True)
+    with open(lock_file, "w") as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
         try:
-            history = json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
             history = []
-    history.append(entry)
-    HISTORY_FILE.write_text(
-        json.dumps(history, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
+            if HISTORY_FILE.exists():
+                try:
+                    history = json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
+                except (json.JSONDecodeError, OSError):
+                    history = []
+            history.append(entry)
+            HISTORY_FILE.write_text(
+                json.dumps(history, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+        finally:
+            fcntl.flock(lf, fcntl.LOCK_UN)
 
 def run_mumei():
     """Run compiler. Detects failure via non-zero exit code."""
@@ -101,8 +116,13 @@ Output only the fixed code in ```rust ... ``` format.
     )
 
     content = response.choices[0].message.content or ""
-    # Extract code block only (handles Qwen3.5 variants: ```Rust / ```rs etc.)
-    code_match = re.search(r'```(?:rust|rs|Rust)\s*\n(.*?)```', content, re.DOTALL)
+    # Extract code block (handles various LLM fence labels:
+    #   ```rust, ```rs, ```Rust, ```mumei, ```mm, ``` (no tag), etc.)
+    code_match = re.search(
+        r'```(?:rust|rs|Rust|RS|mumei|mm|Mumei)?\s*\n(.*?)```',
+        content,
+        re.DOTALL,
+    )
     if code_match:
         return code_match.group(1).strip()
     # Fallback: return raw content if no code block found
@@ -125,10 +145,14 @@ def main():
         try:
             with open(REPORT_FILE, "r") as f:
                 report = json.load(f)
-            # Visualizer sync
-            sync_to_visualizer(REPORT_FILE)
         except Exception:
             report = {"status": "error", "reason": "Report not found"}
+
+        # Visualizer sync (separate try so a sync failure doesn't mask report data)
+        try:
+            sync_to_visualizer(REPORT_FILE)
+        except Exception:
+            pass
 
         with open(SOURCE_FILE, "r") as f:
             source = f.read()
