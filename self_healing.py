@@ -2,7 +2,10 @@ import subprocess
 import json
 import os
 import re
+import shutil
 import time
+import datetime
+from pathlib import Path
 from openai import OpenAI
 from dotenv import load_dotenv
 
@@ -31,6 +34,39 @@ SOURCE_FILE = "sword_test.mm"
 OUTPUT_BASE = "katana"
 REPORT_FILE = "report.json"  # output_dir (カレントディレクトリ) に合わせる
 MAX_RETRIES = 5  # 修正回数の上限
+
+# Visualizer 同期設定
+VISUALIZER_SYNC = os.getenv("ENABLE_VISUALIZER_SYNC", "false").lower() == "true"
+ROOT_DIR = Path(__file__).parent.absolute()
+HISTORY_FILE = ROOT_DIR / "visualizer" / "report_history.json"
+
+
+def sync_to_visualizer(report_path: str) -> None:
+    """report.json を visualizer/ にコピーし、履歴に追記する。"""
+    if not VISUALIZER_SYNC:
+        return
+    report_file = Path(report_path)
+    if not report_file.exists():
+        return
+
+    vis_dir = ROOT_DIR / "visualizer"
+    vis_dir.mkdir(exist_ok=True)
+    shutil.copy(report_file, vis_dir / "report.json")
+
+    # 履歴に追記
+    entry = json.loads(report_file.read_text(encoding="utf-8"))
+    entry["timestamp"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+    history = []
+    if HISTORY_FILE.exists():
+        try:
+            history = json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            history = []
+    history.append(entry)
+    HISTORY_FILE.write_text(
+        json.dumps(history, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
 
 def run_mumei():
     """コンパイラを実行。exit(1)があれば正常に失敗を検知する"""
@@ -89,6 +125,8 @@ def main():
         try:
             with open(REPORT_FILE, "r") as f:
                 report = json.load(f)
+            # Visualizer 同期
+            sync_to_visualizer(REPORT_FILE)
         except Exception:
             report = {"status": "error", "reason": "Report not found"}
 

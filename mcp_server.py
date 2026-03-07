@@ -1,5 +1,6 @@
 import os
 import re
+import shutil
 import subprocess
 import json
 import tempfile
@@ -12,6 +13,38 @@ load_dotenv()
 
 # MCPサーバーの初期化
 mcp = FastMCP("Mumei-Forge")
+
+# Visualizer 同期設定
+# true: report.json を visualizer/ にもコピー（Streamlit ダッシュボード用）
+# false: MCP レスポンスのみ（デフォルト）
+VISUALIZER_SYNC = os.getenv("ENABLE_VISUALIZER_SYNC", "false").lower() == "true"
+HISTORY_FILE = Path(__file__).parent.absolute() / "visualizer" / "report_history.json"
+
+
+def _sync_to_visualizer(report_file: Path, root_dir: Path) -> None:
+    """report.json を visualizer/ にコピーし、履歴に追記する。"""
+    if not VISUALIZER_SYNC:
+        return
+    if not report_file.exists():
+        return
+
+    vis_dir = root_dir / "visualizer"
+    vis_dir.mkdir(exist_ok=True)
+    shutil.copy(report_file, vis_dir / "report.json")
+
+    # 履歴に追記
+    import datetime
+    entry = json.loads(report_file.read_text(encoding="utf-8"))
+    entry["timestamp"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+    history = []
+    if HISTORY_FILE.exists():
+        try:
+            history = json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            history = []
+    history.append(entry)
+    HISTORY_FILE.write_text(json.dumps(history, indent=2, ensure_ascii=False), encoding="utf-8")
 
 @mcp.tool()
 def forge_blade(source_code: str, output_name: str = "katana") -> str:
@@ -41,9 +74,15 @@ def forge_blade(source_code: str, output_name: str = "katana") -> str:
 
         # --- 🔍 隔離されたレポートの読み込み (並行安全の核心) ---
         report_file = tmp_path / "report.json"
+        if not report_file.exists():
+            # コンパイラが cwd に report.json を書く場合のフォールバック
+            cwd_report = root_dir / "report.json"
+            if cwd_report.exists():
+                shutil.copy(cwd_report, report_file)
         if report_file.exists():
             report_data = report_file.read_text(encoding="utf-8")
             response_parts.append(f"### 🔍 検証レポート (Verification Report)\n```json\n{report_data}\n```")
+            _sync_to_visualizer(report_file, root_dir)
 
         if result.returncode == 0:
             response_parts.insert(0, f"✅ 鍛造成功: '{output_name}'")
@@ -115,11 +154,17 @@ def validate_logic(source_code: str) -> str:
 
         # report.json の読み込み（反例データ含む）
         report_file = tmp_path / "report.json"
+        if not report_file.exists():
+            # コンパイラが cwd に report.json を書く場合のフォールバック
+            cwd_report = root_dir / "report.json"
+            if cwd_report.exists():
+                shutil.copy(cwd_report, report_file)
         if report_file.exists():
             report_data = report_file.read_text(encoding="utf-8")
             response_parts.append(
                 f"### 検証レポート\n```json\n{report_data}\n```"
             )
+            _sync_to_visualizer(report_file, root_dir)
 
         # stderr から Z3 反例情報を抽出
         if result.stderr:
@@ -183,11 +228,17 @@ def execute_mm(
 
         # report.json の読み込み
         report_file = tmp_path / "report.json"
+        if not report_file.exists():
+            # コンパイラが cwd に report.json を書く場合のフォールバック
+            cwd_report = root_dir / "report.json"
+            if cwd_report.exists():
+                shutil.copy(cwd_report, report_file)
         if report_file.exists():
             report_data = report_file.read_text(encoding="utf-8")
             response_parts.append(
                 f"### 検証レポート\n```json\n{report_data}\n```"
             )
+            _sync_to_visualizer(report_file, root_dir)
 
         if result.returncode == 0:
             response_parts.insert(0, f"{command} 成功: '{output_name}'")
