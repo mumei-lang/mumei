@@ -841,14 +841,16 @@ pub fn compute_proof_hash(atom: &crate::parser::Atom, module_env: &ModuleEnv) ->
     let mut visited = HashSet::new();
     let mut stack = Vec::new();
 
-    // Collect direct callees from dependency graph
+    // Collect direct callees from dependency graph (sorted for deterministic hashing)
     if let Some(callees) = module_env.dependency_graph.get(&atom.name) {
-        for callee in callees {
+        let mut sorted_callees: Vec<&String> = callees.iter().collect();
+        sorted_callees.sort();
+        for callee in sorted_callees {
             stack.push(callee.clone());
         }
     }
 
-    // Walk transitive callees
+    // Walk transitive callees (sort at each level for determinism)
     while let Some(callee_name) = stack.pop() {
         if !visited.insert(callee_name.clone()) {
             continue; // already visited, prevent infinite loops
@@ -863,7 +865,9 @@ pub fn compute_proof_hash(atom: &crate::parser::Atom, module_env: &ModuleEnv) ->
         }
         // Walk further dependencies
         if let Some(further_callees) = module_env.dependency_graph.get(&callee_name) {
-            for fc in further_callees {
+            let mut sorted_further: Vec<&String> = further_callees.iter().collect();
+            sorted_further.sort();
+            for fc in sorted_further {
                 if !visited.contains(fc) {
                     stack.push(fc.clone());
                 }

@@ -357,6 +357,10 @@ def execute_mm(
             response_parts.append(
                 f"### Verification Report\n```json\n{report_data}\n```"
             )
+            # Feature 1-f: Include semantic feedback section if present
+            sf_section = _format_semantic_feedback(report_data)
+            if sf_section:
+                response_parts.append(sf_section)
             try:
                 _sync_to_visualizer(report_file, root_dir)
             except Exception:

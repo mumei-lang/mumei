@@ -432,9 +432,6 @@ fn cmd_verify(input: &str) {
     resolver::migrate_old_cache(base_dir);
     let mut verification_cache = resolver::load_verification_cache(base_dir);
 
-    // Track which atoms changed so we can re-verify dependents
-    let mut changed_atoms: Vec<String> = Vec::new();
-
     for item in &items {
         match item {
             Item::ImplDef(impl_def) => {
@@ -476,9 +473,6 @@ fn cmd_verify(input: &str) {
                             continue;
                         }
                     }
-
-                    // Hash changed — this atom needs re-verification
-                    changed_atoms.push(atom.name.clone());
 
                     // Collect dependency info for cache entry
                     let deps: Vec<String> = module_env
@@ -531,12 +525,11 @@ fn cmd_verify(input: &str) {
         }
     }
 
-    // Feature 2-f: Dependency-aware re-verification — invalidate dependents of changed atoms
-    for changed in &changed_atoms {
-        resolver::invalidate_dependents(&mut verification_cache, changed, &module_env);
-    }
-
     // Feature 2: Save enhanced verification cache
+    // Note: invalidate_dependents is not needed here because compute_proof_hash
+    // already includes callee signatures (requires/ensures) in the hash.
+    // If a callee's contract changes, all callers will have different proof hashes
+    // and be re-verified automatically.
     resolver::save_verification_cache(base_dir, &verification_cache);
 
     println!();
