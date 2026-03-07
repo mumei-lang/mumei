@@ -109,26 +109,55 @@ Powered by [miette](https://crates.io/crates/miette) — source location, underl
 
 ## Self-Healing Loop (AI + Z3)
 
-Mumei の Self-Healing ループは、AI（LLM）と Z3 形式検証を組み合わせて、コードを自動修正します。
+Mumei's Self-Healing loop combines AI (LLM) and Z3 formal verification to automatically fix code.
 
-### E2E フロー
+### E2E Flow
 
 ```
-AI が .mm コードを生成
+AI generates .mm code
         |
         v
-validate_logic (Z3 検証)
+validate_logic (Z3 verification)
         |
-   [失敗?] -----> AI が反例を分析 → 修正コードを生成 → 再検証 (ループ)
+   [fail?] -----> AI analyzes counter-example -> generates fix -> re-verify (loop)
         |
-   [成功!]
+   [pass!]
         v
-execute_mm (フルビルド: LLVM IR + Rust/Go/TypeScript)
+execute_mm (full build: LLVM IR + Rust/Go/TypeScript)
 ```
 
-### デモ: safe_divide の Self-Healing
+### Interactive Flow (Layered Architecture)
 
-**Step a.** AI が初期コードを生成（事前条件が不十分）:
+The E2E flow and Visualizer serve complementary but independent roles:
+
+| | E2E Flow (MCP) | Visualizer (Streamlit) |
+|---|---|---|
+| **Purpose** | Data channel for AI to autonomously run verify-fix loops | Observation tool for humans to visually inspect verification state |
+| **Consumer** | AI (Claude Desktop, etc.) | Human (developer) |
+| **Data Source** | JSON + stderr included in MCP responses | Reads report.json file |
+| **Real-time** | Immediate on every tool call | Streamlit page reload / rerun |
+
+**Recommended Architecture:**
+
+```
+AI (Claude Desktop etc.)
+  | MCP
+  v
+validate_logic / execute_mm / forge_blade
+  |
+  v
+mumei compiler (Z3 verification)
+  |
+  +---> [Always] Include verification results + counter-examples in MCP response
+  |              -> AI can run autonomous fix loops with this alone
+  |
+  +---> [Optional] Copy to visualizer/report.json
+              -> Streamlit dashboard for human state inspection
+```
+
+### Demo: Self-Healing of safe_divide
+
+**Step a.** AI generates initial code (insufficient precondition):
 
 ```mumei
 type Nat = i64 where v >= 0;
@@ -139,27 +168,27 @@ atom safe_divide(a: Nat, b: Nat)
   body: { a / b };
 ```
 
-**Step b.** `validate_logic` で Z3 検証 → 失敗:
+**Step b.** `validate_logic` runs Z3 verification -> fails:
 
 ```
 $ mumei verify input.mm
 
   x Verification Error: Potential division by zero.
-  help: requires に除数 != 0 の条件を追加してください
+  help: Add a condition divisor != 0 to requires
 
   Verification: 0 passed, 1 failed
 ```
 
-**Step c-d.** AI が反例（`b = 0` でゼロ除算）を分析し、修正コードを生成:
+**Step c-d.** AI analyzes counter-example (`b = 0` causes division by zero) and generates fix:
 
 ```mumei
 atom safe_divide(a: Nat, b: Nat)
-  requires: a >= 0 && b > 0;   // <- 修正: b > 0 追加
+  requires: a >= 0 && b > 0;   // <- fix: added b > 0
   ensures: result >= 0;
   body: { a / b };
 ```
 
-**Step e.** 再検証 → 成功:
+**Step e.** Re-verify -> passes:
 
 ```
 $ mumei verify input.mm
@@ -168,7 +197,7 @@ $ mumei verify input.mm
   Verification passed: 1 item(s) verified
 ```
 
-**Step f.** フルビルドで Rust / Go / TypeScript を生成:
+**Step f.** Full build generates Rust / Go / TypeScript:
 
 ```
 $ mumei build input.mm -o katana
@@ -177,89 +206,71 @@ $ mumei build input.mm -o katana
   Done. Created: katana.rs, katana.go, katana.ts
 ```
 
-### セットアップ
+### Setup
 
 ```bash
-# 1. Ollama コンテナ起動
+# 1. Start Ollama container
 docker compose up -d
 docker exec mumei-ollama ollama pull qwen3.5
 
-# 2. 環境変数設定
+# 2. Configure environment variables
 cp .env.example .env
-# .env の パターン1 (Ollama) のコメントを外す
+# Uncomment Pattern 1 (Ollama) in .env
 
-# 3. 依存パッケージインストール
+# 3. Install Python dependencies
 pip install -r requirements.txt
 
-# 4. Self-Healing ループ実行
+# 4. Run Self-Healing loop
 python self_healing.py
 
-# 5. MCP サーバー起動（Claude Desktop 等から利用）
+# 5. Start MCP server (for use with Claude Desktop, etc.)
 python mcp_server.py
 ```
 
-### MCP ツール一覧
+### MCP Tools
 
 | Tool | Description |
 |------|-------------|
-| `forge_blade` | 検証 + コード生成の一括実行 |
-| `self_heal_loop` | 自律修正ループの実行 |
-| `validate_logic` | Z3 検証のみ（反例データ返却） |
-| `execute_mm` | 汎用ビルド / チェック実行 |
+| `forge_blade` | Verify + code generation in one step |
+| `self_heal_loop` | Run autonomous fix loop |
+| `validate_logic` | Z3 verification only (returns counter-example data) |
+| `execute_mm` | General-purpose build / check execution |
 
-### Visualizer ダッシュボード（オプション）
+### Visualizer Dashboard (Optional)
 
-Streamlit ベースの Visualizer で、検証結果と Self-Healing 履歴をリアルタイムに監視できます。
+A Streamlit-based Visualizer for monitoring verification results and Self-Healing history in real-time.
 
-**アーキテクチャ（レイヤー分離型）:**
-
-```
-AI (Claude Desktop etc.)
-  │ MCP
-  ▼
-validate_logic / execute_mm / forge_blade
-  │
-  ▼
-mumei compiler (Z3 verification)
-  │
-  ├─→ [常時] MCP レスポンスに検証結果 + 反例を含めて返す
-  │         → AI はこれだけで自律修正ループを回せる
-  │
-  └─→ [オプション] visualizer/report.json にコピー
-            → Streamlit ダッシュボードで人間が状態を確認
-```
-
-| シナリオ | E2E フロー | Visualizer | 設定 |
+| Scenario | E2E Flow | Visualizer | Config |
 |---|---|---|---|
-| AI だけで自律修正 | 使う | 使わない | `ENABLE_VISUALIZER_SYNC=false` |
-| 人間がダッシュボードで監視しながら | 使う | 使う | `ENABLE_VISUALIZER_SYNC=true` |
-| 手動でコンパイラを叩いて結果を見る | 使わない | 使う | 直接 `mumei build` 実行 |
+| AI-only autonomous fix | Yes | No | `ENABLE_VISUALIZER_SYNC=false` |
+| Human monitors dashboard while AI works | Yes | Yes | `ENABLE_VISUALIZER_SYNC=true` |
+| Manual compiler run + inspect results | No | Yes | Run `mumei build` directly |
 
-**セットアップ:**
+**Setup:**
 
 ```bash
-# 1. .env に Visualizer 同期を有効化
+# 1. Enable Visualizer sync in .env
 echo "ENABLE_VISUALIZER_SYNC=true" >> .env
 
-# 2. Streamlit 起動
+# 2. Start Streamlit
 pip install streamlit
 streamlit run visualizer/app.py
 
-# 3. MCP ツール実行 or self_healing.py 実行
-#    → report.json が visualizer/ に自動コピーされ、ダッシュボードに反映
+# 3. Run MCP tools or self_healing.py
+#    -> report.json is automatically copied to visualizer/ and reflected in the dashboard
 ```
 
-**機能:**
+**Features:**
 
-- **最新レポート表示**: Z3 検証結果 + counterexample フィールド（反例の変数値）を構造化表示
-- **Self-Healing 履歴**: 各イテレーションの結果を時系列で表示（成功/失敗の集計付き）
-- **AI Fix Suggestion**: 検証失敗時に修正ヒントを自動生成
+- **Latest Report View**: Structured display of Z3 verification results + counterexample field (variable values)
+- **Self-Healing History**: Time-series display of each iteration result (with pass/fail summary)
+- **AI Fix Suggestion**: Auto-generated fix hints on verification failure
 
-**デモ録画:**
+**Demo Recording:**
 
 ![Visualizer Demo](visualizer_demo.mp4)
 
-> Visualizer は E2E フローのモニタリングツール。MCP レスポンスで完結するため、AI は Visualizer に依存しない。人間が見たい場合だけ使用。
+> The Visualizer is a monitoring tool for the E2E flow. Since AI completes its work via MCP responses alone, it does not depend on the Visualizer. Use it only when a human wants to observe.
 
 ---
 

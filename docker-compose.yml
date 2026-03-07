@@ -1,18 +1,18 @@
-# Ollama コンテナ化構成（Mumei Self-Healing / MCP Server 用）
+# Ollama containerization for Mumei Self-Healing / MCP Server
 #
-# 使い方:
+# Usage:
 #   1. docker compose up -d
 #   2. docker exec mumei-ollama ollama pull qwen3.5
-#      (または軽量版: docker exec mumei-ollama ollama pull qwen3.5:small)
-#   3. .env に以下を設定:
+#      (or lightweight: docker exec mumei-ollama ollama pull qwen3.5:small)
+#   3. Set in .env:
 #        LLM_API_KEY=ollama
 #        LLM_BASE_URL=http://localhost:11434/v1
 #        LLM_MODEL=qwen3.5
-#   4. python self_healing.py / python mcp_server.py をホストから実行
+#   4. Run python self_healing.py / python mcp_server.py from host
 #
-# GPU を使う場合:
-#   - nvidia-container-toolkit をインストール済みであること
-#   - deploy セクションのコメントを外す
+# For GPU usage:
+#   - nvidia-container-toolkit must be installed
+#   - Uncomment the deploy section below
 
 services:
   ollama:
@@ -22,7 +22,7 @@ services:
       - "11434:11434"
     volumes:
       - ollama_models:/root/.ollama
-    # GPU を使う場合はコメントを外す
+    # Uncomment below for GPU support
     # deploy:
     #   resources:
     #     reservations:

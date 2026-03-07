@@ -8,18 +8,18 @@ st.set_page_config(page_title="Mumei Visualizer", page_icon="🗡️", layout="w
 st.title("🗡️ Mumei Visualizer")
 st.subheader("Formal Verification Inspection Dashboard")
 
-# --- サイドバー: 表示モード選択 ---
+# --- Sidebar: view mode selection ---
 view_mode = st.sidebar.radio(
-    "表示モード",
-    ["最新レポート", "Self-Healing 履歴"],
+    "View Mode",
+    ["Latest Report", "Self-Healing History"],
     index=0,
 )
 
-# --- 最新レポート表示 ---
-if view_mode == "最新レポート":
+# --- Latest report view ---
+if view_mode == "Latest Report":
     report_path = Path(__file__).parent / "report.json"
     if not report_path.exists():
-        # フォールバック: カレントディレクトリの report.json
+        # Fallback: report.json in current directory
         report_path = Path("report.json")
 
     if not report_path.exists():
@@ -40,22 +40,22 @@ if view_mode == "最新レポート":
         st.error(f"Failed to read report.json: {e}")
         st.stop()
 
-    # 状態の表示
+    # Display status
     if data.get("status") == "failed":
         st.error(
             f"❌ Verification Failed: Atom '{data.get('atom', 'unknown')}' is flawed."
         )
 
-        # --- counterexample フィールド対応 ---
+        # --- counterexample field support ---
         if "counterexample" in data and data["counterexample"]:
-            st.subheader("🔬 Z3 Counter-example (詳細)")
+            st.subheader("Z3 Counter-example (Details)")
             ce = data["counterexample"]
             cols = st.columns(min(len(ce), 4))
             for i, (var_name, var_value) in enumerate(ce.items()):
                 with cols[i % len(cols)]:
                     st.metric(f"Counter-example: {var_name}", var_value)
         else:
-            # 従来の input_a / input_b フォールバック
+            # Legacy input_a / input_b fallback
             col1, col2 = st.columns(2)
             with col1:
                 st.metric("Counter-example: a", data.get("input_a", "N/A"))
@@ -64,7 +64,7 @@ if view_mode == "最新レポート":
 
         st.warning(f"**Reason:** {data.get('reason', 'Unknown')}")
 
-        # AIへの修正指示用プロンプトの自動生成
+        # Auto-generate fix prompt for AI
         ce_info = ""
         if "counterexample" in data and data["counterexample"]:
             ce_info = "\n".join(
@@ -94,16 +94,16 @@ if view_mode == "最新レポート":
         st.json(data)
 
 
-# --- Self-Healing 履歴表示 ---
-elif view_mode == "Self-Healing 履歴":
+# --- Self-Healing history view ---
+elif view_mode == "Self-Healing History":
     history_path = Path(__file__).parent / "report_history.json"
 
     if not history_path.exists():
         st.info(
             "No self-healing history found.\n\n"
-            "履歴を記録するには `ENABLE_VISUALIZER_SYNC=true` を設定してください。\n\n"
+            "To record history, set `ENABLE_VISUALIZER_SYNC=true`.\n\n"
             "```bash\n"
-            "# .env に追加\n"
+            "# Add to .env\n"
             "ENABLE_VISUALIZER_SYNC=true\n"
             "```"
         )
@@ -117,12 +117,12 @@ elif view_mode == "Self-Healing 履歴":
         st.stop()
 
     if not history:
-        st.info("履歴が空です。")
+        st.info("History is empty.")
         st.stop()
 
     st.metric("Total Iterations", len(history))
 
-    # 成功/失敗の集計
+    # Pass/fail summary
     success_count = sum(1 for h in history if h.get("status") == "success")
     fail_count = sum(1 for h in history if h.get("status") == "failed")
 
@@ -134,8 +134,8 @@ elif view_mode == "Self-Healing 履歴":
     with col3:
         st.metric("Other", len(history) - success_count - fail_count)
 
-    # 時系列表示
-    st.subheader("検証履歴 (時系列)")
+    # Timeline display
+    st.subheader("Verification History (Timeline)")
     for i, entry in enumerate(reversed(history)):
         idx = len(history) - i
         status_icon = "OK" if entry.get("status") == "success" else "NG"
@@ -148,14 +148,14 @@ elif view_mode == "Self-Healing 履歴":
         ):
             st.json(entry)
 
-            # counterexample の詳細表示
+            # Display counterexample details
             if "counterexample" in entry and entry["counterexample"]:
                 st.subheader("Counter-example")
                 for var_name, var_value in entry["counterexample"].items():
                     st.code(f"{var_name} = {var_value}")
 
-    # 履歴クリアボタン
+    # Clear history button
     st.divider()
-    if st.button("履歴をクリア", type="secondary"):
+    if st.button("Clear History", type="secondary"):
         history_path.write_text("[]", encoding="utf-8")
         st.rerun()

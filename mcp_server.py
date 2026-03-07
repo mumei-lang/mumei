@@ -8,21 +8,21 @@ from pathlib import Path
 from mcp.server.fastmcp import FastMCP
 from dotenv import load_dotenv
 
-# 環境変数の読み込み
+# Load environment variables
 load_dotenv()
 
-# MCPサーバーの初期化
+# Initialize MCP server
 mcp = FastMCP("Mumei-Forge")
 
-# Visualizer 同期設定
-# true: report.json を visualizer/ にもコピー（Streamlit ダッシュボード用）
-# false: MCP レスポンスのみ（デフォルト）
+# Visualizer sync config
+# true: also copy report.json to visualizer/ (for Streamlit dashboard)
+# false: MCP response only (default)
 VISUALIZER_SYNC = os.getenv("ENABLE_VISUALIZER_SYNC", "false").lower() == "true"
 HISTORY_FILE = Path(__file__).parent.absolute() / "visualizer" / "report_history.json"
 
 
 def _sync_to_visualizer(report_file: Path, root_dir: Path) -> None:
-    """report.json を visualizer/ にコピーし、履歴に追記する。"""
+    """Copy report.json to visualizer/ and append to history."""
     if not VISUALIZER_SYNC:
         return
     if not report_file.exists():
@@ -32,7 +32,7 @@ def _sync_to_visualizer(report_file: Path, root_dir: Path) -> None:
     vis_dir.mkdir(exist_ok=True)
     shutil.copy(report_file, vis_dir / "report.json")
 
-    # 履歴に追記
+    # Append to history
     import datetime
     entry = json.loads(report_file.read_text(encoding="utf-8"))
     entry["timestamp"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -49,18 +49,18 @@ def _sync_to_visualizer(report_file: Path, root_dir: Path) -> None:
 @mcp.tool()
 def forge_blade(source_code: str, output_name: str = "katana") -> str:
     """
-    Mumeiコードを検証し、Rust/Go/TSコードを生成します。
-    検証レポートを含め、すべての一時ファイルは隔離されており並行実行しても安全です。
+    Verify Mumei code and generate Rust/Go/TS output.
+    All temp files including verification reports are isolated per request for safe concurrent execution.
     """
     root_dir = Path(__file__).parent.absolute()
 
-    # 1. リクエストごとに完全隔離された一時ディレクトリを作成
+    # 1. Create fully isolated temp directory per request
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_path = Path(tmpdir)
         source_path = tmp_path / "input.mm"
         source_path.write_text(source_code, encoding="utf-8")
 
-        # 2. コンパイラ実行 (出力先を一時ディレクトリに指定)
+        # 2. Run compiler (output to temp directory)
         output_base = tmp_path / output_name
 
         result = subprocess.run(
@@ -72,42 +72,42 @@ def forge_blade(source_code: str, output_name: str = "katana") -> str:
 
         response_parts = []
 
-        # --- 🔍 隔離されたレポートの読み込み (並行安全の核心) ---
+        # --- Read isolated report (core of concurrency safety) ---
         report_file = tmp_path / "report.json"
         if not report_file.exists():
-            # コンパイラが cwd に report.json を書く場合のフォールバック
+            # Fallback: compiler may write report.json to cwd
             cwd_report = root_dir / "report.json"
             if cwd_report.exists():
                 shutil.copy(cwd_report, report_file)
         if report_file.exists():
             report_data = report_file.read_text(encoding="utf-8")
-            response_parts.append(f"### 🔍 検証レポート (Verification Report)\n```json\n{report_data}\n```")
+            response_parts.append(f"### Verification Report\n```json\n{report_data}\n```")
             _sync_to_visualizer(report_file, root_dir)
 
         if result.returncode == 0:
-            response_parts.insert(0, f"✅ 鍛造成功: '{output_name}'")
-            # 成果物の収集
+            response_parts.insert(0, f"Forge succeeded: '{output_name}'")
+            # Collect generated artifacts
             for ext in [".rs", ".go", ".ts", ".ll"]:
                 gen_file = tmp_path / f"{output_name}{ext}"
                 if gen_file.exists():
-                    # 拡張子に合わせてシンタックスハイライトを変更
+                    # Set syntax highlighting based on extension
                     lang = "rust" if ext in [".rs", ".ll"] else "go" if ext == ".go" else "typescript"
                     content = gen_file.read_text(encoding="utf-8")
-                    response_parts.append(f"\n### 生成コード: {output_name}{ext}\n```{lang}\n{content}\n```")
+                    response_parts.append(f"\n### Generated: {output_name}{ext}\n```{lang}\n{content}\n```")
 
             return "\n".join(response_parts)
         else:
-            # 失敗時：論理欠陥の証拠（レポート）とエラーログをセットで返す
-            response_parts.insert(0, f"❌ 鍛造失敗: 論理的な欠陥が証明されました。")
+            # On failure: return evidence (report) and error log together
+            response_parts.insert(0, f"Forge failed: logical flaw detected.")
             if result.stderr:
-                response_parts.append(f"\n### エラー詳細\n{result.stderr}")
+                response_parts.append(f"\n### Error Details\n{result.stderr}")
 
             return "\n".join(response_parts)
 
 @mcp.tool()
 def self_heal_loop() -> str:
     """
-    self_healing.py を実行し、AIによる自律修正ループ（sword_test.mm対象）を開始します。
+    Run self_healing.py to start an AI-driven autonomous fix loop (targeting sword_test.mm).
     """
     root_dir = Path(__file__).parent.absolute()
 
@@ -120,20 +120,20 @@ def self_heal_loop() -> str:
             timeout=300
         )
         if result.returncode == 0:
-            return f"✅ 自律修正完了:\n{result.stdout}"
+            return f"Self-healing completed:\n{result.stdout}"
         else:
-            return f"❌ 自律修正失敗:\n{result.stderr}\n{result.stdout}"
+            return f"Self-healing failed:\n{result.stderr}\n{result.stdout}"
     except subprocess.TimeoutExpired:
-        return "❌ エラー: 自律修正ループがタイムアウトしました（300秒）。"
+        return "Error: Self-healing loop timed out (300s)."
     except Exception as e:
-        return f"❌ 実行エラー: {str(e)}"
+        return f"Execution error: {str(e)}"
 
 @mcp.tool()
 def validate_logic(source_code: str) -> str:
     """
-    Mumeiコードの形式検証（Z3）のみを実行します。
-    コード生成は行わず、検証結果と反例（Counter-example）を返します。
-    AIが .mm コードを修正する際の検証ステップとして使用します。
+    Run formal verification (Z3) only on Mumei code.
+    No code generation — returns verification results and counter-examples.
+    Used as the verification step when AI iteratively fixes .mm code.
     """
     root_dir = Path(__file__).parent.absolute()
 
@@ -142,7 +142,7 @@ def validate_logic(source_code: str) -> str:
         source_path = tmp_path / "input.mm"
         source_path.write_text(source_code, encoding="utf-8")
 
-        # mumei verify を実行（Z3検証のみ、コード生成なし）
+        # Run mumei verify (Z3 verification only, no codegen)
         result = subprocess.run(
             ["cargo", "run", "--", "verify", str(source_path)],
             cwd=root_dir,
@@ -152,41 +152,41 @@ def validate_logic(source_code: str) -> str:
 
         response_parts = []
 
-        # report.json の読み込み（反例データ含む）
+        # Read report.json (includes counter-example data)
         report_file = tmp_path / "report.json"
         if not report_file.exists():
-            # コンパイラが cwd に report.json を書く場合のフォールバック
+            # Fallback: compiler may write report.json to cwd
             cwd_report = root_dir / "report.json"
             if cwd_report.exists():
                 shutil.copy(cwd_report, report_file)
         if report_file.exists():
             report_data = report_file.read_text(encoding="utf-8")
             response_parts.append(
-                f"### 検証レポート\n```json\n{report_data}\n```"
+                f"### Verification Report\n```json\n{report_data}\n```"
             )
             _sync_to_visualizer(report_file, root_dir)
 
-        # stderr から Z3 反例情報を抽出
+        # Extract Z3 counter-example info from stderr
         if result.stderr:
             counterexamples = re.findall(
                 r'Counter-example:.*', result.stderr
             )
             if counterexamples:
-                response_parts.append("### Z3 反例 (Counter-examples)")
+                response_parts.append("### Z3 Counter-examples")
                 for ce in counterexamples:
                     response_parts.append(f"- `{ce.strip()}`")
 
         if result.returncode == 0:
             response_parts.insert(
-                0, "検証成功: 論理的欠陥は検出されませんでした。"
+                0, "Verification passed: no logical flaws detected."
             )
         else:
             response_parts.insert(
-                0, "検証失敗: 論理的欠陥が検出されました。"
+                0, "Verification failed: logical flaw detected."
             )
             if result.stderr:
                 response_parts.append(
-                    f"\n### エラー詳細\n```\n{result.stderr}\n```"
+                    f"\n### Error Details\n```\n{result.stderr}\n```"
                 )
 
         return "\n".join(response_parts)
@@ -199,9 +199,9 @@ def execute_mm(
     command: str = "build",
 ) -> str:
     """
-    Mumeiコードをコンパイル・実行します。
-    command: "build" (デフォルト) でフルビルド、"verify" で検証のみ、"check" で構文チェックのみ。
-    ビルド結果、生成コード、検証レポートを返します。
+    Compile and execute Mumei code.
+    command: "build" (default) for full build, "verify" for verification only, "check" for syntax check only.
+    Returns build results, generated code, and verification report.
     """
     root_dir = Path(__file__).parent.absolute()
 
@@ -212,7 +212,7 @@ def execute_mm(
 
         output_base = tmp_path / output_name
 
-        # コマンドに応じた引数構築
+        # Build command arguments
         cmd_args = ["cargo", "run", "--", command, str(source_path)]
         if command == "build":
             cmd_args.extend(["-o", str(output_base)])
@@ -226,23 +226,23 @@ def execute_mm(
 
         response_parts = []
 
-        # report.json の読み込み
+        # Read report.json
         report_file = tmp_path / "report.json"
         if not report_file.exists():
-            # コンパイラが cwd に report.json を書く場合のフォールバック
+            # Fallback: compiler may write report.json to cwd
             cwd_report = root_dir / "report.json"
             if cwd_report.exists():
                 shutil.copy(cwd_report, report_file)
         if report_file.exists():
             report_data = report_file.read_text(encoding="utf-8")
             response_parts.append(
-                f"### 検証レポート\n```json\n{report_data}\n```"
+                f"### Verification Report\n```json\n{report_data}\n```"
             )
             _sync_to_visualizer(report_file, root_dir)
 
         if result.returncode == 0:
-            response_parts.insert(0, f"{command} 成功: '{output_name}'")
-            # 成果物の収集
+            response_parts.insert(0, f"{command} succeeded: '{output_name}'")
+            # Collect generated artifacts
             for ext in [".rs", ".go", ".ts", ".ll"]:
                 gen_file = tmp_path / f"{output_name}{ext}"
                 if gen_file.exists():
@@ -253,18 +253,18 @@ def execute_mm(
                     )
                     content = gen_file.read_text(encoding="utf-8")
                     response_parts.append(
-                        f"\n### 生成コード: {output_name}{ext}"
+                        f"\n### Generated: {output_name}{ext}"
                         f"\n```{lang}\n{content}\n```"
                     )
         else:
-            response_parts.insert(0, f"{command} 失敗")
+            response_parts.insert(0, f"{command} failed")
             if result.stderr:
                 response_parts.append(
-                    f"\n### エラー詳細\n```\n{result.stderr}\n```"
+                    f"\n### Error Details\n```\n{result.stderr}\n```"
                 )
             if result.stdout:
                 response_parts.append(
-                    f"\n### 標準出力\n```\n{result.stdout}\n```"
+                    f"\n### Standard Output\n```\n{result.stdout}\n```"
                 )
 
         return "\n".join(response_parts)

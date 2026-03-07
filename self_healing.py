@@ -9,21 +9,21 @@ from pathlib import Path
 from openai import OpenAI
 from dotenv import load_dotenv
 
-# .envファイルから環境変数を読み込む
+# Load environment variables from .env file
 load_dotenv()
 
-# LLMプロバイダー設定（Qwen3.5 / Ollama / vLLM / OpenAI 対応）
+# LLM provider config (supports Qwen3.5 / Ollama / vLLM / OpenAI)
 api_key = os.getenv("LLM_API_KEY", os.getenv("OPENAI_API_KEY", ""))
-base_url = os.getenv("LLM_BASE_URL", None)  # None の場合は OpenAI デフォルト
+base_url = os.getenv("LLM_BASE_URL", None)  # None defaults to OpenAI
 model = os.getenv("LLM_MODEL", "gpt-4o")
 
 if not api_key:
     raise ValueError(
-        "LLM_API_KEY (または OPENAI_API_KEY) が設定されていません。"
-        ".env ファイルを確認してください。"
+        "LLM_API_KEY (or OPENAI_API_KEY) is not set. "
+        "Please check your .env file."
     )
 
-# OpenAI互換クライアントの初期化（Ollama / vLLM / 外部API も対応）
+# Initialize OpenAI-compatible client (supports Ollama / vLLM / external APIs)
 client_kwargs = {"api_key": api_key}
 if base_url:
     client_kwargs["base_url"] = base_url
@@ -32,17 +32,17 @@ client = OpenAI(**client_kwargs)
 
 SOURCE_FILE = "sword_test.mm"
 OUTPUT_BASE = "katana"
-REPORT_FILE = "report.json"  # output_dir (カレントディレクトリ) に合わせる
-MAX_RETRIES = 5  # 修正回数の上限
+REPORT_FILE = "report.json"  # matches output_dir (current directory)
+MAX_RETRIES = 5  # max fix attempts
 
-# Visualizer 同期設定
+# Visualizer sync config
 VISUALIZER_SYNC = os.getenv("ENABLE_VISUALIZER_SYNC", "false").lower() == "true"
 ROOT_DIR = Path(__file__).parent.absolute()
 HISTORY_FILE = ROOT_DIR / "visualizer" / "report_history.json"
 
 
 def sync_to_visualizer(report_path: str) -> None:
-    """report.json を visualizer/ にコピーし、履歴に追記する。"""
+    """Copy report.json to visualizer/ and append to history."""
     if not VISUALIZER_SYNC:
         return
     report_file = Path(report_path)
@@ -53,7 +53,7 @@ def sync_to_visualizer(report_path: str) -> None:
     vis_dir.mkdir(exist_ok=True)
     shutil.copy(report_file, vis_dir / "report.json")
 
-    # 履歴に追記
+    # Append to history
     entry = json.loads(report_file.read_text(encoding="utf-8"))
     entry["timestamp"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
@@ -69,30 +69,30 @@ def sync_to_visualizer(report_path: str) -> None:
     )
 
 def run_mumei():
-    """コンパイラを実行。exit(1)があれば正常に失敗を検知する"""
+    """Run compiler. Detects failure via non-zero exit code."""
     result = subprocess.run(
         ["cargo", "run", "--", "build", SOURCE_FILE, "-o", OUTPUT_BASE],
         capture_output=True, text=True
     )
-    # returncodeが0以外なら失敗
+    # Non-zero returncode means failure
     return result.returncode == 0, result.stdout + result.stderr
 
 def get_fix_from_ai(source_code, error_log, report_data):
-    """AIにエラー内容と検証レポート（反例）を送り、修正案を取得する"""
+    """Send error details and verification report (with counter-examples) to AI and get a fix."""
     prompt = f"""
-あなたはMumei言語の専門家です。以下のコードは形式検証に失敗しました。
-特に 'requires' (事前条件) を修正して、数学的矛盾を解消してください。
+You are an expert in the Mumei language. The following code failed formal verification.
+Please fix the 'requires' (precondition) to resolve the mathematical contradiction.
 
-# ソースコード:
+# Source code:
 {source_code}
 
-# エラーログ:
+# Error log:
 {error_log}
 
-# 検証レポート (反例データ):
+# Verification report (counter-example data):
 {json.dumps(report_data, indent=2)}
 
-修正後のコードのみを、```rust ... ``` の形式で出力してください。
+Output only the fixed code in ```rust ... ``` format.
 """
     response = client.chat.completions.create(
         model=model,
@@ -101,11 +101,11 @@ def get_fix_from_ai(source_code, error_log, report_data):
     )
 
     content = response.choices[0].message.content or ""
-    # コードブロック部分のみ抽出（Qwen3.5 の ```Rust / ```rs 等にも対応）
+    # Extract code block only (handles Qwen3.5 variants: ```Rust / ```rs etc.)
     code_match = re.search(r'```(?:rust|rs|Rust)\s*\n(.*?)```', content, re.DOTALL)
     if code_match:
         return code_match.group(1).strip()
-    # フォールバック: コードブロックが見つからない場合はそのまま返す
+    # Fallback: return raw content if no code block found
     return content.strip()
 
 def main():
@@ -121,11 +121,11 @@ def main():
 
         print(f"Attempt {attempt + 1}: Flaw detected. Consulting AI...")
 
-        # 最新の検証レポートを読み込む
+        # Read the latest verification report
         try:
             with open(REPORT_FILE, "r") as f:
                 report = json.load(f)
-            # Visualizer 同期
+            # Visualizer sync
             sync_to_visualizer(REPORT_FILE)
         except Exception:
             report = {"status": "error", "reason": "Report not found"}
@@ -133,10 +133,10 @@ def main():
         with open(SOURCE_FILE, "r") as f:
             source = f.read()
 
-        # AIから修正コードを取得
+        # Get fix from AI
         fixed_code = get_fix_from_ai(source, logs, report)
 
-        # ファイルを書き換え
+        # Overwrite source file
         with open(SOURCE_FILE, "w") as f:
             f.write(fixed_code)
 
