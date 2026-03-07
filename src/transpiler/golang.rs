@@ -411,7 +411,17 @@ fn format_hir_stmt_go(stmt: &HirStmt) -> String {
         HirStmt::Block { stmts, tail_expr } => {
             let mut lines: Vec<String> = stmts.iter().map(format_hir_stmt_go).collect();
             if let Some(tail) = tail_expr {
-                lines.push(format!("return {}", format_hir_expr_go(tail)));
+                let tail_code = format_hir_expr_go(tail);
+                // Go では if/switch/for は文であり return の右辺にできない。
+                // 旧コードの heuristic guard を再現する。
+                if tail_code.starts_with("if")
+                    || tail_code.starts_with("switch")
+                    || tail_code.starts_with("for")
+                {
+                    lines.push(tail_code);
+                } else {
+                    lines.push(format!("return {}", tail_code));
+                }
             }
             lines.join("\n    ")
         }
