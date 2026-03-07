@@ -290,6 +290,11 @@ fn register_imported_items(items: &[Item], alias: Option<&str>, module_env: &mut
             }
             Item::EffectDef(effect_def) => {
                 module_env.register_effect(effect_def);
+                if let Some(prefix) = alias {
+                    let mut fqn_effect = effect_def.clone();
+                    fqn_effect.name = format!("{}::{}", prefix, effect_def.name);
+                    module_env.register_effect(&fqn_effect);
+                }
             }
             Item::ExternBlock(extern_block) => {
                 // ExternBlock 内の関数を trusted atom として ModuleEnv に登録
