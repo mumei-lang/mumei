@@ -669,6 +669,7 @@ fn compute_hash(source: &str) -> String {
 /// このハッシュが一致すれば、atom の検証結果は変わらないため再検証をスキップできる。
 /// Call Graph サイクル検知・Taint Analysis の結果も暗黙的にキャッシュされる
 /// （呼び出し先の atom が変更されればハッシュが変わり、呼び出し元も再検証される）。
+#[allow(dead_code)]
 pub fn compute_atom_hash(atom: &crate::parser::Atom) -> String {
     let mut hasher = Sha256::new();
     hasher.update(atom.name.as_bytes());
@@ -734,6 +735,7 @@ pub fn compute_atom_hash(atom: &crate::parser::Atom) -> String {
 }
 
 /// Incremental Build 用: メインファイルのビルドキャッシュをロードする
+#[allow(dead_code)]
 pub fn load_build_cache(base_dir: &Path) -> HashMap<String, String> {
     let cache_path = base_dir.join(".mumei_build_cache");
     fs::read_to_string(&cache_path)
@@ -743,11 +745,253 @@ pub fn load_build_cache(base_dir: &Path) -> HashMap<String, String> {
 }
 
 /// Incremental Build 用: メインファイルのビルドキャッシュを保存する
+#[allow(dead_code)]
 pub fn save_build_cache(base_dir: &Path, cache: &HashMap<String, String>) {
     let cache_path = base_dir.join(".mumei_build_cache");
     if let Ok(json) = serde_json::to_string_pretty(cache) {
         let _ = fs::write(cache_path, json);
     }
+}
+
+// =============================================================================
+// Feature 2: Enhanced Verification Cache
+// =============================================================================
+
+/// Enhanced verification cache entry with dependency tracking.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerificationCacheEntry {
+    pub proof_hash: String,
+    pub result: String, // "verified" or "failed"
+    pub dependencies: Vec<String>,
+    pub type_deps: Vec<String>,
+    pub timestamp: String,
+}
+
+/// Compute a proof hash that includes transitive dependency signatures and type predicates.
+/// This extends compute_atom_hash with callee signatures and type predicate content.
+pub fn compute_proof_hash(atom: &crate::parser::Atom, module_env: &ModuleEnv) -> String {
+    let mut hasher = Sha256::new();
+
+    // 1. Include everything from the basic atom hash
+    hasher.update(atom.name.as_bytes());
+    hasher.update(b"|");
+    hasher.update(atom.requires.as_bytes());
+    hasher.update(b"|");
+    hasher.update(atom.ensures.as_bytes());
+    hasher.update(b"|");
+    hasher.update(atom.body_expr.as_bytes());
+    for cp in &atom.consumed_params {
+        hasher.update(b"|consume:");
+        hasher.update(cp.as_bytes());
+    }
+    for p in &atom.params {
+        if p.is_ref {
+            hasher.update(b"|ref:");
+            hasher.update(p.name.as_bytes());
+        }
+        if p.is_ref_mut {
+            hasher.update(b"|ref_mut:");
+            hasher.update(p.name.as_bytes());
+        }
+    }
+    for r in &atom.resources {
+        hasher.update(b"|resource:");
+        hasher.update(r.as_bytes());
+    }
+    for e in &atom.effects {
+        hasher.update(b"|effect:");
+        hasher.update(e.name.as_bytes());
+        for p in &e.params {
+            hasher.update(b",param:");
+            hasher.update(p.value.as_bytes());
+        }
+    }
+    if atom.is_async {
+        hasher.update(b"|async");
+    }
+    if let Some(ref inv) = atom.invariant {
+        hasher.update(b"|invariant:");
+        hasher.update(inv.as_bytes());
+    }
+    let trust_str = match atom.trust_level {
+        crate::parser::TrustLevel::Verified => "verified",
+        crate::parser::TrustLevel::Trusted => "trusted",
+        crate::parser::TrustLevel::Unverified => "unverified",
+    };
+    hasher.update(b"|trust:");
+    hasher.update(trust_str.as_bytes());
+    if let Some(max) = atom.max_unroll {
+        hasher.update(b"|max_unroll:");
+        hasher.update(max.to_string().as_bytes());
+    }
+
+    // 2. Include type predicate content for each param's refined type
+    for p in &atom.params {
+        if let Some(ref type_ref) = p.type_ref {
+            if let Some(refined) = module_env.get_type(&type_ref.name) {
+                hasher.update(b"|type_pred:");
+                hasher.update(type_ref.name.as_bytes());
+                hasher.update(b"=");
+                hasher.update(refined.predicate_raw.as_bytes());
+            }
+        }
+    }
+
+    // 3. Include callee signatures (transitive dependencies)
+    let mut visited = HashSet::new();
+    let mut stack = Vec::new();
+
+    // Collect direct callees from dependency graph
+    if let Some(callees) = module_env.dependency_graph.get(&atom.name) {
+        for callee in callees {
+            stack.push(callee.clone());
+        }
+    }
+
+    // Walk transitive callees
+    while let Some(callee_name) = stack.pop() {
+        if !visited.insert(callee_name.clone()) {
+            continue; // already visited, prevent infinite loops
+        }
+        if let Some(callee_atom) = module_env.get_atom(&callee_name) {
+            hasher.update(b"|dep:");
+            hasher.update(callee_atom.name.as_bytes());
+            hasher.update(b":");
+            hasher.update(callee_atom.requires.as_bytes());
+            hasher.update(b":");
+            hasher.update(callee_atom.ensures.as_bytes());
+        }
+        // Walk further dependencies
+        if let Some(further_callees) = module_env.dependency_graph.get(&callee_name) {
+            for fc in further_callees {
+                if !visited.contains(fc) {
+                    stack.push(fc.clone());
+                }
+            }
+        }
+    }
+
+    format!("{:x}", hasher.finalize())
+}
+
+/// Collect callee names from an atom's body expression string.
+/// This is a simple text-based extraction of function call names.
+pub fn collect_callees_from_body(body_expr: &str) -> HashSet<String> {
+    let mut callees = HashSet::new();
+    // Match patterns like "func_name(" in the body expression
+    let chars: Vec<char> = body_expr.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+    while i < len {
+        // Look for identifier followed by '('
+        if chars[i].is_ascii_alphabetic() || chars[i] == '_' {
+            let start = i;
+            while i < len && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
+                i += 1;
+            }
+            let ident: String = chars[start..i].iter().collect();
+            // Skip whitespace
+            while i < len && chars[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            if i < len && chars[i] == '(' {
+                // Skip known keywords
+                let keywords = [
+                    "if", "else", "while", "let", "match", "true", "false", "return", "acquire",
+                    "release", "perform", "async", "await", "call",
+                ];
+                if !keywords.contains(&ident.as_str()) {
+                    callees.insert(ident);
+                }
+            }
+        } else {
+            i += 1;
+        }
+    }
+    callees
+}
+
+/// Load the enhanced verification cache from `.mumei/cache/verification_cache.json`.
+pub fn load_verification_cache(base_dir: &Path) -> HashMap<String, VerificationCacheEntry> {
+    let cache_path = base_dir
+        .join(".mumei")
+        .join("cache")
+        .join("verification_cache.json");
+    fs::read_to_string(&cache_path)
+        .ok()
+        .and_then(|content| serde_json::from_str(&content).ok())
+        .unwrap_or_default()
+}
+
+/// Save the enhanced verification cache to `.mumei/cache/verification_cache.json`.
+pub fn save_verification_cache(base_dir: &Path, cache: &HashMap<String, VerificationCacheEntry>) {
+    let cache_dir = base_dir.join(".mumei").join("cache");
+    let _ = fs::create_dir_all(&cache_dir);
+    let cache_path = cache_dir.join("verification_cache.json");
+    if let Ok(json) = serde_json::to_string_pretty(cache) {
+        let _ = fs::write(cache_path, json);
+    }
+}
+
+/// Invalidate cache entries for all atoms that transitively depend on the changed atom.
+pub fn invalidate_dependents(
+    cache: &mut HashMap<String, VerificationCacheEntry>,
+    changed_atom: &str,
+    module_env: &ModuleEnv,
+) {
+    let dependents = module_env.get_transitive_dependents(changed_atom);
+    for dep in &dependents {
+        cache.remove(dep);
+    }
+}
+
+/// Migrate old `.mumei_build_cache` to new `.mumei/cache/verification_cache.json`.
+/// On successful migration, deletes the old cache file.
+pub fn migrate_old_cache(base_dir: &Path) {
+    let old_path = base_dir.join(".mumei_build_cache");
+    if !old_path.exists() {
+        return;
+    }
+    // Only migrate if new cache doesn't exist yet
+    let new_cache_path = base_dir
+        .join(".mumei")
+        .join("cache")
+        .join("verification_cache.json");
+    if new_cache_path.exists() {
+        // New cache already exists, just delete old
+        let _ = fs::remove_file(&old_path);
+        return;
+    }
+    // Load old cache
+    if let Ok(content) = fs::read_to_string(&old_path) {
+        if let Ok(old_cache) = serde_json::from_str::<HashMap<String, String>>(&content) {
+            let mut new_cache: HashMap<String, VerificationCacheEntry> = HashMap::new();
+            let timestamp = chrono_timestamp();
+            for (name, hash) in old_cache {
+                new_cache.insert(
+                    name,
+                    VerificationCacheEntry {
+                        proof_hash: hash,
+                        result: "verified".to_string(),
+                        dependencies: Vec::new(),
+                        type_deps: Vec::new(),
+                        timestamp: timestamp.clone(),
+                    },
+                );
+            }
+            save_verification_cache(base_dir, &new_cache);
+        }
+    }
+    let _ = fs::remove_file(&old_path);
+}
+
+/// Simple timestamp string for cache entries.
+fn chrono_timestamp() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    format!("{}s", duration.as_secs())
 }
 
 /// キャッシュファイルを読み込む。存在しない場合は空のキャッシュを返す。
@@ -914,5 +1158,248 @@ extern "Rust" {
             hash1, hash3,
             "different input should produce different hash"
         );
+    }
+
+    // --- Feature 2: Dependency graph and proof hash tests ---
+
+    /// Test collect_callees_from_body extracts function names
+    #[test]
+    fn test_collect_callees_from_body() {
+        let body = "foo(x) + bar(y, z)";
+        let callees = collect_callees_from_body(body);
+        assert!(callees.contains("foo"), "should find foo");
+        assert!(callees.contains("bar"), "should find bar");
+        assert!(!callees.contains("x"), "should not include variable x");
+    }
+
+    /// Test collect_callees_from_body skips keywords
+    #[test]
+    fn test_collect_callees_skips_keywords() {
+        let body = "if(cond) { while(true) { match(x) { foo(1) } } }";
+        let callees = collect_callees_from_body(body);
+        assert!(!callees.contains("if"), "should skip keyword 'if'");
+        assert!(!callees.contains("while"), "should skip keyword 'while'");
+        assert!(!callees.contains("match"), "should skip keyword 'match'");
+        assert!(callees.contains("foo"), "should find foo");
+    }
+
+    /// Test compute_proof_hash is deterministic
+    #[test]
+    fn test_compute_proof_hash_deterministic() {
+        let source = r#"
+atom add(x: i64, y: i64) -> i64
+  requires: x >= 0;
+  ensures: result == x + y;
+  body: x + y;
+"#;
+        let items = parser::parse_module(source);
+        let module_env = ModuleEnv::new();
+
+        for item in &items {
+            if let parser::Item::Atom(atom) = item {
+                let hash1 = compute_proof_hash(atom, &module_env);
+                let hash2 = compute_proof_hash(atom, &module_env);
+                assert_eq!(hash1, hash2, "same atom should produce same proof hash");
+            }
+        }
+    }
+
+    /// Test compute_proof_hash changes when callee signature changes
+    #[test]
+    fn test_proof_hash_includes_callee_signature() {
+        let source = r#"
+atom helper(x: i64) -> i64
+  requires: x >= 0;
+  ensures: result >= 0;
+  body: x;
+
+atom caller(n: i64) -> i64
+  requires: n >= 0;
+  ensures: result >= 0;
+  body: helper(n);
+"#;
+        let items = parser::parse_module(source);
+        let mut module_env = ModuleEnv::new();
+
+        // Register atoms and dependencies
+        for item in &items {
+            if let parser::Item::Atom(atom) = item {
+                module_env.register_atom(atom);
+                let callees = collect_callees_from_body(&atom.body_expr);
+                module_env.register_dependencies(&atom.name, callees);
+            }
+        }
+
+        // Compute hash for caller
+        let caller_atom = module_env.get_atom("caller").unwrap().clone();
+        let hash1 = compute_proof_hash(&caller_atom, &module_env);
+
+        // Now change helper's ensures and re-register
+        let source2 = r#"
+atom helper(x: i64) -> i64
+  requires: x >= 0;
+  ensures: result >= 1;
+  body: x;
+
+atom caller(n: i64) -> i64
+  requires: n >= 0;
+  ensures: result >= 0;
+  body: helper(n);
+"#;
+        let items2 = parser::parse_module(source2);
+        let mut module_env2 = ModuleEnv::new();
+        for item in &items2 {
+            if let parser::Item::Atom(atom) = item {
+                module_env2.register_atom(atom);
+                let callees = collect_callees_from_body(&atom.body_expr);
+                module_env2.register_dependencies(&atom.name, callees);
+            }
+        }
+
+        let caller_atom2 = module_env2.get_atom("caller").unwrap().clone();
+        let hash2 = compute_proof_hash(&caller_atom2, &module_env2);
+
+        assert_ne!(
+            hash1, hash2,
+            "proof hash should change when callee ensures changes"
+        );
+    }
+
+    /// Test dependency graph transitive dependents
+    #[test]
+    fn test_dependency_graph_transitive_dependents() {
+        let mut module_env = ModuleEnv::new();
+
+        // A calls B, B calls C => changing C should affect both A and B
+        let mut callees_a = std::collections::HashSet::new();
+        callees_a.insert("B".to_string());
+        module_env.register_dependencies("A", callees_a);
+
+        let mut callees_b = std::collections::HashSet::new();
+        callees_b.insert("C".to_string());
+        module_env.register_dependencies("B", callees_b);
+
+        let dependents_of_c = module_env.get_transitive_dependents("C");
+        assert!(dependents_of_c.contains("B"), "B directly depends on C");
+        assert!(
+            dependents_of_c.contains("A"),
+            "A transitively depends on C via B"
+        );
+
+        let dependents_of_b = module_env.get_transitive_dependents("B");
+        assert!(dependents_of_b.contains("A"), "A directly depends on B");
+        assert!(!dependents_of_b.contains("C"), "C does not depend on B");
+    }
+
+    /// Test verification cache load/save roundtrip
+    #[test]
+    fn test_verification_cache_roundtrip() {
+        let base_dir =
+            std::env::temp_dir().join(format!("mumei_test_cache_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&base_dir);
+        let base_dir = base_dir.as_path();
+
+        let mut cache = HashMap::new();
+        cache.insert(
+            "test_atom".to_string(),
+            VerificationCacheEntry {
+                proof_hash: "abc123".to_string(),
+                result: "verified".to_string(),
+                dependencies: vec!["dep1".to_string()],
+                type_deps: vec!["Nat".to_string()],
+                timestamp: "1234567890s".to_string(),
+            },
+        );
+
+        save_verification_cache(base_dir, &cache);
+        let loaded = load_verification_cache(base_dir);
+
+        assert_eq!(loaded.len(), 1);
+        assert!(loaded.contains_key("test_atom"));
+        let entry = &loaded["test_atom"];
+        assert_eq!(entry.proof_hash, "abc123");
+        assert_eq!(entry.result, "verified");
+        assert_eq!(entry.dependencies, vec!["dep1"]);
+        assert_eq!(entry.type_deps, vec!["Nat"]);
+        let _ = std::fs::remove_dir_all(base_dir);
+    }
+
+    /// Test invalidate_dependents removes transitive entries
+    #[test]
+    fn test_invalidate_dependents() {
+        let mut module_env = ModuleEnv::new();
+
+        // A calls B, B calls C
+        let mut callees_a = std::collections::HashSet::new();
+        callees_a.insert("B".to_string());
+        module_env.register_dependencies("A", callees_a);
+
+        let mut callees_b = std::collections::HashSet::new();
+        callees_b.insert("C".to_string());
+        module_env.register_dependencies("B", callees_b);
+
+        let mut cache = HashMap::new();
+        for name in &["A", "B", "C"] {
+            cache.insert(
+                name.to_string(),
+                VerificationCacheEntry {
+                    proof_hash: format!("hash_{}", name),
+                    result: "verified".to_string(),
+                    dependencies: vec![],
+                    type_deps: vec![],
+                    timestamp: "0s".to_string(),
+                },
+            );
+        }
+
+        // Invalidate dependents of C
+        invalidate_dependents(&mut cache, "C", &module_env);
+
+        // C itself should still be in cache (we only invalidate dependents)
+        assert!(cache.contains_key("C"), "C itself should remain");
+        // A and B depend on C, so they should be invalidated
+        assert!(
+            !cache.contains_key("B"),
+            "B depends on C and should be invalidated"
+        );
+        assert!(
+            !cache.contains_key("A"),
+            "A transitively depends on C and should be invalidated"
+        );
+    }
+
+    /// Test migrate_old_cache creates new cache directory
+    #[test]
+    fn test_migrate_old_cache() {
+        let base_dir =
+            std::env::temp_dir().join(format!("mumei_test_migrate_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&base_dir);
+        let base_dir = base_dir.as_path();
+
+        // Create old-style cache
+        let old_cache_path = base_dir.join(".mumei_build_cache");
+        let mut old_cache = HashMap::new();
+        old_cache.insert("my_atom".to_string(), "oldhash123".to_string());
+        let json = serde_json::to_string(&old_cache).unwrap();
+        std::fs::write(&old_cache_path, json).unwrap();
+
+        // Run migration
+        migrate_old_cache(base_dir);
+
+        // Old file should be deleted
+        assert!(
+            !old_cache_path.exists(),
+            "old cache file should be deleted after migration"
+        );
+
+        // New cache should exist
+        let new_cache = load_verification_cache(base_dir);
+        assert!(
+            new_cache.contains_key("my_atom"),
+            "migrated atom should exist in new cache"
+        );
+        assert_eq!(new_cache["my_atom"].proof_hash, "oldhash123");
+        assert_eq!(new_cache["my_atom"].result, "verified");
+        let _ = std::fs::remove_dir_all(base_dir);
     }
 }

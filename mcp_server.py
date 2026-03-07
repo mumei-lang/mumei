@@ -70,6 +70,52 @@ def _sync_to_visualizer(report_file: Path, root_dir: Path) -> None:
         finally:
             fcntl.flock(lf, fcntl.LOCK_UN)
 
+def _format_semantic_feedback(report_json: str) -> str:
+    """Parse report.json and format semantic_feedback into a readable section.
+    Returns empty string if no semantic_feedback is present (backward compatible)."""
+    try:
+        report = json.loads(report_json)
+    except (json.JSONDecodeError, TypeError):
+        return ""
+
+    feedback = report.get("semantic_feedback")
+    if not feedback:
+        return ""
+
+    parts = ["### Semantic Feedback"]
+    violated = feedback.get("violated_constraints", [])
+    for vc in violated:
+        param = vc.get("param", "?")
+        typ = vc.get("type", "")
+        value = vc.get("value", "?")
+        constraint = vc.get("constraint", "")
+        explanation = vc.get("explanation", "")
+        suggestion = vc.get("suggestion", "")
+        parts.append(f"- **{param}** (type `{typ}`, value `{value}`): constraint `{constraint}` violated")
+        if explanation:
+            parts.append(f"  - {explanation}")
+        if suggestion:
+            parts.append(f"  - 💡 {suggestion}")
+
+    ctx = feedback.get("context", {})
+    if ctx:
+        parts.append("\n**Context:**")
+        if ctx.get("requires"):
+            parts.append(f"- requires: `{ctx['requires']}`")
+        if ctx.get("ensures"):
+            parts.append(f"- ensures: `{ctx['ensures']}`")
+
+    failure_type = report.get("failure_type", "")
+    if failure_type:
+        parts.append(f"\n**Failure type:** `{failure_type}`")
+
+    span = report.get("span")
+    if span:
+        parts.append(f"**Location:** {span.get('file', '?')}:{span.get('line', '?')}:{span.get('col', '?')}")
+
+    return "\n".join(parts)
+
+
 @mcp.tool()
 def forge_blade(source_code: str, output_name: str = "katana") -> str:
     """
@@ -108,6 +154,10 @@ def forge_blade(source_code: str, output_name: str = "katana") -> str:
         if report_file.exists():
             report_data = report_file.read_text(encoding="utf-8")
             response_parts.append(f"### Verification Report\n```json\n{report_data}\n```")
+            # Feature 1-f: Include semantic feedback section if present
+            sf_section = _format_semantic_feedback(report_data)
+            if sf_section:
+                response_parts.append(sf_section)
             try:
                 _sync_to_visualizer(report_file, root_dir)
             except Exception:
@@ -210,6 +260,10 @@ def validate_logic(source_code: str) -> str:
             response_parts.append(
                 f"### Verification Report\n```json\n{report_data}\n```"
             )
+            # Feature 1-f: Include semantic feedback section if present
+            sf_section = _format_semantic_feedback(report_data)
+            if sf_section:
+                response_parts.append(sf_section)
             try:
                 _sync_to_visualizer(report_file, root_dir)
             except Exception:

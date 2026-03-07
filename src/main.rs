@@ -420,9 +420,20 @@ fn cmd_verify(input: &str) {
     let mut failed = 0;
     let mut skipped = 0;
 
-    // Incremental Build: ビルドキャッシュをロード
-    let build_cache = resolver::load_build_cache(base_dir);
-    let mut new_cache = std::collections::HashMap::new();
+    // Feature 2: Register dependencies for all atoms before verification
+    for item in &items {
+        if let Item::Atom(atom) = item {
+            let callees = resolver::collect_callees_from_body(&atom.body_expr);
+            module_env.register_dependencies(&atom.name, callees);
+        }
+    }
+
+    // Feature 2: Migrate old cache and load enhanced verification cache
+    resolver::migrate_old_cache(base_dir);
+    let mut verification_cache = resolver::load_verification_cache(base_dir);
+
+    // Track which atoms changed so we can re-verify dependents
+    let mut changed_atoms: Vec<String> = Vec::new();
 
     for item in &items {
         match item {
@@ -454,12 +465,11 @@ fn cmd_verify(input: &str) {
                         atom.name
                     );
                 } else {
-                    // Incremental Build: atom のハッシュを計算してキャッシュと比較
-                    let atom_hash = resolver::compute_atom_hash(atom);
-                    new_cache.insert(atom.name.clone(), atom_hash.clone());
+                    // Feature 2: Use compute_proof_hash with dependency-aware hashing
+                    let proof_hash = resolver::compute_proof_hash(atom, &module_env);
 
-                    if let Some(cached_hash) = build_cache.get(&atom.name) {
-                        if *cached_hash == atom_hash {
+                    if let Some(cached_entry) = verification_cache.get(&atom.name) {
+                        if cached_entry.proof_hash == proof_hash {
                             println!("  ⚖️  '{}': skipped (unchanged, cached) ⏩", atom.name);
                             module_env.mark_verified(&atom.name);
                             skipped += 1;
@@ -467,10 +477,42 @@ fn cmd_verify(input: &str) {
                         }
                     }
 
+                    // Hash changed — this atom needs re-verification
+                    changed_atoms.push(atom.name.clone());
+
+                    // Collect dependency info for cache entry
+                    let deps: Vec<String> = module_env
+                        .dependency_graph
+                        .get(&atom.name)
+                        .map(|s| s.iter().cloned().collect())
+                        .unwrap_or_default();
+                    let type_deps: Vec<String> = atom
+                        .params
+                        .iter()
+                        .filter_map(|p| p.type_ref.as_ref().map(|tr| tr.name.clone()))
+                        .filter(|tn| module_env.get_type(tn).is_some())
+                        .collect();
+
                     match verification::verify(atom, output_dir, &module_env) {
                         Ok(_) => {
                             println!("  ⚖️  '{}': verified ✅", atom.name);
                             module_env.mark_verified(&atom.name);
+                            verification_cache.insert(
+                                atom.name.clone(),
+                                resolver::VerificationCacheEntry {
+                                    proof_hash,
+                                    result: "verified".to_string(),
+                                    dependencies: deps,
+                                    type_deps,
+                                    timestamp: format!(
+                                        "{}s",
+                                        std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .unwrap_or_default()
+                                            .as_secs()
+                                    ),
+                                },
+                            );
                             verified += 1;
                         }
                         Err(e) => {
@@ -479,7 +521,7 @@ fn cmd_verify(input: &str) {
                             let e = e.with_source(&source, &atom.span);
                             eprintln!("{:?}", miette::Report::new(e));
                             // 検証失敗した atom はキャッシュから除外
-                            new_cache.remove(&atom.name);
+                            verification_cache.remove(&atom.name);
                             failed += 1;
                         }
                     }
@@ -489,8 +531,13 @@ fn cmd_verify(input: &str) {
         }
     }
 
-    // Incremental Build: キャッシュを保存
-    resolver::save_build_cache(base_dir, &new_cache);
+    // Feature 2-f: Dependency-aware re-verification — invalidate dependents of changed atoms
+    for changed in &changed_atoms {
+        resolver::invalidate_dependents(&mut verification_cache, changed, &module_env);
+    }
+
+    // Feature 2: Save enhanced verification cache
+    resolver::save_verification_cache(base_dir, &verification_cache);
 
     println!();
     if failed > 0 {
@@ -955,13 +1002,22 @@ fn cmd_build(input: &str, output: &str) {
     let input_path = Path::new(input);
     let build_base_dir = input_path.parent().unwrap_or(Path::new("."));
 
-    // Incremental Build: ビルドキャッシュをロード（proof.cache が false ならスキップ）
-    let build_cache = if proof_cfg.cache {
-        resolver::load_build_cache(build_base_dir)
+    // Feature 2: Register dependencies for all atoms before verification
+    for item in &items {
+        if let Item::Atom(atom) = item {
+            let callees = resolver::collect_callees_from_body(&atom.body_expr);
+            module_env.register_dependencies(&atom.name, callees);
+        }
+    }
+
+    // Feature 2: Migrate old cache and load enhanced verification cache
+    resolver::migrate_old_cache(build_base_dir);
+    let verification_cache = if proof_cfg.cache {
+        resolver::load_verification_cache(build_base_dir)
     } else {
         std::collections::HashMap::new()
     };
-    let mut build_cache_new = std::collections::HashMap::new();
+    let mut verification_cache_new = verification_cache.clone();
 
     // [build] targets から有効なトランスパイル言語を決定
     let enable_rust = build_cfg.targets.iter().any(|t| t == "rust");
@@ -1165,13 +1221,12 @@ fn cmd_build(input: &str, output: &str) {
                     // インポートされた atom は検証済み（契約のみ信頼）なのでスキップ
                     println!("  ⚖️  [2/4] Verification: Skipped (imported, contract-trusted).");
                 } else {
-                    // Incremental Build: atom ハッシュでキャッシュ比較
-                    let atom_hash = resolver::compute_atom_hash(atom);
-                    build_cache_new.insert(atom.name.clone(), atom_hash.clone());
+                    // Feature 2: Use compute_proof_hash with dependency-aware hashing
+                    let proof_hash = resolver::compute_proof_hash(atom, &module_env);
 
-                    let cache_hit = build_cache
+                    let cache_hit = verification_cache
                         .get(&atom.name)
-                        .map_or(false, |cached| *cached == atom_hash);
+                        .map_or(false, |entry| entry.proof_hash == proof_hash);
 
                     if cache_hit {
                         println!("  ⚖️  [2/4] Verification: Skipped (unchanged, cached) ⏩");
@@ -1189,12 +1244,40 @@ fn cmd_build(input: &str, output: &str) {
                                     "  ⚖️  [2/4] Verification: Passed. Logic verified with Z3."
                                 );
                                 module_env.mark_verified(&atom.name);
+                                // Collect dependency info for cache entry
+                                let deps: Vec<String> = module_env
+                                    .dependency_graph
+                                    .get(&atom.name)
+                                    .map(|s| s.iter().cloned().collect())
+                                    .unwrap_or_default();
+                                let type_deps: Vec<String> = atom
+                                    .params
+                                    .iter()
+                                    .filter_map(|p| p.type_ref.as_ref().map(|tr| tr.name.clone()))
+                                    .filter(|tn| module_env.get_type(tn).is_some())
+                                    .collect();
+                                verification_cache_new.insert(
+                                    atom.name.clone(),
+                                    resolver::VerificationCacheEntry {
+                                        proof_hash,
+                                        result: "verified".to_string(),
+                                        dependencies: deps,
+                                        type_deps,
+                                        timestamp: format!(
+                                            "{}s",
+                                            std::time::SystemTime::now()
+                                                .duration_since(std::time::UNIX_EPOCH)
+                                                .unwrap_or_default()
+                                                .as_secs()
+                                        ),
+                                    },
+                                );
                             }
                             Err(e) => {
                                 // TODO: インポートされた atom の場合、source と span のファイルが不一致になる。
                                 let e = e.with_source(&source, &atom.span);
                                 eprintln!("{:?}", miette::Report::new(e));
-                                build_cache_new.remove(&atom.name);
+                                verification_cache_new.remove(&atom.name);
                                 std::process::exit(1);
                             }
                         }
@@ -1264,8 +1347,10 @@ fn cmd_build(input: &str, output: &str) {
         println!("⚠️  Warning: No atoms found in the source file.");
     }
 
-    // Incremental Build: ビルドキャッシュを保存
-    resolver::save_build_cache(build_base_dir, &build_cache_new);
+    // Feature 2: Save enhanced verification cache
+    if proof_cfg.cache {
+        resolver::save_verification_cache(build_base_dir, &verification_cache_new);
+    }
 }
 
 // =============================================================================
@@ -2470,5 +2555,129 @@ atom main() -> i64
             module_env.get_atom("main").unwrap().trust_level,
             parser::TrustLevel::Verified
         );
+    }
+
+    // --- Feature 1: Semantic Feedback Tests ---
+
+    /// Test constraint_to_natural_language for various patterns
+    #[test]
+    fn test_constraint_to_natural_language() {
+        // v <= N pattern
+        let result =
+            verification::constraint_to_natural_language("age", "HumanAge", "v <= 120", "121");
+        assert!(result.contains("age"), "should mention param name");
+        assert!(result.contains("121"), "should mention actual value");
+        assert!(result.contains("120"), "should mention bound");
+        assert!(result.contains("HumanAge"), "should mention type name");
+        // Bilingual: should contain both English and Japanese
+        assert!(
+            result.contains("violates") || result.contains("exceeds"),
+            "should have English text"
+        );
+
+        // v >= N pattern
+        let result2 = verification::constraint_to_natural_language("x", "Nat", "v >= 0", "-1");
+        assert!(result2.contains("x"), "should mention param name");
+        assert!(result2.contains("-1"), "should mention actual value");
+
+        // Fallback pattern
+        let result3 =
+            verification::constraint_to_natural_language("val", "Custom", "v % 2 == 0", "3");
+        assert!(result3.contains("val"), "should mention param name");
+        assert!(
+            result3.contains("v % 2 == 0"),
+            "should include raw predicate for unknown patterns"
+        );
+    }
+
+    /// Test suggestion_for_failure_type returns appropriate suggestions
+    #[test]
+    fn test_suggestion_for_failure_type() {
+        let s1 =
+            verification::suggestion_for_failure_type(verification::FAILURE_POSTCONDITION_VIOLATED);
+        assert!(
+            !s1.is_empty(),
+            "postcondition suggestion should not be empty"
+        );
+
+        let s2 = verification::suggestion_for_failure_type(verification::FAILURE_DIVISION_BY_ZERO);
+        assert!(
+            s2.contains("0") || s2.contains("zero") || s2.contains("divisor"),
+            "division by zero suggestion should mention zero or divisor"
+        );
+
+        let s3 = verification::suggestion_for_failure_type("unknown_type");
+        assert!(
+            !s3.is_empty(),
+            "unknown failure type should still return a suggestion"
+        );
+    }
+
+    /// Test build_semantic_feedback produces valid JSON structure
+    #[test]
+    fn test_build_semantic_feedback() {
+        let source = r#"
+type HumanAge = i64 where v >= 0 && v <= 120;
+
+atom validate_age(age: HumanAge) -> i64
+  requires: true;
+  ensures: result >= 0 && result <= 120;
+  body: age;
+"#;
+        let items = parser::parse_module(source);
+        let mut module_env = verification::ModuleEnv::new();
+
+        // Register type
+        for item in &items {
+            if let parser::Item::TypeDef(td) = item {
+                module_env.register_type(td);
+            }
+        }
+
+        // Find atom and build feedback
+        for item in &items {
+            if let parser::Item::Atom(atom) = item {
+                let mappings = verification::build_constraint_mappings_for_atom(atom, &module_env);
+                assert!(
+                    !mappings.is_empty(),
+                    "should have constraint mappings for HumanAge param"
+                );
+
+                let counterexample = serde_json::json!({"age": "121"});
+                let feedback = verification::build_semantic_feedback(
+                    &mappings,
+                    Some(&counterexample),
+                    atom,
+                    verification::FAILURE_POSTCONDITION_VIOLATED,
+                );
+                assert!(feedback.is_some(), "should produce semantic feedback");
+                let feedback = feedback.unwrap();
+
+                // feedback should have violated_constraints
+                let vc = feedback.get("violated_constraints");
+                assert!(vc.is_some(), "should have violated_constraints field");
+                let vc_arr = vc.unwrap().as_array().unwrap();
+                assert!(
+                    !vc_arr.is_empty(),
+                    "should have at least one violated constraint for HumanAge"
+                );
+
+                let first = &vc_arr[0];
+                assert_eq!(first["param"], "age");
+                assert_eq!(first["type"], "HumanAge");
+                assert!(
+                    !first["explanation"].as_str().unwrap().is_empty(),
+                    "explanation should not be empty"
+                );
+                assert!(
+                    !first["suggestion"].as_str().unwrap().is_empty(),
+                    "suggestion should not be empty"
+                );
+
+                // Should have context section
+                let ctx = feedback.get("context");
+                assert!(ctx.is_some(), "should have context field");
+            }
+        }
     }
 }
