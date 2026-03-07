@@ -278,16 +278,20 @@ pub fn lower_stmt(stmt: &Stmt) -> HirStmt {
                     tail_expr: None,
                 }
             } else {
-                let last = &stmts[stmts.len() - 1];
-                // 最後の要素が Stmt::Expr の場合、tail_expr として分離する
-                if let Stmt::Expr(expr) = last {
+                // 全 stmt を先に lower してから最後の要素を判定する。
+                // これにより Stmt::Task/TaskGroup（lower 後に HirStmt::Expr になる）も
+                // 正しく tail_expr として抽出される。
+                let mut lowered: Vec<HirStmt> = stmts.iter().map(lower_stmt).collect();
+                let last = lowered.pop().unwrap();
+                if let HirStmt::Expr(expr) = last {
                     HirStmt::Block {
-                        stmts: stmts[..stmts.len() - 1].iter().map(lower_stmt).collect(),
-                        tail_expr: Some(Box::new(lower_expr(expr))),
+                        stmts: lowered,
+                        tail_expr: Some(Box::new(expr)),
                     }
                 } else {
+                    lowered.push(last);
                     HirStmt::Block {
-                        stmts: stmts.iter().map(lower_stmt).collect(),
+                        stmts: lowered,
                         tail_expr: None,
                     }
                 }
