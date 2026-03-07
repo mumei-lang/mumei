@@ -969,14 +969,8 @@ fn compile_expr<'a>(
             // Effect system Phase 1: placeholder — lower perform to a runtime call
             // In future phases, this will call __effect_{Effect}_{operation}(args)
             let fn_name = format!("__effect_{}_{}", effect, operation);
-            let callee_fn = module.get_function(&fn_name).unwrap_or_else(|| {
-                let param_types: Vec<BasicMetadataTypeEnum> = perform_args
-                    .iter()
-                    .map(|_| context.i64_type().into())
-                    .collect();
-                let fn_type = context.i64_type().fn_type(&param_types, false);
-                module.add_function(&fn_name, fn_type, Some(inkwell::module::Linkage::External))
-            });
+
+            // Compile arguments first so we know actual types (i64 vs f64)
             let mut arg_vals = Vec::new();
             for arg in perform_args {
                 let val = compile_expr(
@@ -984,6 +978,23 @@ fn compile_expr<'a>(
                 )?;
                 arg_vals.push(val);
             }
+
+            // Derive parameter types from compiled argument values (match CallRef pattern)
+            let param_types: Vec<BasicMetadataTypeEnum> = arg_vals
+                .iter()
+                .map(|v| {
+                    if v.is_float_value() {
+                        context.f64_type().into()
+                    } else {
+                        context.i64_type().into()
+                    }
+                })
+                .collect();
+            let fn_type = context.i64_type().fn_type(&param_types, false);
+            let callee_fn = module.get_function(&fn_name).unwrap_or_else(|| {
+                module.add_function(&fn_name, fn_type, Some(inkwell::module::Linkage::External))
+            });
+
             let args_meta: Vec<BasicMetadataValueEnum> =
                 arg_vals.iter().map(|v| (*v).into()).collect();
             let call_result = llvm!(builder.build_call(callee_fn, &args_meta, "perform_result"));

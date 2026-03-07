@@ -769,6 +769,20 @@ impl ModuleEnv {
         }
         result
     }
+
+    /// Resolve an effect set to only its leaf effects (effects with no `includes`).
+    /// This avoids false positives when comparing a caller declaring leaf effects
+    /// against a callee declaring a composite effect (e.g., `[IO]` vs `[FileRead, FileWrite, Console]`).
+    pub fn resolve_leaf_effects(&self, names: &[String]) -> HashSet<String> {
+        let full = self.resolve_effect_set(names);
+        full.into_iter()
+            .filter(|name| {
+                self.effects
+                    .get(name)
+                    .map_or(true, |def| def.includes.is_empty())
+            })
+            .collect()
+    }
 }
 
 // =============================================================================
@@ -1319,17 +1333,19 @@ impl EffectCtx {
 /// Verify effect containment for an atom using Z3.
 /// Proves: ∀e ∈ UsedEffects(Body): e ∈ AllowedEffects(Signature)
 fn verify_effect_containment(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult<()> {
-    // Resolve the allowed effect set (empty for pure atoms, expanded for annotated atoms)
-    let allowed = module_env.resolve_effect_set(&atom.effects);
-
     // Check effect propagation: for each callee atom, verify callee.effects ⊆ caller.effects
+    // Use leaf effects only to avoid false positives with composite effects.
+    // E.g., caller [FileRead, FileWrite, Console] vs callee [IO] should pass
+    // because both resolve to the same leaf set.
+    let allowed_leaves = module_env.resolve_leaf_effects(&atom.effects);
     let body_ast = parse_expression(&atom.body_expr);
     let callees = collect_callees(&body_ast);
     for callee_name in &callees {
         if let Some(callee_atom) = module_env.get_atom(callee_name) {
             if !callee_atom.effects.is_empty() {
-                let callee_effects = module_env.resolve_effect_set(&callee_atom.effects);
-                let missing: Vec<String> = callee_effects.difference(&allowed).cloned().collect();
+                let callee_leaves = module_env.resolve_leaf_effects(&callee_atom.effects);
+                let missing: Vec<String> =
+                    callee_leaves.difference(&allowed_leaves).cloned().collect();
                 if !missing.is_empty() {
                     return Err(MumeiError::verification_at(
                         format!(
