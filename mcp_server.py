@@ -477,56 +477,83 @@ def self_heal_with_effects(
             f"### Effect Boundary: {allowed_effects}\n"
         )
 
+    root_dir = Path(__file__).parent.absolute()
+
     for attempt in range(max_attempts):
-        # Run validation
-        validation_result = validate_logic(current_code)
+        # Run validation — this writes report.json to root_dir (compiler cwd)
+        # then validate_logic moves it into a temp directory.  We run the
+        # compiler directly here so we can read report.json before it is moved.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            source_path = tmp_path / "input.mm"
+            source_path.write_text(current_code, encoding="utf-8")
 
-        if "Verification passed" in validation_result:
-            results.append(f"### Attempt {attempt + 1}: PASSED")
-            results.append(validation_result)
-            results.append(
-                f"\n### Final Code\n```mumei\n{current_code}\n```"
+            compile_result = subprocess.run(
+                ["cargo", "run", "--", "verify", str(source_path)],
+                cwd=root_dir,
+                capture_output=True,
+                text=True,
             )
-            # Reset session effects
-            if allowed_effects:
-                set_allowed_effects()
-            return "\n".join(results)
 
-        results.append(f"### Attempt {attempt + 1}: FAILED")
-        results.append(validation_result)
-
-        # Try to extract report data for structured fix generation
-        root_dir = Path(__file__).parent.absolute()
-        report_file = root_dir / "report.json"
-        report_data = {}
-        if report_file.exists():
-            try:
-                report_data = json.loads(
-                    report_file.read_text(encoding="utf-8")
+            if compile_result.returncode == 0:
+                results.append(f"### Attempt {attempt + 1}: PASSED")
+                results.append("Verification passed: no logical flaws detected.")
+                results.append(
+                    f"\n### Final Code\n```mumei\n{current_code}\n```"
                 )
-            except (json.JSONDecodeError, OSError):
-                pass
+                # Reset session effects
+                if allowed_effects:
+                    set_allowed_effects()
+                return "\n".join(results)
 
-        # Generate fix suggestion based on violation type
-        violation_type = report_data.get("violation_type", "")
-        ev = report_data.get("effect_violation", {})
+            results.append(f"### Attempt {attempt + 1}: FAILED")
+            error_log = compile_result.stderr or compile_result.stdout or ""
+            results.append(f"```\n{error_log}\n```")
 
-        if violation_type == "effect_mismatch":
-            fix_hint = (
-                f"Effect mismatch: '{ev.get('source_operation', '')}' "
-                f"requires [{ev.get('required_effect', '')}]. "
-                f"Resolution: {ev.get('resolution_paths', [{}])[0].get('description', '')}"
-            )
-            results.append(f"\n**Fix hint**: {fix_hint}")
-        elif violation_type == "effect_propagation":
-            fix_hint = (
-                f"Propagation: '{ev.get('caller', '')}' missing "
-                f"{ev.get('missing_effects', [])}. "
-                f"Resolution: {ev.get('resolution_paths', [{}])[0].get('description', '')}"
-            )
-            results.append(f"\n**Fix hint**: {fix_hint}")
+            # Read report.json from compiler cwd (before it gets moved)
+            report_file = root_dir / "report.json"
+            report_data = {}
+            if report_file.exists():
+                try:
+                    report_data = json.loads(
+                        report_file.read_text(encoding="utf-8")
+                    )
+                except (json.JSONDecodeError, OSError):
+                    pass
 
-        results.append("Attempting next iteration...\n")
+            # Generate fix suggestion based on violation type
+            violation_type = report_data.get("violation_type", "")
+            ev = report_data.get("effect_violation", {})
+
+            if violation_type == "effect_mismatch":
+                fix_hint = (
+                    f"Effect mismatch: '{ev.get('source_operation', '')}' "
+                    f"requires [{ev.get('required_effect', '')}]. "
+                    f"Resolution: {ev.get('resolution_paths', [{}])[0].get('description', '')}"
+                )
+                results.append(f"\n**Fix hint**: {fix_hint}")
+            elif violation_type == "effect_propagation":
+                fix_hint = (
+                    f"Propagation: '{ev.get('caller', '')}' missing "
+                    f"{ev.get('missing_effects', [])}. "
+                    f"Resolution: {ev.get('resolution_paths', [{}])[0].get('description', '')}"
+                )
+                results.append(f"\n**Fix hint**: {fix_hint}")
+
+            # Use self_healing.get_fix_from_ai to generate a fix and update current_code
+            try:
+                from self_healing import get_fix_from_ai
+
+                fixed_code = get_fix_from_ai(current_code, error_log, report_data)
+                if fixed_code and fixed_code != current_code:
+                    current_code = fixed_code
+                    results.append("AI-generated fix applied. Retrying...\n")
+                else:
+                    results.append("AI could not generate a different fix.\n")
+                    break
+            except Exception as exc:
+                results.append(f"AI fix generation failed: {exc}\n")
+                break
 
     results.append("Self-healing exhausted max attempts.")
     # Reset session effects

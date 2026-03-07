@@ -1654,6 +1654,11 @@ fn collect_acquire_resources(expr: &Expr) -> Vec<String> {
                 resources.extend(collect_acquire_resources(child));
             }
         }
+        Expr::Perform { args, .. } => {
+            for arg in args {
+                resources.extend(collect_acquire_resources(arg));
+            }
+        }
         Expr::AtomRef { .. } => {}
         Expr::CallRef { callee, args } => {
             resources.extend(collect_acquire_resources(callee));
@@ -1777,6 +1782,7 @@ fn verify_async_recursion_depth(atom: &Atom, module_env: &ModuleEnv) -> MumeiRes
                 .iter()
                 .map(|c| count_self_calls(c, atom_name))
                 .sum(),
+            Expr::Perform { args, .. } => args.iter().map(|a| count_self_calls(a, atom_name)).sum(),
             Expr::AtomRef { .. } => 0,
             Expr::CallRef { callee, args } => {
                 let self_call = if let Expr::AtomRef { name } = callee.as_ref() {
