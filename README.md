@@ -107,6 +107,108 @@ Powered by [miette](https://crates.io/crates/miette) — source location, underl
 
 ---
 
+## Self-Healing Loop (AI + Z3)
+
+Mumei の Self-Healing ループは、AI（LLM）と Z3 形式検証を組み合わせて、コードを自動修正します。
+
+### E2E フロー
+
+```
+AI が .mm コードを生成
+        |
+        v
+validate_logic (Z3 検証)
+        |
+   [失敗?] -----> AI が反例を分析 → 修正コードを生成 → 再検証 (ループ)
+        |
+   [成功!]
+        v
+execute_mm (フルビルド: LLVM IR + Rust/Go/TypeScript)
+```
+
+### デモ: safe_divide の Self-Healing
+
+**Step a.** AI が初期コードを生成（事前条件が不十分）:
+
+```mumei
+type Nat = i64 where v >= 0;
+
+atom safe_divide(a: Nat, b: Nat)
+  requires: a >= 0;
+  ensures: result >= 0;
+  body: { a / b };
+```
+
+**Step b.** `validate_logic` で Z3 検証 → 失敗:
+
+```
+$ mumei verify input.mm
+
+  x Verification Error: Potential division by zero.
+  help: requires に除数 != 0 の条件を追加してください
+
+  Verification: 0 passed, 1 failed
+```
+
+**Step c-d.** AI が反例（`b = 0` でゼロ除算）を分析し、修正コードを生成:
+
+```mumei
+atom safe_divide(a: Nat, b: Nat)
+  requires: a >= 0 && b > 0;   // <- 修正: b > 0 追加
+  ensures: result >= 0;
+  body: { a / b };
+```
+
+**Step e.** 再検証 → 成功:
+
+```
+$ mumei verify input.mm
+  'safe_divide': verified
+
+  Verification passed: 1 item(s) verified
+```
+
+**Step f.** フルビルドで Rust / Go / TypeScript を生成:
+
+```
+$ mumei build input.mm -o katana
+
+  Blade forged successfully with 1 atoms.
+  Done. Created: katana.rs, katana.go, katana.ts
+```
+
+### セットアップ
+
+```bash
+# 1. Ollama コンテナ起動
+docker compose up -d
+docker exec mumei-ollama ollama pull qwen3.5
+
+# 2. 環境変数設定
+cp .env.example .env
+# .env の パターン1 (Ollama) のコメントを外す
+
+# 3. 依存パッケージインストール
+pip install -r requirements.txt
+
+# 4. Self-Healing ループ実行
+python self_healing.py
+
+# 5. MCP サーバー起動（Claude Desktop 等から利用）
+python mcp_server.py
+```
+
+### MCP ツール一覧
+
+| Tool | Description |
+|------|-------------|
+| `forge_blade` | 検証 + コード生成の一括実行 |
+| `self_heal_loop` | 自律修正ループの実行 |
+| `validate_logic` | Z3 検証のみ（反例データ返却） |
+| `execute_mm` | 汎用ビルド / チェック実行 |
+
+---
+
 ## Documentation
 
 | Document | Content |
