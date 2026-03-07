@@ -268,7 +268,9 @@ streamlit run visualizer/app.py
 
 **Demo Recording:**
 
-![Visualizer Demo](visualizer_demo.mp4)
+[MCP Demo](https://github.com/user-attachments/assets/0f0594a4-8946-422c-9d54-bd81af45fc14)
+
+[Visualizer Demo](https://github.com/user-attachments/assets/b36271b7-eeb0-452c-97ca-4045babd23a4)
 
 > The Visualizer is a monitoring tool for the E2E flow. Since AI completes its work via MCP responses alone, it does not depend on the Visualizer. Use it only when a human wants to observe.
 
