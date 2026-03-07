@@ -1475,8 +1475,16 @@ fn verify_effect_containment(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult
             if !callee_atom.effects.is_empty() {
                 let callee_leaves =
                     module_env.resolve_leaf_effects_from_effects(&callee_atom.effects);
-                let missing: Vec<String> =
-                    callee_leaves.difference(&allowed_leaves).cloned().collect();
+                let missing: Vec<String> = callee_leaves
+                    .iter()
+                    .filter(|callee_eff| {
+                        !allowed_leaves.contains(*callee_eff)
+                            && !allowed_leaves
+                                .iter()
+                                .any(|allowed| module_env.is_subeffect(callee_eff, allowed))
+                    })
+                    .cloned()
+                    .collect();
                 if !missing.is_empty() {
                     return Err(MumeiError::verification_at(
                         format!(

@@ -83,8 +83,8 @@ pub fn compile(atom: &Atom, output_path: &Path, module_env: &ModuleEnv) -> Mumei
         }
     }
 
-    // エフェクト情報を LLVM IR にコメントとして出力
-    if !atom.effects.is_empty() {
+    // エフェクト情報を .ll ファイル先頭にコメントとして追記する（後処理）
+    let effects_comment = if !atom.effects.is_empty() {
         let effects_str: Vec<String> = atom
             .effects
             .iter()
@@ -101,8 +101,10 @@ pub fn compile(atom: &Atom, output_path: &Path, module_env: &ModuleEnv) -> Mumei
                 }
             })
             .collect();
-        module.set_source_file_name(&format!("; effects: [{}]", effects_str.join(", ")));
-    }
+        Some(format!("; effects: [{}]", effects_str.join(", ")))
+    } else {
+        None
+    };
 
     let body_ast = parse_expression(&atom.body_expr);
     let result_val = compile_expr(
@@ -122,6 +124,15 @@ pub fn compile(atom: &Atom, output_path: &Path, module_env: &ModuleEnv) -> Mumei
     module
         .print_to_file(&path_with_ext)
         .map_err(|e| MumeiError::codegen(e.to_string()))?;
+
+    // エフェクトコメントを .ll ファイル先頭に挿入（source_filename を破壊しない）
+    if let Some(comment) = effects_comment {
+        let ll_content = std::fs::read_to_string(&path_with_ext)
+            .map_err(|e| MumeiError::codegen(e.to_string()))?;
+        let with_comment = format!("{}\n{}", comment, ll_content);
+        std::fs::write(&path_with_ext, with_comment)
+            .map_err(|e| MumeiError::codegen(e.to_string()))?;
+    }
 
     Ok(())
 }
