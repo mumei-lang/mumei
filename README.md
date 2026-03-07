@@ -207,6 +207,60 @@ python mcp_server.py
 | `validate_logic` | Z3 検証のみ（反例データ返却） |
 | `execute_mm` | 汎用ビルド / チェック実行 |
 
+### Visualizer ダッシュボード（オプション）
+
+Streamlit ベースの Visualizer で、検証結果と Self-Healing 履歴をリアルタイムに監視できます。
+
+**アーキテクチャ（レイヤー分離型）:**
+
+```
+AI (Claude Desktop etc.)
+  │ MCP
+  ▼
+validate_logic / execute_mm / forge_blade
+  │
+  ▼
+mumei compiler (Z3 verification)
+  │
+  ├─→ [常時] MCP レスポンスに検証結果 + 反例を含めて返す
+  │         → AI はこれだけで自律修正ループを回せる
+  │
+  └─→ [オプション] visualizer/report.json にコピー
+            → Streamlit ダッシュボードで人間が状態を確認
+```
+
+| シナリオ | E2E フロー | Visualizer | 設定 |
+|---|---|---|---|
+| AI だけで自律修正 | 使う | 使わない | `ENABLE_VISUALIZER_SYNC=false` |
+| 人間がダッシュボードで監視しながら | 使う | 使う | `ENABLE_VISUALIZER_SYNC=true` |
+| 手動でコンパイラを叩いて結果を見る | 使わない | 使う | 直接 `mumei build` 実行 |
+
+**セットアップ:**
+
+```bash
+# 1. .env に Visualizer 同期を有効化
+echo "ENABLE_VISUALIZER_SYNC=true" >> .env
+
+# 2. Streamlit 起動
+pip install streamlit
+streamlit run visualizer/app.py
+
+# 3. MCP ツール実行 or self_healing.py 実行
+#    → report.json が visualizer/ に自動コピーされ、ダッシュボードに反映
+```
+
+**機能:**
+
+- **最新レポート表示**: Z3 検証結果 + counterexample フィールド（反例の変数値）を構造化表示
+- **Self-Healing 履歴**: 各イテレーションの結果を時系列で表示（成功/失敗の集計付き）
+- **AI Fix Suggestion**: 検証失敗時に修正ヒントを自動生成
+
+**デモ録画:**
+
+![Visualizer Demo](visualizer_demo.mp4)
+
+> Visualizer は E2E フローのモニタリングツール。MCP レスポンスで完結するため、AI は Visualizer に依存しない。人間が見たい場合だけ使用。
+
 ---
 
 ## Documentation
