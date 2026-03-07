@@ -224,6 +224,7 @@ fn load_and_prepare(input: &str) -> (Vec<Item>, verification::ModuleEnv, Vec<Imp
 
     let mut module_env = verification::ModuleEnv::new();
     verification::register_builtin_traits(&mut module_env);
+    verification::register_builtin_effects(&mut module_env);
     let input_path = Path::new(input);
     let base_dir = input_path.parent().unwrap_or(Path::new("."));
 
@@ -270,7 +271,7 @@ fn load_and_prepare(input: &str) -> (Vec<Item>, verification::ModuleEnv, Vec<Imp
             Item::TraitDef(trait_def) => module_env.register_trait(trait_def),
             Item::ImplDef(impl_def) => module_env.register_impl(impl_def),
             Item::ResourceDef(resource_def) => module_env.register_resource(resource_def),
-            Item::EffectDef(_) => {} // Effect definitions registered separately
+            Item::EffectDef(effect_def) => module_env.register_effect(effect_def),
             Item::ExternBlock(extern_block) => {
                 for ext_fn in &extern_block.functions {
                     // ExternFn → trusted Atom に変換して ModuleEnv に登録
@@ -1485,6 +1486,7 @@ fn cmd_repl() {
 
     let mut module_env = verification::ModuleEnv::new();
     verification::register_builtin_traits(&mut module_env);
+    verification::register_builtin_effects(&mut module_env);
 
     // std/prelude を自動ロード
     if let Ok(cwd) = std::env::current_dir() {
