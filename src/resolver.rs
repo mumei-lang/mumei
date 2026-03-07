@@ -702,7 +702,11 @@ pub fn compute_atom_hash(atom: &crate::parser::Atom) -> String {
     // effects も含める（エフェクト制約の変更を検出）
     for e in &atom.effects {
         hasher.update(b"|effect:");
-        hasher.update(e.as_bytes());
+        hasher.update(e.name.as_bytes());
+        for p in &e.params {
+            hasher.update(b",param:");
+            hasher.update(p.value.as_bytes());
+        }
     }
     // async フラグも含める
     if atom.is_async {

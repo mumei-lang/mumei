@@ -188,7 +188,14 @@ pub fn transpile_to_rust(atom: &Atom) -> String {
     let effects_comment = if atom.effects.is_empty() {
         String::new()
     } else {
-        format!("\n/// Effects: [{}]", atom.effects.join(", "))
+        format!(
+            "\n/// Effects: [{}]",
+            atom.effects
+                .iter()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
     };
     format!(
         "/// Verified Atom: {}\n/// Requires: {}\n/// Ensures: {}{}\npub {}fn {}({}) -> {} {{\n    {}\n}}",

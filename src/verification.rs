@@ -1,7 +1,7 @@
 use crate::parser::{
-    parse_expression, Atom, EffectDef, EnumDef, Expr, ImplDef, JoinSemantics, MatchArm, Op,
-    Pattern, QuantifierType, RefinedType, ResourceDef, ResourceMode, Span, StructDef, TraitDef,
-    TrustLevel,
+    parse_expression, Atom, Effect, EffectDef, EnumDef, Expr, ImplDef, Item, JoinSemantics,
+    MatchArm, Op, Pattern, QuantifierType, RefinedType, ResourceDef, ResourceMode, Span, StructDef,
+    TraitDef, TrustLevel,
 };
 use miette::SourceSpan;
 use serde_json::json;
@@ -623,6 +623,18 @@ pub struct ModuleEnv {
     /// エフェクト定義（副作用検証用）
     /// エフェクト名 → EffectDef
     pub effects: HashMap<String, EffectDef>,
+    /// エフェクト定義レジストリ（階層構造対応）
+    /// Step 2a: EffectDef のパラメータ・制約・親を含む完全な定義
+    pub effect_defs: HashMap<String, EffectDef>,
+    /// Symbolic String ID: パス文字列 → 整数ID のマッピング（ハイブリッド・アプローチ）
+    // NOTE: path_id_map/next_path_id/prefix_ranges are infrastructure for Z3 String Sort migration (see ROADMAP.md P4)
+    #[allow(dead_code)]
+    pub path_id_map: HashMap<String, i64>,
+    #[allow(dead_code)]
+    pub next_path_id: i64,
+    /// パスプレフィックス → (range_start, range_end) のマッピング
+    #[allow(dead_code)]
+    pub prefix_ranges: HashMap<String, (i64, i64)>,
 }
 
 impl ModuleEnv {
@@ -737,9 +749,11 @@ impl ModuleEnv {
         self.resources.get(name)
     }
 
-    /// エフェクト定義を登録する
+    /// エフェクト定義を登録する（effects + effect_defs 両方に登録）
     pub fn register_effect(&mut self, effect_def: &EffectDef) {
         self.effects
+            .insert(effect_def.name.clone(), effect_def.clone());
+        self.effect_defs
             .insert(effect_def.name.clone(), effect_def.clone());
     }
 
@@ -770,6 +784,15 @@ impl ModuleEnv {
         result
     }
 
+    /// Vec<Effect> からエフェクト名のリストを展開し、includes を再帰的に解決する。
+    pub fn resolve_effect_set_from_effects(
+        &self,
+        effects: &[crate::parser::Effect],
+    ) -> HashSet<String> {
+        let names: Vec<String> = effects.iter().map(|e| e.name.clone()).collect();
+        self.resolve_effect_set(&names)
+    }
+
     /// Resolve an effect set to only its leaf effects (effects with no `includes`).
     /// This avoids false positives when comparing a caller declaring leaf effects
     /// against a callee declaring a composite effect (e.g., `[IO]` vs `[FileRead, FileWrite, Console]`).
@@ -782,6 +805,104 @@ impl ModuleEnv {
                     .map_or(true, |def| def.includes.is_empty())
             })
             .collect()
+    }
+
+    /// Vec<Effect> からリーフエフェクトを解決する。
+    pub fn resolve_leaf_effects_from_effects(
+        &self,
+        effects: &[crate::parser::Effect],
+    ) -> HashSet<String> {
+        let names: Vec<String> = effects.iter().map(|e| e.name.clone()).collect();
+        self.resolve_leaf_effects(&names)
+    }
+
+    // =========================================================================
+    // Step 2b: エフェクト階層の解決メソッド
+    // =========================================================================
+
+    /// エフェクト名からその祖先エフェクト（親→祖父→...）を全て返す。
+    /// HttpRead → [Network] のように、包含関係を解決する。
+    pub fn get_effect_ancestors(&self, effect_name: &str) -> Vec<String> {
+        let mut ancestors = Vec::new();
+        let mut current = effect_name.to_string();
+        let mut visited = HashSet::new(); // 循環防止
+        loop {
+            // effect_defs を優先、なければ effects も参照
+            let parent_opt = self
+                .effect_defs
+                .get(&current)
+                .and_then(|def| def.parent.clone())
+                .or_else(|| {
+                    self.effects
+                        .get(&current)
+                        .and_then(|def| def.parent.clone())
+                });
+            if let Some(parent) = parent_opt {
+                if !visited.insert(parent.clone()) {
+                    break; // 循環検出
+                }
+                ancestors.push(parent.clone());
+                current = parent;
+            } else {
+                break;
+            }
+        }
+        ancestors
+    }
+
+    /// effect_a が effect_b のサブタイプかを判定。
+    /// HttpRead は Network のサブタイプ → is_subeffect("HttpRead", "Network") == true
+    pub fn is_subeffect(&self, child: &str, parent: &str) -> bool {
+        if child == parent {
+            return true;
+        }
+        self.get_effect_ancestors(child)
+            .contains(&parent.to_string())
+    }
+
+    // =========================================================================
+    // Step 2c: Symbolic String ID 管理（ハイブリッド・アプローチ）
+    // =========================================================================
+
+    /// パス文字列を整数IDに変換して登録する。既に登録済みなら既存IDを返す。
+    // NOTE: register_path_id is infrastructure for Z3 String Sort migration (see ROADMAP.md P4)
+    #[allow(dead_code)]
+    pub fn register_path_id(&mut self, path: &str) -> i64 {
+        if let Some(&id) = self.path_id_map.get(path) {
+            return id;
+        }
+        let id = self.next_path_id;
+        self.next_path_id += 1;
+        self.path_id_map.insert(path.to_string(), id);
+        id
+    }
+
+    /// プレフィックスに対して整数範囲を割り当てる。
+    /// 例: "/tmp/" → (1000, 1999) のように、"/tmp/" で始まるパスはこの範囲のIDを持つ。
+    // NOTE: register_prefix_range is infrastructure for Z3 String Sort migration (see ROADMAP.md P4)
+    #[allow(dead_code)]
+    pub fn register_prefix_range(&mut self, prefix: &str, range_start: i64, range_end: i64) {
+        self.prefix_ranges
+            .insert(prefix.to_string(), (range_start, range_end));
+    }
+
+    /// パスIDが指定プレフィックスの範囲内にあるかチェックする。
+    // NOTE: path_id_matches_prefix is infrastructure for Z3 String Sort migration (see ROADMAP.md P4)
+    #[allow(dead_code)]
+    pub fn path_id_matches_prefix(&self, path_id: i64, prefix: &str) -> bool {
+        if let Some(&(start, end)) = self.prefix_ranges.get(prefix) {
+            path_id >= start && path_id <= end
+        } else {
+            false
+        }
+    }
+
+    /// エフェクト定義を effect_defs レジストリに登録する。
+    // NOTE: register_effect_def is used by future EffectDef import registration path
+    #[allow(dead_code)]
+    pub fn register_effect_def(&mut self, effect_def: &EffectDef) {
+        self.effect_defs
+            .insert(effect_def.name.clone(), effect_def.clone());
     }
 }
 
@@ -910,8 +1031,11 @@ pub fn register_builtin_effects(module_env: &mut ModuleEnv) {
     for name in &["FileRead", "FileWrite", "Network", "Log", "Console"] {
         module_env.register_effect(&EffectDef {
             name: name.to_string(),
+            params: vec![],
+            constraint: None,
             includes: vec![],
             refinement: None,
+            parent: None,
             span: Span::default(),
         });
     }
@@ -920,20 +1044,26 @@ pub fn register_builtin_effects(module_env: &mut ModuleEnv) {
     // IO includes FileRead, FileWrite, Console
     module_env.register_effect(&EffectDef {
         name: "IO".to_string(),
+        params: vec![],
+        constraint: None,
         includes: vec![
             "FileRead".to_string(),
             "FileWrite".to_string(),
             "Console".to_string(),
         ],
         refinement: None,
+        parent: None,
         span: Span::default(),
     });
 
     // FullAccess includes IO, Network, Log
     module_env.register_effect(&EffectDef {
         name: "FullAccess".to_string(),
+        params: vec![],
+        constraint: None,
         includes: vec!["IO".to_string(), "Network".to_string(), "Log".to_string()],
         refinement: None,
+        parent: None,
         span: Span::default(),
     });
 }
@@ -1337,15 +1467,24 @@ fn verify_effect_containment(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult
     // Use leaf effects only to avoid false positives with composite effects.
     // E.g., caller [FileRead, FileWrite, Console] vs callee [IO] should pass
     // because both resolve to the same leaf set.
-    let allowed_leaves = module_env.resolve_leaf_effects(&atom.effects);
+    let allowed_leaves = module_env.resolve_leaf_effects_from_effects(&atom.effects);
     let body_ast = parse_expression(&atom.body_expr);
     let callees = collect_callees(&body_ast);
     for callee_name in &callees {
         if let Some(callee_atom) = module_env.get_atom(callee_name) {
             if !callee_atom.effects.is_empty() {
-                let callee_leaves = module_env.resolve_leaf_effects(&callee_atom.effects);
-                let missing: Vec<String> =
-                    callee_leaves.difference(&allowed_leaves).cloned().collect();
+                let callee_leaves =
+                    module_env.resolve_leaf_effects_from_effects(&callee_atom.effects);
+                let missing: Vec<String> = callee_leaves
+                    .iter()
+                    .filter(|callee_eff| {
+                        !allowed_leaves.contains(*callee_eff)
+                            && !allowed_leaves
+                                .iter()
+                                .any(|allowed| module_env.is_subeffect(callee_eff, allowed))
+                    })
+                    .cloned()
+                    .collect();
                 if !missing.is_empty() {
                     return Err(MumeiError::verification_at(
                         format!(
@@ -2261,6 +2400,187 @@ fn check_taint_propagation(atom: &Atom, env: &Env, module_env: &ModuleEnv) {
     }
 }
 
+// =============================================================================
+// Step 3: Effect Inference（エフェクト推論）
+// =============================================================================
+
+/// body 内の関数呼び出しからエフェクトセットを推論する。
+/// 呼び出し先 atom の effects フィールドを再帰的に集約する。
+/// 親エフェクトへの暗黙的包含も解決する。
+fn infer_effects(atom: &Atom, module_env: &ModuleEnv) -> Vec<Effect> {
+    let body_ast = parse_expression(&atom.body_expr);
+    let callees = collect_callees(&body_ast);
+    let mut inferred = Vec::new();
+    let mut seen_names: HashSet<String> = HashSet::new();
+    for callee_name in &callees {
+        if let Some(callee) = module_env.get_atom(callee_name) {
+            for eff in &callee.effects {
+                if seen_names.insert(eff.name.clone()) {
+                    inferred.push(eff.clone());
+                }
+                // NOTE: ancestors are NOT added to seen_names to avoid suppressing
+                // explicit effect requirements from other callees. The deduplication
+                // via seen_names only applies to effects with the exact same name.
+                // Subtype coverage is handled separately by infer_effects_json's
+                // is_subeffect() check when computing missing_effects.
+            }
+        }
+    }
+    inferred
+}
+
+/// 全 atom のエフェクト推論結果を JSON で出力する。
+/// MCP の get_inferred_effects ツールから呼ばれる。
+pub fn infer_effects_json(items: &[Item], module_env: &ModuleEnv) -> serde_json::Value {
+    let mut results = Vec::new();
+    for item in items {
+        if let Item::Atom(atom) = item {
+            let declared: Vec<String> = atom.effects.iter().map(|e| e.name.clone()).collect();
+            let inferred = infer_effects(atom, module_env);
+            let inferred_names: Vec<String> = inferred.iter().map(|e| e.name.clone()).collect();
+            let missing: Vec<String> = inferred_names
+                .iter()
+                .filter(|n| {
+                    !declared.contains(n) && !declared.iter().any(|d| module_env.is_subeffect(n, d))
+                })
+                .cloned()
+                .collect();
+            let suggestion = if missing.is_empty() {
+                serde_json::Value::Null
+            } else {
+                let all_effects: Vec<String> =
+                    declared.iter().chain(missing.iter()).cloned().collect();
+                serde_json::Value::String(format!("effects: [{}];", all_effects.join(", ")))
+            };
+            results.push(serde_json::json!({
+                "atom": atom.name,
+                "declared_effects": declared,
+                "inferred_effects": inferred_names,
+                "missing_effects": missing,
+                "suggestion": suggestion
+            }));
+        }
+    }
+    serde_json::json!({ "effects_analysis": results })
+}
+
+/// エフェクト整合性検証: 宣言されたエフェクトと推論されたエフェクトの比較。
+/// エフェクト階層の Subtyping も考慮する。
+// NOTE: verify_effect_consistency will be integrated into verify_inner pipeline in a future PR
+#[allow(dead_code)]
+fn verify_effect_consistency(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult<()> {
+    let declared: Vec<String> = atom.effects.iter().map(|e| e.name.clone()).collect();
+    let inferred = infer_effects(atom, module_env);
+
+    for eff in &inferred {
+        // 宣言に含まれるか、宣言のいずれかのサブタイプかをチェック
+        let is_covered = declared.contains(&eff.name)
+            || declared
+                .iter()
+                .any(|d| module_env.is_subeffect(&eff.name, d));
+        if !is_covered {
+            let all_effects: Vec<String> = declared
+                .iter()
+                .chain(std::iter::once(&eff.name))
+                .cloned()
+                .collect();
+            eprintln!(
+                "  ⚠️  Effect suggestion for atom '{}': inferred effect '{}' is not declared. \
+                 Suggested: effects: [{}];",
+                atom.name,
+                eff.name,
+                all_effects.join(", ")
+            );
+        }
+    }
+    Ok(())
+}
+
+// =============================================================================
+// Step 4: ハイブリッド・アプローチによるエフェクトパラメータ検証
+// =============================================================================
+
+/// 定数制約チェック（Constant Folding）。
+/// 定数パスに対する制約を Rust 側で直接検証する。
+// NOTE: check_constant_constraint is called by verify_effect_params (future pipeline integration)
+#[allow(dead_code)]
+fn check_constant_constraint(value: &str, constraint: &str) -> bool {
+    // パーサーは "starts_with(path, \"/tmp/\")" のように2引数形式で制約を出力する。
+    // 文字列引数（最後のクォートされた値）を抽出して検証する。
+    let extract_string_arg = |c: &str| -> Option<String> {
+        // 最後の "..." を抽出する
+        if let Some(last_quote_end) = c.rfind('"') {
+            let before = &c[..last_quote_end];
+            if let Some(last_quote_start) = before.rfind('"') {
+                return Some(c[last_quote_start + 1..last_quote_end].to_string());
+            }
+        }
+        None
+    };
+
+    // starts_with 制約（1引数 or 2引数形式）
+    if constraint.starts_with("starts_with(") {
+        if let Some(arg) = extract_string_arg(constraint) {
+            return value.starts_with(&arg);
+        }
+    }
+    // contains 制約
+    if constraint.starts_with("contains(") {
+        if let Some(arg) = extract_string_arg(constraint) {
+            return value.contains(&arg);
+        }
+    }
+    // ends_with 制約
+    if constraint.starts_with("ends_with(") {
+        if let Some(arg) = extract_string_arg(constraint) {
+            return value.ends_with(&arg);
+        }
+    }
+    // not_contains 制約
+    if constraint.starts_with("not_contains(") {
+        if let Some(arg) = extract_string_arg(constraint) {
+            return !value.contains(&arg);
+        }
+    }
+    // 不明な制約は false を返す（安全側に倒す — 検証できない場合は拒否）
+    false
+}
+
+/// エフェクトパラメータの検証。
+/// 定数パスは Rust 側で直接チェック（Constant Folding）。
+/// 変数パスは Z3 Int で検証（Symbolic String ID）。
+// NOTE: verify_effect_params will be integrated into verify_inner pipeline in a future PR
+#[allow(dead_code)]
+fn verify_effect_params(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult<()> {
+    for effect in &atom.effects {
+        // effect_defs を優先、なければ effects を参照
+        let effect_def = module_env
+            .effect_defs
+            .get(&effect.name)
+            .or_else(|| module_env.effects.get(&effect.name));
+        if let Some(def) = effect_def {
+            for param in &effect.params {
+                if param.is_constant {
+                    // Constant Folding: 定数パスは Rust 側で直接チェック
+                    if let Some(ref constraint) = def.constraint {
+                        if !check_constant_constraint(&param.value, constraint) {
+                            return Err(MumeiError::verification_at(
+                                format!(
+                                    "Effect '{}' parameter '{}' violates constraint: {}",
+                                    effect.name, param.value, constraint
+                                ),
+                                effect.span.clone(),
+                            ));
+                        }
+                    }
+                }
+                // 変数パスの場合の Z3 検証は verify_inner の Z3 コンテキスト内で行う
+            }
+        }
+    }
+    Ok(())
+}
+
 /// mumei.toml の [proof]/[build] 設定を反映した verify
 /// timeout_ms: Z3 ソルバのタイムアウト（ミリ秒）
 /// global_max_unroll: BMC のグローバル展開深度
@@ -2336,19 +2656,28 @@ fn verify_inner(
         // Extract missing effects from the error to produce a structured report.
         let body_ast = parse_expression(&atom.body_expr);
         let callees = collect_callees(&body_ast);
-        let allowed_leaves = module_env.resolve_leaf_effects(&atom.effects);
+        let allowed_leaves = module_env.resolve_leaf_effects_from_effects(&atom.effects);
         let mut missing_all: Vec<String> = Vec::new();
         let mut violating_callee = String::new();
         let mut callee_effs: Vec<String> = Vec::new();
         for callee_name in &callees {
             if let Some(callee_atom) = module_env.get_atom(callee_name) {
                 if !callee_atom.effects.is_empty() {
-                    let callee_leaves = module_env.resolve_leaf_effects(&callee_atom.effects);
-                    let missing: Vec<String> =
-                        callee_leaves.difference(&allowed_leaves).cloned().collect();
+                    let callee_leaves =
+                        module_env.resolve_leaf_effects_from_effects(&callee_atom.effects);
+                    let missing: Vec<String> = callee_leaves
+                        .iter()
+                        .filter(|callee_eff| {
+                            !allowed_leaves.contains(*callee_eff)
+                                && !allowed_leaves
+                                    .iter()
+                                    .any(|allowed| module_env.is_subeffect(callee_eff, allowed))
+                        })
+                        .cloned()
+                        .collect();
                     if !missing.is_empty() {
                         violating_callee = callee_name.clone();
-                        callee_effs = callee_atom.effects.clone();
+                        callee_effs = callee_atom.effects.iter().map(|e| e.name.clone()).collect();
                         missing_all = missing;
                         break;
                     }
@@ -2356,11 +2685,13 @@ fn verify_inner(
             }
         }
         if !missing_all.is_empty() {
+            let caller_effect_names: Vec<String> =
+                atom.effects.iter().map(|e| e.name.clone()).collect();
             save_effect_propagation_report(
                 output_dir,
                 &atom.name,
                 &violating_callee,
-                &atom.effects,
+                &caller_effect_names,
                 &callee_effs,
                 &missing_all,
             );
@@ -2399,7 +2730,7 @@ fn verify_inner(
 
     // Phase 2b: エフェクト許可セットを Z3 環境に注入
     {
-        let allowed_effects = module_env.resolve_effect_set(&atom.effects);
+        let allowed_effects = module_env.resolve_effect_set_from_effects(&atom.effects);
         for effect_name in &allowed_effects {
             let allowed_name = format!("__effect_allowed_{}", effect_name);
             env.insert(allowed_name, Bool::from_bool(&ctx, true).into());
@@ -2674,10 +3005,12 @@ fn verify_inner(
                                 rest.find('\'').map(|e| rest[..e].to_string())
                             })
                             .unwrap_or_default();
+                        let effect_names: Vec<String> =
+                            atom.effects.iter().map(|e| e.name.clone()).collect();
                         save_effect_violation_report(
                             output_dir,
                             &atom.name,
-                            &atom.effects,
+                            &effect_names,
                             required_effect,
                             &source_op,
                             &[

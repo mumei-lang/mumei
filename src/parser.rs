@@ -110,24 +110,74 @@ pub enum ResourceMode {
     Shared,
 }
 
-/// エフェクト定義
+/// エフェクト定義（パラメータ付き）
+/// 例: FileWrite("/tmp/..."), NetRead, ConsoleOut
+#[derive(Debug, Clone, PartialEq)]
+pub struct Effect {
+    pub name: String,             // "FileWrite", "NetRead", "ConsoleOut" 等
+    pub params: Vec<EffectParam>, // パラメータ付きリファインメント（空なら単純エフェクト）
+    pub span: Span,
+}
+
+/// エフェクトパラメータ
+#[derive(Debug, Clone, PartialEq)]
+pub struct EffectParam {
+    pub value: String,              // 具体値（"/tmp/log.txt"）または変数名
+    pub refinement: Option<String>, // Z3 制約式（例: "starts_with(\"/tmp/\")"）
+    pub is_constant: bool,          // true なら Constant Folding 対象
+}
+
+impl Effect {
+    /// 名前のみの単純エフェクトを生成するヘルパー
+    // NOTE: Effect::simple is infrastructure for future effect construction in tests and MCP tools
+    #[allow(dead_code)]
+    pub fn simple(name: &str) -> Self {
+        Effect {
+            name: name.to_string(),
+            params: vec![],
+            span: Span::default(),
+        }
+    }
+}
+
+/// エフェクト定義（effect 宣言）
 /// ```mumei
 /// effect FileRead;
 /// effect FileWrite;
 /// effect Network;
 /// effect Log;
 /// effect IO includes: [FileRead, FileWrite];
-/// effect ScopedFileWrite where path starts_with "/tmp/";
+/// effect HttpRead parent: Network;
+/// effect TcpConnect parent: Network;
+/// effect FileWrite(path: Str) where starts_with(path, "/tmp/");
 /// ```
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct EffectDef {
     pub name: String,
+    /// エフェクト定義パラメータ（例: path: Str）
+    pub params: Vec<EffectDefParam>,
+    /// Z3 に渡す制約式（例: starts_with(path, "/tmp/")）
+    pub constraint: Option<String>,
     /// Superset effects (e.g., IO includes FileRead + FileWrite)
     pub includes: Vec<String>,
     /// Refinement constraint (e.g., path starts_with "/tmp/")
     pub refinement: Option<String>,
+    /// 親エフェクト名（階層構造 / Subtyping）
+    /// Network エフェクトが HttpRead, TcpConnect を包含するような関係を表現。
+    /// 例: HttpRead の parent = Some("Network")
+    /// エフェクト推論時、HttpRead を持つ atom は暗黙的に Network も満たす。
+    pub parent: Option<String>,
     pub span: Span,
+}
+
+/// エフェクト定義パラメータ
+#[derive(Debug, Clone)]
+// NOTE: EffectDefParam fields are read during effect constraint resolution (future Z3 String Sort integration)
+#[allow(dead_code)]
+pub struct EffectDefParam {
+    pub name: String,
+    pub type_name: String, // "Str", "i64" 等
 }
 
 #[derive(Debug, Clone)]
@@ -386,10 +436,10 @@ pub struct Atom {
     /// 2. 維持 (Preservation): invariant が成立する状態で body を実行した後も invariant が維持されることを証明
     /// 3. 再帰呼び出し時: 呼び出し先の invariant を仮定として使用（帰納法の仮定）
     pub invariant: Option<String>,
-    /// この atom が許可するエフェクトセット（Effect System）
-    /// `atom write_log(msg: i64) effects: [Log, FileWrite];` の場合: effects = ["Log", "FileWrite"]
-    /// 空の場合は Pure（副作用なし）として扱われる。
-    pub effects: Vec<String>,
+    /// この atom が持つエフェクトリスト（Effect System）
+    /// `atom write_log(msg: Str) effects: [FileWrite("/tmp/log.txt"), ConsoleOut];`
+    /// 空リストはエフェクトなし（純粋関数）を意味する。
+    pub effects: Vec<Effect>,
     /// ソース位置情報
     pub span: Span,
 }
@@ -1042,14 +1092,40 @@ pub fn parse_module(source: &str) -> Vec<Item> {
     }
 
     // effect 定義: effect Name; / effect Name includes: [...]; / effect Name where ...;
+    // effect Name parent: ParentName; / effect Name(param: Type) where constraint;
     let effect_re = Regex::new(
-        r"(?m)^effect\s+(\w+)(?:\s+includes:\s*\[([^\]]*)\])?(?:\s+where\s+([^;]+))?\s*;",
+        r"(?m)^effect\s+(\w+)(?:\(([^)]*)\))?(?:\s+parent:\s*(\w+))?(?:\s+includes:\s*\[([^\]]*)\])?(?:\s+where\s+([^;]+))?\s*;",
     )
     .unwrap();
     for cap in effect_re.captures_iter(source) {
         let name = cap[1].to_string();
-        let includes: Vec<String> = cap
+        // パラメータのパース: (path: Str, mode: i64)
+        let params: Vec<EffectDefParam> = cap
             .get(2)
+            .map(|m| {
+                m.as_str()
+                    .split(',')
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| {
+                        if let Some((pname, ptype)) = s.split_once(':') {
+                            EffectDefParam {
+                                name: pname.trim().to_string(),
+                                type_name: ptype.trim().to_string(),
+                            }
+                        } else {
+                            EffectDefParam {
+                                name: s.to_string(),
+                                type_name: "Str".to_string(),
+                            }
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let parent = cap.get(3).map(|m| m.as_str().trim().to_string());
+        let includes: Vec<String> = cap
+            .get(4)
             .map(|m| {
                 m.as_str()
                     .split(',')
@@ -1058,12 +1134,16 @@ pub fn parse_module(source: &str) -> Vec<Item> {
                     .collect()
             })
             .unwrap_or_default();
-        let refinement = cap.get(3).map(|m| m.as_str().trim().to_string());
+        let refinement = cap.get(5).map(|m| m.as_str().trim().to_string());
+        let constraint = refinement.clone();
         let m = cap.get(0).unwrap();
         items.push(Item::EffectDef(EffectDef {
             name,
+            params,
+            constraint,
             includes,
             refinement,
+            parent,
             span: span_from_offset(source, m.start(), m.end() - m.start()),
         }));
     }
@@ -1388,17 +1468,12 @@ pub fn parse_atom(source: &str) -> Atom {
         .captures(source)
         .map(|cap| cap[1].trim().to_string());
 
-    // effects 句のパース: "effects: [Log, FileWrite];" — エフェクトセット
+    // effects 句のパース: "effects: [FileWrite("/tmp/log.txt"), ConsoleOut];" — エフェクトセット
+    // パラメータ付きエフェクトをサポート: Name("value") or Name(var) or Name
     let effects_re = Regex::new(r"effects:\s*\[([^\]]*)]\s*;").unwrap();
-    let effects: Vec<String> = effects_re
+    let effects: Vec<Effect> = effects_re
         .captures(source)
-        .map(|cap| {
-            cap[1]
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect()
-        })
+        .map(|cap| parse_effect_list(&cap[1]))
         .unwrap_or_default();
 
     let atom_match = name_caps.get(0).unwrap();
@@ -1421,6 +1496,138 @@ pub fn parse_atom(source: &str) -> Atom {
         invariant,
         effects,
         span: span_from_offset(source, atom_match.start(), source.len()),
+    }
+}
+
+/// エフェクトリスト文字列をパースする。
+/// "FileWrite(\"/tmp/log.txt\"), ConsoleOut, Network" のような文字列を
+/// Vec<Effect> に変換する。パラメータ付きエフェクト（括弧内の値）をサポート。
+fn parse_effect_list(input: &str) -> Vec<Effect> {
+    let mut effects = Vec::new();
+    let input = input.trim();
+    if input.is_empty() {
+        return effects;
+    }
+
+    // 括弧のネストを考慮してカンマで分割する（byte offset で正しくスライス）
+    let mut depth = 0;
+    let mut current_start = 0;
+    for (byte_idx, ch) in input.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ',' if depth == 0 => {
+                let token = input[current_start..byte_idx].trim();
+                if !token.is_empty() {
+                    effects.push(parse_single_effect(token));
+                }
+                current_start = byte_idx + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    // 最後のトークン
+    let token = input[current_start..].trim();
+    if !token.is_empty() {
+        effects.push(parse_single_effect(token));
+    }
+    effects
+}
+
+/// 単一のエフェクト文字列をパースする。
+/// "FileWrite(\"/tmp/log.txt\")" → Effect { name: "FileWrite", params: [...] }
+/// "ConsoleOut" → Effect { name: "ConsoleOut", params: [] }
+fn parse_single_effect(input: &str) -> Effect {
+    let input = input.trim();
+    if let Some(paren_start) = input.find('(') {
+        let name = input[..paren_start].trim().to_string();
+        let paren_end = input.rfind(')').unwrap_or(input.len());
+        let params_str = &input[paren_start + 1..paren_end];
+        let params = parse_effect_params(params_str);
+        Effect {
+            name,
+            params,
+            span: Span::default(),
+        }
+    } else {
+        Effect {
+            name: input.to_string(),
+            params: vec![],
+            span: Span::default(),
+        }
+    }
+}
+
+/// エフェクトパラメータ文字列をパースする。
+/// "\"value\"" → EffectParam { value: "value", is_constant: true }
+/// "var_name" → EffectParam { value: "var_name", is_constant: false }
+fn parse_effect_params(input: &str) -> Vec<EffectParam> {
+    let mut params = Vec::new();
+    // クォート内のカンマを無視してパラメータを分割する
+    let mut in_quote = false;
+    let mut current_start = 0;
+    for (byte_idx, ch) in input.char_indices() {
+        match ch {
+            '"' => in_quote = !in_quote,
+            ',' if !in_quote => {
+                let part = input[current_start..byte_idx].trim();
+                if !part.is_empty() {
+                    params.push(parse_single_effect_param(part));
+                }
+                current_start = byte_idx + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    // 最後のパラメータ
+    let part = input[current_start..].trim();
+    if !part.is_empty() {
+        params.push(parse_single_effect_param(part));
+    }
+    params
+}
+
+/// 単一のエフェクトパラメータをパースするヘルパー
+fn parse_single_effect_param(part: &str) -> EffectParam {
+    // 文字列リテラル（"..." で囲まれている）は定数
+    if (part.starts_with('"') && part.ends_with('"'))
+        || (part.starts_with('\'') && part.ends_with('\''))
+    {
+        let value = part[1..part.len() - 1].to_string();
+        EffectParam {
+            value,
+            refinement: None,
+            is_constant: true,
+        }
+    } else {
+        // 変数名 → 非定数（Z3 検証対象）
+        EffectParam {
+            value: part.to_string(),
+            refinement: None,
+            is_constant: false,
+        }
+    }
+}
+
+/// Effect の名前を返すヘルパー（表示・デバッグ用）
+impl std::fmt::Display for Effect {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.params.is_empty() {
+            write!(f, "{}", self.name)
+        } else {
+            let params_str: Vec<String> = self
+                .params
+                .iter()
+                .map(|p| {
+                    if p.is_constant {
+                        format!("\"{}\"", p.value)
+                    } else {
+                        p.value.clone()
+                    }
+                })
+                .collect();
+            write!(f, "{}({})", self.name, params_str.join(", "))
+        }
     }
 }
 

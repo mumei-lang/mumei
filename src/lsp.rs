@@ -323,12 +323,18 @@ fn build_hover(source: &str, line: usize) -> Option<String> {
         for it in &items {
             if let crate::parser::Item::Atom(a) = it {
                 if a.name == name {
-                    let md = format!(
+                    let mut md = format!(
                         "### atom {}\n\n**requires**:\n```\n{}\n```\n\n**ensures**:\n```\n{}\n```",
                         a.name,
                         a.requires.trim(),
                         a.ensures.trim()
                     );
+                    // エフェクト情報を表示
+                    if !a.effects.is_empty() {
+                        let effects_str: Vec<String> =
+                            a.effects.iter().map(|e| e.name.clone()).collect();
+                        md.push_str(&format!("\n\n**effects**: `[{}]`", effects_str.join(", ")));
+                    }
                     return Some(md);
                 }
             }

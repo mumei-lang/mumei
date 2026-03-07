@@ -223,7 +223,14 @@ pub fn transpile_to_ts(atom: &Atom) -> String {
     let effects_comment = if atom.effects.is_empty() {
         String::new()
     } else {
-        format!("\n * @effects [{}]", atom.effects.join(", "))
+        format!(
+            "\n * @effects [{}]",
+            atom.effects
+                .iter()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
     };
     format!(
         "/**\n * Verified Atom: {}\n * Requires: {}\n * Ensures: {}{}\n */\n{}function {}({}): {} {{\n    {}\n}}",
