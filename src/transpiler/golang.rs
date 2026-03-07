@@ -190,7 +190,14 @@ pub fn transpile_to_go(atom: &Atom) -> String {
     let effects_comment = if atom.effects.is_empty() {
         String::new()
     } else {
-        format!("// Effects: [{}]\n", atom.effects.join(", "))
+        format!(
+            "// Effects: [{}]\n",
+            atom.effects
+                .iter()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
     };
     format!(
         "{}{}{}// {} is a verified Atom.\n// Requires: {}\n// Ensures: {}\nfunc {}({}) int64 {{\n    {}\n}}",

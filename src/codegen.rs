@@ -83,6 +83,27 @@ pub fn compile(atom: &Atom, output_path: &Path, module_env: &ModuleEnv) -> Mumei
         }
     }
 
+    // エフェクト情報を LLVM IR にコメントとして出力
+    if !atom.effects.is_empty() {
+        let effects_str: Vec<String> = atom
+            .effects
+            .iter()
+            .map(|e| {
+                if e.params.is_empty() {
+                    e.name.clone()
+                } else {
+                    let params: Vec<String> = e
+                        .params
+                        .iter()
+                        .map(|p| format!("\"{}\"", p.value))
+                        .collect();
+                    format!("{}({})", e.name, params.join(", "))
+                }
+            })
+            .collect();
+        module.set_source_file_name(&format!("; effects: [{}]", effects_str.join(", ")));
+    }
+
     let body_ast = parse_expression(&atom.body_expr);
     let result_val = compile_expr(
         &context,

@@ -339,6 +339,49 @@ def execute_mm(
 
 
 @mcp.tool()
+def get_inferred_effects(source_code: str) -> str:
+    """
+    Pre-check: Infer what effects are required for the given Mumei code,
+    WITHOUT running full verification. Returns a JSON analysis of:
+    - declared_effects: effects explicitly annotated on each atom
+    - inferred_effects: effects inferred from call graph analysis
+    - missing_effects: effects that should be added
+    - suggestion: suggested effects: [...] annotation
+
+    Use this BEFORE writing code to check what permissions (effects) your
+    code will need. This enables AI to "check its own permissions" before
+    committing to a code path.
+    """
+    root_dir = Path(__file__).parent.absolute()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        source_path = tmp_path / "input.mm"
+        source_path.write_text(source_code, encoding="utf-8")
+
+        result = subprocess.run(
+            ["cargo", "run", "--", "infer-effects", str(source_path)],
+            cwd=root_dir,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+
+        if result.returncode == 0 and result.stdout.strip():
+            try:
+                analysis = json.loads(result.stdout)
+                formatted = json.dumps(analysis, indent=2, ensure_ascii=False)
+                return f"### Effect Analysis\n```json\n{formatted}\n```"
+            except json.JSONDecodeError:
+                return f"Effect inference completed but output was not valid JSON:\n{result.stdout}"
+        else:
+            parts = ["Effect inference failed."]
+            if result.stderr:
+                parts.append(f"\n### Error Details\n```\n{result.stderr}\n```")
+            return "\n".join(parts)
+
+
+@mcp.tool()
 def get_allowed_effects(project_dir: str = ".") -> str:
     """
     Returns the current effect boundary for this session.

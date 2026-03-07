@@ -113,6 +113,11 @@ enum Command {
         #[arg(long, default_value = "html")]
         format: String,
     },
+    /// Infer required effects for all atoms (JSON output, for MCP integration)
+    InferEffects {
+        /// Input .mm file
+        input: String,
+    },
 }
 
 fn main() {
@@ -163,6 +168,9 @@ fn main() {
             format,
         }) => {
             cmd_doc(&input, &output, &format);
+        }
+        Some(Command::InferEffects { input }) => {
+            cmd_infer_effects(&input);
         }
         None => {
             // 後方互換: `mumei input.mm -o dist/katana` → build として実行
@@ -1697,6 +1705,17 @@ fn cmd_repl() {
             }
         }
     }
+}
+
+// =============================================================================
+// mumei infer-effects — Effect inference (JSON output for MCP)
+// =============================================================================
+
+fn cmd_infer_effects(input: &str) {
+    let (items, module_env, _imports, _source) = load_and_prepare(input);
+    let result = verification::infer_effects_json(&items, &module_env);
+    // JSON 出力（MCP が stdout をパースする）
+    println!("{}", serde_json::to_string_pretty(&result).unwrap());
 }
 
 // =============================================================================

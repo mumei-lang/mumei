@@ -72,6 +72,7 @@ mumei build src/main.mm -o dist/output
 | `mumei publish` | Publish to local registry |
 | `mumei setup` | Download Z3 + LLVM toolchain |
 | `mumei inspect` | Show development environment |
+| `mumei infer-effects <file>` | Infer required effects (JSON output) |
 | `mumei lsp` | Start LSP server |
 
 ---
@@ -235,6 +236,7 @@ python mcp_server.py
 | `self_heal_loop` | Run autonomous fix loop |
 | `validate_logic` | Z3 verification only (returns counter-example data) |
 | `execute_mm` | General-purpose build / check execution |
+| `get_inferred_effects` | Pre-check: infer required effects before writing code |
 
 ### Visualizer Dashboard (Optional)
 

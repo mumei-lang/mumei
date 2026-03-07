@@ -109,7 +109,7 @@ Understand the following characteristics of the code exported by Mumei:
 
 ## 7. Prohibited Actions
 
-* **Introducing Side Effects**: Mumei focuses on pure functional verification. Modifying global variables or performing undefined external I/O within the `body` is strictly prohibited.
+* **Introducing Side Effects**: Mumei focuses on pure functional verification. Modifying global variables or performing undefined external I/O within the `body` is strictly prohibited. Atoms without an `effects:` annotation are treated as pure — calling effectful atoms from a pure atom is a verification error.
 * **Ignoring Type Constraints**: Treat numbers as `i64` by default and always account for potential overflows.
 
 ---
@@ -259,6 +259,8 @@ Improve the practicality of `task` / `task_group` introduced in PR-C.
   - `src/main.rs`: `load_and_prepare`, `cmd_check`, `cmd_build`
   - `src/resolver.rs`: `resolve_imports_recursive`, `register_imported_items`
   - `src/lsp.rs`: `verify_source_for_lsp`
+- When adding `Item::EffectDef`, ensure match arms exist in all locations listed above.
+- When constructing `Atom` instances (including extern → atom conversion), always include `effects: vec![]` as default.
 - When using `#[allow(dead_code)]`, always add a NOTE comment explaining the reason.
 
 ---

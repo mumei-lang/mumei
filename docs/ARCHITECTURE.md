@@ -341,6 +341,8 @@ for tainted sources and warns if verification results depend on unverified code.
 1c. `verify_async_recursion_depth()`: Recursive async call depth limit
 1d. `verify_atom_invariant()`: Inductive invariant proof (base + preservation)
 1e. `verify_call_graph_cycles()`: Indirect recursion detection via DFS
+1f. `verify_effect_consistency()`: Effect inference + declared effects comparison (with subtyping)
+1g. `verify_effect_params()`: Constant folding for literal paths + Z3 Int for variable paths
 2. `expr_to_z3(Acquire)`: Tracks `__resource_held_{name}` as Z3 Bool
 3. `expr_to_z3(Await)`: Resource-held-across-await + ownership consistency checks
 4. Body verification + **taint analysis** (`check_taint_propagation`)
@@ -352,6 +354,8 @@ for tainted sources and warns if verification results depend on unverified code.
 source.mm → parse → resolve → monomorphize → verify (Z3) → codegen (LLVM IR) → transpile
                                                  ↑
                                     Resource Hierarchy Check
+                                    Effect Inference & Verification
+                                    Effect Hierarchy Resolution
                                     Deadlock-Free Proof
                                     Data Race Prevention
 ```
