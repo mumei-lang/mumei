@@ -2418,10 +2418,11 @@ fn infer_effects(atom: &Atom, module_env: &ModuleEnv) -> Vec<Effect> {
                 if seen_names.insert(eff.name.clone()) {
                     inferred.push(eff.clone());
                 }
-                // 親エフェクトも暗黙的に含む（互換性判定に使うが推論結果には追加しない）
-                for ancestor in module_env.get_effect_ancestors(&eff.name) {
-                    seen_names.insert(ancestor);
-                }
+                // NOTE: ancestors are NOT added to seen_names to avoid suppressing
+                // explicit effect requirements from other callees. The deduplication
+                // via seen_names only applies to effects with the exact same name.
+                // Subtype coverage is handled separately by infer_effects_json's
+                // is_subeffect() check when computing missing_effects.
             }
         }
     }
