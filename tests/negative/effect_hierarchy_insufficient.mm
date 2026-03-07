@@ -18,10 +18,11 @@ atom tcp_connector(x: i64) -> i64
   ensures: result == x;
   body: x;
 
-// Declares only HttpRead, but would need TcpConnect too if calling tcp_connector
-// HttpRead and TcpConnect are siblings, not subtypes of each other
+// Declares only HttpRead, but calls tcp_connector which needs TcpConnect.
+// HttpRead and TcpConnect are siblings, not subtypes of each other.
+// Expected: effect propagation violation (TcpConnect not covered by HttpRead)
 atom insufficient_effects(x: i64) -> i64
   effects: [HttpRead];
   requires: x >= 0;
   ensures: result == x;
-  body: x;
+  body: tcp_connector(x);
