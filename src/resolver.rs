@@ -288,8 +288,8 @@ fn register_imported_items(items: &[Item], alias: Option<&str>, module_env: &mut
             Item::Import(_) => {
                 // 再帰的に処理済み
             }
-            Item::EffectDef(_) => {
-                // Effect definitions handled separately
+            Item::EffectDef(effect_def) => {
+                module_env.register_effect(effect_def);
             }
             Item::ExternBlock(extern_block) => {
                 // ExternBlock 内の関数を trusted atom として ModuleEnv に登録
