@@ -136,7 +136,10 @@ def main():
 
         if success:
             print(f"Success! Blade is flawless (Attempt {attempt + 1}).")
-
+            try:
+                sync_to_visualizer(REPORT_FILE)
+            except Exception:
+                pass
             return
 
         print(f"Attempt {attempt + 1}: Flaw detected. Consulting AI...")

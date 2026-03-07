@@ -251,7 +251,8 @@ def execute_mm(
             cmd_args,
             cwd=root_dir,
             capture_output=True,
-            text=True
+            text=True,
+            timeout=300,
         )
 
         response_parts = []

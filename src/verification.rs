@@ -1120,20 +1120,26 @@ pub fn verify_impl(impl_def: &ImplDef, module_env: &ModuleEnv, output_dir: &Path
                                     }
                                 }
                             }
+                            // Save counterexample to visualizer report
+                            // (even when no concrete values are available, still write report.json
+                            // so the MCP self-healing flow can detect the failure)
+                            let ce_value = if ce_json.is_empty() {
+                                None
+                            } else {
+                                Some(serde_json::Value::Object(ce_json))
+                            };
+                            save_visualizer_report(
+                                output_dir,
+                                "failed",
+                                &format!("impl {} for {}", impl_def.trait_name, impl_def.target_type),
+                                "N/A",
+                                "N/A",
+                                &format!("Trait law '{}' not satisfied", law_name),
+                                ce_value.as_ref(),
+                            );
                             if ce_parts.is_empty() {
                                 "  (no concrete values available)".to_string()
                             } else {
-                                // Save counterexample to visualizer report
-                                let ce_value = serde_json::Value::Object(ce_json);
-                                save_visualizer_report(
-                                    output_dir,
-                                    "failed",
-                                    &format!("impl {} for {}", impl_def.trait_name, impl_def.target_type),
-                                    "N/A",
-                                    "N/A",
-                                    &format!("Trait law '{}' not satisfied", law_name),
-                                    Some(&ce_value),
-                                );
                                 format!("  Counter-example: {}", ce_parts.join(", "))
                             }
                         } else {
