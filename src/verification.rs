@@ -2032,6 +2032,11 @@ fn collect_callees(expr: &Expr) -> Vec<String> {
                 callees.extend(collect_callees(arg));
             }
         }
+        Expr::Perform { args, .. } => {
+            for arg in args {
+                callees.extend(collect_callees(arg));
+            }
+        }
         _ => {}
     }
     callees

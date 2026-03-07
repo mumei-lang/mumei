@@ -259,6 +259,7 @@ fn verify_source_for_lsp(
 
     let mut module_env = verification::ModuleEnv::new();
     verification::register_builtin_traits(&mut module_env);
+    verification::register_builtin_effects(&mut module_env);
 
     // mumei.toml を探してプロジェクトルートを決定
     let base_dir = path.parent().unwrap_or(std::path::Path::new("."));
@@ -283,7 +284,7 @@ fn verify_source_for_lsp(
             crate::parser::Item::ResourceDef(r) => module_env.register_resource(r),
             crate::parser::Item::Import(_) => {}
             crate::parser::Item::ExternBlock(_) => {}
-            crate::parser::Item::EffectDef(_) => {}
+            crate::parser::Item::EffectDef(e) => module_env.register_effect(e),
         }
     }
 
