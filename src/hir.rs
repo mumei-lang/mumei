@@ -90,12 +90,16 @@ pub enum HirExpr {
         args: Vec<HirExpr>,
     },
     /// task { body }
+    // NOTE: Task is constructed via lower_stmt(Stmt::Task) → HirStmt::Expr(HirExpr::Task),
+    // but codegen/transpiler match on HirExpr::Task directly. The variant is reachable at runtime;
+    // dead_code warning is a false positive from the compiler not tracing through HirStmt::Expr.
     #[allow(dead_code)]
     Task {
         body: Box<HirStmt>,
         group: Option<String>,
     },
     /// task_group { task { ... }; task { ... } }
+    // NOTE: Same as Task — constructed via HirStmt::Expr(HirExpr::TaskGroup) in lower_stmt.
     #[allow(dead_code)]
     TaskGroup {
         children: Vec<HirStmt>,
@@ -108,6 +112,8 @@ pub enum HirExpr {
 pub enum HirStmt {
     /// 変数束縛: let var = expr
     /// TODO: ty will be populated by type inference in future phases
+    // NOTE: Let variant is always constructed by lower_stmt. The dead_code warning is
+    // triggered by the `ty` field which is always None in Phase 1 (type inference not yet implemented).
     #[allow(dead_code)]
     Let {
         var: String,
@@ -149,6 +155,9 @@ pub struct HirMatchArm {
 #[derive(Debug, Clone)]
 pub struct HirAtom {
     pub body: HirStmt,
+    // NOTE: requires_hir/ensures_hir are not yet consumed by verification (which still re-parses
+    // from atom.requires/ensures strings). They will be used once verification migrates to
+    // HIR-based Z3 constraint generation (Phase 2).
     #[allow(dead_code)]
     pub requires_hir: HirExpr,
     #[allow(dead_code)]
@@ -315,6 +324,7 @@ pub fn lower_stmt(stmt: &Stmt) -> HirStmt {
 }
 
 /// 文字列から直接 HirExpr を生成するヘルパー（法則検証等のアドホックなパース用）
+// NOTE: Utility for future phases (e.g., REPL HIR evaluation, test helpers). Not called in current pipeline.
 #[allow(dead_code)]
 pub fn lower_expr_from_str(input: &str) -> HirExpr {
     let expr = parse_expression(input);
@@ -322,6 +332,7 @@ pub fn lower_expr_from_str(input: &str) -> HirExpr {
 }
 
 /// 文字列から直接 HirStmt を生成するヘルパー（ボディ式のアドホックなパース用）
+// NOTE: Utility for future phases (e.g., REPL HIR evaluation, test helpers). Not called in current pipeline.
 #[allow(dead_code)]
 pub fn lower_stmt_from_str(input: &str) -> HirStmt {
     let stmt = parse_body_expr(input);
