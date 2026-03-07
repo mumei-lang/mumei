@@ -1107,7 +1107,7 @@ pub fn verify_impl(impl_def: &ImplDef, module_env: &ModuleEnv) -> MumeiResult<()
                         let counterexample = if let Some(model) = solver.get_model() {
                             let var_names = ["a", "b", "c", "x", "y", "z"];
                             let mut ce_parts = Vec::new();
-                            let mut _ce_json = serde_json::Map::new();
+                            let mut ce_json = serde_json::Map::new();
                             for var_name in &var_names {
                                 if let Some(var_z3) = env.get(*var_name) {
                                     if let Some(val) = model.eval(var_z3, true) {
@@ -1115,11 +1115,14 @@ pub fn verify_impl(impl_def: &ImplDef, module_env: &ModuleEnv) -> MumeiResult<()
                                         // 変数が law 式に含まれている場合のみ表示
                                         if law_expr.contains(*var_name) {
                                             ce_parts.push(format!("{} = {}", var_name, val_str));
-                                            _ce_json.insert(var_name.to_string(), json!(val_str));
+                                            ce_json.insert(var_name.to_string(), json!(val_str));
                                         }
                                     }
                                 }
                             }
+                            // ce_json contains structured counterexample data for future use
+                            // (e.g., passing to save_visualizer_report when verify_impl gains output_dir)
+                            let _ = ce_json;
                             if ce_parts.is_empty() {
                                 "  (no concrete values available)".to_string()
                             } else {
@@ -2309,15 +2312,43 @@ fn verify_inner(
             solver.push();
             solver.assert(&ens_bool.not());
             if solver.check() == SatResult::Sat {
+                // Extract counterexample from Z3 model
+                let (ce_a, ce_b, ce_value) = if let Some(model) = solver.get_model() {
+                    let mut ce_json = serde_json::Map::new();
+                    for param in &atom.params {
+                        if let Some(var_z3) = env.get(&param.name) {
+                            if let Some(val) = model.eval(var_z3, true) {
+                                let val_str = format!("{}", val);
+                                ce_json.insert(param.name.clone(), json!(val_str));
+                            }
+                        }
+                    }
+                    let a_str = ce_json.get(atom.params.get(0).map(|p| p.name.as_str()).unwrap_or(""))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("N/A")
+                        .to_string();
+                    let b_str = ce_json.get(atom.params.get(1).map(|p| p.name.as_str()).unwrap_or(""))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("N/A")
+                        .to_string();
+                    let ce_val = if ce_json.is_empty() {
+                        None
+                    } else {
+                        Some(serde_json::Value::Object(ce_json))
+                    };
+                    (a_str, b_str, ce_val)
+                } else {
+                    ("N/A".to_string(), "N/A".to_string(), None)
+                };
                 solver.pop(1);
                 save_visualizer_report(
                     output_dir,
                     "failed",
                     &atom.name,
-                    "N/A",
-                    "N/A",
+                    &ce_a,
+                    &ce_b,
                     "Postcondition violated.",
-                    None,
+                    ce_value.as_ref(),
                 );
                 return Err(MumeiError::verification_at(
                     "Postcondition (ensures) is not satisfied.",
