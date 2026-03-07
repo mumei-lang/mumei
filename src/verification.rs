@@ -1007,7 +1007,7 @@ fn split_args(input: &str) -> Vec<String> {
 /// impl が対応する trait の全 law を満たしているかを Z3 で検証する。
 /// 各 law の論理式内のメソッド呼び出しを impl の具体的な body で置換し、
 /// ∀x. law_expr が成立するかを検証する。
-pub fn verify_impl(impl_def: &ImplDef, module_env: &ModuleEnv) -> MumeiResult<()> {
+pub fn verify_impl(impl_def: &ImplDef, module_env: &ModuleEnv, output_dir: &Path) -> MumeiResult<()> {
     let trait_def = module_env.get_trait(&impl_def.trait_name).ok_or_else(|| {
         MumeiError::type_error_at(
             format!(
@@ -1120,12 +1120,20 @@ pub fn verify_impl(impl_def: &ImplDef, module_env: &ModuleEnv) -> MumeiResult<()
                                     }
                                 }
                             }
-                            // ce_json contains structured counterexample data for future use
-                            // (e.g., passing to save_visualizer_report when verify_impl gains output_dir)
-                            let _ = ce_json;
                             if ce_parts.is_empty() {
                                 "  (no concrete values available)".to_string()
                             } else {
+                                // Save counterexample to visualizer report
+                                let ce_value = serde_json::Value::Object(ce_json);
+                                save_visualizer_report(
+                                    output_dir,
+                                    "failed",
+                                    &format!("impl {} for {}", impl_def.trait_name, impl_def.target_type),
+                                    "N/A",
+                                    "N/A",
+                                    &format!("Trait law '{}' not satisfied", law_name),
+                                    Some(&ce_value),
+                                );
                                 format!("  Counter-example: {}", ce_parts.join(", "))
                             }
                         } else {
@@ -2892,11 +2900,26 @@ fn expr_to_z3<'a>(
                             solver.push();
                             solver.assert(&ri._eq(&Int::from_i64(ctx, 0)));
                             if solver.check() == SatResult::Sat {
+                                // Extract counterexample: find which variables cause divisor == 0
+                                let ce_hint = if let Some(model) = solver.get_model() {
+                                    let divisor_val = model.eval(&ri, true)
+                                        .map(|v| format!("{}", v))
+                                        .unwrap_or_else(|| "0".to_string());
+                                    let dividend_val = model.eval(&li, true)
+                                        .map(|v| format!("{}", v))
+                                        .unwrap_or_else(|| "?".to_string());
+                                    format!(
+                                        " Counter-example: dividend = {}, divisor = {}",
+                                        dividend_val, divisor_val
+                                    )
+                                } else {
+                                    String::new()
+                                };
                                 solver.pop(1);
                                 return Err(MumeiError::verification(
-                                    "Potential division by zero.",
+                                    format!("Potential division by zero.{}", ce_hint),
                                 )
-                                .with_help("requires に除数 != 0 の条件を追加してください"));
+                                .with_help("Add a condition divisor != 0 to requires"));
                             }
                             solver.pop(1);
                         }
