@@ -417,7 +417,7 @@ fn cmd_verify(input: &str) {
                     "  🔧 Verifying impl {} for {}...",
                     impl_def.trait_name, impl_def.target_type
                 );
-                match verification::verify_impl(impl_def, &module_env) {
+                match verification::verify_impl(impl_def, &module_env, output_dir) {
                     Ok(_) => {
                         println!("    ✅ Laws verified");
                         verified += 1;
@@ -1072,7 +1072,7 @@ fn cmd_build(input: &str, output: &str) {
                 if skip_verify {
                     println!("    ⚖️  Laws verification skipped (verify=false in mumei.toml)");
                 } else {
-                    match verification::verify_impl(impl_def, &module_env) {
+                    match verification::verify_impl(impl_def, &module_env, output_dir) {
                         Ok(_) => println!(
                             "    ✅ Laws verified for impl {} for {}",
                             impl_def.trait_name, impl_def.target_type
