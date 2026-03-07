@@ -433,6 +433,252 @@ pub type MumeiResult<T> = Result<T, MumeiError>;
 type Env<'a> = HashMap<String, Dynamic<'a>>;
 type DynResult<'a> = MumeiResult<Dynamic<'a>>;
 
+// =============================================================================
+// Constraint Mapping (Feature 1-a: Semantic Counter-example Feedback)
+// =============================================================================
+
+/// Tracks the relationship between Z3 symbolic variables and source-level context.
+/// Used to generate semantic feedback from Z3 counter-examples.
+#[derive(Debug, Clone)]
+pub struct ConstraintMapping {
+    param_name: String,
+    type_name: Option<String>,
+    base_type: String,
+    predicate_raw: String,
+    #[allow(dead_code)]
+    span: Span,
+}
+
+// =============================================================================
+// Failure Type Classification (Feature 1-d)
+// =============================================================================
+
+/// Classification of verification failure types for structured reporting.
+pub const FAILURE_POSTCONDITION_VIOLATED: &str = "postcondition_violated";
+pub const FAILURE_PRECONDITION_VIOLATED: &str = "precondition_violated";
+pub const FAILURE_DIVISION_BY_ZERO: &str = "division_by_zero";
+pub const FAILURE_TRAIT_LAW_VIOLATED: &str = "trait_law_violated";
+pub const FAILURE_LINEARITY_VIOLATED: &str = "linearity_violated";
+pub const FAILURE_INVARIANT_VIOLATED: &str = "invariant_violated";
+pub const FAILURE_EXHAUSTIVENESS_FAILED: &str = "exhaustiveness_failed";
+pub const FAILURE_RESOURCE_CONFLICT: &str = "resource_conflict";
+
+// =============================================================================
+// Suggestion Templates per Failure Type (Feature 1-e)
+// =============================================================================
+
+pub fn suggestion_for_failure_type(failure_type: &str) -> &'static str {
+    match failure_type {
+        FAILURE_POSTCONDITION_VIOLATED => {
+            "Ensure the body's return value satisfies the ensures clause, or relax the ensures constraint"
+        }
+        FAILURE_PRECONDITION_VIOLATED => {
+            "The caller must establish the callee's requires clause before the call"
+        }
+        FAILURE_DIVISION_BY_ZERO => {
+            "Add a condition `divisor != 0` to requires, or guard the division with an if-expression"
+        }
+        FAILURE_TRAIT_LAW_VIOLATED => {
+            "The trait implementation does not satisfy the algebraic law; review the impl body"
+        }
+        FAILURE_LINEARITY_VIOLATED => {
+            "A linear resource was used after being consumed; ensure each consume is followed by no further use"
+        }
+        FAILURE_INVARIANT_VIOLATED => {
+            "The loop/recursive invariant is not maintained; strengthen the invariant or fix the body"
+        }
+        FAILURE_EXHAUSTIVENESS_FAILED => {
+            "Not all cases are covered in the match expression; add missing patterns"
+        }
+        FAILURE_RESOURCE_CONFLICT => {
+            "Resource acquisition order may cause deadlock; reorder acquire calls to follow priority ordering"
+        }
+        _ => "Review the verification failure and adjust the code or contracts accordingly",
+    }
+}
+
+// =============================================================================
+// Natural Language Constraint Template Engine (Feature 1-b)
+// =============================================================================
+
+/// Pattern-matches common predicate forms and generates human/AI-readable descriptions.
+/// Returns bilingual output: English primary, Japanese in parentheses.
+pub fn constraint_to_natural_language(
+    param_name: &str,
+    type_name: &str,
+    predicate_raw: &str,
+    value: &str,
+) -> String {
+    let pred = predicate_raw.trim();
+
+    // Try to match range pattern: v >= N && v <= M
+    if let Some(range_desc) = try_match_range(pred, param_name, type_name, value) {
+        return range_desc;
+    }
+
+    // Single comparison patterns
+    if let Some(desc) = try_match_comparison(pred, param_name, type_name, value) {
+        return desc;
+    }
+
+    // Fallback for unrecognized patterns
+    format!(
+        "{param} must satisfy constraint '{pred}' but value is {val} \
+         ({param} は制約 '{pred}' を満たす必要がありますが、値は {val} です)",
+        param = param_name,
+        pred = predicate_raw,
+        val = value,
+    )
+}
+
+/// Try to match a range pattern like "v >= N && v <= M"
+fn try_match_range(pred: &str, param_name: &str, type_name: &str, value: &str) -> Option<String> {
+    // Match patterns like "v >= N && v <= M" or "v > N && v < M"
+    let parts: Vec<&str> = pred.split("&&").map(|s| s.trim()).collect();
+    if parts.len() != 2 {
+        return None;
+    }
+    let lower = extract_bound(parts[0], true)?;
+    let upper = extract_bound(parts[1], false)?;
+    Some(format!(
+        "{param} is {val}, which violates {ty} constraint ({lower_bound} to {upper_bound}) \
+         ({param} が {val} のとき、{ty} の制約 {lower_bound} 以上 {upper_bound} 以下を逸脱します)",
+        param = param_name,
+        val = value,
+        ty = type_name,
+        lower_bound = lower,
+        upper_bound = upper,
+    ))
+}
+
+/// Extract a numeric bound from a comparison expression
+fn extract_bound(expr: &str, is_lower: bool) -> Option<String> {
+    let trimmed = expr.trim();
+    let ops: &[&str] = if is_lower { &[">=", ">"] } else { &["<=", "<"] };
+    for op in ops {
+        if let Some(idx) = trimmed.find(op) {
+            let rhs = trimmed[idx + op.len()..].trim();
+            return Some(rhs.to_string());
+        }
+    }
+    None
+}
+
+/// Try to match single comparison patterns
+fn try_match_comparison(
+    pred: &str,
+    param_name: &str,
+    type_name: &str,
+    value: &str,
+) -> Option<String> {
+    // Ordered from most specific to least specific operator
+    let patterns: &[(&str, &str, &str)] = &[
+        (">=", "must be at least", "以上である必要がありますが"),
+        ("<=", "must be at most", "以下である必要がありますが"),
+        ("!=", "must not be", "であってはなりませんが"),
+        (">", "must be greater than", "より大きい必要がありますが"),
+        ("<", "must be less than", "未満である必要がありますが"),
+    ];
+
+    for (op, en_desc, ja_desc) in patterns {
+        // Look for the operator in the predicate (e.g., "v <= 120")
+        if let Some(idx) = pred.find(op) {
+            let rhs = pred[idx + op.len()..].trim();
+            // Only match if rhs looks like a number or simple identifier
+            if rhs.is_empty() {
+                continue;
+            }
+            return Some(format!(
+                "{param} is {val}, which violates {ty} constraint {pred} \
+                 ({param} {en} {rhs} ({param} は {rhs} {ja}、値は {val} です))",
+                param = param_name,
+                val = value,
+                ty = type_name,
+                pred = pred,
+                rhs = rhs,
+                en = en_desc,
+                ja = ja_desc,
+            ));
+        }
+    }
+    None
+}
+
+/// Build constraint mappings for an atom's parameters by looking up their refined types.
+pub fn build_constraint_mappings_for_atom(
+    atom: &Atom,
+    module_env: &ModuleEnv,
+) -> Vec<ConstraintMapping> {
+    let mut mappings = Vec::new();
+    for param in &atom.params {
+        if let Some(ref type_ref) = param.type_ref {
+            let type_name_str = &type_ref.name;
+            if let Some(refined) = module_env.get_type(type_name_str) {
+                mappings.push(ConstraintMapping {
+                    param_name: param.name.clone(),
+                    type_name: Some(type_name_str.clone()),
+                    base_type: refined._base_type.clone(),
+                    predicate_raw: refined.predicate_raw.clone(),
+                    span: refined.span.clone(),
+                });
+            }
+        }
+    }
+    mappings
+}
+
+/// Build semantic feedback JSON from constraint mappings and counterexample values.
+pub fn build_semantic_feedback(
+    constraint_mappings: &[ConstraintMapping],
+    counterexample: Option<&serde_json::Value>,
+    atom: &Atom,
+    failure_type: &str,
+) -> Option<serde_json::Value> {
+    let ce_map = counterexample.and_then(|ce| ce.as_object());
+    let mut violated_constraints = Vec::new();
+
+    for mapping in constraint_mappings {
+        let value = ce_map
+            .and_then(|m| m.get(&mapping.param_name))
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+
+        let type_name = mapping.type_name.as_deref().unwrap_or(&mapping.base_type);
+        let explanation = constraint_to_natural_language(
+            &mapping.param_name,
+            type_name,
+            &mapping.predicate_raw,
+            value,
+        );
+
+        violated_constraints.push(json!({
+            "param": mapping.param_name,
+            "type": type_name,
+            "value": value,
+            "constraint": mapping.predicate_raw,
+            "explanation": explanation,
+            "suggestion": suggestion_for_failure_type(failure_type)
+        }));
+    }
+
+    if violated_constraints.is_empty() && ce_map.is_none() {
+        return None;
+    }
+
+    let mut feedback = json!({
+        "violated_constraints": violated_constraints
+    });
+
+    // Add context about the atom's contracts
+    feedback["context"] = json!({
+        "requires": atom.requires,
+        "ensures": atom.ensures,
+        "body_expr": atom.body_expr
+    });
+
+    Some(feedback)
+}
+
 /// 検証時に共有するコンテキスト（ctx, arr, module_env を束ねて引数を削減）
 struct VCtx<'a> {
     ctx: &'a Context,
@@ -635,6 +881,14 @@ pub struct ModuleEnv {
     /// パスプレフィックス → (range_start, range_end) のマッピング
     #[allow(dead_code)]
     pub prefix_ranges: HashMap<String, (i64, i64)>,
+
+    // =========================================================================
+    // Dependency Graph (Feature 2-a: Gradual Verification)
+    // =========================================================================
+    /// Forward dependency graph: atom_name → set of atoms it calls
+    pub dependency_graph: HashMap<String, HashSet<String>>,
+    /// Reverse dependency graph: atom_name → set of atoms that call it
+    pub reverse_deps: HashMap<String, HashSet<String>>,
 }
 
 impl ModuleEnv {
@@ -903,6 +1157,40 @@ impl ModuleEnv {
     pub fn register_effect_def(&mut self, effect_def: &EffectDef) {
         self.effect_defs
             .insert(effect_def.name.clone(), effect_def.clone());
+    }
+
+    // =========================================================================
+    // Dependency Graph Methods (Feature 2-a)
+    // =========================================================================
+
+    /// Register the set of atoms that `atom_name` calls.
+    /// Populates both forward (`dependency_graph`) and reverse (`reverse_deps`) maps.
+    pub fn register_dependencies(&mut self, atom_name: &str, callees: HashSet<String>) {
+        for callee in &callees {
+            self.reverse_deps
+                .entry(callee.clone())
+                .or_default()
+                .insert(atom_name.to_string());
+        }
+        self.dependency_graph.insert(atom_name.to_string(), callees);
+    }
+
+    /// BFS traversal of `reverse_deps` to find all atoms transitively depending
+    /// on the given atom.
+    pub fn get_transitive_dependents(&self, atom_name: &str) -> HashSet<String> {
+        let mut result = HashSet::new();
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back(atom_name.to_string());
+        while let Some(current) = queue.pop_front() {
+            if let Some(dependents) = self.reverse_deps.get(&current) {
+                for dep in dependents {
+                    if result.insert(dep.clone()) {
+                        queue.push_back(dep.clone());
+                    }
+                }
+            }
+        }
+        result
     }
 }
 
@@ -1367,6 +1655,9 @@ pub fn verify_impl(
                                 "N/A",
                                 &format!("Trait law '{}' not satisfied", law_name),
                                 ce_value.as_ref(),
+                                FAILURE_TRAIT_LAW_VIOLATED,
+                                None,
+                                Some(&impl_def.span),
                             );
                             if ce_parts.is_empty() {
                                 "  (no concrete values available)".to_string()
@@ -2617,6 +2908,9 @@ fn verify_inner(
                 "N/A",
                 "Trusted: body verification skipped, contract assumed correct.",
                 None,
+                "",
+                None,
+                Some(&atom.span),
             );
             return Ok(());
         }
@@ -2638,6 +2932,9 @@ fn verify_inner(
                     "N/A",
                     "Unverified: no contract to verify.",
                     None,
+                    "",
+                    None,
+                    Some(&atom.span),
                 );
                 return Ok(());
             }
@@ -3022,7 +3319,16 @@ fn verify_inner(
                 }
             }
             save_visualizer_report(
-                output_dir, "failed", &atom.name, "N/A", "N/A", &err_str, None,
+                output_dir,
+                "failed",
+                &atom.name,
+                "N/A",
+                "N/A",
+                &err_str,
+                None,
+                FAILURE_PRECONDITION_VIOLATED,
+                None,
+                Some(&atom.span),
             );
             return Err(e);
         }
@@ -3071,6 +3377,13 @@ fn verify_inner(
                     ("N/A".to_string(), "N/A".to_string(), None)
                 };
                 solver.pop(1);
+                let constraint_mappings = build_constraint_mappings_for_atom(atom, module_env);
+                let semantic_fb = build_semantic_feedback(
+                    &constraint_mappings,
+                    ce_value.as_ref(),
+                    atom,
+                    FAILURE_POSTCONDITION_VIOLATED,
+                );
                 save_visualizer_report(
                     output_dir,
                     "failed",
@@ -3079,6 +3392,9 @@ fn verify_inner(
                     &ce_b,
                     "Postcondition violated.",
                     ce_value.as_ref(),
+                    FAILURE_POSTCONDITION_VIOLATED,
+                    semantic_fb.as_ref(),
+                    Some(&atom.span),
                 );
                 return Err(MumeiError::verification_at(
                     "Postcondition (ensures) is not satisfied.",
@@ -3131,6 +3447,9 @@ fn verify_inner(
             "N/A",
             "Logic contradiction.",
             None,
+            FAILURE_INVARIANT_VIOLATED,
+            None,
+            Some(&atom.span),
         );
         return Err(MumeiError::verification_at(
             "Contradiction found.",
@@ -3146,6 +3465,9 @@ fn verify_inner(
         "N/A",
         "Verified safe.",
         None,
+        "",
+        None,
+        Some(&atom.span),
     );
     Ok(())
 }
@@ -4804,6 +5126,7 @@ fn propagate_equality_from_ensures<'a>(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn save_visualizer_report(
     output_dir: &Path,
     status: &str,
@@ -4812,6 +5135,9 @@ fn save_visualizer_report(
     b: &str,
     reason: &str,
     counterexample: Option<&serde_json::Value>,
+    failure_type: &str,
+    semantic_feedback: Option<&serde_json::Value>,
+    span: Option<&Span>,
 ) {
     let mut report = json!({
         "status": status,
@@ -4820,8 +5146,22 @@ fn save_visualizer_report(
         "input_b": b,
         "reason": reason
     });
+    if !failure_type.is_empty() {
+        report["failure_type"] = json!(failure_type);
+    }
     if let Some(ce) = counterexample {
         report["counterexample"] = ce.clone();
+    }
+    if let Some(sf) = semantic_feedback {
+        report["semantic_feedback"] = sf.clone();
+    }
+    if let Some(s) = span {
+        report["span"] = json!({
+            "file": s.file,
+            "line": s.line,
+            "col": s.col,
+            "len": s.len
+        });
     }
     let _ = fs::create_dir_all(output_dir);
     let _ = fs::write(output_dir.join("report.json"), report.to_string());
