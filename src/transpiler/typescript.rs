@@ -395,5 +395,21 @@ fn format_expr_ts(expr: &Expr) -> String {
             let args_str: Vec<String> = args.iter().map(format_expr_ts).collect();
             format!("{}({})", callee_str, args_str.join(", "))
         }
+        Expr::Perform {
+            effect,
+            operation,
+            args,
+        } => {
+            // @effects perform Effect.operation(args) → function call
+            let args_str: Vec<String> = args.iter().map(format_expr_ts).collect();
+            format!(
+                "/* perform {}.{} */ {}{}({})",
+                effect,
+                operation,
+                effect.to_lowercase(),
+                operation,
+                args_str.join(", ")
+            )
+        }
     }
 }

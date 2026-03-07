@@ -398,5 +398,21 @@ fn format_expr_go(expr: &Expr) -> String {
             let args_str: Vec<String> = args.iter().map(format_expr_go).collect();
             format!("{}({})", callee_str, args_str.join(", "))
         }
+        Expr::Perform {
+            effect,
+            operation,
+            args,
+        } => {
+            // Effects: perform Effect.operation(args) → function call
+            let args_str: Vec<String> = args.iter().map(format_expr_go).collect();
+            format!(
+                "/* perform {}.{} */ {}{}({})",
+                effect,
+                operation,
+                effect,
+                capitalize_first(operation),
+                args_str.join(", ")
+            )
+        }
     }
 }

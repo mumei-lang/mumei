@@ -1007,7 +1007,11 @@ fn split_args(input: &str) -> Vec<String> {
 /// impl が対応する trait の全 law を満たしているかを Z3 で検証する。
 /// 各 law の論理式内のメソッド呼び出しを impl の具体的な body で置換し、
 /// ∀x. law_expr が成立するかを検証する。
-pub fn verify_impl(impl_def: &ImplDef, module_env: &ModuleEnv, output_dir: &Path) -> MumeiResult<()> {
+pub fn verify_impl(
+    impl_def: &ImplDef,
+    module_env: &ModuleEnv,
+    output_dir: &Path,
+) -> MumeiResult<()> {
     let trait_def = module_env.get_trait(&impl_def.trait_name).ok_or_else(|| {
         MumeiError::type_error_at(
             format!(
@@ -1131,7 +1135,10 @@ pub fn verify_impl(impl_def: &ImplDef, module_env: &ModuleEnv, output_dir: &Path
                             save_visualizer_report(
                                 output_dir,
                                 "failed",
-                                &format!("impl {} for {}", impl_def.trait_name, impl_def.target_type),
+                                &format!(
+                                    "impl {} for {}",
+                                    impl_def.trait_name, impl_def.target_type
+                                ),
                                 "N/A",
                                 "N/A",
                                 &format!("Trait law '{}' not satisfied", law_name),
@@ -2354,11 +2361,13 @@ fn verify_inner(
                             }
                         }
                     }
-                    let a_str = ce_json.get(atom.params.get(0).map(|p| p.name.as_str()).unwrap_or(""))
+                    let a_str = ce_json
+                        .get(atom.params.first().map(|p| p.name.as_str()).unwrap_or(""))
                         .and_then(|v| v.as_str())
                         .unwrap_or("N/A")
                         .to_string();
-                    let b_str = ce_json.get(atom.params.get(1).map(|p| p.name.as_str()).unwrap_or(""))
+                    let b_str = ce_json
+                        .get(atom.params.get(1).map(|p| p.name.as_str()).unwrap_or(""))
                         .and_then(|v| v.as_str())
                         .unwrap_or("N/A")
                         .to_string();
@@ -2925,10 +2934,12 @@ fn expr_to_z3<'a>(
                             if solver.check() == SatResult::Sat {
                                 // Extract counterexample: find which variables cause divisor == 0
                                 let ce_hint = if let Some(model) = solver.get_model() {
-                                    let divisor_val = model.eval(&ri, true)
+                                    let divisor_val = model
+                                        .eval(&ri, true)
                                         .map(|v| format!("{}", v))
                                         .unwrap_or_else(|| "0".to_string());
-                                    let dividend_val = model.eval(&li, true)
+                                    let dividend_val = model
+                                        .eval(&li, true)
                                         .map(|v| format!("{}", v))
                                         .unwrap_or_else(|| "?".to_string());
                                     format!(
@@ -2939,9 +2950,10 @@ fn expr_to_z3<'a>(
                                     String::new()
                                 };
                                 solver.pop(1);
-                                return Err(MumeiError::verification(
-                                    format!("Potential division by zero.{}", ce_hint),
-                                )
+                                return Err(MumeiError::verification(format!(
+                                    "Potential division by zero.{}",
+                                    ce_hint
+                                ))
                                 .with_help("Add a condition divisor != 0 to requires"));
                             }
                             solver.pop(1);
@@ -3286,6 +3298,27 @@ fn expr_to_z3<'a>(
         // =================================================================
         // 非同期処理 + リソース管理の Z3 検証
         // =================================================================
+        Expr::Perform {
+            effect,
+            operation,
+            args: perform_args,
+        } => {
+            // Effect system: record effect usage and verify against allowed set
+            // Phase 1 placeholder — actual Z3 effect containment proof comes in Phase 3
+            let used_name = format!("__effect_used_{}", effect);
+            let used_bool = Bool::from_bool(ctx, true);
+            env.insert(used_name, used_bool.into());
+
+            // Process arguments
+            for arg in perform_args {
+                expr_to_z3(vc, arg, env, solver_opt)?;
+            }
+
+            // Return a symbolic result value
+            let result_name = format!("__perform_{}_{}", effect, operation);
+            Ok(Int::new_const(ctx, result_name.as_str()).into())
+        }
+
         Expr::Acquire { resource, body } => {
             // acquire ブロック: リソースを取得して body を実行し、自動解放する。
             // Z3 上ではリソースの保持状態をシンボリック Bool で追跡する。

@@ -210,6 +210,7 @@ fn resolve_imports_recursive(
                     Item::ResourceDef(_) => {}
                     Item::Import(_) => {}
                     Item::ExternBlock(_) => {}
+                    Item::EffectDef(_) => {}
                 }
             }
 
@@ -287,6 +288,9 @@ fn register_imported_items(items: &[Item], alias: Option<&str>, module_env: &mut
             Item::Import(_) => {
                 // 再帰的に処理済み
             }
+            Item::EffectDef(_) => {
+                // Effect definitions handled separately
+            }
             Item::ExternBlock(extern_block) => {
                 // ExternBlock 内の関数を trusted atom として ModuleEnv に登録
                 for ext_fn in &extern_block.functions {
@@ -318,6 +322,7 @@ fn register_imported_items(items: &[Item], alias: Option<&str>, module_env: &mut
                         trust_level: crate::parser::TrustLevel::Trusted,
                         max_unroll: None,
                         invariant: None,
+                        effects: vec![],
                         span: ext_fn.span.clone(),
                     };
                     module_env.register_atom(&atom);

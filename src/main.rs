@@ -270,6 +270,7 @@ fn load_and_prepare(input: &str) -> (Vec<Item>, verification::ModuleEnv, Vec<Imp
             Item::TraitDef(trait_def) => module_env.register_trait(trait_def),
             Item::ImplDef(impl_def) => module_env.register_impl(impl_def),
             Item::ResourceDef(resource_def) => module_env.register_resource(resource_def),
+            Item::EffectDef(_) => {} // Effect definitions registered separately
             Item::ExternBlock(extern_block) => {
                 for ext_fn in &extern_block.functions {
                     // ExternFn → trusted Atom に変換して ModuleEnv に登録
@@ -301,6 +302,7 @@ fn load_and_prepare(input: &str) -> (Vec<Item>, verification::ModuleEnv, Vec<Imp
                         trust_level: parser::TrustLevel::Trusted,
                         max_unroll: None,
                         invariant: None,
+                        effects: vec![],
                         span: ext_fn.span.clone(),
                     };
                     module_env.register_atom(&atom);
@@ -381,6 +383,9 @@ fn cmd_check(input: &str) {
                     eb.language,
                     eb.functions.len()
                 );
+            }
+            Item::EffectDef(e) => {
+                println!("  ⚡ Effect: '{}'", e.name);
             }
         }
     }
@@ -1121,6 +1126,11 @@ fn cmd_build(input: &str, output: &str) {
                 );
             }
 
+            // --- エフェクト定義 ---
+            Item::EffectDef(effect_def) => {
+                println!("  ⚡ Effect: '{}'", effect_def.name);
+            }
+
             // --- Atom の処理 ---
             Item::Atom(atom) => {
                 atom_count += 1;
@@ -1568,6 +1578,7 @@ fn cmd_repl() {
                                     trust_level: parser::TrustLevel::Trusted,
                                     max_unroll: None,
                                     invariant: None,
+                                    effects: vec![],
                                     span: ext_fn.span.clone(),
                                 };
                                 module_env.register_atom(&atom);
@@ -1575,6 +1586,7 @@ fn cmd_repl() {
                             }
                         }
                         parser::Item::Import(_) => {}
+                        parser::Item::EffectDef(_) => {}
                     }
                 }
                 println!("  ✅ Loaded {} definition(s) from '{}'", count, file);
@@ -2410,6 +2422,7 @@ atom main() -> i64
                             trust_level: parser::TrustLevel::Trusted,
                             max_unroll: None,
                             invariant: None,
+                            effects: vec![],
                             span: ext_fn.span.clone(),
                         };
                         module_env.register_atom(&atom);

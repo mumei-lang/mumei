@@ -961,6 +961,38 @@ fn compile_expr<'a>(
                 .unwrap_or(context.i64_type().const_int(0, false).into()))
         }
 
+        Expr::Perform {
+            effect,
+            operation,
+            args: perform_args,
+        } => {
+            // Effect system Phase 1: placeholder — lower perform to a runtime call
+            // In future phases, this will call __effect_{Effect}_{operation}(args)
+            let fn_name = format!("__effect_{}_{}", effect, operation);
+            let callee_fn = module.get_function(&fn_name).unwrap_or_else(|| {
+                let param_types: Vec<BasicMetadataTypeEnum> = perform_args
+                    .iter()
+                    .map(|_| context.i64_type().into())
+                    .collect();
+                let fn_type = context.i64_type().fn_type(&param_types, false);
+                module.add_function(&fn_name, fn_type, None)
+            });
+            let mut arg_vals = Vec::new();
+            for arg in perform_args {
+                let val = compile_expr(
+                    context, builder, module, function, arg, variables, array_ptrs, module_env,
+                )?;
+                arg_vals.push(val);
+            }
+            let args_meta: Vec<BasicMetadataValueEnum> =
+                arg_vals.iter().map(|v| (*v).into()).collect();
+            let call_result = llvm!(builder.build_call(callee_fn, &args_meta, "perform_result"));
+            Ok(call_result
+                .try_as_basic_value()
+                .left()
+                .unwrap_or(context.i64_type().const_int(0, false).into()))
+        }
+
         Expr::FieldAccess(inner_expr, field_name) => {
             // ネスト構造体のフィールドアクセスを再帰的に解決する。
             // v.x → 1段階、v.point.x → 2段階（再帰的に extract_value）
