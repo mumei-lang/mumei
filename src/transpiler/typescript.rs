@@ -212,7 +212,16 @@ pub fn transpile_to_ts(hir_atom: &HirAtom) -> String {
         .collect::<Vec<_>>()
         .join(", ");
 
-    let body = format_hir_stmt_ts(&hir_atom.body);
+    // トップレベルの body が純粋な式（HirStmt::Expr）の場合、return を補う。
+    // Block の場合は内部で tail_expr に return が付与されるため不要。
+    let body = {
+        let raw = format_hir_stmt_ts(&hir_atom.body);
+        if needs_return_prefix_ts(&raw) {
+            format!("return {};", raw)
+        } else {
+            raw
+        }
+    };
 
     let async_keyword = if atom.is_async { "async " } else { "" };
     let return_type = if atom.is_async {
@@ -430,4 +439,18 @@ fn format_hir_stmt_ts(stmt: &HirStmt) -> String {
         }
         HirStmt::Expr(expr) => format_hir_expr_ts(expr),
     }
+}
+
+/// トップレベル body の出力に `return` プレフィックスが必要かを判定する。
+/// 文（let, if, while, switch, コメント, return 済み）には不要。
+fn needs_return_prefix_ts(code: &str) -> bool {
+    !(code.starts_with("return ")
+        || code.starts_with("if ")
+        || code.starts_with("if(")
+        || code.starts_with("while ")
+        || code.starts_with("while(")
+        || code.starts_with("switch ")
+        || code.starts_with("let ")
+        || code.starts_with("//")
+        || code.contains(" = "))
 }

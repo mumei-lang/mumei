@@ -173,7 +173,16 @@ pub fn transpile_to_go(hir_atom: &HirAtom) -> String {
     let params_str = params.join(", ");
 
     // ボディの変換（HIR から直接）
-    let body = format_hir_stmt_go(&hir_atom.body);
+    // トップレベルの body が純粋な式（HirStmt::Expr）の場合、return を補う。
+    // Block の場合は内部で tail_expr に return が付与されるため不要。
+    let body = {
+        let raw = format_hir_stmt_go(&hir_atom.body);
+        if needs_return_prefix_go(&raw) {
+            format!("return {}", raw)
+        } else {
+            raw
+        }
+    };
 
     // mathパッケージが必要な関数(sqrt等)があるか簡易チェック
     let imports = if atom.body_expr.contains("sqrt") {
@@ -432,4 +441,18 @@ fn format_hir_stmt_go(stmt: &HirStmt) -> String {
         }
         HirStmt::Expr(expr) => format_hir_expr_go(expr),
     }
+}
+
+/// トップレベル body の出力に `return` プレフィックスが必要かを判定する。
+/// 文（let, if, for, switch, var, コメント, return 済み）には不要。
+fn needs_return_prefix_go(code: &str) -> bool {
+    // 既に return / 文キーワード / 代入 / コメントで始まっていれば不要
+    !(code.starts_with("return ")
+        || code.starts_with("if ")
+        || code.starts_with("for ")
+        || code.starts_with("switch ")
+        || code.starts_with("var ")
+        || code.starts_with("//")
+        || code.contains(":=")
+        || code.contains(" = "))
 }
