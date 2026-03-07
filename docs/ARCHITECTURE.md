@@ -6,6 +6,7 @@
 source.mm → parse → resolve → monomorphize → verify (Z3) → codegen (LLVM IR) → transpile (Rust/Go/TS)
                                                 ↑
                                    Resource Hierarchy Check (deadlock-free proof)
+                                   Effect Containment Check (side-effect safety proof)
                                    Async Safety Verification (ownership across await)
 ```
 
@@ -375,3 +376,143 @@ exclusion — not deadlock prevention.
 | `async atom f(x: T)` | `pub async fn f(x: T)` | `func f(x T) // goroutine` | `async function f(x: number)` |
 | `await expr` | `expr.await` | `<-ch` | `await expr` |
 | `acquire r { body }` | `let _g = r.lock(); { body }` | `r.Lock(); { body }; r.Unlock()` | `await r.acquire(); { body }; r.release()` |
+
+---
+
+## Effect System (Side-Effect Verification)
+
+### Design
+
+Mumei's Effect System allows developers to declare what side effects a function may
+perform and uses Z3 to mathematically prove that no undeclared effects occur at
+compile time. Atoms without an `effects:` annotation are treated as **Pure** (no
+side effects allowed).
+
+### Effect Definition
+
+```mumei
+// Basic effects
+effect FileRead;
+effect FileWrite;
+effect Network;
+effect Log;
+effect Console;
+
+// Composite effects (transitive inclusion)
+effect IO includes: [FileRead, FileWrite, Console];
+effect FullAccess includes: [IO, Network, Log];
+```
+
+Built-in effects are registered by `register_builtin_effects()` in `verification.rs`
+and also defined in `std/effects.mm`.
+
+### Atom Effect Annotation
+
+```mumei
+atom write_log(msg: i64)
+effects: [Log, FileWrite];
+requires: msg >= 0;
+ensures: result >= 0;
+body: {
+    perform FileWrite.write(msg);
+    perform Log.info(msg);
+    msg
+};
+
+// Pure atom: no effects allowed
+atom pure_add(a: i64, b: i64)
+requires: true;
+ensures: result == a + b;
+body: a + b;
+```
+
+### Z3 Verification Model
+
+The Effect System uses Z3 to prove the **effect containment** property:
+
+```
+ForAll e in UsedEffects(Body): e in AllowedEffects(Signature)
+```
+
+Z3 encoding:
+1. For each known effect E, create a boolean `__effect_allowed_E`
+2. Assert `__effect_allowed_E = true` for each E in the atom's declared effects (transitively expanded)
+3. For each `perform E.op(...)` in the body, create `__effect_used_E = true`
+4. Check that `(__effect_used_E AND NOT __effect_allowed_E)` is UNSAT for all E
+5. If SAT, report the specific effect violation
+
+### Effect Propagation
+
+When atom A calls atom B, the verifier checks:
+
+```
+B.effects is subset of A.effects
+```
+
+If B requires effects not in A's allowed set, a propagation error is reported:
+
+```
+Effect propagation violation: atom 'log_only_caller' calls 'network_logger'
+which requires [Network] effect, but 'log_only_caller' only declares [Log].
+```
+
+### EffectCtx
+
+```rust
+struct EffectCtx {
+    allowed_effects: HashSet<String>,  // From atom's effects annotation (expanded)
+    used_effects: HashSet<String>,     // From perform expressions in body
+    violations: Vec<String>,           // Detected violations
+}
+```
+
+### Verification Pipeline Integration
+
+```
+0. TrustLevel check
+1. verify_resource_hierarchy()
+1b-1e. (existing checks)
+1f. verify_effect_containment() -- Z3 proof of effect set inclusion
+2. expr_to_z3(Acquire): resource tracking
+2b. expr_to_z3(Perform): effect usage tracking and verification
+3-5. (existing pipeline continues)
+```
+
+### Code Generation
+
+| Construct | LLVM IR Output |
+|---|---|
+| `perform Effect.op(args)` | `call i64 @__effect_Effect_op(args)` |
+
+The `@__effect_{Effect}_{operation}` symbols are resolved at link time by the
+runtime implementation of each effect.
+
+### Transpiler Mapping (Effects)
+
+| Mumei | Rust | Go | TypeScript |
+|---|---|---|---|
+| `effects: [FileWrite]` | `/// Effects: [FileWrite]` | `// Effects: [FileWrite]` | `@effects [FileWrite]` (JSDoc) |
+| `perform FileWrite.write(x)` | `/* perform FileWrite.write */ filewrite_write(x)` | `/* perform FileWrite.write */ FileWriteWrite(x)` | `/* perform FileWrite.write */ filewritewrite(x)` |
+
+### Error Reporting
+
+Effect violations produce structured JSON in `report.json` for self-healing integration:
+
+```json
+{
+    "status": "failed",
+    "atom": "log_only",
+    "violation_type": "effect_propagation_violation",
+    "declared_effects": ["Log"],
+    "required_effect": "Network",
+    "suggested_fixes": ["Add [Network] to the effects declaration"],
+    "reason": "Effect violation: atom 'log_only' declares [Log] but requires 'Network'"
+}
+```
+
+### Standard Library
+
+`std/effects.mm` defines the built-in effect hierarchy:
+- **FileRead**, **FileWrite**, **Network**, **Log**, **Console** (basic effects)
+- **IO** includes: FileRead, FileWrite, Console
+- **FullAccess** includes: IO, Network, Log
