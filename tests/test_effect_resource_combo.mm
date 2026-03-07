@@ -4,7 +4,7 @@
 // Atom uses both resource acquire and effect perform.
 
 effect FileWrite;
-resource db;
+resource db priority: 1 mode: exclusive;
 
 atom write_with_resource(x: i64)
 effects: [FileWrite];
