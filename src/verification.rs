@@ -1007,7 +1007,7 @@ fn split_args(input: &str) -> Vec<String> {
 /// impl が対応する trait の全 law を満たしているかを Z3 で検証する。
 /// 各 law の論理式内のメソッド呼び出しを impl の具体的な body で置換し、
 /// ∀x. law_expr が成立するかを検証する。
-pub fn verify_impl(impl_def: &ImplDef, module_env: &ModuleEnv) -> MumeiResult<()> {
+pub fn verify_impl(impl_def: &ImplDef, module_env: &ModuleEnv, output_dir: &Path) -> MumeiResult<()> {
     let trait_def = module_env.get_trait(&impl_def.trait_name).ok_or_else(|| {
         MumeiError::type_error_at(
             format!(
@@ -1107,6 +1107,7 @@ pub fn verify_impl(impl_def: &ImplDef, module_env: &ModuleEnv) -> MumeiResult<()
                         let counterexample = if let Some(model) = solver.get_model() {
                             let var_names = ["a", "b", "c", "x", "y", "z"];
                             let mut ce_parts = Vec::new();
+                            let mut ce_json = serde_json::Map::new();
                             for var_name in &var_names {
                                 if let Some(var_z3) = env.get(*var_name) {
                                     if let Some(val) = model.eval(var_z3, true) {
@@ -1114,10 +1115,28 @@ pub fn verify_impl(impl_def: &ImplDef, module_env: &ModuleEnv) -> MumeiResult<()
                                         // 変数が law 式に含まれている場合のみ表示
                                         if law_expr.contains(*var_name) {
                                             ce_parts.push(format!("{} = {}", var_name, val_str));
+                                            ce_json.insert(var_name.to_string(), json!(val_str));
                                         }
                                     }
                                 }
                             }
+                            // Save counterexample to visualizer report
+                            // (even when no concrete values are available, still write report.json
+                            // so the MCP self-healing flow can detect the failure)
+                            let ce_value = if ce_json.is_empty() {
+                                None
+                            } else {
+                                Some(serde_json::Value::Object(ce_json))
+                            };
+                            save_visualizer_report(
+                                output_dir,
+                                "failed",
+                                &format!("impl {} for {}", impl_def.trait_name, impl_def.target_type),
+                                "N/A",
+                                "N/A",
+                                &format!("Trait law '{}' not satisfied", law_name),
+                                ce_value.as_ref(),
+                            );
                             if ce_parts.is_empty() {
                                 "  (no concrete values available)".to_string()
                             } else {
@@ -1984,6 +2003,7 @@ fn verify_inner(
                 "N/A",
                 "N/A",
                 "Trusted: body verification skipped, contract assumed correct.",
+                None,
             );
             return Ok(());
         }
@@ -2004,6 +2024,7 @@ fn verify_inner(
                     "N/A",
                     "N/A",
                     "Unverified: no contract to verify.",
+                    None,
                 );
                 return Ok(());
             }
@@ -2291,7 +2312,24 @@ fn verify_inner(
 
     // 4. ボディの検証
     let body_ast = parse_expression(&atom.body_expr);
-    let body_result = expr_to_z3(&vc, &body_ast, &mut env, Some(&solver))?;
+    let body_result = match expr_to_z3(&vc, &body_ast, &mut env, Some(&solver)) {
+        Ok(val) => val,
+        Err(e) => {
+            // Body evaluation errors (e.g., division by zero, out-of-bounds) propagate
+            // before reaching the postcondition check. Write a failure report so the
+            // MCP self-healing flow does not read a stale report.json from a prior run.
+            save_visualizer_report(
+                output_dir,
+                "failed",
+                &atom.name,
+                "N/A",
+                "N/A",
+                &format!("{}", e),
+                None,
+            );
+            return Err(e);
+        }
+    };
 
     // 4b. Taint Analysis: unverified 関数の呼び出しを検出し警告
     check_taint_propagation(atom, &env, module_env);
@@ -2305,14 +2343,43 @@ fn verify_inner(
             solver.push();
             solver.assert(&ens_bool.not());
             if solver.check() == SatResult::Sat {
+                // Extract counterexample from Z3 model
+                let (ce_a, ce_b, ce_value) = if let Some(model) = solver.get_model() {
+                    let mut ce_json = serde_json::Map::new();
+                    for param in &atom.params {
+                        if let Some(var_z3) = env.get(&param.name) {
+                            if let Some(val) = model.eval(var_z3, true) {
+                                let val_str = format!("{}", val);
+                                ce_json.insert(param.name.clone(), json!(val_str));
+                            }
+                        }
+                    }
+                    let a_str = ce_json.get(atom.params.get(0).map(|p| p.name.as_str()).unwrap_or(""))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("N/A")
+                        .to_string();
+                    let b_str = ce_json.get(atom.params.get(1).map(|p| p.name.as_str()).unwrap_or(""))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("N/A")
+                        .to_string();
+                    let ce_val = if ce_json.is_empty() {
+                        None
+                    } else {
+                        Some(serde_json::Value::Object(ce_json))
+                    };
+                    (a_str, b_str, ce_val)
+                } else {
+                    ("N/A".to_string(), "N/A".to_string(), None)
+                };
                 solver.pop(1);
                 save_visualizer_report(
                     output_dir,
                     "failed",
                     &atom.name,
-                    "N/A",
-                    "N/A",
+                    &ce_a,
+                    &ce_b,
                     "Postcondition violated.",
+                    ce_value.as_ref(),
                 );
                 return Err(MumeiError::verification_at(
                     "Postcondition (ensures) is not satisfied.",
@@ -2364,6 +2431,7 @@ fn verify_inner(
             "N/A",
             "N/A",
             "Logic contradiction.",
+            None,
         );
         return Err(MumeiError::verification_at(
             "Contradiction found.",
@@ -2378,6 +2446,7 @@ fn verify_inner(
         "N/A",
         "N/A",
         "Verified safe.",
+        None,
     );
     Ok(())
 }
@@ -2854,11 +2923,26 @@ fn expr_to_z3<'a>(
                             solver.push();
                             solver.assert(&ri._eq(&Int::from_i64(ctx, 0)));
                             if solver.check() == SatResult::Sat {
+                                // Extract counterexample: find which variables cause divisor == 0
+                                let ce_hint = if let Some(model) = solver.get_model() {
+                                    let divisor_val = model.eval(&ri, true)
+                                        .map(|v| format!("{}", v))
+                                        .unwrap_or_else(|| "0".to_string());
+                                    let dividend_val = model.eval(&li, true)
+                                        .map(|v| format!("{}", v))
+                                        .unwrap_or_else(|| "?".to_string());
+                                    format!(
+                                        " Counter-example: dividend = {}, divisor = {}",
+                                        dividend_val, divisor_val
+                                    )
+                                } else {
+                                    String::new()
+                                };
                                 solver.pop(1);
                                 return Err(MumeiError::verification(
-                                    "Potential division by zero.",
+                                    format!("Potential division by zero.{}", ce_hint),
                                 )
-                                .with_help("requires に除数 != 0 の条件を追加してください"));
+                                .with_help("Add a condition divisor != 0 to requires"));
                             }
                             solver.pop(1);
                         }
@@ -3980,9 +4064,18 @@ fn save_visualizer_report(
     a: &str,
     b: &str,
     reason: &str,
+    counterexample: Option<&serde_json::Value>,
 ) {
-    let report =
-        json!({ "status": status, "atom": name, "input_a": a, "input_b": b, "reason": reason });
+    let mut report = json!({
+        "status": status,
+        "atom": name,
+        "input_a": a,
+        "input_b": b,
+        "reason": reason
+    });
+    if let Some(ce) = counterexample {
+        report["counterexample"] = ce.clone();
+    }
     let _ = fs::create_dir_all(output_dir);
     let _ = fs::write(output_dir.join("report.json"), report.to_string());
 }
