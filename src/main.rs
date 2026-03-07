@@ -2,6 +2,7 @@
 
 mod ast;
 mod codegen;
+mod hir;
 mod lsp;
 #[allow(dead_code)]
 mod manifest;
@@ -12,6 +13,7 @@ mod setup;
 mod transpiler;
 mod verification;
 
+use crate::hir::lower_atom_to_hir;
 use crate::parser::{ImportDecl, Item};
 use crate::transpiler::{
     transpile, transpile_enum, transpile_impl, transpile_module_header, transpile_struct,
@@ -487,7 +489,8 @@ fn cmd_verify(input: &str) {
                         .filter(|tn| module_env.get_type(tn).is_some())
                         .collect();
 
-                    match verification::verify(atom, output_dir, &module_env) {
+                    let hir_atom = lower_atom_to_hir(atom);
+                    match verification::verify(&hir_atom, output_dir, &module_env) {
                         Ok(_) => {
                             println!("  ⚖️  '{}': verified ✅", atom.name);
                             module_env.mark_verified(&atom.name);
@@ -1225,8 +1228,9 @@ fn cmd_build(input: &str, output: &str) {
                         println!("  ⚖️  [2/4] Verification: Skipped (unchanged, cached) ⏩");
                         module_env.mark_verified(&atom.name);
                     } else {
+                        let hir_atom = lower_atom_to_hir(atom);
                         match verification::verify_with_config(
-                            atom,
+                            &hir_atom,
                             output_dir,
                             &module_env,
                             proof_cfg.timeout_ms,
@@ -1280,7 +1284,8 @@ fn cmd_build(input: &str, output: &str) {
                 // --- 3. Codegen (LLVM 18 + Floating Point) ---
                 // 各 Atom ごとに .ll ファイルを生成（またはモジュールを統合する拡張も可能）
                 let atom_output_path = output_dir.join(format!("{}_{}", file_stem, atom.name));
-                match codegen::compile(atom, &atom_output_path, &module_env) {
+                let hir_atom_cg = lower_atom_to_hir(atom);
+                match codegen::compile(&hir_atom_cg, &atom_output_path, &module_env) {
                     Ok(_) => println!(
                         "  ⚙️  [3/4] Tempering: Done. Compiled '{}' to LLVM IR.",
                         atom.name
@@ -1295,16 +1300,17 @@ fn cmd_build(input: &str, output: &str) {
 
                 // --- 4. Transpile (多言語エクスポート) ---
                 // バンドル用に各言語のコードを生成（有効な言語のみ）
+                let hir_atom_tp = lower_atom_to_hir(atom);
                 if enable_rust {
-                    rust_bundle.push_str(&transpile(atom, TargetLanguage::Rust));
+                    rust_bundle.push_str(&transpile(&hir_atom_tp, TargetLanguage::Rust));
                     rust_bundle.push_str("\n\n");
                 }
                 if enable_go {
-                    go_bundle.push_str(&transpile(atom, TargetLanguage::Go));
+                    go_bundle.push_str(&transpile(&hir_atom_tp, TargetLanguage::Go));
                     go_bundle.push_str("\n\n");
                 }
                 if enable_ts {
-                    ts_bundle.push_str(&transpile(atom, TargetLanguage::TypeScript));
+                    ts_bundle.push_str(&transpile(&hir_atom_tp, TargetLanguage::TypeScript));
                     ts_bundle.push_str("\n\n");
                 }
             }
@@ -1479,7 +1485,8 @@ fn cmd_publish(proof_only: bool) {
                 atom_count += 1;
                 continue;
             }
-            match verification::verify(atom, output_dir, &module_env) {
+            let hir_atom = lower_atom_to_hir(atom);
+            match verification::verify(&hir_atom, output_dir, &module_env) {
                 Ok(_) => {
                     println!("  ⚖️  '{}': verified ✅", atom.name);
                     module_env.mark_verified(&atom.name);
@@ -1742,7 +1749,8 @@ fn cmd_repl() {
                     if let parser::Item::Atom(atom) = item {
                         println!("  ✅ Parsed: atom {}()", atom.name);
                         if is_verify {
-                            match verification::verify(atom, Path::new("."), &module_env) {
+                            let hir_atom = lower_atom_to_hir(atom);
+                            match verification::verify(&hir_atom, Path::new("."), &module_env) {
                                 Ok(()) => println!("  ✅ Verification passed"),
                                 Err(e) => eprintln!("  ❌ Verification failed: {}", e),
                             }

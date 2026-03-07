@@ -2,7 +2,8 @@ pub mod golang;
 pub mod rust;
 pub mod typescript;
 
-use crate::parser::{Atom, EnumDef, ImplDef, ImportDecl, StructDef, TraitDef};
+use crate::hir::HirAtom;
+use crate::parser::{EnumDef, ImplDef, ImportDecl, StructDef, TraitDef};
 
 #[derive(Copy, Clone)]
 pub enum TargetLanguage {
@@ -11,11 +12,11 @@ pub enum TargetLanguage {
     Go,
 }
 
-pub fn transpile(atom: &Atom, lang: TargetLanguage) -> String {
+pub fn transpile(hir_atom: &HirAtom, lang: TargetLanguage) -> String {
     match lang {
-        TargetLanguage::TypeScript => typescript::transpile_to_ts(atom),
-        TargetLanguage::Rust => rust::transpile_to_rust(atom),
-        TargetLanguage::Go => golang::transpile_to_go(atom),
+        TargetLanguage::TypeScript => typescript::transpile_to_ts(hir_atom),
+        TargetLanguage::Rust => rust::transpile_to_rust(hir_atom),
+        TargetLanguage::Go => golang::transpile_to_go(hir_atom),
     }
 }
 

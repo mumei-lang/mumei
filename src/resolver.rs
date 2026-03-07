@@ -938,6 +938,7 @@ pub fn save_verification_cache(base_dir: &Path, cache: &HashMap<String, Verifica
 }
 
 /// Invalidate cache entries for all atoms that transitively depend on the changed atom.
+#[allow(dead_code)]
 pub fn invalidate_dependents(
     cache: &mut HashMap<String, VerificationCacheEntry>,
     changed_atom: &str,

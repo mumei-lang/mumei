@@ -294,7 +294,8 @@ fn verify_source_for_lsp(
             if module_env.is_verified(&atom.name) {
                 continue;
             }
-            verification::verify_with_config(atom, output_dir, &module_env, 5000, 3)?;
+            let hir_atom = crate::hir::lower_atom_to_hir(atom);
+            verification::verify_with_config(&hir_atom, output_dir, &module_env, 5000, 3)?;
             module_env.mark_verified(&atom.name);
         }
     }

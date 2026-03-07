@@ -1,7 +1,8 @@
+use crate::hir::HirAtom;
 use crate::parser::{
-    parse_expression, Atom, Effect, EffectDef, EnumDef, Expr, ImplDef, Item, JoinSemantics,
-    MatchArm, Op, Pattern, QuantifierType, RefinedType, ResourceDef, ResourceMode, Span, StructDef,
-    TraitDef, TrustLevel,
+    parse_body_expr, parse_expression, Atom, Effect, EffectDef, EnumDef, Expr, ImplDef, Item,
+    JoinSemantics, MatchArm, Op, Pattern, QuantifierType, RefinedType, ResourceDef, ResourceMode,
+    Span, Stmt, StructDef, TraitDef, TrustLevel,
 };
 use miette::SourceSpan;
 use serde_json::json;
@@ -1177,6 +1178,7 @@ impl ModuleEnv {
 
     /// BFS traversal of `reverse_deps` to find all atoms transitively depending
     /// on the given atom.
+    #[allow(dead_code)]
     pub fn get_transitive_dependents(&self, atom_name: &str) -> HashSet<String> {
         let mut result = HashSet::new();
         let mut queue = std::collections::VecDeque::new();
@@ -1759,8 +1761,8 @@ fn verify_effect_containment(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult
     // E.g., caller [FileRead, FileWrite, Console] vs callee [IO] should pass
     // because both resolve to the same leaf set.
     let allowed_leaves = module_env.resolve_leaf_effects_from_effects(&atom.effects);
-    let body_ast = parse_expression(&atom.body_expr);
-    let callees = collect_callees(&body_ast);
+    let body_stmt = parse_body_expr(&atom.body_expr);
+    let callees = collect_callees_stmt(&body_stmt);
     for callee_name in &callees {
         if let Some(callee_atom) = module_env.get_atom(callee_name) {
             if !callee_atom.effects.is_empty() {
@@ -2058,61 +2060,71 @@ const BMC_DEFAULT_UNROLL_DEPTH: usize = 3;
 /// 「Unknown（未定義）」として扱い、Z3 探索を打ち切る。
 const MAX_ASYNC_RECURSION_DEPTH: usize = 3;
 
-/// body 内の Acquire 式を再帰的に収集する（BMC 用）。
+/// body 内の Acquire を再帰的に収集する（BMC 用）。
 /// ループ内で acquire が使われているパターンを検出するために使用。
-fn collect_acquire_resources(expr: &Expr) -> Vec<String> {
+fn collect_acquire_resources_expr(expr: &Expr) -> Vec<String> {
     let mut resources = Vec::new();
     match expr {
-        Expr::Acquire { resource, body } => {
-            resources.push(resource.clone());
-            resources.extend(collect_acquire_resources(body));
-        }
-        Expr::Block(stmts) => {
-            for stmt in stmts {
-                resources.extend(collect_acquire_resources(stmt));
-            }
-        }
-        Expr::While { body, .. } => {
-            resources.extend(collect_acquire_resources(body));
-        }
         Expr::IfThenElse {
             then_branch,
             else_branch,
             ..
         } => {
-            resources.extend(collect_acquire_resources(then_branch));
-            resources.extend(collect_acquire_resources(else_branch));
-        }
-        Expr::Let { value, .. } | Expr::Assign { value, .. } => {
-            resources.extend(collect_acquire_resources(value));
+            resources.extend(collect_acquire_resources_stmt(then_branch));
+            resources.extend(collect_acquire_resources_stmt(else_branch));
         }
         Expr::Async { body } => {
-            resources.extend(collect_acquire_resources(body));
+            resources.extend(collect_acquire_resources_stmt(body));
         }
         Expr::Await { expr } => {
-            resources.extend(collect_acquire_resources(expr));
-        }
-        Expr::Task { body, .. } => {
-            resources.extend(collect_acquire_resources(body));
-        }
-        Expr::TaskGroup { children, .. } => {
-            for child in children {
-                resources.extend(collect_acquire_resources(child));
-            }
+            resources.extend(collect_acquire_resources_expr(expr));
         }
         Expr::Perform { args, .. } => {
             for arg in args {
-                resources.extend(collect_acquire_resources(arg));
+                resources.extend(collect_acquire_resources_expr(arg));
             }
         }
         Expr::AtomRef { .. } => {}
         Expr::CallRef { callee, args } => {
-            resources.extend(collect_acquire_resources(callee));
+            resources.extend(collect_acquire_resources_expr(callee));
             for arg in args {
-                resources.extend(collect_acquire_resources(arg));
+                resources.extend(collect_acquire_resources_expr(arg));
             }
         }
         _ => {}
+    }
+    resources
+}
+
+fn collect_acquire_resources_stmt(stmt: &Stmt) -> Vec<String> {
+    let mut resources = Vec::new();
+    match stmt {
+        Stmt::Acquire { resource, body } => {
+            resources.push(resource.clone());
+            resources.extend(collect_acquire_resources_stmt(body));
+        }
+        Stmt::Block(stmts) => {
+            for s in stmts {
+                resources.extend(collect_acquire_resources_stmt(s));
+            }
+        }
+        Stmt::While { body, .. } => {
+            resources.extend(collect_acquire_resources_stmt(body));
+        }
+        Stmt::Let { value, .. } | Stmt::Assign { value, .. } => {
+            resources.extend(collect_acquire_resources_expr(value));
+        }
+        Stmt::Task { body, .. } => {
+            resources.extend(collect_acquire_resources_stmt(body));
+        }
+        Stmt::TaskGroup { children, .. } => {
+            for child in children {
+                resources.extend(collect_acquire_resources_stmt(child));
+            }
+        }
+        Stmt::Expr(e) => {
+            resources.extend(collect_acquire_resources_expr(e));
+        }
     }
     resources
 }
@@ -2125,27 +2137,36 @@ fn collect_acquire_resources(expr: &Expr) -> Vec<String> {
 /// BMC は「ユーザーが不変量を書けない場合」の補助的な検証手段。
 fn verify_bmc_resource_safety(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult<()> {
     // body 内に acquire が含まれない場合はスキップ
-    let body_ast = parse_expression(&atom.body_expr);
-    let acquired_resources = collect_acquire_resources(&body_ast);
+    let body_stmt = parse_body_expr(&atom.body_expr);
+    let acquired_resources = collect_acquire_resources_stmt(&body_stmt);
     if acquired_resources.is_empty() {
         return Ok(());
     }
 
     // While ループ内に acquire があるかチェック
-    fn has_acquire_in_while(expr: &Expr) -> bool {
+    fn has_acquire_in_while_stmt(stmt: &Stmt) -> bool {
+        match stmt {
+            Stmt::While { body, .. } => !collect_acquire_resources_stmt(body).is_empty(),
+            Stmt::Block(stmts) => stmts.iter().any(has_acquire_in_while_stmt),
+            Stmt::Acquire { body, .. } => has_acquire_in_while_stmt(body),
+            Stmt::Task { body, .. } => has_acquire_in_while_stmt(body),
+            Stmt::Expr(e) => has_acquire_in_while_expr(e),
+            _ => false,
+        }
+    }
+    fn has_acquire_in_while_expr(expr: &Expr) -> bool {
         match expr {
-            Expr::While { body, .. } => !collect_acquire_resources(body).is_empty(),
-            Expr::Block(stmts) => stmts.iter().any(has_acquire_in_while),
             Expr::IfThenElse {
                 then_branch,
                 else_branch,
                 ..
-            } => has_acquire_in_while(then_branch) || has_acquire_in_while(else_branch),
+            } => has_acquire_in_while_stmt(then_branch) || has_acquire_in_while_stmt(else_branch),
+            Expr::Async { body } => has_acquire_in_while_stmt(body),
             _ => false,
         }
     }
 
-    if !has_acquire_in_while(&body_ast) {
+    if !has_acquire_in_while_stmt(&body_stmt) {
         return Ok(()); // ループ外の acquire は通常の検証で十分
     }
 
@@ -2191,44 +2212,34 @@ fn verify_async_recursion_depth(atom: &Atom, module_env: &ModuleEnv) -> MumeiRes
         return Ok(());
     }
 
-    fn count_self_calls(expr: &Expr, atom_name: &str) -> usize {
+    fn count_self_calls_expr(expr: &Expr, atom_name: &str) -> usize {
         match expr {
             Expr::Call(name, args) => {
                 let self_call = if name == atom_name { 1 } else { 0 };
                 self_call
                     + args
                         .iter()
-                        .map(|a| count_self_calls(a, atom_name))
+                        .map(|a| count_self_calls_expr(a, atom_name))
                         .sum::<usize>()
             }
-            Expr::Block(stmts) => stmts.iter().map(|s| count_self_calls(s, atom_name)).sum(),
             Expr::IfThenElse {
                 cond,
                 then_branch,
                 else_branch,
             } => {
-                count_self_calls(cond, atom_name)
-                    + count_self_calls(then_branch, atom_name)
-                    + count_self_calls(else_branch, atom_name)
+                count_self_calls_expr(cond, atom_name)
+                    + count_self_calls_stmt(then_branch, atom_name)
+                    + count_self_calls_stmt(else_branch, atom_name)
             }
-            Expr::Let { value, .. } | Expr::Assign { value, .. } => {
-                count_self_calls(value, atom_name)
-            }
-            Expr::Async { body } => count_self_calls(body, atom_name),
-            Expr::Await { expr } => count_self_calls(expr, atom_name),
-            Expr::Acquire { body, .. } => count_self_calls(body, atom_name),
-            Expr::While { cond, body, .. } => {
-                count_self_calls(cond, atom_name) + count_self_calls(body, atom_name)
-            }
+            Expr::Async { body } => count_self_calls_stmt(body, atom_name),
+            Expr::Await { expr } => count_self_calls_expr(expr, atom_name),
             Expr::BinaryOp(l, _, r) => {
-                count_self_calls(l, atom_name) + count_self_calls(r, atom_name)
+                count_self_calls_expr(l, atom_name) + count_self_calls_expr(r, atom_name)
             }
-            Expr::Task { body, .. } => count_self_calls(body, atom_name),
-            Expr::TaskGroup { children, .. } => children
+            Expr::Perform { args, .. } => args
                 .iter()
-                .map(|c| count_self_calls(c, atom_name))
+                .map(|a| count_self_calls_expr(a, atom_name))
                 .sum(),
-            Expr::Perform { args, .. } => args.iter().map(|a| count_self_calls(a, atom_name)).sum(),
             Expr::AtomRef { .. } => 0,
             Expr::CallRef { callee, args } => {
                 let self_call = if let Expr::AtomRef { name } = callee.as_ref() {
@@ -2241,18 +2252,39 @@ fn verify_async_recursion_depth(atom: &Atom, module_env: &ModuleEnv) -> MumeiRes
                     0
                 };
                 self_call
-                    + count_self_calls(callee, atom_name)
+                    + count_self_calls_expr(callee, atom_name)
                     + args
                         .iter()
-                        .map(|a| count_self_calls(a, atom_name))
+                        .map(|a| count_self_calls_expr(a, atom_name))
                         .sum::<usize>()
             }
             _ => 0,
         }
     }
+    fn count_self_calls_stmt(stmt: &Stmt, atom_name: &str) -> usize {
+        match stmt {
+            Stmt::Block(stmts) => stmts
+                .iter()
+                .map(|s| count_self_calls_stmt(s, atom_name))
+                .sum(),
+            Stmt::Let { value, .. } | Stmt::Assign { value, .. } => {
+                count_self_calls_expr(value, atom_name)
+            }
+            Stmt::Acquire { body, .. } => count_self_calls_stmt(body, atom_name),
+            Stmt::While { cond, body, .. } => {
+                count_self_calls_expr(cond, atom_name) + count_self_calls_stmt(body, atom_name)
+            }
+            Stmt::Task { body, .. } => count_self_calls_stmt(body, atom_name),
+            Stmt::TaskGroup { children, .. } => children
+                .iter()
+                .map(|c| count_self_calls_stmt(c, atom_name))
+                .sum(),
+            Stmt::Expr(e) => count_self_calls_expr(e, atom_name),
+        }
+    }
 
-    let body_ast = parse_expression(&atom.body_expr);
-    let self_call_count = count_self_calls(&body_ast, &atom.name);
+    let body_stmt = parse_body_expr(&atom.body_expr);
+    let self_call_count = count_self_calls_stmt(&body_stmt, &atom.name);
 
     if self_call_count > 0 {
         // 再帰的 async 呼び出しが検出された
@@ -2436,8 +2468,8 @@ fn verify_atom_invariant(
         }
 
         // body を実行
-        let body_ast = parse_expression(&atom.body_expr);
-        let _body_result = expr_to_z3(&vc, &body_ast, &mut env, Some(&solver))?;
+        let body_stmt = parse_body_expr(&atom.body_expr);
+        let _body_result = stmt_to_z3(&vc, &body_stmt, &mut env, Some(&solver))?;
 
         // body 実行後の invariant を再評価
         // （env が body の実行で更新されている可能性がある）
@@ -2480,18 +2512,13 @@ fn verify_atom_invariant(
 // BMC の深度制限を適用する。
 
 /// body 内の全 Call 式から呼び出し先の atom 名を収集する。
-fn collect_callees(expr: &Expr) -> Vec<String> {
+fn collect_callees_expr(expr: &Expr) -> Vec<String> {
     let mut callees = Vec::new();
     match expr {
         Expr::Call(name, args) => {
             callees.push(name.clone());
             for arg in args {
-                callees.extend(collect_callees(arg));
-            }
-        }
-        Expr::Block(stmts) => {
-            for s in stmts {
-                callees.extend(collect_callees(s));
+                callees.extend(collect_callees_expr(arg));
             }
         }
         Expr::IfThenElse {
@@ -2499,60 +2526,77 @@ fn collect_callees(expr: &Expr) -> Vec<String> {
             then_branch,
             else_branch,
         } => {
-            callees.extend(collect_callees(cond));
-            callees.extend(collect_callees(then_branch));
-            callees.extend(collect_callees(else_branch));
-        }
-        Expr::Let { value, .. } | Expr::Assign { value, .. } => {
-            callees.extend(collect_callees(value));
-        }
-        Expr::While { cond, body, .. } => {
-            callees.extend(collect_callees(cond));
-            callees.extend(collect_callees(body));
+            callees.extend(collect_callees_expr(cond));
+            callees.extend(collect_callees_stmt(then_branch));
+            callees.extend(collect_callees_stmt(else_branch));
         }
         Expr::BinaryOp(l, _, r) => {
-            callees.extend(collect_callees(l));
-            callees.extend(collect_callees(r));
+            callees.extend(collect_callees_expr(l));
+            callees.extend(collect_callees_expr(r));
         }
-        Expr::Async { body } | Expr::Acquire { body, .. } => {
-            callees.extend(collect_callees(body));
+        Expr::Async { body } => {
+            callees.extend(collect_callees_stmt(body));
         }
         Expr::Await { expr } => {
-            callees.extend(collect_callees(expr));
+            callees.extend(collect_callees_expr(expr));
         }
         Expr::Match { target, arms } => {
-            callees.extend(collect_callees(target));
+            callees.extend(collect_callees_expr(target));
             for arm in arms {
-                callees.extend(collect_callees(&arm.body));
+                callees.extend(collect_callees_stmt(&arm.body));
                 if let Some(guard) = &arm.guard {
-                    callees.extend(collect_callees(guard));
+                    callees.extend(collect_callees_expr(guard));
                 }
-            }
-        }
-        Expr::Task { body, .. } => {
-            callees.extend(collect_callees(body));
-        }
-        Expr::TaskGroup { children, .. } => {
-            for child in children {
-                callees.extend(collect_callees(child));
             }
         }
         Expr::AtomRef { name } => {
             callees.push(name.clone());
         }
         Expr::CallRef { callee, args } => {
-            // Only recurse into callee — AtomRef branch already pushes the name
-            callees.extend(collect_callees(callee));
+            callees.extend(collect_callees_expr(callee));
             for arg in args {
-                callees.extend(collect_callees(arg));
+                callees.extend(collect_callees_expr(arg));
             }
         }
         Expr::Perform { args, .. } => {
             for arg in args {
-                callees.extend(collect_callees(arg));
+                callees.extend(collect_callees_expr(arg));
             }
         }
         _ => {}
+    }
+    callees
+}
+
+fn collect_callees_stmt(stmt: &Stmt) -> Vec<String> {
+    let mut callees = Vec::new();
+    match stmt {
+        Stmt::Block(stmts) => {
+            for s in stmts {
+                callees.extend(collect_callees_stmt(s));
+            }
+        }
+        Stmt::Let { value, .. } | Stmt::Assign { value, .. } => {
+            callees.extend(collect_callees_expr(value));
+        }
+        Stmt::While { cond, body, .. } => {
+            callees.extend(collect_callees_expr(cond));
+            callees.extend(collect_callees_stmt(body));
+        }
+        Stmt::Acquire { body, .. } => {
+            callees.extend(collect_callees_stmt(body));
+        }
+        Stmt::Task { body, .. } => {
+            callees.extend(collect_callees_stmt(body));
+        }
+        Stmt::TaskGroup { children, .. } => {
+            for child in children {
+                callees.extend(collect_callees_stmt(child));
+            }
+        }
+        Stmt::Expr(e) => {
+            callees.extend(collect_callees_expr(e));
+        }
     }
     callees
 }
@@ -2580,8 +2624,8 @@ fn detect_call_cycle(atom_name: &str, module_env: &ModuleEnv) -> Option<Vec<Stri
         path.push(current.to_string());
 
         if let Some(callee_atom) = module_env.get_atom(current) {
-            let body_ast = parse_expression(&callee_atom.body_expr);
-            let callees = collect_callees(&body_ast);
+            let body_stmt = parse_body_expr(&callee_atom.body_expr);
+            let callees = collect_callees_stmt(&body_stmt);
             for callee_name in &callees {
                 if module_env.get_atom(callee_name).is_some() {
                     if callee_name == target && !path.is_empty() {
@@ -2601,8 +2645,8 @@ fn detect_call_cycle(atom_name: &str, module_env: &ModuleEnv) -> Option<Vec<Stri
 
     // atom_name の呼び出し先から DFS 開始
     if let Some(atom) = module_env.get_atom(atom_name) {
-        let body_ast = parse_expression(&atom.body_expr);
-        let callees = collect_callees(&body_ast);
+        let body_stmt = parse_body_expr(&atom.body_expr);
+        let callees = collect_callees_stmt(&body_stmt);
         for callee_name in &callees {
             if module_env.get_atom(callee_name).is_some() {
                 visited.clear();
@@ -2664,8 +2708,8 @@ fn verify_call_graph_cycles(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult<
 /// verify() の body 検証後に呼び出される。
 fn check_taint_propagation(atom: &Atom, env: &Env, module_env: &ModuleEnv) {
     // body 内で呼び出されている関数を収集
-    let body_ast = parse_expression(&atom.body_expr);
-    let callees = collect_callees(&body_ast);
+    let body_stmt = parse_body_expr(&atom.body_expr);
+    let callees = collect_callees_stmt(&body_stmt);
 
     let mut tainted_sources: Vec<String> = Vec::new();
     for callee_name in &callees {
@@ -2699,8 +2743,8 @@ fn check_taint_propagation(atom: &Atom, env: &Env, module_env: &ModuleEnv) {
 /// 呼び出し先 atom の effects フィールドを再帰的に集約する。
 /// 親エフェクトへの暗黙的包含も解決する。
 fn infer_effects(atom: &Atom, module_env: &ModuleEnv) -> Vec<Effect> {
-    let body_ast = parse_expression(&atom.body_expr);
-    let callees = collect_callees(&body_ast);
+    let body_stmt = parse_body_expr(&atom.body_expr);
+    let callees = collect_callees_stmt(&body_stmt);
     let mut inferred = Vec::new();
     let mut seen_names: HashSet<String> = HashSet::new();
     for callee_name in &callees {
@@ -2876,25 +2920,26 @@ fn verify_effect_params(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult<()> 
 /// timeout_ms: Z3 ソルバのタイムアウト（ミリ秒）
 /// global_max_unroll: BMC のグローバル展開深度
 pub fn verify_with_config(
-    atom: &Atom,
+    hir_atom: &HirAtom,
     output_dir: &Path,
     module_env: &ModuleEnv,
     timeout_ms: u64,
     _global_max_unroll: usize,
 ) -> MumeiResult<()> {
-    verify_inner(atom, output_dir, module_env, timeout_ms)
+    verify_inner(hir_atom, output_dir, module_env, timeout_ms)
 }
 
-pub fn verify(atom: &Atom, output_dir: &Path, module_env: &ModuleEnv) -> MumeiResult<()> {
-    verify_inner(atom, output_dir, module_env, 10000)
+pub fn verify(hir_atom: &HirAtom, output_dir: &Path, module_env: &ModuleEnv) -> MumeiResult<()> {
+    verify_inner(hir_atom, output_dir, module_env, 10000)
 }
 
 fn verify_inner(
-    atom: &Atom,
+    hir_atom: &HirAtom,
     output_dir: &Path,
     module_env: &ModuleEnv,
     timeout_ms: u64,
 ) -> MumeiResult<()> {
+    let atom = &hir_atom.atom;
     // Phase 0: 信頼レベルチェック（Trust Boundary）
     match &atom.trust_level {
         TrustLevel::Trusted => {
@@ -2951,8 +2996,8 @@ fn verify_inner(
     if let Err(e) = verify_effect_containment(atom, module_env) {
         // Save structured effect violation report for self-healing integration.
         // Extract missing effects from the error to produce a structured report.
-        let body_ast = parse_expression(&atom.body_expr);
-        let callees = collect_callees(&body_ast);
+        let body_stmt_eff = parse_body_expr(&atom.body_expr);
+        let callees = collect_callees_stmt(&body_stmt_eff);
         let allowed_leaves = module_env.resolve_leaf_effects_from_effects(&atom.effects);
         let mut missing_all: Vec<String> = Vec::new();
         let mut violating_callee = String::new();
@@ -3279,8 +3324,8 @@ fn verify_inner(
     }
 
     // 4. ボディの検証
-    let body_ast = parse_expression(&atom.body_expr);
-    let body_result = match expr_to_z3(&vc, &body_ast, &mut env, Some(&solver)) {
+    let body_stmt = parse_body_expr(&atom.body_expr);
+    let body_result = match stmt_to_z3(&vc, &body_stmt, &mut env, Some(&solver)) {
         Ok(val) => val,
         Err(e) => {
             // Body evaluation errors (e.g., division by zero, out-of-bounds) propagate
@@ -3993,130 +4038,11 @@ fn expr_to_z3<'a>(
             let c = expr_to_z3(vc, cond, env, solver_opt)?
                 .as_bool()
                 .ok_or(MumeiError::type_error("If condition must be boolean"))?;
-            let t = expr_to_z3(vc, then_branch, env, solver_opt)?;
-            let e = expr_to_z3(vc, else_branch, env, solver_opt)?;
+            let t = stmt_to_z3(vc, then_branch, env, solver_opt)?;
+            let e = stmt_to_z3(vc, else_branch, env, solver_opt)?;
             Ok(c.ite(&t, &e))
         }
-        Expr::Let { var, value } => {
-            // Block 内の逐次実行では変数を env に残す（スコープ管理は Block 側で行う）
-            let val = expr_to_z3(vc, value, env, solver_opt)?;
-            env.insert(var.clone(), val.clone());
-            Ok(val)
-        }
-        Expr::Assign { var, value } => {
-            let val = expr_to_z3(vc, value, env, solver_opt)?;
-            env.insert(var.clone(), val.clone());
-            Ok(val)
-        }
-        Expr::Block(stmts) => {
-            let mut last = Int::from_i64(ctx, 0).into();
-            for stmt in stmts {
-                last = expr_to_z3(vc, stmt, env, solver_opt)?;
-            }
-            Ok(last)
-        }
-        Expr::While {
-            cond,
-            invariant,
-            decreases,
-            body,
-        } => {
-            // Loop Invariant 検証ロジック
-            if let Some(solver) = solver_opt {
-                let inv = expr_to_z3(vc, invariant, env, None)?
-                    .as_bool()
-                    .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
 
-                // Base case: 現在の env（let で初期化済み）で invariant が成立するか
-                solver.push();
-                solver.assert(&inv.not());
-                if solver.check() == SatResult::Sat {
-                    solver.pop(1);
-                    return Err(MumeiError::verification("Invariant fails initially"));
-                }
-                solver.pop(1);
-
-                // Inductive step: invariant && cond のもとで body 実行後も invariant が保たれるか
-                let c = expr_to_z3(vc, cond, env, None)?
-                    .as_bool()
-                    .ok_or(MumeiError::type_error("While condition must be boolean"))?;
-
-                // Invariant preservation: invariant && cond のもとで body 実行後も invariant が保たれるか
-                // env のスナップショットを保存し、各チェックを独立に行う
-                {
-                    let env_snapshot = env.clone();
-                    solver.push();
-                    solver.assert(&inv);
-                    solver.assert(&c);
-                    expr_to_z3(vc, body, env, Some(solver))?;
-
-                    let inv_after = expr_to_z3(vc, invariant, env, None)?
-                        .as_bool()
-                        .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
-
-                    solver.assert(&inv_after.not());
-                    if solver.check() == SatResult::Sat {
-                        solver.pop(1);
-                        return Err(MumeiError::verification("Invariant not preserved"));
-                    }
-                    solver.pop(1);
-                    *env = env_snapshot; // env を復元
-                }
-
-                // Termination Check: decreases 句が指定されている場合、停止性を検証
-                if let Some(dec_expr) = decreases {
-                    let env_snapshot = env.clone();
-
-                    // V_before: ループ本体実行前の減少式の値
-                    let v_before = expr_to_z3(vc, dec_expr, env, None)?.as_int().ok_or(
-                        MumeiError::type_error("decreases expression must be integer"),
-                    )?;
-
-                    // A. 下界の証明: invariant && cond => V >= 0
-                    solver.push();
-                    solver.assert(&inv);
-                    solver.assert(&c);
-                    solver.assert(&v_before.lt(&Int::from_i64(ctx, 0)));
-                    if solver.check() == SatResult::Sat {
-                        solver.pop(1);
-                        return Err(MumeiError::verification(
-                            "Termination check failed: decreases expression may be negative",
-                        ));
-                    }
-                    solver.pop(1);
-
-                    // B. 厳密な減少の証明: body 実行後に V' < V
-                    solver.push();
-                    solver.assert(&inv);
-                    solver.assert(&c);
-                    expr_to_z3(vc, body, env, Some(solver))?;
-
-                    let v_after = expr_to_z3(vc, dec_expr, env, None)?.as_int().ok_or(
-                        MumeiError::type_error("decreases expression must be integer"),
-                    )?;
-
-                    solver.assert(&v_after.ge(&v_before));
-                    if solver.check() == SatResult::Sat {
-                        solver.pop(1);
-                        *env = env_snapshot;
-                        return Err(MumeiError::verification(
-                            "Termination check failed: decreases expression does not strictly decrease"
-                        ));
-                    }
-                    solver.pop(1);
-                    *env = env_snapshot; // env を復元
-                }
-            }
-
-            let inv = expr_to_z3(vc, invariant, env, None)?
-                .as_bool()
-                .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
-            let c_not = expr_to_z3(vc, cond, env, None)?
-                .as_bool()
-                .ok_or(MumeiError::type_error("While condition must be boolean"))?
-                .not();
-            Ok(Bool::and(ctx, &[&inv, &c_not]).into())
-        }
         Expr::StructInit { type_name, fields } => {
             // 構造体の各フィールドを検証し、env に登録
             // フィールドに精緻型制約がある場合は solver で検証する
@@ -4285,7 +4211,7 @@ fn expr_to_z3<'a>(
                         let prior_negation = Bool::and(ctx, &neg_refs);
                         solver.push();
                         solver.assert(&prior_negation);
-                        let body_val = expr_to_z3(vc, &arm.body, &mut arm_env, solver_opt)?;
+                        let body_val = stmt_to_z3(vc, &arm.body, &mut arm_env, solver_opt)?;
                         solver.pop(1);
                         result = Some(match result {
                             Some(else_val) => full_cond.ite(&body_val, &else_val),
@@ -4296,7 +4222,7 @@ fn expr_to_z3<'a>(
                     }
                 }
 
-                let body_val = expr_to_z3(vc, &arm.body, &mut arm_env, solver_opt)?;
+                let body_val = stmt_to_z3(vc, &arm.body, &mut arm_env, solver_opt)?;
                 result = Some(match result {
                     Some(else_val) => full_cond.ite(&body_val, &else_val),
                     None => body_val,
@@ -4355,31 +4281,11 @@ fn expr_to_z3<'a>(
             Ok(Int::new_const(ctx, result_name.as_str()).into())
         }
 
-        Expr::Acquire { resource, body } => {
-            // acquire ブロック: リソースを取得して body を実行し、自動解放する。
-            // Z3 上ではリソースの保持状態をシンボリック Bool で追跡する。
-            let held_name = format!("__resource_held_{}", resource);
-            let held_bool = Bool::new_const(ctx, held_name.as_str());
-            if let Some(solver) = solver_opt {
-                // リソース取得: held = true
-                solver.assert(&held_bool);
-            }
-            env.insert(held_name.clone(), held_bool.into());
-
-            // body を検証
-            let body_result = expr_to_z3(vc, body, env, solver_opt)?;
-
-            // リソース解放: held = false
-            let released = Bool::from_bool(ctx, false);
-            env.insert(held_name, released.into());
-
-            Ok(body_result)
-        }
         Expr::Async { body } => {
             // async ブロック: body を非同期コンテキストとして検証する。
             // Z3 上では通常の式として扱い、結果をシンボリック値として返す。
             // await ポイントでの所有権検証は Await 式で行う。
-            expr_to_z3(vc, body, env, solver_opt)
+            stmt_to_z3(vc, body, env, solver_opt)
         }
         Expr::Await { expr } => {
             // =============================================================
@@ -4471,93 +4377,6 @@ fn expr_to_z3<'a>(
             // 内側の式を評価してシンボリック結果を返す
             let inner_result = expr_to_z3(vc, expr, env, solver_opt)?;
             Ok(inner_result)
-        }
-
-        Expr::Task { body, group } => {
-            // タスク式: 子タスクの body を検証する。
-            // タスクの完了順序は TaskGroup で保証されるため、
-            // ここでは body の安全性のみを検証する。
-            static TASK_COUNTER: std::sync::atomic::AtomicUsize =
-                std::sync::atomic::AtomicUsize::new(0);
-            let task_uid = TASK_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let task_id = format!(
-                "__task_{}_{}",
-                group.as_deref().unwrap_or("default"),
-                task_uid
-            );
-            // シンボリック Bool（Z3 が値を決定する）
-            let task_alive = Bool::new_const(ctx, format!("{}_alive", task_id).as_str());
-            env.insert(format!("{}_alive", task_id), task_alive.into());
-
-            let body_result = expr_to_z3(vc, body, env, solver_opt)?;
-
-            // タスク完了マーカー（シンボリック: Z3 が決定）
-            let task_done = Bool::new_const(ctx, format!("{}_done", task_id).as_str());
-            env.insert(format!("{}_done", task_id), task_done.into());
-
-            Ok(body_result)
-        }
-        Expr::TaskGroup {
-            children,
-            join_semantics,
-        } => {
-            // =============================================================
-            // タスクグループ検証 (Structured Concurrency Verification)
-            // =============================================================
-            //
-            // 構造化並行性の核心: 親タスクが子タスクより先に終了しないことを
-            // Z3 で形式的に保証する。
-            //
-            // JoinSemantics::All — 全子タスクの完了を待つ
-            // JoinSemantics::Any — 最初の子タスク完了で続行（残りはキャンセル）
-
-            let mut child_results = Vec::new();
-            let mut child_done_vars = Vec::new();
-
-            for (i, child) in children.iter().enumerate() {
-                let child_id = format!("__task_group_child_{}", i);
-                let child_alive = Bool::new_const(ctx, format!("{}_alive", child_id).as_str());
-                env.insert(format!("{}_alive", child_id), child_alive.into());
-
-                let result = expr_to_z3(vc, child, env, solver_opt)?;
-                child_results.push(result);
-
-                // 子タスク完了フラグ（シンボリック: Z3 が決定）
-                let done_var = Bool::new_const(ctx, format!("{}_done", child_id).as_str());
-                child_done_vars.push(done_var.clone());
-                env.insert(format!("{}_done", child_id), done_var.into());
-            }
-
-            // 親タスク終了フラグ
-            let parent_done = Bool::new_const(ctx, "__task_group_parent_done");
-
-            if let Some(solver) = solver_opt {
-                match join_semantics {
-                    JoinSemantics::All => {
-                        // All: 全子タスクが完了するまで親は終了できない
-                        // 制約: parent_done => ∀i. child_done[i]
-                        for done_var in &child_done_vars {
-                            solver.assert(&parent_done.implies(done_var));
-                        }
-                    }
-                    JoinSemantics::Any => {
-                        // Any: 少なくとも1つの子タスクが完了すれば親は続行可能
-                        // 制約: parent_done => ∃i. child_done[i]
-                        if !child_done_vars.is_empty() {
-                            let any_done =
-                                Bool::or(ctx, &child_done_vars.iter().collect::<Vec<_>>());
-                            solver.assert(&parent_done.implies(&any_done));
-                        }
-                    }
-                }
-            }
-
-            // グループの結果: 最後の子タスクの結果を返す
-            if let Some(last) = child_results.last() {
-                Ok(last.clone())
-            } else {
-                Ok(Int::from_i64(ctx, 0).into())
-            }
         }
 
         // =================================================================
@@ -4793,6 +4612,197 @@ fn expr_to_z3<'a>(
                 Ok(sym.into())
             }
         }
+    }
+}
+
+/// Stmt 版 Z3 変換: Stmt を Z3 シンボリック値に変換する。
+/// Expr/Stmt 分離に伴い、expr_to_z3 から文（Statement）の処理を分離。
+#[allow(clippy::too_many_lines)]
+fn stmt_to_z3<'a>(
+    vc: &VCtx<'a>,
+    stmt: &Stmt,
+    env: &mut Env<'a>,
+    solver_opt: Option<&Solver<'a>>,
+) -> DynResult<'a> {
+    let ctx = vc.ctx;
+    match stmt {
+        Stmt::Let { var, value } => {
+            let val = expr_to_z3(vc, value, env, solver_opt)?;
+            env.insert(var.clone(), val.clone());
+            Ok(val)
+        }
+        Stmt::Assign { var, value } => {
+            let val = expr_to_z3(vc, value, env, solver_opt)?;
+            env.insert(var.clone(), val.clone());
+            Ok(val)
+        }
+        Stmt::Block(stmts) => {
+            let mut last: Dynamic = Int::from_i64(ctx, 0).into();
+            for s in stmts {
+                last = stmt_to_z3(vc, s, env, solver_opt)?;
+            }
+            Ok(last)
+        }
+        Stmt::While {
+            cond,
+            invariant,
+            decreases,
+            body,
+        } => {
+            // Loop Invariant 検証ロジック
+            if let Some(solver) = solver_opt {
+                let inv = expr_to_z3(vc, invariant, env, None)?
+                    .as_bool()
+                    .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
+
+                // Base case
+                solver.push();
+                solver.assert(&inv.not());
+                if solver.check() == SatResult::Sat {
+                    solver.pop(1);
+                    return Err(MumeiError::verification("Invariant fails initially"));
+                }
+                solver.pop(1);
+
+                // Inductive step
+                let c = expr_to_z3(vc, cond, env, None)?
+                    .as_bool()
+                    .ok_or(MumeiError::type_error("While condition must be boolean"))?;
+
+                {
+                    let env_snapshot = env.clone();
+                    solver.push();
+                    solver.assert(&inv);
+                    solver.assert(&c);
+                    stmt_to_z3(vc, body, env, Some(solver))?;
+
+                    let inv_after = expr_to_z3(vc, invariant, env, None)?
+                        .as_bool()
+                        .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
+
+                    solver.assert(&inv_after.not());
+                    if solver.check() == SatResult::Sat {
+                        solver.pop(1);
+                        return Err(MumeiError::verification("Invariant not preserved"));
+                    }
+                    solver.pop(1);
+                    *env = env_snapshot;
+                }
+
+                // Termination Check
+                if let Some(dec_expr) = decreases {
+                    let env_snapshot = env.clone();
+                    let v_before = expr_to_z3(vc, dec_expr, env, None)?.as_int().ok_or(
+                        MumeiError::type_error("decreases expression must be integer"),
+                    )?;
+                    solver.push();
+                    solver.assert(&inv);
+                    solver.assert(&c);
+                    solver.assert(&v_before.lt(&Int::from_i64(ctx, 0)));
+                    if solver.check() == SatResult::Sat {
+                        solver.pop(1);
+                        return Err(MumeiError::verification(
+                            "Termination check failed: decreases expression may be negative",
+                        ));
+                    }
+                    solver.pop(1);
+                    solver.push();
+                    solver.assert(&inv);
+                    solver.assert(&c);
+                    stmt_to_z3(vc, body, env, Some(solver))?;
+                    let v_after = expr_to_z3(vc, dec_expr, env, None)?.as_int().ok_or(
+                        MumeiError::type_error("decreases expression must be integer"),
+                    )?;
+                    solver.assert(&v_after.ge(&v_before));
+                    if solver.check() == SatResult::Sat {
+                        solver.pop(1);
+                        *env = env_snapshot;
+                        return Err(MumeiError::verification(
+                            "Termination check failed: decreases expression does not strictly decrease"
+                        ));
+                    }
+                    solver.pop(1);
+                    *env = env_snapshot;
+                }
+            }
+
+            let inv = expr_to_z3(vc, invariant, env, None)?
+                .as_bool()
+                .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
+            let c_not = expr_to_z3(vc, cond, env, None)?
+                .as_bool()
+                .ok_or(MumeiError::type_error("While condition must be boolean"))?
+                .not();
+            Ok(Bool::and(ctx, &[&inv, &c_not]).into())
+        }
+        Stmt::Acquire { resource, body } => {
+            let held_name = format!("__resource_held_{}", resource);
+            let held_bool = Bool::new_const(ctx, held_name.as_str());
+            if let Some(solver) = solver_opt {
+                solver.assert(&held_bool);
+            }
+            env.insert(held_name.clone(), held_bool.into());
+            let body_result = stmt_to_z3(vc, body, env, solver_opt)?;
+            let released = Bool::from_bool(ctx, false);
+            env.insert(held_name, released.into());
+            Ok(body_result)
+        }
+        Stmt::Task { body, group } => {
+            static TASK_COUNTER: std::sync::atomic::AtomicUsize =
+                std::sync::atomic::AtomicUsize::new(0);
+            let task_uid = TASK_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let task_id = format!(
+                "__task_{}_{}",
+                group.as_deref().unwrap_or("default"),
+                task_uid
+            );
+            let task_alive = Bool::new_const(ctx, format!("{}_alive", task_id).as_str());
+            env.insert(format!("{}_alive", task_id), task_alive.into());
+            let body_result = stmt_to_z3(vc, body, env, solver_opt)?;
+            let task_done = Bool::new_const(ctx, format!("{}_done", task_id).as_str());
+            env.insert(format!("{}_done", task_id), task_done.into());
+            Ok(body_result)
+        }
+        Stmt::TaskGroup {
+            children,
+            join_semantics,
+        } => {
+            let mut child_results = Vec::new();
+            let mut child_done_vars = Vec::new();
+            for (i, child) in children.iter().enumerate() {
+                let child_id = format!("__task_group_child_{}", i);
+                let child_alive = Bool::new_const(ctx, format!("{}_alive", child_id).as_str());
+                env.insert(format!("{}_alive", child_id), child_alive.into());
+                let result = stmt_to_z3(vc, child, env, solver_opt)?;
+                child_results.push(result);
+                let done_var = Bool::new_const(ctx, format!("{}_done", child_id).as_str());
+                child_done_vars.push(done_var.clone());
+                env.insert(format!("{}_done", child_id), done_var.into());
+            }
+            let parent_done = Bool::new_const(ctx, "__task_group_parent_done");
+            if let Some(solver) = solver_opt {
+                match join_semantics {
+                    JoinSemantics::All => {
+                        for done_var in &child_done_vars {
+                            solver.assert(&parent_done.implies(done_var));
+                        }
+                    }
+                    JoinSemantics::Any => {
+                        if !child_done_vars.is_empty() {
+                            let any_done =
+                                Bool::or(ctx, &child_done_vars.iter().collect::<Vec<_>>());
+                            solver.assert(&parent_done.implies(&any_done));
+                        }
+                    }
+                }
+            }
+            if let Some(last) = child_results.last() {
+                Ok(last.clone())
+            } else {
+                Ok(Int::from_i64(ctx, 0).into())
+            }
+        }
+        Stmt::Expr(e) => expr_to_z3(vc, e, env, solver_opt),
     }
 }
 
