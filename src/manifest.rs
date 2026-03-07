@@ -7,6 +7,7 @@
 //! - `[dependencies]`: パッケージ依存（path / git / version）
 //! - `[build]`: ビルド設定（targets, verify, max_unroll）
 //! - `[proof]`: 検証設定（cache, timeout_ms）
+//! - `[effects]`: エフェクト境界設定（allowed, denied）
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs;
@@ -24,6 +25,8 @@ pub struct Manifest {
     pub build: BuildConfig,
     #[serde(default)]
     pub proof: ProofConfig,
+    #[serde(default)]
+    pub effects: EffectsConfig,
 }
 /// [package] セクション
 #[derive(Debug, Clone, Deserialize)]
@@ -96,6 +99,17 @@ impl Default for ProofConfig {
             timeout_ms: 10000,
         }
     }
+}
+/// [effects] セクション — AIエージェントセッションの許可エフェクト設定
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct EffectsConfig {
+    /// デフォルトで許可されるエフェクト (例: ["Log", "FileRead"])
+    /// 空の場合は全エフェクトが許可される（制限なし）
+    #[serde(default)]
+    pub allowed: Vec<String>,
+    /// 拒否されるエフェクト（allowed より優先される）
+    #[serde(default)]
+    pub denied: Vec<String>,
 }
 // =============================================================================
 // デフォルト値ヘルパー

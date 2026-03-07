@@ -210,6 +210,7 @@ fn resolve_imports_recursive(
                     Item::ResourceDef(_) => {}
                     Item::Import(_) => {}
                     Item::ExternBlock(_) => {}
+                    Item::EffectDef(_) => {}
                 }
             }
 
@@ -287,6 +288,14 @@ fn register_imported_items(items: &[Item], alias: Option<&str>, module_env: &mut
             Item::Import(_) => {
                 // 再帰的に処理済み
             }
+            Item::EffectDef(effect_def) => {
+                module_env.register_effect(effect_def);
+                if let Some(prefix) = alias {
+                    let mut fqn_effect = effect_def.clone();
+                    fqn_effect.name = format!("{}::{}", prefix, effect_def.name);
+                    module_env.register_effect(&fqn_effect);
+                }
+            }
             Item::ExternBlock(extern_block) => {
                 // ExternBlock 内の関数を trusted atom として ModuleEnv に登録
                 for ext_fn in &extern_block.functions {
@@ -318,6 +327,7 @@ fn register_imported_items(items: &[Item], alias: Option<&str>, module_env: &mut
                         trust_level: crate::parser::TrustLevel::Trusted,
                         max_unroll: None,
                         invariant: None,
+                        effects: vec![],
                         span: ext_fn.span.clone(),
                     };
                     module_env.register_atom(&atom);
@@ -688,6 +698,11 @@ pub fn compute_atom_hash(atom: &crate::parser::Atom) -> String {
     for r in &atom.resources {
         hasher.update(b"|resource:");
         hasher.update(r.as_bytes());
+    }
+    // effects も含める（エフェクト制約の変更を検出）
+    for e in &atom.effects {
+        hasher.update(b"|effect:");
+        hasher.update(e.as_bytes());
     }
     // async フラグも含める
     if atom.is_async {

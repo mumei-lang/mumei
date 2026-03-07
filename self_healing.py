@@ -93,8 +93,69 @@ def run_mumei():
     return result.returncode == 0, result.stdout + result.stderr
 
 def get_fix_from_ai(source_code, error_log, report_data):
-    """Send error details and verification report (with counter-examples) to AI and get a fix."""
-    prompt = f"""
+    """Send error details and verification report to AI and get a fix.
+
+    Detects effect violations and generates specialized prompts with
+    logical resolution paths.
+    """
+    violation_type = report_data.get("violation_type", "")
+
+    if violation_type == "effect_mismatch":
+        ev = report_data.get("effect_violation", {})
+        resolution_paths = ev.get("resolution_paths", [])
+        opt_a = resolution_paths[0].get("description", "") if resolution_paths else ""
+        opt_b = resolution_paths[1].get("description", "") if len(resolution_paths) > 1 else "Remove the offending call."
+        prompt = f"""
+You are an expert in the Mumei language. The following code has an effect violation.
+The atom '{report_data.get("atom")}' declares effects {ev.get("declared_effects")}
+but uses operation '{ev.get("source_operation")}' which requires [{ev.get("required_effect")}].
+
+# Source code:
+{source_code}
+
+# Error log:
+{error_log}
+
+# Resolution paths (choose ONE):
+
+## Option A: Propagation (expand the effect boundary)
+{opt_a}
+Add the missing effect to the atom's `effects:` declaration.
+
+## Option B: Isolation (remove the effectful operation)
+{opt_b}
+Replace the effectful operation with a pure computation.
+
+Output only the fixed code in ```mumei ... ``` format.
+Choose the option that best preserves the code's intent.
+"""
+    elif violation_type == "effect_propagation":
+        ev = report_data.get("effect_violation", {})
+        caller_effects = ev.get("caller_effects", [])
+        missing_effects = ev.get("missing_effects", [])
+        combined = sorted(set(caller_effects + missing_effects))
+        prompt = f"""
+You are an expert in the Mumei language. The following code has an effect propagation violation.
+Atom '{ev.get("caller")}' calls '{ev.get("callee")}' which requires effects {ev.get("callee_effects")},
+but '{ev.get("caller")}' only declares effects {ev.get("caller_effects")}.
+Missing effects: {ev.get("missing_effects")}
+
+# Source code:
+{source_code}
+
+# Error log:
+{error_log}
+
+# Resolution:
+Add the missing effects {missing_effects} to atom '{ev.get("caller")}'s
+effects declaration. The declaration should be:
+  effects: [{", ".join(combined)}];
+
+Output only the fixed code in ```mumei ... ``` format.
+"""
+    else:
+        # Original prompt for non-effect errors (precondition, postcondition, etc.)
+        prompt = f"""
 You are an expert in the Mumei language. The following code failed formal verification.
 Please fix the 'requires' (precondition) to resolve the mathematical contradiction.
 
@@ -107,12 +168,21 @@ Please fix the 'requires' (precondition) to resolve the mathematical contradicti
 # Verification report (counter-example data):
 {json.dumps(report_data, indent=2)}
 
-Output only the fixed code in ```rust ... ``` format.
+Output only the fixed code in ```mumei ... ``` format.
 """
+
     response = client.chat.completions.create(
         model=model,
-        messages=[{"role": "system", "content": "You are a helpful programming assistant."},
-                  {"role": "user", "content": prompt}]
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You are a helpful programming assistant specializing "
+                    "in the Mumei language with its effect system and Z3 formal verification."
+                ),
+            },
+            {"role": "user", "content": prompt},
+        ],
     )
 
     content = response.choices[0].message.content or ""

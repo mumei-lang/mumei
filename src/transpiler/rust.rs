@@ -185,9 +185,14 @@ pub fn transpile_to_rust(atom: &Atom) -> String {
     };
 
     let async_keyword = if atom.is_async { "async " } else { "" };
+    let effects_comment = if atom.effects.is_empty() {
+        String::new()
+    } else {
+        format!("\n/// Effects: [{}]", atom.effects.join(", "))
+    };
     format!(
-        "/// Verified Atom: {}\n/// Requires: {}\n/// Ensures: {}\npub {}fn {}({}) -> {} {{\n    {}\n}}",
-        atom.name, atom.requires, atom.ensures, async_keyword, atom.name, params_str, return_type, body
+        "/// Verified Atom: {}\n/// Requires: {}\n/// Ensures: {}{}\npub {}fn {}({}) -> {} {{\n    {}\n}}",
+        atom.name, atom.requires, atom.ensures, effects_comment, async_keyword, atom.name, params_str, return_type, body
     )
 }
 
@@ -434,6 +439,22 @@ fn format_expr_rust(expr: &Expr) -> String {
             let callee_str = format_expr_rust(callee);
             let args_str: Vec<String> = args.iter().map(format_expr_rust).collect();
             format!("{}({})", callee_str, args_str.join(", "))
+        }
+        Expr::Perform {
+            effect,
+            operation,
+            args,
+        } => {
+            // Effects: perform Effect.operation(args) → function call
+            let args_str: Vec<String> = args.iter().map(format_expr_rust).collect();
+            format!(
+                "/* perform {}.{} */ {}_{}({})",
+                effect,
+                operation,
+                effect.to_lowercase(),
+                operation,
+                args_str.join(", ")
+            )
         }
     }
 }

@@ -324,6 +324,11 @@ impl Monomorphizer {
                     self.collect_from_expr(arg);
                 }
             }
+            Expr::Perform { args, .. } => {
+                for arg in args {
+                    self.collect_from_expr(arg);
+                }
+            }
         }
     }
 
@@ -483,6 +488,7 @@ impl Monomorphizer {
             trust_level: generic.trust_level.clone(),
             max_unroll: generic.max_unroll,
             invariant: generic.invariant.clone(),
+            effects: generic.effects.clone(),
             span: generic.span.clone(),
         })
     }

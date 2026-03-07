@@ -224,6 +224,7 @@ fn load_and_prepare(input: &str) -> (Vec<Item>, verification::ModuleEnv, Vec<Imp
 
     let mut module_env = verification::ModuleEnv::new();
     verification::register_builtin_traits(&mut module_env);
+    verification::register_builtin_effects(&mut module_env);
     let input_path = Path::new(input);
     let base_dir = input_path.parent().unwrap_or(Path::new("."));
 
@@ -270,6 +271,7 @@ fn load_and_prepare(input: &str) -> (Vec<Item>, verification::ModuleEnv, Vec<Imp
             Item::TraitDef(trait_def) => module_env.register_trait(trait_def),
             Item::ImplDef(impl_def) => module_env.register_impl(impl_def),
             Item::ResourceDef(resource_def) => module_env.register_resource(resource_def),
+            Item::EffectDef(effect_def) => module_env.register_effect(effect_def),
             Item::ExternBlock(extern_block) => {
                 for ext_fn in &extern_block.functions {
                     // ExternFn → trusted Atom に変換して ModuleEnv に登録
@@ -301,6 +303,7 @@ fn load_and_prepare(input: &str) -> (Vec<Item>, verification::ModuleEnv, Vec<Imp
                         trust_level: parser::TrustLevel::Trusted,
                         max_unroll: None,
                         invariant: None,
+                        effects: vec![],
                         span: ext_fn.span.clone(),
                     };
                     module_env.register_atom(&atom);
@@ -381,6 +384,9 @@ fn cmd_check(input: &str) {
                     eb.language,
                     eb.functions.len()
                 );
+            }
+            Item::EffectDef(e) => {
+                println!("  ⚡ Effect: '{}'", e.name);
             }
         }
     }
@@ -533,6 +539,9 @@ max_unroll = 3
 [proof]
 cache = true
 timeout_ms = 10000
+[effects]
+# allowed = ["Log", "FileRead"]
+# denied = ["Network"]
 "#,
         name
     );
@@ -1121,6 +1130,11 @@ fn cmd_build(input: &str, output: &str) {
                 );
             }
 
+            // --- エフェクト定義 ---
+            Item::EffectDef(effect_def) => {
+                println!("  ⚡ Effect: '{}'", effect_def.name);
+            }
+
             // --- Atom の処理 ---
             Item::Atom(atom) => {
                 atom_count += 1;
@@ -1475,6 +1489,7 @@ fn cmd_repl() {
 
     let mut module_env = verification::ModuleEnv::new();
     verification::register_builtin_traits(&mut module_env);
+    verification::register_builtin_effects(&mut module_env);
 
     // std/prelude を自動ロード
     if let Ok(cwd) = std::env::current_dir() {
@@ -1568,6 +1583,7 @@ fn cmd_repl() {
                                     trust_level: parser::TrustLevel::Trusted,
                                     max_unroll: None,
                                     invariant: None,
+                                    effects: vec![],
                                     span: ext_fn.span.clone(),
                                 };
                                 module_env.register_atom(&atom);
@@ -1575,6 +1591,7 @@ fn cmd_repl() {
                             }
                         }
                         parser::Item::Import(_) => {}
+                        parser::Item::EffectDef(e) => module_env.register_effect(e),
                     }
                 }
                 println!("  ✅ Loaded {} definition(s) from '{}'", count, file);
@@ -2410,6 +2427,7 @@ atom main() -> i64
                             trust_level: parser::TrustLevel::Trusted,
                             max_unroll: None,
                             invariant: None,
+                            effects: vec![],
                             span: ext_fn.span.clone(),
                         };
                         module_env.register_atom(&atom);

@@ -187,9 +187,14 @@ pub fn transpile_to_go(atom: &Atom) -> String {
     } else {
         ""
     };
+    let effects_comment = if atom.effects.is_empty() {
+        String::new()
+    } else {
+        format!("// Effects: [{}]\n", atom.effects.join(", "))
+    };
     format!(
-        "{}{}// {} is a verified Atom.\n// Requires: {}\n// Ensures: {}\nfunc {}({}) int64 {{\n    {}\n}}",
-        imports, async_comment, atom.name, atom.requires, atom.ensures, atom.name, params_str, body
+        "{}{}{}// {} is a verified Atom.\n// Requires: {}\n// Ensures: {}\nfunc {}({}) int64 {{\n    {}\n}}",
+        imports, async_comment, effects_comment, atom.name, atom.requires, atom.ensures, atom.name, params_str, body
     )
 }
 
@@ -397,6 +402,22 @@ fn format_expr_go(expr: &Expr) -> String {
             let callee_str = format_expr_go(callee);
             let args_str: Vec<String> = args.iter().map(format_expr_go).collect();
             format!("{}({})", callee_str, args_str.join(", "))
+        }
+        Expr::Perform {
+            effect,
+            operation,
+            args,
+        } => {
+            // Effects: perform Effect.operation(args) → function call
+            let args_str: Vec<String> = args.iter().map(format_expr_go).collect();
+            format!(
+                "/* perform {}.{} */ {}{}({})",
+                effect,
+                operation,
+                effect,
+                capitalize_first(operation),
+                args_str.join(", ")
+            )
         }
     }
 }

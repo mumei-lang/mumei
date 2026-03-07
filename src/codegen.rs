@@ -961,6 +961,49 @@ fn compile_expr<'a>(
                 .unwrap_or(context.i64_type().const_int(0, false).into()))
         }
 
+        Expr::Perform {
+            effect,
+            operation,
+            args: perform_args,
+        } => {
+            // Effect system Phase 1: placeholder — lower perform to a runtime call
+            // In future phases, this will call __effect_{Effect}_{operation}(args)
+            let fn_name = format!("__effect_{}_{}", effect, operation);
+
+            // Compile arguments first so we know actual types (i64 vs f64)
+            let mut arg_vals = Vec::new();
+            for arg in perform_args {
+                let val = compile_expr(
+                    context, builder, module, function, arg, variables, array_ptrs, module_env,
+                )?;
+                arg_vals.push(val);
+            }
+
+            // Derive parameter types from compiled argument values (match CallRef pattern)
+            let param_types: Vec<BasicMetadataTypeEnum> = arg_vals
+                .iter()
+                .map(|v| {
+                    if v.is_float_value() {
+                        context.f64_type().into()
+                    } else {
+                        context.i64_type().into()
+                    }
+                })
+                .collect();
+            let fn_type = context.i64_type().fn_type(&param_types, false);
+            let callee_fn = module.get_function(&fn_name).unwrap_or_else(|| {
+                module.add_function(&fn_name, fn_type, Some(inkwell::module::Linkage::External))
+            });
+
+            let args_meta: Vec<BasicMetadataValueEnum> =
+                arg_vals.iter().map(|v| (*v).into()).collect();
+            let call_result = llvm!(builder.build_call(callee_fn, &args_meta, "perform_result"));
+            Ok(call_result
+                .try_as_basic_value()
+                .left()
+                .unwrap_or(context.i64_type().const_int(0, false).into()))
+        }
+
         Expr::FieldAccess(inner_expr, field_name) => {
             // ネスト構造体のフィールドアクセスを再帰的に解決する。
             // v.x → 1段階、v.point.x → 2段階（再帰的に extract_value）

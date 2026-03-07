@@ -110,6 +110,26 @@ pub enum ResourceMode {
     Shared,
 }
 
+/// エフェクト定義
+/// ```mumei
+/// effect FileRead;
+/// effect FileWrite;
+/// effect Network;
+/// effect Log;
+/// effect IO includes: [FileRead, FileWrite];
+/// effect ScopedFileWrite where path starts_with "/tmp/";
+/// ```
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct EffectDef {
+    pub name: String,
+    /// Superset effects (e.g., IO includes FileRead + FileWrite)
+    pub includes: Vec<String>,
+    /// Refinement constraint (e.g., path starts_with "/tmp/")
+    pub refinement: Option<String>,
+    pub span: Span,
+}
+
 #[derive(Debug, Clone)]
 pub enum Expr {
     Number(i64),
@@ -192,6 +212,14 @@ pub enum Expr {
     /// 契約（requires/ensures）は呼び出し先の atom から伝播される。
     CallRef {
         callee: Box<Expr>,
+        args: Vec<Expr>,
+    },
+    /// エフェクト実行: perform Effect.operation(args)
+    /// 明示的にエフェクトの使用を宣言する。
+    /// Z3 がこのエフェクトが包含する atom の許可セットに含まれることを検証する。
+    Perform {
+        effect: String,
+        operation: String,
         args: Vec<Expr>,
     },
 }
@@ -358,6 +386,10 @@ pub struct Atom {
     /// 2. 維持 (Preservation): invariant が成立する状態で body を実行した後も invariant が維持されることを証明
     /// 3. 再帰呼び出し時: 呼び出し先の invariant を仮定として使用（帰納法の仮定）
     pub invariant: Option<String>,
+    /// この atom が許可するエフェクトセット（Effect System）
+    /// `atom write_log(msg: i64) effects: [Log, FileWrite];` の場合: effects = ["Log", "FileWrite"]
+    /// 空の場合は Pure（副作用なし）として扱われる。
+    pub effects: Vec<String>,
     /// ソース位置情報
     pub span: Span,
 }
@@ -485,6 +517,7 @@ pub struct ImplDef {
 }
 
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum Item {
     Atom(Atom),
     TypeDef(RefinedType),
@@ -497,6 +530,8 @@ pub enum Item {
     ResourceDef(ResourceDef),
     /// extern ブロック: extern "Lang" { fn ...; }
     ExternBlock(ExternBlock),
+    /// エフェクト定義: effect Name;
+    EffectDef(EffectDef),
 }
 
 // =============================================================================
@@ -1006,6 +1041,33 @@ pub fn parse_module(source: &str) -> Vec<Item> {
         }));
     }
 
+    // effect 定義: effect Name; / effect Name includes: [...]; / effect Name where ...;
+    let effect_re = Regex::new(
+        r"(?m)^effect\s+(\w+)(?:\s+includes:\s*\[([^\]]*)\])?(?:\s+where\s+([^;]+))?\s*;",
+    )
+    .unwrap();
+    for cap in effect_re.captures_iter(source) {
+        let name = cap[1].to_string();
+        let includes: Vec<String> = cap
+            .get(2)
+            .map(|m| {
+                m.as_str()
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let refinement = cap.get(3).map(|m| m.as_str().trim().to_string());
+        let m = cap.get(0).unwrap();
+        items.push(Item::EffectDef(EffectDef {
+            name,
+            includes,
+            refinement,
+            span: span_from_offset(source, m.start(), m.end() - m.start()),
+        }));
+    }
+
     // extern ブロック: extern "Rust" { fn name(params) -> RetType; ... }
     let extern_re = Regex::new(r#"(?m)^extern\s+"(\w+)"\s*\{([^}]*)\}"#).unwrap();
     for cap in extern_re.captures_iter(source) {
@@ -1326,6 +1388,19 @@ pub fn parse_atom(source: &str) -> Atom {
         .captures(source)
         .map(|cap| cap[1].trim().to_string());
 
+    // effects 句のパース: "effects: [Log, FileWrite];" — エフェクトセット
+    let effects_re = Regex::new(r"effects:\s*\[([^\]]*)]\s*;").unwrap();
+    let effects: Vec<String> = effects_re
+        .captures(source)
+        .map(|cap| {
+            cap[1]
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+
     let atom_match = name_caps.get(0).unwrap();
     Atom {
         name,
@@ -1344,6 +1419,7 @@ pub fn parse_atom(source: &str) -> Atom {
         trust_level: TrustLevel::Verified,
         max_unroll,
         invariant,
+        effects,
         span: span_from_offset(source, atom_match.start(), source.len()),
     }
 }
@@ -1566,6 +1642,50 @@ fn parse_primary(tokens: &[String], pos: &mut usize) -> Expr {
             };
         }
         panic!("call requires parentheses: call(callee, args...)");
+    }
+
+    // perform 式: perform Effect.operation(args)
+    if token == "perform" {
+        *pos += 1;
+        let effect = if *pos < tokens.len() {
+            let e = tokens[*pos].clone();
+            *pos += 1;
+            e
+        } else {
+            panic!("perform requires an effect name");
+        };
+        // skip "."
+        if *pos < tokens.len() && tokens[*pos] == "." {
+            *pos += 1;
+        } else {
+            panic!("perform requires Effect.operation syntax");
+        }
+        let operation = if *pos < tokens.len() {
+            let o = tokens[*pos].clone();
+            *pos += 1;
+            o
+        } else {
+            panic!("perform requires an operation name");
+        };
+        // parse args: (arg1, arg2, ...)
+        let mut args = Vec::new();
+        if *pos < tokens.len() && tokens[*pos] == "(" {
+            *pos += 1; // skip (
+            while *pos < tokens.len() && tokens[*pos] != ")" {
+                args.push(parse_implies(tokens, pos));
+                if *pos < tokens.len() && tokens[*pos] == "," {
+                    *pos += 1;
+                }
+            }
+            if *pos < tokens.len() && tokens[*pos] == ")" {
+                *pos += 1; // skip )
+            }
+        }
+        return Expr::Perform {
+            effect,
+            operation,
+            args,
+        };
     }
 
     // acquire 式: acquire resource_name { body }

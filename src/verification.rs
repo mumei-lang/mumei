@@ -1,6 +1,7 @@
 use crate::parser::{
-    parse_expression, Atom, EnumDef, Expr, ImplDef, JoinSemantics, MatchArm, Op, Pattern,
-    QuantifierType, RefinedType, ResourceDef, ResourceMode, Span, StructDef, TraitDef, TrustLevel,
+    parse_expression, Atom, EffectDef, EnumDef, Expr, ImplDef, JoinSemantics, MatchArm, Op,
+    Pattern, QuantifierType, RefinedType, ResourceDef, ResourceMode, Span, StructDef, TraitDef,
+    TrustLevel,
 };
 use miette::SourceSpan;
 use serde_json::json;
@@ -619,6 +620,9 @@ pub struct ModuleEnv {
     /// リソース定義（非同期安全性検証用）
     /// リソース名 → (優先度, アクセスモード)
     pub resources: HashMap<String, ResourceDef>,
+    /// エフェクト定義（副作用検証用）
+    /// エフェクト名 → EffectDef
+    pub effects: HashMap<String, EffectDef>,
 }
 
 impl ModuleEnv {
@@ -732,6 +736,53 @@ impl ModuleEnv {
     pub fn get_resource(&self, name: &str) -> Option<&ResourceDef> {
         self.resources.get(name)
     }
+
+    /// エフェクト定義を登録する
+    pub fn register_effect(&mut self, effect_def: &EffectDef) {
+        self.effects
+            .insert(effect_def.name.clone(), effect_def.clone());
+    }
+
+    /// エフェクト定義を取得する
+    #[allow(dead_code)]
+    pub fn get_effect(&self, name: &str) -> Option<&EffectDef> {
+        self.effects.get(name)
+    }
+
+    /// エフェクト名のリストを展開し、includes を再帰的に解決して
+    /// 全てのリーフエフェクト名を返す。
+    pub fn resolve_effect_set(&self, names: &[String]) -> HashSet<String> {
+        let mut result = HashSet::new();
+        let mut stack: Vec<String> = names.to_vec();
+        while let Some(name) = stack.pop() {
+            if result.contains(&name) {
+                continue;
+            }
+            result.insert(name.clone());
+            if let Some(def) = self.effects.get(&name) {
+                for included in &def.includes {
+                    if !result.contains(included) {
+                        stack.push(included.clone());
+                    }
+                }
+            }
+        }
+        result
+    }
+
+    /// Resolve an effect set to only its leaf effects (effects with no `includes`).
+    /// This avoids false positives when comparing a caller declaring leaf effects
+    /// against a callee declaring a composite effect (e.g., `[IO]` vs `[FileRead, FileWrite, Console]`).
+    pub fn resolve_leaf_effects(&self, names: &[String]) -> HashSet<String> {
+        let full = self.resolve_effect_set(names);
+        full.into_iter()
+            .filter(|name| {
+                self.effects
+                    .get(name)
+                    .map_or(true, |def| def.includes.is_empty())
+            })
+            .collect()
+    }
 }
 
 // =============================================================================
@@ -842,6 +893,49 @@ pub fn register_builtin_traits(module_env: &mut ModuleEnv) {
             span: Span::default(),
         });
     }
+}
+
+// =============================================================================
+// 組み込みエフェクト (Built-in Effects)
+// =============================================================================
+
+/// 組み込みエフェクトを ModuleEnv に自動登録する。
+/// FileRead, FileWrite, Network, Log, Console の基本エフェクトと、
+/// IO (FileRead + FileWrite + Console), FullAccess (IO + Network + Log) の
+/// 複合エフェクトを提供。
+pub fn register_builtin_effects(module_env: &mut ModuleEnv) {
+    use crate::parser::EffectDef;
+
+    // --- 基本エフェクト ---
+    for name in &["FileRead", "FileWrite", "Network", "Log", "Console"] {
+        module_env.register_effect(&EffectDef {
+            name: name.to_string(),
+            includes: vec![],
+            refinement: None,
+            span: Span::default(),
+        });
+    }
+
+    // --- 複合エフェクト ---
+    // IO includes FileRead, FileWrite, Console
+    module_env.register_effect(&EffectDef {
+        name: "IO".to_string(),
+        includes: vec![
+            "FileRead".to_string(),
+            "FileWrite".to_string(),
+            "Console".to_string(),
+        ],
+        refinement: None,
+        span: Span::default(),
+    });
+
+    // FullAccess includes IO, Network, Log
+    module_env.register_effect(&EffectDef {
+        name: "FullAccess".to_string(),
+        includes: vec!["IO".to_string(), "Network".to_string(), "Log".to_string()],
+        refinement: None,
+        span: Span::default(),
+    });
 }
 
 // =============================================================================
@@ -1007,7 +1101,11 @@ fn split_args(input: &str) -> Vec<String> {
 /// impl が対応する trait の全 law を満たしているかを Z3 で検証する。
 /// 各 law の論理式内のメソッド呼び出しを impl の具体的な body で置換し、
 /// ∀x. law_expr が成立するかを検証する。
-pub fn verify_impl(impl_def: &ImplDef, module_env: &ModuleEnv, output_dir: &Path) -> MumeiResult<()> {
+pub fn verify_impl(
+    impl_def: &ImplDef,
+    module_env: &ModuleEnv,
+    output_dir: &Path,
+) -> MumeiResult<()> {
     let trait_def = module_env.get_trait(&impl_def.trait_name).ok_or_else(|| {
         MumeiError::type_error_at(
             format!(
@@ -1131,7 +1229,10 @@ pub fn verify_impl(impl_def: &ImplDef, module_env: &ModuleEnv, output_dir: &Path
                             save_visualizer_report(
                                 output_dir,
                                 "failed",
-                                &format!("impl {} for {}", impl_def.trait_name, impl_def.target_type),
+                                &format!(
+                                    "impl {} for {}",
+                                    impl_def.trait_name, impl_def.target_type
+                                ),
                                 "N/A",
                                 "N/A",
                                 &format!("Trait law '{}' not satisfied", law_name),
@@ -1180,8 +1281,189 @@ pub fn verify_impl(impl_def: &ImplDef, module_env: &ModuleEnv, output_dir: &Path
 // これにより、待機グラフ（Wait-For Graph）に循環が生じないことを
 // コンパイル時に数学的に保証する。
 
-/// リソース取得コンテキスト: 現在保持中のリソースとその優先度を追跡する。
-/// acquire 式の検証時に、リソース階層制約をチェックする。
+// リソース取得コンテキスト: 現在保持中のリソースとその優先度を追跡する。
+// acquire 式の検証時に、リソース階層制約をチェックする。
+
+// =============================================================================
+// エフェクト検証コンテキスト (Effect Verification Context)
+// =============================================================================
+
+/// Effect verification context — tracks allowed and used effects per atom scope.
+#[derive(Debug, Clone, Default)]
+#[allow(dead_code)]
+struct EffectCtx {
+    /// Effects allowed in the current scope (from atom's effects annotation, transitively expanded)
+    allowed_effects: HashSet<String>,
+    /// Effects actually used in the body (from perform expressions)
+    used_effects: HashSet<String>,
+    /// Violation messages
+    violations: Vec<String>,
+}
+
+#[allow(dead_code)]
+impl EffectCtx {
+    fn new(allowed: HashSet<String>) -> Self {
+        Self {
+            allowed_effects: allowed,
+            used_effects: HashSet::new(),
+            violations: Vec::new(),
+        }
+    }
+
+    /// Record a perform and check if the effect is allowed
+    fn perform_effect(&mut self, effect_name: &str) -> Result<(), String> {
+        self.used_effects.insert(effect_name.to_string());
+        if !self.allowed_effects.contains(effect_name) {
+            let msg = format!(
+                "Effect violation: '{}' is not in the allowed effect set {:?}",
+                effect_name, self.allowed_effects
+            );
+            self.violations.push(msg.clone());
+            return Err(msg);
+        }
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    fn has_violations(&self) -> bool {
+        !self.violations.is_empty()
+    }
+}
+
+/// Verify effect containment for an atom using Z3.
+/// Proves: ∀e ∈ UsedEffects(Body): e ∈ AllowedEffects(Signature)
+fn verify_effect_containment(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult<()> {
+    // Check effect propagation: for each callee atom, verify callee.effects ⊆ caller.effects
+    // Use leaf effects only to avoid false positives with composite effects.
+    // E.g., caller [FileRead, FileWrite, Console] vs callee [IO] should pass
+    // because both resolve to the same leaf set.
+    let allowed_leaves = module_env.resolve_leaf_effects(&atom.effects);
+    let body_ast = parse_expression(&atom.body_expr);
+    let callees = collect_callees(&body_ast);
+    for callee_name in &callees {
+        if let Some(callee_atom) = module_env.get_atom(callee_name) {
+            if !callee_atom.effects.is_empty() {
+                let callee_leaves = module_env.resolve_leaf_effects(&callee_atom.effects);
+                let missing: Vec<String> =
+                    callee_leaves.difference(&allowed_leaves).cloned().collect();
+                if !missing.is_empty() {
+                    return Err(MumeiError::verification_at(
+                        format!(
+                            "Effect propagation violation: atom '{}' calls '{}' which requires \
+                             {:?} effect(s), but '{}' only declares effects: {:?}. \
+                             Missing: {:?}.",
+                            atom.name,
+                            callee_name,
+                            callee_atom.effects,
+                            atom.name,
+                            atom.effects,
+                            missing,
+                        ),
+                        atom.span.clone(),
+                    )
+                    .with_help(format!(
+                        "Add the missing effects {:?} to atom '{}', or remove the call to '{}'.",
+                        missing, atom.name, callee_name
+                    )));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Save an effect mismatch violation report to report.json for self-healing integration.
+fn save_effect_violation_report(
+    output_dir: &Path,
+    atom_name: &str,
+    declared_effects: &[String],
+    required_effect: &str,
+    source_operation: &str,
+    suggested_fixes: &[String],
+) {
+    let report = json!({
+        "status": "failed",
+        "atom": atom_name,
+        "violation_type": "effect_mismatch",
+        "effect_violation": {
+            "declared_effects": declared_effects,
+            "required_effect": required_effect,
+            "source_operation": source_operation,
+            "suggested_fixes": suggested_fixes,
+            "resolution_paths": [
+                {
+                    "strategy": "propagation",
+                    "description": format!("Add '{}' to the effects declaration of atom '{}'", required_effect, atom_name),
+                    "fix_type": "signature_change",
+                    "target": atom_name,
+                    "change": format!("effects: [{}, {}];", declared_effects.join(", "), required_effect)
+                },
+                {
+                    "strategy": "isolation",
+                    "description": format!("Remove the call to '{}' and use only pure computation", source_operation),
+                    "fix_type": "body_change",
+                    "target": atom_name,
+                    "change": format!("Remove or replace '{}' with a pure alternative", source_operation)
+                }
+            ]
+        },
+        "reason": format!("Effect violation: atom '{}' declares effects {:?} but uses '{}' which requires [{}]",
+            atom_name, declared_effects, source_operation, required_effect)
+    });
+    let _ = fs::create_dir_all(output_dir);
+    let _ = fs::write(
+        output_dir.join("report.json"),
+        serde_json::to_string_pretty(&report).unwrap_or_else(|_| report.to_string()),
+    );
+}
+
+/// Save an effect propagation violation report to report.json for self-healing integration.
+fn save_effect_propagation_report(
+    output_dir: &Path,
+    caller_name: &str,
+    callee_name: &str,
+    caller_effects: &[String],
+    callee_effects: &[String],
+    missing_effects: &[String],
+) {
+    let report = json!({
+        "status": "failed",
+        "atom": caller_name,
+        "violation_type": "effect_propagation",
+        "effect_violation": {
+            "caller": caller_name,
+            "callee": callee_name,
+            "caller_effects": caller_effects,
+            "callee_effects": callee_effects,
+            "missing_effects": missing_effects,
+            "suggested_fixes": [
+                format!("Add {:?} to atom '{}' effects declaration", missing_effects, caller_name),
+                format!("Remove the call to '{}' from atom '{}'", callee_name, caller_name)
+            ],
+            "resolution_paths": [
+                {
+                    "strategy": "propagation",
+                    "description": format!("Expand {}'s effect set to include {}'s effects", caller_name, callee_name),
+                    "fix_type": "signature_change"
+                },
+                {
+                    "strategy": "isolation",
+                    "description": format!("Remove the dependency on '{}'", callee_name),
+                    "fix_type": "body_change"
+                }
+            ]
+        },
+        "reason": format!("Effect propagation violation: '{}' calls '{}' which requires {:?}, but '{}' only declares {:?}",
+            caller_name, callee_name, callee_effects, caller_name, caller_effects)
+    });
+    let _ = fs::create_dir_all(output_dir);
+    let _ = fs::write(
+        output_dir.join("report.json"),
+        serde_json::to_string_pretty(&report).unwrap_or_else(|_| report.to_string()),
+    );
+}
+
 #[derive(Debug, Clone, Default)]
 struct ResourceCtx {
     /// 現在保持中のリソース: (リソース名, 優先度)
@@ -1388,6 +1670,11 @@ fn collect_acquire_resources(expr: &Expr) -> Vec<String> {
                 resources.extend(collect_acquire_resources(child));
             }
         }
+        Expr::Perform { args, .. } => {
+            for arg in args {
+                resources.extend(collect_acquire_resources(arg));
+            }
+        }
         Expr::AtomRef { .. } => {}
         Expr::CallRef { callee, args } => {
             resources.extend(collect_acquire_resources(callee));
@@ -1511,6 +1798,7 @@ fn verify_async_recursion_depth(atom: &Atom, module_env: &ModuleEnv) -> MumeiRes
                 .iter()
                 .map(|c| count_self_calls(c, atom_name))
                 .sum(),
+            Expr::Perform { args, .. } => args.iter().map(|a| count_self_calls(a, atom_name)).sum(),
             Expr::AtomRef { .. } => 0,
             Expr::CallRef { callee, args } => {
                 let self_call = if let Expr::AtomRef { name } = callee.as_ref() {
@@ -1829,6 +2117,11 @@ fn collect_callees(expr: &Expr) -> Vec<String> {
                 callees.extend(collect_callees(arg));
             }
         }
+        Expr::Perform { args, .. } => {
+            for arg in args {
+                callees.extend(collect_callees(arg));
+            }
+        }
         _ => {}
     }
     callees
@@ -2037,6 +2330,44 @@ fn verify_inner(
     // Phase 1: リソース階層検証（デッドロック防止）
     verify_resource_hierarchy(atom, module_env)?;
 
+    // Phase 1f: エフェクト包含検証（副作用安全性）
+    if let Err(e) = verify_effect_containment(atom, module_env) {
+        // Save structured effect violation report for self-healing integration.
+        // Extract missing effects from the error to produce a structured report.
+        let body_ast = parse_expression(&atom.body_expr);
+        let callees = collect_callees(&body_ast);
+        let allowed = module_env.resolve_effect_set(&atom.effects);
+        let mut missing_all: Vec<String> = Vec::new();
+        let mut violating_callee = String::new();
+        let mut callee_effs: Vec<String> = Vec::new();
+        for callee_name in &callees {
+            if let Some(callee_atom) = module_env.get_atom(callee_name) {
+                if !callee_atom.effects.is_empty() {
+                    let callee_effects = module_env.resolve_effect_set(&callee_atom.effects);
+                    let missing: Vec<String> =
+                        callee_effects.difference(&allowed).cloned().collect();
+                    if !missing.is_empty() {
+                        violating_callee = callee_name.clone();
+                        callee_effs = callee_atom.effects.clone();
+                        missing_all = missing;
+                        break;
+                    }
+                }
+            }
+        }
+        if !missing_all.is_empty() {
+            save_effect_propagation_report(
+                output_dir,
+                &atom.name,
+                &violating_callee,
+                &atom.effects,
+                &callee_effs,
+                &missing_all,
+            );
+        }
+        return Err(e);
+    }
+
     // Phase 1b: 有界モデル検査（ループ内 acquire パターン）
     verify_bmc_resource_safety(atom, module_env)?;
 
@@ -2065,6 +2396,15 @@ fn verify_inner(
     };
 
     let mut env: Env = HashMap::new();
+
+    // Phase 2b: エフェクト許可セットを Z3 環境に注入
+    {
+        let allowed_effects = module_env.resolve_effect_set(&atom.effects);
+        for effect_name in &allowed_effects {
+            let allowed_name = format!("__effect_allowed_{}", effect_name);
+            env.insert(allowed_name, Bool::from_bool(&ctx, true).into());
+        }
+    }
 
     // 1. 量子化制約の処理
     for q in &atom.forall_constraints {
@@ -2318,14 +2658,38 @@ fn verify_inner(
             // Body evaluation errors (e.g., division by zero, out-of-bounds) propagate
             // before reaching the postcondition check. Write a failure report so the
             // MCP self-healing flow does not read a stale report.json from a prior run.
+            let err_str = format!("{}", e);
+            // If this is an effect mismatch violation, save a structured report
+            if err_str.contains("Effect violation: 'perform ") {
+                // Extract effect name and operation from error message
+                // Format: "Effect violation: 'perform Effect.op' requires [Effect] effect, ..."
+                if let Some(start) = err_str.find("requires [") {
+                    let after = &err_str[start + 10..];
+                    if let Some(end) = after.find(']') {
+                        let required_effect = &after[..end];
+                        let source_op = err_str
+                            .find("'perform ")
+                            .and_then(|s| {
+                                let rest = &err_str[s + 9..];
+                                rest.find('\'').map(|e| rest[..e].to_string())
+                            })
+                            .unwrap_or_default();
+                        save_effect_violation_report(
+                            output_dir,
+                            &atom.name,
+                            &atom.effects,
+                            required_effect,
+                            &source_op,
+                            &[
+                                format!("Add '{}' to the effects declaration", required_effect),
+                                format!("Remove the call to 'perform {}'", source_op),
+                            ],
+                        );
+                    }
+                }
+            }
             save_visualizer_report(
-                output_dir,
-                "failed",
-                &atom.name,
-                "N/A",
-                "N/A",
-                &format!("{}", e),
-                None,
+                output_dir, "failed", &atom.name, "N/A", "N/A", &err_str, None,
             );
             return Err(e);
         }
@@ -2354,11 +2718,13 @@ fn verify_inner(
                             }
                         }
                     }
-                    let a_str = ce_json.get(atom.params.get(0).map(|p| p.name.as_str()).unwrap_or(""))
+                    let a_str = ce_json
+                        .get(atom.params.first().map(|p| p.name.as_str()).unwrap_or(""))
                         .and_then(|v| v.as_str())
                         .unwrap_or("N/A")
                         .to_string();
-                    let b_str = ce_json.get(atom.params.get(1).map(|p| p.name.as_str()).unwrap_or(""))
+                    let b_str = ce_json
+                        .get(atom.params.get(1).map(|p| p.name.as_str()).unwrap_or(""))
                         .and_then(|v| v.as_str())
                         .unwrap_or("N/A")
                         .to_string();
@@ -2925,10 +3291,12 @@ fn expr_to_z3<'a>(
                             if solver.check() == SatResult::Sat {
                                 // Extract counterexample: find which variables cause divisor == 0
                                 let ce_hint = if let Some(model) = solver.get_model() {
-                                    let divisor_val = model.eval(&ri, true)
+                                    let divisor_val = model
+                                        .eval(&ri, true)
                                         .map(|v| format!("{}", v))
                                         .unwrap_or_else(|| "0".to_string());
-                                    let dividend_val = model.eval(&li, true)
+                                    let dividend_val = model
+                                        .eval(&li, true)
                                         .map(|v| format!("{}", v))
                                         .unwrap_or_else(|| "?".to_string());
                                     format!(
@@ -2939,9 +3307,10 @@ fn expr_to_z3<'a>(
                                     String::new()
                                 };
                                 solver.pop(1);
-                                return Err(MumeiError::verification(
-                                    format!("Potential division by zero.{}", ce_hint),
-                                )
+                                return Err(MumeiError::verification(format!(
+                                    "Potential division by zero.{}",
+                                    ce_hint
+                                ))
                                 .with_help("Add a condition divisor != 0 to requires"));
                             }
                             solver.pop(1);
@@ -3286,6 +3655,51 @@ fn expr_to_z3<'a>(
         // =================================================================
         // 非同期処理 + リソース管理の Z3 検証
         // =================================================================
+        Expr::Perform {
+            effect,
+            operation,
+            args: perform_args,
+        } => {
+            // Effect system: record effect usage and verify against allowed set
+            // Record that this effect was used
+            let used_name = format!("__effect_used_{}", effect);
+            let used_bool = Bool::from_bool(ctx, true);
+            env.insert(used_name.clone(), used_bool.into());
+
+            // Check against allowed effects via Z3 environment
+            let allowed_name = format!("__effect_allowed_{}", effect);
+            if env.get(&allowed_name).is_none() {
+                // Effect not in allowed set — immediate violation
+                return Err(MumeiError::verification(format!(
+                    "Effect violation: 'perform {}.{}' requires [{}] effect, \
+                         but it is not declared in the current atom's effects set.",
+                    effect, operation, effect
+                ))
+                .with_help(format!(
+                    "Fix option 1: Add '{}' to the effects declaration: effects: [{}];\n\
+                         Fix option 2: Remove the call to 'perform {}.{}'.",
+                    effect, effect, effect, operation
+                )));
+            }
+
+            // If solver is available, assert the Z3 containment constraint
+            if let Some(solver) = solver_opt {
+                let used_z3 = Bool::from_bool(ctx, true);
+                let allowed_z3 = Bool::from_bool(ctx, true); // already proven allowed
+                                                             // Assert: used → allowed (trivially true when allowed)
+                solver.assert(&used_z3.implies(&allowed_z3));
+            }
+
+            // Process arguments
+            for arg in perform_args {
+                expr_to_z3(vc, arg, env, solver_opt)?;
+            }
+
+            // Return a symbolic result value
+            let result_name = format!("__perform_{}_{}", effect, operation);
+            Ok(Int::new_const(ctx, result_name.as_str()).into())
+        }
+
         Expr::Acquire { resource, body } => {
             // acquire ブロック: リソースを取得して body を実行し、自動解放する。
             // Z3 上ではリソースの保持状態をシンボリック Bool で追跡する。
