@@ -2496,33 +2496,42 @@ fn verify_effect_consistency(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult
 // NOTE: check_constant_constraint is called by verify_effect_params (future pipeline integration)
 #[allow(dead_code)]
 fn check_constant_constraint(value: &str, constraint: &str) -> bool {
-    // starts_with 制約
-    if let Some(prefix) = constraint
-        .strip_prefix("starts_with(\"")
-        .and_then(|s| s.strip_suffix("\")"))
-    {
-        return value.starts_with(prefix);
+    // パーサーは "starts_with(path, \"/tmp/\")" のように2引数形式で制約を出力する。
+    // 文字列引数（最後のクォートされた値）を抽出して検証する。
+    let extract_string_arg = |c: &str| -> Option<String> {
+        // 最後の "..." を抽出する
+        if let Some(last_quote_end) = c.rfind('"') {
+            let before = &c[..last_quote_end];
+            if let Some(last_quote_start) = before.rfind('"') {
+                return Some(c[last_quote_start + 1..last_quote_end].to_string());
+            }
+        }
+        None
+    };
+
+    // starts_with 制約（1引数 or 2引数形式）
+    if constraint.starts_with("starts_with(") {
+        if let Some(arg) = extract_string_arg(constraint) {
+            return value.starts_with(&arg);
+        }
     }
     // contains 制約
-    if let Some(substr) = constraint
-        .strip_prefix("contains(\"")
-        .and_then(|s| s.strip_suffix("\")"))
-    {
-        return value.contains(substr);
+    if constraint.starts_with("contains(") {
+        if let Some(arg) = extract_string_arg(constraint) {
+            return value.contains(&arg);
+        }
     }
     // ends_with 制約
-    if let Some(suffix) = constraint
-        .strip_prefix("ends_with(\"")
-        .and_then(|s| s.strip_suffix("\")"))
-    {
-        return value.ends_with(suffix);
+    if constraint.starts_with("ends_with(") {
+        if let Some(arg) = extract_string_arg(constraint) {
+            return value.ends_with(&arg);
+        }
     }
     // not_contains 制約
-    if let Some(substr) = constraint
-        .strip_prefix("not_contains(\"")
-        .and_then(|s| s.strip_suffix("\")"))
-    {
-        return !value.contains(substr);
+    if constraint.starts_with("not_contains(") {
+        if let Some(arg) = extract_string_arg(constraint) {
+            return !value.contains(&arg);
+        }
     }
     // 不明な制約は true を返す（安全側に倒す）
     true

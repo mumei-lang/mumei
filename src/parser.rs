@@ -1509,20 +1509,19 @@ fn parse_effect_list(input: &str) -> Vec<Effect> {
         return effects;
     }
 
-    // 括弧のネストを考慮してカンマで分割する
+    // 括弧のネストを考慮してカンマで分割する（byte offset で正しくスライス）
     let mut depth = 0;
     let mut current_start = 0;
-    let chars: Vec<char> = input.chars().collect();
-    for i in 0..chars.len() {
-        match chars[i] {
+    for (byte_idx, ch) in input.char_indices() {
+        match ch {
             '(' => depth += 1,
             ')' => depth -= 1,
             ',' if depth == 0 => {
-                let token = input[current_start..i].trim();
+                let token = input[current_start..byte_idx].trim();
                 if !token.is_empty() {
                     effects.push(parse_single_effect(token));
                 }
-                current_start = i + 1;
+                current_start = byte_idx + ch.len_utf8();
             }
             _ => {}
         }
@@ -1564,31 +1563,50 @@ fn parse_single_effect(input: &str) -> Effect {
 /// "var_name" → EffectParam { value: "var_name", is_constant: false }
 fn parse_effect_params(input: &str) -> Vec<EffectParam> {
     let mut params = Vec::new();
-    for part in input.split(',') {
-        let part = part.trim();
-        if part.is_empty() {
-            continue;
-        }
-        // 文字列リテラル（"..." で囲まれている）は定数
-        if (part.starts_with('"') && part.ends_with('"'))
-            || (part.starts_with('\'') && part.ends_with('\''))
-        {
-            let value = part[1..part.len() - 1].to_string();
-            params.push(EffectParam {
-                value,
-                refinement: None,
-                is_constant: true,
-            });
-        } else {
-            // 変数名 → 非定数（Z3 検証対象）
-            params.push(EffectParam {
-                value: part.to_string(),
-                refinement: None,
-                is_constant: false,
-            });
+    // クォート内のカンマを無視してパラメータを分割する
+    let mut in_quote = false;
+    let mut current_start = 0;
+    for (byte_idx, ch) in input.char_indices() {
+        match ch {
+            '"' => in_quote = !in_quote,
+            ',' if !in_quote => {
+                let part = input[current_start..byte_idx].trim();
+                if !part.is_empty() {
+                    params.push(parse_single_effect_param(part));
+                }
+                current_start = byte_idx + ch.len_utf8();
+            }
+            _ => {}
         }
     }
+    // 最後のパラメータ
+    let part = input[current_start..].trim();
+    if !part.is_empty() {
+        params.push(parse_single_effect_param(part));
+    }
     params
+}
+
+/// 単一のエフェクトパラメータをパースするヘルパー
+fn parse_single_effect_param(part: &str) -> EffectParam {
+    // 文字列リテラル（"..." で囲まれている）は定数
+    if (part.starts_with('"') && part.ends_with('"'))
+        || (part.starts_with('\'') && part.ends_with('\''))
+    {
+        let value = part[1..part.len() - 1].to_string();
+        EffectParam {
+            value,
+            refinement: None,
+            is_constant: true,
+        }
+    } else {
+        // 変数名 → 非定数（Z3 検証対象）
+        EffectParam {
+            value: part.to_string(),
+            refinement: None,
+            is_constant: false,
+        }
+    }
 }
 
 /// Effect の名前を返すヘルパー（表示・デバッグ用）
