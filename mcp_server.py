@@ -50,7 +50,7 @@ def _sync_to_visualizer(report_file: Path, root_dir: Path) -> None:
 def forge_blade(source_code: str, output_name: str = "katana") -> str:
     """
     Verify Mumei code and generate Rust/Go/TS output.
-    All temp files including verification reports are isolated per request for safe concurrent execution.
+    The build command writes report.json to the -o directory, so reports are isolated per request.
     """
     root_dir = Path(__file__).parent.absolute()
 
@@ -72,13 +72,8 @@ def forge_blade(source_code: str, output_name: str = "katana") -> str:
 
         response_parts = []
 
-        # --- Read isolated report (core of concurrency safety) ---
+        # report.json is written to output_dir (parent of -o path) = tmp_path
         report_file = tmp_path / "report.json"
-        if not report_file.exists():
-            # Fallback: compiler may write report.json to cwd
-            cwd_report = root_dir / "report.json"
-            if cwd_report.exists():
-                shutil.copy(cwd_report, report_file)
         if report_file.exists():
             report_data = report_file.read_text(encoding="utf-8")
             response_parts.append(f"### Verification Report\n```json\n{report_data}\n```")
@@ -134,6 +129,9 @@ def validate_logic(source_code: str) -> str:
     Run formal verification (Z3) only on Mumei code.
     No code generation — returns verification results and counter-examples.
     Used as the verification step when AI iteratively fixes .mm code.
+
+    Note: The verify command always writes report.json to the compiler's cwd.
+    Concurrent calls may read stale data. Use forge_blade for concurrent-safe operation.
     """
     root_dir = Path(__file__).parent.absolute()
 
@@ -152,13 +150,16 @@ def validate_logic(source_code: str) -> str:
 
         response_parts = []
 
-        # Read report.json (includes counter-example data)
+        # The verify command writes report.json to cwd (no -o support).
+        # Move (not copy) to reduce the race window under concurrent requests.
         report_file = tmp_path / "report.json"
-        if not report_file.exists():
-            # Fallback: compiler may write report.json to cwd
-            cwd_report = root_dir / "report.json"
-            if cwd_report.exists():
-                shutil.copy(cwd_report, report_file)
+        cwd_report = root_dir / "report.json"
+        if cwd_report.exists():
+            try:
+                shutil.move(str(cwd_report), str(report_file))
+            except OSError:
+                # Another request may have moved it already
+                pass
         if report_file.exists():
             report_data = report_file.read_text(encoding="utf-8")
             response_parts.append(
@@ -202,6 +203,9 @@ def execute_mm(
     Compile and execute Mumei code.
     command: "build" (default) for full build, "verify" for verification only, "check" for syntax check only.
     Returns build results, generated code, and verification report.
+
+    Note: Only "build" is concurrent-safe (report isolated via -o).
+    "verify" and "check" write report.json to cwd, so concurrent calls may race.
     """
     root_dir = Path(__file__).parent.absolute()
 
@@ -211,6 +215,11 @@ def execute_mm(
         source_path.write_text(source_code, encoding="utf-8")
 
         output_base = tmp_path / output_name
+
+        # Validate command against allowlist
+        allowed_commands = {"build", "verify", "check"}
+        if command not in allowed_commands:
+            return f"Invalid command: '{command}'. Allowed: {', '.join(sorted(allowed_commands))}"
 
         # Build command arguments
         cmd_args = ["cargo", "run", "--", command, str(source_path)]
@@ -226,13 +235,16 @@ def execute_mm(
 
         response_parts = []
 
-        # Read report.json
+        # For "build", report.json is written to tmp_path (via -o).
+        # For "verify"/"check", it's written to cwd — move it to reduce race window.
         report_file = tmp_path / "report.json"
-        if not report_file.exists():
-            # Fallback: compiler may write report.json to cwd
+        if not report_file.exists() and command != "build":
             cwd_report = root_dir / "report.json"
             if cwd_report.exists():
-                shutil.copy(cwd_report, report_file)
+                try:
+                    shutil.move(str(cwd_report), str(report_file))
+                except OSError:
+                    pass
         if report_file.exists():
             report_data = report_file.read_text(encoding="utf-8")
             response_parts.append(
