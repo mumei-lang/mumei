@@ -2312,7 +2312,24 @@ fn verify_inner(
 
     // 4. ボディの検証
     let body_ast = parse_expression(&atom.body_expr);
-    let body_result = expr_to_z3(&vc, &body_ast, &mut env, Some(&solver))?;
+    let body_result = match expr_to_z3(&vc, &body_ast, &mut env, Some(&solver)) {
+        Ok(val) => val,
+        Err(e) => {
+            // Body evaluation errors (e.g., division by zero, out-of-bounds) propagate
+            // before reaching the postcondition check. Write a failure report so the
+            // MCP self-healing flow does not read a stale report.json from a prior run.
+            save_visualizer_report(
+                output_dir,
+                "failed",
+                &atom.name,
+                "N/A",
+                "N/A",
+                &format!("{}", e),
+                None,
+            );
+            return Err(e);
+        }
+    };
 
     // 4b. Taint Analysis: unverified 関数の呼び出しを検出し警告
     check_taint_propagation(atom, &env, module_env);

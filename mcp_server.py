@@ -94,7 +94,10 @@ def forge_blade(source_code: str, output_name: str = "katana") -> str:
         if report_file.exists():
             report_data = report_file.read_text(encoding="utf-8")
             response_parts.append(f"### Verification Report\n```json\n{report_data}\n```")
-            _sync_to_visualizer(report_file, root_dir)
+            try:
+                _sync_to_visualizer(report_file, root_dir)
+            except Exception:
+                pass
 
         if result.returncode == 0:
             response_parts.insert(0, f"Forge succeeded: '{output_name}'")
@@ -186,7 +189,10 @@ def validate_logic(source_code: str) -> str:
             response_parts.append(
                 f"### Verification Report\n```json\n{report_data}\n```"
             )
-            _sync_to_visualizer(report_file, root_dir)
+            try:
+                _sync_to_visualizer(report_file, root_dir)
+            except Exception:
+                pass
 
         # Extract Z3 counter-example info from stderr
         if result.stderr:
@@ -276,7 +282,10 @@ def execute_mm(
             response_parts.append(
                 f"### Verification Report\n```json\n{report_data}\n```"
             )
-            _sync_to_visualizer(report_file, root_dir)
+            try:
+                _sync_to_visualizer(report_file, root_dir)
+            except Exception:
+                pass
 
         if result.returncode == 0:
             response_parts.insert(0, f"{command} succeeded: '{output_name}'")
