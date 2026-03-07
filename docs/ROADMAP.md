@@ -446,6 +446,26 @@ Future extensions to the effect subtyping system:
 
 ---
 
+## Multi-Stage IR Roadmap
+
+| Phase | Item | Status | Prerequisite |
+|---|---|---|---|
+| Phase 0 | Expr/Stmt 分離 | ✅ Done | — |
+| Phase 1 | HIR 導入（型確定AST、body_expr の String 脱却） | ✅ Done | Phase 0 |
+| Phase 2 | 基本エフェクトシステム | ⏳ Planned | パーサーの regex 脱却 |
+| Phase 3 | エフェクト多相 | ⏳ Planned | Phase 2 |
+| Phase 4 | MIR 導入（CFG、借用検査用） | ⏳ Planned | 借用検査の設計確定 |
+| Phase 5 | Capability Security 検討 | ⏳ Planned | Phase 3 の成熟度評価 |
+
+### Phase 2〜5 が保留の理由
+
+- **Phase 2 (基本エフェクト)**: 現在のパーサーが regex ベースであり、`<E: Effect>` のような複雑な構文を安全に処理できない。再帰下降パーサーへの移行が先。
+- **Phase 3 (エフェクト多相)**: 具象エフェクトの定義・追跡機構が存在しない状態で多相を入れるのは順番が逆。基本エフェクトの実装と運用実績が前提。
+- **Phase 4 (MIR)**: CFG ベースの中間表現は借用検査・ライフタイム解析に必要だが、借用検査自体の設計が未着手。設計確定後に導入する。
+- **Phase 5 (Capability Security)**: パラメータ付きエフェクトを Z3 で検証する現路線の成熟度を評価し、不十分な場合にオブジェクトベースの権限モデルを導入する。
+
+---
+
 ## Related Documents
 
 - [`docs/FFI.md`](FFI.md) — FFI extern block design (Phase A foundation)

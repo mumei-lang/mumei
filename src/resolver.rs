@@ -938,6 +938,10 @@ pub fn save_verification_cache(base_dir: &Path, cache: &HashMap<String, Verifica
 }
 
 /// Invalidate cache entries for all atoms that transitively depend on the changed atom.
+// NOTE: invalidate_dependents is no longer called because compute_proof_hash already includes
+// callee signatures (requires/ensures) in the hash. If a callee's contract changes, all callers
+// will have different proof hashes and be re-verified automatically. Kept for potential future use.
+#[allow(dead_code)]
 pub fn invalidate_dependents(
     cache: &mut HashMap<String, VerificationCacheEntry>,
     changed_atom: &str,

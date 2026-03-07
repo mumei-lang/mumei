@@ -1,6 +1,5 @@
-use crate::parser::{
-    parse_expression, Atom, EnumDef, Expr, ImplDef, ImportDecl, Op, StructDef, TraitDef,
-};
+use crate::hir::{HirAtom, HirExpr, HirStmt};
+use crate::parser::{EnumDef, ImplDef, ImportDecl, Op, StructDef, TraitDef};
 
 /// 型名をベース型に解決する（transpiler ローカル版）
 fn resolve_base_type(name: &str) -> String {
@@ -155,7 +154,8 @@ pub fn transpile_impl_go(impl_def: &ImplDef) -> String {
     lines.join("\n")
 }
 
-pub fn transpile_to_go(atom: &Atom) -> String {
+pub fn transpile_to_go(hir_atom: &HirAtom) -> String {
+    let atom = &hir_atom.atom;
     // パラメータの型を精緻型名からマッピング
     // ref mut はポインタ型 *T、ref は値渡し（Go は暗黙的に参照渡し）
     let params: Vec<String> = atom
@@ -172,10 +172,19 @@ pub fn transpile_to_go(atom: &Atom) -> String {
         .collect();
     let params_str = params.join(", ");
 
-    // ボディのパースと変換
-    let body = format_expr_go(&parse_expression(&atom.body_expr));
+    // ボディの変換（HIR から直接）
+    // トップレベルの body が純粋な式（HirStmt::Expr）の場合、return を補う。
+    // Block の場合は内部で tail_expr に return が付与されるため不要。
+    let body = {
+        let raw = format_hir_stmt_go(&hir_atom.body);
+        if needs_return_prefix_go(&raw) {
+            format!("return {}", raw)
+        } else {
+            raw
+        }
+    };
 
-    // mathパッケージが必要な関数(sqrt等)があるか簡易チェック（実用上はASTを走査すべきですが、ここでは含めます）
+    // mathパッケージが必要な関数(sqrt等)があるか簡易チェック
     let imports = if atom.body_expr.contains("sqrt") {
         "import \"math\"\n\n"
     } else {
@@ -231,16 +240,16 @@ fn map_type_go(type_name: Option<&str>) -> String {
     }
 }
 
-fn format_expr_go(expr: &Expr) -> String {
+fn format_hir_expr_go(expr: &HirExpr) -> String {
     match expr {
-        Expr::Number(n) => n.to_string(),
-        Expr::Float(f) => format!("{:.15}", f), // Type System 2.0: 浮動小数点
-        Expr::Variable(v) => v.clone(),
-        Expr::ArrayAccess(name, idx) => format!("{}[{}]", name, format_expr_go(idx)),
+        HirExpr::Number(n) => n.to_string(),
+        HirExpr::Float(f) => format!("{:.15}", f), // Type System 2.0: 浮動小数点
+        HirExpr::Variable(v) => v.clone(),
+        HirExpr::ArrayAccess(name, idx) => format!("{}[{}]", name, format_hir_expr_go(idx)),
 
-        Expr::Call(name, args) => {
+        HirExpr::Call { name, args } => {
             // Standard Library 対応
-            let args_str: Vec<String> = args.iter().map(format_expr_go).collect();
+            let args_str: Vec<String> = args.iter().map(format_hir_expr_go).collect();
             match name.as_str() {
                 "sqrt" => format!("math.Sqrt({})", args_str.join(", ")),
                 "len" => format!("int64(len({}))", args_str.join(", ")),
@@ -248,7 +257,7 @@ fn format_expr_go(expr: &Expr) -> String {
             }
         }
 
-        Expr::BinaryOp(l, op, r) => {
+        HirExpr::BinaryOp(l, op, r) => {
             let op_str = match op {
                 Op::Add => "+",
                 Op::Sub => "-",
@@ -264,96 +273,45 @@ fn format_expr_go(expr: &Expr) -> String {
                 Op::Or => "||",
                 Op::Implies => "/* implies */",
             };
-            format!("({} {} {})", format_expr_go(l), op_str, format_expr_go(r))
+            format!(
+                "({} {} {})",
+                format_hir_expr_go(l),
+                op_str,
+                format_hir_expr_go(r)
+            )
         }
 
-        Expr::IfThenElse {
+        HirExpr::IfThenElse {
             cond,
             then_branch,
             else_branch,
         } => {
             format!(
                 "if {} {{\n        {}\n    }} else {{\n        {}\n    }}",
-                format_expr_go(cond),
-                format_expr_go(then_branch),
-                format_expr_go(else_branch)
+                format_hir_expr_go(cond),
+                format_hir_stmt_go(then_branch),
+                format_hir_stmt_go(else_branch)
             )
         }
 
-        Expr::While {
-            cond,
-            invariant,
-            decreases: _,
-            body,
-        } => {
-            format!(
-                "// invariant: {}\n    for {} {{\n        {}\n    }}",
-                format_expr_go(invariant),
-                format_expr_go(cond),
-                format_expr_go(body)
-            )
-        }
-
-        Expr::Let { var, value } => {
-            match value.as_ref() {
-                Expr::IfThenElse {
-                    cond,
-                    then_branch,
-                    else_branch,
-                } => {
-                    format!(
-                        "var {} int64\n    if {} {{\n        {} = {}\n    }} else {{\n        {} = {}\n    }}",
-                        var, format_expr_go(cond), var, format_expr_go(then_branch), var, format_expr_go(else_branch)
-                    )
-                }
-                _ => {
-                    // 型推論を利用した定義
-                    format!("{} := {}", var, format_expr_go(value))
-                }
-            }
-        }
-
-        Expr::Assign { var, value } => {
-            format!("{} = {}", var, format_expr_go(value))
-        }
-
-        Expr::Block(stmts) => stmts
-            .iter()
-            .map(|s| {
-                let code = format_expr_go(s);
-                if code.starts_with("if")
-                    || code.contains(":=")
-                    || code.contains(" = ")
-                    || code.starts_with("for")
-                    || code.starts_with("//")
-                    || code.starts_with("var")
-                {
-                    code
-                } else {
-                    format!("return {}", code)
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n    "),
-
-        Expr::StructInit { type_name, fields } => {
+        HirExpr::StructInit { type_name, fields } => {
             let field_strs: Vec<String> = fields
                 .iter()
-                .map(|(name, expr)| format!("{}: {}", name, format_expr_go(expr)))
+                .map(|(name, expr)| format!("{}: {}", name, format_hir_expr_go(expr)))
                 .collect();
             format!("{}{{{}}}", type_name, field_strs.join(", "))
         }
 
-        Expr::FieldAccess(expr, field) => {
-            format!("{}.{}", format_expr_go(expr), field)
+        HirExpr::FieldAccess(expr, field) => {
+            format!("{}.{}", format_hir_expr_go(expr), field)
         }
 
-        Expr::Match { target, arms } => {
+        HirExpr::Match { target, arms } => {
             // Go には match がないため switch 文に変換
-            let target_str = format_expr_go(target);
+            let target_str = format_hir_expr_go(target);
             let mut cases = Vec::new();
             for arm in arms {
-                let body = format_expr_go(&arm.body);
+                let body = format_hir_stmt_go(&arm.body);
                 match &arm.pattern {
                     crate::parser::Pattern::Literal(n) => {
                         cases.push(format!("case {}:\n        return {}", n, body));
@@ -376,47 +334,41 @@ fn format_expr_go(expr: &Expr) -> String {
             )
         }
 
-        Expr::Acquire { resource, body } => {
-            // Go: 即時実行関数リテラルでスコープを限定し、defer でブロック終了時に Unlock する。
-            // defer は関数スコープなので、ネストやループ内でも正しくブロック終了時に解放される。
-            let body_str = format_expr_go(body);
-            format!("func() int64 {{\n        {r}.Lock()\n        defer {r}.Unlock()\n        return {body}\n    }}()", r = resource, body = body_str)
-        }
-        Expr::Async { body } => {
+        HirExpr::Async { body } => {
             // Go: goroutine + channel パターン
-            let body_str = format_expr_go(body);
+            let body_str = format_hir_stmt_go(body);
             format!("func() int64 {{\n        ch := make(chan int64, 1)\n        go func() {{ ch <- func() int64 {{ {} }}() }}()\n        return <-ch\n    }}()", body_str)
         }
-        Expr::Await { expr } => {
+        HirExpr::Await { expr } => {
             // Go: channel receive（goroutine の結果を待機）
-            let expr_str = format_expr_go(expr);
+            let expr_str = format_hir_expr_go(expr);
             format!("<-{}", expr_str)
         }
-        Expr::Task { body, .. } => {
-            let body_str = format_expr_go(body);
+        HirExpr::Task { body, .. } => {
+            let body_str = format_hir_stmt_go(body);
             format!("func() int64 {{\n        ch := make(chan int64, 1)\n        go func() {{ ch <- func() int64 {{ {} }}() }}()\n        return <-ch\n    }}()", body_str)
         }
-        Expr::TaskGroup { children, .. } => {
-            let tasks: Vec<String> = children.iter().map(format_expr_go).collect();
+        HirExpr::TaskGroup { children, .. } => {
+            let tasks: Vec<String> = children.iter().map(format_hir_stmt_go).collect();
             format!("/* task_group */ func() int64 {{ {} }}()", tasks.join("; "))
         }
         // Higher-order functions (Phase A): atom_ref + call
-        Expr::AtomRef { name } => {
+        HirExpr::AtomRef { name } => {
             // Go では関数名がそのまま第一級値として使える
             name.clone()
         }
-        Expr::CallRef { callee, args } => {
-            let callee_str = format_expr_go(callee);
-            let args_str: Vec<String> = args.iter().map(format_expr_go).collect();
+        HirExpr::CallRef { callee, args } => {
+            let callee_str = format_hir_expr_go(callee);
+            let args_str: Vec<String> = args.iter().map(format_hir_expr_go).collect();
             format!("{}({})", callee_str, args_str.join(", "))
         }
-        Expr::Perform {
+        HirExpr::Perform {
             effect,
             operation,
             args,
         } => {
             // Effects: perform Effect.operation(args) → function call
-            let args_str: Vec<String> = args.iter().map(format_expr_go).collect();
+            let args_str: Vec<String> = args.iter().map(format_hir_expr_go).collect();
             format!(
                 "/* perform {}.{} */ {}{}({})",
                 effect,
@@ -427,4 +379,80 @@ fn format_expr_go(expr: &Expr) -> String {
             )
         }
     }
+}
+
+fn format_hir_stmt_go(stmt: &HirStmt) -> String {
+    match stmt {
+        HirStmt::Let { var, value, .. } => {
+            match value.as_ref() {
+                HirExpr::IfThenElse {
+                    cond,
+                    then_branch,
+                    else_branch,
+                } => {
+                    format!(
+                        "var {} int64\n    if {} {{\n        {} = {}\n    }} else {{\n        {} = {}\n    }}",
+                        var, format_hir_expr_go(cond), var, format_hir_stmt_go(then_branch), var, format_hir_stmt_go(else_branch)
+                    )
+                }
+                _ => {
+                    // 型推論を利用した定義
+                    format!("{} := {}", var, format_hir_expr_go(value))
+                }
+            }
+        }
+        HirStmt::Assign { var, value } => {
+            format!("{} = {}", var, format_hir_expr_go(value))
+        }
+        HirStmt::While {
+            cond,
+            invariant,
+            decreases: _,
+            body,
+        } => {
+            format!(
+                "// invariant: {}\n    for {} {{\n        {}\n    }}",
+                format_hir_expr_go(invariant),
+                format_hir_expr_go(cond),
+                format_hir_stmt_go(body)
+            )
+        }
+        HirStmt::Block { stmts, tail_expr } => {
+            let mut lines: Vec<String> = stmts.iter().map(format_hir_stmt_go).collect();
+            if let Some(tail) = tail_expr {
+                let tail_code = format_hir_expr_go(tail);
+                // Go では if/switch/for は文であり return の右辺にできない。
+                // 旧コードの heuristic guard を再現する。
+                if tail_code.starts_with("if")
+                    || tail_code.starts_with("switch")
+                    || tail_code.starts_with("for")
+                {
+                    lines.push(tail_code);
+                } else {
+                    lines.push(format!("return {}", tail_code));
+                }
+            }
+            lines.join("\n    ")
+        }
+        HirStmt::Acquire { resource, body } => {
+            // Go: 即時実行関数リテラルでスコープを限定し、defer でブロック終了時に Unlock する。
+            let body_str = format_hir_stmt_go(body);
+            format!("func() int64 {{\n        {r}.Lock()\n        defer {r}.Unlock()\n        return {body}\n    }}()", r = resource, body = body_str)
+        }
+        HirStmt::Expr(expr) => format_hir_expr_go(expr),
+    }
+}
+
+/// トップレベル body の出力に `return` プレフィックスが必要かを判定する。
+/// 文（let, if, for, switch, var, コメント, return 済み）には不要。
+fn needs_return_prefix_go(code: &str) -> bool {
+    // 既に return / 文キーワード / 代入 / コメントで始まっていれば不要
+    !(code.starts_with("return ")
+        || code.starts_with("if ")
+        || code.starts_with("for ")
+        || code.starts_with("switch ")
+        || code.starts_with("var ")
+        || code.starts_with("//")
+        || code.contains(":=")
+        || code.contains(" = "))
 }

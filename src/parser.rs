@@ -189,24 +189,8 @@ pub enum Expr {
     BinaryOp(Box<Expr>, Op, Box<Expr>),
     IfThenElse {
         cond: Box<Expr>,
-        then_branch: Box<Expr>,
-        else_branch: Box<Expr>,
-    },
-    Let {
-        var: String,
-        value: Box<Expr>,
-    },
-    Assign {
-        var: String,
-        value: Box<Expr>,
-    },
-    Block(Vec<Expr>),
-    While {
-        cond: Box<Expr>,
-        invariant: Box<Expr>,
-        /// 停止性証明用の減少式（Ranking Function）。None なら停止性チェックをスキップ
-        decreases: Option<Box<Expr>>,
-        body: Box<Expr>,
+        then_branch: Box<Stmt>,
+        else_branch: Box<Stmt>,
     },
     Call(String, Vec<Expr>),
     /// 構造体インスタンス生成: TypeName { field1: expr1, field2: expr2 }
@@ -221,37 +205,15 @@ pub enum Expr {
         target: Box<Expr>,
         arms: Vec<MatchArm>,
     },
-    /// リソース取得: acquire resource_name { body }
-    /// body 実行中はリソースを保持し、ブロック終了時に自動解放する。
-    /// Z3 検証時にリソース階層制約をチェックする。
-    Acquire {
-        resource: String,
-        body: Box<Expr>,
-    },
     /// 非同期式: async { body }
     /// body を非同期コンテキストで実行する。暗黙的に Control エフェクトを持つ。
     Async {
-        body: Box<Expr>,
+        body: Box<Stmt>,
     },
     /// 待機式: await expr
     /// 非同期式の結果を待機する。await ポイントで所有権の検証が行われる。
     Await {
         expr: Box<Expr>,
-    },
-    /// タスク式: task { body }
-    /// 構造化並行性のための子タスクを生成する。
-    /// 親タスクが子タスクより先に終了しないことを Z3 で保証する。
-    Task {
-        body: Box<Expr>,
-        /// タスクグループ名（省略時は暗黙のデフォルトグループ）
-        group: Option<String>,
-    },
-    /// タスクグループ式: task_group { task { ... }, task { ... } }
-    /// 複数の子タスクをグループ化し、全タスクの完了を待機する。
-    TaskGroup {
-        children: Vec<Expr>,
-        /// Join セマンティクス: all（全タスク完了待ち）または any（最初の完了で終了）
-        join_semantics: JoinSemantics,
     },
     /// atom参照: atom_ref(atom_name)
     /// atom を第一級の値として参照する。型は AtomRef<(ParamTypes...) -> ReturnType>
@@ -274,13 +236,54 @@ pub enum Expr {
     },
 }
 
-/// Match 式のアーム（パターン → 式）
+/// 文（Statement）: 副作用を持つ構文要素
+#[derive(Debug, Clone)]
+pub enum Stmt {
+    /// 変数束縛: let var = expr
+    Let { var: String, value: Box<Expr> },
+    /// 代入: var = expr
+    Assign { var: String, value: Box<Expr> },
+    /// ブロック: { stmt1; stmt2; ... }
+    /// ※最後の要素が式として値を返すケースは Stmt::Expr(Expr) として格納される
+    Block(Vec<Stmt>),
+    /// While ループ: while cond invariant: inv { body }
+    While {
+        cond: Box<Expr>,
+        invariant: Box<Expr>,
+        /// 停止性証明用の減少式（Ranking Function）。None なら停止性チェックをスキップ
+        decreases: Option<Box<Expr>>,
+        body: Box<Stmt>,
+    },
+    /// リソース取得: acquire resource_name { body }
+    /// body 実行中はリソースを保持し、ブロック終了時に自動解放する。
+    /// Z3 検証時にリソース階層制約をチェックする。
+    Acquire { resource: String, body: Box<Stmt> },
+    /// タスク式: task { body }
+    /// 構造化並行性のための子タスクを生成する。
+    /// 親タスクが子タスクより先に終了しないことを Z3 で保証する。
+    Task {
+        body: Box<Stmt>,
+        /// タスクグループ名（省略時は暗黙のデフォルトグループ）
+        group: Option<String>,
+    },
+    /// タスクグループ式: task_group { task { ... }, task { ... } }
+    /// 複数の子タスクをグループ化し、全タスクの完了を待機する。
+    TaskGroup {
+        children: Vec<Stmt>,
+        /// Join セマンティクス: all（全タスク完了待ち）または any（最初の完了で終了）
+        join_semantics: JoinSemantics,
+    },
+    /// 式文: 式をステートメントとして扱う
+    Expr(Expr),
+}
+
+/// Match 式のアーム（パターン → 式/文）
 #[derive(Debug, Clone)]
 pub struct MatchArm {
     pub pattern: Pattern,
     /// オプションのガード条件: match x { Pattern if cond => ... }
     pub guard: Option<Box<Expr>>,
-    pub body: Box<Expr>,
+    pub body: Box<Stmt>,
 }
 
 /// タスクグループの Join セマンティクス
@@ -1641,13 +1644,21 @@ pub fn tokenize(input: &str) -> Vec<String> {
         .collect()
 }
 
+/// 純粋な式をパースする（requires/ensures/条件式用）
 pub fn parse_expression(input: &str) -> Expr {
     let tokens = tokenize(input);
     let mut pos = 0;
-    parse_block_or_expr(&tokens, &mut pos)
+    parse_implies(&tokens, &mut pos)
 }
 
-fn parse_block_or_expr(tokens: &[String], pos: &mut usize) -> Expr {
+/// body_expr をパースする（ブロックや文を含むボディ用）
+pub fn parse_body_expr(input: &str) -> Stmt {
+    let tokens = tokenize(input);
+    let mut pos = 0;
+    parse_block_or_stmt(&tokens, &mut pos)
+}
+
+fn parse_block_or_stmt(tokens: &[String], pos: &mut usize) -> Stmt {
     if *pos < tokens.len() && tokens[*pos] == "{" {
         *pos += 1;
         let mut stmts = Vec::new();
@@ -1660,9 +1671,9 @@ fn parse_block_or_expr(tokens: &[String], pos: &mut usize) -> Expr {
         if *pos < tokens.len() && tokens[*pos] == "}" {
             *pos += 1;
         }
-        Expr::Block(stmts)
+        Stmt::Block(stmts)
     } else {
-        parse_implies(tokens, pos)
+        parse_statement(tokens, pos)
     }
 }
 
@@ -1670,23 +1681,23 @@ fn parse_block_or_expr(tokens: &[String], pos: &mut usize) -> Expr {
 /// `{...}` ブロックの場合は通常通りパース。
 /// それ以外の場合は `parse_logical_or` を使い、`=>` を含意演算子として消費しない。
 /// これにより `0 => match x { 0 => 1, _ => 2 }, 1 => ...` のネストが正しく動作する。
-fn parse_match_arm_body(tokens: &[String], pos: &mut usize) -> Expr {
+fn parse_match_arm_body(tokens: &[String], pos: &mut usize) -> Stmt {
     if *pos < tokens.len() && tokens[*pos] == "{" {
         // ブロック式: 通常通りパース（内部の `=>` は match パーサーが処理する）
-        parse_block_or_expr(tokens, pos)
+        parse_block_or_stmt(tokens, pos)
     } else if *pos < tokens.len() && tokens[*pos] == "match" {
         // ネストした match 式: match パーサーに委譲（parse_primary 経由）
-        parse_implies(tokens, pos)
+        Stmt::Expr(parse_implies(tokens, pos))
     } else if *pos < tokens.len() && tokens[*pos] == "if" {
         // if-then-else 式
-        parse_implies(tokens, pos)
+        Stmt::Expr(parse_implies(tokens, pos))
     } else {
         // それ以外: `=>` を消費しないレベルでパース
-        parse_logical_or(tokens, pos)
+        Stmt::Expr(parse_logical_or(tokens, pos))
     }
 }
 
-fn parse_statement(tokens: &[String], pos: &mut usize) -> Expr {
+fn parse_statement(tokens: &[String], pos: &mut usize) -> Stmt {
     if *pos < tokens.len() && tokens[*pos] == "let" {
         *pos += 1;
         let var = tokens[*pos].clone();
@@ -1695,7 +1706,7 @@ fn parse_statement(tokens: &[String], pos: &mut usize) -> Expr {
             *pos += 1;
         }
         let value = parse_implies(tokens, pos);
-        Expr::Let {
+        Stmt::Let {
             var,
             value: Box::new(value),
         }
@@ -1710,12 +1721,102 @@ fn parse_statement(tokens: &[String], pos: &mut usize) -> Expr {
         *pos += 1;
         *pos += 1;
         let value = parse_implies(tokens, pos);
-        Expr::Assign {
+        Stmt::Assign {
             var,
             value: Box::new(value),
         }
+    } else if *pos < tokens.len() && tokens[*pos] == "while" {
+        *pos += 1;
+        let cond = parse_implies(tokens, pos);
+        if *pos < tokens.len() && tokens[*pos] == "invariant" {
+            *pos += 1;
+            if *pos < tokens.len() && tokens[*pos] == ":" {
+                *pos += 1;
+            }
+            let inv = parse_implies(tokens, pos);
+            let decreases = if *pos < tokens.len() && tokens[*pos] == "decreases" {
+                *pos += 1;
+                if *pos < tokens.len() && tokens[*pos] == ":" {
+                    *pos += 1;
+                }
+                Some(Box::new(parse_implies(tokens, pos)))
+            } else {
+                None
+            };
+            let body = parse_block_or_stmt(tokens, pos);
+            Stmt::While {
+                cond: Box::new(cond),
+                invariant: Box::new(inv),
+                decreases,
+                body: Box::new(body),
+            }
+        } else {
+            panic!("Mumei loops require an 'invariant'.");
+        }
+    } else if *pos < tokens.len() && tokens[*pos] == "acquire" {
+        *pos += 1;
+        let resource = if *pos < tokens.len() {
+            let r = tokens[*pos].clone();
+            *pos += 1;
+            r
+        } else {
+            "unknown".to_string()
+        };
+        let body = parse_block_or_stmt(tokens, pos);
+        Stmt::Acquire {
+            resource,
+            body: Box::new(body),
+        }
+    } else if *pos < tokens.len() && tokens[*pos] == "task_group" {
+        *pos += 1;
+        let join_semantics = if *pos < tokens.len() && tokens[*pos] == ":" {
+            *pos += 1;
+            if *pos < tokens.len() && tokens[*pos] == "any" {
+                *pos += 1;
+                JoinSemantics::Any
+            } else if *pos < tokens.len() && tokens[*pos] == "all" {
+                *pos += 1;
+                JoinSemantics::All
+            } else {
+                let unknown = if *pos < tokens.len() {
+                    tokens[*pos].clone()
+                } else {
+                    "<EOF>".to_string()
+                };
+                panic!(
+                    "Unknown task_group join semantics '{}'. Expected 'all' or 'any'.",
+                    unknown
+                );
+            }
+        } else {
+            JoinSemantics::All
+        };
+        let body = parse_block_or_stmt(tokens, pos);
+        let children = if let Stmt::Block(stmts) = body {
+            stmts
+        } else {
+            vec![body]
+        };
+        Stmt::TaskGroup {
+            children,
+            join_semantics,
+        }
+    } else if *pos < tokens.len() && tokens[*pos] == "task" {
+        *pos += 1;
+        let group = if *pos < tokens.len() && tokens[*pos] != "{" {
+            let g = Some(tokens[*pos].clone());
+            *pos += 1;
+            g
+        } else {
+            None
+        };
+        let body = parse_block_or_stmt(tokens, pos);
+        Stmt::Task {
+            body: Box::new(body),
+            group,
+        }
     } else {
-        parse_implies(tokens, pos)
+        Stmt::Expr(parse_implies(tokens, pos))
     }
 }
 
@@ -1895,27 +1996,10 @@ fn parse_primary(tokens: &[String], pos: &mut usize) -> Expr {
         };
     }
 
-    // acquire 式: acquire resource_name { body }
-    if token == "acquire" {
-        *pos += 1;
-        let resource = if *pos < tokens.len() {
-            let r = tokens[*pos].clone();
-            *pos += 1;
-            r
-        } else {
-            "unknown".to_string()
-        };
-        let body = parse_block_or_expr(tokens, pos);
-        return Expr::Acquire {
-            resource,
-            body: Box::new(body),
-        };
-    }
-
     // async 式: async { body }
     if token == "async" {
         *pos += 1;
-        let body = parse_block_or_expr(tokens, pos);
+        let body = parse_block_or_stmt(tokens, pos);
         return Expr::Async {
             body: Box::new(body),
         };
@@ -1930,102 +2014,13 @@ fn parse_primary(tokens: &[String], pos: &mut usize) -> Expr {
         };
     }
 
-    // task 式: task { body } または task group_name { body }
-    if token == "task" {
-        *pos += 1;
-        let group = if *pos < tokens.len() && tokens[*pos] != "{" {
-            let g = Some(tokens[*pos].clone());
-            *pos += 1;
-            g
-        } else {
-            None
-        };
-        let body = parse_block_or_expr(tokens, pos);
-        return Expr::Task {
-            body: Box::new(body),
-            group,
-        };
-    }
-
-    // task_group 式: task_group { task { ... }; task { ... } }
-    // task_group:any { task { ... }; task { ... } }
-    if token == "task_group" {
-        *pos += 1;
-        let join_semantics = if *pos < tokens.len() && tokens[*pos] == ":" {
-            *pos += 1; // skip ":"
-            if *pos < tokens.len() && tokens[*pos] == "any" {
-                *pos += 1;
-                JoinSemantics::Any
-            } else if *pos < tokens.len() && tokens[*pos] == "all" {
-                *pos += 1;
-                JoinSemantics::All
-            } else {
-                let unknown = if *pos < tokens.len() {
-                    tokens[*pos].clone()
-                } else {
-                    "<EOF>".to_string()
-                };
-                panic!(
-                    "Unknown task_group join semantics '{}'. Expected 'all' or 'any'.",
-                    unknown
-                );
-            }
-        } else {
-            JoinSemantics::All
-        };
-        // { task { ... }; task { ... } } をパース
-        let body = parse_block_or_expr(tokens, pos);
-        let children = if let Expr::Block(stmts) = body {
-            stmts
-        } else {
-            vec![body]
-        };
-        return Expr::TaskGroup {
-            children,
-            join_semantics,
-        };
-    }
-
-    // while, if 処理 (既存通り)
-    if token == "while" {
-        *pos += 1;
-        let cond = parse_implies(tokens, pos);
-        if *pos < tokens.len() && tokens[*pos] == "invariant" {
-            *pos += 1;
-            // `invariant:` の `:` をスキップ（tokenizer が `:` を独立トークンとして分離するため）
-            if *pos < tokens.len() && tokens[*pos] == ":" {
-                *pos += 1;
-            }
-            let inv = parse_implies(tokens, pos);
-            // オプション: decreases 句（停止性証明用の減少式）
-            let decreases = if *pos < tokens.len() && tokens[*pos] == "decreases" {
-                *pos += 1;
-                // `decreases:` の `:` もスキップ
-                if *pos < tokens.len() && tokens[*pos] == ":" {
-                    *pos += 1;
-                }
-                Some(Box::new(parse_implies(tokens, pos)))
-            } else {
-                None
-            };
-            let body = parse_block_or_expr(tokens, pos);
-            return Expr::While {
-                cond: Box::new(cond),
-                invariant: Box::new(inv),
-                decreases,
-                body: Box::new(body),
-            };
-        }
-        panic!("Mumei loops require an 'invariant'.");
-    }
-
     if token == "if" {
         *pos += 1;
         let cond = parse_implies(tokens, pos);
-        let then_branch = parse_block_or_expr(tokens, pos);
+        let then_branch = parse_block_or_stmt(tokens, pos);
         if *pos < tokens.len() && tokens[*pos] == "else" {
             *pos += 1;
-            let else_branch = parse_block_or_expr(tokens, pos);
+            let else_branch = parse_block_or_stmt(tokens, pos);
             return Expr::IfThenElse {
                 cond: Box::new(cond),
                 then_branch: Box::new(then_branch),
@@ -2603,17 +2598,17 @@ body: amount;
 
     #[test]
     fn test_parse_acquire_expression() {
-        let expr = parse_expression("acquire mutex_a { x + 1 }");
-        match expr {
-            Expr::Acquire { resource, body } => {
+        let stmt = parse_body_expr("acquire mutex_a { x + 1 }");
+        match stmt {
+            Stmt::Acquire { resource, body } => {
                 assert_eq!(resource, "mutex_a");
                 // body should be a Block containing x + 1
                 match *body {
-                    Expr::Block(_) => {} // OK
+                    Stmt::Block(_) => {} // OK
                     _ => panic!("Expected Block in acquire body"),
                 }
             }
-            _ => panic!("Expected Acquire expression, got {:?}", expr),
+            _ => panic!("Expected Acquire statement, got {:?}", stmt),
         }
     }
 
@@ -2623,7 +2618,7 @@ body: amount;
         match expr {
             Expr::Async { body } => {
                 match *body {
-                    Expr::Block(_) => {} // OK
+                    Stmt::Block(_) => {} // OK
                     _ => panic!("Expected Block in async body"),
                 }
             }
@@ -2776,83 +2771,83 @@ body: v + r;
 
     #[test]
     fn test_parse_task_expression() {
-        let expr = parse_expression("task { x + 1 }");
-        match expr {
-            Expr::Task { body, group } => {
+        let stmt = parse_body_expr("task { x + 1 }");
+        match stmt {
+            Stmt::Task { body, group } => {
                 assert!(group.is_none());
                 match *body {
-                    Expr::Block(_) => {} // OK
+                    Stmt::Block(_) => {} // OK
                     _ => panic!("Expected Block in task body"),
                 }
             }
-            _ => panic!("Expected Task expression, got {:?}", expr),
+            _ => panic!("Expected Task statement, got {:?}", stmt),
         }
     }
 
     #[test]
     fn test_parse_task_with_group_name() {
-        let expr = parse_expression("task workers { x + 1 }");
-        match expr {
-            Expr::Task { body, group } => {
+        let stmt = parse_body_expr("task workers { x + 1 }");
+        match stmt {
+            Stmt::Task { body, group } => {
                 assert_eq!(group, Some("workers".to_string()));
                 match *body {
-                    Expr::Block(_) => {} // OK
+                    Stmt::Block(_) => {} // OK
                     _ => panic!("Expected Block in task body"),
                 }
             }
-            _ => panic!("Expected Task expression, got {:?}", expr),
+            _ => panic!("Expected Task statement, got {:?}", stmt),
         }
     }
 
     #[test]
     fn test_parse_task_group_default_semantics() {
-        let expr = parse_expression("task_group { task { x }; task { y } }");
-        match expr {
-            Expr::TaskGroup {
+        let stmt = parse_body_expr("task_group { task { x }; task { y } }");
+        match stmt {
+            Stmt::TaskGroup {
                 children,
                 join_semantics,
             } => {
                 assert_eq!(join_semantics, JoinSemantics::All);
                 assert_eq!(children.len(), 2);
             }
-            _ => panic!("Expected TaskGroup expression, got {:?}", expr),
+            _ => panic!("Expected TaskGroup statement, got {:?}", stmt),
         }
     }
 
     #[test]
     fn test_parse_task_group_any_semantics() {
-        let expr = parse_expression("task_group:any { task { x }; task { y } }");
-        match expr {
-            Expr::TaskGroup {
+        let stmt = parse_body_expr("task_group:any { task { x }; task { y } }");
+        match stmt {
+            Stmt::TaskGroup {
                 children,
                 join_semantics,
             } => {
                 assert_eq!(join_semantics, JoinSemantics::Any);
                 assert_eq!(children.len(), 2);
             }
-            _ => panic!("Expected TaskGroup expression, got {:?}", expr),
+            _ => panic!("Expected TaskGroup statement, got {:?}", stmt),
         }
     }
 
     #[test]
     fn test_parse_task_group_all_semantics() {
-        let expr = parse_expression("task_group:all { task { x }; task { y } }");
-        match expr {
-            Expr::TaskGroup {
+        let stmt = parse_body_expr("task_group:all { task { x }; task { y } }");
+        match stmt {
+            Stmt::TaskGroup {
                 children,
                 join_semantics,
             } => {
                 assert_eq!(join_semantics, JoinSemantics::All);
                 assert_eq!(children.len(), 2);
             }
-            _ => panic!("Expected TaskGroup expression, got {:?}", expr),
+            _ => panic!("Expected TaskGroup statement, got {:?}", stmt),
         }
     }
 
     #[test]
     #[should_panic(expected = "Unknown task_group join semantics")]
     fn test_parse_task_group_unknown_semantics_panics() {
-        parse_expression("task_group:bogus { task { x } }");
+        parse_body_expr("task_group:bogus { task { x } }");
     }
 
     // =========================================================================

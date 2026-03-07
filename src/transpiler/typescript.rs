@@ -1,6 +1,5 @@
-use crate::parser::{
-    parse_expression, Atom, EnumDef, Expr, ImplDef, ImportDecl, Op, StructDef, TraitDef,
-};
+use crate::hir::{HirAtom, HirExpr, HirStmt};
+use crate::parser::{EnumDef, ImplDef, ImportDecl, Op, StructDef, TraitDef};
 
 /// 型名をベース型に解決する（transpiler ローカル版）
 fn resolve_base_type(name: &str) -> String {
@@ -191,7 +190,8 @@ pub fn transpile_impl_ts(impl_def: &ImplDef) -> String {
     lines.join("\n")
 }
 
-pub fn transpile_to_ts(atom: &Atom) -> String {
+pub fn transpile_to_ts(hir_atom: &HirAtom) -> String {
+    let atom = &hir_atom.atom;
     // TSでは number (f64/i64) または bigint (u64的な扱い) ですが、
     // 汎用性を考慮しすべて number として出力します。
     // ref パラメータは Readonly<T> コメントで論理的な読み取り専用を示す。
@@ -212,7 +212,16 @@ pub fn transpile_to_ts(atom: &Atom) -> String {
         .collect::<Vec<_>>()
         .join(", ");
 
-    let body = format_expr_ts(&parse_expression(&atom.body_expr));
+    // トップレベルの body が純粋な式（HirStmt::Expr）の場合、return を補う。
+    // Block の場合は内部で tail_expr に return が付与されるため不要。
+    let body = {
+        let raw = format_hir_stmt_ts(&hir_atom.body);
+        if needs_return_prefix_ts(&raw) {
+            format!("return {};", raw)
+        } else {
+            raw
+        }
+    };
 
     let async_keyword = if atom.is_async { "async " } else { "" };
     let return_type = if atom.is_async {
@@ -238,15 +247,15 @@ pub fn transpile_to_ts(atom: &Atom) -> String {
     )
 }
 
-fn format_expr_ts(expr: &Expr) -> String {
+fn format_hir_expr_ts(expr: &HirExpr) -> String {
     match expr {
-        Expr::Number(n) => n.to_string(),
-        Expr::Float(f) => f.to_string(), // TypeScriptはそのままのリテラルでOK
-        Expr::Variable(v) => v.clone(),
-        Expr::ArrayAccess(name, idx) => format!("{}[{}]", name, format_expr_ts(idx)),
+        HirExpr::Number(n) => n.to_string(),
+        HirExpr::Float(f) => f.to_string(), // TypeScriptはそのままのリテラルでOK
+        HirExpr::Variable(v) => v.clone(),
+        HirExpr::ArrayAccess(name, idx) => format!("{}[{}]", name, format_hir_expr_ts(idx)),
 
-        Expr::Call(name, args) => {
-            let args_str: Vec<String> = args.iter().map(format_expr_ts).collect();
+        HirExpr::Call { name, args } => {
+            let args_str: Vec<String> = args.iter().map(format_hir_expr_ts).collect();
             match name.as_str() {
                 "sqrt" => format!("Math.sqrt({})", args_str.join(", ")),
                 "len" => format!("{}.length", args_str.join(", ")),
@@ -254,7 +263,7 @@ fn format_expr_ts(expr: &Expr) -> String {
             }
         }
 
-        Expr::BinaryOp(l, op, r) => {
+        HirExpr::BinaryOp(l, op, r) => {
             let op_str = match op {
                 Op::Add => "+",
                 Op::Sub => "-",
@@ -270,92 +279,48 @@ fn format_expr_ts(expr: &Expr) -> String {
                 Op::Or => "||",
                 Op::Implies => "/* implies: (!a || b) */",
             };
-            format!("({} {} {})", format_expr_ts(l), op_str, format_expr_ts(r))
+            format!(
+                "({} {} {})",
+                format_hir_expr_ts(l),
+                op_str,
+                format_hir_expr_ts(r)
+            )
         }
 
-        Expr::IfThenElse {
+        HirExpr::IfThenElse {
             cond,
             then_branch,
             else_branch,
         } => {
             format!(
                 "if ({}) {{\n        {}\n    }} else {{\n        {}\n    }}",
-                format_expr_ts(cond),
-                format_expr_ts(then_branch),
-                format_expr_ts(else_branch)
+                format_hir_expr_ts(cond),
+                format_hir_stmt_ts(then_branch),
+                format_hir_stmt_ts(else_branch)
             )
         }
 
-        Expr::While {
-            cond,
-            invariant,
-            decreases: _,
-            body,
-        } => {
-            format!(
-                "// invariant: {}\n    while ({}) {{\n        {}\n    }}",
-                format_expr_ts(invariant),
-                format_expr_ts(cond),
-                format_expr_ts(body)
-            )
-        }
-
-        Expr::Let { var, value } => {
-            format!("let {} = {};", var, format_expr_ts(value))
-        }
-
-        Expr::Assign { var, value } => {
-            format!("{} = {};", var, format_expr_ts(value))
-        }
-
-        Expr::Block(stmts) => {
-            let mut lines = Vec::new();
-            for (i, s) in stmts.iter().enumerate() {
-                let code = format_expr_ts(s);
-                if i == stmts.len() - 1 {
-                    // 最後の要素が式なら return をつける、既に文ならそのまま
-                    if code.starts_with("if")
-                        || code.starts_with("let")
-                        || code.starts_with("while")
-                        || code.contains(" = ")
-                    {
-                        lines.push(code);
-                    } else {
-                        lines.push(format!("return {};", code));
-                    }
-                } else {
-                    // 文として出力
-                    if code.ends_with(';') || code.ends_with('}') || code.starts_with("//") {
-                        lines.push(code);
-                    } else {
-                        lines.push(format!("{};", code));
-                    }
-                }
-            }
-            lines.join("\n    ")
-        }
-
-        Expr::StructInit {
+        HirExpr::StructInit {
             type_name: _,
             fields,
         } => {
             let field_strs: Vec<String> = fields
                 .iter()
-                .map(|(name, expr)| format!("{}: {}", name, format_expr_ts(expr)))
+                .map(|(name, expr)| format!("{}: {}", name, format_hir_expr_ts(expr)))
                 .collect();
             format!("{{ {} }}", field_strs.join(", "))
         }
 
-        Expr::FieldAccess(expr, field) => {
-            format!("{}.{}", format_expr_ts(expr), field)
+        HirExpr::FieldAccess(expr, field) => {
+            format!("{}.{}", format_hir_expr_ts(expr), field)
         }
 
-        Expr::Match { target, arms } => {
+        HirExpr::Match { target, arms } => {
             // TypeScript では switch 文に変換
-            let target_str = format_expr_ts(target);
+            let target_str = format_hir_expr_ts(target);
             let mut cases = Vec::new();
             for arm in arms {
-                let body = format_expr_ts(&arm.body);
+                let body = format_hir_stmt_ts(&arm.body);
                 match &arm.pattern {
                     crate::parser::Pattern::Literal(n) => {
                         cases.push(format!("case {}: return {};", n, body));
@@ -375,45 +340,39 @@ fn format_expr_ts(expr: &Expr) -> String {
             )
         }
 
-        Expr::Acquire { resource, body } => {
-            // acquire を即時実行 async 関数で包むことで、外側の関数が async でなくても動作する。
-            // async 関数内で呼ばれる場合は await で展開される。
-            let body_str = format_expr_ts(body);
-            format!("(async () => {{ await {r}.acquire(); try {{ return {body}; }} finally {{ {r}.release(); }} }})()", r = resource, body = body_str)
-        }
-        Expr::Async { body } => {
-            let body_str = format_expr_ts(body);
+        HirExpr::Async { body } => {
+            let body_str = format_hir_stmt_ts(body);
             format!("(async () => {{ {} }})()", body_str)
         }
-        Expr::Await { expr } => {
-            let expr_str = format_expr_ts(expr);
+        HirExpr::Await { expr } => {
+            let expr_str = format_hir_expr_ts(expr);
             format!("await {}", expr_str)
         }
-        Expr::Task { body, .. } => {
-            let body_str = format_expr_ts(body);
+        HirExpr::Task { body, .. } => {
+            let body_str = format_hir_stmt_ts(body);
             format!("(async () => {{ {} }})()", body_str)
         }
-        Expr::TaskGroup { children, .. } => {
-            let tasks: Vec<String> = children.iter().map(format_expr_ts).collect();
+        HirExpr::TaskGroup { children, .. } => {
+            let tasks: Vec<String> = children.iter().map(format_hir_stmt_ts).collect();
             format!("Promise.all([{}])", tasks.join(", "))
         }
         // Higher-order functions (Phase A): atom_ref + call
-        Expr::AtomRef { name } => {
+        HirExpr::AtomRef { name } => {
             // TypeScript では関数名がそのまま第一級値
             name.clone()
         }
-        Expr::CallRef { callee, args } => {
-            let callee_str = format_expr_ts(callee);
-            let args_str: Vec<String> = args.iter().map(format_expr_ts).collect();
+        HirExpr::CallRef { callee, args } => {
+            let callee_str = format_hir_expr_ts(callee);
+            let args_str: Vec<String> = args.iter().map(format_hir_expr_ts).collect();
             format!("{}({})", callee_str, args_str.join(", "))
         }
-        Expr::Perform {
+        HirExpr::Perform {
             effect,
             operation,
             args,
         } => {
             // @effects perform Effect.operation(args) → function call
-            let args_str: Vec<String> = args.iter().map(format_expr_ts).collect();
+            let args_str: Vec<String> = args.iter().map(format_hir_expr_ts).collect();
             format!(
                 "/* perform {}.{} */ {}{}({})",
                 effect,
@@ -424,4 +383,74 @@ fn format_expr_ts(expr: &Expr) -> String {
             )
         }
     }
+}
+
+fn format_hir_stmt_ts(stmt: &HirStmt) -> String {
+    match stmt {
+        HirStmt::Let { var, value, .. } => {
+            format!("let {} = {};", var, format_hir_expr_ts(value))
+        }
+        HirStmt::Assign { var, value } => {
+            format!("{} = {};", var, format_hir_expr_ts(value))
+        }
+        HirStmt::While {
+            cond,
+            invariant,
+            decreases: _,
+            body,
+        } => {
+            format!(
+                "// invariant: {}\n    while ({}) {{\n        {}\n    }}",
+                format_hir_expr_ts(invariant),
+                format_hir_expr_ts(cond),
+                format_hir_stmt_ts(body)
+            )
+        }
+        HirStmt::Block { stmts, tail_expr } => {
+            let mut lines = Vec::new();
+            for s in stmts {
+                let code = format_hir_stmt_ts(s);
+                // 文として出力
+                if code.ends_with(';') || code.ends_with('}') || code.starts_with("//") {
+                    lines.push(code);
+                } else {
+                    lines.push(format!("{};", code));
+                }
+            }
+            if let Some(tail) = tail_expr {
+                let tail_code = format_hir_expr_ts(tail);
+                // TS では if/switch/while は文であり return の右辺にできない。
+                // 旧コードの heuristic guard を再現する。
+                if tail_code.starts_with("if")
+                    || tail_code.starts_with("switch")
+                    || tail_code.starts_with("while")
+                {
+                    lines.push(tail_code);
+                } else {
+                    lines.push(format!("return {};", tail_code));
+                }
+            }
+            lines.join("\n    ")
+        }
+        HirStmt::Acquire { resource, body } => {
+            // acquire を即時実行 async 関数で包むことで、外側の関数が async でなくても動作する。
+            let body_str = format_hir_stmt_ts(body);
+            format!("(async () => {{ await {r}.acquire(); try {{ return {body}; }} finally {{ {r}.release(); }} }})()", r = resource, body = body_str)
+        }
+        HirStmt::Expr(expr) => format_hir_expr_ts(expr),
+    }
+}
+
+/// トップレベル body の出力に `return` プレフィックスが必要かを判定する。
+/// 文（let, if, while, switch, コメント, return 済み）には不要。
+fn needs_return_prefix_ts(code: &str) -> bool {
+    !(code.starts_with("return ")
+        || code.starts_with("if ")
+        || code.starts_with("if(")
+        || code.starts_with("while ")
+        || code.starts_with("while(")
+        || code.starts_with("switch ")
+        || code.starts_with("let ")
+        || code.starts_with("//")
+        || code.contains(" = "))
 }
