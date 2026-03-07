@@ -1,6 +1,7 @@
 import subprocess
 import json
 import os
+import re
 import time
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -8,22 +9,33 @@ from dotenv import load_dotenv
 # .envファイルから環境変数を読み込む
 load_dotenv()
 
-# 環境変数からAPIキーを取得（取得できない場合はNone）
-api_key = os.getenv("OPENAI_API_KEY")
+# LLMプロバイダー設定（Qwen3.5 / Ollama / vLLM / OpenAI 対応）
+api_key = os.getenv("LLM_API_KEY", os.getenv("OPENAI_API_KEY", ""))
+base_url = os.getenv("LLM_BASE_URL", None)  # None の場合は OpenAI デフォルト
+model = os.getenv("LLM_MODEL", "gpt-4o")
 
 if not api_key:
-    raise ValueError("❌ OPENAI_API_KEY が設定されていません")
+    raise ValueError(
+        "LLM_API_KEY (または OPENAI_API_KEY) が設定されていません。"
+        ".env ファイルを確認してください。"
+    )
 
-# OpenAI APIの設定
-client = OpenAI(api_key=api_key)
+# OpenAI互換クライアントの初期化（Ollama / vLLM / 外部API も対応）
+client_kwargs = {"api_key": api_key}
+if base_url:
+    client_kwargs["base_url"] = base_url
+
+client = OpenAI(**client_kwargs)
+
 SOURCE_FILE = "sword_test.mm"
-REPORT_FILE = "visualizer/report.json"
-MAX_RETRIES = 5 # 修正回数の上限
+OUTPUT_BASE = "katana"
+REPORT_FILE = "report.json"  # output_dir (カレントディレクトリ) に合わせる
+MAX_RETRIES = 5  # 修正回数の上限
 
 def run_mumei():
     """コンパイラを実行。exit(1)があれば正常に失敗を検知する"""
     result = subprocess.run(
-        ["cargo", "run", "--", SOURCE_FILE],
+        ["cargo", "run", "--", "build", SOURCE_FILE, "-o", OUTPUT_BASE],
         capture_output=True, text=True
     )
     # returncodeが0以外なら失敗
@@ -47,35 +59,37 @@ def get_fix_from_ai(source_code, error_log, report_data):
 修正後のコードのみを、```rust ... ``` の形式で出力してください。
 """
     response = client.chat.completions.create(
-        model="gpt-4o",
+        model=model,
         messages=[{"role": "system", "content": "You are a helpful programming assistant."},
                   {"role": "user", "content": prompt}]
     )
 
     content = response.choices[0].message.content or ""
-    # コードブロック部分のみ抽出
-    if "```rust" in content:
-        return content.split("```rust")[1].split("```")[0].strip()
+    # コードブロック部分のみ抽出（Qwen3.5 の ```Rust / ```rs 等にも対応）
+    code_match = re.search(r'```(?:rust|rs|Rust)\s*\n(.*?)```', content, re.DOTALL)
+    if code_match:
+        return code_match.group(1).strip()
+    # フォールバック: コードブロックが見つからない場合はそのまま返す
     return content.strip()
 
 def main():
-    print("🤖 Mumei Self-Healing Loop Start...")
+    print("Mumei Self-Healing Loop Start...")
 
     for attempt in range(MAX_RETRIES):
         success, logs = run_mumei()
 
         if success:
-            print(f"✅ Success! Blade is flawless (Attempt {attempt + 1}).")
+            print(f"Success! Blade is flawless (Attempt {attempt + 1}).")
 
             return
 
-        print(f"⚠️  Attempt {attempt + 1}: Flaw detected. Consulting AI...")
+        print(f"Attempt {attempt + 1}: Flaw detected. Consulting AI...")
 
         # 最新の検証レポートを読み込む
         try:
             with open(REPORT_FILE, "r") as f:
                 report = json.load(f)
-        except:
+        except Exception:
             report = {"status": "error", "reason": "Report not found"}
 
         with open(SOURCE_FILE, "r") as f:
@@ -88,10 +102,10 @@ def main():
         with open(SOURCE_FILE, "w") as f:
             f.write(fixed_code)
 
-        print("🛠️  Code updated. Retrying...")
+        print("Code updated. Retrying...")
         time.sleep(2)
 
-    print("💀 Healing failed. The blade remains broken.")
+    print("Healing failed. The blade remains broken.")
 
 if __name__ == "__main__":
     main()

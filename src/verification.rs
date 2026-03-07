@@ -1107,6 +1107,7 @@ pub fn verify_impl(impl_def: &ImplDef, module_env: &ModuleEnv) -> MumeiResult<()
                         let counterexample = if let Some(model) = solver.get_model() {
                             let var_names = ["a", "b", "c", "x", "y", "z"];
                             let mut ce_parts = Vec::new();
+                            let mut _ce_json = serde_json::Map::new();
                             for var_name in &var_names {
                                 if let Some(var_z3) = env.get(*var_name) {
                                     if let Some(val) = model.eval(var_z3, true) {
@@ -1114,6 +1115,7 @@ pub fn verify_impl(impl_def: &ImplDef, module_env: &ModuleEnv) -> MumeiResult<()
                                         // 変数が law 式に含まれている場合のみ表示
                                         if law_expr.contains(*var_name) {
                                             ce_parts.push(format!("{} = {}", var_name, val_str));
+                                            _ce_json.insert(var_name.to_string(), json!(val_str));
                                         }
                                     }
                                 }
@@ -1984,6 +1986,7 @@ fn verify_inner(
                 "N/A",
                 "N/A",
                 "Trusted: body verification skipped, contract assumed correct.",
+                None,
             );
             return Ok(());
         }
@@ -2004,6 +2007,7 @@ fn verify_inner(
                     "N/A",
                     "N/A",
                     "Unverified: no contract to verify.",
+                    None,
                 );
                 return Ok(());
             }
@@ -2313,6 +2317,7 @@ fn verify_inner(
                     "N/A",
                     "N/A",
                     "Postcondition violated.",
+                    None,
                 );
                 return Err(MumeiError::verification_at(
                     "Postcondition (ensures) is not satisfied.",
@@ -2364,6 +2369,7 @@ fn verify_inner(
             "N/A",
             "N/A",
             "Logic contradiction.",
+            None,
         );
         return Err(MumeiError::verification_at(
             "Contradiction found.",
@@ -2378,6 +2384,7 @@ fn verify_inner(
         "N/A",
         "N/A",
         "Verified safe.",
+        None,
     );
     Ok(())
 }
@@ -3980,9 +3987,18 @@ fn save_visualizer_report(
     a: &str,
     b: &str,
     reason: &str,
+    counterexample: Option<&serde_json::Value>,
 ) {
-    let report =
-        json!({ "status": status, "atom": name, "input_a": a, "input_b": b, "reason": reason });
+    let mut report = json!({
+        "status": status,
+        "atom": name,
+        "input_a": a,
+        "input_b": b,
+        "reason": reason
+    });
+    if let Some(ce) = counterexample {
+        report["counterexample"] = ce.clone();
+    }
     let _ = fs::create_dir_all(output_dir);
     let _ = fs::write(output_dir.join("report.json"), report.to_string());
 }
