@@ -539,6 +539,9 @@ max_unroll = 3
 [proof]
 cache = true
 timeout_ms = 10000
+[effects]
+# allowed = ["Log", "FileRead"]
+# denied = ["Network"]
 "#,
         name
     );

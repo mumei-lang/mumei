@@ -699,6 +699,11 @@ pub fn compute_atom_hash(atom: &crate::parser::Atom) -> String {
         hasher.update(b"|resource:");
         hasher.update(r.as_bytes());
     }
+    // effects も含める（エフェクト制約の変更を検出）
+    for e in &atom.effects {
+        hasher.update(b"|effect:");
+        hasher.update(e.as_bytes());
+    }
     // async フラグも含める
     if atom.is_async {
         hasher.update(b"|async");

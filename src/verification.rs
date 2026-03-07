@@ -1335,18 +1335,20 @@ fn verify_effect_containment(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult
                         format!(
                             "Effect propagation violation: atom '{}' calls '{}' which requires \
                              {:?} effect(s), but '{}' only declares effects: {:?}. \
-                             Missing: {:?}.\n  \
-                             Suggested Fix: Add {:?} to the effect declaration.",
+                             Missing: {:?}.",
                             atom.name,
                             callee_name,
                             callee_atom.effects,
                             atom.name,
                             atom.effects,
                             missing,
-                            missing,
                         ),
                         atom.span.clone(),
-                    ));
+                    )
+                    .with_help(format!(
+                        "Add the missing effects {:?} to atom '{}', or remove the call to '{}'.",
+                        missing, atom.name, callee_name
+                    )));
                 }
             }
         }
@@ -1355,29 +1357,95 @@ fn verify_effect_containment(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult
     Ok(())
 }
 
-/// Save an effect violation report to report.json for self-healing integration.
+/// Save an effect mismatch violation report to report.json for self-healing integration.
 fn save_effect_violation_report(
     output_dir: &Path,
     atom_name: &str,
-    violation_type: &str,
     declared_effects: &[String],
     required_effect: &str,
+    source_operation: &str,
     suggested_fixes: &[String],
 ) {
     let report = json!({
         "status": "failed",
         "atom": atom_name,
-        "violation_type": violation_type,
-        "declared_effects": declared_effects,
-        "required_effect": required_effect,
-        "suggested_fixes": suggested_fixes,
-        "reason": format!(
-            "Effect {}: atom '{}' declares effects {:?} but requires '{}'",
-            violation_type, atom_name, declared_effects, required_effect
-        )
+        "violation_type": "effect_mismatch",
+        "effect_violation": {
+            "declared_effects": declared_effects,
+            "required_effect": required_effect,
+            "source_operation": source_operation,
+            "suggested_fixes": suggested_fixes,
+            "resolution_paths": [
+                {
+                    "strategy": "propagation",
+                    "description": format!("Add '{}' to the effects declaration of atom '{}'", required_effect, atom_name),
+                    "fix_type": "signature_change",
+                    "target": atom_name,
+                    "change": format!("effects: [{}, {}];", declared_effects.join(", "), required_effect)
+                },
+                {
+                    "strategy": "isolation",
+                    "description": format!("Remove the call to '{}' and use only pure computation", source_operation),
+                    "fix_type": "body_change",
+                    "target": atom_name,
+                    "change": format!("Remove or replace '{}' with a pure alternative", source_operation)
+                }
+            ]
+        },
+        "reason": format!("Effect violation: atom '{}' declares effects {:?} but uses '{}' which requires [{}]",
+            atom_name, declared_effects, source_operation, required_effect)
     });
     let _ = fs::create_dir_all(output_dir);
-    let _ = fs::write(output_dir.join("report.json"), report.to_string());
+    let _ = fs::write(
+        output_dir.join("report.json"),
+        serde_json::to_string_pretty(&report).unwrap_or_else(|_| report.to_string()),
+    );
+}
+
+/// Save an effect propagation violation report to report.json for self-healing integration.
+fn save_effect_propagation_report(
+    output_dir: &Path,
+    caller_name: &str,
+    callee_name: &str,
+    caller_effects: &[String],
+    callee_effects: &[String],
+    missing_effects: &[String],
+) {
+    let report = json!({
+        "status": "failed",
+        "atom": caller_name,
+        "violation_type": "effect_propagation",
+        "effect_violation": {
+            "caller": caller_name,
+            "callee": callee_name,
+            "caller_effects": caller_effects,
+            "callee_effects": callee_effects,
+            "missing_effects": missing_effects,
+            "suggested_fixes": [
+                format!("Add {:?} to atom '{}' effects declaration", missing_effects, caller_name),
+                format!("Remove the call to '{}' from atom '{}'", callee_name, caller_name)
+            ],
+            "resolution_paths": [
+                {
+                    "strategy": "propagation",
+                    "description": format!("Expand {}'s effect set to include {}'s effects", caller_name, callee_name),
+                    "fix_type": "signature_change"
+                },
+                {
+                    "strategy": "isolation",
+                    "description": format!("Remove the dependency on '{}'", callee_name),
+                    "fix_type": "body_change"
+                }
+            ]
+        },
+        "reason": format!("Effect propagation violation: '{}' calls '{}' which requires {:?}, but '{}' only declares {:?}",
+            caller_name, callee_name, callee_effects, caller_name, caller_effects)
+    });
+    let _ = fs::create_dir_all(output_dir);
+    let _ = fs::write(
+        output_dir.join("report.json"),
+        serde_json::to_string_pretty(&report).unwrap_or_else(|_| report.to_string()),
+    );
 }
 
 #[derive(Debug, Clone, Default)]
@@ -2242,20 +2310,39 @@ fn verify_inner(
 
     // Phase 1f: エフェクト包含検証（副作用安全性）
     if let Err(e) = verify_effect_containment(atom, module_env) {
-        // Save structured effect violation report for self-healing integration
-        let err_msg = format!("{}", e);
-        let suggested = vec![format!(
-            "Review and update the effects: annotation on atom '{}'",
-            atom.name
-        )];
-        save_effect_violation_report(
-            output_dir,
-            &atom.name,
-            "effect_propagation_violation",
-            &atom.effects,
-            &err_msg,
-            &suggested,
-        );
+        // Save structured effect violation report for self-healing integration.
+        // Extract missing effects from the error to produce a structured report.
+        let body_ast = parse_expression(&atom.body_expr);
+        let callees = collect_callees(&body_ast);
+        let allowed = module_env.resolve_effect_set(&atom.effects);
+        let mut missing_all: Vec<String> = Vec::new();
+        let mut violating_callee = String::new();
+        let mut callee_effs: Vec<String> = Vec::new();
+        for callee_name in &callees {
+            if let Some(callee_atom) = module_env.get_atom(callee_name) {
+                if !callee_atom.effects.is_empty() {
+                    let callee_effects = module_env.resolve_effect_set(&callee_atom.effects);
+                    let missing: Vec<String> =
+                        callee_effects.difference(&allowed).cloned().collect();
+                    if !missing.is_empty() {
+                        violating_callee = callee_name.clone();
+                        callee_effs = callee_atom.effects.clone();
+                        missing_all = missing;
+                        break;
+                    }
+                }
+            }
+        }
+        if !missing_all.is_empty() {
+            save_effect_propagation_report(
+                output_dir,
+                &atom.name,
+                &violating_callee,
+                &atom.effects,
+                &callee_effs,
+                &missing_all,
+            );
+        }
         return Err(e);
     }
 
@@ -2549,14 +2636,38 @@ fn verify_inner(
             // Body evaluation errors (e.g., division by zero, out-of-bounds) propagate
             // before reaching the postcondition check. Write a failure report so the
             // MCP self-healing flow does not read a stale report.json from a prior run.
+            let err_str = format!("{}", e);
+            // If this is an effect mismatch violation, save a structured report
+            if err_str.contains("Effect violation: 'perform ") {
+                // Extract effect name and operation from error message
+                // Format: "Effect violation: 'perform Effect.op' requires [Effect] effect, ..."
+                if let Some(start) = err_str.find("requires [") {
+                    let after = &err_str[start + 10..];
+                    if let Some(end) = after.find(']') {
+                        let required_effect = &after[..end];
+                        let source_op = err_str
+                            .find("'perform ")
+                            .and_then(|s| {
+                                let rest = &err_str[s + 9..];
+                                rest.find('\'').map(|e| rest[..e].to_string())
+                            })
+                            .unwrap_or_default();
+                        save_effect_violation_report(
+                            output_dir,
+                            &atom.name,
+                            &atom.effects,
+                            required_effect,
+                            &source_op,
+                            &[
+                                format!("Add '{}' to the effects declaration", required_effect),
+                                format!("Remove the call to 'perform {}'", source_op),
+                            ],
+                        );
+                    }
+                }
+            }
             save_visualizer_report(
-                output_dir,
-                "failed",
-                &atom.name,
-                "N/A",
-                "N/A",
-                &format!("{}", e),
-                None,
+                output_dir, "failed", &atom.name, "N/A", "N/A", &err_str, None,
             );
             return Err(e);
         }
@@ -3539,9 +3650,13 @@ fn expr_to_z3<'a>(
                 // Effect not in allowed set — immediate violation
                 return Err(MumeiError::verification(format!(
                     "Effect violation: 'perform {}.{}' requires [{}] effect, \
-                     but it is not declared in the current atom's effects set.\n  \
-                     Suggested Fix: Add effects: [{}]; to the atom declaration.",
-                    effect, operation, effect, effect
+                         but it is not declared in the current atom's effects set.",
+                    effect, operation, effect
+                ))
+                .with_help(format!(
+                    "Fix option 1: Add '{}' to the effects declaration: effects: [{}];\n\
+                         Fix option 2: Remove the call to 'perform {}.{}'.",
+                    effect, effect, effect, operation
                 )));
             }
 
