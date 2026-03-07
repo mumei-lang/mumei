@@ -150,8 +150,12 @@ def validate_logic(source_code: str) -> str:
 
         response_parts = []
 
-        # The verify command writes report.json to cwd (no -o support).
-        # Move (not copy) to reduce the race window under concurrent requests.
+        # TODO: The verify command writes report.json to cwd because it does not
+        #   support -o. This means concurrent calls race on the same file.
+        #   shutil.move (instead of copy) minimises the window, but does not
+        #   eliminate it. To fully fix this, add -o / --report-dir support to
+        #   `mumei verify` on the Rust side so the report can be written
+        #   directly into the per-request temp directory.
         report_file = tmp_path / "report.json"
         cwd_report = root_dir / "report.json"
         if cwd_report.exists():
@@ -236,7 +240,11 @@ def execute_mm(
         response_parts = []
 
         # For "build", report.json is written to tmp_path (via -o).
-        # For "verify"/"check", it's written to cwd — move it to reduce race window.
+        # TODO: For "verify"/"check", report.json is written to cwd because
+        #   those commands do not support -o. shutil.move minimises the race
+        #   window but does not eliminate it. To fully fix, add -o /
+        #   --report-dir support to `mumei verify` and `mumei check` on the
+        #   Rust side.
         report_file = tmp_path / "report.json"
         if not report_file.exists() and command != "build":
             cwd_report = root_dir / "report.json"
