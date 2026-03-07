@@ -23,4 +23,4 @@ atom mismatched(x: i64) -> i64
   effects: [ConsoleOut];
   requires: x >= 0;
   ensures: result == x;
-  body: x;
+  body: file_writer(network_caller(x));

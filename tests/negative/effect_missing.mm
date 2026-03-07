@@ -14,4 +14,4 @@ atom write_data(x: i64) -> i64
 atom caller_no_effects(x: i64) -> i64
   requires: x >= 0;
   ensures: result == x;
-  body: x;
+  body: write_data(x);
