@@ -185,9 +185,14 @@ pub fn transpile_to_rust(atom: &Atom) -> String {
     };
 
     let async_keyword = if atom.is_async { "async " } else { "" };
+    let effects_comment = if atom.effects.is_empty() {
+        String::new()
+    } else {
+        format!("\n/// Effects: [{}]", atom.effects.join(", "))
+    };
     format!(
-        "/// Verified Atom: {}\n/// Requires: {}\n/// Ensures: {}\npub {}fn {}({}) -> {} {{\n    {}\n}}",
-        atom.name, atom.requires, atom.ensures, async_keyword, atom.name, params_str, return_type, body
+        "/// Verified Atom: {}\n/// Requires: {}\n/// Ensures: {}{}\npub {}fn {}({}) -> {} {{\n    {}\n}}",
+        atom.name, atom.requires, atom.ensures, effects_comment, async_keyword, atom.name, params_str, return_type, body
     )
 }
 

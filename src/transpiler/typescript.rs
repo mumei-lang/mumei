@@ -220,9 +220,14 @@ pub fn transpile_to_ts(atom: &Atom) -> String {
     } else {
         "number"
     };
+    let effects_comment = if atom.effects.is_empty() {
+        String::new()
+    } else {
+        format!("\n * @effects [{}]", atom.effects.join(", "))
+    };
     format!(
-        "/**\n * Verified Atom: {}\n * Requires: {}\n * Ensures: {}\n */\n{}function {}({}): {} {{\n    {}\n}}",
-        atom.name, atom.requires, atom.ensures, async_keyword, atom.name, params, return_type, body
+        "/**\n * Verified Atom: {}\n * Requires: {}\n * Ensures: {}{}\n */\n{}function {}({}): {} {{\n    {}\n}}",
+        atom.name, atom.requires, atom.ensures, effects_comment, async_keyword, atom.name, params, return_type, body
     )
 }
 

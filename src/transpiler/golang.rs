@@ -187,9 +187,14 @@ pub fn transpile_to_go(atom: &Atom) -> String {
     } else {
         ""
     };
+    let effects_comment = if atom.effects.is_empty() {
+        String::new()
+    } else {
+        format!("// Effects: [{}]\n", atom.effects.join(", "))
+    };
     format!(
-        "{}{}// {} is a verified Atom.\n// Requires: {}\n// Ensures: {}\nfunc {}({}) int64 {{\n    {}\n}}",
-        imports, async_comment, atom.name, atom.requires, atom.ensures, atom.name, params_str, body
+        "{}{}{}// {} is a verified Atom.\n// Requires: {}\n// Ensures: {}\nfunc {}({}) int64 {{\n    {}\n}}",
+        imports, async_comment, effects_comment, atom.name, atom.requires, atom.ensures, atom.name, params_str, body
     )
 }
 
