@@ -2336,16 +2336,16 @@ fn verify_inner(
         // Extract missing effects from the error to produce a structured report.
         let body_ast = parse_expression(&atom.body_expr);
         let callees = collect_callees(&body_ast);
-        let allowed = module_env.resolve_effect_set(&atom.effects);
+        let allowed_leaves = module_env.resolve_leaf_effects(&atom.effects);
         let mut missing_all: Vec<String> = Vec::new();
         let mut violating_callee = String::new();
         let mut callee_effs: Vec<String> = Vec::new();
         for callee_name in &callees {
             if let Some(callee_atom) = module_env.get_atom(callee_name) {
                 if !callee_atom.effects.is_empty() {
-                    let callee_effects = module_env.resolve_effect_set(&callee_atom.effects);
+                    let callee_leaves = module_env.resolve_leaf_effects(&callee_atom.effects);
                     let missing: Vec<String> =
-                        callee_effects.difference(&allowed).cloned().collect();
+                        callee_leaves.difference(&allowed_leaves).cloned().collect();
                     if !missing.is_empty() {
                         violating_callee = callee_name.clone();
                         callee_effs = callee_atom.effects.clone();
