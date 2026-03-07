@@ -1360,6 +1360,31 @@ fn verify_effect_containment(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult
     Ok(())
 }
 
+/// Save an effect violation report to report.json for self-healing integration.
+fn save_effect_violation_report(
+    output_dir: &Path,
+    atom_name: &str,
+    violation_type: &str,
+    declared_effects: &[String],
+    required_effect: &str,
+    suggested_fixes: &[String],
+) {
+    let report = json!({
+        "status": "failed",
+        "atom": atom_name,
+        "violation_type": violation_type,
+        "declared_effects": declared_effects,
+        "required_effect": required_effect,
+        "suggested_fixes": suggested_fixes,
+        "reason": format!(
+            "Effect {}: atom '{}' declares effects {:?} but requires '{}'",
+            violation_type, atom_name, declared_effects, required_effect
+        )
+    });
+    let _ = fs::create_dir_all(output_dir);
+    let _ = fs::write(output_dir.join("report.json"), report.to_string());
+}
+
 #[derive(Debug, Clone, Default)]
 struct ResourceCtx {
     /// 現在保持中のリソース: (リソース名, 優先度)
@@ -2216,7 +2241,23 @@ fn verify_inner(
     verify_resource_hierarchy(atom, module_env)?;
 
     // Phase 1f: エフェクト包含検証（副作用安全性）
-    verify_effect_containment(atom, module_env)?;
+    if let Err(e) = verify_effect_containment(atom, module_env) {
+        // Save structured effect violation report for self-healing integration
+        let err_msg = format!("{}", e);
+        let suggested = vec![format!(
+            "Review and update the effects: annotation on atom '{}'",
+            atom.name
+        )];
+        save_effect_violation_report(
+            output_dir,
+            &atom.name,
+            "effect_propagation_violation",
+            &atom.effects,
+            &err_msg,
+            &suggested,
+        );
+        return Err(e);
+    }
 
     // Phase 1b: 有界モデル検査（ループ内 acquire パターン）
     verify_bmc_resource_safety(atom, module_env)?;
