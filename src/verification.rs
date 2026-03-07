@@ -1319,12 +1319,7 @@ impl EffectCtx {
 /// Verify effect containment for an atom using Z3.
 /// Proves: ∀e ∈ UsedEffects(Body): e ∈ AllowedEffects(Signature)
 fn verify_effect_containment(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult<()> {
-    // Pure atoms (no effects declared) — any perform in body will be caught by expr_to_z3
-    // Atoms with effects — verify that callees' effects are subsets
-    if atom.effects.is_empty() {
-        return Ok(());
-    }
-
+    // Resolve the allowed effect set (empty for pure atoms, expanded for annotated atoms)
     let allowed = module_env.resolve_effect_set(&atom.effects);
 
     // Check effect propagation: for each callee atom, verify callee.effects ⊆ caller.effects
@@ -2028,6 +2023,11 @@ fn collect_callees(expr: &Expr) -> Vec<String> {
         Expr::CallRef { callee, args } => {
             // Only recurse into callee — AtomRef branch already pushes the name
             callees.extend(collect_callees(callee));
+            for arg in args {
+                callees.extend(collect_callees(arg));
+            }
+        }
+        Expr::Perform { args, .. } => {
             for arg in args {
                 callees.extend(collect_callees(arg));
             }

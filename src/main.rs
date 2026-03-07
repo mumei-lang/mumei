@@ -1588,7 +1588,7 @@ fn cmd_repl() {
                             }
                         }
                         parser::Item::Import(_) => {}
-                        parser::Item::EffectDef(_) => {}
+                        parser::Item::EffectDef(e) => module_env.register_effect(e),
                     }
                 }
                 println!("  ✅ Loaded {} definition(s) from '{}'", count, file);

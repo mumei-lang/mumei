@@ -975,7 +975,7 @@ fn compile_expr<'a>(
                     .map(|_| context.i64_type().into())
                     .collect();
                 let fn_type = context.i64_type().fn_type(&param_types, false);
-                module.add_function(&fn_name, fn_type, None)
+                module.add_function(&fn_name, fn_type, Some(inkwell::module::Linkage::External))
             });
             let mut arg_vals = Vec::new();
             for arg in perform_args {
