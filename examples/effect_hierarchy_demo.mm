@@ -17,8 +17,9 @@ atom fetch_data(x: i64) -> i64
   body: x;
 
 /// Atom that declares Network — covers all subtypes (HttpRead, TcpConnect)
+/// Calls fetch_data (which requires HttpRead) to verify that Network covers HttpRead.
 atom network_operation(x: i64) -> i64
   effects: [Network];
   requires: x >= 0;
   ensures: result == x;
-  body: x;
+  body: fetch_data(x);
