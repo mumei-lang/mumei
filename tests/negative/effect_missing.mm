@@ -10,8 +10,8 @@ atom write_data(x: i64) -> i64
   body: x;
 
 // This atom calls write_data but does NOT declare FileWrite
-// Effect inference should flag this as missing
+// Expected: effect propagation violation (FileWrite not declared)
 atom caller_no_effects(x: i64) -> i64
   requires: x >= 0;
   ensures: result == x;
-  body: x;
+  body: write_data(x);

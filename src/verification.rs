@@ -2541,8 +2541,8 @@ fn check_constant_constraint(value: &str, constraint: &str) -> bool {
             return !value.contains(&arg);
         }
     }
-    // 不明な制約は true を返す（安全側に倒す）
-    true
+    // 不明な制約は false を返す（安全側に倒す — 検証できない場合は拒否）
+    false
 }
 
 /// エフェクトパラメータの検証。

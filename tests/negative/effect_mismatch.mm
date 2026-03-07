@@ -18,9 +18,9 @@ atom network_caller(x: i64) -> i64
   body: x;
 
 // Declares only ConsoleOut but calls both file_writer and network_caller
-// Should suggest adding FileWrite and Network
+// Expected: effect propagation violation (FileWrite and Network not declared)
 atom mismatched(x: i64) -> i64
   effects: [ConsoleOut];
   requires: x >= 0;
   ensures: result == x;
-  body: x;
+  body: { let a = file_writer(x); network_caller(a) };
