@@ -66,7 +66,32 @@ When defining traits with `law` clauses, the compiler expands method calls using
 * `law commutative_add: add(a, b) == add(b, a)` → expanded to `(a + b) == (b + a)` → Z3 proves directly.
 * Use `where` constraints on trait method parameters: `fn div(a: Self, b: Self where v != 0) -> Self;`
 
-### 3.5 Standard Library Usage
+### 3.5 Higher-Order Function Contracts (`call_with_contract`)
+
+When defining atoms that accept function parameters via `atom_ref`, use the `contract()` clause to declare the expected preconditions and postconditions of the function parameter. This enables Z3 to verify the atom's body without relying on `trusted`.
+
+**Syntax**:
+```mumei
+atom apply(x: i64, f: atom_ref(i64) -> i64)
+    requires: x >= 0;
+    ensures: result >= 0;
+    contract(f): ensures: result >= 0;
+    body: call(f, x);
+```
+
+* `contract(f): ensures: <expr>;` — declares the postcondition that `f`'s result must satisfy.
+* `contract(f): requires: <expr>, ensures: <expr>;` — declares both precondition and postcondition.
+* In contract expressions, `x` / `arg0` refer to the first **call-site argument** (not the atom's own parameter), `y` / `arg1` to the second call-site argument, and `result` to the call's return value. Note: if the atom has a parameter named `x`, the contract's `x` will shadow it with the call-site argument value.
+
+**How it works**: When the verifier encounters `call(f, args...)` and `f` is a parametric function parameter with a declared contract, it:
+1. Checks the `requires` clause (if any) holds at the call site — fails verification if the precondition may be violated.
+2. Asserts the `ensures` clause as a fact in the Z3 solver — constraining the symbolic result of the call.
+
+This mechanism replaces the need for `trusted` on higher-order functions like `map`, `fold_left`, and `result_map`.
+
+**Important limitation**: When calling `apply(5, atom_ref(increment))`, the verifier does **not** check that `increment`'s actual contract (`ensures: result == x + 1`) implies the declared `contract(f): ensures: result >= 0`. The caller is responsible for passing only functions that satisfy the declared contract. Passing a function that violates the contract will not be caught at the call site (the verifier trusts the declared contract unconditionally). A subsumption check may be added in a future version.
+
+### 3.6 Standard Library Usage
 
 * **Prelude** (`std/prelude.mm`): Auto-imported. Provides `Eq`, `Ord`, `Numeric`, `Option<T>`, `Result<T, E>`.
 * **Alloc** (`std/alloc.mm`): Import with `import "std/alloc" as alloc;`. Provides `Vector<T>`, `HashMap<K, V>`, `alloc_raw`, `dealloc_raw`.

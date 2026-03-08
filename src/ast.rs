@@ -476,6 +476,8 @@ impl Monomorphizer {
                         type_ref: Some(new_type_ref),
                         is_ref: p.is_ref,
                         is_ref_mut: p.is_ref_mut,
+                        fn_contract_requires: p.fn_contract_requires.clone(),
+                        fn_contract_ensures: p.fn_contract_ensures.clone(),
                     }
                 } else {
                     p.clone()

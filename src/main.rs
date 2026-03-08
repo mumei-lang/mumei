@@ -295,6 +295,8 @@ fn load_and_prepare(input: &str) -> (Vec<Item>, verification::ModuleEnv, Vec<Imp
                             type_ref: Some(parser::parse_type_ref(ty)),
                             is_ref: false,
                             is_ref_mut: false,
+                            fn_contract_requires: None,
+                            fn_contract_ensures: None,
                         })
                         .collect();
 
@@ -1659,6 +1661,8 @@ fn cmd_repl() {
                                         type_ref: Some(parser::parse_type_ref(ty)),
                                         is_ref: false,
                                         is_ref_mut: false,
+                                        fn_contract_requires: None,
+                                        fn_contract_ensures: None,
                                     })
                                     .collect();
                                 let atom = parser::Atom {
@@ -2515,6 +2519,8 @@ atom main() -> i64
                                 type_ref: Some(parser::parse_type_ref(ty)),
                                 is_ref: false,
                                 is_ref_mut: false,
+                                fn_contract_requires: None,
+                                fn_contract_ensures: None,
                             })
                             .collect();
                         let atom = parser::Atom {
@@ -2555,6 +2561,145 @@ atom main() -> i64
         assert_eq!(
             module_env.get_atom("main").unwrap().trust_level,
             parser::TrustLevel::Verified
+        );
+    }
+
+    // --- Phase B: call_with_contract E2E Z3 verification tests ---
+
+    /// Helper: parse source, register items, and verify a single atom by name
+    fn verify_atom_from_source(
+        source: &str,
+        atom_name: &str,
+    ) -> Result<(), verification::MumeiError> {
+        let items = parser::parse_module(source);
+        let mut module_env = verification::ModuleEnv::new();
+        verification::register_builtin_traits(&mut module_env);
+        for item in &items {
+            if let parser::Item::Atom(atom) = item {
+                module_env.register_atom(atom);
+            }
+        }
+        let atom = module_env
+            .get_atom(atom_name)
+            .expect(&format!("atom '{}' not found", atom_name))
+            .clone();
+        let hir_atom = lower_atom_to_hir(&atom);
+        verification::verify(&hir_atom, std::path::Path::new("."), &module_env)
+    }
+
+    #[test]
+    fn test_call_with_contract_basic_ensures() {
+        let source = r#"
+atom increment(x: i64)
+    requires: x >= 0;
+    ensures: result == x + 1;
+    body: x + 1;
+
+atom apply(x: i64, f: atom_ref(i64) -> i64)
+    requires: x >= 0;
+    ensures: result >= 0;
+    contract(f): ensures: result >= 0;
+    body: call(f, x);
+
+atom test_apply()
+    requires: true;
+    ensures: result >= 0;
+    body: apply(5, atom_ref(increment));
+"#;
+        // apply should verify: contract(f) ensures result >= 0 constrains the dynamic call
+        assert!(
+            verify_atom_from_source(source, "apply").is_ok(),
+            "apply with contract(f) ensures should verify"
+        );
+        // test_apply calls apply with concrete atom_ref
+        assert!(
+            verify_atom_from_source(source, "test_apply").is_ok(),
+            "test_apply should verify via compositional verification"
+        );
+    }
+
+    #[test]
+    fn test_call_with_contract_requires_and_ensures() {
+        let source = r#"
+atom apply_twice(x: i64, f: atom_ref(i64) -> i64)
+    requires: x >= 0;
+    ensures: result >= 0;
+    contract(f): requires: x >= 0, ensures: result >= 0;
+    body: {
+        let first = call(f, x);
+        call(f, first)
+    }
+"#;
+        // apply_twice should verify: first call's result >= 0 satisfies second call's requires
+        assert!(
+            verify_atom_from_source(source, "apply_twice").is_ok(),
+            "apply_twice with contract(f) requires+ensures should verify"
+        );
+    }
+
+    #[test]
+    fn test_call_with_contract_binary_function() {
+        let source = r#"
+atom add(a: i64, b: i64)
+    requires: a >= 0 && b >= 0;
+    ensures: result == a + b;
+    body: a + b;
+
+atom fold_two(a: i64, b: i64, f: atom_ref(i64, i64) -> i64)
+    requires: a >= 0 && b >= 0;
+    ensures: result >= 0;
+    contract(f): ensures: result >= 0;
+    body: call(f, a, b);
+
+atom test_fold()
+    requires: true;
+    ensures: result >= 0;
+    body: fold_two(3, 4, atom_ref(add));
+"#;
+        assert!(
+            verify_atom_from_source(source, "fold_two").is_ok(),
+            "fold_two with binary contract should verify"
+        );
+        assert!(
+            verify_atom_from_source(source, "test_fold").is_ok(),
+            "test_fold with concrete atom_ref(add) should verify"
+        );
+    }
+
+    #[test]
+    fn test_call_with_contract_in_match() {
+        let source = r#"
+atom option_map(opt: i64, f: atom_ref(i64) -> i64)
+    requires: opt >= 0 && opt <= 1;
+    ensures: result >= 0;
+    contract(f): ensures: result >= 0;
+    body: {
+        match opt {
+            0 => 0,
+            _ => call(f, opt)
+        }
+    }
+"#;
+        assert!(
+            verify_atom_from_source(source, "option_map").is_ok(),
+            "option_map with contract in match arm should verify"
+        );
+    }
+
+    #[test]
+    fn test_call_with_contract_without_contract_fails() {
+        // An atom using call(f, x) WITHOUT a contract(f) clause
+        // should fail verification because the result is unconstrained
+        let source = r#"
+atom apply_no_contract(x: i64, f: atom_ref(i64) -> i64)
+    requires: x >= 0;
+    ensures: result >= 0;
+    body: call(f, x);
+"#;
+        let result = verify_atom_from_source(source, "apply_no_contract");
+        assert!(
+            result.is_err(),
+            "apply without contract(f) should fail: result is unconstrained"
         );
     }
 
