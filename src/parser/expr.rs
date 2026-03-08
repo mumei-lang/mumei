@@ -12,7 +12,7 @@ use crate::parser::{Expr, JoinSemantics, MatchArm, Op, Stmt};
 /// Right-associative: left > right.
 fn binding_power(tok: &Token) -> Option<(u8, u8)> {
     match tok {
-        Token::FatArrow => Some((2, 1)), // right-assoc =>
+        Token::FatArrow => Some((1, 2)), // left-assoc => (matches old parser's while-loop behavior)
         Token::Or => Some((3, 4)),
         Token::And => Some((5, 6)),
         Token::Eq | Token::Neq | Token::Gt | Token::Lt | Token::Ge | Token::Le => Some((7, 8)),
@@ -302,6 +302,11 @@ fn parse_prefix(ctx: &mut ParseContext) -> Expr {
 }
 
 /// After parsing an identifier, check for function call, struct init, array access, etc.
+///
+/// Known limitation: An uppercase identifier followed by `{` is always parsed as struct
+/// initialization. This means `if SomeType { ... } else { ... }` would incorrectly parse
+/// `SomeType { ... }` as a struct literal. In practice, mumei variables are conventionally
+/// lowercase, so this ambiguity does not arise in real `.mm` files.
 fn parse_ident_continuation(ctx: &mut ParseContext, name: String) -> Expr {
     match ctx.peek() {
         Token::LBrace if name.chars().next().map_or(false, |c| c.is_uppercase()) => {

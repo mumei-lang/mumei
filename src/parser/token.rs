@@ -206,6 +206,7 @@ impl std::fmt::Display for Token {
 
 /// A token with its source span information.
 #[derive(Debug, Clone)]
+// NOTE: SpannedToken fields (line, col, len) are read during span construction for diagnostics and LSP positioning
 #[allow(dead_code)]
 pub struct SpannedToken {
     pub token: Token,

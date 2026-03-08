@@ -6,6 +6,7 @@ use super::token::{SpannedToken, Token};
 
 /// Lexer that converts a source string into a sequence of tokens.
 pub struct Lexer<'a> {
+    // NOTE: source is retained for future span-to-source-text resolution and error reporting
     #[allow(dead_code)]
     source: &'a str,
     chars: Vec<char>,

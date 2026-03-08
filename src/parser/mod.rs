@@ -80,6 +80,7 @@ impl ParseContext {
                     self.advance();
                     name
                 } else {
+                    self.advance();
                     "unknown".to_string()
                 }
             }
@@ -113,12 +114,14 @@ pub fn parse_body_expr(input: &str) -> Stmt {
 }
 
 /// Parse a single atom definition from source text.
+// NOTE: parse_atom is a public API preserved for backward compatibility and used in tests (e.g., test_parse_task_group)
 #[allow(dead_code)]
 pub fn parse_atom(source: &str) -> Atom {
     item::parse_atom_from_source(source)
 }
 
 /// Legacy tokenize function for backward compatibility.
+// NOTE: tokenize is a legacy public API preserved for backward compatibility and used in tests (e.g., test_legacy_tokenize_compat)
 #[allow(dead_code)]
 pub fn tokenize(input: &str) -> Vec<String> {
     lexer::legacy_tokenize(input)
