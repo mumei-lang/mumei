@@ -4,7 +4,7 @@
 
 Mumei formally verifies every function with Z3 before compiling to LLVM IR and transpiling to Rust / Go / TypeScript.
 
-> parse → resolve → monomorphize → **verify (Z3)** → codegen (LLVM IR) → transpile
+> parse → resolve → monomorphize → lower_to_hir → **verify (Z3)** → codegen (LLVM IR) → transpile
 
 ```mumei
 type Nat = i64 where v >= 0;
@@ -86,8 +86,9 @@ mumei build src/main.mm -o dist/output
 | **Traits** | Algebraic laws verified by Z3 (`law reflexive: leq(x, x) == true`) |
 | **Ownership** | `ref` / `ref mut` / `consume` with Z3 aliasing prevention |
 | **Concurrency** | `async`/`await`, `task_group:all`/`task_group:any`, deadlock-free proof |
+| **Effects** | Compile-time side-effect verification, `perform`/`effects:` annotations, effect hierarchy with subtyping |
 | **Safety** | `trusted` / `unverified` atoms, taint analysis, BMC + inductive invariant |
-| **Std Library** | Option, Result, List, BoundedArray, Vector, HashMap, sort algorithms |
+| **Std Library** | Option, Result, List, BoundedArray, Vector, HashMap, sort algorithms, effect definitions |
 | **Output** | LLVM IR + Rust + Go + TypeScript transpiler |
 | **Tooling** | LSP server, VS Code extension, `mumei.toml` manifest, dependency manager |
 
@@ -237,6 +238,9 @@ python mcp_server.py
 | `validate_logic` | Z3 verification only (returns counter-example data) |
 | `execute_mm` | General-purpose build / check execution |
 | `get_inferred_effects` | Pre-check: infer required effects before writing code |
+| `get_allowed_effects` | Query current effect boundary for the session |
+| `set_allowed_effects` | Override effect boundary dynamically |
+| `self_heal_with_effects` | Effect-aware self-healing loop with boundary enforcement |
 
 ### Visualizer Dashboard (Optional)
 
