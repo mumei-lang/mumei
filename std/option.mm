@@ -76,10 +76,11 @@ atom unwrap_or(opt: i64, default_val: i64)
 // --- Map (Phase A): atom_ref による高階関数版 ---
 // opt が Some(tag=1) なら f を適用し、None(tag=0) なら 0 を返す。
 // f は atom_ref で渡された関数。契約は call 時に自動展開される。
-// NOTE: f の契約はパラメトリックなため trusted（Phase B で解決予定）
-trusted atom map(opt: i64, f: atom_ref(i64) -> i64)
+// Phase B: call_with_contract により f の契約を Z3 で展開。trusted 不要。
+atom map(opt: i64, f: atom_ref(i64) -> i64)
     requires: opt >= 0 && opt <= 1;
     ensures: result >= 0;
+    contract(f): ensures: result >= 0;
     body: {
         match opt {
             0 => 0,

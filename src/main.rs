@@ -295,6 +295,8 @@ fn load_and_prepare(input: &str) -> (Vec<Item>, verification::ModuleEnv, Vec<Imp
                             type_ref: Some(parser::parse_type_ref(ty)),
                             is_ref: false,
                             is_ref_mut: false,
+                            fn_contract_requires: None,
+                            fn_contract_ensures: None,
                         })
                         .collect();
 
@@ -1659,6 +1661,8 @@ fn cmd_repl() {
                                         type_ref: Some(parser::parse_type_ref(ty)),
                                         is_ref: false,
                                         is_ref_mut: false,
+                                        fn_contract_requires: None,
+                                        fn_contract_ensures: None,
                                     })
                                     .collect();
                                 let atom = parser::Atom {
@@ -2515,6 +2519,8 @@ atom main() -> i64
                                 type_ref: Some(parser::parse_type_ref(ty)),
                                 is_ref: false,
                                 is_ref_mut: false,
+                                fn_contract_requires: None,
+                                fn_contract_ensures: None,
                             })
                             .collect();
                         let atom = parser::Atom {

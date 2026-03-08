@@ -685,6 +685,10 @@ struct VCtx<'a> {
     ctx: &'a Context,
     arr: &'a Array<'a>,
     module_env: &'a ModuleEnv,
+    /// Phase B call_with_contract: 現在検証中の atom への参照。
+    /// CallRef の動的ケース（パラメトリック関数型）で、呼び出し先の関数パラメータに
+    /// 宣言された contract(f) 情報を取得するために使用する。
+    current_atom: Option<&'a crate::parser::Atom>,
 }
 
 // =============================================================================
@@ -1597,6 +1601,7 @@ pub fn verify_impl(
             ctx: &ctx,
             arr: &arr,
             module_env,
+            current_atom: None,
         };
 
         let mut env: Env = HashMap::new();
@@ -2365,6 +2370,7 @@ fn verify_atom_invariant(
         ctx: &ctx,
         arr: &arr,
         module_env,
+        current_atom: Some(atom),
     };
 
     let mut env: Env = HashMap::new();
@@ -3066,6 +3072,7 @@ fn verify_inner(
         ctx: &ctx,
         arr: &arr,
         module_env,
+        current_atom: Some(atom),
     };
 
     let mut env: Env = HashMap::new();
@@ -4503,20 +4510,101 @@ fn expr_to_z3<'a>(
                 }
             }
 
-            // callee が atom_ref でない場合（動的関数ポインタ / パラメトリック関数型）:
-            // 具体的な atom の契約を展開できないため、シンボリック結果を返す。
-            // NOTE: これにより ensures の検証が失敗する可能性がある。
-            // パラメトリックな関数型パラメータ（f: atom_ref(T) -> R）を持つ atom は
-            // trusted として宣言するか、Phase B の call_with_contract を待つ必要がある。
+            // =============================================================
+            // Phase B: call_with_contract — パラメトリック関数型の契約展開
+            // =============================================================
+            // callee が Variable で、current_atom のパラメータに contract(f) が
+            // 宣言されている場合、その契約を使って結果を制約する。
+            // これにより trusted マーカーなしで高階関数を検証できる。
+
             let mut arg_vals = Vec::new();
             for arg in args {
                 arg_vals.push(expr_to_z3(vc, arg, env, solver_opt)?);
             }
+
             static DYNAMIC_CALL_COUNTER: std::sync::atomic::AtomicUsize =
                 std::sync::atomic::AtomicUsize::new(0);
             let id = DYNAMIC_CALL_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let result = Int::new_const(ctx, format!("call_ref_dynamic_{}", id));
-            Ok(result.into())
+            let result: Dynamic = Int::new_const(ctx, format!("call_ref_dynamic_{}", id)).into();
+
+            // callee が Variable の場合、current_atom のパラメータから contract 情報を取得
+            if let Expr::Variable(callee_var_name) = callee.as_ref() {
+                if let Some(current_atom) = vc.current_atom {
+                    if let Some(param) = current_atom
+                        .params
+                        .iter()
+                        .find(|p| p.name == *callee_var_name)
+                    {
+                        // contract(f): ensures: <expr> が宣言されている場合
+                        if let Some(ref fn_ensures) = param.fn_contract_ensures {
+                            let mut contract_env = env.clone();
+
+                            // atom_ref のパラメータ型情報から引数名を生成
+                            // atom_ref(i64) -> i64 の場合、arg0 として引数をマッピング
+                            // atom_ref(i64, i64) -> i64 の場合、arg0, arg1 として引数をマッピング
+                            for (i, arg_val) in arg_vals.iter().enumerate() {
+                                contract_env.insert(format!("arg{}", i), arg_val.clone());
+                            }
+
+                            // 最初の引数を "x" としてもマッピング（よくある1引数パターン用）
+                            if let Some(first_arg) = arg_vals.first() {
+                                contract_env.insert("x".to_string(), first_arg.clone());
+                            }
+                            // 2引数の場合 "y" もマッピング
+                            if let Some(second_arg) = arg_vals.get(1) {
+                                contract_env.insert("y".to_string(), second_arg.clone());
+                            }
+
+                            // result をマッピング
+                            contract_env.insert("result".to_string(), result.clone());
+
+                            // requires の検証（宣言されている場合）
+                            if let Some(ref fn_requires) = param.fn_contract_requires {
+                                if fn_requires.trim() != "true" {
+                                    let req_ast = parse_expression(fn_requires);
+                                    if let Ok(req_z3) =
+                                        expr_to_z3(vc, &req_ast, &mut contract_env, None)
+                                    {
+                                        if let Some(req_bool) = req_z3.as_bool() {
+                                            if let Some(solver) = solver_opt {
+                                                solver.push();
+                                                solver.assert(&req_bool.not());
+                                                if solver.check() == SatResult::Sat {
+                                                    solver.pop(1);
+                                                    return Err(MumeiError::verification(format!(
+                                                        "call_with_contract({}): precondition '{}' may not hold at call site",
+                                                        callee_var_name, fn_requires
+                                                    ))
+                                                    .with_help(
+                                                        "関数パラメータの事前条件を満たしていません。引数の制約を確認してください",
+                                                    ));
+                                                }
+                                                solver.pop(1);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // ensures を事実として solver に追加
+                            if fn_ensures.trim() != "true" {
+                                let ens_ast = parse_expression(fn_ensures);
+                                if let Ok(ens_z3) =
+                                    expr_to_z3(vc, &ens_ast, &mut contract_env, None)
+                                {
+                                    if let Some(ens_bool) = ens_z3.as_bool() {
+                                        if let Some(solver) = solver_opt {
+                                            solver.assert(&ens_bool);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Ok(result)
         }
 
         Expr::FieldAccess(inner_expr, field_name) => {

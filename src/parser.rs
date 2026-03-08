@@ -386,6 +386,16 @@ pub struct Param {
     /// - ref mut パラメータへの書き込みは所有者に反映される
     /// - ref mut は同時に1つのみ存在可能（エイリアシング防止）
     pub is_ref_mut: bool,
+    /// Higher-Order Function contract: requires clause for function parameter.
+    /// When this param is an atom_ref, this specifies the precondition that must
+    /// hold at each call site of the function parameter.
+    /// Syntax: `contract(f): requires: <expr>, ensures: <expr>;`
+    pub fn_contract_requires: Option<String>,
+    /// Higher-Order Function contract: ensures clause for function parameter.
+    /// When this param is an atom_ref, this specifies the postcondition that
+    /// the function parameter's result must satisfy. Used by call_with_contract
+    /// to constrain the symbolic result of `call(f, args...)` in Z3.
+    pub fn_contract_ensures: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1368,6 +1378,8 @@ pub fn parse_atom(source: &str) -> Atom {
                     type_ref: Some(type_ref),
                     is_ref,
                     is_ref_mut,
+                    fn_contract_requires: None,
+                    fn_contract_ensures: None,
                 }
             } else {
                 Param {
@@ -1376,6 +1388,8 @@ pub fn parse_atom(source: &str) -> Atom {
                     type_ref: None,
                     is_ref,
                     is_ref_mut,
+                    fn_contract_requires: None,
+                    fn_contract_ensures: None,
                 }
             }
         })
@@ -1478,6 +1492,43 @@ pub fn parse_atom(source: &str) -> Atom {
         .captures(source)
         .map(|cap| parse_effect_list(&cap[1]))
         .unwrap_or_default();
+
+    // contract(param_name) 句のパース: 高階関数パラメータの契約
+    // Syntax: contract(f): ensures: <expr>;
+    //         contract(f): requires: <expr>, ensures: <expr>;
+    // atom_ref パラメータに対して、呼び出し結果が満たすべき事前条件・事後条件を宣言する。
+    // call_with_contract により、call(f, args) の結果を Z3 で制約するために使用される。
+    let contract_re = Regex::new(r"contract\((\w+)\):\s*([^;]+);").unwrap();
+    let mut params = params;
+    for cap in contract_re.captures_iter(source) {
+        let param_name = cap[1].trim().to_string();
+        let contract_body = cap[2].trim();
+
+        let mut fn_requires: Option<String> = None;
+        let mut fn_ensures: Option<String> = None;
+
+        // Parse "requires: <expr>, ensures: <expr>" or "ensures: <expr>"
+        if let Some(ens_pos) = contract_body.find("ensures:") {
+            let ens_str = contract_body[ens_pos + "ensures:".len()..].trim();
+            fn_ensures = Some(ens_str.to_string());
+
+            // Check for requires before ensures
+            let before_ensures = &contract_body[..ens_pos];
+            if let Some(req_pos) = before_ensures.find("requires:") {
+                let req_str = before_ensures[req_pos + "requires:".len()..]
+                    .trim()
+                    .trim_end_matches(',')
+                    .trim();
+                fn_requires = Some(req_str.to_string());
+            }
+        }
+
+        // Associate with the matching param
+        if let Some(param) = params.iter_mut().find(|p| p.name == param_name) {
+            param.fn_contract_requires = fn_requires;
+            param.fn_contract_ensures = fn_ensures;
+        }
+    }
 
     let atom_match = name_caps.get(0).unwrap();
     Atom {
@@ -3023,6 +3074,87 @@ atom fold_two(a: i64, b: i64, f: atom_ref(i64, i64) -> i64)
         let type_ref = atoms[0].params[2].type_ref.as_ref().unwrap();
         assert!(type_ref.is_fn_type());
         assert_eq!(type_ref.type_args.len(), 3); // 2 params + 1 return
+    }
+
+    // --- Phase B: contract() clause parsing tests ---
+
+    #[test]
+    fn test_parse_contract_ensures_only() {
+        let source = r#"
+atom apply(x: i64, f: atom_ref(i64) -> i64)
+    requires: x >= 0;
+    ensures: result >= 0;
+    contract(f): ensures: result >= 0;
+    body: call(f, x);
+"#;
+        let items = parse_module(source);
+        let atoms: Vec<_> = items
+            .iter()
+            .filter_map(|i| if let Item::Atom(a) = i { Some(a) } else { None })
+            .collect();
+        assert_eq!(atoms.len(), 1);
+        let f_param = &atoms[0].params[1];
+        assert_eq!(f_param.name, "f");
+        assert!(
+            f_param.fn_contract_requires.is_none(),
+            "requires should be None"
+        );
+        assert_eq!(
+            f_param.fn_contract_ensures.as_deref(),
+            Some("result >= 0"),
+            "ensures should be parsed"
+        );
+    }
+
+    #[test]
+    fn test_parse_contract_requires_and_ensures() {
+        let source = r#"
+atom apply_twice(x: i64, f: atom_ref(i64) -> i64)
+    requires: x >= 0;
+    ensures: result >= 0;
+    contract(f): requires: x >= 0, ensures: result >= 0;
+    body: {
+        let first = call(f, x);
+        call(f, first)
+    }
+"#;
+        let items = parse_module(source);
+        let atoms: Vec<_> = items
+            .iter()
+            .filter_map(|i| if let Item::Atom(a) = i { Some(a) } else { None })
+            .collect();
+        assert_eq!(atoms.len(), 1);
+        let f_param = &atoms[0].params[1];
+        assert_eq!(f_param.name, "f");
+        assert_eq!(
+            f_param.fn_contract_requires.as_deref(),
+            Some("x >= 0"),
+            "requires should be parsed"
+        );
+        assert_eq!(
+            f_param.fn_contract_ensures.as_deref(),
+            Some("result >= 0"),
+            "ensures should be parsed"
+        );
+    }
+
+    #[test]
+    fn test_parse_contract_no_contract() {
+        let source = r#"
+atom simple(x: i64)
+    requires: x >= 0;
+    ensures: result >= 0;
+    body: x;
+"#;
+        let items = parse_module(source);
+        let atoms: Vec<_> = items
+            .iter()
+            .filter_map(|i| if let Item::Atom(a) = i { Some(a) } else { None })
+            .collect();
+        assert_eq!(atoms.len(), 1);
+        let x_param = &atoms[0].params[0];
+        assert!(x_param.fn_contract_requires.is_none());
+        assert!(x_param.fn_contract_ensures.is_none());
     }
 
     #[test]
