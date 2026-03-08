@@ -1395,11 +1395,26 @@ pub fn parse_atom(source: &str) -> Atom {
         })
         .collect();
 
+    // contract(...): 句の範囲を収集し、requires:/ensures: マッチから除外する。
+    // これにより clause の記述順序に依存しない正しいパースが可能になる。
+    let contract_re_ranges = Regex::new(r"contract\(\w+\):\s*[^;]+;").unwrap();
+    let contract_spans: Vec<(usize, usize)> = contract_re_ranges
+        .find_iter(source)
+        .map(|m| (m.start(), m.end()))
+        .collect();
+    let is_inside_contract = |offset: usize| -> bool {
+        contract_spans
+            .iter()
+            .any(|&(s, e)| offset >= s && offset < e)
+    };
+
     let requires_raw = req_re
-        .captures(source)
+        .captures_iter(source)
+        .find(|c| !is_inside_contract(c.get(0).unwrap().start()))
         .map_or("true".to_string(), |c| c[1].trim().to_string());
     let ensures = ens_re
-        .captures(source)
+        .captures_iter(source)
+        .find(|c| !is_inside_contract(c.get(0).unwrap().start()))
         .map_or("true".to_string(), |c| c[1].trim().to_string());
 
     let body_marker = "body:";
@@ -3135,6 +3150,34 @@ atom apply_twice(x: i64, f: atom_ref(i64) -> i64)
             f_param.fn_contract_ensures.as_deref(),
             Some("result >= 0"),
             "ensures should be parsed"
+        );
+    }
+
+    #[test]
+    fn test_parse_contract_before_ensures() {
+        // contract() clause appears BEFORE the atom-level ensures.
+        // This must not confuse the parser into using the contract's ensures
+        // as the atom's ensures.
+        let source = r#"
+atom apply(x: i64, f: atom_ref(i64) -> i64)
+    requires: x >= 0;
+    contract(f): ensures: result >= 0;
+    ensures: result >= 1;
+    body: call(f, x);
+"#;
+        let items = parse_module(source);
+        let atoms: Vec<_> = items
+            .iter()
+            .filter_map(|i| if let Item::Atom(a) = i { Some(a) } else { None })
+            .collect();
+        assert_eq!(atoms.len(), 1);
+        // The atom's own ensures should be "result >= 1", not the contract's "result >= 0"
+        assert_eq!(atoms[0].ensures.trim(), "result >= 1");
+        let f_param = &atoms[0].params[1];
+        assert_eq!(
+            f_param.fn_contract_ensures.as_deref(),
+            Some("result >= 0"),
+            "contract ensures should be parsed separately"
         );
     }
 

@@ -696,6 +696,19 @@ pub fn compute_atom_hash(atom: &crate::parser::Atom) -> String {
             hasher.update(b"|ref_mut:");
             hasher.update(p.name.as_bytes());
         }
+        // fn_contract_requires / fn_contract_ensures も含める（契約変更を検出）
+        if let Some(ref req) = p.fn_contract_requires {
+            hasher.update(b"|fn_contract_req:");
+            hasher.update(p.name.as_bytes());
+            hasher.update(b"=");
+            hasher.update(req.as_bytes());
+        }
+        if let Some(ref ens) = p.fn_contract_ensures {
+            hasher.update(b"|fn_contract_ens:");
+            hasher.update(p.name.as_bytes());
+            hasher.update(b"=");
+            hasher.update(ens.as_bytes());
+        }
     }
     // resources も含める（リソース制約の変更を検出）
     for r in &atom.resources {
@@ -794,6 +807,19 @@ pub fn compute_proof_hash(atom: &crate::parser::Atom, module_env: &ModuleEnv) ->
         if p.is_ref_mut {
             hasher.update(b"|ref_mut:");
             hasher.update(p.name.as_bytes());
+        }
+        // fn_contract_requires / fn_contract_ensures も含める（契約変更を検出）
+        if let Some(ref req) = p.fn_contract_requires {
+            hasher.update(b"|fn_contract_req:");
+            hasher.update(p.name.as_bytes());
+            hasher.update(b"=");
+            hasher.update(req.as_bytes());
+        }
+        if let Some(ref ens) = p.fn_contract_ensures {
+            hasher.update(b"|fn_contract_ens:");
+            hasher.update(p.name.as_bytes());
+            hasher.update(b"=");
+            hasher.update(ens.as_bytes());
         }
     }
     for r in &atom.resources {
