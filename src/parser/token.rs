@@ -105,6 +105,7 @@ pub enum Token {
 
 impl Token {
     /// Check if two tokens match by variant (ignoring inner values for literals/idents).
+    // NOTE: same_kind is infrastructure for future token comparison in error recovery and diagnostics
     #[allow(dead_code)]
     pub fn same_kind(&self, other: &Token) -> bool {
         std::mem::discriminant(self) == std::mem::discriminant(other)

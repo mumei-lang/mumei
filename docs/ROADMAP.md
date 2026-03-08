@@ -452,7 +452,7 @@ Future extensions to the effect subtyping system:
 |---|---|---|---|
 | Phase 0 | Expr/Stmt separation | ✅ Done | — |
 | Phase 1 | HIR introduction (typed AST, eliminate String-based body_expr) | ✅ Done | Phase 0 |
-| Phase 2 | Basic Effect System | ⏳ Planned | ✅ Parser migrated to recursive descent |
+| Phase 2 | Basic Effect System | ⏳ Planned | ✅ Expression parser migrated to recursive descent (item parsing still regex) |
 | Phase 3 | Effect Polymorphism | ⏳ Planned | Phase 2 |
 | Phase 4 | MIR introduction (CFG for borrow checking) | ⏳ Planned | Borrow checking design finalized |
 | Phase 5 | Capability Security evaluation | ⏳ Planned | Phase 3 maturity assessment |

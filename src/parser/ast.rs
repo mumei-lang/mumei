@@ -91,6 +91,7 @@ pub struct EffectParam {
 }
 
 impl Effect {
+    // NOTE: Effect::simple is infrastructure for future effect construction in tests and MCP tools
     #[allow(dead_code)]
     pub fn simple(name: &str) -> Self {
         Effect {
@@ -101,6 +102,7 @@ impl Effect {
     }
 }
 
+// NOTE: EffectDef fields are read during effect hierarchy resolution and MCP get_inferred_effects
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct EffectDef {
@@ -113,6 +115,7 @@ pub struct EffectDef {
     pub span: Span,
 }
 
+// NOTE: EffectDefParam fields are read during effect constraint resolution (future Z3 String Sort integration)
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct EffectDefParam {
@@ -223,6 +226,7 @@ pub struct EnumVariant {
     pub name: String,
     pub fields: Vec<String>,
     pub field_types: Vec<TypeRef>,
+    // NOTE: is_recursive is set by parser for recursive ADT detection; read by future codegen for box/pointer decisions
     #[allow(dead_code)]
     pub is_recursive: bool,
 }
@@ -232,6 +236,7 @@ pub struct EnumDef {
     pub name: String,
     pub type_params: Vec<String>,
     pub variants: Vec<EnumVariant>,
+    // NOTE: is_recursive is set by parser for recursive ADT detection; read by future codegen for box/pointer decisions
     #[allow(dead_code)]
     pub is_recursive: bool,
     pub span: Span,
@@ -282,6 +287,7 @@ pub struct Param {
 pub struct Atom {
     pub name: String,
     pub type_params: Vec<String>,
+    // NOTE: where_bounds is used for trait bound validation during future monomorphization
     #[allow(dead_code)]
     pub where_bounds: Vec<TypeParamBound>,
     pub params: Vec<Param>,
@@ -323,6 +329,7 @@ pub struct StructDef {
     pub name: String,
     pub type_params: Vec<String>,
     pub fields: Vec<StructField>,
+    // NOTE: method_names tracks struct-associated atoms (e.g., "Stack::push") for future method resolution
     #[allow(dead_code)]
     pub method_names: Vec<String>,
     pub span: Span,
@@ -346,6 +353,7 @@ pub struct TraitMethod {
     pub name: String,
     pub param_types: Vec<String>,
     pub return_type: String,
+    // NOTE: param_constraints holds per-parameter refinement types (e.g., "v != 0") for future Z3 constraint generation
     #[allow(dead_code)]
     pub param_constraints: Vec<Option<String>>,
 }
@@ -385,6 +393,7 @@ pub enum Item {
 // FFI Bridge (extern blocks)
 // =============================================================================
 
+// NOTE: ExternFn fields will be used when auto-registering extern functions as trusted atoms in ModuleEnv
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct ExternFn {
@@ -394,6 +403,7 @@ pub struct ExternFn {
     pub span: Span,
 }
 
+// NOTE: ExternBlock span will be used for error reporting in future extern function validation
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct ExternBlock {
