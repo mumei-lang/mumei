@@ -2581,7 +2581,7 @@ atom main() -> i64
         }
         let atom = module_env
             .get_atom(atom_name)
-            .expect(&format!("atom '{}' not found", atom_name))
+            .unwrap_or_else(|| panic!("atom '{}' not found", atom_name))
             .clone();
         let hir_atom = lower_atom_to_hir(&atom);
         verification::verify(&hir_atom, std::path::Path::new("."), &module_env)
