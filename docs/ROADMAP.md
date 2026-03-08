@@ -450,19 +450,19 @@ Future extensions to the effect subtyping system:
 
 | Phase | Item | Status | Prerequisite |
 |---|---|---|---|
-| Phase 0 | Expr/Stmt 分離 | ✅ Done | — |
-| Phase 1 | HIR 導入（型確定AST、body_expr の String 脱却） | ✅ Done | Phase 0 |
-| Phase 2 | 基本エフェクトシステム | ⏳ Planned | パーサーの regex 脱却 |
-| Phase 3 | エフェクト多相 | ⏳ Planned | Phase 2 |
-| Phase 4 | MIR 導入（CFG、借用検査用） | ⏳ Planned | 借用検査の設計確定 |
-| Phase 5 | Capability Security 検討 | ⏳ Planned | Phase 3 の成熟度評価 |
+| Phase 0 | Expr/Stmt separation | ✅ Done | — |
+| Phase 1 | HIR introduction (typed AST, eliminate String-based body_expr) | ✅ Done | Phase 0 |
+| Phase 2 | Basic Effect System | ⏳ Planned | Migrate parser away from regex |
+| Phase 3 | Effect Polymorphism | ⏳ Planned | Phase 2 |
+| Phase 4 | MIR introduction (CFG for borrow checking) | ⏳ Planned | Borrow checking design finalized |
+| Phase 5 | Capability Security evaluation | ⏳ Planned | Phase 3 maturity assessment |
 
-### Phase 2〜5 が保留の理由
+### Why Phases 2–5 Are Deferred
 
-- **Phase 2 (基本エフェクト)**: 現在のパーサーが regex ベースであり、`<E: Effect>` のような複雑な構文を安全に処理できない。再帰下降パーサーへの移行が先。
-- **Phase 3 (エフェクト多相)**: 具象エフェクトの定義・追跡機構が存在しない状態で多相を入れるのは順番が逆。基本エフェクトの実装と運用実績が前提。
-- **Phase 4 (MIR)**: CFG ベースの中間表現は借用検査・ライフタイム解析に必要だが、借用検査自体の設計が未着手。設計確定後に導入する。
-- **Phase 5 (Capability Security)**: パラメータ付きエフェクトを Z3 で検証する現路線の成熟度を評価し、不十分な場合にオブジェクトベースの権限モデルを導入する。
+- **Phase 2 (Basic Effects)**: The current parser is regex-based and cannot safely handle complex syntax like `<E: Effect>`. Migration to a recursive descent parser must come first.
+- **Phase 3 (Effect Polymorphism)**: Adding polymorphism before concrete effect definition and tracking infrastructure exists is premature. Requires basic effect implementation and operational experience.
+- **Phase 4 (MIR)**: A CFG-based intermediate representation is needed for borrow checking and lifetime analysis, but the borrow checking design itself is not yet started. Will be introduced after the design is finalized.
+- **Phase 5 (Capability Security)**: Evaluate the maturity of the current approach (verifying parameterized effects with Z3). If insufficient, introduce an object-based capability model.
 
 ---
 

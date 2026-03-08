@@ -5,7 +5,7 @@
 ```
 source.mm → parse → resolve → monomorphize → lower_to_hir → verify (Z3) → codegen (LLVM IR) → transpile (Rust/Go/TS)
                                                     ↑
-                                      HIR: Expr/Stmt 分離、型情報付与
+                                      HIR: Expr/Stmt separation, type annotation
                                       Resource Hierarchy Check (deadlock-free proof)
                                       Effect Containment Check (side-effect safety proof)
                                       Async Safety Verification (ownership across await)
@@ -21,7 +21,7 @@ source.mm → parse → resolve → monomorphize → lower_to_hir → verify (Z3
 | `src/resolver.rs` | Import resolution, circular detection, prelude auto-load, incremental build cache |
 | `src/verification.rs` | Z3 verification, `ModuleEnv`, `LinearityCtx`, law expansion, equality propagation, resource hierarchy, BMC, async recursion depth, inductive invariant, trust boundary |
 | `src/codegen.rs` | LLVM IR generation — Pattern Matrix, StructType, malloc/free, nested extract_value |
-| `src/hir.rs` | HIR（High-level IR）定義、AST → HIR lowering |
+| `src/hir.rs` | HIR (High-level IR) definitions, AST → HIR lowering |
 | `src/transpiler/` | Multi-target: Rust (`&T`), Go (interface), TypeScript (`/* readonly */`) |
 | `src/main.rs` | CLI orchestrator — `build`/`verify`/`check`/`init` with incremental cache |
 

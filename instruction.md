@@ -162,7 +162,7 @@ Mumei caches verification results per-atom in `.mumei_build_cache`:
 
 ## 11. Current Development Phase: Strategic Roadmap v0.3.0+
 
-> 詳細: [`docs/ROADMAP.md`](docs/ROADMAP.md)
+> Details: [`docs/ROADMAP.md`](docs/ROADMAP.md)
 
 ### LSP Status: Frozen
 
