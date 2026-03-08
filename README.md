@@ -87,10 +87,10 @@ mumei build src/main.mm -o dist/output
 | **Ownership** | `ref` / `ref mut` / `consume` with Z3 aliasing prevention |
 | **Concurrency** | `async`/`await`, `task_group:all`/`task_group:any`, deadlock-free proof |
 | **Effects** | Compile-time side-effect verification, `perform`/`effects:` annotations, effect hierarchy with subtyping |
-| **Safety** | `trusted` / `unverified` atoms, taint analysis, BMC + inductive invariant |
+| **Safety** | `trusted` / `unverified` atoms, taint analysis, BMC + inductive invariant, `call_with_contract` for higher-order function verification |
 | **Std Library** | Option, Result, List, BoundedArray, Vector, HashMap, sort algorithms, effect definitions |
 | **Output** | LLVM IR + Rust + Go + TypeScript transpiler |
-| **Tooling** | LSP server, VS Code extension, `mumei.toml` manifest, dependency manager |
+| **Tooling** | LSP server, VS Code extension, `mumei.toml` manifest, dependency manager, MCP server, Streamlit Visualizer |
 
 ### Rich Diagnostics
 

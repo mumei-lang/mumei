@@ -2,6 +2,63 @@
 
 ---
 
+## PR #62: Parser Migration — Recursive Descent with Proper Lexer
+
+### Summary
+
+Migrates the parser from regex-based approach to a full recursive descent parser with proper lexer. Replaces monolithic `src/parser.rs` (3,052 lines) with 7 focused modules under `src/parser/`. Also incorporates PR #61's `contract()` clause parsing for higher-order function parameters.
+
+### Parser Module Structure
+
+| Module | Role |
+|---|---|
+| `src/parser/mod.rs` | Public API, `ParseContext` struct, 84+ tests |
+| `src/parser/token.rs` | `Token` enum (60+ variants), `SpannedToken` with line/col/len |
+| `src/parser/lexer.rs` | `Lexer` — source string → `Vec<SpannedToken>` with span tracking |
+| `src/parser/ast.rs` | All AST types (`Expr`, `Stmt`, `Item`, `Atom`, etc.) |
+| `src/parser/expr.rs` | Pratt parser for expressions (operator precedence via binding power) |
+| `src/parser/item.rs` | Recursive descent for top-level items (replaces ~15 regex patterns) |
+| `src/parser/pattern.rs` | Match arm pattern parsing |
+
+### Key Changes
+
+- **Lexer**: Proper tokenization with span tracking (line/col/len per token), handles comments, string literals, multi-character operators (`==`, `!=`, `>=`, `<=`, `=>`, `&&`, `||`, `|>`, `->`)
+- **Pratt Parser**: Extensible operator precedence via binding power table — trivial to add `|>`, `@`, future operators
+- **Item Parsing**: All top-level items (import, type, struct, enum, trait, impl, resource, effect, extern, atom) parsed via recursive descent instead of regex
+- **contract() Clause**: `Param.fn_contract_requires` and `Param.fn_contract_ensures` fields for higher-order function parameter contracts (from PR #61)
+- **Keyword Field Access**: Keywords like `mode`, `priority` correctly handled as field names after `.` and as function names in expression contexts
+- **Backward Compatible**: All public APIs preserved (`parse_module`, `parse_expression`, `parse_body_expr`, `parse_atom`, `tokenize`) — zero caller changes needed
+
+### Unblocks
+
+- Phase 2: Basic Effect System (`<E: Effect>` generic syntax)
+- Phase C: Lambda syntax (`fn(x) => x + 1`)
+- MIR introduction (CFG with accurate source spans)
+
+---
+
+## PR #61: call_with_contract — Z3 Verification of Higher-Order Functions
+
+### Summary
+
+Implements `call_with_contract` in the verification engine so that higher-order functions (`map`, `fold_left`, `result_map`, etc.) can be formally verified by Z3 without `trusted` markers.
+
+### Key Changes
+
+- **`contract(f)` clause syntax**: Declare requires/ensures constraints for function parameters
+- **Phase B verification**: `CallRef` dynamic case expands contracts via Z3 (requires validation + ensures assertion)
+- **Removed `trusted`** from `map`, `fold_left`, `list_map`, `result_map`, `apply`, `apply_twice`, `fold_two`
+- **Documentation**: `instruction.md` §3.5 — contract syntax reference
+
+### Test Results
+
+- `tests/test_call_with_contract.mm`: 10/10 atoms verified
+- `std/option.mm`: 8/8 verified (including `map` without `trusted`)
+- `std/result.mm`: 12/12 verified (including `result_map` without `trusted`)
+- `std/list.mm`: `fold_left` and `list_map` verified without `trusted`
+
+---
+
 ## Effect System: Inference, Refinement Types × Effects, Hierarchy
 
 ### Summary
