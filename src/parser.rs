@@ -1542,6 +1542,12 @@ pub fn parse_atom(source: &str) -> Atom {
         if let Some(param) = params.iter_mut().find(|p| p.name == param_name) {
             param.fn_contract_requires = fn_requires;
             param.fn_contract_ensures = fn_ensures;
+        } else {
+            eprintln!(
+                "  ⚠️  contract({}): parameter '{}' not found in atom parameters. \
+                 The contract clause will be ignored.",
+                param_name, param_name
+            );
         }
     }
 

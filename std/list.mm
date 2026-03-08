@@ -183,7 +183,6 @@ body: {
 atom list_map(n: i64, f: atom_ref(i64) -> i64)
 requires: n >= 0;
 ensures: result == n;
-contract(f): ensures: true;
 body: {
     let i = 0;
     while i < n

@@ -81,7 +81,7 @@ atom apply(x: i64, f: atom_ref(i64) -> i64)
 
 * `contract(f): ensures: <expr>;` — declares the postcondition that `f`'s result must satisfy.
 * `contract(f): requires: <expr>, ensures: <expr>;` — declares both precondition and postcondition.
-* In contract expressions, `x` / `arg0` refer to the first argument, `y` / `arg1` to the second, and `result` to the call's return value.
+* In contract expressions, `x` / `arg0` refer to the first **call-site argument** (not the atom's own parameter), `y` / `arg1` to the second call-site argument, and `result` to the call's return value. Note: if the atom has a parameter named `x`, the contract's `x` will shadow it with the call-site argument value.
 
 **How it works**: When the verifier encounters `call(f, args...)` and `f` is a parametric function parameter with a declared contract, it:
 1. Checks the `requires` clause (if any) holds at the call site — fails verification if the precondition may be violated.
