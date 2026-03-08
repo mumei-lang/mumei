@@ -59,6 +59,14 @@ pub fn parse_expr(ctx: &mut ParseContext, min_bp: u8) -> Expr {
                     ctx.advance();
                     lhs = Expr::FieldAccess(Box::new(lhs), field);
                     continue;
+                } else {
+                    // Accept keyword tokens as field names (e.g., obj.mode, obj.priority)
+                    let field_name = format!("{}", ctx.peek());
+                    if field_name.chars().next().map_or(false, |c| c.is_alphabetic()) {
+                        ctx.advance();
+                        lhs = Expr::FieldAccess(Box::new(lhs), field_name);
+                        continue;
+                    }
                 }
             }
             break;
@@ -276,11 +284,11 @@ fn parse_prefix(ctx: &mut ParseContext) -> Expr {
         // Any other keyword used as identifier in expression context
         ref tok => {
             // For backward compatibility: some keywords can appear as variable names
-            // in expression contexts (e.g., in requires/ensures clauses)
+            // or function names in expression contexts (e.g., in requires/ensures clauses)
             let name = format!("{}", tok);
             if name.chars().next().map_or(false, |c| c.is_alphabetic()) {
                 ctx.advance();
-                Expr::Variable(name)
+                parse_ident_continuation(ctx, name)
             } else {
                 ctx.advance();
                 Expr::Number(0)
