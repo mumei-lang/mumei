@@ -849,6 +849,8 @@ pub fn parse_atom_from_source(source: &str) -> Atom {
                     type_ref: Some(type_ref),
                     is_ref,
                     is_ref_mut,
+                    fn_contract_requires: None,
+                    fn_contract_ensures: None,
                 }
             } else {
                 Param {
@@ -857,16 +859,33 @@ pub fn parse_atom_from_source(source: &str) -> Atom {
                     type_ref: None,
                     is_ref,
                     is_ref_mut,
+                    fn_contract_requires: None,
+                    fn_contract_ensures: None,
                 }
             }
         })
         .collect();
 
+    // contract(...): clause ranges — collect them so requires:/ensures: matching excludes them.
+    // This ensures clause ordering doesn't matter (contract can appear before/after ensures).
+    let contract_re_ranges = Regex::new(r"contract\(\w+\):\s*[^;]+;").unwrap();
+    let contract_spans: Vec<(usize, usize)> = contract_re_ranges
+        .find_iter(source)
+        .map(|m| (m.start(), m.end()))
+        .collect();
+    let is_inside_contract = |offset: usize| -> bool {
+        contract_spans
+            .iter()
+            .any(|&(s, e)| offset >= s && offset < e)
+    };
+
     let requires_raw = req_re
-        .captures(source)
+        .captures_iter(source)
+        .find(|c| !is_inside_contract(c.get(0).unwrap().start()))
         .map_or("true".to_string(), |c| c[1].trim().to_string());
     let ensures = ens_re
-        .captures(source)
+        .captures_iter(source)
+        .find(|c| !is_inside_contract(c.get(0).unwrap().start()))
         .map_or("true".to_string(), |c| c[1].trim().to_string());
 
     let body_marker = "body:";
@@ -951,6 +970,41 @@ pub fn parse_atom_from_source(source: &str) -> Atom {
         .captures(source)
         .map(|cap| parse_effect_list(&cap[1]))
         .unwrap_or_default();
+
+    // contract(param_name) clause parsing: higher-order function parameter contracts
+    // Syntax: contract(f): ensures: <expr>;
+    //         contract(f): requires: <expr>, ensures: <expr>;
+    let contract_re = Regex::new(r"contract\((\w+)\):\s*([^;]+);").unwrap();
+    let mut params = params;
+    for cap in contract_re.captures_iter(source) {
+        let param_name = cap[1].to_string();
+        let clauses = cap[2].to_string();
+        let mut fn_req: Option<String> = None;
+        let mut fn_ens: Option<String> = None;
+        // Parse "requires: <expr>, ensures: <expr>" or just "ensures: <expr>"
+        if let Some(req_idx) = clauses.find("requires:") {
+            let after_req = &clauses[req_idx + "requires:".len()..];
+            // Find comma before "ensures:" (if present)
+            if let Some(ens_marker) = after_req.find("ensures:") {
+                let req_val = after_req[..ens_marker].trim().trim_end_matches(',').trim();
+                fn_req = Some(req_val.to_string());
+                let ens_val = after_req[ens_marker + "ensures:".len()..].trim();
+                fn_ens = Some(ens_val.to_string());
+            } else {
+                fn_req = Some(after_req.trim().to_string());
+            }
+        } else if let Some(ens_idx) = clauses.find("ensures:") {
+            let ens_val = clauses[ens_idx + "ensures:".len()..].trim();
+            fn_ens = Some(ens_val.to_string());
+        }
+        // Attach contract to matching parameter
+        for p in params.iter_mut() {
+            if p.name == param_name {
+                p.fn_contract_requires = fn_req.clone();
+                p.fn_contract_ensures = fn_ens.clone();
+            }
+        }
+    }
 
     let atom_match = name_caps.get(0).unwrap();
     Atom {

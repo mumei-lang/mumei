@@ -270,6 +270,12 @@ pub struct Param {
     pub type_ref: Option<TypeRef>,
     pub is_ref: bool,
     pub is_ref_mut: bool,
+    /// Higher-Order Function contract: requires clause for function parameter.
+    /// Syntax: `contract(f): requires: <expr>, ensures: <expr>;`
+    pub fn_contract_requires: Option<String>,
+    /// Higher-Order Function contract: ensures clause for function parameter.
+    /// Used by call_with_contract to constrain the symbolic result of `call(f, args...)` in Z3.
+    pub fn_contract_ensures: Option<String>,
 }
 
 #[derive(Debug, Clone)]
