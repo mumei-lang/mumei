@@ -89,6 +89,8 @@ atom apply(x: i64, f: atom_ref(i64) -> i64)
 
 This mechanism replaces the need for `trusted` on higher-order functions like `map`, `fold_left`, and `result_map`.
 
+**Important limitation**: When calling `apply(5, atom_ref(increment))`, the verifier does **not** check that `increment`'s actual contract (`ensures: result == x + 1`) implies the declared `contract(f): ensures: result >= 0`. The caller is responsible for passing only functions that satisfy the declared contract. Passing a function that violates the contract will not be caught at the call site (the verifier trusts the declared contract unconditionally). A subsumption check may be added in a future version.
+
 ### 3.6 Standard Library Usage
 
 * **Prelude** (`std/prelude.mm`): Auto-imported. Provides `Eq`, `Ord`, `Numeric`, `Option<T>`, `Result<T, E>`.
