@@ -1032,4 +1032,20 @@ extern "Rust" {
             _ => panic!("Expected Implies at top level, got {:?}", expr),
         }
     }
+
+    #[test]
+    fn test_parse_keyword_variable_assignment() {
+        // Keywords used as variable names must support assignment
+        let stmt = parse_body_expr("{ mode = mode - 1 }");
+        match stmt {
+            Stmt::Block(stmts) => {
+                assert_eq!(stmts.len(), 1);
+                match &stmts[0] {
+                    Stmt::Assign { var, .. } => assert_eq!(var, "mode"),
+                    other => panic!("Expected Assign for keyword variable, got {:?}", other),
+                }
+            }
+            _ => panic!("Expected Block"),
+        }
+    }
 }

@@ -522,6 +522,28 @@ pub fn parse_statement(ctx: &mut ParseContext) -> Stmt {
             }
         }
 
-        _ => Stmt::Expr(parse_expr(ctx, 0)),
+        // Check for assignment with keyword-named variables (e.g., mode = expr)
+        // The lexer converts keywords like "mode", "priority" to typed tokens,
+        // so they don't match Token::Ident above. This mirrors the old parser's
+        // behavior which checked is_alphabetic() on any token string.
+        ref tok => {
+            let name = format!("{}", tok);
+            if name.chars().next().map_or(false, |c| c.is_alphabetic())
+                && ctx.peek_at(1).map_or(false, |t| *t == Token::Assign)
+                && ctx
+                    .peek_at(2)
+                    .map_or(true, |t| *t != Token::Assign && *t != Token::Gt)
+            {
+                ctx.advance(); // consume keyword token
+                ctx.advance(); // consume =
+                let value = parse_expr(ctx, 0);
+                Stmt::Assign {
+                    var: name,
+                    value: Box::new(value),
+                }
+            } else {
+                Stmt::Expr(parse_expr(ctx, 0))
+            }
+        }
     }
 }
