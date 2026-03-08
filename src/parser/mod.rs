@@ -973,4 +973,63 @@ extern "Rust" {
             _ => panic!("Expected ArrayAccess"),
         }
     }
+
+    // --- Regression tests for keyword field access and function call fixes ---
+
+    #[test]
+    fn test_parse_keyword_field_access() {
+        // Keywords like "mode", "priority" must work as field names after "."
+        let expr = parse_expression("config.mode");
+        match expr {
+            Expr::FieldAccess(_, field) => assert_eq!(field, "mode"),
+            _ => panic!("Expected FieldAccess for keyword field, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn test_parse_keyword_field_access_priority() {
+        let expr = parse_expression("resource.priority");
+        match expr {
+            Expr::FieldAccess(_, field) => assert_eq!(field, "priority"),
+            _ => panic!("Expected FieldAccess for keyword field, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn test_parse_keyword_field_access_exclusive() {
+        let expr = parse_expression("lock.exclusive");
+        match expr {
+            Expr::FieldAccess(_, field) => assert_eq!(field, "exclusive"),
+            _ => panic!("Expected FieldAccess for keyword field, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn test_parse_keyword_as_function_call() {
+        // Keywords used as function names in expression context
+        let expr = parse_expression("shared(x)");
+        match expr {
+            Expr::Call(name, args) => {
+                assert_eq!(name, "shared");
+                assert_eq!(args.len(), 1);
+            }
+            _ => panic!("Expected Call for keyword function, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn test_parse_implies_left_associative() {
+        // a => b => c should parse as (a => b) => c (left-associative)
+        let expr = parse_expression("a => b => c");
+        match expr {
+            Expr::BinaryOp(lhs, Op::Implies, _rhs) => {
+                // lhs should be (a => b)
+                match *lhs {
+                    Expr::BinaryOp(_, Op::Implies, _) => {}
+                    _ => panic!("Expected nested Implies on left side, got {:?}", lhs),
+                }
+            }
+            _ => panic!("Expected Implies at top level, got {:?}", expr),
+        }
+    }
 }

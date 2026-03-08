@@ -452,14 +452,14 @@ Future extensions to the effect subtyping system:
 |---|---|---|---|
 | Phase 0 | Expr/Stmt separation | ✅ Done | — |
 | Phase 1 | HIR introduction (typed AST, eliminate String-based body_expr) | ✅ Done | Phase 0 |
-| Phase 2 | Basic Effect System | ⏳ Planned | ✅ Full parser migrated to recursive descent (lexer + Pratt parser + item parsing) |
+| Phase 2 | Basic Effect System | ⏳ Planned | ✅ Expression parser migrated to recursive descent (item parsing still regex) |
 | Phase 3 | Effect Polymorphism | ⏳ Planned | Phase 2 |
 | Phase 4 | MIR introduction (CFG for borrow checking) | ⏳ Planned | Borrow checking design finalized |
 | Phase 5 | Capability Security evaluation | ⏳ Planned | Phase 3 maturity assessment |
 
 ### Why Phases 2–5 Are Deferred
 
-- **Phase 2 (Basic Effects)**: ✅ Parser prerequisite met — full recursive descent parser with proper lexer now handles all syntax including `<E: Effect>`. Ready to implement.
+- **Phase 2 (Basic Effects)**: ✅ Parser prerequisite met — expression parser migrated to recursive descent with proper lexer (Pratt parser). Item-level parsing still uses regex. Ready to implement `<E: Effect>` syntax.
 - **Phase 3 (Effect Polymorphism)**: Adding polymorphism before concrete effect definition and tracking infrastructure exists is premature. Requires basic effect implementation and operational experience.
 - **Phase 4 (MIR)**: A CFG-based intermediate representation is needed for borrow checking and lifetime analysis, but the borrow checking design itself is not yet started. Will be introduced after the design is finalized.
 - **Phase 5 (Capability Security)**: Evaluate the maturity of the current approach (verifying parameterized effects with Z3). If insufficient, introduce an object-based capability model.

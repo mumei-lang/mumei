@@ -188,7 +188,7 @@ fn parse_prefix(ctx: &mut ParseContext) -> Expr {
                 // Optional guard: if cond
                 let guard = if ctx.peek() == &Token::If {
                     ctx.advance();
-                    // Parse guard at binding power above => (so => is not consumed)
+                    // Parse guard at binding power above => (l_bp=1, so min_bp=3 excludes it)
                     Some(Box::new(parse_expr(ctx, 3)))
                 } else {
                     None
@@ -365,7 +365,7 @@ fn parse_match_arm_body(ctx: &mut ParseContext) -> Stmt {
     } else if ctx.peek() == &Token::Match || ctx.peek() == &Token::If {
         Stmt::Expr(parse_expr(ctx, 0))
     } else {
-        // Parse at binding power 3, above => (bp=2) so => is not consumed
+        // Parse at binding power 3, above => (l_bp=1) so => is not consumed
         Stmt::Expr(parse_expr(ctx, 3))
     }
 }

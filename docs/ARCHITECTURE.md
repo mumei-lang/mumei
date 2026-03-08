@@ -22,7 +22,7 @@ source.mm → parse → resolve → monomorphize → lower_to_hir → verify (Z3
 | `src/parser/lexer.rs` | `Lexer` struct — converts source string to `Vec<SpannedToken>` with span info |
 | `src/parser/ast.rs` | All AST type definitions (`Expr`, `Stmt`, `Item`, `Atom`, `StructDef`, `EnumDef`, etc.) |
 | `src/parser/expr.rs` | Expression/statement parsing with Pratt parser (operator precedence via binding power table) |
-| `src/parser/item.rs` | Top-level item parsing — recursive descent replacements for all regex patterns, `contract()` clause parsing for higher-order function parameters |
+| `src/parser/item.rs` | Top-level item parsing — still regex-based internally for atom/struct/enum/trait bodies, `contract()` clause parsing for higher-order function parameters |
 | `src/parser/pattern.rs` | Pattern parsing for match arms |
 | `src/ast.rs` | `TypeRef`, `Monomorphizer` — generic type expansion engine |
 | `src/resolver.rs` | Import resolution, circular detection, prelude auto-load, incremental build cache |
