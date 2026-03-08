@@ -139,7 +139,8 @@ impl std::fmt::Display for TypeRef {
 // - 実行時の型消去やオーバーヘッドがない
 
 use crate::parser::{
-    parse_type_ref, Atom, EnumDef, EnumVariant, Expr, Item, Param, StructDef, StructField,
+    parse_body_expr, parse_type_ref, Atom, EnumDef, EnumVariant, Expr, Item, Param, Stmt,
+    StructDef, StructField,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -189,9 +190,9 @@ impl Monomorphizer {
                             self.collect_from_type_ref(type_ref);
                         }
                     }
-                    // body 内の式から収集
-                    let body_expr = crate::parser::parse_expression(&atom.body_expr);
-                    self.collect_from_expr(&body_expr);
+                    // body 内の文から収集
+                    let body_stmt = parse_body_expr(&atom.body_expr);
+                    self.collect_from_stmt(&body_stmt);
                 }
                 Item::StructDef(sdef) => {
                     for field in &sdef.fields {
@@ -256,34 +257,13 @@ impl Monomorphizer {
                 else_branch,
             } => {
                 self.collect_from_expr(cond);
-                self.collect_from_expr(then_branch);
-                self.collect_from_expr(else_branch);
-            }
-            Expr::Block(stmts) => {
-                for s in stmts {
-                    self.collect_from_expr(s);
-                }
-            }
-            Expr::Let { value, .. } | Expr::Assign { value, .. } => {
-                self.collect_from_expr(value);
-            }
-            Expr::While {
-                cond,
-                invariant,
-                decreases,
-                body,
-            } => {
-                self.collect_from_expr(cond);
-                self.collect_from_expr(invariant);
-                if let Some(dec) = decreases {
-                    self.collect_from_expr(dec);
-                }
-                self.collect_from_expr(body);
+                self.collect_from_stmt(then_branch);
+                self.collect_from_stmt(else_branch);
             }
             Expr::Match { target, arms } => {
                 self.collect_from_expr(target);
                 for arm in arms {
-                    self.collect_from_expr(&arm.body);
+                    self.collect_from_stmt(&arm.body);
                     if let Some(guard) = &arm.guard {
                         self.collect_from_expr(guard);
                     }
@@ -295,22 +275,11 @@ impl Monomorphizer {
             Expr::ArrayAccess(_, idx) => {
                 self.collect_from_expr(idx);
             }
-            Expr::Acquire { body, .. } => {
-                self.collect_from_expr(body);
-            }
             Expr::Async { body } => {
-                self.collect_from_expr(body);
+                self.collect_from_stmt(body);
             }
             Expr::Await { expr } => {
                 self.collect_from_expr(expr);
-            }
-            Expr::Task { body, .. } => {
-                self.collect_from_expr(body);
-            }
-            Expr::TaskGroup { children, .. } => {
-                for child in children {
-                    self.collect_from_expr(child);
-                }
             }
             Expr::Number(_) | Expr::Float(_) | Expr::Variable(_) => {}
             Expr::AtomRef { name } => {
@@ -323,6 +292,52 @@ impl Monomorphizer {
                 for arg in args {
                     self.collect_from_expr(arg);
                 }
+            }
+            Expr::Perform { args, .. } => {
+                for arg in args {
+                    self.collect_from_expr(arg);
+                }
+            }
+        }
+    }
+
+    /// 文から StructInit の type_name を走査してジェネリック使用箇所を収集する
+    fn collect_from_stmt(&mut self, stmt: &Stmt) {
+        match stmt {
+            Stmt::Let { value, .. } | Stmt::Assign { value, .. } => {
+                self.collect_from_expr(value);
+            }
+            Stmt::Block(stmts) => {
+                for s in stmts {
+                    self.collect_from_stmt(s);
+                }
+            }
+            Stmt::While {
+                cond,
+                invariant,
+                decreases,
+                body,
+            } => {
+                self.collect_from_expr(cond);
+                self.collect_from_expr(invariant);
+                if let Some(dec) = decreases {
+                    self.collect_from_expr(dec);
+                }
+                self.collect_from_stmt(body);
+            }
+            Stmt::Acquire { body, .. } => {
+                self.collect_from_stmt(body);
+            }
+            Stmt::Task { body, .. } => {
+                self.collect_from_stmt(body);
+            }
+            Stmt::TaskGroup { children, .. } => {
+                for child in children {
+                    self.collect_from_stmt(child);
+                }
+            }
+            Stmt::Expr(expr) => {
+                self.collect_from_expr(expr);
             }
         }
     }
@@ -483,6 +498,7 @@ impl Monomorphizer {
             trust_level: generic.trust_level.clone(),
             max_unroll: generic.max_unroll,
             invariant: generic.invariant.clone(),
+            effects: generic.effects.clone(),
             span: generic.span.clone(),
         })
     }

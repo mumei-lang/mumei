@@ -1,4 +1,5 @@
-use crate::parser::{parse_expression, Atom, Expr, Op, Pattern};
+use crate::hir::{HirAtom, HirExpr, HirStmt};
+use crate::parser::{Op, Pattern};
 use crate::verification::{ModuleEnv, MumeiError, MumeiResult};
 use inkwell::builder::Builder;
 use inkwell::context::Context;
@@ -45,7 +46,8 @@ fn resolve_param_type<'a>(
     }
 }
 
-pub fn compile(atom: &Atom, output_path: &Path, module_env: &ModuleEnv) -> MumeiResult<()> {
+pub fn compile(hir_atom: &HirAtom, output_path: &Path, module_env: &ModuleEnv) -> MumeiResult<()> {
+    let atom = &hir_atom.atom;
     let context = Context::create();
     let module = context.create_module(&atom.name);
     let builder = context.create_builder();
@@ -83,13 +85,35 @@ pub fn compile(atom: &Atom, output_path: &Path, module_env: &ModuleEnv) -> Mumei
         }
     }
 
-    let body_ast = parse_expression(&atom.body_expr);
-    let result_val = compile_expr(
+    // エフェクト情報を .ll ファイル先頭にコメントとして追記する（後処理）
+    let effects_comment = if !atom.effects.is_empty() {
+        let effects_str: Vec<String> = atom
+            .effects
+            .iter()
+            .map(|e| {
+                if e.params.is_empty() {
+                    e.name.clone()
+                } else {
+                    let params: Vec<String> = e
+                        .params
+                        .iter()
+                        .map(|p| format!("\"{}\"", p.value))
+                        .collect();
+                    format!("{}({})", e.name, params.join(", "))
+                }
+            })
+            .collect();
+        Some(format!("; effects: [{}]", effects_str.join(", ")))
+    } else {
+        None
+    };
+
+    let result_val = compile_hir_stmt(
         &context,
         &builder,
         &module,
         &function,
-        &body_ast,
+        &hir_atom.body,
         &mut variables,
         &array_ptrs,
         module_env,
@@ -102,195 +126,324 @@ pub fn compile(atom: &Atom, output_path: &Path, module_env: &ModuleEnv) -> Mumei
         .print_to_file(&path_with_ext)
         .map_err(|e| MumeiError::codegen(e.to_string()))?;
 
+    // エフェクトコメントを .ll ファイル先頭に挿入（source_filename を破壊しない）
+    if let Some(comment) = effects_comment {
+        let ll_content = std::fs::read_to_string(&path_with_ext)
+            .map_err(|e| MumeiError::codegen(e.to_string()))?;
+        let with_comment = format!("{}\n{}", comment, ll_content);
+        std::fs::write(&path_with_ext, with_comment)
+            .map_err(|e| MumeiError::codegen(e.to_string()))?;
+    }
+
     Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
-fn compile_expr<'a>(
+fn compile_hir_stmt<'a>(
     context: &'a Context,
     builder: &Builder<'a>,
     module: &Module<'a>,
     function: &FunctionValue<'a>,
-    expr: &Expr,
+    stmt: &HirStmt,
+    variables: &mut HashMap<String, BasicValueEnum<'a>>,
+    array_ptrs: &HashMap<String, (BasicValueEnum<'a>, BasicValueEnum<'a>)>,
+    module_env: &ModuleEnv,
+) -> MumeiResult<BasicValueEnum<'a>> {
+    match stmt {
+        HirStmt::Let { var, value, .. } => {
+            let val = compile_hir_expr(
+                context, builder, module, function, value, variables, array_ptrs, module_env,
+            )?;
+            variables.insert(var.clone(), val);
+            Ok(val)
+        }
+        HirStmt::Assign { var, value } => {
+            let val = compile_hir_expr(
+                context, builder, module, function, value, variables, array_ptrs, module_env,
+            )?;
+            variables.insert(var.clone(), val);
+            Ok(val)
+        }
+        HirStmt::While {
+            cond,
+            invariant: _,
+            decreases: _,
+            body,
+        } => {
+            let header_block = context.append_basic_block(*function, "loop.header");
+            let body_block = context.append_basic_block(*function, "loop.body");
+            let after_block = context.append_basic_block(*function, "loop.after");
+
+            let pre_loop_vars = variables.clone();
+            let entry_end_block = builder.get_insert_block().unwrap();
+
+            llvm!(builder.build_unconditional_branch(header_block));
+
+            builder.position_at_end(header_block);
+            let mut phi_nodes: Vec<(String, PhiValue<'a>)> = Vec::new();
+            for (name, pre_val) in &pre_loop_vars {
+                let phi = llvm!(builder.build_phi(pre_val.get_type(), &format!("phi_{}", name)));
+                phi.add_incoming(&[(pre_val, entry_end_block)]);
+                phi_nodes.push((name.clone(), phi));
+                variables.insert(name.clone(), phi.as_basic_value());
+            }
+
+            let cond_val = compile_hir_expr(
+                context, builder, module, function, cond, variables, array_ptrs, module_env,
+            )?
+            .into_int_value();
+            let cond_bool = llvm!(builder.build_int_compare(
+                IntPredicate::NE,
+                cond_val,
+                context.i64_type().const_int(0, false),
+                "loop_cond"
+            ));
+            llvm!(builder.build_conditional_branch(cond_bool, body_block, after_block));
+
+            builder.position_at_end(body_block);
+            compile_hir_stmt(
+                context, builder, module, function, body, variables, array_ptrs, module_env,
+            )?;
+            let body_end_block = builder.get_insert_block().unwrap();
+
+            for (name, phi) in &phi_nodes {
+                if let Some(body_val) = variables.get(name) {
+                    phi.add_incoming(&[(body_val, body_end_block)]);
+                }
+            }
+
+            llvm!(builder.build_unconditional_branch(header_block));
+
+            builder.position_at_end(after_block);
+            for (name, phi) in &phi_nodes {
+                variables.insert(name.clone(), phi.as_basic_value());
+            }
+            Ok(context.i64_type().const_int(0, false).into())
+        }
+        HirStmt::Block { stmts, tail_expr } => {
+            let mut last_val: BasicValueEnum = context.i64_type().const_int(0, false).into();
+            for s in stmts {
+                last_val = compile_hir_stmt(
+                    context, builder, module, function, s, variables, array_ptrs, module_env,
+                )?;
+            }
+            if let Some(tail) = tail_expr {
+                last_val = compile_hir_expr(
+                    context, builder, module, function, tail, variables, array_ptrs, module_env,
+                )?;
+            }
+            Ok(last_val)
+        }
+        HirStmt::Acquire { resource, body } => {
+            // --- mutex_lock/unlock の外部関数宣言 ---
+            let ptr_type = context.ptr_type(AddressSpace::default());
+            let i32_type = context.i32_type();
+
+            let lock_fn = module
+                .get_function("pthread_mutex_lock")
+                .unwrap_or_else(|| {
+                    let fn_type = i32_type.fn_type(&[ptr_type.into()], false);
+                    module.add_function(
+                        "pthread_mutex_lock",
+                        fn_type,
+                        Some(inkwell::module::Linkage::External),
+                    )
+                });
+            let unlock_fn = module
+                .get_function("pthread_mutex_unlock")
+                .unwrap_or_else(|| {
+                    let fn_type = i32_type.fn_type(&[ptr_type.into()], false);
+                    module.add_function(
+                        "pthread_mutex_unlock",
+                        fn_type,
+                        Some(inkwell::module::Linkage::External),
+                    )
+                });
+
+            let global_name = format!("__mumei_resource_{}", resource);
+            let mutex_global = module.get_global(&global_name).unwrap_or_else(|| {
+                let i8_type = context.i8_type();
+                let global =
+                    module.add_global(i8_type, Some(AddressSpace::default()), &global_name);
+                global.set_linkage(inkwell::module::Linkage::External);
+                global
+            });
+            let mutex_ptr = mutex_global.as_pointer_value();
+
+            llvm!(builder.build_call(lock_fn, &[mutex_ptr.into()], &format!("lock_{}", resource)));
+
+            let body_result = compile_hir_stmt(
+                context, builder, module, function, body, variables, array_ptrs, module_env,
+            )?;
+
+            llvm!(builder.build_call(
+                unlock_fn,
+                &[mutex_ptr.into()],
+                &format!("unlock_{}", resource)
+            ));
+
+            Ok(body_result)
+        }
+        HirStmt::Expr(expr) => compile_hir_expr(
+            context, builder, module, function, expr, variables, array_ptrs, module_env,
+        ),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compile_hir_expr<'a>(
+    context: &'a Context,
+    builder: &Builder<'a>,
+    module: &Module<'a>,
+    function: &FunctionValue<'a>,
+    expr: &HirExpr,
     variables: &mut HashMap<String, BasicValueEnum<'a>>,
     array_ptrs: &HashMap<String, (BasicValueEnum<'a>, BasicValueEnum<'a>)>,
     module_env: &ModuleEnv,
 ) -> MumeiResult<BasicValueEnum<'a>> {
     match expr {
-        Expr::Number(n) => Ok(context.i64_type().const_int(*n as u64, true).into()),
+        HirExpr::Number(n) => Ok(context.i64_type().const_int(*n as u64, true).into()),
 
-        Expr::Float(f) => Ok(context.f64_type().const_float(*f).into()),
+        HirExpr::Float(f) => Ok(context.f64_type().const_float(*f).into()),
 
-        Expr::Variable(name) => variables
-            .get(name)
+        HirExpr::Variable(name) => variables
+            .get(name.as_str())
             .cloned()
             .ok_or_else(|| MumeiError::codegen(format!("Undefined variable: {}", name))),
 
-        Expr::Call(name, args) => {
-            match name.as_str() {
-                "sqrt" => {
-                    let arg = compile_expr(
-                        context, builder, module, function, &args[0], variables, array_ptrs,
-                        module_env,
-                    )?;
-                    let sqrt_func = module.get_function("llvm.sqrt.f64").unwrap_or_else(|| {
-                        let type_f64 = context.f64_type();
-                        let fn_type = type_f64.fn_type(&[type_f64.into()], false);
-                        module.add_function("llvm.sqrt.f64", fn_type, None)
-                    });
-                    let call = llvm!(builder.build_call(sqrt_func, &[arg.into()], "sqrt_tmp"));
-                    let result = call.as_any_value_enum();
-                    Ok(result.into_float_value().into())
-                }
-                "len" => {
-                    // Fat Pointer: 配列名から長さフィールドを取得
-                    if !args.is_empty() {
-                        if let Expr::Variable(arr_name) = &args[0] {
-                            if let Some((len_val, _)) = array_ptrs.get(arr_name) {
-                                return Ok(*len_val);
-                            }
+        HirExpr::Call { name, args } => match name.as_str() {
+            "sqrt" => {
+                let arg = compile_hir_expr(
+                    context, builder, module, function, &args[0], variables, array_ptrs, module_env,
+                )?;
+                let sqrt_func = module.get_function("llvm.sqrt.f64").unwrap_or_else(|| {
+                    let type_f64 = context.f64_type();
+                    let fn_type = type_f64.fn_type(&[type_f64.into()], false);
+                    module.add_function("llvm.sqrt.f64", fn_type, None)
+                });
+                let call = llvm!(builder.build_call(sqrt_func, &[arg.into()], "sqrt_tmp"));
+                let result = call.as_any_value_enum();
+                Ok(result.into_float_value().into())
+            }
+            "len" => {
+                if !args.is_empty() {
+                    if let HirExpr::Variable(arr_name) = &args[0] {
+                        if let Some((len_val, _)) = array_ptrs.get(arr_name.as_str()) {
+                            return Ok(*len_val);
                         }
                     }
-                    // フォールバック: 配列が見つからない場合はダミー定数
-                    Ok(context.i64_type().const_int(0, false).into())
                 }
-                "alloc_raw" => {
-                    // alloc_raw(size) → malloc(size * 8) → i64 としてポインタを返す
-                    let size_val = compile_expr(
-                        context, builder, module, function, &args[0], variables, array_ptrs,
-                        module_env,
-                    )?;
-                    let malloc_fn = module.get_function("malloc").unwrap_or_else(|| {
-                        let ptr_type = context.ptr_type(AddressSpace::default());
-                        let fn_type = ptr_type.fn_type(&[context.i64_type().into()], false);
-                        module.add_function(
-                            "malloc",
-                            fn_type,
-                            Some(inkwell::module::Linkage::External),
-                        )
+                Ok(context.i64_type().const_int(0, false).into())
+            }
+            "alloc_raw" => {
+                let size_val = compile_hir_expr(
+                    context, builder, module, function, &args[0], variables, array_ptrs, module_env,
+                )?;
+                let malloc_fn = module.get_function("malloc").unwrap_or_else(|| {
+                    let ptr_type = context.ptr_type(AddressSpace::default());
+                    let fn_type = ptr_type.fn_type(&[context.i64_type().into()], false);
+                    module.add_function("malloc", fn_type, Some(inkwell::module::Linkage::External))
+                });
+                let byte_size = llvm!(builder.build_int_mul(
+                    size_val.into_int_value(),
+                    context.i64_type().const_int(8, false),
+                    "byte_size"
+                ));
+                let ptr =
+                    llvm!(builder.build_call(malloc_fn, &[byte_size.into()], "malloc_result"));
+                let ptr_val = ptr.as_any_value_enum().into_pointer_value();
+                Ok(
+                    llvm!(builder.build_ptr_to_int(ptr_val, context.i64_type(), "ptr_as_int"))
+                        .into(),
+                )
+            }
+            "dealloc_raw" => {
+                let ptr_int = compile_hir_expr(
+                    context, builder, module, function, &args[0], variables, array_ptrs, module_env,
+                )?;
+                let free_fn = module.get_function("free").unwrap_or_else(|| {
+                    let ptr_type = context.ptr_type(AddressSpace::default());
+                    let fn_type = context.void_type().fn_type(&[ptr_type.into()], false);
+                    module.add_function("free", fn_type, Some(inkwell::module::Linkage::External))
+                });
+                let ptr_val = llvm!(builder.build_int_to_ptr(
+                    ptr_int.into_int_value(),
+                    context.ptr_type(AddressSpace::default()),
+                    "int_as_ptr"
+                ));
+                llvm!(builder.build_call(free_fn, &[ptr_val.into()], "free_call"));
+                Ok(context.i64_type().const_int(0, false).into())
+            }
+            _ => {
+                let fqn_name = name.replace('.', "::");
+                let resolved_callee = module_env
+                    .get_atom(name)
+                    .or_else(|| module_env.get_atom(&fqn_name));
+                if let Some(callee) = resolved_callee {
+                    let callee_param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = callee
+                        .params
+                        .iter()
+                        .map(|p| {
+                            resolve_param_type(context, p.type_name.as_deref(), module_env).into()
+                        })
+                        .collect();
+
+                    let has_float = callee.params.iter().any(|p| {
+                        p.type_name
+                            .as_deref()
+                            .map(|t| module_env.resolve_base_type(t) == "f64")
+                            .unwrap_or(false)
                     });
-                    // size * 8 (bytes per i64 element)
-                    let byte_size = llvm!(builder.build_int_mul(
-                        size_val.into_int_value(),
-                        context.i64_type().const_int(8, false),
-                        "byte_size"
-                    ));
-                    let ptr =
-                        llvm!(builder.build_call(malloc_fn, &[byte_size.into()], "malloc_result"));
-                    let ptr_val = ptr.as_any_value_enum().into_pointer_value();
-                    // ポインタを i64 にキャスト（Mumei の RawPtr = i64 where v >= 0）
-                    Ok(
-                        llvm!(builder.build_ptr_to_int(ptr_val, context.i64_type(), "ptr_as_int"))
-                            .into(),
-                    )
-                }
-                "dealloc_raw" => {
-                    // dealloc_raw(ptr) → free(ptr)
-                    let ptr_int = compile_expr(
-                        context, builder, module, function, &args[0], variables, array_ptrs,
-                        module_env,
-                    )?;
-                    let free_fn = module.get_function("free").unwrap_or_else(|| {
-                        let ptr_type = context.ptr_type(AddressSpace::default());
-                        let fn_type = context.void_type().fn_type(&[ptr_type.into()], false);
-                        module.add_function(
-                            "free",
-                            fn_type,
-                            Some(inkwell::module::Linkage::External),
-                        )
-                    });
-                    // i64 をポインタにキャスト
-                    let ptr_val = llvm!(builder.build_int_to_ptr(
-                        ptr_int.into_int_value(),
-                        context.ptr_type(AddressSpace::default()),
-                        "int_as_ptr"
-                    ));
-                    llvm!(builder.build_call(free_fn, &[ptr_val.into()], "free_call"));
-                    // 成功を示す 0 を返す
-                    Ok(context.i64_type().const_int(0, false).into())
-                }
-                _ => {
-                    // ユーザー定義関数呼び出し: declare（外部宣言）+ call
-                    // FQN dot-notation: "math.add" → "math::add" として解決
-                    let fqn_name = name.replace('.', "::");
-                    let resolved_callee = module_env
-                        .get_atom(name)
-                        .or_else(|| module_env.get_atom(&fqn_name));
-                    if let Some(callee) = resolved_callee {
-                        // 呼び出し先の関数型を構築
-                        let callee_param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = callee
-                            .params
-                            .iter()
-                            .map(|p| {
-                                resolve_param_type(context, p.type_name.as_deref(), module_env)
-                                    .into()
-                            })
-                            .collect();
-
-                        // 戻り値型の推定: f64 パラメータがあれば f64、なければ i64
-                        let has_float = callee.params.iter().any(|p| {
-                            p.type_name
-                                .as_deref()
-                                .map(|t| module_env.resolve_base_type(t) == "f64")
-                                .unwrap_or(false)
-                        });
-                        let callee_fn = if has_float {
-                            let fn_type = context.f64_type().fn_type(&callee_param_types, false);
-                            module.get_function(name).unwrap_or_else(|| {
-                                module.add_function(
-                                    name,
-                                    fn_type,
-                                    Some(inkwell::module::Linkage::External),
-                                )
-                            })
-                        } else {
-                            let fn_type = context.i64_type().fn_type(&callee_param_types, false);
-                            module.get_function(name).unwrap_or_else(|| {
-                                module.add_function(
-                                    name,
-                                    fn_type,
-                                    Some(inkwell::module::Linkage::External),
-                                )
-                            })
-                        };
-
-                        // 引数を評価
-                        let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
-                        for arg in args {
-                            let val = compile_expr(
-                                context, builder, module, function, arg, variables, array_ptrs,
-                                module_env,
-                            )?;
-                            arg_vals.push(val.into());
-                        }
-
-                        let call_result = llvm!(builder.build_call(
-                            callee_fn,
-                            &arg_vals,
-                            &format!("call_{}", name)
-                        ));
-                        let result = call_result.as_any_value_enum();
-                        if has_float {
-                            Ok(result.into_float_value().into())
-                        } else {
-                            Ok(result.into_int_value().into())
-                        }
+                    let callee_fn = if has_float {
+                        let fn_type = context.f64_type().fn_type(&callee_param_types, false);
+                        module.get_function(name).unwrap_or_else(|| {
+                            module.add_function(
+                                name,
+                                fn_type,
+                                Some(inkwell::module::Linkage::External),
+                            )
+                        })
                     } else {
-                        Err(MumeiError::codegen(format!("Unknown function {}", name)))
+                        let fn_type = context.i64_type().fn_type(&callee_param_types, false);
+                        module.get_function(name).unwrap_or_else(|| {
+                            module.add_function(
+                                name,
+                                fn_type,
+                                Some(inkwell::module::Linkage::External),
+                            )
+                        })
+                    };
+
+                    let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
+                    for arg in args {
+                        let val = compile_hir_expr(
+                            context, builder, module, function, arg, variables, array_ptrs,
+                            module_env,
+                        )?;
+                        arg_vals.push(val.into());
                     }
+
+                    let call_result =
+                        llvm!(builder.build_call(callee_fn, &arg_vals, &format!("call_{}", name)));
+                    let result = call_result.as_any_value_enum();
+                    if has_float {
+                        Ok(result.into_float_value().into())
+                    } else {
+                        Ok(result.into_int_value().into())
+                    }
+                } else {
+                    Err(MumeiError::codegen(format!("Unknown function {}", name)))
                 }
             }
-        }
+        },
 
-        Expr::ArrayAccess(name, index_expr) => {
-            // Fat Pointer: data_ptr から GEP + load
-            let idx = compile_expr(
+        HirExpr::ArrayAccess(name, index_expr) => {
+            let idx = compile_hir_expr(
                 context, builder, module, function, index_expr, variables, array_ptrs, module_env,
             )?
             .into_int_value();
-            if let Some((len_val, data_ptr_val)) = array_ptrs.get(name) {
+            if let Some((len_val, data_ptr_val)) = array_ptrs.get(name.as_str()) {
                 let data_ptr = data_ptr_val.into_pointer_value();
-                // ランタイム境界チェック: idx < len を検証し、違反時は 0 を返す（安全なフォールバック）
                 let len_int = len_val.into_int_value();
                 let in_bounds = llvm!(builder.build_int_compare(
                     IntPredicate::SLT,
@@ -312,7 +465,6 @@ fn compile_expr<'a>(
 
                 llvm!(builder.build_conditional_branch(safe, safe_block, oob_block));
 
-                // Safe path: GEP + load
                 builder.position_at_end(safe_block);
                 let elem_ptr = unsafe {
                     llvm!(builder.build_gep(context.i64_type(), data_ptr, &[idx], "elem_ptr"))
@@ -321,19 +473,16 @@ fn compile_expr<'a>(
                 let safe_end = builder.get_insert_block().unwrap();
                 llvm!(builder.build_unconditional_branch(merge_block));
 
-                // OOB path: return 0 (safe default)
                 builder.position_at_end(oob_block);
                 let zero_val = context.i64_type().const_int(0, false);
                 let oob_end = builder.get_insert_block().unwrap();
                 llvm!(builder.build_unconditional_branch(merge_block));
 
-                // Merge
                 builder.position_at_end(merge_block);
                 let phi = llvm!(builder.build_phi(context.i64_type(), "arr_result"));
                 phi.add_incoming(&[(&loaded, safe_end), (&zero_val, oob_end)]);
                 Ok(phi.as_basic_value())
             } else {
-                // 配列が Fat Pointer として登録されていない場合はエラー
                 Err(MumeiError::codegen(format!(
                     "Array '{}' not found as fat pointer parameter",
                     name
@@ -341,11 +490,11 @@ fn compile_expr<'a>(
             }
         }
 
-        Expr::BinaryOp(left, op, right) => {
-            let lhs = compile_expr(
+        HirExpr::BinaryOp(left, op, right) => {
+            let lhs = compile_hir_expr(
                 context, builder, module, function, left, variables, array_ptrs, module_env,
             )?;
-            let rhs = compile_expr(
+            let rhs = compile_hir_expr(
                 context, builder, module, function, right, variables, array_ptrs, module_env,
             )?;
 
@@ -422,12 +571,12 @@ fn compile_expr<'a>(
             }
         }
 
-        Expr::IfThenElse {
+        HirExpr::IfThenElse {
             cond,
             then_branch,
             else_branch,
         } => {
-            let cond_val = compile_expr(
+            let cond_val = compile_hir_expr(
                 context, builder, module, function, cond, variables, array_ptrs, module_env,
             )?
             .into_int_value();
@@ -445,7 +594,7 @@ fn compile_expr<'a>(
             llvm!(builder.build_conditional_branch(cond_bool, then_block, else_block));
 
             builder.position_at_end(then_block);
-            let then_val = compile_expr(
+            let then_val = compile_hir_stmt(
                 context,
                 builder,
                 module,
@@ -459,7 +608,7 @@ fn compile_expr<'a>(
             llvm!(builder.build_unconditional_branch(merge_block));
 
             builder.position_at_end(else_block);
-            let else_val = compile_expr(
+            let else_val = compile_hir_stmt(
                 context,
                 builder,
                 module,
@@ -478,96 +627,17 @@ fn compile_expr<'a>(
             Ok(phi.as_basic_value())
         }
 
-        Expr::While {
-            cond,
-            invariant: _,
-            decreases: _,
-            body,
-        } => {
-            let header_block = context.append_basic_block(*function, "loop.header");
-            let body_block = context.append_basic_block(*function, "loop.body");
-            let after_block = context.append_basic_block(*function, "loop.after");
-
-            let pre_loop_vars = variables.clone();
-            let entry_end_block = builder.get_insert_block().unwrap();
-
-            llvm!(builder.build_unconditional_branch(header_block));
-
-            builder.position_at_end(header_block);
-            let mut phi_nodes: Vec<(String, PhiValue<'a>)> = Vec::new();
-            for (name, pre_val) in &pre_loop_vars {
-                let phi = llvm!(builder.build_phi(pre_val.get_type(), &format!("phi_{}", name)));
-                phi.add_incoming(&[(pre_val, entry_end_block)]);
-                phi_nodes.push((name.clone(), phi));
-                variables.insert(name.clone(), phi.as_basic_value());
-            }
-
-            let cond_val = compile_expr(
-                context, builder, module, function, cond, variables, array_ptrs, module_env,
-            )?
-            .into_int_value();
-            let cond_bool = llvm!(builder.build_int_compare(
-                IntPredicate::NE,
-                cond_val,
-                context.i64_type().const_int(0, false),
-                "loop_cond"
-            ));
-            llvm!(builder.build_conditional_branch(cond_bool, body_block, after_block));
-
-            builder.position_at_end(body_block);
-            compile_expr(
-                context, builder, module, function, body, variables, array_ptrs, module_env,
-            )?;
-            let body_end_block = builder.get_insert_block().unwrap();
-
-            for (name, phi) in &phi_nodes {
-                if let Some(body_val) = variables.get(name) {
-                    phi.add_incoming(&[(body_val, body_end_block)]);
-                }
-            }
-
-            llvm!(builder.build_unconditional_branch(header_block));
-
-            builder.position_at_end(after_block);
-            for (name, phi) in &phi_nodes {
-                variables.insert(name.clone(), phi.as_basic_value());
-            }
-            Ok(context.i64_type().const_int(0, false).into())
-        }
-
-        Expr::Block(stmts) => {
-            let mut last_val = context.i64_type().const_int(0, false).into();
-            for stmt in stmts {
-                last_val = compile_expr(
-                    context, builder, module, function, stmt, variables, array_ptrs, module_env,
-                )?;
-            }
-            Ok(last_val)
-        }
-
-        Expr::Let { var, value } | Expr::Assign { var, value } => {
-            let val = compile_expr(
-                context, builder, module, function, value, variables, array_ptrs, module_env,
-            )?;
-            variables.insert(var.clone(), val);
-            Ok(val)
-        }
-
-        Expr::StructInit { type_name, fields } => {
-            // 構造体の各フィールドを評価し、フラットな変数として variables に登録
-            // LLVM 上では各フィールドを独立した値として扱う（値渡しセマンティクス）
+        HirExpr::StructInit { type_name, fields } => {
             let mut last_val: BasicValueEnum = context.i64_type().const_int(0, false).into();
             if let Some(sdef) = module_env.get_struct(type_name) {
-                // 構造体定義に基づいてフィールド型を解決
                 for (field_name, field_expr) in fields {
-                    let val = compile_expr(
+                    let val = compile_hir_expr(
                         context, builder, module, function, field_expr, variables, array_ptrs,
                         module_env,
                     )?;
                     let qualified = format!("__struct_{}_{}", type_name, field_name);
                     variables.insert(qualified, val);
                 }
-                // 構造体定義のフィールド順で LLVM StructType を構築
                 let field_types: Vec<inkwell::types::BasicTypeEnum> = sdef
                     .fields
                     .iter()
@@ -595,9 +665,8 @@ fn compile_expr<'a>(
                 }
                 last_val = struct_val.into();
             } else {
-                // 構造体定義が見つからない場合はフィールドだけ登録
                 for (field_name, field_expr) in fields {
-                    let val = compile_expr(
+                    let val = compile_hir_expr(
                         context, builder, module, function, field_expr, variables, array_ptrs,
                         module_env,
                     )?;
@@ -609,44 +678,23 @@ fn compile_expr<'a>(
             Ok(last_val)
         }
 
-        Expr::Match { target, arms } => {
-            // =================================================================
-            // Pattern Matrix 方式による Match 式の LLVM IR 生成
-            // =================================================================
-            // パターン行列を「上から順に試行する if-else チェーン」として
-            // コンパイルする。各行（アーム）は以下の手順で処理：
-            //
-            // 1. パターンの条件判定（Literal: ==, Variant: tag ==, _: true）
-            // 2. ガード条件がある場合は追加の条件分岐
-            // 3. パターン変数のバインド
-            // 4. body のコンパイル
-            // 5. merge ブロックへジャンプ
-            //
-            // ネストパターンは再帰的に条件を AND 結合する。
-            // これにより CFG が線形な if-else チェーンになり、
-            // switch_block の後付け挿入問題を完全に解消する。
-            let target_val = compile_expr(
+        HirExpr::Match { target, arms } => {
+            let target_val = compile_hir_expr(
                 context, builder, module, function, target, variables, array_ptrs, module_env,
             )?;
 
             let merge_block = context.append_basic_block(*function, "match.merge");
             let unreachable_block = context.append_basic_block(*function, "match.unreachable");
 
-            // 結果を集約する phi ノード用のバッファ
             let mut incoming: Vec<(BasicValueEnum<'a>, inkwell::basic_block::BasicBlock<'a>)> =
                 Vec::new();
 
-            // 次のアームの試行ブロック（最後のアームの fail は unreachable へ）
-            // アームを逆順に処理して fail_block チェーンを構築…ではなく、
-            // 順方向で「現在のアームが失敗したら次のアームへ」を構築する。
             let arm_count = arms.len();
-            // 各アームの「試行開始」ブロックを事前に作成
             let mut try_blocks: Vec<inkwell::basic_block::BasicBlock<'a>> = Vec::new();
             for i in 0..arm_count {
                 try_blocks.push(context.append_basic_block(*function, &format!("match.try_{}", i)));
             }
 
-            // 現在のブロックから最初の try ブロックへジャンプ
             llvm!(builder.build_unconditional_branch(try_blocks[0]));
 
             for (i, arm) in arms.iter().enumerate() {
@@ -659,7 +707,6 @@ fn compile_expr<'a>(
 
                 builder.position_at_end(try_block);
 
-                // --- Step 1: パターン条件の生成（再帰的） ---
                 let pattern_matches = compile_pattern_test(
                     context,
                     builder,
@@ -669,12 +716,10 @@ fn compile_expr<'a>(
                     module_env,
                 )?;
 
-                // --- Step 2: ガード条件 ---
                 let full_cond = if let Some(guard) = &arm.guard {
-                    // ガード評価のためにパターン変数を一時バインド
                     let mut guard_vars = variables.clone();
                     bind_pattern_variables(&arm.pattern, target_val, &mut guard_vars);
-                    let guard_val = compile_expr(
+                    let guard_val = compile_hir_expr(
                         context,
                         builder,
                         module,
@@ -696,17 +741,15 @@ fn compile_expr<'a>(
                     pattern_matches
                 };
 
-                // 条件分岐: マッチ → body ブロック, 不一致 → 次のアーム
                 let body_block =
                     context.append_basic_block(*function, &format!("match.body_{}", i));
                 llvm!(builder.build_conditional_branch(full_cond, body_block, fail_block));
 
-                // --- Step 3 & 4: パターン変数バインド + body コンパイル ---
                 builder.position_at_end(body_block);
                 let mut arm_vars = variables.clone();
                 bind_pattern_variables(&arm.pattern, target_val, &mut arm_vars);
 
-                let body_val = compile_expr(
+                let body_val = compile_hir_stmt(
                     context,
                     builder,
                     module,
@@ -721,13 +764,11 @@ fn compile_expr<'a>(
                 incoming.push((body_val, body_end));
             }
 
-            // unreachable ブロック: 網羅性は verification で保証済みなので到達しない
             builder.position_at_end(unreachable_block);
             let unreachable_val: BasicValueEnum = context.i64_type().const_int(0, false).into();
             llvm!(builder.build_unconditional_branch(merge_block));
             incoming.push((unreachable_val, unreachable_block));
 
-            // merge ブロックで phi ノードを構築
             builder.position_at_end(merge_block);
             let phi = llvm!(builder.build_phi(context.i64_type(), "match_result"));
             for (val, block) in &incoming {
@@ -738,131 +779,29 @@ fn compile_expr<'a>(
         }
 
         // =================================================================
-        // 非同期処理 + リソース管理の LLVM IR 生成
+        // 非同期処理の LLVM IR 生成
         // =================================================================
-        //
-        // acquire: pthread_mutex_lock/unlock を外部関数として呼び出す。
-        //          リソース名からグローバル mutex 変数を解決し、lock → body → unlock。
-        //          Z3 検証済みのためデッドロックは発生しないが、ランタイムの
-        //          相互排他は必要（検証は順序の正しさのみ保証）。
-        //
-        // async:   現在は同期的に body をコンパイル。
-        //          将来: LLVM coroutine intrinsics (llvm.coro.*) による
-        //          ステートマシン変換を生成。
-        //
-        // await:   現在は内側の式をそのままコンパイル。
-        //          将来: llvm.coro.suspend + resume ポイントを生成。
-        //
-        Expr::Acquire { resource, body } => {
-            // --- mutex_lock/unlock の外部関数宣言 ---
-            // pthread_mutex_lock(mutex: *mut pthread_mutex_t) -> i32
-            // pthread_mutex_unlock(mutex: *mut pthread_mutex_t) -> i32
-            // Mumei ランタイムでは、リソース名に対応するグローバル mutex を
-            // __mumei_resource_{name} として外部シンボルで参照する。
-            let ptr_type = context.ptr_type(AddressSpace::default());
-            let i32_type = context.i32_type();
-
-            let lock_fn = module
-                .get_function("pthread_mutex_lock")
-                .unwrap_or_else(|| {
-                    let fn_type = i32_type.fn_type(&[ptr_type.into()], false);
-                    module.add_function(
-                        "pthread_mutex_lock",
-                        fn_type,
-                        Some(inkwell::module::Linkage::External),
-                    )
-                });
-            let unlock_fn = module
-                .get_function("pthread_mutex_unlock")
-                .unwrap_or_else(|| {
-                    let fn_type = i32_type.fn_type(&[ptr_type.into()], false);
-                    module.add_function(
-                        "pthread_mutex_unlock",
-                        fn_type,
-                        Some(inkwell::module::Linkage::External),
-                    )
-                });
-
-            // グローバル mutex 変数: @__mumei_resource_{name}
-            // リンク時にランタイムライブラリまたはユーザーコードが提供する。
-            let global_name = format!("__mumei_resource_{}", resource);
-            let mutex_global = module.get_global(&global_name).unwrap_or_else(|| {
-                // i8 型のグローバル変数として宣言（実際の型はランタイム依存）
-                // pthread_mutex_t のサイズはプラットフォーム依存のため、
-                // opaque pointer として扱い、リンカが解決する。
-                let i8_type = context.i8_type();
-                let global =
-                    module.add_global(i8_type, Some(AddressSpace::default()), &global_name);
-                global.set_linkage(inkwell::module::Linkage::External);
-                global
-            });
-            let mutex_ptr = mutex_global.as_pointer_value();
-
-            // pthread_mutex_lock(&__mumei_resource_{name})
-            llvm!(builder.build_call(lock_fn, &[mutex_ptr.into()], &format!("lock_{}", resource)));
-
-            // body をコンパイル
-            let body_result = compile_expr(
-                context, builder, module, function, body, variables, array_ptrs, module_env,
-            )?;
-
-            // pthread_mutex_unlock(&__mumei_resource_{name})
-            llvm!(builder.build_call(
-                unlock_fn,
-                &[mutex_ptr.into()],
-                &format!("unlock_{}", resource)
-            ));
-
-            Ok(body_result)
-        }
-        Expr::Async { body } => {
-            // async ブロック: 現在は同期的に body をコンパイルする。
-            // Z3 で非同期安全性は検証済みのため、同期実行でもセマンティクスは正しい。
-            //
-            // 将来の LLVM coroutine 変換:
-            //   %id = call token @llvm.coro.id(i32 0, ptr null, ptr null, ptr null)
-            //   %hdl = call ptr @llvm.coro.begin(token %id, ptr %alloc)
-            //   ... body ...
-            //   call i1 @llvm.coro.end(ptr %hdl, i1 false)
-            compile_expr(
-                context, builder, module, function, body, variables, array_ptrs, module_env,
-            )
-        }
-        Expr::Await { expr } => {
-            // await 式: 現在は内側の式をそのままコンパイルする。
-            // Z3 で await 跨ぎの安全性は検証済み（リソース保持 + 所有権一貫性）。
-            //
-            // 将来の LLVM coroutine suspend:
-            //   %save = call token @llvm.coro.save(ptr %hdl)
-            //   %suspend = call i8 @llvm.coro.suspend(token %save, i1 false)
-            //   switch i8 %suspend, label %suspend.end [i8 0, label %resume; i8 1, label %cleanup]
-            compile_expr(
-                context, builder, module, function, expr, variables, array_ptrs, module_env,
-            )
-        }
-
-        // Task/TaskGroup: 現在は body をそのままコンパイル（将来: スケジューラ統合）
-        Expr::Task { body, .. } => compile_expr(
+        HirExpr::Async { body } => compile_hir_stmt(
             context, builder, module, function, body, variables, array_ptrs, module_env,
         ),
-        Expr::TaskGroup { children, .. } => {
+        HirExpr::Await { expr: await_expr } => compile_hir_expr(
+            context, builder, module, function, await_expr, variables, array_ptrs, module_env,
+        ),
+
+        HirExpr::Task { body, .. } => compile_hir_stmt(
+            context, builder, module, function, body, variables, array_ptrs, module_env,
+        ),
+        HirExpr::TaskGroup { children, .. } => {
             let mut last_val: BasicValueEnum = context.i64_type().const_int(0, false).into();
             for child in children {
-                last_val = compile_expr(
+                last_val = compile_hir_stmt(
                     context, builder, module, function, child, variables, array_ptrs, module_env,
                 )?;
             }
             Ok(last_val)
         }
 
-        // Higher-order functions (Phase A): atom_ref + call
-        // NOTE: 現在 higher_order_demo.mm でのみ E2E テスト済み。
-        // 相互再帰、クロスファイル atom_ref、複数間接呼び出しサイトの
-        // codegen エッジケースは追加テストが必要。
-        Expr::AtomRef { name } => {
-            // atom_ref(name) → 関数ポインタとして LLVM IR を生成
-            // module.get_function(name) で関数を取得し、ポインタ値として返す
-            // 関数がまだモジュールに登録されていない場合は外部宣言として追加する
+        HirExpr::AtomRef { name } => {
             let func = if let Some(f) = module.get_function(name) {
                 f
             } else if let Some(callee_atom) = module_env.get_atom(name) {
@@ -871,10 +810,6 @@ fn compile_expr<'a>(
                     .iter()
                     .map(|p| resolve_param_type(context, p.type_name.as_deref(), module_env).into())
                     .collect();
-                // 戻り値は常に i64: compile() 関数 (line 61) が全 atom を i64 戻り値で
-                // コンパイルするため、forward declaration も i64 に統一する。
-                // f64 パラメータは param_types で正しく処理されるが、戻り値型の不一致は
-                // LLVM IR リンク時に未定義動作を引き起こす。
                 let fn_type = context.i64_type().fn_type(&callee_param_types, false);
                 module.add_function(name, fn_type, Some(inkwell::module::Linkage::External))
             } else {
@@ -883,7 +818,6 @@ fn compile_expr<'a>(
                     name
                 )));
             };
-            // 関数ポインタを i64 にキャストして返す（mumei は i64 ベース）
             let fn_ptr = func.as_global_value().as_pointer_value();
             let ptr_int = llvm!(builder.build_ptr_to_int(
                 fn_ptr,
@@ -892,23 +826,20 @@ fn compile_expr<'a>(
             ));
             Ok(ptr_int.into())
         }
-        Expr::CallRef { callee, args } => {
-            // call(callee_expr, args...) → 関数ポインタ経由の間接呼び出し
-            let callee_val = compile_expr(
+        HirExpr::CallRef { callee, args } => {
+            let callee_val = compile_hir_expr(
                 context, builder, module, function, callee, variables, array_ptrs, module_env,
             )?;
 
-            // 引数をコンパイル
             let mut arg_vals: Vec<BasicValueEnum> = Vec::new();
             for arg in args {
-                let val = compile_expr(
+                let val = compile_hir_expr(
                     context, builder, module, function, arg, variables, array_ptrs, module_env,
                 )?;
                 arg_vals.push(val);
             }
 
-            // callee が AtomRef の場合、直接関数呼び出しに最適化
-            if let Expr::AtomRef { name } = callee.as_ref() {
+            if let HirExpr::AtomRef { name } = callee.as_ref() {
                 if let Some(callee_fn) = module.get_function(name) {
                     let args_meta: Vec<BasicMetadataValueEnum> =
                         arg_vals.iter().map(|v| (*v).into()).collect();
@@ -924,7 +855,6 @@ fn compile_expr<'a>(
                 }
             }
 
-            // 間接呼び出し: callee_val を関数ポインタに変換して indirect_call
             let callee_int = callee_val.into_int_value();
             let param_types: Vec<BasicMetadataTypeEnum> = arg_vals
                 .iter()
@@ -961,12 +891,47 @@ fn compile_expr<'a>(
                 .unwrap_or(context.i64_type().const_int(0, false).into()))
         }
 
-        Expr::FieldAccess(inner_expr, field_name) => {
-            // ネスト構造体のフィールドアクセスを再帰的に解決する。
-            // v.x → 1段階、v.point.x → 2段階（再帰的に extract_value）
+        HirExpr::Perform {
+            effect,
+            operation,
+            args: perform_args,
+        } => {
+            let fn_name = format!("__effect_{}_{}", effect, operation);
 
-            // まずフラット変数として探す（1段階アクセスの高速パス）
-            if let Expr::Variable(var_name) = inner_expr.as_ref() {
+            let mut arg_vals = Vec::new();
+            for arg in perform_args {
+                let val = compile_hir_expr(
+                    context, builder, module, function, arg, variables, array_ptrs, module_env,
+                )?;
+                arg_vals.push(val);
+            }
+
+            let param_types: Vec<BasicMetadataTypeEnum> = arg_vals
+                .iter()
+                .map(|v| {
+                    if v.is_float_value() {
+                        context.f64_type().into()
+                    } else {
+                        context.i64_type().into()
+                    }
+                })
+                .collect();
+            let fn_type = context.i64_type().fn_type(&param_types, false);
+            let callee_fn = module.get_function(&fn_name).unwrap_or_else(|| {
+                module.add_function(&fn_name, fn_type, Some(inkwell::module::Linkage::External))
+            });
+
+            let args_meta: Vec<BasicMetadataValueEnum> =
+                arg_vals.iter().map(|v| (*v).into()).collect();
+            let call_result = llvm!(builder.build_call(callee_fn, &args_meta, "perform_result"));
+            Ok(call_result
+                .try_as_basic_value()
+                .left()
+                .unwrap_or(context.i64_type().const_int(0, false).into()))
+        }
+
+        HirExpr::FieldAccess(inner_expr, field_name) => {
+            if let HirExpr::Variable(var_name) = inner_expr.as_ref() {
                 let candidates = [
                     format!("__struct_{}_{}", var_name, field_name),
                     format!("{}_{}", var_name, field_name),
@@ -976,8 +941,7 @@ fn compile_expr<'a>(
                         return Ok(*val);
                     }
                 }
-                // 構造体値から extract_value で取得を試みる
-                if let Some(struct_val) = variables.get(var_name) {
+                if let Some(struct_val) = variables.get(var_name.as_str()) {
                     if struct_val.is_struct_value() {
                         let sv = struct_val.into_struct_value();
                         if let Some(idx) = find_field_index(var_name, field_name, module_env) {
@@ -995,16 +959,12 @@ fn compile_expr<'a>(
                     field_name, var_name
                 )))
             } else {
-                // ネストされたフィールドアクセス: 内側の式を再帰的に評価
-                // v.point.x → compile_expr(v.point) → extract_value(result, x_idx)
-                let base_val = compile_expr(
+                let base_val = compile_hir_expr(
                     context, builder, module, function, inner_expr, variables, array_ptrs,
                     module_env,
                 )?;
                 if base_val.is_struct_value() {
                     let sv = base_val.into_struct_value();
-                    // フィールドインデックスを型定義から解決
-                    // 内側の式の型名を推定して構造体定義を探す
                     if let Some(idx) = find_field_index_by_name(field_name, module_env) {
                         let extracted = llvm!(builder.build_extract_value(
                             sv,
@@ -1013,7 +973,6 @@ fn compile_expr<'a>(
                         ));
                         Ok(extracted)
                     } else {
-                        // フォールバック: インデックス 0
                         let extracted = llvm!(builder.build_extract_value(
                             sv,
                             0,

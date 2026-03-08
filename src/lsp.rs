@@ -259,6 +259,7 @@ fn verify_source_for_lsp(
 
     let mut module_env = verification::ModuleEnv::new();
     verification::register_builtin_traits(&mut module_env);
+    verification::register_builtin_effects(&mut module_env);
 
     // mumei.toml を探してプロジェクトルートを決定
     let base_dir = path.parent().unwrap_or(std::path::Path::new("."));
@@ -283,6 +284,7 @@ fn verify_source_for_lsp(
             crate::parser::Item::ResourceDef(r) => module_env.register_resource(r),
             crate::parser::Item::Import(_) => {}
             crate::parser::Item::ExternBlock(_) => {}
+            crate::parser::Item::EffectDef(e) => module_env.register_effect(e),
         }
     }
 
@@ -292,7 +294,8 @@ fn verify_source_for_lsp(
             if module_env.is_verified(&atom.name) {
                 continue;
             }
-            verification::verify_with_config(atom, output_dir, &module_env, 5000, 3)?;
+            let hir_atom = crate::hir::lower_atom_to_hir(atom);
+            verification::verify_with_config(&hir_atom, output_dir, &module_env, 5000, 3)?;
             module_env.mark_verified(&atom.name);
         }
     }
@@ -321,12 +324,18 @@ fn build_hover(source: &str, line: usize) -> Option<String> {
         for it in &items {
             if let crate::parser::Item::Atom(a) = it {
                 if a.name == name {
-                    let md = format!(
+                    let mut md = format!(
                         "### atom {}\n\n**requires**:\n```\n{}\n```\n\n**ensures**:\n```\n{}\n```",
                         a.name,
                         a.requires.trim(),
                         a.ensures.trim()
                     );
+                    // エフェクト情報を表示
+                    if !a.effects.is_empty() {
+                        let effects_str: Vec<String> =
+                            a.effects.iter().map(|e| e.name.clone()).collect();
+                        md.push_str(&format!("\n\n**effects**: `[{}]`", effects_str.join(", ")));
+                    }
                     return Some(md);
                 }
             }

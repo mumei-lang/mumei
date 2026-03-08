@@ -2,6 +2,7 @@
 
 mod ast;
 mod codegen;
+mod hir;
 mod lsp;
 #[allow(dead_code)]
 mod manifest;
@@ -12,6 +13,7 @@ mod setup;
 mod transpiler;
 mod verification;
 
+use crate::hir::lower_atom_to_hir;
 use crate::parser::{ImportDecl, Item};
 use crate::transpiler::{
     transpile, transpile_enum, transpile_impl, transpile_module_header, transpile_struct,
@@ -113,6 +115,11 @@ enum Command {
         #[arg(long, default_value = "html")]
         format: String,
     },
+    /// Infer required effects for all atoms (JSON output, for MCP integration)
+    InferEffects {
+        /// Input .mm file
+        input: String,
+    },
 }
 
 fn main() {
@@ -163,6 +170,9 @@ fn main() {
             format,
         }) => {
             cmd_doc(&input, &output, &format);
+        }
+        Some(Command::InferEffects { input }) => {
+            cmd_infer_effects(&input);
         }
         None => {
             // 後方互換: `mumei input.mm -o dist/katana` → build として実行
@@ -224,6 +234,7 @@ fn load_and_prepare(input: &str) -> (Vec<Item>, verification::ModuleEnv, Vec<Imp
 
     let mut module_env = verification::ModuleEnv::new();
     verification::register_builtin_traits(&mut module_env);
+    verification::register_builtin_effects(&mut module_env);
     let input_path = Path::new(input);
     let base_dir = input_path.parent().unwrap_or(Path::new("."));
 
@@ -270,6 +281,7 @@ fn load_and_prepare(input: &str) -> (Vec<Item>, verification::ModuleEnv, Vec<Imp
             Item::TraitDef(trait_def) => module_env.register_trait(trait_def),
             Item::ImplDef(impl_def) => module_env.register_impl(impl_def),
             Item::ResourceDef(resource_def) => module_env.register_resource(resource_def),
+            Item::EffectDef(effect_def) => module_env.register_effect(effect_def),
             Item::ExternBlock(extern_block) => {
                 for ext_fn in &extern_block.functions {
                     // ExternFn → trusted Atom に変換して ModuleEnv に登録
@@ -301,6 +313,7 @@ fn load_and_prepare(input: &str) -> (Vec<Item>, verification::ModuleEnv, Vec<Imp
                         trust_level: parser::TrustLevel::Trusted,
                         max_unroll: None,
                         invariant: None,
+                        effects: vec![],
                         span: ext_fn.span.clone(),
                     };
                     module_env.register_atom(&atom);
@@ -382,6 +395,9 @@ fn cmd_check(input: &str) {
                     eb.functions.len()
                 );
             }
+            Item::EffectDef(e) => {
+                println!("  ⚡ Effect: '{}'", e.name);
+            }
         }
     }
     println!(
@@ -406,9 +422,17 @@ fn cmd_verify(input: &str) {
     let mut failed = 0;
     let mut skipped = 0;
 
-    // Incremental Build: ビルドキャッシュをロード
-    let build_cache = resolver::load_build_cache(base_dir);
-    let mut new_cache = std::collections::HashMap::new();
+    // Feature 2: Register dependencies for all atoms before verification
+    for item in &items {
+        if let Item::Atom(atom) = item {
+            let callees = resolver::collect_callees_from_body(&atom.body_expr);
+            module_env.register_dependencies(&atom.name, callees);
+        }
+    }
+
+    // Feature 2: Migrate old cache and load enhanced verification cache
+    resolver::migrate_old_cache(base_dir);
+    let mut verification_cache = resolver::load_verification_cache(base_dir);
 
     for item in &items {
         match item {
@@ -440,12 +464,11 @@ fn cmd_verify(input: &str) {
                         atom.name
                     );
                 } else {
-                    // Incremental Build: atom のハッシュを計算してキャッシュと比較
-                    let atom_hash = resolver::compute_atom_hash(atom);
-                    new_cache.insert(atom.name.clone(), atom_hash.clone());
+                    // Feature 2: Use compute_proof_hash with dependency-aware hashing
+                    let proof_hash = resolver::compute_proof_hash(atom, &module_env);
 
-                    if let Some(cached_hash) = build_cache.get(&atom.name) {
-                        if *cached_hash == atom_hash {
+                    if let Some(cached_entry) = verification_cache.get(&atom.name) {
+                        if cached_entry.proof_hash == proof_hash {
                             println!("  ⚖️  '{}': skipped (unchanged, cached) ⏩", atom.name);
                             module_env.mark_verified(&atom.name);
                             skipped += 1;
@@ -453,10 +476,40 @@ fn cmd_verify(input: &str) {
                         }
                     }
 
-                    match verification::verify(atom, output_dir, &module_env) {
+                    // Collect dependency info for cache entry
+                    let deps: Vec<String> = module_env
+                        .dependency_graph
+                        .get(&atom.name)
+                        .map(|s| s.iter().cloned().collect())
+                        .unwrap_or_default();
+                    let type_deps: Vec<String> = atom
+                        .params
+                        .iter()
+                        .filter_map(|p| p.type_ref.as_ref().map(|tr| tr.name.clone()))
+                        .filter(|tn| module_env.get_type(tn).is_some())
+                        .collect();
+
+                    let hir_atom = lower_atom_to_hir(atom);
+                    match verification::verify(&hir_atom, output_dir, &module_env) {
                         Ok(_) => {
                             println!("  ⚖️  '{}': verified ✅", atom.name);
                             module_env.mark_verified(&atom.name);
+                            verification_cache.insert(
+                                atom.name.clone(),
+                                resolver::VerificationCacheEntry {
+                                    proof_hash,
+                                    result: "verified".to_string(),
+                                    dependencies: deps,
+                                    type_deps,
+                                    timestamp: format!(
+                                        "{}s",
+                                        std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .unwrap_or_default()
+                                            .as_secs()
+                                    ),
+                                },
+                            );
                             verified += 1;
                         }
                         Err(e) => {
@@ -465,7 +518,7 @@ fn cmd_verify(input: &str) {
                             let e = e.with_source(&source, &atom.span);
                             eprintln!("{:?}", miette::Report::new(e));
                             // 検証失敗した atom はキャッシュから除外
-                            new_cache.remove(&atom.name);
+                            verification_cache.remove(&atom.name);
                             failed += 1;
                         }
                     }
@@ -475,8 +528,12 @@ fn cmd_verify(input: &str) {
         }
     }
 
-    // Incremental Build: キャッシュを保存
-    resolver::save_build_cache(base_dir, &new_cache);
+    // Feature 2: Save enhanced verification cache
+    // Note: invalidate_dependents is not needed here because compute_proof_hash
+    // already includes callee signatures (requires/ensures) in the hash.
+    // If a callee's contract changes, all callers will have different proof hashes
+    // and be re-verified automatically.
+    resolver::save_verification_cache(base_dir, &verification_cache);
 
     println!();
     if failed > 0 {
@@ -533,6 +590,9 @@ max_unroll = 3
 [proof]
 cache = true
 timeout_ms = 10000
+[effects]
+# allowed = ["Log", "FileRead"]
+# denied = ["Network"]
 "#,
         name
     );
@@ -938,13 +998,22 @@ fn cmd_build(input: &str, output: &str) {
     let input_path = Path::new(input);
     let build_base_dir = input_path.parent().unwrap_or(Path::new("."));
 
-    // Incremental Build: ビルドキャッシュをロード（proof.cache が false ならスキップ）
-    let build_cache = if proof_cfg.cache {
-        resolver::load_build_cache(build_base_dir)
+    // Feature 2: Register dependencies for all atoms before verification
+    for item in &items {
+        if let Item::Atom(atom) = item {
+            let callees = resolver::collect_callees_from_body(&atom.body_expr);
+            module_env.register_dependencies(&atom.name, callees);
+        }
+    }
+
+    // Feature 2: Migrate old cache and load enhanced verification cache
+    resolver::migrate_old_cache(build_base_dir);
+    let verification_cache = if proof_cfg.cache {
+        resolver::load_verification_cache(build_base_dir)
     } else {
         std::collections::HashMap::new()
     };
-    let mut build_cache_new = std::collections::HashMap::new();
+    let mut verification_cache_new = verification_cache.clone();
 
     // [build] targets から有効なトランスパイル言語を決定
     let enable_rust = build_cfg.targets.iter().any(|t| t == "rust");
@@ -1121,6 +1190,11 @@ fn cmd_build(input: &str, output: &str) {
                 );
             }
 
+            // --- エフェクト定義 ---
+            Item::EffectDef(effect_def) => {
+                println!("  ⚡ Effect: '{}'", effect_def.name);
+            }
+
             // --- Atom の処理 ---
             Item::Atom(atom) => {
                 atom_count += 1;
@@ -1135,6 +1209,9 @@ fn cmd_build(input: &str, output: &str) {
                     atom.name, async_marker, res_marker
                 );
 
+                // HIR lowering: body_expr を1回だけパースして全ステージで再利用する
+                let hir_atom = lower_atom_to_hir(atom);
+
                 // --- 2. Verification (形式検証: Z3 + StdLib) ---
                 if skip_verify {
                     println!("  ⚖️  [2/4] Verification: Skipped (verify=false in mumei.toml).");
@@ -1143,20 +1220,19 @@ fn cmd_build(input: &str, output: &str) {
                     // インポートされた atom は検証済み（契約のみ信頼）なのでスキップ
                     println!("  ⚖️  [2/4] Verification: Skipped (imported, contract-trusted).");
                 } else {
-                    // Incremental Build: atom ハッシュでキャッシュ比較
-                    let atom_hash = resolver::compute_atom_hash(atom);
-                    build_cache_new.insert(atom.name.clone(), atom_hash.clone());
+                    // Feature 2: Use compute_proof_hash with dependency-aware hashing
+                    let proof_hash = resolver::compute_proof_hash(atom, &module_env);
 
-                    let cache_hit = build_cache
+                    let cache_hit = verification_cache
                         .get(&atom.name)
-                        .map_or(false, |cached| *cached == atom_hash);
+                        .map_or(false, |entry| entry.proof_hash == proof_hash);
 
                     if cache_hit {
                         println!("  ⚖️  [2/4] Verification: Skipped (unchanged, cached) ⏩");
                         module_env.mark_verified(&atom.name);
                     } else {
                         match verification::verify_with_config(
-                            atom,
+                            &hir_atom,
                             output_dir,
                             &module_env,
                             proof_cfg.timeout_ms,
@@ -1167,12 +1243,40 @@ fn cmd_build(input: &str, output: &str) {
                                     "  ⚖️  [2/4] Verification: Passed. Logic verified with Z3."
                                 );
                                 module_env.mark_verified(&atom.name);
+                                // Collect dependency info for cache entry
+                                let deps: Vec<String> = module_env
+                                    .dependency_graph
+                                    .get(&atom.name)
+                                    .map(|s| s.iter().cloned().collect())
+                                    .unwrap_or_default();
+                                let type_deps: Vec<String> = atom
+                                    .params
+                                    .iter()
+                                    .filter_map(|p| p.type_ref.as_ref().map(|tr| tr.name.clone()))
+                                    .filter(|tn| module_env.get_type(tn).is_some())
+                                    .collect();
+                                verification_cache_new.insert(
+                                    atom.name.clone(),
+                                    resolver::VerificationCacheEntry {
+                                        proof_hash,
+                                        result: "verified".to_string(),
+                                        dependencies: deps,
+                                        type_deps,
+                                        timestamp: format!(
+                                            "{}s",
+                                            std::time::SystemTime::now()
+                                                .duration_since(std::time::UNIX_EPOCH)
+                                                .unwrap_or_default()
+                                                .as_secs()
+                                        ),
+                                    },
+                                );
                             }
                             Err(e) => {
                                 // TODO: インポートされた atom の場合、source と span のファイルが不一致になる。
                                 let e = e.with_source(&source, &atom.span);
                                 eprintln!("{:?}", miette::Report::new(e));
-                                build_cache_new.remove(&atom.name);
+                                verification_cache_new.remove(&atom.name);
                                 std::process::exit(1);
                             }
                         }
@@ -1182,7 +1286,7 @@ fn cmd_build(input: &str, output: &str) {
                 // --- 3. Codegen (LLVM 18 + Floating Point) ---
                 // 各 Atom ごとに .ll ファイルを生成（またはモジュールを統合する拡張も可能）
                 let atom_output_path = output_dir.join(format!("{}_{}", file_stem, atom.name));
-                match codegen::compile(atom, &atom_output_path, &module_env) {
+                match codegen::compile(&hir_atom, &atom_output_path, &module_env) {
                     Ok(_) => println!(
                         "  ⚙️  [3/4] Tempering: Done. Compiled '{}' to LLVM IR.",
                         atom.name
@@ -1198,15 +1302,15 @@ fn cmd_build(input: &str, output: &str) {
                 // --- 4. Transpile (多言語エクスポート) ---
                 // バンドル用に各言語のコードを生成（有効な言語のみ）
                 if enable_rust {
-                    rust_bundle.push_str(&transpile(atom, TargetLanguage::Rust));
+                    rust_bundle.push_str(&transpile(&hir_atom, TargetLanguage::Rust));
                     rust_bundle.push_str("\n\n");
                 }
                 if enable_go {
-                    go_bundle.push_str(&transpile(atom, TargetLanguage::Go));
+                    go_bundle.push_str(&transpile(&hir_atom, TargetLanguage::Go));
                     go_bundle.push_str("\n\n");
                 }
                 if enable_ts {
-                    ts_bundle.push_str(&transpile(atom, TargetLanguage::TypeScript));
+                    ts_bundle.push_str(&transpile(&hir_atom, TargetLanguage::TypeScript));
                     ts_bundle.push_str("\n\n");
                 }
             }
@@ -1242,8 +1346,10 @@ fn cmd_build(input: &str, output: &str) {
         println!("⚠️  Warning: No atoms found in the source file.");
     }
 
-    // Incremental Build: ビルドキャッシュを保存
-    resolver::save_build_cache(build_base_dir, &build_cache_new);
+    // Feature 2: Save enhanced verification cache
+    if proof_cfg.cache {
+        resolver::save_verification_cache(build_base_dir, &verification_cache_new);
+    }
 }
 
 // =============================================================================
@@ -1379,7 +1485,8 @@ fn cmd_publish(proof_only: bool) {
                 atom_count += 1;
                 continue;
             }
-            match verification::verify(atom, output_dir, &module_env) {
+            let hir_atom = lower_atom_to_hir(atom);
+            match verification::verify(&hir_atom, output_dir, &module_env) {
                 Ok(_) => {
                     println!("  ⚖️  '{}': verified ✅", atom.name);
                     module_env.mark_verified(&atom.name);
@@ -1475,6 +1582,7 @@ fn cmd_repl() {
 
     let mut module_env = verification::ModuleEnv::new();
     verification::register_builtin_traits(&mut module_env);
+    verification::register_builtin_effects(&mut module_env);
 
     // std/prelude を自動ロード
     if let Ok(cwd) = std::env::current_dir() {
@@ -1568,6 +1676,7 @@ fn cmd_repl() {
                                     trust_level: parser::TrustLevel::Trusted,
                                     max_unroll: None,
                                     invariant: None,
+                                    effects: vec![],
                                     span: ext_fn.span.clone(),
                                 };
                                 module_env.register_atom(&atom);
@@ -1575,6 +1684,7 @@ fn cmd_repl() {
                             }
                         }
                         parser::Item::Import(_) => {}
+                        parser::Item::EffectDef(e) => module_env.register_effect(e),
                     }
                 }
                 println!("  ✅ Loaded {} definition(s) from '{}'", count, file);
@@ -1639,7 +1749,8 @@ fn cmd_repl() {
                     if let parser::Item::Atom(atom) = item {
                         println!("  ✅ Parsed: atom {}()", atom.name);
                         if is_verify {
-                            match verification::verify(atom, Path::new("."), &module_env) {
+                            let hir_atom = lower_atom_to_hir(atom);
+                            match verification::verify(&hir_atom, Path::new("."), &module_env) {
                                 Ok(()) => println!("  ✅ Verification passed"),
                                 Err(e) => eprintln!("  ❌ Verification failed: {}", e),
                             }
@@ -1680,6 +1791,17 @@ fn cmd_repl() {
             }
         }
     }
+}
+
+// =============================================================================
+// mumei infer-effects — Effect inference (JSON output for MCP)
+// =============================================================================
+
+fn cmd_infer_effects(input: &str) {
+    let (items, module_env, _imports, _source) = load_and_prepare(input);
+    let result = verification::infer_effects_json(&items, &module_env);
+    // JSON 出力（MCP が stdout をパースする）
+    println!("{}", serde_json::to_string_pretty(&result).unwrap());
 }
 
 // =============================================================================
@@ -2410,6 +2532,7 @@ atom main() -> i64
                             trust_level: parser::TrustLevel::Trusted,
                             max_unroll: None,
                             invariant: None,
+                            effects: vec![],
                             span: ext_fn.span.clone(),
                         };
                         module_env.register_atom(&atom);
@@ -2433,5 +2556,129 @@ atom main() -> i64
             module_env.get_atom("main").unwrap().trust_level,
             parser::TrustLevel::Verified
         );
+    }
+
+    // --- Feature 1: Semantic Feedback Tests ---
+
+    /// Test constraint_to_natural_language for various patterns
+    #[test]
+    fn test_constraint_to_natural_language() {
+        // v <= N pattern
+        let result =
+            verification::constraint_to_natural_language("age", "HumanAge", "v <= 120", "121");
+        assert!(result.contains("age"), "should mention param name");
+        assert!(result.contains("121"), "should mention actual value");
+        assert!(result.contains("120"), "should mention bound");
+        assert!(result.contains("HumanAge"), "should mention type name");
+        // Bilingual: should contain both English and Japanese
+        assert!(
+            result.contains("violates") || result.contains("exceeds"),
+            "should have English text"
+        );
+
+        // v >= N pattern
+        let result2 = verification::constraint_to_natural_language("x", "Nat", "v >= 0", "-1");
+        assert!(result2.contains("x"), "should mention param name");
+        assert!(result2.contains("-1"), "should mention actual value");
+
+        // Fallback pattern
+        let result3 =
+            verification::constraint_to_natural_language("val", "Custom", "v % 2 == 0", "3");
+        assert!(result3.contains("val"), "should mention param name");
+        assert!(
+            result3.contains("v % 2 == 0"),
+            "should include raw predicate for unknown patterns"
+        );
+    }
+
+    /// Test suggestion_for_failure_type returns appropriate suggestions
+    #[test]
+    fn test_suggestion_for_failure_type() {
+        let s1 =
+            verification::suggestion_for_failure_type(verification::FAILURE_POSTCONDITION_VIOLATED);
+        assert!(
+            !s1.is_empty(),
+            "postcondition suggestion should not be empty"
+        );
+
+        let s2 = verification::suggestion_for_failure_type(verification::FAILURE_DIVISION_BY_ZERO);
+        assert!(
+            s2.contains("0") || s2.contains("zero") || s2.contains("divisor"),
+            "division by zero suggestion should mention zero or divisor"
+        );
+
+        let s3 = verification::suggestion_for_failure_type("unknown_type");
+        assert!(
+            !s3.is_empty(),
+            "unknown failure type should still return a suggestion"
+        );
+    }
+
+    /// Test build_semantic_feedback produces valid JSON structure
+    #[test]
+    fn test_build_semantic_feedback() {
+        let source = r#"
+type HumanAge = i64 where v >= 0 && v <= 120;
+
+atom validate_age(age: HumanAge) -> i64
+  requires: true;
+  ensures: result >= 0 && result <= 120;
+  body: age;
+"#;
+        let items = parser::parse_module(source);
+        let mut module_env = verification::ModuleEnv::new();
+
+        // Register type
+        for item in &items {
+            if let parser::Item::TypeDef(td) = item {
+                module_env.register_type(td);
+            }
+        }
+
+        // Find atom and build feedback
+        for item in &items {
+            if let parser::Item::Atom(atom) = item {
+                let mappings = verification::build_constraint_mappings_for_atom(atom, &module_env);
+                assert!(
+                    !mappings.is_empty(),
+                    "should have constraint mappings for HumanAge param"
+                );
+
+                let counterexample = serde_json::json!({"age": "121"});
+                let feedback = verification::build_semantic_feedback(
+                    &mappings,
+                    Some(&counterexample),
+                    atom,
+                    verification::FAILURE_POSTCONDITION_VIOLATED,
+                );
+                assert!(feedback.is_some(), "should produce semantic feedback");
+                let feedback = feedback.unwrap();
+
+                // feedback should have violated_constraints
+                let vc = feedback.get("violated_constraints");
+                assert!(vc.is_some(), "should have violated_constraints field");
+                let vc_arr = vc.unwrap().as_array().unwrap();
+                assert!(
+                    !vc_arr.is_empty(),
+                    "should have at least one violated constraint for HumanAge"
+                );
+
+                let first = &vc_arr[0];
+                assert_eq!(first["param"], "age");
+                assert_eq!(first["type"], "HumanAge");
+                assert!(
+                    !first["explanation"].as_str().unwrap().is_empty(),
+                    "explanation should not be empty"
+                );
+                assert!(
+                    !first["suggestion"].as_str().unwrap().is_empty(),
+                    "suggestion should not be empty"
+                );
+
+                // Should have context section
+                let ctx = feedback.get("context");
+                assert!(ctx.is_some(), "should have context field");
+            }
+        }
     }
 }

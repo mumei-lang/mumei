@@ -3,10 +3,13 @@
 ## Pipeline
 
 ```
-source.mm → parse → resolve → monomorphize → verify (Z3) → codegen (LLVM IR) → transpile (Rust/Go/TS)
-                                                ↑
-                                   Resource Hierarchy Check (deadlock-free proof)
-                                   Async Safety Verification (ownership across await)
+source.mm → parse → resolve → monomorphize → lower_to_hir → verify (Z3) → codegen (LLVM IR) → transpile (Rust/Go/TS)
+                                                    ↑
+                                      HIR: Expr/Stmt separation, type annotation
+                                      Resource Hierarchy Check (deadlock-free proof)
+                                      Effect Containment Check (side-effect safety proof)
+                                      Async Safety Verification (ownership across await)
+                                      // TODO: → lower_to_mir → borrow check → verify
 ```
 
 ## Source Files
@@ -18,6 +21,7 @@ source.mm → parse → resolve → monomorphize → verify (Z3) → codegen (LL
 | `src/resolver.rs` | Import resolution, circular detection, prelude auto-load, incremental build cache |
 | `src/verification.rs` | Z3 verification, `ModuleEnv`, `LinearityCtx`, law expansion, equality propagation, resource hierarchy, BMC, async recursion depth, inductive invariant, trust boundary |
 | `src/codegen.rs` | LLVM IR generation — Pattern Matrix, StructType, malloc/free, nested extract_value |
+| `src/hir.rs` | HIR (High-level IR) definitions, AST → HIR lowering |
 | `src/transpiler/` | Multi-target: Rust (`&T`), Go (interface), TypeScript (`/* readonly */`) |
 | `src/main.rs` | CLI orchestrator — `build`/`verify`/`check`/`init` with incremental cache |
 
@@ -36,6 +40,14 @@ pub struct ModuleEnv {
     pub traits: HashMap<String, TraitDef>,
     pub impls: Vec<ImplDef>,
     pub verified_cache: HashSet<String>,
+    pub resources: HashMap<String, ResourceDef>,
+    pub effects: HashMap<String, EffectDef>,
+    pub effect_defs: HashMap<String, EffectDef>,       // Full registry with hierarchy
+    pub path_id_map: HashMap<String, i64>,              // Symbolic String ID (hybrid approach)
+    pub next_path_id: i64,
+    pub prefix_ranges: HashMap<String, (i64, i64)>,     // Path prefix → ID range
+    pub dependency_graph: HashMap<String, HashSet<String>>, // atom → callees
+    pub reverse_deps: HashMap<String, HashSet<String>>,     // atom → callers
 }
 ```
 
@@ -65,15 +77,16 @@ pub struct LinearityCtx {
 
 1. Quantifier constraints (`forall`/`exists`)
 2. Refinement type injection (params → Z3 symbolic variables)
-3. Struct field constraints (recursive for nested structs)
-4. Array length symbols (`len_<name> >= 0`)
-5. Linearity setup (`__alive_`/`__borrowed_` Z3 Bools)
-6. `requires` assertion
-7. Body evaluation (`expr_to_z3`)
-8. `ensures` verification (negate + check Sat)
-9. Equality ensures propagation (`result == expr` → Z3 equality)
-10. Linearity finalization (consume marking + violation check)
-11. Contradiction check
+2b. Struct field constraints (recursive for nested structs)
+2c. Array length symbols (`len_<name> >= 0`)
+2d. Linearity setup (`__alive_`/`__borrowed_` Z3 Bools)
+2e. Effect allowed set injection (`__effect_allowed_*` Z3 Bools)
+3. `requires` assertion
+4. Body evaluation (`stmt_to_z3` / `expr_to_z3` — Expr/Stmt separated)
+5. `ensures` verification (negate + check Sat)
+6. Equality ensures propagation (`result == expr` → Z3 equality)
+7. Linearity finalization (consume marking + violation check)
+8. Contradiction check
 
 ---
 
@@ -87,20 +100,24 @@ pub struct LinearityCtx {
 
 ---
 
-## Incremental Build
+## Incremental Build (Enhanced Verification Cache)
 
-- **Cache file**: `.mumei_build_cache` (JSON: `{ atom_name: hash }`)
-- **Hash**: `SHA256(name | requires | ensures | body_expr | consume:x | ref:y)`
+- **Cache file**: `.mumei/cache/verification_cache.json`
+- **Entry format**: `VerificationCacheEntry { proof_hash, result, dependencies, type_deps, timestamp }`
+- **Proof hash**: `SHA256(name | requires | ensures | body_expr | consume | ref | effects | trust | callee signatures | type predicates)`
+  - Includes transitive callee signatures (requires/ensures) — if a callee's contract changes, all callers are automatically re-verified
+  - Includes type predicate content for refined type parameters
 - **Cache hit** → skip Z3 verification, mark as verified
 - **Cache miss** → re-verify, update cache on success
 - **Failure** → remove from cache (force re-verify next time)
+- **Migration**: Old `.mumei_build_cache` files are automatically migrated to the new format
 
 ---
 
 ## FQN Resolution
 
 - `math.add(x, y)` → `math::add` (automatic `.` → `::` conversion)
-- Applied in both `expr_to_z3` (verification) and `compile_expr` (codegen)
+- Applied in both `expr_to_z3`/`stmt_to_z3` (verification) and `compile_hir_expr`/`compile_hir_stmt` (codegen)
 - Resolver registers both `add` and `math::add` in ModuleEnv
 
 ---
@@ -340,6 +357,8 @@ for tainted sources and warns if verification results depend on unverified code.
 1c. `verify_async_recursion_depth()`: Recursive async call depth limit
 1d. `verify_atom_invariant()`: Inductive invariant proof (base + preservation)
 1e. `verify_call_graph_cycles()`: Indirect recursion detection via DFS
+1f. `verify_effect_consistency()`: Effect inference + declared effects comparison (with subtyping)
+1g. `verify_effect_params()`: Constant folding for literal paths + Z3 Int for variable paths
 2. `expr_to_z3(Acquire)`: Tracks `__resource_held_{name}` as Z3 Bool
 3. `expr_to_z3(Await)`: Resource-held-across-await + ownership consistency checks
 4. Body verification + **taint analysis** (`check_taint_propagation`)
@@ -351,6 +370,8 @@ for tainted sources and warns if verification results depend on unverified code.
 source.mm → parse → resolve → monomorphize → verify (Z3) → codegen (LLVM IR) → transpile
                                                  ↑
                                     Resource Hierarchy Check
+                                    Effect Inference & Verification
+                                    Effect Hierarchy Resolution
                                     Deadlock-Free Proof
                                     Data Race Prevention
 ```
@@ -375,3 +396,143 @@ exclusion — not deadlock prevention.
 | `async atom f(x: T)` | `pub async fn f(x: T)` | `func f(x T) // goroutine` | `async function f(x: number)` |
 | `await expr` | `expr.await` | `<-ch` | `await expr` |
 | `acquire r { body }` | `let _g = r.lock(); { body }` | `r.Lock(); { body }; r.Unlock()` | `await r.acquire(); { body }; r.release()` |
+
+---
+
+## Effect System (Side-Effect Verification)
+
+### Design
+
+Mumei's Effect System allows developers to declare what side effects a function may
+perform and uses Z3 to mathematically prove that no undeclared effects occur at
+compile time. Atoms without an `effects:` annotation are treated as **Pure** (no
+side effects allowed).
+
+### Effect Definition
+
+```mumei
+// Basic effects
+effect FileRead;
+effect FileWrite;
+effect Network;
+effect Log;
+effect Console;
+
+// Composite effects (transitive inclusion)
+effect IO includes: [FileRead, FileWrite, Console];
+effect FullAccess includes: [IO, Network, Log];
+```
+
+Built-in effects are registered by `register_builtin_effects()` in `verification.rs`
+and also defined in `std/effects.mm`.
+
+### Atom Effect Annotation
+
+```mumei
+atom write_log(msg: i64)
+effects: [Log, FileWrite];
+requires: msg >= 0;
+ensures: result >= 0;
+body: {
+    perform FileWrite.write(msg);
+    perform Log.info(msg);
+    msg
+};
+
+// Pure atom: no effects allowed
+atom pure_add(a: i64, b: i64)
+requires: true;
+ensures: result == a + b;
+body: a + b;
+```
+
+### Z3 Verification Model
+
+The Effect System uses Z3 to prove the **effect containment** property:
+
+```
+ForAll e in UsedEffects(Body): e in AllowedEffects(Signature)
+```
+
+Z3 encoding:
+1. For each known effect E, create a boolean `__effect_allowed_E`
+2. Assert `__effect_allowed_E = true` for each E in the atom's declared effects (transitively expanded)
+3. For each `perform E.op(...)` in the body, create `__effect_used_E = true`
+4. Check that `(__effect_used_E AND NOT __effect_allowed_E)` is UNSAT for all E
+5. If SAT, report the specific effect violation
+
+### Effect Propagation
+
+When atom A calls atom B, the verifier checks:
+
+```
+B.effects is subset of A.effects
+```
+
+If B requires effects not in A's allowed set, a propagation error is reported:
+
+```
+Effect propagation violation: atom 'log_only_caller' calls 'network_logger'
+which requires [Network] effect, but 'log_only_caller' only declares [Log].
+```
+
+### EffectCtx
+
+```rust
+struct EffectCtx {
+    allowed_effects: HashSet<String>,  // From atom's effects annotation (expanded)
+    used_effects: HashSet<String>,     // From perform expressions in body
+    violations: Vec<String>,           // Detected violations
+}
+```
+
+### Verification Pipeline Integration
+
+```
+0. TrustLevel check
+1. verify_resource_hierarchy()
+1b-1e. (existing checks)
+1f. verify_effect_containment() -- Z3 proof of effect set inclusion
+2. expr_to_z3(Acquire): resource tracking
+2b. expr_to_z3(Perform): effect usage tracking and verification
+3-5. (existing pipeline continues)
+```
+
+### Code Generation
+
+| Construct | LLVM IR Output |
+|---|---|
+| `perform Effect.op(args)` | `call i64 @__effect_Effect_op(args)` |
+
+The `@__effect_{Effect}_{operation}` symbols are resolved at link time by the
+runtime implementation of each effect.
+
+### Transpiler Mapping (Effects)
+
+| Mumei | Rust | Go | TypeScript |
+|---|---|---|---|
+| `effects: [FileWrite]` | `/// Effects: [FileWrite]` | `// Effects: [FileWrite]` | `@effects [FileWrite]` (JSDoc) |
+| `perform FileWrite.write(x)` | `/* perform FileWrite.write */ filewrite_write(x)` | `/* perform FileWrite.write */ FileWriteWrite(x)` | `/* perform FileWrite.write */ filewritewrite(x)` |
+
+### Error Reporting
+
+Effect violations produce structured JSON in `report.json` for self-healing integration:
+
+```json
+{
+    "status": "failed",
+    "atom": "log_only",
+    "violation_type": "effect_propagation_violation",
+    "declared_effects": ["Log"],
+    "required_effect": "Network",
+    "suggested_fixes": ["Add [Network] to the effects declaration"],
+    "reason": "Effect violation: atom 'log_only' declares [Log] but requires 'Network'"
+}
+```
+
+### Standard Library
+
+`std/effects.mm` defines the built-in effect hierarchy:
+- **FileRead**, **FileWrite**, **Network**, **Log**, **Console** (basic effects)
+- **IO** includes: FileRead, FileWrite, Console
+- **FullAccess** includes: IO, Network, Log

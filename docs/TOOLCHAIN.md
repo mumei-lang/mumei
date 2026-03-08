@@ -12,6 +12,7 @@
 | `mumei publish` | ✅ | Publish to local registry (`~/.mumei/packages/`) |
 | `mumei setup` | ✅ | Download & configure Z3 + LLVM into `~/.mumei/toolchains/` |
 | `mumei inspect` | ✅ | Inspect development environment (Z3, LLVM, std library, toolchains) |
+| `mumei infer-effects` | ✅ | Infer required effects (JSON output for MCP) |
 | `mumei lsp` | ✅ | Language Server Protocol (hover, diagnostics) |
 
 ### Installation
@@ -88,7 +89,7 @@ Published package structure:
 │       └── 0.1.0/
 │           ├── mumei.toml
 │           ├── src/main.mm
-│           └── .mumei_build_cache    ← proof artifact
+│           └── .mumei/cache/verification_cache.json  ← proof artifact
 ├── registry.json                     ← package index
 └── toolchains/
     ├── z3-4.13.4/
@@ -178,7 +179,7 @@ Inspects all tools with multi-path std library search (cwd → exe dir → `MUME
 
 ## Future Roadmap
 
-> 詳細: [`docs/ROADMAP.md`](ROADMAP.md)
+> Details: [`docs/ROADMAP.md`](ROADMAP.md)
 
 ### 🥇 Priority 1: Network-First Standard Library
 

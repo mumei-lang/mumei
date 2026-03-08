@@ -109,7 +109,7 @@ Understand the following characteristics of the code exported by Mumei:
 
 ## 7. Prohibited Actions
 
-* **Introducing Side Effects**: Mumei focuses on pure functional verification. Modifying global variables or performing undefined external I/O within the `body` is strictly prohibited.
+* **Introducing Side Effects**: Mumei focuses on pure functional verification. Modifying global variables or performing undefined external I/O within the `body` is strictly prohibited. Atoms without an `effects:` annotation are treated as pure — calling effectful atoms from a pure atom is a verification error.
 * **Ignoring Type Constraints**: Treat numbers as `i64` by default and always account for potential overflows.
 
 ---
@@ -133,11 +133,13 @@ Mumei serves as a bridge between heavyweight formal proof assistants and modern 
 
 ## 9. Incremental Build
 
-Mumei caches verification results per-atom in `.mumei_build_cache`:
+Mumei caches verification results per-atom in `.mumei/cache/verification_cache.json`:
 
-* Each atom's hash is computed from `name | requires | ensures | body_expr | consume | ref`.
+* Each atom's **proof hash** is computed from `name | requires | ensures | body_expr | consume | ref | effects | trust level | callee signatures | type predicates`.
+* The proof hash includes transitive callee signatures — if a callee's contract changes, all callers are automatically re-verified.
 * If the hash matches the cached value, Z3 verification is **skipped** — significantly reducing build times.
 * If verification **fails**, the atom is removed from cache and will be re-verified next time.
+* Old `.mumei_build_cache` files are automatically migrated to the new format.
 
 > On the second run: `✅ Verification passed: 2 verified, 6 skipped (unchanged) ⚡`
 
@@ -162,7 +164,7 @@ Mumei caches verification results per-atom in `.mumei_build_cache`:
 
 ## 11. Current Development Phase: Strategic Roadmap v0.3.0+
 
-> 詳細: [`docs/ROADMAP.md`](docs/ROADMAP.md)
+> Details: [`docs/ROADMAP.md`](docs/ROADMAP.md)
 
 ### LSP Status: Frozen
 
@@ -251,14 +253,16 @@ Improve the practicality of `task` / `task_group` introduced in PR-C.
 
 - Always run `cargo fmt` before committing.
 - When adding a new `Expr` variant, add match arms in **all** of these locations:
-  - `src/verification.rs`: `expr_to_z3`, `collect_callees`, `count_self_calls`, `collect_acquire_resources`
-  - `src/ast.rs`: `collect_from_expr`
-  - `src/codegen.rs`: `compile_expr`
-  - `src/transpiler/rust.rs`, `golang.rs`, `typescript.rs`: `format_expr_*`
+  - `src/verification.rs`: `expr_to_z3`, `stmt_to_z3`, `collect_callees_expr`, `collect_callees_stmt`, `count_self_calls_expr`, `count_self_calls_stmt`, `collect_acquire_resources_expr`, `collect_acquire_resources_stmt`
+  - `src/ast.rs`: `collect_from_expr`, `collect_from_stmt`
+  - `src/codegen.rs`: `compile_hir_expr`, `compile_hir_stmt`
+  - `src/transpiler/rust.rs`, `golang.rs`, `typescript.rs`: `format_hir_expr_*`, `format_hir_stmt_*`
 - When adding a new `Item` variant, add match arms in **all** of these locations:
   - `src/main.rs`: `load_and_prepare`, `cmd_check`, `cmd_build`
   - `src/resolver.rs`: `resolve_imports_recursive`, `register_imported_items`
   - `src/lsp.rs`: `verify_source_for_lsp`
+- When adding `Item::EffectDef`, ensure match arms exist in all locations listed above.
+- When constructing `Atom` instances (including extern → atom conversion), always include `effects: vec![]` as default.
 - When using `#[allow(dead_code)]`, always add a NOTE comment explaining the reason.
 
 ---

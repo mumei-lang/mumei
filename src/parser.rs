@@ -110,6 +110,76 @@ pub enum ResourceMode {
     Shared,
 }
 
+/// エフェクト定義（パラメータ付き）
+/// 例: FileWrite("/tmp/..."), NetRead, ConsoleOut
+#[derive(Debug, Clone, PartialEq)]
+pub struct Effect {
+    pub name: String,             // "FileWrite", "NetRead", "ConsoleOut" 等
+    pub params: Vec<EffectParam>, // パラメータ付きリファインメント（空なら単純エフェクト）
+    pub span: Span,
+}
+
+/// エフェクトパラメータ
+#[derive(Debug, Clone, PartialEq)]
+pub struct EffectParam {
+    pub value: String,              // 具体値（"/tmp/log.txt"）または変数名
+    pub refinement: Option<String>, // Z3 制約式（例: "starts_with(\"/tmp/\")"）
+    pub is_constant: bool,          // true なら Constant Folding 対象
+}
+
+impl Effect {
+    /// 名前のみの単純エフェクトを生成するヘルパー
+    // NOTE: Effect::simple is infrastructure for future effect construction in tests and MCP tools
+    #[allow(dead_code)]
+    pub fn simple(name: &str) -> Self {
+        Effect {
+            name: name.to_string(),
+            params: vec![],
+            span: Span::default(),
+        }
+    }
+}
+
+/// エフェクト定義（effect 宣言）
+/// ```mumei
+/// effect FileRead;
+/// effect FileWrite;
+/// effect Network;
+/// effect Log;
+/// effect IO includes: [FileRead, FileWrite];
+/// effect HttpRead parent: Network;
+/// effect TcpConnect parent: Network;
+/// effect FileWrite(path: Str) where starts_with(path, "/tmp/");
+/// ```
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct EffectDef {
+    pub name: String,
+    /// エフェクト定義パラメータ（例: path: Str）
+    pub params: Vec<EffectDefParam>,
+    /// Z3 に渡す制約式（例: starts_with(path, "/tmp/")）
+    pub constraint: Option<String>,
+    /// Superset effects (e.g., IO includes FileRead + FileWrite)
+    pub includes: Vec<String>,
+    /// Refinement constraint (e.g., path starts_with "/tmp/")
+    pub refinement: Option<String>,
+    /// 親エフェクト名（階層構造 / Subtyping）
+    /// Network エフェクトが HttpRead, TcpConnect を包含するような関係を表現。
+    /// 例: HttpRead の parent = Some("Network")
+    /// エフェクト推論時、HttpRead を持つ atom は暗黙的に Network も満たす。
+    pub parent: Option<String>,
+    pub span: Span,
+}
+
+/// エフェクト定義パラメータ
+#[derive(Debug, Clone)]
+// NOTE: EffectDefParam fields are read during effect constraint resolution (future Z3 String Sort integration)
+#[allow(dead_code)]
+pub struct EffectDefParam {
+    pub name: String,
+    pub type_name: String, // "Str", "i64" 等
+}
+
 #[derive(Debug, Clone)]
 pub enum Expr {
     Number(i64),
@@ -119,24 +189,8 @@ pub enum Expr {
     BinaryOp(Box<Expr>, Op, Box<Expr>),
     IfThenElse {
         cond: Box<Expr>,
-        then_branch: Box<Expr>,
-        else_branch: Box<Expr>,
-    },
-    Let {
-        var: String,
-        value: Box<Expr>,
-    },
-    Assign {
-        var: String,
-        value: Box<Expr>,
-    },
-    Block(Vec<Expr>),
-    While {
-        cond: Box<Expr>,
-        invariant: Box<Expr>,
-        /// 停止性証明用の減少式（Ranking Function）。None なら停止性チェックをスキップ
-        decreases: Option<Box<Expr>>,
-        body: Box<Expr>,
+        then_branch: Box<Stmt>,
+        else_branch: Box<Stmt>,
     },
     Call(String, Vec<Expr>),
     /// 構造体インスタンス生成: TypeName { field1: expr1, field2: expr2 }
@@ -151,37 +205,15 @@ pub enum Expr {
         target: Box<Expr>,
         arms: Vec<MatchArm>,
     },
-    /// リソース取得: acquire resource_name { body }
-    /// body 実行中はリソースを保持し、ブロック終了時に自動解放する。
-    /// Z3 検証時にリソース階層制約をチェックする。
-    Acquire {
-        resource: String,
-        body: Box<Expr>,
-    },
     /// 非同期式: async { body }
     /// body を非同期コンテキストで実行する。暗黙的に Control エフェクトを持つ。
     Async {
-        body: Box<Expr>,
+        body: Box<Stmt>,
     },
     /// 待機式: await expr
     /// 非同期式の結果を待機する。await ポイントで所有権の検証が行われる。
     Await {
         expr: Box<Expr>,
-    },
-    /// タスク式: task { body }
-    /// 構造化並行性のための子タスクを生成する。
-    /// 親タスクが子タスクより先に終了しないことを Z3 で保証する。
-    Task {
-        body: Box<Expr>,
-        /// タスクグループ名（省略時は暗黙のデフォルトグループ）
-        group: Option<String>,
-    },
-    /// タスクグループ式: task_group { task { ... }, task { ... } }
-    /// 複数の子タスクをグループ化し、全タスクの完了を待機する。
-    TaskGroup {
-        children: Vec<Expr>,
-        /// Join セマンティクス: all（全タスク完了待ち）または any（最初の完了で終了）
-        join_semantics: JoinSemantics,
     },
     /// atom参照: atom_ref(atom_name)
     /// atom を第一級の値として参照する。型は AtomRef<(ParamTypes...) -> ReturnType>
@@ -194,15 +226,64 @@ pub enum Expr {
         callee: Box<Expr>,
         args: Vec<Expr>,
     },
+    /// エフェクト実行: perform Effect.operation(args)
+    /// 明示的にエフェクトの使用を宣言する。
+    /// Z3 がこのエフェクトが包含する atom の許可セットに含まれることを検証する。
+    Perform {
+        effect: String,
+        operation: String,
+        args: Vec<Expr>,
+    },
 }
 
-/// Match 式のアーム（パターン → 式）
+/// 文（Statement）: 副作用を持つ構文要素
+#[derive(Debug, Clone)]
+pub enum Stmt {
+    /// 変数束縛: let var = expr
+    Let { var: String, value: Box<Expr> },
+    /// 代入: var = expr
+    Assign { var: String, value: Box<Expr> },
+    /// ブロック: { stmt1; stmt2; ... }
+    /// ※最後の要素が式として値を返すケースは Stmt::Expr(Expr) として格納される
+    Block(Vec<Stmt>),
+    /// While ループ: while cond invariant: inv { body }
+    While {
+        cond: Box<Expr>,
+        invariant: Box<Expr>,
+        /// 停止性証明用の減少式（Ranking Function）。None なら停止性チェックをスキップ
+        decreases: Option<Box<Expr>>,
+        body: Box<Stmt>,
+    },
+    /// リソース取得: acquire resource_name { body }
+    /// body 実行中はリソースを保持し、ブロック終了時に自動解放する。
+    /// Z3 検証時にリソース階層制約をチェックする。
+    Acquire { resource: String, body: Box<Stmt> },
+    /// タスク式: task { body }
+    /// 構造化並行性のための子タスクを生成する。
+    /// 親タスクが子タスクより先に終了しないことを Z3 で保証する。
+    Task {
+        body: Box<Stmt>,
+        /// タスクグループ名（省略時は暗黙のデフォルトグループ）
+        group: Option<String>,
+    },
+    /// タスクグループ式: task_group { task { ... }, task { ... } }
+    /// 複数の子タスクをグループ化し、全タスクの完了を待機する。
+    TaskGroup {
+        children: Vec<Stmt>,
+        /// Join セマンティクス: all（全タスク完了待ち）または any（最初の完了で終了）
+        join_semantics: JoinSemantics,
+    },
+    /// 式文: 式をステートメントとして扱う
+    Expr(Expr),
+}
+
+/// Match 式のアーム（パターン → 式/文）
 #[derive(Debug, Clone)]
 pub struct MatchArm {
     pub pattern: Pattern,
     /// オプションのガード条件: match x { Pattern if cond => ... }
     pub guard: Option<Box<Expr>>,
-    pub body: Box<Expr>,
+    pub body: Box<Stmt>,
 }
 
 /// タスクグループの Join セマンティクス
@@ -358,6 +439,10 @@ pub struct Atom {
     /// 2. 維持 (Preservation): invariant が成立する状態で body を実行した後も invariant が維持されることを証明
     /// 3. 再帰呼び出し時: 呼び出し先の invariant を仮定として使用（帰納法の仮定）
     pub invariant: Option<String>,
+    /// この atom が持つエフェクトリスト（Effect System）
+    /// `atom write_log(msg: Str) effects: [FileWrite("/tmp/log.txt"), ConsoleOut];`
+    /// 空リストはエフェクトなし（純粋関数）を意味する。
+    pub effects: Vec<Effect>,
     /// ソース位置情報
     pub span: Span,
 }
@@ -485,6 +570,7 @@ pub struct ImplDef {
 }
 
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum Item {
     Atom(Atom),
     TypeDef(RefinedType),
@@ -497,6 +583,8 @@ pub enum Item {
     ResourceDef(ResourceDef),
     /// extern ブロック: extern "Lang" { fn ...; }
     ExternBlock(ExternBlock),
+    /// エフェクト定義: effect Name;
+    EffectDef(EffectDef),
 }
 
 // =============================================================================
@@ -1006,6 +1094,63 @@ pub fn parse_module(source: &str) -> Vec<Item> {
         }));
     }
 
+    // effect 定義: effect Name; / effect Name includes: [...]; / effect Name where ...;
+    // effect Name parent: ParentName; / effect Name(param: Type) where constraint;
+    let effect_re = Regex::new(
+        r"(?m)^effect\s+(\w+)(?:\(([^)]*)\))?(?:\s+parent:\s*(\w+))?(?:\s+includes:\s*\[([^\]]*)\])?(?:\s+where\s+([^;]+))?\s*;",
+    )
+    .unwrap();
+    for cap in effect_re.captures_iter(source) {
+        let name = cap[1].to_string();
+        // パラメータのパース: (path: Str, mode: i64)
+        let params: Vec<EffectDefParam> = cap
+            .get(2)
+            .map(|m| {
+                m.as_str()
+                    .split(',')
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| {
+                        if let Some((pname, ptype)) = s.split_once(':') {
+                            EffectDefParam {
+                                name: pname.trim().to_string(),
+                                type_name: ptype.trim().to_string(),
+                            }
+                        } else {
+                            EffectDefParam {
+                                name: s.to_string(),
+                                type_name: "Str".to_string(),
+                            }
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let parent = cap.get(3).map(|m| m.as_str().trim().to_string());
+        let includes: Vec<String> = cap
+            .get(4)
+            .map(|m| {
+                m.as_str()
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let refinement = cap.get(5).map(|m| m.as_str().trim().to_string());
+        let constraint = refinement.clone();
+        let m = cap.get(0).unwrap();
+        items.push(Item::EffectDef(EffectDef {
+            name,
+            params,
+            constraint,
+            includes,
+            refinement,
+            parent,
+            span: span_from_offset(source, m.start(), m.end() - m.start()),
+        }));
+    }
+
     // extern ブロック: extern "Rust" { fn name(params) -> RetType; ... }
     let extern_re = Regex::new(r#"(?m)^extern\s+"(\w+)"\s*\{([^}]*)\}"#).unwrap();
     for cap in extern_re.captures_iter(source) {
@@ -1326,6 +1471,14 @@ pub fn parse_atom(source: &str) -> Atom {
         .captures(source)
         .map(|cap| cap[1].trim().to_string());
 
+    // effects 句のパース: "effects: [FileWrite("/tmp/log.txt"), ConsoleOut];" — エフェクトセット
+    // パラメータ付きエフェクトをサポート: Name("value") or Name(var) or Name
+    let effects_re = Regex::new(r"effects:\s*\[([^\]]*)]\s*;").unwrap();
+    let effects: Vec<Effect> = effects_re
+        .captures(source)
+        .map(|cap| parse_effect_list(&cap[1]))
+        .unwrap_or_default();
+
     let atom_match = name_caps.get(0).unwrap();
     Atom {
         name,
@@ -1344,7 +1497,140 @@ pub fn parse_atom(source: &str) -> Atom {
         trust_level: TrustLevel::Verified,
         max_unroll,
         invariant,
+        effects,
         span: span_from_offset(source, atom_match.start(), source.len()),
+    }
+}
+
+/// エフェクトリスト文字列をパースする。
+/// "FileWrite(\"/tmp/log.txt\"), ConsoleOut, Network" のような文字列を
+/// Vec<Effect> に変換する。パラメータ付きエフェクト（括弧内の値）をサポート。
+fn parse_effect_list(input: &str) -> Vec<Effect> {
+    let mut effects = Vec::new();
+    let input = input.trim();
+    if input.is_empty() {
+        return effects;
+    }
+
+    // 括弧のネストを考慮してカンマで分割する（byte offset で正しくスライス）
+    let mut depth = 0;
+    let mut current_start = 0;
+    for (byte_idx, ch) in input.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ',' if depth == 0 => {
+                let token = input[current_start..byte_idx].trim();
+                if !token.is_empty() {
+                    effects.push(parse_single_effect(token));
+                }
+                current_start = byte_idx + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    // 最後のトークン
+    let token = input[current_start..].trim();
+    if !token.is_empty() {
+        effects.push(parse_single_effect(token));
+    }
+    effects
+}
+
+/// 単一のエフェクト文字列をパースする。
+/// "FileWrite(\"/tmp/log.txt\")" → Effect { name: "FileWrite", params: [...] }
+/// "ConsoleOut" → Effect { name: "ConsoleOut", params: [] }
+fn parse_single_effect(input: &str) -> Effect {
+    let input = input.trim();
+    if let Some(paren_start) = input.find('(') {
+        let name = input[..paren_start].trim().to_string();
+        let paren_end = input.rfind(')').unwrap_or(input.len());
+        let params_str = &input[paren_start + 1..paren_end];
+        let params = parse_effect_params(params_str);
+        Effect {
+            name,
+            params,
+            span: Span::default(),
+        }
+    } else {
+        Effect {
+            name: input.to_string(),
+            params: vec![],
+            span: Span::default(),
+        }
+    }
+}
+
+/// エフェクトパラメータ文字列をパースする。
+/// "\"value\"" → EffectParam { value: "value", is_constant: true }
+/// "var_name" → EffectParam { value: "var_name", is_constant: false }
+fn parse_effect_params(input: &str) -> Vec<EffectParam> {
+    let mut params = Vec::new();
+    // クォート内のカンマを無視してパラメータを分割する
+    let mut in_quote = false;
+    let mut current_start = 0;
+    for (byte_idx, ch) in input.char_indices() {
+        match ch {
+            '"' => in_quote = !in_quote,
+            ',' if !in_quote => {
+                let part = input[current_start..byte_idx].trim();
+                if !part.is_empty() {
+                    params.push(parse_single_effect_param(part));
+                }
+                current_start = byte_idx + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    // 最後のパラメータ
+    let part = input[current_start..].trim();
+    if !part.is_empty() {
+        params.push(parse_single_effect_param(part));
+    }
+    params
+}
+
+/// 単一のエフェクトパラメータをパースするヘルパー
+fn parse_single_effect_param(part: &str) -> EffectParam {
+    // 文字列リテラル（"..." で囲まれている）は定数
+    if (part.starts_with('"') && part.ends_with('"'))
+        || (part.starts_with('\'') && part.ends_with('\''))
+    {
+        let value = part[1..part.len() - 1].to_string();
+        EffectParam {
+            value,
+            refinement: None,
+            is_constant: true,
+        }
+    } else {
+        // 変数名 → 非定数（Z3 検証対象）
+        EffectParam {
+            value: part.to_string(),
+            refinement: None,
+            is_constant: false,
+        }
+    }
+}
+
+/// Effect の名前を返すヘルパー（表示・デバッグ用）
+impl std::fmt::Display for Effect {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.params.is_empty() {
+            write!(f, "{}", self.name)
+        } else {
+            let params_str: Vec<String> = self
+                .params
+                .iter()
+                .map(|p| {
+                    if p.is_constant {
+                        format!("\"{}\"", p.value)
+                    } else {
+                        p.value.clone()
+                    }
+                })
+                .collect();
+            write!(f, "{}({})", self.name, params_str.join(", "))
+        }
     }
 }
 
@@ -1358,13 +1644,21 @@ pub fn tokenize(input: &str) -> Vec<String> {
         .collect()
 }
 
+/// 純粋な式をパースする（requires/ensures/条件式用）
 pub fn parse_expression(input: &str) -> Expr {
     let tokens = tokenize(input);
     let mut pos = 0;
-    parse_block_or_expr(&tokens, &mut pos)
+    parse_implies(&tokens, &mut pos)
 }
 
-fn parse_block_or_expr(tokens: &[String], pos: &mut usize) -> Expr {
+/// body_expr をパースする（ブロックや文を含むボディ用）
+pub fn parse_body_expr(input: &str) -> Stmt {
+    let tokens = tokenize(input);
+    let mut pos = 0;
+    parse_block_or_stmt(&tokens, &mut pos)
+}
+
+fn parse_block_or_stmt(tokens: &[String], pos: &mut usize) -> Stmt {
     if *pos < tokens.len() && tokens[*pos] == "{" {
         *pos += 1;
         let mut stmts = Vec::new();
@@ -1377,9 +1671,9 @@ fn parse_block_or_expr(tokens: &[String], pos: &mut usize) -> Expr {
         if *pos < tokens.len() && tokens[*pos] == "}" {
             *pos += 1;
         }
-        Expr::Block(stmts)
+        Stmt::Block(stmts)
     } else {
-        parse_implies(tokens, pos)
+        parse_statement(tokens, pos)
     }
 }
 
@@ -1387,23 +1681,23 @@ fn parse_block_or_expr(tokens: &[String], pos: &mut usize) -> Expr {
 /// `{...}` ブロックの場合は通常通りパース。
 /// それ以外の場合は `parse_logical_or` を使い、`=>` を含意演算子として消費しない。
 /// これにより `0 => match x { 0 => 1, _ => 2 }, 1 => ...` のネストが正しく動作する。
-fn parse_match_arm_body(tokens: &[String], pos: &mut usize) -> Expr {
+fn parse_match_arm_body(tokens: &[String], pos: &mut usize) -> Stmt {
     if *pos < tokens.len() && tokens[*pos] == "{" {
         // ブロック式: 通常通りパース（内部の `=>` は match パーサーが処理する）
-        parse_block_or_expr(tokens, pos)
+        parse_block_or_stmt(tokens, pos)
     } else if *pos < tokens.len() && tokens[*pos] == "match" {
         // ネストした match 式: match パーサーに委譲（parse_primary 経由）
-        parse_implies(tokens, pos)
+        Stmt::Expr(parse_implies(tokens, pos))
     } else if *pos < tokens.len() && tokens[*pos] == "if" {
         // if-then-else 式
-        parse_implies(tokens, pos)
+        Stmt::Expr(parse_implies(tokens, pos))
     } else {
         // それ以外: `=>` を消費しないレベルでパース
-        parse_logical_or(tokens, pos)
+        Stmt::Expr(parse_logical_or(tokens, pos))
     }
 }
 
-fn parse_statement(tokens: &[String], pos: &mut usize) -> Expr {
+fn parse_statement(tokens: &[String], pos: &mut usize) -> Stmt {
     if *pos < tokens.len() && tokens[*pos] == "let" {
         *pos += 1;
         let var = tokens[*pos].clone();
@@ -1412,7 +1706,7 @@ fn parse_statement(tokens: &[String], pos: &mut usize) -> Expr {
             *pos += 1;
         }
         let value = parse_implies(tokens, pos);
-        Expr::Let {
+        Stmt::Let {
             var,
             value: Box::new(value),
         }
@@ -1427,12 +1721,102 @@ fn parse_statement(tokens: &[String], pos: &mut usize) -> Expr {
         *pos += 1;
         *pos += 1;
         let value = parse_implies(tokens, pos);
-        Expr::Assign {
+        Stmt::Assign {
             var,
             value: Box::new(value),
         }
+    } else if *pos < tokens.len() && tokens[*pos] == "while" {
+        *pos += 1;
+        let cond = parse_implies(tokens, pos);
+        if *pos < tokens.len() && tokens[*pos] == "invariant" {
+            *pos += 1;
+            if *pos < tokens.len() && tokens[*pos] == ":" {
+                *pos += 1;
+            }
+            let inv = parse_implies(tokens, pos);
+            let decreases = if *pos < tokens.len() && tokens[*pos] == "decreases" {
+                *pos += 1;
+                if *pos < tokens.len() && tokens[*pos] == ":" {
+                    *pos += 1;
+                }
+                Some(Box::new(parse_implies(tokens, pos)))
+            } else {
+                None
+            };
+            let body = parse_block_or_stmt(tokens, pos);
+            Stmt::While {
+                cond: Box::new(cond),
+                invariant: Box::new(inv),
+                decreases,
+                body: Box::new(body),
+            }
+        } else {
+            panic!("Mumei loops require an 'invariant'.");
+        }
+    } else if *pos < tokens.len() && tokens[*pos] == "acquire" {
+        *pos += 1;
+        let resource = if *pos < tokens.len() {
+            let r = tokens[*pos].clone();
+            *pos += 1;
+            r
+        } else {
+            "unknown".to_string()
+        };
+        let body = parse_block_or_stmt(tokens, pos);
+        Stmt::Acquire {
+            resource,
+            body: Box::new(body),
+        }
+    } else if *pos < tokens.len() && tokens[*pos] == "task_group" {
+        *pos += 1;
+        let join_semantics = if *pos < tokens.len() && tokens[*pos] == ":" {
+            *pos += 1;
+            if *pos < tokens.len() && tokens[*pos] == "any" {
+                *pos += 1;
+                JoinSemantics::Any
+            } else if *pos < tokens.len() && tokens[*pos] == "all" {
+                *pos += 1;
+                JoinSemantics::All
+            } else {
+                let unknown = if *pos < tokens.len() {
+                    tokens[*pos].clone()
+                } else {
+                    "<EOF>".to_string()
+                };
+                panic!(
+                    "Unknown task_group join semantics '{}'. Expected 'all' or 'any'.",
+                    unknown
+                );
+            }
+        } else {
+            JoinSemantics::All
+        };
+        let body = parse_block_or_stmt(tokens, pos);
+        let children = if let Stmt::Block(stmts) = body {
+            stmts
+        } else {
+            vec![body]
+        };
+        Stmt::TaskGroup {
+            children,
+            join_semantics,
+        }
+    } else if *pos < tokens.len() && tokens[*pos] == "task" {
+        *pos += 1;
+        let group = if *pos < tokens.len() && tokens[*pos] != "{" {
+            let g = Some(tokens[*pos].clone());
+            *pos += 1;
+            g
+        } else {
+            None
+        };
+        let body = parse_block_or_stmt(tokens, pos);
+        Stmt::Task {
+            body: Box::new(body),
+            group,
+        }
     } else {
-        parse_implies(tokens, pos)
+        Stmt::Expr(parse_implies(tokens, pos))
     }
 }
 
@@ -1568,27 +1952,54 @@ fn parse_primary(tokens: &[String], pos: &mut usize) -> Expr {
         panic!("call requires parentheses: call(callee, args...)");
     }
 
-    // acquire 式: acquire resource_name { body }
-    if token == "acquire" {
+    // perform 式: perform Effect.operation(args)
+    if token == "perform" {
         *pos += 1;
-        let resource = if *pos < tokens.len() {
-            let r = tokens[*pos].clone();
+        let effect = if *pos < tokens.len() {
+            let e = tokens[*pos].clone();
             *pos += 1;
-            r
+            e
         } else {
-            "unknown".to_string()
+            panic!("perform requires an effect name");
         };
-        let body = parse_block_or_expr(tokens, pos);
-        return Expr::Acquire {
-            resource,
-            body: Box::new(body),
+        // skip "."
+        if *pos < tokens.len() && tokens[*pos] == "." {
+            *pos += 1;
+        } else {
+            panic!("perform requires Effect.operation syntax");
+        }
+        let operation = if *pos < tokens.len() {
+            let o = tokens[*pos].clone();
+            *pos += 1;
+            o
+        } else {
+            panic!("perform requires an operation name");
+        };
+        // parse args: (arg1, arg2, ...)
+        let mut args = Vec::new();
+        if *pos < tokens.len() && tokens[*pos] == "(" {
+            *pos += 1; // skip (
+            while *pos < tokens.len() && tokens[*pos] != ")" {
+                args.push(parse_implies(tokens, pos));
+                if *pos < tokens.len() && tokens[*pos] == "," {
+                    *pos += 1;
+                }
+            }
+            if *pos < tokens.len() && tokens[*pos] == ")" {
+                *pos += 1; // skip )
+            }
+        }
+        return Expr::Perform {
+            effect,
+            operation,
+            args,
         };
     }
 
     // async 式: async { body }
     if token == "async" {
         *pos += 1;
-        let body = parse_block_or_expr(tokens, pos);
+        let body = parse_block_or_stmt(tokens, pos);
         return Expr::Async {
             body: Box::new(body),
         };
@@ -1603,102 +2014,13 @@ fn parse_primary(tokens: &[String], pos: &mut usize) -> Expr {
         };
     }
 
-    // task 式: task { body } または task group_name { body }
-    if token == "task" {
-        *pos += 1;
-        let group = if *pos < tokens.len() && tokens[*pos] != "{" {
-            let g = Some(tokens[*pos].clone());
-            *pos += 1;
-            g
-        } else {
-            None
-        };
-        let body = parse_block_or_expr(tokens, pos);
-        return Expr::Task {
-            body: Box::new(body),
-            group,
-        };
-    }
-
-    // task_group 式: task_group { task { ... }; task { ... } }
-    // task_group:any { task { ... }; task { ... } }
-    if token == "task_group" {
-        *pos += 1;
-        let join_semantics = if *pos < tokens.len() && tokens[*pos] == ":" {
-            *pos += 1; // skip ":"
-            if *pos < tokens.len() && tokens[*pos] == "any" {
-                *pos += 1;
-                JoinSemantics::Any
-            } else if *pos < tokens.len() && tokens[*pos] == "all" {
-                *pos += 1;
-                JoinSemantics::All
-            } else {
-                let unknown = if *pos < tokens.len() {
-                    tokens[*pos].clone()
-                } else {
-                    "<EOF>".to_string()
-                };
-                panic!(
-                    "Unknown task_group join semantics '{}'. Expected 'all' or 'any'.",
-                    unknown
-                );
-            }
-        } else {
-            JoinSemantics::All
-        };
-        // { task { ... }; task { ... } } をパース
-        let body = parse_block_or_expr(tokens, pos);
-        let children = if let Expr::Block(stmts) = body {
-            stmts
-        } else {
-            vec![body]
-        };
-        return Expr::TaskGroup {
-            children,
-            join_semantics,
-        };
-    }
-
-    // while, if 処理 (既存通り)
-    if token == "while" {
-        *pos += 1;
-        let cond = parse_implies(tokens, pos);
-        if *pos < tokens.len() && tokens[*pos] == "invariant" {
-            *pos += 1;
-            // `invariant:` の `:` をスキップ（tokenizer が `:` を独立トークンとして分離するため）
-            if *pos < tokens.len() && tokens[*pos] == ":" {
-                *pos += 1;
-            }
-            let inv = parse_implies(tokens, pos);
-            // オプション: decreases 句（停止性証明用の減少式）
-            let decreases = if *pos < tokens.len() && tokens[*pos] == "decreases" {
-                *pos += 1;
-                // `decreases:` の `:` もスキップ
-                if *pos < tokens.len() && tokens[*pos] == ":" {
-                    *pos += 1;
-                }
-                Some(Box::new(parse_implies(tokens, pos)))
-            } else {
-                None
-            };
-            let body = parse_block_or_expr(tokens, pos);
-            return Expr::While {
-                cond: Box::new(cond),
-                invariant: Box::new(inv),
-                decreases,
-                body: Box::new(body),
-            };
-        }
-        panic!("Mumei loops require an 'invariant'.");
-    }
-
     if token == "if" {
         *pos += 1;
         let cond = parse_implies(tokens, pos);
-        let then_branch = parse_block_or_expr(tokens, pos);
+        let then_branch = parse_block_or_stmt(tokens, pos);
         if *pos < tokens.len() && tokens[*pos] == "else" {
             *pos += 1;
-            let else_branch = parse_block_or_expr(tokens, pos);
+            let else_branch = parse_block_or_stmt(tokens, pos);
             return Expr::IfThenElse {
                 cond: Box::new(cond),
                 then_branch: Box::new(then_branch),
@@ -2276,17 +2598,17 @@ body: amount;
 
     #[test]
     fn test_parse_acquire_expression() {
-        let expr = parse_expression("acquire mutex_a { x + 1 }");
-        match expr {
-            Expr::Acquire { resource, body } => {
+        let stmt = parse_body_expr("acquire mutex_a { x + 1 }");
+        match stmt {
+            Stmt::Acquire { resource, body } => {
                 assert_eq!(resource, "mutex_a");
                 // body should be a Block containing x + 1
                 match *body {
-                    Expr::Block(_) => {} // OK
+                    Stmt::Block(_) => {} // OK
                     _ => panic!("Expected Block in acquire body"),
                 }
             }
-            _ => panic!("Expected Acquire expression, got {:?}", expr),
+            _ => panic!("Expected Acquire statement, got {:?}", stmt),
         }
     }
 
@@ -2296,7 +2618,7 @@ body: amount;
         match expr {
             Expr::Async { body } => {
                 match *body {
-                    Expr::Block(_) => {} // OK
+                    Stmt::Block(_) => {} // OK
                     _ => panic!("Expected Block in async body"),
                 }
             }
@@ -2449,83 +2771,83 @@ body: v + r;
 
     #[test]
     fn test_parse_task_expression() {
-        let expr = parse_expression("task { x + 1 }");
-        match expr {
-            Expr::Task { body, group } => {
+        let stmt = parse_body_expr("task { x + 1 }");
+        match stmt {
+            Stmt::Task { body, group } => {
                 assert!(group.is_none());
                 match *body {
-                    Expr::Block(_) => {} // OK
+                    Stmt::Block(_) => {} // OK
                     _ => panic!("Expected Block in task body"),
                 }
             }
-            _ => panic!("Expected Task expression, got {:?}", expr),
+            _ => panic!("Expected Task statement, got {:?}", stmt),
         }
     }
 
     #[test]
     fn test_parse_task_with_group_name() {
-        let expr = parse_expression("task workers { x + 1 }");
-        match expr {
-            Expr::Task { body, group } => {
+        let stmt = parse_body_expr("task workers { x + 1 }");
+        match stmt {
+            Stmt::Task { body, group } => {
                 assert_eq!(group, Some("workers".to_string()));
                 match *body {
-                    Expr::Block(_) => {} // OK
+                    Stmt::Block(_) => {} // OK
                     _ => panic!("Expected Block in task body"),
                 }
             }
-            _ => panic!("Expected Task expression, got {:?}", expr),
+            _ => panic!("Expected Task statement, got {:?}", stmt),
         }
     }
 
     #[test]
     fn test_parse_task_group_default_semantics() {
-        let expr = parse_expression("task_group { task { x }; task { y } }");
-        match expr {
-            Expr::TaskGroup {
+        let stmt = parse_body_expr("task_group { task { x }; task { y } }");
+        match stmt {
+            Stmt::TaskGroup {
                 children,
                 join_semantics,
             } => {
                 assert_eq!(join_semantics, JoinSemantics::All);
                 assert_eq!(children.len(), 2);
             }
-            _ => panic!("Expected TaskGroup expression, got {:?}", expr),
+            _ => panic!("Expected TaskGroup statement, got {:?}", stmt),
         }
     }
 
     #[test]
     fn test_parse_task_group_any_semantics() {
-        let expr = parse_expression("task_group:any { task { x }; task { y } }");
-        match expr {
-            Expr::TaskGroup {
+        let stmt = parse_body_expr("task_group:any { task { x }; task { y } }");
+        match stmt {
+            Stmt::TaskGroup {
                 children,
                 join_semantics,
             } => {
                 assert_eq!(join_semantics, JoinSemantics::Any);
                 assert_eq!(children.len(), 2);
             }
-            _ => panic!("Expected TaskGroup expression, got {:?}", expr),
+            _ => panic!("Expected TaskGroup statement, got {:?}", stmt),
         }
     }
 
     #[test]
     fn test_parse_task_group_all_semantics() {
-        let expr = parse_expression("task_group:all { task { x }; task { y } }");
-        match expr {
-            Expr::TaskGroup {
+        let stmt = parse_body_expr("task_group:all { task { x }; task { y } }");
+        match stmt {
+            Stmt::TaskGroup {
                 children,
                 join_semantics,
             } => {
                 assert_eq!(join_semantics, JoinSemantics::All);
                 assert_eq!(children.len(), 2);
             }
-            _ => panic!("Expected TaskGroup expression, got {:?}", expr),
+            _ => panic!("Expected TaskGroup statement, got {:?}", stmt),
         }
     }
 
     #[test]
     #[should_panic(expected = "Unknown task_group join semantics")]
     fn test_parse_task_group_unknown_semantics_panics() {
-        parse_expression("task_group:bogus { task { x } }");
+        parse_body_expr("task_group:bogus { task { x } }");
     }
 
     // =========================================================================

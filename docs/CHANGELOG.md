@@ -2,6 +2,52 @@
 
 ---
 
+## Effect System: Inference, Refinement Types × Effects, Hierarchy
+
+### Summary
+
+Implements comprehensive Effect Inference and Refinement Types × Effects integration with a hybrid verification approach (Constant Folding + Symbolic String ID).
+
+### Effect System Core
+
+- **Effect/EffectDef structs**: `Effect` with params, `EffectDef` with constraint and `parent:` for hierarchy
+- **Parser**: `effects: [...]` clause in atoms, `effect` declarations with `parent:` and `where` constraints
+- **Effect Hierarchy (Subtyping)**: `parent:` field enables Network → HttpRead/TcpConnect relationships
+- **`get_effect_ancestors()` / `is_subeffect()`**: Traverse hierarchy chain for subtype checking
+
+### Effect Inference
+
+- **`infer_effects()`**: Call graph traversal infers required effects from callee atoms
+- **`infer_effects_json()`**: JSON serialization for CLI/MCP integration
+- **`verify_effect_consistency()`**: Checks declared vs inferred effects with subtyping support
+
+### Hybrid Path Verification
+
+- **Constant Folding**: Rust-side compile-time check for literal path constraints (e.g., `starts_with`)
+- **Symbolic String ID**: Path strings mapped to Z3 Int sort for variable path verification
+- **`verify_effect_params()`**: Effect parameter constraint verification
+
+### CLI & MCP
+
+- **`mumei infer-effects <file>`**: New CLI subcommand for JSON effect inference output
+- **`get_inferred_effects` MCP tool**: Pre-check tool for AI to verify required permissions before writing code
+
+### File Consistency
+
+- All transpilers (Rust/Go/TypeScript) output effect annotations as doc comments
+- LLVM IR codegen includes effect metadata
+- LSP hover displays effect information
+- Resolver handles `Item::EffectDef` registration with FQN support
+- `compute_atom_hash()` includes effect fields for cache invalidation
+
+### Documentation
+
+- **ROADMAP.md**: Z3 String Sort migration plan + Effect hierarchy extensions
+- **ARCHITECTURE.md**: Updated verification steps (1f, 1g) and pipeline diagram
+- **instruction.md**: Updated coding conventions for `Item::EffectDef` and `Atom.effects`
+
+---
+
 ## PR #35: miette Rich Diagnostics (Phase 1) + Higher-Order Functions `atom_ref` (Phase 2)
 
 ### Summary
@@ -187,8 +233,11 @@ This PR implements dynamic memory management, ownership system, borrowing, and c
 
 ## Incremental Build
 
-- `.mumei_build_cache` with per-atom SHA-256 hashing
-- `compute_atom_hash()`: hashes `name | requires | ensures | body_expr | consume | ref`
+- `.mumei/cache/verification_cache.json` with enhanced per-atom verification cache
+- `compute_proof_hash()`: hashes `name | requires | ensures | body_expr | consume | ref | effects | trust | callee signatures | type predicates`
+- Transitive dependency tracking: callee contract changes automatically invalidate callers
+- `VerificationCacheEntry`: stores `proof_hash`, `result`, `dependencies`, `type_deps`, `timestamp`
+- Old `.mumei_build_cache` automatically migrated via `migrate_old_cache()`
 - Unchanged atoms skip Z3 verification
 - Cache invalidation on verification failure
 

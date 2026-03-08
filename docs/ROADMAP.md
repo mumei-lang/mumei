@@ -404,6 +404,68 @@ P3-B (mumei doc)       (independent)
 
 ---
 
+## P4: Effect System — Inference, Refinement, Hierarchy
+
+### Current Implementation
+
+- **Effect Inference**: Call graph traversal infers required effects from callee atoms
+- **Hybrid Path Verification**: Constant Folding (Rust-side) + Symbolic String ID (Z3 Int)
+- **Effect Hierarchy (Subtyping)**: `parent:` field on EffectDef enables Network → HttpRead/TcpConnect
+- **MCP Pre-check**: `get_inferred_effects` tool lets AI check required permissions before writing code
+
+### TODO: Z3 String Sort Migration
+
+When the hybrid approach reaches its limits (complex string operations, regex matching, concatenation verification), migrate to Z3's native String sort:
+
+**Prerequisites**:
+- `z3` crate version 0.12+ with stable `z3::ast::String` support
+- `libz3` static linking to avoid environment dependency issues
+- Performance benchmarking: String sort is significantly slower than Int sort
+
+**Migration plan**:
+1. Add `Str` to mumei's Type system (`TypeRef::Str`)
+2. Lift string literals to `z3::ast::String::from_str` in constraint generation
+3. Convert `starts_with(path, "/tmp/")` to Z3's `str.prefixof` operation
+4. Convert `contains(path, "..")` to Z3's `str.contains` operation
+5. Benchmark AI-in-the-loop latency (target: < 500ms for typical path constraints)
+
+**Unlocks**:
+- Free-form path construction: `"/tmp/" + user_id + "/log.txt"` verification
+- Regex-based path policies: `matches(path, "/tmp/[a-z]+\\.txt")`
+- URL validation for std.http effects: `starts_with(url, "https://")`
+
+### TODO: Effect Hierarchy Extensions
+
+Future extensions to the effect subtyping system:
+
+1. **Multi-parent (Intersection)**: `effect SecureNetRead parent: [Network, Encrypted];`
+2. **Effect polymorphism**: `atom pipe<E: Effect>(f: atom_ref(T) -> U with E)` — generic over effect sets
+3. **Effect narrowing**: When calling a `Network`-annotated function with only `HttpRead`, narrow the effect at the call site
+4. **Negative effects**: `atom pure_compute() effects: [!IO];` — explicitly deny effects
+5. **Effect aliases**: `effect IO = FileRead | FileWrite | ConsoleOut;` — union types for convenience
+
+---
+
+## Multi-Stage IR Roadmap
+
+| Phase | Item | Status | Prerequisite |
+|---|---|---|---|
+| Phase 0 | Expr/Stmt separation | ✅ Done | — |
+| Phase 1 | HIR introduction (typed AST, eliminate String-based body_expr) | ✅ Done | Phase 0 |
+| Phase 2 | Basic Effect System | ⏳ Planned | Migrate parser away from regex |
+| Phase 3 | Effect Polymorphism | ⏳ Planned | Phase 2 |
+| Phase 4 | MIR introduction (CFG for borrow checking) | ⏳ Planned | Borrow checking design finalized |
+| Phase 5 | Capability Security evaluation | ⏳ Planned | Phase 3 maturity assessment |
+
+### Why Phases 2–5 Are Deferred
+
+- **Phase 2 (Basic Effects)**: The current parser is regex-based and cannot safely handle complex syntax like `<E: Effect>`. Migration to a recursive descent parser must come first.
+- **Phase 3 (Effect Polymorphism)**: Adding polymorphism before concrete effect definition and tracking infrastructure exists is premature. Requires basic effect implementation and operational experience.
+- **Phase 4 (MIR)**: A CFG-based intermediate representation is needed for borrow checking and lifetime analysis, but the borrow checking design itself is not yet started. Will be introduced after the design is finalized.
+- **Phase 5 (Capability Security)**: Evaluate the maturity of the current approach (verifying parameterized effects with Z3). If insufficient, introduce an object-based capability model.
+
+---
+
 ## Related Documents
 
 - [`docs/FFI.md`](FFI.md) — FFI extern block design (Phase A foundation)

@@ -14,6 +14,13 @@ load_dotenv()
 # Initialize MCP server
 mcp = FastMCP("Mumei-Forge")
 
+# Module-level session state for effect boundary overrides
+_session_effects: dict = {
+    "allowed": [],
+    "denied": [],
+    "source": "default",  # "default" | "mumei.toml" | "session_override"
+}
+
 # Visualizer sync config
 # true: also copy report.json to visualizer/ (for Streamlit dashboard)
 # false: MCP response only (default)
@@ -63,6 +70,52 @@ def _sync_to_visualizer(report_file: Path, root_dir: Path) -> None:
         finally:
             fcntl.flock(lf, fcntl.LOCK_UN)
 
+def _format_semantic_feedback(report_json: str) -> str:
+    """Parse report.json and format semantic_feedback into a readable section.
+    Returns empty string if no semantic_feedback is present (backward compatible)."""
+    try:
+        report = json.loads(report_json)
+    except (json.JSONDecodeError, TypeError):
+        return ""
+
+    feedback = report.get("semantic_feedback")
+    if not feedback:
+        return ""
+
+    parts = ["### Semantic Feedback"]
+    violated = feedback.get("violated_constraints", [])
+    for vc in violated:
+        param = vc.get("param", "?")
+        typ = vc.get("type", "")
+        value = vc.get("value", "?")
+        constraint = vc.get("constraint", "")
+        explanation = vc.get("explanation", "")
+        suggestion = vc.get("suggestion", "")
+        parts.append(f"- **{param}** (type `{typ}`, value `{value}`): constraint `{constraint}` violated")
+        if explanation:
+            parts.append(f"  - {explanation}")
+        if suggestion:
+            parts.append(f"  - 💡 {suggestion}")
+
+    ctx = feedback.get("context", {})
+    if ctx:
+        parts.append("\n**Context:**")
+        if ctx.get("requires"):
+            parts.append(f"- requires: `{ctx['requires']}`")
+        if ctx.get("ensures"):
+            parts.append(f"- ensures: `{ctx['ensures']}`")
+
+    failure_type = report.get("failure_type", "")
+    if failure_type:
+        parts.append(f"\n**Failure type:** `{failure_type}`")
+
+    span = report.get("span")
+    if span:
+        parts.append(f"**Location:** {span.get('file', '?')}:{span.get('line', '?')}:{span.get('col', '?')}")
+
+    return "\n".join(parts)
+
+
 @mcp.tool()
 def forge_blade(source_code: str, output_name: str = "katana") -> str:
     """
@@ -89,11 +142,22 @@ def forge_blade(source_code: str, output_name: str = "katana") -> str:
 
         response_parts = []
 
+        # Inject effect boundary context if restricted
+        effects_ctx = json.loads(get_allowed_effects(str(root_dir)))
+        if not effects_ctx.get("unrestricted", True):
+            response_parts.append(
+                f"### Effect Boundary\n{effects_ctx['summary']}\n"
+            )
+
         # report.json is written to output_dir (parent of -o path) = tmp_path
         report_file = tmp_path / "report.json"
         if report_file.exists():
             report_data = report_file.read_text(encoding="utf-8")
             response_parts.append(f"### Verification Report\n```json\n{report_data}\n```")
+            # Feature 1-f: Include semantic feedback section if present
+            sf_section = _format_semantic_feedback(report_data)
+            if sf_section:
+                response_parts.append(sf_section)
             try:
                 _sync_to_visualizer(report_file, root_dir)
             except Exception:
@@ -170,6 +234,13 @@ def validate_logic(source_code: str) -> str:
 
         response_parts = []
 
+        # Inject effect boundary context if restricted
+        effects_ctx = json.loads(get_allowed_effects(str(root_dir)))
+        if not effects_ctx.get("unrestricted", True):
+            response_parts.append(
+                f"### Effect Boundary\n{effects_ctx['summary']}\n"
+            )
+
         # TODO: The verify command writes report.json to cwd because it does not
         #   support -o. This means concurrent calls race on the same file.
         #   shutil.move (instead of copy) minimises the window, but does not
@@ -189,6 +260,10 @@ def validate_logic(source_code: str) -> str:
             response_parts.append(
                 f"### Verification Report\n```json\n{report_data}\n```"
             )
+            # Feature 1-f: Include semantic feedback section if present
+            sf_section = _format_semantic_feedback(report_data)
+            if sf_section:
+                response_parts.append(sf_section)
             try:
                 _sync_to_visualizer(report_file, root_dir)
             except Exception:
@@ -282,6 +357,10 @@ def execute_mm(
             response_parts.append(
                 f"### Verification Report\n```json\n{report_data}\n```"
             )
+            # Feature 1-f: Include semantic feedback section if present
+            sf_section = _format_semantic_feedback(report_data)
+            if sf_section:
+                response_parts.append(sf_section)
             try:
                 _sync_to_visualizer(report_file, root_dir)
             except Exception:
@@ -315,6 +394,272 @@ def execute_mm(
                 )
 
         return "\n".join(response_parts)
+
+
+@mcp.tool()
+def get_inferred_effects(source_code: str) -> str:
+    """
+    Pre-check: Infer what effects are required for the given Mumei code,
+    WITHOUT running full verification. Returns a JSON analysis of:
+    - declared_effects: effects explicitly annotated on each atom
+    - inferred_effects: effects inferred from call graph analysis
+    - missing_effects: effects that should be added
+    - suggestion: suggested effects: [...] annotation
+
+    Use this BEFORE writing code to check what permissions (effects) your
+    code will need. This enables AI to "check its own permissions" before
+    committing to a code path.
+    """
+    root_dir = Path(__file__).parent.absolute()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        source_path = tmp_path / "input.mm"
+        source_path.write_text(source_code, encoding="utf-8")
+
+        result = subprocess.run(
+            ["cargo", "run", "--", "infer-effects", str(source_path)],
+            cwd=root_dir,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+
+        if result.returncode == 0 and result.stdout.strip():
+            try:
+                analysis = json.loads(result.stdout)
+                formatted = json.dumps(analysis, indent=2, ensure_ascii=False)
+                return f"### Effect Analysis\n```json\n{formatted}\n```"
+            except json.JSONDecodeError:
+                return f"Effect inference completed but output was not valid JSON:\n{result.stdout}"
+        else:
+            parts = ["Effect inference failed."]
+            if result.stderr:
+                parts.append(f"\n### Error Details\n```\n{result.stderr}\n```")
+            return "\n".join(parts)
+
+
+@mcp.tool()
+def get_allowed_effects(project_dir: str = ".") -> str:
+    """
+    Returns the current effect boundary for this session.
+    AI agents should call this BEFORE generating any .mm code
+    to understand which effects (I/O, Network, FileWrite, etc.) are permitted.
+
+    The boundary is determined by:
+    1. Session override (set via set_allowed_effects)
+    2. mumei.toml [effects] section
+    3. Default: all effects allowed (no restrictions)
+
+    Returns structured JSON with allowed/denied effect sets and
+    a natural language summary suitable for system prompt injection.
+    """
+    root_dir = Path(project_dir).absolute()
+
+    # Check session override first
+    if _session_effects["source"] == "session_override":
+        effects = _session_effects
+    else:
+        # Read from mumei.toml
+        toml_path = root_dir / "mumei.toml"
+        effects = {"allowed": [], "denied": [], "source": "default"}
+        if toml_path.exists():
+            try:
+                import tomllib
+
+                with open(toml_path, "rb") as f:
+                    config = tomllib.load(f)
+                if "effects" in config:
+                    effects["allowed"] = config["effects"].get("allowed", [])
+                    effects["denied"] = config["effects"].get("denied", [])
+                    effects["source"] = "mumei.toml"
+            except Exception:
+                pass
+
+    # Build response
+    response = {
+        "allowed_effects": effects["allowed"],
+        "denied_effects": effects["denied"],
+        "source": effects["source"],
+        "unrestricted": len(effects["allowed"]) == 0
+        and len(effects["denied"]) == 0,
+    }
+
+    # Natural language summary for AI context injection
+    if response["unrestricted"]:
+        summary = "All effects are currently permitted. No restrictions."
+    else:
+        parts = []
+        if effects["allowed"]:
+            parts.append(f"Allowed effects: {effects['allowed']}")
+        if effects["denied"]:
+            parts.append(f"Denied effects: {effects['denied']}")
+        parts.append(
+            "Code using effects outside this boundary will be rejected by Z3 verification."
+        )
+        summary = " ".join(parts)
+
+    response["summary"] = summary
+
+    return json.dumps(response, indent=2)
+
+
+@mcp.tool()
+def set_allowed_effects(
+    allowed: list[str] | None = None, denied: list[str] | None = None
+) -> str:
+    """
+    Override the effect boundary for the current MCP session.
+    This takes precedence over mumei.toml settings.
+
+    Use this to restrict or expand the AI agent's capabilities dynamically.
+    Example: set_allowed_effects(allowed=["Log", "FileRead"], denied=["Network"])
+
+    To reset to mumei.toml defaults, call with empty lists.
+    """
+    global _session_effects
+
+    if allowed is None:
+        allowed = []
+    if denied is None:
+        denied = []
+
+    if not allowed and not denied:
+        _session_effects = {"allowed": [], "denied": [], "source": "default"}
+        return "Effect boundary reset to project defaults (mumei.toml or unrestricted)."
+
+    _session_effects = {
+        "allowed": allowed,
+        "denied": denied,
+        "source": "session_override",
+    }
+
+    return json.dumps(
+        {
+            "status": "updated",
+            "allowed_effects": allowed,
+            "denied_effects": denied,
+            "message": (
+                f"Session effect boundary set. Only {allowed} effects are permitted."
+                if allowed
+                else f"Effects {denied} are now denied."
+            ),
+        },
+        indent=2,
+    )
+
+
+@mcp.tool()
+def self_heal_with_effects(
+    source_code: str,
+    allowed_effects: list[str] | None = None,
+    max_attempts: int = 5,
+) -> str:
+    """
+    Run an effect-aware self-healing loop on the given source code.
+
+    1. Validates the code with Z3 (including effect verification)
+    2. If effect violations are found, generates fixes using logical resolution paths
+    3. Re-validates until the code passes or max_attempts is reached
+
+    The allowed_effects parameter restricts which effects the healed code may use.
+    If empty or None, no effect restrictions are applied.
+    """
+    if allowed_effects is None:
+        allowed_effects = []
+
+    results = []
+    current_code = source_code
+
+    # Temporarily set session effects if provided
+    if allowed_effects:
+        set_allowed_effects(allowed=allowed_effects)
+        results.append(
+            f"### Effect Boundary: {allowed_effects}\n"
+        )
+
+    root_dir = Path(__file__).parent.absolute()
+
+    try:
+        for attempt in range(max_attempts):
+            # Run validation — this writes report.json to root_dir (compiler cwd)
+            # then validate_logic moves it into a temp directory.  We run the
+            # compiler directly here so we can read report.json before it is moved.
+            with tempfile.TemporaryDirectory() as tmpdir:
+                tmp_path = Path(tmpdir)
+                source_path = tmp_path / "input.mm"
+                source_path.write_text(current_code, encoding="utf-8")
+
+                compile_result = subprocess.run(
+                    ["cargo", "run", "--", "verify", str(source_path)],
+                    cwd=root_dir,
+                    capture_output=True,
+                    text=True,
+                )
+
+                if compile_result.returncode == 0:
+                    results.append(f"### Attempt {attempt + 1}: PASSED")
+                    results.append("Verification passed: no logical flaws detected.")
+                    results.append(
+                        f"\n### Final Code\n```mumei\n{current_code}\n```"
+                    )
+                    return "\n".join(results)
+
+                results.append(f"### Attempt {attempt + 1}: FAILED")
+                error_log = compile_result.stderr or compile_result.stdout or ""
+                results.append(f"```\n{error_log}\n```")
+
+                # Read report.json from compiler cwd (before it gets moved)
+                report_file = root_dir / "report.json"
+                report_data = {}
+                if report_file.exists():
+                    try:
+                        report_data = json.loads(
+                            report_file.read_text(encoding="utf-8")
+                        )
+                    except (json.JSONDecodeError, OSError):
+                        pass
+
+                # Generate fix suggestion based on violation type
+                violation_type = report_data.get("violation_type", "")
+                ev = report_data.get("effect_violation", {})
+
+                if violation_type == "effect_mismatch":
+                    fix_hint = (
+                        f"Effect mismatch: '{ev.get('source_operation', '')}' "
+                        f"requires [{ev.get('required_effect', '')}]. "
+                        f"Resolution: {ev.get('resolution_paths', [{}])[0].get('description', '')}"
+                    )
+                    results.append(f"\n**Fix hint**: {fix_hint}")
+                elif violation_type == "effect_propagation":
+                    fix_hint = (
+                        f"Propagation: '{ev.get('caller', '')}' missing "
+                        f"{ev.get('missing_effects', [])}. "
+                        f"Resolution: {ev.get('resolution_paths', [{}])[0].get('description', '')}"
+                    )
+                    results.append(f"\n**Fix hint**: {fix_hint}")
+
+                # Use self_healing.get_fix_from_ai to generate a fix and update current_code
+                try:
+                    from self_healing import get_fix_from_ai
+
+                    fixed_code = get_fix_from_ai(current_code, error_log, report_data)
+                    if fixed_code and fixed_code != current_code:
+                        current_code = fixed_code
+                        results.append("AI-generated fix applied. Retrying...\n")
+                    else:
+                        results.append("AI could not generate a different fix.\n")
+                        break
+                except Exception as exc:
+                    results.append(f"AI fix generation failed: {exc}\n")
+                    break
+
+        results.append("Self-healing exhausted max attempts.")
+        return "\n".join(results)
+    finally:
+        # Always reset session effects, even on exception
+        if allowed_effects:
+            set_allowed_effects()
 
 
 if __name__ == "__main__":

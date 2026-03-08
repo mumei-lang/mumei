@@ -84,6 +84,39 @@ if view_mode == "Latest Report":
             language="markdown",
         )
 
+    # --- Effect Violation Details ---
+    if data.get("violation_type") in ("effect_mismatch", "effect_propagation"):
+        st.subheader("Effect Violation Details")
+        ev = data.get("effect_violation", {})
+
+        if data["violation_type"] == "effect_mismatch":
+            st.error(
+                f"Atom '{data.get('atom')}' used effect "
+                f"'{ev.get('required_effect')}' "
+                f"but only declares: {ev.get('declared_effects')}"
+            )
+        else:
+            st.error(
+                f"Atom '{ev.get('caller')}' calls '{ev.get('callee')}' "
+                f"but is missing effects: {ev.get('missing_effects')}"
+            )
+
+        # Show resolution paths
+        st.subheader("Resolution Paths")
+        for path in ev.get("resolution_paths", []):
+            strategy = path.get("strategy", "unknown").upper()
+            st.info(f"**{strategy}**: {path.get('description', '')}")
+
+        # AI fix suggestions
+        fixes = ev.get("suggested_fixes", [])
+        if fixes:
+            st.code(
+                "\n".join(
+                    f"# Fix {i+1}: {fix}" for i, fix in enumerate(fixes)
+                ),
+                language="markdown",
+            )
+
     elif data.get("status") == "success":
         st.success(
             f"✅ Atom '{data.get('atom', 'unknown')}' is mathematically pure."

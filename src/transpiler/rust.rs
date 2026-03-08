@@ -1,6 +1,5 @@
-use crate::parser::{
-    parse_expression, Atom, EnumDef, Expr, ImplDef, ImportDecl, Op, StructDef, TraitDef,
-};
+use crate::hir::{HirAtom, HirExpr, HirStmt};
+use crate::parser::{EnumDef, ImplDef, ImportDecl, Op, StructDef, TraitDef};
 
 /// 型名をベース型に解決する（transpiler ローカル版）
 /// 精緻型の解決は ModuleEnv が担当するが、transpiler は単相化後の具体型名を受け取るため、
@@ -149,7 +148,8 @@ pub fn transpile_impl_rust(impl_def: &ImplDef) -> String {
     lines.join("\n")
 }
 
-pub fn transpile_to_rust(atom: &Atom) -> String {
+pub fn transpile_to_rust(hir_atom: &HirAtom) -> String {
+    let atom = &hir_atom.atom;
     // 引数の型を精緻型のベース型からマッピング (Type System 2.0)
     // ref パラメータは &T に、ref mut は &mut T に、consume はそのまま T（所有権移動）に変換
     let params: Vec<String> = atom
@@ -168,8 +168,7 @@ pub fn transpile_to_rust(atom: &Atom) -> String {
         .collect();
     let params_str = params.join(", ");
 
-    let body_ast = parse_expression(&atom.body_expr);
-    let body = format_expr_rust(&body_ast);
+    let body = format_hir_stmt_rust(&hir_atom.body);
 
     // 戻り値型の推論: ボディに f64 リテラルや f64 パラメータが含まれていれば f64
     let has_float_param = atom.params.iter().any(|p| {
@@ -178,47 +177,76 @@ pub fn transpile_to_rust(atom: &Atom) -> String {
             .map(|t| resolve_base_type(t) == "f64")
             .unwrap_or(false)
     });
-    let return_type = if has_float_param || body_contains_float(&body_ast) {
+    let return_type = if has_float_param || hir_stmt_contains_float(&hir_atom.body) {
         "f64"
     } else {
         "i64"
     };
 
     let async_keyword = if atom.is_async { "async " } else { "" };
+    let effects_comment = if atom.effects.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n/// Effects: [{}]",
+            atom.effects
+                .iter()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
     format!(
-        "/// Verified Atom: {}\n/// Requires: {}\n/// Ensures: {}\npub {}fn {}({}) -> {} {{\n    {}\n}}",
-        atom.name, atom.requires, atom.ensures, async_keyword, atom.name, params_str, return_type, body
+        "/// Verified Atom: {}\n/// Requires: {}\n/// Ensures: {}{}\npub {}fn {}({}) -> {} {{\n    {}\n}}",
+        atom.name, atom.requires, atom.ensures, effects_comment, async_keyword, atom.name, params_str, return_type, body
     )
 }
 
-/// AST に f64 リテラルが含まれるかを再帰的にチェック
-fn body_contains_float(expr: &Expr) -> bool {
+/// HIR 式に f64 リテラルが含まれるかを再帰的にチェック
+fn hir_expr_contains_float(expr: &HirExpr) -> bool {
     match expr {
-        Expr::Float(_) => true,
-        Expr::BinaryOp(l, _, r) => body_contains_float(l) || body_contains_float(r),
-        Expr::Block(stmts) => stmts.iter().any(body_contains_float),
-        Expr::Let { value, .. } | Expr::Assign { value, .. } => body_contains_float(value),
-        Expr::IfThenElse {
+        HirExpr::Float(_) => true,
+        HirExpr::BinaryOp(l, _, r) => hir_expr_contains_float(l) || hir_expr_contains_float(r),
+        HirExpr::IfThenElse {
             cond,
             then_branch,
             else_branch,
         } => {
-            body_contains_float(cond)
-                || body_contains_float(then_branch)
-                || body_contains_float(else_branch)
+            hir_expr_contains_float(cond)
+                || hir_stmt_contains_float(then_branch)
+                || hir_stmt_contains_float(else_branch)
         }
-        Expr::While { cond, body, .. } => body_contains_float(cond) || body_contains_float(body),
-        Expr::Call(_, args) => args.iter().any(body_contains_float),
-        Expr::Match { target, arms } => {
-            body_contains_float(target) || arms.iter().any(|a| body_contains_float(&a.body))
+        HirExpr::Call { args, .. } => args.iter().any(hir_expr_contains_float),
+        HirExpr::Match { target, arms } => {
+            hir_expr_contains_float(target) || arms.iter().any(|a| hir_stmt_contains_float(&a.body))
         }
-        Expr::Acquire { body, .. } | Expr::Async { body } => body_contains_float(body),
-        Expr::Await { expr } => body_contains_float(expr),
-        Expr::AtomRef { .. } => false,
-        Expr::CallRef { callee, args } => {
-            body_contains_float(callee) || args.iter().any(body_contains_float)
+        HirExpr::Async { body } | HirExpr::Task { body, .. } => hir_stmt_contains_float(body),
+        HirExpr::Await { expr } => hir_expr_contains_float(expr),
+        HirExpr::CallRef { callee, args } => {
+            hir_expr_contains_float(callee) || args.iter().any(hir_expr_contains_float)
         }
+        HirExpr::TaskGroup { children, .. } => children.iter().any(hir_stmt_contains_float),
         _ => false,
+    }
+}
+
+/// HIR 文に f64 リテラルが含まれるかを再帰的にチェック
+fn hir_stmt_contains_float(stmt: &HirStmt) -> bool {
+    match stmt {
+        HirStmt::Let { value, .. } | HirStmt::Assign { value, .. } => {
+            hir_expr_contains_float(value)
+        }
+        HirStmt::Block { stmts, tail_expr } => {
+            stmts.iter().any(hir_stmt_contains_float)
+                || tail_expr
+                    .as_ref()
+                    .map_or(false, |e| hir_expr_contains_float(e))
+        }
+        HirStmt::While { cond, body, .. } => {
+            hir_expr_contains_float(cond) || hir_stmt_contains_float(body)
+        }
+        HirStmt::Acquire { body, .. } => hir_stmt_contains_float(body),
+        HirStmt::Expr(expr) => hir_expr_contains_float(expr),
     }
 }
 
@@ -257,10 +285,10 @@ fn strip_parens(s: &str) -> &str {
     }
 }
 
-fn format_expr_rust(expr: &Expr) -> String {
+fn format_hir_expr_rust(expr: &HirExpr) -> String {
     match expr {
-        Expr::Number(n) => n.to_string(),
-        Expr::Float(f) => {
+        HirExpr::Number(n) => n.to_string(),
+        HirExpr::Float(f) => {
             // Rustのリテラルとして明確にするため、.0を保証
             let s = f.to_string();
             if s.contains('.') {
@@ -269,14 +297,14 @@ fn format_expr_rust(expr: &Expr) -> String {
                 format!("{}.0", s)
             }
         }
-        Expr::Variable(v) => v.clone(),
-        Expr::ArrayAccess(name, idx) => {
+        HirExpr::Variable(v) => v.clone(),
+        HirExpr::ArrayAccess(name, idx) => {
             // インデックスは常に usize にキャスト
-            format!("{}[{} as usize]", name, format_expr_rust(idx))
+            format!("{}[{} as usize]", name, format_hir_expr_rust(idx))
         }
 
-        Expr::Call(name, args) => {
-            let args_str: Vec<String> = args.iter().map(format_expr_rust).collect();
+        HirExpr::Call { name, args } => {
+            let args_str: Vec<String> = args.iter().map(format_hir_expr_rust).collect();
             match name.as_str() {
                 "sqrt" => {
                     // Rustでは f64 のメソッドとして呼び出す。整数ならキャストが必要。
@@ -287,7 +315,7 @@ fn format_expr_rust(expr: &Expr) -> String {
             }
         }
 
-        Expr::BinaryOp(l, op, r) => {
+        HirExpr::BinaryOp(l, op, r) => {
             let op_str = match op {
                 Op::Add => "+",
                 Op::Sub => "-",
@@ -305,84 +333,39 @@ fn format_expr_rust(expr: &Expr) -> String {
             };
             format!(
                 "({} {} {})",
-                format_expr_rust(l),
+                format_hir_expr_rust(l),
                 op_str,
-                format_expr_rust(r)
+                format_hir_expr_rust(r)
             )
         }
 
-        Expr::IfThenElse {
+        HirExpr::IfThenElse {
             cond,
             then_branch,
             else_branch,
         } => {
             format!(
                 "if {} {{ {} }} else {{ {} }}",
-                format_expr_rust(cond),
-                format_expr_rust(then_branch),
-                format_expr_rust(else_branch)
+                format_hir_expr_rust(cond),
+                format_hir_stmt_rust(then_branch),
+                format_hir_stmt_rust(else_branch)
             )
         }
 
-        Expr::While {
-            cond,
-            invariant,
-            decreases,
-            body,
-        } => {
-            let cond_str = format_expr_rust(cond);
-            let dec_comment = decreases
-                .as_ref()
-                .map(|d| format!(" decreases: {}", format_expr_rust(d)))
-                .unwrap_or_default();
-            format!(
-                "{{ // invariant: {}{}\n        while {} {{ {} }} \n    }}",
-                format_expr_rust(invariant),
-                dec_comment,
-                strip_parens(&cond_str),
-                format_expr_rust(body)
-            )
-        }
-
-        Expr::Let { var, value } => {
-            let val_str = format_expr_rust(value);
-            format!("let mut {} = {};", var, strip_parens(&val_str))
-        }
-
-        Expr::Assign { var, value } => {
-            let val_str = format_expr_rust(value);
-            format!("{} = {};", var, strip_parens(&val_str))
-        }
-
-        Expr::Block(stmts) => {
-            let mut lines = Vec::new();
-            for (i, stmt) in stmts.iter().enumerate() {
-                let s = format_expr_rust(stmt);
-                if i == stmts.len() - 1 {
-                    lines.push(strip_parens(&s).to_string());
-                } else if s.ends_with(';') || s.ends_with('}') {
-                    lines.push(s);
-                } else {
-                    lines.push(format!("{};", s));
-                }
-            }
-            format!("{{\n        {}\n    }}", lines.join("\n        "))
-        }
-
-        Expr::StructInit { type_name, fields } => {
+        HirExpr::StructInit { type_name, fields } => {
             let field_strs: Vec<String> = fields
                 .iter()
-                .map(|(name, expr)| format!("{}: {}", name, format_expr_rust(expr)))
+                .map(|(name, expr)| format!("{}: {}", name, format_hir_expr_rust(expr)))
                 .collect();
             format!("{} {{ {} }}", type_name, field_strs.join(", "))
         }
 
-        Expr::FieldAccess(expr, field) => {
-            format!("{}.{}", format_expr_rust(expr), field)
+        HirExpr::FieldAccess(expr, field) => {
+            format!("{}.{}", format_hir_expr_rust(expr), field)
         }
 
-        Expr::Match { target, arms } => {
-            let target_str = format_expr_rust(target);
+        HirExpr::Match { target, arms } => {
+            let target_str = format_hir_expr_rust(target);
             let arms_str: Vec<String> = arms
                 .iter()
                 .map(|arm| {
@@ -390,51 +373,115 @@ fn format_expr_rust(expr: &Expr) -> String {
                     let guard = arm
                         .guard
                         .as_ref()
-                        .map(|g| format!(" if {}", format_expr_rust(g)))
+                        .map(|g| format!(" if {}", format_hir_expr_rust(g)))
                         .unwrap_or_default();
-                    let body = format_expr_rust(&arm.body);
+                    let body = format_hir_stmt_rust(&arm.body);
                     format!("{}{} => {}", pat, guard, body)
                 })
                 .collect();
             format!("match {} {{ {} }}", target_str, arms_str.join(", "))
         }
 
-        Expr::Acquire { resource, body } => {
+        HirExpr::Async { body } => {
+            let body_str = format_hir_stmt_rust(body);
+            format!("async {{ {} }}", body_str)
+        }
+        HirExpr::Await { expr } => {
+            let expr_str = format_hir_expr_rust(expr);
+            format!("{}.await", expr_str)
+        }
+        HirExpr::Task { body, .. } => {
+            let body_str = format_hir_stmt_rust(body);
+            format!("tokio::spawn(async {{ {} }})", body_str)
+        }
+        HirExpr::TaskGroup { children, .. } => {
+            let tasks: Vec<String> = children.iter().map(format_hir_stmt_rust).collect();
+            format!("tokio::join!({})", tasks.join(", "))
+        }
+        // Higher-order functions (Phase A): atom_ref + call
+        HirExpr::AtomRef { name } => {
+            // Rust では関数名がそのまま関数ポインタとして使える
+            name.clone()
+        }
+        HirExpr::CallRef { callee, args } => {
+            // Rust は関数ポインタの呼び出しが透過的
+            let callee_str = format_hir_expr_rust(callee);
+            let args_str: Vec<String> = args.iter().map(format_hir_expr_rust).collect();
+            format!("{}({})", callee_str, args_str.join(", "))
+        }
+        HirExpr::Perform {
+            effect,
+            operation,
+            args,
+        } => {
+            // Effects: perform Effect.operation(args) → function call
+            let args_str: Vec<String> = args.iter().map(format_hir_expr_rust).collect();
+            format!(
+                "/* perform {}.{} */ {}_{}({})",
+                effect,
+                operation,
+                effect.to_lowercase(),
+                operation,
+                args_str.join(", ")
+            )
+        }
+    }
+}
+
+fn format_hir_stmt_rust(stmt: &HirStmt) -> String {
+    match stmt {
+        HirStmt::Let { var, value, .. } => {
+            let val_str = format_hir_expr_rust(value);
+            format!("let mut {} = {};", var, strip_parens(&val_str))
+        }
+        HirStmt::Assign { var, value } => {
+            let val_str = format_hir_expr_rust(value);
+            format!("{} = {};", var, strip_parens(&val_str))
+        }
+        HirStmt::While {
+            cond,
+            invariant,
+            decreases,
+            body,
+        } => {
+            let cond_str = format_hir_expr_rust(cond);
+            let dec_comment = decreases
+                .as_ref()
+                .map(|d| format!(" decreases: {}", format_hir_expr_rust(d)))
+                .unwrap_or_default();
+            format!(
+                "{{ // invariant: {}{}\n        while {} {{ {} }} \n    }}",
+                format_hir_expr_rust(invariant),
+                dec_comment,
+                strip_parens(&cond_str),
+                format_hir_stmt_rust(body)
+            )
+        }
+        HirStmt::Block { stmts, tail_expr } => {
+            let mut lines = Vec::new();
+            for s in stmts {
+                let code = format_hir_stmt_rust(s);
+                if code.ends_with(';') || code.ends_with('}') {
+                    lines.push(code);
+                } else {
+                    lines.push(format!("{};", code));
+                }
+            }
+            if let Some(tail) = tail_expr {
+                lines.push(strip_parens(&format_hir_expr_rust(tail)).to_string());
+            }
+            format!("{{\n        {}\n    }}", lines.join("\n        "))
+        }
+        HirStmt::Acquire { resource, body } => {
             // Rust: スコープガードパターン（MutexGuard の RAII）
-            let body_str = format_expr_rust(body);
+            let body_str = format_hir_stmt_rust(body);
             format!(
                 "{{\n        let _guard_{r} = {r}.lock().unwrap();\n        {body}\n    }}",
                 r = resource,
                 body = body_str
             )
         }
-        Expr::Async { body } => {
-            let body_str = format_expr_rust(body);
-            format!("async {{ {} }}", body_str)
-        }
-        Expr::Await { expr } => {
-            let expr_str = format_expr_rust(expr);
-            format!("{}.await", expr_str)
-        }
-        Expr::Task { body, .. } => {
-            let body_str = format_expr_rust(body);
-            format!("tokio::spawn(async {{ {} }})", body_str)
-        }
-        Expr::TaskGroup { children, .. } => {
-            let tasks: Vec<String> = children.iter().map(format_expr_rust).collect();
-            format!("tokio::join!({})", tasks.join(", "))
-        }
-        // Higher-order functions (Phase A): atom_ref + call
-        Expr::AtomRef { name } => {
-            // Rust では関数名がそのまま関数ポインタとして使える
-            name.clone()
-        }
-        Expr::CallRef { callee, args } => {
-            // Rust は関数ポインタの呼び出しが透過的
-            let callee_str = format_expr_rust(callee);
-            let args_str: Vec<String> = args.iter().map(format_expr_rust).collect();
-            format!("{}({})", callee_str, args_str.join(", "))
-        }
+        HirStmt::Expr(expr) => format_hir_expr_rust(expr),
     }
 }
 

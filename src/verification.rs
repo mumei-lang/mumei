@@ -1,6 +1,8 @@
+use crate::hir::HirAtom;
 use crate::parser::{
-    parse_expression, Atom, EnumDef, Expr, ImplDef, JoinSemantics, MatchArm, Op, Pattern,
-    QuantifierType, RefinedType, ResourceDef, ResourceMode, Span, StructDef, TraitDef, TrustLevel,
+    parse_body_expr, parse_expression, Atom, Effect, EffectDef, EnumDef, Expr, ImplDef, Item,
+    JoinSemantics, MatchArm, Op, Pattern, QuantifierType, RefinedType, ResourceDef, ResourceMode,
+    Span, Stmt, StructDef, TraitDef, TrustLevel,
 };
 use miette::SourceSpan;
 use serde_json::json;
@@ -432,6 +434,252 @@ pub type MumeiResult<T> = Result<T, MumeiError>;
 type Env<'a> = HashMap<String, Dynamic<'a>>;
 type DynResult<'a> = MumeiResult<Dynamic<'a>>;
 
+// =============================================================================
+// Constraint Mapping (Feature 1-a: Semantic Counter-example Feedback)
+// =============================================================================
+
+/// Tracks the relationship between Z3 symbolic variables and source-level context.
+/// Used to generate semantic feedback from Z3 counter-examples.
+#[derive(Debug, Clone)]
+pub struct ConstraintMapping {
+    param_name: String,
+    type_name: Option<String>,
+    base_type: String,
+    predicate_raw: String,
+    #[allow(dead_code)]
+    span: Span,
+}
+
+// =============================================================================
+// Failure Type Classification (Feature 1-d)
+// =============================================================================
+
+/// Classification of verification failure types for structured reporting.
+pub const FAILURE_POSTCONDITION_VIOLATED: &str = "postcondition_violated";
+pub const FAILURE_PRECONDITION_VIOLATED: &str = "precondition_violated";
+pub const FAILURE_DIVISION_BY_ZERO: &str = "division_by_zero";
+pub const FAILURE_TRAIT_LAW_VIOLATED: &str = "trait_law_violated";
+pub const FAILURE_LINEARITY_VIOLATED: &str = "linearity_violated";
+pub const FAILURE_INVARIANT_VIOLATED: &str = "invariant_violated";
+pub const FAILURE_EXHAUSTIVENESS_FAILED: &str = "exhaustiveness_failed";
+pub const FAILURE_RESOURCE_CONFLICT: &str = "resource_conflict";
+
+// =============================================================================
+// Suggestion Templates per Failure Type (Feature 1-e)
+// =============================================================================
+
+pub fn suggestion_for_failure_type(failure_type: &str) -> &'static str {
+    match failure_type {
+        FAILURE_POSTCONDITION_VIOLATED => {
+            "Ensure the body's return value satisfies the ensures clause, or relax the ensures constraint"
+        }
+        FAILURE_PRECONDITION_VIOLATED => {
+            "The caller must establish the callee's requires clause before the call"
+        }
+        FAILURE_DIVISION_BY_ZERO => {
+            "Add a condition `divisor != 0` to requires, or guard the division with an if-expression"
+        }
+        FAILURE_TRAIT_LAW_VIOLATED => {
+            "The trait implementation does not satisfy the algebraic law; review the impl body"
+        }
+        FAILURE_LINEARITY_VIOLATED => {
+            "A linear resource was used after being consumed; ensure each consume is followed by no further use"
+        }
+        FAILURE_INVARIANT_VIOLATED => {
+            "The loop/recursive invariant is not maintained; strengthen the invariant or fix the body"
+        }
+        FAILURE_EXHAUSTIVENESS_FAILED => {
+            "Not all cases are covered in the match expression; add missing patterns"
+        }
+        FAILURE_RESOURCE_CONFLICT => {
+            "Resource acquisition order may cause deadlock; reorder acquire calls to follow priority ordering"
+        }
+        _ => "Review the verification failure and adjust the code or contracts accordingly",
+    }
+}
+
+// =============================================================================
+// Natural Language Constraint Template Engine (Feature 1-b)
+// =============================================================================
+
+/// Pattern-matches common predicate forms and generates human/AI-readable descriptions.
+/// Returns bilingual output: English primary, Japanese in parentheses.
+pub fn constraint_to_natural_language(
+    param_name: &str,
+    type_name: &str,
+    predicate_raw: &str,
+    value: &str,
+) -> String {
+    let pred = predicate_raw.trim();
+
+    // Try to match range pattern: v >= N && v <= M
+    if let Some(range_desc) = try_match_range(pred, param_name, type_name, value) {
+        return range_desc;
+    }
+
+    // Single comparison patterns
+    if let Some(desc) = try_match_comparison(pred, param_name, type_name, value) {
+        return desc;
+    }
+
+    // Fallback for unrecognized patterns
+    format!(
+        "{param} must satisfy constraint '{pred}' but value is {val} \
+         ({param} は制約 '{pred}' を満たす必要がありますが、値は {val} です)",
+        param = param_name,
+        pred = predicate_raw,
+        val = value,
+    )
+}
+
+/// Try to match a range pattern like "v >= N && v <= M"
+fn try_match_range(pred: &str, param_name: &str, type_name: &str, value: &str) -> Option<String> {
+    // Match patterns like "v >= N && v <= M" or "v > N && v < M"
+    let parts: Vec<&str> = pred.split("&&").map(|s| s.trim()).collect();
+    if parts.len() != 2 {
+        return None;
+    }
+    let lower = extract_bound(parts[0], true)?;
+    let upper = extract_bound(parts[1], false)?;
+    Some(format!(
+        "{param} is {val}, which violates {ty} constraint ({lower_bound} to {upper_bound}) \
+         ({param} が {val} のとき、{ty} の制約 {lower_bound} 以上 {upper_bound} 以下を逸脱します)",
+        param = param_name,
+        val = value,
+        ty = type_name,
+        lower_bound = lower,
+        upper_bound = upper,
+    ))
+}
+
+/// Extract a numeric bound from a comparison expression
+fn extract_bound(expr: &str, is_lower: bool) -> Option<String> {
+    let trimmed = expr.trim();
+    let ops: &[&str] = if is_lower { &[">=", ">"] } else { &["<=", "<"] };
+    for op in ops {
+        if let Some(idx) = trimmed.find(op) {
+            let rhs = trimmed[idx + op.len()..].trim();
+            return Some(rhs.to_string());
+        }
+    }
+    None
+}
+
+/// Try to match single comparison patterns
+fn try_match_comparison(
+    pred: &str,
+    param_name: &str,
+    type_name: &str,
+    value: &str,
+) -> Option<String> {
+    // Ordered from most specific to least specific operator
+    let patterns: &[(&str, &str, &str)] = &[
+        (">=", "must be at least", "以上である必要がありますが"),
+        ("<=", "must be at most", "以下である必要がありますが"),
+        ("!=", "must not be", "であってはなりませんが"),
+        (">", "must be greater than", "より大きい必要がありますが"),
+        ("<", "must be less than", "未満である必要がありますが"),
+    ];
+
+    for (op, en_desc, ja_desc) in patterns {
+        // Look for the operator in the predicate (e.g., "v <= 120")
+        if let Some(idx) = pred.find(op) {
+            let rhs = pred[idx + op.len()..].trim();
+            // Only match if rhs looks like a number or simple identifier
+            if rhs.is_empty() {
+                continue;
+            }
+            return Some(format!(
+                "{param} is {val}, which violates {ty} constraint {pred} \
+                 ({param} {en} {rhs} ({param} は {rhs} {ja}、値は {val} です))",
+                param = param_name,
+                val = value,
+                ty = type_name,
+                pred = pred,
+                rhs = rhs,
+                en = en_desc,
+                ja = ja_desc,
+            ));
+        }
+    }
+    None
+}
+
+/// Build constraint mappings for an atom's parameters by looking up their refined types.
+pub fn build_constraint_mappings_for_atom(
+    atom: &Atom,
+    module_env: &ModuleEnv,
+) -> Vec<ConstraintMapping> {
+    let mut mappings = Vec::new();
+    for param in &atom.params {
+        if let Some(ref type_ref) = param.type_ref {
+            let type_name_str = &type_ref.name;
+            if let Some(refined) = module_env.get_type(type_name_str) {
+                mappings.push(ConstraintMapping {
+                    param_name: param.name.clone(),
+                    type_name: Some(type_name_str.clone()),
+                    base_type: refined._base_type.clone(),
+                    predicate_raw: refined.predicate_raw.clone(),
+                    span: refined.span.clone(),
+                });
+            }
+        }
+    }
+    mappings
+}
+
+/// Build semantic feedback JSON from constraint mappings and counterexample values.
+pub fn build_semantic_feedback(
+    constraint_mappings: &[ConstraintMapping],
+    counterexample: Option<&serde_json::Value>,
+    atom: &Atom,
+    failure_type: &str,
+) -> Option<serde_json::Value> {
+    let ce_map = counterexample.and_then(|ce| ce.as_object());
+    let mut violated_constraints = Vec::new();
+
+    for mapping in constraint_mappings {
+        let value = ce_map
+            .and_then(|m| m.get(&mapping.param_name))
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+
+        let type_name = mapping.type_name.as_deref().unwrap_or(&mapping.base_type);
+        let explanation = constraint_to_natural_language(
+            &mapping.param_name,
+            type_name,
+            &mapping.predicate_raw,
+            value,
+        );
+
+        violated_constraints.push(json!({
+            "param": mapping.param_name,
+            "type": type_name,
+            "value": value,
+            "constraint": mapping.predicate_raw,
+            "explanation": explanation,
+            "suggestion": suggestion_for_failure_type(failure_type)
+        }));
+    }
+
+    if violated_constraints.is_empty() && ce_map.is_none() {
+        return None;
+    }
+
+    let mut feedback = json!({
+        "violated_constraints": violated_constraints
+    });
+
+    // Add context about the atom's contracts
+    feedback["context"] = json!({
+        "requires": atom.requires,
+        "ensures": atom.ensures,
+        "body_expr": atom.body_expr
+    });
+
+    Some(feedback)
+}
+
 /// 検証時に共有するコンテキスト（ctx, arr, module_env を束ねて引数を削減）
 struct VCtx<'a> {
     ctx: &'a Context,
@@ -619,6 +867,29 @@ pub struct ModuleEnv {
     /// リソース定義（非同期安全性検証用）
     /// リソース名 → (優先度, アクセスモード)
     pub resources: HashMap<String, ResourceDef>,
+    /// エフェクト定義（副作用検証用）
+    /// エフェクト名 → EffectDef
+    pub effects: HashMap<String, EffectDef>,
+    /// エフェクト定義レジストリ（階層構造対応）
+    /// Step 2a: EffectDef のパラメータ・制約・親を含む完全な定義
+    pub effect_defs: HashMap<String, EffectDef>,
+    /// Symbolic String ID: パス文字列 → 整数ID のマッピング（ハイブリッド・アプローチ）
+    // NOTE: path_id_map/next_path_id/prefix_ranges are infrastructure for Z3 String Sort migration (see ROADMAP.md P4)
+    #[allow(dead_code)]
+    pub path_id_map: HashMap<String, i64>,
+    #[allow(dead_code)]
+    pub next_path_id: i64,
+    /// パスプレフィックス → (range_start, range_end) のマッピング
+    #[allow(dead_code)]
+    pub prefix_ranges: HashMap<String, (i64, i64)>,
+
+    // =========================================================================
+    // Dependency Graph (Feature 2-a: Gradual Verification)
+    // =========================================================================
+    /// Forward dependency graph: atom_name → set of atoms it calls
+    pub dependency_graph: HashMap<String, HashSet<String>>,
+    /// Reverse dependency graph: atom_name → set of atoms that call it
+    pub reverse_deps: HashMap<String, HashSet<String>>,
 }
 
 impl ModuleEnv {
@@ -732,6 +1003,197 @@ impl ModuleEnv {
     pub fn get_resource(&self, name: &str) -> Option<&ResourceDef> {
         self.resources.get(name)
     }
+
+    /// エフェクト定義を登録する（effects + effect_defs 両方に登録）
+    pub fn register_effect(&mut self, effect_def: &EffectDef) {
+        self.effects
+            .insert(effect_def.name.clone(), effect_def.clone());
+        self.effect_defs
+            .insert(effect_def.name.clone(), effect_def.clone());
+    }
+
+    /// エフェクト定義を取得する
+    #[allow(dead_code)]
+    pub fn get_effect(&self, name: &str) -> Option<&EffectDef> {
+        self.effects.get(name)
+    }
+
+    /// エフェクト名のリストを展開し、includes を再帰的に解決して
+    /// 全てのリーフエフェクト名を返す。
+    pub fn resolve_effect_set(&self, names: &[String]) -> HashSet<String> {
+        let mut result = HashSet::new();
+        let mut stack: Vec<String> = names.to_vec();
+        while let Some(name) = stack.pop() {
+            if result.contains(&name) {
+                continue;
+            }
+            result.insert(name.clone());
+            if let Some(def) = self.effects.get(&name) {
+                for included in &def.includes {
+                    if !result.contains(included) {
+                        stack.push(included.clone());
+                    }
+                }
+            }
+        }
+        result
+    }
+
+    /// Vec<Effect> からエフェクト名のリストを展開し、includes を再帰的に解決する。
+    pub fn resolve_effect_set_from_effects(
+        &self,
+        effects: &[crate::parser::Effect],
+    ) -> HashSet<String> {
+        let names: Vec<String> = effects.iter().map(|e| e.name.clone()).collect();
+        self.resolve_effect_set(&names)
+    }
+
+    /// Resolve an effect set to only its leaf effects (effects with no `includes`).
+    /// This avoids false positives when comparing a caller declaring leaf effects
+    /// against a callee declaring a composite effect (e.g., `[IO]` vs `[FileRead, FileWrite, Console]`).
+    pub fn resolve_leaf_effects(&self, names: &[String]) -> HashSet<String> {
+        let full = self.resolve_effect_set(names);
+        full.into_iter()
+            .filter(|name| {
+                self.effects
+                    .get(name)
+                    .map_or(true, |def| def.includes.is_empty())
+            })
+            .collect()
+    }
+
+    /// Vec<Effect> からリーフエフェクトを解決する。
+    pub fn resolve_leaf_effects_from_effects(
+        &self,
+        effects: &[crate::parser::Effect],
+    ) -> HashSet<String> {
+        let names: Vec<String> = effects.iter().map(|e| e.name.clone()).collect();
+        self.resolve_leaf_effects(&names)
+    }
+
+    // =========================================================================
+    // Step 2b: エフェクト階層の解決メソッド
+    // =========================================================================
+
+    /// エフェクト名からその祖先エフェクト（親→祖父→...）を全て返す。
+    /// HttpRead → [Network] のように、包含関係を解決する。
+    pub fn get_effect_ancestors(&self, effect_name: &str) -> Vec<String> {
+        let mut ancestors = Vec::new();
+        let mut current = effect_name.to_string();
+        let mut visited = HashSet::new(); // 循環防止
+        loop {
+            // effect_defs を優先、なければ effects も参照
+            let parent_opt = self
+                .effect_defs
+                .get(&current)
+                .and_then(|def| def.parent.clone())
+                .or_else(|| {
+                    self.effects
+                        .get(&current)
+                        .and_then(|def| def.parent.clone())
+                });
+            if let Some(parent) = parent_opt {
+                if !visited.insert(parent.clone()) {
+                    break; // 循環検出
+                }
+                ancestors.push(parent.clone());
+                current = parent;
+            } else {
+                break;
+            }
+        }
+        ancestors
+    }
+
+    /// effect_a が effect_b のサブタイプかを判定。
+    /// HttpRead は Network のサブタイプ → is_subeffect("HttpRead", "Network") == true
+    pub fn is_subeffect(&self, child: &str, parent: &str) -> bool {
+        if child == parent {
+            return true;
+        }
+        self.get_effect_ancestors(child)
+            .contains(&parent.to_string())
+    }
+
+    // =========================================================================
+    // Step 2c: Symbolic String ID 管理（ハイブリッド・アプローチ）
+    // =========================================================================
+
+    /// パス文字列を整数IDに変換して登録する。既に登録済みなら既存IDを返す。
+    // NOTE: register_path_id is infrastructure for Z3 String Sort migration (see ROADMAP.md P4)
+    #[allow(dead_code)]
+    pub fn register_path_id(&mut self, path: &str) -> i64 {
+        if let Some(&id) = self.path_id_map.get(path) {
+            return id;
+        }
+        let id = self.next_path_id;
+        self.next_path_id += 1;
+        self.path_id_map.insert(path.to_string(), id);
+        id
+    }
+
+    /// プレフィックスに対して整数範囲を割り当てる。
+    /// 例: "/tmp/" → (1000, 1999) のように、"/tmp/" で始まるパスはこの範囲のIDを持つ。
+    // NOTE: register_prefix_range is infrastructure for Z3 String Sort migration (see ROADMAP.md P4)
+    #[allow(dead_code)]
+    pub fn register_prefix_range(&mut self, prefix: &str, range_start: i64, range_end: i64) {
+        self.prefix_ranges
+            .insert(prefix.to_string(), (range_start, range_end));
+    }
+
+    /// パスIDが指定プレフィックスの範囲内にあるかチェックする。
+    // NOTE: path_id_matches_prefix is infrastructure for Z3 String Sort migration (see ROADMAP.md P4)
+    #[allow(dead_code)]
+    pub fn path_id_matches_prefix(&self, path_id: i64, prefix: &str) -> bool {
+        if let Some(&(start, end)) = self.prefix_ranges.get(prefix) {
+            path_id >= start && path_id <= end
+        } else {
+            false
+        }
+    }
+
+    /// エフェクト定義を effect_defs レジストリに登録する。
+    // NOTE: register_effect_def is used by future EffectDef import registration path
+    #[allow(dead_code)]
+    pub fn register_effect_def(&mut self, effect_def: &EffectDef) {
+        self.effect_defs
+            .insert(effect_def.name.clone(), effect_def.clone());
+    }
+
+    // =========================================================================
+    // Dependency Graph Methods (Feature 2-a)
+    // =========================================================================
+
+    /// Register the set of atoms that `atom_name` calls.
+    /// Populates both forward (`dependency_graph`) and reverse (`reverse_deps`) maps.
+    pub fn register_dependencies(&mut self, atom_name: &str, callees: HashSet<String>) {
+        for callee in &callees {
+            self.reverse_deps
+                .entry(callee.clone())
+                .or_default()
+                .insert(atom_name.to_string());
+        }
+        self.dependency_graph.insert(atom_name.to_string(), callees);
+    }
+
+    /// BFS traversal of `reverse_deps` to find all atoms transitively depending
+    /// on the given atom.
+    #[allow(dead_code)]
+    pub fn get_transitive_dependents(&self, atom_name: &str) -> HashSet<String> {
+        let mut result = HashSet::new();
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back(atom_name.to_string());
+        while let Some(current) = queue.pop_front() {
+            if let Some(dependents) = self.reverse_deps.get(&current) {
+                for dep in dependents {
+                    if result.insert(dep.clone()) {
+                        queue.push_back(dep.clone());
+                    }
+                }
+            }
+        }
+        result
+    }
 }
 
 // =============================================================================
@@ -842,6 +1304,58 @@ pub fn register_builtin_traits(module_env: &mut ModuleEnv) {
             span: Span::default(),
         });
     }
+}
+
+// =============================================================================
+// 組み込みエフェクト (Built-in Effects)
+// =============================================================================
+
+/// 組み込みエフェクトを ModuleEnv に自動登録する。
+/// FileRead, FileWrite, Network, Log, Console の基本エフェクトと、
+/// IO (FileRead + FileWrite + Console), FullAccess (IO + Network + Log) の
+/// 複合エフェクトを提供。
+pub fn register_builtin_effects(module_env: &mut ModuleEnv) {
+    use crate::parser::EffectDef;
+
+    // --- 基本エフェクト ---
+    for name in &["FileRead", "FileWrite", "Network", "Log", "Console"] {
+        module_env.register_effect(&EffectDef {
+            name: name.to_string(),
+            params: vec![],
+            constraint: None,
+            includes: vec![],
+            refinement: None,
+            parent: None,
+            span: Span::default(),
+        });
+    }
+
+    // --- 複合エフェクト ---
+    // IO includes FileRead, FileWrite, Console
+    module_env.register_effect(&EffectDef {
+        name: "IO".to_string(),
+        params: vec![],
+        constraint: None,
+        includes: vec![
+            "FileRead".to_string(),
+            "FileWrite".to_string(),
+            "Console".to_string(),
+        ],
+        refinement: None,
+        parent: None,
+        span: Span::default(),
+    });
+
+    // FullAccess includes IO, Network, Log
+    module_env.register_effect(&EffectDef {
+        name: "FullAccess".to_string(),
+        params: vec![],
+        constraint: None,
+        includes: vec!["IO".to_string(), "Network".to_string(), "Log".to_string()],
+        refinement: None,
+        parent: None,
+        span: Span::default(),
+    });
 }
 
 // =============================================================================
@@ -1007,7 +1521,11 @@ fn split_args(input: &str) -> Vec<String> {
 /// impl が対応する trait の全 law を満たしているかを Z3 で検証する。
 /// 各 law の論理式内のメソッド呼び出しを impl の具体的な body で置換し、
 /// ∀x. law_expr が成立するかを検証する。
-pub fn verify_impl(impl_def: &ImplDef, module_env: &ModuleEnv, output_dir: &Path) -> MumeiResult<()> {
+pub fn verify_impl(
+    impl_def: &ImplDef,
+    module_env: &ModuleEnv,
+    output_dir: &Path,
+) -> MumeiResult<()> {
     let trait_def = module_env.get_trait(&impl_def.trait_name).ok_or_else(|| {
         MumeiError::type_error_at(
             format!(
@@ -1131,11 +1649,17 @@ pub fn verify_impl(impl_def: &ImplDef, module_env: &ModuleEnv, output_dir: &Path
                             save_visualizer_report(
                                 output_dir,
                                 "failed",
-                                &format!("impl {} for {}", impl_def.trait_name, impl_def.target_type),
+                                &format!(
+                                    "impl {} for {}",
+                                    impl_def.trait_name, impl_def.target_type
+                                ),
                                 "N/A",
                                 "N/A",
                                 &format!("Trait law '{}' not satisfied", law_name),
                                 ce_value.as_ref(),
+                                FAILURE_TRAIT_LAW_VIOLATED,
+                                None,
+                                Some(&impl_def.span),
                             );
                             if ce_parts.is_empty() {
                                 "  (no concrete values available)".to_string()
@@ -1180,8 +1704,198 @@ pub fn verify_impl(impl_def: &ImplDef, module_env: &ModuleEnv, output_dir: &Path
 // これにより、待機グラフ（Wait-For Graph）に循環が生じないことを
 // コンパイル時に数学的に保証する。
 
-/// リソース取得コンテキスト: 現在保持中のリソースとその優先度を追跡する。
-/// acquire 式の検証時に、リソース階層制約をチェックする。
+// リソース取得コンテキスト: 現在保持中のリソースとその優先度を追跡する。
+// acquire 式の検証時に、リソース階層制約をチェックする。
+
+// =============================================================================
+// エフェクト検証コンテキスト (Effect Verification Context)
+// =============================================================================
+
+/// Effect verification context — tracks allowed and used effects per atom scope.
+#[derive(Debug, Clone, Default)]
+#[allow(dead_code)]
+struct EffectCtx {
+    /// Effects allowed in the current scope (from atom's effects annotation, transitively expanded)
+    allowed_effects: HashSet<String>,
+    /// Effects actually used in the body (from perform expressions)
+    used_effects: HashSet<String>,
+    /// Violation messages
+    violations: Vec<String>,
+}
+
+#[allow(dead_code)]
+impl EffectCtx {
+    fn new(allowed: HashSet<String>) -> Self {
+        Self {
+            allowed_effects: allowed,
+            used_effects: HashSet::new(),
+            violations: Vec::new(),
+        }
+    }
+
+    /// Record a perform and check if the effect is allowed
+    fn perform_effect(&mut self, effect_name: &str) -> Result<(), String> {
+        self.used_effects.insert(effect_name.to_string());
+        if !self.allowed_effects.contains(effect_name) {
+            let msg = format!(
+                "Effect violation: '{}' is not in the allowed effect set {:?}",
+                effect_name, self.allowed_effects
+            );
+            self.violations.push(msg.clone());
+            return Err(msg);
+        }
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    fn has_violations(&self) -> bool {
+        !self.violations.is_empty()
+    }
+}
+
+/// Verify effect containment for an atom using Z3.
+/// Proves: ∀e ∈ UsedEffects(Body): e ∈ AllowedEffects(Signature)
+fn verify_effect_containment(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult<()> {
+    // Check effect propagation: for each callee atom, verify callee.effects ⊆ caller.effects
+    // Use leaf effects only to avoid false positives with composite effects.
+    // E.g., caller [FileRead, FileWrite, Console] vs callee [IO] should pass
+    // because both resolve to the same leaf set.
+    let allowed_leaves = module_env.resolve_leaf_effects_from_effects(&atom.effects);
+    let body_stmt = parse_body_expr(&atom.body_expr);
+    let callees = collect_callees_stmt(&body_stmt);
+    for callee_name in &callees {
+        if let Some(callee_atom) = module_env.get_atom(callee_name) {
+            if !callee_atom.effects.is_empty() {
+                let callee_leaves =
+                    module_env.resolve_leaf_effects_from_effects(&callee_atom.effects);
+                let missing: Vec<String> = callee_leaves
+                    .iter()
+                    .filter(|callee_eff| {
+                        !allowed_leaves.contains(*callee_eff)
+                            && !allowed_leaves
+                                .iter()
+                                .any(|allowed| module_env.is_subeffect(callee_eff, allowed))
+                    })
+                    .cloned()
+                    .collect();
+                if !missing.is_empty() {
+                    return Err(MumeiError::verification_at(
+                        format!(
+                            "Effect propagation violation: atom '{}' calls '{}' which requires \
+                             {:?} effect(s), but '{}' only declares effects: {:?}. \
+                             Missing: {:?}.",
+                            atom.name,
+                            callee_name,
+                            callee_atom.effects,
+                            atom.name,
+                            atom.effects,
+                            missing,
+                        ),
+                        atom.span.clone(),
+                    )
+                    .with_help(format!(
+                        "Add the missing effects {:?} to atom '{}', or remove the call to '{}'.",
+                        missing, atom.name, callee_name
+                    )));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Save an effect mismatch violation report to report.json for self-healing integration.
+fn save_effect_violation_report(
+    output_dir: &Path,
+    atom_name: &str,
+    declared_effects: &[String],
+    required_effect: &str,
+    source_operation: &str,
+    suggested_fixes: &[String],
+) {
+    let report = json!({
+        "status": "failed",
+        "atom": atom_name,
+        "violation_type": "effect_mismatch",
+        "effect_violation": {
+            "declared_effects": declared_effects,
+            "required_effect": required_effect,
+            "source_operation": source_operation,
+            "suggested_fixes": suggested_fixes,
+            "resolution_paths": [
+                {
+                    "strategy": "propagation",
+                    "description": format!("Add '{}' to the effects declaration of atom '{}'", required_effect, atom_name),
+                    "fix_type": "signature_change",
+                    "target": atom_name,
+                    "change": format!("effects: [{}, {}];", declared_effects.join(", "), required_effect)
+                },
+                {
+                    "strategy": "isolation",
+                    "description": format!("Remove the call to '{}' and use only pure computation", source_operation),
+                    "fix_type": "body_change",
+                    "target": atom_name,
+                    "change": format!("Remove or replace '{}' with a pure alternative", source_operation)
+                }
+            ]
+        },
+        "reason": format!("Effect violation: atom '{}' declares effects {:?} but uses '{}' which requires [{}]",
+            atom_name, declared_effects, source_operation, required_effect)
+    });
+    let _ = fs::create_dir_all(output_dir);
+    let _ = fs::write(
+        output_dir.join("report.json"),
+        serde_json::to_string_pretty(&report).unwrap_or_else(|_| report.to_string()),
+    );
+}
+
+/// Save an effect propagation violation report to report.json for self-healing integration.
+fn save_effect_propagation_report(
+    output_dir: &Path,
+    caller_name: &str,
+    callee_name: &str,
+    caller_effects: &[String],
+    callee_effects: &[String],
+    missing_effects: &[String],
+) {
+    let report = json!({
+        "status": "failed",
+        "atom": caller_name,
+        "violation_type": "effect_propagation",
+        "effect_violation": {
+            "caller": caller_name,
+            "callee": callee_name,
+            "caller_effects": caller_effects,
+            "callee_effects": callee_effects,
+            "missing_effects": missing_effects,
+            "suggested_fixes": [
+                format!("Add {:?} to atom '{}' effects declaration", missing_effects, caller_name),
+                format!("Remove the call to '{}' from atom '{}'", callee_name, caller_name)
+            ],
+            "resolution_paths": [
+                {
+                    "strategy": "propagation",
+                    "description": format!("Expand {}'s effect set to include {}'s effects", caller_name, callee_name),
+                    "fix_type": "signature_change"
+                },
+                {
+                    "strategy": "isolation",
+                    "description": format!("Remove the dependency on '{}'", callee_name),
+                    "fix_type": "body_change"
+                }
+            ]
+        },
+        "reason": format!("Effect propagation violation: '{}' calls '{}' which requires {:?}, but '{}' only declares {:?}",
+            caller_name, callee_name, callee_effects, caller_name, caller_effects)
+    });
+    let _ = fs::create_dir_all(output_dir);
+    let _ = fs::write(
+        output_dir.join("report.json"),
+        serde_json::to_string_pretty(&report).unwrap_or_else(|_| report.to_string()),
+    );
+}
+
 #[derive(Debug, Clone, Default)]
 struct ResourceCtx {
     /// 現在保持中のリソース: (リソース名, 優先度)
@@ -1346,56 +2060,71 @@ const BMC_DEFAULT_UNROLL_DEPTH: usize = 3;
 /// 「Unknown（未定義）」として扱い、Z3 探索を打ち切る。
 const MAX_ASYNC_RECURSION_DEPTH: usize = 3;
 
-/// body 内の Acquire 式を再帰的に収集する（BMC 用）。
+/// body 内の Acquire を再帰的に収集する（BMC 用）。
 /// ループ内で acquire が使われているパターンを検出するために使用。
-fn collect_acquire_resources(expr: &Expr) -> Vec<String> {
+fn collect_acquire_resources_expr(expr: &Expr) -> Vec<String> {
     let mut resources = Vec::new();
     match expr {
-        Expr::Acquire { resource, body } => {
-            resources.push(resource.clone());
-            resources.extend(collect_acquire_resources(body));
-        }
-        Expr::Block(stmts) => {
-            for stmt in stmts {
-                resources.extend(collect_acquire_resources(stmt));
-            }
-        }
-        Expr::While { body, .. } => {
-            resources.extend(collect_acquire_resources(body));
-        }
         Expr::IfThenElse {
             then_branch,
             else_branch,
             ..
         } => {
-            resources.extend(collect_acquire_resources(then_branch));
-            resources.extend(collect_acquire_resources(else_branch));
-        }
-        Expr::Let { value, .. } | Expr::Assign { value, .. } => {
-            resources.extend(collect_acquire_resources(value));
+            resources.extend(collect_acquire_resources_stmt(then_branch));
+            resources.extend(collect_acquire_resources_stmt(else_branch));
         }
         Expr::Async { body } => {
-            resources.extend(collect_acquire_resources(body));
+            resources.extend(collect_acquire_resources_stmt(body));
         }
         Expr::Await { expr } => {
-            resources.extend(collect_acquire_resources(expr));
+            resources.extend(collect_acquire_resources_expr(expr));
         }
-        Expr::Task { body, .. } => {
-            resources.extend(collect_acquire_resources(body));
-        }
-        Expr::TaskGroup { children, .. } => {
-            for child in children {
-                resources.extend(collect_acquire_resources(child));
+        Expr::Perform { args, .. } => {
+            for arg in args {
+                resources.extend(collect_acquire_resources_expr(arg));
             }
         }
         Expr::AtomRef { .. } => {}
         Expr::CallRef { callee, args } => {
-            resources.extend(collect_acquire_resources(callee));
+            resources.extend(collect_acquire_resources_expr(callee));
             for arg in args {
-                resources.extend(collect_acquire_resources(arg));
+                resources.extend(collect_acquire_resources_expr(arg));
             }
         }
         _ => {}
+    }
+    resources
+}
+
+fn collect_acquire_resources_stmt(stmt: &Stmt) -> Vec<String> {
+    let mut resources = Vec::new();
+    match stmt {
+        Stmt::Acquire { resource, body } => {
+            resources.push(resource.clone());
+            resources.extend(collect_acquire_resources_stmt(body));
+        }
+        Stmt::Block(stmts) => {
+            for s in stmts {
+                resources.extend(collect_acquire_resources_stmt(s));
+            }
+        }
+        Stmt::While { body, .. } => {
+            resources.extend(collect_acquire_resources_stmt(body));
+        }
+        Stmt::Let { value, .. } | Stmt::Assign { value, .. } => {
+            resources.extend(collect_acquire_resources_expr(value));
+        }
+        Stmt::Task { body, .. } => {
+            resources.extend(collect_acquire_resources_stmt(body));
+        }
+        Stmt::TaskGroup { children, .. } => {
+            for child in children {
+                resources.extend(collect_acquire_resources_stmt(child));
+            }
+        }
+        Stmt::Expr(e) => {
+            resources.extend(collect_acquire_resources_expr(e));
+        }
     }
     resources
 }
@@ -1408,27 +2137,36 @@ fn collect_acquire_resources(expr: &Expr) -> Vec<String> {
 /// BMC は「ユーザーが不変量を書けない場合」の補助的な検証手段。
 fn verify_bmc_resource_safety(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult<()> {
     // body 内に acquire が含まれない場合はスキップ
-    let body_ast = parse_expression(&atom.body_expr);
-    let acquired_resources = collect_acquire_resources(&body_ast);
+    let body_stmt = parse_body_expr(&atom.body_expr);
+    let acquired_resources = collect_acquire_resources_stmt(&body_stmt);
     if acquired_resources.is_empty() {
         return Ok(());
     }
 
     // While ループ内に acquire があるかチェック
-    fn has_acquire_in_while(expr: &Expr) -> bool {
+    fn has_acquire_in_while_stmt(stmt: &Stmt) -> bool {
+        match stmt {
+            Stmt::While { body, .. } => !collect_acquire_resources_stmt(body).is_empty(),
+            Stmt::Block(stmts) => stmts.iter().any(has_acquire_in_while_stmt),
+            Stmt::Acquire { body, .. } => has_acquire_in_while_stmt(body),
+            Stmt::Task { body, .. } => has_acquire_in_while_stmt(body),
+            Stmt::Expr(e) => has_acquire_in_while_expr(e),
+            _ => false,
+        }
+    }
+    fn has_acquire_in_while_expr(expr: &Expr) -> bool {
         match expr {
-            Expr::While { body, .. } => !collect_acquire_resources(body).is_empty(),
-            Expr::Block(stmts) => stmts.iter().any(has_acquire_in_while),
             Expr::IfThenElse {
                 then_branch,
                 else_branch,
                 ..
-            } => has_acquire_in_while(then_branch) || has_acquire_in_while(else_branch),
+            } => has_acquire_in_while_stmt(then_branch) || has_acquire_in_while_stmt(else_branch),
+            Expr::Async { body } => has_acquire_in_while_stmt(body),
             _ => false,
         }
     }
 
-    if !has_acquire_in_while(&body_ast) {
+    if !has_acquire_in_while_stmt(&body_stmt) {
         return Ok(()); // ループ外の acquire は通常の検証で十分
     }
 
@@ -1474,42 +2212,33 @@ fn verify_async_recursion_depth(atom: &Atom, module_env: &ModuleEnv) -> MumeiRes
         return Ok(());
     }
 
-    fn count_self_calls(expr: &Expr, atom_name: &str) -> usize {
+    fn count_self_calls_expr(expr: &Expr, atom_name: &str) -> usize {
         match expr {
             Expr::Call(name, args) => {
                 let self_call = if name == atom_name { 1 } else { 0 };
                 self_call
                     + args
                         .iter()
-                        .map(|a| count_self_calls(a, atom_name))
+                        .map(|a| count_self_calls_expr(a, atom_name))
                         .sum::<usize>()
             }
-            Expr::Block(stmts) => stmts.iter().map(|s| count_self_calls(s, atom_name)).sum(),
             Expr::IfThenElse {
                 cond,
                 then_branch,
                 else_branch,
             } => {
-                count_self_calls(cond, atom_name)
-                    + count_self_calls(then_branch, atom_name)
-                    + count_self_calls(else_branch, atom_name)
+                count_self_calls_expr(cond, atom_name)
+                    + count_self_calls_stmt(then_branch, atom_name)
+                    + count_self_calls_stmt(else_branch, atom_name)
             }
-            Expr::Let { value, .. } | Expr::Assign { value, .. } => {
-                count_self_calls(value, atom_name)
-            }
-            Expr::Async { body } => count_self_calls(body, atom_name),
-            Expr::Await { expr } => count_self_calls(expr, atom_name),
-            Expr::Acquire { body, .. } => count_self_calls(body, atom_name),
-            Expr::While { cond, body, .. } => {
-                count_self_calls(cond, atom_name) + count_self_calls(body, atom_name)
-            }
+            Expr::Async { body } => count_self_calls_stmt(body, atom_name),
+            Expr::Await { expr } => count_self_calls_expr(expr, atom_name),
             Expr::BinaryOp(l, _, r) => {
-                count_self_calls(l, atom_name) + count_self_calls(r, atom_name)
+                count_self_calls_expr(l, atom_name) + count_self_calls_expr(r, atom_name)
             }
-            Expr::Task { body, .. } => count_self_calls(body, atom_name),
-            Expr::TaskGroup { children, .. } => children
+            Expr::Perform { args, .. } => args
                 .iter()
-                .map(|c| count_self_calls(c, atom_name))
+                .map(|a| count_self_calls_expr(a, atom_name))
                 .sum(),
             Expr::AtomRef { .. } => 0,
             Expr::CallRef { callee, args } => {
@@ -1523,18 +2252,39 @@ fn verify_async_recursion_depth(atom: &Atom, module_env: &ModuleEnv) -> MumeiRes
                     0
                 };
                 self_call
-                    + count_self_calls(callee, atom_name)
+                    + count_self_calls_expr(callee, atom_name)
                     + args
                         .iter()
-                        .map(|a| count_self_calls(a, atom_name))
+                        .map(|a| count_self_calls_expr(a, atom_name))
                         .sum::<usize>()
             }
             _ => 0,
         }
     }
+    fn count_self_calls_stmt(stmt: &Stmt, atom_name: &str) -> usize {
+        match stmt {
+            Stmt::Block(stmts) => stmts
+                .iter()
+                .map(|s| count_self_calls_stmt(s, atom_name))
+                .sum(),
+            Stmt::Let { value, .. } | Stmt::Assign { value, .. } => {
+                count_self_calls_expr(value, atom_name)
+            }
+            Stmt::Acquire { body, .. } => count_self_calls_stmt(body, atom_name),
+            Stmt::While { cond, body, .. } => {
+                count_self_calls_expr(cond, atom_name) + count_self_calls_stmt(body, atom_name)
+            }
+            Stmt::Task { body, .. } => count_self_calls_stmt(body, atom_name),
+            Stmt::TaskGroup { children, .. } => children
+                .iter()
+                .map(|c| count_self_calls_stmt(c, atom_name))
+                .sum(),
+            Stmt::Expr(e) => count_self_calls_expr(e, atom_name),
+        }
+    }
 
-    let body_ast = parse_expression(&atom.body_expr);
-    let self_call_count = count_self_calls(&body_ast, &atom.name);
+    let body_stmt = parse_body_expr(&atom.body_expr);
+    let self_call_count = count_self_calls_stmt(&body_stmt, &atom.name);
 
     if self_call_count > 0 {
         // 再帰的 async 呼び出しが検出された
@@ -1718,8 +2468,8 @@ fn verify_atom_invariant(
         }
 
         // body を実行
-        let body_ast = parse_expression(&atom.body_expr);
-        let _body_result = expr_to_z3(&vc, &body_ast, &mut env, Some(&solver))?;
+        let body_stmt = parse_body_expr(&atom.body_expr);
+        let _body_result = stmt_to_z3(&vc, &body_stmt, &mut env, Some(&solver))?;
 
         // body 実行後の invariant を再評価
         // （env が body の実行で更新されている可能性がある）
@@ -1762,18 +2512,13 @@ fn verify_atom_invariant(
 // BMC の深度制限を適用する。
 
 /// body 内の全 Call 式から呼び出し先の atom 名を収集する。
-fn collect_callees(expr: &Expr) -> Vec<String> {
+fn collect_callees_expr(expr: &Expr) -> Vec<String> {
     let mut callees = Vec::new();
     match expr {
         Expr::Call(name, args) => {
             callees.push(name.clone());
             for arg in args {
-                callees.extend(collect_callees(arg));
-            }
-        }
-        Expr::Block(stmts) => {
-            for s in stmts {
-                callees.extend(collect_callees(s));
+                callees.extend(collect_callees_expr(arg));
             }
         }
         Expr::IfThenElse {
@@ -1781,55 +2526,77 @@ fn collect_callees(expr: &Expr) -> Vec<String> {
             then_branch,
             else_branch,
         } => {
-            callees.extend(collect_callees(cond));
-            callees.extend(collect_callees(then_branch));
-            callees.extend(collect_callees(else_branch));
-        }
-        Expr::Let { value, .. } | Expr::Assign { value, .. } => {
-            callees.extend(collect_callees(value));
-        }
-        Expr::While { cond, body, .. } => {
-            callees.extend(collect_callees(cond));
-            callees.extend(collect_callees(body));
+            callees.extend(collect_callees_expr(cond));
+            callees.extend(collect_callees_stmt(then_branch));
+            callees.extend(collect_callees_stmt(else_branch));
         }
         Expr::BinaryOp(l, _, r) => {
-            callees.extend(collect_callees(l));
-            callees.extend(collect_callees(r));
+            callees.extend(collect_callees_expr(l));
+            callees.extend(collect_callees_expr(r));
         }
-        Expr::Async { body } | Expr::Acquire { body, .. } => {
-            callees.extend(collect_callees(body));
+        Expr::Async { body } => {
+            callees.extend(collect_callees_stmt(body));
         }
         Expr::Await { expr } => {
-            callees.extend(collect_callees(expr));
+            callees.extend(collect_callees_expr(expr));
         }
         Expr::Match { target, arms } => {
-            callees.extend(collect_callees(target));
+            callees.extend(collect_callees_expr(target));
             for arm in arms {
-                callees.extend(collect_callees(&arm.body));
+                callees.extend(collect_callees_stmt(&arm.body));
                 if let Some(guard) = &arm.guard {
-                    callees.extend(collect_callees(guard));
+                    callees.extend(collect_callees_expr(guard));
                 }
-            }
-        }
-        Expr::Task { body, .. } => {
-            callees.extend(collect_callees(body));
-        }
-        Expr::TaskGroup { children, .. } => {
-            for child in children {
-                callees.extend(collect_callees(child));
             }
         }
         Expr::AtomRef { name } => {
             callees.push(name.clone());
         }
         Expr::CallRef { callee, args } => {
-            // Only recurse into callee — AtomRef branch already pushes the name
-            callees.extend(collect_callees(callee));
+            callees.extend(collect_callees_expr(callee));
             for arg in args {
-                callees.extend(collect_callees(arg));
+                callees.extend(collect_callees_expr(arg));
+            }
+        }
+        Expr::Perform { args, .. } => {
+            for arg in args {
+                callees.extend(collect_callees_expr(arg));
             }
         }
         _ => {}
+    }
+    callees
+}
+
+fn collect_callees_stmt(stmt: &Stmt) -> Vec<String> {
+    let mut callees = Vec::new();
+    match stmt {
+        Stmt::Block(stmts) => {
+            for s in stmts {
+                callees.extend(collect_callees_stmt(s));
+            }
+        }
+        Stmt::Let { value, .. } | Stmt::Assign { value, .. } => {
+            callees.extend(collect_callees_expr(value));
+        }
+        Stmt::While { cond, body, .. } => {
+            callees.extend(collect_callees_expr(cond));
+            callees.extend(collect_callees_stmt(body));
+        }
+        Stmt::Acquire { body, .. } => {
+            callees.extend(collect_callees_stmt(body));
+        }
+        Stmt::Task { body, .. } => {
+            callees.extend(collect_callees_stmt(body));
+        }
+        Stmt::TaskGroup { children, .. } => {
+            for child in children {
+                callees.extend(collect_callees_stmt(child));
+            }
+        }
+        Stmt::Expr(e) => {
+            callees.extend(collect_callees_expr(e));
+        }
     }
     callees
 }
@@ -1857,8 +2624,8 @@ fn detect_call_cycle(atom_name: &str, module_env: &ModuleEnv) -> Option<Vec<Stri
         path.push(current.to_string());
 
         if let Some(callee_atom) = module_env.get_atom(current) {
-            let body_ast = parse_expression(&callee_atom.body_expr);
-            let callees = collect_callees(&body_ast);
+            let body_stmt = parse_body_expr(&callee_atom.body_expr);
+            let callees = collect_callees_stmt(&body_stmt);
             for callee_name in &callees {
                 if module_env.get_atom(callee_name).is_some() {
                     if callee_name == target && !path.is_empty() {
@@ -1878,8 +2645,8 @@ fn detect_call_cycle(atom_name: &str, module_env: &ModuleEnv) -> Option<Vec<Stri
 
     // atom_name の呼び出し先から DFS 開始
     if let Some(atom) = module_env.get_atom(atom_name) {
-        let body_ast = parse_expression(&atom.body_expr);
-        let callees = collect_callees(&body_ast);
+        let body_stmt = parse_body_expr(&atom.body_expr);
+        let callees = collect_callees_stmt(&body_stmt);
         for callee_name in &callees {
             if module_env.get_atom(callee_name).is_some() {
                 visited.clear();
@@ -1941,8 +2708,8 @@ fn verify_call_graph_cycles(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult<
 /// verify() の body 検証後に呼び出される。
 fn check_taint_propagation(atom: &Atom, env: &Env, module_env: &ModuleEnv) {
     // body 内で呼び出されている関数を収集
-    let body_ast = parse_expression(&atom.body_expr);
-    let callees = collect_callees(&body_ast);
+    let body_stmt = parse_body_expr(&atom.body_expr);
+    let callees = collect_callees_stmt(&body_stmt);
 
     let mut tainted_sources: Vec<String> = Vec::new();
     for callee_name in &callees {
@@ -1968,29 +2735,211 @@ fn check_taint_propagation(atom: &Atom, env: &Env, module_env: &ModuleEnv) {
     }
 }
 
+// =============================================================================
+// Step 3: Effect Inference（エフェクト推論）
+// =============================================================================
+
+/// body 内の関数呼び出しからエフェクトセットを推論する。
+/// 呼び出し先 atom の effects フィールドを再帰的に集約する。
+/// 親エフェクトへの暗黙的包含も解決する。
+fn infer_effects(atom: &Atom, module_env: &ModuleEnv) -> Vec<Effect> {
+    let body_stmt = parse_body_expr(&atom.body_expr);
+    let callees = collect_callees_stmt(&body_stmt);
+    let mut inferred = Vec::new();
+    let mut seen_names: HashSet<String> = HashSet::new();
+    for callee_name in &callees {
+        if let Some(callee) = module_env.get_atom(callee_name) {
+            for eff in &callee.effects {
+                if seen_names.insert(eff.name.clone()) {
+                    inferred.push(eff.clone());
+                }
+                // NOTE: ancestors are NOT added to seen_names to avoid suppressing
+                // explicit effect requirements from other callees. The deduplication
+                // via seen_names only applies to effects with the exact same name.
+                // Subtype coverage is handled separately by infer_effects_json's
+                // is_subeffect() check when computing missing_effects.
+            }
+        }
+    }
+    inferred
+}
+
+/// 全 atom のエフェクト推論結果を JSON で出力する。
+/// MCP の get_inferred_effects ツールから呼ばれる。
+pub fn infer_effects_json(items: &[Item], module_env: &ModuleEnv) -> serde_json::Value {
+    let mut results = Vec::new();
+    for item in items {
+        if let Item::Atom(atom) = item {
+            let declared: Vec<String> = atom.effects.iter().map(|e| e.name.clone()).collect();
+            let inferred = infer_effects(atom, module_env);
+            let inferred_names: Vec<String> = inferred.iter().map(|e| e.name.clone()).collect();
+            let missing: Vec<String> = inferred_names
+                .iter()
+                .filter(|n| {
+                    !declared.contains(n) && !declared.iter().any(|d| module_env.is_subeffect(n, d))
+                })
+                .cloned()
+                .collect();
+            let suggestion = if missing.is_empty() {
+                serde_json::Value::Null
+            } else {
+                let all_effects: Vec<String> =
+                    declared.iter().chain(missing.iter()).cloned().collect();
+                serde_json::Value::String(format!("effects: [{}];", all_effects.join(", ")))
+            };
+            results.push(serde_json::json!({
+                "atom": atom.name,
+                "declared_effects": declared,
+                "inferred_effects": inferred_names,
+                "missing_effects": missing,
+                "suggestion": suggestion
+            }));
+        }
+    }
+    serde_json::json!({ "effects_analysis": results })
+}
+
+/// エフェクト整合性検証: 宣言されたエフェクトと推論されたエフェクトの比較。
+/// エフェクト階層の Subtyping も考慮する。
+// NOTE: verify_effect_consistency will be integrated into verify_inner pipeline in a future PR
+#[allow(dead_code)]
+fn verify_effect_consistency(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult<()> {
+    let declared: Vec<String> = atom.effects.iter().map(|e| e.name.clone()).collect();
+    let inferred = infer_effects(atom, module_env);
+
+    for eff in &inferred {
+        // 宣言に含まれるか、宣言のいずれかのサブタイプかをチェック
+        let is_covered = declared.contains(&eff.name)
+            || declared
+                .iter()
+                .any(|d| module_env.is_subeffect(&eff.name, d));
+        if !is_covered {
+            let all_effects: Vec<String> = declared
+                .iter()
+                .chain(std::iter::once(&eff.name))
+                .cloned()
+                .collect();
+            eprintln!(
+                "  ⚠️  Effect suggestion for atom '{}': inferred effect '{}' is not declared. \
+                 Suggested: effects: [{}];",
+                atom.name,
+                eff.name,
+                all_effects.join(", ")
+            );
+        }
+    }
+    Ok(())
+}
+
+// =============================================================================
+// Step 4: ハイブリッド・アプローチによるエフェクトパラメータ検証
+// =============================================================================
+
+/// 定数制約チェック（Constant Folding）。
+/// 定数パスに対する制約を Rust 側で直接検証する。
+// NOTE: check_constant_constraint is called by verify_effect_params (future pipeline integration)
+#[allow(dead_code)]
+fn check_constant_constraint(value: &str, constraint: &str) -> bool {
+    // パーサーは "starts_with(path, \"/tmp/\")" のように2引数形式で制約を出力する。
+    // 文字列引数（最後のクォートされた値）を抽出して検証する。
+    let extract_string_arg = |c: &str| -> Option<String> {
+        // 最後の "..." を抽出する
+        if let Some(last_quote_end) = c.rfind('"') {
+            let before = &c[..last_quote_end];
+            if let Some(last_quote_start) = before.rfind('"') {
+                return Some(c[last_quote_start + 1..last_quote_end].to_string());
+            }
+        }
+        None
+    };
+
+    // starts_with 制約（1引数 or 2引数形式）
+    if constraint.starts_with("starts_with(") {
+        if let Some(arg) = extract_string_arg(constraint) {
+            return value.starts_with(&arg);
+        }
+    }
+    // contains 制約
+    if constraint.starts_with("contains(") {
+        if let Some(arg) = extract_string_arg(constraint) {
+            return value.contains(&arg);
+        }
+    }
+    // ends_with 制約
+    if constraint.starts_with("ends_with(") {
+        if let Some(arg) = extract_string_arg(constraint) {
+            return value.ends_with(&arg);
+        }
+    }
+    // not_contains 制約
+    if constraint.starts_with("not_contains(") {
+        if let Some(arg) = extract_string_arg(constraint) {
+            return !value.contains(&arg);
+        }
+    }
+    // 不明な制約は false を返す（安全側に倒す — 検証できない場合は拒否）
+    false
+}
+
+/// エフェクトパラメータの検証。
+/// 定数パスは Rust 側で直接チェック（Constant Folding）。
+/// 変数パスは Z3 Int で検証（Symbolic String ID）。
+// NOTE: verify_effect_params will be integrated into verify_inner pipeline in a future PR
+#[allow(dead_code)]
+fn verify_effect_params(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult<()> {
+    for effect in &atom.effects {
+        // effect_defs を優先、なければ effects を参照
+        let effect_def = module_env
+            .effect_defs
+            .get(&effect.name)
+            .or_else(|| module_env.effects.get(&effect.name));
+        if let Some(def) = effect_def {
+            for param in &effect.params {
+                if param.is_constant {
+                    // Constant Folding: 定数パスは Rust 側で直接チェック
+                    if let Some(ref constraint) = def.constraint {
+                        if !check_constant_constraint(&param.value, constraint) {
+                            return Err(MumeiError::verification_at(
+                                format!(
+                                    "Effect '{}' parameter '{}' violates constraint: {}",
+                                    effect.name, param.value, constraint
+                                ),
+                                effect.span.clone(),
+                            ));
+                        }
+                    }
+                }
+                // 変数パスの場合の Z3 検証は verify_inner の Z3 コンテキスト内で行う
+            }
+        }
+    }
+    Ok(())
+}
+
 /// mumei.toml の [proof]/[build] 設定を反映した verify
 /// timeout_ms: Z3 ソルバのタイムアウト（ミリ秒）
 /// global_max_unroll: BMC のグローバル展開深度
 pub fn verify_with_config(
-    atom: &Atom,
+    hir_atom: &HirAtom,
     output_dir: &Path,
     module_env: &ModuleEnv,
     timeout_ms: u64,
     _global_max_unroll: usize,
 ) -> MumeiResult<()> {
-    verify_inner(atom, output_dir, module_env, timeout_ms)
+    verify_inner(hir_atom, output_dir, module_env, timeout_ms)
 }
 
-pub fn verify(atom: &Atom, output_dir: &Path, module_env: &ModuleEnv) -> MumeiResult<()> {
-    verify_inner(atom, output_dir, module_env, 10000)
+pub fn verify(hir_atom: &HirAtom, output_dir: &Path, module_env: &ModuleEnv) -> MumeiResult<()> {
+    verify_inner(hir_atom, output_dir, module_env, 10000)
 }
 
 fn verify_inner(
-    atom: &Atom,
+    hir_atom: &HirAtom,
     output_dir: &Path,
     module_env: &ModuleEnv,
     timeout_ms: u64,
 ) -> MumeiResult<()> {
+    let atom = &hir_atom.atom;
     // Phase 0: 信頼レベルチェック（Trust Boundary）
     match &atom.trust_level {
         TrustLevel::Trusted => {
@@ -2004,6 +2953,9 @@ fn verify_inner(
                 "N/A",
                 "Trusted: body verification skipped, contract assumed correct.",
                 None,
+                "",
+                None,
+                Some(&atom.span),
             );
             return Ok(());
         }
@@ -2025,6 +2977,9 @@ fn verify_inner(
                     "N/A",
                     "Unverified: no contract to verify.",
                     None,
+                    "",
+                    None,
+                    Some(&atom.span),
                 );
                 return Ok(());
             }
@@ -2036,6 +2991,55 @@ fn verify_inner(
 
     // Phase 1: リソース階層検証（デッドロック防止）
     verify_resource_hierarchy(atom, module_env)?;
+
+    // Phase 1f: エフェクト包含検証（副作用安全性）
+    if let Err(e) = verify_effect_containment(atom, module_env) {
+        // Save structured effect violation report for self-healing integration.
+        // Extract missing effects from the error to produce a structured report.
+        let body_stmt_eff = parse_body_expr(&atom.body_expr);
+        let callees = collect_callees_stmt(&body_stmt_eff);
+        let allowed_leaves = module_env.resolve_leaf_effects_from_effects(&atom.effects);
+        let mut missing_all: Vec<String> = Vec::new();
+        let mut violating_callee = String::new();
+        let mut callee_effs: Vec<String> = Vec::new();
+        for callee_name in &callees {
+            if let Some(callee_atom) = module_env.get_atom(callee_name) {
+                if !callee_atom.effects.is_empty() {
+                    let callee_leaves =
+                        module_env.resolve_leaf_effects_from_effects(&callee_atom.effects);
+                    let missing: Vec<String> = callee_leaves
+                        .iter()
+                        .filter(|callee_eff| {
+                            !allowed_leaves.contains(*callee_eff)
+                                && !allowed_leaves
+                                    .iter()
+                                    .any(|allowed| module_env.is_subeffect(callee_eff, allowed))
+                        })
+                        .cloned()
+                        .collect();
+                    if !missing.is_empty() {
+                        violating_callee = callee_name.clone();
+                        callee_effs = callee_atom.effects.iter().map(|e| e.name.clone()).collect();
+                        missing_all = missing;
+                        break;
+                    }
+                }
+            }
+        }
+        if !missing_all.is_empty() {
+            let caller_effect_names: Vec<String> =
+                atom.effects.iter().map(|e| e.name.clone()).collect();
+            save_effect_propagation_report(
+                output_dir,
+                &atom.name,
+                &violating_callee,
+                &caller_effect_names,
+                &callee_effs,
+                &missing_all,
+            );
+        }
+        return Err(e);
+    }
 
     // Phase 1b: 有界モデル検査（ループ内 acquire パターン）
     verify_bmc_resource_safety(atom, module_env)?;
@@ -2065,6 +3069,15 @@ fn verify_inner(
     };
 
     let mut env: Env = HashMap::new();
+
+    // Phase 2b: エフェクト許可セットを Z3 環境に注入
+    {
+        let allowed_effects = module_env.resolve_effect_set_from_effects(&atom.effects);
+        for effect_name in &allowed_effects {
+            let allowed_name = format!("__effect_allowed_{}", effect_name);
+            env.insert(allowed_name, Bool::from_bool(&ctx, true).into());
+        }
+    }
 
     // 1. 量子化制約の処理
     for q in &atom.forall_constraints {
@@ -2311,21 +3324,56 @@ fn verify_inner(
     }
 
     // 4. ボディの検証
-    let body_ast = parse_expression(&atom.body_expr);
-    let body_result = match expr_to_z3(&vc, &body_ast, &mut env, Some(&solver)) {
+    let body_stmt = parse_body_expr(&atom.body_expr);
+    let body_result = match stmt_to_z3(&vc, &body_stmt, &mut env, Some(&solver)) {
         Ok(val) => val,
         Err(e) => {
             // Body evaluation errors (e.g., division by zero, out-of-bounds) propagate
             // before reaching the postcondition check. Write a failure report so the
             // MCP self-healing flow does not read a stale report.json from a prior run.
+            let err_str = format!("{}", e);
+            // If this is an effect mismatch violation, save a structured report
+            if err_str.contains("Effect violation: 'perform ") {
+                // Extract effect name and operation from error message
+                // Format: "Effect violation: 'perform Effect.op' requires [Effect] effect, ..."
+                if let Some(start) = err_str.find("requires [") {
+                    let after = &err_str[start + 10..];
+                    if let Some(end) = after.find(']') {
+                        let required_effect = &after[..end];
+                        let source_op = err_str
+                            .find("'perform ")
+                            .and_then(|s| {
+                                let rest = &err_str[s + 9..];
+                                rest.find('\'').map(|e| rest[..e].to_string())
+                            })
+                            .unwrap_or_default();
+                        let effect_names: Vec<String> =
+                            atom.effects.iter().map(|e| e.name.clone()).collect();
+                        save_effect_violation_report(
+                            output_dir,
+                            &atom.name,
+                            &effect_names,
+                            required_effect,
+                            &source_op,
+                            &[
+                                format!("Add '{}' to the effects declaration", required_effect),
+                                format!("Remove the call to 'perform {}'", source_op),
+                            ],
+                        );
+                    }
+                }
+            }
             save_visualizer_report(
                 output_dir,
                 "failed",
                 &atom.name,
                 "N/A",
                 "N/A",
-                &format!("{}", e),
+                &err_str,
                 None,
+                FAILURE_PRECONDITION_VIOLATED,
+                None,
+                Some(&atom.span),
             );
             return Err(e);
         }
@@ -2354,11 +3402,13 @@ fn verify_inner(
                             }
                         }
                     }
-                    let a_str = ce_json.get(atom.params.get(0).map(|p| p.name.as_str()).unwrap_or(""))
+                    let a_str = ce_json
+                        .get(atom.params.first().map(|p| p.name.as_str()).unwrap_or(""))
                         .and_then(|v| v.as_str())
                         .unwrap_or("N/A")
                         .to_string();
-                    let b_str = ce_json.get(atom.params.get(1).map(|p| p.name.as_str()).unwrap_or(""))
+                    let b_str = ce_json
+                        .get(atom.params.get(1).map(|p| p.name.as_str()).unwrap_or(""))
                         .and_then(|v| v.as_str())
                         .unwrap_or("N/A")
                         .to_string();
@@ -2372,6 +3422,13 @@ fn verify_inner(
                     ("N/A".to_string(), "N/A".to_string(), None)
                 };
                 solver.pop(1);
+                let constraint_mappings = build_constraint_mappings_for_atom(atom, module_env);
+                let semantic_fb = build_semantic_feedback(
+                    &constraint_mappings,
+                    ce_value.as_ref(),
+                    atom,
+                    FAILURE_POSTCONDITION_VIOLATED,
+                );
                 save_visualizer_report(
                     output_dir,
                     "failed",
@@ -2380,6 +3437,9 @@ fn verify_inner(
                     &ce_b,
                     "Postcondition violated.",
                     ce_value.as_ref(),
+                    FAILURE_POSTCONDITION_VIOLATED,
+                    semantic_fb.as_ref(),
+                    Some(&atom.span),
                 );
                 return Err(MumeiError::verification_at(
                     "Postcondition (ensures) is not satisfied.",
@@ -2432,6 +3492,9 @@ fn verify_inner(
             "N/A",
             "Logic contradiction.",
             None,
+            FAILURE_INVARIANT_VIOLATED,
+            None,
+            Some(&atom.span),
         );
         return Err(MumeiError::verification_at(
             "Contradiction found.",
@@ -2447,6 +3510,9 @@ fn verify_inner(
         "N/A",
         "Verified safe.",
         None,
+        "",
+        None,
+        Some(&atom.span),
     );
     Ok(())
 }
@@ -2925,10 +3991,12 @@ fn expr_to_z3<'a>(
                             if solver.check() == SatResult::Sat {
                                 // Extract counterexample: find which variables cause divisor == 0
                                 let ce_hint = if let Some(model) = solver.get_model() {
-                                    let divisor_val = model.eval(&ri, true)
+                                    let divisor_val = model
+                                        .eval(&ri, true)
                                         .map(|v| format!("{}", v))
                                         .unwrap_or_else(|| "0".to_string());
-                                    let dividend_val = model.eval(&li, true)
+                                    let dividend_val = model
+                                        .eval(&li, true)
                                         .map(|v| format!("{}", v))
                                         .unwrap_or_else(|| "?".to_string());
                                     format!(
@@ -2939,9 +4007,10 @@ fn expr_to_z3<'a>(
                                     String::new()
                                 };
                                 solver.pop(1);
-                                return Err(MumeiError::verification(
-                                    format!("Potential division by zero.{}", ce_hint),
-                                )
+                                return Err(MumeiError::verification(format!(
+                                    "Potential division by zero.{}",
+                                    ce_hint
+                                ))
                                 .with_help("Add a condition divisor != 0 to requires"));
                             }
                             solver.pop(1);
@@ -2969,130 +4038,11 @@ fn expr_to_z3<'a>(
             let c = expr_to_z3(vc, cond, env, solver_opt)?
                 .as_bool()
                 .ok_or(MumeiError::type_error("If condition must be boolean"))?;
-            let t = expr_to_z3(vc, then_branch, env, solver_opt)?;
-            let e = expr_to_z3(vc, else_branch, env, solver_opt)?;
+            let t = stmt_to_z3(vc, then_branch, env, solver_opt)?;
+            let e = stmt_to_z3(vc, else_branch, env, solver_opt)?;
             Ok(c.ite(&t, &e))
         }
-        Expr::Let { var, value } => {
-            // Block 内の逐次実行では変数を env に残す（スコープ管理は Block 側で行う）
-            let val = expr_to_z3(vc, value, env, solver_opt)?;
-            env.insert(var.clone(), val.clone());
-            Ok(val)
-        }
-        Expr::Assign { var, value } => {
-            let val = expr_to_z3(vc, value, env, solver_opt)?;
-            env.insert(var.clone(), val.clone());
-            Ok(val)
-        }
-        Expr::Block(stmts) => {
-            let mut last = Int::from_i64(ctx, 0).into();
-            for stmt in stmts {
-                last = expr_to_z3(vc, stmt, env, solver_opt)?;
-            }
-            Ok(last)
-        }
-        Expr::While {
-            cond,
-            invariant,
-            decreases,
-            body,
-        } => {
-            // Loop Invariant 検証ロジック
-            if let Some(solver) = solver_opt {
-                let inv = expr_to_z3(vc, invariant, env, None)?
-                    .as_bool()
-                    .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
 
-                // Base case: 現在の env（let で初期化済み）で invariant が成立するか
-                solver.push();
-                solver.assert(&inv.not());
-                if solver.check() == SatResult::Sat {
-                    solver.pop(1);
-                    return Err(MumeiError::verification("Invariant fails initially"));
-                }
-                solver.pop(1);
-
-                // Inductive step: invariant && cond のもとで body 実行後も invariant が保たれるか
-                let c = expr_to_z3(vc, cond, env, None)?
-                    .as_bool()
-                    .ok_or(MumeiError::type_error("While condition must be boolean"))?;
-
-                // Invariant preservation: invariant && cond のもとで body 実行後も invariant が保たれるか
-                // env のスナップショットを保存し、各チェックを独立に行う
-                {
-                    let env_snapshot = env.clone();
-                    solver.push();
-                    solver.assert(&inv);
-                    solver.assert(&c);
-                    expr_to_z3(vc, body, env, Some(solver))?;
-
-                    let inv_after = expr_to_z3(vc, invariant, env, None)?
-                        .as_bool()
-                        .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
-
-                    solver.assert(&inv_after.not());
-                    if solver.check() == SatResult::Sat {
-                        solver.pop(1);
-                        return Err(MumeiError::verification("Invariant not preserved"));
-                    }
-                    solver.pop(1);
-                    *env = env_snapshot; // env を復元
-                }
-
-                // Termination Check: decreases 句が指定されている場合、停止性を検証
-                if let Some(dec_expr) = decreases {
-                    let env_snapshot = env.clone();
-
-                    // V_before: ループ本体実行前の減少式の値
-                    let v_before = expr_to_z3(vc, dec_expr, env, None)?.as_int().ok_or(
-                        MumeiError::type_error("decreases expression must be integer"),
-                    )?;
-
-                    // A. 下界の証明: invariant && cond => V >= 0
-                    solver.push();
-                    solver.assert(&inv);
-                    solver.assert(&c);
-                    solver.assert(&v_before.lt(&Int::from_i64(ctx, 0)));
-                    if solver.check() == SatResult::Sat {
-                        solver.pop(1);
-                        return Err(MumeiError::verification(
-                            "Termination check failed: decreases expression may be negative",
-                        ));
-                    }
-                    solver.pop(1);
-
-                    // B. 厳密な減少の証明: body 実行後に V' < V
-                    solver.push();
-                    solver.assert(&inv);
-                    solver.assert(&c);
-                    expr_to_z3(vc, body, env, Some(solver))?;
-
-                    let v_after = expr_to_z3(vc, dec_expr, env, None)?.as_int().ok_or(
-                        MumeiError::type_error("decreases expression must be integer"),
-                    )?;
-
-                    solver.assert(&v_after.ge(&v_before));
-                    if solver.check() == SatResult::Sat {
-                        solver.pop(1);
-                        *env = env_snapshot;
-                        return Err(MumeiError::verification(
-                            "Termination check failed: decreases expression does not strictly decrease"
-                        ));
-                    }
-                    solver.pop(1);
-                    *env = env_snapshot; // env を復元
-                }
-            }
-
-            let inv = expr_to_z3(vc, invariant, env, None)?
-                .as_bool()
-                .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
-            let c_not = expr_to_z3(vc, cond, env, None)?
-                .as_bool()
-                .ok_or(MumeiError::type_error("While condition must be boolean"))?
-                .not();
-            Ok(Bool::and(ctx, &[&inv, &c_not]).into())
-        }
         Expr::StructInit { type_name, fields } => {
             // 構造体の各フィールドを検証し、env に登録
             // フィールドに精緻型制約がある場合は solver で検証する
@@ -3261,7 +4211,7 @@ fn expr_to_z3<'a>(
                         let prior_negation = Bool::and(ctx, &neg_refs);
                         solver.push();
                         solver.assert(&prior_negation);
-                        let body_val = expr_to_z3(vc, &arm.body, &mut arm_env, solver_opt)?;
+                        let body_val = stmt_to_z3(vc, &arm.body, &mut arm_env, solver_opt)?;
                         solver.pop(1);
                         result = Some(match result {
                             Some(else_val) => full_cond.ite(&body_val, &else_val),
@@ -3272,7 +4222,7 @@ fn expr_to_z3<'a>(
                     }
                 }
 
-                let body_val = expr_to_z3(vc, &arm.body, &mut arm_env, solver_opt)?;
+                let body_val = stmt_to_z3(vc, &arm.body, &mut arm_env, solver_opt)?;
                 result = Some(match result {
                     Some(else_val) => full_cond.ite(&body_val, &else_val),
                     None => body_val,
@@ -3286,31 +4236,56 @@ fn expr_to_z3<'a>(
         // =================================================================
         // 非同期処理 + リソース管理の Z3 検証
         // =================================================================
-        Expr::Acquire { resource, body } => {
-            // acquire ブロック: リソースを取得して body を実行し、自動解放する。
-            // Z3 上ではリソースの保持状態をシンボリック Bool で追跡する。
-            let held_name = format!("__resource_held_{}", resource);
-            let held_bool = Bool::new_const(ctx, held_name.as_str());
-            if let Some(solver) = solver_opt {
-                // リソース取得: held = true
-                solver.assert(&held_bool);
+        Expr::Perform {
+            effect,
+            operation,
+            args: perform_args,
+        } => {
+            // Effect system: record effect usage and verify against allowed set
+            // Record that this effect was used
+            let used_name = format!("__effect_used_{}", effect);
+            let used_bool = Bool::from_bool(ctx, true);
+            env.insert(used_name.clone(), used_bool.into());
+
+            // Check against allowed effects via Z3 environment
+            let allowed_name = format!("__effect_allowed_{}", effect);
+            if env.get(&allowed_name).is_none() {
+                // Effect not in allowed set — immediate violation
+                return Err(MumeiError::verification(format!(
+                    "Effect violation: 'perform {}.{}' requires [{}] effect, \
+                         but it is not declared in the current atom's effects set.",
+                    effect, operation, effect
+                ))
+                .with_help(format!(
+                    "Fix option 1: Add '{}' to the effects declaration: effects: [{}];\n\
+                         Fix option 2: Remove the call to 'perform {}.{}'.",
+                    effect, effect, effect, operation
+                )));
             }
-            env.insert(held_name.clone(), held_bool.into());
 
-            // body を検証
-            let body_result = expr_to_z3(vc, body, env, solver_opt)?;
+            // If solver is available, assert the Z3 containment constraint
+            if let Some(solver) = solver_opt {
+                let used_z3 = Bool::from_bool(ctx, true);
+                let allowed_z3 = Bool::from_bool(ctx, true); // already proven allowed
+                                                             // Assert: used → allowed (trivially true when allowed)
+                solver.assert(&used_z3.implies(&allowed_z3));
+            }
 
-            // リソース解放: held = false
-            let released = Bool::from_bool(ctx, false);
-            env.insert(held_name, released.into());
+            // Process arguments
+            for arg in perform_args {
+                expr_to_z3(vc, arg, env, solver_opt)?;
+            }
 
-            Ok(body_result)
+            // Return a symbolic result value
+            let result_name = format!("__perform_{}_{}", effect, operation);
+            Ok(Int::new_const(ctx, result_name.as_str()).into())
         }
+
         Expr::Async { body } => {
             // async ブロック: body を非同期コンテキストとして検証する。
             // Z3 上では通常の式として扱い、結果をシンボリック値として返す。
             // await ポイントでの所有権検証は Await 式で行う。
-            expr_to_z3(vc, body, env, solver_opt)
+            stmt_to_z3(vc, body, env, solver_opt)
         }
         Expr::Await { expr } => {
             // =============================================================
@@ -3402,93 +4377,6 @@ fn expr_to_z3<'a>(
             // 内側の式を評価してシンボリック結果を返す
             let inner_result = expr_to_z3(vc, expr, env, solver_opt)?;
             Ok(inner_result)
-        }
-
-        Expr::Task { body, group } => {
-            // タスク式: 子タスクの body を検証する。
-            // タスクの完了順序は TaskGroup で保証されるため、
-            // ここでは body の安全性のみを検証する。
-            static TASK_COUNTER: std::sync::atomic::AtomicUsize =
-                std::sync::atomic::AtomicUsize::new(0);
-            let task_uid = TASK_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let task_id = format!(
-                "__task_{}_{}",
-                group.as_deref().unwrap_or("default"),
-                task_uid
-            );
-            // シンボリック Bool（Z3 が値を決定する）
-            let task_alive = Bool::new_const(ctx, format!("{}_alive", task_id).as_str());
-            env.insert(format!("{}_alive", task_id), task_alive.into());
-
-            let body_result = expr_to_z3(vc, body, env, solver_opt)?;
-
-            // タスク完了マーカー（シンボリック: Z3 が決定）
-            let task_done = Bool::new_const(ctx, format!("{}_done", task_id).as_str());
-            env.insert(format!("{}_done", task_id), task_done.into());
-
-            Ok(body_result)
-        }
-        Expr::TaskGroup {
-            children,
-            join_semantics,
-        } => {
-            // =============================================================
-            // タスクグループ検証 (Structured Concurrency Verification)
-            // =============================================================
-            //
-            // 構造化並行性の核心: 親タスクが子タスクより先に終了しないことを
-            // Z3 で形式的に保証する。
-            //
-            // JoinSemantics::All — 全子タスクの完了を待つ
-            // JoinSemantics::Any — 最初の子タスク完了で続行（残りはキャンセル）
-
-            let mut child_results = Vec::new();
-            let mut child_done_vars = Vec::new();
-
-            for (i, child) in children.iter().enumerate() {
-                let child_id = format!("__task_group_child_{}", i);
-                let child_alive = Bool::new_const(ctx, format!("{}_alive", child_id).as_str());
-                env.insert(format!("{}_alive", child_id), child_alive.into());
-
-                let result = expr_to_z3(vc, child, env, solver_opt)?;
-                child_results.push(result);
-
-                // 子タスク完了フラグ（シンボリック: Z3 が決定）
-                let done_var = Bool::new_const(ctx, format!("{}_done", child_id).as_str());
-                child_done_vars.push(done_var.clone());
-                env.insert(format!("{}_done", child_id), done_var.into());
-            }
-
-            // 親タスク終了フラグ
-            let parent_done = Bool::new_const(ctx, "__task_group_parent_done");
-
-            if let Some(solver) = solver_opt {
-                match join_semantics {
-                    JoinSemantics::All => {
-                        // All: 全子タスクが完了するまで親は終了できない
-                        // 制約: parent_done => ∀i. child_done[i]
-                        for done_var in &child_done_vars {
-                            solver.assert(&parent_done.implies(done_var));
-                        }
-                    }
-                    JoinSemantics::Any => {
-                        // Any: 少なくとも1つの子タスクが完了すれば親は続行可能
-                        // 制約: parent_done => ∃i. child_done[i]
-                        if !child_done_vars.is_empty() {
-                            let any_done =
-                                Bool::or(ctx, &child_done_vars.iter().collect::<Vec<_>>());
-                            solver.assert(&parent_done.implies(&any_done));
-                        }
-                    }
-                }
-            }
-
-            // グループの結果: 最後の子タスクの結果を返す
-            if let Some(last) = child_results.last() {
-                Ok(last.clone())
-            } else {
-                Ok(Int::from_i64(ctx, 0).into())
-            }
         }
 
         // =================================================================
@@ -3724,6 +4612,197 @@ fn expr_to_z3<'a>(
                 Ok(sym.into())
             }
         }
+    }
+}
+
+/// Stmt 版 Z3 変換: Stmt を Z3 シンボリック値に変換する。
+/// Expr/Stmt 分離に伴い、expr_to_z3 から文（Statement）の処理を分離。
+#[allow(clippy::too_many_lines)]
+fn stmt_to_z3<'a>(
+    vc: &VCtx<'a>,
+    stmt: &Stmt,
+    env: &mut Env<'a>,
+    solver_opt: Option<&Solver<'a>>,
+) -> DynResult<'a> {
+    let ctx = vc.ctx;
+    match stmt {
+        Stmt::Let { var, value } => {
+            let val = expr_to_z3(vc, value, env, solver_opt)?;
+            env.insert(var.clone(), val.clone());
+            Ok(val)
+        }
+        Stmt::Assign { var, value } => {
+            let val = expr_to_z3(vc, value, env, solver_opt)?;
+            env.insert(var.clone(), val.clone());
+            Ok(val)
+        }
+        Stmt::Block(stmts) => {
+            let mut last: Dynamic = Int::from_i64(ctx, 0).into();
+            for s in stmts {
+                last = stmt_to_z3(vc, s, env, solver_opt)?;
+            }
+            Ok(last)
+        }
+        Stmt::While {
+            cond,
+            invariant,
+            decreases,
+            body,
+        } => {
+            // Loop Invariant 検証ロジック
+            if let Some(solver) = solver_opt {
+                let inv = expr_to_z3(vc, invariant, env, None)?
+                    .as_bool()
+                    .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
+
+                // Base case
+                solver.push();
+                solver.assert(&inv.not());
+                if solver.check() == SatResult::Sat {
+                    solver.pop(1);
+                    return Err(MumeiError::verification("Invariant fails initially"));
+                }
+                solver.pop(1);
+
+                // Inductive step
+                let c = expr_to_z3(vc, cond, env, None)?
+                    .as_bool()
+                    .ok_or(MumeiError::type_error("While condition must be boolean"))?;
+
+                {
+                    let env_snapshot = env.clone();
+                    solver.push();
+                    solver.assert(&inv);
+                    solver.assert(&c);
+                    stmt_to_z3(vc, body, env, Some(solver))?;
+
+                    let inv_after = expr_to_z3(vc, invariant, env, None)?
+                        .as_bool()
+                        .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
+
+                    solver.assert(&inv_after.not());
+                    if solver.check() == SatResult::Sat {
+                        solver.pop(1);
+                        return Err(MumeiError::verification("Invariant not preserved"));
+                    }
+                    solver.pop(1);
+                    *env = env_snapshot;
+                }
+
+                // Termination Check
+                if let Some(dec_expr) = decreases {
+                    let env_snapshot = env.clone();
+                    let v_before = expr_to_z3(vc, dec_expr, env, None)?.as_int().ok_or(
+                        MumeiError::type_error("decreases expression must be integer"),
+                    )?;
+                    solver.push();
+                    solver.assert(&inv);
+                    solver.assert(&c);
+                    solver.assert(&v_before.lt(&Int::from_i64(ctx, 0)));
+                    if solver.check() == SatResult::Sat {
+                        solver.pop(1);
+                        return Err(MumeiError::verification(
+                            "Termination check failed: decreases expression may be negative",
+                        ));
+                    }
+                    solver.pop(1);
+                    solver.push();
+                    solver.assert(&inv);
+                    solver.assert(&c);
+                    stmt_to_z3(vc, body, env, Some(solver))?;
+                    let v_after = expr_to_z3(vc, dec_expr, env, None)?.as_int().ok_or(
+                        MumeiError::type_error("decreases expression must be integer"),
+                    )?;
+                    solver.assert(&v_after.ge(&v_before));
+                    if solver.check() == SatResult::Sat {
+                        solver.pop(1);
+                        *env = env_snapshot;
+                        return Err(MumeiError::verification(
+                            "Termination check failed: decreases expression does not strictly decrease"
+                        ));
+                    }
+                    solver.pop(1);
+                    *env = env_snapshot;
+                }
+            }
+
+            let inv = expr_to_z3(vc, invariant, env, None)?
+                .as_bool()
+                .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
+            let c_not = expr_to_z3(vc, cond, env, None)?
+                .as_bool()
+                .ok_or(MumeiError::type_error("While condition must be boolean"))?
+                .not();
+            Ok(Bool::and(ctx, &[&inv, &c_not]).into())
+        }
+        Stmt::Acquire { resource, body } => {
+            let held_name = format!("__resource_held_{}", resource);
+            let held_bool = Bool::new_const(ctx, held_name.as_str());
+            if let Some(solver) = solver_opt {
+                solver.assert(&held_bool);
+            }
+            env.insert(held_name.clone(), held_bool.into());
+            let body_result = stmt_to_z3(vc, body, env, solver_opt)?;
+            let released = Bool::from_bool(ctx, false);
+            env.insert(held_name, released.into());
+            Ok(body_result)
+        }
+        Stmt::Task { body, group } => {
+            static TASK_COUNTER: std::sync::atomic::AtomicUsize =
+                std::sync::atomic::AtomicUsize::new(0);
+            let task_uid = TASK_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let task_id = format!(
+                "__task_{}_{}",
+                group.as_deref().unwrap_or("default"),
+                task_uid
+            );
+            let task_alive = Bool::new_const(ctx, format!("{}_alive", task_id).as_str());
+            env.insert(format!("{}_alive", task_id), task_alive.into());
+            let body_result = stmt_to_z3(vc, body, env, solver_opt)?;
+            let task_done = Bool::new_const(ctx, format!("{}_done", task_id).as_str());
+            env.insert(format!("{}_done", task_id), task_done.into());
+            Ok(body_result)
+        }
+        Stmt::TaskGroup {
+            children,
+            join_semantics,
+        } => {
+            let mut child_results = Vec::new();
+            let mut child_done_vars = Vec::new();
+            for (i, child) in children.iter().enumerate() {
+                let child_id = format!("__task_group_child_{}", i);
+                let child_alive = Bool::new_const(ctx, format!("{}_alive", child_id).as_str());
+                env.insert(format!("{}_alive", child_id), child_alive.into());
+                let result = stmt_to_z3(vc, child, env, solver_opt)?;
+                child_results.push(result);
+                let done_var = Bool::new_const(ctx, format!("{}_done", child_id).as_str());
+                child_done_vars.push(done_var.clone());
+                env.insert(format!("{}_done", child_id), done_var.into());
+            }
+            let parent_done = Bool::new_const(ctx, "__task_group_parent_done");
+            if let Some(solver) = solver_opt {
+                match join_semantics {
+                    JoinSemantics::All => {
+                        for done_var in &child_done_vars {
+                            solver.assert(&parent_done.implies(done_var));
+                        }
+                    }
+                    JoinSemantics::Any => {
+                        if !child_done_vars.is_empty() {
+                            let any_done =
+                                Bool::or(ctx, &child_done_vars.iter().collect::<Vec<_>>());
+                            solver.assert(&parent_done.implies(&any_done));
+                        }
+                    }
+                }
+            }
+            if let Some(last) = child_results.last() {
+                Ok(last.clone())
+            } else {
+                Ok(Int::from_i64(ctx, 0).into())
+            }
+        }
+        Stmt::Expr(e) => expr_to_z3(vc, e, env, solver_opt),
     }
 }
 
@@ -4057,6 +5136,7 @@ fn propagate_equality_from_ensures<'a>(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn save_visualizer_report(
     output_dir: &Path,
     status: &str,
@@ -4065,6 +5145,9 @@ fn save_visualizer_report(
     b: &str,
     reason: &str,
     counterexample: Option<&serde_json::Value>,
+    failure_type: &str,
+    semantic_feedback: Option<&serde_json::Value>,
+    span: Option<&Span>,
 ) {
     let mut report = json!({
         "status": status,
@@ -4073,8 +5156,22 @@ fn save_visualizer_report(
         "input_b": b,
         "reason": reason
     });
+    if !failure_type.is_empty() {
+        report["failure_type"] = json!(failure_type);
+    }
     if let Some(ce) = counterexample {
         report["counterexample"] = ce.clone();
+    }
+    if let Some(sf) = semantic_feedback {
+        report["semantic_feedback"] = sf.clone();
+    }
+    if let Some(s) = span {
+        report["span"] = json!({
+            "file": s.file,
+            "line": s.line,
+            "col": s.col,
+            "len": s.len
+        });
     }
     let _ = fs::create_dir_all(output_dir);
     let _ = fs::write(output_dir.join("report.json"), report.to_string());
