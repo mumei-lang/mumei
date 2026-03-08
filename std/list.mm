@@ -160,7 +160,7 @@ atom list_reverse(list: i64)
 // 配列パラメータがないため codegen 時にエラーになる。
 // mumei build std/list.mm を単独実行しないこと。
 atom fold_left(n: i64, init: i64, f: atom_ref(i64, i64) -> i64)
-requires: n >= 0;
+requires: n >= 0 && init >= 0;
 ensures: result >= 0;
 contract(f): ensures: result >= 0;
 body: {
