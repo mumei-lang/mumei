@@ -16,7 +16,14 @@ source.mm → parse → resolve → monomorphize → lower_to_hir → verify (Z3
 
 | File | Role |
 |---|---|
-| `src/parser.rs` | AST definitions, tokenizer, parser (struct/enum/trait/impl/atom/match/generics/ref/ref mut/consume/async/acquire/await/resource/trusted/unverified/invariant) |
+| `src/parser/` | Modular recursive descent parser with proper lexer |
+| `src/parser/mod.rs` | Public API (`parse_module`, `parse_expression`, `parse_body_expr`, `parse_atom`, `tokenize`), `ParseContext` struct |
+| `src/parser/token.rs` | `Token` enum (60+ variants), `SpannedToken` with line/col/len tracking |
+| `src/parser/lexer.rs` | `Lexer` struct — converts source string to `Vec<SpannedToken>` with span info |
+| `src/parser/ast.rs` | All AST type definitions (`Expr`, `Stmt`, `Item`, `Atom`, `StructDef`, `EnumDef`, etc.) |
+| `src/parser/expr.rs` | Expression/statement parsing with Pratt parser (operator precedence via binding power table) |
+| `src/parser/item.rs` | Top-level item parsing — recursive descent replacements for all regex patterns |
+| `src/parser/pattern.rs` | Pattern parsing for match arms |
 | `src/ast.rs` | `TypeRef`, `Monomorphizer` — generic type expansion engine |
 | `src/resolver.rs` | Import resolution, circular detection, prelude auto-load, incremental build cache |
 | `src/verification.rs` | Z3 verification, `ModuleEnv`, `LinearityCtx`, law expansion, equality propagation, resource hierarchy, BMC, async recursion depth, inductive invariant, trust boundary |
