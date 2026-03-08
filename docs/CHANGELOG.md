@@ -233,8 +233,11 @@ This PR implements dynamic memory management, ownership system, borrowing, and c
 
 ## Incremental Build
 
-- `.mumei_build_cache` with per-atom SHA-256 hashing
-- `compute_atom_hash()`: hashes `name | requires | ensures | body_expr | consume | ref`
+- `.mumei/cache/verification_cache.json` with enhanced per-atom verification cache
+- `compute_proof_hash()`: hashes `name | requires | ensures | body_expr | consume | ref | effects | trust | callee signatures | type predicates`
+- Transitive dependency tracking: callee contract changes automatically invalidate callers
+- `VerificationCacheEntry`: stores `proof_hash`, `result`, `dependencies`, `type_deps`, `timestamp`
+- Old `.mumei_build_cache` automatically migrated via `migrate_old_cache()`
 - Unchanged atoms skip Z3 verification
 - Cache invalidation on verification failure
 

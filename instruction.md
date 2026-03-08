@@ -133,11 +133,13 @@ Mumei serves as a bridge between heavyweight formal proof assistants and modern 
 
 ## 9. Incremental Build
 
-Mumei caches verification results per-atom in `.mumei_build_cache`:
+Mumei caches verification results per-atom in `.mumei/cache/verification_cache.json`:
 
-* Each atom's hash is computed from `name | requires | ensures | body_expr | consume | ref`.
+* Each atom's **proof hash** is computed from `name | requires | ensures | body_expr | consume | ref | effects | trust level | callee signatures | type predicates`.
+* The proof hash includes transitive callee signatures — if a callee's contract changes, all callers are automatically re-verified.
 * If the hash matches the cached value, Z3 verification is **skipped** — significantly reducing build times.
 * If verification **fails**, the atom is removed from cache and will be re-verified next time.
+* Old `.mumei_build_cache` files are automatically migrated to the new format.
 
 > On the second run: `✅ Verification passed: 2 verified, 6 skipped (unchanged) ⚡`
 
@@ -251,10 +253,10 @@ Improve the practicality of `task` / `task_group` introduced in PR-C.
 
 - Always run `cargo fmt` before committing.
 - When adding a new `Expr` variant, add match arms in **all** of these locations:
-  - `src/verification.rs`: `expr_to_z3`, `collect_callees`, `count_self_calls`, `collect_acquire_resources`
-  - `src/ast.rs`: `collect_from_expr`
-  - `src/codegen.rs`: `compile_expr`
-  - `src/transpiler/rust.rs`, `golang.rs`, `typescript.rs`: `format_expr_*`
+  - `src/verification.rs`: `expr_to_z3`, `stmt_to_z3`, `collect_callees_expr`, `collect_callees_stmt`, `count_self_calls_expr`, `count_self_calls_stmt`, `collect_acquire_resources_expr`, `collect_acquire_resources_stmt`
+  - `src/ast.rs`: `collect_from_expr`, `collect_from_stmt`
+  - `src/codegen.rs`: `compile_hir_expr`, `compile_hir_stmt`
+  - `src/transpiler/rust.rs`, `golang.rs`, `typescript.rs`: `format_hir_expr_*`, `format_hir_stmt_*`
 - When adding a new `Item` variant, add match arms in **all** of these locations:
   - `src/main.rs`: `load_and_prepare`, `cmd_check`, `cmd_build`
   - `src/resolver.rs`: `resolve_imports_recursive`, `register_imported_items`

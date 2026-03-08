@@ -40,6 +40,14 @@ pub struct ModuleEnv {
     pub traits: HashMap<String, TraitDef>,
     pub impls: Vec<ImplDef>,
     pub verified_cache: HashSet<String>,
+    pub resources: HashMap<String, ResourceDef>,
+    pub effects: HashMap<String, EffectDef>,
+    pub effect_defs: HashMap<String, EffectDef>,       // Full registry with hierarchy
+    pub path_id_map: HashMap<String, i64>,              // Symbolic String ID (hybrid approach)
+    pub next_path_id: i64,
+    pub prefix_ranges: HashMap<String, (i64, i64)>,     // Path prefix → ID range
+    pub dependency_graph: HashMap<String, HashSet<String>>, // atom → callees
+    pub reverse_deps: HashMap<String, HashSet<String>>,     // atom → callers
 }
 ```
 
@@ -69,15 +77,16 @@ pub struct LinearityCtx {
 
 1. Quantifier constraints (`forall`/`exists`)
 2. Refinement type injection (params → Z3 symbolic variables)
-3. Struct field constraints (recursive for nested structs)
-4. Array length symbols (`len_<name> >= 0`)
-5. Linearity setup (`__alive_`/`__borrowed_` Z3 Bools)
-6. `requires` assertion
-7. Body evaluation (`expr_to_z3`)
-8. `ensures` verification (negate + check Sat)
-9. Equality ensures propagation (`result == expr` → Z3 equality)
-10. Linearity finalization (consume marking + violation check)
-11. Contradiction check
+2b. Struct field constraints (recursive for nested structs)
+2c. Array length symbols (`len_<name> >= 0`)
+2d. Linearity setup (`__alive_`/`__borrowed_` Z3 Bools)
+2e. Effect allowed set injection (`__effect_allowed_*` Z3 Bools)
+3. `requires` assertion
+4. Body evaluation (`stmt_to_z3` / `expr_to_z3` — Expr/Stmt separated)
+5. `ensures` verification (negate + check Sat)
+6. Equality ensures propagation (`result == expr` → Z3 equality)
+7. Linearity finalization (consume marking + violation check)
+8. Contradiction check
 
 ---
 
@@ -91,20 +100,24 @@ pub struct LinearityCtx {
 
 ---
 
-## Incremental Build
+## Incremental Build (Enhanced Verification Cache)
 
-- **Cache file**: `.mumei_build_cache` (JSON: `{ atom_name: hash }`)
-- **Hash**: `SHA256(name | requires | ensures | body_expr | consume:x | ref:y)`
+- **Cache file**: `.mumei/cache/verification_cache.json`
+- **Entry format**: `VerificationCacheEntry { proof_hash, result, dependencies, type_deps, timestamp }`
+- **Proof hash**: `SHA256(name | requires | ensures | body_expr | consume | ref | effects | trust | callee signatures | type predicates)`
+  - Includes transitive callee signatures (requires/ensures) — if a callee's contract changes, all callers are automatically re-verified
+  - Includes type predicate content for refined type parameters
 - **Cache hit** → skip Z3 verification, mark as verified
 - **Cache miss** → re-verify, update cache on success
 - **Failure** → remove from cache (force re-verify next time)
+- **Migration**: Old `.mumei_build_cache` files are automatically migrated to the new format
 
 ---
 
 ## FQN Resolution
 
 - `math.add(x, y)` → `math::add` (automatic `.` → `::` conversion)
-- Applied in both `expr_to_z3` (verification) and `compile_expr` (codegen)
+- Applied in both `expr_to_z3`/`stmt_to_z3` (verification) and `compile_hir_expr`/`compile_hir_stmt` (codegen)
 - Resolver registers both `add` and `math::add` in ModuleEnv
 
 ---
