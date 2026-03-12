@@ -1236,7 +1236,6 @@ impl ModuleEnv {
     }
 
     /// 指定した型がトレイトを実装しているか確認する
-    #[allow(dead_code)]
     pub fn find_impl(&self, trait_name: &str, target_type: &str) -> Option<&ImplDef> {
         self.impls
             .iter()
@@ -1244,7 +1243,6 @@ impl ModuleEnv {
     }
 
     /// 指定した型がトレイト境界を全て満たしているか検証する
-    #[allow(dead_code)]
     pub fn check_trait_bounds(&self, type_name: &str, bounds: &[String]) -> Result<(), String> {
         for bound in bounds {
             if self.find_impl(bound, type_name).is_none() {
@@ -1425,6 +1423,11 @@ impl ModuleEnv {
         } else {
             false
         }
+    }
+
+    /// エフェクト定義が存在するか確認する（トレイト境界 "Effect" の検証用）
+    pub fn has_effect_def(&self, name: &str) -> bool {
+        self.effect_defs.contains_key(name)
     }
 
     /// エフェクト定義を effect_defs レジストリに登録する。
@@ -2163,14 +2166,17 @@ impl EffectCtx {
 
 /// Verify effect containment for an atom using Z3.
 /// Proves: ∀e ∈ UsedEffects(Body): e ∈ AllowedEffects(Signature)
-fn verify_effect_containment(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult<()> {
+fn verify_effect_containment(
+    atom: &Atom,
+    body_stmt: &Stmt,
+    module_env: &ModuleEnv,
+) -> MumeiResult<()> {
     // Check effect propagation: for each callee atom, verify callee.effects ⊆ caller.effects
     // Use leaf effects only to avoid false positives with composite effects.
     // E.g., caller [FileRead, FileWrite, Console] vs callee [IO] should pass
     // because both resolve to the same leaf set.
     let allowed_leaves = module_env.resolve_leaf_effects_from_effects(&atom.effects);
-    let body_stmt = parse_body_expr(&atom.body_expr);
-    let callees = collect_callees_stmt(&body_stmt);
+    let callees = collect_callees_stmt(body_stmt);
     for callee_name in &callees {
         if let Some(callee_atom) = module_env.get_atom(callee_name) {
             if !callee_atom.effects.is_empty() {
@@ -2546,10 +2552,13 @@ fn collect_acquire_resources_stmt(stmt: &Stmt) -> Vec<String> {
 /// 展開回数は atom.max_unroll（指定時）または BMC_DEFAULT_UNROLL_DEPTH を使用。
 /// ループ不変量が提供されている場合はスキップ（不変量ベースの検証が優先）。
 /// BMC は「ユーザーが不変量を書けない場合」の補助的な検証手段。
-fn verify_bmc_resource_safety(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult<()> {
+fn verify_bmc_resource_safety(
+    atom: &Atom,
+    body_stmt: &Stmt,
+    module_env: &ModuleEnv,
+) -> MumeiResult<()> {
     // body 内に acquire が含まれない場合はスキップ
-    let body_stmt = parse_body_expr(&atom.body_expr);
-    let acquired_resources = collect_acquire_resources_stmt(&body_stmt);
+    let acquired_resources = collect_acquire_resources_stmt(body_stmt);
     if acquired_resources.is_empty() {
         return Ok(());
     }
@@ -2577,7 +2586,7 @@ fn verify_bmc_resource_safety(atom: &Atom, module_env: &ModuleEnv) -> MumeiResul
         }
     }
 
-    if !has_acquire_in_while_stmt(&body_stmt) {
+    if !has_acquire_in_while_stmt(body_stmt) {
         return Ok(()); // ループ外の acquire は通常の検証で十分
     }
 
@@ -2618,7 +2627,11 @@ fn verify_bmc_resource_safety(atom: &Atom, module_env: &ModuleEnv) -> MumeiResul
 /// 仕組み: body 内の Call 式を走査し、呼び出し先が async atom かつ
 /// 自身と同名の場合、再帰深度カウンタをインクリメント。
 /// 上限を超えたら「Unknown」として打ち切り、警告を出す。
-fn verify_async_recursion_depth(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult<()> {
+fn verify_async_recursion_depth(
+    atom: &Atom,
+    body_stmt: &Stmt,
+    module_env: &ModuleEnv,
+) -> MumeiResult<()> {
     if !atom.is_async {
         return Ok(());
     }
@@ -2695,8 +2708,7 @@ fn verify_async_recursion_depth(atom: &Atom, module_env: &ModuleEnv) -> MumeiRes
         }
     }
 
-    let body_stmt = parse_body_expr(&atom.body_expr);
-    let self_call_count = count_self_calls_stmt(&body_stmt, &atom.name);
+    let self_call_count = count_self_calls_stmt(body_stmt, &atom.name);
 
     if self_call_count > 0 {
         // 再帰的 async 呼び出しが検出された
@@ -2763,6 +2775,7 @@ fn verify_async_recursion_depth(atom: &Atom, module_env: &ModuleEnv) -> MumeiRes
 /// atom レベルの invariant を帰納的に検証する。
 fn verify_atom_invariant(
     atom: &Atom,
+    body_stmt: &Stmt,
     invariant_raw: &str,
     module_env: &ModuleEnv,
 ) -> MumeiResult<()> {
@@ -2881,8 +2894,7 @@ fn verify_atom_invariant(
         }
 
         // body を実行
-        let body_stmt = parse_body_expr(&atom.body_expr);
-        let _body_result = stmt_to_z3(&vc, &body_stmt, &mut env, Some(&solver))?;
+        let _body_result = stmt_to_z3(&vc, body_stmt, &mut env, Some(&solver))?;
 
         // body 実行後の invariant を再評価
         // （env が body の実行で更新されている可能性がある）
@@ -3122,10 +3134,9 @@ fn verify_call_graph_cycles(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult<
 
 /// unverified 関数の呼び出しを検出し、taint マーカーを env に追加する。
 /// verify() の body 検証後に呼び出される。
-fn check_taint_propagation(atom: &Atom, env: &Env, module_env: &ModuleEnv) {
+fn check_taint_propagation(atom: &Atom, body_stmt: &Stmt, env: &Env, module_env: &ModuleEnv) {
     // body 内で呼び出されている関数を収集
-    let body_stmt = parse_body_expr(&atom.body_expr);
-    let callees = collect_callees_stmt(&body_stmt);
+    let callees = collect_callees_stmt(body_stmt);
 
     let mut tainted_sources: Vec<String> = Vec::new();
     for callee_name in &callees {
@@ -3158,9 +3169,8 @@ fn check_taint_propagation(atom: &Atom, env: &Env, module_env: &ModuleEnv) {
 /// body 内の関数呼び出しからエフェクトセットを推論する。
 /// 呼び出し先 atom の effects フィールドを再帰的に集約する。
 /// 親エフェクトへの暗黙的包含も解決する。
-fn infer_effects(atom: &Atom, module_env: &ModuleEnv) -> Vec<Effect> {
-    let body_stmt = parse_body_expr(&atom.body_expr);
-    let callees = collect_callees_stmt(&body_stmt);
+fn infer_effects(_atom: &Atom, body_stmt: &Stmt, module_env: &ModuleEnv) -> Vec<Effect> {
+    let callees = collect_callees_stmt(body_stmt);
     let mut inferred = Vec::new();
     let mut seen_names: HashSet<String> = HashSet::new();
     for callee_name in &callees {
@@ -3187,7 +3197,8 @@ pub fn infer_effects_json(items: &[Item], module_env: &ModuleEnv) -> serde_json:
     for item in items {
         if let Item::Atom(atom) = item {
             let declared: Vec<String> = atom.effects.iter().map(|e| e.name.clone()).collect();
-            let inferred = infer_effects(atom, module_env);
+            let body_stmt = parse_body_expr(&atom.body_expr);
+            let inferred = infer_effects(atom, &body_stmt, module_env);
             let inferred_names: Vec<String> = inferred.iter().map(|e| e.name.clone()).collect();
             let missing: Vec<String> = inferred_names
                 .iter()
@@ -3221,7 +3232,8 @@ pub fn infer_effects_json(items: &[Item], module_env: &ModuleEnv) -> serde_json:
 #[allow(dead_code)]
 fn verify_effect_consistency(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult<()> {
     let declared: Vec<String> = atom.effects.iter().map(|e| e.name.clone()).collect();
-    let inferred = infer_effects(atom, module_env);
+    let body_stmt_eff = parse_body_expr(&atom.body_expr);
+    let inferred = infer_effects(atom, &body_stmt_eff, module_env);
 
     for eff in &inferred {
         // 宣言に含まれるか、宣言のいずれかのサブタイプかをチェック
@@ -3409,11 +3421,10 @@ fn verify_inner(
     verify_resource_hierarchy(atom, module_env)?;
 
     // Phase 1f: エフェクト包含検証（副作用安全性）
-    if let Err(e) = verify_effect_containment(atom, module_env) {
+    if let Err(e) = verify_effect_containment(atom, &hir_atom.body_stmt, module_env) {
         // Save structured effect violation report for self-healing integration.
         // Extract missing effects from the error to produce a structured report.
-        let body_stmt_eff = parse_body_expr(&atom.body_expr);
-        let callees = collect_callees_stmt(&body_stmt_eff);
+        let callees = collect_callees_stmt(&hir_atom.body_stmt);
         let allowed_leaves = module_env.resolve_leaf_effects_from_effects(&atom.effects);
         let mut missing_all: Vec<String> = Vec::new();
         let mut violating_callee = String::new();
@@ -3458,14 +3469,14 @@ fn verify_inner(
     }
 
     // Phase 1b: 有界モデル検査（ループ内 acquire パターン）
-    verify_bmc_resource_safety(atom, module_env)?;
+    verify_bmc_resource_safety(atom, &hir_atom.body_stmt, module_env)?;
 
     // Phase 1c: 再帰的 async 呼び出しの深度検証
-    verify_async_recursion_depth(atom, module_env)?;
+    verify_async_recursion_depth(atom, &hir_atom.body_stmt, module_env)?;
 
     // Phase 1d: atom レベル invariant の帰納的検証
     if let Some(ref invariant_expr) = atom.invariant {
-        verify_atom_invariant(atom, invariant_expr, module_env)?;
+        verify_atom_invariant(atom, &hir_atom.body_stmt, invariant_expr, module_env)?;
     }
 
     // Phase 1e: Call Graph サイクル検知（間接再帰の検出）
@@ -3741,8 +3752,7 @@ fn verify_inner(
     }
 
     // 4. ボディの検証
-    let body_stmt = parse_body_expr(&atom.body_expr);
-    let body_result = match stmt_to_z3(&vc, &body_stmt, &mut env, Some(&solver)) {
+    let body_result = match stmt_to_z3(&vc, &hir_atom.body_stmt, &mut env, Some(&solver)) {
         Ok(val) => val,
         Err(e) => {
             // Body evaluation errors (e.g., division by zero, out-of-bounds) propagate
@@ -3787,12 +3797,8 @@ fn verify_inner(
                 FAILURE_PRECONDITION_VIOLATED
             };
             let constraint_mappings = build_constraint_mappings_for_atom(atom, module_env);
-            let semantic_fb = build_semantic_feedback(
-                &constraint_mappings,
-                None,
-                atom,
-                body_failure_type,
-            );
+            let semantic_fb =
+                build_semantic_feedback(&constraint_mappings, None, atom, body_failure_type);
             save_visualizer_report(
                 output_dir,
                 "failed",
@@ -3810,7 +3816,7 @@ fn verify_inner(
     };
 
     // 4b. Taint Analysis: unverified 関数の呼び出しを検出し警告
-    check_taint_propagation(atom, &env, module_env);
+    check_taint_propagation(atom, &hir_atom.body_stmt, &env, module_env);
 
     // 5. 事後条件 (ensures)
     if atom.ensures.trim() != "true" {

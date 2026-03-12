@@ -77,13 +77,34 @@ pub fn parse_type_ref(input: &str) -> TypeRef {
         };
 
         let rest = after_paren[close_pos + 1..].trim();
-        let return_type = if let Some(arrow_rest) = rest.strip_prefix("->") {
-            parse_type_ref(arrow_rest.trim())
+        let (return_type, effect_set) = if let Some(arrow_rest) = rest.strip_prefix("->") {
+            let arrow_rest = arrow_rest.trim();
+            // Check for " with " keyword to parse effect set
+            if let Some(with_pos) = arrow_rest.find(" with ") {
+                let return_type_str = &arrow_rest[..with_pos];
+                let effect_part = arrow_rest[with_pos + 6..].trim();
+                let effects = if effect_part.starts_with('[') && effect_part.ends_with(']') {
+                    // [E1, E2] format
+                    effect_part[1..effect_part.len() - 1]
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                } else {
+                    // Single effect name: "E" or "FileWrite"
+                    vec![effect_part.to_string()]
+                };
+                (parse_type_ref(return_type_str.trim()), Some(effects))
+            } else {
+                (parse_type_ref(arrow_rest), None)
+            }
         } else {
-            TypeRef::simple("i64")
+            (TypeRef::simple("i64"), None)
         };
 
-        return TypeRef::fn_type(param_types, return_type);
+        let mut type_ref = TypeRef::fn_type(param_types, return_type);
+        type_ref.effect_set = effect_set;
+        return type_ref;
     }
 
     if let Some(angle_pos) = input.find('<') {
@@ -152,22 +173,34 @@ pub fn parse_type_ref_from_ctx(ctx: &mut super::ParseContext) -> TypeRef {
     parse_type_ref(&type_str)
 }
 
-/// Split type args considering nested angle brackets
+/// Split type args considering nested angle brackets and parentheses.
+/// Tracks both `<`/`>` and `(`/`)` depth so that types like
+/// `atom_ref(i64, i64) -> i64` used as generic type arguments
+/// are not incorrectly split at commas inside parentheses.
 fn split_type_args(input: &str) -> Vec<String> {
     let mut result = Vec::new();
-    let mut depth = 0;
+    let mut angle_depth = 0;
+    let mut paren_depth = 0;
     let mut current = String::new();
     for c in input.chars() {
         match c {
             '<' => {
-                depth += 1;
+                angle_depth += 1;
                 current.push(c);
             }
             '>' => {
-                depth -= 1;
+                angle_depth -= 1;
                 current.push(c);
             }
-            ',' if depth == 0 => {
+            '(' => {
+                paren_depth += 1;
+                current.push(c);
+            }
+            ')' => {
+                paren_depth -= 1;
+                current.push(c);
+            }
+            ',' if angle_depth == 0 && paren_depth == 0 => {
                 let trimmed = current.trim().to_string();
                 if !trimmed.is_empty() {
                     result.push(trimmed);

@@ -10,6 +10,11 @@ pub struct TypeRef {
     /// 型引数リスト（例: Stack<i64> → [TypeRef("i64")]）。
     /// 非ジェネリック型の場合は空。
     pub type_args: Vec<TypeRef>,
+    /// エフェクトセット（関数型に付与されるエフェクト情報）
+    /// 例: atom_ref(i64) -> i64 with [FileWrite] → Some(vec!["FileWrite"])
+    /// 例: atom_ref(i64) -> i64 with E → Some(vec!["E"])
+    /// 非関数型や with なしの場合は None
+    pub effect_set: Option<Vec<String>>,
 }
 
 impl TypeRef {
@@ -18,6 +23,7 @@ impl TypeRef {
         TypeRef {
             name: name.to_string(),
             type_args: vec![],
+            effect_set: None,
         }
     }
 
@@ -26,12 +32,13 @@ impl TypeRef {
         TypeRef {
             name: name.to_string(),
             type_args: args,
+            effect_set: None,
         }
     }
 
     /// 表示用の正規化名を返す（例: "Stack<i64>", "atom_ref(i64) -> i64"）
     pub fn display_name(&self) -> String {
-        if self.is_fn_type() {
+        let base = if self.is_fn_type() {
             // 関数型: atom_ref(param_types...) -> return_type
             let param_types: Vec<String> = self.type_args[..self.type_args.len() - 1]
                 .iter()
@@ -44,6 +51,15 @@ impl TypeRef {
         } else {
             let args: Vec<String> = self.type_args.iter().map(|a| a.display_name()).collect();
             format!("{}<{}>", self.name, args.join(", "))
+        };
+        if let Some(ref effects) = self.effect_set {
+            if effects.len() == 1 {
+                format!("{} with {}", base, effects[0])
+            } else {
+                format!("{} with [{}]", base, effects.join(", "))
+            }
+        } else {
+            base
         }
     }
 
@@ -64,6 +80,7 @@ impl TypeRef {
         TypeRef {
             name: "atom_ref".to_string(),
             type_args,
+            effect_set: None,
         }
     }
 
@@ -106,17 +123,52 @@ impl TypeRef {
                     .map(|a| a.substitute(type_map))
                     .collect();
             }
+            // エフェクトセットの置換
+            // self にエフェクトセットがある場合はそれを置換して使用し、
+            // ない場合は replacement のエフェクトセットをそのまま保持する。
+            // これにより、bare 型パラメータ（例: F）が関数型（例: atom_ref(i64) -> i64 with FileWrite）
+            // に置換されたときに replacement の effect_set が失われないようにする。
+            if let Some(ref effects) = self.effect_set {
+                result.effect_set = Some(
+                    effects
+                        .iter()
+                        .map(|eff| {
+                            if let Some(concrete) = type_map.get(eff) {
+                                concrete.name.clone()
+                            } else {
+                                eff.clone()
+                            }
+                        })
+                        .collect(),
+                );
+            }
+            // else: replacement の effect_set をそのまま保持
             result
         } else {
             // 型パラメータでない場合、型引数のみ再帰的に置換
-            TypeRef {
+            let mut result = TypeRef {
                 name: self.name.clone(),
                 type_args: self
                     .type_args
                     .iter()
                     .map(|a| a.substitute(type_map))
                     .collect(),
-            }
+                effect_set: None,
+            };
+            // エフェクトセットの置換
+            result.effect_set = self.effect_set.as_ref().map(|effects| {
+                effects
+                    .iter()
+                    .map(|eff| {
+                        if let Some(concrete) = type_map.get(eff) {
+                            concrete.name.clone()
+                        } else {
+                            eff.clone()
+                        }
+                    })
+                    .collect()
+            });
+            result
         }
     }
 }
@@ -352,7 +404,12 @@ impl Monomorphizer {
 
     /// Phase 2: 収集したインスタンスを単相化し、具体的な Item のリストを返す。
     /// ジェネリック定義自体は除外され、具体化された定義のみが返される。
-    pub fn monomorphize(&self, items: &[Item]) -> Vec<Item> {
+    /// `module_env` が提供された場合、単相化時にトレイト境界を検証する。
+    pub fn monomorphize(
+        &self,
+        items: &[Item],
+        module_env: Option<&crate::verification::ModuleEnv>,
+    ) -> Vec<Item> {
         let mut result: Vec<Item> = Vec::new();
 
         // 非ジェネリックな Item はそのまま通す
@@ -393,7 +450,7 @@ impl Monomorphizer {
 
             // Atom の単相化
             if let Some(generic_def) = self.generic_atoms.get(&tref.name) {
-                if let Some(mono_atom) = self.monomorphize_atom(generic_def, &tref) {
+                if let Some(mono_atom) = self.monomorphize_atom(generic_def, &tref, module_env) {
                     result.push(Item::Atom(mono_atom));
                 }
             }
@@ -468,9 +525,48 @@ impl Monomorphizer {
     }
 
     /// ジェネリック Atom を具体型で単相化する
-    fn monomorphize_atom(&self, generic: &Atom, instance: &TypeRef) -> Option<Atom> {
+    /// `module_env` が提供された場合、トレイト境界を検証する。
+    fn monomorphize_atom(
+        &self,
+        generic: &Atom,
+        instance: &TypeRef,
+        module_env: Option<&crate::verification::ModuleEnv>,
+    ) -> Option<Atom> {
         let type_map = self.build_type_map(&generic.type_params, &instance.type_args)?;
         let mono_name = instance.display_name();
+
+        // トレイト境界バリデーション
+        if let Some(menv) = module_env {
+            for bound in &generic.where_bounds {
+                if let Some(concrete_type_ref) = type_map.get(&bound.param) {
+                    let concrete_name = concrete_type_ref.display_name();
+                    for trait_name in &bound.bounds {
+                        if trait_name == "Effect" {
+                            // "Effect" 境界は特別扱い: エフェクト定義の存在を確認
+                            if !menv.has_effect_def(&concrete_name) {
+                                eprintln!(
+                                    "  \u{26a0}\u{fe0f}  Trait bound violation: '{}' is not a known effect \
+                                     (required by bound '{}: Effect' in atom '{}')",
+                                    concrete_name, bound.param, generic.name
+                                );
+                                return None;
+                            }
+                        } else {
+                            // 通常のトレイト境界: impl が存在するか確認
+                            if let Err(e) =
+                                menv.check_trait_bounds(&concrete_name, &[trait_name.clone()])
+                            {
+                                eprintln!(
+                                    "  \u{26a0}\u{fe0f}  Trait bound violation in monomorphization of '{}': {}",
+                                    mono_name, e
+                                );
+                                return None;
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         let params = generic
             .params
