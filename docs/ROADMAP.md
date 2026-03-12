@@ -452,14 +452,16 @@ Future extensions to the effect subtyping system:
 |---|---|---|---|
 | Phase 0 | Expr/Stmt separation | ✅ Done | — |
 | Phase 1 | HIR introduction (typed AST, eliminate String-based body_expr) | ✅ Done | Phase 0 |
-| Phase 2 | Basic Effect System | ⏳ Planned | ✅ Expression parser migrated to recursive descent (item parsing still regex) |
+| Phase 2 | Basic Effect System (parameterized effects, security policy) | ✅ Done | ✅ Expression parser migrated to recursive descent (item parsing still regex) |
+| Phase 2.5 | Lambda / Closure Support | ✅ Done | Phase 2 |
+| Phase 2.5 | Semantic Feedback v2 (all failure types, bilingual) | ✅ Done | Phase 1 |
 | Phase 3 | Effect Polymorphism | ⏳ Planned | Phase 2 |
 | Phase 4 | MIR introduction (CFG for borrow checking) | ⏳ Planned | Borrow checking design finalized |
 | Phase 5 | Capability Security evaluation | ⏳ Planned | Phase 3 maturity assessment |
 
 ### Why Phases 2–5 Are Deferred
 
-- **Phase 2 (Basic Effects)**: ✅ Parser prerequisite met — expression parser migrated to recursive descent with proper lexer (Pratt parser). Item-level parsing still uses regex. Ready to implement `<E: Effect>` syntax.
+- **Phase 2 (Basic Effects)**: ✅ Complete — parameterized effects (`FileRead(path: Str)`, `HttpGet(url: Str)`) implemented with security policy enforcement. Standard library effects defined in `std/effects.mm`, `std/http.mm`, `std/file.mm`. Z3 verifies parameter constraints (e.g., `starts_with(path, "/tmp/")`) at compile time.
 - **Phase 3 (Effect Polymorphism)**: Adding polymorphism before concrete effect definition and tracking infrastructure exists is premature. Requires basic effect implementation and operational experience.
 - **Phase 4 (MIR)**: A CFG-based intermediate representation is needed for borrow checking and lifetime analysis, but the borrow checking design itself is not yet started. Will be introduced after the design is finalized.
 - **Phase 5 (Capability Security)**: Evaluate the maturity of the current approach (verifying parameterized effects with Z3). If insufficient, introduce an object-based capability model.
