@@ -257,10 +257,21 @@ fn load_and_prepare(input: &str) -> (Vec<Item>, verification::ModuleEnv, Vec<Imp
         std::process::exit(1);
     }
 
+    // 単相化前にトレイト/impl/エフェクト定義を ModuleEnv に先行登録する
+    // （monomorphize_atom のトレイト境界バリデーションで必要）
+    for item in &items {
+        match item {
+            Item::TraitDef(trait_def) => module_env.register_trait(trait_def),
+            Item::ImplDef(impl_def) => module_env.register_impl(impl_def),
+            Item::EffectDef(effect_def) => module_env.register_effect(effect_def),
+            _ => {}
+        }
+    }
+
     let mut mono = ast::Monomorphizer::new();
     mono.collect(&items);
     let items = if mono.has_generics() {
-        let mono_items = mono.monomorphize(&items);
+        let mono_items = mono.monomorphize(&items, Some(&module_env));
         println!(
             "  🔬 Monomorphization: {} generic instance(s) expanded.",
             mono.instances().len()
@@ -278,10 +289,13 @@ fn load_and_prepare(input: &str) -> (Vec<Item>, verification::ModuleEnv, Vec<Imp
             Item::StructDef(struct_def) => module_env.register_struct(struct_def),
             Item::EnumDef(enum_def) => module_env.register_enum(enum_def),
             Item::Atom(atom) => module_env.register_atom(atom),
-            Item::TraitDef(trait_def) => module_env.register_trait(trait_def),
-            Item::ImplDef(impl_def) => module_env.register_impl(impl_def),
+            // TraitDef/ImplDef/EffectDef は単相化前のループで登録済み。
+            // register_trait/register_effect は HashMap::insert なので冪等だが、
+            // register_impl は Vec::push なので重複登録を避ける。
+            Item::TraitDef(_) => {}
+            Item::ImplDef(_) => {}
             Item::ResourceDef(resource_def) => module_env.register_resource(resource_def),
-            Item::EffectDef(effect_def) => module_env.register_effect(effect_def),
+            Item::EffectDef(_) => {}
             Item::ExternBlock(extern_block) => {
                 for ext_fn in &extern_block.functions {
                     // ExternFn → trusted Atom に変換して ModuleEnv に登録
@@ -2726,13 +2740,13 @@ atom apply_no_contract(x: i64, f: atom_ref(i64) -> i64)
         assert!(result2.contains("x"), "should mention param name");
         assert!(result2.contains("-1"), "should mention actual value");
 
-        // Fallback pattern
+        // Modulo pattern (now matched by try_match_modulo)
         let result3 =
             verification::constraint_to_natural_language("val", "Custom", "v % 2 == 0", "3");
         assert!(result3.contains("val"), "should mention param name");
         assert!(
-            result3.contains("v % 2 == 0"),
-            "should include raw predicate for unknown patterns"
+            result3.contains("multiple of") || result3.contains("倍数"),
+            "should describe modulo constraint"
         );
     }
 

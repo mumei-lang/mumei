@@ -124,6 +124,12 @@ pub struct EffectDefParam {
 }
 
 #[derive(Debug, Clone)]
+pub struct LambdaParam {
+    pub name: String,
+    pub type_ref: Option<TypeRef>,
+}
+
+#[derive(Debug, Clone)]
 pub enum Expr {
     Number(i64),
     Float(f64),
@@ -162,6 +168,12 @@ pub enum Expr {
         effect: String,
         operation: String,
         args: Vec<Expr>,
+    },
+    /// Lambda 式: |params| body or |params| -> RetType { body }
+    Lambda {
+        params: Vec<LambdaParam>,
+        return_type: Option<String>,
+        body: Box<Stmt>,
     },
 }
 
@@ -287,8 +299,8 @@ pub struct Param {
 pub struct Atom {
     pub name: String,
     pub type_params: Vec<String>,
-    // NOTE: where_bounds is used for trait bound validation during future monomorphization
-    #[allow(dead_code)]
+    /// トレイト境界: 型パラメータに課す制約（例: [TypeParamBound { param: "T", bounds: ["Comparable"] }]）
+    /// 単相化時のトレイト境界バリデーションで使用
     pub where_bounds: Vec<TypeParamBound>,
     pub params: Vec<Param>,
     pub requires: String,

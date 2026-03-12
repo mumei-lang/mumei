@@ -537,6 +537,42 @@ Effect violations produce structured JSON in `report.json` for self-healing inte
 }
 ```
 
+### Effect Polymorphism
+
+Mumei supports effect polymorphism through `<E: Effect>` type parameter bounds,
+resolved via monomorphization (same mechanism as type polymorphism).
+
+#### Syntax
+
+```mumei
+atom pipe<E: Effect>(f: atom_ref(i64) -> i64 with E)
+    effects: [E];
+    requires: true;
+    ensures: true;
+    body: call(f, 42);
+```
+
+#### Resolution Flow
+
+```
+1. Parser: atom pipe<E: Effect>(...) → type_params=["E"], where_bounds=[{E: Effect}]
+2. Monomorphizer: pipe<FileWrite>(...) → type_map={E: FileWrite}
+   - effects: [E] → effects: [FileWrite]
+   - with E → with [FileWrite]
+   - perform E.op → perform FileWrite.op
+3. Verifier: verify pipe<FileWrite> as a concrete atom
+   - verify_effect_containment: FileWrite ⊆ caller's effects
+   - Z3: standard effect containment proof
+```
+
+#### Key Design Decision
+
+Effect polymorphism is resolved at compile time through monomorphization, not through
+Z3 quantifiers. This ensures:
+- No runtime overhead (zero-cost abstraction)
+- Predictable verification performance (no universal quantification)
+- Consistent with mumei's existing generics system
+
 ### Standard Library
 
 `std/effects.mm` defines the built-in effect hierarchy:
