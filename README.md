@@ -86,7 +86,7 @@ mumei build src/main.mm -o dist/output
 | **Traits** | Algebraic laws verified by Z3 (`law reflexive: leq(x, x) == true`) |
 | **Ownership** | `ref` / `ref mut` / `consume` with Z3 aliasing prevention |
 | **Concurrency** | `async`/`await`, `task_group:all`/`task_group:any`, deadlock-free proof |
-| **Effects** | Compile-time side-effect verification, `perform`/`effects:` annotations, effect hierarchy with subtyping, parameterized effects (`FileRead(path)`, `HttpGet(url)`), security policy enforcement |
+| **Effects** | Compile-time side-effect verification, `perform`/`effects:` annotations, effect hierarchy with subtyping, parameterized effects (`FileRead(path)`, `HttpGet(url)`), **effect polymorphism (`<E: Effect>`)**, security policy enforcement |
 | **Lambda** | First-class closures `|x, y| x + y`, capture analysis, transpiles to Rust closures / TS arrows / Go func literals |
 | **Safety** | `trusted` / `unverified` atoms, taint analysis, BMC + inductive invariant, `call_with_contract` for higher-order function verification |
 | **Std Library** | Option, Result, List, BoundedArray, Vector, HashMap, sort algorithms, effect definitions |
