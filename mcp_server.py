@@ -135,9 +135,8 @@ def _format_semantic_feedback(report_json: str) -> str:
         if ctx.get("ensures"):
             parts.append(f"- ensures: `{ctx['ensures']}`")
 
-    failure_type = report.get("failure_type", "")
-    if failure_type:
-        parts.append(f"\n**Failure type:** `{failure_type}`")
+    if effective_failure_type:
+        parts.append(f"\n**Failure type:** `{effective_failure_type}`")
 
     suggestion = report.get("suggestion", "")
     if suggestion:
@@ -155,7 +154,7 @@ def _format_semantic_feedback(report_json: str) -> str:
     return "\n".join(parts)
 
 
-def _build_machine_readable(report: dict, feedback: dict) -> dict | None:
+def _build_machine_readable(report: dict, feedback: dict) -> "dict | None":
     """Build a machine-readable JSON block from report and feedback for AI agents."""
     failure_type = report.get("failure_type", "")
     if not failure_type:
@@ -670,7 +669,7 @@ def get_allowed_effects(project_dir: str = ".") -> str:
 
 @mcp.tool()
 def set_allowed_effects(
-    allowed: list[str] | None = None, denied: list[str] | None = None
+    allowed: "list[str] | None" = None, denied: "list[str] | None" = None
 ) -> str:
     """
     Override the effect boundary for the current MCP session.
@@ -716,7 +715,7 @@ def set_allowed_effects(
 @mcp.tool()
 def self_heal_with_effects(
     source_code: str,
-    allowed_effects: list[str] | None = None,
+    allowed_effects: "list[str] | None" = None,
     max_attempts: int = 5,
 ) -> str:
     """

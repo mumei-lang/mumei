@@ -226,6 +226,7 @@ fn hir_expr_contains_float(expr: &HirExpr) -> bool {
             hir_expr_contains_float(callee) || args.iter().any(hir_expr_contains_float)
         }
         HirExpr::TaskGroup { children, .. } => children.iter().any(hir_stmt_contains_float),
+        HirExpr::Lambda { body, .. } => hir_stmt_contains_float(body),
         _ => false,
     }
 }
