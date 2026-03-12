@@ -390,12 +390,12 @@ fn collect_pattern_bindings(pattern: &crate::parser::Pattern, bound: &mut HashSe
 fn collect_free_variables_stmt(stmt: &HirStmt) -> HashSet<String> {
     let mut vars = HashSet::new();
     match stmt {
-        HirStmt::Let { var, value, .. } => {
+        HirStmt::Let { value, .. } => {
             vars.extend(collect_free_variables_expr(value));
-            // The variable itself is bound, not free — but we still collect
-            // references from the value expression. The bound variable is
-            // excluded from outer scope by the caller.
-            vars.remove(var);
+            // Note: the bound variable is tracked by the Block handler's `bound` set.
+            // We do NOT remove `var` here because it may appear free in the value
+            // expression (e.g., `let x = x + 1` where `x` on the right refers to
+            // an outer binding that must be captured).
         }
         HirStmt::Assign { var, value } => {
             vars.insert(var.clone());
