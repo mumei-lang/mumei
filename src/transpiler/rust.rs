@@ -226,6 +226,7 @@ fn hir_expr_contains_float(expr: &HirExpr) -> bool {
             hir_expr_contains_float(callee) || args.iter().any(hir_expr_contains_float)
         }
         HirExpr::TaskGroup { children, .. } => children.iter().any(hir_stmt_contains_float),
+        HirExpr::Lambda { body, .. } => hir_stmt_contains_float(body),
         _ => false,
     }
 }
@@ -424,6 +425,30 @@ fn format_hir_expr_rust(expr: &HirExpr) -> String {
                 operation,
                 args_str.join(", ")
             )
+        }
+        HirExpr::Lambda {
+            params,
+            body,
+            captures,
+            ..
+        } => {
+            let move_kw = if captures.is_empty() { "" } else { "move " };
+            let params_str: Vec<String> = params
+                .iter()
+                .map(|p| {
+                    if let Some(ref tr) = p.type_ref {
+                        format!(
+                            "{}: {}",
+                            p.name,
+                            crate::transpiler::rust::map_type_rust(Some(&tr.name))
+                        )
+                    } else {
+                        p.name.clone()
+                    }
+                })
+                .collect();
+            let body_str = format_hir_stmt_rust(body);
+            format!("{}|{}| {{ {} }}", move_kw, params_str.join(", "), body_str)
         }
     }
 }

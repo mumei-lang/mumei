@@ -298,6 +298,14 @@ impl Monomorphizer {
                     self.collect_from_expr(arg);
                 }
             }
+            Expr::Lambda { params, body, .. } => {
+                for param in params {
+                    if let Some(ref type_ref) = param.type_ref {
+                        self.collect_from_type_ref(type_ref);
+                    }
+                }
+                self.collect_from_stmt(body);
+            }
         }
     }
 

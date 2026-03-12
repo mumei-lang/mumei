@@ -5,7 +5,7 @@
 use super::pattern::parse_pattern;
 use super::token::Token;
 use super::ParseContext;
-use crate::parser::{Expr, JoinSemantics, MatchArm, Op, Stmt};
+use crate::parser::{Expr, JoinSemantics, LambdaParam, MatchArm, Op, Stmt};
 
 /// Pratt parser binding power for binary operators.
 /// Returns (left_bp, right_bp). Left-associative: left < right.
@@ -283,6 +283,50 @@ fn parse_prefix(ctx: &mut ParseContext) -> Expr {
         Token::Exists => {
             ctx.advance();
             parse_ident_continuation(ctx, "exists".to_string())
+        }
+
+        // Lambda: |params| body or |params| -> RetType { body }
+        Token::Bar => {
+            ctx.advance(); // consume opening |
+            let mut params = Vec::new();
+            while ctx.peek() != &Token::Bar && ctx.peek() != &Token::Eof {
+                let param_name = ctx.expect_ident();
+                let type_ref = if ctx.peek() == &Token::Colon {
+                    ctx.advance(); // skip :
+                    Some(crate::parser::item::parse_type_ref_from_ctx(ctx))
+                } else {
+                    None
+                };
+                params.push(LambdaParam {
+                    name: param_name,
+                    type_ref,
+                });
+                if ctx.peek() == &Token::Comma {
+                    ctx.advance();
+                }
+            }
+            if ctx.peek() == &Token::Bar {
+                ctx.advance(); // consume closing |
+            }
+            // Optional return type: -> Type (use parse_type_ref_from_ctx to handle generics)
+            let return_type = if ctx.peek() == &Token::Arrow {
+                ctx.advance(); // skip ->
+                let tr = crate::parser::item::parse_type_ref_from_ctx(ctx);
+                Some(tr.display_name())
+            } else {
+                None
+            };
+            // Parse body: either { stmts } or a single expression
+            let body = if ctx.peek() == &Token::LBrace {
+                parse_block_or_stmt(ctx)
+            } else {
+                Stmt::Expr(parse_expr(ctx, 0))
+            };
+            Expr::Lambda {
+                params,
+                return_type,
+                body: Box::new(body),
+            }
         }
 
         // Any other keyword used as identifier in expression context

@@ -378,6 +378,43 @@ fn format_hir_expr_go(expr: &HirExpr) -> String {
                 args_str.join(", ")
             )
         }
+        HirExpr::Lambda {
+            params,
+            return_type,
+            body,
+            ..
+        } => {
+            let params_str: Vec<String> = params
+                .iter()
+                .map(|p| {
+                    if let Some(ref tr) = p.type_ref {
+                        format!(
+                            "{} {}",
+                            p.name,
+                            crate::transpiler::golang::map_type_go(Some(&tr.name))
+                        )
+                    } else {
+                        format!("{} int64", p.name)
+                    }
+                })
+                .collect();
+            let ret = return_type
+                .as_ref()
+                .map(|r| {
+                    format!(
+                        " {}",
+                        crate::transpiler::golang::map_type_go(Some(r.as_str()))
+                    )
+                })
+                .unwrap_or_else(|| " int64".to_string());
+            let body_str = format_hir_stmt_go(body);
+            let body_with_return = if needs_return_prefix_go(&body_str) {
+                format!("return {}", body_str)
+            } else {
+                body_str
+            };
+            format!("func({}){} {{ {} }}", params_str.join(", "), ret, body_with_return)
+        }
     }
 }
 

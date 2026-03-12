@@ -41,34 +41,42 @@ extern "Rust" {
 // GET リクエストを送信し、レスポンスハンドルを返す。
 // ネットワークエラー時はハンドル 0 を返す。
 atom get(url: i64)
+    effects: [HttpGet]
     requires: true;
     ensures: result >= 0;
     body: {
+        perform HttpGet.request(url);
         http_get(url)
     }
 
 // POST リクエストを送信し、レスポンスハンドルを返す。
 // body は JSON ハンドルまたは文字列ハンドル。
 atom post(url: i64, body: i64)
+    effects: [HttpPost]
     requires: true;
     ensures: result >= 0;
     body: {
+        perform HttpPost.request(url);
         http_post(url, body)
     }
 
 // PUT リクエストを送信し、レスポンスハンドルを返す。
 atom put(url: i64, body: i64)
+    effects: [HttpPut]
     requires: true;
     ensures: result >= 0;
     body: {
+        perform HttpPut.request(url);
         http_put(url, body)
     }
 
 // DELETE リクエストを送信し、レスポンスハンドルを返す。
 atom delete(url: i64)
+    effects: [HttpDelete]
     requires: true;
     ensures: result >= 0;
     body: {
+        perform HttpDelete.request(url);
         http_delete(url)
     }
 

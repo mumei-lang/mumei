@@ -930,6 +930,18 @@ fn compile_hir_expr<'a>(
                 .unwrap_or(context.i64_type().const_int(0, false).into()))
         }
 
+        HirExpr::Lambda {
+            params, captures, ..
+        } => {
+            // LLVM IR: Lambda as closure struct (function pointer + captured env)
+            // For now, represent as an i64 tag (closure ID) — full closure conversion
+            // will be added in a future phase with __Closure_N struct generation.
+            let _param_count = params.len();
+            let _capture_count = captures.len();
+            // Return a symbolic closure ID
+            Ok(context.i64_type().const_int(0, false).into())
+        }
+
         HirExpr::FieldAccess(inner_expr, field_name) => {
             if let HirExpr::Variable(var_name) = inner_expr.as_ref() {
                 let candidates = [

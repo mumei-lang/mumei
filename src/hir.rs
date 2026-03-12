@@ -40,6 +40,8 @@
 // 現路線で不十分な場合に、FileCap のようなオブジェクトベースの権限モデルを導入する。
 // =============================================================================
 
+use std::collections::HashSet;
+
 use crate::parser::{
     parse_body_expr, parse_expression, Atom, Expr, JoinSemantics, Op, Pattern, Stmt,
 };
@@ -105,6 +107,14 @@ pub enum HirExpr {
         children: Vec<HirStmt>,
         join_semantics: JoinSemantics,
     },
+    /// Lambda 式（クロージャ変換前）
+    Lambda {
+        params: Vec<HirLambdaParam>,
+        return_type: Option<String>,
+        body: Box<HirStmt>,
+        /// キャプチャされた外部変数（lower_expr 時に解析）
+        captures: Vec<String>,
+    },
 }
 
 /// HIR 文: 副作用を持つ構文要素
@@ -141,6 +151,12 @@ pub enum HirStmt {
     },
     /// 式文
     Expr(HirExpr),
+}
+
+#[derive(Debug, Clone)]
+pub struct HirLambdaParam {
+    pub name: String,
+    pub type_ref: Option<crate::ast::TypeRef>,
 }
 
 /// Match 式のアーム
@@ -256,6 +272,33 @@ pub fn lower_expr(expr: &Expr) -> HirExpr {
             operation: operation.clone(),
             args: args.iter().map(lower_expr).collect(),
         },
+        Expr::Lambda {
+            params,
+            return_type,
+            body,
+        } => {
+            let hir_body = lower_stmt(body);
+            // Capture analysis: find free variables in body that are not in params
+            let param_names: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
+            let free_vars = collect_free_variables_stmt(&hir_body);
+            let captures: Vec<String> = free_vars
+                .into_iter()
+                .filter(|v| !param_names.contains(v))
+                .collect();
+
+            HirExpr::Lambda {
+                params: params
+                    .iter()
+                    .map(|p| HirLambdaParam {
+                        name: p.name.clone(),
+                        type_ref: p.type_ref.clone(),
+                    })
+                    .collect(),
+                return_type: return_type.clone(),
+                body: Box::new(hir_body),
+                captures,
+            }
+        }
     }
 }
 
@@ -325,6 +368,192 @@ pub fn lower_stmt(stmt: &Stmt) -> HirStmt {
         }),
         Stmt::Expr(expr) => HirStmt::Expr(lower_expr(expr)),
     }
+}
+
+/// Collect variable names bound by a pattern (recursive for nested Variant patterns).
+fn collect_pattern_bindings(pattern: &crate::parser::Pattern, bound: &mut HashSet<String>) {
+    match pattern {
+        crate::parser::Pattern::Variable(name) => {
+            bound.insert(name.clone());
+        }
+        crate::parser::Pattern::Variant { fields, .. } => {
+            for field_pattern in fields {
+                collect_pattern_bindings(field_pattern, bound);
+            }
+        }
+        crate::parser::Pattern::Wildcard | crate::parser::Pattern::Literal(_) => {}
+    }
+}
+
+/// Collect free variables from a HirStmt (recursive traversal).
+/// Returns all variable names referenced, excluding those bound by let statements.
+fn collect_free_variables_stmt(stmt: &HirStmt) -> HashSet<String> {
+    let mut vars = HashSet::new();
+    match stmt {
+        HirStmt::Let { value, .. } => {
+            vars.extend(collect_free_variables_expr(value));
+            // Note: the bound variable is tracked by the Block handler's `bound` set.
+            // We do NOT remove `var` here because it may appear free in the value
+            // expression (e.g., `let x = x + 1` where `x` on the right refers to
+            // an outer binding that must be captured).
+        }
+        HirStmt::Assign { var, value } => {
+            vars.insert(var.clone());
+            vars.extend(collect_free_variables_expr(value));
+        }
+        HirStmt::While {
+            cond,
+            invariant,
+            decreases,
+            body,
+        } => {
+            vars.extend(collect_free_variables_expr(cond));
+            vars.extend(collect_free_variables_expr(invariant));
+            if let Some(dec) = decreases {
+                vars.extend(collect_free_variables_expr(dec));
+            }
+            vars.extend(collect_free_variables_stmt(body));
+        }
+        HirStmt::Block { stmts, tail_expr } => {
+            let mut bound = HashSet::new();
+            for s in stmts {
+                let s_vars = collect_free_variables_stmt(s);
+                for v in s_vars {
+                    if !bound.contains(&v) {
+                        vars.insert(v);
+                    }
+                }
+                if let HirStmt::Let { var, .. } = s {
+                    bound.insert(var.clone());
+                }
+            }
+            if let Some(tail) = tail_expr {
+                let t_vars = collect_free_variables_expr(tail);
+                for v in t_vars {
+                    if !bound.contains(&v) {
+                        vars.insert(v);
+                    }
+                }
+            }
+        }
+        HirStmt::Acquire { body, .. } => {
+            vars.extend(collect_free_variables_stmt(body));
+        }
+        HirStmt::Expr(expr) => {
+            vars.extend(collect_free_variables_expr(expr));
+        }
+    }
+    vars
+}
+
+/// Collect free variables from a HirExpr (recursive traversal).
+fn collect_free_variables_expr(expr: &HirExpr) -> HashSet<String> {
+    let mut vars = HashSet::new();
+    match expr {
+        HirExpr::Variable(name) => {
+            // Exclude boolean literals
+            if name != "true" && name != "false" {
+                vars.insert(name.clone());
+            }
+        }
+        HirExpr::Number(_) | HirExpr::Float(_) => {}
+        HirExpr::ArrayAccess(name, idx) => {
+            vars.insert(name.clone());
+            vars.extend(collect_free_variables_expr(idx));
+        }
+        HirExpr::BinaryOp(l, _, r) => {
+            vars.extend(collect_free_variables_expr(l));
+            vars.extend(collect_free_variables_expr(r));
+        }
+        HirExpr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            vars.extend(collect_free_variables_expr(cond));
+            vars.extend(collect_free_variables_stmt(then_branch));
+            vars.extend(collect_free_variables_stmt(else_branch));
+        }
+        HirExpr::Call { args, .. } => {
+            for arg in args {
+                vars.extend(collect_free_variables_expr(arg));
+            }
+        }
+        HirExpr::StructInit { fields, .. } => {
+            for (_, expr) in fields {
+                vars.extend(collect_free_variables_expr(expr));
+            }
+        }
+        HirExpr::FieldAccess(expr, _) => {
+            vars.extend(collect_free_variables_expr(expr));
+        }
+        HirExpr::Match { target, arms } => {
+            vars.extend(collect_free_variables_expr(target));
+            for arm in arms {
+                // Collect variables bound by the pattern to exclude from free vars
+                let mut pattern_bound = HashSet::new();
+                collect_pattern_bindings(&arm.pattern, &mut pattern_bound);
+                let arm_body_vars = collect_free_variables_stmt(&arm.body);
+                for v in arm_body_vars {
+                    if !pattern_bound.contains(&v) {
+                        vars.insert(v);
+                    }
+                }
+                if let Some(guard) = &arm.guard {
+                    let guard_vars = collect_free_variables_expr(guard);
+                    for v in guard_vars {
+                        if !pattern_bound.contains(&v) {
+                            vars.insert(v);
+                        }
+                    }
+                }
+            }
+        }
+        HirExpr::AtomRef { .. } => {}
+        HirExpr::CallRef { callee, args } => {
+            vars.extend(collect_free_variables_expr(callee));
+            for arg in args {
+                vars.extend(collect_free_variables_expr(arg));
+            }
+        }
+        HirExpr::Async { body } => {
+            vars.extend(collect_free_variables_stmt(body));
+        }
+        HirExpr::Await { expr } => {
+            vars.extend(collect_free_variables_expr(expr));
+        }
+        HirExpr::Perform { args, .. } => {
+            for arg in args {
+                vars.extend(collect_free_variables_expr(arg));
+            }
+        }
+        HirExpr::Task { body, .. } => {
+            vars.extend(collect_free_variables_stmt(body));
+        }
+        HirExpr::TaskGroup { children, .. } => {
+            for child in children {
+                vars.extend(collect_free_variables_stmt(child));
+            }
+        }
+        HirExpr::Lambda {
+            params,
+            body,
+            captures,
+            ..
+        } => {
+            // Lambda's own captures are free in the enclosing scope
+            vars.extend(captures.iter().cloned());
+            // Also collect from body, excluding lambda's own params
+            let param_names: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
+            let body_vars = collect_free_variables_stmt(body);
+            for v in body_vars {
+                if !param_names.contains(&v) {
+                    vars.insert(v);
+                }
+            }
+        }
+    }
+    vars
 }
 
 /// 文字列から直接 HirExpr を生成するヘルパー（法則検証等のアドホックなパース用）

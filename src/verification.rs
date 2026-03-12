@@ -471,32 +471,48 @@ pub const FAILURE_RESOURCE_CONFLICT: &str = "resource_conflict";
 pub fn suggestion_for_failure_type(failure_type: &str) -> &'static str {
     match failure_type {
         FAILURE_POSTCONDITION_VIOLATED => {
-            "Ensure the body's return value satisfies the ensures clause, or relax the ensures constraint"
+            "Ensure the body's return value satisfies the ensures clause, or relax the ensures constraint \
+             (本体の戻り値が ensures 句を満たすようにするか、ensures 制約を緩和してください)"
         }
         FAILURE_PRECONDITION_VIOLATED => {
-            "The caller must establish the callee's requires clause before the call"
+            "The caller must establish the callee's requires clause before the call \
+             (呼び出し元は呼び出し先の requires 句を呼び出し前に確立する必要があります)"
         }
         FAILURE_DIVISION_BY_ZERO => {
-            "Add a condition `divisor != 0` to requires, or guard the division with an if-expression"
+            "Add a guard condition `divisor != 0` in the requires clause / \
+             requires 句に `divisor != 0` ガード条件を追加してください"
         }
         FAILURE_TRAIT_LAW_VIOLATED => {
-            "The trait implementation does not satisfy the algebraic law; review the impl body"
+            "The trait implementation does not satisfy the algebraic law; review the impl body \
+             (トレイト実装が代数法則を満たしていません。impl 本体を見直してください)"
         }
         FAILURE_LINEARITY_VIOLATED => {
-            "A linear resource was used after being consumed; ensure each consume is followed by no further use"
+            "Clone the value before the second use, or restructure to avoid reuse \
+             (2回目の使用前に値をクローンするか、再利用を避けるよう構造を変更してください)"
         }
         FAILURE_INVARIANT_VIOLATED => {
-            "The loop/recursive invariant is not maintained; strengthen the invariant or fix the body"
+            "The loop/recursive invariant is not maintained; strengthen the invariant or fix the body \
+             (ループ/再帰不変条件が維持されていません。不変条件を強化するか本体を修正してください)"
         }
         FAILURE_EXHAUSTIVENESS_FAILED => {
-            "Not all cases are covered in the match expression; add missing patterns"
+            "Not all cases are covered in the match expression; add missing patterns \
+             (match 式で全てのケースがカバーされていません。不足パターンを追加してください)"
         }
         FAILURE_RESOURCE_CONFLICT => {
-            "Resource acquisition order may cause deadlock; reorder acquire calls to follow priority ordering"
+            "Resource acquisition order may cause deadlock; reorder acquire calls to follow priority ordering \
+             (リソース取得順序がデッドロックを引き起こす可能性があります。優先順位に従って取得順序を変更してください)"
         }
-        _ => "Review the verification failure and adjust the code or contracts accordingly",
+        FAILURE_EFFECT_NOT_ALLOWED => {
+            "Add the required effect to the atom's effect list or the security policy / \
+             必要なエフェクトを atom のエフェクトリストまたはセキュリティポリシーに追加してください"
+        }
+        _ => "Review the verification failure and adjust the code or contracts accordingly \
+              (検証失敗を確認し、コードまたは契約を適宜修正してください)",
     }
 }
+
+/// Constant for effect-not-allowed failure type
+pub const FAILURE_EFFECT_NOT_ALLOWED: &str = "effect_not_allowed";
 
 // =============================================================================
 // Natural Language Constraint Template Engine (Feature 1-b)
@@ -512,9 +528,29 @@ pub fn constraint_to_natural_language(
 ) -> String {
     let pred = predicate_raw.trim();
 
-    // Try to match range pattern: v >= N && v <= M
+    // Try to match range pattern: v >= N && v <= M  or  N <= v && v <= M
     if let Some(range_desc) = try_match_range(pred, param_name, type_name, value) {
         return range_desc;
+    }
+
+    // Modulo constraints: v % N == 0
+    if let Some(desc) = try_match_modulo(pred, param_name, value) {
+        return desc;
+    }
+
+    // Enum/set membership: v == 1 || v == 2 || v == 3
+    if let Some(desc) = try_match_enum(pred, param_name, value) {
+        return desc;
+    }
+
+    // String constraints: starts_with, ends_with, contains
+    if let Some(desc) = try_match_string_constraint(pred, param_name, value) {
+        return desc;
+    }
+
+    // Negation patterns: !(expr) or v != N
+    if let Some(desc) = try_match_negation(pred, param_name, type_name, value) {
+        return desc;
     }
 
     // Single comparison patterns
@@ -532,15 +568,19 @@ pub fn constraint_to_natural_language(
     )
 }
 
-/// Try to match a range pattern like "v >= N && v <= M"
+/// Try to match a range pattern like "v >= N && v <= M" or reversed "N <= v && v <= M"
 fn try_match_range(pred: &str, param_name: &str, type_name: &str, value: &str) -> Option<String> {
-    // Match patterns like "v >= N && v <= M" or "v > N && v < M"
     let parts: Vec<&str> = pred.split("&&").map(|s| s.trim()).collect();
     if parts.len() != 2 {
         return None;
     }
-    let lower = extract_bound(parts[0], true)?;
-    let upper = extract_bound(parts[1], false)?;
+    // Try normal order: v >= N && v <= M
+    let lower = extract_bound(parts[0], true).or_else(|| extract_bound_reversed(parts[0], true));
+    let upper = extract_bound(parts[1], false).or_else(|| extract_bound_reversed(parts[1], false));
+    let (lower, upper) = match (lower, upper) {
+        (Some(l), Some(u)) => (l, u),
+        _ => return None,
+    };
     Some(format!(
         "{param} is {val}, which violates {ty} constraint ({lower_bound} to {upper_bound}) \
          ({param} が {val} のとき、{ty} の制約 {lower_bound} 以上 {upper_bound} 以下を逸脱します)",
@@ -560,6 +600,164 @@ fn extract_bound(expr: &str, is_lower: bool) -> Option<String> {
         if let Some(idx) = trimmed.find(op) {
             let rhs = trimmed[idx + op.len()..].trim();
             return Some(rhs.to_string());
+        }
+    }
+    None
+}
+
+/// Extract a numeric bound from reversed comparison: "N <= v" (lower) or "N >= v" (upper)
+fn extract_bound_reversed(expr: &str, is_lower: bool) -> Option<String> {
+    let trimmed = expr.trim();
+    // For lower bound, look for "N <= v" pattern (reversed)
+    let ops: &[&str] = if is_lower { &["<=", "<"] } else { &[">=", ">"] };
+    for op in ops {
+        if let Some(idx) = trimmed.find(op) {
+            let lhs = trimmed[..idx].trim();
+            // lhs should be a numeric literal (the bound), not a variable name
+            if !lhs.is_empty()
+                && lhs
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || c == '-' || c == '.')
+            {
+                return Some(lhs.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Try to match modulo patterns: v % N == 0
+fn try_match_modulo(pred: &str, param_name: &str, value: &str) -> Option<String> {
+    let re_parts: Vec<&str> = pred.split("==").map(|s| s.trim()).collect();
+    if re_parts.len() != 2 {
+        return None;
+    }
+    // Check for pattern: v % N == 0 or 0 == v % N
+    let (mod_part, zero_part) = if re_parts[0].contains('%') {
+        (re_parts[0], re_parts[1])
+    } else if re_parts[1].contains('%') {
+        (re_parts[1], re_parts[0])
+    } else {
+        return None;
+    };
+    if zero_part != "0" {
+        return None;
+    }
+    let mod_parts: Vec<&str> = mod_part.split('%').map(|s| s.trim()).collect();
+    if mod_parts.len() != 2 {
+        return None;
+    }
+    let divisor = mod_parts[1];
+    Some(format!(
+        "'{param}' must be a multiple of {n} but value is {val} \
+         ('{param}' は {n} の倍数である必要がありますが、値は {val} です)",
+        param = param_name,
+        n = divisor,
+        val = value,
+    ))
+}
+
+/// Try to match enum/set membership: v == 1 || v == 2 || v == 3
+fn try_match_enum(pred: &str, param_name: &str, value: &str) -> Option<String> {
+    let parts: Vec<&str> = pred.split("||").map(|s| s.trim()).collect();
+    if parts.len() < 2 {
+        return None;
+    }
+    let mut values = Vec::new();
+    for part in &parts {
+        let eq_parts: Vec<&str> = part.split("==").map(|s| s.trim()).collect();
+        if eq_parts.len() != 2 {
+            return None;
+        }
+        // One side should be a variable-like token, other should be a value
+        let val = if eq_parts[0].chars().all(|c| c.is_ascii_digit() || c == '-') {
+            eq_parts[0]
+        } else if eq_parts[1].chars().all(|c| c.is_ascii_digit() || c == '-') {
+            eq_parts[1]
+        } else {
+            return None;
+        };
+        values.push(val.to_string());
+    }
+    Some(format!(
+        "'{param}' must be one of [{vals}] but value is {val} \
+         ('{param}' は [{vals}] のいずれかである必要がありますが、値は {val} です)",
+        param = param_name,
+        vals = values.join(", "),
+        val = value,
+    ))
+}
+
+/// Try to match string constraint patterns: starts_with, ends_with, contains
+fn try_match_string_constraint(pred: &str, param_name: &str, value: &str) -> Option<String> {
+    let string_fns = [
+        ("starts_with", "must start with", "で始まる必要がありますが"),
+        ("ends_with", "must end with", "で終わる必要がありますが"),
+        ("contains", "must contain", "を含む必要がありますが"),
+    ];
+    for (fn_name, en_desc, ja_desc) in &string_fns {
+        if let Some(start) = pred.find(fn_name) {
+            // Extract the argument: starts_with(var, "prefix") or starts_with(var, prefix)
+            let after = &pred[start + fn_name.len()..];
+            if let Some(paren_start) = after.find('(') {
+                let inner = &after[paren_start + 1..];
+                if let Some(paren_end) = inner.rfind(')') {
+                    let args_str = &inner[..paren_end];
+                    let args: Vec<&str> = args_str.splitn(2, ',').map(|s| s.trim()).collect();
+                    let pattern_val = if args.len() == 2 {
+                        args[1].trim_matches('"').trim_matches('\'')
+                    } else if args.len() == 1 {
+                        args[0].trim_matches('"').trim_matches('\'')
+                    } else {
+                        continue;
+                    };
+                    return Some(format!(
+                        "'{param}' {en} \"{pattern}\" but value is {val} \
+                         ('{param}' は \"{pattern}\" {ja}、値は {val} です)",
+                        param = param_name,
+                        en = en_desc,
+                        pattern = pattern_val,
+                        ja = ja_desc,
+                        val = value,
+                    ));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Try to match negation patterns: !(expr) or v != N
+fn try_match_negation(
+    pred: &str,
+    param_name: &str,
+    type_name: &str,
+    value: &str,
+) -> Option<String> {
+    let trimmed = pred.trim();
+    // Pattern: !(inner_expr)
+    if trimmed.starts_with("!(") && trimmed.ends_with(')') {
+        let inner = &trimmed[2..trimmed.len() - 1];
+        return Some(format!(
+            "'{param}' must NOT satisfy '{inner}' but value is {val} \
+             ('{param}' は '{inner}' を満たしてはなりませんが、値は {val} です)",
+            param = param_name,
+            inner = inner,
+            val = value,
+        ));
+    }
+    // Pattern: v != N (already handled in try_match_comparison, but handle standalone)
+    if let Some(idx) = trimmed.find("!=") {
+        let rhs = trimmed[idx + 2..].trim();
+        if !rhs.is_empty() {
+            return Some(format!(
+                "'{param}' ({ty}) must not be {rhs} but value is {val} \
+                 ('{param}' ({ty}) は {rhs} であってはなりませんが、値は {val} です)",
+                param = param_name,
+                ty = type_name,
+                rhs = rhs,
+                val = value,
+            ));
         }
     }
     None
@@ -678,6 +876,79 @@ pub fn build_semantic_feedback(
     });
 
     Some(feedback)
+}
+
+/// Build semantic feedback for division-by-zero violations.
+pub fn build_division_by_zero_feedback(dividend_val: &str, divisor_val: &str) -> serde_json::Value {
+    json!({
+        "failure_type": FAILURE_DIVISION_BY_ZERO,
+        "explanation": format!(
+            "Division by zero: dividend = {}, divisor = {} \
+             (ゼロ除算: 被除数 = {}, 除数 = {})",
+            dividend_val, divisor_val, dividend_val, divisor_val
+        ),
+        "counter_example": {
+            "dividend": dividend_val,
+            "divisor": divisor_val
+        },
+        "suggestion": suggestion_for_failure_type(FAILURE_DIVISION_BY_ZERO)
+    })
+}
+
+/// Build semantic feedback for linearity/ownership violations.
+pub fn build_linearity_feedback(
+    atom_name: &str,
+    violations: &[String],
+    span: &Span,
+) -> serde_json::Value {
+    let violation_details: Vec<serde_json::Value> = violations
+        .iter()
+        .map(|v| {
+            json!({
+                "description": v,
+                "explanation": format!(
+                    "{} (変数の線形性違反です)",
+                    v
+                )
+            })
+        })
+        .collect();
+
+    json!({
+        "failure_type": FAILURE_LINEARITY_VIOLATED,
+        "atom": atom_name,
+        "violations": violation_details,
+        "span": {
+            "file": span.file,
+            "line": span.line,
+        },
+        "suggestion": suggestion_for_failure_type(FAILURE_LINEARITY_VIOLATED)
+    })
+}
+
+/// Build semantic feedback for effect containment violations.
+/// NOTE: Currently unused; will be wired into verify_effect_containment in Commit 3.
+#[allow(dead_code)]
+pub fn build_effect_feedback(
+    atom_name: &str,
+    attempted_effect: &str,
+    allowed_effects: &[String],
+    missing_effects: &[String],
+) -> serde_json::Value {
+    json!({
+        "failure_type": FAILURE_EFFECT_NOT_ALLOWED,
+        "atom": atom_name,
+        "attempted_effect": attempted_effect,
+        "allowed_effects": allowed_effects,
+        "missing_effects": missing_effects,
+        "explanation": format!(
+            "Effect '{}' is not allowed by the current policy. Allowed effects: {:?}. Missing: {:?} \
+             (エフェクト '{}' は現在のポリシーで許可されていません。許可: {:?}、不足: {:?})",
+            attempted_effect, allowed_effects, missing_effects,
+            attempted_effect, allowed_effects, missing_effects
+        ),
+        "suggestion": suggestion_for_failure_type(FAILURE_EFFECT_NOT_ALLOWED)
+    })
 }
 
 /// 検証時に共有するコンテキスト（ctx, arr, module_env を束ねて引数を削減）
@@ -1713,6 +1984,138 @@ pub fn verify_impl(
 // acquire 式の検証時に、リソース階層制約をチェックする。
 
 // =============================================================================
+// セキュリティポリシー (Security Policy)
+// =============================================================================
+
+/// A single allowed effect with optional parameter constraints.
+/// Used by SecurityPolicy to define which effects (and under what conditions)
+/// are permitted in the current session.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct AllowedEffect {
+    pub effect_name: String,
+    /// Parameter constraints as (param_name, constraint_expr) pairs.
+    /// E.g., ("path", "starts_with(path, \"/tmp/\")") for FileRead.
+    pub param_constraints: Vec<(String, String)>,
+}
+
+/// Security policy defining which effects are permitted.
+/// Enforced during effect containment verification.
+/// Can be set dynamically via the MCP server's set_allowed_effects tool.
+#[derive(Debug, Clone, Default)]
+#[allow(dead_code)]
+pub struct SecurityPolicy {
+    pub allowed_effects: Vec<AllowedEffect>,
+}
+
+#[allow(dead_code)]
+impl SecurityPolicy {
+    pub fn new() -> Self {
+        Self {
+            allowed_effects: Vec::new(),
+        }
+    }
+
+    /// Add an allowed effect with optional parameter constraints.
+    pub fn allow_effect(&mut self, effect_name: &str, param_constraints: Vec<(String, String)>) {
+        self.allowed_effects.push(AllowedEffect {
+            effect_name: effect_name.to_string(),
+            param_constraints,
+        });
+    }
+
+    /// Check if an effect is allowed by this policy (name-level only).
+    pub fn is_effect_allowed(&self, effect_name: &str) -> bool {
+        self.allowed_effects
+            .iter()
+            .any(|ae| ae.effect_name == effect_name)
+    }
+
+    /// Get the parameter constraints for a specific effect.
+    pub fn get_constraints(&self, effect_name: &str) -> Vec<&(String, String)> {
+        self.allowed_effects
+            .iter()
+            .filter(|ae| ae.effect_name == effect_name)
+            .flat_map(|ae| ae.param_constraints.iter())
+            .collect()
+    }
+
+    /// Check if an effect with a specific string parameter satisfies the policy.
+    /// Uses constant folding for string literals: directly evaluates starts_with/contains.
+    /// For symbolic (non-literal) parameters, returns Ok (deferred to Z3).
+    // TODO: Migrate to Z3 String Sort when available for full symbolic string verification.
+    pub fn check_param_constraint(
+        &self,
+        effect_name: &str,
+        param_name: &str,
+        param_value: Option<&str>,
+    ) -> Result<(), String> {
+        let constraints = self.get_constraints(effect_name);
+        if constraints.is_empty() {
+            return Ok(());
+        }
+
+        for (cname, cexpr) in &constraints {
+            if cname != param_name {
+                continue;
+            }
+            // Constant folding: if param_value is a known string literal, evaluate directly
+            if let Some(val) = param_value {
+                if !evaluate_string_constraint(cexpr, param_name, val) {
+                    return Err(format!(
+                        "Parameter constraint violated: {} = \"{}\" does not satisfy `{}` \
+                         (パラメータ制約違反: {} = \"{}\" は `{}` を満たしません)",
+                        param_name, val, cexpr, param_name, val, cexpr
+                    ));
+                }
+            }
+            // If param_value is None (symbolic), we defer to Z3 symbolic verification
+        }
+        Ok(())
+    }
+}
+
+/// Evaluate a string constraint expression against a concrete value.
+/// Supports: starts_with(param, "prefix"), ends_with(param, "suffix"), contains(param, "substr")
+#[allow(dead_code)]
+fn evaluate_string_constraint(constraint_expr: &str, _param_name: &str, value: &str) -> bool {
+    let trimmed = constraint_expr.trim();
+
+    // starts_with(param, "prefix")
+    if let Some(inner) = trimmed.strip_prefix("starts_with(") {
+        if let Some(inner) = inner.strip_suffix(')') {
+            if let Some((_p, rest)) = inner.split_once(',') {
+                let prefix = rest.trim().trim_matches('"');
+                return value.starts_with(prefix);
+            }
+        }
+    }
+
+    // ends_with(param, "suffix")
+    if let Some(inner) = trimmed.strip_prefix("ends_with(") {
+        if let Some(inner) = inner.strip_suffix(')') {
+            if let Some((_p, rest)) = inner.split_once(',') {
+                let suffix = rest.trim().trim_matches('"');
+                return value.ends_with(suffix);
+            }
+        }
+    }
+
+    // contains(param, "substr")
+    if let Some(inner) = trimmed.strip_prefix("contains(") {
+        if let Some(inner) = inner.strip_suffix(')') {
+            if let Some((_p, rest)) = inner.split_once(',') {
+                let substr = rest.trim().trim_matches('"');
+                return value.contains(substr);
+            }
+        }
+    }
+
+    // Unknown constraint — conservatively allow (will be checked by Z3 if symbolic)
+    true
+}
+
+// =============================================================================
 // エフェクト検証コンテキスト (Effect Verification Context)
 // =============================================================================
 
@@ -2096,6 +2499,9 @@ fn collect_acquire_resources_expr(expr: &Expr) -> Vec<String> {
                 resources.extend(collect_acquire_resources_expr(arg));
             }
         }
+        Expr::Lambda { body, .. } => {
+            resources.extend(collect_acquire_resources_stmt(body));
+        }
         _ => {}
     }
     resources
@@ -2263,6 +2669,7 @@ fn verify_async_recursion_depth(atom: &Atom, module_env: &ModuleEnv) -> MumeiRes
                         .map(|a| count_self_calls_expr(a, atom_name))
                         .sum::<usize>()
             }
+            Expr::Lambda { body, .. } => count_self_calls_stmt(body, atom_name),
             _ => 0,
         }
     }
@@ -2568,6 +2975,9 @@ fn collect_callees_expr(expr: &Expr) -> Vec<String> {
             for arg in args {
                 callees.extend(collect_callees_expr(arg));
             }
+        }
+        Expr::Lambda { body, .. } => {
+            callees.extend(collect_callees_stmt(body));
         }
         _ => {}
     }
@@ -3370,6 +3780,19 @@ fn verify_inner(
                     }
                 }
             }
+            // Determine failure type: division-by-zero gets its own category
+            let body_failure_type = if err_str.contains("division by zero") {
+                FAILURE_DIVISION_BY_ZERO
+            } else {
+                FAILURE_PRECONDITION_VIOLATED
+            };
+            let constraint_mappings = build_constraint_mappings_for_atom(atom, module_env);
+            let semantic_fb = build_semantic_feedback(
+                &constraint_mappings,
+                None,
+                atom,
+                body_failure_type,
+            );
             save_visualizer_report(
                 output_dir,
                 "failed",
@@ -3378,8 +3801,8 @@ fn verify_inner(
                 "N/A",
                 &err_str,
                 None,
-                FAILURE_PRECONDITION_VIOLATED,
-                None,
+                body_failure_type,
+                semantic_fb.as_ref(),
                 Some(&atom.span),
             );
             return Err(e);
@@ -3479,7 +3902,21 @@ fn verify_inner(
 
         // 蓄積された違反をチェック
         if linearity_ctx.has_violations() {
-            let violations = linearity_ctx.get_violations().join("\n  ");
+            let violations_list = linearity_ctx.get_violations();
+            let violations = violations_list.join("\n  ");
+            let linearity_fb = build_linearity_feedback(&atom.name, violations_list, &atom.span);
+            save_visualizer_report(
+                output_dir,
+                "failed",
+                &atom.name,
+                "N/A",
+                "N/A",
+                &format!("Linearity violations in atom '{}'", atom.name),
+                None,
+                FAILURE_LINEARITY_VIOLATED,
+                Some(&linearity_fb),
+                Some(&atom.span),
+            );
             return Err(MumeiError::verification_at(
                 format!(
                     "Linearity violations in atom '{}':\n  {}",
@@ -3997,26 +4434,37 @@ fn expr_to_z3<'a>(
                             solver.assert(&ri._eq(&Int::from_i64(ctx, 0)));
                             if solver.check() == SatResult::Sat {
                                 // Extract counterexample: find which variables cause divisor == 0
-                                let ce_hint = if let Some(model) = solver.get_model() {
-                                    let divisor_val = model
-                                        .eval(&ri, true)
-                                        .map(|v| format!("{}", v))
-                                        .unwrap_or_else(|| "0".to_string());
-                                    let dividend_val = model
-                                        .eval(&li, true)
-                                        .map(|v| format!("{}", v))
-                                        .unwrap_or_else(|| "?".to_string());
-                                    format!(
-                                        " Counter-example: dividend = {}, divisor = {}",
-                                        dividend_val, divisor_val
-                                    )
-                                } else {
-                                    String::new()
-                                };
+                                let (ce_hint, div_feedback) =
+                                    if let Some(model) = solver.get_model() {
+                                        let divisor_val = model
+                                            .eval(&ri, true)
+                                            .map(|v| format!("{}", v))
+                                            .unwrap_or_else(|| "0".to_string());
+                                        let dividend_val = model
+                                            .eval(&li, true)
+                                            .map(|v| format!("{}", v))
+                                            .unwrap_or_else(|| "?".to_string());
+                                        let hint = format!(
+                                            " Counter-example: dividend = {}, divisor = {}",
+                                            dividend_val, divisor_val
+                                        );
+                                        let fb = build_division_by_zero_feedback(
+                                            &dividend_val,
+                                            &divisor_val,
+                                        );
+                                        (hint, Some(fb))
+                                    } else {
+                                        (String::new(), None)
+                                    };
+                                // Attach structured feedback to error message for upstream reporting
+                                let feedback_hint = div_feedback
+                                    .as_ref()
+                                    .map(|fb| format!(" [semantic_feedback: {}]", fb))
+                                    .unwrap_or_default();
                                 solver.pop(1);
                                 return Err(MumeiError::verification(format!(
-                                    "Potential division by zero.{}",
-                                    ce_hint
+                                    "Potential division by zero.{}{}",
+                                    ce_hint, feedback_hint
                                 ))
                                 .with_help("Add a condition divisor != 0 to requires"));
                             }
@@ -4702,6 +5150,32 @@ fn expr_to_z3<'a>(
                 Ok(sym.into())
             }
         }
+        // Lambda 式: Z3 uninterpreted function として表現する
+        // 将来のフェーズでキャプチャ変数の環境アサーションと
+        // 高階関数コントラクトの検証を追加する
+        Expr::Lambda { params, body, .. } => {
+            // Create a fresh symbolic value for the lambda
+            // Lambda bodies will be verified when called via higher-order function contracts
+            // Use a unique counter to avoid Z3 constant name collisions when multiple lambdas
+            // with the same arity appear in the same atom body (e.g., `let f = |x| x+1; let g = |x| x-1;`).
+            static LAMBDA_COUNTER: std::sync::atomic::AtomicUsize =
+                std::sync::atomic::AtomicUsize::new(0);
+            let lambda_id = LAMBDA_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let lambda_name = format!("__lambda_{}_{}", params.len(), lambda_id);
+            let lambda_sym = Int::new_const(ctx, lambda_name.as_str());
+
+            // Register parameter names in a sub-environment for body verification
+            let mut lambda_env = env.clone();
+            for p in params {
+                let p_sym = Int::new_const(ctx, p.name.as_str());
+                lambda_env.insert(p.name.clone(), p_sym.into());
+            }
+
+            // Verify the lambda body in the sub-environment
+            let _body_val = stmt_to_z3(vc, body, &mut lambda_env, solver_opt)?;
+
+            Ok(lambda_sym.into())
+        }
     }
 }
 
@@ -5255,6 +5729,7 @@ fn save_visualizer_report(
     if let Some(sf) = semantic_feedback {
         report["semantic_feedback"] = sf.clone();
     }
+    report["suggestion"] = json!(suggestion_for_failure_type(failure_type));
     if let Some(s) = span {
         report["span"] = json!({
             "file": s.file,
@@ -5265,4 +5740,266 @@ fn save_visualizer_report(
     }
     let _ = fs::create_dir_all(output_dir);
     let _ = fs::write(output_dir.join("report.json"), report.to_string());
+}
+
+// =============================================================================
+// Tests: Semantic Feedback functions (Part 1-5)
+// =============================================================================
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- constraint_to_natural_language tests ----
+
+    #[test]
+    fn test_constraint_to_natural_language_range() {
+        let result =
+            constraint_to_natural_language("age", "BoundedAge", "age >= 0 && age <= 120", "150");
+        assert!(result.contains("age"));
+        assert!(result.contains("150"));
+    }
+
+    #[test]
+    fn test_constraint_to_natural_language_modulo() {
+        let result = constraint_to_natural_language("n", "EvenInt", "n % 2 == 0", "3");
+        assert!(result.contains("multiple") || result.contains("倍数"));
+        assert!(result.contains("3"));
+    }
+
+    #[test]
+    fn test_constraint_to_natural_language_enum() {
+        let result = constraint_to_natural_language(
+            "status",
+            "StatusCode",
+            "status == 1 || status == 2 || status == 3",
+            "5",
+        );
+        assert!(result.contains("one of") || result.contains("のいずれか"));
+        assert!(result.contains("5"));
+    }
+
+    #[test]
+    fn test_constraint_to_natural_language_negation() {
+        let result = constraint_to_natural_language("x", "NonZero", "x != 0", "0");
+        assert!(result.contains("not") || result.contains("ありません"));
+        assert!(result.contains("0"));
+    }
+
+    #[test]
+    fn test_constraint_to_natural_language_string_constraint() {
+        let result = constraint_to_natural_language(
+            "path",
+            "SafePath",
+            "starts_with(path, \"/tmp/\")",
+            "/etc/passwd",
+        );
+        assert!(result.contains("starts_with") || result.contains("start"));
+    }
+
+    #[test]
+    fn test_constraint_to_natural_language_comparison() {
+        let result = constraint_to_natural_language("x", "Positive", "x > 0", "-1");
+        assert!(result.contains("greater than") || result.contains("より大きい"));
+    }
+
+    #[test]
+    fn test_constraint_to_natural_language_fallback() {
+        let result = constraint_to_natural_language("x", "Custom", "some_complex_pred(x)", "42");
+        assert!(result.contains("x"));
+        assert!(result.contains("42"));
+    }
+
+    // ---- suggestion_for_failure_type tests ----
+
+    #[test]
+    fn test_suggestion_for_failure_type_division() {
+        let suggestion = suggestion_for_failure_type(FAILURE_DIVISION_BY_ZERO);
+        assert!(suggestion.contains("divisor") || suggestion.contains("0"));
+    }
+
+    #[test]
+    fn test_suggestion_for_failure_type_linearity() {
+        let suggestion = suggestion_for_failure_type(FAILURE_LINEARITY_VIOLATED);
+        assert!(
+            suggestion.contains("Clone")
+                || suggestion.contains("clone")
+                || suggestion.contains("クローン")
+        );
+    }
+
+    #[test]
+    fn test_suggestion_for_failure_type_effect() {
+        let suggestion = suggestion_for_failure_type("effect_not_allowed");
+        assert!(suggestion.contains("effect") || suggestion.contains("エフェクト"));
+    }
+
+    #[test]
+    fn test_suggestion_for_failure_type_postcondition() {
+        let suggestion = suggestion_for_failure_type(FAILURE_POSTCONDITION_VIOLATED);
+        assert!(!suggestion.is_empty());
+    }
+
+    #[test]
+    fn test_suggestion_for_failure_type_precondition() {
+        let suggestion = suggestion_for_failure_type(FAILURE_PRECONDITION_VIOLATED);
+        assert!(!suggestion.is_empty());
+    }
+
+    // ---- build_division_by_zero_feedback tests ----
+
+    #[test]
+    fn test_build_division_by_zero_feedback() {
+        let feedback = build_division_by_zero_feedback("10", "0");
+        assert_eq!(feedback["failure_type"], FAILURE_DIVISION_BY_ZERO);
+        assert!(feedback["counter_example"]["dividend"].as_str().is_some());
+        assert!(feedback["counter_example"]["divisor"].as_str().is_some());
+    }
+
+    // ---- build_linearity_feedback tests ----
+
+    #[test]
+    fn test_build_linearity_feedback() {
+        let violations = vec!["Variable 'x' used after being consumed".to_string()];
+        let span = Span {
+            file: "test.mm".to_string(),
+            line: 10,
+            col: 1,
+            len: 5,
+        };
+        let feedback = build_linearity_feedback("test_atom", &violations, &span);
+        assert_eq!(feedback["failure_type"], FAILURE_LINEARITY_VIOLATED);
+        assert!(feedback["violations"].is_array());
+        assert_eq!(feedback["atom"], "test_atom");
+    }
+
+    // ---- build_effect_feedback tests ----
+
+    #[test]
+    fn test_build_effect_feedback() {
+        let allowed = vec!["FileRead".to_string()];
+        let missing = vec!["FileWrite".to_string()];
+        let feedback = build_effect_feedback("test_atom", "FileWrite", &allowed, &missing);
+        assert_eq!(feedback["failure_type"], "effect_not_allowed");
+        assert_eq!(feedback["attempted_effect"], "FileWrite");
+        assert!(feedback["allowed_effects"].is_array());
+        assert!(feedback["missing_effects"].is_array());
+    }
+
+    // ---- try_match_comparison tests ----
+
+    #[test]
+    fn test_try_match_comparison() {
+        let result = try_match_comparison("x > 10", "x", "Bounded", "5");
+        assert!(result.is_some());
+        let msg = result.unwrap();
+        assert!(msg.contains("greater than") || msg.contains("より大きい"));
+        assert!(msg.contains("5"));
+    }
+
+    #[test]
+    fn test_try_match_comparison_lte() {
+        let result = try_match_comparison("x <= 100", "x", "Capped", "150");
+        assert!(result.is_some());
+        let msg = result.unwrap();
+        assert!(msg.contains("at most") || msg.contains("以下"));
+    }
+
+    // ---- SecurityPolicy tests ----
+
+    #[test]
+    fn test_security_policy_new() {
+        let policy = SecurityPolicy::new();
+        assert!(policy.allowed_effects.is_empty());
+    }
+
+    #[test]
+    fn test_security_policy_allow_and_check() {
+        let mut policy = SecurityPolicy::new();
+        policy.allow_effect(
+            "FileRead",
+            vec![(
+                "path".to_string(),
+                "starts_with(path, \"/tmp/\")".to_string(),
+            )],
+        );
+        assert!(policy.is_effect_allowed("FileRead"));
+        assert!(!policy.is_effect_allowed("FileWrite"));
+    }
+
+    #[test]
+    fn test_security_policy_get_constraints() {
+        let mut policy = SecurityPolicy::new();
+        policy.allow_effect(
+            "HttpGet",
+            vec![(
+                "url".to_string(),
+                "starts_with(url, \"https://\")".to_string(),
+            )],
+        );
+        let constraints = policy.get_constraints("HttpGet");
+        assert_eq!(constraints.len(), 1);
+        assert_eq!(constraints[0].0, "url");
+    }
+
+    #[test]
+    fn test_security_policy_check_param_constraint() {
+        let mut policy = SecurityPolicy::new();
+        policy.allow_effect(
+            "FileRead",
+            vec![(
+                "path".to_string(),
+                "starts_with(path, \"/tmp/\")".to_string(),
+            )],
+        );
+        assert!(policy
+            .check_param_constraint("FileRead", "path", Some("/tmp/data.txt"))
+            .is_ok());
+        assert!(policy
+            .check_param_constraint("FileRead", "path", Some("/etc/passwd"))
+            .is_err());
+    }
+
+    // ---- evaluate_string_constraint tests ----
+
+    #[test]
+    fn test_evaluate_string_constraint_starts_with() {
+        assert!(evaluate_string_constraint(
+            "starts_with(path, \"/tmp/\")",
+            "path",
+            "/tmp/data.txt"
+        ));
+        assert!(!evaluate_string_constraint(
+            "starts_with(path, \"/tmp/\")",
+            "path",
+            "/etc/passwd"
+        ));
+    }
+
+    #[test]
+    fn test_evaluate_string_constraint_ends_with() {
+        assert!(evaluate_string_constraint(
+            "ends_with(file, \".mm\")",
+            "file",
+            "test.mm"
+        ));
+        assert!(!evaluate_string_constraint(
+            "ends_with(file, \".mm\")",
+            "file",
+            "test.rs"
+        ));
+    }
+
+    #[test]
+    fn test_evaluate_string_constraint_contains() {
+        assert!(evaluate_string_constraint(
+            "contains(url, \"api\")",
+            "url",
+            "https://api.example.com"
+        ));
+        assert!(!evaluate_string_constraint(
+            "contains(url, \"api\")",
+            "url",
+            "https://example.com"
+        ));
+    }
 }

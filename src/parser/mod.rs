@@ -1048,4 +1048,86 @@ extern "Rust" {
             _ => panic!("Expected Block"),
         }
     }
+
+    // =========================================================================
+    // Lambda parsing tests (Part 3-9)
+    // =========================================================================
+
+    #[test]
+    fn test_parse_lambda_simple() {
+        // |x| x + 1
+        let expr = parse_expression("|x| x + 1");
+        match expr {
+            Expr::Lambda {
+                params,
+                return_type,
+                ..
+            } => {
+                assert_eq!(params.len(), 1);
+                assert_eq!(params[0].name, "x");
+                assert!(params[0].type_ref.is_none());
+                assert!(return_type.is_none());
+            }
+            _ => panic!("Expected Lambda, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn test_parse_lambda_typed_params() {
+        // |x: i64, y: i64| -> i64 { x + y }
+        let expr = parse_expression("|x: i64, y: i64| -> i64 { x + y }");
+        match expr {
+            Expr::Lambda {
+                params,
+                return_type,
+                ..
+            } => {
+                assert_eq!(params.len(), 2);
+                assert_eq!(params[0].name, "x");
+                assert!(params[0].type_ref.is_some());
+                assert_eq!(params[0].type_ref.as_ref().unwrap().name, "i64");
+                assert_eq!(params[1].name, "y");
+                assert!(params[1].type_ref.is_some());
+                assert_eq!(return_type, Some("i64".to_string()));
+            }
+            _ => panic!("Expected Lambda, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn test_parse_lambda_single_typed_param() {
+        // |x: i64| x
+        let expr = parse_expression("|x: i64| x");
+        match expr {
+            Expr::Lambda {
+                params,
+                return_type,
+                ..
+            } => {
+                assert_eq!(params.len(), 1);
+                assert_eq!(params[0].name, "x");
+                assert!(params[0].type_ref.is_some());
+                assert_eq!(params[0].type_ref.as_ref().unwrap().name, "i64");
+                assert!(return_type.is_none());
+            }
+            _ => panic!("Expected Lambda, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn test_parse_lambda_block_body() {
+        // |x| { let y = x + 1; y }
+        let expr = parse_expression("|x| { let y = x + 1; y }");
+        match expr {
+            Expr::Lambda { params, body, .. } => {
+                assert_eq!(params.len(), 1);
+                assert_eq!(params[0].name, "x");
+                match *body {
+                    Stmt::Block(_) => {}
+                    _ => panic!("Expected Block body"),
+                }
+            }
+            _ => panic!("Expected Lambda, got {:?}", expr),
+        }
+    }
 }
