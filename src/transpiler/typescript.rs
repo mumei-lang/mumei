@@ -412,11 +412,16 @@ fn format_hir_expr_ts(expr: &HirExpr) -> String {
                 })
                 .unwrap_or_default();
             let body_str = format_hir_stmt_ts(body);
+            let body_with_return = if needs_return_prefix_ts(&body_str) {
+                format!("return {};", body_str)
+            } else {
+                body_str
+            };
             format!(
                 "(({}){} => {{ {} }})",
                 params_str.join(", "),
                 ret,
-                body_str
+                body_with_return
             )
         }
     }

@@ -308,11 +308,11 @@ fn parse_prefix(ctx: &mut ParseContext) -> Expr {
             if ctx.peek() == &Token::Bar {
                 ctx.advance(); // consume closing |
             }
-            // Optional return type: -> Type
+            // Optional return type: -> Type (use parse_type_ref_from_ctx to handle generics)
             let return_type = if ctx.peek() == &Token::Arrow {
                 ctx.advance(); // skip ->
-                let type_name = ctx.expect_ident();
-                Some(type_name)
+                let tr = crate::parser::item::parse_type_ref_from_ctx(ctx);
+                Some(tr.display_name())
             } else {
                 None
             };

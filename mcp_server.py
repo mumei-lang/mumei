@@ -109,13 +109,20 @@ def _format_semantic_feedback(report_json: str) -> str:
             parts.append(f"  - {expl}")
 
     # Division-by-zero specific
-    if feedback.get("failure_type") == "division_by_zero":
+    # Check both top-level report and semantic_feedback sub-object for failure_type,
+    # since build_division_by_zero_feedback embeds failure_type in the feedback object.
+    report_failure_type = report.get("failure_type", "")
+    feedback_failure_type = feedback.get("failure_type", "")
+    effective_failure_type = report_failure_type or feedback_failure_type
+
+    if effective_failure_type == "division_by_zero":
+        # counter_example may be in feedback sub-object (from build_division_by_zero_feedback)
         ce = feedback.get("counter_example", {})
         if ce:
             parts.append(f"- Counter-example: dividend = {ce.get('dividend', '?')}, divisor = {ce.get('divisor', '?')}")
 
     # Effect violations
-    if feedback.get("failure_type") == "effect_not_allowed":
+    if effective_failure_type == "effect_not_allowed":
         parts.append(f"- Attempted effect: `{feedback.get('attempted_effect', '?')}`")
         parts.append(f"- Allowed effects: {feedback.get('allowed_effects', [])}")
         parts.append(f"- Missing effects: {feedback.get('missing_effects', [])}")
@@ -186,7 +193,9 @@ def _build_machine_readable(report: dict, feedback: dict) -> dict | None:
 
 def _format_effect_feedback(report_json: str) -> str:
     """Format effect-specific violation feedback from report.json.
-    Returns empty string if no effect violation is present."""
+    Returns empty string if no effect violation is present.
+    Handles both mismatch (required_effect/source_operation) and
+    propagation (caller/callee/missing_effects) violation structures."""
     try:
         report = json.loads(report_json)
     except (json.JSONDecodeError, TypeError):
@@ -197,9 +206,20 @@ def _format_effect_feedback(report_json: str) -> str:
         return ""
 
     parts = ["### Effect Violation Details"]
-    parts.append(f"- **Declared effects:** {effect_violation.get('declared_effects', [])}")
-    parts.append(f"- **Required effect:** `{effect_violation.get('required_effect', '?')}`")
-    parts.append(f"- **Source operation:** `{effect_violation.get('source_operation', '?')}`")
+    violation_type = report.get("violation_type", "")
+
+    if violation_type == "effect_propagation":
+        # save_effect_propagation_report structure: caller/callee/missing_effects
+        parts.append(f"- **Caller atom:** `{effect_violation.get('caller', '?')}`")
+        parts.append(f"- **Callee atom:** `{effect_violation.get('callee', '?')}`")
+        parts.append(f"- **Caller declared effects:** {effect_violation.get('caller_effects', [])}")
+        parts.append(f"- **Callee required effects:** {effect_violation.get('callee_effects', [])}")
+        parts.append(f"- **Missing effects:** {effect_violation.get('missing_effects', [])}")
+    else:
+        # save_effect_violation_report structure (effect_mismatch): required_effect/source_operation
+        parts.append(f"- **Declared effects:** {effect_violation.get('declared_effects', [])}")
+        parts.append(f"- **Required effect:** `{effect_violation.get('required_effect', '?')}`")
+        parts.append(f"- **Source operation:** `{effect_violation.get('source_operation', '?')}`")
 
     suggested_fixes = effect_violation.get("suggested_fixes", [])
     if suggested_fixes:
