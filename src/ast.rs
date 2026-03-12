@@ -352,7 +352,12 @@ impl Monomorphizer {
 
     /// Phase 2: 収集したインスタンスを単相化し、具体的な Item のリストを返す。
     /// ジェネリック定義自体は除外され、具体化された定義のみが返される。
-    pub fn monomorphize(&self, items: &[Item]) -> Vec<Item> {
+    /// `module_env` が提供された場合、単相化時にトレイト境界を検証する。
+    pub fn monomorphize(
+        &self,
+        items: &[Item],
+        module_env: Option<&crate::verification::ModuleEnv>,
+    ) -> Vec<Item> {
         let mut result: Vec<Item> = Vec::new();
 
         // 非ジェネリックな Item はそのまま通す
@@ -393,7 +398,7 @@ impl Monomorphizer {
 
             // Atom の単相化
             if let Some(generic_def) = self.generic_atoms.get(&tref.name) {
-                if let Some(mono_atom) = self.monomorphize_atom(generic_def, &tref) {
+                if let Some(mono_atom) = self.monomorphize_atom(generic_def, &tref, module_env) {
                     result.push(Item::Atom(mono_atom));
                 }
             }
@@ -468,9 +473,48 @@ impl Monomorphizer {
     }
 
     /// ジェネリック Atom を具体型で単相化する
-    fn monomorphize_atom(&self, generic: &Atom, instance: &TypeRef) -> Option<Atom> {
+    /// `module_env` が提供された場合、トレイト境界を検証する。
+    fn monomorphize_atom(
+        &self,
+        generic: &Atom,
+        instance: &TypeRef,
+        module_env: Option<&crate::verification::ModuleEnv>,
+    ) -> Option<Atom> {
         let type_map = self.build_type_map(&generic.type_params, &instance.type_args)?;
         let mono_name = instance.display_name();
+
+        // トレイト境界バリデーション
+        if let Some(menv) = module_env {
+            for bound in &generic.where_bounds {
+                if let Some(concrete_type_ref) = type_map.get(&bound.param) {
+                    let concrete_name = concrete_type_ref.display_name();
+                    for trait_name in &bound.bounds {
+                        if trait_name == "Effect" {
+                            // "Effect" 境界は特別扱い: エフェクト定義の存在を確認
+                            if !menv.has_effect_def(&concrete_name) {
+                                eprintln!(
+                                    "  \u{26a0}\u{fe0f}  Trait bound violation: '{}' is not a known effect \
+                                     (required by bound '{}: Effect' in atom '{}')",
+                                    concrete_name, bound.param, generic.name
+                                );
+                                return None;
+                            }
+                        } else {
+                            // 通常のトレイト境界: impl が存在するか確認
+                            if let Err(e) =
+                                menv.check_trait_bounds(&concrete_name, &[trait_name.clone()])
+                            {
+                                eprintln!(
+                                    "  \u{26a0}\u{fe0f}  Trait bound violation in monomorphization of '{}': {}",
+                                    mono_name, e
+                                );
+                                return None;
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         let params = generic
             .params

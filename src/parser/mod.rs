@@ -1130,4 +1130,105 @@ extern "Rust" {
             _ => panic!("Expected Lambda, got {:?}", expr),
         }
     }
+
+    #[test]
+    fn test_where_bounds_effect_bound() {
+        // atom pipe<E: Effect>(...) のパースが成功し、
+        // where_bounds に Effect 境界が記録されることを確認
+        let source = r#"
+effect FileWrite;
+
+atom pipe<E: Effect>(x: i64)
+    requires: true;
+    ensures: true;
+    body: x;
+"#;
+        let items = parse_module(source);
+        let atoms: Vec<_> = items
+            .iter()
+            .filter_map(|i| if let Item::Atom(a) = i { Some(a) } else { None })
+            .collect();
+        assert_eq!(atoms[0].name, "pipe");
+        assert_eq!(atoms[0].type_params, vec!["E"]);
+        assert_eq!(atoms[0].where_bounds.len(), 1);
+        assert_eq!(atoms[0].where_bounds[0].param, "E");
+        assert_eq!(atoms[0].where_bounds[0].bounds, vec!["Effect"]);
+    }
+
+    #[test]
+    fn test_where_bounds_trait_bound_check() {
+        // ModuleEnv のトレイト境界チェックが正しく動作するか確認
+        let source = r#"
+trait Comparable {
+    atom compare(a: i64, b: i64) -> i64
+        requires: true;
+        ensures: true;
+        body: a;
+}
+
+impl Comparable for i64 {
+    atom compare(a: i64, b: i64) -> i64
+        requires: true;
+        ensures: true;
+        body: a;
+}
+"#;
+        let items = parse_module(source);
+
+        let mut module_env = crate::verification::ModuleEnv::new();
+        crate::verification::register_builtin_traits(&mut module_env);
+        for item in &items {
+            match item {
+                Item::TraitDef(t) => module_env.register_trait(t),
+                Item::ImplDef(i) => module_env.register_impl(i),
+                _ => {}
+            }
+        }
+
+        // i64 は Comparable を実装しているのでチェック成功
+        assert!(
+            module_env
+                .check_trait_bounds("i64", &["Comparable".to_string()])
+                .is_ok(),
+            "i64 should satisfy Comparable bound"
+        );
+
+        // f64 は Comparable を実装していないのでチェック失敗
+        assert!(
+            module_env
+                .check_trait_bounds("f64", &["Comparable".to_string()])
+                .is_err(),
+            "f64 should NOT satisfy Comparable bound"
+        );
+    }
+
+    #[test]
+    fn test_has_effect_def() {
+        // ModuleEnv.has_effect_def() が正しく動作するか確認
+        let source = r#"
+effect FileWrite;
+effect Network;
+"#;
+        let items = parse_module(source);
+
+        let mut module_env = crate::verification::ModuleEnv::new();
+        for item in &items {
+            if let Item::EffectDef(e) = item {
+                module_env.register_effect(e);
+            }
+        }
+
+        assert!(
+            module_env.has_effect_def("FileWrite"),
+            "FileWrite should be a known effect"
+        );
+        assert!(
+            module_env.has_effect_def("Network"),
+            "Network should be a known effect"
+        );
+        assert!(
+            !module_env.has_effect_def("Console"),
+            "Console should NOT be a known effect"
+        );
+    }
 }

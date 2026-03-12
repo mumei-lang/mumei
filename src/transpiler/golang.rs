@@ -413,7 +413,12 @@ fn format_hir_expr_go(expr: &HirExpr) -> String {
             } else {
                 body_str
             };
-            format!("func({}){} {{ {} }}", params_str.join(", "), ret, body_with_return)
+            format!(
+                "func({}){} {{ {} }}",
+                params_str.join(", "),
+                ret,
+                body_with_return
+            )
         }
     }
 }

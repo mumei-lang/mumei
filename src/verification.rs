@@ -1236,7 +1236,6 @@ impl ModuleEnv {
     }
 
     /// 指定した型がトレイトを実装しているか確認する
-    #[allow(dead_code)]
     pub fn find_impl(&self, trait_name: &str, target_type: &str) -> Option<&ImplDef> {
         self.impls
             .iter()
@@ -1244,7 +1243,6 @@ impl ModuleEnv {
     }
 
     /// 指定した型がトレイト境界を全て満たしているか検証する
-    #[allow(dead_code)]
     pub fn check_trait_bounds(&self, type_name: &str, bounds: &[String]) -> Result<(), String> {
         for bound in bounds {
             if self.find_impl(bound, type_name).is_none() {
@@ -1425,6 +1423,11 @@ impl ModuleEnv {
         } else {
             false
         }
+    }
+
+    /// エフェクト定義が存在するか確認する（トレイト境界 "Effect" の検証用）
+    pub fn has_effect_def(&self, name: &str) -> bool {
+        self.effect_defs.contains_key(name)
     }
 
     /// エフェクト定義を effect_defs レジストリに登録する。
@@ -3787,12 +3790,8 @@ fn verify_inner(
                 FAILURE_PRECONDITION_VIOLATED
             };
             let constraint_mappings = build_constraint_mappings_for_atom(atom, module_env);
-            let semantic_fb = build_semantic_feedback(
-                &constraint_mappings,
-                None,
-                atom,
-                body_failure_type,
-            );
+            let semantic_fb =
+                build_semantic_feedback(&constraint_mappings, None, atom, body_failure_type);
             save_visualizer_report(
                 output_dir,
                 "failed",

@@ -257,10 +257,21 @@ fn load_and_prepare(input: &str) -> (Vec<Item>, verification::ModuleEnv, Vec<Imp
         std::process::exit(1);
     }
 
+    // 単相化前にトレイト/impl/エフェクト定義を ModuleEnv に先行登録する
+    // （monomorphize_atom のトレイト境界バリデーションで必要）
+    for item in &items {
+        match item {
+            Item::TraitDef(trait_def) => module_env.register_trait(trait_def),
+            Item::ImplDef(impl_def) => module_env.register_impl(impl_def),
+            Item::EffectDef(effect_def) => module_env.register_effect(effect_def),
+            _ => {}
+        }
+    }
+
     let mut mono = ast::Monomorphizer::new();
     mono.collect(&items);
     let items = if mono.has_generics() {
-        let mono_items = mono.monomorphize(&items);
+        let mono_items = mono.monomorphize(&items, Some(&module_env));
         println!(
             "  🔬 Monomorphization: {} generic instance(s) expanded.",
             mono.instances().len()
