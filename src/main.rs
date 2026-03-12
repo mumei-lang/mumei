@@ -2726,13 +2726,13 @@ atom apply_no_contract(x: i64, f: atom_ref(i64) -> i64)
         assert!(result2.contains("x"), "should mention param name");
         assert!(result2.contains("-1"), "should mention actual value");
 
-        // Fallback pattern
+        // Modulo pattern (now matched by try_match_modulo)
         let result3 =
             verification::constraint_to_natural_language("val", "Custom", "v % 2 == 0", "3");
         assert!(result3.contains("val"), "should mention param name");
         assert!(
-            result3.contains("v % 2 == 0"),
-            "should include raw predicate for unknown patterns"
+            result3.contains("multiple of") || result3.contains("倍数"),
+            "should describe modulo constraint"
         );
     }
 

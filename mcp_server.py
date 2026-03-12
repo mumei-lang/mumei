@@ -72,7 +72,8 @@ def _sync_to_visualizer(report_file: Path, root_dir: Path) -> None:
 
 def _format_semantic_feedback(report_json: str) -> str:
     """Parse report.json and format semantic_feedback into a readable section.
-    Returns empty string if no semantic_feedback is present (backward compatible)."""
+    Returns empty string if no semantic_feedback is present (backward compatible).
+    Includes a machine_readable JSON block for AI agent consumption."""
     try:
         report = json.loads(report_json)
     except (json.JSONDecodeError, TypeError):
@@ -95,7 +96,29 @@ def _format_semantic_feedback(report_json: str) -> str:
         if explanation:
             parts.append(f"  - {explanation}")
         if suggestion:
-            parts.append(f"  - 💡 {suggestion}")
+            parts.append(f"  - Suggestion: {suggestion}")
+
+    # Linearity violations
+    violations = feedback.get("violations", [])
+    for v in violations:
+        desc = v.get("description", "")
+        expl = v.get("explanation", "")
+        if desc:
+            parts.append(f"- {desc}")
+        if expl:
+            parts.append(f"  - {expl}")
+
+    # Division-by-zero specific
+    if feedback.get("failure_type") == "division_by_zero":
+        ce = feedback.get("counter_example", {})
+        if ce:
+            parts.append(f"- Counter-example: dividend = {ce.get('dividend', '?')}, divisor = {ce.get('divisor', '?')}")
+
+    # Effect violations
+    if feedback.get("failure_type") == "effect_not_allowed":
+        parts.append(f"- Attempted effect: `{feedback.get('attempted_effect', '?')}`")
+        parts.append(f"- Allowed effects: {feedback.get('allowed_effects', [])}")
+        parts.append(f"- Missing effects: {feedback.get('missing_effects', [])}")
 
     ctx = feedback.get("context", {})
     if ctx:
@@ -109,9 +132,86 @@ def _format_semantic_feedback(report_json: str) -> str:
     if failure_type:
         parts.append(f"\n**Failure type:** `{failure_type}`")
 
+    suggestion = report.get("suggestion", "")
+    if suggestion:
+        parts.append(f"**Suggestion:** {suggestion}")
+
     span = report.get("span")
     if span:
         parts.append(f"**Location:** {span.get('file', '?')}:{span.get('line', '?')}:{span.get('col', '?')}")
+
+    # Machine-readable section for AI agents
+    machine_readable = _build_machine_readable(report, feedback)
+    if machine_readable:
+        parts.append(f"\n### Machine Readable\n```json\n{json.dumps(machine_readable, indent=2)}\n```")
+
+    return "\n".join(parts)
+
+
+def _build_machine_readable(report: dict, feedback: dict) -> dict | None:
+    """Build a machine-readable JSON block from report and feedback for AI agents."""
+    failure_type = report.get("failure_type", "")
+    if not failure_type:
+        return None
+
+    result = {
+        "failure_type": failure_type,
+        "atom": report.get("atom", ""),
+    }
+
+    span = report.get("span", {})
+    if span:
+        result["file"] = span.get("file", "")
+        result["line"] = span.get("line", 0)
+
+    violated = feedback.get("violated_constraints", [])
+    if violated:
+        actions = []
+        for vc in violated:
+            action = {
+                "action": "fix_constraint",
+                "param": vc.get("param", ""),
+                "current_value": vc.get("value", ""),
+                "constraint": vc.get("constraint", ""),
+            }
+            actions.append(action)
+        result["actions"] = actions
+
+    if feedback.get("counter_example"):
+        result["counter_example"] = feedback["counter_example"]
+
+    result["suggestion"] = report.get("suggestion", "")
+    return result
+
+
+def _format_effect_feedback(report_json: str) -> str:
+    """Format effect-specific violation feedback from report.json.
+    Returns empty string if no effect violation is present."""
+    try:
+        report = json.loads(report_json)
+    except (json.JSONDecodeError, TypeError):
+        return ""
+
+    effect_violation = report.get("effect_violation")
+    if not effect_violation:
+        return ""
+
+    parts = ["### Effect Violation Details"]
+    parts.append(f"- **Declared effects:** {effect_violation.get('declared_effects', [])}")
+    parts.append(f"- **Required effect:** `{effect_violation.get('required_effect', '?')}`")
+    parts.append(f"- **Source operation:** `{effect_violation.get('source_operation', '?')}`")
+
+    suggested_fixes = effect_violation.get("suggested_fixes", [])
+    if suggested_fixes:
+        parts.append("\n**Suggested Fixes:**")
+        for fix in suggested_fixes:
+            parts.append(f"- {fix}")
+
+    resolution_paths = effect_violation.get("resolution_paths", [])
+    if resolution_paths:
+        parts.append("\n**Resolution Paths:**")
+        for rp in resolution_paths:
+            parts.append(f"- **{rp.get('strategy', '?')}**: {rp.get('description', '')}")
 
     return "\n".join(parts)
 
@@ -260,14 +360,30 @@ def validate_logic(source_code: str) -> str:
             response_parts.append(
                 f"### Verification Report\n```json\n{report_data}\n```"
             )
-            # Feature 1-f: Include semantic feedback section if present
+            # Include semantic feedback section (always present for AI agents)
             sf_section = _format_semantic_feedback(report_data)
             if sf_section:
                 response_parts.append(sf_section)
+            else:
+                # Even on success, include a semantic_feedback status for AI agents
+                response_parts.append(
+                    '### Semantic Feedback\n'
+                    '```json\n{"status": "all_constraints_satisfied"}\n```'
+                )
+            # Include effect-specific feedback if present
+            ef_section = _format_effect_feedback(report_data)
+            if ef_section:
+                response_parts.append(ef_section)
             try:
                 _sync_to_visualizer(report_file, root_dir)
             except Exception:
                 pass
+        else:
+            # No report file — still include semantic feedback status
+            response_parts.append(
+                '### Semantic Feedback\n'
+                '```json\n{"status": "no_report_available"}\n```'
+            )
 
         # Extract Z3 counter-example info from stderr
         if result.stderr:

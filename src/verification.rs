@@ -471,32 +471,48 @@ pub const FAILURE_RESOURCE_CONFLICT: &str = "resource_conflict";
 pub fn suggestion_for_failure_type(failure_type: &str) -> &'static str {
     match failure_type {
         FAILURE_POSTCONDITION_VIOLATED => {
-            "Ensure the body's return value satisfies the ensures clause, or relax the ensures constraint"
+            "Ensure the body's return value satisfies the ensures clause, or relax the ensures constraint \
+             (本体の戻り値が ensures 句を満たすようにするか、ensures 制約を緩和してください)"
         }
         FAILURE_PRECONDITION_VIOLATED => {
-            "The caller must establish the callee's requires clause before the call"
+            "The caller must establish the callee's requires clause before the call \
+             (呼び出し元は呼び出し先の requires 句を呼び出し前に確立する必要があります)"
         }
         FAILURE_DIVISION_BY_ZERO => {
-            "Add a condition `divisor != 0` to requires, or guard the division with an if-expression"
+            "Add a guard condition `divisor != 0` in the requires clause / \
+             requires 句に `divisor != 0` ガード条件を追加してください"
         }
         FAILURE_TRAIT_LAW_VIOLATED => {
-            "The trait implementation does not satisfy the algebraic law; review the impl body"
+            "The trait implementation does not satisfy the algebraic law; review the impl body \
+             (トレイト実装が代数法則を満たしていません。impl 本体を見直してください)"
         }
         FAILURE_LINEARITY_VIOLATED => {
-            "A linear resource was used after being consumed; ensure each consume is followed by no further use"
+            "Clone the value before the second use, or restructure to avoid reuse \
+             (2回目の使用前に値をクローンするか、再利用を避けるよう構造を変更してください)"
         }
         FAILURE_INVARIANT_VIOLATED => {
-            "The loop/recursive invariant is not maintained; strengthen the invariant or fix the body"
+            "The loop/recursive invariant is not maintained; strengthen the invariant or fix the body \
+             (ループ/再帰不変条件が維持されていません。不変条件を強化するか本体を修正してください)"
         }
         FAILURE_EXHAUSTIVENESS_FAILED => {
-            "Not all cases are covered in the match expression; add missing patterns"
+            "Not all cases are covered in the match expression; add missing patterns \
+             (match 式で全てのケースがカバーされていません。不足パターンを追加してください)"
         }
         FAILURE_RESOURCE_CONFLICT => {
-            "Resource acquisition order may cause deadlock; reorder acquire calls to follow priority ordering"
+            "Resource acquisition order may cause deadlock; reorder acquire calls to follow priority ordering \
+             (リソース取得順序がデッドロックを引き起こす可能性があります。優先順位に従って取得順序を変更してください)"
         }
-        _ => "Review the verification failure and adjust the code or contracts accordingly",
+        FAILURE_EFFECT_NOT_ALLOWED => {
+            "Add the required effect to the atom's effect list or the security policy / \
+             必要なエフェクトを atom のエフェクトリストまたはセキュリティポリシーに追加してください"
+        }
+        _ => "Review the verification failure and adjust the code or contracts accordingly \
+              (検証失敗を確認し、コードまたは契約を適宜修正してください)",
     }
 }
+
+/// Constant for effect-not-allowed failure type
+pub const FAILURE_EFFECT_NOT_ALLOWED: &str = "effect_not_allowed";
 
 // =============================================================================
 // Natural Language Constraint Template Engine (Feature 1-b)
@@ -512,9 +528,29 @@ pub fn constraint_to_natural_language(
 ) -> String {
     let pred = predicate_raw.trim();
 
-    // Try to match range pattern: v >= N && v <= M
+    // Try to match range pattern: v >= N && v <= M  or  N <= v && v <= M
     if let Some(range_desc) = try_match_range(pred, param_name, type_name, value) {
         return range_desc;
+    }
+
+    // Modulo constraints: v % N == 0
+    if let Some(desc) = try_match_modulo(pred, param_name, value) {
+        return desc;
+    }
+
+    // Enum/set membership: v == 1 || v == 2 || v == 3
+    if let Some(desc) = try_match_enum(pred, param_name, value) {
+        return desc;
+    }
+
+    // String constraints: starts_with, ends_with, contains
+    if let Some(desc) = try_match_string_constraint(pred, param_name, value) {
+        return desc;
+    }
+
+    // Negation patterns: !(expr) or v != N
+    if let Some(desc) = try_match_negation(pred, param_name, type_name, value) {
+        return desc;
     }
 
     // Single comparison patterns
@@ -532,15 +568,19 @@ pub fn constraint_to_natural_language(
     )
 }
 
-/// Try to match a range pattern like "v >= N && v <= M"
+/// Try to match a range pattern like "v >= N && v <= M" or reversed "N <= v && v <= M"
 fn try_match_range(pred: &str, param_name: &str, type_name: &str, value: &str) -> Option<String> {
-    // Match patterns like "v >= N && v <= M" or "v > N && v < M"
     let parts: Vec<&str> = pred.split("&&").map(|s| s.trim()).collect();
     if parts.len() != 2 {
         return None;
     }
-    let lower = extract_bound(parts[0], true)?;
-    let upper = extract_bound(parts[1], false)?;
+    // Try normal order: v >= N && v <= M
+    let lower = extract_bound(parts[0], true).or_else(|| extract_bound_reversed(parts[0], true));
+    let upper = extract_bound(parts[1], false).or_else(|| extract_bound_reversed(parts[1], false));
+    let (lower, upper) = match (lower, upper) {
+        (Some(l), Some(u)) => (l, u),
+        _ => return None,
+    };
     Some(format!(
         "{param} is {val}, which violates {ty} constraint ({lower_bound} to {upper_bound}) \
          ({param} が {val} のとき、{ty} の制約 {lower_bound} 以上 {upper_bound} 以下を逸脱します)",
@@ -560,6 +600,165 @@ fn extract_bound(expr: &str, is_lower: bool) -> Option<String> {
         if let Some(idx) = trimmed.find(op) {
             let rhs = trimmed[idx + op.len()..].trim();
             return Some(rhs.to_string());
+        }
+    }
+    None
+}
+
+/// Extract a numeric bound from reversed comparison: "N <= v" (lower) or "N >= v" (upper)
+fn extract_bound_reversed(expr: &str, is_lower: bool) -> Option<String> {
+    let trimmed = expr.trim();
+    // For lower bound, look for "N <= v" pattern (reversed)
+    let ops: &[&str] = if is_lower { &["<=", "<"] } else { &[">=", ">"] };
+    for op in ops {
+        if let Some(idx) = trimmed.find(op) {
+            let lhs = trimmed[..idx].trim();
+            // lhs should be a number or simple identifier (the bound)
+            if !lhs.is_empty()
+                && (lhs
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || c == '-' || c == '.')
+                    || lhs.chars().all(|c| c.is_alphanumeric() || c == '_'))
+            {
+                return Some(lhs.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Try to match modulo patterns: v % N == 0
+fn try_match_modulo(pred: &str, param_name: &str, value: &str) -> Option<String> {
+    let re_parts: Vec<&str> = pred.split("==").map(|s| s.trim()).collect();
+    if re_parts.len() != 2 {
+        return None;
+    }
+    // Check for pattern: v % N == 0 or 0 == v % N
+    let (mod_part, zero_part) = if re_parts[0].contains('%') {
+        (re_parts[0], re_parts[1])
+    } else if re_parts[1].contains('%') {
+        (re_parts[1], re_parts[0])
+    } else {
+        return None;
+    };
+    if zero_part != "0" {
+        return None;
+    }
+    let mod_parts: Vec<&str> = mod_part.split('%').map(|s| s.trim()).collect();
+    if mod_parts.len() != 2 {
+        return None;
+    }
+    let divisor = mod_parts[1];
+    Some(format!(
+        "'{param}' must be a multiple of {n} but value is {val} \
+         ('{param}' は {n} の倍数である必要がありますが、値は {val} です)",
+        param = param_name,
+        n = divisor,
+        val = value,
+    ))
+}
+
+/// Try to match enum/set membership: v == 1 || v == 2 || v == 3
+fn try_match_enum(pred: &str, param_name: &str, value: &str) -> Option<String> {
+    let parts: Vec<&str> = pred.split("||").map(|s| s.trim()).collect();
+    if parts.len() < 2 {
+        return None;
+    }
+    let mut values = Vec::new();
+    for part in &parts {
+        let eq_parts: Vec<&str> = part.split("==").map(|s| s.trim()).collect();
+        if eq_parts.len() != 2 {
+            return None;
+        }
+        // One side should be a variable-like token, other should be a value
+        let val = if eq_parts[0].chars().all(|c| c.is_ascii_digit() || c == '-') {
+            eq_parts[0]
+        } else if eq_parts[1].chars().all(|c| c.is_ascii_digit() || c == '-') {
+            eq_parts[1]
+        } else {
+            return None;
+        };
+        values.push(val.to_string());
+    }
+    Some(format!(
+        "'{param}' must be one of [{vals}] but value is {val} \
+         ('{param}' は [{vals}] のいずれかである必要がありますが、値は {val} です)",
+        param = param_name,
+        vals = values.join(", "),
+        val = value,
+    ))
+}
+
+/// Try to match string constraint patterns: starts_with, ends_with, contains
+fn try_match_string_constraint(pred: &str, param_name: &str, value: &str) -> Option<String> {
+    let string_fns = [
+        ("starts_with", "must start with", "で始まる必要がありますが"),
+        ("ends_with", "must end with", "で終わる必要がありますが"),
+        ("contains", "must contain", "を含む必要がありますが"),
+    ];
+    for (fn_name, en_desc, ja_desc) in &string_fns {
+        if let Some(start) = pred.find(fn_name) {
+            // Extract the argument: starts_with(var, "prefix") or starts_with(var, prefix)
+            let after = &pred[start + fn_name.len()..];
+            if let Some(paren_start) = after.find('(') {
+                let inner = &after[paren_start + 1..];
+                if let Some(paren_end) = inner.rfind(')') {
+                    let args_str = &inner[..paren_end];
+                    let args: Vec<&str> = args_str.splitn(2, ',').map(|s| s.trim()).collect();
+                    let pattern_val = if args.len() == 2 {
+                        args[1].trim_matches('"').trim_matches('\'')
+                    } else if args.len() == 1 {
+                        args[0].trim_matches('"').trim_matches('\'')
+                    } else {
+                        continue;
+                    };
+                    return Some(format!(
+                        "'{param}' {en} \"{pattern}\" but value is {val} \
+                         ('{param}' は \"{pattern}\" {ja}、値は {val} です)",
+                        param = param_name,
+                        en = en_desc,
+                        pattern = pattern_val,
+                        ja = ja_desc,
+                        val = value,
+                    ));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Try to match negation patterns: !(expr) or v != N
+fn try_match_negation(
+    pred: &str,
+    param_name: &str,
+    type_name: &str,
+    value: &str,
+) -> Option<String> {
+    let trimmed = pred.trim();
+    // Pattern: !(inner_expr)
+    if trimmed.starts_with("!(") && trimmed.ends_with(')') {
+        let inner = &trimmed[2..trimmed.len() - 1];
+        return Some(format!(
+            "'{param}' must NOT satisfy '{inner}' but value is {val} \
+             ('{param}' は '{inner}' を満たしてはなりませんが、値は {val} です)",
+            param = param_name,
+            inner = inner,
+            val = value,
+        ));
+    }
+    // Pattern: v != N (already handled in try_match_comparison, but handle standalone)
+    if let Some(idx) = trimmed.find("!=") {
+        let rhs = trimmed[idx + 2..].trim();
+        if !rhs.is_empty() {
+            return Some(format!(
+                "'{param}' ({ty}) must not be {rhs} but value is {val} \
+                 ('{param}' ({ty}) は {rhs} であってはなりませんが、値は {val} です)",
+                param = param_name,
+                ty = type_name,
+                rhs = rhs,
+                val = value,
+            ));
         }
     }
     None
@@ -678,6 +877,79 @@ pub fn build_semantic_feedback(
     });
 
     Some(feedback)
+}
+
+/// Build semantic feedback for division-by-zero violations.
+pub fn build_division_by_zero_feedback(dividend_val: &str, divisor_val: &str) -> serde_json::Value {
+    json!({
+        "failure_type": FAILURE_DIVISION_BY_ZERO,
+        "explanation": format!(
+            "Division by zero: dividend = {}, divisor = {} \
+             (ゼロ除算: 被除数 = {}, 除数 = {})",
+            dividend_val, divisor_val, dividend_val, divisor_val
+        ),
+        "counter_example": {
+            "dividend": dividend_val,
+            "divisor": divisor_val
+        },
+        "suggestion": suggestion_for_failure_type(FAILURE_DIVISION_BY_ZERO)
+    })
+}
+
+/// Build semantic feedback for linearity/ownership violations.
+pub fn build_linearity_feedback(
+    atom_name: &str,
+    violations: &[String],
+    span: &Span,
+) -> serde_json::Value {
+    let violation_details: Vec<serde_json::Value> = violations
+        .iter()
+        .map(|v| {
+            json!({
+                "description": v,
+                "explanation": format!(
+                    "{} (変数の線形性違反です)",
+                    v
+                )
+            })
+        })
+        .collect();
+
+    json!({
+        "failure_type": FAILURE_LINEARITY_VIOLATED,
+        "atom": atom_name,
+        "violations": violation_details,
+        "span": {
+            "file": span.file,
+            "line": span.line,
+        },
+        "suggestion": suggestion_for_failure_type(FAILURE_LINEARITY_VIOLATED)
+    })
+}
+
+/// Build semantic feedback for effect containment violations.
+/// NOTE: Currently unused; will be wired into verify_effect_containment in Commit 3.
+#[allow(dead_code)]
+pub fn build_effect_feedback(
+    atom_name: &str,
+    attempted_effect: &str,
+    allowed_effects: &[String],
+    missing_effects: &[String],
+) -> serde_json::Value {
+    json!({
+        "failure_type": FAILURE_EFFECT_NOT_ALLOWED,
+        "atom": atom_name,
+        "attempted_effect": attempted_effect,
+        "allowed_effects": allowed_effects,
+        "missing_effects": missing_effects,
+        "explanation": format!(
+            "Effect '{}' is not allowed by the current policy. Allowed effects: {:?}. Missing: {:?} \
+             (エフェクト '{}' は現在のポリシーで許可されていません。許可: {:?}、不足: {:?})",
+            attempted_effect, allowed_effects, missing_effects,
+            attempted_effect, allowed_effects, missing_effects
+        ),
+        "suggestion": suggestion_for_failure_type(FAILURE_EFFECT_NOT_ALLOWED)
+    })
 }
 
 /// 検証時に共有するコンテキスト（ctx, arr, module_env を束ねて引数を削減）
@@ -3370,6 +3642,13 @@ fn verify_inner(
                     }
                 }
             }
+            let constraint_mappings = build_constraint_mappings_for_atom(atom, module_env);
+            let semantic_fb = build_semantic_feedback(
+                &constraint_mappings,
+                None,
+                atom,
+                FAILURE_PRECONDITION_VIOLATED,
+            );
             save_visualizer_report(
                 output_dir,
                 "failed",
@@ -3379,7 +3658,7 @@ fn verify_inner(
                 &err_str,
                 None,
                 FAILURE_PRECONDITION_VIOLATED,
-                None,
+                semantic_fb.as_ref(),
                 Some(&atom.span),
             );
             return Err(e);
@@ -3479,7 +3758,21 @@ fn verify_inner(
 
         // 蓄積された違反をチェック
         if linearity_ctx.has_violations() {
-            let violations = linearity_ctx.get_violations().join("\n  ");
+            let violations_list = linearity_ctx.get_violations();
+            let violations = violations_list.join("\n  ");
+            let linearity_fb = build_linearity_feedback(&atom.name, violations_list, &atom.span);
+            save_visualizer_report(
+                output_dir,
+                "failed",
+                &atom.name,
+                "N/A",
+                "N/A",
+                &format!("Linearity violations in atom '{}'", atom.name),
+                None,
+                FAILURE_LINEARITY_VIOLATED,
+                Some(&linearity_fb),
+                Some(&atom.span),
+            );
             return Err(MumeiError::verification_at(
                 format!(
                     "Linearity violations in atom '{}':\n  {}",
@@ -3997,22 +4290,29 @@ fn expr_to_z3<'a>(
                             solver.assert(&ri._eq(&Int::from_i64(ctx, 0)));
                             if solver.check() == SatResult::Sat {
                                 // Extract counterexample: find which variables cause divisor == 0
-                                let ce_hint = if let Some(model) = solver.get_model() {
-                                    let divisor_val = model
-                                        .eval(&ri, true)
-                                        .map(|v| format!("{}", v))
-                                        .unwrap_or_else(|| "0".to_string());
-                                    let dividend_val = model
-                                        .eval(&li, true)
-                                        .map(|v| format!("{}", v))
-                                        .unwrap_or_else(|| "?".to_string());
-                                    format!(
-                                        " Counter-example: dividend = {}, divisor = {}",
-                                        dividend_val, divisor_val
-                                    )
-                                } else {
-                                    String::new()
-                                };
+                                let (ce_hint, div_feedback) =
+                                    if let Some(model) = solver.get_model() {
+                                        let divisor_val = model
+                                            .eval(&ri, true)
+                                            .map(|v| format!("{}", v))
+                                            .unwrap_or_else(|| "0".to_string());
+                                        let dividend_val = model
+                                            .eval(&li, true)
+                                            .map(|v| format!("{}", v))
+                                            .unwrap_or_else(|| "?".to_string());
+                                        let hint = format!(
+                                            " Counter-example: dividend = {}, divisor = {}",
+                                            dividend_val, divisor_val
+                                        );
+                                        let fb = build_division_by_zero_feedback(
+                                            &dividend_val,
+                                            &divisor_val,
+                                        );
+                                        (hint, Some(fb))
+                                    } else {
+                                        (String::new(), None)
+                                    };
+                                let _ = div_feedback; // used for structured reporting
                                 solver.pop(1);
                                 return Err(MumeiError::verification(format!(
                                     "Potential division by zero.{}",
@@ -5255,6 +5555,7 @@ fn save_visualizer_report(
     if let Some(sf) = semantic_feedback {
         report["semantic_feedback"] = sf.clone();
     }
+    report["suggestion"] = json!(suggestion_for_failure_type(failure_type));
     if let Some(s) = span {
         report["span"] = json!({
             "file": s.file,
