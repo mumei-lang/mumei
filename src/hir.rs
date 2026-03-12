@@ -370,6 +370,21 @@ pub fn lower_stmt(stmt: &Stmt) -> HirStmt {
     }
 }
 
+/// Collect variable names bound by a pattern (recursive for nested Variant patterns).
+fn collect_pattern_bindings(pattern: &crate::parser::Pattern, bound: &mut HashSet<String>) {
+    match pattern {
+        crate::parser::Pattern::Variable(name) => {
+            bound.insert(name.clone());
+        }
+        crate::parser::Pattern::Variant { fields, .. } => {
+            for field_pattern in fields {
+                collect_pattern_bindings(field_pattern, bound);
+            }
+        }
+        crate::parser::Pattern::Wildcard | crate::parser::Pattern::Literal(_) => {}
+    }
+}
+
 /// Collect free variables from a HirStmt (recursive traversal).
 /// Returns all variable names referenced, excluding those bound by let statements.
 fn collect_free_variables_stmt(stmt: &HirStmt) -> HashSet<String> {
@@ -475,9 +490,22 @@ fn collect_free_variables_expr(expr: &HirExpr) -> HashSet<String> {
         HirExpr::Match { target, arms } => {
             vars.extend(collect_free_variables_expr(target));
             for arm in arms {
-                vars.extend(collect_free_variables_stmt(&arm.body));
+                // Collect variables bound by the pattern to exclude from free vars
+                let mut pattern_bound = HashSet::new();
+                collect_pattern_bindings(&arm.pattern, &mut pattern_bound);
+                let arm_body_vars = collect_free_variables_stmt(&arm.body);
+                for v in arm_body_vars {
+                    if !pattern_bound.contains(&v) {
+                        vars.insert(v);
+                    }
+                }
                 if let Some(guard) = &arm.guard {
-                    vars.extend(collect_free_variables_expr(guard));
+                    let guard_vars = collect_free_variables_expr(guard);
+                    for v in guard_vars {
+                        if !pattern_bound.contains(&v) {
+                            vars.insert(v);
+                        }
+                    }
                 }
             }
         }

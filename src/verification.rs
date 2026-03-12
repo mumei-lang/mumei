@@ -613,12 +613,11 @@ fn extract_bound_reversed(expr: &str, is_lower: bool) -> Option<String> {
     for op in ops {
         if let Some(idx) = trimmed.find(op) {
             let lhs = trimmed[..idx].trim();
-            // lhs should be a number or simple identifier (the bound)
+            // lhs should be a numeric literal (the bound), not a variable name
             if !lhs.is_empty()
-                && (lhs
+                && lhs
                     .chars()
                     .all(|c| c.is_ascii_digit() || c == '-' || c == '.')
-                    || lhs.chars().all(|c| c.is_alphanumeric() || c == '_'))
             {
                 return Some(lhs.to_string());
             }
@@ -2500,6 +2499,9 @@ fn collect_acquire_resources_expr(expr: &Expr) -> Vec<String> {
                 resources.extend(collect_acquire_resources_expr(arg));
             }
         }
+        Expr::Lambda { body, .. } => {
+            resources.extend(collect_acquire_resources_stmt(body));
+        }
         _ => {}
     }
     resources
@@ -2667,6 +2669,7 @@ fn verify_async_recursion_depth(atom: &Atom, module_env: &ModuleEnv) -> MumeiRes
                         .map(|a| count_self_calls_expr(a, atom_name))
                         .sum::<usize>()
             }
+            Expr::Lambda { body, .. } => count_self_calls_stmt(body, atom_name),
             _ => 0,
         }
     }
@@ -2972,6 +2975,9 @@ fn collect_callees_expr(expr: &Expr) -> Vec<String> {
             for arg in args {
                 callees.extend(collect_callees_expr(arg));
             }
+        }
+        Expr::Lambda { body, .. } => {
+            callees.extend(collect_callees_stmt(body));
         }
         _ => {}
     }
@@ -3774,12 +3780,18 @@ fn verify_inner(
                     }
                 }
             }
+            // Determine failure type: division-by-zero gets its own category
+            let body_failure_type = if err_str.contains("division by zero") {
+                FAILURE_DIVISION_BY_ZERO
+            } else {
+                FAILURE_PRECONDITION_VIOLATED
+            };
             let constraint_mappings = build_constraint_mappings_for_atom(atom, module_env);
             let semantic_fb = build_semantic_feedback(
                 &constraint_mappings,
                 None,
                 atom,
-                FAILURE_PRECONDITION_VIOLATED,
+                body_failure_type,
             );
             save_visualizer_report(
                 output_dir,
@@ -3789,7 +3801,7 @@ fn verify_inner(
                 "N/A",
                 &err_str,
                 None,
-                FAILURE_PRECONDITION_VIOLATED,
+                body_failure_type,
                 semantic_fb.as_ref(),
                 Some(&atom.span),
             );
@@ -4444,11 +4456,15 @@ fn expr_to_z3<'a>(
                                     } else {
                                         (String::new(), None)
                                     };
-                                let _ = div_feedback; // used for structured reporting
+                                // Attach structured feedback to error message for upstream reporting
+                                let feedback_hint = div_feedback
+                                    .as_ref()
+                                    .map(|fb| format!(" [semantic_feedback: {}]", fb))
+                                    .unwrap_or_default();
                                 solver.pop(1);
                                 return Err(MumeiError::verification(format!(
-                                    "Potential division by zero.{}",
-                                    ce_hint
+                                    "Potential division by zero.{}{}",
+                                    ce_hint, feedback_hint
                                 ))
                                 .with_help("Add a condition divisor != 0 to requires"));
                             }

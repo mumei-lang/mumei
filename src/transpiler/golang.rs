@@ -408,7 +408,12 @@ fn format_hir_expr_go(expr: &HirExpr) -> String {
                 })
                 .unwrap_or_else(|| " int64".to_string());
             let body_str = format_hir_stmt_go(body);
-            format!("func({}){} {{ {} }}", params_str.join(", "), ret, body_str)
+            let body_with_return = if needs_return_prefix_go(&body_str) {
+                format!("return {}", body_str)
+            } else {
+                body_str
+            };
+            format!("func({}){} {{ {} }}", params_str.join(", "), ret, body_with_return)
         }
     }
 }

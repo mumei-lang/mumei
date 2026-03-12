@@ -254,14 +254,28 @@ def forge_blade(source_code: str, output_name: str = "katana") -> str:
         if report_file.exists():
             report_data = report_file.read_text(encoding="utf-8")
             response_parts.append(f"### Verification Report\n```json\n{report_data}\n```")
-            # Feature 1-f: Include semantic feedback section if present
+            # Include semantic feedback section (always present for AI agents)
             sf_section = _format_semantic_feedback(report_data)
             if sf_section:
                 response_parts.append(sf_section)
+            else:
+                response_parts.append(
+                    '### Semantic Feedback\n'
+                    '```json\n{"status": "all_constraints_satisfied"}\n```'
+                )
+            # Include effect-specific feedback if present
+            ef_section = _format_effect_feedback(report_data)
+            if ef_section:
+                response_parts.append(ef_section)
             try:
                 _sync_to_visualizer(report_file, root_dir)
             except Exception:
                 pass
+        else:
+            response_parts.append(
+                '### Semantic Feedback\n'
+                '```json\n{"status": "no_report_available"}\n```'
+            )
 
         if result.returncode == 0:
             response_parts.insert(0, f"Forge succeeded: '{output_name}'")
@@ -473,14 +487,28 @@ def execute_mm(
             response_parts.append(
                 f"### Verification Report\n```json\n{report_data}\n```"
             )
-            # Feature 1-f: Include semantic feedback section if present
+            # Include semantic feedback section (always present for AI agents)
             sf_section = _format_semantic_feedback(report_data)
             if sf_section:
                 response_parts.append(sf_section)
+            else:
+                response_parts.append(
+                    '### Semantic Feedback\n'
+                    '```json\n{"status": "all_constraints_satisfied"}\n```'
+                )
+            # Include effect-specific feedback if present
+            ef_section = _format_effect_feedback(report_data)
+            if ef_section:
+                response_parts.append(ef_section)
             try:
                 _sync_to_visualizer(report_file, root_dir)
             except Exception:
                 pass
+        else:
+            response_parts.append(
+                '### Semantic Feedback\n'
+                '```json\n{"status": "no_report_available"}\n```'
+            )
 
         if result.returncode == 0:
             response_parts.insert(0, f"{command} succeeded: '{output_name}'")

@@ -413,7 +413,7 @@ fn format_hir_expr_ts(expr: &HirExpr) -> String {
                 .unwrap_or_default();
             let body_str = format_hir_stmt_ts(body);
             format!(
-                "(({}){}  => {{ {} }})",
+                "(({}){} => {{ {} }})",
                 params_str.join(", "),
                 ret,
                 body_str

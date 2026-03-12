@@ -23,12 +23,6 @@ effect Network;
 effect Log;
 effect Console;
 
-// --- Parameterized File Effects ---
-// FileRead(path) constrains which file paths may be read.
-// FileWrite(path) constrains which file paths may be written.
-effect FileRead(path: Str);
-effect FileWrite(path: Str);
-
 // --- Parameterized Network Effects ---
 // HTTP method effects with URL parameter for security policy enforcement.
 effect HttpGet(url: Str);
@@ -39,8 +33,12 @@ effect HttpDelete(url: Str);
 // --- Parameterized Effects with Default Constraints ---
 // These constrained variants restrict the parameter domain.
 // Used by security policies to enforce safe defaults.
-effect FileRead(path: Str) where starts_with(path, "/tmp/");
-effect HttpGet(url: Str) where starts_with(url, "https://");
+// NOTE: FileRead and FileWrite are already defined as non-parameterized above.
+// Parameterized overloading is not yet supported by the parser/ModuleEnv.
+// When parameterized effect overloading is implemented, uncomment these:
+//   effect FileRead(path: Str) where starts_with(path, "/tmp/");
+//   effect FileWrite(path: Str);
+//   effect HttpGet(url: Str) where starts_with(url, "https://");
 
 // --- Composite Effects ---
 // IO includes file I/O and console access
