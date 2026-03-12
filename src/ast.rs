@@ -10,6 +10,11 @@ pub struct TypeRef {
     /// 型引数リスト（例: Stack<i64> → [TypeRef("i64")]）。
     /// 非ジェネリック型の場合は空。
     pub type_args: Vec<TypeRef>,
+    /// エフェクトセット（関数型に付与されるエフェクト情報）
+    /// 例: atom_ref(i64) -> i64 with [FileWrite] → Some(vec!["FileWrite"])
+    /// 例: atom_ref(i64) -> i64 with E → Some(vec!["E"])
+    /// 非関数型や with なしの場合は None
+    pub effect_set: Option<Vec<String>>,
 }
 
 impl TypeRef {
@@ -18,6 +23,7 @@ impl TypeRef {
         TypeRef {
             name: name.to_string(),
             type_args: vec![],
+            effect_set: None,
         }
     }
 
@@ -26,12 +32,13 @@ impl TypeRef {
         TypeRef {
             name: name.to_string(),
             type_args: args,
+            effect_set: None,
         }
     }
 
     /// 表示用の正規化名を返す（例: "Stack<i64>", "atom_ref(i64) -> i64"）
     pub fn display_name(&self) -> String {
-        if self.is_fn_type() {
+        let base = if self.is_fn_type() {
             // 関数型: atom_ref(param_types...) -> return_type
             let param_types: Vec<String> = self.type_args[..self.type_args.len() - 1]
                 .iter()
@@ -44,6 +51,15 @@ impl TypeRef {
         } else {
             let args: Vec<String> = self.type_args.iter().map(|a| a.display_name()).collect();
             format!("{}<{}>", self.name, args.join(", "))
+        };
+        if let Some(ref effects) = self.effect_set {
+            if effects.len() == 1 {
+                format!("{} with {}", base, effects[0])
+            } else {
+                format!("{} with [{}]", base, effects.join(", "))
+            }
+        } else {
+            base
         }
     }
 
@@ -64,6 +80,7 @@ impl TypeRef {
         TypeRef {
             name: "atom_ref".to_string(),
             type_args,
+            effect_set: None,
         }
     }
 
@@ -106,17 +123,45 @@ impl TypeRef {
                     .map(|a| a.substitute(type_map))
                     .collect();
             }
+            // エフェクトセットの置換
+            result.effect_set = self.effect_set.as_ref().map(|effects| {
+                effects
+                    .iter()
+                    .map(|eff| {
+                        if let Some(concrete) = type_map.get(eff) {
+                            concrete.name.clone()
+                        } else {
+                            eff.clone()
+                        }
+                    })
+                    .collect()
+            });
             result
         } else {
             // 型パラメータでない場合、型引数のみ再帰的に置換
-            TypeRef {
+            let mut result = TypeRef {
                 name: self.name.clone(),
                 type_args: self
                     .type_args
                     .iter()
                     .map(|a| a.substitute(type_map))
                     .collect(),
-            }
+                effect_set: None,
+            };
+            // エフェクトセットの置換
+            result.effect_set = self.effect_set.as_ref().map(|effects| {
+                effects
+                    .iter()
+                    .map(|eff| {
+                        if let Some(concrete) = type_map.get(eff) {
+                            concrete.name.clone()
+                        } else {
+                            eff.clone()
+                        }
+                    })
+                    .collect()
+            });
+            result
         }
     }
 }

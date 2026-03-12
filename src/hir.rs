@@ -180,6 +180,8 @@ pub struct HirAtom {
     pub ensures_hir: HirExpr,
     /// 元の Atom（メタデータアクセス用）
     pub atom: Atom,
+    /// パース済みの body ステートメント（verification.rs での再パースを避ける）
+    pub body_stmt: Stmt,
 }
 
 // =============================================================================
@@ -203,6 +205,7 @@ pub fn lower_atom_to_hir(atom: &Atom) -> HirAtom {
         requires_hir,
         ensures_hir,
         atom: atom.clone(),
+        body_stmt,
     }
 }
 
