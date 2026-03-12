@@ -5720,3 +5720,265 @@ fn save_visualizer_report(
     let _ = fs::create_dir_all(output_dir);
     let _ = fs::write(output_dir.join("report.json"), report.to_string());
 }
+
+// =============================================================================
+// Tests: Semantic Feedback functions (Part 1-5)
+// =============================================================================
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- constraint_to_natural_language tests ----
+
+    #[test]
+    fn test_constraint_to_natural_language_range() {
+        let result =
+            constraint_to_natural_language("age", "BoundedAge", "age >= 0 && age <= 120", "150");
+        assert!(result.contains("age"));
+        assert!(result.contains("150"));
+    }
+
+    #[test]
+    fn test_constraint_to_natural_language_modulo() {
+        let result = constraint_to_natural_language("n", "EvenInt", "n % 2 == 0", "3");
+        assert!(result.contains("multiple") || result.contains("倍数"));
+        assert!(result.contains("3"));
+    }
+
+    #[test]
+    fn test_constraint_to_natural_language_enum() {
+        let result = constraint_to_natural_language(
+            "status",
+            "StatusCode",
+            "status == 1 || status == 2 || status == 3",
+            "5",
+        );
+        assert!(result.contains("one of") || result.contains("のいずれか"));
+        assert!(result.contains("5"));
+    }
+
+    #[test]
+    fn test_constraint_to_natural_language_negation() {
+        let result = constraint_to_natural_language("x", "NonZero", "x != 0", "0");
+        assert!(result.contains("not") || result.contains("ありません"));
+        assert!(result.contains("0"));
+    }
+
+    #[test]
+    fn test_constraint_to_natural_language_string_constraint() {
+        let result = constraint_to_natural_language(
+            "path",
+            "SafePath",
+            "starts_with(path, \"/tmp/\")",
+            "/etc/passwd",
+        );
+        assert!(result.contains("starts_with") || result.contains("start"));
+    }
+
+    #[test]
+    fn test_constraint_to_natural_language_comparison() {
+        let result = constraint_to_natural_language("x", "Positive", "x > 0", "-1");
+        assert!(result.contains("greater than") || result.contains("より大きい"));
+    }
+
+    #[test]
+    fn test_constraint_to_natural_language_fallback() {
+        let result = constraint_to_natural_language("x", "Custom", "some_complex_pred(x)", "42");
+        assert!(result.contains("x"));
+        assert!(result.contains("42"));
+    }
+
+    // ---- suggestion_for_failure_type tests ----
+
+    #[test]
+    fn test_suggestion_for_failure_type_division() {
+        let suggestion = suggestion_for_failure_type(FAILURE_DIVISION_BY_ZERO);
+        assert!(suggestion.contains("divisor") || suggestion.contains("0"));
+    }
+
+    #[test]
+    fn test_suggestion_for_failure_type_linearity() {
+        let suggestion = suggestion_for_failure_type(FAILURE_LINEARITY_VIOLATED);
+        assert!(
+            suggestion.contains("Clone")
+                || suggestion.contains("clone")
+                || suggestion.contains("クローン")
+        );
+    }
+
+    #[test]
+    fn test_suggestion_for_failure_type_effect() {
+        let suggestion = suggestion_for_failure_type("effect_not_allowed");
+        assert!(suggestion.contains("effect") || suggestion.contains("エフェクト"));
+    }
+
+    #[test]
+    fn test_suggestion_for_failure_type_postcondition() {
+        let suggestion = suggestion_for_failure_type(FAILURE_POSTCONDITION_VIOLATED);
+        assert!(!suggestion.is_empty());
+    }
+
+    #[test]
+    fn test_suggestion_for_failure_type_precondition() {
+        let suggestion = suggestion_for_failure_type(FAILURE_PRECONDITION_VIOLATED);
+        assert!(!suggestion.is_empty());
+    }
+
+    // ---- build_division_by_zero_feedback tests ----
+
+    #[test]
+    fn test_build_division_by_zero_feedback() {
+        let feedback = build_division_by_zero_feedback("10", "0");
+        assert_eq!(feedback["failure_type"], FAILURE_DIVISION_BY_ZERO);
+        assert!(feedback["counter_example"]["dividend"].as_str().is_some());
+        assert!(feedback["counter_example"]["divisor"].as_str().is_some());
+    }
+
+    // ---- build_linearity_feedback tests ----
+
+    #[test]
+    fn test_build_linearity_feedback() {
+        let violations = vec!["Variable 'x' used after being consumed".to_string()];
+        let span = Span {
+            file: "test.mm".to_string(),
+            line: 10,
+            col: 1,
+            len: 5,
+        };
+        let feedback = build_linearity_feedback("test_atom", &violations, &span);
+        assert_eq!(feedback["failure_type"], FAILURE_LINEARITY_VIOLATED);
+        assert!(feedback["violations"].is_array());
+        assert_eq!(feedback["atom"], "test_atom");
+    }
+
+    // ---- build_effect_feedback tests ----
+
+    #[test]
+    fn test_build_effect_feedback() {
+        let allowed = vec!["FileRead".to_string()];
+        let missing = vec!["FileWrite".to_string()];
+        let feedback = build_effect_feedback("test_atom", "FileWrite", &allowed, &missing);
+        assert_eq!(feedback["failure_type"], "effect_not_allowed");
+        assert_eq!(feedback["attempted_effect"], "FileWrite");
+        assert!(feedback["allowed_effects"].is_array());
+        assert!(feedback["missing_effects"].is_array());
+    }
+
+    // ---- try_match_comparison tests ----
+
+    #[test]
+    fn test_try_match_comparison() {
+        let result = try_match_comparison("x > 10", "x", "Bounded", "5");
+        assert!(result.is_some());
+        let msg = result.unwrap();
+        assert!(msg.contains("greater than") || msg.contains("より大きい"));
+        assert!(msg.contains("5"));
+    }
+
+    #[test]
+    fn test_try_match_comparison_lte() {
+        let result = try_match_comparison("x <= 100", "x", "Capped", "150");
+        assert!(result.is_some());
+        let msg = result.unwrap();
+        assert!(msg.contains("at most") || msg.contains("以下"));
+    }
+
+    // ---- SecurityPolicy tests ----
+
+    #[test]
+    fn test_security_policy_new() {
+        let policy = SecurityPolicy::new();
+        assert!(policy.allowed_effects.is_empty());
+    }
+
+    #[test]
+    fn test_security_policy_allow_and_check() {
+        let mut policy = SecurityPolicy::new();
+        policy.allow_effect(
+            "FileRead",
+            vec![(
+                "path".to_string(),
+                "starts_with(path, \"/tmp/\")".to_string(),
+            )],
+        );
+        assert!(policy.is_effect_allowed("FileRead"));
+        assert!(!policy.is_effect_allowed("FileWrite"));
+    }
+
+    #[test]
+    fn test_security_policy_get_constraints() {
+        let mut policy = SecurityPolicy::new();
+        policy.allow_effect(
+            "HttpGet",
+            vec![(
+                "url".to_string(),
+                "starts_with(url, \"https://\")".to_string(),
+            )],
+        );
+        let constraints = policy.get_constraints("HttpGet");
+        assert_eq!(constraints.len(), 1);
+        assert_eq!(constraints[0].0, "url");
+    }
+
+    #[test]
+    fn test_security_policy_check_param_constraint() {
+        let mut policy = SecurityPolicy::new();
+        policy.allow_effect(
+            "FileRead",
+            vec![(
+                "path".to_string(),
+                "starts_with(path, \"/tmp/\")".to_string(),
+            )],
+        );
+        assert!(policy
+            .check_param_constraint("FileRead", "path", Some("/tmp/data.txt"))
+            .is_ok());
+        assert!(policy
+            .check_param_constraint("FileRead", "path", Some("/etc/passwd"))
+            .is_err());
+    }
+
+    // ---- evaluate_string_constraint tests ----
+
+    #[test]
+    fn test_evaluate_string_constraint_starts_with() {
+        assert!(evaluate_string_constraint(
+            "starts_with(path, \"/tmp/\")",
+            "path",
+            "/tmp/data.txt"
+        ));
+        assert!(!evaluate_string_constraint(
+            "starts_with(path, \"/tmp/\")",
+            "path",
+            "/etc/passwd"
+        ));
+    }
+
+    #[test]
+    fn test_evaluate_string_constraint_ends_with() {
+        assert!(evaluate_string_constraint(
+            "ends_with(file, \".mm\")",
+            "file",
+            "test.mm"
+        ));
+        assert!(!evaluate_string_constraint(
+            "ends_with(file, \".mm\")",
+            "file",
+            "test.rs"
+        ));
+    }
+
+    #[test]
+    fn test_evaluate_string_constraint_contains() {
+        assert!(evaluate_string_constraint(
+            "contains(url, \"api\")",
+            "url",
+            "https://api.example.com"
+        ));
+        assert!(!evaluate_string_constraint(
+            "contains(url, \"api\")",
+            "url",
+            "https://example.com"
+        ));
+    }
+}
