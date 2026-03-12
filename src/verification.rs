@@ -5156,7 +5156,12 @@ fn expr_to_z3<'a>(
         Expr::Lambda { params, body, .. } => {
             // Create a fresh symbolic value for the lambda
             // Lambda bodies will be verified when called via higher-order function contracts
-            let lambda_name = format!("__lambda_{}", params.len());
+            // Use a unique counter to avoid Z3 constant name collisions when multiple lambdas
+            // with the same arity appear in the same atom body (e.g., `let f = |x| x+1; let g = |x| x-1;`).
+            static LAMBDA_COUNTER: std::sync::atomic::AtomicUsize =
+                std::sync::atomic::AtomicUsize::new(0);
+            let lambda_id = LAMBDA_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let lambda_name = format!("__lambda_{}_{}", params.len(), lambda_id);
             let lambda_sym = Int::new_const(ctx, lambda_name.as_str());
 
             // Register parameter names in a sub-environment for body verification
