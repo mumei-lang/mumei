@@ -2217,37 +2217,39 @@ fn verify_effect_containment(
     }
 
     // atom_ref パラメータの effect_set ⊆ caller のエフェクト
+    // 複合エフェクト（IO, FullAccess 等）を正しく扱うため、両側をリーフに解決して比較する
     for param in &atom.params {
         if let Some(ref type_ref) = param.type_ref {
             if type_ref.is_fn_type() {
                 if let Some(ref effect_set) = type_ref.effect_set {
-                    for eff_name in effect_set {
-                        let is_allowed = allowed_leaves.contains(eff_name)
-                            || allowed_leaves
-                                .iter()
-                                .any(|allowed| module_env.is_subeffect(eff_name, allowed));
-                        if !is_allowed {
-                            return Err(MumeiError::verification_at(
-                                format!(
-                                    "Effect polymorphism violation: atom '{}' accepts function parameter '{}' \
-                                     with effect [{}], but '{}' only declares effects: {:?}. \
-                                     The function parameter's effect must be a subset of the atom's declared effects.",
-                                    atom.name, param.name, eff_name, atom.name,
-                                    atom.effects.iter().map(|e| e.name.as_str()).collect::<Vec<_>>()
-                                ),
-                                atom.span.clone(),
-                            )
-                            .with_help(format!(
-                                "Add '{}' to the effects declaration: effects: [{}, {}];",
-                                eff_name,
-                                atom.effects
+                    let param_leaves = module_env.resolve_leaf_effects(effect_set);
+                    let missing: Vec<String> = param_leaves
+                        .iter()
+                        .filter(|eff| {
+                            !allowed_leaves.contains(*eff)
+                                && !allowed_leaves
                                     .iter()
-                                    .map(|e| e.name.as_str())
-                                    .collect::<Vec<_>>()
-                                    .join(", "),
-                                eff_name
-                            )));
-                        }
+                                    .any(|allowed| module_env.is_subeffect(eff, allowed))
+                        })
+                        .cloned()
+                        .collect();
+                    if !missing.is_empty() {
+                        return Err(MumeiError::verification_at(
+                            format!(
+                                "Effect polymorphism violation: atom '{}' accepts function parameter '{}' \
+                                 with effect [{}], but '{}' only declares effects: {:?}. \
+                                 The function parameter's effect must be a subset of the atom's declared effects. \
+                                 Missing leaf effects: {:?}.",
+                                atom.name, param.name, effect_set.join(", "), atom.name,
+                                atom.effects.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
+                                missing
+                            ),
+                            atom.span.clone(),
+                        )
+                        .with_help(format!(
+                            "Add the missing effects {:?} to the effects declaration of atom '{}'.",
+                            missing, atom.name
+                        )));
                     }
                 }
             }

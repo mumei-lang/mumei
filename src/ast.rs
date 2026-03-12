@@ -64,11 +64,28 @@ impl TypeRef {
     }
 
     /// 型パラメータ（型変数）かどうかを判定する。
-    /// 大文字1文字（T, U, V など）を型パラメータとして扱う。
+    /// 大文字1文字（T, U, V, E）、または大文字1文字＋数字（E1, E2, T1）を型パラメータとして扱う。
+    ///
+    /// NOTE: この判定は collect_from_type_ref で「型引数がすべて具体型か」を判定する際に使われる。
+    /// FileWrite, Network 等の具体的な型名（大文字始まりの複数文字）は型パラメータと
+    /// 見なさないよう、パターンを限定している。将来、式パーサーが generic call を解析できる
+    /// ようになった場合は、パーサーが type_params リストを保持してそれと照合する方式に
+    /// 移行すべきである。
     pub fn is_type_param(&self) -> bool {
-        self.type_args.is_empty()
-            && self.name.len() == 1
-            && self.name.chars().next().map_or(false, |c| c.is_uppercase())
+        if !self.type_args.is_empty() {
+            return false;
+        }
+        let name = &self.name;
+        let mut chars = name.chars();
+        match chars.next() {
+            Some(first) if first.is_uppercase() => {
+                // 大文字1文字のみ (T, U, V, E)
+                // または大文字1文字 + 数字のみ (E1, E2, T1)
+                let rest: String = chars.collect();
+                rest.is_empty() || rest.chars().all(|c| c.is_ascii_digit())
+            }
+            _ => false,
+        }
     }
 
     /// 関数型を作成する: atom_ref(param_types...) -> return_type
@@ -614,20 +631,18 @@ impl Monomorphizer {
         }
 
         // requires/ensures 内のエフェクト変数を置換（将来の拡張に備えて）
+        // ワードバウンダリ付き置換で部分文字列マッチを防ぐ
+        // 例: param="E" が "Error" 内の "E" にマッチしないようにする
         let mut mono_requires = generic.requires.clone();
         let mut mono_ensures = generic.ensures.clone();
         for bound in &generic.where_bounds {
             if bound.bounds.contains(&"Effect".to_string()) {
                 if let Some(concrete_type_ref) = type_map.get(&bound.param) {
-                    // エフェクト変数名が短い場合の衝突を避けるため、
-                    // requires/ensures にエフェクト変数が含まれる場合のみ置換
                     let param = &bound.param;
                     let concrete = &concrete_type_ref.name;
-                    if mono_requires.contains(param) {
-                        mono_requires = mono_requires.replace(param, concrete);
-                    }
-                    if mono_ensures.contains(param) {
-                        mono_ensures = mono_ensures.replace(param, concrete);
+                    if let Ok(re) = regex::Regex::new(&format!(r"\b{}\b", regex::escape(param))) {
+                        mono_requires = re.replace_all(&mono_requires, concrete.as_str()).to_string();
+                        mono_ensures = re.replace_all(&mono_ensures, concrete.as_str()).to_string();
                     }
                 }
             }
