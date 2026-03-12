@@ -1231,4 +1231,73 @@ effect Network;
             "Console should NOT be a known effect"
         );
     }
+
+    #[test]
+    fn test_parse_type_ref_with_effect() {
+        let tr = parse_type_ref("atom_ref(i64) -> i64 with E");
+        assert!(tr.is_fn_type());
+        assert_eq!(tr.effect_set, Some(vec!["E".to_string()]));
+    }
+
+    #[test]
+    fn test_parse_type_ref_with_multiple_effects() {
+        let tr = parse_type_ref("atom_ref(i64) -> i64 with [FileWrite, Network]");
+        assert!(tr.is_fn_type());
+        assert_eq!(
+            tr.effect_set,
+            Some(vec!["FileWrite".to_string(), "Network".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_parse_type_ref_without_effect() {
+        let tr = parse_type_ref("atom_ref(i64) -> i64");
+        assert!(tr.is_fn_type());
+        assert_eq!(tr.effect_set, None);
+    }
+
+    #[test]
+    fn test_parse_effect_polymorphic_atom() {
+        let source = r#"
+effect FileWrite;
+
+atom pipe<E: Effect>(f: atom_ref(i64) -> i64 with E)
+    effects: [E];
+    requires: true;
+    ensures: true;
+    body: call(f, 42);
+"#;
+        let items = parse_module(source);
+        let atoms: Vec<_> = items
+            .iter()
+            .filter_map(|i| if let Item::Atom(a) = i { Some(a) } else { None })
+            .collect();
+
+        assert_eq!(atoms[0].name, "pipe");
+        assert_eq!(atoms[0].type_params, vec!["E"]);
+        assert_eq!(atoms[0].where_bounds[0].bounds, vec!["Effect"]);
+        assert_eq!(atoms[0].effects.len(), 1);
+        assert_eq!(atoms[0].effects[0].name, "E");
+
+        // Verify parameter f has effect_set
+        let f_param = &atoms[0].params[0];
+        assert_eq!(f_param.name, "f");
+        if let Some(ref type_ref) = f_param.type_ref {
+            assert!(type_ref.is_fn_type());
+            assert_eq!(type_ref.effect_set, Some(vec!["E".to_string()]));
+        } else {
+            panic!("Expected type_ref for parameter f");
+        }
+    }
+
+    #[test]
+    fn test_display_name_with_effect() {
+        let tr = parse_type_ref("atom_ref(i64) -> i64 with E");
+        let display = tr.display_name();
+        assert!(
+            display.contains("with E"),
+            "display_name should contain 'with E': {}",
+            display
+        );
+    }
 }
