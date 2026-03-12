@@ -2216,6 +2216,44 @@ fn verify_effect_containment(
         }
     }
 
+    // atom_ref パラメータの effect_set ⊆ caller のエフェクト
+    for param in &atom.params {
+        if let Some(ref type_ref) = param.type_ref {
+            if type_ref.is_fn_type() {
+                if let Some(ref effect_set) = type_ref.effect_set {
+                    for eff_name in effect_set {
+                        let is_allowed = allowed_leaves.contains(eff_name)
+                            || allowed_leaves
+                                .iter()
+                                .any(|allowed| module_env.is_subeffect(eff_name, allowed));
+                        if !is_allowed {
+                            return Err(MumeiError::verification_at(
+                                format!(
+                                    "Effect polymorphism violation: atom '{}' accepts function parameter '{}' \
+                                     with effect [{}], but '{}' only declares effects: {:?}. \
+                                     The function parameter's effect must be a subset of the atom's declared effects.",
+                                    atom.name, param.name, eff_name, atom.name,
+                                    atom.effects.iter().map(|e| e.name.as_str()).collect::<Vec<_>>()
+                                ),
+                                atom.span.clone(),
+                            )
+                            .with_help(format!(
+                                "Add '{}' to the effects declaration: effects: [{}, {}];",
+                                eff_name,
+                                atom.effects
+                                    .iter()
+                                    .map(|e| e.name.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(", "),
+                                eff_name
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -3169,7 +3207,7 @@ fn check_taint_propagation(atom: &Atom, body_stmt: &Stmt, env: &Env, module_env:
 /// body 内の関数呼び出しからエフェクトセットを推論する。
 /// 呼び出し先 atom の effects フィールドを再帰的に集約する。
 /// 親エフェクトへの暗黙的包含も解決する。
-fn infer_effects(_atom: &Atom, body_stmt: &Stmt, module_env: &ModuleEnv) -> Vec<Effect> {
+fn infer_effects(atom: &Atom, body_stmt: &Stmt, module_env: &ModuleEnv) -> Vec<Effect> {
     let callees = collect_callees_stmt(body_stmt);
     let mut inferred = Vec::new();
     let mut seen_names: HashSet<String> = HashSet::new();
@@ -3187,6 +3225,22 @@ fn infer_effects(_atom: &Atom, body_stmt: &Stmt, module_env: &ModuleEnv) -> Vec<
             }
         }
     }
+
+    // atom_ref パラメータの effect_set からもエフェクトを推論
+    for param in &atom.params {
+        if let Some(ref type_ref) = param.type_ref {
+            if type_ref.is_fn_type() {
+                if let Some(ref effect_set) = type_ref.effect_set {
+                    for eff_name in effect_set {
+                        if seen_names.insert(eff_name.clone()) {
+                            inferred.push(Effect::simple(eff_name));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     inferred
 }
 
@@ -3368,6 +3422,13 @@ fn verify_inner(
     timeout_ms: u64,
 ) -> MumeiResult<()> {
     let atom = &hir_atom.atom;
+
+    // ジェネリック atom は単相化後に検証される
+    // 例: pipe<E: Effect> は検証スキップ、pipe<FileWrite> が検証対象
+    if !atom.type_params.is_empty() {
+        return Ok(());
+    }
+
     // Phase 0: 信頼レベルチェック（Trust Boundary）
     match &atom.trust_level {
         TrustLevel::Trusted => {
