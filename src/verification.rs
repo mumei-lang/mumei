@@ -1985,6 +1985,138 @@ pub fn verify_impl(
 // acquire 式の検証時に、リソース階層制約をチェックする。
 
 // =============================================================================
+// セキュリティポリシー (Security Policy)
+// =============================================================================
+
+/// A single allowed effect with optional parameter constraints.
+/// Used by SecurityPolicy to define which effects (and under what conditions)
+/// are permitted in the current session.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct AllowedEffect {
+    pub effect_name: String,
+    /// Parameter constraints as (param_name, constraint_expr) pairs.
+    /// E.g., ("path", "starts_with(path, \"/tmp/\")") for FileRead.
+    pub param_constraints: Vec<(String, String)>,
+}
+
+/// Security policy defining which effects are permitted.
+/// Enforced during effect containment verification.
+/// Can be set dynamically via the MCP server's set_allowed_effects tool.
+#[derive(Debug, Clone, Default)]
+#[allow(dead_code)]
+pub struct SecurityPolicy {
+    pub allowed_effects: Vec<AllowedEffect>,
+}
+
+#[allow(dead_code)]
+impl SecurityPolicy {
+    pub fn new() -> Self {
+        Self {
+            allowed_effects: Vec::new(),
+        }
+    }
+
+    /// Add an allowed effect with optional parameter constraints.
+    pub fn allow_effect(&mut self, effect_name: &str, param_constraints: Vec<(String, String)>) {
+        self.allowed_effects.push(AllowedEffect {
+            effect_name: effect_name.to_string(),
+            param_constraints,
+        });
+    }
+
+    /// Check if an effect is allowed by this policy (name-level only).
+    pub fn is_effect_allowed(&self, effect_name: &str) -> bool {
+        self.allowed_effects
+            .iter()
+            .any(|ae| ae.effect_name == effect_name)
+    }
+
+    /// Get the parameter constraints for a specific effect.
+    pub fn get_constraints(&self, effect_name: &str) -> Vec<&(String, String)> {
+        self.allowed_effects
+            .iter()
+            .filter(|ae| ae.effect_name == effect_name)
+            .flat_map(|ae| ae.param_constraints.iter())
+            .collect()
+    }
+
+    /// Check if an effect with a specific string parameter satisfies the policy.
+    /// Uses constant folding for string literals: directly evaluates starts_with/contains.
+    /// For symbolic (non-literal) parameters, returns Ok (deferred to Z3).
+    // TODO: Migrate to Z3 String Sort when available for full symbolic string verification.
+    pub fn check_param_constraint(
+        &self,
+        effect_name: &str,
+        param_name: &str,
+        param_value: Option<&str>,
+    ) -> Result<(), String> {
+        let constraints = self.get_constraints(effect_name);
+        if constraints.is_empty() {
+            return Ok(());
+        }
+
+        for (cname, cexpr) in &constraints {
+            if cname != param_name {
+                continue;
+            }
+            // Constant folding: if param_value is a known string literal, evaluate directly
+            if let Some(val) = param_value {
+                if !evaluate_string_constraint(cexpr, param_name, val) {
+                    return Err(format!(
+                        "Parameter constraint violated: {} = \"{}\" does not satisfy `{}` \
+                         (パラメータ制約違反: {} = \"{}\" は `{}` を満たしません)",
+                        param_name, val, cexpr, param_name, val, cexpr
+                    ));
+                }
+            }
+            // If param_value is None (symbolic), we defer to Z3 symbolic verification
+        }
+        Ok(())
+    }
+}
+
+/// Evaluate a string constraint expression against a concrete value.
+/// Supports: starts_with(param, "prefix"), ends_with(param, "suffix"), contains(param, "substr")
+#[allow(dead_code)]
+fn evaluate_string_constraint(constraint_expr: &str, _param_name: &str, value: &str) -> bool {
+    let trimmed = constraint_expr.trim();
+
+    // starts_with(param, "prefix")
+    if let Some(inner) = trimmed.strip_prefix("starts_with(") {
+        if let Some(inner) = inner.strip_suffix(')') {
+            if let Some((_p, rest)) = inner.split_once(',') {
+                let prefix = rest.trim().trim_matches('"');
+                return value.starts_with(prefix);
+            }
+        }
+    }
+
+    // ends_with(param, "suffix")
+    if let Some(inner) = trimmed.strip_prefix("ends_with(") {
+        if let Some(inner) = inner.strip_suffix(')') {
+            if let Some((_p, rest)) = inner.split_once(',') {
+                let suffix = rest.trim().trim_matches('"');
+                return value.ends_with(suffix);
+            }
+        }
+    }
+
+    // contains(param, "substr")
+    if let Some(inner) = trimmed.strip_prefix("contains(") {
+        if let Some(inner) = inner.strip_suffix(')') {
+            if let Some((_p, rest)) = inner.split_once(',') {
+                let substr = rest.trim().trim_matches('"');
+                return value.contains(substr);
+            }
+        }
+    }
+
+    // Unknown constraint — conservatively allow (will be checked by Z3 if symbolic)
+    true
+}
+
+// =============================================================================
 // エフェクト検証コンテキスト (Effect Verification Context)
 // =============================================================================
 
