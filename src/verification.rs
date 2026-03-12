@@ -5134,6 +5134,27 @@ fn expr_to_z3<'a>(
                 Ok(sym.into())
             }
         }
+        // Lambda 式: Z3 uninterpreted function として表現する
+        // 将来のフェーズでキャプチャ変数の環境アサーションと
+        // 高階関数コントラクトの検証を追加する
+        Expr::Lambda { params, body, .. } => {
+            // Create a fresh symbolic value for the lambda
+            // Lambda bodies will be verified when called via higher-order function contracts
+            let lambda_name = format!("__lambda_{}", params.len());
+            let lambda_sym = Int::new_const(ctx, lambda_name.as_str());
+
+            // Register parameter names in a sub-environment for body verification
+            let mut lambda_env = env.clone();
+            for p in params {
+                let p_sym = Int::new_const(ctx, p.name.as_str());
+                lambda_env.insert(p.name.clone(), p_sym.into());
+            }
+
+            // Verify the lambda body in the sub-environment
+            let _body_val = stmt_to_z3(vc, body, &mut lambda_env, solver_opt)?;
+
+            Ok(lambda_sym.into())
+        }
     }
 }
 

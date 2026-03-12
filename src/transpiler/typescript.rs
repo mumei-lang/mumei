@@ -382,6 +382,43 @@ fn format_hir_expr_ts(expr: &HirExpr) -> String {
                 args_str.join(", ")
             )
         }
+        HirExpr::Lambda {
+            params,
+            return_type,
+            body,
+            ..
+        } => {
+            let params_str: Vec<String> = params
+                .iter()
+                .map(|p| {
+                    if let Some(ref tr) = p.type_ref {
+                        format!(
+                            "{}: {}",
+                            p.name,
+                            crate::transpiler::typescript::map_type_ts(Some(&tr.name))
+                        )
+                    } else {
+                        p.name.clone()
+                    }
+                })
+                .collect();
+            let ret = return_type
+                .as_ref()
+                .map(|r| {
+                    format!(
+                        ": {}",
+                        crate::transpiler::typescript::map_type_ts(Some(r.as_str()))
+                    )
+                })
+                .unwrap_or_default();
+            let body_str = format_hir_stmt_ts(body);
+            format!(
+                "(({}){}  => {{ {} }})",
+                params_str.join(", "),
+                ret,
+                body_str
+            )
+        }
     }
 }
 

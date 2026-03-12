@@ -83,6 +83,7 @@ pub enum Token {
     Arrow,     // ->
     FatArrow,  // =>
     Pipe,      // |>
+    Bar,       // |
     Assign,    // =
     Dot,       // .
     Comma,     // ,
@@ -186,6 +187,7 @@ impl std::fmt::Display for Token {
             Token::Arrow => write!(f, "->"),
             Token::FatArrow => write!(f, "=>"),
             Token::Pipe => write!(f, "|>"),
+            Token::Bar => write!(f, "|"),
             Token::Assign => write!(f, "="),
             Token::Dot => write!(f, "."),
             Token::Comma => write!(f, ","),

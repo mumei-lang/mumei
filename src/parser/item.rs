@@ -101,6 +101,57 @@ pub fn parse_type_ref(input: &str) -> TypeRef {
     }
 }
 
+/// Parse a type reference from a ParseContext token stream.
+/// Collects tokens that form a type (including generics like `Stack<i64>`)
+/// and delegates to the string-based `parse_type_ref`.
+pub fn parse_type_ref_from_ctx(ctx: &mut super::ParseContext) -> TypeRef {
+    use super::token::Token;
+    let mut type_str = String::new();
+    // Collect the base type name
+    match ctx.peek().clone() {
+        Token::Ident(s) => {
+            type_str.push_str(&s);
+            ctx.advance();
+        }
+        ref tok => {
+            let name = format!("{}", tok);
+            if name.chars().next().map_or(false, |c| c.is_alphabetic()) {
+                type_str.push_str(&name);
+                ctx.advance();
+            }
+        }
+    }
+    // Handle generic type args: <T, U, ...>
+    if ctx.peek() == &Token::Lt {
+        type_str.push('<');
+        ctx.advance();
+        let mut depth = 1;
+        while depth > 0 && ctx.peek() != &Token::Eof {
+            match ctx.peek().clone() {
+                Token::Lt => {
+                    depth += 1;
+                    type_str.push('<');
+                    ctx.advance();
+                }
+                Token::Gt => {
+                    depth -= 1;
+                    type_str.push('>');
+                    ctx.advance();
+                }
+                Token::Comma => {
+                    type_str.push_str(", ");
+                    ctx.advance();
+                }
+                ref tok => {
+                    type_str.push_str(&format!("{}", tok));
+                    ctx.advance();
+                }
+            }
+        }
+    }
+    parse_type_ref(&type_str)
+}
+
 /// Split type args considering nested angle brackets
 fn split_type_args(input: &str) -> Vec<String> {
     let mut result = Vec::new();

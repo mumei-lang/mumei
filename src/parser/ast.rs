@@ -124,6 +124,12 @@ pub struct EffectDefParam {
 }
 
 #[derive(Debug, Clone)]
+pub struct LambdaParam {
+    pub name: String,
+    pub type_ref: Option<TypeRef>,
+}
+
+#[derive(Debug, Clone)]
 pub enum Expr {
     Number(i64),
     Float(f64),
@@ -162,6 +168,12 @@ pub enum Expr {
         effect: String,
         operation: String,
         args: Vec<Expr>,
+    },
+    /// Lambda 式: |params| body or |params| -> RetType { body }
+    Lambda {
+        params: Vec<LambdaParam>,
+        return_type: Option<String>,
+        body: Box<Stmt>,
     },
 }
 

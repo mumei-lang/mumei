@@ -171,7 +171,7 @@ impl<'a> Lexer<'a> {
                     self.advance();
                     Token::Pipe
                 } else {
-                    Token::Ident("|".to_string())
+                    Token::Bar
                 }
             }
 
