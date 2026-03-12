@@ -173,22 +173,34 @@ pub fn parse_type_ref_from_ctx(ctx: &mut super::ParseContext) -> TypeRef {
     parse_type_ref(&type_str)
 }
 
-/// Split type args considering nested angle brackets
+/// Split type args considering nested angle brackets and parentheses.
+/// Tracks both `<`/`>` and `(`/`)` depth so that types like
+/// `atom_ref(i64, i64) -> i64` used as generic type arguments
+/// are not incorrectly split at commas inside parentheses.
 fn split_type_args(input: &str) -> Vec<String> {
     let mut result = Vec::new();
-    let mut depth = 0;
+    let mut angle_depth = 0;
+    let mut paren_depth = 0;
     let mut current = String::new();
     for c in input.chars() {
         match c {
             '<' => {
-                depth += 1;
+                angle_depth += 1;
                 current.push(c);
             }
             '>' => {
-                depth -= 1;
+                angle_depth -= 1;
                 current.push(c);
             }
-            ',' if depth == 0 => {
+            '(' => {
+                paren_depth += 1;
+                current.push(c);
+            }
+            ')' => {
+                paren_depth -= 1;
+                current.push(c);
+            }
+            ',' if angle_depth == 0 && paren_depth == 0 => {
                 let trimmed = current.trim().to_string();
                 if !trimmed.is_empty() {
                     result.push(trimmed);

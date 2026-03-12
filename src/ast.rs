@@ -124,18 +124,25 @@ impl TypeRef {
                     .collect();
             }
             // エフェクトセットの置換
-            result.effect_set = self.effect_set.as_ref().map(|effects| {
-                effects
-                    .iter()
-                    .map(|eff| {
-                        if let Some(concrete) = type_map.get(eff) {
-                            concrete.name.clone()
-                        } else {
-                            eff.clone()
-                        }
-                    })
-                    .collect()
-            });
+            // self にエフェクトセットがある場合はそれを置換して使用し、
+            // ない場合は replacement のエフェクトセットをそのまま保持する。
+            // これにより、bare 型パラメータ（例: F）が関数型（例: atom_ref(i64) -> i64 with FileWrite）
+            // に置換されたときに replacement の effect_set が失われないようにする。
+            if let Some(ref effects) = self.effect_set {
+                result.effect_set = Some(
+                    effects
+                        .iter()
+                        .map(|eff| {
+                            if let Some(concrete) = type_map.get(eff) {
+                                concrete.name.clone()
+                            } else {
+                                eff.clone()
+                            }
+                        })
+                        .collect(),
+                );
+            }
+            // else: replacement の effect_set をそのまま保持
             result
         } else {
             // 型パラメータでない場合、型引数のみ再帰的に置換

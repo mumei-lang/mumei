@@ -289,10 +289,13 @@ fn load_and_prepare(input: &str) -> (Vec<Item>, verification::ModuleEnv, Vec<Imp
             Item::StructDef(struct_def) => module_env.register_struct(struct_def),
             Item::EnumDef(enum_def) => module_env.register_enum(enum_def),
             Item::Atom(atom) => module_env.register_atom(atom),
-            Item::TraitDef(trait_def) => module_env.register_trait(trait_def),
-            Item::ImplDef(impl_def) => module_env.register_impl(impl_def),
+            // TraitDef/ImplDef/EffectDef は単相化前のループで登録済み。
+            // register_trait/register_effect は HashMap::insert なので冪等だが、
+            // register_impl は Vec::push なので重複登録を避ける。
+            Item::TraitDef(_) => {}
+            Item::ImplDef(_) => {}
             Item::ResourceDef(resource_def) => module_env.register_resource(resource_def),
-            Item::EffectDef(effect_def) => module_env.register_effect(effect_def),
+            Item::EffectDef(_) => {}
             Item::ExternBlock(extern_block) => {
                 for ext_fn in &extern_block.functions {
                     // ExternFn → trusted Atom に変換して ModuleEnv に登録
