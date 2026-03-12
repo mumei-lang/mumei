@@ -3557,8 +3557,12 @@ fn verify_inner(
     if let Err(e) = verify_effect_containment(atom, &hir_atom.body_stmt, module_env) {
         // Save structured effect violation report for self-healing integration.
         // Extract missing effects from the error to produce a structured report.
-        let callees = collect_callees_stmt(&hir_atom.body_stmt);
         let allowed_leaves = module_env.resolve_leaf_effects_from_effects(&atom.effects);
+        let caller_effect_names: Vec<String> =
+            atom.effects.iter().map(|e| e.name.clone()).collect();
+
+        // まず callee ベースの違反を探す（effect_propagation）
+        let callees = collect_callees_stmt(&hir_atom.body_stmt);
         let mut missing_all: Vec<String> = Vec::new();
         let mut violating_callee = String::new();
         let mut callee_effs: Vec<String> = Vec::new();
@@ -3587,8 +3591,6 @@ fn verify_inner(
             }
         }
         if !missing_all.is_empty() {
-            let caller_effect_names: Vec<String> =
-                atom.effects.iter().map(|e| e.name.clone()).collect();
             save_effect_propagation_report(
                 output_dir,
                 &atom.name,
@@ -3599,7 +3601,6 @@ fn verify_inner(
             );
         } else {
             // callee ループでは見つからなかった場合、atom_ref パラメータの effect_set 違反を確認する
-            let allowed_leaves_ref = module_env.resolve_leaf_effects_from_effects(&atom.effects);
             for param in &atom.params {
                 if let Some(ref type_ref) = param.type_ref {
                     if type_ref.is_fn_type() {
@@ -3608,16 +3609,14 @@ fn verify_inner(
                             let missing: Vec<String> = param_leaves
                                 .iter()
                                 .filter(|eff| {
-                                    !allowed_leaves_ref.contains(*eff)
-                                        && !allowed_leaves_ref
+                                    !allowed_leaves.contains(*eff)
+                                        && !allowed_leaves
                                             .iter()
                                             .any(|allowed| module_env.is_subeffect(eff, allowed))
                                 })
                                 .cloned()
                                 .collect();
                             if !missing.is_empty() {
-                                let caller_effect_names: Vec<String> =
-                                    atom.effects.iter().map(|e| e.name.clone()).collect();
                                 save_effect_polymorphism_report(
                                     output_dir,
                                     &atom.name,
