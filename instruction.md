@@ -91,7 +91,41 @@ This mechanism replaces the need for `trusted` on higher-order functions like `m
 
 **Important limitation**: When calling `apply(5, atom_ref(increment))`, the verifier does **not** check that `increment`'s actual contract (`ensures: result == x + 1`) implies the declared `contract(f): ensures: result >= 0`. The caller is responsible for passing only functions that satisfy the declared contract. Passing a function that violates the contract will not be caught at the call site (the verifier trusts the declared contract unconditionally). A subsumption check may be added in a future version.
 
-### 3.6 Standard Library Usage
+### 3.6 Effect-Polymorphic Higher-Order Functions
+
+When defining atoms that are generic over effect sets, use `<E: Effect>` type parameter bounds and `with E` on function parameter types:
+
+**Syntax**:
+```mumei
+atom pipe<E: Effect>(f: atom_ref(i64) -> i64 with E)
+    effects: [E];
+    requires: true;
+    ensures: true;
+    body: call(f, 42);
+```
+
+* `<E: Effect>` — declares `E` as an effect type parameter. The compiler verifies that the concrete type argument is a known effect definition.
+* `with E` — annotates the function parameter's effect set. After monomorphization, `E` is replaced with the concrete effect (e.g., `FileWrite`).
+* `effects: [E]` — the atom's own effect set includes the effect variable. After monomorphization, this becomes `effects: [FileWrite]`.
+
+**How it works**: Effect polymorphism is resolved through monomorphization (same as type polymorphism):
+1. `pipe<FileWrite>(atom_ref(writer))` triggers monomorphization of `pipe` with `E = FileWrite`
+2. A concrete `pipe<FileWrite>` atom is generated with `effects: [FileWrite]` and `with [FileWrite]`
+3. The concrete atom is verified by Z3 using the standard effect containment check
+
+**Multiple effect parameters**:
+```mumei
+atom transform<E1: Effect, E2: Effect>(
+    r: atom_ref(i64) -> i64 with E1,
+    w: atom_ref(i64) -> i64 with E2
+)
+    effects: [E1, E2];
+    requires: true;
+    ensures: true;
+    body: { let x = call(r, 1); call(w, x) };
+```
+
+### 3.7 Standard Library Usage
 
 * **Prelude** (`std/prelude.mm`): Auto-imported. Provides `Eq`, `Ord`, `Numeric`, `Option<T>`, `Result<T, E>`.
 * **Alloc** (`std/alloc.mm`): Import with `import "std/alloc" as alloc;`. Provides `Vector<T>`, `HashMap<K, V>`, `alloc_raw`, `dealloc_raw`.

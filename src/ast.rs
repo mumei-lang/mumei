@@ -64,11 +64,28 @@ impl TypeRef {
     }
 
     /// 型パラメータ（型変数）かどうかを判定する。
-    /// 大文字1文字（T, U, V など）を型パラメータとして扱う。
+    /// 大文字1文字（T, U, V, E）、または大文字1文字＋数字（E1, E2, T1）を型パラメータとして扱う。
+    ///
+    /// NOTE: この判定は collect_from_type_ref で「型引数がすべて具体型か」を判定する際に使われる。
+    /// FileWrite, Network 等の具体的な型名（大文字始まりの複数文字）は型パラメータと
+    /// 見なさないよう、パターンを限定している。将来、式パーサーが generic call を解析できる
+    /// ようになった場合は、パーサーが type_params リストを保持してそれと照合する方式に
+    /// 移行すべきである。
     pub fn is_type_param(&self) -> bool {
-        self.type_args.is_empty()
-            && self.name.len() == 1
-            && self.name.chars().next().map_or(false, |c| c.is_uppercase())
+        if !self.type_args.is_empty() {
+            return false;
+        }
+        let name = &self.name;
+        let mut chars = name.chars();
+        match chars.next() {
+            Some(first) if first.is_uppercase() => {
+                // 大文字1文字のみ (T, U, V, E)
+                // または大文字1文字 + 数字のみ (E1, E2, T1)
+                let rest: String = chars.collect();
+                rest.is_empty() || rest.chars().all(|c| c.is_ascii_digit())
+            }
+            _ => false,
+        }
     }
 
     /// 関数型を作成する: atom_ref(param_types...) -> return_type
@@ -191,7 +208,7 @@ impl std::fmt::Display for TypeRef {
 // - 実行時の型消去やオーバーヘッドがない
 
 use crate::parser::{
-    parse_body_expr, parse_type_ref, Atom, EnumDef, EnumVariant, Expr, Item, Param, Stmt,
+    parse_body_expr, parse_type_ref, Atom, Effect, EnumDef, EnumVariant, Expr, Item, Param, Stmt,
     StructDef, StructField,
 };
 use std::collections::{HashMap, HashSet};
@@ -589,22 +606,71 @@ impl Monomorphizer {
             })
             .collect();
 
+        // エフェクトの単相化: effects: [E] → effects: [FileWrite]
+        let mono_effects: Vec<Effect> = generic
+            .effects
+            .iter()
+            .map(|eff| {
+                if let Some(concrete_type_ref) = type_map.get(&eff.name) {
+                    // エフェクト変数を具体エフェクトに置換
+                    Effect {
+                        name: concrete_type_ref.name.clone(),
+                        params: eff.params.clone(),
+                        span: eff.span.clone(),
+                    }
+                } else {
+                    eff.clone()
+                }
+            })
+            .collect();
+
+        // body_expr 内のエフェクト変数を置換
+        let mut mono_body = generic.body_expr.clone();
+        for bound in &generic.where_bounds {
+            if bound.bounds.contains(&"Effect".to_string()) {
+                if let Some(concrete_type_ref) = type_map.get(&bound.param) {
+                    // "perform E." → "perform FileWrite." のように置換
+                    let from = format!("perform {}.", bound.param);
+                    let to = format!("perform {}.", concrete_type_ref.name);
+                    mono_body = mono_body.replace(&from, &to);
+                }
+            }
+        }
+
+        // requires/ensures 内のエフェクト変数を置換（将来の拡張に備えて）
+        // ワードバウンダリ付き置換で部分文字列マッチを防ぐ
+        // 例: param="E" が "Error" 内の "E" にマッチしないようにする
+        let mut mono_requires = generic.requires.clone();
+        let mut mono_ensures = generic.ensures.clone();
+        for bound in &generic.where_bounds {
+            if bound.bounds.contains(&"Effect".to_string()) {
+                if let Some(concrete_type_ref) = type_map.get(&bound.param) {
+                    let param = &bound.param;
+                    let concrete = &concrete_type_ref.name;
+                    if let Ok(re) = regex::Regex::new(&format!(r"\b{}\b", regex::escape(param))) {
+                        mono_requires = re.replace_all(&mono_requires, concrete.as_str()).to_string();
+                        mono_ensures = re.replace_all(&mono_ensures, concrete.as_str()).to_string();
+                    }
+                }
+            }
+        }
+
         Some(Atom {
             name: mono_name,
             type_params: vec![],
             where_bounds: vec![], // 単相化後は境界なし
             params,
-            requires: generic.requires.clone(),
+            requires: mono_requires,
             forall_constraints: generic.forall_constraints.clone(),
-            ensures: generic.ensures.clone(),
-            body_expr: generic.body_expr.clone(),
+            ensures: mono_ensures,
+            body_expr: mono_body,
             consumed_params: generic.consumed_params.clone(),
             resources: generic.resources.clone(),
             is_async: generic.is_async,
             trust_level: generic.trust_level.clone(),
             max_unroll: generic.max_unroll,
             invariant: generic.invariant.clone(),
-            effects: generic.effects.clone(),
+            effects: mono_effects,
             span: generic.span.clone(),
         })
     }
@@ -637,5 +703,160 @@ impl Monomorphizer {
     #[allow(dead_code)]
     pub fn instances(&self) -> &HashSet<String> {
         &self.instances
+    }
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::{parse_module, Item};
+
+    /// Helper: parse items, set up monomorphizer with manual instance registration,
+    /// build module_env, and return monomorphized items.
+    /// The expression parser doesn't handle generic function calls like `pipe<FileWrite>(...)`,
+    /// so we manually register instances (same as main.rs pipeline which uses item-level parsing).
+    fn setup_mono_with_instances(source: &str, instances: &[&str]) -> Vec<Item> {
+        let items = parse_module(source);
+        let mut mono = Monomorphizer::new();
+        mono.collect(&items);
+
+        // Manually register instances since the expression parser treats
+        // `pipe<FileWrite>(...)` as comparisons, not generic calls
+        for inst in instances {
+            mono.instances.insert(inst.to_string());
+        }
+
+        let mut module_env = crate::verification::ModuleEnv::new();
+        for item in &items {
+            if let Item::EffectDef(e) = item {
+                module_env.register_effect(e);
+            }
+        }
+
+        mono.monomorphize(&items, Some(&module_env))
+    }
+
+    #[test]
+    fn test_monomorphize_effect_variable() {
+        let source = r#"
+effect FileWrite;
+
+atom pipe<E: Effect>(f: atom_ref(i64) -> i64 with E)
+    effects: [E];
+    requires: true;
+    ensures: true;
+    body: call(f, 42);
+
+atom main()
+    effects: [FileWrite];
+    requires: true;
+    ensures: true;
+    body: call(pipe, 42);
+"#;
+        let mono_items = setup_mono_with_instances(source, &["pipe<FileWrite>"]);
+
+        let mono_atoms: Vec<_> = mono_items
+            .iter()
+            .filter_map(|i| if let Item::Atom(a) = i { Some(a) } else { None })
+            .collect();
+
+        let pipe_mono = mono_atoms.iter().find(|a| a.name.contains("pipe")).unwrap();
+        assert!(
+            pipe_mono.type_params.is_empty(),
+            "単相化後は型パラメータなし"
+        );
+        assert_eq!(pipe_mono.effects.len(), 1);
+        assert_eq!(
+            pipe_mono.effects[0].name, "FileWrite",
+            "E → FileWrite に置換されるべき"
+        );
+
+        // パラメータ f の TypeRef.effect_set も具体化されていることを確認
+        let f_param = &pipe_mono.params[0];
+        if let Some(ref type_ref) = f_param.type_ref {
+            assert_eq!(type_ref.effect_set, Some(vec!["FileWrite".to_string()]));
+        }
+    }
+
+    #[test]
+    fn test_monomorphize_effect_body_expr() {
+        let source = r#"
+effect Network;
+
+atom do_net<E: Effect>(x: i64)
+    effects: [E];
+    requires: true;
+    ensures: true;
+    body: { perform E.call(x); x };
+
+atom main()
+    effects: [Network];
+    requires: true;
+    ensures: true;
+    body: 42;
+"#;
+        let mono_items = setup_mono_with_instances(source, &["do_net<Network>"]);
+
+        let mono_atoms: Vec<_> = mono_items
+            .iter()
+            .filter_map(|i| if let Item::Atom(a) = i { Some(a) } else { None })
+            .collect();
+
+        let do_net_mono = mono_atoms
+            .iter()
+            .find(|a| a.name.contains("do_net"))
+            .unwrap();
+        assert!(
+            do_net_mono.body_expr.contains("perform Network."),
+            "body_expr should contain 'perform Network.' but got: {}",
+            do_net_mono.body_expr
+        );
+        assert!(
+            !do_net_mono.body_expr.contains("perform E."),
+            "body_expr should NOT contain 'perform E.' after monomorphization"
+        );
+    }
+
+    #[test]
+    fn test_monomorphize_multiple_effect_params() {
+        let source = r#"
+effect FileRead;
+effect FileWrite;
+
+atom transform<E1: Effect, E2: Effect>(x: i64)
+    effects: [E1, E2];
+    requires: true;
+    ensures: true;
+    body: x;
+
+atom main()
+    effects: [FileRead, FileWrite];
+    requires: true;
+    ensures: true;
+    body: 1;
+"#;
+        let mono_items = setup_mono_with_instances(source, &["transform<FileRead, FileWrite>"]);
+
+        let mono_atoms: Vec<_> = mono_items
+            .iter()
+            .filter_map(|i| if let Item::Atom(a) = i { Some(a) } else { None })
+            .collect();
+
+        let transform_mono = mono_atoms
+            .iter()
+            .find(|a| a.name.contains("transform"))
+            .unwrap();
+        assert_eq!(transform_mono.effects.len(), 2);
+        let effect_names: Vec<&str> = transform_mono
+            .effects
+            .iter()
+            .map(|e| e.name.as_str())
+            .collect();
+        assert!(effect_names.contains(&"FileRead"));
+        assert!(effect_names.contains(&"FileWrite"));
     }
 }

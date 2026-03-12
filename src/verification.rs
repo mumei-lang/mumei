@@ -2216,6 +2216,46 @@ fn verify_effect_containment(
         }
     }
 
+    // atom_ref パラメータの effect_set ⊆ caller のエフェクト
+    // 複合エフェクト（IO, FullAccess 等）を正しく扱うため、両側をリーフに解決して比較する
+    for param in &atom.params {
+        if let Some(ref type_ref) = param.type_ref {
+            if type_ref.is_fn_type() {
+                if let Some(ref effect_set) = type_ref.effect_set {
+                    let param_leaves = module_env.resolve_leaf_effects(effect_set);
+                    let missing: Vec<String> = param_leaves
+                        .iter()
+                        .filter(|eff| {
+                            !allowed_leaves.contains(*eff)
+                                && !allowed_leaves
+                                    .iter()
+                                    .any(|allowed| module_env.is_subeffect(eff, allowed))
+                        })
+                        .cloned()
+                        .collect();
+                    if !missing.is_empty() {
+                        return Err(MumeiError::verification_at(
+                            format!(
+                                "Effect polymorphism violation: atom '{}' accepts function parameter '{}' \
+                                 with effect [{}], but '{}' only declares effects: {:?}. \
+                                 The function parameter's effect must be a subset of the atom's declared effects. \
+                                 Missing leaf effects: {:?}.",
+                                atom.name, param.name, effect_set.join(", "), atom.name,
+                                atom.effects.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
+                                missing
+                            ),
+                            atom.span.clone(),
+                        )
+                        .with_help(format!(
+                            "Add the missing effects {:?} to the effects declaration of atom '{}'.",
+                            missing, atom.name
+                        )));
+                    }
+                }
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -2302,6 +2342,76 @@ fn save_effect_propagation_report(
         },
         "reason": format!("Effect propagation violation: '{}' calls '{}' which requires {:?}, but '{}' only declares {:?}",
             caller_name, callee_name, callee_effects, caller_name, caller_effects)
+    });
+    let _ = fs::create_dir_all(output_dir);
+    let _ = fs::write(
+        output_dir.join("report.json"),
+        serde_json::to_string_pretty(&report).unwrap_or_else(|_| report.to_string()),
+    );
+}
+
+/// Save an effect polymorphism violation report to report.json for self-healing integration.
+/// Called when an atom_ref parameter's effect_set is not a subset of the atom's declared effects.
+fn save_effect_polymorphism_report(
+    output_dir: &Path,
+    atom_name: &str,
+    param_name: &str,
+    param_effect_set: &[String],
+    declared_effects: &[String],
+    missing_effects: &[String],
+) {
+    let report = json!({
+        "status": "failed",
+        "atom": atom_name,
+        "violation_type": "effect_polymorphism",
+        "effect_violation": {
+            "atom": atom_name,
+            "param": param_name,
+            "param_effect_set": param_effect_set,
+            "declared_effects": declared_effects,
+            "missing_effects": missing_effects,
+            "suggested_fixes": [
+                format!(
+                    "Add {:?} to atom '{}' effects declaration: effects: [{}];",
+                    missing_effects,
+                    atom_name,
+                    declared_effects.iter().chain(missing_effects.iter()).cloned().collect::<Vec<_>>().join(", ")
+                ),
+                format!(
+                    "Change parameter '{}' to use only effects declared by '{}'",
+                    param_name, atom_name
+                )
+            ],
+            "resolution_paths": [
+                {
+                    "strategy": "propagation",
+                    "description": format!(
+                        "Add missing effects {:?} to atom '{}' effects declaration",
+                        missing_effects, atom_name
+                    ),
+                    "fix_type": "signature_change",
+                    "target": atom_name,
+                    "change": format!(
+                        "effects: [{}];",
+                        declared_effects.iter().chain(missing_effects.iter()).cloned().collect::<Vec<_>>().join(", ")
+                    )
+                },
+                {
+                    "strategy": "restriction",
+                    "description": format!(
+                        "Restrict parameter '{}' to use only effects in {:?}",
+                        param_name, declared_effects
+                    ),
+                    "fix_type": "param_change",
+                    "target": param_name
+                }
+            ]
+        },
+        "reason": format!(
+            "Effect polymorphism violation: atom '{}' accepts function parameter '{}' with effect {:?}, \
+             but '{}' only declares effects {:?}. Missing leaf effects: {:?}.",
+            atom_name, param_name, param_effect_set, atom_name, declared_effects, missing_effects
+        )
     });
     let _ = fs::create_dir_all(output_dir);
     let _ = fs::write(
@@ -3169,7 +3279,7 @@ fn check_taint_propagation(atom: &Atom, body_stmt: &Stmt, env: &Env, module_env:
 /// body 内の関数呼び出しからエフェクトセットを推論する。
 /// 呼び出し先 atom の effects フィールドを再帰的に集約する。
 /// 親エフェクトへの暗黙的包含も解決する。
-fn infer_effects(_atom: &Atom, body_stmt: &Stmt, module_env: &ModuleEnv) -> Vec<Effect> {
+fn infer_effects(atom: &Atom, body_stmt: &Stmt, module_env: &ModuleEnv) -> Vec<Effect> {
     let callees = collect_callees_stmt(body_stmt);
     let mut inferred = Vec::new();
     let mut seen_names: HashSet<String> = HashSet::new();
@@ -3187,6 +3297,22 @@ fn infer_effects(_atom: &Atom, body_stmt: &Stmt, module_env: &ModuleEnv) -> Vec<
             }
         }
     }
+
+    // atom_ref パラメータの effect_set からもエフェクトを推論
+    for param in &atom.params {
+        if let Some(ref type_ref) = param.type_ref {
+            if type_ref.is_fn_type() {
+                if let Some(ref effect_set) = type_ref.effect_set {
+                    for eff_name in effect_set {
+                        if seen_names.insert(eff_name.clone()) {
+                            inferred.push(Effect::simple(eff_name));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     inferred
 }
 
@@ -3368,6 +3494,13 @@ fn verify_inner(
     timeout_ms: u64,
 ) -> MumeiResult<()> {
     let atom = &hir_atom.atom;
+
+    // ジェネリック atom は単相化後に検証される
+    // 例: pipe<E: Effect> は検証スキップ、pipe<FileWrite> が検証対象
+    if !atom.type_params.is_empty() {
+        return Ok(());
+    }
+
     // Phase 0: 信頼レベルチェック（Trust Boundary）
     match &atom.trust_level {
         TrustLevel::Trusted => {
@@ -3424,8 +3557,12 @@ fn verify_inner(
     if let Err(e) = verify_effect_containment(atom, &hir_atom.body_stmt, module_env) {
         // Save structured effect violation report for self-healing integration.
         // Extract missing effects from the error to produce a structured report.
-        let callees = collect_callees_stmt(&hir_atom.body_stmt);
         let allowed_leaves = module_env.resolve_leaf_effects_from_effects(&atom.effects);
+        let caller_effect_names: Vec<String> =
+            atom.effects.iter().map(|e| e.name.clone()).collect();
+
+        // まず callee ベースの違反を探す（effect_propagation）
+        let callees = collect_callees_stmt(&hir_atom.body_stmt);
         let mut missing_all: Vec<String> = Vec::new();
         let mut violating_callee = String::new();
         let mut callee_effs: Vec<String> = Vec::new();
@@ -3454,8 +3591,6 @@ fn verify_inner(
             }
         }
         if !missing_all.is_empty() {
-            let caller_effect_names: Vec<String> =
-                atom.effects.iter().map(|e| e.name.clone()).collect();
             save_effect_propagation_report(
                 output_dir,
                 &atom.name,
@@ -3464,6 +3599,38 @@ fn verify_inner(
                 &callee_effs,
                 &missing_all,
             );
+        } else {
+            // callee ループでは見つからなかった場合、atom_ref パラメータの effect_set 違反を確認する
+            for param in &atom.params {
+                if let Some(ref type_ref) = param.type_ref {
+                    if type_ref.is_fn_type() {
+                        if let Some(ref effect_set) = type_ref.effect_set {
+                            let param_leaves = module_env.resolve_leaf_effects(effect_set);
+                            let missing: Vec<String> = param_leaves
+                                .iter()
+                                .filter(|eff| {
+                                    !allowed_leaves.contains(*eff)
+                                        && !allowed_leaves
+                                            .iter()
+                                            .any(|allowed| module_env.is_subeffect(eff, allowed))
+                                })
+                                .cloned()
+                                .collect();
+                            if !missing.is_empty() {
+                                save_effect_polymorphism_report(
+                                    output_dir,
+                                    &atom.name,
+                                    &param.name,
+                                    effect_set,
+                                    &caller_effect_names,
+                                    &missing,
+                                );
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
         }
         return Err(e);
     }
