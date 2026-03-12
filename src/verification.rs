@@ -2350,6 +2350,76 @@ fn save_effect_propagation_report(
     );
 }
 
+/// Save an effect polymorphism violation report to report.json for self-healing integration.
+/// Called when an atom_ref parameter's effect_set is not a subset of the atom's declared effects.
+fn save_effect_polymorphism_report(
+    output_dir: &Path,
+    atom_name: &str,
+    param_name: &str,
+    param_effect_set: &[String],
+    declared_effects: &[String],
+    missing_effects: &[String],
+) {
+    let report = json!({
+        "status": "failed",
+        "atom": atom_name,
+        "violation_type": "effect_polymorphism",
+        "effect_violation": {
+            "atom": atom_name,
+            "param": param_name,
+            "param_effect_set": param_effect_set,
+            "declared_effects": declared_effects,
+            "missing_effects": missing_effects,
+            "suggested_fixes": [
+                format!(
+                    "Add {:?} to atom '{}' effects declaration: effects: [{}];",
+                    missing_effects,
+                    atom_name,
+                    declared_effects.iter().chain(missing_effects.iter()).cloned().collect::<Vec<_>>().join(", ")
+                ),
+                format!(
+                    "Change parameter '{}' to use only effects declared by '{}'",
+                    param_name, atom_name
+                )
+            ],
+            "resolution_paths": [
+                {
+                    "strategy": "propagation",
+                    "description": format!(
+                        "Add missing effects {:?} to atom '{}' effects declaration",
+                        missing_effects, atom_name
+                    ),
+                    "fix_type": "signature_change",
+                    "target": atom_name,
+                    "change": format!(
+                        "effects: [{}];",
+                        declared_effects.iter().chain(missing_effects.iter()).cloned().collect::<Vec<_>>().join(", ")
+                    )
+                },
+                {
+                    "strategy": "restriction",
+                    "description": format!(
+                        "Restrict parameter '{}' to use only effects in {:?}",
+                        param_name, declared_effects
+                    ),
+                    "fix_type": "param_change",
+                    "target": param_name
+                }
+            ]
+        },
+        "reason": format!(
+            "Effect polymorphism violation: atom '{}' accepts function parameter '{}' with effect {:?}, \
+             but '{}' only declares effects {:?}. Missing leaf effects: {:?}.",
+            atom_name, param_name, param_effect_set, atom_name, declared_effects, missing_effects
+        )
+    });
+    let _ = fs::create_dir_all(output_dir);
+    let _ = fs::write(
+        output_dir.join("report.json"),
+        serde_json::to_string_pretty(&report).unwrap_or_else(|_| report.to_string()),
+    );
+}
+
 #[derive(Debug, Clone, Default)]
 struct ResourceCtx {
     /// 現在保持中のリソース: (リソース名, 優先度)
@@ -3527,6 +3597,41 @@ fn verify_inner(
                 &callee_effs,
                 &missing_all,
             );
+        } else {
+            // callee ループでは見つからなかった場合、atom_ref パラメータの effect_set 違反を確認する
+            let allowed_leaves_ref = module_env.resolve_leaf_effects_from_effects(&atom.effects);
+            for param in &atom.params {
+                if let Some(ref type_ref) = param.type_ref {
+                    if type_ref.is_fn_type() {
+                        if let Some(ref effect_set) = type_ref.effect_set {
+                            let param_leaves = module_env.resolve_leaf_effects(effect_set);
+                            let missing: Vec<String> = param_leaves
+                                .iter()
+                                .filter(|eff| {
+                                    !allowed_leaves_ref.contains(*eff)
+                                        && !allowed_leaves_ref
+                                            .iter()
+                                            .any(|allowed| module_env.is_subeffect(eff, allowed))
+                                })
+                                .cloned()
+                                .collect();
+                            if !missing.is_empty() {
+                                let caller_effect_names: Vec<String> =
+                                    atom.effects.iter().map(|e| e.name.clone()).collect();
+                                save_effect_polymorphism_report(
+                                    output_dir,
+                                    &atom.name,
+                                    &param.name,
+                                    effect_set,
+                                    &caller_effect_names,
+                                    &missing,
+                                );
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
         }
         return Err(e);
     }

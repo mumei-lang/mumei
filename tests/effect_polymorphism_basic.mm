@@ -1,3 +1,8 @@
+// NOTE: This file tests effect polymorphism end-to-end.
+// The expression parser does not yet support generic calls like `pipe<FileWrite>(...)`.
+// Run with: cargo run -- verify tests/effect_polymorphism_basic.mm
+// The monomorphizer requires item-level instance registration (see src/ast.rs tests).
+
 effect FileWrite;
 
 atom writer(x: i64)
