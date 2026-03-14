@@ -61,6 +61,7 @@ pub struct HirEffectSet {
     /// Effect names that this node may produce (BTreeSet for deterministic iteration order)
     pub effects: BTreeSet<String>,
     /// Parameterized effect usages (consumed by future LSP/diagnostic passes)
+    // NOTE: parameterized is populated during lowering and consumed by future LSP/diagnostic passes.
     #[allow(dead_code)]
     pub parameterized: Vec<HirEffectUsage>,
 }
@@ -68,6 +69,7 @@ pub struct HirEffectSet {
 /// Structured effect usage information for parameterized effects.
 /// Fields are populated during lowering and available for future LSP/diagnostic consumers.
 #[derive(Debug, Clone)]
+// NOTE: HirEffectUsage is populated during lowering. Not yet referenced in current pipeline.
 #[allow(dead_code)]
 pub struct HirEffectUsage {
     pub effect_name: String,
@@ -93,6 +95,7 @@ pub enum HirExpr {
         args: Vec<HirExpr>,
         /// Effects the callee may produce (populated during lowering when ModuleEnv is available)
         /// Consumed by future LSP hover and diagnostic passes.
+        // NOTE: callee_effects is populated during lowering when ModuleEnv is available. Consumed by future LSP hover passes.
         #[allow(dead_code)]
         callee_effects: Option<HirEffectSet>,
     },
@@ -124,6 +127,7 @@ pub enum HirExpr {
         operation: String,
         args: Vec<HirExpr>,
         /// Structured effect usage info (consumed by future LSP/diagnostic passes)
+        // NOTE: effect_usage is populated during lowering. Consumed by future LSP/diagnostic passes.
         #[allow(dead_code)]
         effect_usage: Option<HirEffectUsage>,
     },

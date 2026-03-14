@@ -3658,12 +3658,9 @@ fn verify_inner(
     verify_call_graph_cycles(atom, module_env)?;
 
     // Phase 1f: エフェクト整合性チェック（宣言 vs 推論、警告レベル）
-    if let Err(e) = verify_effect_consistency(atom, module_env) {
-        eprintln!(
-            "  ⚠️  Effect consistency warning for '{}': {}",
-            atom.name, e
-        );
-    }
+    // Note: verify_effect_consistency always returns Ok(()) — warnings are emitted
+    // via eprintln! inside the function itself.
+    let _ = verify_effect_consistency(atom, module_env);
 
     // Phase 1g: エフェクトパラメータ制約検証
     verify_effect_params(atom, module_env)?;
