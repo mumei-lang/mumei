@@ -2,6 +2,41 @@
 
 ---
 
+## PR #69: Phase 4a Wiring + HIR Effect Types (Task 5) + Capability Security (Task 6)
+
+### Summary
+
+Completes Phase 4a LinearityCtx wiring, adds HIR effect type information, and evaluates capability security for the parameterized effect system.
+
+### Part A — LinearityCtx Wiring (Phase 4a completion)
+
+- `VCtx` gains `linearity_ctx` and `effect_ctx` fields (wrapped in `RefCell` for interior mutability)
+- `check_alive()` wired into `expr_to_z3` Variable branch for use-after-consume detection
+- `borrow()`/`release_borrow()` wired into call-site ref/ref-mut argument handling
+- Removed `#[allow(dead_code)]` from `borrow`, `release_borrow`, `check_alive`
+
+### Part B — HIR Effect Type Information (Task 5)
+
+- New types: `HirEffectSet` (`BTreeSet<String>` for deterministic iteration), `HirEffectUsage`
+- Added `effect_set` to `HirAtom`, `callee_effects` to `HirExpr::Call`, `effect_usage` to `HirExpr::Perform`
+- New `lower_atom_to_hir_with_env()` populates effect info from `ModuleEnv`
+- Codegen + all 3 transpilers read from `hir_atom.effect_set.effects` with `atom.effects` fallback for parameterized detail
+
+### Part C — Capability Security (Task 6)
+
+- `verify_effect_params()` and `verify_effect_consistency()` wired into `verify_inner()`
+- `EffectCtx` wired into `VCtx` and `Perform` handling in `expr_to_z3`
+- `SecurityPolicy` field added to `ModuleEnv`; `is_effect_allowed` check in Perform handler
+- `build_effect_feedback()` wired into `verify_effect_containment()` error path (human-readable explanation)
+- `docs/CAPABILITY_SECURITY.md`: evaluation document recommending Option A (parameterized effects + Z3)
+
+### Test Results
+
+- 140 existing Rust unit tests pass
+- New test `.mm` files: `test_borrow_tracking.mm`, `test_use_after_consume.mm`, `test_capability_evaluation.mm`
+
+---
+
 ## Four-Task Implementation: Parser Migration + Extern Codegen + Span Fix + MIR Foundation
 
 ### Summary
@@ -417,9 +452,14 @@ This PR implements dynamic memory management, ownership system, borrowing, and c
 
 The following data structures and logic are implemented but not yet wired into the compiler pipeline:
 
-| Item | Data Structure | Missing Integration |
+| Item | Data Structure | Status |
 |---|---|---|
-| Struct method parsing | `StructDef.method_names` | Parser for `impl Stack { atom push(...) }` syntax |
-| Trait method constraints | `TraitMethod.param_constraints` | Z3 injection in `verify_impl` and inter-atom calls |
-| Automatic borrow tracking | `LinearityCtx.borrow()` / `release_borrow()` | ✅ Integrated — call-site `ref` arg → borrow/release_borrow in `expr_to_z3` |
-| Use-after-consume detection | `LinearityCtx.check_alive()` | ✅ Integrated — variable access check in `expr_to_z3` `Variable` branch |
+| Struct method parsing | `StructDef.method_names` | ⏳ Parser for `impl Stack { atom push(...) }` syntax |
+| Trait method constraints | `TraitMethod.param_constraints` | ⏳ Z3 injection in `verify_impl` and inter-atom calls |
+| Automatic borrow tracking | `LinearityCtx.borrow()` / `release_borrow()` | ✅ Integrated (PR #69) |
+| Use-after-consume detection | `LinearityCtx.check_alive()` | ✅ Integrated (PR #69) |
+| Effect tracking context | `EffectCtx` | ✅ Integrated (PR #69) |
+| Security policy enforcement | `SecurityPolicy` | ✅ Integrated (PR #69) |
+| Effect consistency check | `verify_effect_consistency()` | ✅ Integrated (PR #69, warning level) |
+| Effect parameter constraints | `verify_effect_params()` | ✅ Integrated (PR #69) |
+| Effect feedback | `build_effect_feedback()` | ✅ Integrated (PR #69) |

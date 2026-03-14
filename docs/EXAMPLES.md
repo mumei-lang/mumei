@@ -86,7 +86,7 @@ examples/import_test/
 ---
 ## Higher-Order Functions Demo (`examples/higher_order_demo.mm`)
 
-Demonstrates `atom_ref` + `call` for first-class function references:
+Demonstrates `atom_ref` + `call` + `contract()` for first-class function references with Z3-verified contracts:
 
 ```mumei
 atom increment(x: i64)
@@ -94,10 +94,11 @@ atom increment(x: i64)
     ensures: result == x + 1;
     body: x + 1;
 
-// Parametric function-type parameter — must be trusted (Phase A limitation)
-trusted atom apply(x: i64, f: atom_ref(i64) -> i64)
+// contract(f) lets Z3 verify without trusted (Phase B: call_with_contract)
+atom apply(x: i64, f: atom_ref(i64) -> i64)
     requires: x >= 0;
     ensures: result >= 0;
+    contract(f): ensures: result >= 0;
     body: call(f, x);
 
 // At call site, increment's contract IS propagated via atom_ref
