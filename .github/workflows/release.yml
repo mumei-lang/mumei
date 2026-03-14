@@ -90,13 +90,32 @@ jobs:
         run: |
           mkdir -p gh-pages-dist
           cp scripts/install.sh gh-pages-dist/install.sh
+          # Disable Jekyll processing (static site)
+          touch gh-pages-dist/.nojekyll
           cat > gh-pages-dist/index.html <<'HTMLEOF'
           <!DOCTYPE html>
           <html lang="en">
           <head>
             <meta charset="utf-8">
             <meta name="viewport" content="width=device-width, initial-scale=1">
-            <title>Mumei — Quick Start</title>
+            <title>Mumei — Mathematical Proof-Driven Programming Language</title>
+            <meta name="description" content="Mumei (無銘) is a mathematical proof-driven programming language. Formally verified with Z3, compiled to LLVM IR, transpiled to Rust/Go/TypeScript.">
+            <link rel="canonical" href="https://mumei-lang.github.io/mumei/">
+            <!-- Open Graph -->
+            <meta property="og:title" content="Mumei — Mathematical Proof-Driven Programming Language">
+            <meta property="og:description" content="Formally verified with Z3, compiled to LLVM IR, transpiled to Rust/Go/TypeScript.">
+            <meta property="og:url" content="https://mumei-lang.github.io/mumei/">
+            <meta property="og:type" content="website">
+            <meta property="og:site_name" content="Mumei">
+            <!-- Twitter Card -->
+            <meta name="twitter:card" content="summary">
+            <meta name="twitter:title" content="Mumei — Mathematical Proof-Driven Programming Language">
+            <meta name="twitter:description" content="Formally verified with Z3, compiled to LLVM IR, transpiled to Rust/Go/TypeScript.">
+            <!-- Additional SEO -->
+            <meta name="keywords" content="mumei, programming language, formal verification, Z3, LLVM, Rust, Go, TypeScript, proof-driven, mathematical verification">
+            <meta name="author" content="mumei-lang">
+            <meta name="robots" content="index, follow">
+            <link rel="sitemap" type="application/xml" href="/mumei/sitemap.xml">
             <style>
               :root { --bg: #0d1117; --fg: #c9d1d9; --accent: #58a6ff; --code-bg: #161b22; --border: #30363d; }
               * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -156,6 +175,31 @@ jobs:
           </body>
           </html>
           HTMLEOF
+      - name: Generate sitemap.xml and robots.txt
+        run: |
+          TODAY=$(date -u +%Y-%m-%d)
+          cat > gh-pages-dist/sitemap.xml <<SITEMAPEOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+            <url>
+              <loc>https://mumei-lang.github.io/mumei/</loc>
+              <lastmod>${TODAY}</lastmod>
+              <changefreq>monthly</changefreq>
+              <priority>1.0</priority>
+            </url>
+            <url>
+              <loc>https://mumei-lang.github.io/mumei/install.sh</loc>
+              <lastmod>${TODAY}</lastmod>
+              <changefreq>monthly</changefreq>
+              <priority>0.5</priority>
+            </url>
+          </urlset>
+          SITEMAPEOF
+          cat > gh-pages-dist/robots.txt <<'ROBOTSEOF'
+          User-agent: *
+          Allow: /
+          Sitemap: https://mumei-lang.github.io/mumei/sitemap.xml
+          ROBOTSEOF
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v4
         with:
