@@ -4,12 +4,12 @@
 
 ```
 source.mm → parse → resolve → monomorphize → lower_to_hir → verify (Z3) → codegen (LLVM IR) → transpile (Rust/Go/TS)
-                                                    ↑
-                                      HIR: Expr/Stmt separation, type annotation
-                                      Resource Hierarchy Check (deadlock-free proof)
-                                      Effect Containment Check (side-effect safety proof)
-                                      Async Safety Verification (ownership across await)
-                                      // TODO: → lower_to_mir → borrow check → verify
+                                                    ↑                          ↑
+                                      HIR: Expr/Stmt separation         lower_to_mir (Phase 4b)
+                                      Resource Hierarchy Check           CFG-based MIR for
+                                      Effect Containment Check           borrow checking (future)
+                                      Async Safety Verification
+                                      LinearityCtx wiring (Phase 4a)
 ```
 
 ## Source Files
@@ -22,7 +22,8 @@ source.mm → parse → resolve → monomorphize → lower_to_hir → verify (Z3
 | `src/parser/lexer.rs` | `Lexer` struct — converts source string to `Vec<SpannedToken>` with span info |
 | `src/parser/ast.rs` | All AST type definitions (`Expr`, `Stmt`, `Item`, `Atom`, `StructDef`, `EnumDef`, etc.) |
 | `src/parser/expr.rs` | Expression/statement parsing with Pratt parser (operator precedence via binding power table) |
-| `src/parser/item.rs` | Top-level item parsing — still regex-based internally for atom/struct/enum/trait bodies, `contract()` clause parsing for higher-order function parameters |
+| `src/parser/item.rs` | Top-level item parsing — fully migrated to recursive descent (no regex), `contract()` clause parsing for higher-order function parameters |
+| `src/mir.rs` | MIR (Mid-level IR) definitions — CFG-based BasicBlocks, three-address code, basic HIR → MIR lowering |
 | `src/parser/pattern.rs` | Pattern parsing for match arms |
 | `src/ast.rs` | `TypeRef`, `Monomorphizer` — generic type expansion engine |
 | `src/resolver.rs` | Import resolution, circular detection, prelude auto-load, incremental build cache |

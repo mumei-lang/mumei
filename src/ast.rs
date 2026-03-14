@@ -570,9 +570,10 @@ impl Monomorphizer {
                             }
                         } else {
                             // 通常のトレイト境界: impl が存在するか確認
-                            if let Err(e) =
-                                menv.check_trait_bounds(&concrete_name, &[trait_name.clone()])
-                            {
+                            if let Err(e) = menv.check_trait_bounds(
+                                &concrete_name,
+                                std::slice::from_ref(trait_name),
+                            ) {
                                 eprintln!(
                                     "  \u{26a0}\u{fe0f}  Trait bound violation in monomorphization of '{}': {}",
                                     mono_name, e
@@ -648,7 +649,9 @@ impl Monomorphizer {
                     let param = &bound.param;
                     let concrete = &concrete_type_ref.name;
                     if let Ok(re) = regex::Regex::new(&format!(r"\b{}\b", regex::escape(param))) {
-                        mono_requires = re.replace_all(&mono_requires, concrete.as_str()).to_string();
+                        mono_requires = re
+                            .replace_all(&mono_requires, concrete.as_str())
+                            .to_string();
                         mono_ensures = re.replace_all(&mono_ensures, concrete.as_str()).to_string();
                     }
                 }

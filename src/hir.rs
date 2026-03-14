@@ -10,10 +10,16 @@
 // =============================================================================
 
 // =============================================================================
-// TODO: MIR (Mid-level IR) — CFG ベースの中間表現
+// MIR (Mid-level IR) — CFG ベースの中間表現
 // =============================================================================
-// 前提条件: 借用検査（Borrow Checking）の設計が確定してから導入する。
-// MIR は制御フローグラフ（CFG）をグラフ構造として持ち、以下の解析に使用予定:
+// Phase 4b: MIR data structures and basic HIR → MIR lowering are now defined
+// in src/mir.rs. The lowering covers:
+//   - Let / Assign → MirStatement::Assign + StorageLive
+//   - BinaryOp → flattened temporaries + Rvalue::BinaryOp
+//   - IfThenElse → 3+ BasicBlocks with SwitchInt terminator
+//   - While → loop header / body / after blocks with back-edge
+//   - Call → Rvalue::Call
+// Future phases will add:
 //   - 借用の生存期間（Lifetime）解析
 //   - Z3 への制約生成の最適化
 //   - Drop の自動挿入

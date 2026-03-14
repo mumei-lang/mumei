@@ -35,7 +35,7 @@ pub fn parse_pattern(ctx: &mut ParseContext) -> Pattern {
             let name = name.clone();
             ctx.advance();
 
-            if name.chars().next().map_or(false, |c| c.is_uppercase()) {
+            if name.chars().next().is_some_and(|c| c.is_uppercase()) {
                 // Uppercase → Variant pattern
                 if ctx.peek() == &Token::LParen {
                     ctx.advance(); // (
