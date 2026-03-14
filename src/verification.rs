@@ -927,8 +927,6 @@ pub fn build_linearity_feedback(
 }
 
 /// Build semantic feedback for effect containment violations.
-/// NOTE: Currently unused; will be wired into verify_effect_containment in Commit 3.
-#[allow(dead_code)]
 pub fn build_effect_feedback(
     atom_name: &str,
     attempted_effect: &str,
@@ -964,6 +962,8 @@ struct VCtx<'a> {
     /// Wrapped in RefCell so that recursive expr_to_z3/stmt_to_z3 calls can
     /// mutate it without changing every call-site signature.
     linearity_ctx: Option<&'a std::cell::RefCell<LinearityCtx>>,
+    /// EffectCtx for tracking allowed vs used effects during body evaluation.
+    effect_ctx: Option<&'a std::cell::RefCell<EffectCtx>>,
 }
 
 // =============================================================================
@@ -1054,7 +1054,6 @@ impl LinearityCtx {
     /// 変数を借用する（読み取り専用の参照）
     /// 借用中は所有者が consume/free できなくなる。
     /// borrower_name: 借用する側の変数名（ライフタイム追跡用）
-    #[allow(dead_code)]
     pub fn borrow(&mut self, owner_name: &str, borrower_name: &str) -> Result<(), String> {
         // 生存チェック: 消費済み変数は借用できない
         if let Some(false) = self.alive.get(owner_name) {
@@ -1076,7 +1075,6 @@ impl LinearityCtx {
     }
 
     /// 借用を解放する
-    #[allow(dead_code)]
     pub fn release_borrow(&mut self, owner_name: &str, borrower_name: &str) {
         if let Some(count) = self.borrow_count.get_mut(owner_name) {
             if *count > 0 {
@@ -1090,7 +1088,6 @@ impl LinearityCtx {
 
     /// 変数が生存しているかチェックする
     /// 消費済み変数へのアクセスはエラーを記録する
-    #[allow(dead_code)]
     pub fn check_alive(&mut self, name: &str) -> Result<(), String> {
         if let Some(false) = self.alive.get(name) {
             let msg = format!(
@@ -1104,6 +1101,7 @@ impl LinearityCtx {
     }
 
     /// 変数が借用中かどうかを確認する
+    /// Available for future borrow-conflict diagnostic passes.
     #[allow(dead_code)]
     pub fn is_borrowed(&self, name: &str) -> bool {
         self.borrow_count.get(name).is_some_and(|&c| c > 0)
@@ -1169,6 +1167,8 @@ pub struct ModuleEnv {
     pub dependency_graph: HashMap<String, HashSet<String>>,
     /// Reverse dependency graph: atom_name → set of atoms that call it
     pub reverse_deps: HashMap<String, HashSet<String>>,
+    /// Security policy for effect parameter constraint enforcement
+    pub security_policy: Option<SecurityPolicy>,
 }
 
 impl ModuleEnv {
@@ -1881,6 +1881,7 @@ pub fn verify_impl(
             module_env,
             current_atom: None,
             linearity_ctx: None,
+            effect_ctx: None,
         };
 
         let mut env: Env = HashMap::new();
@@ -1999,11 +2000,11 @@ pub fn verify_impl(
 /// Used by SecurityPolicy to define which effects (and under what conditions)
 /// are permitted in the current session.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct AllowedEffect {
     pub effect_name: String,
     /// Parameter constraints as (param_name, constraint_expr) pairs.
     /// E.g., ("path", "starts_with(path, \"/tmp/\")") for FileRead.
+    #[allow(dead_code)]
     pub param_constraints: Vec<(String, String)>,
 }
 
@@ -2011,7 +2012,6 @@ pub struct AllowedEffect {
 /// Enforced during effect containment verification.
 /// Can be set dynamically via the MCP server's set_allowed_effects tool.
 #[derive(Debug, Clone, Default)]
-#[allow(dead_code)]
 pub struct SecurityPolicy {
     pub allowed_effects: Vec<AllowedEffect>,
 }
@@ -2129,7 +2129,6 @@ fn evaluate_string_constraint(constraint_expr: &str, _param_name: &str, value: &
 
 /// Effect verification context — tracks allowed and used effects per atom scope.
 #[derive(Debug, Clone, Default)]
-#[allow(dead_code)]
 struct EffectCtx {
     /// Effects allowed in the current scope (from atom's effects annotation, transitively expanded)
     allowed_effects: HashSet<String>,
@@ -2139,7 +2138,6 @@ struct EffectCtx {
     violations: Vec<String>,
 }
 
-#[allow(dead_code)]
 impl EffectCtx {
     fn new(allowed: HashSet<String>) -> Self {
         Self {
@@ -2198,17 +2196,22 @@ fn verify_effect_containment(
                     .cloned()
                     .collect();
                 if !missing.is_empty() {
+                    let allowed_strs: Vec<String> =
+                        atom.effects.iter().map(|e| e.name.clone()).collect();
+                    let feedback =
+                        build_effect_feedback(&atom.name, &missing[0], &allowed_strs, &missing);
                     return Err(MumeiError::verification_at(
                         format!(
                             "Effect propagation violation: atom '{}' calls '{}' which requires \
                              {:?} effect(s), but '{}' only declares effects: {:?}. \
-                             Missing: {:?}.",
+                             Missing: {:?}. Feedback: {}",
                             atom.name,
                             callee_name,
                             callee_atom.effects,
                             atom.name,
                             atom.effects,
                             missing,
+                            feedback,
                         ),
                         atom.span.clone(),
                     )
@@ -2907,6 +2910,7 @@ fn verify_atom_invariant(
         module_env,
         current_atom: Some(atom),
         linearity_ctx: None,
+        effect_ctx: None,
     };
 
     let mut env: Env = HashMap::new();
@@ -3360,8 +3364,6 @@ pub fn infer_effects_json(items: &[Item], module_env: &ModuleEnv) -> serde_json:
 
 /// エフェクト整合性検証: 宣言されたエフェクトと推論されたエフェクトの比較。
 /// エフェクト階層の Subtyping も考慮する。
-// NOTE: verify_effect_consistency will be integrated into verify_inner pipeline in a future PR
-#[allow(dead_code)]
 fn verify_effect_consistency(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult<()> {
     let declared: Vec<String> = atom.effects.iter().map(|e| e.name.clone()).collect();
     let body_stmt_eff = parse_body_expr(&atom.body_expr);
@@ -3397,8 +3399,6 @@ fn verify_effect_consistency(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult
 
 /// 定数制約チェック（Constant Folding）。
 /// 定数パスに対する制約を Rust 側で直接検証する。
-// NOTE: check_constant_constraint is called by verify_effect_params (future pipeline integration)
-#[allow(dead_code)]
 fn check_constant_constraint(value: &str, constraint: &str) -> bool {
     // パーサーは "starts_with(path, \"/tmp/\")" のように2引数形式で制約を出力する。
     // 文字列引数（最後のクォートされた値）を抽出して検証する。
@@ -3444,8 +3444,6 @@ fn check_constant_constraint(value: &str, constraint: &str) -> bool {
 /// エフェクトパラメータの検証。
 /// 定数パスは Rust 側で直接チェック（Constant Folding）。
 /// 変数パスは Z3 Int で検証（Symbolic String ID）。
-// NOTE: verify_effect_params will be integrated into verify_inner pipeline in a future PR
-#[allow(dead_code)]
 fn verify_effect_params(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult<()> {
     for effect in &atom.effects {
         // effect_defs を優先、なければ effects を参照
@@ -3655,6 +3653,17 @@ fn verify_inner(
     // Phase 1e: Call Graph サイクル検知（間接再帰の検出）
     verify_call_graph_cycles(atom, module_env)?;
 
+    // Phase 1f: エフェクト整合性チェック（宣言 vs 推論、警告レベル）
+    if let Err(e) = verify_effect_consistency(atom, module_env) {
+        eprintln!(
+            "  ⚠️  Effect consistency warning for '{}': {}",
+            atom.name, e
+        );
+    }
+
+    // Phase 1g: エフェクトパラメータ制約検証
+    verify_effect_params(atom, module_env)?;
+
     let mut cfg = Config::new();
     cfg.set_timeout_msec(timeout_ms);
     let ctx = Context::new(&cfg);
@@ -3665,12 +3674,16 @@ fn verify_inner(
     // linearity_ctx is wrapped in RefCell so expr_to_z3/stmt_to_z3 can mutate it
     // without requiring signature changes to every recursive call site.
     let linearity_ctx_cell = std::cell::RefCell::new(LinearityCtx::new());
+    // Build EffectCtx from the atom's declared effects (transitively resolved)
+    let allowed_effects_set = module_env.resolve_effect_set_from_effects(&atom.effects);
+    let effect_ctx_cell = std::cell::RefCell::new(EffectCtx::new(allowed_effects_set));
     let vc = VCtx {
         ctx: &ctx,
         arr: &arr,
         module_env,
         current_atom: Some(atom),
         linearity_ctx: Some(&linearity_ctx_cell),
+        effect_ctx: Some(&effect_ctx_cell),
     };
 
     let mut env: Env = HashMap::new();
@@ -4521,6 +4534,19 @@ fn expr_to_z3<'a>(
                             )?;
                         }
 
+                        // Release borrows after call returns.
+                        // Once the callee has finished, ref/ref mut borrows are released
+                        // so the owner can be consumed or re-borrowed.
+                        if let Some(lctx_cell) = vc.linearity_ctx {
+                            for (i, param) in callee.params.iter().enumerate() {
+                                if param.is_ref || param.is_ref_mut {
+                                    if let Some(Expr::Variable(arg_name)) = args.get(i) {
+                                        lctx_cell.borrow_mut().release_borrow(arg_name, name);
+                                    }
+                                }
+                            }
+                        }
+
                         // Taint Analysis: 呼び出し先が unverified の場合、
                         // 戻り値を __tainted_ マーカーで汚染済みとしてマークする。
                         if callee.trust_level == TrustLevel::Unverified {
@@ -4927,6 +4953,26 @@ fn expr_to_z3<'a>(
             let used_name = format!("__effect_used_{}", effect);
             let used_bool = Bool::from_bool(ctx, true);
             env.insert(used_name.clone(), used_bool.into());
+
+            // Wire EffectCtx: track the performed effect
+            if let Some(ectx_cell) = vc.effect_ctx {
+                let mut ectx = ectx_cell.borrow_mut();
+                // Record usage; violations are warnings here (Z3 check below is authoritative)
+                let _ = ectx.perform_effect(effect);
+            }
+
+            // Check SecurityPolicy parameter constraints if available.
+            // Currently only checks constant arguments (Number-based path IDs);
+            // symbolic arguments are validated via Z3 constraints in verify_effect_params.
+            if let Some(ref policy) = vc.module_env.security_policy {
+                if !policy.is_effect_allowed(effect) {
+                    return Err(MumeiError::verification(format!(
+                        "Security policy violation: effect '{}' is not permitted by the \
+                         current security policy",
+                        effect
+                    )));
+                }
+            }
 
             // Check against allowed effects via Z3 environment
             let allowed_name = format!("__effect_allowed_{}", effect);

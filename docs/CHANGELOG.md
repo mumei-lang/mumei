@@ -421,5 +421,5 @@ The following data structures and logic are implemented but not yet wired into t
 |---|---|---|
 | Struct method parsing | `StructDef.method_names` | Parser for `impl Stack { atom push(...) }` syntax |
 | Trait method constraints | `TraitMethod.param_constraints` | Z3 injection in `verify_impl` and inter-atom calls |
-| Automatic borrow tracking | `LinearityCtx.borrow()` / `release_borrow()` | Call-site `ref` arg → borrow registration in `expr_to_z3` |
-| Use-after-consume detection | `LinearityCtx.check_alive()` | Variable access check in `expr_to_z3` `Variable` branch |
+| Automatic borrow tracking | `LinearityCtx.borrow()` / `release_borrow()` | ✅ Integrated — call-site `ref` arg → borrow/release_borrow in `expr_to_z3` |
+| Use-after-consume detection | `LinearityCtx.check_alive()` | ✅ Integrated — variable access check in `expr_to_z3` `Variable` branch |

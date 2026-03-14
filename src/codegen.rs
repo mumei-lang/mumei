@@ -129,20 +129,27 @@ pub fn compile(
     }
 
     // エフェクト情報を .ll ファイル先頭にコメントとして追記する（後処理）
-    let effects_comment = if !atom.effects.is_empty() {
-        let effects_str: Vec<String> = atom
+    // HIR の effect_set から読み取る（パラメータ付きエフェクトは atom.effects にフォールバック）
+    let effects_comment = if !hir_atom.effect_set.effects.is_empty() {
+        let effects_str: Vec<String> = hir_atom
+            .effect_set
             .effects
             .iter()
-            .map(|e| {
-                if e.params.is_empty() {
-                    e.name.clone()
+            .map(|name| {
+                // パラメータ付きエフェクトの詳細は atom.effects から取得
+                if let Some(e) = atom.effects.iter().find(|e| &e.name == name) {
+                    if e.params.is_empty() {
+                        name.clone()
+                    } else {
+                        let params: Vec<String> = e
+                            .params
+                            .iter()
+                            .map(|p| format!("\"{}\"", p.value))
+                            .collect();
+                        format!("{}({})", name, params.join(", "))
+                    }
                 } else {
-                    let params: Vec<String> = e
-                        .params
-                        .iter()
-                        .map(|p| format!("\"{}\"", p.value))
-                        .collect();
-                    format!("{}({})", e.name, params.join(", "))
+                    name.clone()
                 }
             })
             .collect();
@@ -354,7 +361,7 @@ fn compile_hir_expr<'a>(
             .cloned()
             .ok_or_else(|| MumeiError::codegen(format!("Undefined variable: {}", name))),
 
-        HirExpr::Call { name, args } => match name.as_str() {
+        HirExpr::Call { name, args, .. } => match name.as_str() {
             "sqrt" => {
                 let arg = compile_hir_expr(
                     context, builder, module, function, &args[0], variables, array_ptrs, module_env,
@@ -938,6 +945,7 @@ fn compile_hir_expr<'a>(
             effect,
             operation,
             args: perform_args,
+            ..
         } => {
             let fn_name = format!("__effect_{}_{}", effect, operation);
 

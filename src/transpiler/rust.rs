@@ -184,14 +184,16 @@ pub fn transpile_to_rust(hir_atom: &HirAtom) -> String {
     };
 
     let async_keyword = if atom.is_async { "async " } else { "" };
-    let effects_comment = if atom.effects.is_empty() {
+    let effects_comment = if hir_atom.effect_set.effects.is_empty() {
         String::new()
     } else {
         format!(
             "\n/// Effects: [{}]",
-            atom.effects
+            hir_atom
+                .effect_set
+                .effects
                 .iter()
-                .map(|e| e.to_string())
+                .cloned()
                 .collect::<Vec<_>>()
                 .join(", ")
         )
@@ -304,7 +306,7 @@ fn format_hir_expr_rust(expr: &HirExpr) -> String {
             format!("{}[{} as usize]", name, format_hir_expr_rust(idx))
         }
 
-        HirExpr::Call { name, args } => {
+        HirExpr::Call { name, args, .. } => {
             let args_str: Vec<String> = args.iter().map(format_hir_expr_rust).collect();
             match name.as_str() {
                 "sqrt" => {
@@ -414,6 +416,7 @@ fn format_hir_expr_rust(expr: &HirExpr) -> String {
             effect,
             operation,
             args,
+            ..
         } => {
             // Effects: perform Effect.operation(args) → function call
             let args_str: Vec<String> = args.iter().map(format_hir_expr_rust).collect();

@@ -306,7 +306,7 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &HirExpr) -> Operand {
             ));
             Operand::Place(Place::Local(tmp))
         }
-        HirExpr::Call { name, args } => {
+        HirExpr::Call { name, args, .. } => {
             let arg_ops: Vec<Operand> = args.iter().map(|a| lower_expr(ctx, a)).collect();
             let tmp = ctx.alloc_temp();
             ctx.emit(MirStatement::StorageLive(tmp.clone()));
@@ -389,6 +389,7 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &HirExpr) -> Operand {
             effect,
             operation,
             args,
+            ..
         } => {
             let arg_ops: Vec<Operand> = args.iter().map(|a| lower_expr(ctx, a)).collect();
             let tmp = ctx.alloc_temp();

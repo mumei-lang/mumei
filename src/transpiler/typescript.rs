@@ -229,14 +229,16 @@ pub fn transpile_to_ts(hir_atom: &HirAtom) -> String {
     } else {
         "number"
     };
-    let effects_comment = if atom.effects.is_empty() {
+    let effects_comment = if hir_atom.effect_set.effects.is_empty() {
         String::new()
     } else {
         format!(
             "\n * @effects [{}]",
-            atom.effects
+            hir_atom
+                .effect_set
+                .effects
                 .iter()
-                .map(|e| e.to_string())
+                .cloned()
                 .collect::<Vec<_>>()
                 .join(", ")
         )
@@ -254,7 +256,7 @@ fn format_hir_expr_ts(expr: &HirExpr) -> String {
         HirExpr::Variable(v) => v.clone(),
         HirExpr::ArrayAccess(name, idx) => format!("{}[{}]", name, format_hir_expr_ts(idx)),
 
-        HirExpr::Call { name, args } => {
+        HirExpr::Call { name, args, .. } => {
             let args_str: Vec<String> = args.iter().map(format_hir_expr_ts).collect();
             match name.as_str() {
                 "sqrt" => format!("Math.sqrt({})", args_str.join(", ")),
@@ -370,6 +372,7 @@ fn format_hir_expr_ts(expr: &HirExpr) -> String {
             effect,
             operation,
             args,
+            ..
         } => {
             // @effects perform Effect.operation(args) → function call
             let args_str: Vec<String> = args.iter().map(format_hir_expr_ts).collect();

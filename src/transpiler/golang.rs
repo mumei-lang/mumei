@@ -196,14 +196,16 @@ pub fn transpile_to_go(hir_atom: &HirAtom) -> String {
     } else {
         ""
     };
-    let effects_comment = if atom.effects.is_empty() {
+    let effects_comment = if hir_atom.effect_set.effects.is_empty() {
         String::new()
     } else {
         format!(
             "// Effects: [{}]\n",
-            atom.effects
+            hir_atom
+                .effect_set
+                .effects
                 .iter()
-                .map(|e| e.to_string())
+                .cloned()
                 .collect::<Vec<_>>()
                 .join(", ")
         )
@@ -247,7 +249,7 @@ fn format_hir_expr_go(expr: &HirExpr) -> String {
         HirExpr::Variable(v) => v.clone(),
         HirExpr::ArrayAccess(name, idx) => format!("{}[{}]", name, format_hir_expr_go(idx)),
 
-        HirExpr::Call { name, args } => {
+        HirExpr::Call { name, args, .. } => {
             // Standard Library 対応
             let args_str: Vec<String> = args.iter().map(format_hir_expr_go).collect();
             match name.as_str() {
@@ -366,6 +368,7 @@ fn format_hir_expr_go(expr: &HirExpr) -> String {
             effect,
             operation,
             args,
+            ..
         } => {
             // Effects: perform Effect.operation(args) → function call
             let args_str: Vec<String> = args.iter().map(format_hir_expr_go).collect();

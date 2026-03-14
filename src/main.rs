@@ -15,7 +15,9 @@ mod setup;
 mod transpiler;
 mod verification;
 
+#[cfg(test)]
 use crate::hir::lower_atom_to_hir;
+use crate::hir::lower_atom_to_hir_with_env;
 use crate::parser::{ImportDecl, Item};
 use crate::transpiler::{
     transpile, transpile_enum, transpile_impl, transpile_module_header, transpile_struct,
@@ -533,7 +535,7 @@ fn cmd_verify(input: &str) {
                         .filter(|tn| module_env.get_type(tn).is_some())
                         .collect();
 
-                    let hir_atom = lower_atom_to_hir(atom);
+                    let hir_atom = lower_atom_to_hir_with_env(atom, Some(&module_env));
                     match verification::verify(&hir_atom, output_dir, &module_env) {
                         Ok(_) => {
                             println!("  ⚖️  '{}': verified ✅", atom.name);
@@ -1253,7 +1255,7 @@ fn cmd_build(input: &str, output: &str) {
                 );
 
                 // HIR lowering: body_expr を1回だけパースして全ステージで再利用する
-                let hir_atom = lower_atom_to_hir(atom);
+                let hir_atom = lower_atom_to_hir_with_env(atom, Some(&module_env));
 
                 // --- 2. Verification (形式検証: Z3 + StdLib) ---
                 if skip_verify {
@@ -1529,7 +1531,7 @@ fn cmd_publish(proof_only: bool) {
                 atom_count += 1;
                 continue;
             }
-            let hir_atom = lower_atom_to_hir(atom);
+            let hir_atom = lower_atom_to_hir_with_env(atom, Some(&module_env));
             match verification::verify(&hir_atom, output_dir, &module_env) {
                 Ok(_) => {
                     println!("  ⚖️  '{}': verified ✅", atom.name);
@@ -1795,7 +1797,7 @@ fn cmd_repl() {
                     if let parser::Item::Atom(atom) = item {
                         println!("  ✅ Parsed: atom {}()", atom.name);
                         if is_verify {
-                            let hir_atom = lower_atom_to_hir(atom);
+                            let hir_atom = lower_atom_to_hir_with_env(atom, Some(&module_env));
                             match verification::verify(&hir_atom, Path::new("."), &module_env) {
                                 Ok(()) => println!("  ✅ Verification passed"),
                                 Err(e) => eprintln!("  ❌ Verification failed: {}", e),
