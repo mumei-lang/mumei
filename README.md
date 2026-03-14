@@ -31,6 +31,19 @@ atom write_log(msg: Nat)
     };
 ```
 
+```mumei
+// Algebraic laws on traits — Z3 proves every impl satisfies them.
+trait Comparable {
+    fn leq(a: Self, b: Self) -> bool;
+    law reflexive: leq(x, x) == true;
+    law transitive: leq(a, b) && leq(b, c) => leq(a, c);
+}
+
+impl Comparable for i64 {
+    fn leq(a: i64, b: i64) -> bool { a <= b }
+}
+```
+
 ---
 
 ## Install
@@ -98,16 +111,71 @@ mumei build src/main.mm -o dist/output
 | Category | Highlights |
 |----------|-----------|
 | **Types** | Refinement types (`i64 where v >= 0`), Structs, Enums (ADT), Generics |
-| **Verification** | Pre/postconditions, loop invariants, termination, `forall`/`exists` quantifiers |
-| **Traits** | Algebraic laws verified by Z3 (`law reflexive: leq(x, x) == true`) |
-| **Ownership** | `ref` / `ref mut` / `consume` with Z3 aliasing prevention |
-| **Concurrency** | `async`/`await`, `task_group:all`/`task_group:any`, deadlock-free proof |
-| **Effects** | Compile-time side-effect verification, `perform`/`effects:` annotations, effect hierarchy with subtyping, parameterized effects (`FileRead(path)`, `HttpGet(url)`), **effect polymorphism (`<E: Effect>`)**, security policy enforcement |
-| **Lambda** | First-class closures `|x, y| x + y`, capture analysis, transpiles to Rust closures / TS arrows / Go func literals |
-| **Safety** | `trusted` / `unverified` atoms, taint analysis, BMC + inductive invariant, `call_with_contract` for higher-order function verification |
+| **Verification** | Pre/postconditions, [loop invariants + termination proof](docs/LANGUAGE.md#termination-checking), `forall`/`exists` quantifiers |
+| **Traits** | [Algebraic laws verified by Z3](docs/LANGUAGE.md#trait-definitions-with-laws) (`law reflexive: leq(x, x) == true`) |
+| **Ownership** | [`ref` / `ref mut` / `consume`](docs/LANGUAGE.md#ownership-and-borrowing) with Z3 aliasing prevention |
+| **Concurrency** | `async`/`await`, `task_group:all`/`task_group:any`, [deadlock-free proof via resource hierarchy](docs/LANGUAGE.md#asyncawait-and-resource-hierarchy) |
+| **Effects** | Compile-time side-effect verification, `perform`/`effects:`, effect hierarchy, parameterized effects, [effect polymorphism (`<E: Effect>`)](docs/LANGUAGE.md), [capability security](docs/CAPABILITY_SECURITY.md) |
+| **Lambda** | First-class closures `\|x, y\| x + y`, capture analysis, transpiles to Rust / TS / Go |
+| **Safety** | `trusted` / `unverified` atoms, taint analysis, BMC + inductive invariant, [`call_with_contract`](docs/LANGUAGE.md#higher-order-functions-phase-a) for higher-order function verification |
 | **Std Library** | Option, Result, List, BoundedArray, Vector, HashMap, sort algorithms, effect definitions |
 | **Output** | LLVM IR + Rust + Go + TypeScript transpiler |
 | **Tooling** | LSP server, VS Code extension, `mumei.toml` manifest, dependency manager, MCP server, Streamlit Visualizer, semantic feedback (bilingual EN/JP) |
+
+<details>
+<summary><b>More examples</b></summary>
+
+**Loop invariant + termination proof** — Z3 proves the loop terminates and the invariant holds inductively:
+
+```mumei
+atom sum_up_to(n: i64)
+    requires: n >= 0;
+    ensures: result >= 0;
+    body: {
+        let s = 0;
+        let i = 0;
+        while i < n
+        invariant: s >= 0 && i <= n
+        decreases: n - i
+        {
+            s = s + i;
+            i = i + 1;
+        };
+        s
+    };
+```
+
+**Higher-order function contracts** — `contract(f)` lets Z3 verify generic callbacks without `trusted`:
+
+```mumei
+atom apply_twice(x: i64, f: atom_ref(i64) -> i64)
+    requires: x >= 0;
+    ensures: result >= 0;
+    contract(f): requires: x >= 0, ensures: result >= 0;
+    body: {
+        let first = call(f, x);
+        call(f, first)
+    };
+```
+
+**Deadlock-free concurrency** — resource priorities are verified at compile time:
+
+```mumei
+resource db   priority: 1 mode: exclusive;
+resource cache priority: 2 mode: shared;
+
+async atom transfer(amount: i64)
+    resources: [db, cache];
+    requires: amount >= 0;
+    ensures: result >= 0;
+    body: {
+        acquire db { acquire cache { amount } }
+    };
+```
+
+See [Language Reference](docs/LANGUAGE.md) for full syntax documentation.
+
+</details>
 
 ### Rich Diagnostics
 
