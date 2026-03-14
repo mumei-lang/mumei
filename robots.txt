@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://mumei-lang.github.io/mumei/sitemap.xml
