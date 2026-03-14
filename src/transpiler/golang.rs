@@ -199,16 +199,19 @@ pub fn transpile_to_go(hir_atom: &HirAtom) -> String {
     let effects_comment = if hir_atom.effect_set.effects.is_empty() {
         String::new()
     } else {
-        format!(
-            "// Effects: [{}]\n",
-            hir_atom
-                .effect_set
-                .effects
-                .iter()
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
+        let effects_str: Vec<String> = hir_atom
+            .effect_set
+            .effects
+            .iter()
+            .map(|name| {
+                if let Some(e) = atom.effects.iter().find(|e| &e.name == name) {
+                    e.to_string()
+                } else {
+                    name.clone()
+                }
+            })
+            .collect();
+        format!("// Effects: [{}]\n", effects_str.join(", "))
     };
     format!(
         "{}{}{}// {} is a verified Atom.\n// Requires: {}\n// Ensures: {}\nfunc {}({}) int64 {{\n    {}\n}}",

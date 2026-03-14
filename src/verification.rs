@@ -2200,18 +2200,22 @@ fn verify_effect_containment(
                         atom.effects.iter().map(|e| e.name.clone()).collect();
                     let feedback =
                         build_effect_feedback(&atom.name, &missing[0], &allowed_strs, &missing);
+                    let feedback_explanation = feedback["explanation"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string();
                     return Err(MumeiError::verification_at(
                         format!(
                             "Effect propagation violation: atom '{}' calls '{}' which requires \
                              {:?} effect(s), but '{}' only declares effects: {:?}. \
-                             Missing: {:?}. Feedback: {}",
+                             Missing: {:?}. {}",
                             atom.name,
                             callee_name,
                             callee_atom.effects,
                             atom.name,
                             atom.effects,
                             missing,
-                            feedback,
+                            feedback_explanation,
                         ),
                         atom.span.clone(),
                     )

@@ -49,7 +49,7 @@
 // enforcement. Object-based capability model documented as future alternative.
 // =============================================================================
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 use crate::parser::{
     parse_body_expr, parse_expression, Atom, Expr, JoinSemantics, Op, Pattern, Stmt,
@@ -58,8 +58,8 @@ use crate::parser::{
 /// Effect set attached to HIR nodes.
 #[derive(Debug, Clone, Default)]
 pub struct HirEffectSet {
-    /// Effect names that this node may produce
-    pub effects: HashSet<String>,
+    /// Effect names that this node may produce (BTreeSet for deterministic iteration order)
+    pub effects: BTreeSet<String>,
     /// Parameterized effect usages (consumed by future LSP/diagnostic passes)
     #[allow(dead_code)]
     pub parameterized: Vec<HirEffectUsage>,
