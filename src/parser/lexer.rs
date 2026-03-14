@@ -242,7 +242,7 @@ impl<'a> Lexer<'a> {
             if c.is_ascii_digit() {
                 num_str.push(c);
                 self.advance();
-            } else if c == '.' && self.peek_next().map_or(false, |n| n.is_ascii_digit()) {
+            } else if c == '.' && self.peek_next().is_some_and(|n| n.is_ascii_digit()) {
                 // Only treat as float if digit follows the dot
                 is_float = true;
                 num_str.push(c);

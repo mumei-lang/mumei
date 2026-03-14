@@ -4,12 +4,12 @@
 
 ```
 source.mm → parse → resolve → monomorphize → lower_to_hir → verify (Z3) → codegen (LLVM IR) → transpile (Rust/Go/TS)
-                                                    ↑
-                                      HIR: Expr/Stmt separation, type annotation
-                                      Resource Hierarchy Check (deadlock-free proof)
-                                      Effect Containment Check (side-effect safety proof)
-                                      Async Safety Verification (ownership across await)
-                                      // TODO: → lower_to_mir → borrow check → verify
+                                                    ↑                          ↑
+                                      HIR: Expr/Stmt separation         lower_to_mir (Phase 4b)
+                                      Resource Hierarchy Check           CFG-based MIR for
+                                      Effect Containment Check           borrow checking (future)
+                                      Async Safety Verification
+                                      LinearityCtx wiring (Phase 4a)
 ```
 
 ## Source Files
@@ -22,13 +22,14 @@ source.mm → parse → resolve → monomorphize → lower_to_hir → verify (Z3
 | `src/parser/lexer.rs` | `Lexer` struct — converts source string to `Vec<SpannedToken>` with span info |
 | `src/parser/ast.rs` | All AST type definitions (`Expr`, `Stmt`, `Item`, `Atom`, `StructDef`, `EnumDef`, etc.) |
 | `src/parser/expr.rs` | Expression/statement parsing with Pratt parser (operator precedence via binding power table) |
-| `src/parser/item.rs` | Top-level item parsing — still regex-based internally for atom/struct/enum/trait bodies, `contract()` clause parsing for higher-order function parameters |
+| `src/parser/item.rs` | Top-level item parsing — fully migrated to recursive descent (no regex), `contract()` clause parsing for higher-order function parameters |
+| `src/mir.rs` | MIR (Mid-level IR) definitions — CFG-based BasicBlocks, three-address code, basic HIR → MIR lowering |
 | `src/parser/pattern.rs` | Pattern parsing for match arms |
 | `src/ast.rs` | `TypeRef`, `Monomorphizer` — generic type expansion engine |
 | `src/resolver.rs` | Import resolution, circular detection, prelude auto-load, incremental build cache |
 | `src/verification.rs` | Z3 verification, `ModuleEnv`, `LinearityCtx`, law expansion, equality propagation, resource hierarchy, BMC, async recursion depth, inductive invariant, trust boundary, `call_with_contract` (Phase B higher-order function verification) |
 | `src/codegen.rs` | LLVM IR generation — Pattern Matrix, StructType, malloc/free, nested extract_value |
-| `src/hir.rs` | HIR (High-level IR) definitions, AST → HIR lowering |
+| `src/hir.rs` | HIR (High-level IR) definitions, AST → HIR lowering, `HirEffectSet` on `HirAtom`/`HirExpr::Call`/`HirExpr::Perform` |
 | `src/transpiler/` | Multi-target: Rust (`&T`), Go (interface), TypeScript (`/* readonly */`) |
 | `src/main.rs` | CLI orchestrator — `build`/`verify`/`check`/`init` with incremental cache |
 
@@ -55,6 +56,7 @@ pub struct ModuleEnv {
     pub prefix_ranges: HashMap<String, (i64, i64)>,     // Path prefix → ID range
     pub dependency_graph: HashMap<String, HashSet<String>>, // atom → callees
     pub reverse_deps: HashMap<String, HashSet<String>>,     // atom → callers
+    pub security_policy: Option<SecurityPolicy>,            // Effect parameter constraints
 }
 ```
 
@@ -364,9 +366,11 @@ for tainted sources and warns if verification results depend on unverified code.
 1c. `verify_async_recursion_depth()`: Recursive async call depth limit
 1d. `verify_atom_invariant()`: Inductive invariant proof (base + preservation)
 1e. `verify_call_graph_cycles()`: Indirect recursion detection via DFS
-1f. `verify_effect_consistency()`: Effect inference + declared effects comparison (with subtyping)
+1f. `verify_effect_containment()`: Z3 proof of effect set inclusion
+1f. `verify_effect_consistency()`: Effect inference + declared effects comparison (warning level)
 1g. `verify_effect_params()`: Constant folding for literal paths + Z3 Int for variable paths
 2. `expr_to_z3(Acquire)`: Tracks `__resource_held_{name}` as Z3 Bool
+2b. `expr_to_z3(Perform)`: `EffectCtx` tracks usage + `SecurityPolicy` enforcement + Z3 containment check
 3. `expr_to_z3(Await)`: Resource-held-across-await + ownership consistency checks
 4. Body verification + **taint analysis** (`check_taint_propagation`)
 5. Standard `verify()` pipeline continues (requires/ensures/linearity)

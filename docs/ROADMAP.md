@@ -31,7 +31,7 @@ This is the **prerequisite** for std.http / std.json.
 - ✅ `ExternFn` / `ExternBlock` AST + Span
 - ✅ `Item::ExternBlock` all match arms covered
 - ✅ extern → ModuleEnv auto-registration (trusted atom) — implemented in PR #32
-- ❌ LLVM codegen (extern function declare + call)
+- ✅ LLVM codegen (extern function declare + call)
 
 **Implementation Plan**:
 
@@ -456,15 +456,17 @@ Future extensions to the effect subtyping system:
 | Phase 2.5 | Lambda / Closure Support | ✅ Done | Phase 2 |
 | Phase 2.5 | Semantic Feedback v2 (all failure types, bilingual) | ✅ Done | Phase 1 |
 | Phase 3 | Effect Polymorphism | ✅ Done | Phase 2 |
-| Phase 4 | MIR introduction (CFG for borrow checking) | ⏳ Planned | Borrow checking design finalized |
-| Phase 5 | Capability Security evaluation | ⏳ Planned | Phase 3 maturity assessment |
+| Phase 4 | MIR introduction (CFG for borrow checking) | 🚧 Phase 4a/4b done | LinearityCtx wired + MIR data structures |
+| Phase 5 | HIR Effect Type Information | ✅ Done | HirEffectSet on HirAtom/HirExpr, lower_atom_to_hir_with_env |
+| Phase 6 | Capability Security evaluation | ✅ Done | See docs/CAPABILITY_SECURITY.md |
 
 ### Why Phases 2–5 Are Deferred
 
 - **Phase 2 (Basic Effects)**: ✅ Complete — parameterized effects (`FileRead(path: Str)`, `HttpGet(url: Str)`) implemented with security policy enforcement. Standard library effects defined in `std/effects.mm`, `std/http.mm`, `std/file.mm`. Z3 verifies parameter constraints (e.g., `starts_with(path, "/tmp/")`) at compile time.
 - **Phase 3 (Effect Polymorphism)**: ✅ Complete — Effect polymorphism via `<E: Effect>` bounds and `with E` syntax. Resolved through monomorphization (same as type polymorphism).
 - **Phase 4 (MIR)**: A CFG-based intermediate representation is needed for borrow checking and lifetime analysis, but the borrow checking design itself is not yet started. Will be introduced after the design is finalized.
-- **Phase 5 (Capability Security)**: Evaluate the maturity of the current approach (verifying parameterized effects with Z3). If insufficient, introduce an object-based capability model.
+- **Phase 5 (HIR Effect Type Information)**: ✅ Complete — `HirEffectSet` attached to `HirAtom`, `HirExpr::Call`, `HirExpr::Perform`. `lower_atom_to_hir_with_env()` populates effect info from `ModuleEnv`. Codegen and all transpilers read effects from `hir_atom.effect_set`.
+- **Phase 6 (Capability Security)**: ✅ Complete — Evaluation documented in `docs/CAPABILITY_SECURITY.md`. Recommendation: Continue with parameterized effects + Z3 (Option A). `EffectCtx`, `SecurityPolicy`, `verify_effect_params`, `verify_effect_consistency`, `build_effect_feedback` all wired into the verification pipeline.
 
 ---
 

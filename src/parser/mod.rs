@@ -67,6 +67,14 @@ impl ParseContext {
         // Silently skip if not matching (backward compat with old parser behavior)
     }
 
+    pub fn tokens_ref(&self) -> &[SpannedToken] {
+        &self.tokens
+    }
+
+    pub fn pos(&self) -> usize {
+        self.pos
+    }
+
     pub fn expect_ident(&mut self) -> String {
         match self.peek().clone() {
             Token::Ident(s) => {
@@ -76,7 +84,7 @@ impl ParseContext {
             // Many keywords can appear as identifiers in various contexts
             ref tok => {
                 let name = format!("{}", tok);
-                if name.chars().next().map_or(false, |c| c.is_alphabetic()) {
+                if name.chars().next().is_some_and(|c| c.is_alphabetic()) {
                     self.advance();
                     name
                 } else {

@@ -927,8 +927,6 @@ pub fn build_linearity_feedback(
 }
 
 /// Build semantic feedback for effect containment violations.
-/// NOTE: Currently unused; will be wired into verify_effect_containment in Commit 3.
-#[allow(dead_code)]
 pub fn build_effect_feedback(
     atom_name: &str,
     attempted_effect: &str,
@@ -951,6 +949,81 @@ pub fn build_effect_feedback(
     })
 }
 
+// =============================================================================
+// Unsat Core: Tracking Label Parsing & Contradiction Feedback
+// =============================================================================
+
+/// Parse a Z3 tracking label into a human-readable constraint description.
+/// Returns None for unrecognized labels (internal bookkeeping variables).
+fn parse_tracking_label(label: &str) -> Option<String> {
+    if label == "track_requires" {
+        return Some("Precondition (requires) / 前提条件 (requires)".to_string());
+    }
+    if let Some(rest) = label.strip_prefix("track_refined_type_") {
+        // format: track_refined_type_{var}::{type}
+        if let Some(idx) = rest.find("::") {
+            let var = &rest[..idx];
+            let type_name = &rest[idx + 2..];
+            return Some(format!(
+                "Refined type constraint: {} ({}) / 精緻型制約: {} ({})",
+                var, type_name, var, type_name
+            ));
+        }
+    }
+    if let Some(rest) = label.strip_prefix("track_struct_field_") {
+        // format: track_struct_field_{param}::{field}
+        if let Some(idx) = rest.find("::") {
+            let param = &rest[..idx];
+            let field = &rest[idx + 2..];
+            return Some(format!(
+                "Struct field constraint: {}.{} / 構造体フィールド制約: {}.{}",
+                param, field, param, field
+            ));
+        }
+    }
+    if let Some(rest) = label.strip_prefix("track_quantifier_") {
+        return Some(format!(
+            "Quantifier constraint #{} / 量子化制約 #{}",
+            rest, rest
+        ));
+    }
+    if let Some(rest) = label.strip_prefix("track_u64_nonneg_") {
+        return Some(format!(
+            "Non-negative constraint: {} (u64) / 非負制約: {} (u64)",
+            rest, rest
+        ));
+    }
+    None
+}
+
+/// Build semantic feedback JSON for contradiction (unsat) detection with unsat core info.
+pub fn build_contradiction_feedback(
+    atom_name: &str,
+    conflicting_constraints: &[String],
+    raw_labels: &[String],
+) -> serde_json::Value {
+    let explanation = if conflicting_constraints.is_empty() {
+        "The constraints are mutually contradictory, but the specific conflicting set could not be determined. \
+         (制約が相互に矛盾していますが、具体的な矛盾セットを特定できませんでした)".to_string()
+    } else {
+        format!(
+            "The following constraints are mutually contradictory: {} \
+             (以下の制約が相互に矛盾しています: {})",
+            conflicting_constraints.join(", "),
+            conflicting_constraints.join(", ")
+        )
+    };
+
+    json!({
+        "failure_type": FAILURE_INVARIANT_VIOLATED,
+        "atom": atom_name,
+        "conflicting_constraints": conflicting_constraints,
+        "raw_unsat_core": raw_labels,
+        "explanation": explanation,
+        "suggestion": suggestion_for_failure_type(FAILURE_INVARIANT_VIOLATED)
+    })
+}
+
 /// 検証時に共有するコンテキスト（ctx, arr, module_env を束ねて引数を削減）
 struct VCtx<'a> {
     ctx: &'a Context,
@@ -960,6 +1033,12 @@ struct VCtx<'a> {
     /// CallRef の動的ケース（パラメトリック関数型）で、呼び出し先の関数パラメータに
     /// 宣言された contract(f) 情報を取得するために使用する。
     current_atom: Option<&'a crate::parser::Atom>,
+    /// LinearityCtx for ownership/borrowing tracking during body evaluation.
+    /// Wrapped in RefCell so that recursive expr_to_z3/stmt_to_z3 calls can
+    /// mutate it without changing every call-site signature.
+    linearity_ctx: Option<&'a std::cell::RefCell<LinearityCtx>>,
+    /// EffectCtx for tracking allowed vs used effects during body evaluation.
+    effect_ctx: Option<&'a std::cell::RefCell<EffectCtx>>,
 }
 
 // =============================================================================
@@ -1050,7 +1129,6 @@ impl LinearityCtx {
     /// 変数を借用する（読み取り専用の参照）
     /// 借用中は所有者が consume/free できなくなる。
     /// borrower_name: 借用する側の変数名（ライフタイム追跡用）
-    #[allow(dead_code)]
     pub fn borrow(&mut self, owner_name: &str, borrower_name: &str) -> Result<(), String> {
         // 生存チェック: 消費済み変数は借用できない
         if let Some(false) = self.alive.get(owner_name) {
@@ -1072,7 +1150,6 @@ impl LinearityCtx {
     }
 
     /// 借用を解放する
-    #[allow(dead_code)]
     pub fn release_borrow(&mut self, owner_name: &str, borrower_name: &str) {
         if let Some(count) = self.borrow_count.get_mut(owner_name) {
             if *count > 0 {
@@ -1086,7 +1163,6 @@ impl LinearityCtx {
 
     /// 変数が生存しているかチェックする
     /// 消費済み変数へのアクセスはエラーを記録する
-    #[allow(dead_code)]
     pub fn check_alive(&mut self, name: &str) -> Result<(), String> {
         if let Some(false) = self.alive.get(name) {
             let msg = format!(
@@ -1100,9 +1176,10 @@ impl LinearityCtx {
     }
 
     /// 変数が借用中かどうかを確認する
+    /// Available for future borrow-conflict diagnostic passes.
     #[allow(dead_code)]
     pub fn is_borrowed(&self, name: &str) -> bool {
-        self.borrow_count.get(name).map_or(false, |&c| c > 0)
+        self.borrow_count.get(name).is_some_and(|&c| c > 0)
     }
 
     /// 蓄積された違反リストを返す
@@ -1165,6 +1242,8 @@ pub struct ModuleEnv {
     pub dependency_graph: HashMap<String, HashSet<String>>,
     /// Reverse dependency graph: atom_name → set of atoms that call it
     pub reverse_deps: HashMap<String, HashSet<String>>,
+    /// Security policy for effect parameter constraint enforcement
+    pub security_policy: Option<SecurityPolicy>,
 }
 
 impl ModuleEnv {
@@ -1330,7 +1409,7 @@ impl ModuleEnv {
             .filter(|name| {
                 self.effects
                     .get(name)
-                    .map_or(true, |def| def.includes.is_empty())
+                    .is_none_or(|def| def.includes.is_empty())
             })
             .collect()
     }
@@ -1876,6 +1955,8 @@ pub fn verify_impl(
             arr: &arr,
             module_env,
             current_atom: None,
+            linearity_ctx: None,
+            effect_ctx: None,
         };
 
         let mut env: Env = HashMap::new();
@@ -1994,11 +2075,11 @@ pub fn verify_impl(
 /// Used by SecurityPolicy to define which effects (and under what conditions)
 /// are permitted in the current session.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct AllowedEffect {
     pub effect_name: String,
     /// Parameter constraints as (param_name, constraint_expr) pairs.
     /// E.g., ("path", "starts_with(path, \"/tmp/\")") for FileRead.
+    #[allow(dead_code)]
     pub param_constraints: Vec<(String, String)>,
 }
 
@@ -2006,7 +2087,6 @@ pub struct AllowedEffect {
 /// Enforced during effect containment verification.
 /// Can be set dynamically via the MCP server's set_allowed_effects tool.
 #[derive(Debug, Clone, Default)]
-#[allow(dead_code)]
 pub struct SecurityPolicy {
     pub allowed_effects: Vec<AllowedEffect>,
 }
@@ -2124,7 +2204,6 @@ fn evaluate_string_constraint(constraint_expr: &str, _param_name: &str, value: &
 
 /// Effect verification context — tracks allowed and used effects per atom scope.
 #[derive(Debug, Clone, Default)]
-#[allow(dead_code)]
 struct EffectCtx {
     /// Effects allowed in the current scope (from atom's effects annotation, transitively expanded)
     allowed_effects: HashSet<String>,
@@ -2134,7 +2213,6 @@ struct EffectCtx {
     violations: Vec<String>,
 }
 
-#[allow(dead_code)]
 impl EffectCtx {
     fn new(allowed: HashSet<String>) -> Self {
         Self {
@@ -2193,17 +2271,24 @@ fn verify_effect_containment(
                     .cloned()
                     .collect();
                 if !missing.is_empty() {
+                    let allowed_strs: Vec<String> =
+                        atom.effects.iter().map(|e| e.name.clone()).collect();
+                    let feedback =
+                        build_effect_feedback(&atom.name, &missing[0], &allowed_strs, &missing);
+                    let feedback_explanation =
+                        feedback["explanation"].as_str().unwrap_or("").to_string();
                     return Err(MumeiError::verification_at(
                         format!(
                             "Effect propagation violation: atom '{}' calls '{}' which requires \
                              {:?} effect(s), but '{}' only declares effects: {:?}. \
-                             Missing: {:?}.",
+                             Missing: {:?}. {}",
                             atom.name,
                             callee_name,
                             callee_atom.effects,
                             atom.name,
                             atom.effects,
                             missing,
+                            feedback_explanation,
                         ),
                         atom.span.clone(),
                     )
@@ -2901,6 +2986,8 @@ fn verify_atom_invariant(
         arr: &arr,
         module_env,
         current_atom: Some(atom),
+        linearity_ctx: None,
+        effect_ctx: None,
     };
 
     let mut env: Env = HashMap::new();
@@ -3354,8 +3441,6 @@ pub fn infer_effects_json(items: &[Item], module_env: &ModuleEnv) -> serde_json:
 
 /// エフェクト整合性検証: 宣言されたエフェクトと推論されたエフェクトの比較。
 /// エフェクト階層の Subtyping も考慮する。
-// NOTE: verify_effect_consistency will be integrated into verify_inner pipeline in a future PR
-#[allow(dead_code)]
 fn verify_effect_consistency(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult<()> {
     let declared: Vec<String> = atom.effects.iter().map(|e| e.name.clone()).collect();
     let body_stmt_eff = parse_body_expr(&atom.body_expr);
@@ -3391,8 +3476,6 @@ fn verify_effect_consistency(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult
 
 /// 定数制約チェック（Constant Folding）。
 /// 定数パスに対する制約を Rust 側で直接検証する。
-// NOTE: check_constant_constraint is called by verify_effect_params (future pipeline integration)
-#[allow(dead_code)]
 fn check_constant_constraint(value: &str, constraint: &str) -> bool {
     // パーサーは "starts_with(path, \"/tmp/\")" のように2引数形式で制約を出力する。
     // 文字列引数（最後のクォートされた値）を抽出して検証する。
@@ -3438,8 +3521,6 @@ fn check_constant_constraint(value: &str, constraint: &str) -> bool {
 /// エフェクトパラメータの検証。
 /// 定数パスは Rust 側で直接チェック（Constant Folding）。
 /// 変数パスは Z3 Int で検証（Symbolic String ID）。
-// NOTE: verify_effect_params will be integrated into verify_inner pipeline in a future PR
-#[allow(dead_code)]
 fn verify_effect_params(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult<()> {
     for effect in &atom.effects {
         // effect_defs を優先、なければ effects を参照
@@ -3649,6 +3730,14 @@ fn verify_inner(
     // Phase 1e: Call Graph サイクル検知（間接再帰の検出）
     verify_call_graph_cycles(atom, module_env)?;
 
+    // Phase 1f: エフェクト整合性チェック（宣言 vs 推論、警告レベル）
+    // Note: verify_effect_consistency always returns Ok(()) — warnings are emitted
+    // via eprintln! inside the function itself.
+    let _ = verify_effect_consistency(atom, module_env);
+
+    // Phase 1g: エフェクトパラメータ制約検証
+    verify_effect_params(atom, module_env)?;
+
     let mut cfg = Config::new();
     cfg.set_timeout_msec(timeout_ms);
     let ctx = Context::new(&cfg);
@@ -3656,11 +3745,19 @@ fn verify_inner(
 
     let int_sort = z3::Sort::int(&ctx);
     let arr = Array::new_const(&ctx, "arr", &int_sort, &int_sort);
+    // linearity_ctx is wrapped in RefCell so expr_to_z3/stmt_to_z3 can mutate it
+    // without requiring signature changes to every recursive call site.
+    let linearity_ctx_cell = std::cell::RefCell::new(LinearityCtx::new());
+    // Build EffectCtx from the atom's declared effects (transitively resolved)
+    let allowed_effects_set = module_env.resolve_effect_set_from_effects(&atom.effects);
+    let effect_ctx_cell = std::cell::RefCell::new(EffectCtx::new(allowed_effects_set));
     let vc = VCtx {
         ctx: &ctx,
         arr: &arr,
         module_env,
         current_atom: Some(atom),
+        linearity_ctx: Some(&linearity_ctx_cell),
+        effect_ctx: Some(&effect_ctx_cell),
     };
 
     let mut env: Env = HashMap::new();
@@ -3675,7 +3772,7 @@ fn verify_inner(
     }
 
     // 1. 量子化制約の処理
-    for q in &atom.forall_constraints {
+    for (q_index, q) in atom.forall_constraints.iter().enumerate() {
         let i = Int::new_const(&ctx, q.var.as_str());
         let start = Int::from_i64(&ctx, q.start.parse::<i64>().unwrap_or(0));
         let end = if let Ok(val) = q.end.parse::<i64>() {
@@ -3704,7 +3801,9 @@ fn verify_inner(
                 &Bool::and(&ctx, &[&range_cond, &condition_z3]),
             ),
         };
-        solver.assert(&quantifier_expr);
+        let track_label = format!("track_quantifier_{}", q_index);
+        let track_bool = Bool::new_const(&ctx, track_label.as_str());
+        solver.assert_and_track(&quantifier_expr, &track_bool);
     }
 
     // 2. 引数（params）に対する精緻型制約の自動適用
@@ -3740,7 +3839,10 @@ fn verify_inner(
                         let constraint_ast = parse_expression(constraint_raw);
                         let constraint_z3 = expr_to_z3(&vc, &constraint_ast, &mut local_env, None)?;
                         if let Some(constraint_bool) = constraint_z3.as_bool() {
-                            solver.assert(&constraint_bool);
+                            let track_label =
+                                format!("track_struct_field_{}::{}", param.name, field.name);
+                            let track_bool = Bool::new_const(&ctx, track_label.as_str());
+                            solver.assert_and_track(&constraint_bool, &track_bool);
                         }
                     }
                 }
@@ -3762,7 +3864,7 @@ fn verify_inner(
     // 2d. 線形性チェック: consumed_params + ref パラメータの Z3 シンボリック Bool 連携
     // consume 宣言されたパラメータに対して is_alive フラグを Z3 上で追跡する。
     // ref パラメータに対しては借用カウントを追跡し、借用中の consume を禁止する。
-    let mut linearity_ctx = LinearityCtx::new();
+    // linearity_ctx_cell is shared with VCtx (created above) via RefCell.
 
     // consume 対象パラメータの登録
     if !atom.consumed_params.is_empty() {
@@ -3798,7 +3900,7 @@ fn verify_inner(
                 ));
             }
             // LinearityCtx に登録
-            linearity_ctx.register(param_name);
+            linearity_ctx_cell.borrow_mut().register(param_name);
 
             // Z3 上で is_alive シンボリック Bool を作成し、初期値 true を assert
             let alive_name = format!("__alive_{}", param_name);
@@ -3816,7 +3918,7 @@ fn verify_inner(
     for param in &atom.params {
         if param.is_ref || param.is_ref_mut {
             // ref/ref mut パラメータを LinearityCtx に登録（借用として）
-            linearity_ctx.register(&param.name);
+            linearity_ctx_cell.borrow_mut().register(&param.name);
 
             // Z3 上で borrowed フラグを作成
             let borrowed_name = format!("__borrowed_{}", param.name);
@@ -3848,7 +3950,8 @@ fn verify_inner(
         let req_ast = parse_expression(&atom.requires);
         let req_z3 = expr_to_z3(&vc, &req_ast, &mut env, None)?;
         if let Some(req_bool) = req_z3.as_bool() {
-            solver.assert(&req_bool);
+            let track_requires = Bool::new_const(&ctx, "track_requires");
+            solver.assert_and_track(&req_bool, &track_requires);
         }
     }
 
@@ -4060,7 +4163,7 @@ fn verify_inner(
     if !atom.consumed_params.is_empty() {
         // consume 対象パラメータを消費済みとしてマーク
         for param_name in &atom.consumed_params {
-            if let Err(e) = linearity_ctx.consume(param_name) {
+            if let Err(e) = linearity_ctx_cell.borrow_mut().consume(param_name) {
                 return Err(MumeiError::verification_at(
                     format!("Linearity violation in atom '{}': {}", atom.name, e),
                     atom.span.clone(),
@@ -4074,8 +4177,9 @@ fn verify_inner(
         }
 
         // 蓄積された違反をチェック
-        if linearity_ctx.has_violations() {
-            let violations_list = linearity_ctx.get_violations();
+        let lctx_guard = linearity_ctx_cell.borrow();
+        if lctx_guard.has_violations() {
+            let violations_list = lctx_guard.get_violations();
             let violations = violations_list.join("\n  ");
             let linearity_fb = build_linearity_feedback(&atom.name, violations_list, &atom.span);
             save_visualizer_report(
@@ -4101,6 +4205,17 @@ fn verify_inner(
     }
 
     if solver.check() == SatResult::Unsat {
+        let unsat_core = solver.get_unsat_core();
+        let core_labels: Vec<String> = unsat_core.iter().map(|b| format!("{}", b)).collect();
+
+        let conflicting_constraints: Vec<String> = core_labels
+            .iter()
+            .filter_map(|label| parse_tracking_label(label))
+            .collect();
+
+        let contradiction_fb =
+            build_contradiction_feedback(&atom.name, &conflicting_constraints, &core_labels);
+
         save_visualizer_report(
             output_dir,
             "failed",
@@ -4110,11 +4225,21 @@ fn verify_inner(
             "Logic contradiction.",
             None,
             FAILURE_INVARIANT_VIOLATED,
-            None,
+            Some(&contradiction_fb),
             Some(&atom.span),
         );
+
+        let constraint_summary = if conflicting_constraints.is_empty() {
+            "Contradiction found.".to_string()
+        } else {
+            format!(
+                "Contradiction found. Conflicting constraints: [{}]",
+                conflicting_constraints.join(", ")
+            )
+        };
+
         return Err(MumeiError::verification_at(
-            "Contradiction found.",
+            constraint_summary,
             atom.span.clone(),
         ));
     }
@@ -4147,7 +4272,8 @@ fn apply_refinement_constraint<'a>(
         "f64" => Float::new_const(ctx, var_name, 11, 53).into(),
         "u64" => {
             let v = Int::new_const(ctx, var_name);
-            solver.assert(&v.ge(&Int::from_i64(ctx, 0)));
+            let track_u64 = Bool::new_const(ctx, format!("track_u64_nonneg_{}", var_name).as_str());
+            solver.assert_and_track(&v.ge(&Int::from_i64(ctx, 0)), &track_u64);
             v.into()
         }
         _ => Int::new_const(ctx, var_name).into(),
@@ -4172,7 +4298,9 @@ fn apply_refinement_constraint<'a>(
             )),
         )?;
 
-    solver.assert(&predicate_z3);
+    let track_label = format!("track_refined_type_{}::{}", var_name, refined.name);
+    let track_bool = Bool::new_const(ctx, track_label.as_str());
+    solver.assert_and_track(&predicate_z3, &track_bool);
     Ok(())
 }
 
@@ -4187,10 +4315,22 @@ fn expr_to_z3<'a>(
     match expr {
         Expr::Number(n) => Ok(Int::from_i64(ctx, *n).into()),
         Expr::Float(f) => Ok(Float::from_f64(ctx, *f).into()),
-        Expr::Variable(name) => Ok(env
-            .get(name)
-            .cloned()
-            .unwrap_or_else(|| Int::new_const(ctx, name.as_str()).into())),
+        Expr::Variable(name) => {
+            // Wire check_alive() into variable access: if the variable has been
+            // consumed, report a use-after-consume error.
+            if let Some(lctx_cell) = vc.linearity_ctx {
+                if let Err(e) = lctx_cell.borrow_mut().check_alive(name) {
+                    return Err(MumeiError::verification(format!(
+                        "Linearity violation: {}",
+                        e
+                    )));
+                }
+            }
+            Ok(env
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| Int::new_const(ctx, name.as_str()).into()))
+        }
         Expr::Call(name, args) => {
             match name.as_str() {
                 // =============================================================
@@ -4344,6 +4484,36 @@ fn expr_to_z3<'a>(
                             }
                         }
 
+                        // Wire borrow()/consume() into call-site argument handling.
+                        // For each callee parameter, if it is `ref`/`ref mut`, call borrow().
+                        // If the callee has `consumed_params`, call consume() for the
+                        // corresponding argument variable.
+                        if let Some(lctx_cell) = vc.linearity_ctx {
+                            // Handle ref/ref mut parameters → borrow
+                            for (i, param) in callee.params.iter().enumerate() {
+                                if param.is_ref || param.is_ref_mut {
+                                    if let Some(Expr::Variable(arg_name)) = args.get(i) {
+                                        let _ = lctx_cell.borrow_mut().borrow(arg_name, name);
+                                    }
+                                }
+                            }
+                            // Handle consumed_params → consume
+                            for consumed_name in &callee.consumed_params {
+                                if let Some(idx) =
+                                    callee.params.iter().position(|p| p.name == *consumed_name)
+                                {
+                                    if let Some(Expr::Variable(arg_name)) = args.get(idx) {
+                                        if let Err(e) = lctx_cell.borrow_mut().consume(arg_name) {
+                                            return Err(MumeiError::verification(format!(
+                                                "Linearity violation at call to '{}': {}",
+                                                name, e
+                                            )));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         // requires の検証: 呼び出し元のコンテキストで事前条件が満たされるか
                         if callee.requires.trim() != "true" {
                             if let Some(solver) = solver_opt {
@@ -4466,6 +4636,19 @@ fn expr_to_z3<'a>(
                                 &mut call_env,
                                 solver_opt,
                             )?;
+                        }
+
+                        // Release borrows after call returns.
+                        // Once the callee has finished, ref/ref mut borrows are released
+                        // so the owner can be consumed or re-borrowed.
+                        if let Some(lctx_cell) = vc.linearity_ctx {
+                            for (i, param) in callee.params.iter().enumerate() {
+                                if param.is_ref || param.is_ref_mut {
+                                    if let Some(Expr::Variable(arg_name)) = args.get(i) {
+                                        lctx_cell.borrow_mut().release_borrow(arg_name, name);
+                                    }
+                                }
+                            }
                         }
 
                         // Taint Analysis: 呼び出し先が unverified の場合、
@@ -4874,6 +5057,26 @@ fn expr_to_z3<'a>(
             let used_name = format!("__effect_used_{}", effect);
             let used_bool = Bool::from_bool(ctx, true);
             env.insert(used_name.clone(), used_bool.into());
+
+            // Wire EffectCtx: track the performed effect
+            if let Some(ectx_cell) = vc.effect_ctx {
+                let mut ectx = ectx_cell.borrow_mut();
+                // Record usage; violations are warnings here (Z3 check below is authoritative)
+                let _ = ectx.perform_effect(effect);
+            }
+
+            // Check SecurityPolicy parameter constraints if available.
+            // Currently only checks constant arguments (Number-based path IDs);
+            // symbolic arguments are validated via Z3 constraints in verify_effect_params.
+            if let Some(ref policy) = vc.module_env.security_policy {
+                if !policy.is_effect_allowed(effect) {
+                    return Err(MumeiError::verification(format!(
+                        "Security policy violation: effect '{}' is not permitted by the \
+                         current security policy",
+                        effect
+                    )));
+                }
+            }
 
             // Check against allowed effects via Z3 environment
             let allowed_name = format!("__effect_allowed_{}", effect);
@@ -6174,5 +6377,125 @@ mod tests {
             "url",
             "https://example.com"
         ));
+    }
+
+    // ---- parse_tracking_label tests ----
+
+    #[test]
+    fn test_parse_tracking_label_requires() {
+        let result = parse_tracking_label("track_requires");
+        assert!(result.is_some());
+        let msg = result.unwrap();
+        assert!(msg.contains("requires"));
+        assert!(msg.contains("前提条件"));
+    }
+
+    #[test]
+    fn test_parse_tracking_label_refined_type() {
+        let result = parse_tracking_label("track_refined_type_n::Nat");
+        assert!(result.is_some());
+        let msg = result.unwrap();
+        assert!(msg.contains("n"));
+        assert!(msg.contains("Nat"));
+        assert!(msg.contains("精緻型"));
+    }
+
+    #[test]
+    fn test_parse_tracking_label_refined_type_underscore_var() {
+        let result = parse_tracking_label("track_refined_type_my_var::Pos");
+        assert!(result.is_some());
+        let msg = result.unwrap();
+        assert!(msg.contains("my_var"));
+        assert!(msg.contains("Pos"));
+        assert!(msg.contains("精緻型"));
+    }
+
+    #[test]
+    fn test_parse_tracking_label_struct_field() {
+        let result = parse_tracking_label("track_struct_field_p::age");
+        assert!(result.is_some());
+        let msg = result.unwrap();
+        assert!(msg.contains("p"));
+        assert!(msg.contains("age"));
+        assert!(msg.contains("構造体フィールド"));
+    }
+
+    #[test]
+    fn test_parse_tracking_label_struct_field_underscore() {
+        let result = parse_tracking_label("track_struct_field_my_obj::my_field");
+        assert!(result.is_some());
+        let msg = result.unwrap();
+        assert!(msg.contains("my_obj"));
+        assert!(msg.contains("my_field"));
+        assert!(msg.contains("構造体フィールド"));
+    }
+
+    #[test]
+    fn test_parse_tracking_label_quantifier() {
+        let result = parse_tracking_label("track_quantifier_0");
+        assert!(result.is_some());
+        let msg = result.unwrap();
+        assert!(msg.contains("#0"));
+        assert!(msg.contains("量子化"));
+    }
+
+    #[test]
+    fn test_parse_tracking_label_u64_nonneg() {
+        let result = parse_tracking_label("track_u64_nonneg_x");
+        assert!(result.is_some());
+        let msg = result.unwrap();
+        assert!(msg.contains("x"));
+        assert!(msg.contains("u64"));
+    }
+
+    #[test]
+    fn test_parse_tracking_label_unknown() {
+        assert!(parse_tracking_label("__alive_x").is_none());
+        assert!(parse_tracking_label("__borrowed_y").is_none());
+        assert!(parse_tracking_label("random_label").is_none());
+    }
+
+    // ---- build_contradiction_feedback tests ----
+
+    #[test]
+    fn test_build_contradiction_feedback_with_constraints() {
+        let constraints = vec![
+            "Precondition (requires)".to_string(),
+            "Refined type constraint: n (Nat)".to_string(),
+        ];
+        let raw = vec![
+            "track_requires".to_string(),
+            "track_refined_type_n::Nat".to_string(),
+        ];
+        let feedback = build_contradiction_feedback("test_atom", &constraints, &raw);
+        assert_eq!(feedback["failure_type"], FAILURE_INVARIANT_VIOLATED);
+        assert_eq!(feedback["atom"], "test_atom");
+        assert!(feedback["conflicting_constraints"].is_array());
+        assert_eq!(
+            feedback["conflicting_constraints"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(feedback["raw_unsat_core"].is_array());
+        assert!(feedback["explanation"]
+            .as_str()
+            .unwrap()
+            .contains("contradictory"));
+    }
+
+    #[test]
+    fn test_build_contradiction_feedback_empty() {
+        let feedback = build_contradiction_feedback("test_atom", &[], &[]);
+        assert_eq!(feedback["atom"], "test_atom");
+        assert!(feedback["conflicting_constraints"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert!(feedback["explanation"]
+            .as_str()
+            .unwrap()
+            .contains("could not be determined"));
     }
 }

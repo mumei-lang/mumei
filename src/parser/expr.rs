@@ -62,11 +62,7 @@ pub fn parse_expr(ctx: &mut ParseContext, min_bp: u8) -> Expr {
                 } else {
                     // Accept keyword tokens as field names (e.g., obj.mode, obj.priority)
                     let field_name = format!("{}", ctx.peek());
-                    if field_name
-                        .chars()
-                        .next()
-                        .map_or(false, |c| c.is_alphabetic())
-                    {
+                    if field_name.chars().next().is_some_and(|c| c.is_alphabetic()) {
                         ctx.advance();
                         lhs = Expr::FieldAccess(Box::new(lhs), field_name);
                         continue;
@@ -334,7 +330,7 @@ fn parse_prefix(ctx: &mut ParseContext) -> Expr {
             // For backward compatibility: some keywords can appear as variable names
             // or function names in expression contexts (e.g., in requires/ensures clauses)
             let name = format!("{}", tok);
-            if name.chars().next().map_or(false, |c| c.is_alphabetic()) {
+            if name.chars().next().is_some_and(|c| c.is_alphabetic()) {
                 ctx.advance();
                 parse_ident_continuation(ctx, name)
             } else {
@@ -353,7 +349,7 @@ fn parse_prefix(ctx: &mut ParseContext) -> Expr {
 /// lowercase, so this ambiguity does not arise in real `.mm` files.
 fn parse_ident_continuation(ctx: &mut ParseContext, name: String) -> Expr {
     match ctx.peek() {
-        Token::LBrace if name.chars().next().map_or(false, |c| c.is_uppercase()) => {
+        Token::LBrace if name.chars().next().is_some_and(|c| c.is_uppercase()) => {
             // Struct initialization: TypeName { field: expr, ... }
             ctx.advance(); // {
             let mut fields = Vec::new();
@@ -548,10 +544,10 @@ pub fn parse_statement(ctx: &mut ParseContext) -> Stmt {
         Token::Ident(ref name) => {
             let name_clone = name.clone();
             // Peek ahead for assignment
-            if ctx.peek_at(1).map_or(false, |t| *t == Token::Assign)
+            if ctx.peek_at(1).is_some_and(|t| *t == Token::Assign)
                 && ctx
                     .peek_at(2)
-                    .map_or(true, |t| *t != Token::Assign && *t != Token::Gt)
+                    .is_none_or(|t| *t != Token::Assign && *t != Token::Gt)
             {
                 // It's an assignment: var = expr (but not == or =>)
                 ctx.advance(); // consume ident
@@ -572,11 +568,11 @@ pub fn parse_statement(ctx: &mut ParseContext) -> Stmt {
         // behavior which checked is_alphabetic() on any token string.
         ref tok => {
             let name = format!("{}", tok);
-            if name.chars().next().map_or(false, |c| c.is_alphabetic())
-                && ctx.peek_at(1).map_or(false, |t| *t == Token::Assign)
+            if name.chars().next().is_some_and(|c| c.is_alphabetic())
+                && ctx.peek_at(1).is_some_and(|t| *t == Token::Assign)
                 && ctx
                     .peek_at(2)
-                    .map_or(true, |t| *t != Token::Assign && *t != Token::Gt)
+                    .is_none_or(|t| *t != Token::Assign && *t != Token::Gt)
             {
                 ctx.advance(); // consume keyword token
                 ctx.advance(); // consume =

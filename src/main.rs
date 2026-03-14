@@ -6,6 +6,8 @@ mod hir;
 mod lsp;
 #[allow(dead_code)]
 mod manifest;
+#[allow(dead_code)]
+mod mir;
 mod parser;
 mod registry;
 mod resolver;
@@ -13,7 +15,9 @@ mod setup;
 mod transpiler;
 mod verification;
 
+#[cfg(test)]
 use crate::hir::lower_atom_to_hir;
+use crate::hir::lower_atom_to_hir_with_env;
 use crate::parser::{ImportDecl, Item};
 use crate::transpiler::{
     transpile, transpile_enum, transpile_impl, transpile_module_header, transpile_struct,
@@ -22,6 +26,35 @@ use crate::transpiler::{
 use clap::{Parser, Subcommand};
 use std::fs;
 use std::path::Path;
+
+// =============================================================================
+// Helpers
+// =============================================================================
+
+/// Resolve the correct source text for a given span.
+/// If the span's file field is non-empty (i.e., from an imported file),
+/// read that file; otherwise fall back to the main source.
+fn resolve_source_for_span(main_source: &str, span: &parser::Span) -> String {
+    if span.file.is_empty() {
+        main_source.to_string()
+    } else {
+        std::fs::read_to_string(&span.file).unwrap_or_else(|_| main_source.to_string())
+    }
+}
+
+/// Collect all ExternBlock items from a list of Items.
+fn collect_extern_blocks(items: &[Item]) -> Vec<parser::ExternBlock> {
+    items
+        .iter()
+        .filter_map(|item| {
+            if let Item::ExternBlock(eb) = item {
+                Some(eb.clone())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
 
 // =============================================================================
 // CLI: mumei build / verify / check / init / setup / inspect
@@ -463,11 +496,8 @@ fn cmd_verify(input: &str) {
                         verified += 1;
                     }
                     Err(e) => {
-                        // TODO: インポートされたファイルのエラー時、source はメインファイルの内容だが
-                        // impl_def.span はインポート元ファイルを指す場合がある。
-                        // 正しくは impl_def.span.file からソースを読み直す必要がある。
-                        // See: https://github.com/mumei-lang/mumei/pull/35
-                        let e = e.with_source(&source, &impl_def.span);
+                        let resolved = resolve_source_for_span(&source, &impl_def.span);
+                        let e = e.with_source(&resolved, &impl_def.span);
                         eprintln!("{:?}", miette::Report::new(e));
                         failed += 1;
                     }
@@ -505,7 +535,7 @@ fn cmd_verify(input: &str) {
                         .filter(|tn| module_env.get_type(tn).is_some())
                         .collect();
 
-                    let hir_atom = lower_atom_to_hir(atom);
+                    let hir_atom = lower_atom_to_hir_with_env(atom, Some(&module_env));
                     match verification::verify(&hir_atom, output_dir, &module_env) {
                         Ok(_) => {
                             println!("  ⚖️  '{}': verified ✅", atom.name);
@@ -529,9 +559,8 @@ fn cmd_verify(input: &str) {
                             verified += 1;
                         }
                         Err(e) => {
-                            // TODO: インポートされた atom の場合、source と span のファイルが不一致になる。
-                            // atom.span.file からソースを読み直すべき。
-                            let e = e.with_source(&source, &atom.span);
+                            let resolved = resolve_source_for_span(&source, &atom.span);
+                            let e = e.with_source(&resolved, &atom.span);
                             eprintln!("{:?}", miette::Report::new(e));
                             // 検証失敗した atom はキャッシュから除外
                             verification_cache.remove(&atom.name);
@@ -1163,8 +1192,8 @@ fn cmd_build(input: &str, output: &str) {
                             impl_def.trait_name, impl_def.target_type
                         ),
                         Err(e) => {
-                            // TODO: インポートされた impl の場合、source と span のファイルが不一致になる。
-                            let e = e.with_source(&source, &impl_def.span);
+                            let resolved = resolve_source_for_span(&source, &impl_def.span);
+                            let e = e.with_source(&resolved, &impl_def.span);
                             eprintln!("{:?}", miette::Report::new(e));
                             std::process::exit(1);
                         }
@@ -1226,7 +1255,7 @@ fn cmd_build(input: &str, output: &str) {
                 );
 
                 // HIR lowering: body_expr を1回だけパースして全ステージで再利用する
-                let hir_atom = lower_atom_to_hir(atom);
+                let hir_atom = lower_atom_to_hir_with_env(atom, Some(&module_env));
 
                 // --- 2. Verification (形式検証: Z3 + StdLib) ---
                 if skip_verify {
@@ -1241,7 +1270,7 @@ fn cmd_build(input: &str, output: &str) {
 
                     let cache_hit = verification_cache
                         .get(&atom.name)
-                        .map_or(false, |entry| entry.proof_hash == proof_hash);
+                        .is_some_and(|entry| entry.proof_hash == proof_hash);
 
                     if cache_hit {
                         println!("  ⚖️  [2/4] Verification: Skipped (unchanged, cached) ⏩");
@@ -1289,8 +1318,8 @@ fn cmd_build(input: &str, output: &str) {
                                 );
                             }
                             Err(e) => {
-                                // TODO: インポートされた atom の場合、source と span のファイルが不一致になる。
-                                let e = e.with_source(&source, &atom.span);
+                                let resolved = resolve_source_for_span(&source, &atom.span);
+                                let e = e.with_source(&resolved, &atom.span);
                                 eprintln!("{:?}", miette::Report::new(e));
                                 verification_cache_new.remove(&atom.name);
                                 std::process::exit(1);
@@ -1302,14 +1331,15 @@ fn cmd_build(input: &str, output: &str) {
                 // --- 3. Codegen (LLVM 18 + Floating Point) ---
                 // 各 Atom ごとに .ll ファイルを生成（またはモジュールを統合する拡張も可能）
                 let atom_output_path = output_dir.join(format!("{}_{}", file_stem, atom.name));
-                match codegen::compile(&hir_atom, &atom_output_path, &module_env) {
+                let extern_blocks = collect_extern_blocks(&items);
+                match codegen::compile(&hir_atom, &atom_output_path, &module_env, &extern_blocks) {
                     Ok(_) => println!(
                         "  ⚙️  [3/4] Tempering: Done. Compiled '{}' to LLVM IR.",
                         atom.name
                     ),
                     Err(e) => {
-                        // TODO: インポートされた atom の場合、source と span のファイルが不一致になる。
-                        let e = e.with_source(&source, &atom.span);
+                        let resolved = resolve_source_for_span(&source, &atom.span);
+                        let e = e.with_source(&resolved, &atom.span);
                         eprintln!("{:?}", miette::Report::new(e));
                         std::process::exit(1);
                     }
@@ -1414,7 +1444,7 @@ fn cmd_add(dep: &str) {
         // Git URL 依存
         let pkg_name = dep
             .split('/')
-            .last()
+            .next_back()
             .unwrap_or("unknown")
             .trim_end_matches(".git")
             .replace('-', "_");
@@ -1501,7 +1531,7 @@ fn cmd_publish(proof_only: bool) {
                 atom_count += 1;
                 continue;
             }
-            let hir_atom = lower_atom_to_hir(atom);
+            let hir_atom = lower_atom_to_hir_with_env(atom, Some(&module_env));
             match verification::verify(&hir_atom, output_dir, &module_env) {
                 Ok(_) => {
                     println!("  ⚖️  '{}': verified ✅", atom.name);
@@ -1509,8 +1539,8 @@ fn cmd_publish(proof_only: bool) {
                     atom_count += 1;
                 }
                 Err(e) => {
-                    // TODO: インポートされた atom の場合、source と span のファイルが不一致になる。
-                    let e = e.with_source(&source, &atom.span);
+                    let resolved = resolve_source_for_span(&source, &atom.span);
+                    let e = e.with_source(&resolved, &atom.span);
                     eprintln!("{:?}", miette::Report::new(e));
                     failed += 1;
                 }
@@ -1560,7 +1590,7 @@ fn cmd_publish(proof_only: bool) {
         if let Ok(entries) = fs::read_dir(".") {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().map_or(false, |e| e == "mm") {
+                if path.extension().is_some_and(|e| e == "mm") {
                     let _ = fs::copy(&path, pkg_dir.join(path.file_name().unwrap()));
                 }
             }
@@ -1767,7 +1797,7 @@ fn cmd_repl() {
                     if let parser::Item::Atom(atom) = item {
                         println!("  ✅ Parsed: atom {}()", atom.name);
                         if is_verify {
-                            let hir_atom = lower_atom_to_hir(atom);
+                            let hir_atom = lower_atom_to_hir_with_env(atom, Some(&module_env));
                             match verification::verify(&hir_atom, Path::new("."), &module_env) {
                                 Ok(()) => println!("  ✅ Verification passed"),
                                 Err(e) => eprintln!("  ❌ Verification failed: {}", e),
@@ -2012,7 +2042,7 @@ fn collect_mm_files(dir: &Path) -> Vec<std::path::PathBuf> {
             let path = entry.path();
             if path.is_dir() {
                 result.extend(collect_mm_files(&path));
-            } else if path.extension().map_or(false, |ext| ext == "mm") {
+            } else if path.extension().is_some_and(|ext| ext == "mm") {
                 result.push(path);
             }
         }

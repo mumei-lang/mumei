@@ -1,8 +1,6 @@
 // =============================================================================
-// Top-level item parsing (replaces all regex in parse_module / parse_atom)
+// Top-level item parsing (token-based recursive descent -- no regex)
 // =============================================================================
-
-use regex::Regex;
 
 use crate::ast::TypeRef;
 use crate::parser::{
@@ -12,9 +10,11 @@ use crate::parser::{
     TypeParamBound,
 };
 
-// ---- Helper functions (moved from old parser.rs) ----
+use super::token::{SpannedToken, Token};
+use super::ParseContext;
 
-/// Parse type params from a string like "<T, U>"
+// ---- Helper functions (preserved from old parser) ----
+
 fn parse_type_params_from_str(input: &str) -> (Vec<String>, usize) {
     if !input.starts_with('<') {
         return (vec![], 0);
@@ -46,7 +46,6 @@ fn parse_type_params_from_str(input: &str) -> (Vec<String>, usize) {
     (params, end + 1)
 }
 
-/// Parse type reference string to TypeRef
 pub fn parse_type_ref(input: &str) -> TypeRef {
     let input = input.trim();
 
@@ -79,19 +78,16 @@ pub fn parse_type_ref(input: &str) -> TypeRef {
         let rest = after_paren[close_pos + 1..].trim();
         let (return_type, effect_set) = if let Some(arrow_rest) = rest.strip_prefix("->") {
             let arrow_rest = arrow_rest.trim();
-            // Check for " with " keyword to parse effect set
             if let Some(with_pos) = arrow_rest.find(" with ") {
                 let return_type_str = &arrow_rest[..with_pos];
                 let effect_part = arrow_rest[with_pos + 6..].trim();
                 let effects = if effect_part.starts_with('[') && effect_part.ends_with(']') {
-                    // [E1, E2] format
                     effect_part[1..effect_part.len() - 1]
                         .split(',')
                         .map(|s| s.trim().to_string())
                         .filter(|s| !s.is_empty())
                         .collect()
                 } else {
-                    // Single effect name: "E" or "FileWrite"
                     vec![effect_part.to_string()]
                 };
                 (parse_type_ref(return_type_str.trim()), Some(effects))
@@ -122,13 +118,8 @@ pub fn parse_type_ref(input: &str) -> TypeRef {
     }
 }
 
-/// Parse a type reference from a ParseContext token stream.
-/// Collects tokens that form a type (including generics like `Stack<i64>`)
-/// and delegates to the string-based `parse_type_ref`.
 pub fn parse_type_ref_from_ctx(ctx: &mut super::ParseContext) -> TypeRef {
-    use super::token::Token;
     let mut type_str = String::new();
-    // Collect the base type name
     match ctx.peek().clone() {
         Token::Ident(s) => {
             type_str.push_str(&s);
@@ -136,13 +127,12 @@ pub fn parse_type_ref_from_ctx(ctx: &mut super::ParseContext) -> TypeRef {
         }
         ref tok => {
             let name = format!("{}", tok);
-            if name.chars().next().map_or(false, |c| c.is_alphabetic()) {
+            if name.chars().next().is_some_and(|c| c.is_alphabetic()) {
                 type_str.push_str(&name);
                 ctx.advance();
             }
         }
     }
-    // Handle generic type args: <T, U, ...>
     if ctx.peek() == &Token::Lt {
         type_str.push('<');
         ctx.advance();
@@ -173,10 +163,6 @@ pub fn parse_type_ref_from_ctx(ctx: &mut super::ParseContext) -> TypeRef {
     parse_type_ref(&type_str)
 }
 
-/// Split type args considering nested angle brackets and parentheses.
-/// Tracks both `<`/`>` and `(`/`)` depth so that types like
-/// `atom_ref(i64, i64) -> i64` used as generic type arguments
-/// are not incorrectly split at commas inside parentheses.
 fn split_type_args(input: &str) -> Vec<String> {
     let mut result = Vec::new();
     let mut angle_depth = 0;
@@ -219,12 +205,10 @@ fn split_type_args(input: &str) -> Vec<String> {
     result
 }
 
-/// Parse type params with trait bounds
 fn parse_type_params_with_bounds(input: &str) -> (Vec<String>, Vec<TypeParamBound>) {
     let (raw_params, _) = parse_type_params_from_str(input);
     let mut type_params = Vec::new();
     let mut bounds = Vec::new();
-
     for raw in &raw_params {
         if let Some((param, bound_str)) = raw.split_once(':') {
             let param = param.trim().to_string();
@@ -245,9 +229,6 @@ fn parse_type_params_with_bounds(input: &str) -> (Vec<String>, Vec<TypeParamBoun
     (type_params, bounds)
 }
 
-/// Split params considering nested parentheses
-/// Split enum variants considering nested parentheses.
-/// e.g. "Cons(i64, List), Nil" -> ["Cons(i64, List)", "Nil"]
 fn split_variants(input: &str) -> Vec<String> {
     let mut result = Vec::new();
     let mut depth = 0;
@@ -314,15 +295,12 @@ fn split_params(input: &str) -> Vec<String> {
     result
 }
 
-// ---- Effect parsing helpers ----
-
 fn parse_effect_list(input: &str) -> Vec<Effect> {
     let mut effects = Vec::new();
     let input = input.trim();
     if input.is_empty() {
         return effects;
     }
-
     let mut depth = 0;
     let mut current_start = 0;
     for (byte_idx, ch) in input.char_indices() {
@@ -410,509 +388,717 @@ fn parse_single_effect_param(part: &str) -> EffectParam {
     }
 }
 
-// ---- Main parse_module: regex-based (preserved for backward compat) ----
+// =============================================================================
+// Token-based helpers
+// =============================================================================
 
-/// Parse a full module source into a list of Items.
-/// This is the main entry point, kept backward-compatible.
-pub fn parse_module_from_source(source: &str) -> Vec<Item> {
-    let mut items = Vec::new();
+fn span_from_token(tok: &SpannedToken) -> Span {
+    Span::new("", tok.line, tok.col, tok.len)
+}
 
-    // Strip comments
-    let comment_re = Regex::new(r"//[^\n]*").unwrap();
-    let source = comment_re.replace_all(source, "").to_string();
-    let source = source.as_str();
-
-    // import
-    let import_re = Regex::new(r#"(?m)^import\s+"([^"]+)"(?:\s+as\s+(\w+))?\s*;"#).unwrap();
-    for cap in import_re.captures_iter(source) {
-        let path = cap[1].to_string();
-        let alias = cap.get(2).map(|m| m.as_str().to_string());
-        let m = cap.get(0).unwrap();
-        items.push(Item::Import(ImportDecl {
-            span: span_from_offset(source, m.start(), m.end() - m.start()),
-            path,
-            alias,
-        }));
+/// Append a token's text to a string with smart spacing:
+/// no space before `)`, `,`, `;`, `:`, `.`, `]`
+/// no space after `(`, `.`, `[`
+fn append_token(text: &mut String, tok: &Token) {
+    let no_leading_space = matches!(
+        tok,
+        Token::RParen
+            | Token::Comma
+            | Token::Semicolon
+            | Token::Colon
+            | Token::RBrace
+            | Token::RBracket
+            | Token::Dot
+            | Token::LParen
+            | Token::LBracket
+    );
+    let after_no_space = text.ends_with('(') || text.ends_with('.') || text.ends_with('[');
+    if !text.is_empty() && !no_leading_space && !after_no_space {
+        text.push(' ');
     }
-
-    // type
-    let type_re = Regex::new(r"(?m)^type\s+(\w+)\s*=\s*(\w+)\s+where\s+([^;]+);").unwrap();
-    for cap in type_re.captures_iter(source) {
-        let full_predicate = cap[3].trim().to_string();
-        let tokens = super::lexer::legacy_tokenize(&full_predicate);
-        let operand = tokens.first().cloned().unwrap_or_else(|| "v".to_string());
-        let m = cap.get(0).unwrap();
-        items.push(Item::TypeDef(RefinedType {
-            name: cap[1].to_string(),
-            _base_type: cap[2].to_string(),
-            operand,
-            predicate_raw: full_predicate,
-            span: span_from_offset(source, m.start(), m.end() - m.start()),
-        }));
+    match tok {
+        Token::StringLit(s) => {
+            text.push('"');
+            text.push_str(s);
+            text.push('"');
+        }
+        other => text.push_str(&format!("{}", other)),
     }
+}
 
-    // struct
-    let struct_re = Regex::new(r"(?m)^struct\s+(\w+)\s*(<[^>]*>)?\s*\{([^}]*)\}").unwrap();
-    for cap in struct_re.captures_iter(source) {
-        let name = cap[1].to_string();
-        let type_params = cap
-            .get(2)
-            .map(|m| {
-                let (params, _) = parse_type_params_from_str(m.as_str());
-                params
-            })
-            .unwrap_or_default();
-        let fields_raw = &cap[3];
-        let fields: Vec<StructField> = fields_raw
-            .split(',')
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .map(|s| {
-                let (field_part, constraint) = if let Some(idx) = s.find("where") {
-                    (s[..idx].trim(), Some(s[idx + 5..].trim().to_string()))
-                } else {
-                    (s.trim(), None)
-                };
-                let parts: Vec<&str> = field_part.splitn(2, ':').collect();
-                let type_name_str = parts
-                    .get(1)
-                    .map(|t| t.trim().to_string())
-                    .unwrap_or_else(|| "i64".to_string());
-                let type_ref = parse_type_ref(&type_name_str);
-                StructField {
-                    name: parts[0].trim().to_string(),
-                    type_name: type_name_str,
-                    type_ref,
-                    constraint,
-                }
-            })
-            .collect();
-        let m = cap.get(0).unwrap();
-        items.push(Item::StructDef(StructDef {
-            name,
-            type_params,
-            fields,
-            method_names: vec![],
-            span: span_from_offset(source, m.start(), m.end() - m.start()),
-        }));
+fn collect_until_semicolon(ctx: &mut ParseContext) -> String {
+    let mut text = String::new();
+    let mut depth_brace = 0i32;
+    let mut depth_paren = 0i32;
+    let mut depth_bracket = 0i32;
+    loop {
+        match ctx.peek() {
+            Token::Eof => break,
+            Token::Semicolon if depth_brace == 0 && depth_paren == 0 && depth_bracket == 0 => break,
+            _ => {}
+        }
+        let tok = ctx.advance().clone();
+        match &tok.token {
+            Token::LBrace => depth_brace += 1,
+            Token::RBrace => depth_brace -= 1,
+            Token::LParen => depth_paren += 1,
+            Token::RParen => depth_paren -= 1,
+            Token::LBracket => depth_bracket += 1,
+            Token::RBracket => depth_bracket -= 1,
+            _ => {}
+        }
+        append_token(&mut text, &tok.token);
     }
+    text
+}
 
-    // enum
-    let enum_re = Regex::new(r"(?m)^enum\s+(\w+)\s*(<[^>]*>)?\s*\{([^}]*)\}").unwrap();
-    for cap in enum_re.captures_iter(source) {
-        let name = cap[1].to_string();
-        let type_params = cap
-            .get(2)
-            .map(|m| {
-                let (params, _) = parse_type_params_from_str(m.as_str());
-                params
-            })
-            .unwrap_or_default();
-        let variants_raw = &cap[3];
-        let mut any_recursive = false;
-        // Use depth-aware split to handle commas inside parentheses
-        // e.g. "Cons(i64, List), Nil" should split into ["Cons(i64, List)", "Nil"]
-        let variant_strs = split_variants(variants_raw);
-        let variants: Vec<EnumVariant> = variant_strs
-            .iter()
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .map(|s| {
-                if let Some(paren_start) = s.find('(') {
-                    let variant_name = s[..paren_start].trim().to_string();
-                    let fields_str = &s[paren_start + 1..s.rfind(')').unwrap_or(s.len())];
-                    let fields: Vec<String> = fields_str
-                        .split(',')
-                        .map(|f| {
-                            let f = f.trim().to_string();
-                            if f == "Self" {
-                                name.clone()
-                            } else {
-                                f
-                            }
-                        })
-                        .filter(|f| !f.is_empty())
-                        .collect();
-                    let field_types: Vec<TypeRef> =
-                        fields.iter().map(|f| parse_type_ref(f)).collect();
-                    let is_recursive = fields.iter().any(|f| f == &name);
-                    if is_recursive {
-                        any_recursive = true;
-                    }
-                    EnumVariant {
-                        name: variant_name,
-                        fields,
-                        field_types,
-                        is_recursive,
-                    }
-                } else {
-                    EnumVariant {
-                        name: s.to_string(),
-                        fields: vec![],
-                        field_types: vec![],
-                        is_recursive: false,
-                    }
-                }
-            })
-            .collect();
-        let m = cap.get(0).unwrap();
-        items.push(Item::EnumDef(EnumDef {
-            name,
-            type_params,
-            variants,
-            is_recursive: any_recursive,
-            span: span_from_offset(source, m.start(), m.end() - m.start()),
-        }));
+fn collect_brace_body(ctx: &mut ParseContext) -> String {
+    let mut text = String::new();
+    let mut depth = 0i32;
+    loop {
+        match ctx.peek() {
+            Token::Eof => break,
+            Token::RBrace if depth == 0 => break,
+            _ => {}
+        }
+        let tok = ctx.advance().clone();
+        match &tok.token {
+            Token::LBrace => depth += 1,
+            Token::RBrace => depth -= 1,
+            _ => {}
+        }
+        append_token(&mut text, &tok.token);
     }
+    text
+}
 
-    // trait
-    let trait_re = Regex::new(r"(?m)^trait\s+(\w+)\s*\{([^}]*)\}").unwrap();
-    for cap in trait_re.captures_iter(source) {
-        let name = cap[1].to_string();
-        let body = &cap[2];
-        let mut methods = Vec::new();
-        let mut laws = Vec::new();
+fn collect_braced_block(ctx: &mut ParseContext) -> String {
+    if ctx.peek() == &Token::LBrace {
+        ctx.advance();
+    }
+    let body = collect_brace_body(ctx);
+    if ctx.peek() == &Token::RBrace {
+        ctx.advance();
+    }
+    body
+}
 
-        for line in body.lines() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
+fn parse_type_params_from_ctx(ctx: &mut ParseContext) -> Vec<String> {
+    if ctx.peek() != &Token::Lt {
+        return vec![];
+    }
+    let text = collect_angle_brackets(ctx);
+    let (params, _) = parse_type_params_from_str(&text);
+    params
+}
+
+fn collect_angle_brackets(ctx: &mut ParseContext) -> String {
+    let mut text = String::new();
+    let mut depth = 0;
+    loop {
+        match ctx.peek() {
+            Token::Lt => {
+                depth += 1;
+                text.push('<');
+                ctx.advance();
             }
-
-            if line.starts_with("fn ") {
-                let fn_re = Regex::new(r"fn\s+(\w+)\s*\(([^)]*)\)\s*->\s*(\w+)").unwrap();
-                if let Some(fcap) = fn_re.captures(line) {
-                    let method_name = fcap[1].to_string();
-                    let params_str = &fcap[2];
-                    let return_type = fcap[3].to_string();
-                    let mut param_types: Vec<String> = Vec::new();
-                    let mut param_constraints: Vec<Option<String>> = Vec::new();
-                    for p in params_str.split(',') {
-                        let p = p.trim();
-                        if p.is_empty() {
-                            continue;
-                        }
-                        if let Some((before_where, constraint)) = p.split_once("where") {
-                            let type_str = if let Some((_, t)) = before_where.split_once(':') {
-                                t.trim().to_string()
-                            } else {
-                                before_where.trim().to_string()
-                            };
-                            param_types.push(type_str);
-                            param_constraints.push(Some(constraint.trim().to_string()));
-                        } else if let Some((_, t)) = p.split_once(':') {
-                            param_types.push(t.trim().to_string());
-                            param_constraints.push(None);
-                        } else {
-                            param_types.push(p.to_string());
-                            param_constraints.push(None);
-                        }
-                    }
-                    methods.push(TraitMethod {
-                        name: method_name,
-                        param_types,
-                        return_type,
-                        param_constraints,
-                    });
+            Token::Gt => {
+                depth -= 1;
+                text.push('>');
+                ctx.advance();
+                if depth == 0 {
+                    break;
                 }
-            } else if line.starts_with("law ") {
-                let law_re = Regex::new(r"law\s+(\w+)\s*:\s*([^;]+)").unwrap();
-                if let Some(lcap) = law_re.captures(line) {
-                    let law_name = lcap[1].to_string();
-                    let law_expr = lcap[2].trim().to_string();
-                    laws.push((law_name, law_expr));
+            }
+            Token::Eof => break,
+            _ => {
+                let tok = ctx.advance();
+                text.push_str(&format!("{}", tok.token));
+            }
+        }
+    }
+    text
+}
+
+fn collect_balanced_parens(ctx: &mut ParseContext) -> String {
+    if ctx.peek() != &Token::LParen {
+        return String::new();
+    }
+    ctx.advance();
+    let mut text = String::new();
+    let mut depth = 1;
+    loop {
+        match ctx.peek() {
+            Token::Eof => break,
+            Token::LParen => {
+                depth += 1;
+                text.push('(');
+                ctx.advance();
+            }
+            Token::RParen => {
+                depth -= 1;
+                if depth == 0 {
+                    ctx.advance();
+                    break;
+                }
+                text.push(')');
+                ctx.advance();
+            }
+            _ => {
+                let tok = ctx.advance();
+                if !text.is_empty()
+                    && !text.ends_with('(')
+                    && !matches!(tok.token, Token::Comma | Token::RParen)
+                {
+                    text.push(' ');
+                }
+                match &tok.token {
+                    Token::StringLit(s) => {
+                        text.push('"');
+                        text.push_str(s);
+                        text.push('"');
+                    }
+                    other => text.push_str(&format!("{}", other)),
                 }
             }
         }
-        let m = cap.get(0).unwrap();
-        items.push(Item::TraitDef(TraitDef {
-            name,
-            methods,
-            laws,
-            span: span_from_offset(source, m.start(), m.end() - m.start()),
-        }));
     }
+    text
+}
 
-    // impl
-    let impl_header_re = Regex::new(r"(?m)^impl\s+(\w+)\s+for\s+(\w+)\s*\{").unwrap();
-    for cap in impl_header_re.captures_iter(source) {
-        let trait_name = cap[1].to_string();
-        let target_type = cap[2].to_string();
-        let block_start = cap.get(0).unwrap().end();
+fn skip_balanced(ctx: &mut ParseContext, open: Token, close: Token) {
+    if ctx.peek() != &open {
+        return;
+    }
+    ctx.advance();
+    let mut depth = 1;
+    while depth > 0 && ctx.peek() != &Token::Eof {
+        if *ctx.peek() == open {
+            depth += 1;
+        } else if *ctx.peek() == close {
+            depth -= 1;
+        }
+        ctx.advance();
+    }
+}
+
+fn parse_bracket_list(ctx: &mut ParseContext) -> Vec<String> {
+    let mut result = Vec::new();
+    if ctx.peek() != &Token::LBracket {
+        return result;
+    }
+    ctx.advance();
+    while ctx.peek() != &Token::RBracket && ctx.peek() != &Token::Eof {
+        let name = ctx.expect_ident();
+        result.push(name);
+        if ctx.peek() == &Token::Comma {
+            ctx.advance();
+        }
+    }
+    ctx.expect(Token::RBracket);
+    result
+}
+
+fn parse_integer_literal(ctx: &mut ParseContext) -> i64 {
+    let negative = if ctx.peek() == &Token::Minus {
+        ctx.advance();
+        true
+    } else {
+        false
+    };
+    if let Token::IntLit(n) = ctx.peek().clone() {
+        ctx.advance();
+        if negative {
+            -n
+        } else {
+            n
+        }
+    } else {
+        0
+    }
+}
+
+fn collect_body(ctx: &mut ParseContext) -> String {
+    if ctx.peek() == &Token::LBrace {
+        let mut text = String::from("{");
+        ctx.advance();
         let mut depth = 1;
-        let mut block_end = block_start;
-        for (i, c) in source[block_start..].char_indices() {
-            match c {
-                '{' => depth += 1,
-                '}' => {
+        while depth > 0 && ctx.peek() != &Token::Eof {
+            let tok = ctx.advance().clone();
+            match &tok.token {
+                Token::LBrace => {
+                    depth += 1;
+                    text.push_str(" {");
+                }
+                Token::RBrace => {
                     depth -= 1;
                     if depth == 0 {
-                        block_end = block_start + i;
+                        text.push_str(" }");
                         break;
                     }
+                    text.push_str(" }");
                 }
-                _ => {}
+                other => {
+                    append_token(&mut text, other);
+                }
             }
         }
-        let body = &source[block_start..block_end];
-        let mut method_bodies = Vec::new();
-
-        let fn_header_re = Regex::new(r"fn\s+(\w+)\s*\([^)]*\)\s*->\s*\w+\s*\{").unwrap();
-        for fcap in fn_header_re.captures_iter(body) {
-            let method_name = fcap[1].to_string();
-            let fn_body_start = fcap.get(0).unwrap().end();
-            let mut fn_depth = 1;
-            let mut fn_body_end = fn_body_start;
-            for (i, c) in body[fn_body_start..].char_indices() {
-                match c {
-                    '{' => fn_depth += 1,
-                    '}' => {
-                        fn_depth -= 1;
-                        if fn_depth == 0 {
-                            fn_body_end = fn_body_start + i;
-                            break;
-                        }
-                    }
+        text
+    } else {
+        let mut text = String::new();
+        let mut depth_brace = 0i32;
+        let mut depth_paren = 0i32;
+        loop {
+            if depth_brace == 0 && depth_paren == 0 {
+                match ctx.peek() {
+                    Token::Eof
+                    | Token::Atom
+                    | Token::Struct
+                    | Token::Enum
+                    | Token::Trait
+                    | Token::Impl
+                    | Token::Import
+                    | Token::Extern
+                    | Token::Resource
+                    | Token::Effect
+                    | Token::Async
+                    | Token::Trusted
+                    | Token::Unverified
+                    | Token::Semicolon => break,
                     _ => {}
                 }
             }
-            let method_body = body[fn_body_start..fn_body_end].trim().to_string();
-            method_bodies.push((method_name, method_body));
+            let tok = ctx.advance().clone();
+            match &tok.token {
+                Token::LBrace => depth_brace += 1,
+                Token::RBrace => depth_brace -= 1,
+                Token::LParen => depth_paren += 1,
+                Token::RParen => depth_paren -= 1,
+                _ => {}
+            }
+            append_token(&mut text, &tok.token);
         }
-        let m = cap.get(0).unwrap();
-        items.push(Item::ImplDef(ImplDef {
-            trait_name,
-            target_type,
-            method_bodies,
-            span: span_from_offset(source, m.start(), block_end + 1 - m.start()),
-        }));
+        text
     }
+}
 
-    // resource
-    let resource_re =
-        Regex::new(r"(?m)^resource\s+(\w+)\s+priority:\s*(-?\d+)\s+mode:\s*(exclusive|shared)\s*;")
-            .unwrap();
-    for cap in resource_re.captures_iter(source) {
-        let name = cap[1].to_string();
-        let priority = cap[2].parse::<i64>().unwrap_or(0);
-        let mode = match &cap[3] {
-            "exclusive" => ResourceMode::Exclusive,
-            _ => ResourceMode::Shared,
-        };
-        let m = cap.get(0).unwrap();
-        items.push(Item::ResourceDef(ResourceDef {
-            name,
-            priority,
-            mode,
-            span: span_from_offset(source, m.start(), m.end() - m.start()),
-        }));
-    }
+// =============================================================================
+// Token-based module parser
+// =============================================================================
 
-    // effect
-    let effect_re = Regex::new(
-        r"(?m)^effect\s+(\w+)(?:\(([^)]*)\))?(?:\s+parent:\s*(\w+))?(?:\s+includes:\s*\[([^\]]*)\])?(?:\s+where\s+([^;]+))?\s*;",
-    )
-    .unwrap();
-    for cap in effect_re.captures_iter(source) {
-        let name = cap[1].to_string();
-        let params: Vec<EffectDefParam> = cap
-            .get(2)
-            .map(|m| {
-                m.as_str()
+pub fn parse_module_from_tokens(ctx: &mut ParseContext) -> Vec<Item> {
+    let mut items = Vec::new();
+
+    loop {
+        match ctx.peek().clone() {
+            Token::Eof => break,
+
+            Token::Import => {
+                let start_tok = ctx.advance().clone();
+                if let Token::StringLit(path) = ctx.peek().clone() {
+                    ctx.advance();
+                    let alias = if ctx.peek() == &Token::As {
+                        ctx.advance();
+                        Some(ctx.expect_ident())
+                    } else {
+                        None
+                    };
+                    ctx.expect(Token::Semicolon);
+                    items.push(Item::Import(ImportDecl {
+                        span: span_from_token(&start_tok),
+                        path,
+                        alias,
+                    }));
+                }
+            }
+
+            Token::Type => {
+                let start_tok = ctx.advance().clone();
+                let name = ctx.expect_ident();
+                ctx.expect(Token::Assign);
+                let base_type = ctx.expect_ident();
+                ctx.expect(Token::Where);
+                let predicate_raw = collect_until_semicolon(ctx);
+                ctx.expect(Token::Semicolon);
+                let tokens = super::lexer::legacy_tokenize(&predicate_raw);
+                let operand = tokens.first().cloned().unwrap_or_else(|| "v".to_string());
+                items.push(Item::TypeDef(RefinedType {
+                    name,
+                    _base_type: base_type,
+                    operand,
+                    predicate_raw,
+                    span: span_from_token(&start_tok),
+                }));
+            }
+
+            Token::Struct => {
+                let start_tok = ctx.advance().clone();
+                let name = ctx.expect_ident();
+                let type_params = parse_type_params_from_ctx(ctx);
+                let fields_raw = collect_braced_block(ctx);
+                let fields: Vec<StructField> = fields_raw
                     .split(',')
                     .map(|s| s.trim())
                     .filter(|s| !s.is_empty())
                     .map(|s| {
-                        if let Some((pname, ptype)) = s.split_once(':') {
-                            EffectDefParam {
-                                name: pname.trim().to_string(),
-                                type_name: ptype.trim().to_string(),
+                        let (field_part, constraint) = if let Some(idx) = s.find("where") {
+                            (s[..idx].trim(), Some(s[idx + 5..].trim().to_string()))
+                        } else {
+                            (s.trim(), None)
+                        };
+                        let parts: Vec<&str> = field_part.splitn(2, ':').collect();
+                        let type_name_str = parts
+                            .get(1)
+                            .map(|t| t.trim().to_string())
+                            .unwrap_or_else(|| "i64".to_string());
+                        let type_ref = parse_type_ref(&type_name_str);
+                        StructField {
+                            name: parts[0].trim().to_string(),
+                            type_name: type_name_str,
+                            type_ref,
+                            constraint,
+                        }
+                    })
+                    .collect();
+                items.push(Item::StructDef(StructDef {
+                    name,
+                    type_params,
+                    fields,
+                    method_names: vec![],
+                    span: span_from_token(&start_tok),
+                }));
+            }
+
+            Token::Enum => {
+                let start_tok = ctx.advance().clone();
+                let name = ctx.expect_ident();
+                let type_params = parse_type_params_from_ctx(ctx);
+                let variants_raw = collect_braced_block(ctx);
+                let mut any_recursive = false;
+                let variant_strs = split_variants(&variants_raw);
+                let variants: Vec<EnumVariant> = variant_strs
+                    .iter()
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| {
+                        if let Some(paren_start) = s.find('(') {
+                            let variant_name = s[..paren_start].trim().to_string();
+                            let fields_str = &s[paren_start + 1..s.rfind(')').unwrap_or(s.len())];
+                            let fields: Vec<String> = fields_str
+                                .split(',')
+                                .map(|f| {
+                                    let f = f.trim().to_string();
+                                    if f == "Self" {
+                                        name.clone()
+                                    } else {
+                                        f
+                                    }
+                                })
+                                .filter(|f| !f.is_empty())
+                                .collect();
+                            let field_types: Vec<TypeRef> =
+                                fields.iter().map(|f| parse_type_ref(f)).collect();
+                            let is_recursive = fields.iter().any(|f| f == &name);
+                            if is_recursive {
+                                any_recursive = true;
+                            }
+                            EnumVariant {
+                                name: variant_name,
+                                fields,
+                                field_types,
+                                is_recursive,
                             }
                         } else {
-                            EffectDefParam {
+                            EnumVariant {
                                 name: s.to_string(),
-                                type_name: "Str".to_string(),
+                                fields: vec![],
+                                field_types: vec![],
+                                is_recursive: false,
                             }
                         }
                     })
-                    .collect()
-            })
-            .unwrap_or_default();
-        let parent = cap.get(3).map(|m| m.as_str().trim().to_string());
-        let includes: Vec<String> = cap
-            .get(4)
-            .map(|m| {
-                m.as_str()
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect()
-            })
-            .unwrap_or_default();
-        let refinement = cap.get(5).map(|m| m.as_str().trim().to_string());
-        let constraint = refinement.clone();
-        let m = cap.get(0).unwrap();
-        items.push(Item::EffectDef(EffectDef {
-            name,
-            params,
-            constraint,
-            includes,
-            refinement,
-            parent,
-            span: span_from_offset(source, m.start(), m.end() - m.start()),
-        }));
-    }
+                    .collect();
+                items.push(Item::EnumDef(EnumDef {
+                    name,
+                    type_params,
+                    variants,
+                    is_recursive: any_recursive,
+                    span: span_from_token(&start_tok),
+                }));
+            }
 
-    // extern
-    let extern_re = Regex::new(r#"(?m)^extern\s+"(\w+)"\s*\{([^}]*)\}"#).unwrap();
-    for cap in extern_re.captures_iter(source) {
-        let language = cap[1].to_string();
-        let body = &cap[2];
-        let body_offset = cap.get(2).unwrap().start();
-        let mut functions = Vec::new();
-        let fn_re = Regex::new(r"fn\s+(\w+)\s*\(([^)]*)\)\s*->\s*(\w+)").unwrap();
-        for fcap in fn_re.captures_iter(body) {
-            let name = fcap[1].to_string();
-            let params_str = &fcap[2];
-            let param_types: Vec<String> = params_str
-                .split(',')
-                .map(|p| p.trim())
-                .filter(|p| !p.is_empty())
-                .map(|p| {
-                    if let Some((_, t)) = p.split_once(':') {
-                        t.trim().to_string()
+            Token::Trait => {
+                let start_tok = ctx.advance().clone();
+                let name = ctx.expect_ident();
+                let body = collect_braced_block(ctx);
+                let mut methods = Vec::new();
+                let mut laws = Vec::new();
+                // Token reconstruction produces single-line text; use flat parser
+                // which scans for "fn " and "law " prefixes regardless of newlines.
+                parse_trait_body_flat(&body, &mut methods, &mut laws);
+                items.push(Item::TraitDef(TraitDef {
+                    name,
+                    methods,
+                    laws,
+                    span: span_from_token(&start_tok),
+                }));
+            }
+
+            Token::Impl => {
+                let start_tok = ctx.advance().clone();
+                let trait_name = ctx.expect_ident();
+                if ctx.peek() == &Token::For {
+                    ctx.advance();
+                }
+                let target_type = ctx.expect_ident();
+                if ctx.peek() == &Token::LBrace {
+                    ctx.advance();
+                }
+                let mut method_bodies = Vec::new();
+                while ctx.peek() != &Token::RBrace && ctx.peek() != &Token::Eof {
+                    if ctx.peek() == &Token::Fn {
+                        ctx.advance();
+                        let method_name = ctx.expect_ident();
+                        if ctx.peek() == &Token::LParen {
+                            skip_balanced(ctx, Token::LParen, Token::RParen);
+                        }
+                        if ctx.peek() == &Token::Arrow {
+                            ctx.advance();
+                            ctx.expect_ident();
+                        }
+                        let method_body = collect_braced_block(ctx);
+                        method_bodies.push((method_name, method_body));
                     } else {
-                        p.to_string()
+                        ctx.advance();
                     }
-                })
-                .collect();
-            let return_type = fcap[3].to_string();
-            let fm = fcap.get(0).unwrap();
-            functions.push(ExternFn {
-                name,
-                param_types,
-                return_type,
-                span: span_from_offset(source, body_offset + fm.start(), fm.end() - fm.start()),
-            });
-        }
-        let m = cap.get(0).unwrap();
-        items.push(Item::ExternBlock(ExternBlock {
-            language,
-            functions,
-            span: span_from_offset(source, m.start(), m.end() - m.start()),
-        }));
-    }
+                }
+                if ctx.peek() == &Token::RBrace {
+                    ctx.advance();
+                }
+                items.push(Item::ImplDef(ImplDef {
+                    trait_name,
+                    target_type,
+                    method_bodies,
+                    span: span_from_token(&start_tok),
+                }));
+            }
 
-    // atoms (modified and plain)
-    let atom_re = Regex::new(r"atom\s+\w+").unwrap();
-    let modified_atom_re = Regex::new(r"(?:(?:async|trusted|unverified)\s+)+atom\s+\w+").unwrap();
-    let modified_atom_indices: Vec<_> = modified_atom_re.find_iter(source).collect();
-    let mut modified_atom_starts: std::collections::HashSet<usize> =
-        std::collections::HashSet::new();
-    for mat in &modified_atom_indices {
-        let start = mat.start();
-        modified_atom_starts.insert(start);
-        let atom_source = &source[start..];
-        let mut is_async = false;
-        let mut trust_level = TrustLevel::Verified;
-        let mut remaining = atom_source;
-        loop {
-            remaining = remaining.trim_start();
-            if remaining.starts_with("async")
-                && remaining[5..].starts_with(|c: char| c.is_whitespace())
-            {
-                is_async = true;
-                remaining = &remaining[5..];
-            } else if remaining.starts_with("trusted")
-                && remaining[7..].starts_with(|c: char| c.is_whitespace())
-            {
-                trust_level = TrustLevel::Trusted;
-                remaining = &remaining[7..];
-            } else if remaining.starts_with("unverified")
-                && remaining[10..].starts_with(|c: char| c.is_whitespace())
-            {
-                trust_level = TrustLevel::Unverified;
-                remaining = &remaining[10..];
-            } else {
-                break;
+            Token::Resource => {
+                let start_tok = ctx.advance().clone();
+                let name = ctx.expect_ident();
+                ctx.expect(Token::Priority);
+                ctx.expect(Token::Colon);
+                let priority = parse_integer_literal(ctx);
+                ctx.expect(Token::Mode);
+                ctx.expect(Token::Colon);
+                let mode = match ctx.peek() {
+                    Token::Exclusive => {
+                        ctx.advance();
+                        ResourceMode::Exclusive
+                    }
+                    Token::Shared => {
+                        ctx.advance();
+                        ResourceMode::Shared
+                    }
+                    _ => {
+                        let ident = ctx.expect_ident();
+                        if ident == "exclusive" {
+                            ResourceMode::Exclusive
+                        } else {
+                            ResourceMode::Shared
+                        }
+                    }
+                };
+                ctx.expect(Token::Semicolon);
+                items.push(Item::ResourceDef(ResourceDef {
+                    name,
+                    priority,
+                    mode,
+                    span: span_from_token(&start_tok),
+                }));
+            }
+
+            Token::Effect => {
+                let start_tok = ctx.advance().clone();
+                let name = ctx.expect_ident();
+                let params: Vec<EffectDefParam> = if ctx.peek() == &Token::LParen {
+                    ctx.advance();
+                    let mut ps = Vec::new();
+                    while ctx.peek() != &Token::RParen && ctx.peek() != &Token::Eof {
+                        let pname = ctx.expect_ident();
+                        let ptype = if ctx.peek() == &Token::Colon {
+                            ctx.advance();
+                            ctx.expect_ident()
+                        } else {
+                            "Str".to_string()
+                        };
+                        ps.push(EffectDefParam {
+                            name: pname,
+                            type_name: ptype,
+                        });
+                        if ctx.peek() == &Token::Comma {
+                            ctx.advance();
+                        }
+                    }
+                    ctx.expect(Token::RParen);
+                    ps
+                } else {
+                    vec![]
+                };
+                let parent = if ctx.peek() == &Token::Parent {
+                    ctx.advance();
+                    ctx.expect(Token::Colon);
+                    Some(ctx.expect_ident())
+                } else {
+                    None
+                };
+                let includes: Vec<String> = if ctx.peek() == &Token::Includes {
+                    ctx.advance();
+                    ctx.expect(Token::Colon);
+                    parse_bracket_list(ctx)
+                } else {
+                    vec![]
+                };
+                let refinement = if ctx.peek() == &Token::Where {
+                    ctx.advance();
+                    let text = collect_until_semicolon(ctx);
+                    Some(text)
+                } else {
+                    None
+                };
+                ctx.expect(Token::Semicolon);
+                let constraint = refinement.clone();
+                items.push(Item::EffectDef(EffectDef {
+                    name,
+                    params,
+                    constraint,
+                    includes,
+                    refinement,
+                    parent,
+                    span: span_from_token(&start_tok),
+                }));
+            }
+
+            Token::Extern => {
+                let start_tok = ctx.advance().clone();
+                let language = if let Token::StringLit(s) = ctx.peek().clone() {
+                    ctx.advance();
+                    s
+                } else {
+                    ctx.expect_ident()
+                };
+                if ctx.peek() == &Token::LBrace {
+                    ctx.advance();
+                }
+                let mut functions = Vec::new();
+                while ctx.peek() != &Token::RBrace && ctx.peek() != &Token::Eof {
+                    if ctx.peek() == &Token::Fn {
+                        let fn_tok = ctx.advance().clone();
+                        let fn_name = ctx.expect_ident();
+                        ctx.expect(Token::LParen);
+                        let mut param_types = Vec::new();
+                        while ctx.peek() != &Token::RParen && ctx.peek() != &Token::Eof {
+                            let first = ctx.expect_ident();
+                            let type_name = if ctx.peek() == &Token::Colon {
+                                ctx.advance();
+                                ctx.expect_ident()
+                            } else {
+                                first
+                            };
+                            param_types.push(type_name);
+                            if ctx.peek() == &Token::Comma {
+                                ctx.advance();
+                            }
+                        }
+                        ctx.expect(Token::RParen);
+                        let return_type = if ctx.peek() == &Token::Arrow {
+                            ctx.advance();
+                            ctx.expect_ident()
+                        } else {
+                            "i64".to_string()
+                        };
+                        ctx.expect(Token::Semicolon);
+                        functions.push(ExternFn {
+                            name: fn_name,
+                            param_types,
+                            return_type,
+                            span: span_from_token(&fn_tok),
+                        });
+                    } else {
+                        ctx.advance();
+                    }
+                }
+                if ctx.peek() == &Token::RBrace {
+                    ctx.advance();
+                }
+                items.push(Item::ExternBlock(ExternBlock {
+                    language,
+                    functions,
+                    span: span_from_token(&start_tok),
+                }));
+            }
+
+            Token::Atom | Token::Async | Token::Trusted | Token::Unverified => {
+                let start_tok = ctx.tokens_ref()[ctx.pos()].clone();
+                let mut is_async = false;
+                let mut trust_level = TrustLevel::Verified;
+                loop {
+                    match ctx.peek() {
+                        Token::Async => {
+                            is_async = true;
+                            ctx.advance();
+                        }
+                        Token::Trusted => {
+                            trust_level = TrustLevel::Trusted;
+                            ctx.advance();
+                        }
+                        Token::Unverified => {
+                            trust_level = TrustLevel::Unverified;
+                            ctx.advance();
+                        }
+                        _ => break,
+                    }
+                }
+                if ctx.peek() != &Token::Atom {
+                    ctx.advance();
+                    continue;
+                }
+                ctx.advance();
+                let mut atom = parse_atom_body(ctx, &start_tok);
+                atom.is_async = is_async;
+                atom.trust_level = trust_level;
+                items.push(Item::Atom(atom));
+            }
+
+            _ => {
+                ctx.advance();
             }
         }
-        let atom_start_in_remaining = remaining.find("atom").unwrap_or(0);
-        let atom_text = &remaining[atom_start_in_remaining..];
-        let next_atom_pos = atom_re
-            .find(atom_text.get(5..).unwrap_or(""))
-            .map(|m| m.start() + 5)
-            .unwrap_or(atom_text.len());
-        let atom_slice = &atom_text[..next_atom_pos];
-        let mut atom = parse_atom_from_source(atom_slice);
-        atom.is_async = is_async;
-        atom.trust_level = trust_level;
-        items.push(Item::Atom(atom));
-    }
-
-    let atom_indices: Vec<_> = atom_re.find_iter(source).map(|m| m.start()).collect();
-    for i in 0..atom_indices.len() {
-        let start = atom_indices[i];
-        let skip = modified_atom_starts
-            .iter()
-            .any(|&ms| start > ms && start < ms + 30);
-        if skip {
-            continue;
-        }
-        let prefix = &source[start.saturating_sub(12)..start];
-        if prefix.contains("async") || prefix.contains("trusted") || prefix.contains("unverified") {
-            continue;
-        }
-        let end = if i + 1 < atom_indices.len() {
-            atom_indices[i + 1]
-        } else {
-            source.len()
-        };
-        let atom_source = &source[start..end];
-        items.push(Item::Atom(parse_atom_from_source(atom_source)));
     }
 
     items
 }
 
-/// Parse a single atom definition from source text.
-pub fn parse_atom_from_source(source: &str) -> Atom {
-    let name_re = Regex::new(r"atom\s+(\w+)\s*(<[^>]*>)?\s*\(").unwrap();
-    let req_re = Regex::new(r"requires:\s*([^;]+);").unwrap();
-    let ens_re = Regex::new(r"ensures:\s*([^;]+);").unwrap();
+// =============================================================================
+// Atom body parsing
+// =============================================================================
 
-    let forall_re =
-        Regex::new(r"forall\(\s*(\w+)\s*,\s*([^,]+)\s*,\s*([^,]+)\s*,\s*([^)]+)\)").unwrap();
-    let exists_re =
-        Regex::new(r"exists\(\s*(\w+)\s*,\s*([^,]+)\s*,\s*([^,]+)\s*,\s*([^)]+)\)").unwrap();
+fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
+    let name = ctx.expect_ident();
 
-    let name_caps = name_re.captures(source).expect("Failed to parse atom name");
-    let name = name_caps[1].to_string();
-    let (type_params, where_bounds) = name_caps
-        .get(2)
-        .map(|m| parse_type_params_with_bounds(m.as_str()))
-        .unwrap_or_default();
+    let (type_params, where_bounds) = if ctx.peek() == &Token::Lt {
+        let type_params_str = collect_angle_brackets(ctx);
+        parse_type_params_with_bounds(&type_params_str)
+    } else {
+        (vec![], vec![])
+    };
 
-    let params_start = name_caps.get(0).unwrap().end();
-    let after_open = &source[params_start..];
-    let mut depth = 1;
-    let mut params_end = 0;
-    for (i, c) in after_open.char_indices() {
-        match c {
-            '(' => depth += 1,
-            ')' => {
-                depth -= 1;
-                if depth == 0 {
-                    params_end = i;
-                    break;
-                }
-            }
-            _ => {}
-        }
-    }
-    let params_str = &after_open[..params_end];
-
-    let params: Vec<Param> = split_params(params_str)
+    let params_str = if ctx.peek() == &Token::LParen {
+        collect_balanced_parens(ctx)
+    } else {
+        String::new()
+    };
+    let params: Vec<Param> = split_params(&params_str)
         .iter()
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
@@ -950,155 +1136,155 @@ pub fn parse_atom_from_source(source: &str) -> Atom {
         })
         .collect();
 
-    // contract(...): clause ranges — collect them so requires:/ensures: matching excludes them.
-    // This ensures clause ordering doesn't matter (contract can appear before/after ensures).
-    let contract_re_ranges = Regex::new(r"contract\(\w+\):\s*[^;]+;").unwrap();
-    let contract_spans: Vec<(usize, usize)> = contract_re_ranges
-        .find_iter(source)
-        .map(|m| (m.start(), m.end()))
-        .collect();
-    let is_inside_contract = |offset: usize| -> bool {
-        contract_spans
-            .iter()
-            .any(|&(s, e)| offset >= s && offset < e)
-    };
-
-    let requires_raw = req_re
-        .captures_iter(source)
-        .find(|c| !is_inside_contract(c.get(0).unwrap().start()))
-        .map_or("true".to_string(), |c| c[1].trim().to_string());
-    let ensures = ens_re
-        .captures_iter(source)
-        .find(|c| !is_inside_contract(c.get(0).unwrap().start()))
-        .map_or("true".to_string(), |c| c[1].trim().to_string());
-
-    let body_marker = "body:";
-    let body_start_pos =
-        source.find(body_marker).expect("Failed to find body:") + body_marker.len();
-    let body_snippet = source[body_start_pos..].trim();
-
+    let mut requires_raw = "true".to_string();
+    let mut ensures = "true".to_string();
     let mut body_raw = String::new();
-    if body_snippet.starts_with('{') {
-        let mut brace_count = 0;
-        for c in body_snippet.chars() {
-            body_raw.push(c);
-            if c == '{' {
-                brace_count += 1;
-            } else if c == '}' {
-                brace_count -= 1;
-                if brace_count == 0 {
-                    break;
+    let mut consumed_params: Vec<String> = Vec::new();
+    let mut resources: Vec<String> = Vec::new();
+    let mut max_unroll: Option<usize> = None;
+    let mut invariant: Option<String> = None;
+    let mut effects: Vec<Effect> = Vec::new();
+    let mut contracts: Vec<(String, Option<String>, Option<String>)> = Vec::new();
+
+    loop {
+        match ctx.peek().clone() {
+            Token::Requires => {
+                ctx.advance();
+                ctx.expect(Token::Colon);
+                requires_raw = collect_until_semicolon(ctx);
+                ctx.expect(Token::Semicolon);
+            }
+            Token::Ensures => {
+                ctx.advance();
+                ctx.expect(Token::Colon);
+                ensures = collect_until_semicolon(ctx);
+                ctx.expect(Token::Semicolon);
+            }
+            Token::Body => {
+                ctx.advance();
+                ctx.expect(Token::Colon);
+                body_raw = collect_body(ctx);
+                break;
+            }
+            Token::Consume => {
+                ctx.advance();
+                let text = collect_until_semicolon(ctx);
+                for p in text.split(',') {
+                    let p = p.trim();
+                    if !p.is_empty() {
+                        consumed_params.push(p.to_string());
+                    }
                 }
+                ctx.expect(Token::Semicolon);
+            }
+            Token::Resources => {
+                ctx.advance();
+                ctx.expect(Token::Colon);
+                if ctx.peek() == &Token::LBracket {
+                    resources = parse_bracket_list(ctx);
+                } else {
+                    let text = collect_until_semicolon(ctx);
+                    for r in text.split(',') {
+                        let r = r.trim();
+                        if !r.is_empty() {
+                            resources.push(r.to_string());
+                        }
+                    }
+                }
+                ctx.expect(Token::Semicolon);
+            }
+            Token::MaxUnroll => {
+                ctx.advance();
+                ctx.expect(Token::Colon);
+                if let Token::IntLit(n) = ctx.peek().clone() {
+                    ctx.advance();
+                    max_unroll = Some(n as usize);
+                }
+                ctx.expect(Token::Semicolon);
+            }
+            Token::Invariant => {
+                ctx.advance();
+                ctx.expect(Token::Colon);
+                invariant = Some(collect_until_semicolon(ctx));
+                ctx.expect(Token::Semicolon);
+            }
+            Token::Effects => {
+                ctx.advance();
+                ctx.expect(Token::Colon);
+                if ctx.peek() == &Token::LBracket {
+                    ctx.advance();
+                    let mut effect_text = String::new();
+                    while ctx.peek() != &Token::RBracket && ctx.peek() != &Token::Eof {
+                        if !effect_text.is_empty() {
+                            effect_text.push(' ');
+                        }
+                        let tok = ctx.advance();
+                        match &tok.token {
+                            Token::StringLit(s) => {
+                                effect_text.push('"');
+                                effect_text.push_str(s);
+                                effect_text.push('"');
+                            }
+                            other => effect_text.push_str(&format!("{}", other)),
+                        }
+                    }
+                    ctx.expect(Token::RBracket);
+                    effects = parse_effect_list(&effect_text);
+                } else {
+                    let text = collect_until_semicolon(ctx);
+                    effects = parse_effect_list(&text);
+                }
+                ctx.expect(Token::Semicolon);
+            }
+            Token::Contract => {
+                ctx.advance();
+                ctx.expect(Token::LParen);
+                let param_name = ctx.expect_ident();
+                ctx.expect(Token::RParen);
+                ctx.expect(Token::Colon);
+                let clauses = collect_until_semicolon(ctx);
+                ctx.expect(Token::Semicolon);
+                let (fn_req, fn_ens) = parse_contract_clauses(&clauses);
+                contracts.push((param_name, fn_req, fn_ens));
+            }
+            Token::Atom
+            | Token::Async
+            | Token::Trusted
+            | Token::Unverified
+            | Token::Struct
+            | Token::Enum
+            | Token::Trait
+            | Token::Impl
+            | Token::Import
+            | Token::Extern
+            | Token::Resource
+            | Token::Effect
+            | Token::Eof => break,
+            _ => {
+                ctx.advance();
             }
         }
-    } else {
-        body_raw = body_snippet.split(';').next().unwrap_or("").to_string();
     }
 
-    let mut forall_constraints = Vec::new();
-    for cap in forall_re.captures_iter(&requires_raw) {
-        forall_constraints.push(Quantifier {
-            q_type: QuantifierType::ForAll,
-            var: cap[1].to_string(),
-            start: cap[2].trim().to_string(),
-            end: cap[3].trim().to_string(),
-            condition: cap[4].trim().to_string(),
-        });
-    }
-    for cap in exists_re.captures_iter(&requires_raw) {
-        forall_constraints.push(Quantifier {
-            q_type: QuantifierType::Exists,
-            var: cap[1].to_string(),
-            start: cap[2].trim().to_string(),
-            end: cap[3].trim().to_string(),
-            condition: cap[4].trim().to_string(),
-        });
-    }
-
-    let consume_re = Regex::new(r"consume\s+([^;]+);").unwrap();
-    let consumed_params: Vec<String> = consume_re
-        .captures_iter(source)
-        .flat_map(|cap| {
-            cap[1]
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect::<Vec<_>>()
-        })
-        .collect();
-
-    let resources_re = Regex::new(r"resources:\s*\[?([^\];]+)\]?\s*;").unwrap();
-    let resources: Vec<String> = resources_re
-        .captures_iter(source)
-        .flat_map(|cap| {
-            cap[1]
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect::<Vec<_>>()
-        })
-        .collect();
-
-    let max_unroll_re = Regex::new(r"max_unroll:\s*(\d+)\s*;").unwrap();
-    let max_unroll = max_unroll_re
-        .captures(source)
-        .and_then(|cap| cap[1].parse::<usize>().ok());
-
-    let invariant_re = Regex::new(r"(?m)^invariant:\s*([^;]+);").unwrap();
-    let invariant = invariant_re
-        .captures(source)
-        .map(|cap| cap[1].trim().to_string());
-
-    let effects_re = Regex::new(r"effects:\s*\[([^\]]*)]\s*;").unwrap();
-    let effects: Vec<Effect> = effects_re
-        .captures(source)
-        .map(|cap| parse_effect_list(&cap[1]))
-        .unwrap_or_default();
-
-    // contract(param_name) clause parsing: higher-order function parameter contracts
-    // Syntax: contract(f): ensures: <expr>;
-    //         contract(f): requires: <expr>, ensures: <expr>;
-    let contract_re = Regex::new(r"contract\((\w+)\):\s*([^;]+);").unwrap();
     let mut params = params;
-    for cap in contract_re.captures_iter(source) {
-        let param_name = cap[1].to_string();
-        let clauses = cap[2].to_string();
-        let mut fn_req: Option<String> = None;
-        let mut fn_ens: Option<String> = None;
-        // Parse "requires: <expr>, ensures: <expr>" or just "ensures: <expr>"
-        if let Some(req_idx) = clauses.find("requires:") {
-            let after_req = &clauses[req_idx + "requires:".len()..];
-            // Find comma before "ensures:" (if present)
-            if let Some(ens_marker) = after_req.find("ensures:") {
-                let req_val = after_req[..ens_marker].trim().trim_end_matches(',').trim();
-                fn_req = Some(req_val.to_string());
-                let ens_val = after_req[ens_marker + "ensures:".len()..].trim();
-                fn_ens = Some(ens_val.to_string());
-            } else {
-                fn_req = Some(after_req.trim().to_string());
-            }
-        } else if let Some(ens_idx) = clauses.find("ensures:") {
-            let ens_val = clauses[ens_idx + "ensures:".len()..].trim();
-            fn_ens = Some(ens_val.to_string());
-        }
-        // Attach contract to matching parameter
+    for (param_name, fn_req, fn_ens) in &contracts {
         for p in params.iter_mut() {
-            if p.name == param_name {
+            if p.name == *param_name {
                 p.fn_contract_requires = fn_req.clone();
                 p.fn_contract_ensures = fn_ens.clone();
             }
         }
     }
 
-    let atom_match = name_caps.get(0).unwrap();
+    let forall_constraints = extract_quantifiers(&requires_raw);
+    let requires_cleaned = strip_quantifiers(&requires_raw);
+
     Atom {
         name,
         type_params,
         where_bounds,
         params,
-        requires: forall_re
-            .replace_all(&exists_re.replace_all(&requires_raw, "true"), "true")
-            .to_string(),
+        requires: requires_cleaned,
         forall_constraints,
         ensures,
         body_expr: body_raw,
@@ -1109,12 +1295,277 @@ pub fn parse_atom_from_source(source: &str) -> Atom {
         max_unroll,
         invariant,
         effects,
-        span: span_from_offset(source, atom_match.start(), source.len()),
+        span: span_from_token(start_tok),
     }
 }
 
-// ---- Span helper ----
+// =============================================================================
+// String-based helpers for trait/law/contract parsing
+// =============================================================================
 
+fn parse_contract_clauses(clauses: &str) -> (Option<String>, Option<String>) {
+    let mut fn_req: Option<String> = None;
+    let mut fn_ens: Option<String> = None;
+    let req_markers = ["requires :", "requires:"];
+    let ens_markers = ["ensures :", "ensures:"];
+    for req_marker in &req_markers {
+        if let Some(req_idx) = clauses.find(req_marker) {
+            let after_req = &clauses[req_idx + req_marker.len()..];
+            for ens_marker in &ens_markers {
+                if let Some(ens_pos) = after_req.find(ens_marker) {
+                    let req_val = after_req[..ens_pos].trim().trim_end_matches(',').trim();
+                    fn_req = Some(req_val.to_string());
+                    let ens_val = after_req[ens_pos + ens_marker.len()..].trim();
+                    fn_ens = Some(ens_val.to_string());
+                    return (fn_req, fn_ens);
+                }
+            }
+            fn_req = Some(after_req.trim().to_string());
+            return (fn_req, fn_ens);
+        }
+    }
+    for ens_marker in &ens_markers {
+        if let Some(ens_idx) = clauses.find(ens_marker) {
+            let ens_val = clauses[ens_idx + ens_marker.len()..].trim();
+            fn_ens = Some(ens_val.to_string());
+            return (fn_req, fn_ens);
+        }
+    }
+    (fn_req, fn_ens)
+}
+
+fn parse_trait_method_from_str(line: &str) -> Option<TraitMethod> {
+    let line = line.trim();
+    if !line.starts_with("fn ") {
+        return None;
+    }
+    let rest = &line[3..];
+    let paren_start = rest.find('(')?;
+    let method_name = rest[..paren_start].trim().to_string();
+    let paren_end = rest.rfind(')')?;
+    let params_str = &rest[paren_start + 1..paren_end];
+    let arrow_pos = rest[paren_end..].find("->");
+    let return_type = if let Some(ap) = arrow_pos {
+        rest[paren_end + ap + 2..]
+            .trim()
+            .trim_end_matches(';')
+            .trim()
+            .to_string()
+    } else {
+        "i64".to_string()
+    };
+    let mut param_types = Vec::new();
+    let mut param_constraints = Vec::new();
+    for p in params_str.split(',') {
+        let p = p.trim();
+        if p.is_empty() {
+            continue;
+        }
+        if let Some((before_where, constraint)) = p.split_once("where") {
+            let type_str = if let Some((_, t)) = before_where.split_once(':') {
+                t.trim().to_string()
+            } else {
+                before_where.trim().to_string()
+            };
+            param_types.push(type_str);
+            param_constraints.push(Some(constraint.trim().to_string()));
+        } else if let Some((_, t)) = p.split_once(':') {
+            param_types.push(t.trim().to_string());
+            param_constraints.push(None);
+        } else {
+            param_types.push(p.to_string());
+            param_constraints.push(None);
+        }
+    }
+    Some(TraitMethod {
+        name: method_name,
+        param_types,
+        return_type,
+        param_constraints,
+    })
+}
+
+fn parse_law_from_str(line: &str) -> Option<(String, String)> {
+    let line = line.trim();
+    if !line.starts_with("law ") {
+        return None;
+    }
+    let rest = &line[4..];
+    let colon_pos = rest.find(':')?;
+    let law_name = rest[..colon_pos].trim().to_string();
+    let law_expr = rest[colon_pos + 1..].trim().to_string();
+    Some((law_name, law_expr))
+}
+
+fn parse_trait_body_flat(
+    body: &str,
+    methods: &mut Vec<TraitMethod>,
+    laws: &mut Vec<(String, String)>,
+) {
+    let body = body.trim();
+    if body.is_empty() {
+        return;
+    }
+    let mut i = 0;
+    let len = body.len();
+    while i < len {
+        while i < len
+            && body
+                .as_bytes()
+                .get(i)
+                .is_some_and(|b| b.is_ascii_whitespace())
+        {
+            i += 1;
+        }
+        if i >= len {
+            break;
+        }
+        if i + 3 <= len && &body[i..i + 3] == "fn " {
+            let start = i;
+            let end = find_next_trait_item(body, i + 3);
+            if let Some(method) = parse_trait_method_from_str(body[start..end].trim()) {
+                methods.push(method);
+            }
+            i = end;
+        } else if i + 4 <= len && &body[i..i + 4] == "law " {
+            let start = i;
+            let end = find_next_trait_item(body, i + 4);
+            if let Some(law) = parse_law_from_str(body[start..end].trim()) {
+                laws.push(law);
+            }
+            i = end;
+        } else {
+            i += 1;
+        }
+    }
+}
+
+fn find_next_trait_item(body: &str, start: usize) -> usize {
+    let mut i = start;
+    while i < body.len() {
+        if i + 3 <= body.len() && &body[i..i + 3] == "fn " {
+            return i;
+        }
+        if i + 4 <= body.len() && &body[i..i + 4] == "law " {
+            return i;
+        }
+        i += 1;
+    }
+    body.len()
+}
+
+fn extract_quantifiers(requires: &str) -> Vec<Quantifier> {
+    let mut quantifiers = Vec::new();
+    for (prefix, q_type) in [
+        ("forall(", QuantifierType::ForAll),
+        ("exists(", QuantifierType::Exists),
+    ] {
+        let mut search_from = 0;
+        while let Some(pos) = requires[search_from..].find(prefix) {
+            let abs_pos = search_from + pos + prefix.len();
+            let mut depth = 1;
+            let mut end_pos = abs_pos;
+            for (i, c) in requires[abs_pos..].char_indices() {
+                match c {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end_pos = abs_pos + i;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let inner = &requires[abs_pos..end_pos];
+            let parts: Vec<&str> = inner.splitn(4, ',').collect();
+            if parts.len() >= 4 {
+                quantifiers.push(Quantifier {
+                    q_type: q_type.clone(),
+                    var: parts[0].trim().to_string(),
+                    start: parts[1].trim().to_string(),
+                    end: parts[2].trim().to_string(),
+                    condition: parts[3].trim().to_string(),
+                });
+            }
+            search_from = end_pos + 1;
+        }
+    }
+    quantifiers
+}
+
+fn strip_quantifiers(requires: &str) -> String {
+    let mut result = requires.to_string();
+    for prefix in ["forall(", "exists("] {
+        while let Some(pos) = result.find(prefix) {
+            let after = pos + prefix.len();
+            let mut depth = 1;
+            let mut end = after;
+            for (i, c) in result[after..].char_indices() {
+                match c {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = after + i + 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            result = format!("{}true{}", &result[..pos], &result[end..]);
+        }
+    }
+    result
+}
+
+// =============================================================================
+// Backward-compatible public API
+// =============================================================================
+
+pub fn parse_module_from_source(source: &str) -> Vec<Item> {
+    let mut lexer = super::lexer::Lexer::new(source);
+    let tokens = lexer.tokenize();
+    let mut ctx = ParseContext::new(tokens);
+    parse_module_from_tokens(&mut ctx)
+}
+
+pub fn parse_atom_from_source(source: &str) -> Atom {
+    let mut lexer = super::lexer::Lexer::new(source);
+    let tokens = lexer.tokenize();
+    let mut ctx = ParseContext::new(tokens);
+    let start_tok = ctx.tokens_ref()[0].clone();
+    let mut is_async = false;
+    let mut trust_level = TrustLevel::Verified;
+    loop {
+        match ctx.peek() {
+            Token::Async => {
+                is_async = true;
+                ctx.advance();
+            }
+            Token::Trusted => {
+                trust_level = TrustLevel::Trusted;
+                ctx.advance();
+            }
+            Token::Unverified => {
+                trust_level = TrustLevel::Unverified;
+                ctx.advance();
+            }
+            _ => break,
+        }
+    }
+    if ctx.peek() == &Token::Atom {
+        ctx.advance();
+    }
+    let mut atom = parse_atom_body(&mut ctx, &start_tok);
+    atom.is_async = is_async;
+    atom.trust_level = trust_level;
+    atom
+}
+
+#[allow(dead_code)]
 fn offset_to_line_col(source: &str, offset: usize) -> (usize, usize) {
     let mut line = 1;
     let mut col = 1;
@@ -1132,6 +1583,7 @@ fn offset_to_line_col(source: &str, offset: usize) -> (usize, usize) {
     (line, col)
 }
 
+#[allow(dead_code)]
 fn span_from_offset(source: &str, offset: usize, len: usize) -> Span {
     let (line, col) = offset_to_line_col(source, offset);
     Span::new("", line, col, len)

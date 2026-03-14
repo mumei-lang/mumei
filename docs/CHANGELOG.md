@@ -2,6 +2,109 @@
 
 ---
 
+## PR #69: Phase 4a Wiring + HIR Effect Types (Task 5) + Capability Security (Task 6)
+
+### Summary
+
+Completes Phase 4a LinearityCtx wiring, adds HIR effect type information, and evaluates capability security for the parameterized effect system.
+
+### Part A — LinearityCtx Wiring (Phase 4a completion)
+
+- `VCtx` gains `linearity_ctx` and `effect_ctx` fields (wrapped in `RefCell` for interior mutability)
+- `check_alive()` wired into `expr_to_z3` Variable branch for use-after-consume detection
+- `borrow()`/`release_borrow()` wired into call-site ref/ref-mut argument handling
+- Removed `#[allow(dead_code)]` from `borrow`, `release_borrow`, `check_alive`
+
+### Part B — HIR Effect Type Information (Task 5)
+
+- New types: `HirEffectSet` (`BTreeSet<String>` for deterministic iteration), `HirEffectUsage`
+- Added `effect_set` to `HirAtom`, `callee_effects` to `HirExpr::Call`, `effect_usage` to `HirExpr::Perform`
+- New `lower_atom_to_hir_with_env()` populates effect info from `ModuleEnv`
+- Codegen + all 3 transpilers read from `hir_atom.effect_set.effects` with `atom.effects` fallback for parameterized detail
+
+### Part C — Capability Security (Task 6)
+
+- `verify_effect_params()` and `verify_effect_consistency()` wired into `verify_inner()`
+- `EffectCtx` wired into `VCtx` and `Perform` handling in `expr_to_z3`
+- `SecurityPolicy` field added to `ModuleEnv`; `is_effect_allowed` check in Perform handler
+- `build_effect_feedback()` wired into `verify_effect_containment()` error path (human-readable explanation)
+- `docs/CAPABILITY_SECURITY.md`: evaluation document recommending Option A (parameterized effects + Z3)
+
+### Test Results
+
+- 140 existing Rust unit tests pass
+- New test `.mm` files: `test_borrow_tracking.mm`, `test_use_after_consume.mm`, `test_capability_evaluation.mm`
+
+---
+
+## Four-Task Implementation: Parser Migration + Extern Codegen + Span Fix + MIR Foundation
+
+### Summary
+
+Implements four interconnected roadmap tasks as a single cohesive change: item parser regex→recursive descent migration, LLVM codegen for extern functions, import span mismatch fix, and MIR foundation with LinearityCtx wiring.
+
+### Task 1: Item Parser regex → Recursive Descent
+
+- **`src/parser/item.rs`**: Rewrote `parse_module_from_source()` and `parse_atom_from_source()` to use token-based parsing via `Lexer` + `ParseContext` instead of ~20 `Regex::new()` calls
+- Smart token-to-text reconstruction with `append_token()` helper for context-aware spacing
+- All 134 existing tests pass unchanged — backward compatible
+
+### Task 2: LLVM Codegen for Extern Functions (P1-A Completion)
+
+- **`src/codegen.rs`**: Added `declare_extern_functions()` that emits LLVM IR `declare` statements for each `ExternFn`
+- Maps Mumei types → LLVM types via `resolve_param_type()`
+- Sets calling convention based on `extern_block.language` ("C" or "Rust")
+- **`src/main.rs`**: Added `collect_extern_blocks()` helper to gather `ExternBlock` items for codegen
+- **`docs/ROADMAP.md`**: Marked P1-A LLVM codegen as ✅
+
+### Task 3: Import Span Mismatch Fix
+
+- **`src/main.rs`**: Created `resolve_source_for_span()` helper that checks `Span.file` and reads the imported file when needed
+- Fixed all 5+ locations where `e.with_source(&source, &atom.span)` used the wrong source for imported atoms/impls
+- Removed all TODO comments related to the span mismatch bug
+
+### Task 4a: LinearityCtx Wiring into Verification Pipeline
+
+- **`src/verification.rs`**: Added `linearity_ctx: Option<&'a RefCell<LinearityCtx>>` field to `VCtx` struct
+- Wrapped `LinearityCtx` in `RefCell` for interior mutability (avoids refactoring 60+ call sites)
+- Wired `check_alive()` into `expr_to_z3` Variable branch (use-after-consume detection)
+- Wired `borrow()` into call-site `ref`/`ref mut` argument handling
+- Wired `consume()` into call-site `consumed_params` argument handling
+- `LinearityCtx.borrow()`, `check_alive()`, `consume()` are no longer dead code
+
+### Task 4b: MIR Data Structures + HIR → MIR Lowering
+
+- **`src/mir.rs`** (new): MIR data structures (`Local`, `Place`, `Rvalue`, `Operand`, `MirConstant`, `MirStatement`, `Terminator`, `BasicBlock`, `MirBody`, `LocalDecl`)
+- `lower_hir_to_mir()`: Flattens nested HIR expressions into three-address code across BasicBlocks
+  - `HirStmt::Let` → `MirStatement::Assign` + `StorageLive`
+  - `HirExpr::BinaryOp` → temp + `Rvalue::BinaryOp`
+  - `HirExpr::IfThenElse` → 3+ BasicBlocks with `Terminator::SwitchInt`
+  - `HirStmt::While` → loop header / body / after blocks with back-edge
+  - `HirExpr::Call` → `Rvalue::Call`
+- 6 unit tests covering addition, if/else, let binding, function call, while loop, constants
+- **`src/hir.rs`**: Updated TODO comment to reference `src/mir.rs`
+- **`src/main.rs`**: Added `mod mir;`
+
+### Files Changed
+
+| File | Summary |
+|---|---|
+| `src/parser/item.rs` | Regex → recursive descent migration with smart token reconstruction |
+| `src/codegen.rs` | `declare_extern_functions()` for LLVM IR extern declarations |
+| `src/main.rs` | `resolve_source_for_span()`, `collect_extern_blocks()`, `mod mir;` |
+| `src/verification.rs` | LinearityCtx wired into VCtx via RefCell, borrow/consume/check_alive at call sites |
+| `src/mir.rs` | **New** — MIR data structures + HIR → MIR lowering + 6 unit tests |
+| `src/hir.rs` | Updated MIR TODO comment |
+| `docs/ROADMAP.md` | P1-A LLVM codegen ✅, Phase 4 status updated |
+| `docs/ARCHITECTURE.md` | Pipeline diagram + source file table updated |
+| `docs/CHANGELOG.md` | This entry |
+
+### Test Results
+
+- 140 tests passing (134 original + 6 new MIR tests)
+
+---
+
 ## PR #62: Parser Migration — Recursive Descent with Proper Lexer
 
 ### Summary
@@ -349,9 +452,14 @@ This PR implements dynamic memory management, ownership system, borrowing, and c
 
 The following data structures and logic are implemented but not yet wired into the compiler pipeline:
 
-| Item | Data Structure | Missing Integration |
+| Item | Data Structure | Status |
 |---|---|---|
-| Struct method parsing | `StructDef.method_names` | Parser for `impl Stack { atom push(...) }` syntax |
-| Trait method constraints | `TraitMethod.param_constraints` | Z3 injection in `verify_impl` and inter-atom calls |
-| Automatic borrow tracking | `LinearityCtx.borrow()` / `release_borrow()` | Call-site `ref` arg → borrow registration in `expr_to_z3` |
-| Use-after-consume detection | `LinearityCtx.check_alive()` | Variable access check in `expr_to_z3` `Variable` branch |
+| Struct method parsing | `StructDef.method_names` | ⏳ Parser for `impl Stack { atom push(...) }` syntax |
+| Trait method constraints | `TraitMethod.param_constraints` | ⏳ Z3 injection in `verify_impl` and inter-atom calls |
+| Automatic borrow tracking | `LinearityCtx.borrow()` / `release_borrow()` | ✅ Integrated (PR #69) |
+| Use-after-consume detection | `LinearityCtx.check_alive()` | ✅ Integrated (PR #69) |
+| Effect tracking context | `EffectCtx` | ✅ Integrated (PR #69) |
+| Security policy enforcement | `SecurityPolicy` | ✅ Integrated (PR #69) |
+| Effect consistency check | `verify_effect_consistency()` | ✅ Integrated (PR #69, warning level) |
+| Effect parameter constraints | `verify_effect_params()` | ✅ Integrated (PR #69) |
+| Effect feedback | `build_effect_feedback()` | ✅ Integrated (PR #69) |

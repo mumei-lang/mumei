@@ -98,6 +98,16 @@ def _format_semantic_feedback(report_json: str) -> str:
         if suggestion:
             parts.append(f"  - Suggestion: {suggestion}")
 
+    # Unsat core: conflicting constraints (contradiction detection)
+    conflicting = feedback.get("conflicting_constraints", [])
+    if conflicting:
+        parts.append("\n**Conflicting Constraints (Unsat Core):**")
+        for c in conflicting:
+            parts.append(f"- {c}")
+        explanation = feedback.get("explanation", "")
+        if explanation:
+            parts.append(f"\n  {explanation}")
+
     # Linearity violations
     violations = feedback.get("violations", [])
     for v in violations:
@@ -185,6 +195,11 @@ def _build_machine_readable(report: dict, feedback: dict) -> "dict | None":
 
     if feedback.get("counter_example"):
         result["counter_example"] = feedback["counter_example"]
+
+    conflicting = feedback.get("conflicting_constraints", [])
+    if conflicting:
+        result["conflicting_constraints"] = conflicting
+        result["raw_unsat_core"] = feedback.get("raw_unsat_core", [])
 
     result["suggestion"] = report.get("suggestion", "")
     return result
