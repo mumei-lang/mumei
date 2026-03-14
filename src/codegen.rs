@@ -46,11 +46,54 @@ fn resolve_param_type<'a>(
     }
 }
 
-pub fn compile(hir_atom: &HirAtom, output_path: &Path, module_env: &ModuleEnv) -> MumeiResult<()> {
+/// Emit LLVM `declare` for each function in the extern blocks so that
+/// call-site codegen can resolve them via `module.get_function(name)`.
+pub fn declare_extern_functions<'ctx>(
+    context: &'ctx Context,
+    module: &Module<'ctx>,
+    extern_blocks: &[crate::parser::ExternBlock],
+    module_env: &ModuleEnv,
+) {
+    for eb in extern_blocks {
+        for ext_fn in &eb.functions {
+            // Skip if already declared (e.g. by a previous block)
+            if module.get_function(&ext_fn.name).is_some() {
+                continue;
+            }
+            let param_types: Vec<BasicMetadataTypeEnum> = ext_fn
+                .param_types
+                .iter()
+                .map(|ty| resolve_param_type(context, Some(ty.as_str()), module_env).into())
+                .collect();
+
+            let ret_base = module_env.resolve_base_type(&ext_fn.return_type);
+            let fn_type = match ret_base.as_str() {
+                "f64" => context.f64_type().fn_type(&param_types, false),
+                _ => context.i64_type().fn_type(&param_types, false),
+            };
+            // Both "C" and "Rust" FFI use the C calling convention
+            module.add_function(
+                &ext_fn.name,
+                fn_type,
+                Some(inkwell::module::Linkage::External),
+            );
+        }
+    }
+}
+
+pub fn compile(
+    hir_atom: &HirAtom,
+    output_path: &Path,
+    module_env: &ModuleEnv,
+    extern_blocks: &[crate::parser::ExternBlock],
+) -> MumeiResult<()> {
     let atom = &hir_atom.atom;
     let context = Context::create();
     let module = context.create_module(&atom.name);
     let builder = context.create_builder();
+
+    // Declare all extern functions before compiling the atom body
+    declare_extern_functions(&context, &module, extern_blocks, module_env);
 
     let i64_type = context.i64_type();
 

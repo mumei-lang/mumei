@@ -960,6 +960,10 @@ struct VCtx<'a> {
     /// CallRef の動的ケース（パラメトリック関数型）で、呼び出し先の関数パラメータに
     /// 宣言された contract(f) 情報を取得するために使用する。
     current_atom: Option<&'a crate::parser::Atom>,
+    /// LinearityCtx for ownership/borrowing tracking during body evaluation.
+    /// Wrapped in RefCell so that recursive expr_to_z3/stmt_to_z3 calls can
+    /// mutate it without changing every call-site signature.
+    linearity_ctx: Option<&'a std::cell::RefCell<LinearityCtx>>,
 }
 
 // =============================================================================
@@ -1102,7 +1106,7 @@ impl LinearityCtx {
     /// 変数が借用中かどうかを確認する
     #[allow(dead_code)]
     pub fn is_borrowed(&self, name: &str) -> bool {
-        self.borrow_count.get(name).map_or(false, |&c| c > 0)
+        self.borrow_count.get(name).is_some_and(|&c| c > 0)
     }
 
     /// 蓄積された違反リストを返す
@@ -1330,7 +1334,7 @@ impl ModuleEnv {
             .filter(|name| {
                 self.effects
                     .get(name)
-                    .map_or(true, |def| def.includes.is_empty())
+                    .is_none_or(|def| def.includes.is_empty())
             })
             .collect()
     }
@@ -1876,6 +1880,7 @@ pub fn verify_impl(
             arr: &arr,
             module_env,
             current_atom: None,
+            linearity_ctx: None,
         };
 
         let mut env: Env = HashMap::new();
@@ -2901,6 +2906,7 @@ fn verify_atom_invariant(
         arr: &arr,
         module_env,
         current_atom: Some(atom),
+        linearity_ctx: None,
     };
 
     let mut env: Env = HashMap::new();
@@ -3656,11 +3662,15 @@ fn verify_inner(
 
     let int_sort = z3::Sort::int(&ctx);
     let arr = Array::new_const(&ctx, "arr", &int_sort, &int_sort);
+    // linearity_ctx is wrapped in RefCell so expr_to_z3/stmt_to_z3 can mutate it
+    // without requiring signature changes to every recursive call site.
+    let linearity_ctx_cell = std::cell::RefCell::new(LinearityCtx::new());
     let vc = VCtx {
         ctx: &ctx,
         arr: &arr,
         module_env,
         current_atom: Some(atom),
+        linearity_ctx: Some(&linearity_ctx_cell),
     };
 
     let mut env: Env = HashMap::new();
@@ -3762,7 +3772,7 @@ fn verify_inner(
     // 2d. 線形性チェック: consumed_params + ref パラメータの Z3 シンボリック Bool 連携
     // consume 宣言されたパラメータに対して is_alive フラグを Z3 上で追跡する。
     // ref パラメータに対しては借用カウントを追跡し、借用中の consume を禁止する。
-    let mut linearity_ctx = LinearityCtx::new();
+    // linearity_ctx_cell is shared with VCtx (created above) via RefCell.
 
     // consume 対象パラメータの登録
     if !atom.consumed_params.is_empty() {
@@ -3798,7 +3808,7 @@ fn verify_inner(
                 ));
             }
             // LinearityCtx に登録
-            linearity_ctx.register(param_name);
+            linearity_ctx_cell.borrow_mut().register(param_name);
 
             // Z3 上で is_alive シンボリック Bool を作成し、初期値 true を assert
             let alive_name = format!("__alive_{}", param_name);
@@ -3816,7 +3826,7 @@ fn verify_inner(
     for param in &atom.params {
         if param.is_ref || param.is_ref_mut {
             // ref/ref mut パラメータを LinearityCtx に登録（借用として）
-            linearity_ctx.register(&param.name);
+            linearity_ctx_cell.borrow_mut().register(&param.name);
 
             // Z3 上で borrowed フラグを作成
             let borrowed_name = format!("__borrowed_{}", param.name);
@@ -4060,7 +4070,7 @@ fn verify_inner(
     if !atom.consumed_params.is_empty() {
         // consume 対象パラメータを消費済みとしてマーク
         for param_name in &atom.consumed_params {
-            if let Err(e) = linearity_ctx.consume(param_name) {
+            if let Err(e) = linearity_ctx_cell.borrow_mut().consume(param_name) {
                 return Err(MumeiError::verification_at(
                     format!("Linearity violation in atom '{}': {}", atom.name, e),
                     atom.span.clone(),
@@ -4074,8 +4084,9 @@ fn verify_inner(
         }
 
         // 蓄積された違反をチェック
-        if linearity_ctx.has_violations() {
-            let violations_list = linearity_ctx.get_violations();
+        let lctx_guard = linearity_ctx_cell.borrow();
+        if lctx_guard.has_violations() {
+            let violations_list = lctx_guard.get_violations();
             let violations = violations_list.join("\n  ");
             let linearity_fb = build_linearity_feedback(&atom.name, violations_list, &atom.span);
             save_visualizer_report(
@@ -4187,10 +4198,22 @@ fn expr_to_z3<'a>(
     match expr {
         Expr::Number(n) => Ok(Int::from_i64(ctx, *n).into()),
         Expr::Float(f) => Ok(Float::from_f64(ctx, *f).into()),
-        Expr::Variable(name) => Ok(env
-            .get(name)
-            .cloned()
-            .unwrap_or_else(|| Int::new_const(ctx, name.as_str()).into())),
+        Expr::Variable(name) => {
+            // Wire check_alive() into variable access: if the variable has been
+            // consumed, report a use-after-consume error.
+            if let Some(lctx_cell) = vc.linearity_ctx {
+                if let Err(e) = lctx_cell.borrow_mut().check_alive(name) {
+                    return Err(MumeiError::verification(format!(
+                        "Linearity violation: {}",
+                        e
+                    )));
+                }
+            }
+            Ok(env
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| Int::new_const(ctx, name.as_str()).into()))
+        }
         Expr::Call(name, args) => {
             match name.as_str() {
                 // =============================================================
@@ -4339,6 +4362,36 @@ fn expr_to_z3<'a>(
                                     // 実引数値を精緻型の述語変数に束縛して制約を検証
                                     if let Some(val) = arg_vals.get(i) {
                                         call_env.insert(refined.operand.clone(), val.clone());
+                                    }
+                                }
+                            }
+                        }
+
+                        // Wire borrow()/consume() into call-site argument handling.
+                        // For each callee parameter, if it is `ref`/`ref mut`, call borrow().
+                        // If the callee has `consumed_params`, call consume() for the
+                        // corresponding argument variable.
+                        if let Some(lctx_cell) = vc.linearity_ctx {
+                            // Handle ref/ref mut parameters → borrow
+                            for (i, param) in callee.params.iter().enumerate() {
+                                if param.is_ref || param.is_ref_mut {
+                                    if let Some(Expr::Variable(arg_name)) = args.get(i) {
+                                        let _ = lctx_cell.borrow_mut().borrow(arg_name, name);
+                                    }
+                                }
+                            }
+                            // Handle consumed_params → consume
+                            for consumed_name in &callee.consumed_params {
+                                if let Some(idx) =
+                                    callee.params.iter().position(|p| p.name == *consumed_name)
+                                {
+                                    if let Some(Expr::Variable(arg_name)) = args.get(idx) {
+                                        if let Err(e) = lctx_cell.borrow_mut().consume(arg_name) {
+                                            return Err(MumeiError::verification(format!(
+                                                "Linearity violation at call to '{}': {}",
+                                                name, e
+                                            )));
+                                        }
                                     }
                                 }
                             }

@@ -31,7 +31,7 @@ This is the **prerequisite** for std.http / std.json.
 - ✅ `ExternFn` / `ExternBlock` AST + Span
 - ✅ `Item::ExternBlock` all match arms covered
 - ✅ extern → ModuleEnv auto-registration (trusted atom) — implemented in PR #32
-- ❌ LLVM codegen (extern function declare + call)
+- ✅ LLVM codegen (extern function declare + call)
 
 **Implementation Plan**:
 
@@ -456,7 +456,7 @@ Future extensions to the effect subtyping system:
 | Phase 2.5 | Lambda / Closure Support | ✅ Done | Phase 2 |
 | Phase 2.5 | Semantic Feedback v2 (all failure types, bilingual) | ✅ Done | Phase 1 |
 | Phase 3 | Effect Polymorphism | ✅ Done | Phase 2 |
-| Phase 4 | MIR introduction (CFG for borrow checking) | ⏳ Planned | Borrow checking design finalized |
+| Phase 4 | MIR introduction (CFG for borrow checking) | 🚧 Phase 4a/4b done | LinearityCtx wired + MIR data structures |
 | Phase 5 | Capability Security evaluation | ⏳ Planned | Phase 3 maturity assessment |
 
 ### Why Phases 2–5 Are Deferred

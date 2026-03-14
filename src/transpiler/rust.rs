@@ -241,7 +241,7 @@ fn hir_stmt_contains_float(stmt: &HirStmt) -> bool {
             stmts.iter().any(hir_stmt_contains_float)
                 || tail_expr
                     .as_ref()
-                    .map_or(false, |e| hir_expr_contains_float(e))
+                    .is_some_and(|e| hir_expr_contains_float(e))
         }
         HirStmt::While { cond, body, .. } => {
             hir_expr_contains_float(cond) || hir_stmt_contains_float(body)
