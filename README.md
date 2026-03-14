@@ -293,6 +293,7 @@ streamlit run visualizer/app.py
 | [Architecture](docs/ARCHITECTURE.md) | Compiler internals |
 | [Toolchain](docs/TOOLCHAIN.md) | CLI commands, package management |
 | [Roadmap](docs/ROADMAP.md) | Strategic roadmap |
+| [Capability Security](docs/CAPABILITY_SECURITY.md) | Effect-based capability security evaluation |
 | [Changelog](docs/CHANGELOG.md) | Release history |
 
 ---
