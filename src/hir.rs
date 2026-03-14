@@ -27,30 +27,55 @@
 // =============================================================================
 
 // =============================================================================
-// Effect System — エフェクト型の基盤
+// Effect System — エフェクト型の基盤: ✅ Complete
 // =============================================================================
+// HirEffectSet attached to HirAtom, HirExpr::Call, HirExpr::Perform.
+// lower_atom_to_hir_with_env() populates effect info from ModuleEnv.
 // 対応状況:
 //   1. パーサーの regex 脱却 → ✅ 式パーサーは再帰下降に移行済み (PR #62)
 //   2. 基本エフェクト定義 → ✅ effect FileWrite(path: Str); 構文サポート済み
 //   3. atom にエフェクトアノテーション → ✅ effects: [...] + perform 構文サポート済み
 //   4. エフェクト多相 → ✅ <E: Effect> + with E 構文 + 単相化ベースの解決
+//   5. HIR エフェクト情報付与 → ✅ HirEffectSet, callee_effects, effect_usage
 // TypeRef に effect_set フィールドを追加済み (PR #65)。
-// HirExpr/HirStmt へのエフェクト情報付与は将来の拡張で対応予定。
 // =============================================================================
 
 // =============================================================================
-// TODO: Capability Security
+// Capability Security — Evaluation Complete
 // =============================================================================
-// 前提条件: エフェクト多相（上記 Phase 3）の成熟度評価が完了してから検討する。
-// パラメータ付きエフェクト（FileWrite("/tmp/...") 等）を Z3 で検証する
-// 現路線で不十分な場合に、FileCap のようなオブジェクトベースの権限モデルを導入する。
+// See docs/CAPABILITY_SECURITY.md for the full evaluation.
+// Current status: Option A (parameterized effects + Z3) is sufficient for
+// current use cases. SecurityPolicy is wired into ModuleEnv for runtime
+// enforcement. Object-based capability model documented as future alternative.
 // =============================================================================
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 use crate::parser::{
     parse_body_expr, parse_expression, Atom, Expr, JoinSemantics, Op, Pattern, Stmt,
 };
+
+/// Effect set attached to HIR nodes.
+#[derive(Debug, Clone, Default)]
+pub struct HirEffectSet {
+    /// Effect names that this node may produce (BTreeSet for deterministic iteration order)
+    pub effects: BTreeSet<String>,
+    /// Parameterized effect usages (consumed by future LSP/diagnostic passes)
+    // NOTE: parameterized is populated during lowering and consumed by future LSP/diagnostic passes.
+    #[allow(dead_code)]
+    pub parameterized: Vec<HirEffectUsage>,
+}
+
+/// Structured effect usage information for parameterized effects.
+/// Fields are populated during lowering and available for future LSP/diagnostic consumers.
+#[derive(Debug, Clone)]
+// NOTE: HirEffectUsage is populated during lowering. Not yet referenced in current pipeline.
+#[allow(dead_code)]
+pub struct HirEffectUsage {
+    pub effect_name: String,
+    pub operation: String,
+    pub param_values: Vec<String>,
+}
 
 /// HIR 式: 純粋な式を表す
 #[derive(Debug, Clone)]
@@ -68,6 +93,11 @@ pub enum HirExpr {
     Call {
         name: String,
         args: Vec<HirExpr>,
+        /// Effects the callee may produce (populated during lowering when ModuleEnv is available)
+        /// Consumed by future LSP hover and diagnostic passes.
+        // NOTE: callee_effects is populated during lowering when ModuleEnv is available. Consumed by future LSP hover passes.
+        #[allow(dead_code)]
+        callee_effects: Option<HirEffectSet>,
     },
     StructInit {
         type_name: String,
@@ -96,6 +126,10 @@ pub enum HirExpr {
         effect: String,
         operation: String,
         args: Vec<HirExpr>,
+        /// Structured effect usage info (consumed by future LSP/diagnostic passes)
+        // NOTE: effect_usage is populated during lowering. Consumed by future LSP/diagnostic passes.
+        #[allow(dead_code)]
+        effect_usage: Option<HirEffectUsage>,
     },
     /// task { body }
     // NOTE: Task is constructed via lower_stmt(Stmt::Task) → HirStmt::Expr(HirExpr::Task),
@@ -188,6 +222,8 @@ pub struct HirAtom {
     pub atom: Atom,
     /// パース済みの body ステートメント（verification.rs での再パースを避ける）
     pub body_stmt: Stmt,
+    /// Effect set declared on this atom (resolved from atom.effects)
+    pub effect_set: HirEffectSet,
 }
 
 // =============================================================================
@@ -197,14 +233,37 @@ pub struct HirAtom {
 /// AST の Atom を HirAtom に変換する（body_expr の String パースを含む）
 /// parse_expression の呼び出しを 1 回に集約する。
 pub fn lower_atom_to_hir(atom: &Atom) -> HirAtom {
+    lower_atom_to_hir_with_env(atom, None)
+}
+
+/// AST の Atom を HirAtom に変換する。ModuleEnv があればエフェクト情報も付与する。
+pub fn lower_atom_to_hir_with_env(
+    atom: &Atom,
+    module_env: Option<&crate::verification::ModuleEnv>,
+) -> HirAtom {
     let body_stmt = parse_body_expr(&atom.body_expr);
-    let body = lower_stmt(&body_stmt);
+    let body = lower_stmt_with_env(&body_stmt, module_env);
 
     let requires_expr = parse_expression(&atom.requires);
-    let requires_hir = lower_expr(&requires_expr);
+    let requires_hir = lower_expr_with_env(&requires_expr, module_env);
 
     let ensures_expr = parse_expression(&atom.ensures);
-    let ensures_hir = lower_expr(&ensures_expr);
+    let ensures_hir = lower_expr_with_env(&ensures_expr, module_env);
+
+    // Build effect set from atom.effects
+    let effect_set = HirEffectSet {
+        effects: atom.effects.iter().map(|e| e.name.clone()).collect(),
+        parameterized: atom
+            .effects
+            .iter()
+            .filter(|e| !e.params.is_empty())
+            .map(|e| HirEffectUsage {
+                effect_name: e.name.clone(),
+                operation: String::new(),
+                param_values: e.params.iter().map(|p| p.value.clone()).collect(),
+            })
+            .collect(),
+    };
 
     HirAtom {
         body,
@@ -212,81 +271,131 @@ pub fn lower_atom_to_hir(atom: &Atom) -> HirAtom {
         ensures_hir,
         atom: atom.clone(),
         body_stmt,
+        effect_set,
     }
 }
 
 /// AST の Expr を HirExpr に変換する
 pub fn lower_expr(expr: &Expr) -> HirExpr {
+    lower_expr_with_env(expr, None)
+}
+
+/// AST の Expr を HirExpr に変換する。ModuleEnv があれば callee_effects / effect_usage を付与。
+pub fn lower_expr_with_env(
+    expr: &Expr,
+    module_env: Option<&crate::verification::ModuleEnv>,
+) -> HirExpr {
     match expr {
         Expr::Number(n) => HirExpr::Number(*n),
         Expr::Float(f) => HirExpr::Float(*f),
         Expr::Variable(s) => HirExpr::Variable(s.clone()),
         Expr::ArrayAccess(name, idx) => {
-            HirExpr::ArrayAccess(name.clone(), Box::new(lower_expr(idx)))
+            HirExpr::ArrayAccess(name.clone(), Box::new(lower_expr_with_env(idx, module_env)))
         }
-        Expr::BinaryOp(l, op, r) => {
-            HirExpr::BinaryOp(Box::new(lower_expr(l)), op.clone(), Box::new(lower_expr(r)))
-        }
+        Expr::BinaryOp(l, op, r) => HirExpr::BinaryOp(
+            Box::new(lower_expr_with_env(l, module_env)),
+            op.clone(),
+            Box::new(lower_expr_with_env(r, module_env)),
+        ),
         Expr::IfThenElse {
             cond,
             then_branch,
             else_branch,
         } => HirExpr::IfThenElse {
-            cond: Box::new(lower_expr(cond)),
-            then_branch: Box::new(lower_stmt(then_branch)),
-            else_branch: Box::new(lower_stmt(else_branch)),
+            cond: Box::new(lower_expr_with_env(cond, module_env)),
+            then_branch: Box::new(lower_stmt_with_env(then_branch, module_env)),
+            else_branch: Box::new(lower_stmt_with_env(else_branch, module_env)),
         },
-        Expr::Call(name, args) => HirExpr::Call {
-            name: name.clone(),
-            args: args.iter().map(lower_expr).collect(),
-        },
+        Expr::Call(name, args) => {
+            let callee_effects = module_env.and_then(|env| {
+                env.get_atom(name).map(|callee_atom| HirEffectSet {
+                    effects: callee_atom.effects.iter().map(|e| e.name.clone()).collect(),
+                    parameterized: callee_atom
+                        .effects
+                        .iter()
+                        .filter(|e| !e.params.is_empty())
+                        .map(|e| HirEffectUsage {
+                            effect_name: e.name.clone(),
+                            operation: String::new(),
+                            param_values: e.params.iter().map(|p| p.value.clone()).collect(),
+                        })
+                        .collect(),
+                })
+            });
+            HirExpr::Call {
+                name: name.clone(),
+                args: args
+                    .iter()
+                    .map(|a| lower_expr_with_env(a, module_env))
+                    .collect(),
+                callee_effects,
+            }
+        }
         Expr::StructInit { type_name, fields } => HirExpr::StructInit {
             type_name: type_name.clone(),
             fields: fields
                 .iter()
-                .map(|(name, expr)| (name.clone(), lower_expr(expr)))
+                .map(|(name, expr)| (name.clone(), lower_expr_with_env(expr, module_env)))
                 .collect(),
         },
-        Expr::FieldAccess(expr, field) => {
-            HirExpr::FieldAccess(Box::new(lower_expr(expr)), field.clone())
-        }
+        Expr::FieldAccess(expr, field) => HirExpr::FieldAccess(
+            Box::new(lower_expr_with_env(expr, module_env)),
+            field.clone(),
+        ),
         Expr::Match { target, arms } => HirExpr::Match {
-            target: Box::new(lower_expr(target)),
+            target: Box::new(lower_expr_with_env(target, module_env)),
             arms: arms
                 .iter()
                 .map(|arm| HirMatchArm {
                     pattern: arm.pattern.clone(),
-                    guard: arm.guard.as_ref().map(|g| Box::new(lower_expr(g))),
-                    body: Box::new(lower_stmt(&arm.body)),
+                    guard: arm
+                        .guard
+                        .as_ref()
+                        .map(|g| Box::new(lower_expr_with_env(g, module_env))),
+                    body: Box::new(lower_stmt_with_env(&arm.body, module_env)),
                 })
                 .collect(),
         },
         Expr::AtomRef { name } => HirExpr::AtomRef { name: name.clone() },
         Expr::CallRef { callee, args } => HirExpr::CallRef {
-            callee: Box::new(lower_expr(callee)),
-            args: args.iter().map(lower_expr).collect(),
+            callee: Box::new(lower_expr_with_env(callee, module_env)),
+            args: args
+                .iter()
+                .map(|a| lower_expr_with_env(a, module_env))
+                .collect(),
         },
         Expr::Async { body } => HirExpr::Async {
-            body: Box::new(lower_stmt(body)),
+            body: Box::new(lower_stmt_with_env(body, module_env)),
         },
         Expr::Await { expr } => HirExpr::Await {
-            expr: Box::new(lower_expr(expr)),
+            expr: Box::new(lower_expr_with_env(expr, module_env)),
         },
         Expr::Perform {
             effect,
             operation,
             args,
-        } => HirExpr::Perform {
-            effect: effect.clone(),
-            operation: operation.clone(),
-            args: args.iter().map(lower_expr).collect(),
-        },
+        } => {
+            let effect_usage = Some(HirEffectUsage {
+                effect_name: effect.clone(),
+                operation: operation.clone(),
+                param_values: Vec::new(),
+            });
+            HirExpr::Perform {
+                effect: effect.clone(),
+                operation: operation.clone(),
+                args: args
+                    .iter()
+                    .map(|a| lower_expr_with_env(a, module_env))
+                    .collect(),
+                effect_usage,
+            }
+        }
         Expr::Lambda {
             params,
             return_type,
             body,
         } => {
-            let hir_body = lower_stmt(body);
+            let hir_body = lower_stmt_with_env(body, module_env);
             // Capture analysis: find free variables in body that are not in params
             let param_names: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
             let free_vars = collect_free_variables_stmt(&hir_body);
@@ -313,15 +422,23 @@ pub fn lower_expr(expr: &Expr) -> HirExpr {
 
 /// AST の Stmt を HirStmt に変換する
 pub fn lower_stmt(stmt: &Stmt) -> HirStmt {
+    lower_stmt_with_env(stmt, None)
+}
+
+/// AST の Stmt を HirStmt に変換する。ModuleEnv があればエフェクト情報を付与。
+pub fn lower_stmt_with_env(
+    stmt: &Stmt,
+    module_env: Option<&crate::verification::ModuleEnv>,
+) -> HirStmt {
     match stmt {
         Stmt::Let { var, value } => HirStmt::Let {
             var: var.clone(),
             ty: None, // TODO: type inference
-            value: Box::new(lower_expr(value)),
+            value: Box::new(lower_expr_with_env(value, module_env)),
         },
         Stmt::Assign { var, value } => HirStmt::Assign {
             var: var.clone(),
-            value: Box::new(lower_expr(value)),
+            value: Box::new(lower_expr_with_env(value, module_env)),
         },
         Stmt::Block(stmts) => {
             if stmts.is_empty() {
@@ -330,10 +447,10 @@ pub fn lower_stmt(stmt: &Stmt) -> HirStmt {
                     tail_expr: None,
                 }
             } else {
-                // 全 stmt を先に lower してから最後の要素を判定する。
-                // これにより Stmt::Task/TaskGroup（lower 後に HirStmt::Expr になる）も
-                // 正しく tail_expr として抽出される。
-                let mut lowered: Vec<HirStmt> = stmts.iter().map(lower_stmt).collect();
+                let mut lowered: Vec<HirStmt> = stmts
+                    .iter()
+                    .map(|s| lower_stmt_with_env(s, module_env))
+                    .collect();
                 let last = lowered.pop().unwrap();
                 if let HirStmt::Expr(expr) = last {
                     HirStmt::Block {
@@ -355,27 +472,32 @@ pub fn lower_stmt(stmt: &Stmt) -> HirStmt {
             decreases,
             body,
         } => HirStmt::While {
-            cond: Box::new(lower_expr(cond)),
-            invariant: Box::new(lower_expr(invariant)),
-            decreases: decreases.as_ref().map(|d| Box::new(lower_expr(d))),
-            body: Box::new(lower_stmt(body)),
+            cond: Box::new(lower_expr_with_env(cond, module_env)),
+            invariant: Box::new(lower_expr_with_env(invariant, module_env)),
+            decreases: decreases
+                .as_ref()
+                .map(|d| Box::new(lower_expr_with_env(d, module_env))),
+            body: Box::new(lower_stmt_with_env(body, module_env)),
         },
         Stmt::Acquire { resource, body } => HirStmt::Acquire {
             resource: resource.clone(),
-            body: Box::new(lower_stmt(body)),
+            body: Box::new(lower_stmt_with_env(body, module_env)),
         },
         Stmt::Task { body, group } => HirStmt::Expr(HirExpr::Task {
-            body: Box::new(lower_stmt(body)),
+            body: Box::new(lower_stmt_with_env(body, module_env)),
             group: group.clone(),
         }),
         Stmt::TaskGroup {
             children,
             join_semantics,
         } => HirStmt::Expr(HirExpr::TaskGroup {
-            children: children.iter().map(lower_stmt).collect(),
+            children: children
+                .iter()
+                .map(|s| lower_stmt_with_env(s, module_env))
+                .collect(),
             join_semantics: join_semantics.clone(),
         }),
-        Stmt::Expr(expr) => HirStmt::Expr(lower_expr(expr)),
+        Stmt::Expr(expr) => HirStmt::Expr(lower_expr_with_env(expr, module_env)),
     }
 }
 

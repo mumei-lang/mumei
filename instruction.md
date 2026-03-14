@@ -212,7 +212,8 @@ Mumei caches verification results per-atom in `.mumei/cache/verification_cache.j
 | `docs/ROADMAP.md` | **Strategic roadmap v0.3.0+** — 3 priorities, phases, dependencies, timeline |
 | `docs/ARCHITECTURE.md` | Compiler internals, pipeline, ModuleEnv, LinearityCtx |
 | `docs/STDLIB.md` | Standard library reference (all modules + atoms + planned std.json/std.http) |
-| `docs/CHANGELOG.md` | Change history (PR #16, PR #31) |
+| `docs/CHANGELOG.md` | Change history |
+| `docs/CAPABILITY_SECURITY.md` | Effect-based capability security evaluation |
 | `docs/DIAGNOSTICS.md` | Span-based diagnostics design and implementation status |
 | `docs/FFI.md` | FFI extern block design, implementation status, and bridge completion plan |
 | `docs/CONCURRENCY.md` | Structured concurrency (task/task_group) design, implementation status, and std.http integration plan |
