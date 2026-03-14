@@ -949,6 +949,81 @@ pub fn build_effect_feedback(
     })
 }
 
+// =============================================================================
+// Unsat Core: Tracking Label Parsing & Contradiction Feedback
+// =============================================================================
+
+/// Parse a Z3 tracking label into a human-readable constraint description.
+/// Returns None for unrecognized labels (internal bookkeeping variables).
+fn parse_tracking_label(label: &str) -> Option<String> {
+    if label == "track_requires" {
+        return Some("Precondition (requires) / 前提条件 (requires)".to_string());
+    }
+    if let Some(rest) = label.strip_prefix("track_refined_type_") {
+        // format: track_refined_type_{var}_{type}
+        if let Some(idx) = rest.find('_') {
+            let var = &rest[..idx];
+            let type_name = &rest[idx + 1..];
+            return Some(format!(
+                "Refined type constraint: {} ({}) / 精緻型制約: {} ({})",
+                var, type_name, var, type_name
+            ));
+        }
+    }
+    if let Some(rest) = label.strip_prefix("track_struct_field_") {
+        // format: track_struct_field_{param}_{field}
+        if let Some(idx) = rest.find('_') {
+            let param = &rest[..idx];
+            let field = &rest[idx + 1..];
+            return Some(format!(
+                "Struct field constraint: {}.{} / 構造体フィールド制約: {}.{}",
+                param, field, param, field
+            ));
+        }
+    }
+    if let Some(rest) = label.strip_prefix("track_quantifier_") {
+        return Some(format!(
+            "Quantifier constraint #{} / 量子化制約 #{}",
+            rest, rest
+        ));
+    }
+    if let Some(rest) = label.strip_prefix("track_u64_nonneg_") {
+        return Some(format!(
+            "Non-negative constraint: {} (u64) / 非負制約: {} (u64)",
+            rest, rest
+        ));
+    }
+    None
+}
+
+/// Build semantic feedback JSON for contradiction (unsat) detection with unsat core info.
+pub fn build_contradiction_feedback(
+    atom_name: &str,
+    conflicting_constraints: &[String],
+    raw_labels: &[String],
+) -> serde_json::Value {
+    let explanation = if conflicting_constraints.is_empty() {
+        "The constraints are mutually contradictory, but the specific conflicting set could not be determined. \
+         (制約が相互に矛盾していますが、具体的な矛盾セットを特定できませんでした)".to_string()
+    } else {
+        format!(
+            "The following constraints are mutually contradictory: {} \
+             (以下の制約が相互に矛盾しています: {})",
+            conflicting_constraints.join(", "),
+            conflicting_constraints.join(", ")
+        )
+    };
+
+    json!({
+        "failure_type": FAILURE_INVARIANT_VIOLATED,
+        "atom": atom_name,
+        "conflicting_constraints": conflicting_constraints,
+        "raw_unsat_core": raw_labels,
+        "explanation": explanation,
+        "suggestion": suggestion_for_failure_type(FAILURE_INVARIANT_VIOLATED)
+    })
+}
+
 /// 検証時に共有するコンテキスト（ctx, arr, module_env を束ねて引数を削減）
 struct VCtx<'a> {
     ctx: &'a Context,
@@ -2200,10 +2275,8 @@ fn verify_effect_containment(
                         atom.effects.iter().map(|e| e.name.clone()).collect();
                     let feedback =
                         build_effect_feedback(&atom.name, &missing[0], &allowed_strs, &missing);
-                    let feedback_explanation = feedback["explanation"]
-                        .as_str()
-                        .unwrap_or("")
-                        .to_string();
+                    let feedback_explanation =
+                        feedback["explanation"].as_str().unwrap_or("").to_string();
                     return Err(MumeiError::verification_at(
                         format!(
                             "Effect propagation violation: atom '{}' calls '{}' which requires \
@@ -3699,7 +3772,7 @@ fn verify_inner(
     }
 
     // 1. 量子化制約の処理
-    for q in &atom.forall_constraints {
+    for (q_index, q) in atom.forall_constraints.iter().enumerate() {
         let i = Int::new_const(&ctx, q.var.as_str());
         let start = Int::from_i64(&ctx, q.start.parse::<i64>().unwrap_or(0));
         let end = if let Ok(val) = q.end.parse::<i64>() {
@@ -3728,7 +3801,9 @@ fn verify_inner(
                 &Bool::and(&ctx, &[&range_cond, &condition_z3]),
             ),
         };
-        solver.assert(&quantifier_expr);
+        let track_label = format!("track_quantifier_{}", q_index);
+        let track_bool = Bool::new_const(&ctx, track_label.as_str());
+        solver.assert_and_track(&quantifier_expr, &track_bool);
     }
 
     // 2. 引数（params）に対する精緻型制約の自動適用
@@ -3764,7 +3839,10 @@ fn verify_inner(
                         let constraint_ast = parse_expression(constraint_raw);
                         let constraint_z3 = expr_to_z3(&vc, &constraint_ast, &mut local_env, None)?;
                         if let Some(constraint_bool) = constraint_z3.as_bool() {
-                            solver.assert(&constraint_bool);
+                            let track_label =
+                                format!("track_struct_field_{}_{}", param.name, field.name);
+                            let track_bool = Bool::new_const(&ctx, track_label.as_str());
+                            solver.assert_and_track(&constraint_bool, &track_bool);
                         }
                     }
                 }
@@ -3872,7 +3950,8 @@ fn verify_inner(
         let req_ast = parse_expression(&atom.requires);
         let req_z3 = expr_to_z3(&vc, &req_ast, &mut env, None)?;
         if let Some(req_bool) = req_z3.as_bool() {
-            solver.assert(&req_bool);
+            let track_requires = Bool::new_const(&ctx, "track_requires");
+            solver.assert_and_track(&req_bool, &track_requires);
         }
     }
 
@@ -4126,6 +4205,17 @@ fn verify_inner(
     }
 
     if solver.check() == SatResult::Unsat {
+        let unsat_core = solver.get_unsat_core();
+        let core_labels: Vec<String> = unsat_core.iter().map(|b| format!("{}", b)).collect();
+
+        let conflicting_constraints: Vec<String> = core_labels
+            .iter()
+            .filter_map(|label| parse_tracking_label(label))
+            .collect();
+
+        let contradiction_fb =
+            build_contradiction_feedback(&atom.name, &conflicting_constraints, &core_labels);
+
         save_visualizer_report(
             output_dir,
             "failed",
@@ -4135,11 +4225,21 @@ fn verify_inner(
             "Logic contradiction.",
             None,
             FAILURE_INVARIANT_VIOLATED,
-            None,
+            Some(&contradiction_fb),
             Some(&atom.span),
         );
+
+        let constraint_summary = if conflicting_constraints.is_empty() {
+            "Contradiction found.".to_string()
+        } else {
+            format!(
+                "Contradiction found. Conflicting constraints: [{}]",
+                conflicting_constraints.join(", ")
+            )
+        };
+
         return Err(MumeiError::verification_at(
-            "Contradiction found.",
+            constraint_summary,
             atom.span.clone(),
         ));
     }
@@ -4172,7 +4272,8 @@ fn apply_refinement_constraint<'a>(
         "f64" => Float::new_const(ctx, var_name, 11, 53).into(),
         "u64" => {
             let v = Int::new_const(ctx, var_name);
-            solver.assert(&v.ge(&Int::from_i64(ctx, 0)));
+            let track_u64 = Bool::new_const(ctx, format!("track_u64_nonneg_{}", var_name).as_str());
+            solver.assert_and_track(&v.ge(&Int::from_i64(ctx, 0)), &track_u64);
             v.into()
         }
         _ => Int::new_const(ctx, var_name).into(),
@@ -4197,7 +4298,9 @@ fn apply_refinement_constraint<'a>(
             )),
         )?;
 
-    solver.assert(&predicate_z3);
+    let track_label = format!("track_refined_type_{}_{}", var_name, refined.name);
+    let track_bool = Bool::new_const(ctx, track_label.as_str());
+    solver.assert_and_track(&predicate_z3, &track_bool);
     Ok(())
 }
 
@@ -6274,5 +6377,105 @@ mod tests {
             "url",
             "https://example.com"
         ));
+    }
+
+    // ---- parse_tracking_label tests ----
+
+    #[test]
+    fn test_parse_tracking_label_requires() {
+        let result = parse_tracking_label("track_requires");
+        assert!(result.is_some());
+        let msg = result.unwrap();
+        assert!(msg.contains("requires"));
+        assert!(msg.contains("前提条件"));
+    }
+
+    #[test]
+    fn test_parse_tracking_label_refined_type() {
+        let result = parse_tracking_label("track_refined_type_n_Nat");
+        assert!(result.is_some());
+        let msg = result.unwrap();
+        assert!(msg.contains("n"));
+        assert!(msg.contains("Nat"));
+        assert!(msg.contains("精緻型"));
+    }
+
+    #[test]
+    fn test_parse_tracking_label_struct_field() {
+        let result = parse_tracking_label("track_struct_field_p_age");
+        assert!(result.is_some());
+        let msg = result.unwrap();
+        assert!(msg.contains("p"));
+        assert!(msg.contains("age"));
+        assert!(msg.contains("構造体フィールド"));
+    }
+
+    #[test]
+    fn test_parse_tracking_label_quantifier() {
+        let result = parse_tracking_label("track_quantifier_0");
+        assert!(result.is_some());
+        let msg = result.unwrap();
+        assert!(msg.contains("#0"));
+        assert!(msg.contains("量子化"));
+    }
+
+    #[test]
+    fn test_parse_tracking_label_u64_nonneg() {
+        let result = parse_tracking_label("track_u64_nonneg_x");
+        assert!(result.is_some());
+        let msg = result.unwrap();
+        assert!(msg.contains("x"));
+        assert!(msg.contains("u64"));
+    }
+
+    #[test]
+    fn test_parse_tracking_label_unknown() {
+        assert!(parse_tracking_label("__alive_x").is_none());
+        assert!(parse_tracking_label("__borrowed_y").is_none());
+        assert!(parse_tracking_label("random_label").is_none());
+    }
+
+    // ---- build_contradiction_feedback tests ----
+
+    #[test]
+    fn test_build_contradiction_feedback_with_constraints() {
+        let constraints = vec![
+            "Precondition (requires)".to_string(),
+            "Refined type constraint: n (Nat)".to_string(),
+        ];
+        let raw = vec![
+            "track_requires".to_string(),
+            "track_refined_type_n_Nat".to_string(),
+        ];
+        let feedback = build_contradiction_feedback("test_atom", &constraints, &raw);
+        assert_eq!(feedback["failure_type"], FAILURE_INVARIANT_VIOLATED);
+        assert_eq!(feedback["atom"], "test_atom");
+        assert!(feedback["conflicting_constraints"].is_array());
+        assert_eq!(
+            feedback["conflicting_constraints"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(feedback["raw_unsat_core"].is_array());
+        assert!(feedback["explanation"]
+            .as_str()
+            .unwrap()
+            .contains("contradictory"));
+    }
+
+    #[test]
+    fn test_build_contradiction_feedback_empty() {
+        let feedback = build_contradiction_feedback("test_atom", &[], &[]);
+        assert_eq!(feedback["atom"], "test_atom");
+        assert!(feedback["conflicting_constraints"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert!(feedback["explanation"]
+            .as_str()
+            .unwrap()
+            .contains("could not be determined"));
     }
 }
