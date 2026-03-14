@@ -960,10 +960,10 @@ fn parse_tracking_label(label: &str) -> Option<String> {
         return Some("Precondition (requires) / 前提条件 (requires)".to_string());
     }
     if let Some(rest) = label.strip_prefix("track_refined_type_") {
-        // format: track_refined_type_{var}_{type}
-        if let Some(idx) = rest.find('_') {
+        // format: track_refined_type_{var}::{type}
+        if let Some(idx) = rest.find("::") {
             let var = &rest[..idx];
-            let type_name = &rest[idx + 1..];
+            let type_name = &rest[idx + 2..];
             return Some(format!(
                 "Refined type constraint: {} ({}) / 精緻型制約: {} ({})",
                 var, type_name, var, type_name
@@ -971,10 +971,10 @@ fn parse_tracking_label(label: &str) -> Option<String> {
         }
     }
     if let Some(rest) = label.strip_prefix("track_struct_field_") {
-        // format: track_struct_field_{param}_{field}
-        if let Some(idx) = rest.find('_') {
+        // format: track_struct_field_{param}::{field}
+        if let Some(idx) = rest.find("::") {
             let param = &rest[..idx];
-            let field = &rest[idx + 1..];
+            let field = &rest[idx + 2..];
             return Some(format!(
                 "Struct field constraint: {}.{} / 構造体フィールド制約: {}.{}",
                 param, field, param, field
@@ -3840,7 +3840,7 @@ fn verify_inner(
                         let constraint_z3 = expr_to_z3(&vc, &constraint_ast, &mut local_env, None)?;
                         if let Some(constraint_bool) = constraint_z3.as_bool() {
                             let track_label =
-                                format!("track_struct_field_{}_{}", param.name, field.name);
+                                format!("track_struct_field_{}::{}", param.name, field.name);
                             let track_bool = Bool::new_const(&ctx, track_label.as_str());
                             solver.assert_and_track(&constraint_bool, &track_bool);
                         }
@@ -4298,7 +4298,7 @@ fn apply_refinement_constraint<'a>(
             )),
         )?;
 
-    let track_label = format!("track_refined_type_{}_{}", var_name, refined.name);
+    let track_label = format!("track_refined_type_{}::{}", var_name, refined.name);
     let track_bool = Bool::new_const(ctx, track_label.as_str());
     solver.assert_and_track(&predicate_z3, &track_bool);
     Ok(())
@@ -6392,7 +6392,7 @@ mod tests {
 
     #[test]
     fn test_parse_tracking_label_refined_type() {
-        let result = parse_tracking_label("track_refined_type_n_Nat");
+        let result = parse_tracking_label("track_refined_type_n::Nat");
         assert!(result.is_some());
         let msg = result.unwrap();
         assert!(msg.contains("n"));
@@ -6401,12 +6401,32 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_tracking_label_refined_type_underscore_var() {
+        let result = parse_tracking_label("track_refined_type_my_var::Pos");
+        assert!(result.is_some());
+        let msg = result.unwrap();
+        assert!(msg.contains("my_var"));
+        assert!(msg.contains("Pos"));
+        assert!(msg.contains("精緻型"));
+    }
+
+    #[test]
     fn test_parse_tracking_label_struct_field() {
-        let result = parse_tracking_label("track_struct_field_p_age");
+        let result = parse_tracking_label("track_struct_field_p::age");
         assert!(result.is_some());
         let msg = result.unwrap();
         assert!(msg.contains("p"));
         assert!(msg.contains("age"));
+        assert!(msg.contains("構造体フィールド"));
+    }
+
+    #[test]
+    fn test_parse_tracking_label_struct_field_underscore() {
+        let result = parse_tracking_label("track_struct_field_my_obj::my_field");
+        assert!(result.is_some());
+        let msg = result.unwrap();
+        assert!(msg.contains("my_obj"));
+        assert!(msg.contains("my_field"));
         assert!(msg.contains("構造体フィールド"));
     }
 
@@ -6445,7 +6465,7 @@ mod tests {
         ];
         let raw = vec![
             "track_requires".to_string(),
-            "track_refined_type_n_Nat".to_string(),
+            "track_refined_type_n::Nat".to_string(),
         ];
         let feedback = build_contradiction_feedback("test_atom", &constraints, &raw);
         assert_eq!(feedback["failure_type"], FAILURE_INVARIANT_VIOLATED);
