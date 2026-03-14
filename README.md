@@ -15,6 +15,22 @@ atom increment(n: Nat)
   body: n + 1;
 ```
 
+```mumei
+// Side effects are verified at compile time — undeclared effects won't compile.
+effect FileWrite;
+effect Log;
+
+atom write_log(msg: Nat)
+    effects: [FileWrite, Log];
+    requires: msg >= 0;
+    ensures: result == msg;
+    body: {
+        perform FileWrite.write(msg);
+        perform Log.info(msg);
+        msg
+    };
+```
+
 ---
 
 ## Install
