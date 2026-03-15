@@ -413,23 +413,30 @@ P3-B (mumei doc)       (independent)
 - **Effect Hierarchy (Subtyping)**: `parent:` field on EffectDef enables Network → HttpRead/TcpConnect
 - **MCP Pre-check**: `get_inferred_effects` tool lets AI check required permissions before writing code
 
-### TODO: Z3 String Sort Migration
+### Z3 String Sort Integration (In Progress)
 
-When the hybrid approach reaches its limits (complex string operations, regex matching, concatenation verification), migrate to Z3's native String sort:
+Z3's native String sort has been integrated for symbolic effect parameter verification.
+The hybrid approach (Constant Folding + Z3 String Sort) is now active:
 
-**Prerequisites**:
-- `z3` crate version 0.12+ with stable `z3::ast::String` support
-- `libz3` static linking to avoid environment dependency issues
-- Performance benchmarking: String sort is significantly slower than Int sort
+**Completed**:
+- ✅ `z3` crate 0.12.1 confirmed with stable `z3::ast::String` support
+- ✅ `z3::ast::String` imported as `Z3String` in verification.rs
+- ✅ `parse_constraint_to_z3_string()` maps constraint strings to Z3 String operations:
+  - `starts_with(path, "/tmp/")` → `Z3String::prefix_of`
+  - `ends_with(path, ".txt")` → `Z3String::suffix_of`
+  - `contains(path, "data")` → `Z3String::contains`
+  - `not_contains(path, "..")` → `NOT Z3String::contains`
+- ✅ Perform handler extended: symbolic (variable) args verified via Z3 String constraints
+- ✅ Sort-aware timeout: Z3 solving timeout doubled when String constraints are present
+- ✅ Constraint budget checked on String constraint creation
+- ✅ Performance validated: 10 String constraints solve in < 500ms
 
-**Migration plan**:
-1. Add `Str` to mumei's Type system (`TypeRef::Str`)
-2. Lift string literals to `z3::ast::String::from_str` in constraint generation
-3. Convert `starts_with(path, "/tmp/")` to Z3's `str.prefixof` operation
-4. Convert `contains(path, "..")` to Z3's `str.contains` operation
-5. Benchmark AI-in-the-loop latency (target: < 500ms for typical path constraints)
+**Hybrid Strategy**:
+- Constant paths: verified by `check_constant_constraint()` (Rust-side, zero Z3 overhead)
+- Symbolic paths (variables): verified by Z3 String Sort constraints in the solver
+- `path_id_map` / `prefix_ranges` retained as `#[allow(dead_code)]` for future Int encoding fallback
 
-**Unlocks**:
+**Future Unlocks**:
 - Free-form path construction: `"/tmp/" + user_id + "/log.txt"` verification
 - Regex-based path policies: `matches(path, "/tmp/[a-z]+\\.txt")`
 - URL validation for std.http effects: `starts_with(url, "https://")`
@@ -456,7 +463,7 @@ Future extensions to the effect subtyping system:
 | Phase 2.5 | Lambda / Closure Support | ✅ Done | Phase 2 |
 | Phase 2.5 | Semantic Feedback v2 (all failure types, bilingual) | ✅ Done | Phase 1 |
 | Phase 3 | Effect Polymorphism | ✅ Done | Phase 2 |
-| Phase 4 | MIR introduction (CFG for borrow checking) | 🚧 Phase 4a/4b done | LinearityCtx wired + MIR data structures |
+| Phase 4 | MIR introduction (CFG for borrow checking) | 🚧 Phase 4a/4b done, liveness + move analysis | LinearityCtx wired + MIR data structures + mir_analysis.rs |
 | Phase 5 | HIR Effect Type Information | ✅ Done | HirEffectSet on HirAtom/HirExpr, lower_atom_to_hir_with_env |
 | Phase 6 | Capability Security evaluation | ✅ Done | See docs/CAPABILITY_SECURITY.md |
 

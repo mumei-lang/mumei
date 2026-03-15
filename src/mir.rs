@@ -341,10 +341,16 @@ fn lower_stmt(ctx: &mut LowerCtx, stmt: &HirStmt) -> Option<Operand> {
             //   after_block: continue
 
             // Finish the current block with a Goto to the header.
-            let header_id = ctx.next_block;
+            // finish_block() assigns id = next_block then increments, so the
+            // header will be the *next* block after the pre-block.
+            let header_id = ctx.next_block + 1;
             let _pre_block = ctx.finish_block(Terminator::Goto(header_id));
 
             // Header block: evaluate condition.
+            // TODO: Like IfThenElse, block ID pre-computation assumes lower_expr(cond)
+            // and lower_stmt(body) produce zero additional blocks. If the condition or
+            // body contains nested control flow, body_id and after_id will be wrong.
+            // Fix by switching to a forward-declaration / back-patching pattern.
             let cond_op = lower_expr(ctx, cond);
             let body_id = header_id + 1;
             let after_id = header_id + 2;
@@ -417,6 +423,11 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &HirExpr) -> Operand {
             ctx.emit(MirStatement::StorageLive(result_local.clone()));
 
             // Finish current block with SwitchInt.
+            // TODO: Block ID pre-computation assumes each branch produces exactly
+            // one block. Nested control flow (e.g., `if a { if b { 1 } else { 2 } }
+            // else { 3 }`) creates additional blocks inside lower_stmt, causing
+            // else_id and merge_id to point to wrong blocks. Fix by switching to a
+            // forward-declaration / back-patching pattern for block IDs.
             let then_id = ctx.next_block + 1;
             let else_id = ctx.next_block + 2;
             let merge_id = ctx.next_block + 3;

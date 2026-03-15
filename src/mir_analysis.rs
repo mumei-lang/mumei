@@ -642,7 +642,9 @@ pub fn analyze_moves(body: &MirBody) -> MoveAnalysisResult {
     worklist.push_back(body.entry_block);
     in_worklist.insert(body.entry_block);
 
-    let max_iterations = body.block_count() * 10;
+    // Theoretical convergence bound is O(block_count * local_count).
+    // Use max(local_count, 10) to handle bodies with many locals correctly.
+    let max_iterations = body.block_count() * body.local_count().max(10);
     let mut iterations = 0;
 
     while let Some(block_id) = worklist.pop_front() {
