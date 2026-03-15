@@ -794,8 +794,26 @@ impl EffectStateMachine {
             .initial_state
             .clone()
             .unwrap_or_else(|| def.states[0].clone());
+        // Validate that initial_state is in the declared states list
+        if !def.states.contains(&initial) {
+            eprintln!(
+                "Warning: effect '{}' has initial state '{}' which is not in states {:?}, \
+                 skipping temporal verification",
+                def.name, initial, def.states
+            );
+            return None;
+        }
         let mut transitions = HashMap::new();
         for t in &def.transitions {
+            // Validate that from_state and to_state are in the declared states list
+            if !def.states.contains(&t.from_state) || !def.states.contains(&t.to_state) {
+                eprintln!(
+                    "Warning: effect '{}' transition '{}': state '{}' -> '{}' references \
+                     undeclared state(s) (declared: {:?}), skipping temporal verification",
+                    def.name, t.operation, t.from_state, t.to_state, def.states
+                );
+                return None;
+            }
             transitions.insert(
                 (t.operation.clone(), t.from_state.clone()),
                 t.to_state.clone(),
@@ -1908,6 +1926,53 @@ mod tests {
             initial_state: Some("S0".to_string()),
         };
         assert!(EffectStateMachine::from_effect_def(&def).is_none());
+    }
+
+    #[test]
+    fn test_effect_state_machine_invalid_initial_state() {
+        // initial state "C" is not in states [A, B] → should return None
+        let def = crate::parser::EffectDef {
+            name: "Bad".to_string(),
+            params: vec![],
+            constraint: None,
+            includes: vec![],
+            refinement: None,
+            parent: None,
+            span: Span::default(),
+            states: vec!["A".to_string(), "B".to_string()],
+            transitions: vec![],
+            initial_state: Some("C".to_string()),
+        };
+        assert!(
+            EffectStateMachine::from_effect_def(&def).is_none(),
+            "Should reject initial state not in declared states"
+        );
+    }
+
+    #[test]
+    fn test_effect_state_machine_invalid_transition_state() {
+        use crate::parser::EffectTransition;
+        // transition references undeclared state "X" → should return None
+        let def = crate::parser::EffectDef {
+            name: "Bad".to_string(),
+            params: vec![],
+            constraint: None,
+            includes: vec![],
+            refinement: None,
+            parent: None,
+            span: Span::default(),
+            states: vec!["A".to_string(), "B".to_string()],
+            transitions: vec![EffectTransition {
+                operation: "go".to_string(),
+                from_state: "A".to_string(),
+                to_state: "X".to_string(), // undeclared
+            }],
+            initial_state: Some("A".to_string()),
+        };
+        assert!(
+            EffectStateMachine::from_effect_def(&def).is_none(),
+            "Should reject transition referencing undeclared state"
+        );
     }
 
     #[test]
