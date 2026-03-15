@@ -172,7 +172,7 @@ pub struct LivenessResult {
 ///    c. live_in[B] = gen[B] ∪ (live_out[B] - kill[B])
 ///    d. If live_in[B] changed, add predecessors(B) to worklist
 ///
-/// Iteration is bounded by block_count * 10 to prevent explosion.
+/// Iteration is bounded by block_count * max(local_count, 10) to prevent explosion.
 pub fn compute_liveness(body: &MirBody) -> LivenessResult {
     let successors = body.successors();
     let predecessors = body.predecessors();
@@ -201,7 +201,9 @@ pub fn compute_liveness(body: &MirBody) -> LivenessResult {
         in_worklist.insert(block.id);
     }
 
-    let max_iterations = body.block_count() * 10;
+    // Theoretical convergence bound is O(block_count * local_count).
+    // Use max(local_count, 10) to handle bodies with many locals correctly.
+    let max_iterations = body.block_count() * body.local_count().max(10);
     let mut iterations = 0;
 
     while let Some(block_id) = worklist.pop_front() {
@@ -267,6 +269,13 @@ pub fn compute_liveness(body: &MirBody) -> LivenessResult {
 /// For branches (SwitchInt), if a variable dies in only one branch,
 /// the Drop is placed only in that branch's target block, preventing
 /// double-free.
+///
+/// TODO: Variables used only by a SwitchInt discriminant (in terminator_uses
+/// but not in live_out) are currently excluded from dropping in this block
+/// to prevent use-after-drop, but no compensating drop is inserted in the
+/// successor blocks. This causes a leak for resource types. When Mumei adds
+/// types with destructors, add a second pass that inserts Drop at the start
+/// of each successor block for such locals.
 pub fn insert_drops(body: &mut MirBody, liveness: &LivenessResult) {
     // Pre-compute gen/kill for each block
     let gen_kill: HashMap<BasicBlockId, GenKill> = body
