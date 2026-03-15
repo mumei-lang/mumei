@@ -577,6 +577,35 @@ Z3 quantifiers. This ensures:
 - Predictable verification performance (no universal quantification)
 - Consistent with mumei's existing generics system
 
+### Z3 String Sort for Effect Parameters
+
+Effect parameters (e.g., `FileRead(path: Str)`) support two verification strategies:
+
+**Constant Folding** (Rust-side):
+When the argument is a literal (e.g., `perform FileRead.read("/tmp/data.txt")`),
+`check_constant_constraint()` evaluates the constraint directly in Rust with zero Z3 overhead.
+
+**Z3 String Sort** (Symbolic):
+When the argument is a variable (e.g., `perform FileRead.read(path)`),
+the verifier creates a `z3::ast::String` variable and asserts the effect's constraint
+as a Z3 String operation:
+
+| Constraint | Z3 Operation |
+|---|---|
+| `starts_with(path, "/tmp/")` | `Z3String::prefix_of(prefix, path_z3)` |
+| `ends_with(path, ".txt")` | `Z3String::suffix_of(suffix, path_z3)` |
+| `contains(path, "data")` | `Z3String::contains(path_z3, substr)` |
+| `not_contains(path, "..")` | `NOT Z3String::contains(path_z3, substr)` |
+
+The `parse_constraint_to_z3_string()` function in `verification.rs` handles this mapping.
+
+**Sort-aware Timeout**: When String Sort constraints are detected (via pre-scan of
+effect definitions), the Z3 solver timeout is automatically doubled because String
+Sort solving is significantly slower than Int Sort.
+
+**Constraint Budget**: Each Z3 String constraint creation is tracked against the
+per-atom constraint budget (default: 1000) to prevent solver explosion.
+
 ### Standard Library
 
 `std/effects.mm` defines the built-in effect hierarchy:

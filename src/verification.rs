@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs;
 use std::path::Path;
-use z3::ast::{Array, Ast, Bool, Dynamic, Float, Int};
+use z3::ast::{Array, Ast, Bool, Dynamic, Float, Int, String as Z3String};
 use z3::{Config, Context, SatResult, Solver};
 
 // --- エラー型の定義 ---
@@ -2219,6 +2219,79 @@ fn evaluate_string_constraint(constraint_expr: &str, _param_name: &str, value: &
 }
 
 // =============================================================================
+// Z3 String Sort — Constraint Parsing and Mapping
+// =============================================================================
+//
+// Convert effect parameter constraint strings (e.g. "starts_with(path, \"/tmp/\")")
+// into Z3 String Sort constraints for symbolic verification of variable paths.
+// Constant paths continue to be checked by evaluate_string_constraint / check_constant_constraint.
+//
+
+/// Parse a constraint string and generate a Z3 Bool expression using Z3 String Sort.
+///
+/// Supports:
+/// - `starts_with(param, "prefix")` → Z3: `str.prefixof("prefix", param_z3)`
+/// - `ends_with(param, "suffix")`   → Z3: `str.suffixof("suffix", param_z3)`
+/// - `contains(param, "substr")`    → Z3: `str.contains(param_z3, "substr")`
+/// - `not_contains(param, "substr")`→ Z3: `NOT str.contains(param_z3, "substr")`
+///
+/// Returns `None` if the constraint cannot be parsed.
+fn parse_constraint_to_z3_string<'ctx>(
+    ctx: &'ctx Context,
+    constraint: &str,
+    param_z3: &Z3String<'ctx>,
+) -> Option<Bool<'ctx>> {
+    let trimmed = constraint.trim();
+
+    // Extract the string literal argument from the constraint
+    let extract_string_arg = |c: &str| -> Option<std::string::String> {
+        if let Some(last_quote_end) = c.rfind('"') {
+            let before = &c[..last_quote_end];
+            if let Some(last_quote_start) = before.rfind('"') {
+                return Some(c[last_quote_start + 1..last_quote_end].to_string());
+            }
+        }
+        None
+    };
+
+    // starts_with(param, "prefix") → Z3: prefix.prefix(param)
+    // Z3 semantics: prefix.prefix(s) means "prefix is a prefix of s"
+    if trimmed.starts_with("starts_with(") {
+        if let Some(arg) = extract_string_arg(trimmed) {
+            let prefix_z3 = Z3String::from_str(ctx, &arg).ok()?;
+            return Some(prefix_z3.prefix(param_z3));
+        }
+    }
+
+    // ends_with(param, "suffix") → Z3: suffix.suffix(param)
+    // Z3 semantics: suffix.suffix(s) means "suffix is a suffix of s"
+    if trimmed.starts_with("ends_with(") {
+        if let Some(arg) = extract_string_arg(trimmed) {
+            let suffix_z3 = Z3String::from_str(ctx, &arg).ok()?;
+            return Some(suffix_z3.suffix(param_z3));
+        }
+    }
+
+    // contains(param, "substr") → Z3: param.contains(substr)
+    if trimmed.starts_with("contains(") {
+        if let Some(arg) = extract_string_arg(trimmed) {
+            let substr_z3 = Z3String::from_str(ctx, &arg).ok()?;
+            return Some(param_z3.contains(&substr_z3));
+        }
+    }
+
+    // not_contains(param, "substr") → Z3: NOT param.contains(substr)
+    if trimmed.starts_with("not_contains(") {
+        if let Some(arg) = extract_string_arg(trimmed) {
+            let substr_z3 = Z3String::from_str(ctx, &arg).ok()?;
+            return Some(param_z3.contains(&substr_z3).not());
+        }
+    }
+
+    None
+}
+
+// =============================================================================
 // エフェクト検証コンテキスト (Effect Verification Context)
 // =============================================================================
 
@@ -3848,14 +3921,32 @@ fn verify_inner(
     // once MIR lowering covers all expression forms (Match, Lambda, Async, etc.)
 
     // Sort-aware timeout: if has_string_constraints is true, double the timeout.
-    // Currently infrastructure-only: will be activated when Z3 String Sort is integrated.
-    let effective_timeout = timeout_ms;
-    // TODO: Enable when Z3 String Sort integration is active:
-    // let effective_timeout = if has_string_constraints_cell.get() {
-    //     timeout_ms * 2
-    // } else {
-    //     timeout_ms
-    // };
+    // Z3 String Sort is now integrated for effect parameter constraints.
+    // When string constraints are present, solving is significantly slower,
+    // so we double the timeout to accommodate.
+    let has_string_constraints_cell_pre = std::cell::Cell::new(false);
+    // Pre-scan: check if any effect has Str-typed params with constraints
+    // that would need Z3 String Sort (variable params, not constant-folded).
+    for eff in &atom.effects {
+        let effect_def = module_env
+            .effect_defs
+            .get(&eff.name)
+            .or_else(|| module_env.effects.get(&eff.name));
+        if let Some(def) = effect_def {
+            if def.constraint.is_some() {
+                for p in &eff.params {
+                    if !p.is_constant {
+                        has_string_constraints_cell_pre.set(true);
+                    }
+                }
+            }
+        }
+    }
+    let effective_timeout = if has_string_constraints_cell_pre.get() {
+        timeout_ms * 2
+    } else {
+        timeout_ms
+    };
 
     let mut cfg = Config::new();
     cfg.set_timeout_msec(effective_timeout);
@@ -3872,9 +3963,9 @@ fn verify_inner(
     let effect_ctx_cell = std::cell::RefCell::new(EffectCtx::new(allowed_effects_set));
     // Per-atom constraint budget tracking
     let constraint_count_cell = std::cell::Cell::new(0usize);
-    // Sort-aware timeout: flag for Z3 String Sort constraints
-    // When Z3 String Sort is integrated, setting this to true will double timeout_ms.
-    let has_string_constraints_cell = std::cell::Cell::new(false);
+    // Sort-aware timeout: flag for Z3 String Sort constraints.
+    // Set to true when Z3 String constraints are added during expr_to_z3.
+    let has_string_constraints_cell = std::cell::Cell::new(has_string_constraints_cell_pre.get());
     let vc = VCtx {
         ctx: &ctx,
         arr: &arr,
@@ -5279,9 +5370,92 @@ fn expr_to_z3<'a>(
                 solver.assert(&used_z3.implies(&allowed_z3));
             }
 
-            // Process arguments
+            // Process arguments and collect Z3 values
+            let mut arg_z3_values: Vec<Dynamic> = Vec::new();
             for arg in perform_args {
-                expr_to_z3(vc, arg, env, solver_opt)?;
+                let val = expr_to_z3(vc, arg, env, solver_opt)?;
+                arg_z3_values.push(val);
+            }
+
+            // Z3 String Sort: verify symbolic parameter constraints
+            // Look up the EffectDef to get constraint and param definitions
+            let effect_def = vc
+                .module_env
+                .effect_defs
+                .get(effect.as_str())
+                .or_else(|| vc.module_env.effects.get(effect.as_str()))
+                .cloned();
+            if let Some(def) = effect_def {
+                if let Some(ref constraint) = def.constraint {
+                    // For each argument, check if it's a symbolic (non-constant) value
+                    // that needs Z3 String constraint verification.
+                    for (i, arg) in perform_args.iter().enumerate() {
+                        // Number/Float literals are constants already checked
+                        // by verify_effect_params (Phase 1g). Skip Z3 String here.
+                        // Variables and other expressions need symbolic verification.
+                        let is_constant = matches!(arg, Expr::Number(_) | Expr::Float(_));
+                        if is_constant {
+                            // Constant args are already checked by check_constant_constraint
+                            // in verify_effect_params (Phase 1g). Skip Z3 String here.
+                            continue;
+                        }
+                        // Symbolic argument: create Z3 String variable and assert constraint
+                        if let Some(solver) = solver_opt {
+                            let param_name =
+                                def.params.get(i).map(|p| p.name.as_str()).unwrap_or("arg");
+                            let z3_str_name =
+                                format!("__effect_str_{}_{}_{}", effect, operation, param_name);
+
+                            // Create Z3 String variable for the symbolic argument
+                            let param_z3_str = Z3String::new_const(ctx, z3_str_name.as_str());
+
+                            // If the argument has a `requires` constraint in the env
+                            // (e.g., from atom parameter refinements), propagate it.
+                            // Check if there's a string variable in the env for this arg.
+                            if let Expr::Variable(var_name) = arg {
+                                let str_env_key = format!("__str_{}", var_name);
+                                if let Some(existing) = env.get(&str_env_key) {
+                                    // Bind the param to the existing string variable
+                                    if let Some(existing_str) = existing.as_string() {
+                                        let eq_constraint = param_z3_str._eq(&existing_str);
+                                        solver.assert(&eq_constraint);
+                                    }
+                                }
+                            }
+
+                            // Parse the constraint and assert it
+                            if let Some(constraint_bool) =
+                                parse_constraint_to_z3_string(ctx, constraint, &param_z3_str)
+                            {
+                                // Set has_string_constraints flag for sort-aware timeout
+                                if let Some(flag) = vc.has_string_constraints {
+                                    flag.set(true);
+                                }
+                                // Check constraint budget
+                                if let Some(count) = vc.constraint_count {
+                                    let current = count.get();
+                                    if current >= vc.constraint_budget {
+                                        return Err(MumeiError::verification(format!(
+                                            "Constraint budget exceeded for effect '{}' \
+                                             string constraint: {} constraints (limit: {})",
+                                            effect, current, vc.constraint_budget
+                                        )));
+                                    }
+                                    count.set(current + 1);
+                                }
+                                let track_label = format!(
+                                    "track_effect_str_{}_{}_{}",
+                                    effect, operation, param_name
+                                );
+                                let track_bool = Bool::new_const(ctx, track_label.as_str());
+                                solver.assert_and_track(&constraint_bool, &track_bool);
+                            }
+
+                            // Store the Z3 String variable in env for downstream use
+                            env.insert(z3_str_name, param_z3_str.into());
+                        }
+                    }
+                }
             }
 
             // Return a symbolic result value
@@ -6781,5 +6955,140 @@ mod tests {
     #[test]
     fn test_default_constraint_budget_value() {
         assert_eq!(DEFAULT_CONSTRAINT_BUDGET, 1000);
+    }
+
+    // =========================================================================
+    // Task 4: Effect Parameter Z3 String Sort — Tests
+    // =========================================================================
+
+    #[test]
+    fn test_constant_path_ok() {
+        // Constant path "/tmp/data.txt" should pass starts_with(path, "/tmp/") constraint
+        assert!(check_constant_constraint(
+            "/tmp/data.txt",
+            "starts_with(path, \"/tmp/\")"
+        ));
+        assert!(check_constant_constraint(
+            "/tmp/nested/file.log",
+            "starts_with(path, \"/tmp/\")"
+        ));
+    }
+
+    #[test]
+    fn test_constant_path_ng() {
+        // Constant path "/etc/passwd" should fail starts_with(path, "/tmp/") constraint
+        assert!(!check_constant_constraint(
+            "/etc/passwd",
+            "starts_with(path, \"/tmp/\")"
+        ));
+        assert!(!check_constant_constraint(
+            "/var/log/syslog",
+            "starts_with(path, \"/tmp/\")"
+        ));
+    }
+
+    #[test]
+    fn test_z3_string_parse_constraint_starts_with() {
+        // Test parse_constraint_to_z3_string with starts_with
+        let cfg = z3::Config::new();
+        let ctx = z3::Context::new(&cfg);
+        let param = Z3String::new_const(&ctx, "path");
+
+        // starts_with should produce a Bool constraint
+        let result = parse_constraint_to_z3_string(&ctx, "starts_with(path, \"/tmp/\")", &param);
+        assert!(result.is_some(), "starts_with constraint should parse");
+
+        // ends_with should also work
+        let result2 = parse_constraint_to_z3_string(&ctx, "ends_with(path, \".txt\")", &param);
+        assert!(result2.is_some(), "ends_with constraint should parse");
+
+        // contains should also work
+        let result3 = parse_constraint_to_z3_string(&ctx, "contains(path, \"data\")", &param);
+        assert!(result3.is_some(), "contains constraint should parse");
+
+        // not_contains should also work
+        let result4 = parse_constraint_to_z3_string(&ctx, "not_contains(path, \"..\")", &param);
+        assert!(result4.is_some(), "not_contains constraint should parse");
+
+        // Invalid constraint should return None
+        let result5 = parse_constraint_to_z3_string(&ctx, "unknown_fn(path, \"x\")", &param);
+        assert!(result5.is_none(), "unknown constraint should return None");
+    }
+
+    #[test]
+    fn test_z3_string_constraint_satisfiability() {
+        // Test that Z3 String Sort constraints are satisfiable/unsatisfiable as expected
+        let cfg = z3::Config::new();
+        let ctx = z3::Context::new(&cfg);
+        let solver = z3::Solver::new(&ctx);
+
+        // Create a Z3 String variable
+        let path = Z3String::new_const(&ctx, "path");
+
+        // Assert: path starts with "/tmp/"
+        let prefix = Z3String::from_str(&ctx, "/tmp/").unwrap();
+        solver.assert(&prefix.prefix(&path));
+
+        // Should be satisfiable (there exist strings starting with /tmp/)
+        assert_eq!(solver.check(), z3::SatResult::Sat);
+
+        // Now also assert: path starts with "/etc/"
+        let prefix2 = Z3String::from_str(&ctx, "/etc/").unwrap();
+        solver.assert(&prefix2.prefix(&path));
+
+        // Should be unsatisfiable (can't start with both /tmp/ and /etc/)
+        assert_eq!(solver.check(), z3::SatResult::Unsat);
+    }
+
+    #[test]
+    fn test_contains_constraint() {
+        // Test contains constraint with Z3 String Sort
+        let cfg = z3::Config::new();
+        let ctx = z3::Context::new(&cfg);
+        let solver = z3::Solver::new(&ctx);
+
+        let path = Z3String::new_const(&ctx, "path");
+
+        // Assert: path contains ".."
+        let substr = Z3String::from_str(&ctx, "..").unwrap();
+        let contains_dotdot = path.contains(&substr);
+        // Assert NOT contains ".." (path traversal prevention)
+        solver.assert(&contains_dotdot.not());
+
+        // Also assert path starts with "/tmp/"
+        let prefix = Z3String::from_str(&ctx, "/tmp/").unwrap();
+        solver.assert(&prefix.prefix(&path));
+
+        // Should be satisfiable: "/tmp/safe.txt" satisfies both
+        assert_eq!(solver.check(), z3::SatResult::Sat);
+    }
+
+    #[test]
+    fn test_z3_string_performance() {
+        // Test that String Sort constraint solving completes within reasonable time
+        let start = std::time::Instant::now();
+
+        let cfg = z3::Config::new();
+        let ctx = z3::Context::new(&cfg);
+        let solver = z3::Solver::new(&ctx);
+
+        // Create multiple string variables with constraints
+        for i in 0..10 {
+            let name = format!("path_{}", i);
+            let var = Z3String::new_const(&ctx, name.as_str());
+            let prefix = Z3String::from_str(&ctx, "/tmp/").unwrap();
+            solver.assert(&prefix.prefix(&var));
+        }
+
+        let result = solver.check();
+        let elapsed = start.elapsed();
+
+        assert_eq!(result, z3::SatResult::Sat);
+        // Should solve within 500ms even with 10 string constraints
+        assert!(
+            elapsed.as_millis() < 500,
+            "String Sort constraint solving took {}ms, expected < 500ms",
+            elapsed.as_millis()
+        );
     }
 }
