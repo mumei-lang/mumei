@@ -1,14 +1,19 @@
 // =============================================================================
-// MIR Analysis: Liveness Analysis + Drop Insertion
+// MIR Analysis: Liveness Analysis + Drop Insertion + Move Analysis
 // =============================================================================
-// Implements backward dataflow liveness analysis on MIR CFG, then inserts
-// MirStatement::Drop at points where variables become dead.
+// Implements:
+//   1. Backward dataflow liveness analysis on MIR CFG, then inserts
+//      MirStatement::Drop at points where variables become dead.
+//   2. Forward dataflow move analysis to detect use-after-move, double-move,
+//      and conflicting merge at branch join points.
 //
 // Pipeline: compute_gen_kill → compute_liveness → insert_drops
+//           analyze_moves (forward dataflow for ownership tracking)
 // =============================================================================
 
 use crate::mir::{
-    BasicBlock, BasicBlockId, Local, MirBody, MirStatement, Operand, Place, Rvalue, Terminator,
+    BasicBlock, BasicBlockId, Local, LocalDecl, MirBody, MirStatement, Operand, Place, Rvalue,
+    Terminator,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -300,6 +305,431 @@ pub fn insert_drops(body: &mut MirBody, liveness: &LivenessResult) {
         for l in drops {
             block.statements.push(MirStatement::Drop(l));
         }
+    }
+}
+
+// =============================================================================
+// Move Analysis: Forward Dataflow (Ownership Tracking)
+// =============================================================================
+
+/// MIR-level ownership state. Tracks whether each Local is alive or consumed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MirLinearityState {
+    /// Local → true (alive) / false (consumed)
+    pub status: HashMap<Local, bool>,
+}
+
+/// Describes a conflict when merging two states at a branch join point.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct MergeConflict {
+    pub local: Local,
+    pub description: String,
+}
+
+impl MirLinearityState {
+    #[allow(dead_code)]
+    pub fn new() -> Self {
+        MirLinearityState {
+            status: HashMap::new(),
+        }
+    }
+
+    /// Initialize all locals as alive.
+    pub fn init_all_alive(locals: &[LocalDecl]) -> Self {
+        let mut status = HashMap::new();
+        for decl in locals {
+            status.insert(decl.local.clone(), true);
+        }
+        MirLinearityState { status }
+    }
+
+    /// Mark a local as consumed (moved). Returns an error if already consumed.
+    pub fn consume(&mut self, local: &Local) -> Result<(), String> {
+        match self.status.get(local) {
+            Some(true) => {
+                self.status.insert(local.clone(), false);
+                Ok(())
+            }
+            Some(false) => Err(format!(
+                "Local({}) is already consumed (double move)",
+                local.0
+            )),
+            None => {
+                // Unknown local — treat as alive then consume
+                self.status.insert(local.clone(), false);
+                Ok(())
+            }
+        }
+    }
+
+    /// Check that a local is still alive (not consumed). Returns error if consumed.
+    pub fn check_alive(&self, local: &Local) -> Result<(), String> {
+        match self.status.get(local) {
+            Some(true) | None => Ok(()),
+            Some(false) => Err(format!("Local({}) was used after being moved", local.0)),
+        }
+    }
+
+    /// Merge two states at a join point. Returns the merged state and any conflicts.
+    /// A conflict occurs when one path has a local alive and the other has it consumed.
+    pub fn merge(&self, other: &Self) -> (Self, Vec<MergeConflict>) {
+        let mut merged = HashMap::new();
+        let mut conflicts = Vec::new();
+
+        // Collect all locals from both states
+        let all_locals: HashSet<Local> = self
+            .status
+            .keys()
+            .chain(other.status.keys())
+            .cloned()
+            .collect();
+
+        for local in all_locals {
+            let self_alive = self.status.get(&local).copied().unwrap_or(true);
+            let other_alive = other.status.get(&local).copied().unwrap_or(true);
+
+            if self_alive != other_alive {
+                conflicts.push(MergeConflict {
+                    local: local.clone(),
+                    description: format!(
+                        "Local({}) is alive on one path but consumed on another at merge point",
+                        local.0
+                    ),
+                });
+                // Conservative: mark as consumed at merge (prevent use-after-move)
+                merged.insert(local, false);
+            } else {
+                merged.insert(local, self_alive);
+            }
+        }
+
+        (MirLinearityState { status: merged }, conflicts)
+    }
+}
+
+// =============================================================================
+// Move Analysis Result
+// =============================================================================
+
+/// Result of forward dataflow move analysis.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct MoveAnalysisResult {
+    pub entry_states: HashMap<BasicBlockId, MirLinearityState>,
+    pub exit_states: HashMap<BasicBlockId, MirLinearityState>,
+    pub violations: Vec<MoveViolation>,
+}
+
+/// A detected move violation.
+#[derive(Debug, Clone)]
+pub struct MoveViolation {
+    pub block_id: BasicBlockId,
+    pub local: Local,
+    pub kind: MoveViolationKind,
+}
+
+/// Classification of move violations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MoveViolationKind {
+    UseAfterMove,
+    DoubleMove,
+    ConflictingMerge,
+}
+
+impl std::fmt::Display for MoveViolationKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MoveViolationKind::UseAfterMove => write!(f, "UseAfterMove"),
+            MoveViolationKind::DoubleMove => write!(f, "DoubleMove"),
+            MoveViolationKind::ConflictingMerge => write!(f, "ConflictingMerge"),
+        }
+    }
+}
+
+/// Collect locals that are read (used) by an operand.
+fn collect_operand_read_locals(op: &Operand) -> Vec<Local> {
+    let mut locals = Vec::new();
+    match op {
+        Operand::Place(place) => {
+            let mut set = HashSet::new();
+            collect_place_locals(place, &mut set);
+            locals.extend(set);
+        }
+        Operand::Constant(_) => {}
+    }
+    locals
+}
+
+/// Process a single statement within move analysis, updating state and recording violations.
+fn process_statement_for_moves(
+    stmt: &MirStatement,
+    state: &mut MirLinearityState,
+    block_id: BasicBlockId,
+    violations: &mut Vec<MoveViolation>,
+) {
+    match stmt {
+        MirStatement::Assign(place, rvalue) => {
+            // Check rvalue operands for use-after-move
+            match rvalue {
+                Rvalue::Use(op) => {
+                    // Rvalue::Use(Operand::Place(...)) is a potential move
+                    if let Operand::Place(Place::Local(src)) = op {
+                        match state.consume(src) {
+                            Ok(()) => {}
+                            Err(_) => {
+                                // Already consumed → UseAfterMove or DoubleMove
+                                if state.status.get(src) == Some(&false) {
+                                    violations.push(MoveViolation {
+                                        block_id,
+                                        local: src.clone(),
+                                        kind: MoveViolationKind::DoubleMove,
+                                    });
+                                }
+                            }
+                        }
+                    } else {
+                        // Non-place operand (constant) — no move
+                        for l in collect_operand_read_locals(op) {
+                            if state.check_alive(&l).is_err() {
+                                violations.push(MoveViolation {
+                                    block_id,
+                                    local: l,
+                                    kind: MoveViolationKind::UseAfterMove,
+                                });
+                            }
+                        }
+                    }
+                }
+                Rvalue::BinaryOp(_, lhs, rhs) => {
+                    for op in [lhs, rhs] {
+                        for l in collect_operand_read_locals(op) {
+                            if state.check_alive(&l).is_err() {
+                                violations.push(MoveViolation {
+                                    block_id,
+                                    local: l,
+                                    kind: MoveViolationKind::UseAfterMove,
+                                });
+                            }
+                        }
+                    }
+                }
+                Rvalue::Call { args, .. } => {
+                    for op in args {
+                        for l in collect_operand_read_locals(op) {
+                            if state.check_alive(&l).is_err() {
+                                violations.push(MoveViolation {
+                                    block_id,
+                                    local: l,
+                                    kind: MoveViolationKind::UseAfterMove,
+                                });
+                            }
+                        }
+                    }
+                }
+                Rvalue::Ref(place) | Rvalue::RefMut(place) => {
+                    let mut set = HashSet::new();
+                    collect_place_locals(place, &mut set);
+                    for l in set {
+                        if state.check_alive(&l).is_err() {
+                            violations.push(MoveViolation {
+                                block_id,
+                                local: l,
+                                kind: MoveViolationKind::UseAfterMove,
+                            });
+                        }
+                    }
+                }
+                Rvalue::StructInit { fields, .. } => {
+                    for (_, op) in fields {
+                        for l in collect_operand_read_locals(op) {
+                            if state.check_alive(&l).is_err() {
+                                violations.push(MoveViolation {
+                                    block_id,
+                                    local: l,
+                                    kind: MoveViolationKind::UseAfterMove,
+                                });
+                            }
+                        }
+                    }
+                }
+                Rvalue::FieldAccess(op, _) => {
+                    for l in collect_operand_read_locals(op) {
+                        if state.check_alive(&l).is_err() {
+                            violations.push(MoveViolation {
+                                block_id,
+                                local: l,
+                                kind: MoveViolationKind::UseAfterMove,
+                            });
+                        }
+                    }
+                }
+                Rvalue::Perform { args, .. } => {
+                    for op in args {
+                        for l in collect_operand_read_locals(op) {
+                            if state.check_alive(&l).is_err() {
+                                violations.push(MoveViolation {
+                                    block_id,
+                                    local: l,
+                                    kind: MoveViolationKind::UseAfterMove,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+
+            // The destination local is defined (reborn) by assignment
+            if let Place::Local(dst) = place {
+                state.status.insert(dst.clone(), true);
+            }
+        }
+        MirStatement::StorageLive(l) => {
+            // New storage: local becomes alive
+            state.status.insert(l.clone(), true);
+        }
+        MirStatement::StorageDead(l) => {
+            // Storage ends: local becomes dead/consumed
+            state.status.insert(l.clone(), false);
+        }
+        MirStatement::Drop(l) => {
+            // Drop consumes the local
+            state.status.insert(l.clone(), false);
+        }
+        MirStatement::Nop => {}
+    }
+}
+
+/// Perform forward dataflow move analysis on a MIR body.
+///
+/// Algorithm:
+/// 1. Initialize entry_block's entry_state with all locals alive
+/// 2. Add entry block to worklist
+/// 3. While worklist is not empty:
+///    a. Pop block B
+///    b. state = entry_states[B].clone()
+///    c. Process each statement in B (track moves, check alive)
+///    d. exit_states[B] = state
+///    e. For each successor S:
+///       - If entry_states[S] is unset, copy exit_states[B]
+///       - If set, merge and record ConflictingMerge violations
+///       - If entry_states[S] changed, add S to worklist
+///
+/// Iteration bound: block_count * 10
+pub fn analyze_moves(body: &MirBody) -> MoveAnalysisResult {
+    let successors = body.successors();
+
+    let mut entry_states: HashMap<BasicBlockId, MirLinearityState> = HashMap::new();
+    let mut exit_states: HashMap<BasicBlockId, MirLinearityState> = HashMap::new();
+    let mut violations: Vec<MoveViolation> = Vec::new();
+
+    // Initialize entry block with all locals alive
+    let init_state = MirLinearityState::init_all_alive(&body.locals);
+    entry_states.insert(body.entry_block, init_state);
+
+    // Worklist
+    let mut worklist: VecDeque<BasicBlockId> = VecDeque::new();
+    let mut in_worklist: HashSet<BasicBlockId> = HashSet::new();
+    worklist.push_back(body.entry_block);
+    in_worklist.insert(body.entry_block);
+
+    let max_iterations = body.block_count() * 10;
+    let mut iterations = 0;
+
+    while let Some(block_id) = worklist.pop_front() {
+        in_worklist.remove(&block_id);
+        iterations += 1;
+        if iterations > max_iterations {
+            eprintln!(
+                "Warning: move analysis for '{}' reached iteration limit ({})",
+                body.name, max_iterations
+            );
+            break;
+        }
+
+        // Find the block
+        let block = match body.blocks.iter().find(|b| b.id == block_id) {
+            Some(b) => b,
+            None => continue,
+        };
+
+        // Get entry state for this block
+        let mut state = match entry_states.get(&block_id) {
+            Some(s) => s.clone(),
+            None => continue,
+        };
+
+        // Process each statement
+        for stmt in &block.statements {
+            process_statement_for_moves(stmt, &mut state, block_id, &mut violations);
+        }
+
+        // Process terminator operands (read access)
+        match &block.terminator {
+            Terminator::Return(op) => {
+                for l in collect_operand_read_locals(op) {
+                    if state.check_alive(&l).is_err() {
+                        violations.push(MoveViolation {
+                            block_id,
+                            local: l,
+                            kind: MoveViolationKind::UseAfterMove,
+                        });
+                    }
+                }
+            }
+            Terminator::SwitchInt { discr, .. } => {
+                for l in collect_operand_read_locals(discr) {
+                    if state.check_alive(&l).is_err() {
+                        violations.push(MoveViolation {
+                            block_id,
+                            local: l,
+                            kind: MoveViolationKind::UseAfterMove,
+                        });
+                    }
+                }
+            }
+            Terminator::Goto(_) | Terminator::Unreachable => {}
+        }
+
+        // Save exit state
+        exit_states.insert(block_id, state.clone());
+
+        // Propagate to successors
+        if let Some(succs) = successors.get(&block_id) {
+            for &succ_id in succs {
+                if let Some(existing) = entry_states.get(&succ_id) {
+                    // Merge with existing entry state
+                    let (merged, conflicts) = existing.merge(&state);
+                    for conflict in &conflicts {
+                        violations.push(MoveViolation {
+                            block_id: succ_id,
+                            local: conflict.local.clone(),
+                            kind: MoveViolationKind::ConflictingMerge,
+                        });
+                    }
+                    if merged != *existing {
+                        entry_states.insert(succ_id, merged);
+                        if !in_worklist.contains(&succ_id) {
+                            worklist.push_back(succ_id);
+                            in_worklist.insert(succ_id);
+                        }
+                    }
+                } else {
+                    // First visit: copy exit state
+                    entry_states.insert(succ_id, state.clone());
+                    if !in_worklist.contains(&succ_id) {
+                        worklist.push_back(succ_id);
+                        in_worklist.insert(succ_id);
+                    }
+                }
+            }
+        }
+    }
+
+    MoveAnalysisResult {
+        entry_states,
+        exit_states,
+        violations,
     }
 }
 
@@ -630,5 +1060,415 @@ mod tests {
 
         // Block 0: live_out should contain Local(1) (live_in of successor Block 1)
         assert!(liveness.live_out[&0].contains(&Local(1)));
+    }
+
+    // =========================================================================
+    // Move Analysis Tests
+    // =========================================================================
+
+    #[test]
+    fn test_move_analysis_normal_case() {
+        // atom f(x: Int) body: { let y = x + 1; y }
+        // No move violations expected — x is used (read) but not moved
+        let atom = make_atom("f", vec![make_param("x", "Int")], "{ let y = x + 1; y }");
+        let hir = lower_atom_to_hir(&atom);
+        let mir = lower_hir_to_mir(&hir);
+        let result = analyze_moves(&mir);
+
+        // Should have entry/exit states for all blocks
+        for block in &mir.blocks {
+            assert!(result.entry_states.contains_key(&block.id));
+            assert!(result.exit_states.contains_key(&block.id));
+        }
+
+        // No use-after-move or double-move violations expected
+        let critical_violations: Vec<_> = result
+            .violations
+            .iter()
+            .filter(|v| {
+                v.kind == MoveViolationKind::UseAfterMove || v.kind == MoveViolationKind::DoubleMove
+            })
+            .collect();
+        assert!(
+            critical_violations.is_empty(),
+            "Normal code should have no critical move violations, got: {:?}",
+            critical_violations
+                .iter()
+                .map(|v| format!("{} at block {}", v.kind, v.block_id))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_move_analysis_use_after_move() {
+        // Manually construct MIR for: let y = move x; use x (should detect UseAfterMove)
+        // Block 0: y = Use(x); return x
+        // The second use of x after it has been consumed should be a violation
+        let body = MirBody {
+            name: "use_after_move".to_string(),
+            locals: vec![
+                LocalDecl {
+                    local: Local(0),
+                    name: Some("x".to_string()),
+                    ty: Some("Int".to_string()),
+                },
+                LocalDecl {
+                    local: Local(1),
+                    name: Some("y".to_string()),
+                    ty: Some("Int".to_string()),
+                },
+            ],
+            blocks: vec![BasicBlock {
+                id: 0,
+                statements: vec![
+                    // y = move x (Use of Place is a move)
+                    MirStatement::Assign(
+                        Place::Local(Local(1)),
+                        Rvalue::Use(Operand::Place(Place::Local(Local(0)))),
+                    ),
+                ],
+                // Return x — but x was already moved!
+                terminator: Terminator::Return(Operand::Place(Place::Local(Local(0)))),
+            }],
+            entry_block: 0,
+        };
+
+        let result = analyze_moves(&body);
+
+        // Should detect UseAfterMove for Local(0) in block 0's terminator
+        let uam_violations: Vec<_> = result
+            .violations
+            .iter()
+            .filter(|v| v.kind == MoveViolationKind::UseAfterMove && v.local == Local(0))
+            .collect();
+        assert!(
+            !uam_violations.is_empty(),
+            "Should detect use-after-move for x after move to y"
+        );
+    }
+
+    #[test]
+    fn test_move_analysis_double_move() {
+        // Block 0: y = move x; z = move x; return z
+        // The second move of x should be a DoubleMove
+        let body = MirBody {
+            name: "double_move".to_string(),
+            locals: vec![
+                LocalDecl {
+                    local: Local(0),
+                    name: Some("x".to_string()),
+                    ty: Some("Int".to_string()),
+                },
+                LocalDecl {
+                    local: Local(1),
+                    name: Some("y".to_string()),
+                    ty: Some("Int".to_string()),
+                },
+                LocalDecl {
+                    local: Local(2),
+                    name: Some("z".to_string()),
+                    ty: Some("Int".to_string()),
+                },
+            ],
+            blocks: vec![BasicBlock {
+                id: 0,
+                statements: vec![
+                    // y = move x
+                    MirStatement::Assign(
+                        Place::Local(Local(1)),
+                        Rvalue::Use(Operand::Place(Place::Local(Local(0)))),
+                    ),
+                    // z = move x (double move!)
+                    MirStatement::Assign(
+                        Place::Local(Local(2)),
+                        Rvalue::Use(Operand::Place(Place::Local(Local(0)))),
+                    ),
+                ],
+                terminator: Terminator::Return(Operand::Place(Place::Local(Local(2)))),
+            }],
+            entry_block: 0,
+        };
+
+        let result = analyze_moves(&body);
+
+        // Should detect DoubleMove for Local(0)
+        let dm_violations: Vec<_> = result
+            .violations
+            .iter()
+            .filter(|v| v.kind == MoveViolationKind::DoubleMove && v.local == Local(0))
+            .collect();
+        assert!(!dm_violations.is_empty(), "Should detect double move of x");
+    }
+
+    #[test]
+    fn test_move_analysis_conflicting_merge() {
+        // if/else where one branch moves x and the other doesn't
+        // Block 0: SwitchInt(cond) → then=1, else=2
+        // Block 1: y = move x; goto 3
+        // Block 2: goto 3 (x is alive here)
+        // Block 3: return 0
+        // At block 3, x is consumed from path 1 but alive from path 2 → ConflictingMerge
+        let body = MirBody {
+            name: "conflicting_merge".to_string(),
+            locals: vec![
+                LocalDecl {
+                    local: Local(0),
+                    name: Some("cond".to_string()),
+                    ty: Some("Int".to_string()),
+                },
+                LocalDecl {
+                    local: Local(1),
+                    name: Some("x".to_string()),
+                    ty: Some("Int".to_string()),
+                },
+                LocalDecl {
+                    local: Local(2),
+                    name: Some("y".to_string()),
+                    ty: Some("Int".to_string()),
+                },
+            ],
+            blocks: vec![
+                BasicBlock {
+                    id: 0,
+                    statements: vec![],
+                    terminator: Terminator::SwitchInt {
+                        discr: Operand::Place(Place::Local(Local(0))),
+                        targets: vec![(1, 1)],
+                        otherwise: 2,
+                    },
+                },
+                BasicBlock {
+                    id: 1,
+                    statements: vec![
+                        // y = move x (x is consumed on this path)
+                        MirStatement::Assign(
+                            Place::Local(Local(2)),
+                            Rvalue::Use(Operand::Place(Place::Local(Local(1)))),
+                        ),
+                    ],
+                    terminator: Terminator::Goto(3),
+                },
+                BasicBlock {
+                    id: 2,
+                    statements: vec![],
+                    // x is alive on this path
+                    terminator: Terminator::Goto(3),
+                },
+                BasicBlock {
+                    id: 3,
+                    statements: vec![],
+                    terminator: Terminator::Return(Operand::Constant(
+                        crate::mir::MirConstant::Int(0),
+                    )),
+                },
+            ],
+            entry_block: 0,
+        };
+
+        let result = analyze_moves(&body);
+
+        // Should detect ConflictingMerge for Local(1) at block 3
+        let cm_violations: Vec<_> = result
+            .violations
+            .iter()
+            .filter(|v| v.kind == MoveViolationKind::ConflictingMerge && v.local == Local(1))
+            .collect();
+        assert!(
+            !cm_violations.is_empty(),
+            "Should detect conflicting merge for x at join point"
+        );
+    }
+
+    #[test]
+    fn test_move_analysis_loop_move() {
+        // While loop where move happens inside the loop body.
+        // On 2nd iteration, the local is already consumed → violation detected.
+        //
+        // Block 0: goto 1
+        // Block 1: SwitchInt(cond) → body=2, after=3
+        // Block 2: y = move x; goto 1
+        // Block 3: return 0
+        let body = MirBody {
+            name: "loop_move".to_string(),
+            locals: vec![
+                LocalDecl {
+                    local: Local(0),
+                    name: Some("cond".to_string()),
+                    ty: Some("Int".to_string()),
+                },
+                LocalDecl {
+                    local: Local(1),
+                    name: Some("x".to_string()),
+                    ty: Some("Int".to_string()),
+                },
+                LocalDecl {
+                    local: Local(2),
+                    name: Some("y".to_string()),
+                    ty: Some("Int".to_string()),
+                },
+            ],
+            blocks: vec![
+                BasicBlock {
+                    id: 0,
+                    statements: vec![],
+                    terminator: Terminator::Goto(1),
+                },
+                BasicBlock {
+                    id: 1,
+                    statements: vec![],
+                    terminator: Terminator::SwitchInt {
+                        discr: Operand::Place(Place::Local(Local(0))),
+                        targets: vec![(1, 2)],
+                        otherwise: 3,
+                    },
+                },
+                BasicBlock {
+                    id: 2,
+                    statements: vec![
+                        // y = move x (on second iteration, x is already consumed)
+                        MirStatement::Assign(
+                            Place::Local(Local(2)),
+                            Rvalue::Use(Operand::Place(Place::Local(Local(1)))),
+                        ),
+                    ],
+                    terminator: Terminator::Goto(1),
+                },
+                BasicBlock {
+                    id: 3,
+                    statements: vec![],
+                    terminator: Terminator::Return(Operand::Constant(
+                        crate::mir::MirConstant::Int(0),
+                    )),
+                },
+            ],
+            entry_block: 0,
+        };
+
+        let result = analyze_moves(&body);
+
+        // On second iteration, the loop header (block 1) receives a state where x is consumed
+        // from block 2's exit. This should cause a ConflictingMerge at block 1 (x alive from
+        // block 0, consumed from block 2), and potentially DoubleMove in block 2 on re-visit.
+        let loop_violations: Vec<_> = result
+            .violations
+            .iter()
+            .filter(|v| v.local == Local(1))
+            .collect();
+        assert!(
+            !loop_violations.is_empty(),
+            "Should detect move violation for x inside while loop on second iteration"
+        );
+    }
+
+    #[test]
+    fn test_move_analysis_function_call_consume() {
+        // Block 0: result = call callee(x); return x
+        // x is read in the call arguments, then used again in return → UseAfterMove
+        // (Since all Rvalue::Use(Operand::Place) are treated as moves)
+        let body = MirBody {
+            name: "call_consume".to_string(),
+            locals: vec![
+                LocalDecl {
+                    local: Local(0),
+                    name: Some("x".to_string()),
+                    ty: Some("Int".to_string()),
+                },
+                LocalDecl {
+                    local: Local(1),
+                    name: Some("result".to_string()),
+                    ty: Some("Int".to_string()),
+                },
+            ],
+            blocks: vec![BasicBlock {
+                id: 0,
+                statements: vec![
+                    // result = callee(x)
+                    MirStatement::Assign(
+                        Place::Local(Local(1)),
+                        Rvalue::Call {
+                            func: "callee".to_string(),
+                            args: vec![Operand::Place(Place::Local(Local(0)))],
+                        },
+                    ),
+                ],
+                // Return x — x was passed to callee (read access, not a move via Call)
+                // Call args are read, not moved, so x is still alive
+                terminator: Terminator::Return(Operand::Place(Place::Local(Local(0)))),
+            }],
+            entry_block: 0,
+        };
+
+        let result = analyze_moves(&body);
+
+        // Call args are read access (not moves), so x should still be alive
+        // No UseAfterMove expected since Call doesn't consume arguments
+        let uam_for_x: Vec<_> = result
+            .violations
+            .iter()
+            .filter(|v| v.kind == MoveViolationKind::UseAfterMove && v.local == Local(0))
+            .collect();
+        assert!(
+            uam_for_x.is_empty(),
+            "Call arguments are read access, not moves — x should still be alive"
+        );
+    }
+
+    #[test]
+    fn test_mir_linearity_state_basic() {
+        let locals = vec![
+            LocalDecl {
+                local: Local(0),
+                name: Some("a".to_string()),
+                ty: None,
+            },
+            LocalDecl {
+                local: Local(1),
+                name: Some("b".to_string()),
+                ty: None,
+            },
+        ];
+
+        let mut state = MirLinearityState::init_all_alive(&locals);
+        assert!(state.status[&Local(0)]);
+        assert!(state.status[&Local(1)]);
+
+        // Consume a
+        assert!(state.consume(&Local(0)).is_ok());
+        assert!(!state.status[&Local(0)]);
+
+        // Check alive: a should be consumed, b should be alive
+        assert!(state.check_alive(&Local(0)).is_err());
+        assert!(state.check_alive(&Local(1)).is_ok());
+
+        // Double consume should fail
+        assert!(state.consume(&Local(0)).is_err());
+    }
+
+    #[test]
+    fn test_mir_linearity_state_merge() {
+        let mut state1 = MirLinearityState::new();
+        state1.status.insert(Local(0), true);
+        state1.status.insert(Local(1), false); // consumed
+
+        let mut state2 = MirLinearityState::new();
+        state2.status.insert(Local(0), false); // consumed
+        state2.status.insert(Local(1), false); // consumed
+
+        let (merged, conflicts) = state1.merge(&state2);
+
+        // Local(0): alive vs consumed → conflict
+        assert!(
+            conflicts.iter().any(|c| c.local == Local(0)),
+            "Should have conflict for Local(0)"
+        );
+        // Local(1): both consumed → no conflict
+        assert!(
+            !conflicts.iter().any(|c| c.local == Local(1)),
+            "Should not have conflict for Local(1)"
+        );
+        // Merged: Local(0) should be consumed (conservative)
+        assert!(!merged.status[&Local(0)]);
+        // Merged: Local(1) should be consumed
+        assert!(!merged.status[&Local(1)]);
     }
 }
