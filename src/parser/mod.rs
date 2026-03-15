@@ -1308,4 +1308,93 @@ atom pipe<E: Effect>(f: atom_ref(i64) -> i64 with E)
             display
         );
     }
+
+    // =========================================================================
+    // Stateful Effect Parsing Tests (Task 3: Temporal Effect Verification)
+    // =========================================================================
+
+    #[test]
+    fn test_parse_stateful_effect_def() {
+        let source = r#"
+effect File
+    states: [Closed, Open];
+    initial: Closed;
+    transition open: Closed -> Open;
+    transition write: Open -> Open;
+    transition read: Open -> Open;
+    transition close: Open -> Closed;
+"#;
+        let items = parse_module(source);
+        let effects: Vec<_> = items
+            .iter()
+            .filter_map(|i| {
+                if let Item::EffectDef(e) = i {
+                    Some(e)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(effects.len(), 1);
+        assert_eq!(effects[0].name, "File");
+        assert_eq!(effects[0].states, vec!["Closed", "Open"]);
+        assert_eq!(effects[0].initial_state, Some("Closed".to_string()));
+        assert_eq!(effects[0].transitions.len(), 4);
+        // Check first transition: open: Closed -> Open
+        assert_eq!(effects[0].transitions[0].operation, "open");
+        assert_eq!(effects[0].transitions[0].from_state, "Closed");
+        assert_eq!(effects[0].transitions[0].to_state, "Open");
+        // Check last transition: close: Open -> Closed
+        assert_eq!(effects[0].transitions[3].operation, "close");
+        assert_eq!(effects[0].transitions[3].from_state, "Open");
+        assert_eq!(effects[0].transitions[3].to_state, "Closed");
+    }
+
+    #[test]
+    fn test_parse_stateless_effect_backward_compat() {
+        // Existing stateless effect syntax must still work
+        let source = "effect FileWrite;";
+        let items = parse_module(source);
+        let effects: Vec<_> = items
+            .iter()
+            .filter_map(|i| {
+                if let Item::EffectDef(e) = i {
+                    Some(e)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(effects.len(), 1);
+        assert_eq!(effects[0].name, "FileWrite");
+        assert!(effects[0].states.is_empty());
+        assert!(effects[0].transitions.is_empty());
+        assert!(effects[0].initial_state.is_none());
+    }
+
+    #[test]
+    fn test_parse_stateful_effect_partial() {
+        // Effect with only states and initial (no transitions)
+        let source = r#"
+effect Connection
+    states: [Disconnected, Connected];
+    initial: Disconnected;
+"#;
+        let items = parse_module(source);
+        let effects: Vec<_> = items
+            .iter()
+            .filter_map(|i| {
+                if let Item::EffectDef(e) = i {
+                    Some(e)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(effects.len(), 1);
+        assert_eq!(effects[0].name, "Connection");
+        assert_eq!(effects[0].states, vec!["Disconnected", "Connected"]);
+        assert_eq!(effects[0].initial_state, Some("Disconnected".to_string()));
+        assert!(effects[0].transitions.is_empty());
+    }
 }

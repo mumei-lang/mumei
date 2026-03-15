@@ -94,6 +94,7 @@ pub struct LinearityCtx {
 1f. Effect containment verification
 1g. Effect parameter constraint verification (constant folding)
 1h. MIR-based move analysis (UseAfterMove, DoubleMove, ConflictingMerge → warnings)
+1i. Temporal effect verification (stateful effects — forward dataflow state tracking)
 2. Quantifier constraints (`forall`/`exists`)
 2b. Refinement type injection (params → Z3 symbolic variables)
 2c. Struct field constraints (recursive for nested structs)
@@ -614,6 +615,47 @@ Sort solving is significantly slower than Int Sort.
 
 **Constraint Budget**: Each Z3 String constraint creation is tracked against the
 per-atom constraint budget (default: 1000) to prevent solver explosion.
+
+### Stateful Effects (Temporal Effect Verification)
+
+Mumei supports **stateful effects** — effects with defined states and transitions that
+are verified at compile time. This enables temporal ordering verification (e.g., a file
+must be opened before writing, and closed after use).
+
+#### Syntax
+
+```mumei
+effect File
+    states: [Closed, Open];
+    initial: Closed;
+    transition open: Closed -> Open;
+    transition write: Open -> Open;
+    transition read: Open -> Open;
+    transition close: Open -> Closed;
+```
+
+#### Verification (Phase 1i)
+
+The temporal effect verifier uses **forward dataflow analysis** on the MIR CFG:
+
+1. **EffectStateMachine**: Built from `EffectDef` with states, transitions, and initial state
+2. **Forward Dataflow**: Worklist algorithm tracks effect state at each basic block entry/exit
+3. **Violation Detection**:
+   - `InvalidPreState`: Operation performed in wrong state (e.g., write when Closed)
+   - `ConflictingState`: Merge point has conflicting states from different branches
+   - `UnexpectedFinalState`: Function exits with effect in unexpected state
+
+**Explosion Prevention**:
+- State machine size limited to 8 states (`MAX_EFFECT_STATES`)
+- Iteration limit: `block_count * max(state_machines_count, 10)`
+- Abstract interpretation (Rust-side) before Z3 — Z3 reserved for ConflictingState cases
+- Per-atom constraint budget applies to temporal Z3 constraints
+
+#### Modular Verification (Future)
+
+Atom-level `effect_pre` / `effect_post` contracts will enable verifying atoms independently:
+- Each atom declares required pre-state and guaranteed post-state for each stateful effect
+- Callers verify against the callee's contract without analyzing the callee's body
 
 ### Standard Library
 

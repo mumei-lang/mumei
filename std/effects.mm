@@ -49,3 +49,22 @@ effect NetworkIO includes: [HttpGet, HttpPost, HttpPut, HttpDelete];
 
 // FullAccess includes all effects
 effect FullAccess includes: [IO, NetworkIO, Network, Log];
+
+// --- Stateful Effects (Temporal Effect Verification) ---
+// Stateful effects define states and transitions for compile-time
+// temporal ordering verification (Phase 1i).
+// Example: A File effect with Open/Closed states:
+//
+//   effect File
+//       states: [Closed, Open];
+//       initial: Closed;
+//       transition open: Closed -> Open;
+//       transition write: Open -> Open;
+//       transition read: Open -> Open;
+//       transition close: Open -> Closed;
+//
+// The compiler verifies that operations occur in valid states:
+//   perform File.open(x);   // OK: Closed -> Open
+//   perform File.write(x);  // OK: Open -> Open
+//   perform File.close(x);  // OK: Open -> Closed
+//   perform File.write(x);  // ERROR: InvalidPreState (expected Open, got Closed)

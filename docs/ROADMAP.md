@@ -466,6 +466,7 @@ Future extensions to the effect subtyping system:
 | Phase 4 | MIR introduction (CFG for borrow checking) | 🚧 Phase 4a/4b done, liveness + move analysis | LinearityCtx wired + MIR data structures + mir_analysis.rs |
 | Phase 5 | HIR Effect Type Information | ✅ Done | HirEffectSet on HirAtom/HirExpr, lower_atom_to_hir_with_env |
 | Phase 6 | Capability Security evaluation | ✅ Done | See docs/CAPABILITY_SECURITY.md |
+| Phase 7 | Temporal Effect Verification (Stateful Effects) | ✅ Done | EffectStateMachine, forward dataflow, Phase 1i |
 
 ### Why Phases 2–5 Are Deferred
 

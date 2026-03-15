@@ -113,6 +113,19 @@ pub struct EffectDef {
     pub refinement: Option<String>,
     pub parent: Option<String>,
     pub span: Span,
+    // Stateful effect fields (Task 3: Temporal Effect Verification)
+    pub states: Vec<String>,
+    pub transitions: Vec<EffectTransition>,
+    pub initial_state: Option<String>,
+}
+
+/// A state transition rule for a stateful effect.
+/// Represents: `transition operation: FromState -> ToState;`
+#[derive(Debug, Clone)]
+pub struct EffectTransition {
+    pub operation: String,
+    pub from_state: String,
+    pub to_state: String,
 }
 
 // NOTE: EffectDefParam fields are read during effect constraint resolution (future Z3 String Sort integration)
@@ -315,6 +328,13 @@ pub struct Atom {
     pub invariant: Option<String>,
     pub effects: Vec<Effect>,
     pub span: Span,
+    // TODO: Task 3 future extension — Modular Verification with effect pre/post state.
+    // When atom A calls atom B and B uses a stateful effect, A needs to know
+    // B's effect state contract (pre-state and post-state) to verify temporal ordering.
+    //   pub effect_pre: HashMap<String, String>,   // effect_name → required pre-state
+    //   pub effect_post: HashMap<String, String>,   // effect_name → guaranteed post-state
+    // This enables modular verification: each atom is verified independently using
+    // its own pre/post contracts, without analyzing the full CFG across call boundaries.
 }
 
 // =============================================================================
