@@ -1024,7 +1024,9 @@ pub fn build_contradiction_feedback(
     })
 }
 
-/// Default constraint budget per atom (max number of solver.assert() calls).
+/// Default constraint budget per atom (max number of expr_to_z3 invocations).
+/// Each call to expr_to_z3 with an active solver increments the counter.
+/// This correlates with Z3 AST node generation and overall verification complexity.
 pub const DEFAULT_CONSTRAINT_BUDGET: usize = 1000;
 
 /// 検証時に共有するコンテキスト（ctx, arr, module_env を束ねて引数を削減）
@@ -1042,9 +1044,9 @@ struct VCtx<'a> {
     linearity_ctx: Option<&'a std::cell::RefCell<LinearityCtx>>,
     /// EffectCtx for tracking allowed vs used effects during body evaluation.
     effect_ctx: Option<&'a std::cell::RefCell<EffectCtx>>,
-    /// Per-atom constraint budget: tracks the number of solver.assert() calls.
-    /// When the count exceeds the limit, verification returns an error to
-    /// prevent Z3 explosion on pathological inputs.
+    /// Per-atom constraint budget: tracks the number of expr_to_z3 invocations
+    /// (when a solver is active). When the count exceeds the limit, verification
+    /// returns an error to prevent Z3 explosion on pathological inputs.
     constraint_count: Option<&'a std::cell::Cell<usize>>,
     /// Maximum allowed constraint count for this atom.
     constraint_budget: usize,
@@ -3614,8 +3616,13 @@ impl VerificationMetrics {
         self.phase_times.push((name.to_string(), duration));
     }
 
-    /// Print metrics to stderr (for --verbose / debug output).
+    /// Print metrics to stderr when MUMEI_VERBOSE=1 is set or debug_assertions are enabled.
     pub fn print_summary(&self) {
+        let verbose = cfg!(debug_assertions)
+            || std::env::var("MUMEI_VERBOSE").is_ok_and(|v| v == "1" || v == "true");
+        if !verbose {
+            return;
+        }
         eprintln!("  [metrics] atom '{}' verification phases:", self.atom_name);
         for (name, dur) in &self.phase_times {
             eprintln!("    {}: {:.3}ms", name, dur.as_secs_f64() * 1000.0);
@@ -3858,12 +3865,13 @@ fn verify_inner(
     // Sort-aware timeout: if has_string_constraints is true, double the timeout.
     // Currently infrastructure-only: will be activated when Z3 String Sort is integrated.
     let effective_timeout = timeout_ms;
-    // TODO: Enable when Z3 String Sort integration is active:
-    // let effective_timeout = if has_string_constraints_cell.get() {
-    //     timeout_ms * 2
-    // } else {
-    //     timeout_ms
-    // };
+    // NOTE: Simply uncommenting the block below will NOT work because:
+    //   1. has_string_constraints_cell is defined after this point (line ~3843)
+    //   2. Even if reordered, the flag would always be false here — it is only
+    //      set during body evaluation, which happens after Context creation.
+    // The correct approach requires either a two-pass design (first pass to detect
+    // string constraints, second pass with adjusted timeout) or lazy Context creation.
+    // TODO(Z3 String Sort): Implement two-pass timeout adjustment when string theory is integrated.
 
     let mut cfg = Config::new();
     cfg.set_timeout_msec(effective_timeout);
@@ -4205,9 +4213,11 @@ fn verify_inner(
                     }
                 }
             }
-            // Determine failure type: division-by-zero gets its own category
+            // Determine failure type from error message content
             let body_failure_type = if err_str.contains("division by zero") {
                 FAILURE_DIVISION_BY_ZERO
+            } else if err_str.contains("Constraint budget exceeded") {
+                "constraint_budget_exceeded"
             } else {
                 FAILURE_PRECONDITION_VIOLATED
             };
@@ -4226,6 +4236,9 @@ fn verify_inner(
                 semantic_fb.as_ref(),
                 Some(&atom.span),
             );
+            metrics.record_phase("Phase 4: body evaluation (failed)", phase_start.elapsed());
+            metrics.total_constraints = constraint_count_cell.get();
+            metrics.print_summary();
             return Err(e);
         }
     };
@@ -4295,6 +4308,12 @@ fn verify_inner(
                     semantic_fb.as_ref(),
                     Some(&atom.span),
                 );
+                metrics.record_phase(
+                    "Phase 5: ensures verification (failed)",
+                    phase_start.elapsed(),
+                );
+                metrics.total_constraints = constraint_count_cell.get();
+                metrics.print_summary();
                 return Err(MumeiError::verification_at(
                     "Postcondition (ensures) is not satisfied.",
                     atom.span.clone(),
@@ -4305,9 +4324,12 @@ fn verify_inner(
         env.remove("result");
     }
 
+    metrics.record_phase("Phase 5: ensures verification", phase_start.elapsed());
+
     // 5b. 線形性チェック: consume 対象パラメータの検証
     // body 実行後、consume 宣言されたパラメータが正しく消費されていることを確認。
     // LinearityCtx に蓄積された違反（二重解放・Use-After-Free）があればエラー。
+    let phase_start = std::time::Instant::now();
     if !atom.consumed_params.is_empty() {
         // consume 対象パラメータを消費済みとしてマーク
         for param_name in &atom.consumed_params {
@@ -4342,6 +4364,9 @@ fn verify_inner(
                 Some(&linearity_fb),
                 Some(&atom.span),
             );
+            metrics.record_phase("Phase 5b: linearity check (failed)", phase_start.elapsed());
+            metrics.total_constraints = constraint_count_cell.get();
+            metrics.print_summary();
             return Err(MumeiError::verification_at(
                 format!(
                     "Linearity violations in atom '{}':\n  {}",
@@ -4352,7 +4377,7 @@ fn verify_inner(
         }
     }
 
-    metrics.record_phase("Phase 5: ensures verification", phase_start.elapsed());
+    metrics.record_phase("Phase 5b: linearity check", phase_start.elapsed());
 
     let z3_check_start = std::time::Instant::now();
     if solver.check() == SatResult::Unsat {
@@ -4389,6 +4414,13 @@ fn verify_inner(
             )
         };
 
+        metrics.z3_check_time = z3_check_start.elapsed();
+        metrics.total_constraints = constraint_count_cell.get();
+        metrics.record_phase(
+            "Phase 6: final Z3 check (contradiction)",
+            z3_check_start.elapsed(),
+        );
+        metrics.print_summary();
         return Err(MumeiError::verification_at(
             constraint_summary,
             atom.span.clone(),
@@ -4399,7 +4431,7 @@ fn verify_inner(
     metrics.total_constraints = constraint_count_cell.get();
     metrics.record_phase("Phase 6: final Z3 check", z3_check_start.elapsed());
 
-    // Print metrics summary (always for now; future: gate behind --verbose)
+    // Print metrics summary (gated behind MUMEI_VERBOSE=1 or debug_assertions)
     metrics.print_summary();
 
     save_visualizer_report(
