@@ -968,6 +968,11 @@ pub fn parse_module_from_tokens(ctx: &mut ParseContext) -> Vec<Item> {
                 };
 
                 // Parse stateful effect fields (states, initial, transition)
+                // NOTE: Combining a `where` clause with stateful fields is not currently
+                // supported. The `where` parser (collect_until_semicolon) leaves the
+                // semicolon unconsumed, which causes the stateful-fields loop below to
+                // break immediately. If this combination is needed in the future, the
+                // parser must consume the `where` semicolon before entering this loop.
                 let mut states: Vec<String> = vec![];
                 let mut transitions: Vec<crate::parser::EffectTransition> = vec![];
                 let mut initial_state: Option<String> = None;

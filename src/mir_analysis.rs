@@ -810,6 +810,8 @@ impl EffectStateMachine {
     }
 
     /// Check whether an operation can be performed from the given state.
+    // NOTE: can_transition is used in tests and retained for future modular verification
+    // (effect_pre/effect_post contract checking).
     #[allow(dead_code)]
     pub fn can_transition(&self, operation: &str, current_state: &str) -> bool {
         self.transitions
@@ -858,6 +860,8 @@ pub enum TemporalViolationKind {
     /// Different branches produce different effect states at a merge point
     ConflictingState,
     /// Effect is in unexpected state at function exit (e.g., file left Open)
+    // NOTE: UnexpectedFinalState is reserved for future modular verification when
+    // effect_pre/effect_post contracts specify expected final states at function exit.
     #[allow(dead_code)]
     UnexpectedFinalState,
 }
