@@ -3928,6 +3928,12 @@ fn verify_inner(
                     );
                 }
                 crate::mir_analysis::MoveViolationKind::ConflictingMerge => {
+                    eprintln!(
+                        "  ⚠️  MIR move warning: Local({}) has conflicting ownership state \
+                         at merge point (block {}) — alive on one path, consumed on another \
+                         (may be false positive for Copy types)",
+                        v.local.0, v.block_id
+                    );
                     move_conflict_locals.push((v.local.clone(), v.block_id));
                 }
             }
@@ -4086,9 +4092,16 @@ fn verify_inner(
 
     let mut env: Env = HashMap::new();
 
-    // Phase 1h (continued): Assert Z3 constraints for ConflictingMerge violations.
-    // Each conflict creates a Bool variable `__move_conflict_{local}_{block}` and
-    // asserts it, so the solver can check for contradictions.
+    // Phase 1h (continued): Register Z3 variables for ConflictingMerge violations.
+    // NOTE: Currently a no-op — asserting a fresh unconstrained Bool as true is
+    // always satisfiable and cannot cause Unsat. The variables are registered as
+    // infrastructure for Phase 4c, when type information will allow connecting
+    // these to actual ownership constraints (e.g., asserting that a Move-typed
+    // local must be alive at the merge point). Until then, ConflictingMerge
+    // violations are reported as warnings only (see eprintln above).
+    // TODO(Phase 4c): Replace with `solver.assert(&conflict_var.not())` or
+    // equivalent constraint that makes ConflictingMerge cause Unsat, after
+    // Copy vs Move type distinction is integrated into MirLinearityState.
     for (local, block_id) in &move_conflict_locals {
         let var_name = format!("__move_conflict_{}_{}", local.0, block_id);
         let conflict_var = Bool::new_const(&ctx, var_name.as_str());
