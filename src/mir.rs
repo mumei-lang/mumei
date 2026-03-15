@@ -14,6 +14,7 @@
 
 use crate::hir::{HirAtom, HirExpr, HirStmt};
 use crate::parser::Op;
+use std::collections::HashMap;
 
 // =============================================================================
 // Core MIR types
@@ -25,6 +26,7 @@ pub struct Local(pub usize);
 
 /// A place in memory (variable or field access).
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum Place {
     Local(Local),
     Field(Box<Place>, String),
@@ -33,6 +35,7 @@ pub enum Place {
 
 /// Right-hand side of an assignment.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum Rvalue {
     Use(Operand),
     BinaryOp(Op, Operand, Operand),
@@ -56,12 +59,14 @@ pub enum Rvalue {
 
 /// An operand: either a place (variable) or a constant.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum Operand {
     Place(Place),
     Constant(MirConstant),
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum MirConstant {
     Int(i64),
     Float(f64),
@@ -70,15 +75,18 @@ pub enum MirConstant {
 
 /// A single MIR statement (three-address code).
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum MirStatement {
     Assign(Place, Rvalue),
     StorageLive(Local),
     StorageDead(Local),
+    Drop(Local),
     Nop,
 }
 
 /// Block terminator: how control flow leaves a basic block.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum Terminator {
     Goto(BasicBlockId),
     SwitchInt {
@@ -106,6 +114,7 @@ pub const MIR_ANALYSIS_COMPLEXITY_LIMIT: usize = 10_000;
 
 /// A complete MIR body for one atom.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct MirBody {
     pub name: String,
     pub locals: Vec<LocalDecl>,
@@ -148,9 +157,47 @@ impl MirBody {
             Ok(())
         }
     }
+
+    /// Returns a map from each block ID to its successor block IDs.
+    pub fn successors(&self) -> HashMap<BasicBlockId, Vec<BasicBlockId>> {
+        let mut result = HashMap::new();
+        for block in &self.blocks {
+            let succs = match &block.terminator {
+                Terminator::Goto(target) => vec![*target],
+                Terminator::SwitchInt {
+                    targets, otherwise, ..
+                } => {
+                    let mut s: Vec<BasicBlockId> = targets.iter().map(|(_, t)| *t).collect();
+                    s.push(*otherwise);
+                    s
+                }
+                Terminator::Return(_) => vec![],
+                Terminator::Unreachable => vec![],
+            };
+            result.insert(block.id, succs);
+        }
+        result
+    }
+
+    /// Returns a map from each block ID to its predecessor block IDs.
+    pub fn predecessors(&self) -> HashMap<BasicBlockId, Vec<BasicBlockId>> {
+        let mut result: HashMap<BasicBlockId, Vec<BasicBlockId>> = HashMap::new();
+        // Initialize all blocks with empty predecessor lists
+        for block in &self.blocks {
+            result.entry(block.id).or_default();
+        }
+        let succs = self.successors();
+        for (block_id, successors) in &succs {
+            for &succ in successors {
+                result.entry(succ).or_default().push(*block_id);
+            }
+        }
+        result
+    }
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct LocalDecl {
     pub local: Local,
     pub name: Option<String>,
