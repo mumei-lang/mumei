@@ -2,6 +2,68 @@
 
 ---
 
+## Task 3: Temporal Effect Verification (Stateful Effects)
+
+### Summary
+
+Implements compile-time verification of effect state transitions (temporal ordering).
+Effects can now define states (e.g., Closed, Open) and transitions (e.g., open: Closed → Open),
+and the compiler verifies that operations occur in valid states using forward dataflow analysis
+on the MIR CFG.
+
+### Stateful Effect Syntax (Parser Extensions)
+
+- **`EffectDef`** gains `states: Vec<String>`, `transitions: Vec<EffectTransition>`, `initial_state: Option<String>`
+- **`EffectTransition`** struct: `operation`, `from_state`, `to_state`
+- Parser recognizes `states: [...]`, `initial: ...`, `transition op: From -> To;` inside effect definitions
+- Backward compatible: empty states = stateless effect (existing behavior unchanged)
+
+### EffectStateMachine (mir_analysis.rs)
+
+- `EffectStateMachine`: Constructed from `EffectDef`, holds states, transition map, initial state
+- `can_transition(operation, current_state)` / `next_state(operation, current_state)` methods
+- `MAX_EFFECT_STATES = 8`: Effects with more states are skipped with a warning
+
+### Forward Dataflow Analysis (mir_analysis.rs)
+
+- `analyze_temporal_effects()`: Worklist algorithm tracking effect state through MIR CFG
+- `EffectStateMap`: `HashMap<effect_name, current_state>` per basic block
+- Violation types: `InvalidPreState`, `ConflictingState`, `UnexpectedFinalState`
+- Iteration limit: `block_count * max(state_machines_count, 10)`
+
+### Verification Pipeline (Phase 1i)
+
+- Phase 1i added to `verify_inner()`: builds state machines from `effect_defs`, runs `analyze_temporal_effects()`
+- `InvalidPreState` / `UnexpectedFinalState` → hard verification errors
+- `ConflictingState` → warnings (Z3 delegation marked as TODO for future)
+- Metrics recorded for Phase 1i timing
+
+### Modular Verification Stubs
+
+- TODO comments added to `Atom` struct for future `effect_pre` / `effect_post` fields
+- Documents the modular verification approach for cross-atom state tracking
+
+### Files Changed
+
+| File | Summary |
+|---|---|
+| `src/parser/ast.rs` | `EffectDef` extended with states/transitions/initial_state, `EffectTransition` struct |
+| `src/parser/item.rs` | Stateful effect syntax parsing (states, initial, transition keywords) |
+| `src/parser/mod.rs` | 3 parser tests for stateful effect syntax |
+| `src/mir_analysis.rs` | `EffectStateMachine`, `analyze_temporal_effects()`, 9 unit tests |
+| `src/verification.rs` | Phase 1i temporal effect verification, `register_builtin_effects` defaults |
+| `tests/test_temporal_effects.mm` | Integration test with stateful File effect |
+| `std/effects.mm` | Stateful effect example (commented) |
+| `docs/ROADMAP.md` | Phase 7 (Temporal Effect Verification) added |
+| `docs/ARCHITECTURE.md` | Phase 1i + Stateful Effects section added |
+| `docs/CHANGELOG.md` | This entry |
+
+### Test Results
+
+- All tests passing (existing + 12 new: 9 unit tests + 3 parser tests)
+
+---
+
 ## PR #77: Task 4 — Effect Parameter Z3 String Sort Integration
 
 ### Summary

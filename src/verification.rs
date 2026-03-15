@@ -1701,6 +1701,9 @@ pub fn register_builtin_effects(module_env: &mut ModuleEnv) {
             refinement: None,
             parent: None,
             span: Span::default(),
+            states: vec![],
+            transitions: vec![],
+            initial_state: None,
         });
     }
 
@@ -1718,6 +1721,9 @@ pub fn register_builtin_effects(module_env: &mut ModuleEnv) {
         refinement: None,
         parent: None,
         span: Span::default(),
+        states: vec![],
+        transitions: vec![],
+        initial_state: None,
     });
 
     // FullAccess includes IO, Network, Log
@@ -1729,6 +1735,9 @@ pub fn register_builtin_effects(module_env: &mut ModuleEnv) {
         refinement: None,
         parent: None,
         span: Span::default(),
+        states: vec![],
+        transitions: vec![],
+        initial_state: None,
     });
 }
 
@@ -3941,6 +3950,74 @@ fn verify_inner(
     }
     metrics.record_phase("Phase 1h: MIR move analysis", phase_start.elapsed());
 
+    // Phase 1i: Temporal effect verification (stateful effects)
+    // Build state machines from effect_defs and run forward dataflow analysis
+    // on the MIR to verify that perform operations occur in valid states.
+    let phase_start = std::time::Instant::now();
+    {
+        let mut state_machines: std::collections::HashMap<
+            String,
+            crate::mir_analysis::EffectStateMachine,
+        > = std::collections::HashMap::new();
+
+        // Build state machines from all known effect_defs
+        for (name, def) in &module_env.effect_defs {
+            if let Some(sm) = crate::mir_analysis::EffectStateMachine::from_effect_def(def) {
+                state_machines.insert(name.clone(), sm);
+            }
+        }
+        // Also check effects map
+        for (name, def) in &module_env.effects {
+            if !state_machines.contains_key(name) {
+                if let Some(sm) = crate::mir_analysis::EffectStateMachine::from_effect_def(def) {
+                    state_machines.insert(name.clone(), sm);
+                }
+            }
+        }
+
+        if !state_machines.is_empty() && mir_body.check_analysis_budget().is_ok() {
+            let temporal_result =
+                crate::mir_analysis::analyze_temporal_effects(&mir_body, &state_machines);
+
+            for v in &temporal_result.violations {
+                match v.kind {
+                    crate::mir_analysis::TemporalViolationKind::InvalidPreState => {
+                        // Hard error: operation performed in wrong state
+                        return Err(MumeiError::verification(format!(
+                            "Temporal effect violation: '{}' operation '{}' requires state '{}' \
+                             but current state is '{}' (block {})",
+                            v.effect, v.operation, v.expected_state, v.actual_state, v.block_id
+                        )));
+                    }
+                    crate::mir_analysis::TemporalViolationKind::ConflictingState => {
+                        // Delegate to Z3 for conflicting states at merge points.
+                        // For now, report as warning (Z3 integration is future work).
+                        eprintln!(
+                            "  \u{26a0}\u{fe0f}  Temporal effect warning: '{}' has conflicting states \
+                             at merge point (block {}): '{}' vs '{}'. \
+                             Z3 constraint delegation pending.",
+                            v.effect, v.block_id, v.expected_state, v.actual_state
+                        );
+                        // TODO: Generate Z3 Int Sort constraints for conflicting state resolution:
+                        // - Each state = integer (e.g., Open=0, Closed=1)
+                        // - Create Z3 variables: __effect_state_{effect}_{block_id}
+                        // - Assert transition constraints and merge constraints
+                        // - Check constraint_budget before adding constraints
+                    }
+                    crate::mir_analysis::TemporalViolationKind::UnexpectedFinalState => {
+                        // Hard error: effect left in unexpected state at exit
+                        return Err(MumeiError::verification(format!(
+                            "Temporal effect violation: '{}' is in state '{}' at function exit, \
+                             expected '{}' (block {})",
+                            v.effect, v.actual_state, v.expected_state, v.block_id
+                        )));
+                    }
+                }
+            }
+        }
+    }
+    metrics.record_phase("Phase 1i: temporal effects", phase_start.elapsed());
+
     // TODO: Phase 4c — Replace HIR-level LinearityCtx with MIR-based MoveAnalysis
     // once MIR lowering covers all expression forms (Match, Lambda, Async, etc.)
 
@@ -3993,11 +4070,7 @@ fn verify_inner(
     }
     fn expr_has_symbolic_perform_args(expr: &Expr, module_env: &ModuleEnv) -> bool {
         match expr {
-            Expr::Perform {
-                effect,
-                args,
-                ..
-            } => {
+            Expr::Perform { effect, args, .. } => {
                 let effect_def = module_env
                     .effect_defs
                     .get(effect.as_str())
@@ -5558,7 +5631,8 @@ fn expr_to_z3<'a>(
                             let unique_id = EFFECT_STR_COUNTER
                                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                             let z3_str_name = format!(
-                                "__effect_str_{}_{}_{}_{}", effect, operation, param_name, unique_id
+                                "__effect_str_{}_{}_{}_{}",
+                                effect, operation, param_name, unique_id
                             );
 
                             // Create Z3 String variable for the symbolic argument
