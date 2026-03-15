@@ -3815,8 +3815,14 @@ fn verify_inner(
 
     // Phase 1h: MIR-based move analysis
     // Lower HIR to MIR and run forward dataflow move analysis.
-    // UseAfterMove / DoubleMove → immediate error.
-    // ConflictingMerge → Z3 constraint (deferred to solver phase below).
+    //
+    // NOTE: Currently all Rvalue::Use(Place::Local(..)) are treated as moves,
+    // but MIR lowering emits this pattern for all direct assignments including
+    // Copy types (Int, Nat, Bool, f64). Until the analysis can distinguish
+    // Copy vs Move types, violations are reported as warnings only.
+    // UseAfterMove / DoubleMove / ConflictingMerge → warning (not hard error).
+    // TODO: Phase 4c — integrate type information into MirLinearityState so that
+    // Copy types are not consumed by Rvalue::Use, then promote to hard errors.
     let phase_start = std::time::Instant::now();
     let mir_body = crate::mir::lower_hir_to_mir(hir_atom);
     let mut move_conflict_locals: Vec<(crate::mir::Local, crate::mir::BasicBlockId)> = Vec::new();
@@ -3825,16 +3831,18 @@ fn verify_inner(
         for v in &move_result.violations {
             match v.kind {
                 crate::mir_analysis::MoveViolationKind::UseAfterMove => {
-                    return Err(MumeiError::verification(format!(
-                        "Move violation: Local({}) was used after being moved in block {}",
+                    eprintln!(
+                        "  ⚠️  MIR move warning: Local({}) was used after being moved in block {} \
+                         (may be false positive for Copy types)",
                         v.local.0, v.block_id
-                    )));
+                    );
                 }
                 crate::mir_analysis::MoveViolationKind::DoubleMove => {
-                    return Err(MumeiError::verification(format!(
-                        "Move violation: Local({}) was moved twice in block {}",
+                    eprintln!(
+                        "  ⚠️  MIR move warning: Local({}) was moved twice in block {} \
+                         (may be false positive for Copy types)",
                         v.local.0, v.block_id
-                    )));
+                    );
                 }
                 crate::mir_analysis::MoveViolationKind::ConflictingMerge => {
                     move_conflict_locals.push((v.local.clone(), v.block_id));
