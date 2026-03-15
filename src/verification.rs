@@ -1024,6 +1024,11 @@ pub fn build_contradiction_feedback(
     })
 }
 
+/// Default constraint budget per atom (max number of expr_to_z3 invocations).
+/// Each call to expr_to_z3 with an active solver increments the counter.
+/// This correlates with Z3 AST node generation and overall verification complexity.
+pub const DEFAULT_CONSTRAINT_BUDGET: usize = 1000;
+
 /// 検証時に共有するコンテキスト（ctx, arr, module_env を束ねて引数を削減）
 struct VCtx<'a> {
     ctx: &'a Context,
@@ -1039,6 +1044,20 @@ struct VCtx<'a> {
     linearity_ctx: Option<&'a std::cell::RefCell<LinearityCtx>>,
     /// EffectCtx for tracking allowed vs used effects during body evaluation.
     effect_ctx: Option<&'a std::cell::RefCell<EffectCtx>>,
+    /// Per-atom constraint budget: tracks the number of expr_to_z3 invocations
+    /// (when a solver is active). When the count exceeds the limit, verification
+    /// returns an error to prevent Z3 explosion on pathological inputs.
+    constraint_count: Option<&'a std::cell::Cell<usize>>,
+    /// Maximum allowed constraint count for this atom.
+    constraint_budget: usize,
+    /// Flag set to true when Z3 String Sort constraints are added.
+    /// When true, the Sort-aware timeout mechanism doubles timeout_ms
+    /// to accommodate the higher complexity of string theory solving.
+    /// Currently infrastructure-only: will be activated when Z3 String Sort
+    /// is integrated for effect parameter constraints.
+    /// Z3 String Sort 統合時にここを有効化する
+    #[allow(dead_code)]
+    has_string_constraints: Option<&'a std::cell::Cell<bool>>,
 }
 
 // =============================================================================
@@ -1957,6 +1976,9 @@ pub fn verify_impl(
             current_atom: None,
             linearity_ctx: None,
             effect_ctx: None,
+            constraint_count: None,
+            constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
+            has_string_constraints: None,
         };
 
         let mut env: Env = HashMap::new();
@@ -2988,6 +3010,9 @@ fn verify_atom_invariant(
         current_atom: Some(atom),
         linearity_ctx: None,
         effect_ctx: None,
+        constraint_count: None,
+        constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
+        has_string_constraints: None,
     };
 
     let mut env: Env = HashMap::new();
@@ -3568,6 +3593,48 @@ pub fn verify(hir_atom: &HirAtom, output_dir: &Path, module_env: &ModuleEnv) -> 
     verify_inner(hir_atom, output_dir, module_env, 10000)
 }
 
+/// Compile-time metrics for a single atom verification.
+/// Tracks the duration of each phase and total constraint count.
+pub struct VerificationMetrics {
+    pub atom_name: String,
+    pub phase_times: Vec<(String, std::time::Duration)>,
+    pub total_constraints: usize,
+    pub z3_check_time: std::time::Duration,
+}
+
+impl VerificationMetrics {
+    fn new(atom_name: &str) -> Self {
+        Self {
+            atom_name: atom_name.to_string(),
+            phase_times: Vec::new(),
+            total_constraints: 0,
+            z3_check_time: std::time::Duration::ZERO,
+        }
+    }
+
+    fn record_phase(&mut self, name: &str, duration: std::time::Duration) {
+        self.phase_times.push((name.to_string(), duration));
+    }
+
+    /// Print metrics to stderr when MUMEI_VERBOSE=1 is set or debug_assertions are enabled.
+    pub fn print_summary(&self) {
+        let verbose = cfg!(debug_assertions)
+            || std::env::var("MUMEI_VERBOSE").is_ok_and(|v| v == "1" || v == "true");
+        if !verbose {
+            return;
+        }
+        eprintln!("  [metrics] atom '{}' verification phases:", self.atom_name);
+        for (name, dur) in &self.phase_times {
+            eprintln!("    {}: {:.3}ms", name, dur.as_secs_f64() * 1000.0);
+        }
+        eprintln!(
+            "    total_constraints: {}, z3_check: {:.3}ms",
+            self.total_constraints,
+            self.z3_check_time.as_secs_f64() * 1000.0
+        );
+    }
+}
+
 fn verify_inner(
     hir_atom: &HirAtom,
     output_dir: &Path,
@@ -3575,6 +3642,7 @@ fn verify_inner(
     timeout_ms: u64,
 ) -> MumeiResult<()> {
     let atom = &hir_atom.atom;
+    let mut metrics = VerificationMetrics::new(&atom.name);
 
     // ジェネリック atom は単相化後に検証される
     // 例: pipe<E: Effect> は検証スキップ、pipe<FileWrite> が検証対象
@@ -3631,10 +3699,13 @@ fn verify_inner(
         }
     }
 
-    // Phase 1: リソース階層検証（デッドロック防止）
+    // Phase 1a: リソース階層検証（デッドロック防止）
+    let phase_start = std::time::Instant::now();
     verify_resource_hierarchy(atom, module_env)?;
+    metrics.record_phase("Phase 1a: resource hierarchy", phase_start.elapsed());
 
     // Phase 1f: エフェクト包含検証（副作用安全性）
+    let phase_start = std::time::Instant::now();
     if let Err(e) = verify_effect_containment(atom, &hir_atom.body_stmt, module_env) {
         // Save structured effect violation report for self-healing integration.
         // Extract missing effects from the error to produce a structured report.
@@ -3715,31 +3786,53 @@ fn verify_inner(
         }
         return Err(e);
     }
+    metrics.record_phase("Phase 1f: effect containment", phase_start.elapsed());
 
     // Phase 1b: 有界モデル検査（ループ内 acquire パターン）
+    let phase_start = std::time::Instant::now();
     verify_bmc_resource_safety(atom, &hir_atom.body_stmt, module_env)?;
+    metrics.record_phase("Phase 1b: BMC resource safety", phase_start.elapsed());
 
     // Phase 1c: 再帰的 async 呼び出しの深度検証
+    let phase_start = std::time::Instant::now();
     verify_async_recursion_depth(atom, &hir_atom.body_stmt, module_env)?;
+    metrics.record_phase("Phase 1c: async recursion depth", phase_start.elapsed());
 
     // Phase 1d: atom レベル invariant の帰納的検証
+    let phase_start = std::time::Instant::now();
     if let Some(ref invariant_expr) = atom.invariant {
         verify_atom_invariant(atom, &hir_atom.body_stmt, invariant_expr, module_env)?;
     }
+    metrics.record_phase("Phase 1d: atom invariant", phase_start.elapsed());
 
     // Phase 1e: Call Graph サイクル検知（間接再帰の検出）
+    let phase_start = std::time::Instant::now();
     verify_call_graph_cycles(atom, module_env)?;
+    metrics.record_phase("Phase 1e: call graph cycles", phase_start.elapsed());
 
-    // Phase 1f: エフェクト整合性チェック（宣言 vs 推論、警告レベル）
+    // Phase 1f-2: エフェクト整合性チェック（宣言 vs 推論、警告レベル）
     // Note: verify_effect_consistency always returns Ok(()) — warnings are emitted
     // via eprintln! inside the function itself.
     let _ = verify_effect_consistency(atom, module_env);
 
     // Phase 1g: エフェクトパラメータ制約検証
+    let phase_start = std::time::Instant::now();
     verify_effect_params(atom, module_env)?;
+    metrics.record_phase("Phase 1g: effect params", phase_start.elapsed());
+
+    // Sort-aware timeout: if has_string_constraints is true, double the timeout.
+    // Currently infrastructure-only: will be activated when Z3 String Sort is integrated.
+    let effective_timeout = timeout_ms;
+    // NOTE: Simply uncommenting the block below will NOT work because:
+    //   1. has_string_constraints_cell is defined after this point (line ~3843)
+    //   2. Even if reordered, the flag would always be false here — it is only
+    //      set during body evaluation, which happens after Context creation.
+    // The correct approach requires either a two-pass design (first pass to detect
+    // string constraints, second pass with adjusted timeout) or lazy Context creation.
+    // TODO(Z3 String Sort): Implement two-pass timeout adjustment when string theory is integrated.
 
     let mut cfg = Config::new();
-    cfg.set_timeout_msec(timeout_ms);
+    cfg.set_timeout_msec(effective_timeout);
     let ctx = Context::new(&cfg);
     let solver = Solver::new(&ctx);
 
@@ -3751,6 +3844,11 @@ fn verify_inner(
     // Build EffectCtx from the atom's declared effects (transitively resolved)
     let allowed_effects_set = module_env.resolve_effect_set_from_effects(&atom.effects);
     let effect_ctx_cell = std::cell::RefCell::new(EffectCtx::new(allowed_effects_set));
+    // Per-atom constraint budget tracking
+    let constraint_count_cell = std::cell::Cell::new(0usize);
+    // Sort-aware timeout: flag for Z3 String Sort constraints
+    // When Z3 String Sort is integrated, setting this to true will double timeout_ms.
+    let has_string_constraints_cell = std::cell::Cell::new(false);
     let vc = VCtx {
         ctx: &ctx,
         arr: &arr,
@@ -3758,6 +3856,9 @@ fn verify_inner(
         current_atom: Some(atom),
         linearity_ctx: Some(&linearity_ctx_cell),
         effect_ctx: Some(&effect_ctx_cell),
+        constraint_count: Some(&constraint_count_cell),
+        constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
+        has_string_constraints: Some(&has_string_constraints_cell),
     };
 
     let mut env: Env = HashMap::new();
@@ -4022,6 +4123,7 @@ fn verify_inner(
     }
 
     // 4. ボディの検証
+    let phase_start = std::time::Instant::now();
     let body_result = match stmt_to_z3(&vc, &hir_atom.body_stmt, &mut env, Some(&solver)) {
         Ok(val) => val,
         Err(e) => {
@@ -4060,9 +4162,11 @@ fn verify_inner(
                     }
                 }
             }
-            // Determine failure type: division-by-zero gets its own category
+            // Determine failure type from error message content
             let body_failure_type = if err_str.contains("division by zero") {
                 FAILURE_DIVISION_BY_ZERO
+            } else if err_str.contains("Constraint budget exceeded") {
+                "constraint_budget_exceeded"
             } else {
                 FAILURE_PRECONDITION_VIOLATED
             };
@@ -4081,14 +4185,20 @@ fn verify_inner(
                 semantic_fb.as_ref(),
                 Some(&atom.span),
             );
+            metrics.record_phase("Phase 4: body evaluation (failed)", phase_start.elapsed());
+            metrics.total_constraints = constraint_count_cell.get();
+            metrics.print_summary();
             return Err(e);
         }
     };
+
+    metrics.record_phase("Phase 4: body evaluation", phase_start.elapsed());
 
     // 4b. Taint Analysis: unverified 関数の呼び出しを検出し警告
     check_taint_propagation(atom, &hir_atom.body_stmt, &env, module_env);
 
     // 5. 事後条件 (ensures)
+    let phase_start = std::time::Instant::now();
     if atom.ensures.trim() != "true" {
         env.insert("result".to_string(), body_result);
         let ens_ast = parse_expression(&atom.ensures);
@@ -4147,6 +4257,9 @@ fn verify_inner(
                     semantic_fb.as_ref(),
                     Some(&atom.span),
                 );
+                metrics.record_phase("Phase 5: ensures verification (failed)", phase_start.elapsed());
+                metrics.total_constraints = constraint_count_cell.get();
+                metrics.print_summary();
                 return Err(MumeiError::verification_at(
                     "Postcondition (ensures) is not satisfied.",
                     atom.span.clone(),
@@ -4157,9 +4270,12 @@ fn verify_inner(
         env.remove("result");
     }
 
+    metrics.record_phase("Phase 5: ensures verification", phase_start.elapsed());
+
     // 5b. 線形性チェック: consume 対象パラメータの検証
     // body 実行後、consume 宣言されたパラメータが正しく消費されていることを確認。
     // LinearityCtx に蓄積された違反（二重解放・Use-After-Free）があればエラー。
+    let phase_start = std::time::Instant::now();
     if !atom.consumed_params.is_empty() {
         // consume 対象パラメータを消費済みとしてマーク
         for param_name in &atom.consumed_params {
@@ -4194,6 +4310,9 @@ fn verify_inner(
                 Some(&linearity_fb),
                 Some(&atom.span),
             );
+            metrics.record_phase("Phase 5b: linearity check (failed)", phase_start.elapsed());
+            metrics.total_constraints = constraint_count_cell.get();
+            metrics.print_summary();
             return Err(MumeiError::verification_at(
                 format!(
                     "Linearity violations in atom '{}':\n  {}",
@@ -4204,6 +4323,9 @@ fn verify_inner(
         }
     }
 
+    metrics.record_phase("Phase 5b: linearity check", phase_start.elapsed());
+
+    let z3_check_start = std::time::Instant::now();
     if solver.check() == SatResult::Unsat {
         let unsat_core = solver.get_unsat_core();
         let core_labels: Vec<String> = unsat_core.iter().map(|b| format!("{}", b)).collect();
@@ -4238,11 +4360,22 @@ fn verify_inner(
             )
         };
 
+        metrics.z3_check_time = z3_check_start.elapsed();
+        metrics.total_constraints = constraint_count_cell.get();
+        metrics.record_phase("Phase 6: final Z3 check (contradiction)", z3_check_start.elapsed());
+        metrics.print_summary();
         return Err(MumeiError::verification_at(
             constraint_summary,
             atom.span.clone(),
         ));
     }
+
+    metrics.z3_check_time = z3_check_start.elapsed();
+    metrics.total_constraints = constraint_count_cell.get();
+    metrics.record_phase("Phase 6: final Z3 check", z3_check_start.elapsed());
+
+    // Print metrics summary (gated behind MUMEI_VERBOSE=1 or debug_assertions)
+    metrics.print_summary();
 
     save_visualizer_report(
         output_dir,
@@ -4256,6 +4389,22 @@ fn verify_inner(
         None,
         Some(&atom.span),
     );
+    Ok(())
+}
+
+/// Increment the constraint count in VCtx and check budget.
+/// Returns an error if the constraint budget has been exceeded.
+fn check_constraint_budget(vc: &VCtx, atom_name: &str) -> MumeiResult<()> {
+    if let Some(cell) = vc.constraint_count {
+        let new_count = cell.get() + 1;
+        cell.set(new_count);
+        if new_count > vc.constraint_budget {
+            return Err(MumeiError::verification(format!(
+                "Constraint budget exceeded for atom '{}': {} constraints (limit: {})",
+                atom_name, new_count, vc.constraint_budget
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -4310,6 +4459,17 @@ fn expr_to_z3<'a>(
     env: &mut Env<'a>,
     solver_opt: Option<&Solver<'a>>,
 ) -> DynResult<'a> {
+    // Per-atom constraint budget: increment count and check limit.
+    // This tracks the number of Z3 AST nodes generated, which correlates
+    // with solver.assert() pressure and overall verification complexity.
+    if solver_opt.is_some() {
+        let atom_name = vc
+            .current_atom
+            .map(|a| a.name.as_str())
+            .unwrap_or("<unknown>");
+        check_constraint_budget(vc, atom_name)?;
+    }
+
     let ctx = vc.ctx;
     let arr = vc.arr;
     match expr {
@@ -6497,5 +6657,112 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("could not be determined"));
+    }
+
+    // =========================================================================
+    // Task 0: Explosion Prevention Infrastructure tests
+    // =========================================================================
+
+    #[test]
+    fn test_constraint_budget_exceeded() {
+        // Simulate constraint budget exceeded by setting a very low budget
+        let ctx = z3::Context::new(&z3::Config::new());
+        let int_sort = z3::Sort::int(&ctx);
+        let arr = z3::ast::Array::new_const(&ctx, "arr", &int_sort, &int_sort);
+        let count_cell = std::cell::Cell::new(0usize);
+        let has_string_cell = std::cell::Cell::new(false);
+        let module_env = ModuleEnv::new();
+
+        let vc = VCtx {
+            ctx: &ctx,
+            arr: &arr,
+            module_env: &module_env,
+            current_atom: None,
+            linearity_ctx: None,
+            effect_ctx: None,
+            constraint_count: Some(&count_cell),
+            constraint_budget: 5, // Very low budget
+            has_string_constraints: Some(&has_string_cell),
+        };
+
+        // Each call increments and checks
+        for i in 0..5 {
+            let result = check_constraint_budget(&vc, "test_atom");
+            assert!(result.is_ok(), "Should succeed at count {}", i + 1);
+        }
+
+        // 6th call should exceed budget (count becomes 6 > 5)
+        let result = check_constraint_budget(&vc, "test_atom");
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(err_msg.contains("Constraint budget exceeded"));
+        assert!(err_msg.contains("test_atom"));
+        assert!(err_msg.contains("limit: 5"));
+    }
+
+    #[test]
+    fn test_constraint_budget_no_limit() {
+        // When constraint_count is None, no budget checking occurs
+        let ctx = z3::Context::new(&z3::Config::new());
+        let int_sort = z3::Sort::int(&ctx);
+        let arr = z3::ast::Array::new_const(&ctx, "arr", &int_sort, &int_sort);
+        let module_env = ModuleEnv::new();
+
+        let vc = VCtx {
+            ctx: &ctx,
+            arr: &arr,
+            module_env: &module_env,
+            current_atom: None,
+            linearity_ctx: None,
+            effect_ctx: None,
+            constraint_count: None,
+            constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
+            has_string_constraints: None,
+        };
+
+        // Should always succeed when no constraint tracking
+        for _ in 0..100 {
+            assert!(check_constraint_budget(&vc, "test_atom").is_ok());
+        }
+    }
+
+    #[test]
+    fn test_verification_metrics_basic() {
+        let mut metrics = VerificationMetrics::new("test_atom");
+
+        assert_eq!(metrics.atom_name, "test_atom");
+        assert!(metrics.phase_times.is_empty());
+        assert_eq!(metrics.total_constraints, 0);
+        assert_eq!(metrics.z3_check_time, std::time::Duration::ZERO);
+
+        // Record some phases
+        metrics.record_phase("Phase 1", std::time::Duration::from_millis(10));
+        metrics.record_phase("Phase 2", std::time::Duration::from_millis(20));
+        metrics.total_constraints = 42;
+        metrics.z3_check_time = std::time::Duration::from_millis(5);
+
+        assert_eq!(metrics.phase_times.len(), 2);
+        assert_eq!(metrics.phase_times[0].0, "Phase 1");
+        assert_eq!(
+            metrics.phase_times[0].1,
+            std::time::Duration::from_millis(10)
+        );
+        assert_eq!(metrics.phase_times[1].0, "Phase 2");
+        assert_eq!(metrics.total_constraints, 42);
+        assert_eq!(metrics.z3_check_time, std::time::Duration::from_millis(5));
+    }
+
+    #[test]
+    fn test_has_string_constraints_flag() {
+        // Test that the has_string_constraints flag can be set and read
+        let cell = std::cell::Cell::new(false);
+        assert!(!cell.get());
+        cell.set(true);
+        assert!(cell.get());
+    }
+
+    #[test]
+    fn test_default_constraint_budget_value() {
+        assert_eq!(DEFAULT_CONSTRAINT_BUDGET, 1000);
     }
 }
