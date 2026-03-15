@@ -177,7 +177,7 @@ pub struct LivenessResult {
 ///    c. live_in[B] = gen[B] ∪ (live_out[B] - kill[B])
 ///    d. If live_in[B] changed, add predecessors(B) to worklist
 ///
-/// Iteration is bounded by block_count * 10 to prevent explosion.
+/// Iteration is bounded by block_count * max(local_count, 10) to prevent explosion.
 pub fn compute_liveness(body: &MirBody) -> LivenessResult {
     let successors = body.successors();
     let predecessors = body.predecessors();
