@@ -347,6 +347,10 @@ fn lower_stmt(ctx: &mut LowerCtx, stmt: &HirStmt) -> Option<Operand> {
             let _pre_block = ctx.finish_block(Terminator::Goto(header_id));
 
             // Header block: evaluate condition.
+            // TODO: Like IfThenElse, block ID pre-computation assumes lower_expr(cond)
+            // and lower_stmt(body) produce zero additional blocks. If the condition or
+            // body contains nested control flow, body_id and after_id will be wrong.
+            // Fix by switching to a forward-declaration / back-patching pattern.
             let cond_op = lower_expr(ctx, cond);
             let body_id = header_id + 1;
             let after_id = header_id + 2;

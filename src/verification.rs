@@ -5537,8 +5537,16 @@ fn expr_to_z3<'a>(
                         if let Some(solver) = solver_opt {
                             let param_name =
                                 def.params.get(i).map(|p| p.name.as_str()).unwrap_or("arg");
-                            let z3_str_name =
-                                format!("__effect_str_{}_{}_{}", effect, operation, param_name);
+                            // Use a unique counter to distinguish different perform call sites.
+                            // Without this, Z3 reuses the same constant for the same name,
+                            // incorrectly merging constraints from distinct call sites.
+                            static EFFECT_STR_COUNTER: std::sync::atomic::AtomicUsize =
+                                std::sync::atomic::AtomicUsize::new(0);
+                            let unique_id = EFFECT_STR_COUNTER
+                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            let z3_str_name = format!(
+                                "__effect_str_{}_{}_{}_{}", effect, operation, param_name, unique_id
+                            );
 
                             // Create Z3 String variable for the symbolic argument
                             let param_z3_str = Z3String::new_const(ctx, z3_str_name.as_str());
@@ -5578,8 +5586,8 @@ fn expr_to_z3<'a>(
                                     count.set(current + 1);
                                 }
                                 let track_label = format!(
-                                    "track_effect_str_{}_{}_{}",
-                                    effect, operation, param_name
+                                    "track_effect_str_{}_{}_{}_{}",
+                                    effect, operation, param_name, unique_id
                                 );
                                 let track_bool = Bool::new_const(ctx, track_label.as_str());
                                 solver.assert_and_track(&constraint_bool, &track_bool);
