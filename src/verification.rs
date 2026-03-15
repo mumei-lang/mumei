@@ -3820,6 +3820,48 @@ fn verify_inner(
     verify_effect_params(atom, module_env)?;
     metrics.record_phase("Phase 1g: effect params", phase_start.elapsed());
 
+    // Phase 1h: MIR-based move analysis
+    // Lower HIR to MIR and run forward dataflow move analysis.
+    //
+    // NOTE: Currently all Rvalue::Use(Place::Local(..)) are treated as moves,
+    // but MIR lowering emits this pattern for all direct assignments including
+    // Copy types (Int, Nat, Bool, f64). Until the analysis can distinguish
+    // Copy vs Move types, violations are reported as warnings only.
+    // UseAfterMove / DoubleMove / ConflictingMerge → warning (not hard error).
+    // TODO: Phase 4c — integrate type information into MirLinearityState so that
+    // Copy types are not consumed by Rvalue::Use, then promote to hard errors.
+    let phase_start = std::time::Instant::now();
+    let mir_body = crate::mir::lower_hir_to_mir(hir_atom);
+    let mut move_conflict_locals: Vec<(crate::mir::Local, crate::mir::BasicBlockId)> = Vec::new();
+    if mir_body.check_analysis_budget().is_ok() {
+        let move_result = crate::mir_analysis::analyze_moves(&mir_body);
+        for v in &move_result.violations {
+            match v.kind {
+                crate::mir_analysis::MoveViolationKind::UseAfterMove => {
+                    eprintln!(
+                        "  ⚠️  MIR move warning: Local({}) was used after being moved in block {} \
+                         (may be false positive for Copy types)",
+                        v.local.0, v.block_id
+                    );
+                }
+                crate::mir_analysis::MoveViolationKind::DoubleMove => {
+                    eprintln!(
+                        "  ⚠️  MIR move warning: Local({}) was moved twice in block {} \
+                         (may be false positive for Copy types)",
+                        v.local.0, v.block_id
+                    );
+                }
+                crate::mir_analysis::MoveViolationKind::ConflictingMerge => {
+                    move_conflict_locals.push((v.local.clone(), v.block_id));
+                }
+            }
+        }
+    }
+    metrics.record_phase("Phase 1h: MIR move analysis", phase_start.elapsed());
+
+    // TODO: Phase 4c — Replace HIR-level LinearityCtx with MIR-based MoveAnalysis
+    // once MIR lowering covers all expression forms (Match, Lambda, Async, etc.)
+
     // Sort-aware timeout: if has_string_constraints is true, double the timeout.
     // Currently infrastructure-only: will be activated when Z3 String Sort is integrated.
     let effective_timeout = timeout_ms;
@@ -3862,6 +3904,15 @@ fn verify_inner(
     };
 
     let mut env: Env = HashMap::new();
+
+    // Phase 1h (continued): Assert Z3 constraints for ConflictingMerge violations.
+    // Each conflict creates a Bool variable `__move_conflict_{local}_{block}` and
+    // asserts it, so the solver can check for contradictions.
+    for (local, block_id) in &move_conflict_locals {
+        let var_name = format!("__move_conflict_{}_{}", local.0, block_id);
+        let conflict_var = Bool::new_const(&ctx, var_name.as_str());
+        solver.assert(&conflict_var);
+    }
 
     // Phase 2b: エフェクト許可セットを Z3 環境に注入
     {
@@ -4257,7 +4308,10 @@ fn verify_inner(
                     semantic_fb.as_ref(),
                     Some(&atom.span),
                 );
-                metrics.record_phase("Phase 5: ensures verification (failed)", phase_start.elapsed());
+                metrics.record_phase(
+                    "Phase 5: ensures verification (failed)",
+                    phase_start.elapsed(),
+                );
                 metrics.total_constraints = constraint_count_cell.get();
                 metrics.print_summary();
                 return Err(MumeiError::verification_at(
@@ -4362,7 +4416,10 @@ fn verify_inner(
 
         metrics.z3_check_time = z3_check_start.elapsed();
         metrics.total_constraints = constraint_count_cell.get();
-        metrics.record_phase("Phase 6: final Z3 check (contradiction)", z3_check_start.elapsed());
+        metrics.record_phase(
+            "Phase 6: final Z3 check (contradiction)",
+            z3_check_start.elapsed(),
+        );
         metrics.print_summary();
         return Err(MumeiError::verification_at(
             constraint_summary,
