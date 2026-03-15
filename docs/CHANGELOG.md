@@ -2,6 +2,59 @@
 
 ---
 
+## PR #77: Task 4 — Effect Parameter Z3 String Sort Integration
+
+### Summary
+
+Integrates Z3's native String Sort (`z3::ast::String`) for symbolic verification of effect parameter constraints. Previously, only constant (literal) effect arguments were verified; variable/symbolic arguments were silently skipped. This PR adds a hybrid verification strategy and includes cumulative fixes from Tasks 0 (explosion prevention), 1 (move analysis), and 2 (liveness + drop).
+
+### Z3 String Sort for Effect Parameters
+
+- **`parse_constraint_to_z3_string()`**: Maps constraint strings to Z3 String operations:
+  - `starts_with(path, "/tmp/")` → `Z3String::prefix_of`
+  - `ends_with(path, ".txt")` → `Z3String::suffix_of`
+  - `contains(path, "data")` → `Z3String::contains`
+  - `not_contains(path, "..")` → `NOT Z3String::contains`
+- **Perform handler extended**: Symbolic (variable) args create Z3 String variables with unique IDs per call site (`EFFECT_STR_COUNTER`) and assert effect constraints
+- **Sort-aware timeout**: Two-pass pre-scan (`body_has_symbolic_perform_args`) doubles Z3 timeout when String constraints are detected
+- **Constraint budget**: String constraint creation tracked against per-atom budget (default: 1000)
+- **`not_contains` support**: Added to `evaluate_string_constraint` and `check_constant_constraint` for parity
+
+### MIR Infrastructure (Tasks 0, 1, 2)
+
+- **`src/mir_analysis.rs`** (new): Liveness analysis (backward dataflow), drop insertion, and forward dataflow move analysis
+  - `compute_gen_kill()` / `compute_liveness()` / `insert_drops()`: Backward dataflow for automatic resource cleanup
+  - `analyze_moves()`: Forward dataflow detecting UseAfterMove, DoubleMove, ConflictingMerge
+  - `MirLinearityState`: Per-local alive/consumed tracking with merge conflict detection
+- **While-loop MIR off-by-one fix**: `header_id = ctx.next_block + 1` (was self-loop)
+- **Iteration bounds**: Liveness and move analysis use `block_count * max(local_count, 10)` for correct convergence
+- **MIR analysis budget**: `MIR_ANALYSIS_COMPLEXITY_LIMIT = 10,000` prevents explosion on pathological inputs
+- **ConflictingMerge**: Reported as warnings (not hard errors) pending Copy vs Move type distinction (Phase 4c)
+
+### Verification Pipeline Improvements
+
+- **Constraint budget exceeded**: Correctly classified as `"constraint_budget_exceeded"` failure type (was misclassified as precondition violation)
+- **Metrics**: `VerificationMetrics` tracks per-phase timing and constraint counts
+- **`evaluate_string_constraint`**: Now handles `not_contains` (was conservatively allowing unknown constraints)
+
+### Files Changed
+
+| File | Summary |
+|---|---|
+| `src/verification.rs` | Z3 String Sort integration, `parse_constraint_to_z3_string()`, sort-aware timeout pre-scan, constraint budget fix, ConflictingMerge warnings, `not_contains` support |
+| `src/mir.rs` | While-loop off-by-one fix, TODO comments for nested control flow fragility |
+| `src/mir_analysis.rs` | **New** — Liveness analysis, drop insertion, move analysis with correct iteration bounds |
+| `docs/ARCHITECTURE.md` | Z3 String Sort section, verification steps updated |
+| `docs/ROADMAP.md` | Z3 String Sort integration status updated |
+| `docs/CHANGELOG.md` | This entry |
+
+### Test Results
+
+- 181 tests passing (175 existing + 6 new Z3 String Sort tests)
+- New tests: `test_constant_path_ok`, `test_constant_path_ng`, `test_z3_string_parse_constraint_starts_with`, `test_z3_string_constraint_satisfiability`, `test_contains_constraint`, `test_z3_string_performance`
+
+---
+
 ## PR #69: Phase 4a Wiring + HIR Effect Types (Task 5) + Capability Security (Task 6)
 
 ### Summary

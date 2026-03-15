@@ -24,6 +24,7 @@ source.mm → parse → resolve → monomorphize → lower_to_hir → verify (Z3
 | `src/parser/expr.rs` | Expression/statement parsing with Pratt parser (operator precedence via binding power table) |
 | `src/parser/item.rs` | Top-level item parsing — fully migrated to recursive descent (no regex), `contract()` clause parsing for higher-order function parameters |
 | `src/mir.rs` | MIR (Mid-level IR) definitions — CFG-based BasicBlocks, three-address code, basic HIR → MIR lowering |
+| `src/mir_analysis.rs` | MIR dataflow analyses — liveness (backward), drop insertion, move analysis (forward), ConflictingMerge detection |
 | `src/parser/pattern.rs` | Pattern parsing for match arms |
 | `src/ast.rs` | `TypeRef`, `Monomorphizer` — generic type expansion engine |
 | `src/resolver.rs` | Import resolution, circular detection, prelude auto-load, incremental build cache |
@@ -84,18 +85,26 @@ pub struct LinearityCtx {
 
 ## Verification Steps (per atom)
 
-1. Quantifier constraints (`forall`/`exists`)
-2. Refinement type injection (params → Z3 symbolic variables)
-2b. Struct field constraints (recursive for nested structs)
-2c. Array length symbols (`len_<name> >= 0`)
-2d. Linearity setup (`__alive_`/`__borrowed_` Z3 Bools)
-2e. Effect allowed set injection (`__effect_allowed_*` Z3 Bools)
-3. `requires` assertion
-4. Body evaluation (`stmt_to_z3` / `expr_to_z3` — Expr/Stmt separated)
+0. Trust level check (trusted → skip, unverified → warn)
+1a. Resource hierarchy verification (deadlock prevention)
+1b. BMC resource safety (loop-internal acquire patterns)
+1c. Async recursion depth check
+1d. Atom invariant induction (base + preservation)
+1e. Call graph cycle detection (indirect recursion)
+1f. Effect containment verification
+1g. Effect parameter constraint verification (constant folding)
+1h. MIR-based move analysis (UseAfterMove, DoubleMove, ConflictingMerge → warnings)
+2. Quantifier constraints (`forall`/`exists`)
+2b. Refinement type injection (params → Z3 symbolic variables)
+2c. Struct field constraints (recursive for nested structs)
+2d. Array length symbols (`len_<name> >= 0`)
+2e. Linearity setup (`__alive_`/`__borrowed_` Z3 Bools)
+2f. Effect allowed set injection (`__effect_allowed_*` Z3 Bools)
+3. `requires` assertion + aliasing prevention
+4. Body evaluation (`stmt_to_z3` / `expr_to_z3` — incl. Z3 String Sort for effect params)
 5. `ensures` verification (negate + check Sat)
-6. Equality ensures propagation (`result == expr` → Z3 equality)
-7. Linearity finalization (consume marking + violation check)
-8. Contradiction check
+5b. Linearity finalization (consume marking + violation check)
+6. Contradiction check (unsat core analysis)
 
 ---
 

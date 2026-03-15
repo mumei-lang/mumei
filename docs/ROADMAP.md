@@ -463,7 +463,7 @@ Future extensions to the effect subtyping system:
 | Phase 2.5 | Lambda / Closure Support | ✅ Done | Phase 2 |
 | Phase 2.5 | Semantic Feedback v2 (all failure types, bilingual) | ✅ Done | Phase 1 |
 | Phase 3 | Effect Polymorphism | ✅ Done | Phase 2 |
-| Phase 4 | MIR introduction (CFG for borrow checking) | 🚧 Phase 4a/4b done | LinearityCtx wired + MIR data structures |
+| Phase 4 | MIR introduction (CFG for borrow checking) | 🚧 Phase 4a/4b done, liveness + move analysis | LinearityCtx wired + MIR data structures + mir_analysis.rs |
 | Phase 5 | HIR Effect Type Information | ✅ Done | HirEffectSet on HirAtom/HirExpr, lower_atom_to_hir_with_env |
 | Phase 6 | Capability Security evaluation | ✅ Done | See docs/CAPABILITY_SECURITY.md |
 
