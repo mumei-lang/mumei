@@ -26,3 +26,17 @@ atom valid_file_usage(x: i64)
         perform File.close(x);
         x
     };
+
+// NOTE: To test that Phase 1i rejects invalid temporal ordering, uncomment
+// the atom below. It performs write before open, which should produce an
+// InvalidPreState error at compile time:
+//
+// atom invalid_file_usage(x: i64)
+//     requires: x >= 0;
+//     ensures: result >= 0;
+//     effects: [File];
+//     body: {
+//         perform File.write(x);
+//         perform File.open(x);
+//         x
+//     };

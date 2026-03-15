@@ -888,7 +888,12 @@ fn merge_effect_states(
         match merged.get(effect) {
             Some(a_state) if a_state != b_state => {
                 conflicts.push((effect.clone(), a_state.clone(), b_state.clone()));
-                // Keep a's state (arbitrary choice; Z3 will resolve)
+                // Use b's state so that merged != a (the existing entry_state).
+                // This ensures the worklist propagates the change to successors.
+                // The choice between a and b is arbitrary (Z3 will resolve
+                // ConflictingState cases in the future); what matters is that
+                // the merged map differs from the existing entry_state.
+                merged.insert(effect.clone(), b_state.clone());
             }
             None => {
                 merged.insert(effect.clone(), b_state.clone());
@@ -943,6 +948,9 @@ pub fn analyze_temporal_effects(
     let mut entry_states: HashMap<BasicBlockId, EffectStateMap> = HashMap::new();
     let mut exit_states: HashMap<BasicBlockId, EffectStateMap> = HashMap::new();
     let mut violations: Vec<TemporalEffectViolation> = Vec::new();
+    // Track already-reported conflicts to avoid duplicate ConflictingState violations
+    // when the worklist re-processes a merge point.
+    let mut reported_conflicts: HashSet<(BasicBlockId, String)> = HashSet::new();
 
     // Initialize entry block with all effects' initial states
     let mut init_map = EffectStateMap::new();
@@ -1006,9 +1014,24 @@ pub fn analyze_temporal_effects(
                             effect: effect.clone(),
                             operation: operation.clone(),
                             expected_state: expected,
-                            actual_state: cur_state,
+                            actual_state: cur_state.clone(),
                             kind: TemporalViolationKind::InvalidPreState,
                         });
+                        // Error recovery: assume the transition succeeded from a valid
+                        // state to avoid cascading false violations on subsequent
+                        // operations in the same block. Pick the first valid from_state
+                        // and use its target as the new current state.
+                        if let Some((_, first_valid_from)) = sm
+                            .transitions
+                            .keys()
+                            .find(|(op, _)| op == &operation)
+                        {
+                            if let Some(recovery_next) =
+                                sm.next_state(&operation, first_valid_from)
+                            {
+                                current.insert(effect.clone(), recovery_next.clone());
+                            }
+                        }
                     }
                 }
             }
@@ -1023,14 +1046,17 @@ pub fn analyze_temporal_effects(
                 if let Some(existing) = entry_states.get(&succ_id) {
                     let (merged, conflicts) = merge_effect_states(existing, &current);
                     for (effect, state_a, state_b) in &conflicts {
-                        violations.push(TemporalEffectViolation {
-                            block_id: succ_id,
-                            effect: effect.clone(),
-                            operation: String::new(),
-                            expected_state: state_a.clone(),
-                            actual_state: state_b.clone(),
-                            kind: TemporalViolationKind::ConflictingState,
-                        });
+                        let conflict_key = (succ_id, effect.clone());
+                        if reported_conflicts.insert(conflict_key) {
+                            violations.push(TemporalEffectViolation {
+                                block_id: succ_id,
+                                effect: effect.clone(),
+                                operation: String::new(),
+                                expected_state: state_a.clone(),
+                                actual_state: state_b.clone(),
+                                kind: TemporalViolationKind::ConflictingState,
+                            });
+                        }
                     }
                     if merged != *existing {
                         entry_states.insert(succ_id, merged);
@@ -2004,6 +2030,65 @@ mod tests {
         assert_eq!(result.violations[0].effect, "File");
         assert_eq!(result.violations[0].operation, "write");
         assert_eq!(result.violations[0].actual_state, "Closed");
+    }
+
+    #[test]
+    fn test_temporal_effect_invalid_prestate_no_cascade() {
+        // write → close when initial state is Closed.
+        // write on Closed → InvalidPreState (correct).
+        // After error recovery, state becomes Open (write's normal target).
+        // close on Open → valid (no second violation).
+        // Without error recovery, close on Closed would produce a second false violation.
+        let def = make_file_effect_def();
+        let sm = EffectStateMachine::from_effect_def(&def).unwrap();
+        let mut sms = HashMap::new();
+        sms.insert("File".to_string(), sm);
+
+        let body = MirBody {
+            name: "test_no_cascade".to_string(),
+            locals: vec![LocalDecl {
+                local: Local(0),
+                name: Some("_ret".to_string()),
+                ty: None,
+            }],
+            blocks: vec![BasicBlock {
+                id: 0,
+                statements: vec![
+                    MirStatement::Assign(
+                        Place::Local(Local(0)),
+                        Rvalue::Perform {
+                            effect: "File".to_string(),
+                            operation: "write".to_string(),
+                            args: vec![],
+                        },
+                    ),
+                    MirStatement::Assign(
+                        Place::Local(Local(0)),
+                        Rvalue::Perform {
+                            effect: "File".to_string(),
+                            operation: "close".to_string(),
+                            args: vec![],
+                        },
+                    ),
+                ],
+                terminator: Terminator::Return(Operand::Constant(crate::mir::MirConstant::Int(0))),
+            }],
+            entry_block: 0,
+        };
+
+        let result = analyze_temporal_effects(&body, &sms);
+        // Only one violation: write on Closed. close on Open (recovered) is valid.
+        assert_eq!(
+            result.violations.len(),
+            1,
+            "Should have exactly 1 violation (no cascade), got: {:?}",
+            result.violations
+        );
+        assert_eq!(
+            result.violations[0].kind,
+            TemporalViolationKind::InvalidPreState
+        );
+        assert_eq!(result.violations[0].operation, "write");
     }
 
     #[test]
