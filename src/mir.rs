@@ -419,6 +419,11 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &HirExpr) -> Operand {
             ctx.emit(MirStatement::StorageLive(result_local.clone()));
 
             // Finish current block with SwitchInt.
+            // TODO: Block ID pre-computation assumes each branch produces exactly
+            // one block. Nested control flow (e.g., `if a { if b { 1 } else { 2 } }
+            // else { 3 }`) creates additional blocks inside lower_stmt, causing
+            // else_id and merge_id to point to wrong blocks. Fix by switching to a
+            // forward-declaration / back-patching pattern for block IDs.
             let then_id = ctx.next_block + 1;
             let else_id = ctx.next_block + 2;
             let merge_id = ctx.next_block + 3;
