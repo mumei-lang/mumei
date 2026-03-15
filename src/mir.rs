@@ -341,7 +341,9 @@ fn lower_stmt(ctx: &mut LowerCtx, stmt: &HirStmt) -> Option<Operand> {
             //   after_block: continue
 
             // Finish the current block with a Goto to the header.
-            let header_id = ctx.next_block;
+            // finish_block() assigns id = next_block then increments, so the
+            // header will be the *next* block after the pre-block.
+            let header_id = ctx.next_block + 1;
             let _pre_block = ctx.finish_block(Terminator::Goto(header_id));
 
             // Header block: evaluate condition.

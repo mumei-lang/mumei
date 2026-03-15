@@ -2204,6 +2204,16 @@ fn evaluate_string_constraint(constraint_expr: &str, _param_name: &str, value: &
         }
     }
 
+    // not_contains(param, "substr")
+    if let Some(inner) = trimmed.strip_prefix("not_contains(") {
+        if let Some(inner) = inner.strip_suffix(')') {
+            if let Some((_p, rest)) = inner.split_once(',') {
+                let substr = rest.trim().trim_matches('"');
+                return !value.contains(substr);
+            }
+        }
+    }
+
     // contains(param, "substr")
     if let Some(inner) = trimmed.strip_prefix("contains(") {
         if let Some(inner) = inner.strip_suffix(')') {
@@ -3933,7 +3943,7 @@ fn verify_inner(
     // When string constraints are present, solving is significantly slower,
     // so we double the timeout to accommodate.
     let has_string_constraints_cell_pre = std::cell::Cell::new(false);
-    // Pre-scan: check if any effect has Str-typed params with constraints
+    // Pre-scan (1): check if any declared effect has Str-typed params with constraints
     // that would need Z3 String Sort (variable params, not constant-folded).
     for eff in &atom.effects {
         let effect_def = module_env
@@ -3949,6 +3959,94 @@ fn verify_inner(
                 }
             }
         }
+    }
+    // Pre-scan (2): also check the body for `perform` expressions with
+    // non-constant args whose EffectDef has a constraint. This catches cases
+    // where the atom declares `effects: [FileRead("/tmp/")]` (constant) but
+    // the body does `perform FileRead.read(some_variable)`.
+    fn body_has_symbolic_perform_args(stmt: &Stmt, module_env: &ModuleEnv) -> bool {
+        match stmt {
+            Stmt::Block(stmts) => stmts
+                .iter()
+                .any(|s| body_has_symbolic_perform_args(s, module_env)),
+            Stmt::Let { value, .. } | Stmt::Assign { value, .. } => {
+                expr_has_symbolic_perform_args(value, module_env)
+            }
+            Stmt::While { cond, body, .. } => {
+                expr_has_symbolic_perform_args(cond, module_env)
+                    || body_has_symbolic_perform_args(body, module_env)
+            }
+            Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => {
+                body_has_symbolic_perform_args(body, module_env)
+            }
+            Stmt::TaskGroup { children, .. } => children
+                .iter()
+                .any(|c| body_has_symbolic_perform_args(c, module_env)),
+            Stmt::Expr(e) => expr_has_symbolic_perform_args(e, module_env),
+        }
+    }
+    fn expr_has_symbolic_perform_args(expr: &Expr, module_env: &ModuleEnv) -> bool {
+        match expr {
+            Expr::Perform {
+                effect,
+                args,
+                ..
+            } => {
+                let effect_def = module_env
+                    .effect_defs
+                    .get(effect.as_str())
+                    .or_else(|| module_env.effects.get(effect.as_str()));
+                if let Some(def) = effect_def {
+                    if def.constraint.is_some() {
+                        for arg in args {
+                            if !matches!(arg, Expr::Number(_) | Expr::Float(_)) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+                // Also recurse into args
+                args.iter()
+                    .any(|a| expr_has_symbolic_perform_args(a, module_env))
+            }
+            Expr::IfThenElse {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
+                expr_has_symbolic_perform_args(cond, module_env)
+                    || body_has_symbolic_perform_args(then_branch, module_env)
+                    || body_has_symbolic_perform_args(else_branch, module_env)
+            }
+            Expr::BinaryOp(l, _, r) => {
+                expr_has_symbolic_perform_args(l, module_env)
+                    || expr_has_symbolic_perform_args(r, module_env)
+            }
+            Expr::Call(_, args) => args
+                .iter()
+                .any(|a| expr_has_symbolic_perform_args(a, module_env)),
+            Expr::Async { body } => body_has_symbolic_perform_args(body, module_env),
+            Expr::Await { expr } => expr_has_symbolic_perform_args(expr, module_env),
+            Expr::Lambda { body, .. } => body_has_symbolic_perform_args(body, module_env),
+            Expr::CallRef { callee, args } => {
+                expr_has_symbolic_perform_args(callee, module_env)
+                    || args
+                        .iter()
+                        .any(|a| expr_has_symbolic_perform_args(a, module_env))
+            }
+            Expr::Match { target, arms } => {
+                expr_has_symbolic_perform_args(target, module_env)
+                    || arms
+                        .iter()
+                        .any(|arm| body_has_symbolic_perform_args(&arm.body, module_env))
+            }
+            _ => false,
+        }
+    }
+    if !has_string_constraints_cell_pre.get()
+        && body_has_symbolic_perform_args(&hir_atom.body_stmt, module_env)
+    {
+        has_string_constraints_cell_pre.set(true);
     }
     let effective_timeout = if has_string_constraints_cell_pre.get() {
         timeout_ms * 2
@@ -4296,9 +4394,11 @@ fn verify_inner(
                     }
                 }
             }
-            // Determine failure type: division-by-zero gets its own category
+            // Determine failure type: division-by-zero and budget exceeded get their own categories
             let body_failure_type = if err_str.contains("division by zero") {
                 FAILURE_DIVISION_BY_ZERO
+            } else if err_str.contains("Constraint budget exceeded") {
+                "constraint_budget_exceeded"
             } else {
                 FAILURE_PRECONDITION_VIOLATED
             };
