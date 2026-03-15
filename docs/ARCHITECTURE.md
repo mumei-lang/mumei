@@ -24,6 +24,7 @@ source.mm → parse → resolve → monomorphize → lower_to_hir → verify (Z3
 | `src/parser/expr.rs` | Expression/statement parsing with Pratt parser (operator precedence via binding power table) |
 | `src/parser/item.rs` | Top-level item parsing — fully migrated to recursive descent (no regex), `contract()` clause parsing for higher-order function parameters |
 | `src/mir.rs` | MIR (Mid-level IR) definitions — CFG-based BasicBlocks, three-address code, basic HIR → MIR lowering |
+| `src/mir_analysis.rs` | MIR dataflow analyses — liveness (backward), drop insertion, move analysis (forward), ConflictingMerge detection |
 | `src/parser/pattern.rs` | Pattern parsing for match arms |
 | `src/ast.rs` | `TypeRef`, `Monomorphizer` — generic type expansion engine |
 | `src/resolver.rs` | Import resolution, circular detection, prelude auto-load, incremental build cache |
@@ -84,18 +85,27 @@ pub struct LinearityCtx {
 
 ## Verification Steps (per atom)
 
-1. Quantifier constraints (`forall`/`exists`)
-2. Refinement type injection (params → Z3 symbolic variables)
-2b. Struct field constraints (recursive for nested structs)
-2c. Array length symbols (`len_<name> >= 0`)
-2d. Linearity setup (`__alive_`/`__borrowed_` Z3 Bools)
-2e. Effect allowed set injection (`__effect_allowed_*` Z3 Bools)
-3. `requires` assertion
-4. Body evaluation (`stmt_to_z3` / `expr_to_z3` — Expr/Stmt separated)
+0. Trust level check (trusted → skip, unverified → warn)
+1a. Resource hierarchy verification (deadlock prevention)
+1b. BMC resource safety (loop-internal acquire patterns)
+1c. Async recursion depth check
+1d. Atom invariant induction (base + preservation)
+1e. Call graph cycle detection (indirect recursion)
+1f. Effect containment verification
+1g. Effect parameter constraint verification (constant folding)
+1h. MIR-based move analysis (UseAfterMove, DoubleMove, ConflictingMerge → warnings)
+1i. Temporal effect verification (stateful effects — forward dataflow state tracking)
+2. Quantifier constraints (`forall`/`exists`)
+2b. Refinement type injection (params → Z3 symbolic variables)
+2c. Struct field constraints (recursive for nested structs)
+2d. Array length symbols (`len_<name> >= 0`)
+2e. Linearity setup (`__alive_`/`__borrowed_` Z3 Bools)
+2f. Effect allowed set injection (`__effect_allowed_*` Z3 Bools)
+3. `requires` assertion + aliasing prevention
+4. Body evaluation (`stmt_to_z3` / `expr_to_z3` — incl. Z3 String Sort for effect params)
 5. `ensures` verification (negate + check Sat)
-6. Equality ensures propagation (`result == expr` → Z3 equality)
-7. Linearity finalization (consume marking + violation check)
-8. Contradiction check
+5b. Linearity finalization (consume marking + violation check)
+6. Contradiction check (unsat core analysis)
 
 ---
 
@@ -576,6 +586,76 @@ Z3 quantifiers. This ensures:
 - No runtime overhead (zero-cost abstraction)
 - Predictable verification performance (no universal quantification)
 - Consistent with mumei's existing generics system
+
+### Z3 String Sort for Effect Parameters
+
+Effect parameters (e.g., `FileRead(path: Str)`) support two verification strategies:
+
+**Constant Folding** (Rust-side):
+When the argument is a literal (e.g., `perform FileRead.read("/tmp/data.txt")`),
+`check_constant_constraint()` evaluates the constraint directly in Rust with zero Z3 overhead.
+
+**Z3 String Sort** (Symbolic):
+When the argument is a variable (e.g., `perform FileRead.read(path)`),
+the verifier creates a `z3::ast::String` variable and asserts the effect's constraint
+as a Z3 String operation:
+
+| Constraint | Z3 Operation |
+|---|---|
+| `starts_with(path, "/tmp/")` | `Z3String::prefix_of(prefix, path_z3)` |
+| `ends_with(path, ".txt")` | `Z3String::suffix_of(suffix, path_z3)` |
+| `contains(path, "data")` | `Z3String::contains(path_z3, substr)` |
+| `not_contains(path, "..")` | `NOT Z3String::contains(path_z3, substr)` |
+
+The `parse_constraint_to_z3_string()` function in `verification.rs` handles this mapping.
+
+**Sort-aware Timeout**: When String Sort constraints are detected (via pre-scan of
+effect definitions), the Z3 solver timeout is automatically doubled because String
+Sort solving is significantly slower than Int Sort.
+
+**Constraint Budget**: Each Z3 String constraint creation is tracked against the
+per-atom constraint budget (default: 1000) to prevent solver explosion.
+
+### Stateful Effects (Temporal Effect Verification)
+
+Mumei supports **stateful effects** — effects with defined states and transitions that
+are verified at compile time. This enables temporal ordering verification (e.g., a file
+must be opened before writing, and closed after use).
+
+#### Syntax
+
+```mumei
+effect File
+    states: [Closed, Open];
+    initial: Closed;
+    transition open: Closed -> Open;
+    transition write: Open -> Open;
+    transition read: Open -> Open;
+    transition close: Open -> Closed;
+```
+
+#### Verification (Phase 1i)
+
+The temporal effect verifier uses **forward dataflow analysis** on the MIR CFG:
+
+1. **EffectStateMachine**: Built from `EffectDef` with states, transitions, and initial state
+2. **Forward Dataflow**: Worklist algorithm tracks effect state at each basic block entry/exit
+3. **Violation Detection**:
+   - `InvalidPreState`: Operation performed in wrong state (e.g., write when Closed)
+   - `ConflictingState`: Merge point has conflicting states from different branches
+   - `UnexpectedFinalState`: Function exits with effect in unexpected state
+
+**Explosion Prevention**:
+- State machine size limited to 8 states (`MAX_EFFECT_STATES`)
+- Iteration limit: `block_count * max(state_machines_count, 10)`
+- Abstract interpretation (Rust-side) before Z3 — Z3 reserved for ConflictingState cases
+- Per-atom constraint budget applies to temporal Z3 constraints
+
+#### Modular Verification (Future)
+
+Atom-level `effect_pre` / `effect_post` contracts will enable verifying atoms independently:
+- Each atom declares required pre-state and guaranteed post-state for each stateful effect
+- Callers verify against the callee's contract without analyzing the callee's body
 
 ### Standard Library
 

@@ -966,7 +966,57 @@ pub fn parse_module_from_tokens(ctx: &mut ParseContext) -> Vec<Item> {
                 } else {
                     None
                 };
-                ctx.expect(Token::Semicolon);
+
+                // Parse stateful effect fields (states, initial, transition)
+                // NOTE: Combining a `where` clause with stateful fields is not currently
+                // supported. The `where` parser (collect_until_semicolon) leaves the
+                // semicolon unconsumed, which causes the stateful-fields loop below to
+                // break immediately. If this combination is needed in the future, the
+                // parser must consume the `where` semicolon before entering this loop.
+                let mut states: Vec<String> = vec![];
+                let mut transitions: Vec<crate::parser::EffectTransition> = vec![];
+                let mut initial_state: Option<String> = None;
+                let mut is_stateful = false;
+
+                loop {
+                    match ctx.peek().clone() {
+                        Token::Ident(ref s) if s == "states" => {
+                            is_stateful = true;
+                            ctx.advance();
+                            ctx.expect(Token::Colon);
+                            states = parse_bracket_list(ctx);
+                            ctx.expect(Token::Semicolon);
+                        }
+                        Token::Ident(ref s) if s == "initial" => {
+                            is_stateful = true;
+                            ctx.advance();
+                            ctx.expect(Token::Colon);
+                            initial_state = Some(ctx.expect_ident());
+                            ctx.expect(Token::Semicolon);
+                        }
+                        Token::Ident(ref s) if s == "transition" => {
+                            is_stateful = true;
+                            ctx.advance();
+                            let operation = ctx.expect_ident();
+                            ctx.expect(Token::Colon);
+                            let from_state = ctx.expect_ident();
+                            ctx.expect(Token::Arrow);
+                            let to_state = ctx.expect_ident();
+                            ctx.expect(Token::Semicolon);
+                            transitions.push(crate::parser::EffectTransition {
+                                operation,
+                                from_state,
+                                to_state,
+                            });
+                        }
+                        _ => break,
+                    }
+                }
+
+                if !is_stateful {
+                    ctx.expect(Token::Semicolon);
+                }
+
                 let constraint = refinement.clone();
                 items.push(Item::EffectDef(EffectDef {
                     name,
@@ -976,6 +1026,9 @@ pub fn parse_module_from_tokens(ctx: &mut ParseContext) -> Vec<Item> {
                     refinement,
                     parent,
                     span: span_from_token(&start_tok),
+                    states,
+                    transitions,
+                    initial_state,
                 }));
             }
 

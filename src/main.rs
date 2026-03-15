@@ -6,8 +6,8 @@ mod hir;
 mod lsp;
 #[allow(dead_code)]
 mod manifest;
-#[allow(dead_code)]
 mod mir;
+mod mir_analysis;
 mod parser;
 mod registry;
 mod resolver;
@@ -536,6 +536,20 @@ fn cmd_verify(input: &str) {
                         .collect();
 
                     let hir_atom = lower_atom_to_hir_with_env(atom, Some(&module_env));
+
+                    // MIR pipeline: lower to MIR and run analyses
+                    let mir_body = mir::lower_hir_to_mir(&hir_atom);
+                    match mir_body.check_analysis_budget() {
+                        Ok(()) => {
+                            let liveness = mir_analysis::compute_liveness(&mir_body);
+                            let mut mir_body_mut = mir_body;
+                            mir_analysis::insert_drops(&mut mir_body_mut, &liveness);
+                        }
+                        Err(msg) => {
+                            eprintln!("  ⚠️  {}", msg);
+                        }
+                    }
+
                     match verification::verify(&hir_atom, output_dir, &module_env) {
                         Ok(_) => {
                             println!("  ⚖️  '{}': verified ✅", atom.name);
@@ -1256,6 +1270,19 @@ fn cmd_build(input: &str, output: &str) {
 
                 // HIR lowering: body_expr を1回だけパースして全ステージで再利用する
                 let hir_atom = lower_atom_to_hir_with_env(atom, Some(&module_env));
+
+                // MIR pipeline: lower to MIR and run analyses
+                let mir_body = mir::lower_hir_to_mir(&hir_atom);
+                match mir_body.check_analysis_budget() {
+                    Ok(()) => {
+                        let liveness = mir_analysis::compute_liveness(&mir_body);
+                        let mut mir_body_mut = mir_body;
+                        mir_analysis::insert_drops(&mut mir_body_mut, &liveness);
+                    }
+                    Err(msg) => {
+                        eprintln!("  ⚠️  {}", msg);
+                    }
+                }
 
                 // --- 2. Verification (形式検証: Z3 + StdLib) ---
                 if skip_verify {

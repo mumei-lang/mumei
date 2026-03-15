@@ -1,4 +1,4 @@
-# Mumei (無銘)
+# Mumei (無銘) [![GitHub](https://img.shields.io/github/stars/mumei-lang/mumei?style=social)](https://github.com/mumei-lang/mumei)
 
 **Mathematical Proof-Driven Programming Language**
 

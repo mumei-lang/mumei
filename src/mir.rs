@@ -14,6 +14,7 @@
 
 use crate::hir::{HirAtom, HirExpr, HirStmt};
 use crate::parser::Op;
+use std::collections::HashMap;
 
 // =============================================================================
 // Core MIR types
@@ -25,6 +26,7 @@ pub struct Local(pub usize);
 
 /// A place in memory (variable or field access).
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum Place {
     Local(Local),
     Field(Box<Place>, String),
@@ -33,6 +35,7 @@ pub enum Place {
 
 /// Right-hand side of an assignment.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum Rvalue {
     Use(Operand),
     BinaryOp(Op, Operand, Operand),
@@ -56,12 +59,14 @@ pub enum Rvalue {
 
 /// An operand: either a place (variable) or a constant.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum Operand {
     Place(Place),
     Constant(MirConstant),
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum MirConstant {
     Int(i64),
     Float(f64),
@@ -70,15 +75,18 @@ pub enum MirConstant {
 
 /// A single MIR statement (three-address code).
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum MirStatement {
     Assign(Place, Rvalue),
     StorageLive(Local),
     StorageDead(Local),
+    Drop(Local),
     Nop,
 }
 
 /// Block terminator: how control flow leaves a basic block.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum Terminator {
     Goto(BasicBlockId),
     SwitchInt {
@@ -100,8 +108,13 @@ pub struct BasicBlock {
     pub terminator: Terminator,
 }
 
+/// Upper bound on MIR analysis complexity (block_count * local_count).
+/// When exceeded, dataflow analyses are skipped to prevent explosion.
+pub const MIR_ANALYSIS_COMPLEXITY_LIMIT: usize = 10_000;
+
 /// A complete MIR body for one atom.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct MirBody {
     pub name: String,
     pub locals: Vec<LocalDecl>,
@@ -109,7 +122,82 @@ pub struct MirBody {
     pub entry_block: BasicBlockId,
 }
 
+impl MirBody {
+    /// Number of basic blocks in this MIR body.
+    pub fn block_count(&self) -> usize {
+        self.blocks.len()
+    }
+
+    /// Number of local variables in this MIR body.
+    pub fn local_count(&self) -> usize {
+        self.locals.len()
+    }
+
+    /// Approximate complexity metric for dataflow analyses.
+    /// The product of blocks × locals bounds the size of the dataflow lattice.
+    pub fn complexity(&self) -> usize {
+        self.blocks.len() * self.locals.len()
+    }
+
+    /// Check whether this MIR body exceeds the analysis complexity budget.
+    /// Returns an error message if the budget is exceeded, describing the
+    /// overshoot so callers can decide whether to skip MIR analysis.
+    pub fn check_analysis_budget(&self) -> Result<(), String> {
+        let c = self.complexity();
+        if c > MIR_ANALYSIS_COMPLEXITY_LIMIT {
+            Err(format!(
+                "MIR analysis budget exceeded for '{}': complexity {} (blocks={} * locals={}) > limit {}",
+                self.name,
+                c,
+                self.block_count(),
+                self.local_count(),
+                MIR_ANALYSIS_COMPLEXITY_LIMIT
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Returns a map from each block ID to its successor block IDs.
+    pub fn successors(&self) -> HashMap<BasicBlockId, Vec<BasicBlockId>> {
+        let mut result = HashMap::new();
+        for block in &self.blocks {
+            let succs = match &block.terminator {
+                Terminator::Goto(target) => vec![*target],
+                Terminator::SwitchInt {
+                    targets, otherwise, ..
+                } => {
+                    let mut s: Vec<BasicBlockId> = targets.iter().map(|(_, t)| *t).collect();
+                    s.push(*otherwise);
+                    s
+                }
+                Terminator::Return(_) => vec![],
+                Terminator::Unreachable => vec![],
+            };
+            result.insert(block.id, succs);
+        }
+        result
+    }
+
+    /// Returns a map from each block ID to its predecessor block IDs.
+    pub fn predecessors(&self) -> HashMap<BasicBlockId, Vec<BasicBlockId>> {
+        let mut result: HashMap<BasicBlockId, Vec<BasicBlockId>> = HashMap::new();
+        // Initialize all blocks with empty predecessor lists
+        for block in &self.blocks {
+            result.entry(block.id).or_default();
+        }
+        let succs = self.successors();
+        for (block_id, successors) in &succs {
+            for &succ in successors {
+                result.entry(succ).or_default().push(*block_id);
+            }
+        }
+        result
+    }
+}
+
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct LocalDecl {
     pub local: Local,
     pub name: Option<String>,
@@ -253,10 +341,16 @@ fn lower_stmt(ctx: &mut LowerCtx, stmt: &HirStmt) -> Option<Operand> {
             //   after_block: continue
 
             // Finish the current block with a Goto to the header.
-            let header_id = ctx.next_block;
+            // finish_block() assigns id = next_block then increments, so the
+            // header will be the *next* block after the pre-block.
+            let header_id = ctx.next_block + 1;
             let _pre_block = ctx.finish_block(Terminator::Goto(header_id));
 
             // Header block: evaluate condition.
+            // TODO: Like IfThenElse, block ID pre-computation assumes lower_expr(cond)
+            // and lower_stmt(body) produce zero additional blocks. If the condition or
+            // body contains nested control flow, body_id and after_id will be wrong.
+            // Fix by switching to a forward-declaration / back-patching pattern.
             let cond_op = lower_expr(ctx, cond);
             let body_id = header_id + 1;
             let after_id = header_id + 2;
@@ -329,6 +423,11 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &HirExpr) -> Operand {
             ctx.emit(MirStatement::StorageLive(result_local.clone()));
 
             // Finish current block with SwitchInt.
+            // TODO: Block ID pre-computation assumes each branch produces exactly
+            // one block. Nested control flow (e.g., `if a { if b { 1 } else { 2 } }
+            // else { 3 }`) creates additional blocks inside lower_stmt, causing
+            // else_id and merge_id to point to wrong blocks. Fix by switching to a
+            // forward-declaration / back-patching pattern for block IDs.
             let then_id = ctx.next_block + 1;
             let else_id = ctx.next_block + 2;
             let merge_id = ctx.next_block + 3;
@@ -629,5 +728,74 @@ mod tests {
             Terminator::Return(Operand::Constant(MirConstant::Int(42))) => {}
             other => panic!("Expected Return(Constant(Int(42))), got {:?}", other),
         }
+    }
+
+    // =========================================================================
+    // Task 0: MIR analysis budget tests
+    // =========================================================================
+
+    #[test]
+    fn test_mir_body_metrics() {
+        let atom = make_atom(
+            "add",
+            vec![make_param("a", "Int"), make_param("b", "Int")],
+            "a + b",
+        );
+        let hir = lower_atom_to_hir(&atom);
+        let mir = lower_hir_to_mir(&hir);
+
+        assert!(mir.block_count() >= 1);
+        assert!(mir.local_count() >= 2);
+        assert_eq!(mir.complexity(), mir.block_count() * mir.local_count());
+    }
+
+    #[test]
+    fn test_mir_analysis_budget_ok() {
+        // A simple atom should be well within budget
+        let atom = make_atom("simple", vec![make_param("x", "Int")], "x + 1");
+        let hir = lower_atom_to_hir(&atom);
+        let mir = lower_hir_to_mir(&hir);
+
+        assert!(mir.check_analysis_budget().is_ok());
+        assert!(mir.complexity() < MIR_ANALYSIS_COMPLEXITY_LIMIT);
+    }
+
+    #[test]
+    fn test_mir_analysis_budget_exceeded() {
+        // Manually construct a MirBody that exceeds the budget
+        let mut locals = Vec::new();
+        for i in 0..200 {
+            locals.push(LocalDecl {
+                local: Local(i),
+                name: Some(format!("v{}", i)),
+                ty: Some("Int".to_string()),
+            });
+        }
+        let mut blocks = Vec::new();
+        for i in 0..100 {
+            blocks.push(BasicBlock {
+                id: i,
+                statements: vec![],
+                terminator: Terminator::Unreachable,
+            });
+        }
+        let body = MirBody {
+            name: "huge".to_string(),
+            locals,
+            blocks,
+            entry_block: 0,
+        };
+
+        assert_eq!(body.block_count(), 100);
+        assert_eq!(body.local_count(), 200);
+        assert_eq!(body.complexity(), 20_000);
+        assert!(body.complexity() > MIR_ANALYSIS_COMPLEXITY_LIMIT);
+
+        let err = body.check_analysis_budget();
+        assert!(err.is_err());
+        let msg = err.unwrap_err();
+        assert!(msg.contains("MIR analysis budget exceeded"));
+        assert!(msg.contains("huge"));
+        assert!(msg.contains("20000"));
     }
 }

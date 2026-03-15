@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs;
 use std::path::Path;
-use z3::ast::{Array, Ast, Bool, Dynamic, Float, Int};
+use z3::ast::{Array, Ast, Bool, Dynamic, Float, Int, String as Z3String};
 use z3::{Config, Context, SatResult, Solver};
 
 // --- エラー型の定義 ---
@@ -1024,6 +1024,9 @@ pub fn build_contradiction_feedback(
     })
 }
 
+/// Default constraint budget per atom (max number of solver.assert() calls).
+pub const DEFAULT_CONSTRAINT_BUDGET: usize = 1000;
+
 /// 検証時に共有するコンテキスト（ctx, arr, module_env を束ねて引数を削減）
 struct VCtx<'a> {
     ctx: &'a Context,
@@ -1039,6 +1042,20 @@ struct VCtx<'a> {
     linearity_ctx: Option<&'a std::cell::RefCell<LinearityCtx>>,
     /// EffectCtx for tracking allowed vs used effects during body evaluation.
     effect_ctx: Option<&'a std::cell::RefCell<EffectCtx>>,
+    /// Per-atom constraint budget: tracks the number of solver.assert() calls.
+    /// When the count exceeds the limit, verification returns an error to
+    /// prevent Z3 explosion on pathological inputs.
+    constraint_count: Option<&'a std::cell::Cell<usize>>,
+    /// Maximum allowed constraint count for this atom.
+    constraint_budget: usize,
+    /// Flag set to true when Z3 String Sort constraints are added.
+    /// When true, the Sort-aware timeout mechanism doubles timeout_ms
+    /// to accommodate the higher complexity of string theory solving.
+    /// Currently infrastructure-only: will be activated when Z3 String Sort
+    /// is integrated for effect parameter constraints.
+    /// Z3 String Sort 統合時にここを有効化する
+    #[allow(dead_code)]
+    has_string_constraints: Option<&'a std::cell::Cell<bool>>,
 }
 
 // =============================================================================
@@ -1684,6 +1701,9 @@ pub fn register_builtin_effects(module_env: &mut ModuleEnv) {
             refinement: None,
             parent: None,
             span: Span::default(),
+            states: vec![],
+            transitions: vec![],
+            initial_state: None,
         });
     }
 
@@ -1701,6 +1721,9 @@ pub fn register_builtin_effects(module_env: &mut ModuleEnv) {
         refinement: None,
         parent: None,
         span: Span::default(),
+        states: vec![],
+        transitions: vec![],
+        initial_state: None,
     });
 
     // FullAccess includes IO, Network, Log
@@ -1712,6 +1735,9 @@ pub fn register_builtin_effects(module_env: &mut ModuleEnv) {
         refinement: None,
         parent: None,
         span: Span::default(),
+        states: vec![],
+        transitions: vec![],
+        initial_state: None,
     });
 }
 
@@ -1957,6 +1983,9 @@ pub fn verify_impl(
             current_atom: None,
             linearity_ctx: None,
             effect_ctx: None,
+            constraint_count: None,
+            constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
+            has_string_constraints: None,
         };
 
         let mut env: Env = HashMap::new();
@@ -2184,6 +2213,16 @@ fn evaluate_string_constraint(constraint_expr: &str, _param_name: &str, value: &
         }
     }
 
+    // not_contains(param, "substr")
+    if let Some(inner) = trimmed.strip_prefix("not_contains(") {
+        if let Some(inner) = inner.strip_suffix(')') {
+            if let Some((_p, rest)) = inner.split_once(',') {
+                let substr = rest.trim().trim_matches('"');
+                return !value.contains(substr);
+            }
+        }
+    }
+
     // contains(param, "substr")
     if let Some(inner) = trimmed.strip_prefix("contains(") {
         if let Some(inner) = inner.strip_suffix(')') {
@@ -2196,6 +2235,79 @@ fn evaluate_string_constraint(constraint_expr: &str, _param_name: &str, value: &
 
     // Unknown constraint — conservatively allow (will be checked by Z3 if symbolic)
     true
+}
+
+// =============================================================================
+// Z3 String Sort — Constraint Parsing and Mapping
+// =============================================================================
+//
+// Convert effect parameter constraint strings (e.g. "starts_with(path, \"/tmp/\")")
+// into Z3 String Sort constraints for symbolic verification of variable paths.
+// Constant paths continue to be checked by evaluate_string_constraint / check_constant_constraint.
+//
+
+/// Parse a constraint string and generate a Z3 Bool expression using Z3 String Sort.
+///
+/// Supports:
+/// - `starts_with(param, "prefix")` → Z3: `str.prefixof("prefix", param_z3)`
+/// - `ends_with(param, "suffix")`   → Z3: `str.suffixof("suffix", param_z3)`
+/// - `contains(param, "substr")`    → Z3: `str.contains(param_z3, "substr")`
+/// - `not_contains(param, "substr")`→ Z3: `NOT str.contains(param_z3, "substr")`
+///
+/// Returns `None` if the constraint cannot be parsed.
+fn parse_constraint_to_z3_string<'ctx>(
+    ctx: &'ctx Context,
+    constraint: &str,
+    param_z3: &Z3String<'ctx>,
+) -> Option<Bool<'ctx>> {
+    let trimmed = constraint.trim();
+
+    // Extract the string literal argument from the constraint
+    let extract_string_arg = |c: &str| -> Option<std::string::String> {
+        if let Some(last_quote_end) = c.rfind('"') {
+            let before = &c[..last_quote_end];
+            if let Some(last_quote_start) = before.rfind('"') {
+                return Some(c[last_quote_start + 1..last_quote_end].to_string());
+            }
+        }
+        None
+    };
+
+    // starts_with(param, "prefix") → Z3: prefix.prefix(param)
+    // Z3 semantics: prefix.prefix(s) means "prefix is a prefix of s"
+    if trimmed.starts_with("starts_with(") {
+        if let Some(arg) = extract_string_arg(trimmed) {
+            let prefix_z3 = Z3String::from_str(ctx, &arg).ok()?;
+            return Some(prefix_z3.prefix(param_z3));
+        }
+    }
+
+    // ends_with(param, "suffix") → Z3: suffix.suffix(param)
+    // Z3 semantics: suffix.suffix(s) means "suffix is a suffix of s"
+    if trimmed.starts_with("ends_with(") {
+        if let Some(arg) = extract_string_arg(trimmed) {
+            let suffix_z3 = Z3String::from_str(ctx, &arg).ok()?;
+            return Some(suffix_z3.suffix(param_z3));
+        }
+    }
+
+    // contains(param, "substr") → Z3: param.contains(substr)
+    if trimmed.starts_with("contains(") {
+        if let Some(arg) = extract_string_arg(trimmed) {
+            let substr_z3 = Z3String::from_str(ctx, &arg).ok()?;
+            return Some(param_z3.contains(&substr_z3));
+        }
+    }
+
+    // not_contains(param, "substr") → Z3: NOT param.contains(substr)
+    if trimmed.starts_with("not_contains(") {
+        if let Some(arg) = extract_string_arg(trimmed) {
+            let substr_z3 = Z3String::from_str(ctx, &arg).ok()?;
+            return Some(param_z3.contains(&substr_z3).not());
+        }
+    }
+
+    None
 }
 
 // =============================================================================
@@ -2988,6 +3100,9 @@ fn verify_atom_invariant(
         current_atom: Some(atom),
         linearity_ctx: None,
         effect_ctx: None,
+        constraint_count: None,
+        constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
+        has_string_constraints: None,
     };
 
     let mut env: Env = HashMap::new();
@@ -3568,6 +3683,43 @@ pub fn verify(hir_atom: &HirAtom, output_dir: &Path, module_env: &ModuleEnv) -> 
     verify_inner(hir_atom, output_dir, module_env, 10000)
 }
 
+/// Compile-time metrics for a single atom verification.
+/// Tracks the duration of each phase and total constraint count.
+pub struct VerificationMetrics {
+    pub atom_name: String,
+    pub phase_times: Vec<(String, std::time::Duration)>,
+    pub total_constraints: usize,
+    pub z3_check_time: std::time::Duration,
+}
+
+impl VerificationMetrics {
+    fn new(atom_name: &str) -> Self {
+        Self {
+            atom_name: atom_name.to_string(),
+            phase_times: Vec::new(),
+            total_constraints: 0,
+            z3_check_time: std::time::Duration::ZERO,
+        }
+    }
+
+    fn record_phase(&mut self, name: &str, duration: std::time::Duration) {
+        self.phase_times.push((name.to_string(), duration));
+    }
+
+    /// Print metrics to stderr (for --verbose / debug output).
+    pub fn print_summary(&self) {
+        eprintln!("  [metrics] atom '{}' verification phases:", self.atom_name);
+        for (name, dur) in &self.phase_times {
+            eprintln!("    {}: {:.3}ms", name, dur.as_secs_f64() * 1000.0);
+        }
+        eprintln!(
+            "    total_constraints: {}, z3_check: {:.3}ms",
+            self.total_constraints,
+            self.z3_check_time.as_secs_f64() * 1000.0
+        );
+    }
+}
+
 fn verify_inner(
     hir_atom: &HirAtom,
     output_dir: &Path,
@@ -3575,6 +3727,7 @@ fn verify_inner(
     timeout_ms: u64,
 ) -> MumeiResult<()> {
     let atom = &hir_atom.atom;
+    let mut metrics = VerificationMetrics::new(&atom.name);
 
     // ジェネリック atom は単相化後に検証される
     // 例: pipe<E: Effect> は検証スキップ、pipe<FileWrite> が検証対象
@@ -3631,10 +3784,13 @@ fn verify_inner(
         }
     }
 
-    // Phase 1: リソース階層検証（デッドロック防止）
+    // Phase 1a: リソース階層検証（デッドロック防止）
+    let phase_start = std::time::Instant::now();
     verify_resource_hierarchy(atom, module_env)?;
+    metrics.record_phase("Phase 1a: resource hierarchy", phase_start.elapsed());
 
     // Phase 1f: エフェクト包含検証（副作用安全性）
+    let phase_start = std::time::Instant::now();
     if let Err(e) = verify_effect_containment(atom, &hir_atom.body_stmt, module_env) {
         // Save structured effect violation report for self-healing integration.
         // Extract missing effects from the error to produce a structured report.
@@ -3715,31 +3871,276 @@ fn verify_inner(
         }
         return Err(e);
     }
+    metrics.record_phase("Phase 1f: effect containment", phase_start.elapsed());
 
     // Phase 1b: 有界モデル検査（ループ内 acquire パターン）
+    let phase_start = std::time::Instant::now();
     verify_bmc_resource_safety(atom, &hir_atom.body_stmt, module_env)?;
+    metrics.record_phase("Phase 1b: BMC resource safety", phase_start.elapsed());
 
     // Phase 1c: 再帰的 async 呼び出しの深度検証
+    let phase_start = std::time::Instant::now();
     verify_async_recursion_depth(atom, &hir_atom.body_stmt, module_env)?;
+    metrics.record_phase("Phase 1c: async recursion depth", phase_start.elapsed());
 
     // Phase 1d: atom レベル invariant の帰納的検証
+    let phase_start = std::time::Instant::now();
     if let Some(ref invariant_expr) = atom.invariant {
         verify_atom_invariant(atom, &hir_atom.body_stmt, invariant_expr, module_env)?;
     }
+    metrics.record_phase("Phase 1d: atom invariant", phase_start.elapsed());
 
     // Phase 1e: Call Graph サイクル検知（間接再帰の検出）
+    let phase_start = std::time::Instant::now();
     verify_call_graph_cycles(atom, module_env)?;
+    metrics.record_phase("Phase 1e: call graph cycles", phase_start.elapsed());
 
-    // Phase 1f: エフェクト整合性チェック（宣言 vs 推論、警告レベル）
+    // Phase 1f-2: エフェクト整合性チェック（宣言 vs 推論、警告レベル）
     // Note: verify_effect_consistency always returns Ok(()) — warnings are emitted
     // via eprintln! inside the function itself.
     let _ = verify_effect_consistency(atom, module_env);
 
     // Phase 1g: エフェクトパラメータ制約検証
+    let phase_start = std::time::Instant::now();
     verify_effect_params(atom, module_env)?;
+    metrics.record_phase("Phase 1g: effect params", phase_start.elapsed());
+
+    // Phase 1h: MIR-based move analysis
+    // Lower HIR to MIR and run forward dataflow move analysis.
+    //
+    // NOTE: Currently all Rvalue::Use(Place::Local(..)) are treated as moves,
+    // but MIR lowering emits this pattern for all direct assignments including
+    // Copy types (Int, Nat, Bool, f64). Until the analysis can distinguish
+    // Copy vs Move types, violations are reported as warnings only.
+    // UseAfterMove / DoubleMove / ConflictingMerge → warning (not hard error).
+    // TODO: Phase 4c — integrate type information into MirLinearityState so that
+    // Copy types are not consumed by Rvalue::Use, then promote to hard errors.
+    let phase_start = std::time::Instant::now();
+    let mir_body = crate::mir::lower_hir_to_mir(hir_atom);
+    let mut move_conflict_locals: Vec<(crate::mir::Local, crate::mir::BasicBlockId)> = Vec::new();
+    if mir_body.check_analysis_budget().is_ok() {
+        let move_result = crate::mir_analysis::analyze_moves(&mir_body);
+        for v in &move_result.violations {
+            match v.kind {
+                crate::mir_analysis::MoveViolationKind::UseAfterMove => {
+                    eprintln!(
+                        "  ⚠️  MIR move warning: Local({}) was used after being moved in block {} \
+                         (may be false positive for Copy types)",
+                        v.local.0, v.block_id
+                    );
+                }
+                crate::mir_analysis::MoveViolationKind::DoubleMove => {
+                    eprintln!(
+                        "  ⚠️  MIR move warning: Local({}) was moved twice in block {} \
+                         (may be false positive for Copy types)",
+                        v.local.0, v.block_id
+                    );
+                }
+                crate::mir_analysis::MoveViolationKind::ConflictingMerge => {
+                    eprintln!(
+                        "  ⚠️  MIR move warning: Local({}) has conflicting ownership state \
+                         at merge point (block {}) — alive on one path, consumed on another \
+                         (may be false positive for Copy types)",
+                        v.local.0, v.block_id
+                    );
+                    move_conflict_locals.push((v.local.clone(), v.block_id));
+                }
+            }
+        }
+    }
+    metrics.record_phase("Phase 1h: MIR move analysis", phase_start.elapsed());
+
+    // Phase 1i: Temporal effect verification (stateful effects)
+    // Build state machines from effect_defs and run forward dataflow analysis
+    // on the MIR to verify that perform operations occur in valid states.
+    let phase_start = std::time::Instant::now();
+    {
+        let mut state_machines: std::collections::HashMap<
+            String,
+            crate::mir_analysis::EffectStateMachine,
+        > = std::collections::HashMap::new();
+
+        // Build state machines from all known effect_defs
+        for (name, def) in &module_env.effect_defs {
+            if let Some(sm) = crate::mir_analysis::EffectStateMachine::from_effect_def(def) {
+                state_machines.insert(name.clone(), sm);
+            }
+        }
+        // Also check effects map
+        for (name, def) in &module_env.effects {
+            if !state_machines.contains_key(name) {
+                if let Some(sm) = crate::mir_analysis::EffectStateMachine::from_effect_def(def) {
+                    state_machines.insert(name.clone(), sm);
+                }
+            }
+        }
+
+        if !state_machines.is_empty() && mir_body.check_analysis_budget().is_ok() {
+            let temporal_result =
+                crate::mir_analysis::analyze_temporal_effects(&mir_body, &state_machines);
+
+            for v in &temporal_result.violations {
+                match v.kind {
+                    crate::mir_analysis::TemporalViolationKind::InvalidPreState => {
+                        // Hard error: operation performed in wrong state
+                        return Err(MumeiError::verification(format!(
+                            "Temporal effect violation: '{}' operation '{}' requires state '{}' \
+                             but current state is '{}' (block {})",
+                            v.effect, v.operation, v.expected_state, v.actual_state, v.block_id
+                        )));
+                    }
+                    crate::mir_analysis::TemporalViolationKind::ConflictingState => {
+                        // Delegate to Z3 for conflicting states at merge points.
+                        // For now, report as warning (Z3 integration is future work).
+                        eprintln!(
+                            "  \u{26a0}\u{fe0f}  Temporal effect warning: '{}' has conflicting states \
+                             at merge point (block {}): '{}' vs '{}'. \
+                             Z3 constraint delegation pending.",
+                            v.effect, v.block_id, v.expected_state, v.actual_state
+                        );
+                        // TODO: Generate Z3 Int Sort constraints for conflicting state resolution:
+                        // - Each state = integer (e.g., Open=0, Closed=1)
+                        // - Create Z3 variables: __effect_state_{effect}_{block_id}
+                        // - Assert transition constraints and merge constraints
+                        // - Check constraint_budget before adding constraints
+                    }
+                    crate::mir_analysis::TemporalViolationKind::UnexpectedFinalState => {
+                        // Hard error: effect left in unexpected state at exit
+                        return Err(MumeiError::verification(format!(
+                            "Temporal effect violation: '{}' is in state '{}' at function exit, \
+                             expected '{}' (block {})",
+                            v.effect, v.actual_state, v.expected_state, v.block_id
+                        )));
+                    }
+                }
+            }
+        }
+    }
+    metrics.record_phase("Phase 1i: temporal effects", phase_start.elapsed());
+
+    // TODO: Phase 4c — Replace HIR-level LinearityCtx with MIR-based MoveAnalysis
+    // once MIR lowering covers all expression forms (Match, Lambda, Async, etc.)
+
+    // Sort-aware timeout: if has_string_constraints is true, double the timeout.
+    // Z3 String Sort is now integrated for effect parameter constraints.
+    // When string constraints are present, solving is significantly slower,
+    // so we double the timeout to accommodate.
+    let has_string_constraints_cell_pre = std::cell::Cell::new(false);
+    // Pre-scan (1): check if any declared effect has Str-typed params with constraints
+    // that would need Z3 String Sort (variable params, not constant-folded).
+    for eff in &atom.effects {
+        let effect_def = module_env
+            .effect_defs
+            .get(&eff.name)
+            .or_else(|| module_env.effects.get(&eff.name));
+        if let Some(def) = effect_def {
+            if def.constraint.is_some() {
+                for p in &eff.params {
+                    if !p.is_constant {
+                        has_string_constraints_cell_pre.set(true);
+                    }
+                }
+            }
+        }
+    }
+    // Pre-scan (2): also check the body for `perform` expressions with
+    // non-constant args whose EffectDef has a constraint. This catches cases
+    // where the atom declares `effects: [FileRead("/tmp/")]` (constant) but
+    // the body does `perform FileRead.read(some_variable)`.
+    fn body_has_symbolic_perform_args(stmt: &Stmt, module_env: &ModuleEnv) -> bool {
+        match stmt {
+            Stmt::Block(stmts) => stmts
+                .iter()
+                .any(|s| body_has_symbolic_perform_args(s, module_env)),
+            Stmt::Let { value, .. } | Stmt::Assign { value, .. } => {
+                expr_has_symbolic_perform_args(value, module_env)
+            }
+            Stmt::While { cond, body, .. } => {
+                expr_has_symbolic_perform_args(cond, module_env)
+                    || body_has_symbolic_perform_args(body, module_env)
+            }
+            Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => {
+                body_has_symbolic_perform_args(body, module_env)
+            }
+            Stmt::TaskGroup { children, .. } => children
+                .iter()
+                .any(|c| body_has_symbolic_perform_args(c, module_env)),
+            Stmt::Expr(e) => expr_has_symbolic_perform_args(e, module_env),
+        }
+    }
+    fn expr_has_symbolic_perform_args(expr: &Expr, module_env: &ModuleEnv) -> bool {
+        match expr {
+            Expr::Perform { effect, args, .. } => {
+                let effect_def = module_env
+                    .effect_defs
+                    .get(effect.as_str())
+                    .or_else(|| module_env.effects.get(effect.as_str()));
+                if let Some(def) = effect_def {
+                    if def.constraint.is_some() {
+                        for arg in args {
+                            if !matches!(arg, Expr::Number(_) | Expr::Float(_)) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+                // Also recurse into args
+                args.iter()
+                    .any(|a| expr_has_symbolic_perform_args(a, module_env))
+            }
+            Expr::IfThenElse {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
+                expr_has_symbolic_perform_args(cond, module_env)
+                    || body_has_symbolic_perform_args(then_branch, module_env)
+                    || body_has_symbolic_perform_args(else_branch, module_env)
+            }
+            Expr::BinaryOp(l, _, r) => {
+                expr_has_symbolic_perform_args(l, module_env)
+                    || expr_has_symbolic_perform_args(r, module_env)
+            }
+            Expr::Call(_, args) => args
+                .iter()
+                .any(|a| expr_has_symbolic_perform_args(a, module_env)),
+            Expr::Async { body } => body_has_symbolic_perform_args(body, module_env),
+            Expr::Await { expr } => expr_has_symbolic_perform_args(expr, module_env),
+            Expr::Lambda { body, .. } => body_has_symbolic_perform_args(body, module_env),
+            Expr::CallRef { callee, args } => {
+                expr_has_symbolic_perform_args(callee, module_env)
+                    || args
+                        .iter()
+                        .any(|a| expr_has_symbolic_perform_args(a, module_env))
+            }
+            Expr::Match { target, arms } => {
+                expr_has_symbolic_perform_args(target, module_env)
+                    || arms
+                        .iter()
+                        .any(|arm| body_has_symbolic_perform_args(&arm.body, module_env))
+            }
+            // NOTE: StructInit, FieldAccess, and ArrayAccess contain sub-expressions
+            // that could hold nested Perform nodes, but are not recursed into here.
+            // This means the pre-scan conservatively under-estimates: if a perform with
+            // a variable arg appears inside a struct field initializer, field access base,
+            // or array index, the timeout won't be doubled. This is safe (slower, not
+            // incorrect) and these patterns are rare in practice.
+            _ => false,
+        }
+    }
+    if !has_string_constraints_cell_pre.get()
+        && body_has_symbolic_perform_args(&hir_atom.body_stmt, module_env)
+    {
+        has_string_constraints_cell_pre.set(true);
+    }
+    let effective_timeout = if has_string_constraints_cell_pre.get() {
+        timeout_ms * 2
+    } else {
+        timeout_ms
+    };
 
     let mut cfg = Config::new();
-    cfg.set_timeout_msec(timeout_ms);
+    cfg.set_timeout_msec(effective_timeout);
     let ctx = Context::new(&cfg);
     let solver = Solver::new(&ctx);
 
@@ -3751,6 +4152,11 @@ fn verify_inner(
     // Build EffectCtx from the atom's declared effects (transitively resolved)
     let allowed_effects_set = module_env.resolve_effect_set_from_effects(&atom.effects);
     let effect_ctx_cell = std::cell::RefCell::new(EffectCtx::new(allowed_effects_set));
+    // Per-atom constraint budget tracking
+    let constraint_count_cell = std::cell::Cell::new(0usize);
+    // Sort-aware timeout: flag for Z3 String Sort constraints.
+    // Set to true when Z3 String constraints are added during expr_to_z3.
+    let has_string_constraints_cell = std::cell::Cell::new(has_string_constraints_cell_pre.get());
     let vc = VCtx {
         ctx: &ctx,
         arr: &arr,
@@ -3758,9 +4164,28 @@ fn verify_inner(
         current_atom: Some(atom),
         linearity_ctx: Some(&linearity_ctx_cell),
         effect_ctx: Some(&effect_ctx_cell),
+        constraint_count: Some(&constraint_count_cell),
+        constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
+        has_string_constraints: Some(&has_string_constraints_cell),
     };
 
     let mut env: Env = HashMap::new();
+
+    // Phase 1h (continued): Register Z3 variables for ConflictingMerge violations.
+    // NOTE: Currently a no-op — asserting a fresh unconstrained Bool as true is
+    // always satisfiable and cannot cause Unsat. The variables are registered as
+    // infrastructure for Phase 4c, when type information will allow connecting
+    // these to actual ownership constraints (e.g., asserting that a Move-typed
+    // local must be alive at the merge point). Until then, ConflictingMerge
+    // violations are reported as warnings only (see eprintln above).
+    // TODO(Phase 4c): Replace with `solver.assert(&conflict_var.not())` or
+    // equivalent constraint that makes ConflictingMerge cause Unsat, after
+    // Copy vs Move type distinction is integrated into MirLinearityState.
+    for (local, block_id) in &move_conflict_locals {
+        let var_name = format!("__move_conflict_{}_{}", local.0, block_id);
+        let conflict_var = Bool::new_const(&ctx, var_name.as_str());
+        solver.assert(&conflict_var);
+    }
 
     // Phase 2b: エフェクト許可セットを Z3 環境に注入
     {
@@ -4022,6 +4447,7 @@ fn verify_inner(
     }
 
     // 4. ボディの検証
+    let phase_start = std::time::Instant::now();
     let body_result = match stmt_to_z3(&vc, &hir_atom.body_stmt, &mut env, Some(&solver)) {
         Ok(val) => val,
         Err(e) => {
@@ -4060,9 +4486,11 @@ fn verify_inner(
                     }
                 }
             }
-            // Determine failure type: division-by-zero gets its own category
+            // Determine failure type: division-by-zero and budget exceeded get their own categories
             let body_failure_type = if err_str.contains("division by zero") {
                 FAILURE_DIVISION_BY_ZERO
+            } else if err_str.contains("Constraint budget exceeded") {
+                "constraint_budget_exceeded"
             } else {
                 FAILURE_PRECONDITION_VIOLATED
             };
@@ -4085,10 +4513,13 @@ fn verify_inner(
         }
     };
 
+    metrics.record_phase("Phase 4: body evaluation", phase_start.elapsed());
+
     // 4b. Taint Analysis: unverified 関数の呼び出しを検出し警告
     check_taint_propagation(atom, &hir_atom.body_stmt, &env, module_env);
 
     // 5. 事後条件 (ensures)
+    let phase_start = std::time::Instant::now();
     if atom.ensures.trim() != "true" {
         env.insert("result".to_string(), body_result);
         let ens_ast = parse_expression(&atom.ensures);
@@ -4147,6 +4578,12 @@ fn verify_inner(
                     semantic_fb.as_ref(),
                     Some(&atom.span),
                 );
+                metrics.record_phase(
+                    "Phase 5: ensures verification (failed)",
+                    phase_start.elapsed(),
+                );
+                metrics.total_constraints = constraint_count_cell.get();
+                metrics.print_summary();
                 return Err(MumeiError::verification_at(
                     "Postcondition (ensures) is not satisfied.",
                     atom.span.clone(),
@@ -4204,6 +4641,9 @@ fn verify_inner(
         }
     }
 
+    metrics.record_phase("Phase 5: ensures verification", phase_start.elapsed());
+
+    let z3_check_start = std::time::Instant::now();
     if solver.check() == SatResult::Unsat {
         let unsat_core = solver.get_unsat_core();
         let core_labels: Vec<String> = unsat_core.iter().map(|b| format!("{}", b)).collect();
@@ -4238,11 +4678,25 @@ fn verify_inner(
             )
         };
 
+        metrics.z3_check_time = z3_check_start.elapsed();
+        metrics.total_constraints = constraint_count_cell.get();
+        metrics.record_phase(
+            "Phase 6: final Z3 check (contradiction)",
+            z3_check_start.elapsed(),
+        );
+        metrics.print_summary();
         return Err(MumeiError::verification_at(
             constraint_summary,
             atom.span.clone(),
         ));
     }
+
+    metrics.z3_check_time = z3_check_start.elapsed();
+    metrics.total_constraints = constraint_count_cell.get();
+    metrics.record_phase("Phase 6: final Z3 check", z3_check_start.elapsed());
+
+    // Print metrics summary (always for now; future: gate behind --verbose)
+    metrics.print_summary();
 
     save_visualizer_report(
         output_dir,
@@ -4256,6 +4710,22 @@ fn verify_inner(
         None,
         Some(&atom.span),
     );
+    Ok(())
+}
+
+/// Increment the constraint count in VCtx and check budget.
+/// Returns an error if the constraint budget has been exceeded.
+fn check_constraint_budget(vc: &VCtx, atom_name: &str) -> MumeiResult<()> {
+    if let Some(cell) = vc.constraint_count {
+        let new_count = cell.get() + 1;
+        cell.set(new_count);
+        if new_count > vc.constraint_budget {
+            return Err(MumeiError::verification(format!(
+                "Constraint budget exceeded for atom '{}': {} constraints (limit: {})",
+                atom_name, new_count, vc.constraint_budget
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -4310,6 +4780,17 @@ fn expr_to_z3<'a>(
     env: &mut Env<'a>,
     solver_opt: Option<&Solver<'a>>,
 ) -> DynResult<'a> {
+    // Per-atom constraint budget: increment count and check limit.
+    // This tracks the number of Z3 AST nodes generated, which correlates
+    // with solver.assert() pressure and overall verification complexity.
+    if solver_opt.is_some() {
+        let atom_name = vc
+            .current_atom
+            .map(|a| a.name.as_str())
+            .unwrap_or("<unknown>");
+        check_constraint_budget(vc, atom_name)?;
+    }
+
     let ctx = vc.ctx;
     let arr = vc.arr;
     match expr {
@@ -5102,9 +5583,108 @@ fn expr_to_z3<'a>(
                 solver.assert(&used_z3.implies(&allowed_z3));
             }
 
-            // Process arguments
+            // Process arguments and collect Z3 values
+            let mut arg_z3_values: Vec<Dynamic> = Vec::new();
             for arg in perform_args {
-                expr_to_z3(vc, arg, env, solver_opt)?;
+                let val = expr_to_z3(vc, arg, env, solver_opt)?;
+                arg_z3_values.push(val);
+            }
+
+            // Z3 String Sort: verify symbolic parameter constraints
+            // Look up the EffectDef to get constraint and param definitions
+            let effect_def = vc
+                .module_env
+                .effect_defs
+                .get(effect.as_str())
+                .or_else(|| vc.module_env.effects.get(effect.as_str()))
+                .cloned();
+            if let Some(def) = effect_def {
+                if let Some(ref constraint) = def.constraint {
+                    // For each argument, check if it's a symbolic (non-constant) value
+                    // that needs Z3 String constraint verification.
+                    // NOTE: Currently def.constraint is a single string (e.g., "starts_with(path, \"/tmp/\")")
+                    // that is applied to ALL non-constant args. This is correct for single-parameter
+                    // effects (the only kind currently supported by the parser), but would incorrectly
+                    // apply a path-specific constraint to unrelated parameters if multi-parameter
+                    // effects like FileOp(path: Str, mode: Str) are added. When that happens,
+                    // extract the parameter name from the constraint string, find its index in
+                    // def.params, and only apply the constraint when `i` matches that index.
+                    for (i, arg) in perform_args.iter().enumerate() {
+                        // Number/Float literals are constants already checked
+                        // by verify_effect_params (Phase 1g). Skip Z3 String here.
+                        // Variables and other expressions need symbolic verification.
+                        let is_constant = matches!(arg, Expr::Number(_) | Expr::Float(_));
+                        if is_constant {
+                            // Constant args are already checked by check_constant_constraint
+                            // in verify_effect_params (Phase 1g). Skip Z3 String here.
+                            continue;
+                        }
+                        // Symbolic argument: create Z3 String variable and assert constraint
+                        if let Some(solver) = solver_opt {
+                            let param_name =
+                                def.params.get(i).map(|p| p.name.as_str()).unwrap_or("arg");
+                            // Use a unique counter to distinguish different perform call sites.
+                            // Without this, Z3 reuses the same constant for the same name,
+                            // incorrectly merging constraints from distinct call sites.
+                            static EFFECT_STR_COUNTER: std::sync::atomic::AtomicUsize =
+                                std::sync::atomic::AtomicUsize::new(0);
+                            let unique_id = EFFECT_STR_COUNTER
+                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            let z3_str_name = format!(
+                                "__effect_str_{}_{}_{}_{}",
+                                effect, operation, param_name, unique_id
+                            );
+
+                            // Create Z3 String variable for the symbolic argument
+                            let param_z3_str = Z3String::new_const(ctx, z3_str_name.as_str());
+
+                            // If the argument has a `requires` constraint in the env
+                            // (e.g., from atom parameter refinements), propagate it.
+                            // Check if there's a string variable in the env for this arg.
+                            if let Expr::Variable(var_name) = arg {
+                                let str_env_key = format!("__str_{}", var_name);
+                                if let Some(existing) = env.get(&str_env_key) {
+                                    // Bind the param to the existing string variable
+                                    if let Some(existing_str) = existing.as_string() {
+                                        let eq_constraint = param_z3_str._eq(&existing_str);
+                                        solver.assert(&eq_constraint);
+                                    }
+                                }
+                            }
+
+                            // Parse the constraint and assert it
+                            if let Some(constraint_bool) =
+                                parse_constraint_to_z3_string(ctx, constraint, &param_z3_str)
+                            {
+                                // Set has_string_constraints flag for sort-aware timeout
+                                if let Some(flag) = vc.has_string_constraints {
+                                    flag.set(true);
+                                }
+                                // Check constraint budget
+                                if let Some(count) = vc.constraint_count {
+                                    let current = count.get();
+                                    if current >= vc.constraint_budget {
+                                        return Err(MumeiError::verification(format!(
+                                            "Constraint budget exceeded for effect '{}' \
+                                             string constraint: {} constraints (limit: {})",
+                                            effect, current, vc.constraint_budget
+                                        )));
+                                    }
+                                    count.set(current + 1);
+                                }
+                                let track_label = format!(
+                                    "track_effect_str_{}_{}_{}_{}",
+                                    effect, operation, param_name, unique_id
+                                );
+                                let track_bool = Bool::new_const(ctx, track_label.as_str());
+                                solver.assert_and_track(&constraint_bool, &track_bool);
+                            }
+
+                            // Store the Z3 String variable in env for downstream use
+                            env.insert(z3_str_name, param_z3_str.into());
+                        }
+                    }
+                }
             }
 
             // Return a symbolic result value
@@ -6497,5 +7077,247 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("could not be determined"));
+    }
+
+    // =========================================================================
+    // Task 0: Explosion Prevention Infrastructure tests
+    // =========================================================================
+
+    #[test]
+    fn test_constraint_budget_exceeded() {
+        // Simulate constraint budget exceeded by setting a very low budget
+        let ctx = z3::Context::new(&z3::Config::new());
+        let int_sort = z3::Sort::int(&ctx);
+        let arr = z3::ast::Array::new_const(&ctx, "arr", &int_sort, &int_sort);
+        let count_cell = std::cell::Cell::new(0usize);
+        let has_string_cell = std::cell::Cell::new(false);
+        let module_env = ModuleEnv::new();
+
+        let vc = VCtx {
+            ctx: &ctx,
+            arr: &arr,
+            module_env: &module_env,
+            current_atom: None,
+            linearity_ctx: None,
+            effect_ctx: None,
+            constraint_count: Some(&count_cell),
+            constraint_budget: 5, // Very low budget
+            has_string_constraints: Some(&has_string_cell),
+        };
+
+        // Each call increments and checks
+        for i in 0..5 {
+            let result = check_constraint_budget(&vc, "test_atom");
+            assert!(result.is_ok(), "Should succeed at count {}", i + 1);
+        }
+
+        // 6th call should exceed budget (count becomes 6 > 5)
+        let result = check_constraint_budget(&vc, "test_atom");
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(err_msg.contains("Constraint budget exceeded"));
+        assert!(err_msg.contains("test_atom"));
+        assert!(err_msg.contains("limit: 5"));
+    }
+
+    #[test]
+    fn test_constraint_budget_no_limit() {
+        // When constraint_count is None, no budget checking occurs
+        let ctx = z3::Context::new(&z3::Config::new());
+        let int_sort = z3::Sort::int(&ctx);
+        let arr = z3::ast::Array::new_const(&ctx, "arr", &int_sort, &int_sort);
+        let module_env = ModuleEnv::new();
+
+        let vc = VCtx {
+            ctx: &ctx,
+            arr: &arr,
+            module_env: &module_env,
+            current_atom: None,
+            linearity_ctx: None,
+            effect_ctx: None,
+            constraint_count: None,
+            constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
+            has_string_constraints: None,
+        };
+
+        // Should always succeed when no constraint tracking
+        for _ in 0..100 {
+            assert!(check_constraint_budget(&vc, "test_atom").is_ok());
+        }
+    }
+
+    #[test]
+    fn test_verification_metrics_basic() {
+        let mut metrics = VerificationMetrics::new("test_atom");
+
+        assert_eq!(metrics.atom_name, "test_atom");
+        assert!(metrics.phase_times.is_empty());
+        assert_eq!(metrics.total_constraints, 0);
+        assert_eq!(metrics.z3_check_time, std::time::Duration::ZERO);
+
+        // Record some phases
+        metrics.record_phase("Phase 1", std::time::Duration::from_millis(10));
+        metrics.record_phase("Phase 2", std::time::Duration::from_millis(20));
+        metrics.total_constraints = 42;
+        metrics.z3_check_time = std::time::Duration::from_millis(5);
+
+        assert_eq!(metrics.phase_times.len(), 2);
+        assert_eq!(metrics.phase_times[0].0, "Phase 1");
+        assert_eq!(
+            metrics.phase_times[0].1,
+            std::time::Duration::from_millis(10)
+        );
+        assert_eq!(metrics.phase_times[1].0, "Phase 2");
+        assert_eq!(metrics.total_constraints, 42);
+        assert_eq!(metrics.z3_check_time, std::time::Duration::from_millis(5));
+    }
+
+    #[test]
+    fn test_has_string_constraints_flag() {
+        // Test that the has_string_constraints flag can be set and read
+        let cell = std::cell::Cell::new(false);
+        assert!(!cell.get());
+        cell.set(true);
+        assert!(cell.get());
+    }
+
+    #[test]
+    fn test_default_constraint_budget_value() {
+        assert_eq!(DEFAULT_CONSTRAINT_BUDGET, 1000);
+    }
+
+    // =========================================================================
+    // Task 4: Effect Parameter Z3 String Sort — Tests
+    // =========================================================================
+
+    #[test]
+    fn test_constant_path_ok() {
+        // Constant path "/tmp/data.txt" should pass starts_with(path, "/tmp/") constraint
+        assert!(check_constant_constraint(
+            "/tmp/data.txt",
+            "starts_with(path, \"/tmp/\")"
+        ));
+        assert!(check_constant_constraint(
+            "/tmp/nested/file.log",
+            "starts_with(path, \"/tmp/\")"
+        ));
+    }
+
+    #[test]
+    fn test_constant_path_ng() {
+        // Constant path "/etc/passwd" should fail starts_with(path, "/tmp/") constraint
+        assert!(!check_constant_constraint(
+            "/etc/passwd",
+            "starts_with(path, \"/tmp/\")"
+        ));
+        assert!(!check_constant_constraint(
+            "/var/log/syslog",
+            "starts_with(path, \"/tmp/\")"
+        ));
+    }
+
+    #[test]
+    fn test_z3_string_parse_constraint_starts_with() {
+        // Test parse_constraint_to_z3_string with starts_with
+        let cfg = z3::Config::new();
+        let ctx = z3::Context::new(&cfg);
+        let param = Z3String::new_const(&ctx, "path");
+
+        // starts_with should produce a Bool constraint
+        let result = parse_constraint_to_z3_string(&ctx, "starts_with(path, \"/tmp/\")", &param);
+        assert!(result.is_some(), "starts_with constraint should parse");
+
+        // ends_with should also work
+        let result2 = parse_constraint_to_z3_string(&ctx, "ends_with(path, \".txt\")", &param);
+        assert!(result2.is_some(), "ends_with constraint should parse");
+
+        // contains should also work
+        let result3 = parse_constraint_to_z3_string(&ctx, "contains(path, \"data\")", &param);
+        assert!(result3.is_some(), "contains constraint should parse");
+
+        // not_contains should also work
+        let result4 = parse_constraint_to_z3_string(&ctx, "not_contains(path, \"..\")", &param);
+        assert!(result4.is_some(), "not_contains constraint should parse");
+
+        // Invalid constraint should return None
+        let result5 = parse_constraint_to_z3_string(&ctx, "unknown_fn(path, \"x\")", &param);
+        assert!(result5.is_none(), "unknown constraint should return None");
+    }
+
+    #[test]
+    fn test_z3_string_constraint_satisfiability() {
+        // Test that Z3 String Sort constraints are satisfiable/unsatisfiable as expected
+        let cfg = z3::Config::new();
+        let ctx = z3::Context::new(&cfg);
+        let solver = z3::Solver::new(&ctx);
+
+        // Create a Z3 String variable
+        let path = Z3String::new_const(&ctx, "path");
+
+        // Assert: path starts with "/tmp/"
+        let prefix = Z3String::from_str(&ctx, "/tmp/").unwrap();
+        solver.assert(&prefix.prefix(&path));
+
+        // Should be satisfiable (there exist strings starting with /tmp/)
+        assert_eq!(solver.check(), z3::SatResult::Sat);
+
+        // Now also assert: path starts with "/etc/"
+        let prefix2 = Z3String::from_str(&ctx, "/etc/").unwrap();
+        solver.assert(&prefix2.prefix(&path));
+
+        // Should be unsatisfiable (can't start with both /tmp/ and /etc/)
+        assert_eq!(solver.check(), z3::SatResult::Unsat);
+    }
+
+    #[test]
+    fn test_contains_constraint() {
+        // Test contains constraint with Z3 String Sort
+        let cfg = z3::Config::new();
+        let ctx = z3::Context::new(&cfg);
+        let solver = z3::Solver::new(&ctx);
+
+        let path = Z3String::new_const(&ctx, "path");
+
+        // Assert: path contains ".."
+        let substr = Z3String::from_str(&ctx, "..").unwrap();
+        let contains_dotdot = path.contains(&substr);
+        // Assert NOT contains ".." (path traversal prevention)
+        solver.assert(&contains_dotdot.not());
+
+        // Also assert path starts with "/tmp/"
+        let prefix = Z3String::from_str(&ctx, "/tmp/").unwrap();
+        solver.assert(&prefix.prefix(&path));
+
+        // Should be satisfiable: "/tmp/safe.txt" satisfies both
+        assert_eq!(solver.check(), z3::SatResult::Sat);
+    }
+
+    #[test]
+    fn test_z3_string_performance() {
+        // Test that String Sort constraint solving completes within reasonable time
+        let start = std::time::Instant::now();
+
+        let cfg = z3::Config::new();
+        let ctx = z3::Context::new(&cfg);
+        let solver = z3::Solver::new(&ctx);
+
+        // Create multiple string variables with constraints
+        for i in 0..10 {
+            let name = format!("path_{}", i);
+            let var = Z3String::new_const(&ctx, name.as_str());
+            let prefix = Z3String::from_str(&ctx, "/tmp/").unwrap();
+            solver.assert(&prefix.prefix(&var));
+        }
+
+        let result = solver.check();
+        let elapsed = start.elapsed();
+
+        assert_eq!(result, z3::SatResult::Sat);
+        // Should solve within 500ms even with 10 string constraints
+        assert!(
+            elapsed.as_millis() < 500,
+            "String Sort constraint solving took {}ms, expected < 500ms",
+            elapsed.as_millis()
+        );
     }
 }
