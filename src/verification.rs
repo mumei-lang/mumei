@@ -3816,12 +3816,13 @@ fn verify_inner(
     // Sort-aware timeout: if has_string_constraints is true, double the timeout.
     // Currently infrastructure-only: will be activated when Z3 String Sort is integrated.
     let effective_timeout = timeout_ms;
-    // TODO: Enable when Z3 String Sort integration is active:
-    // let effective_timeout = if has_string_constraints_cell.get() {
-    //     timeout_ms * 2
-    // } else {
-    //     timeout_ms
-    // };
+    // NOTE: Simply uncommenting the block below will NOT work because:
+    //   1. has_string_constraints_cell is defined after this point (line ~3843)
+    //   2. Even if reordered, the flag would always be false here — it is only
+    //      set during body evaluation, which happens after Context creation.
+    // The correct approach requires either a two-pass design (first pass to detect
+    // string constraints, second pass with adjusted timeout) or lazy Context creation.
+    // TODO(Z3 String Sort): Implement two-pass timeout adjustment when string theory is integrated.
 
     let mut cfg = Config::new();
     cfg.set_timeout_msec(effective_timeout);
@@ -4154,9 +4155,11 @@ fn verify_inner(
                     }
                 }
             }
-            // Determine failure type: division-by-zero gets its own category
+            // Determine failure type from error message content
             let body_failure_type = if err_str.contains("division by zero") {
                 FAILURE_DIVISION_BY_ZERO
+            } else if err_str.contains("Constraint budget exceeded") {
+                "constraint_budget_exceeded"
             } else {
                 FAILURE_PRECONDITION_VIOLATED
             };
