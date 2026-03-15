@@ -4046,6 +4046,12 @@ fn verify_inner(
                         .iter()
                         .any(|arm| body_has_symbolic_perform_args(&arm.body, module_env))
             }
+            // NOTE: StructInit, FieldAccess, and ArrayAccess contain sub-expressions
+            // that could hold nested Perform nodes, but are not recursed into here.
+            // This means the pre-scan conservatively under-estimates: if a perform with
+            // a variable arg appears inside a struct field initializer, field access base,
+            // or array index, the timeout won't be doubled. This is safe (slower, not
+            // incorrect) and these patterns are rare in practice.
             _ => false,
         }
     }
@@ -5523,6 +5529,13 @@ fn expr_to_z3<'a>(
                 if let Some(ref constraint) = def.constraint {
                     // For each argument, check if it's a symbolic (non-constant) value
                     // that needs Z3 String constraint verification.
+                    // NOTE: Currently def.constraint is a single string (e.g., "starts_with(path, \"/tmp/\")")
+                    // that is applied to ALL non-constant args. This is correct for single-parameter
+                    // effects (the only kind currently supported by the parser), but would incorrectly
+                    // apply a path-specific constraint to unrelated parameters if multi-parameter
+                    // effects like FileOp(path: Str, mode: Str) are added. When that happens,
+                    // extract the parameter name from the constraint string, find its index in
+                    // def.params, and only apply the constraint when `i` matches that index.
                     for (i, arg) in perform_args.iter().enumerate() {
                         // Number/Float literals are constants already checked
                         // by verify_effect_params (Phase 1g). Skip Z3 String here.
