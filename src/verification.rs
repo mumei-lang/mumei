@@ -3813,11 +3813,17 @@ fn infer_requires(atom: &Atom, module_env: &ModuleEnv) -> Vec<String> {
     }
 
     // 2. Callee requires propagation
+    // NOTE: Callee requires are propagated verbatim without substituting the callee's
+    // parameter names for the caller's actual arguments. For example, if `callee(x)` has
+    // `requires: x > 0` and the caller invokes `callee(a + b)`, the inferred requires
+    // would be `x > 0` — referencing `x` which may not exist in the caller's scope.
+    // TODO: Parse the call site arguments, map callee param names to caller expressions,
+    // and substitute before propagating. This requires tracking which arguments are passed
+    // to each callee call site.
     let callees = collect_callees_stmt(&body_stmt);
     for callee_name in &callees {
         if let Some(callee_atom) = module_env.get_atom(callee_name) {
             if callee_atom.requires != "true" && !callee_atom.requires.is_empty() {
-                // Propagate callee requires, substituting parameter names
                 let callee_req = callee_atom.requires.clone();
                 if seen.insert(callee_req.clone()) {
                     requires.push(callee_req);
@@ -3869,10 +3875,11 @@ fn infer_ensures(atom: &Atom, module_env: &ModuleEnv) -> Vec<String> {
     });
 
     if all_params_nonneg && !param_names.is_empty() {
-        // Check if body only uses addition/multiplication (preserves non-negativity)
-        let body_only_nonneg_ops = !body_expr_str.contains(" - ")
-            && !body_expr_str.contains("/ ")
-            && !body_expr_str.contains("% ");
+        // Check if body only uses addition/multiplication (preserves non-negativity).
+        // Use character-level check (not space-delimited) to avoid missing `a-b`, `a/b`, `a%b`.
+        let body_only_nonneg_ops = !body_expr_str.contains('-')
+            && !body_expr_str.contains('/')
+            && !body_expr_str.contains('%');
         if body_only_nonneg_ops {
             ensures.push("result >= 0".to_string());
         }

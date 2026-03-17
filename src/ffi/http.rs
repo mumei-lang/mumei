@@ -179,6 +179,11 @@ pub extern "C" fn http_header_get(handle: i64, name: *const c_char) -> *const c_
     }
 }
 
+// NOTE: http_header_set modifies headers on the stored *response* object, not on
+// future requests. The std/http.mm API comment says 'リクエストヘッダーを設定' but
+// this actually modifies the in-memory response copy. It cannot be used to set
+// headers for outgoing requests. To support request headers, a request builder
+// pattern would need to be added (e.g., http_request_new / http_request_header / http_request_send).
 #[no_mangle]
 pub extern "C" fn http_header_set(handle: i64, name: *const c_char, value: *const c_char) -> i64 {
     let name_str = unsafe { c_str_to_str(name) }.to_string();
