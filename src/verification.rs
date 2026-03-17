@@ -3673,7 +3673,7 @@ pub fn infer_effects_json(items: &[Item], module_env: &ModuleEnv) -> serde_json:
 fn collect_divisors_expr(expr: &Expr) -> Vec<String> {
     let mut divisors = Vec::new();
     match expr {
-        Expr::BinaryOp(_, Op::Div, rhs) => {
+        Expr::BinaryOp(lhs, Op::Div, rhs) => {
             // The right-hand side is a divisor
             match rhs.as_ref() {
                 Expr::Variable(name) => divisors.push(name.clone()),
@@ -3684,7 +3684,8 @@ fn collect_divisors_expr(expr: &Expr) -> Vec<String> {
                 }
                 _ => {}
             }
-            // Also recurse into sub-expressions
+            // Also recurse into sub-expressions (both sides)
+            divisors.extend(collect_divisors_expr(lhs));
             divisors.extend(collect_divisors_expr(rhs));
         }
         Expr::BinaryOp(lhs, _, rhs) => {
@@ -3734,6 +3735,9 @@ fn collect_divisors_stmt(stmt: &Stmt) -> Vec<String> {
         }
         Stmt::Acquire { body, .. } => {
             divisors.extend(collect_divisors_stmt(body));
+        }
+        Stmt::Expr(e) => {
+            divisors.extend(collect_divisors_expr(e));
         }
         _ => {}
     }
@@ -5608,12 +5612,8 @@ fn expr_to_z3<'a>(
                 let rs = r.as_string().ok_or("Expected string for Str op")?;
                 return match op {
                     Op::Add => {
-                        // Z3 string concatenation via fresh symbolic variable
-                        let result = Z3String::fresh_const(ctx, "str_concat");
-                        let concat_eq = result._eq(&z3::ast::String::concat(ctx, &[&ls, &rs]));
-                        if let Some(solver) = solver_opt {
-                            solver.assert(&concat_eq);
-                        }
+                        // Z3 string concatenation — return concat directly
+                        let result = z3::ast::String::concat(ctx, &[&ls, &rs]);
                         Ok(result.into())
                     }
                     Op::Eq => Ok(ls._eq(&rs).into()),
