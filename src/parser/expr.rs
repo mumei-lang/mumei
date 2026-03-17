@@ -259,6 +259,13 @@ fn parse_prefix(ctx: &mut ParseContext) -> Expr {
             Expr::Float(val)
         }
 
+        // Plan 9: First-class Str type — parse string literals
+        Token::StringLit(s) => {
+            let val = s.clone();
+            ctx.advance();
+            Expr::StringLit(val)
+        }
+
         Token::True => {
             ctx.advance();
             Expr::Variable("true".to_string())

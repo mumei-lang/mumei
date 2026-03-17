@@ -82,6 +82,8 @@ pub struct HirEffectUsage {
 pub enum HirExpr {
     Number(i64),
     Float(f64),
+    /// Plan 9: First-class string literal
+    StringLit(String),
     Variable(String),
     ArrayAccess(String, Box<HirExpr>),
     BinaryOp(Box<HirExpr>, Op, Box<HirExpr>),
@@ -167,6 +169,13 @@ pub enum HirExpr {
     #[allow(dead_code)]
     ChanRecv {
         channel: Box<HirExpr>,
+    },
+    /// Plan 14: Enum variant construction expression — `Some(42)`, `Ok(value)`
+    /// Constructed during HIR lowering when a Call name resolves to a known enum variant.
+    VariantInit {
+        enum_name: String,
+        variant_name: String,
+        fields: Vec<HirExpr>,
     },
 }
 
@@ -298,9 +307,11 @@ pub fn lower_expr_with_env(
     expr: &Expr,
     module_env: Option<&crate::verification::ModuleEnv>,
 ) -> HirExpr {
-    match expr {
+    let result = match expr {
         Expr::Number(n) => HirExpr::Number(*n),
         Expr::Float(f) => HirExpr::Float(*f),
+        // Plan 9: String literal lowering
+        Expr::StringLit(s) => HirExpr::StringLit(s.clone()),
         Expr::Variable(s) => HirExpr::Variable(s.clone()),
         Expr::ArrayAccess(name, idx) => {
             HirExpr::ArrayAccess(name.clone(), Box::new(lower_expr_with_env(idx, module_env)))
@@ -438,7 +449,31 @@ pub fn lower_expr_with_env(
         Expr::ChanRecv { channel } => HirExpr::ChanRecv {
             channel: Box::new(lower_expr_with_env(channel, module_env)),
         },
+    };
+
+    // Plan 14: Check if Call expressions should be converted to VariantInit.
+    // If the call name matches a known enum variant AND is NOT a known atom/function,
+    // convert to VariantInit. This prevents namespace collisions where a function
+    // named e.g. "Some" or "Ok" would be incorrectly treated as a variant constructor.
+    if let HirExpr::Call {
+        ref name, ref args, ..
+    } = result
+    {
+        if let Some(env) = module_env {
+            // Only convert if the name is NOT a known atom (functions take priority)
+            if env.get_atom(name).is_none() {
+                if let Some(enum_def) = env.find_enum_by_variant(name) {
+                    return HirExpr::VariantInit {
+                        enum_name: enum_def.name.clone(),
+                        variant_name: name.clone(),
+                        fields: args.clone(),
+                    };
+                }
+            }
+        }
     }
+
+    result
 }
 
 /// AST の Stmt を HirStmt に変換する
@@ -614,7 +649,7 @@ fn collect_free_variables_expr(expr: &HirExpr) -> HashSet<String> {
                 vars.insert(name.clone());
             }
         }
-        HirExpr::Number(_) | HirExpr::Float(_) => {}
+        HirExpr::Number(_) | HirExpr::Float(_) | HirExpr::StringLit(_) => {}
         HirExpr::ArrayAccess(name, idx) => {
             vars.insert(name.clone());
             vars.extend(collect_free_variables_expr(idx));
@@ -717,6 +752,12 @@ fn collect_free_variables_expr(expr: &HirExpr) -> HashSet<String> {
         }
         HirExpr::ChanRecv { channel } => {
             vars.extend(collect_free_variables_expr(channel));
+        }
+        // Plan 14: VariantInit free variables
+        HirExpr::VariantInit { fields, .. } => {
+            for field in fields {
+                vars.extend(collect_free_variables_expr(field));
+            }
         }
     }
     vars

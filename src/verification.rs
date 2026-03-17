@@ -1312,6 +1312,10 @@ impl ModuleEnv {
 
     /// 精緻型名からベース型名を解決する（例: "Nat" -> "i64", "Pos" -> "f64"）
     pub fn resolve_base_type(&self, type_name: &str) -> String {
+        // Plan 9: Str is a primitive type, return as-is
+        if type_name == "Str" {
+            return "Str".to_string();
+        }
         if let Some(refined) = self.types.get(type_name) {
             return refined._base_type.clone();
         }
@@ -1991,6 +1995,8 @@ pub fn verify_impl(
             let base = module_env.resolve_base_type(&impl_def.target_type);
             let var: Dynamic = match base.as_str() {
                 "f64" => Float::new_const(&ctx, *var_name, 11, 53).into(),
+                // Plan 9: Str parameters as Z3 String Sort
+                "Str" => Z3String::new_const(&ctx, *var_name).into(),
                 _ => Int::new_const(&ctx, *var_name).into(),
             };
             env.insert(var_name.to_string(), var);
@@ -3074,8 +3080,7 @@ fn verify_async_recursion_depth(
             Expr::Lambda { body, .. } => count_self_calls_stmt(body, atom_name),
             // Plan 8: Channel operations — traverse sub-expressions for self-calls
             Expr::ChanSend { channel, value } => {
-                count_self_calls_expr(channel, atom_name)
-                    + count_self_calls_expr(value, atom_name)
+                count_self_calls_expr(channel, atom_name) + count_self_calls_expr(value, atom_name)
             }
             Expr::ChanRecv { channel } => count_self_calls_expr(channel, atom_name),
             _ => 0,
@@ -3206,6 +3211,8 @@ fn verify_atom_invariant(
             .unwrap_or_else(|| "i64".to_string());
         let var: Dynamic = match base.as_str() {
             "f64" => Float::new_const(&ctx, param.name.as_str(), 11, 53).into(),
+            // Plan 9: Str parameters as Z3 String Sort
+            "Str" => Z3String::new_const(&ctx, param.name.as_str()).into(),
             _ => Int::new_const(&ctx, param.name.as_str()).into(),
         };
         env.insert(param.name.clone(), var);
@@ -3652,6 +3659,300 @@ pub fn infer_effects_json(items: &[Item], module_env: &ModuleEnv) -> serde_json:
         }
     }
     serde_json::json!({ "effects_analysis": results })
+}
+
+// =============================================================================
+// Plan 13: Contract Inference Engine
+// =============================================================================
+// Dataflow analysis to infer requires/ensures contracts for atoms.
+// - infer_requires: divisor tracking + callee requires propagation
+// - infer_ensures: simple body expression analysis + non-negativity
+
+/// Collect all divisor expressions from a statement (Plan 13-1 helper).
+/// Tracks expressions used as right-hand side of division operations.
+fn collect_divisors_expr(expr: &Expr) -> Vec<String> {
+    let mut divisors = Vec::new();
+    match expr {
+        Expr::BinaryOp(lhs, Op::Div, rhs) => {
+            // The right-hand side is a divisor
+            match rhs.as_ref() {
+                Expr::Variable(name) => divisors.push(name.clone()),
+                Expr::Number(n) => {
+                    if *n == 0 {
+                        divisors.push("0".to_string());
+                    }
+                }
+                _ => {}
+            }
+            // Also recurse into sub-expressions (both sides)
+            divisors.extend(collect_divisors_expr(lhs));
+            divisors.extend(collect_divisors_expr(rhs));
+        }
+        Expr::BinaryOp(lhs, _, rhs) => {
+            divisors.extend(collect_divisors_expr(lhs));
+            divisors.extend(collect_divisors_expr(rhs));
+        }
+        Expr::Call(_, args) => {
+            for arg in args {
+                divisors.extend(collect_divisors_expr(arg));
+            }
+        }
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            divisors.extend(collect_divisors_expr(cond));
+            divisors.extend(collect_divisors_stmt(then_branch));
+            divisors.extend(collect_divisors_stmt(else_branch));
+        }
+        Expr::Match { target, arms } => {
+            divisors.extend(collect_divisors_expr(target));
+            for arm in arms {
+                divisors.extend(collect_divisors_stmt(&arm.body));
+            }
+        }
+        Expr::Async { body } => {
+            divisors.extend(collect_divisors_stmt(body));
+        }
+        Expr::Await { expr } => {
+            divisors.extend(collect_divisors_expr(expr));
+        }
+        Expr::Lambda { body, .. } => {
+            divisors.extend(collect_divisors_stmt(body));
+        }
+        Expr::Perform { args, .. } => {
+            for arg in args {
+                divisors.extend(collect_divisors_expr(arg));
+            }
+        }
+        Expr::CallRef { callee, args } => {
+            divisors.extend(collect_divisors_expr(callee));
+            for arg in args {
+                divisors.extend(collect_divisors_expr(arg));
+            }
+        }
+        Expr::ChanSend { channel, value } => {
+            divisors.extend(collect_divisors_expr(channel));
+            divisors.extend(collect_divisors_expr(value));
+        }
+        Expr::ChanRecv { channel } => {
+            divisors.extend(collect_divisors_expr(channel));
+        }
+        _ => {}
+    }
+    divisors
+}
+
+/// Collect all divisor expressions from a statement.
+fn collect_divisors_stmt(stmt: &Stmt) -> Vec<String> {
+    let mut divisors = Vec::new();
+    match stmt {
+        Stmt::Block(stmts) => {
+            for s in stmts {
+                divisors.extend(collect_divisors_stmt(s));
+            }
+        }
+        Stmt::Let { value, .. } | Stmt::Assign { value, .. } => {
+            divisors.extend(collect_divisors_expr(value));
+        }
+        Stmt::While { cond, body, .. } => {
+            divisors.extend(collect_divisors_expr(cond));
+            divisors.extend(collect_divisors_stmt(body));
+        }
+        Stmt::Acquire { body, .. } => {
+            divisors.extend(collect_divisors_stmt(body));
+        }
+        Stmt::Task { body, .. } => {
+            divisors.extend(collect_divisors_stmt(body));
+        }
+        Stmt::TaskGroup { children, .. } => {
+            for child in children {
+                divisors.extend(collect_divisors_stmt(child));
+            }
+        }
+        Stmt::Expr(e) => {
+            divisors.extend(collect_divisors_expr(e));
+        }
+        _ => {}
+    }
+    divisors
+}
+
+/// Infer requires constraints for an atom (Plan 13-1).
+/// Analyzes the body to find:
+/// 1. Division operations → "divisor != 0"
+/// 2. Callee requires propagation → caller must satisfy callee's requires
+fn infer_requires(atom: &Atom, module_env: &ModuleEnv) -> Vec<String> {
+    let mut requires = Vec::new();
+    let mut seen = HashSet::new();
+    let body_stmt = parse_body_expr(&atom.body_expr);
+
+    // 1. Divisor tracking
+    let divisors = collect_divisors_stmt(&body_stmt);
+    let param_names: HashSet<String> = atom.params.iter().map(|p| p.name.clone()).collect();
+    for div in &divisors {
+        if param_names.contains(div) && seen.insert(format!("{} != 0", div)) {
+            // Check if already covered by refinement type
+            let is_covered = atom.params.iter().any(|p| {
+                if p.name == *div {
+                    if let Some(ref tr) = p.type_ref {
+                        if let Some(rt) = module_env.get_type(&tr.name) {
+                            // If the type already ensures non-zero (e.g., Pos type)
+                            return rt.predicate_raw.contains("> 0")
+                                || rt.predicate_raw.contains("!= 0");
+                        }
+                    }
+                }
+                false
+            });
+            if !is_covered {
+                requires.push(format!("{} != 0", div));
+            }
+        }
+    }
+
+    // 2. Callee requires propagation
+    // NOTE: Callee requires are propagated verbatim without substituting the callee's
+    // parameter names for the caller's actual arguments. For example, if `callee(x)` has
+    // `requires: x > 0` and the caller invokes `callee(a + b)`, the inferred requires
+    // would be `x > 0` — referencing `x` which may not exist in the caller's scope.
+    // TODO: Parse the call site arguments, map callee param names to caller expressions,
+    // and substitute before propagating. This requires tracking which arguments are passed
+    // to each callee call site.
+    let callees = collect_callees_stmt(&body_stmt);
+    for callee_name in &callees {
+        if let Some(callee_atom) = module_env.get_atom(callee_name) {
+            if callee_atom.requires != "true" && !callee_atom.requires.is_empty() {
+                let callee_req = callee_atom.requires.clone();
+                if seen.insert(callee_req.clone()) {
+                    requires.push(callee_req);
+                }
+            }
+        }
+    }
+
+    requires
+}
+
+/// Infer ensures constraints for an atom (Plan 13-2).
+/// Analyzes the body to find:
+/// 1. Simple body expressions → "result == expr"
+/// 2. Non-negativity analysis → "result >= 0" if all paths return non-negative
+fn infer_ensures(atom: &Atom, module_env: &ModuleEnv) -> Vec<String> {
+    let mut ensures = Vec::new();
+
+    // Simple body expression analysis
+    let body_expr_str = atom.body_expr.trim();
+    let is_simple = !body_expr_str.contains("if ")
+        && !body_expr_str.contains("while ")
+        && !body_expr_str.contains("match ")
+        && !body_expr_str.contains('{');
+
+    if is_simple && !body_expr_str.is_empty() {
+        // Check if the body is a simple arithmetic expression
+        let body_stmt = parse_body_expr(&atom.body_expr);
+        if let Stmt::Let { .. } = &body_stmt {
+            // Skip complex let bindings
+        } else {
+            ensures.push(format!("result == {}", body_expr_str));
+        }
+    }
+
+    // Non-negativity analysis: check if all parameters involved are non-negative types
+    let param_names: HashSet<String> = atom.params.iter().map(|p| p.name.clone()).collect();
+    let all_params_nonneg = atom.params.iter().all(|p| {
+        if let Some(ref tr) = p.type_ref {
+            if let Some(rt) = module_env.get_type(&tr.name) {
+                return rt.predicate_raw.contains(">= 0") || rt.predicate_raw.contains("> 0");
+            }
+            // Nat type
+            if tr.name == "Nat" {
+                return true;
+            }
+        }
+        false
+    });
+
+    if all_params_nonneg && !param_names.is_empty() {
+        // Check if body only uses addition/multiplication (preserves non-negativity).
+        // Use character-level check (not space-delimited) to avoid missing `a-b`, `a/b`, `a%b`.
+        let body_only_nonneg_ops = !body_expr_str.contains('-')
+            && !body_expr_str.contains('/')
+            && !body_expr_str.contains('%');
+        if body_only_nonneg_ops {
+            ensures.push("result >= 0".to_string());
+        }
+    }
+
+    ensures
+}
+
+/// Infer contracts for all atoms in JSON format (Plan 13-3).
+/// Called by the CLI command `mumei infer-contracts` and MCP tool.
+pub fn infer_contracts_json(items: &[Item], module_env: &ModuleEnv) -> serde_json::Value {
+    let mut results = Vec::new();
+    for item in items {
+        if let Item::Atom(atom) = item {
+            let inferred_requires = infer_requires(atom, module_env);
+            let inferred_ensures = infer_ensures(atom, module_env);
+            let declared_requires = atom.requires.clone();
+            let declared_ensures = atom.ensures.clone();
+
+            // Filter out inferred requires already covered by declared
+            let new_requires: Vec<String> = inferred_requires
+                .iter()
+                .filter(|r| !declared_requires.contains(r.as_str()))
+                .cloned()
+                .collect();
+
+            // Filter out inferred ensures already covered by declared
+            let new_ensures: Vec<String> = inferred_ensures
+                .iter()
+                .filter(|e| !declared_ensures.contains(e.as_str()))
+                .cloned()
+                .collect();
+
+            let suggestion_requires = if new_requires.is_empty() {
+                serde_json::Value::Null
+            } else {
+                let all_reqs: Vec<String> = if declared_requires == "true" {
+                    new_requires.clone()
+                } else {
+                    let mut all = vec![declared_requires.clone()];
+                    all.extend(new_requires.clone());
+                    all
+                };
+                serde_json::Value::String(format!("requires: {};", all_reqs.join(" && ")))
+            };
+
+            let suggestion_ensures = if new_ensures.is_empty() {
+                serde_json::Value::Null
+            } else {
+                let all_ens: Vec<String> = if declared_ensures == "true" {
+                    new_ensures.clone()
+                } else {
+                    let mut all = vec![declared_ensures.clone()];
+                    all.extend(new_ensures.clone());
+                    all
+                };
+                serde_json::Value::String(format!("ensures: {};", all_ens.join(" && ")))
+            };
+
+            results.push(serde_json::json!({
+                "atom": atom.name,
+                "declared_requires": declared_requires,
+                "declared_ensures": declared_ensures,
+                "inferred_requires": inferred_requires,
+                "inferred_ensures": inferred_ensures,
+                "new_requires": new_requires,
+                "new_ensures": new_ensures,
+                "suggestion_requires": suggestion_requires,
+                "suggestion_ensures": suggestion_ensures,
+            }));
+        }
+    }
+    serde_json::json!({ "contracts_analysis": results })
 }
 
 /// エフェクト整合性検証: 宣言されたエフェクトと推論されたエフェクトの比較。
@@ -4328,6 +4629,25 @@ fn verify_inner(
 
     let mut env: Env = HashMap::new();
 
+    // Plan 9: Pre-register parameters with correct Z3 Sort based on their base type.
+    // Without this, Str-typed parameters without refinement types would be lazily
+    // created as Int in expr_to_z3's Variable fallback, causing string operations
+    // (concatenation, equality) to silently produce incorrect verification results.
+    // This matches the treatment in verify_atom_invariant (line 3206-3218).
+    for param in &atom.params {
+        let base = param
+            .type_name
+            .as_deref()
+            .map(|t| module_env.resolve_base_type(t))
+            .unwrap_or_else(|| "i64".to_string());
+        let var: Dynamic = match base.as_str() {
+            "f64" => Float::new_const(&ctx, param.name.as_str(), 11, 53).into(),
+            "Str" => Z3String::new_const(&ctx, param.name.as_str()).into(),
+            _ => Int::new_const(&ctx, param.name.as_str()).into(),
+        };
+        env.insert(param.name.clone(), var);
+    }
+
     // Phase 1h (continued): ConflictingMerge Z3 infrastructure.
     // With Phase 4c Copy/Move type distinction integrated, move violations for
     // Move types are now hard errors (returned above). This loop registers Z3
@@ -4402,6 +4722,8 @@ fn verify_inner(
                     let base = module_env.resolve_base_type(&field.type_name);
                     let field_z3: Dynamic = match base.as_str() {
                         "f64" => Float::new_const(&ctx, field_var_name.as_str(), 11, 53).into(),
+                        // Plan 9: Str fields as Z3 String Sort
+                        "Str" => Z3String::new_const(&ctx, field_var_name.as_str()).into(),
                         _ => Int::new_const(&ctx, field_var_name.as_str()).into(),
                     };
                     env.insert(field_var_name.clone(), field_z3.clone());
@@ -4898,6 +5220,8 @@ fn apply_refinement_constraint<'a>(
             solver.assert_and_track(&v.ge(&Int::from_i64(ctx, 0)), &track_u64);
             v.into()
         }
+        // Plan 9-7: Str base type uses Z3 String Sort for refinement constraints
+        "Str" => Z3String::new_const(ctx, var_name).into(),
         _ => Int::new_const(ctx, var_name).into(),
     };
 
@@ -4948,6 +5272,8 @@ fn expr_to_z3<'a>(
     match expr {
         Expr::Number(n) => Ok(Int::from_i64(ctx, *n).into()),
         Expr::Float(f) => Ok(Float::from_f64(ctx, *f).into()),
+        // Plan 9: String literal to Z3 String Sort
+        Expr::StringLit(s) => Ok(Z3String::from_str(ctx, s).unwrap().into()),
         Expr::Variable(name) => {
             // Wire check_alive() into variable access: if the variable has been
             // consumed, report a use-after-consume error.
@@ -5340,6 +5666,22 @@ fn expr_to_z3<'a>(
         Expr::BinaryOp(left, op, right) => {
             let l = expr_to_z3(vc, left, env, solver_opt)?;
             let r = expr_to_z3(vc, right, env, solver_opt)?;
+
+            // Plan 9-8: String concatenation — if both operands are Z3 String Sort
+            if l.get_sort() == z3::Sort::string(ctx) && r.get_sort() == z3::Sort::string(ctx) {
+                let ls = l.as_string().ok_or("Expected string for Str op")?;
+                let rs = r.as_string().ok_or("Expected string for Str op")?;
+                return match op {
+                    Op::Add => {
+                        // Z3 string concatenation — return concat directly
+                        let result = z3::ast::String::concat(ctx, &[&ls, &rs]);
+                        Ok(result.into())
+                    }
+                    Op::Eq => Ok(ls._eq(&rs).into()),
+                    Op::Neq => Ok(ls._eq(&rs).not().into()),
+                    _ => Err(format!("Unsupported operator {:?} for Str type", op).into()),
+                };
+            }
 
             // 浮動小数点か整数かで Z3 の AST メソッドを使い分ける
             if l.as_float().is_some() || r.as_float().is_some() {
