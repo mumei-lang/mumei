@@ -451,19 +451,24 @@ pub fn lower_expr_with_env(
         },
     };
 
-    // Plan 14: Check if Call expressions should be converted to VariantInit
-    // If the call name matches a known enum variant, convert to VariantInit
+    // Plan 14: Check if Call expressions should be converted to VariantInit.
+    // If the call name matches a known enum variant AND is NOT a known atom/function,
+    // convert to VariantInit. This prevents namespace collisions where a function
+    // named e.g. "Some" or "Ok" would be incorrectly treated as a variant constructor.
     if let HirExpr::Call {
         ref name, ref args, ..
     } = result
     {
         if let Some(env) = module_env {
-            if let Some(enum_def) = env.find_enum_by_variant(name) {
-                return HirExpr::VariantInit {
-                    enum_name: enum_def.name.clone(),
-                    variant_name: name.clone(),
-                    fields: args.clone(),
-                };
+            // Only convert if the name is NOT a known atom (functions take priority)
+            if env.get_atom(name).is_none() {
+                if let Some(enum_def) = env.find_enum_by_variant(name) {
+                    return HirExpr::VariantInit {
+                        enum_name: enum_def.name.clone(),
+                        variant_name: name.clone(),
+                        fields: args.clone(),
+                    };
+                }
             }
         }
     }

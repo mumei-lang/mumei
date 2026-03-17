@@ -11,6 +11,10 @@ use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::sync::Mutex;
 
+// NOTE: JSON_STORE and STRING_STORE are append-only — handles are never removed.
+// For long-running programs, this causes unbounded memory growth.
+// TODO: Add `json_free(handle: i64)` and `string_free(handle: i64)` FFI functions
+// to allow Mumei programs to release handles when no longer needed.
 lazy_static::lazy_static! {
     static ref JSON_STORE: Mutex<HashMap<i64, Value>> = Mutex::new(HashMap::new());
     static ref NEXT_JSON_HANDLE: Mutex<i64> = Mutex::new(1);

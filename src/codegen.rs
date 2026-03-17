@@ -29,6 +29,11 @@ fn array_struct_type(context: &Context) -> inkwell::types::StructType<'_> {
 /// Plan 14: Generate LLVM struct type for an enum (tagged union).
 /// Layout: { i64 tag, i64 payload_0, i64 payload_1, ... }
 /// The number of payload slots is the maximum field count across all variants.
+///
+/// NOTE: All payload slots are currently hardcoded to i64. Variants with f64 or Str
+/// fields will be stored in i64 slots, which causes a type mismatch in LLVM IR.
+/// TODO: Resolve actual field types from EnumDef variant fields and use the
+/// appropriate LLVM type (f64_type, ptr_type, etc.) for each payload slot.
 fn enum_llvm_type<'a>(
     context: &'a Context,
     enum_def: &crate::parser::EnumDef,
@@ -41,7 +46,7 @@ fn enum_llvm_type<'a>(
         .unwrap_or(0);
     let mut field_types: Vec<inkwell::types::BasicTypeEnum> = vec![context.i64_type().into()]; // tag
     for _ in 0..max_fields {
-        field_types.push(context.i64_type().into()); // payload slots
+        field_types.push(context.i64_type().into()); // payload slots (i64 only for now)
     }
     context.struct_type(&field_types, false)
 }
@@ -135,6 +140,9 @@ pub fn compile(
         .iter()
         .map(|p| resolve_param_type(&context, p.type_name.as_deref(), module_env).into())
         .collect();
+    // NOTE: Atom return type is hardcoded to i64. If an atom's body returns a Str
+    // (pointer) or f64 value, this will cause an LLVM IR type mismatch.
+    // TODO: Infer or declare atom return types and use the appropriate LLVM type here.
     let fn_type = i64_type.fn_type(&param_types, false);
     let function = module.add_function(&atom.name, fn_type, None);
 
