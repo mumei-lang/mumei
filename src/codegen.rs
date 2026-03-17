@@ -945,6 +945,10 @@ fn compile_hir_expr<'a>(
             incoming.push((unreachable_val, unreachable_block));
 
             builder.position_at_end(merge_block);
+            // NOTE: phi type is hardcoded to i64. If match arms return Str (pointer) or
+            // enum struct values, this will cause an LLVM type mismatch panic.
+            // TODO: Infer the phi type from the first arm's body value type, similar to
+            // how IfThenElse uses `then_val.get_type()` for its phi node.
             let phi = llvm!(builder.build_phi(context.i64_type(), "match_result"));
             for (val, block) in &incoming {
                 phi.add_incoming(&[(val, *block)]);

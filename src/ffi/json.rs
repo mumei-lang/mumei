@@ -138,6 +138,11 @@ pub extern "C" fn json_array_len(handle: i64) -> i64 {
 
 #[no_mangle]
 pub extern "C" fn json_array_get(handle: i64, index: i64) -> i64 {
+    // Guard against negative indices — `index as usize` wraps to a huge value,
+    // which arr.get() would return None for, but the explicit check is clearer.
+    if index < 0 {
+        return 0;
+    }
     let store = JSON_STORE.lock().unwrap();
     match store.get(&handle) {
         Some(val) => {
