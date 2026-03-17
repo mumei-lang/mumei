@@ -4622,6 +4622,25 @@ fn verify_inner(
 
     let mut env: Env = HashMap::new();
 
+    // Plan 9: Pre-register parameters with correct Z3 Sort based on their base type.
+    // Without this, Str-typed parameters without refinement types would be lazily
+    // created as Int in expr_to_z3's Variable fallback, causing string operations
+    // (concatenation, equality) to silently produce incorrect verification results.
+    // This matches the treatment in verify_atom_invariant (line 3206-3218).
+    for param in &atom.params {
+        let base = param
+            .type_name
+            .as_deref()
+            .map(|t| module_env.resolve_base_type(t))
+            .unwrap_or_else(|| "i64".to_string());
+        let var: Dynamic = match base.as_str() {
+            "f64" => Float::new_const(&ctx, param.name.as_str(), 11, 53).into(),
+            "Str" => Z3String::new_const(&ctx, param.name.as_str()).into(),
+            _ => Int::new_const(&ctx, param.name.as_str()).into(),
+        };
+        env.insert(param.name.clone(), var);
+    }
+
     // Phase 1h (continued): ConflictingMerge Z3 infrastructure.
     // With Phase 4c Copy/Move type distinction integrated, move violations for
     // Move types are now hard errors (returned above). This loop registers Z3

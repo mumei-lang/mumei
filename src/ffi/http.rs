@@ -17,6 +17,10 @@ struct HttpResponse {
     headers: HashMap<String, String>,
 }
 
+// NOTE: HTTP_STORE is append-only — handles are never removed.
+// For long-running programs, this causes unbounded memory growth.
+// TODO: Add `http_free(handle: i64)` FFI function to allow Mumei programs
+// to release response handles when no longer needed.
 lazy_static::lazy_static! {
     static ref HTTP_STORE: Mutex<HashMap<i64, HttpResponse>> = Mutex::new(HashMap::new());
     static ref NEXT_HTTP_HANDLE: Mutex<i64> = Mutex::new(1);
@@ -31,6 +35,8 @@ fn alloc_http_handle(resp: HttpResponse) -> i64 {
     handle
 }
 
+// NOTE: Intentionally leaks CString. See src/ffi/json.rs alloc_string_result for details.
+// TODO: Share a single alloc_string_result implementation or add mumei_str_free.
 fn alloc_string_result(s: &str) -> *const c_char {
     match std::ffi::CString::new(s) {
         Ok(cs) => {

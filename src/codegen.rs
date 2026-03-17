@@ -526,6 +526,9 @@ fn compile_hir_expr<'a>(
                     let result = call_result.as_any_value_enum();
                     if has_float {
                         Ok(result.into_float_value().into())
+                    } else if result.is_pointer_value() {
+                        // Plan 9: Handle Str (pointer) return type from extern functions
+                        Ok(result.into_pointer_value().into())
                     } else {
                         Ok(result.into_int_value().into())
                     }

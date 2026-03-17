@@ -31,11 +31,15 @@ fn alloc_json_handle(val: Value) -> i64 {
     handle
 }
 
+// NOTE: alloc_string_result intentionally leaks CString via std::mem::forget.
+// Every call permanently leaks memory. This is acceptable for short-lived CLI tools,
+// but causes unbounded memory growth in long-running programs or loops.
+// TODO: Add `mumei_str_free(ptr: *const c_char)` FFI function, or use a string
+// interning table to allow reuse/deallocation of returned string pointers.
 fn alloc_string_result(s: &str) -> *const c_char {
     match CString::new(s) {
         Ok(cs) => {
             let ptr = cs.as_ptr();
-            // Leak the CString to keep the pointer valid
             std::mem::forget(cs);
             ptr
         }
