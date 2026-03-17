@@ -150,6 +150,8 @@ pub struct LambdaParam {
 pub enum Expr {
     Number(i64),
     Float(f64),
+    /// Plan 9: First-class string literal
+    StringLit(String),
     Variable(String),
     ArrayAccess(String, Box<Expr>),
     BinaryOp(Box<Expr>, Op, Box<Expr>),

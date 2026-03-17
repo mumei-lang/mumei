@@ -71,6 +71,8 @@ pub enum MirConstant {
     Int(i64),
     Float(f64),
     Bool(bool),
+    /// Plan 9: String constant
+    Str(String),
     /// Function reference (atom_ref) — holds the function name.
     FuncRef(String),
 }
@@ -423,6 +425,8 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &HirExpr) -> Operand {
     match expr {
         HirExpr::Number(n) => Operand::Constant(MirConstant::Int(*n)),
         HirExpr::Float(f) => Operand::Constant(MirConstant::Float(*f)),
+        // Plan 9: String literal lowering to MIR
+        HirExpr::StringLit(s) => Operand::Constant(MirConstant::Str(s.clone())),
         HirExpr::Variable(name) => {
             if name == "true" {
                 Operand::Constant(MirConstant::Bool(true))
@@ -730,6 +734,25 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &HirExpr) -> Operand {
         HirExpr::ChanRecv { channel } => {
             let _ch = lower_expr(ctx, channel);
             Operand::Constant(MirConstant::Int(0))
+        }
+
+        // Plan 14: Enum variant construction — lower fields and emit as call-like
+        HirExpr::VariantInit {
+            enum_name,
+            variant_name,
+            fields,
+        } => {
+            let field_ops: Vec<Operand> = fields.iter().map(|f| lower_expr(ctx, f)).collect();
+            let tmp = ctx.alloc_temp();
+            ctx.emit(MirStatement::StorageLive(tmp.clone()));
+            ctx.emit(MirStatement::Assign(
+                Place::Local(tmp.clone()),
+                Rvalue::Call {
+                    func: format!("{}::{}", enum_name, variant_name),
+                    args: field_ops,
+                },
+            ));
+            Operand::Place(Place::Local(tmp))
         }
     }
 }

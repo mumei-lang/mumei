@@ -18,18 +18,20 @@
 //   - ハンドル > 0 = 有効なレスポンスオブジェクト
 //   - task_group と組み合わせて並行リクエストが可能
 //   - FFI 経由で Rust 側の reqwest を操作する
+//   - Plan 11: Str 型対応 — URL/ボディ/ヘッダーは Str として直接渡す
 
 // --- extern 宣言: Rust FFI バックエンド ---
+// Plan 11: Str 型に移行 — URL/ボディ/ヘッダーパラメータを i64 から Str に変更
 extern "Rust" {
-    fn http_get(url: i64) -> i64;
-    fn http_post(url: i64, body: i64) -> i64;
-    fn http_put(url: i64, body: i64) -> i64;
-    fn http_delete(url: i64) -> i64;
+    fn http_get(url: Str) -> i64;
+    fn http_post(url: Str, body: Str) -> i64;
+    fn http_put(url: Str, body: Str) -> i64;
+    fn http_delete(url: Str) -> i64;
     fn http_status(handle: i64) -> i64;
-    fn http_body(handle: i64) -> i64;
+    fn http_body(handle: i64) -> Str;
     fn http_body_json(handle: i64) -> i64;
-    fn http_header_get(handle: i64, name: i64) -> i64;
-    fn http_header_set(handle: i64, name: i64, value: i64) -> i64;
+    fn http_header_get(handle: i64, name: Str) -> Str;
+    fn http_header_set(handle: i64, name: Str, value: Str) -> i64;
     fn http_is_ok(handle: i64) -> i64;
     fn http_is_error(handle: i64) -> i64;
 }
@@ -39,9 +41,10 @@ extern "Rust" {
 // =============================================================
 
 // GET リクエストを送信し、レスポンスハンドルを返す。
+// Plan 11: url を Str 型に変更
 // ネットワークエラー時はハンドル 0 を返す。
-atom get(url: i64)
-    effects: [HttpGet]
+atom get(url: Str)
+    effects: [HttpGet(url)]
     requires: true;
     ensures: result >= 0;
     body: {
@@ -50,9 +53,9 @@ atom get(url: i64)
     }
 
 // POST リクエストを送信し、レスポンスハンドルを返す。
-// body は JSON ハンドルまたは文字列ハンドル。
-atom post(url: i64, body: i64)
-    effects: [HttpPost]
+// Plan 11: url, body を Str 型に変更
+atom post(url: Str, body: Str)
+    effects: [HttpPost(url)]
     requires: true;
     ensures: result >= 0;
     body: {
@@ -61,8 +64,9 @@ atom post(url: i64, body: i64)
     }
 
 // PUT リクエストを送信し、レスポンスハンドルを返す。
-atom put(url: i64, body: i64)
-    effects: [HttpPut]
+// Plan 11: url, body を Str 型に変更
+atom put(url: Str, body: Str)
+    effects: [HttpPut(url)]
     requires: true;
     ensures: result >= 0;
     body: {
@@ -71,8 +75,9 @@ atom put(url: i64, body: i64)
     }
 
 // DELETE リクエストを送信し、レスポンスハンドルを返す。
-atom delete(url: i64)
-    effects: [HttpDelete]
+// Plan 11: url を Str 型に変更
+atom delete(url: Str)
+    effects: [HttpDelete(url)]
     requires: true;
     ensures: result >= 0;
     body: {
@@ -92,10 +97,11 @@ atom status(handle: i64)
         http_status(handle)
     }
 
-// レスポンスボディを文字列ハンドルとして取得
+// レスポンスボディを Str として取得
+// Plan 11: 戻り値を Str に変更
 atom body(handle: i64)
     requires: handle >= 0;
-    ensures: result >= 0;
+    ensures: true;
     body: {
         http_body(handle)
     }
@@ -113,16 +119,18 @@ atom body_json(handle: i64)
 // Public API: ヘッダー操作
 // =============================================================
 
-// レスポンスヘッダーの値を取得（ハンドルを返す）
-atom header_get(handle: i64, name: i64)
+// レスポンスヘッダーの値を取得
+// Plan 11: name を Str 型に変更、戻り値も Str
+atom header_get(handle: i64, name: Str)
     requires: handle >= 0;
-    ensures: result >= 0;
+    ensures: true;
     body: {
         http_header_get(handle, name)
     }
 
 // リクエストヘッダーを設定（新しいハンドルを返す）
-atom header_set(handle: i64, name: i64, value: i64)
+// Plan 11: name, value を Str 型に変更
+atom header_set(handle: i64, name: Str, value: Str)
     requires: handle >= 0;
     ensures: result >= 0;
     body: {

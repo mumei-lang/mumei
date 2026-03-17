@@ -275,6 +275,8 @@ fn map_type_rust(type_name: Option<&str>) -> String {
             match base.as_str() {
                 "f64" => "f64".to_string(),
                 "u64" => "u64".to_string(),
+                // Plan 9: Str type
+                "Str" => "&str".to_string(),
                 _ => "i64".to_string(),
             }
         }
@@ -303,6 +305,8 @@ fn format_hir_expr_rust(expr: &HirExpr) -> String {
                 format!("{}.0", s)
             }
         }
+        // Plan 9: String literal
+        HirExpr::StringLit(s) => format!("\"{}\"", s),
         HirExpr::Variable(v) => v.clone(),
         HirExpr::ArrayAccess(name, idx) => {
             // インデックスは常に usize にキャスト
@@ -466,6 +470,19 @@ fn format_hir_expr_rust(expr: &HirExpr) -> String {
         }
         HirExpr::ChanRecv { channel } => {
             format!("{}.recv()", format_hir_expr_rust(channel))
+        }
+        // Plan 14: Enum variant construction
+        HirExpr::VariantInit {
+            enum_name,
+            variant_name,
+            fields,
+        } => {
+            if fields.is_empty() {
+                format!("{}::{}", enum_name, variant_name)
+            } else {
+                let field_strs: Vec<String> = fields.iter().map(format_hir_expr_rust).collect();
+                format!("{}::{}({})", enum_name, variant_name, field_strs.join(", "))
+            }
         }
     }
 }
