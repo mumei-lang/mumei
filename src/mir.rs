@@ -201,7 +201,7 @@ impl MirBody {
 /// Whether a local is Copy (bitwise-duplicable) or Move (ownership transfer).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Movability {
-    /// Primitive types (i64, f64, bool, String literals) — assignment copies.
+    /// Primitive types (i64, f64, bool) and refined type aliases (Nat, Pos, etc.) — assignment copies.
     Copy,
     /// Structs, enums, and other owned types — assignment moves.
     Move,
@@ -213,7 +213,9 @@ pub fn movability_from_type(ty: &Option<String>) -> Movability {
     match ty.as_deref() {
         Some(
             "i64" | "i32" | "i16" | "i8" | "u64" | "u32" | "u16" | "u8" | "f64" | "f32" | "Int"
-            | "Nat" | "Float" | "bool" | "Bool",
+            | "Nat" | "Pos" | "Float" | "bool" | "Bool"
+            // Standard library refined types (all i64-based)
+            | "RawPtr" | "NullablePtr" | "HumanAge",
         ) => Movability::Copy,
         _ => Movability::Move,
     }

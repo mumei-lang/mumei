@@ -2966,6 +2966,11 @@ fn verify_bmc_resource_safety(
                 ..
             } => has_acquire_in_while_stmt(then_branch) || has_acquire_in_while_stmt(else_branch),
             Expr::Async { body } => has_acquire_in_while_stmt(body),
+            // Plan 8: Channel operations — traverse sub-expressions
+            Expr::ChanSend { channel, value } => {
+                has_acquire_in_while_expr(channel) || has_acquire_in_while_expr(value)
+            }
+            Expr::ChanRecv { channel } => has_acquire_in_while_expr(channel),
             _ => false,
         }
     }
@@ -4265,6 +4270,12 @@ fn verify_inner(
                         .iter()
                         .any(|arm| body_has_symbolic_perform_args(&arm.body, module_env))
             }
+            // Plan 8: Channel operations — traverse sub-expressions for symbolic perform args
+            Expr::ChanSend { channel, value } => {
+                expr_has_symbolic_perform_args(channel, module_env)
+                    || expr_has_symbolic_perform_args(value, module_env)
+            }
+            Expr::ChanRecv { channel } => expr_has_symbolic_perform_args(channel, module_env),
             // NOTE: StructInit, FieldAccess, and ArrayAccess contain sub-expressions
             // that could hold nested Perform nodes, but are not recursed into here.
             // This means the pre-scan conservatively under-estimates: if a perform with
@@ -6282,7 +6293,10 @@ fn expr_to_z3<'a>(
         // Plan 8: Channel recv — evaluate channel, return symbolic int
         Expr::ChanRecv { channel } => {
             let _ch = expr_to_z3(vc, channel, env, solver_opt)?;
-            let recv_sym = Int::new_const(ctx, "__chan_recv");
+            static RECV_COUNTER: std::sync::atomic::AtomicUsize =
+                std::sync::atomic::AtomicUsize::new(0);
+            let recv_id = RECV_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let recv_sym = Int::new_const(ctx, format!("__chan_recv_{}", recv_id).as_str());
             Ok(recv_sym.into())
         }
     }
