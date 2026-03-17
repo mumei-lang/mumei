@@ -426,6 +426,17 @@ fn format_hir_expr_go(expr: &HirExpr) -> String {
                 body_with_return
             )
         }
+        // Plan 8: Channel operations transpiled to Go native channels
+        HirExpr::ChanSend { channel, value } => {
+            format!(
+                "{} <- {}",
+                format_hir_expr_go(channel),
+                format_hir_expr_go(value)
+            )
+        }
+        HirExpr::ChanRecv { channel } => {
+            format!("<-{}", format_hir_expr_go(channel))
+        }
     }
 }
 

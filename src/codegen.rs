@@ -993,6 +993,17 @@ fn compile_hir_expr<'a>(
             Ok(context.i64_type().const_int(0, false).into())
         }
 
+        // Plan 8: Channel send — compile value expr, return unit (0)
+        HirExpr::ChanSend { value, .. } => {
+            let _val = compile_hir_expr(
+                context, builder, module, function, value, variables, array_ptrs, module_env,
+            )?;
+            Ok(context.i64_type().const_int(0, false).into())
+        }
+
+        // Plan 8: Channel recv — return a placeholder value
+        HirExpr::ChanRecv { .. } => Ok(context.i64_type().const_int(0, false).into()),
+
         HirExpr::FieldAccess(inner_expr, field_name) => {
             if let HirExpr::Variable(var_name) = inner_expr.as_ref() {
                 let candidates = [

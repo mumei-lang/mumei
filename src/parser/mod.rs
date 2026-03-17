@@ -523,7 +523,7 @@ atom concurrent(x: i64)
             })
             .collect();
         assert_eq!(effects.len(), 1);
-        assert_eq!(effects[0].parent, Some("Network".to_string()));
+        assert_eq!(effects[0].parent, vec!["Network".to_string()]);
     }
 
     #[test]

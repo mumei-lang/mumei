@@ -12,8 +12,8 @@
 // =============================================================================
 
 use crate::mir::{
-    BasicBlock, BasicBlockId, Local, LocalDecl, MirBody, MirStatement, Operand, Place, Rvalue,
-    Terminator,
+    BasicBlock, BasicBlockId, Local, LocalDecl, MirBody, MirStatement, Movability, Operand, Place,
+    Rvalue, Terminator,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -275,12 +275,11 @@ pub fn compute_liveness(body: &MirBody) -> LivenessResult {
 /// the Drop is placed only in that branch's target block, preventing
 /// double-free.
 ///
-/// TODO: Variables used only by a SwitchInt discriminant (in terminator_uses
-/// but not in live_out) are currently excluded from dropping in this block
-/// to prevent use-after-drop, but no compensating drop is inserted in the
-/// successor blocks. This causes a leak for resource types. When Mumei adds
-/// types with destructors, add a second pass that inserts Drop at the start
-/// of each successor block for such locals.
+/// **Pass 2 (Plan 4):** Variables used only by a SwitchInt discriminant
+/// (in gen via terminator but not in live_out) are excluded from dropping in
+/// the current block to prevent use-after-drop. Instead, compensating Drop
+/// statements are inserted at the start of each successor block, preventing
+/// resource leaks.
 pub fn insert_drops(body: &mut MirBody, liveness: &LivenessResult) {
     // Pre-compute gen/kill for each block
     let gen_kill: HashMap<BasicBlockId, GenKill> = body
@@ -288,6 +287,10 @@ pub fn insert_drops(body: &mut MirBody, liveness: &LivenessResult) {
         .iter()
         .map(|b| (b.id, compute_gen_kill(b)))
         .collect();
+
+    // Pass 1: standard drop insertion (locals dying within the block).
+    // Collect SwitchInt discriminant locals that need successor drops (Pass 2).
+    let mut successor_drops: Vec<(Vec<BasicBlockId>, Local)> = Vec::new();
 
     for block in &mut body.blocks {
         let block_id = block.id;
@@ -299,11 +302,33 @@ pub fn insert_drops(body: &mut MirBody, liveness: &LivenessResult) {
             .unwrap_or_default();
         let gk = gen_kill.get(&block_id).unwrap();
 
+        // Collect locals used by the terminator (SwitchInt discriminant).
+        let terminator_locals = terminator_used_locals(&block.terminator);
+
         // Locals that are live coming in but not live going out → they die in this block
         let mut drops: Vec<Local> = Vec::new();
         for l in &live_in {
             if !live_out.contains(l) && !gk.kill.contains(l) {
-                drops.push(l.clone());
+                if terminator_locals.contains(l) {
+                    // This local is used by the terminator — cannot drop before it.
+                    // Schedule compensating drop in successor blocks (Pass 2).
+                    let succs = match &block.terminator {
+                        Terminator::SwitchInt {
+                            targets, otherwise, ..
+                        } => {
+                            let mut s: Vec<BasicBlockId> =
+                                targets.iter().map(|(_, id)| *id).collect();
+                            s.push(*otherwise);
+                            s
+                        }
+                        _ => Vec::new(),
+                    };
+                    if !succs.is_empty() {
+                        successor_drops.push((succs, l.clone()));
+                    }
+                } else {
+                    drops.push(l.clone());
+                }
             }
         }
 
@@ -315,6 +340,44 @@ pub fn insert_drops(body: &mut MirBody, liveness: &LivenessResult) {
             block.statements.push(MirStatement::Drop(l));
         }
     }
+
+    // Pass 2 (Plan 4): Insert compensating drops at the start of successor blocks
+    // for SwitchInt discriminant locals.
+    for (succ_ids, local) in successor_drops {
+        for succ_id in succ_ids {
+            if let Some(succ_block) = body.blocks.iter_mut().find(|b| b.id == succ_id) {
+                // Prevent double-drop: only insert if not already present.
+                if !block_already_drops(succ_block, &local) {
+                    succ_block
+                        .statements
+                        .insert(0, MirStatement::Drop(local.clone()));
+                }
+            }
+        }
+    }
+}
+
+/// Collect all locals read by a terminator.
+fn terminator_used_locals(terminator: &Terminator) -> HashSet<Local> {
+    let mut locals = HashSet::new();
+    match terminator {
+        Terminator::Return(op) => {
+            collect_operand_locals(op, &mut locals);
+        }
+        Terminator::SwitchInt { discr, .. } => {
+            collect_operand_locals(discr, &mut locals);
+        }
+        Terminator::Goto(_) | Terminator::Unreachable => {}
+    }
+    locals
+}
+
+/// Check whether a block already contains a Drop for the given local.
+fn block_already_drops(block: &BasicBlock, local: &Local) -> bool {
+    block.statements.iter().any(|stmt| match stmt {
+        MirStatement::Drop(l) => l == local,
+        _ => false,
+    })
 }
 
 // =============================================================================
@@ -470,12 +533,24 @@ fn collect_operand_read_locals(op: &Operand) -> Vec<Local> {
     locals
 }
 
+/// Look up movability for a local from the locals list.
+fn lookup_movability(local: &Local, locals: &[LocalDecl]) -> Movability {
+    locals
+        .iter()
+        .find(|d| d.local == *local)
+        .map(|d| d.movability)
+        .unwrap_or(Movability::Move)
+}
+
 /// Process a single statement within move analysis, updating state and recording violations.
+/// `locals` is used to look up Copy/Move distinction: Copy locals are never consumed by
+/// `Rvalue::Use`.
 fn process_statement_for_moves(
     stmt: &MirStatement,
     state: &mut MirLinearityState,
     block_id: BasicBlockId,
     violations: &mut Vec<MoveViolation>,
+    locals: &[LocalDecl],
 ) {
     match stmt {
         MirStatement::Assign(place, rvalue) => {
@@ -484,16 +559,27 @@ fn process_statement_for_moves(
                 Rvalue::Use(op) => {
                     // Rvalue::Use(Operand::Place(...)) is a potential move
                     if let Operand::Place(Place::Local(src)) = op {
-                        match state.consume(src) {
-                            Ok(()) => {}
-                            Err(_) => {
-                                // Already consumed → UseAfterMove or DoubleMove
-                                if state.status.get(src) == Some(&false) {
-                                    violations.push(MoveViolation {
-                                        block_id,
-                                        local: src.clone(),
-                                        kind: MoveViolationKind::DoubleMove,
-                                    });
+                        // Copy types are never consumed — only check alive
+                        if lookup_movability(src, locals) == Movability::Copy {
+                            if state.check_alive(src).is_err() {
+                                violations.push(MoveViolation {
+                                    block_id,
+                                    local: src.clone(),
+                                    kind: MoveViolationKind::UseAfterMove,
+                                });
+                            }
+                        } else {
+                            match state.consume(src) {
+                                Ok(()) => {}
+                                Err(_) => {
+                                    // Already consumed → UseAfterMove or DoubleMove
+                                    if state.status.get(src) == Some(&false) {
+                                        violations.push(MoveViolation {
+                                            block_id,
+                                            local: src.clone(),
+                                            kind: MoveViolationKind::DoubleMove,
+                                        });
+                                    }
                                 }
                             }
                         }
@@ -672,7 +758,7 @@ pub fn analyze_moves(body: &MirBody) -> MoveAnalysisResult {
 
         // Process each statement
         for stmt in &block.statements {
-            process_statement_for_moves(stmt, &mut state, block_id, &mut violations);
+            process_statement_for_moves(stmt, &mut state, block_id, &mut violations, &body.locals);
         }
 
         // Process terminator operands (read access)
@@ -712,6 +798,24 @@ pub fn analyze_moves(body: &MirBody) -> MoveAnalysisResult {
                     // Merge with existing entry state
                     let (merged, conflicts) = existing.merge(&state);
                     for conflict in &conflicts {
+                        // Copy-type locals cannot have ownership conflicts —
+                        // skip ConflictingMerge for them.
+                        if lookup_movability(&conflict.local, &body.locals) == Movability::Copy {
+                            continue;
+                        }
+                        // Compiler-generated temporaries (no user-visible name) are
+                        // lowering artefacts (e.g., match result locals). They may
+                        // legitimately have different alive/consumed states across
+                        // control-flow paths, so skip ConflictingMerge for them.
+                        let is_named = body
+                            .locals
+                            .iter()
+                            .find(|d| d.local == conflict.local)
+                            .and_then(|d| d.name.as_ref())
+                            .is_some();
+                        if !is_named {
+                            continue;
+                        }
                         violations.push(MoveViolation {
                             block_id: succ_id,
                             local: conflict.local.clone(),
@@ -1039,13 +1143,10 @@ pub fn analyze_temporal_effects(
                         // state to avoid cascading false violations on subsequent
                         // operations in the same block. Pick the first valid from_state
                         // and use its target as the new current state.
-                        if let Some((_, first_valid_from)) = sm
-                            .transitions
-                            .keys()
-                            .find(|(op, _)| op == &operation)
+                        if let Some((_, first_valid_from)) =
+                            sm.transitions.keys().find(|(op, _)| op == &operation)
                         {
-                            if let Some(recovery_next) =
-                                sm.next_state(&operation, first_valid_from)
+                            if let Some(recovery_next) = sm.next_state(&operation, first_valid_from)
                             {
                                 current.insert(effect.clone(), recovery_next.clone());
                             }
@@ -1393,11 +1494,13 @@ mod tests {
                     local: Local(0),
                     name: Some("x".to_string()),
                     ty: Some("Int".to_string()),
+                    movability: Movability::Copy,
                 },
                 LocalDecl {
                     local: Local(1),
                     name: Some("tmp".to_string()),
                     ty: Some("Int".to_string()),
+                    movability: Movability::Copy,
                 },
             ],
             blocks: vec![
@@ -1478,12 +1581,14 @@ mod tests {
                 LocalDecl {
                     local: Local(0),
                     name: Some("x".to_string()),
-                    ty: Some("Int".to_string()),
+                    ty: Some("MyStruct".to_string()),
+                    movability: Movability::Move,
                 },
                 LocalDecl {
                     local: Local(1),
                     name: Some("y".to_string()),
-                    ty: Some("Int".to_string()),
+                    ty: Some("MyStruct".to_string()),
+                    movability: Movability::Move,
                 },
             ],
             blocks: vec![BasicBlock {
@@ -1525,17 +1630,20 @@ mod tests {
                 LocalDecl {
                     local: Local(0),
                     name: Some("x".to_string()),
-                    ty: Some("Int".to_string()),
+                    ty: Some("MyStruct".to_string()),
+                    movability: Movability::Move,
                 },
                 LocalDecl {
                     local: Local(1),
                     name: Some("y".to_string()),
-                    ty: Some("Int".to_string()),
+                    ty: Some("MyStruct".to_string()),
+                    movability: Movability::Move,
                 },
                 LocalDecl {
                     local: Local(2),
                     name: Some("z".to_string()),
-                    ty: Some("Int".to_string()),
+                    ty: Some("MyStruct".to_string()),
+                    movability: Movability::Move,
                 },
             ],
             blocks: vec![BasicBlock {
@@ -1583,16 +1691,19 @@ mod tests {
                     local: Local(0),
                     name: Some("cond".to_string()),
                     ty: Some("Int".to_string()),
+                    movability: Movability::Copy,
                 },
                 LocalDecl {
                     local: Local(1),
                     name: Some("x".to_string()),
-                    ty: Some("Int".to_string()),
+                    ty: Some("MyStruct".to_string()),
+                    movability: Movability::Move,
                 },
                 LocalDecl {
                     local: Local(2),
                     name: Some("y".to_string()),
-                    ty: Some("Int".to_string()),
+                    ty: Some("MyStruct".to_string()),
+                    movability: Movability::Move,
                 },
             ],
             blocks: vec![
@@ -1663,16 +1774,19 @@ mod tests {
                     local: Local(0),
                     name: Some("cond".to_string()),
                     ty: Some("Int".to_string()),
+                    movability: Movability::Copy,
                 },
                 LocalDecl {
                     local: Local(1),
                     name: Some("x".to_string()),
-                    ty: Some("Int".to_string()),
+                    ty: Some("MyStruct".to_string()),
+                    movability: Movability::Move,
                 },
                 LocalDecl {
                     local: Local(2),
                     name: Some("y".to_string()),
-                    ty: Some("Int".to_string()),
+                    ty: Some("MyStruct".to_string()),
+                    movability: Movability::Move,
                 },
             ],
             blocks: vec![
@@ -1740,11 +1854,13 @@ mod tests {
                     local: Local(0),
                     name: Some("x".to_string()),
                     ty: Some("Int".to_string()),
+                    movability: Movability::Copy,
                 },
                 LocalDecl {
                     local: Local(1),
                     name: Some("result".to_string()),
                     ty: Some("Int".to_string()),
+                    movability: Movability::Copy,
                 },
             ],
             blocks: vec![BasicBlock {
@@ -1782,17 +1898,120 @@ mod tests {
     }
 
     #[test]
+    fn test_copy_type_reuse_no_violation() {
+        // Copy types (Int) can be used multiple times without move violations.
+        // Block 0: y = Use(x); z = Use(x); return z
+        // x is Copy, so both uses are valid (no consume).
+        let body = MirBody {
+            name: "copy_reuse".to_string(),
+            locals: vec![
+                LocalDecl {
+                    local: Local(0),
+                    name: Some("x".to_string()),
+                    ty: Some("Int".to_string()),
+                    movability: Movability::Copy,
+                },
+                LocalDecl {
+                    local: Local(1),
+                    name: Some("y".to_string()),
+                    ty: Some("Int".to_string()),
+                    movability: Movability::Copy,
+                },
+                LocalDecl {
+                    local: Local(2),
+                    name: Some("z".to_string()),
+                    ty: Some("Int".to_string()),
+                    movability: Movability::Copy,
+                },
+            ],
+            blocks: vec![BasicBlock {
+                id: 0,
+                statements: vec![
+                    MirStatement::Assign(
+                        Place::Local(Local(1)),
+                        Rvalue::Use(Operand::Place(Place::Local(Local(0)))),
+                    ),
+                    MirStatement::Assign(
+                        Place::Local(Local(2)),
+                        Rvalue::Use(Operand::Place(Place::Local(Local(0)))),
+                    ),
+                ],
+                terminator: Terminator::Return(Operand::Place(Place::Local(Local(2)))),
+            }],
+            entry_block: 0,
+        };
+
+        let result = analyze_moves(&body);
+        let violations: Vec<_> = result
+            .violations
+            .iter()
+            .filter(|v| v.local == Local(0))
+            .collect();
+        assert!(
+            violations.is_empty(),
+            "Copy type Int should not produce move violations, got: {:?}",
+            violations
+        );
+    }
+
+    #[test]
+    fn test_move_type_use_after_move_detected() {
+        // Move types (MyStruct) should produce UseAfterMove when used after being moved.
+        // Block 0: y = Use(x); return x
+        // x is Move, so the return after move should be a violation.
+        let body = MirBody {
+            name: "move_uam".to_string(),
+            locals: vec![
+                LocalDecl {
+                    local: Local(0),
+                    name: Some("x".to_string()),
+                    ty: Some("MyStruct".to_string()),
+                    movability: Movability::Move,
+                },
+                LocalDecl {
+                    local: Local(1),
+                    name: Some("y".to_string()),
+                    ty: Some("MyStruct".to_string()),
+                    movability: Movability::Move,
+                },
+            ],
+            blocks: vec![BasicBlock {
+                id: 0,
+                statements: vec![MirStatement::Assign(
+                    Place::Local(Local(1)),
+                    Rvalue::Use(Operand::Place(Place::Local(Local(0)))),
+                )],
+                terminator: Terminator::Return(Operand::Place(Place::Local(Local(0)))),
+            }],
+            entry_block: 0,
+        };
+
+        let result = analyze_moves(&body);
+        let uam: Vec<_> = result
+            .violations
+            .iter()
+            .filter(|v| v.kind == MoveViolationKind::UseAfterMove && v.local == Local(0))
+            .collect();
+        assert!(
+            !uam.is_empty(),
+            "Move type MyStruct should produce UseAfterMove"
+        );
+    }
+
+    #[test]
     fn test_mir_linearity_state_basic() {
         let locals = vec![
             LocalDecl {
                 local: Local(0),
                 name: Some("a".to_string()),
                 ty: None,
+                movability: Movability::Move,
             },
             LocalDecl {
                 local: Local(1),
                 name: Some("b".to_string()),
                 ty: None,
+                movability: Movability::Move,
             },
         ];
 
@@ -1853,7 +2072,7 @@ mod tests {
             constraint: None,
             includes: vec![],
             refinement: None,
-            parent: None,
+            parent: vec![],
             span: Span::default(),
             states: vec!["Closed".to_string(), "Open".to_string()],
             transitions: vec![
@@ -1902,7 +2121,7 @@ mod tests {
             constraint: None,
             includes: vec![],
             refinement: None,
-            parent: None,
+            parent: vec![],
             span: Span::default(),
             states: vec![],
             transitions: vec![],
@@ -1919,7 +2138,7 @@ mod tests {
             constraint: None,
             includes: vec![],
             refinement: None,
-            parent: None,
+            parent: vec![],
             span: Span::default(),
             states: (0..9).map(|i| format!("S{}", i)).collect(),
             transitions: vec![],
@@ -1937,7 +2156,7 @@ mod tests {
             constraint: None,
             includes: vec![],
             refinement: None,
-            parent: None,
+            parent: vec![],
             span: Span::default(),
             states: vec!["A".to_string(), "B".to_string()],
             transitions: vec![],
@@ -1959,7 +2178,7 @@ mod tests {
             constraint: None,
             includes: vec![],
             refinement: None,
-            parent: None,
+            parent: vec![],
             span: Span::default(),
             states: vec!["A".to_string(), "B".to_string()],
             transitions: vec![EffectTransition {
@@ -2004,6 +2223,7 @@ mod tests {
                 local: Local(0),
                 name: Some("_ret".to_string()),
                 ty: None,
+                movability: Movability::Move,
             }],
             blocks: vec![
                 BasicBlock {
@@ -2070,6 +2290,7 @@ mod tests {
                 local: Local(0),
                 name: Some("_ret".to_string()),
                 ty: None,
+                movability: Movability::Move,
             }],
             blocks: vec![BasicBlock {
                 id: 0,
@@ -2115,6 +2336,7 @@ mod tests {
                 local: Local(0),
                 name: Some("_ret".to_string()),
                 ty: None,
+                movability: Movability::Move,
             }],
             blocks: vec![BasicBlock {
                 id: 0,
@@ -2171,11 +2393,13 @@ mod tests {
                     local: Local(0),
                     name: Some("_ret".to_string()),
                     ty: None,
+                    movability: Movability::Move,
                 },
                 LocalDecl {
                     local: Local(1),
                     name: Some("cond".to_string()),
                     ty: None,
+                    movability: Movability::Move,
                 },
             ],
             blocks: vec![
@@ -2255,11 +2479,13 @@ mod tests {
                     local: Local(0),
                     name: Some("_ret".to_string()),
                     ty: None,
+                    movability: Movability::Move,
                 },
                 LocalDecl {
                     local: Local(1),
                     name: Some("cond".to_string()),
                     ty: None,
+                    movability: Movability::Move,
                 },
             ],
             blocks: vec![
@@ -2349,11 +2575,13 @@ mod tests {
                     local: Local(0),
                     name: Some("_ret".to_string()),
                     ty: None,
+                    movability: Movability::Move,
                 },
                 LocalDecl {
                     local: Local(1),
                     name: Some("cond".to_string()),
                     ty: None,
+                    movability: Movability::Move,
                 },
             ],
             blocks: vec![

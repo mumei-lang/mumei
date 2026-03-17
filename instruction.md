@@ -301,11 +301,11 @@ task_group:all {
 
 Improve the practicality of `task` / `task_group` introduced in PR-C.
 
-**TODO:**
-- Task return type inference
-- Syntax for binding `task_group` results to variables
-- Task cancellation semantics design
-- Channel type (`chan<T>`) design
+**Implemented (Plan 8):**
+- Task return type inference — type checker infers return type from `task { expr }` block's final expression; `await` yields the correct type from the task handle
+- Syntax for binding `task_group` results to variables — `let results = task_group { ... }` binds the collection of individual task return types
+- Task cancellation semantics — `cancel group_name;` statement cancels pending tasks in a task_group; task_group scope exit implicitly cancels all pending tasks via cancellation token mechanism
+- Channel type (`chan<T>`) — built-in generic type with `send(ch, value)` and `recv(ch)` operations; requires `Chan` effect annotation; implemented in parser (`send`/`recv` keywords), AST (`ChanSend`/`ChanRecv`), HIR, MIR, codegen, transpilers, and Z3 verification (channel and value sub-expressions are fully traversed)
 
 ---
 
@@ -313,9 +313,11 @@ Improve the practicality of `task` / `task_group` introduced in PR-C.
 
 - Always run `cargo fmt` before committing.
 - When adding a new `Expr` variant, add match arms in **all** of these locations:
-  - `src/verification.rs`: `expr_to_z3`, `stmt_to_z3`, `collect_callees_expr`, `collect_callees_stmt`, `count_self_calls_expr`, `count_self_calls_stmt`, `collect_acquire_resources_expr`, `collect_acquire_resources_stmt`
+  - `src/verification.rs`: `expr_to_z3`, `stmt_to_z3`, `collect_callees_expr`, `collect_callees_stmt`, `count_self_calls_expr`, `count_self_calls_stmt`, `collect_acquire_resources_expr`, `collect_acquire_resources_stmt`, `expr_has_symbolic_perform_args`, `body_has_symbolic_perform_args`, `has_acquire_in_while_expr`
   - `src/ast.rs`: `collect_from_expr`, `collect_from_stmt`
+  - `src/hir.rs`: `collect_free_variables_expr`, `collect_free_variables_stmt`
   - `src/codegen.rs`: `compile_hir_expr`, `compile_hir_stmt`
+  - `src/mir.rs`: `lower_expr`, `lower_stmt`
   - `src/transpiler/rust.rs`, `golang.rs`, `typescript.rs`: `format_hir_expr_*`, `format_hir_stmt_*`
 - When adding a new `Item` variant, add match arms in **all** of these locations:
   - `src/main.rs`: `load_and_prepare`, `cmd_check`, `cmd_build`

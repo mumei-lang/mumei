@@ -430,6 +430,17 @@ fn format_hir_expr_ts(expr: &HirExpr) -> String {
                 body_with_return
             )
         }
+        // Plan 8: Channel operations transpiled to TypeScript
+        HirExpr::ChanSend { channel, value } => {
+            format!(
+                "await {}.send({})",
+                format_hir_expr_ts(channel),
+                format_hir_expr_ts(value)
+            )
+        }
+        HirExpr::ChanRecv { channel } => {
+            format!("await {}.recv()", format_hir_expr_ts(channel))
+        }
     }
 }
 

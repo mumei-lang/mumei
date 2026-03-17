@@ -456,6 +456,17 @@ fn format_hir_expr_rust(expr: &HirExpr) -> String {
             let body_str = format_hir_stmt_rust(body);
             format!("{}|{}| {{ {} }}", move_kw, params_str.join(", "), body_str)
         }
+        // Plan 8: Channel operations transpiled to Rust
+        HirExpr::ChanSend { channel, value } => {
+            format!(
+                "{}.send({})",
+                format_hir_expr_rust(channel),
+                format_hir_expr_rust(value)
+            )
+        }
+        HirExpr::ChanRecv { channel } => {
+            format!("{}.recv()", format_hir_expr_rust(channel))
+        }
     }
 }
 

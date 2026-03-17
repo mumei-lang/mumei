@@ -81,6 +81,8 @@ pub struct Effect {
     pub name: String,
     pub params: Vec<EffectParam>,
     pub span: Span,
+    /// Plan 6: Negative effects — when true, this effect is negated (e.g., `!IO`)
+    pub negated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -98,6 +100,7 @@ impl Effect {
             name: name.to_string(),
             params: vec![],
             span: Span::default(),
+            negated: false,
         }
     }
 }
@@ -111,7 +114,8 @@ pub struct EffectDef {
     pub constraint: Option<String>,
     pub includes: Vec<String>,
     pub refinement: Option<String>,
-    pub parent: Option<String>,
+    /// Plan 6: Multi-parent support — `parent: [Network, Encrypted]`
+    pub parent: Vec<String>,
     pub span: Span,
     // Stateful effect fields (Task 3: Temporal Effect Verification)
     pub states: Vec<String>,
@@ -188,6 +192,19 @@ pub enum Expr {
         return_type: Option<String>,
         body: Box<Stmt>,
     },
+    // Plan 8: Channel send expression — `send(ch, value)`
+    // NOTE: ChanSend is constructed by the parser when `send` keyword is encountered.
+    #[allow(dead_code)]
+    ChanSend {
+        channel: Box<Expr>,
+        value: Box<Expr>,
+    },
+    // Plan 8: Channel receive expression — `recv(ch)`
+    // NOTE: ChanRecv is constructed by the parser when `recv` keyword is encountered.
+    #[allow(dead_code)]
+    ChanRecv {
+        channel: Box<Expr>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -218,6 +235,12 @@ pub enum Stmt {
     TaskGroup {
         children: Vec<Stmt>,
         join_semantics: JoinSemantics,
+    },
+    // Plan 8: Cancel statement — `cancel task_group_name;`
+    // NOTE: Cancel is constructed by the parser when `cancel` keyword is encountered.
+    #[allow(dead_code)]
+    Cancel {
+        target: String,
     },
     Expr(Expr),
 }

@@ -147,8 +147,8 @@ executable runs anywhere.
 **Current State**:
 - ✅ GitHub Actions release workflow (macOS x86_64/aarch64, Linux x86_64)
 - ✅ `mumei setup` for Z3/LLVM auto-download
-- ❌ musl target (fully static linking)
-- ❌ Windows binaries
+- ✅ musl target (fully static linking) — added in Plan 7
+- ✅ Windows binaries (`x86_64-pc-windows-msvc`) — added in Plan 7
 
 **Implementation Plan**:
 
@@ -409,11 +409,11 @@ P3-B (mumei doc)       (independent)
 ### Current Implementation
 
 - **Effect Inference**: Call graph traversal infers required effects from callee atoms
-- **Hybrid Path Verification**: Constant Folding (Rust-side) + Symbolic String ID (Z3 Int)
+- **Hybrid Path Verification**: Constant Folding (Rust-side) + Z3 String Sort (symbolic paths)
 - **Effect Hierarchy (Subtyping)**: `parent:` field on EffectDef enables Network → HttpRead/TcpConnect
 - **MCP Pre-check**: `get_inferred_effects` tool lets AI check required permissions before writing code
 
-### Z3 String Sort Integration (In Progress)
+### Z3 String Sort Integration (Complete)
 
 Z3's native String sort has been integrated for symbolic effect parameter verification.
 The hybrid approach (Constant Folding + Z3 String Sort) is now active:
@@ -441,15 +441,15 @@ The hybrid approach (Constant Folding + Z3 String Sort) is now active:
 - Regex-based path policies: `matches(path, "/tmp/[a-z]+\\.txt")`
 - URL validation for std.http effects: `starts_with(url, "https://")`
 
-### TODO: Effect Hierarchy Extensions
+### Effect Hierarchy Extensions
 
-Future extensions to the effect subtyping system:
+Extensions to the effect subtyping system:
 
-1. **Multi-parent (Intersection)**: `effect SecureNetRead parent: [Network, Encrypted];`
+1. **Multi-parent (Intersection)**: `effect SecureNetRead parent: [Network, Encrypted];` — ✅ Done (Plan 6)
 2. **Effect polymorphism**: `atom pipe<E: Effect>(f: atom_ref(T) -> U with E)` — ✅ Done
-3. **Effect narrowing**: When calling a `Network`-annotated function with only `HttpRead`, narrow the effect at the call site
-4. **Negative effects**: `atom pure_compute() effects: [!IO];` — explicitly deny effects
-5. **Effect aliases**: `effect IO = FileRead | FileWrite | ConsoleOut;` — union types for convenience
+3. **Effect narrowing**: When calling a `Network`-annotated function with only `HttpRead`, narrow the effect at the call site — ✅ Done (Plan 6, info diagnostic)
+4. **Negative effects**: `atom pure_compute() effects: [!IO];` — explicitly deny effects — ✅ Done (Plan 6)
+5. **Effect aliases**: `effect IO = FileRead | FileWrite | ConsoleOut;` — union types for convenience — ✅ Done (Plan 6)
 
 ---
 
@@ -463,7 +463,7 @@ Future extensions to the effect subtyping system:
 | Phase 2.5 | Lambda / Closure Support | ✅ Done | Phase 2 |
 | Phase 2.5 | Semantic Feedback v2 (all failure types, bilingual) | ✅ Done | Phase 1 |
 | Phase 3 | Effect Polymorphism | ✅ Done | Phase 2 |
-| Phase 4 | MIR introduction (CFG for borrow checking) | 🚧 Phase 4a/4b done, liveness + move analysis | LinearityCtx wired + MIR data structures + mir_analysis.rs |
+| Phase 4 | MIR introduction (CFG for borrow checking) | ✅ Phase 4a-4c done: liveness, move analysis, Copy/Move distinction, drop insertion | LinearityCtx wired + MIR data structures + mir_analysis.rs |
 | Phase 5 | HIR Effect Type Information | ✅ Done | HirEffectSet on HirAtom/HirExpr, lower_atom_to_hir_with_env |
 | Phase 6 | Capability Security evaluation | ✅ Done | See docs/CAPABILITY_SECURITY.md |
 | Phase 7 | Temporal Effect Verification (Stateful Effects) | ✅ Done | EffectStateMachine, forward dataflow, Phase 1i |
@@ -475,6 +475,23 @@ Future extensions to the effect subtyping system:
 - **Phase 4 (MIR)**: A CFG-based intermediate representation is needed for borrow checking and lifetime analysis, but the borrow checking design itself is not yet started. Will be introduced after the design is finalized.
 - **Phase 5 (HIR Effect Type Information)**: ✅ Complete — `HirEffectSet` attached to `HirAtom`, `HirExpr::Call`, `HirExpr::Perform`. `lower_atom_to_hir_with_env()` populates effect info from `ModuleEnv`. Codegen and all transpilers read effects from `hir_atom.effect_set`.
 - **Phase 6 (Capability Security)**: ✅ Complete — Evaluation documented in `docs/CAPABILITY_SECURITY.md`. Recommendation: Continue with parameterized effects + Z3 (Option A). `EffectCtx`, `SecurityPolicy`, `verify_effect_params`, `verify_effect_consistency`, `build_effect_feedback` all wired into the verification pipeline.
+
+---
+
+## Phase 4c+ Implementation Plans
+
+Detailed session plans for the next 8 implementation priorities are documented in [SESSION_PLANS.md](./SESSION_PLANS.md).
+
+| # | Plan | Status |
+|---|------|--------|
+| 1 | Phase 4c: MIR Copy/Move type distinction | ✅ Implemented |
+| 2 | MIR Lowering: remaining expression forms | ✅ Implemented |
+| 3 | MIR control flow lowering hardening | ✅ Implemented |
+| 4 | MIR Drop Insertion: SwitchInt successor drops | ✅ Implemented |
+| 5 | Z3 String Sort migration | ✅ Implemented |
+| 6 | Effect Hierarchy extensions | ✅ Implemented |
+| 7 | Runtime Portability: musl + Windows | ✅ CI infrastructure added (untested on runners) |
+| 8 | Concurrency improvements | ✅ Parser/AST/HIR infrastructure added (codegen placeholder) |
 
 ---
 

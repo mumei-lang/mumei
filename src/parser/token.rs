@@ -58,6 +58,11 @@ pub enum Token {
     Parent,
     As,
     Contract,
+    // Plan 8: Concurrency keywords
+    Chan,
+    Send,
+    Recv,
+    Cancel,
 
     // --- Literals ---
     IntLit(i64),
@@ -168,6 +173,10 @@ impl std::fmt::Display for Token {
             Token::Parent => write!(f, "parent"),
             Token::As => write!(f, "as"),
             Token::Contract => write!(f, "contract"),
+            Token::Chan => write!(f, "chan"),
+            Token::Send => write!(f, "send"),
+            Token::Recv => write!(f, "recv"),
+            Token::Cancel => write!(f, "cancel"),
             Token::IntLit(n) => write!(f, "{}", n),
             Token::FloatLit(n) => write!(f, "{}", n),
             Token::StringLit(s) => write!(f, "\"{}\"", s),
