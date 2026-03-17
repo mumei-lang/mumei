@@ -2882,6 +2882,14 @@ fn collect_acquire_resources_expr(expr: &Expr) -> Vec<String> {
         Expr::Lambda { body, .. } => {
             resources.extend(collect_acquire_resources_stmt(body));
         }
+        // Plan 8: Channel operations — traverse sub-expressions for acquire resources
+        Expr::ChanSend { channel, value } => {
+            resources.extend(collect_acquire_resources_expr(channel));
+            resources.extend(collect_acquire_resources_expr(value));
+        }
+        Expr::ChanRecv { channel } => {
+            resources.extend(collect_acquire_resources_expr(channel));
+        }
         _ => {}
     }
     resources
@@ -3059,6 +3067,12 @@ fn verify_async_recursion_depth(
                         .sum::<usize>()
             }
             Expr::Lambda { body, .. } => count_self_calls_stmt(body, atom_name),
+            // Plan 8: Channel operations — traverse sub-expressions for self-calls
+            Expr::ChanSend { channel, value } => {
+                count_self_calls_expr(channel, atom_name)
+                    + count_self_calls_expr(value, atom_name)
+            }
+            Expr::ChanRecv { channel } => count_self_calls_expr(channel, atom_name),
             _ => 0,
         }
     }
@@ -3373,6 +3387,14 @@ fn collect_callees_expr(expr: &Expr) -> Vec<String> {
         }
         Expr::Lambda { body, .. } => {
             callees.extend(collect_callees_stmt(body));
+        }
+        // Plan 8: Channel operations — traverse sub-expressions for callees
+        Expr::ChanSend { channel, value } => {
+            callees.extend(collect_callees_expr(channel));
+            callees.extend(collect_callees_expr(value));
+        }
+        Expr::ChanRecv { channel } => {
+            callees.extend(collect_callees_expr(channel));
         }
         _ => {}
     }
@@ -6251,13 +6273,15 @@ fn expr_to_z3<'a>(
 
             Ok(lambda_sym.into())
         }
-        // Plan 8: Channel send — evaluate value, return unit
-        Expr::ChanSend { value, .. } => {
+        // Plan 8: Channel send — evaluate channel and value, return unit
+        Expr::ChanSend { channel, value } => {
+            let _ch = expr_to_z3(vc, channel, env, solver_opt)?;
             let _val = expr_to_z3(vc, value, env, solver_opt)?;
             Ok(Int::from_i64(ctx, 0).into())
         }
-        // Plan 8: Channel recv — return symbolic int
-        Expr::ChanRecv { .. } => {
+        // Plan 8: Channel recv — evaluate channel, return symbolic int
+        Expr::ChanRecv { channel } => {
+            let _ch = expr_to_z3(vc, channel, env, solver_opt)?;
             let recv_sym = Int::new_const(ctx, "__chan_recv");
             Ok(recv_sym.into())
         }

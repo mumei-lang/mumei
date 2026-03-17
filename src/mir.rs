@@ -213,7 +213,7 @@ pub fn movability_from_type(ty: &Option<String>) -> Movability {
     match ty.as_deref() {
         Some(
             "i64" | "i32" | "i16" | "i8" | "u64" | "u32" | "u16" | "u8" | "f64" | "f32" | "Int"
-            | "Float" | "bool" | "Bool",
+            | "Nat" | "Float" | "bool" | "Bool",
         ) => Movability::Copy,
         _ => Movability::Move,
     }
