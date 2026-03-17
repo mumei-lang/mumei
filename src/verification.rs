@@ -1446,29 +1446,26 @@ impl ModuleEnv {
 
     /// エフェクト名からその祖先エフェクト（親→祖父→...）を全て返す。
     /// HttpRead → [Network] のように、包含関係を解決する。
+    /// Plan 6: Multi-parent support — BFS over all parents.
     pub fn get_effect_ancestors(&self, effect_name: &str) -> Vec<String> {
         let mut ancestors = Vec::new();
-        let mut current = effect_name.to_string();
-        let mut visited = HashSet::new(); // 循環防止
-        loop {
+        let mut visited = HashSet::new();
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back(effect_name.to_string());
+        visited.insert(effect_name.to_string());
+        while let Some(current) = queue.pop_front() {
             // effect_defs を優先、なければ effects も参照
-            let parent_opt = self
+            let parents: Vec<String> = self
                 .effect_defs
                 .get(&current)
-                .and_then(|def| def.parent.clone())
-                .or_else(|| {
-                    self.effects
-                        .get(&current)
-                        .and_then(|def| def.parent.clone())
-                });
-            if let Some(parent) = parent_opt {
-                if !visited.insert(parent.clone()) {
-                    break; // 循環検出
+                .map(|def| def.parent.clone())
+                .or_else(|| self.effects.get(&current).map(|def| def.parent.clone()))
+                .unwrap_or_default();
+            for parent in parents {
+                if visited.insert(parent.clone()) {
+                    ancestors.push(parent.clone());
+                    queue.push_back(parent);
                 }
-                ancestors.push(parent.clone());
-                current = parent;
-            } else {
-                break;
             }
         }
         ancestors
@@ -1699,7 +1696,7 @@ pub fn register_builtin_effects(module_env: &mut ModuleEnv) {
             constraint: None,
             includes: vec![],
             refinement: None,
-            parent: None,
+            parent: vec![],
             span: Span::default(),
             states: vec![],
             transitions: vec![],
@@ -1719,7 +1716,7 @@ pub fn register_builtin_effects(module_env: &mut ModuleEnv) {
             "Console".to_string(),
         ],
         refinement: None,
-        parent: None,
+        parent: vec![],
         span: Span::default(),
         states: vec![],
         transitions: vec![],
@@ -1733,7 +1730,7 @@ pub fn register_builtin_effects(module_env: &mut ModuleEnv) {
         constraint: None,
         includes: vec!["IO".to_string(), "Network".to_string(), "Log".to_string()],
         refinement: None,
-        parent: None,
+        parent: vec![],
         span: Span::default(),
         states: vec![],
         transitions: vec![],
@@ -2413,6 +2410,76 @@ fn verify_effect_containment(
         }
     }
 
+    // Plan 6: Negative effects — verify that body does not use forbidden effects.
+    // E.g., `effects: [!IO]` means the atom forbids IO and all its sub-effects.
+    let negated_effects: Vec<&Effect> = atom.effects.iter().filter(|e| e.negated).collect();
+    if !negated_effects.is_empty() {
+        for callee_name in &callees {
+            if let Some(callee_atom) = module_env.get_atom(callee_name) {
+                for callee_eff in &callee_atom.effects {
+                    if callee_eff.negated {
+                        continue;
+                    }
+                    let callee_leaf_set =
+                        module_env.resolve_leaf_effects(std::slice::from_ref(&callee_eff.name));
+                    for neg in &negated_effects {
+                        let neg_leaf_set =
+                            module_env.resolve_leaf_effects(std::slice::from_ref(&neg.name));
+                        // Check if any callee leaf is a sub-effect of the negated effect
+                        // or is in the negated leaf set
+                        for callee_leaf in &callee_leaf_set {
+                            let is_forbidden = neg_leaf_set.contains(callee_leaf)
+                                || module_env.is_subeffect(callee_leaf, &neg.name);
+                            if is_forbidden {
+                                return Err(MumeiError::verification_at(
+                                    format!(
+                                        "Negative effect violation: atom '{}' declares '!{}' \
+                                         but calls '{}' which uses effect '{}' \
+                                         (resolved leaf: '{}'). This effect is forbidden.",
+                                        atom.name, neg.name, callee_name,
+                                        callee_eff.name, callee_leaf,
+                                    ),
+                                    atom.span.clone(),
+                                )
+                                .with_help(format!(
+                                    "Remove the call to '{}', or remove '!{}' from the effects declaration.",
+                                    callee_name, neg.name
+                                )));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Plan 6: Effect narrowing — diagnostic when caller has a subtype of callee's required effect.
+    for callee_name in &callees {
+        if let Some(callee_atom) = module_env.get_atom(callee_name) {
+            for callee_eff in &callee_atom.effects {
+                if callee_eff.negated {
+                    continue;
+                }
+                // Check if the caller has a more specific (narrower) effect
+                for caller_eff in &atom.effects {
+                    if caller_eff.negated {
+                        continue;
+                    }
+                    if caller_eff.name != callee_eff.name
+                        && module_env.is_subeffect(&caller_eff.name, &callee_eff.name)
+                    {
+                        // Caller has a narrower effect — emit info diagnostic (not error)
+                        eprintln!(
+                            "Info: Effect narrowing at call site — atom '{}' provides '{}' \
+                             (subtype of '{}') for callee '{}'.",
+                            atom.name, caller_eff.name, callee_eff.name, callee_name
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     // atom_ref パラメータの effect_set ⊆ caller のエフェクト
     // 複合エフェクト（IO, FullAccess 等）を正しく扱うため、両側をリーフに解決して比較する
     for param in &atom.params {
@@ -2849,6 +2916,8 @@ fn collect_acquire_resources_stmt(stmt: &Stmt) -> Vec<String> {
         Stmt::Expr(e) => {
             resources.extend(collect_acquire_resources_expr(e));
         }
+        // Plan 8: Cancel statement has no resources
+        Stmt::Cancel { .. } => {}
     }
     resources
 }
@@ -3012,6 +3081,8 @@ fn verify_async_recursion_depth(
                 .map(|c| count_self_calls_stmt(c, atom_name))
                 .sum(),
             Stmt::Expr(e) => count_self_calls_expr(e, atom_name),
+            // Plan 8: Cancel statement has no self-calls
+            Stmt::Cancel { .. } => 0,
         }
     }
 
@@ -3337,6 +3408,8 @@ fn collect_callees_stmt(stmt: &Stmt) -> Vec<String> {
         Stmt::Expr(e) => {
             callees.extend(collect_callees_expr(e));
         }
+        // Plan 8: Cancel statement has no callees
+        Stmt::Cancel { .. } => {}
     }
     callees
 }
@@ -3634,8 +3707,8 @@ fn check_constant_constraint(value: &str, constraint: &str) -> bool {
 }
 
 /// エフェクトパラメータの検証。
-/// 定数パスは Rust 側で直接チェック（Constant Folding）。
-/// 変数パスは Z3 Int で検証（Symbolic String ID）。
+/// 定数パスは Rust 側で直接チェック（Constant Folding — fast path）。
+/// 変数パスは Z3 String Sort で検証（Plan 5: Z3 String Sort migration）。
 fn verify_effect_params(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult<()> {
     for effect in &atom.effects {
         // effect_defs を優先、なければ effects を参照
@@ -3646,7 +3719,7 @@ fn verify_effect_params(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult<()> 
         if let Some(def) = effect_def {
             for param in &effect.params {
                 if param.is_constant {
-                    // Constant Folding: 定数パスは Rust 側で直接チェック
+                    // Constant Folding: 定数パスは Rust 側で直接チェック (fast path)
                     if let Some(ref constraint) = def.constraint {
                         if !check_constant_constraint(&param.value, constraint) {
                             return Err(MumeiError::verification_at(
@@ -3658,8 +3731,58 @@ fn verify_effect_params(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult<()> 
                             ));
                         }
                     }
+                } else {
+                    // Plan 5: Variable path — verify with Z3 String Sort.
+                    // Create a fresh Z3 context and solver to check the constraint
+                    // is satisfiable for the symbolic parameter.
+                    if let Some(ref constraint) = def.constraint {
+                        let z3_cfg = z3::Config::new();
+                        let z3_ctx = z3::Context::new(&z3_cfg);
+                        let solver = z3::Solver::new(&z3_ctx);
+                        // Timeout: 500ms for string constraints
+                        let mut z3_params = z3::Params::new(&z3_ctx);
+                        z3_params.set_u32("timeout", 500);
+                        solver.set_params(&z3_params);
+
+                        let param_z3_str =
+                            z3::ast::String::new_const(&z3_ctx, param.value.as_str());
+                        let check_result = {
+                            let maybe_bool =
+                                parse_constraint_to_z3_string(&z3_ctx, constraint, &param_z3_str);
+                            if let Some(constraint_bool) = maybe_bool {
+                                solver.assert(&constraint_bool);
+                                Some(solver.check())
+                            } else {
+                                None
+                            }
+                        };
+                        if let Some(result) = check_result {
+                            match result {
+                                z3::SatResult::Unsat => {
+                                    return Err(MumeiError::verification_at(
+                                        format!(
+                                            "Effect '{}' variable parameter '{}' constraint '{}' \
+                                             is unsatisfiable (Z3 String Sort)",
+                                            effect.name, param.value, constraint
+                                        ),
+                                        effect.span.clone(),
+                                    ));
+                                }
+                                z3::SatResult::Unknown => {
+                                    // Timeout or undecidable — emit warning, do not block.
+                                    eprintln!(
+                                        "Warning: Z3 String constraint check for '{}' \
+                                         parameter '{}' timed out or was undecidable",
+                                        effect.name, param.value
+                                    );
+                                }
+                                z3::SatResult::Sat => {
+                                    // Constraint is satisfiable — OK
+                                }
+                            }
+                        }
+                    }
                 }
-                // 変数パスの場合の Z3 検証は verify_inner の Z3 コンテキスト内で行う
             }
         }
     }
@@ -3905,45 +4028,44 @@ fn verify_inner(
     verify_effect_params(atom, module_env)?;
     metrics.record_phase("Phase 1g: effect params", phase_start.elapsed());
 
-    // Phase 1h: MIR-based move analysis
+    // Phase 1h: MIR-based move analysis (Phase 4c integrated)
     // Lower HIR to MIR and run forward dataflow move analysis.
-    //
-    // NOTE: Currently all Rvalue::Use(Place::Local(..)) are treated as moves,
-    // but MIR lowering emits this pattern for all direct assignments including
-    // Copy types (Int, Nat, Bool, f64). Until the analysis can distinguish
-    // Copy vs Move types, violations are reported as warnings only.
-    // UseAfterMove / DoubleMove / ConflictingMerge → warning (not hard error).
-    // TODO: Phase 4c — integrate type information into MirLinearityState so that
-    // Copy types are not consumed by Rvalue::Use, then promote to hard errors.
+    // Copy types (Int, Nat, Bool, f64, etc.) are distinguished from Move types
+    // via the Movability field on LocalDecl. Copy types are never consumed by
+    // Rvalue::Use, so violations are only reported for Move types.
+    // Move type violations are hard errors; Copy type false positives are eliminated.
     let phase_start = std::time::Instant::now();
     let mir_body = crate::mir::lower_hir_to_mir(hir_atom);
-    let mut move_conflict_locals: Vec<(crate::mir::Local, crate::mir::BasicBlockId)> = Vec::new();
+    let move_conflict_locals: Vec<(crate::mir::Local, crate::mir::BasicBlockId)> = Vec::new();
     if mir_body.check_analysis_budget().is_ok() {
         let move_result = crate::mir_analysis::analyze_moves(&mir_body);
-        for v in &move_result.violations {
+        if let Some(v) = move_result.violations.first() {
+            // Look up the local's name for better error messages
+            let local_name = mir_body
+                .locals
+                .iter()
+                .find(|d| d.local == v.local)
+                .and_then(|d| d.name.clone())
+                .unwrap_or_else(|| format!("_{}", v.local.0));
             match v.kind {
                 crate::mir_analysis::MoveViolationKind::UseAfterMove => {
-                    eprintln!(
-                        "  ⚠️  MIR move warning: Local({}) was used after being moved in block {} \
-                         (may be false positive for Copy types)",
-                        v.local.0, v.block_id
-                    );
+                    return Err(MumeiError::verification(format!(
+                        "use of moved value `{}`: Local({}) was used after being moved in block {}",
+                        local_name, v.local.0, v.block_id
+                    )));
                 }
                 crate::mir_analysis::MoveViolationKind::DoubleMove => {
-                    eprintln!(
-                        "  ⚠️  MIR move warning: Local({}) was moved twice in block {} \
-                         (may be false positive for Copy types)",
-                        v.local.0, v.block_id
-                    );
+                    return Err(MumeiError::verification(format!(
+                        "value `{}` moved twice: Local({}) was moved more than once in block {}",
+                        local_name, v.local.0, v.block_id
+                    )));
                 }
                 crate::mir_analysis::MoveViolationKind::ConflictingMerge => {
-                    eprintln!(
-                        "  ⚠️  MIR move warning: Local({}) has conflicting ownership state \
-                         at merge point (block {}) — alive on one path, consumed on another \
-                         (may be false positive for Copy types)",
-                        v.local.0, v.block_id
-                    );
-                    move_conflict_locals.push((v.local.clone(), v.block_id));
+                    return Err(MumeiError::verification(format!(
+                        "conflicting ownership of `{}`: Local({}) is alive on one control-flow path \
+                         but consumed on another at merge point (block {})",
+                        local_name, v.local.0, v.block_id
+                    )));
                 }
             }
         }
@@ -4066,6 +4188,8 @@ fn verify_inner(
                 .iter()
                 .any(|c| body_has_symbolic_perform_args(c, module_env)),
             Stmt::Expr(e) => expr_has_symbolic_perform_args(e, module_env),
+            // Plan 8: Cancel statement has no perform args
+            Stmt::Cancel { .. } => false,
         }
     }
     fn expr_has_symbolic_perform_args(expr: &Expr, module_env: &ModuleEnv) -> bool {
@@ -4171,16 +4295,11 @@ fn verify_inner(
 
     let mut env: Env = HashMap::new();
 
-    // Phase 1h (continued): Register Z3 variables for ConflictingMerge violations.
-    // NOTE: Currently a no-op — asserting a fresh unconstrained Bool as true is
-    // always satisfiable and cannot cause Unsat. The variables are registered as
-    // infrastructure for Phase 4c, when type information will allow connecting
-    // these to actual ownership constraints (e.g., asserting that a Move-typed
-    // local must be alive at the merge point). Until then, ConflictingMerge
-    // violations are reported as warnings only (see eprintln above).
-    // TODO(Phase 4c): Replace with `solver.assert(&conflict_var.not())` or
-    // equivalent constraint that makes ConflictingMerge cause Unsat, after
-    // Copy vs Move type distinction is integrated into MirLinearityState.
+    // Phase 1h (continued): ConflictingMerge Z3 infrastructure.
+    // With Phase 4c Copy/Move type distinction integrated, move violations for
+    // Move types are now hard errors (returned above). This loop registers Z3
+    // variables for any remaining conflict locals as infrastructure for future
+    // ownership constraint integration.
     for (local, block_id) in &move_conflict_locals {
         let var_name = format!("__move_conflict_{}_{}", local.0, block_id);
         let conflict_var = Bool::new_const(&ctx, var_name.as_str());
@@ -6132,6 +6251,16 @@ fn expr_to_z3<'a>(
 
             Ok(lambda_sym.into())
         }
+        // Plan 8: Channel send — evaluate value, return unit
+        Expr::ChanSend { value, .. } => {
+            let _val = expr_to_z3(vc, value, env, solver_opt)?;
+            Ok(Int::from_i64(ctx, 0).into())
+        }
+        // Plan 8: Channel recv — return symbolic int
+        Expr::ChanRecv { .. } => {
+            let recv_sym = Int::new_const(ctx, "__chan_recv");
+            Ok(recv_sym.into())
+        }
     }
 }
 
@@ -6323,6 +6452,8 @@ fn stmt_to_z3<'a>(
             }
         }
         Stmt::Expr(e) => expr_to_z3(vc, e, env, solver_opt),
+        // Plan 8: Cancel statement — no-op in Z3 verification
+        Stmt::Cancel { .. } => Ok(Int::from_i64(ctx, 0).into()),
     }
 }
 

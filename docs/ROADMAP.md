@@ -478,6 +478,23 @@ Future extensions to the effect subtyping system:
 
 ---
 
+## Phase 4c+ Implementation Plans
+
+Detailed session plans for the next 8 implementation priorities are documented in [SESSION_PLANS.md](./SESSION_PLANS.md).
+
+| # | Plan | Status |
+|---|------|--------|
+| 1 | Phase 4c: MIR Copy/Move type distinction | ✅ Implemented |
+| 2 | MIR Lowering: remaining expression forms | ✅ Implemented |
+| 3 | MIR control flow lowering hardening | ✅ Implemented |
+| 4 | MIR Drop Insertion: SwitchInt successor drops | ✅ Implemented |
+| 5 | Z3 String Sort migration | ✅ Implemented |
+| 6 | Effect Hierarchy extensions | ✅ Implemented |
+| 7 | Runtime Portability: musl + Windows | ✅ Implemented |
+| 8 | Concurrency improvements | ✅ Implemented |
+
+---
+
 ## Related Documents
 
 - [`docs/FFI.md`](FFI.md) — FFI extern block design (Phase A foundation)

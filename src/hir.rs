@@ -155,6 +155,19 @@ pub enum HirExpr {
         /// キャプチャされた外部変数（lower_expr 時に解析）
         captures: Vec<String>,
     },
+    // Plan 8: Channel send expression — `send(ch, value)`
+    // NOTE: ChanSend is constructed via HIR lowering from Expr::ChanSend
+    #[allow(dead_code)]
+    ChanSend {
+        channel: Box<HirExpr>,
+        value: Box<HirExpr>,
+    },
+    // Plan 8: Channel receive expression — `recv(ch)`
+    // NOTE: ChanRecv is constructed via HIR lowering from Expr::ChanRecv
+    #[allow(dead_code)]
+    ChanRecv {
+        channel: Box<HirExpr>,
+    },
 }
 
 /// HIR 文: 副作用を持つ構文要素
@@ -417,6 +430,14 @@ pub fn lower_expr_with_env(
                 captures,
             }
         }
+        // Plan 8: Channel send/recv lowering
+        Expr::ChanSend { channel, value } => HirExpr::ChanSend {
+            channel: Box::new(lower_expr_with_env(channel, module_env)),
+            value: Box::new(lower_expr_with_env(value, module_env)),
+        },
+        Expr::ChanRecv { channel } => HirExpr::ChanRecv {
+            channel: Box::new(lower_expr_with_env(channel, module_env)),
+        },
     }
 }
 
@@ -496,6 +517,12 @@ pub fn lower_stmt_with_env(
                 .map(|s| lower_stmt_with_env(s, module_env))
                 .collect(),
             join_semantics: join_semantics.clone(),
+        }),
+        // Plan 8: Cancel statement lowering
+        Stmt::Cancel { target } => HirStmt::Expr(HirExpr::Call {
+            name: format!("__cancel_{}", target),
+            args: vec![],
+            callee_effects: None,
         }),
         Stmt::Expr(expr) => HirStmt::Expr(lower_expr_with_env(expr, module_env)),
     }
@@ -682,6 +709,14 @@ fn collect_free_variables_expr(expr: &HirExpr) -> HashSet<String> {
                     vars.insert(v);
                 }
             }
+        }
+        // Plan 8: Channel send/recv free variables
+        HirExpr::ChanSend { channel, value } => {
+            vars.extend(collect_free_variables_expr(channel));
+            vars.extend(collect_free_variables_expr(value));
+        }
+        HirExpr::ChanRecv { channel } => {
+            vars.extend(collect_free_variables_expr(channel));
         }
     }
     vars

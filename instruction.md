@@ -301,11 +301,11 @@ task_group:all {
 
 Improve the practicality of `task` / `task_group` introduced in PR-C.
 
-**TODO:**
-- Task return type inference
-- Syntax for binding `task_group` results to variables
-- Task cancellation semantics design
-- Channel type (`chan<T>`) design
+**Implemented (Plan 8):**
+- Task return type inference — type checker infers return type from `task { expr }` block's final expression; `await` yields the correct type from the task handle
+- Syntax for binding `task_group` results to variables — `let results = task_group { ... }` binds the collection of individual task return types
+- Task cancellation semantics — `cancel group_name;` statement cancels pending tasks in a task_group; task_group scope exit implicitly cancels all pending tasks via cancellation token mechanism
+- Channel type (`chan<T>`) — built-in generic type with `send(ch, value)` and `recv(ch)` operations; requires `Chan` effect annotation; implemented in parser (`send`/`recv` keywords), AST (`ChanSend`/`ChanRecv`), HIR, codegen, and transpilers
 
 ---
 

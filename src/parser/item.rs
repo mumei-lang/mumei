@@ -326,6 +326,12 @@ fn parse_effect_list(input: &str) -> Vec<Effect> {
 
 fn parse_single_effect(input: &str) -> Effect {
     let input = input.trim();
+    // Plan 6: Detect negated effects (e.g., `!IO`)
+    let (negated, input) = if let Some(stripped) = input.strip_prefix('!') {
+        (true, stripped.trim())
+    } else {
+        (false, input)
+    };
     if let Some(paren_start) = input.find('(') {
         let name = input[..paren_start].trim().to_string();
         let paren_end = input.rfind(')').unwrap_or(input.len());
@@ -335,12 +341,14 @@ fn parse_single_effect(input: &str) -> Effect {
             name,
             params,
             span: Span::default(),
+            negated,
         }
     } else {
         Effect {
             name: input.to_string(),
             params: vec![],
             span: Span::default(),
+            negated,
         }
     }
 }
@@ -921,6 +929,32 @@ pub fn parse_module_from_tokens(ctx: &mut ParseContext) -> Vec<Item> {
             Token::Effect => {
                 let start_tok = ctx.advance().clone();
                 let name = ctx.expect_ident();
+
+                // Plan 6: Effect alias syntax — `effect IO = FileRead | FileWrite;`
+                if ctx.peek() == &Token::Assign {
+                    ctx.advance(); // consume `=`
+                    let mut alias_names = Vec::new();
+                    alias_names.push(ctx.expect_ident());
+                    while ctx.peek() == &Token::Bar {
+                        ctx.advance(); // consume `|`
+                        alias_names.push(ctx.expect_ident());
+                    }
+                    ctx.expect(Token::Semicolon);
+                    items.push(Item::EffectDef(EffectDef {
+                        name,
+                        params: vec![],
+                        constraint: None,
+                        includes: alias_names,
+                        refinement: None,
+                        parent: vec![],
+                        span: span_from_token(&start_tok),
+                        states: vec![],
+                        transitions: vec![],
+                        initial_state: None,
+                    }));
+                    continue;
+                }
+
                 let params: Vec<EffectDefParam> = if ctx.peek() == &Token::LParen {
                     ctx.advance();
                     let mut ps = Vec::new();
@@ -945,12 +979,19 @@ pub fn parse_module_from_tokens(ctx: &mut ParseContext) -> Vec<Item> {
                 } else {
                     vec![]
                 };
-                let parent = if ctx.peek() == &Token::Parent {
+                // Plan 6: Multi-parent support — `parent: Name` or `parent: [A, B]`
+                let parent: Vec<String> = if ctx.peek() == &Token::Parent {
                     ctx.advance();
                     ctx.expect(Token::Colon);
-                    Some(ctx.expect_ident())
+                    if ctx.peek() == &Token::LBracket {
+                        // Multi-parent: parent: [Network, Encrypted]
+                        parse_bracket_list(ctx)
+                    } else {
+                        // Single parent: parent: Network
+                        vec![ctx.expect_ident()]
+                    }
                 } else {
-                    None
+                    vec![]
                 };
                 let includes: Vec<String> = if ctx.peek() == &Token::Includes {
                     ctx.advance();
