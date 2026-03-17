@@ -3712,6 +3712,33 @@ fn collect_divisors_expr(expr: &Expr) -> Vec<String> {
                 divisors.extend(collect_divisors_stmt(&arm.body));
             }
         }
+        Expr::Async { body } => {
+            divisors.extend(collect_divisors_stmt(body));
+        }
+        Expr::Await { expr } => {
+            divisors.extend(collect_divisors_expr(expr));
+        }
+        Expr::Lambda { body, .. } => {
+            divisors.extend(collect_divisors_stmt(body));
+        }
+        Expr::Perform { args, .. } => {
+            for arg in args {
+                divisors.extend(collect_divisors_expr(arg));
+            }
+        }
+        Expr::CallRef { callee, args } => {
+            divisors.extend(collect_divisors_expr(callee));
+            for arg in args {
+                divisors.extend(collect_divisors_expr(arg));
+            }
+        }
+        Expr::ChanSend { channel, value } => {
+            divisors.extend(collect_divisors_expr(channel));
+            divisors.extend(collect_divisors_expr(value));
+        }
+        Expr::ChanRecv { channel } => {
+            divisors.extend(collect_divisors_expr(channel));
+        }
         _ => {}
     }
     divisors
@@ -3735,6 +3762,14 @@ fn collect_divisors_stmt(stmt: &Stmt) -> Vec<String> {
         }
         Stmt::Acquire { body, .. } => {
             divisors.extend(collect_divisors_stmt(body));
+        }
+        Stmt::Task { body, .. } => {
+            divisors.extend(collect_divisors_stmt(body));
+        }
+        Stmt::TaskGroup { children, .. } => {
+            for child in children {
+                divisors.extend(collect_divisors_stmt(child));
+            }
         }
         Stmt::Expr(e) => {
             divisors.extend(collect_divisors_expr(e));

@@ -588,31 +588,72 @@ fn compile_hir_expr<'a>(
                 context, builder, module, function, right, variables, array_ptrs, module_env,
             )?;
 
-            // Plan 9-8: String concatenation — if both operands are pointer (Str) type
+            // Plan 9-8: String operations — if both operands are pointer (Str) type
             if lhs.is_pointer_value() && rhs.is_pointer_value() {
-                if let Op::Add = op {
-                    // Call runtime helper mumei_str_concat(a, b) -> *const c_char
-                    let str_concat_fn =
-                        module.get_function("mumei_str_concat").unwrap_or_else(|| {
-                            let ptr_type = context.ptr_type(inkwell::AddressSpace::default());
-                            let fn_type =
-                                ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
-                            module.add_function("mumei_str_concat", fn_type, None)
-                        });
-                    let result = llvm!(builder.build_call(
-                        str_concat_fn,
-                        &[lhs.into(), rhs.into()],
-                        "str_concat_tmp"
-                    ));
-                    return result
-                        .try_as_basic_value()
-                        .left()
-                        .ok_or(MumeiError::codegen("str_concat returned void".to_string()));
+                let ptr_type = context.ptr_type(inkwell::AddressSpace::default());
+                match op {
+                    Op::Add => {
+                        // Call runtime helper mumei_str_concat(a, b) -> *const c_char
+                        let str_concat_fn =
+                            module.get_function("mumei_str_concat").unwrap_or_else(|| {
+                                let fn_type =
+                                    ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+                                module.add_function("mumei_str_concat", fn_type, None)
+                            });
+                        let result = llvm!(builder.build_call(
+                            str_concat_fn,
+                            &[lhs.into(), rhs.into()],
+                            "str_concat_tmp"
+                        ));
+                        return result
+                            .try_as_basic_value()
+                            .left()
+                            .ok_or(MumeiError::codegen("str_concat returned void".to_string()));
+                    }
+                    Op::Eq | Op::Neq => {
+                        // Call runtime helper mumei_str_eq(a, b) -> i64 (0 or 1)
+                        let str_eq_fn =
+                            module.get_function("mumei_str_eq").unwrap_or_else(|| {
+                                let fn_type = context.i64_type().fn_type(
+                                    &[ptr_type.into(), ptr_type.into()],
+                                    false,
+                                );
+                                module.add_function("mumei_str_eq", fn_type, None)
+                            });
+                        let result = llvm!(builder.build_call(
+                            str_eq_fn,
+                            &[lhs.into(), rhs.into()],
+                            "str_eq_tmp"
+                        ));
+                        let eq_val = result
+                            .try_as_basic_value()
+                            .left()
+                            .ok_or(MumeiError::codegen("str_eq returned void".to_string()))?
+                            .into_int_value();
+                        if matches!(op, Op::Neq) {
+                            // Negate: result == 0 means not equal → flip
+                            let negated = llvm!(builder.build_int_compare(
+                                IntPredicate::EQ,
+                                eq_val,
+                                context.i64_type().const_int(0, false),
+                                "str_neq_tmp"
+                            ));
+                            return Ok(llvm!(builder.build_int_z_extend(
+                                negated,
+                                context.i64_type(),
+                                "str_neq_ext"
+                            ))
+                            .into());
+                        }
+                        return Ok(eq_val.into());
+                    }
+                    _ => {
+                        return Err(MumeiError::codegen(format!(
+                            "Unsupported operator {:?} for Str type in codegen",
+                            op
+                        )));
+                    }
                 }
-                return Err(MumeiError::codegen(format!(
-                    "Unsupported operator {:?} for Str type in codegen",
-                    op
-                )));
             }
 
             if lhs.is_float_value() || rhs.is_float_value() {

@@ -252,3 +252,15 @@ pub extern "C" fn mumei_str_concat(a: *const c_char, b: *const c_char) -> *const
     let result = format!("{}{}", a_str, b_str);
     alloc_string_result(&result)
 }
+
+/// Plan 9: String equality runtime helper — returns 1 if equal, 0 otherwise
+#[no_mangle]
+pub extern "C" fn mumei_str_eq(a: *const c_char, b: *const c_char) -> i64 {
+    let a_str = unsafe { c_str_to_str(a) };
+    let b_str = unsafe { c_str_to_str(b) };
+    if a_str == b_str {
+        1
+    } else {
+        0
+    }
+}
