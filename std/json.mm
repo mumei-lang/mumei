@@ -17,26 +17,28 @@
 //   - ハンドル 0 = null / 解析失敗
 //   - ハンドル > 0 = 有効な JSON オブジェクト/配列/値
 //   - FFI 経由で Rust 側の serde_json::Value を操作する
+//   - Plan 10: Str 型対応 — 文字列パラメータは Str として直接渡す
 
 // --- extern 宣言: Rust FFI バックエンド ---
+// Plan 10: Str 型に移行 — 文字列パラメータを i64 ハンドルから Str に変更
 extern "Rust" {
-    fn json_parse(input: i64) -> i64;
-    fn json_stringify(handle: i64) -> i64;
-    fn json_get(handle: i64, key: i64) -> i64;
-    fn json_get_int(handle: i64, key: i64) -> i64;
-    fn json_get_str(handle: i64, key: i64) -> i64;
-    fn json_get_bool(handle: i64, key: i64) -> i64;
+    fn json_parse(input: Str) -> i64;
+    fn json_stringify(handle: i64) -> Str;
+    fn json_get(handle: i64, key: Str) -> i64;
+    fn json_get_int(handle: i64, key: Str) -> i64;
+    fn json_get_str(handle: i64, key: Str) -> Str;
+    fn json_get_bool(handle: i64, key: Str) -> i64;
     fn json_array_len(handle: i64) -> i64;
     fn json_array_get(handle: i64, index: i64) -> i64;
     fn json_is_null(handle: i64) -> i64;
     fn json_is_object(handle: i64) -> i64;
     fn json_is_array(handle: i64) -> i64;
     fn json_object_new() -> i64;
-    fn json_object_set(handle: i64, key: i64, value: i64) -> i64;
+    fn json_object_set(handle: i64, key: Str, value: i64) -> i64;
     fn json_array_new() -> i64;
     fn json_array_push(handle: i64, value: i64) -> i64;
     fn json_from_int(value: i64) -> i64;
-    fn json_from_str(value: i64) -> i64;
+    fn json_from_str(value: Str) -> i64;
     fn json_from_bool(value: i64) -> i64;
 }
 
@@ -45,8 +47,9 @@ extern "Rust" {
 // =============================================================
 
 // JSON 文字列をパースし、ハンドルを返す。
+// Plan 10: input を Str 型に変更
 // 解析失敗時はハンドル 0 (null) を返す。
-atom parse(input: i64)
+atom parse(input: Str)
     requires: true;
     ensures: result >= 0;
     body: {
@@ -54,6 +57,7 @@ atom parse(input: i64)
     }
 
 // JSON ハンドルを文字列に変換する。
+// Plan 10: 戻り値は Str
 // ハンドル 0 の場合は "null" を返す。
 atom stringify(handle: i64)
     requires: handle >= 0;
@@ -67,7 +71,8 @@ atom stringify(handle: i64)
 // =============================================================
 
 // オブジェクトからキーで値を取得（ハンドルを返す）
-atom get(handle: i64, key: i64)
+// Plan 10: key を Str 型に変更
+atom get(handle: i64, key: Str)
     requires: handle >= 0;
     ensures: result >= 0;
     body: {
@@ -75,15 +80,17 @@ atom get(handle: i64, key: i64)
     }
 
 // オブジェクトからキーで整数値を取得
-atom get_int(handle: i64, key: i64)
+// Plan 10: key を Str 型に変更
+atom get_int(handle: i64, key: Str)
     requires: handle >= 0;
     ensures: true;
     body: {
         json_get_int(handle, key)
     }
 
-// オブジェクトからキーで文字列値を取得（ハンドルを返す）
-atom get_str(handle: i64, key: i64)
+// オブジェクトからキーで文字列値を取得
+// Plan 10: key を Str 型に変更、戻り値も Str
+atom get_str(handle: i64, key: Str)
     requires: handle >= 0;
     ensures: true;
     body: {
@@ -91,7 +98,8 @@ atom get_str(handle: i64, key: i64)
     }
 
 // オブジェクトからキーでブール値を取得（0=false, 1=true）
-atom get_bool(handle: i64, key: i64)
+// Plan 10: key を Str 型に変更
+atom get_bool(handle: i64, key: Str)
     requires: handle >= 0;
     ensures: result >= 0 && result <= 1;
     body: {
@@ -159,7 +167,8 @@ atom object_new()
     }
 
 // オブジェクトにキーと値を設定
-atom object_set(handle: i64, key: i64, value: i64)
+// Plan 10: key を Str 型に変更
+atom object_set(handle: i64, key: Str, value: i64)
     requires: handle >= 0;
     ensures: result >= 0;
     body: {
@@ -191,7 +200,8 @@ atom from_int(value: i64)
     }
 
 // 文字列から JSON 値を生成
-atom from_str(value: i64)
+// Plan 10: value を Str 型に変更
+atom from_str(value: Str)
     requires: true;
     ensures: result >= 0;
     body: {

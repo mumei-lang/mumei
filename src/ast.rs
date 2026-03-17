@@ -350,7 +350,7 @@ impl Monomorphizer {
             Expr::Await { expr } => {
                 self.collect_from_expr(expr);
             }
-            Expr::Number(_) | Expr::Float(_) | Expr::Variable(_) => {}
+            Expr::Number(_) | Expr::Float(_) | Expr::Variable(_) | Expr::StringLit(_) => {}
             Expr::AtomRef { name } => {
                 // atom_ref(name) は呼び出し先の atom を参照するため、名前を収集
                 let tref = parse_type_ref(name);
@@ -374,6 +374,14 @@ impl Monomorphizer {
                     }
                 }
                 self.collect_from_stmt(body);
+            }
+            // Plan 8: Channel expressions — traverse inner expressions for generic collection
+            Expr::ChanSend { channel, value } => {
+                self.collect_from_expr(channel);
+                self.collect_from_expr(value);
+            }
+            Expr::ChanRecv { channel } => {
+                self.collect_from_expr(channel);
             }
         }
     }
@@ -413,6 +421,8 @@ impl Monomorphizer {
                     self.collect_from_stmt(child);
                 }
             }
+            // Plan 8: Cancel statement — no generic types to collect
+            Stmt::Cancel { .. } => {}
             Stmt::Expr(expr) => {
                 self.collect_from_expr(expr);
             }
@@ -618,6 +628,7 @@ impl Monomorphizer {
                         name: concrete_type_ref.name.clone(),
                         params: eff.params.clone(),
                         span: eff.span.clone(),
+                        negated: eff.negated,
                     }
                 } else {
                     eff.clone()

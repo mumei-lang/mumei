@@ -327,6 +327,11 @@ impl<'a> Lexer<'a> {
             "parent" => Token::Parent,
             "as" => Token::As,
             "contract" => Token::Contract,
+            // Plan 8: Concurrency keywords
+            "chan" => Token::Chan,
+            "send" => Token::Send,
+            "recv" => Token::Recv,
+            "cancel" => Token::Cancel,
             _ => Token::Ident(ident),
         }
     }

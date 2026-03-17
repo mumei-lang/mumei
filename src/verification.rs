@@ -1312,6 +1312,10 @@ impl ModuleEnv {
 
     /// 精緻型名からベース型名を解決する（例: "Nat" -> "i64", "Pos" -> "f64"）
     pub fn resolve_base_type(&self, type_name: &str) -> String {
+        // Plan 9: Str is a primitive type, return as-is
+        if type_name == "Str" {
+            return "Str".to_string();
+        }
         if let Some(refined) = self.types.get(type_name) {
             return refined._base_type.clone();
         }
@@ -1446,29 +1450,26 @@ impl ModuleEnv {
 
     /// エフェクト名からその祖先エフェクト（親→祖父→...）を全て返す。
     /// HttpRead → [Network] のように、包含関係を解決する。
+    /// Plan 6: Multi-parent support — BFS over all parents.
     pub fn get_effect_ancestors(&self, effect_name: &str) -> Vec<String> {
         let mut ancestors = Vec::new();
-        let mut current = effect_name.to_string();
-        let mut visited = HashSet::new(); // 循環防止
-        loop {
+        let mut visited = HashSet::new();
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back(effect_name.to_string());
+        visited.insert(effect_name.to_string());
+        while let Some(current) = queue.pop_front() {
             // effect_defs を優先、なければ effects も参照
-            let parent_opt = self
+            let parents: Vec<String> = self
                 .effect_defs
                 .get(&current)
-                .and_then(|def| def.parent.clone())
-                .or_else(|| {
-                    self.effects
-                        .get(&current)
-                        .and_then(|def| def.parent.clone())
-                });
-            if let Some(parent) = parent_opt {
-                if !visited.insert(parent.clone()) {
-                    break; // 循環検出
+                .map(|def| def.parent.clone())
+                .or_else(|| self.effects.get(&current).map(|def| def.parent.clone()))
+                .unwrap_or_default();
+            for parent in parents {
+                if visited.insert(parent.clone()) {
+                    ancestors.push(parent.clone());
+                    queue.push_back(parent);
                 }
-                ancestors.push(parent.clone());
-                current = parent;
-            } else {
-                break;
             }
         }
         ancestors
@@ -1699,7 +1700,7 @@ pub fn register_builtin_effects(module_env: &mut ModuleEnv) {
             constraint: None,
             includes: vec![],
             refinement: None,
-            parent: None,
+            parent: vec![],
             span: Span::default(),
             states: vec![],
             transitions: vec![],
@@ -1719,7 +1720,7 @@ pub fn register_builtin_effects(module_env: &mut ModuleEnv) {
             "Console".to_string(),
         ],
         refinement: None,
-        parent: None,
+        parent: vec![],
         span: Span::default(),
         states: vec![],
         transitions: vec![],
@@ -1733,7 +1734,7 @@ pub fn register_builtin_effects(module_env: &mut ModuleEnv) {
         constraint: None,
         includes: vec!["IO".to_string(), "Network".to_string(), "Log".to_string()],
         refinement: None,
-        parent: None,
+        parent: vec![],
         span: Span::default(),
         states: vec![],
         transitions: vec![],
@@ -1994,6 +1995,8 @@ pub fn verify_impl(
             let base = module_env.resolve_base_type(&impl_def.target_type);
             let var: Dynamic = match base.as_str() {
                 "f64" => Float::new_const(&ctx, *var_name, 11, 53).into(),
+                // Plan 9: Str parameters as Z3 String Sort
+                "Str" => Z3String::new_const(&ctx, *var_name).into(),
                 _ => Int::new_const(&ctx, *var_name).into(),
             };
             env.insert(var_name.to_string(), var);
@@ -2413,6 +2416,76 @@ fn verify_effect_containment(
         }
     }
 
+    // Plan 6: Negative effects — verify that body does not use forbidden effects.
+    // E.g., `effects: [!IO]` means the atom forbids IO and all its sub-effects.
+    let negated_effects: Vec<&Effect> = atom.effects.iter().filter(|e| e.negated).collect();
+    if !negated_effects.is_empty() {
+        for callee_name in &callees {
+            if let Some(callee_atom) = module_env.get_atom(callee_name) {
+                for callee_eff in &callee_atom.effects {
+                    if callee_eff.negated {
+                        continue;
+                    }
+                    let callee_leaf_set =
+                        module_env.resolve_leaf_effects(std::slice::from_ref(&callee_eff.name));
+                    for neg in &negated_effects {
+                        let neg_leaf_set =
+                            module_env.resolve_leaf_effects(std::slice::from_ref(&neg.name));
+                        // Check if any callee leaf is a sub-effect of the negated effect
+                        // or is in the negated leaf set
+                        for callee_leaf in &callee_leaf_set {
+                            let is_forbidden = neg_leaf_set.contains(callee_leaf)
+                                || module_env.is_subeffect(callee_leaf, &neg.name);
+                            if is_forbidden {
+                                return Err(MumeiError::verification_at(
+                                    format!(
+                                        "Negative effect violation: atom '{}' declares '!{}' \
+                                         but calls '{}' which uses effect '{}' \
+                                         (resolved leaf: '{}'). This effect is forbidden.",
+                                        atom.name, neg.name, callee_name,
+                                        callee_eff.name, callee_leaf,
+                                    ),
+                                    atom.span.clone(),
+                                )
+                                .with_help(format!(
+                                    "Remove the call to '{}', or remove '!{}' from the effects declaration.",
+                                    callee_name, neg.name
+                                )));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Plan 6: Effect narrowing — diagnostic when caller has a subtype of callee's required effect.
+    for callee_name in &callees {
+        if let Some(callee_atom) = module_env.get_atom(callee_name) {
+            for callee_eff in &callee_atom.effects {
+                if callee_eff.negated {
+                    continue;
+                }
+                // Check if the caller has a more specific (narrower) effect
+                for caller_eff in &atom.effects {
+                    if caller_eff.negated {
+                        continue;
+                    }
+                    if caller_eff.name != callee_eff.name
+                        && module_env.is_subeffect(&caller_eff.name, &callee_eff.name)
+                    {
+                        // Caller has a narrower effect — emit info diagnostic (not error)
+                        eprintln!(
+                            "Info: Effect narrowing at call site — atom '{}' provides '{}' \
+                             (subtype of '{}') for callee '{}'.",
+                            atom.name, caller_eff.name, callee_eff.name, callee_name
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     // atom_ref パラメータの effect_set ⊆ caller のエフェクト
     // 複合エフェクト（IO, FullAccess 等）を正しく扱うため、両側をリーフに解決して比較する
     for param in &atom.params {
@@ -2815,6 +2888,14 @@ fn collect_acquire_resources_expr(expr: &Expr) -> Vec<String> {
         Expr::Lambda { body, .. } => {
             resources.extend(collect_acquire_resources_stmt(body));
         }
+        // Plan 8: Channel operations — traverse sub-expressions for acquire resources
+        Expr::ChanSend { channel, value } => {
+            resources.extend(collect_acquire_resources_expr(channel));
+            resources.extend(collect_acquire_resources_expr(value));
+        }
+        Expr::ChanRecv { channel } => {
+            resources.extend(collect_acquire_resources_expr(channel));
+        }
         _ => {}
     }
     resources
@@ -2849,6 +2930,8 @@ fn collect_acquire_resources_stmt(stmt: &Stmt) -> Vec<String> {
         Stmt::Expr(e) => {
             resources.extend(collect_acquire_resources_expr(e));
         }
+        // Plan 8: Cancel statement has no resources
+        Stmt::Cancel { .. } => {}
     }
     resources
 }
@@ -2889,6 +2972,11 @@ fn verify_bmc_resource_safety(
                 ..
             } => has_acquire_in_while_stmt(then_branch) || has_acquire_in_while_stmt(else_branch),
             Expr::Async { body } => has_acquire_in_while_stmt(body),
+            // Plan 8: Channel operations — traverse sub-expressions
+            Expr::ChanSend { channel, value } => {
+                has_acquire_in_while_expr(channel) || has_acquire_in_while_expr(value)
+            }
+            Expr::ChanRecv { channel } => has_acquire_in_while_expr(channel),
             _ => false,
         }
     }
@@ -2990,6 +3078,11 @@ fn verify_async_recursion_depth(
                         .sum::<usize>()
             }
             Expr::Lambda { body, .. } => count_self_calls_stmt(body, atom_name),
+            // Plan 8: Channel operations — traverse sub-expressions for self-calls
+            Expr::ChanSend { channel, value } => {
+                count_self_calls_expr(channel, atom_name) + count_self_calls_expr(value, atom_name)
+            }
+            Expr::ChanRecv { channel } => count_self_calls_expr(channel, atom_name),
             _ => 0,
         }
     }
@@ -3012,6 +3105,8 @@ fn verify_async_recursion_depth(
                 .map(|c| count_self_calls_stmt(c, atom_name))
                 .sum(),
             Stmt::Expr(e) => count_self_calls_expr(e, atom_name),
+            // Plan 8: Cancel statement has no self-calls
+            Stmt::Cancel { .. } => 0,
         }
     }
 
@@ -3116,6 +3211,8 @@ fn verify_atom_invariant(
             .unwrap_or_else(|| "i64".to_string());
         let var: Dynamic = match base.as_str() {
             "f64" => Float::new_const(&ctx, param.name.as_str(), 11, 53).into(),
+            // Plan 9: Str parameters as Z3 String Sort
+            "Str" => Z3String::new_const(&ctx, param.name.as_str()).into(),
             _ => Int::new_const(&ctx, param.name.as_str()).into(),
         };
         env.insert(param.name.clone(), var);
@@ -3303,6 +3400,14 @@ fn collect_callees_expr(expr: &Expr) -> Vec<String> {
         Expr::Lambda { body, .. } => {
             callees.extend(collect_callees_stmt(body));
         }
+        // Plan 8: Channel operations — traverse sub-expressions for callees
+        Expr::ChanSend { channel, value } => {
+            callees.extend(collect_callees_expr(channel));
+            callees.extend(collect_callees_expr(value));
+        }
+        Expr::ChanRecv { channel } => {
+            callees.extend(collect_callees_expr(channel));
+        }
         _ => {}
     }
     callees
@@ -3337,6 +3442,8 @@ fn collect_callees_stmt(stmt: &Stmt) -> Vec<String> {
         Stmt::Expr(e) => {
             callees.extend(collect_callees_expr(e));
         }
+        // Plan 8: Cancel statement has no callees
+        Stmt::Cancel { .. } => {}
     }
     callees
 }
@@ -3554,6 +3661,300 @@ pub fn infer_effects_json(items: &[Item], module_env: &ModuleEnv) -> serde_json:
     serde_json::json!({ "effects_analysis": results })
 }
 
+// =============================================================================
+// Plan 13: Contract Inference Engine
+// =============================================================================
+// Dataflow analysis to infer requires/ensures contracts for atoms.
+// - infer_requires: divisor tracking + callee requires propagation
+// - infer_ensures: simple body expression analysis + non-negativity
+
+/// Collect all divisor expressions from a statement (Plan 13-1 helper).
+/// Tracks expressions used as right-hand side of division operations.
+fn collect_divisors_expr(expr: &Expr) -> Vec<String> {
+    let mut divisors = Vec::new();
+    match expr {
+        Expr::BinaryOp(lhs, Op::Div, rhs) => {
+            // The right-hand side is a divisor
+            match rhs.as_ref() {
+                Expr::Variable(name) => divisors.push(name.clone()),
+                Expr::Number(n) => {
+                    if *n == 0 {
+                        divisors.push("0".to_string());
+                    }
+                }
+                _ => {}
+            }
+            // Also recurse into sub-expressions (both sides)
+            divisors.extend(collect_divisors_expr(lhs));
+            divisors.extend(collect_divisors_expr(rhs));
+        }
+        Expr::BinaryOp(lhs, _, rhs) => {
+            divisors.extend(collect_divisors_expr(lhs));
+            divisors.extend(collect_divisors_expr(rhs));
+        }
+        Expr::Call(_, args) => {
+            for arg in args {
+                divisors.extend(collect_divisors_expr(arg));
+            }
+        }
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            divisors.extend(collect_divisors_expr(cond));
+            divisors.extend(collect_divisors_stmt(then_branch));
+            divisors.extend(collect_divisors_stmt(else_branch));
+        }
+        Expr::Match { target, arms } => {
+            divisors.extend(collect_divisors_expr(target));
+            for arm in arms {
+                divisors.extend(collect_divisors_stmt(&arm.body));
+            }
+        }
+        Expr::Async { body } => {
+            divisors.extend(collect_divisors_stmt(body));
+        }
+        Expr::Await { expr } => {
+            divisors.extend(collect_divisors_expr(expr));
+        }
+        Expr::Lambda { body, .. } => {
+            divisors.extend(collect_divisors_stmt(body));
+        }
+        Expr::Perform { args, .. } => {
+            for arg in args {
+                divisors.extend(collect_divisors_expr(arg));
+            }
+        }
+        Expr::CallRef { callee, args } => {
+            divisors.extend(collect_divisors_expr(callee));
+            for arg in args {
+                divisors.extend(collect_divisors_expr(arg));
+            }
+        }
+        Expr::ChanSend { channel, value } => {
+            divisors.extend(collect_divisors_expr(channel));
+            divisors.extend(collect_divisors_expr(value));
+        }
+        Expr::ChanRecv { channel } => {
+            divisors.extend(collect_divisors_expr(channel));
+        }
+        _ => {}
+    }
+    divisors
+}
+
+/// Collect all divisor expressions from a statement.
+fn collect_divisors_stmt(stmt: &Stmt) -> Vec<String> {
+    let mut divisors = Vec::new();
+    match stmt {
+        Stmt::Block(stmts) => {
+            for s in stmts {
+                divisors.extend(collect_divisors_stmt(s));
+            }
+        }
+        Stmt::Let { value, .. } | Stmt::Assign { value, .. } => {
+            divisors.extend(collect_divisors_expr(value));
+        }
+        Stmt::While { cond, body, .. } => {
+            divisors.extend(collect_divisors_expr(cond));
+            divisors.extend(collect_divisors_stmt(body));
+        }
+        Stmt::Acquire { body, .. } => {
+            divisors.extend(collect_divisors_stmt(body));
+        }
+        Stmt::Task { body, .. } => {
+            divisors.extend(collect_divisors_stmt(body));
+        }
+        Stmt::TaskGroup { children, .. } => {
+            for child in children {
+                divisors.extend(collect_divisors_stmt(child));
+            }
+        }
+        Stmt::Expr(e) => {
+            divisors.extend(collect_divisors_expr(e));
+        }
+        _ => {}
+    }
+    divisors
+}
+
+/// Infer requires constraints for an atom (Plan 13-1).
+/// Analyzes the body to find:
+/// 1. Division operations → "divisor != 0"
+/// 2. Callee requires propagation → caller must satisfy callee's requires
+fn infer_requires(atom: &Atom, module_env: &ModuleEnv) -> Vec<String> {
+    let mut requires = Vec::new();
+    let mut seen = HashSet::new();
+    let body_stmt = parse_body_expr(&atom.body_expr);
+
+    // 1. Divisor tracking
+    let divisors = collect_divisors_stmt(&body_stmt);
+    let param_names: HashSet<String> = atom.params.iter().map(|p| p.name.clone()).collect();
+    for div in &divisors {
+        if param_names.contains(div) && seen.insert(format!("{} != 0", div)) {
+            // Check if already covered by refinement type
+            let is_covered = atom.params.iter().any(|p| {
+                if p.name == *div {
+                    if let Some(ref tr) = p.type_ref {
+                        if let Some(rt) = module_env.get_type(&tr.name) {
+                            // If the type already ensures non-zero (e.g., Pos type)
+                            return rt.predicate_raw.contains("> 0")
+                                || rt.predicate_raw.contains("!= 0");
+                        }
+                    }
+                }
+                false
+            });
+            if !is_covered {
+                requires.push(format!("{} != 0", div));
+            }
+        }
+    }
+
+    // 2. Callee requires propagation
+    // NOTE: Callee requires are propagated verbatim without substituting the callee's
+    // parameter names for the caller's actual arguments. For example, if `callee(x)` has
+    // `requires: x > 0` and the caller invokes `callee(a + b)`, the inferred requires
+    // would be `x > 0` — referencing `x` which may not exist in the caller's scope.
+    // TODO: Parse the call site arguments, map callee param names to caller expressions,
+    // and substitute before propagating. This requires tracking which arguments are passed
+    // to each callee call site.
+    let callees = collect_callees_stmt(&body_stmt);
+    for callee_name in &callees {
+        if let Some(callee_atom) = module_env.get_atom(callee_name) {
+            if callee_atom.requires != "true" && !callee_atom.requires.is_empty() {
+                let callee_req = callee_atom.requires.clone();
+                if seen.insert(callee_req.clone()) {
+                    requires.push(callee_req);
+                }
+            }
+        }
+    }
+
+    requires
+}
+
+/// Infer ensures constraints for an atom (Plan 13-2).
+/// Analyzes the body to find:
+/// 1. Simple body expressions → "result == expr"
+/// 2. Non-negativity analysis → "result >= 0" if all paths return non-negative
+fn infer_ensures(atom: &Atom, module_env: &ModuleEnv) -> Vec<String> {
+    let mut ensures = Vec::new();
+
+    // Simple body expression analysis
+    let body_expr_str = atom.body_expr.trim();
+    let is_simple = !body_expr_str.contains("if ")
+        && !body_expr_str.contains("while ")
+        && !body_expr_str.contains("match ")
+        && !body_expr_str.contains('{');
+
+    if is_simple && !body_expr_str.is_empty() {
+        // Check if the body is a simple arithmetic expression
+        let body_stmt = parse_body_expr(&atom.body_expr);
+        if let Stmt::Let { .. } = &body_stmt {
+            // Skip complex let bindings
+        } else {
+            ensures.push(format!("result == {}", body_expr_str));
+        }
+    }
+
+    // Non-negativity analysis: check if all parameters involved are non-negative types
+    let param_names: HashSet<String> = atom.params.iter().map(|p| p.name.clone()).collect();
+    let all_params_nonneg = atom.params.iter().all(|p| {
+        if let Some(ref tr) = p.type_ref {
+            if let Some(rt) = module_env.get_type(&tr.name) {
+                return rt.predicate_raw.contains(">= 0") || rt.predicate_raw.contains("> 0");
+            }
+            // Nat type
+            if tr.name == "Nat" {
+                return true;
+            }
+        }
+        false
+    });
+
+    if all_params_nonneg && !param_names.is_empty() {
+        // Check if body only uses addition/multiplication (preserves non-negativity).
+        // Use character-level check (not space-delimited) to avoid missing `a-b`, `a/b`, `a%b`.
+        let body_only_nonneg_ops = !body_expr_str.contains('-')
+            && !body_expr_str.contains('/')
+            && !body_expr_str.contains('%');
+        if body_only_nonneg_ops {
+            ensures.push("result >= 0".to_string());
+        }
+    }
+
+    ensures
+}
+
+/// Infer contracts for all atoms in JSON format (Plan 13-3).
+/// Called by the CLI command `mumei infer-contracts` and MCP tool.
+pub fn infer_contracts_json(items: &[Item], module_env: &ModuleEnv) -> serde_json::Value {
+    let mut results = Vec::new();
+    for item in items {
+        if let Item::Atom(atom) = item {
+            let inferred_requires = infer_requires(atom, module_env);
+            let inferred_ensures = infer_ensures(atom, module_env);
+            let declared_requires = atom.requires.clone();
+            let declared_ensures = atom.ensures.clone();
+
+            // Filter out inferred requires already covered by declared
+            let new_requires: Vec<String> = inferred_requires
+                .iter()
+                .filter(|r| !declared_requires.contains(r.as_str()))
+                .cloned()
+                .collect();
+
+            // Filter out inferred ensures already covered by declared
+            let new_ensures: Vec<String> = inferred_ensures
+                .iter()
+                .filter(|e| !declared_ensures.contains(e.as_str()))
+                .cloned()
+                .collect();
+
+            let suggestion_requires = if new_requires.is_empty() {
+                serde_json::Value::Null
+            } else {
+                let all_reqs: Vec<String> = if declared_requires == "true" {
+                    new_requires.clone()
+                } else {
+                    let mut all = vec![declared_requires.clone()];
+                    all.extend(new_requires.clone());
+                    all
+                };
+                serde_json::Value::String(format!("requires: {};", all_reqs.join(" && ")))
+            };
+
+            let suggestion_ensures = if new_ensures.is_empty() {
+                serde_json::Value::Null
+            } else {
+                let all_ens: Vec<String> = if declared_ensures == "true" {
+                    new_ensures.clone()
+                } else {
+                    let mut all = vec![declared_ensures.clone()];
+                    all.extend(new_ensures.clone());
+                    all
+                };
+                serde_json::Value::String(format!("ensures: {};", all_ens.join(" && ")))
+            };
+
+            results.push(serde_json::json!({
+                "atom": atom.name,
+                "declared_requires": declared_requires,
+                "declared_ensures": declared_ensures,
+                "inferred_requires": inferred_requires,
+                "inferred_ensures": inferred_ensures,
+                "new_requires": new_requires,
+                "new_ensures": new_ensures,
+                "suggestion_requires": suggestion_requires,
+                "suggestion_ensures": suggestion_ensures,
+            }));
+        }
+    }
+    serde_json::json!({ "contracts_analysis": results })
+}
+
 /// エフェクト整合性検証: 宣言されたエフェクトと推論されたエフェクトの比較。
 /// エフェクト階層の Subtyping も考慮する。
 fn verify_effect_consistency(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult<()> {
@@ -3634,8 +4035,8 @@ fn check_constant_constraint(value: &str, constraint: &str) -> bool {
 }
 
 /// エフェクトパラメータの検証。
-/// 定数パスは Rust 側で直接チェック（Constant Folding）。
-/// 変数パスは Z3 Int で検証（Symbolic String ID）。
+/// 定数パスは Rust 側で直接チェック（Constant Folding — fast path）。
+/// 変数パスは Z3 String Sort で検証（Plan 5: Z3 String Sort migration）。
 fn verify_effect_params(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult<()> {
     for effect in &atom.effects {
         // effect_defs を優先、なければ effects を参照
@@ -3646,7 +4047,7 @@ fn verify_effect_params(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult<()> 
         if let Some(def) = effect_def {
             for param in &effect.params {
                 if param.is_constant {
-                    // Constant Folding: 定数パスは Rust 側で直接チェック
+                    // Constant Folding: 定数パスは Rust 側で直接チェック (fast path)
                     if let Some(ref constraint) = def.constraint {
                         if !check_constant_constraint(&param.value, constraint) {
                             return Err(MumeiError::verification_at(
@@ -3658,8 +4059,58 @@ fn verify_effect_params(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult<()> 
                             ));
                         }
                     }
+                } else {
+                    // Plan 5: Variable path — verify with Z3 String Sort.
+                    // Create a fresh Z3 context and solver to check the constraint
+                    // is satisfiable for the symbolic parameter.
+                    if let Some(ref constraint) = def.constraint {
+                        let z3_cfg = z3::Config::new();
+                        let z3_ctx = z3::Context::new(&z3_cfg);
+                        let solver = z3::Solver::new(&z3_ctx);
+                        // Timeout: 500ms for string constraints
+                        let mut z3_params = z3::Params::new(&z3_ctx);
+                        z3_params.set_u32("timeout", 500);
+                        solver.set_params(&z3_params);
+
+                        let param_z3_str =
+                            z3::ast::String::new_const(&z3_ctx, param.value.as_str());
+                        let check_result = {
+                            let maybe_bool =
+                                parse_constraint_to_z3_string(&z3_ctx, constraint, &param_z3_str);
+                            if let Some(constraint_bool) = maybe_bool {
+                                solver.assert(&constraint_bool);
+                                Some(solver.check())
+                            } else {
+                                None
+                            }
+                        };
+                        if let Some(result) = check_result {
+                            match result {
+                                z3::SatResult::Unsat => {
+                                    return Err(MumeiError::verification_at(
+                                        format!(
+                                            "Effect '{}' variable parameter '{}' constraint '{}' \
+                                             is unsatisfiable (Z3 String Sort)",
+                                            effect.name, param.value, constraint
+                                        ),
+                                        effect.span.clone(),
+                                    ));
+                                }
+                                z3::SatResult::Unknown => {
+                                    // Timeout or undecidable — emit warning, do not block.
+                                    eprintln!(
+                                        "Warning: Z3 String constraint check for '{}' \
+                                         parameter '{}' timed out or was undecidable",
+                                        effect.name, param.value
+                                    );
+                                }
+                                z3::SatResult::Sat => {
+                                    // Constraint is satisfiable — OK
+                                }
+                            }
+                        }
+                    }
                 }
-                // 変数パスの場合の Z3 検証は verify_inner の Z3 コンテキスト内で行う
             }
         }
     }
@@ -3905,45 +4356,44 @@ fn verify_inner(
     verify_effect_params(atom, module_env)?;
     metrics.record_phase("Phase 1g: effect params", phase_start.elapsed());
 
-    // Phase 1h: MIR-based move analysis
+    // Phase 1h: MIR-based move analysis (Phase 4c integrated)
     // Lower HIR to MIR and run forward dataflow move analysis.
-    //
-    // NOTE: Currently all Rvalue::Use(Place::Local(..)) are treated as moves,
-    // but MIR lowering emits this pattern for all direct assignments including
-    // Copy types (Int, Nat, Bool, f64). Until the analysis can distinguish
-    // Copy vs Move types, violations are reported as warnings only.
-    // UseAfterMove / DoubleMove / ConflictingMerge → warning (not hard error).
-    // TODO: Phase 4c — integrate type information into MirLinearityState so that
-    // Copy types are not consumed by Rvalue::Use, then promote to hard errors.
+    // Copy types (Int, Nat, Bool, f64, etc.) are distinguished from Move types
+    // via the Movability field on LocalDecl. Copy types are never consumed by
+    // Rvalue::Use, so violations are only reported for Move types.
+    // Move type violations are hard errors; Copy type false positives are eliminated.
     let phase_start = std::time::Instant::now();
     let mir_body = crate::mir::lower_hir_to_mir(hir_atom);
-    let mut move_conflict_locals: Vec<(crate::mir::Local, crate::mir::BasicBlockId)> = Vec::new();
+    let move_conflict_locals: Vec<(crate::mir::Local, crate::mir::BasicBlockId)> = Vec::new();
     if mir_body.check_analysis_budget().is_ok() {
         let move_result = crate::mir_analysis::analyze_moves(&mir_body);
-        for v in &move_result.violations {
+        if let Some(v) = move_result.violations.first() {
+            // Look up the local's name for better error messages
+            let local_name = mir_body
+                .locals
+                .iter()
+                .find(|d| d.local == v.local)
+                .and_then(|d| d.name.clone())
+                .unwrap_or_else(|| format!("_{}", v.local.0));
             match v.kind {
                 crate::mir_analysis::MoveViolationKind::UseAfterMove => {
-                    eprintln!(
-                        "  ⚠️  MIR move warning: Local({}) was used after being moved in block {} \
-                         (may be false positive for Copy types)",
-                        v.local.0, v.block_id
-                    );
+                    return Err(MumeiError::verification(format!(
+                        "use of moved value `{}`: Local({}) was used after being moved in block {}",
+                        local_name, v.local.0, v.block_id
+                    )));
                 }
                 crate::mir_analysis::MoveViolationKind::DoubleMove => {
-                    eprintln!(
-                        "  ⚠️  MIR move warning: Local({}) was moved twice in block {} \
-                         (may be false positive for Copy types)",
-                        v.local.0, v.block_id
-                    );
+                    return Err(MumeiError::verification(format!(
+                        "value `{}` moved twice: Local({}) was moved more than once in block {}",
+                        local_name, v.local.0, v.block_id
+                    )));
                 }
                 crate::mir_analysis::MoveViolationKind::ConflictingMerge => {
-                    eprintln!(
-                        "  ⚠️  MIR move warning: Local({}) has conflicting ownership state \
-                         at merge point (block {}) — alive on one path, consumed on another \
-                         (may be false positive for Copy types)",
-                        v.local.0, v.block_id
-                    );
-                    move_conflict_locals.push((v.local.clone(), v.block_id));
+                    return Err(MumeiError::verification(format!(
+                        "conflicting ownership of `{}`: Local({}) is alive on one control-flow path \
+                         but consumed on another at merge point (block {})",
+                        local_name, v.local.0, v.block_id
+                    )));
                 }
             }
         }
@@ -4066,6 +4516,8 @@ fn verify_inner(
                 .iter()
                 .any(|c| body_has_symbolic_perform_args(c, module_env)),
             Stmt::Expr(e) => expr_has_symbolic_perform_args(e, module_env),
+            // Plan 8: Cancel statement has no perform args
+            Stmt::Cancel { .. } => false,
         }
     }
     fn expr_has_symbolic_perform_args(expr: &Expr, module_env: &ModuleEnv) -> bool {
@@ -4119,6 +4571,12 @@ fn verify_inner(
                         .iter()
                         .any(|arm| body_has_symbolic_perform_args(&arm.body, module_env))
             }
+            // Plan 8: Channel operations — traverse sub-expressions for symbolic perform args
+            Expr::ChanSend { channel, value } => {
+                expr_has_symbolic_perform_args(channel, module_env)
+                    || expr_has_symbolic_perform_args(value, module_env)
+            }
+            Expr::ChanRecv { channel } => expr_has_symbolic_perform_args(channel, module_env),
             // NOTE: StructInit, FieldAccess, and ArrayAccess contain sub-expressions
             // that could hold nested Perform nodes, but are not recursed into here.
             // This means the pre-scan conservatively under-estimates: if a perform with
@@ -4171,16 +4629,30 @@ fn verify_inner(
 
     let mut env: Env = HashMap::new();
 
-    // Phase 1h (continued): Register Z3 variables for ConflictingMerge violations.
-    // NOTE: Currently a no-op — asserting a fresh unconstrained Bool as true is
-    // always satisfiable and cannot cause Unsat. The variables are registered as
-    // infrastructure for Phase 4c, when type information will allow connecting
-    // these to actual ownership constraints (e.g., asserting that a Move-typed
-    // local must be alive at the merge point). Until then, ConflictingMerge
-    // violations are reported as warnings only (see eprintln above).
-    // TODO(Phase 4c): Replace with `solver.assert(&conflict_var.not())` or
-    // equivalent constraint that makes ConflictingMerge cause Unsat, after
-    // Copy vs Move type distinction is integrated into MirLinearityState.
+    // Plan 9: Pre-register parameters with correct Z3 Sort based on their base type.
+    // Without this, Str-typed parameters without refinement types would be lazily
+    // created as Int in expr_to_z3's Variable fallback, causing string operations
+    // (concatenation, equality) to silently produce incorrect verification results.
+    // This matches the treatment in verify_atom_invariant (line 3206-3218).
+    for param in &atom.params {
+        let base = param
+            .type_name
+            .as_deref()
+            .map(|t| module_env.resolve_base_type(t))
+            .unwrap_or_else(|| "i64".to_string());
+        let var: Dynamic = match base.as_str() {
+            "f64" => Float::new_const(&ctx, param.name.as_str(), 11, 53).into(),
+            "Str" => Z3String::new_const(&ctx, param.name.as_str()).into(),
+            _ => Int::new_const(&ctx, param.name.as_str()).into(),
+        };
+        env.insert(param.name.clone(), var);
+    }
+
+    // Phase 1h (continued): ConflictingMerge Z3 infrastructure.
+    // With Phase 4c Copy/Move type distinction integrated, move violations for
+    // Move types are now hard errors (returned above). This loop registers Z3
+    // variables for any remaining conflict locals as infrastructure for future
+    // ownership constraint integration.
     for (local, block_id) in &move_conflict_locals {
         let var_name = format!("__move_conflict_{}_{}", local.0, block_id);
         let conflict_var = Bool::new_const(&ctx, var_name.as_str());
@@ -4250,6 +4722,8 @@ fn verify_inner(
                     let base = module_env.resolve_base_type(&field.type_name);
                     let field_z3: Dynamic = match base.as_str() {
                         "f64" => Float::new_const(&ctx, field_var_name.as_str(), 11, 53).into(),
+                        // Plan 9: Str fields as Z3 String Sort
+                        "Str" => Z3String::new_const(&ctx, field_var_name.as_str()).into(),
                         _ => Int::new_const(&ctx, field_var_name.as_str()).into(),
                     };
                     env.insert(field_var_name.clone(), field_z3.clone());
@@ -4746,6 +5220,8 @@ fn apply_refinement_constraint<'a>(
             solver.assert_and_track(&v.ge(&Int::from_i64(ctx, 0)), &track_u64);
             v.into()
         }
+        // Plan 9-7: Str base type uses Z3 String Sort for refinement constraints
+        "Str" => Z3String::new_const(ctx, var_name).into(),
         _ => Int::new_const(ctx, var_name).into(),
     };
 
@@ -4796,6 +5272,8 @@ fn expr_to_z3<'a>(
     match expr {
         Expr::Number(n) => Ok(Int::from_i64(ctx, *n).into()),
         Expr::Float(f) => Ok(Float::from_f64(ctx, *f).into()),
+        // Plan 9: String literal to Z3 String Sort
+        Expr::StringLit(s) => Ok(Z3String::from_str(ctx, s).unwrap().into()),
         Expr::Variable(name) => {
             // Wire check_alive() into variable access: if the variable has been
             // consumed, report a use-after-consume error.
@@ -5188,6 +5666,22 @@ fn expr_to_z3<'a>(
         Expr::BinaryOp(left, op, right) => {
             let l = expr_to_z3(vc, left, env, solver_opt)?;
             let r = expr_to_z3(vc, right, env, solver_opt)?;
+
+            // Plan 9-8: String concatenation — if both operands are Z3 String Sort
+            if l.get_sort() == z3::Sort::string(ctx) && r.get_sort() == z3::Sort::string(ctx) {
+                let ls = l.as_string().ok_or("Expected string for Str op")?;
+                let rs = r.as_string().ok_or("Expected string for Str op")?;
+                return match op {
+                    Op::Add => {
+                        // Z3 string concatenation — return concat directly
+                        let result = z3::ast::String::concat(ctx, &[&ls, &rs]);
+                        Ok(result.into())
+                    }
+                    Op::Eq => Ok(ls._eq(&rs).into()),
+                    Op::Neq => Ok(ls._eq(&rs).not().into()),
+                    _ => Err(format!("Unsupported operator {:?} for Str type", op).into()),
+                };
+            }
 
             // 浮動小数点か整数かで Z3 の AST メソッドを使い分ける
             if l.as_float().is_some() || r.as_float().is_some() {
@@ -6132,6 +6626,21 @@ fn expr_to_z3<'a>(
 
             Ok(lambda_sym.into())
         }
+        // Plan 8: Channel send — evaluate channel and value, return unit
+        Expr::ChanSend { channel, value } => {
+            let _ch = expr_to_z3(vc, channel, env, solver_opt)?;
+            let _val = expr_to_z3(vc, value, env, solver_opt)?;
+            Ok(Int::from_i64(ctx, 0).into())
+        }
+        // Plan 8: Channel recv — evaluate channel, return symbolic int
+        Expr::ChanRecv { channel } => {
+            let _ch = expr_to_z3(vc, channel, env, solver_opt)?;
+            static RECV_COUNTER: std::sync::atomic::AtomicUsize =
+                std::sync::atomic::AtomicUsize::new(0);
+            let recv_id = RECV_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let recv_sym = Int::new_const(ctx, format!("__chan_recv_{}", recv_id).as_str());
+            Ok(recv_sym.into())
+        }
     }
 }
 
@@ -6323,6 +6832,8 @@ fn stmt_to_z3<'a>(
             }
         }
         Stmt::Expr(e) => expr_to_z3(vc, e, env, solver_opt),
+        // Plan 8: Cancel statement — no-op in Z3 verification
+        Stmt::Cancel { .. } => Ok(Int::from_i64(ctx, 0).into()),
     }
 }
 

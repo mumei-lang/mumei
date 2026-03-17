@@ -157,6 +157,31 @@ fn parse_prefix(ctx: &mut ParseContext) -> Expr {
             }
         }
 
+        // Plan 8: Channel send — `send(ch, value)`
+        Token::Send => {
+            ctx.advance();
+            ctx.expect(Token::LParen);
+            let channel = parse_expr(ctx, 0);
+            ctx.expect(Token::Comma);
+            let value = parse_expr(ctx, 0);
+            ctx.expect(Token::RParen);
+            Expr::ChanSend {
+                channel: Box::new(channel),
+                value: Box::new(value),
+            }
+        }
+
+        // Plan 8: Channel receive — `recv(ch)`
+        Token::Recv => {
+            ctx.advance();
+            ctx.expect(Token::LParen);
+            let channel = parse_expr(ctx, 0);
+            ctx.expect(Token::RParen);
+            Expr::ChanRecv {
+                channel: Box::new(channel),
+            }
+        }
+
         Token::If => {
             ctx.advance();
             let cond = parse_expr(ctx, 0);
@@ -232,6 +257,13 @@ fn parse_prefix(ctx: &mut ParseContext) -> Expr {
             let val = f;
             ctx.advance();
             Expr::Float(val)
+        }
+
+        // Plan 9: First-class Str type — parse string literals
+        Token::StringLit(s) => {
+            let val = s.clone();
+            ctx.advance();
+            Expr::StringLit(val)
         }
 
         Token::True => {
@@ -538,6 +570,13 @@ pub fn parse_statement(ctx: &mut ParseContext) -> Stmt {
                 body: Box::new(body),
                 group,
             }
+        }
+
+        // Plan 8: Cancel statement — `cancel group_name`
+        Token::Cancel => {
+            ctx.advance();
+            let target = ctx.expect_ident();
+            Stmt::Cancel { target }
         }
 
         // Check for assignment: ident = expr

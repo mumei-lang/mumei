@@ -2,6 +2,8 @@
 
 mod ast;
 mod codegen;
+#[allow(dead_code)]
+mod ffi;
 mod hir;
 mod lsp;
 #[allow(dead_code)]
@@ -153,6 +155,11 @@ enum Command {
         /// Input .mm file
         input: String,
     },
+    /// Infer contracts (requires/ensures) for all atoms (JSON output, Plan 13)
+    InferContracts {
+        /// Input .mm file
+        input: String,
+    },
 }
 
 fn main() {
@@ -206,6 +213,9 @@ fn main() {
         }
         Some(Command::InferEffects { input }) => {
             cmd_infer_effects(&input);
+        }
+        Some(Command::InferContracts { input }) => {
+            cmd_infer_contracts(&input);
         }
         None => {
             // 後方互換: `mumei input.mm -o dist/katana` → build として実行
@@ -1875,6 +1885,14 @@ fn cmd_repl() {
 fn cmd_infer_effects(input: &str) {
     let (items, module_env, _imports, _source) = load_and_prepare(input);
     let result = verification::infer_effects_json(&items, &module_env);
+    // JSON 出力（MCP が stdout をパースする）
+    println!("{}", serde_json::to_string_pretty(&result).unwrap());
+}
+
+/// Plan 13-3: CLI command for contract inference
+fn cmd_infer_contracts(input: &str) {
+    let (items, module_env, _imports, _source) = load_and_prepare(input);
+    let result = verification::infer_contracts_json(&items, &module_env);
     // JSON 出力（MCP が stdout をパースする）
     println!("{}", serde_json::to_string_pretty(&result).unwrap());
 }

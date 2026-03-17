@@ -26,6 +26,31 @@ fn array_struct_type(context: &Context) -> inkwell::types::StructType<'_> {
     context.struct_type(&[i64_type.into(), ptr_type.into()], false)
 }
 
+/// Plan 14: Generate LLVM struct type for an enum (tagged union).
+/// Layout: { i64 tag, i64 payload_0, i64 payload_1, ... }
+/// The number of payload slots is the maximum field count across all variants.
+///
+/// NOTE: All payload slots are currently hardcoded to i64. Variants with f64 or Str
+/// fields will be stored in i64 slots, which causes a type mismatch in LLVM IR.
+/// TODO: Resolve actual field types from EnumDef variant fields and use the
+/// appropriate LLVM type (f64_type, ptr_type, etc.) for each payload slot.
+fn enum_llvm_type<'a>(
+    context: &'a Context,
+    enum_def: &crate::parser::EnumDef,
+) -> inkwell::types::StructType<'a> {
+    let max_fields = enum_def
+        .variants
+        .iter()
+        .map(|v| v.fields.len())
+        .max()
+        .unwrap_or(0);
+    let mut field_types: Vec<inkwell::types::BasicTypeEnum> = vec![context.i64_type().into()]; // tag
+    for _ in 0..max_fields {
+        field_types.push(context.i64_type().into()); // payload slots (i64 only for now)
+    }
+    context.struct_type(&field_types, false)
+}
+
 /// パラメータの LLVM 型を解決する
 fn resolve_param_type<'a>(
     context: &'a Context,
@@ -39,7 +64,15 @@ fn resolve_param_type<'a>(
                 "f64" => context.f64_type().into(),
                 "u64" => context.i64_type().into(),
                 "[i64]" => array_struct_type(context).into(),
-                _ => context.i64_type().into(),
+                // Plan 9: Str type as pointer
+                "Str" => context.ptr_type(inkwell::AddressSpace::default()).into(),
+                _ => {
+                    // Plan 14: Check if type is an enum
+                    if let Some(enum_def) = module_env.get_enum(name) {
+                        return enum_llvm_type(context, enum_def).into();
+                    }
+                    context.i64_type().into()
+                }
             }
         }
         None => context.i64_type().into(),
@@ -69,6 +102,10 @@ pub fn declare_extern_functions<'ctx>(
             let ret_base = module_env.resolve_base_type(&ext_fn.return_type);
             let fn_type = match ret_base.as_str() {
                 "f64" => context.f64_type().fn_type(&param_types, false),
+                // Plan 9: Str return type as pointer
+                "Str" => context
+                    .ptr_type(inkwell::AddressSpace::default())
+                    .fn_type(&param_types, false),
                 _ => context.i64_type().fn_type(&param_types, false),
             };
             // Both "C" and "Rust" FFI use the C calling convention
@@ -103,6 +140,9 @@ pub fn compile(
         .iter()
         .map(|p| resolve_param_type(&context, p.type_name.as_deref(), module_env).into())
         .collect();
+    // NOTE: Atom return type is hardcoded to i64. If an atom's body returns a Str
+    // (pointer) or f64 value, this will cause an LLVM IR type mismatch.
+    // TODO: Infer or declare atom return types and use the appropriate LLVM type here.
     let fn_type = i64_type.fn_type(&param_types, false);
     let function = module.add_function(&atom.name, fn_type, None);
 
@@ -356,6 +396,14 @@ fn compile_hir_expr<'a>(
 
         HirExpr::Float(f) => Ok(context.f64_type().const_float(*f).into()),
 
+        // Plan 9: String literal as global string pointer
+        HirExpr::StringLit(s) => {
+            let global = builder.build_global_string_ptr(s, "str_lit").map_err(|e| {
+                MumeiError::codegen(format!("Failed to build string literal: {:?}", e))
+            })?;
+            Ok(global.as_pointer_value().into())
+        }
+
         HirExpr::Variable(name) => variables
             .get(name.as_str())
             .cloned()
@@ -478,6 +526,9 @@ fn compile_hir_expr<'a>(
                     let result = call_result.as_any_value_enum();
                     if has_float {
                         Ok(result.into_float_value().into())
+                    } else if result.is_pointer_value() {
+                        // Plan 9: Handle Str (pointer) return type from extern functions
+                        Ok(result.into_pointer_value().into())
                     } else {
                         Ok(result.into_int_value().into())
                     }
@@ -547,6 +598,74 @@ fn compile_hir_expr<'a>(
             let rhs = compile_hir_expr(
                 context, builder, module, function, right, variables, array_ptrs, module_env,
             )?;
+
+            // Plan 9-8: String operations — if both operands are pointer (Str) type
+            if lhs.is_pointer_value() && rhs.is_pointer_value() {
+                let ptr_type = context.ptr_type(inkwell::AddressSpace::default());
+                match op {
+                    Op::Add => {
+                        // Call runtime helper mumei_str_concat(a, b) -> *const c_char
+                        let str_concat_fn =
+                            module.get_function("mumei_str_concat").unwrap_or_else(|| {
+                                let fn_type =
+                                    ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+                                module.add_function("mumei_str_concat", fn_type, None)
+                            });
+                        let result = llvm!(builder.build_call(
+                            str_concat_fn,
+                            &[lhs.into(), rhs.into()],
+                            "str_concat_tmp"
+                        ));
+                        return result
+                            .try_as_basic_value()
+                            .left()
+                            .ok_or(MumeiError::codegen("str_concat returned void".to_string()));
+                    }
+                    Op::Eq | Op::Neq => {
+                        // Call runtime helper mumei_str_eq(a, b) -> i64 (0 or 1)
+                        let str_eq_fn =
+                            module.get_function("mumei_str_eq").unwrap_or_else(|| {
+                                let fn_type = context.i64_type().fn_type(
+                                    &[ptr_type.into(), ptr_type.into()],
+                                    false,
+                                );
+                                module.add_function("mumei_str_eq", fn_type, None)
+                            });
+                        let result = llvm!(builder.build_call(
+                            str_eq_fn,
+                            &[lhs.into(), rhs.into()],
+                            "str_eq_tmp"
+                        ));
+                        let eq_val = result
+                            .try_as_basic_value()
+                            .left()
+                            .ok_or(MumeiError::codegen("str_eq returned void".to_string()))?
+                            .into_int_value();
+                        if matches!(op, Op::Neq) {
+                            // Negate: result == 0 means not equal → flip
+                            let negated = llvm!(builder.build_int_compare(
+                                IntPredicate::EQ,
+                                eq_val,
+                                context.i64_type().const_int(0, false),
+                                "str_neq_tmp"
+                            ));
+                            return Ok(llvm!(builder.build_int_z_extend(
+                                negated,
+                                context.i64_type(),
+                                "str_neq_ext"
+                            ))
+                            .into());
+                        }
+                        return Ok(eq_val.into());
+                    }
+                    _ => {
+                        return Err(MumeiError::codegen(format!(
+                            "Unsupported operator {:?} for Str type in codegen",
+                            op
+                        )));
+                    }
+                }
+            }
 
             if lhs.is_float_value() || rhs.is_float_value() {
                 let l = if lhs.is_float_value() {
@@ -768,7 +887,13 @@ fn compile_hir_expr<'a>(
 
                 let full_cond = if let Some(guard) = &arm.guard {
                     let mut guard_vars = variables.clone();
-                    bind_pattern_variables(&arm.pattern, target_val, &mut guard_vars);
+                    bind_pattern_variables(
+                        context,
+                        builder,
+                        &arm.pattern,
+                        target_val,
+                        &mut guard_vars,
+                    );
                     let guard_val = compile_hir_expr(
                         context,
                         builder,
@@ -797,7 +922,7 @@ fn compile_hir_expr<'a>(
 
                 builder.position_at_end(body_block);
                 let mut arm_vars = variables.clone();
-                bind_pattern_variables(&arm.pattern, target_val, &mut arm_vars);
+                bind_pattern_variables(context, builder, &arm.pattern, target_val, &mut arm_vars);
 
                 let body_val = compile_hir_stmt(
                     context,
@@ -820,6 +945,10 @@ fn compile_hir_expr<'a>(
             incoming.push((unreachable_val, unreachable_block));
 
             builder.position_at_end(merge_block);
+            // NOTE: phi type is hardcoded to i64. If match arms return Str (pointer) or
+            // enum struct values, this will cause an LLVM type mismatch panic.
+            // TODO: Infer the phi type from the first arm's body value type, similar to
+            // how IfThenElse uses `then_val.get_type()` for its phi node.
             let phi = llvm!(builder.build_phi(context.i64_type(), "match_result"));
             for (val, block) in &incoming {
                 phi.add_incoming(&[(val, *block)]);
@@ -993,6 +1122,58 @@ fn compile_hir_expr<'a>(
             Ok(context.i64_type().const_int(0, false).into())
         }
 
+        // Plan 8: Channel send — compile value expr, return unit (0)
+        HirExpr::ChanSend { value, .. } => {
+            let _val = compile_hir_expr(
+                context, builder, module, function, value, variables, array_ptrs, module_env,
+            )?;
+            Ok(context.i64_type().const_int(0, false).into())
+        }
+
+        // Plan 8: Channel recv — return a placeholder value
+        HirExpr::ChanRecv { .. } => Ok(context.i64_type().const_int(0, false).into()),
+
+        // Plan 14: Enum variant construction — build tagged union struct
+        HirExpr::VariantInit {
+            enum_name,
+            variant_name,
+            fields,
+        } => {
+            let enum_def = module_env.get_enum(enum_name).ok_or_else(|| {
+                MumeiError::codegen(format!("Enum '{}' not found in module_env", enum_name))
+            })?;
+            let variant_idx = enum_def
+                .variants
+                .iter()
+                .position(|v| v.name == *variant_name)
+                .unwrap_or(0);
+            let enum_type = enum_llvm_type(context, enum_def);
+            let mut val = enum_type.get_undef();
+            // Set tag
+            val = llvm!(builder.build_insert_value(
+                val,
+                context.i64_type().const_int(variant_idx as u64, false),
+                0,
+                "tag"
+            ))
+            .into_struct_value();
+            // Set payload fields
+            for (i, field_expr) in fields.iter().enumerate() {
+                let field_val = compile_hir_expr(
+                    context, builder, module, function, field_expr, variables, array_ptrs,
+                    module_env,
+                )?;
+                val = llvm!(builder.build_insert_value(
+                    val,
+                    field_val,
+                    (i + 1) as u32,
+                    &format!("payload_{}", i)
+                ))
+                .into_struct_value();
+            }
+            Ok(val.into())
+        }
+
         HirExpr::FieldAccess(inner_expr, field_name) => {
             if let HirExpr::Variable(var_name) = inner_expr.as_ref() {
                 let candidates = [
@@ -1089,8 +1270,7 @@ fn compile_pattern_test<'a>(
             variant_name,
             fields,
         } => {
-            // Enum variant: tag 値で判定
-            let target_int = target.into_int_value();
+            // Plan 14: Enum variant pattern matching with payload support
             let tag_val = if let Some(enum_def) = module_env.find_enum_by_variant(variant_name) {
                 enum_def
                     .variants
@@ -1103,35 +1283,43 @@ fn compile_pattern_test<'a>(
                     .bytes()
                     .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64))
             };
+
+            // Extract tag from target (struct or int)
+            let target_tag = if target.is_struct_value() {
+                llvm!(builder.build_extract_value(target.into_struct_value(), 0, "pat_tag"))
+                    .into_int_value()
+            } else {
+                target.into_int_value()
+            };
+
             let tag_const = context.i64_type().const_int(tag_val, false);
             let tag_match = llvm!(builder.build_int_compare(
                 IntPredicate::EQ,
-                target_int,
+                target_tag,
                 tag_const,
                 "pat_tag_eq"
             ));
 
             // ネストパターンの再帰処理: 各フィールドの条件を AND 結合
-            // 現在は tag のみで payload を持たないため、フィールドパターンが
-            // Wildcard/Variable 以外の場合のみ再帰（将来の payload 対応の準備）
             let mut result = tag_match;
-            for field_pat in fields.iter() {
+            for (field_idx, field_pat) in fields.iter().enumerate() {
                 match field_pat {
                     Pattern::Wildcard | Pattern::Variable(_) => {
                         // 常にマッチ → AND しても変わらない
                     }
                     _ => {
-                        // 将来: payload からフィールド値を取得して再帰
-                        // 現在は payload がないため、ダミー値 0 で再帰テスト
-                        let dummy_field: BasicValueEnum =
-                            context.i64_type().const_int(0, false).into();
+                        // Plan 14: Extract actual payload field from struct
+                        let field_val = if target.is_struct_value() {
+                            llvm!(builder.build_extract_value(
+                                target.into_struct_value(),
+                                (field_idx + 1) as u32,
+                                &format!("pat_payload_{}", field_idx)
+                            ))
+                        } else {
+                            context.i64_type().const_int(0, false).into()
+                        };
                         let field_test = compile_pattern_test(
-                            context,
-                            builder,
-                            field_pat,
-                            dummy_field,
-                            _variables,
-                            module_env,
+                            context, builder, field_pat, field_val, _variables, module_env,
                         )?;
                         result = llvm!(builder.build_and(result, field_test, "pat_nested_and"));
                     }
@@ -1144,8 +1332,10 @@ fn compile_pattern_test<'a>(
 
 /// パターンから変数バインドを variables に登録する（再帰的）。
 /// - Variable(name) → target の値を name にバインド
-/// - Variant の fields 内の Variable → 将来は payload から取得、現在はダミー
+/// - Variant の fields 内の Variable → Plan 14: payload から extract_value で取得
 fn bind_pattern_variables<'a>(
+    context: &'a Context,
+    builder: &Builder<'a>,
     pattern: &Pattern,
     target: BasicValueEnum<'a>,
     variables: &mut HashMap<String, BasicValueEnum<'a>>,
@@ -1158,20 +1348,39 @@ fn bind_pattern_variables<'a>(
             variant_name: _,
             fields,
         } => {
-            for field_pat in fields.iter() {
+            for (field_idx, field_pat) in fields.iter().enumerate() {
                 match field_pat {
                     Pattern::Variable(fname) => {
-                        // 将来: payload からフィールド値を GEP + load で取得
-                        // 現在は tag のみなのでダミー値
-                        let dummy: BasicValueEnum =
-                            target.get_type().into_int_type().const_int(0, false).into();
-                        variables.insert(fname.clone(), dummy);
+                        // Plan 14: Extract payload field from tagged union struct
+                        if target.is_struct_value() {
+                            if let Ok(field_val) = builder.build_extract_value(
+                                target.into_struct_value(),
+                                (field_idx + 1) as u32,
+                                &format!("bind_{}", fname),
+                            ) {
+                                variables.insert(fname.clone(), field_val);
+                            }
+                        } else {
+                            // Fallback for non-struct targets (legacy tag-only enums)
+                            let dummy: BasicValueEnum =
+                                context.i64_type().const_int(0, false).into();
+                            variables.insert(fname.clone(), dummy);
+                        }
                     }
                     Pattern::Variant { .. } => {
-                        // ネストした Variant: 再帰的にバインド（将来の payload 対応）
-                        let dummy: BasicValueEnum =
-                            target.get_type().into_int_type().const_int(0, false).into();
-                        bind_pattern_variables(field_pat, dummy, variables);
+                        // ネストした Variant: 再帰的にバインド
+                        let nested_val = if target.is_struct_value() {
+                            builder
+                                .build_extract_value(
+                                    target.into_struct_value(),
+                                    (field_idx + 1) as u32,
+                                    &format!("nested_payload_{}", field_idx),
+                                )
+                                .unwrap_or(context.i64_type().const_int(0, false).into())
+                        } else {
+                            context.i64_type().const_int(0, false).into()
+                        };
+                        bind_pattern_variables(context, builder, field_pat, nested_val, variables);
                     }
                     _ => {}
                 }

@@ -71,6 +71,10 @@ pub enum MirConstant {
     Int(i64),
     Float(f64),
     Bool(bool),
+    /// Plan 9: String constant
+    Str(String),
+    /// Function reference (atom_ref) — holds the function name.
+    FuncRef(String),
 }
 
 /// A single MIR statement (three-address code).
@@ -196,12 +200,37 @@ impl MirBody {
     }
 }
 
+/// Whether a local is Copy (bitwise-duplicable) or Move (ownership transfer).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Movability {
+    /// Primitive types (i64, f64, bool) and refined type aliases (Nat, Pos, etc.) — assignment copies.
+    Copy,
+    /// Structs, enums, and other owned types — assignment moves.
+    Move,
+}
+
+/// Determine movability from a type name string.
+/// Primitive numeric types and bool are Copy; everything else is Move.
+pub fn movability_from_type(ty: &Option<String>) -> Movability {
+    match ty.as_deref() {
+        Some(
+            "i64" | "i32" | "i16" | "i8" | "u64" | "u32" | "u16" | "u8" | "f64" | "f32" | "Int"
+            | "Nat" | "Pos" | "Float" | "bool" | "Bool"
+            // Standard library refined types (all i64-based)
+            | "RawPtr" | "NullablePtr" | "HumanAge",
+        ) => Movability::Copy,
+        _ => Movability::Move,
+    }
+}
+
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct LocalDecl {
     pub local: Local,
     pub name: Option<String>,
     pub ty: Option<String>,
+    /// Whether this local is Copy or Move. Defaults to Move for unknown types.
+    pub movability: Movability,
 }
 
 // =============================================================================
@@ -236,10 +265,12 @@ impl LowerCtx {
     fn alloc_local(&mut self, name: Option<String>, ty: Option<String>) -> Local {
         let local = Local(self.next_local);
         self.next_local += 1;
+        let movability = movability_from_type(&ty);
         self.locals.push(LocalDecl {
             local: local.clone(),
             name: name.clone(),
             ty,
+            movability,
         });
         if let Some(n) = name {
             self.var_map.insert(n, local.clone());
@@ -263,6 +294,15 @@ impl LowerCtx {
             terminator,
         });
         id
+    }
+
+    /// Patch the terminator of an already-finished block (back-patching pattern).
+    /// Used by control-flow lowering to fill in block IDs that are not yet known
+    /// at the time the block is first created.
+    fn patch_terminator(&mut self, block_id: BasicBlockId, terminator: Terminator) {
+        if let Some(block) = self.blocks.iter_mut().find(|b| b.id == block_id) {
+            block.terminator = terminator;
+        }
     }
 
     /// Emit a statement into the current (in-progress) block.
@@ -335,36 +375,41 @@ fn lower_stmt(ctx: &mut LowerCtx, stmt: &HirStmt) -> Option<Operand> {
             tail_expr.as_ref().map(|expr| lower_expr(ctx, expr))
         }
         HirStmt::While { cond, body, .. } => {
-            // While loop:
+            // While loop (Plan 3: back-patching pattern):
+            //   pre_block: Goto(header)
             //   header_block: evaluate condition, SwitchInt -> body or after
             //   body_block: execute body, Goto -> header
             //   after_block: continue
 
-            // Finish the current block with a Goto to the header.
-            // finish_block() assigns id = next_block then increments, so the
-            // header will be the *next* block after the pre-block.
-            let header_id = ctx.next_block + 1;
-            let _pre_block = ctx.finish_block(Terminator::Goto(header_id));
+            // Finish pre-block with placeholder — we patch it to Goto(header).
+            let pre_block = ctx.finish_block(Terminator::Unreachable);
 
             // Header block: evaluate condition.
-            // TODO: Like IfThenElse, block ID pre-computation assumes lower_expr(cond)
-            // and lower_stmt(body) produce zero additional blocks. If the condition or
-            // body contains nested control flow, body_id and after_id will be wrong.
-            // Fix by switching to a forward-declaration / back-patching pattern.
+            let header_id = ctx.next_block;
             let cond_op = lower_expr(ctx, cond);
-            let body_id = header_id + 1;
-            let after_id = header_id + 2;
-            let _header = ctx.finish_block(Terminator::SwitchInt {
-                discr: cond_op,
-                targets: vec![(1, body_id)],
-                otherwise: after_id,
-            });
+            // Finish header with placeholder — patch after body is lowered.
+            let header_exit = ctx.finish_block(Terminator::Unreachable);
 
-            // Body block.
+            // Body block: lower body, then Goto back to header.
+            let body_id = ctx.next_block;
             lower_stmt(ctx, body);
-            let _body = ctx.finish_block(Terminator::Goto(header_id));
+            let _body_exit = ctx.finish_block(Terminator::Goto(header_id));
 
-            // After block is the new current block (will be finished by the caller).
+            // After block is the next block to be created.
+            let after_id = ctx.next_block;
+
+            // Back-patch: pre → Goto(header)
+            ctx.patch_terminator(pre_block, Terminator::Goto(header_id));
+            // Back-patch: header → SwitchInt(body, otherwise=after)
+            ctx.patch_terminator(
+                header_exit,
+                Terminator::SwitchInt {
+                    discr: cond_op,
+                    targets: vec![(1, body_id)],
+                    otherwise: after_id,
+                },
+            );
+
             None
         }
         HirStmt::Acquire { body, .. } => {
@@ -380,6 +425,8 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &HirExpr) -> Operand {
     match expr {
         HirExpr::Number(n) => Operand::Constant(MirConstant::Int(*n)),
         HirExpr::Float(f) => Operand::Constant(MirConstant::Float(*f)),
+        // Plan 9: String literal lowering to MIR
+        HirExpr::StringLit(s) => Operand::Constant(MirConstant::Str(s.clone())),
         HirExpr::Variable(name) => {
             if name == "true" {
                 Operand::Constant(MirConstant::Bool(true))
@@ -422,40 +469,47 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &HirExpr) -> Operand {
             let result_local = ctx.alloc_temp();
             ctx.emit(MirStatement::StorageLive(result_local.clone()));
 
-            // Finish current block with SwitchInt.
-            // TODO: Block ID pre-computation assumes each branch produces exactly
-            // one block. Nested control flow (e.g., `if a { if b { 1 } else { 2 } }
-            // else { 3 }`) creates additional blocks inside lower_stmt, causing
-            // else_id and merge_id to point to wrong blocks. Fix by switching to a
-            // forward-declaration / back-patching pattern for block IDs.
-            let then_id = ctx.next_block + 1;
-            let else_id = ctx.next_block + 2;
-            let merge_id = ctx.next_block + 3;
-            let _cond_block = ctx.finish_block(Terminator::SwitchInt {
-                discr: cond_op,
-                targets: vec![(1, then_id)],
-                otherwise: else_id,
-            });
+            // Plan 3: Use back-patching pattern for block IDs.
+            // Finish cond block with a placeholder — we patch it after lowering branches.
+            let cond_block = ctx.finish_block(Terminator::Unreachable);
 
-            // Then block.
+            // Then block: lower branch, record first block ID.
+            let then_id = ctx.next_block;
             let then_val =
                 lower_stmt(ctx, then_branch).unwrap_or(Operand::Constant(MirConstant::Int(0)));
             ctx.emit(MirStatement::Assign(
                 Place::Local(result_local.clone()),
                 Rvalue::Use(then_val),
             ));
-            let _then = ctx.finish_block(Terminator::Goto(merge_id));
+            let then_exit = ctx.finish_block(Terminator::Unreachable); // placeholder
 
-            // Else block.
+            // Else block: lower branch, record first block ID.
+            let else_id = ctx.next_block;
             let else_val =
                 lower_stmt(ctx, else_branch).unwrap_or(Operand::Constant(MirConstant::Int(0)));
             ctx.emit(MirStatement::Assign(
                 Place::Local(result_local.clone()),
                 Rvalue::Use(else_val),
             ));
-            let _else = ctx.finish_block(Terminator::Goto(merge_id));
+            let else_exit = ctx.finish_block(Terminator::Unreachable); // placeholder
 
-            // Merge block is the new current block.
+            // Merge block is the next block to be created.
+            let merge_id = ctx.next_block;
+
+            // Back-patch: cond → SwitchInt(then, otherwise=else)
+            ctx.patch_terminator(
+                cond_block,
+                Terminator::SwitchInt {
+                    discr: cond_op,
+                    targets: vec![(1, then_id)],
+                    otherwise: else_id,
+                },
+            );
+            // Back-patch: then exit → Goto(merge)
+            ctx.patch_terminator(then_exit, Terminator::Goto(merge_id));
+            // Back-patch: else exit → Goto(merge)
+            ctx.patch_terminator(else_exit, Terminator::Goto(merge_id));
+
             Operand::Place(Place::Local(result_local))
         }
         HirExpr::StructInit { type_name, fields } => {
@@ -522,18 +576,183 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &HirExpr) -> Operand {
                 }
             }
         }
-        // For complex expressions not yet lowered, emit a placeholder constant.
-        // These will be expanded in future phases.
-        HirExpr::Match { .. }
-        | HirExpr::AtomRef { .. }
-        | HirExpr::CallRef { .. }
-        | HirExpr::Async { .. }
-        | HirExpr::Await { .. }
-        | HirExpr::Task { .. }
-        | HirExpr::TaskGroup { .. }
-        | HirExpr::Lambda { .. } => {
-            // TODO: Phase 4c — lower remaining expression forms
+        // --- Plan 2: Remaining expression form lowering ---
+        HirExpr::Match { target, arms } => {
+            // Lower match target to a discriminant operand.
+            let discr_op = lower_expr(ctx, target);
+            let result_local = ctx.alloc_temp();
+            ctx.emit(MirStatement::StorageLive(result_local.clone()));
+
+            // Build arm blocks: for each arm, create a block that evaluates the body.
+            // Use SwitchInt for literal patterns; last arm (or wildcard) is otherwise.
+            let mut arm_targets: Vec<(i64, BasicBlockId)> = Vec::new();
+            let mut arm_block_ids: Vec<BasicBlockId> = Vec::new();
+
+            // Reserve block IDs: we finish the current block, then create arm blocks.
+            // First, finish the current block with a placeholder — we'll patch it.
+            let switch_block_id = ctx.next_block;
+
+            // Pre-scan arms to determine block layout.
+            // Each arm gets one or more blocks; we record start IDs after lowering.
+            // Strategy: finish current block with Unreachable, then lower arms,
+            // then patch the SwitchInt terminator.
+            let _switch_block = ctx.finish_block(Terminator::Unreachable);
+
+            let mut otherwise_id: Option<BasicBlockId> = None;
+
+            for arm in arms {
+                let arm_start = ctx.next_block;
+                arm_block_ids.push(arm_start);
+
+                // Lower the arm body.
+                let arm_val =
+                    lower_stmt(ctx, &arm.body).unwrap_or(Operand::Constant(MirConstant::Int(0)));
+                ctx.emit(MirStatement::Assign(
+                    Place::Local(result_local.clone()),
+                    Rvalue::Use(arm_val),
+                ));
+                // Goto merge — will be patched after all arms.
+                ctx.finish_block(Terminator::Unreachable); // placeholder
+
+                // Map pattern to integer target.
+                match &arm.pattern {
+                    crate::parser::Pattern::Literal(n) => {
+                        arm_targets.push((*n, arm_start));
+                    }
+                    crate::parser::Pattern::Wildcard => {
+                        otherwise_id = Some(arm_start);
+                    }
+                    crate::parser::Pattern::Variable(_) => {
+                        // Variable pattern binds the value — treat as otherwise.
+                        otherwise_id = Some(arm_start);
+                    }
+                    crate::parser::Pattern::Variant { .. } => {
+                        // Variant pattern — use variant index if available.
+                        // For now, treat as otherwise fallback.
+                        otherwise_id = Some(arm_start);
+                    }
+                }
+            }
+
+            // Merge block.
+            let merge_id = ctx.next_block;
+
+            // Patch the SwitchInt terminator on the switch block.
+            let otherwise_target = otherwise_id.unwrap_or(merge_id);
+            if let Some(block) = ctx.blocks.get_mut(switch_block_id) {
+                block.terminator = Terminator::SwitchInt {
+                    discr: discr_op,
+                    targets: arm_targets,
+                    otherwise: otherwise_target,
+                };
+            }
+
+            // Patch all arm exit blocks to Goto(merge_id).
+            // Patch all Unreachable blocks after switch_block_id to Goto(merge_id).
+            for block in ctx.blocks.iter_mut() {
+                if block.id > switch_block_id && matches!(block.terminator, Terminator::Unreachable)
+                {
+                    block.terminator = Terminator::Goto(merge_id);
+                }
+            }
+
+            Operand::Place(Place::Local(result_local))
+        }
+
+        HirExpr::AtomRef { name } => {
+            // Atom reference — a first-class function pointer.
+            Operand::Constant(MirConstant::FuncRef(name.clone()))
+        }
+
+        HirExpr::CallRef { callee, args } => {
+            // Indirect call through a callee expression.
+            let callee_op = lower_expr(ctx, callee);
+            let arg_ops: Vec<Operand> = args.iter().map(|a| lower_expr(ctx, a)).collect();
+            let tmp = ctx.alloc_temp();
+            ctx.emit(MirStatement::StorageLive(tmp.clone()));
+
+            // If callee is a FuncRef constant, extract the name for a direct call.
+            let func_name = match &callee_op {
+                Operand::Constant(MirConstant::FuncRef(name)) => name.clone(),
+                _ => "__indirect_call".to_string(),
+            };
+            ctx.emit(MirStatement::Assign(
+                Place::Local(tmp.clone()),
+                Rvalue::Call {
+                    func: func_name,
+                    args: arg_ops,
+                },
+            ));
+            Operand::Place(Place::Local(tmp))
+        }
+
+        HirExpr::Lambda { body, captures, .. } => {
+            // Lambda: lower captures and body inline.
+            // Capture references are already in scope from the enclosing function.
+            // Lower the body as statements and return the result.
+            let _capture_refs: Vec<Place> = captures.iter().map(|c| ctx.lookup_var(c)).collect();
+            lower_stmt(ctx, body).unwrap_or(Operand::Constant(MirConstant::Int(0)))
+        }
+
+        HirExpr::Async { body } => {
+            // Async block: lower body inline for MIR analysis purposes.
+            // Full async lowering (coroutine transform) deferred to codegen.
+            lower_stmt(ctx, body).unwrap_or(Operand::Constant(MirConstant::Int(0)))
+        }
+
+        HirExpr::Await { expr } => {
+            // Await: lower the inner expression.
+            // Full suspension point lowering deferred to codegen.
+            lower_expr(ctx, expr)
+        }
+
+        HirExpr::Task { body, .. } => {
+            // Task: lower body inline for ownership/move analysis.
+            lower_stmt(ctx, body).unwrap_or(Operand::Constant(MirConstant::Int(0)))
+        }
+
+        HirExpr::TaskGroup { children, .. } => {
+            // TaskGroup: lower each child task sequentially.
+            // The result is the last child's value.
+            let mut last_op = Operand::Constant(MirConstant::Int(0));
+            for child in children {
+                if let Some(op) = lower_stmt(ctx, child) {
+                    last_op = op;
+                }
+            }
+            last_op
+        }
+
+        // Plan 8: Channel send — lower value, emit as call-like operation
+        HirExpr::ChanSend { channel, value } => {
+            let _ch = lower_expr(ctx, channel);
+            let _val = lower_expr(ctx, value);
             Operand::Constant(MirConstant::Int(0))
+        }
+
+        // Plan 8: Channel recv — lower channel, return placeholder
+        HirExpr::ChanRecv { channel } => {
+            let _ch = lower_expr(ctx, channel);
+            Operand::Constant(MirConstant::Int(0))
+        }
+
+        // Plan 14: Enum variant construction — lower fields and emit as call-like
+        HirExpr::VariantInit {
+            enum_name,
+            variant_name,
+            fields,
+        } => {
+            let field_ops: Vec<Operand> = fields.iter().map(|f| lower_expr(ctx, f)).collect();
+            let tmp = ctx.alloc_temp();
+            ctx.emit(MirStatement::StorageLive(tmp.clone()));
+            ctx.emit(MirStatement::Assign(
+                Place::Local(tmp.clone()),
+                Rvalue::Call {
+                    func: format!("{}::{}", enum_name, variant_name),
+                    args: field_ops,
+                },
+            ));
+            Operand::Place(Place::Local(tmp))
         }
     }
 }
@@ -769,6 +988,7 @@ mod tests {
                 local: Local(i),
                 name: Some(format!("v{}", i)),
                 ty: Some("Int".to_string()),
+                movability: Movability::Copy,
             });
         }
         let mut blocks = Vec::new();

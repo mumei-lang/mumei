@@ -238,6 +238,8 @@ fn map_type_go(type_name: Option<&str>) -> String {
             match base.as_str() {
                 "f64" => "float64".to_string(),
                 "u64" => "uint64".to_string(),
+                // Plan 9: Str type
+                "Str" => "string".to_string(),
                 _ => "int64".to_string(),
             }
         }
@@ -249,6 +251,8 @@ fn format_hir_expr_go(expr: &HirExpr) -> String {
     match expr {
         HirExpr::Number(n) => n.to_string(),
         HirExpr::Float(f) => format!("{:.15}", f), // Type System 2.0: 浮動小数点
+        // Plan 9: String literal
+        HirExpr::StringLit(s) => format!("\"{}\"", s),
         HirExpr::Variable(v) => v.clone(),
         HirExpr::ArrayAccess(name, idx) => format!("{}[{}]", name, format_hir_expr_go(idx)),
 
@@ -425,6 +429,35 @@ fn format_hir_expr_go(expr: &HirExpr) -> String {
                 ret,
                 body_with_return
             )
+        }
+        // Plan 8: Channel operations transpiled to Go native channels
+        HirExpr::ChanSend { channel, value } => {
+            format!(
+                "{} <- {}",
+                format_hir_expr_go(channel),
+                format_hir_expr_go(value)
+            )
+        }
+        HirExpr::ChanRecv { channel } => {
+            format!("<-{}", format_hir_expr_go(channel))
+        }
+        // Plan 14: Enum variant construction
+        HirExpr::VariantInit {
+            enum_name,
+            variant_name,
+            fields,
+        } => {
+            if fields.is_empty() {
+                format!("{}_{}", enum_name, variant_name)
+            } else {
+                let field_strs: Vec<String> = fields.iter().map(format_hir_expr_go).collect();
+                format!(
+                    "{}_{}{{{}}}",
+                    enum_name,
+                    variant_name,
+                    field_strs.join(", ")
+                )
+            }
         }
     }
 }

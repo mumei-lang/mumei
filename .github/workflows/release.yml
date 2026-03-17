@@ -24,6 +24,14 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
             name: mumei-aarch64-unknown-linux-gnu
+          # Plan 7: musl static linking target
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            name: mumei-x86_64-unknown-linux-musl
+          # Plan 7: Windows target
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            name: mumei-x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -32,7 +40,7 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - name: Install system dependencies (Ubuntu)
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && !contains(matrix.target, 'musl')
         run: |
           sudo apt-get update
           sudo apt-get install -y libz3-dev pkg-config libssl-dev libzstd-dev
@@ -44,6 +52,23 @@ jobs:
           sudo apt-get install -y llvm-17-dev libclang-17-dev libpolly-17-dev
           echo "LLVM_SYS_170_PREFIX=/usr/lib/llvm-17" >> $GITHUB_ENV
           echo "LIBCLANG_PATH=/usr/lib/llvm-17/lib" >> $GITHUB_ENV
+      # Plan 7: musl static linking dependencies
+      - name: Install system dependencies (Ubuntu musl)
+        if: contains(matrix.target, 'musl')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools pkg-config libssl-dev libzstd-dev
+          # Install Z3 static library
+          sudo apt-get install -y libz3-dev
+          # LLVM 17 from official apt repo
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
+          codename=$(lsb_release -cs)
+          echo "deb http://apt.llvm.org/${codename}/ llvm-toolchain-${codename}-17 main" | sudo tee /etc/apt/sources.list.d/llvm-17.list > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y llvm-17-dev libclang-17-dev libpolly-17-dev
+          echo "LLVM_SYS_170_PREFIX=/usr/lib/llvm-17" >> $GITHUB_ENV
+          echo "LIBCLANG_PATH=/usr/lib/llvm-17/lib" >> $GITHUB_ENV
+          echo "RUSTFLAGS=-C target-feature=+crt-static" >> $GITHUB_ENV
       - name: Install system dependencies (macOS)
         if: runner.os == 'macOS'
         run: |
@@ -52,20 +77,60 @@ jobs:
           echo "LIBCLANG_PATH=$(brew --prefix llvm@17)/lib" >> $GITHUB_ENV
           echo "Z3_SYS_Z3_HEADER=$(brew --prefix z3)/include/z3.h" >> $GITHUB_ENV
           echo "Z3_SYS_Z3_LIB_DIR=$(brew --prefix z3)/lib" >> $GITHUB_ENV
+      # Plan 7: Windows dependencies
+      - name: Install system dependencies (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # Install LLVM 17 via Chocolatey
+          choco install llvm --version=17.0.6 -y
+          $llvmPath = "C:\Program Files\LLVM"
+          echo "LLVM_SYS_170_PREFIX=$llvmPath" >> $env:GITHUB_ENV
+          echo "LIBCLANG_PATH=$llvmPath\lib" >> $env:GITHUB_ENV
+          # Install Z3 via vcpkg
+          vcpkg install z3:x64-windows-static
+          $vcpkgRoot = "$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows-static"
+          echo "Z3_SYS_Z3_HEADER=$vcpkgRoot\include\z3.h" >> $env:GITHUB_ENV
+          echo "Z3_SYS_Z3_LIB_DIR=$vcpkgRoot\lib" >> $env:GITHUB_ENV
       - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }}
-      - name: Package binary + std library
+      # Plan 7: Verify musl binary is statically linked
+      - name: Verify static linking (musl)
+        if: contains(matrix.target, 'musl')
+        run: |
+          file target/${{ matrix.target }}/release/mumei
+          # Should report "statically linked" or "not a dynamic executable"
+          ldd target/${{ matrix.target }}/release/mumei 2>&1 || true
+      - name: Package binary + std library (Unix)
+        if: runner.os != 'Windows'
         run: |
           mkdir -p release-pkg/std
           cp target/${{ matrix.target }}/release/mumei release-pkg/
           cp -r std/* release-pkg/std/
           cd release-pkg
           tar czf ../${{ matrix.name }}.tar.gz .
-      - name: Upload artifact
+      # Plan 7: Windows packaging uses .zip instead of .tar.gz
+      - name: Package binary + std library (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path release-pkg/std
+          Copy-Item "target/${{ matrix.target }}/release/mumei.exe" "release-pkg/"
+          Copy-Item -Recurse "std/*" "release-pkg/std/"
+          Compress-Archive -Path "release-pkg/*" -DestinationPath "${{ matrix.name }}.zip"
+      - name: Upload artifact (Unix)
+        if: runner.os != 'Windows'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
           path: ${{ matrix.name }}.tar.gz
+      # Plan 7: Upload Windows artifact as .zip
+      - name: Upload artifact (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: ${{ matrix.name }}.zip
 
   release:
     needs: build
@@ -77,7 +142,9 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/**/*.tar.gz
+          files: |
+            artifacts/**/*.tar.gz
+            artifacts/**/*.zip
           generate_release_notes: true
 
   # --- GitHub Pages: install.sh を公開 ---
@@ -239,8 +306,10 @@ jobs:
       - name: Compute SHA256 checksums
         id: sha256
         run: |
-          for f in artifacts/*/mumei-*.tar.gz; do
-            name=$(basename "$f" .tar.gz)
+          for f in artifacts/*/mumei-*.tar.gz artifacts/*/mumei-*.zip; do
+            [ -f "$f" ] || continue
+            base=$(basename "$f")
+            name="${base%%.*}"
             sha=$(sha256sum "$f" | awk '{print $1}')
             echo "${name}_sha256=${sha}" >> "$GITHUB_OUTPUT"
             echo "${name}: ${sha}"

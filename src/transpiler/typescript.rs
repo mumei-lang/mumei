@@ -52,6 +52,8 @@ fn map_type_ts(type_name: Option<&str>) -> String {
             let base = resolve_base_type(name);
             match base.as_str() {
                 "f64" | "i64" | "u64" => "number".to_string(),
+                // Plan 9: Str type
+                "Str" => "string".to_string(),
                 _ => "number".to_string(),
             }
         }
@@ -256,6 +258,8 @@ fn format_hir_expr_ts(expr: &HirExpr) -> String {
     match expr {
         HirExpr::Number(n) => n.to_string(),
         HirExpr::Float(f) => f.to_string(), // TypeScriptはそのままのリテラルでOK
+        // Plan 9: String literal
+        HirExpr::StringLit(s) => format!("\"{}\"", s),
         HirExpr::Variable(v) => v.clone(),
         HirExpr::ArrayAccess(name, idx) => format!("{}[{}]", name, format_hir_expr_ts(idx)),
 
@@ -429,6 +433,39 @@ fn format_hir_expr_ts(expr: &HirExpr) -> String {
                 ret,
                 body_with_return
             )
+        }
+        // Plan 8: Channel operations transpiled to TypeScript
+        HirExpr::ChanSend { channel, value } => {
+            format!(
+                "await {}.send({})",
+                format_hir_expr_ts(channel),
+                format_hir_expr_ts(value)
+            )
+        }
+        HirExpr::ChanRecv { channel } => {
+            format!("await {}.recv()", format_hir_expr_ts(channel))
+        }
+        // Plan 14: Enum variant construction
+        HirExpr::VariantInit {
+            enum_name,
+            variant_name,
+            fields,
+        } => {
+            if fields.is_empty() {
+                format!("{{ tag: {}Tag.{} }}", enum_name, variant_name)
+            } else {
+                let field_strs: Vec<String> = fields
+                    .iter()
+                    .enumerate()
+                    .map(|(i, f)| format!("field_{}: {}", i, format_hir_expr_ts(f)))
+                    .collect();
+                format!(
+                    "{{ tag: {}Tag.{}, {} }}",
+                    enum_name,
+                    variant_name,
+                    field_strs.join(", ")
+                )
+            }
         }
     }
 }
