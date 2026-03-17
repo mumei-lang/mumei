@@ -155,8 +155,12 @@ pub extern "C" fn http_body_json(handle: i64) -> i64 {
             let body = resp.body.clone();
             drop(store);
             // Delegate to json_parse from the json FFI module via C ABI
-            let c_body = std::ffi::CString::new(body).unwrap_or_default();
-            super::json::json_parse(c_body.as_ptr())
+            match std::ffi::CString::new(body) {
+                Ok(c_body) => super::json::json_parse(c_body.as_ptr()),
+                // Body contains interior NUL bytes — cannot convert to C string.
+                // Return 0 (parse failure) instead of silently passing empty string.
+                Err(_) => 0,
+            }
         }
         None => 0,
     }
