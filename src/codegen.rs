@@ -37,6 +37,7 @@ fn array_struct_type(context: &Context) -> inkwell::types::StructType<'_> {
 fn enum_llvm_type<'a>(
     context: &'a Context,
     enum_def: &crate::parser::EnumDef,
+    module_env: Option<&ModuleEnv>,
 ) -> inkwell::types::StructType<'a> {
     let max_fields = enum_def
         .variants
@@ -45,8 +46,36 @@ fn enum_llvm_type<'a>(
         .max()
         .unwrap_or(0);
     let mut field_types: Vec<inkwell::types::BasicTypeEnum> = vec![context.i64_type().into()]; // tag
-    for _ in 0..max_fields {
-        field_types.push(context.i64_type().into()); // payload slots (i64 only for now)
+    for slot in 0..max_fields {
+        // Plan 9: Resolve actual field types from EnumDef.variants[*].field_types
+        // Collect the type names across all variants at this slot position
+        let mut resolved_type: Option<inkwell::types::BasicTypeEnum> = None;
+        for variant in &enum_def.variants {
+            if slot < variant.field_types.len() {
+                let type_name = &variant.field_types[slot].name;
+                let slot_type = if let Some(menv) = module_env {
+                    resolve_param_type(context, Some(type_name.as_str()), menv)
+                } else {
+                    match type_name.as_str() {
+                        "f64" => context.f64_type().into(),
+                        "Str" => context.ptr_type(inkwell::AddressSpace::default()).into(),
+                        _ => context.i64_type().into(),
+                    }
+                };
+                match resolved_type {
+                    None => resolved_type = Some(slot_type),
+                    Some(existing) => {
+                        // If types differ across variants, use the largest compatible type.
+                        // ptr and i64 are same size on 64-bit; f64 needs its own slot.
+                        if existing != slot_type {
+                            // Default to i64 as the most general integer type
+                            resolved_type = Some(context.i64_type().into());
+                        }
+                    }
+                }
+            }
+        }
+        field_types.push(resolved_type.unwrap_or(context.i64_type().into()));
     }
     context.struct_type(&field_types, false)
 }
@@ -69,7 +98,7 @@ fn resolve_param_type<'a>(
                 _ => {
                     // Plan 14: Check if type is an enum
                     if let Some(enum_def) = module_env.get_enum(name) {
-                        return enum_llvm_type(context, enum_def).into();
+                        return enum_llvm_type(context, enum_def, Some(module_env)).into();
                     }
                     context.i64_type().into()
                 }
@@ -134,7 +163,7 @@ fn resolve_return_type<'a>(
             "[i64]" => array_struct_type(context).into(),
             _ => {
                 if let Some(enum_def) = module_env.get_enum(&base) {
-                    return enum_llvm_type(context, enum_def).into();
+                    return enum_llvm_type(context, enum_def, Some(module_env)).into();
                 }
                 context.i64_type().into()
             }
@@ -832,11 +861,8 @@ fn compile_hir_expr<'a>(
                     .fields
                     .iter()
                     .map(|f| {
-                        let base = module_env.resolve_base_type(&f.type_name);
-                        match base.as_str() {
-                            "f64" => context.f64_type().into(),
-                            _ => context.i64_type().into(),
-                        }
+                        // Plan 9: Use resolve_param_type for consistent type resolution
+                        resolve_param_type(context, Some(f.type_name.as_str()), module_env)
                     })
                     .collect();
                 let struct_type = context.struct_type(&field_types.to_vec(), false);
@@ -1201,7 +1227,7 @@ fn compile_hir_expr<'a>(
                 .iter()
                 .position(|v| v.name == *variant_name)
                 .unwrap_or(0);
-            let enum_type = enum_llvm_type(context, enum_def);
+            let enum_type = enum_llvm_type(context, enum_def, Some(module_env));
             let mut val = enum_type.get_undef();
             // Set tag
             val = llvm!(builder.build_insert_value(
