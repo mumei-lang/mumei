@@ -34,6 +34,8 @@ extern "Rust" {
     fn http_header_set(handle: i64, name: Str, value: Str) -> i64;
     fn http_is_ok(handle: i64) -> i64;
     fn http_is_error(handle: i64) -> i64;
+    // Plan 16: Memory management
+    fn http_free(handle: i64) -> i64;
 }
 
 // =============================================================
@@ -156,4 +158,16 @@ atom is_error(handle: i64)
     ensures: result >= 0 && result <= 1;
     body: {
         http_is_error(handle)
+    }
+
+// =============================================================
+// Plan 16: Memory Management
+// =============================================================
+
+// HTTP レスポンスハンドルを解放する（1=成功, 0=無効なハンドル）
+atom free(handle: i64)
+    requires: handle >= 0;
+    ensures: result >= 0 && result <= 1;
+    body: {
+        http_free(handle)
     }

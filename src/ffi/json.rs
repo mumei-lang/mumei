@@ -11,10 +11,9 @@ use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::sync::Mutex;
 
-// NOTE: JSON_STORE and STRING_STORE are append-only — handles are never removed.
-// For long-running programs, this causes unbounded memory growth.
-// TODO: Add `json_free(handle: i64)` and `string_free(handle: i64)` FFI functions
-// to allow Mumei programs to release handles when no longer needed.
+// Plan 16: JSON_STORE and STRING_STORE now support handle removal via
+// json_free() and string_free(). Handles are allocated with incrementing IDs
+// and can be individually released when no longer needed.
 lazy_static::lazy_static! {
     static ref JSON_STORE: Mutex<HashMap<i64, Value>> = Mutex::new(HashMap::new());
     static ref NEXT_JSON_HANDLE: Mutex<i64> = Mutex::new(1);
@@ -32,11 +31,10 @@ fn alloc_json_handle(val: Value) -> i64 {
 }
 
 // NOTE: alloc_string_result intentionally leaks CString via std::mem::forget.
-// Every call permanently leaks memory. This is acceptable for short-lived CLI tools,
-// but causes unbounded memory growth in long-running programs or loops.
-// TODO: Add `mumei_str_free(ptr: *const c_char)` FFI function, or use a string
-// interning table to allow reuse/deallocation of returned string pointers.
-fn alloc_string_result(s: &str) -> *const c_char {
+// This is kept for backward compatibility with existing FFI functions that return
+// *const c_char directly. New code should prefer mumei_str_alloc() which stores
+// strings in STRING_STORE for managed lifetime.
+pub fn alloc_string_result(s: &str) -> *const c_char {
     match CString::new(s) {
         Ok(cs) => {
             let ptr = cs.as_ptr();
@@ -275,5 +273,72 @@ pub extern "C" fn mumei_str_eq(a: *const c_char, b: *const c_char) -> i64 {
         1
     } else {
         0
+    }
+}
+
+// =============================================================
+// Plan 16: Memory Management — Handle Release Functions
+// =============================================================
+
+/// Release a JSON handle from JSON_STORE.
+/// Returns 1 if the handle was found and removed, 0 otherwise.
+#[no_mangle]
+pub extern "C" fn json_free(handle: i64) -> i64 {
+    let mut store = JSON_STORE.lock().unwrap();
+    if store.remove(&handle).is_some() {
+        1
+    } else {
+        0
+    }
+}
+
+/// Release a string handle from STRING_STORE.
+/// Returns 1 if the handle was found and removed, 0 otherwise.
+#[no_mangle]
+pub extern "C" fn string_free(handle: i64) -> i64 {
+    let mut store = STRING_STORE.lock().unwrap();
+    if store.remove(&handle).is_some() {
+        1
+    } else {
+        0
+    }
+}
+
+/// Allocate a string in STRING_STORE and return its handle.
+/// This is the managed alternative to alloc_string_result.
+pub fn mumei_str_alloc_internal(s: &str) -> i64 {
+    let mut store = STRING_STORE.lock().unwrap();
+    let mut next = NEXT_STRING_HANDLE.lock().unwrap();
+    let handle = *next;
+    *next += 1;
+    if let Ok(cs) = CString::new(s) {
+        store.insert(handle, cs);
+        handle
+    } else {
+        0
+    }
+}
+
+/// FFI entry point: Allocate a string in STRING_STORE.
+#[no_mangle]
+pub extern "C" fn mumei_str_alloc(s: *const c_char) -> i64 {
+    let s_str = unsafe { c_str_to_str(s) };
+    mumei_str_alloc_internal(s_str)
+}
+
+/// FFI entry point: Free a string handle from STRING_STORE.
+#[no_mangle]
+pub extern "C" fn mumei_str_free(handle: i64) -> i64 {
+    string_free(handle)
+}
+
+/// FFI entry point: Get a raw C string pointer from a STRING_STORE handle.
+/// Returns null if the handle is invalid.
+#[no_mangle]
+pub extern "C" fn mumei_str_get(handle: i64) -> *const c_char {
+    let store = STRING_STORE.lock().unwrap();
+    match store.get(&handle) {
+        Some(cs) => cs.as_ptr(),
+        None => std::ptr::null(),
     }
 }
