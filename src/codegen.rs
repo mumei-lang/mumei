@@ -550,6 +550,8 @@ fn compile_hir_expr<'a>(
                         Ok(result.into_float_value().into())
                     } else if result.is_pointer_value() {
                         Ok(result.into_pointer_value().into())
+                    } else if result.is_struct_value() {
+                        Ok(result.into_struct_value().into())
                     } else {
                         Ok(result.into_int_value().into())
                     }
