@@ -492,6 +492,12 @@ Detailed session plans for the next 8 implementation priorities are documented i
 | 6 | Effect Hierarchy extensions | ✅ Implemented |
 | 7 | Runtime Portability: musl + Windows | ✅ CI infrastructure added (untested on runners) |
 | 8 | Concurrency improvements | ✅ Parser/AST/HIR infrastructure added (codegen placeholder) |
+| 9 | Plan 15: Examples + E2E tests | ✅ 5 examples + 3 test files |
+| 10 | Plan 16: FFI memory management | ✅ json_free/string_free/http_free |
+| 11 | Plan 17: Str type migration | ✅ Examples use Str-typed parameters |
+| 12 | Plan 18: Codegen return types | ✅ `resolve_return_type()`, `-> Type` syntax |
+| 13 | Plan 19: MIR Phase 4c completion | ✅ MoveAnalysis is primary engine |
+| 14 | Plan 20: Z3 temporal effect integration | ✅ `encode_effect_state()`, ConflictingState Z3 probes |
 
 ---
 

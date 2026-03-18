@@ -9,6 +9,11 @@
 //
 // Pipeline: compute_gen_kill → compute_liveness → insert_drops
 //           analyze_moves (forward dataflow for ownership tracking)
+//
+// Plan 19 (Phase 4c complete): This module is now the primary ownership/move
+// analysis engine, replacing the HIR-level LinearityCtx for move detection.
+// verification.rs Phase 1h calls analyze_moves() and reports violations as
+// hard errors. LinearityCtx is retained only for Z3-level borrow tracking.
 // =============================================================================
 
 use crate::mir::{
@@ -1231,6 +1236,7 @@ mod tests {
             max_unroll: None,
             invariant: None,
             effects: vec![],
+            return_type: None,
             span: Span::new("", 1, 1, 0),
         }
     }

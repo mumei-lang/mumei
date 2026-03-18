@@ -1,8 +1,10 @@
 # Phase 4c+ Roadmap — Session Plans
 
-These are 8 sequential implementation plans for Phase 4c and beyond.
+These are sequential implementation plans for Phase 4c and beyond.
 Each plan is a self-contained session prompt with full context, implementation details, affected files, and acceptance criteria.
 Plans should be executed in priority order (Plan 1 first).
+
+> **Status**: Plans 1–8 completed. Plans 15–20 completed in PR #83.
 
 ---
 

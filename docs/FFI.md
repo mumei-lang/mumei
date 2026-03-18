@@ -57,7 +57,9 @@ Handled in all match blocks in `main.rs`, `resolver.rs`, `lsp.rs`.
 | `Item::ExternBlock` variant | ✅ Implemented (all match arms) |
 | Parser tests | ✅ Implemented (`test_parse_extern_block`, `test_parse_extern_block_c`) |
 | trusted atom auto-registration | ✅ Implemented (PR #32: extern → ModuleEnv auto-registration) |
-| LLVM codegen | ❌ Not implemented (future: extern function declare + call) |
+| LLVM codegen | ✅ Implemented (`declare_extern_functions()` + `resolve_return_type()`) |
+| FFI memory management | ✅ Implemented (`json_free`, `string_free`, `http_free`) |
+| Managed string lifetime | ✅ Implemented (`mumei_str_alloc`, `mumei_str_free`, `mumei_str_get`) |
 
 ## Bridge Mechanism (Design)
 
@@ -121,18 +123,25 @@ Completing the FFI Bridge is the top priority as a prerequisite for std.http / s
    - Set `TrustLevel::Trusted` (skip body verification)
    - Auto-register in `ModuleEnv.atoms`
 
-2. **LLVM declare generation** (pending)
-   - Output extern functions as LLVM IR `declare`
-   - Type mapping: Mumei types → LLVM types
+2. **LLVM declare generation** ✅
+   - `declare_extern_functions()` emits LLVM IR `declare` for all extern functions
+   - `resolve_param_type()` / `resolve_return_type()` map Mumei types → LLVM types
 
-3. **Call-site code generation** (pending)
-   - Generate call to extern atoms registered in ModuleEnv
-   - Ensure ABI compatibility (extern "C" / extern "Rust")
+3. **Call-site code generation** ✅
+   - Callee return type resolved from `atom.return_type` annotation
+   - ABI: both "C" and "Rust" use C calling convention
+
+4. **Memory management** ✅ (Plan 16)
+   - `json_free()` / `string_free()` / `http_free()` release handles from global stores
+   - `mumei_str_alloc()` / `mumei_str_free()` / `mumei_str_get()` for managed string lifetime
+   - Exposed as atoms in `std/json.mm` and `std/http.mm`
 
 **Files modified**:
 - `src/main.rs` — ExternBlock → atom conversion in `load_and_prepare()`
 - `src/verification.rs` — trusted verification for extern atoms
-- `src/codegen.rs` — LLVM `declare` + `call` generation (pending)
+- `src/codegen.rs` — `declare_extern_functions()`, `resolve_return_type()`, LLVM `declare` + `call` generation
+- `src/ffi/json.rs` — JSON FFI backend + memory management (`json_free`, `string_free`, `mumei_str_alloc/free/get`)
+- `src/ffi/http.rs` — HTTP FFI backend + memory management (`http_free`)
 
 ### Other Extensions
 

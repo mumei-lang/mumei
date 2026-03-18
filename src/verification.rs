@@ -996,6 +996,20 @@ fn parse_tracking_label(label: &str) -> Option<String> {
     None
 }
 
+/// Encode an effect state name as an integer for Z3 Int Sort constraints.
+/// Returns the index of the state in the state machine's states list, or -1 if not found.
+fn encode_effect_state(
+    state_machine: &crate::mir_analysis::EffectStateMachine,
+    state_name: &str,
+) -> i64 {
+    state_machine
+        .states
+        .iter()
+        .position(|s| s == state_name)
+        .map(|i| i as i64)
+        .unwrap_or(-1)
+}
+
 /// Build semantic feedback JSON for contradiction (unsat) detection with unsat core info.
 pub fn build_contradiction_feedback(
     atom_name: &str,
@@ -1062,26 +1076,29 @@ struct VCtx<'a> {
 // 線形性チェック（Linear Types / Ownership Tracking）
 // =============================================================================
 //
-// 動的メモリ管理における二重解放・Use-After-Free を防ぐために、
-// 変数の「生存状態」を追跡する。
+// NOTE (Plan 19 — Phase 4c complete): The primary ownership/move analysis has
+// been migrated to MIR-based MoveAnalysis (src/mir_analysis.rs).  Phase 1h in
+// verify() now runs forward dataflow move analysis on the MIR CFG and reports
+// UseAfterMove, DoubleMove, and ConflictingMerge as hard errors.
 //
-// 設計:
-// - LinearityCtx が各変数の生存フラグ (is_alive) を管理
-// - consume(x) 呼び出し時に x を「消費済み」としてマーク
-// - 消費済み変数へのアクセスはコンパイルエラー
+// LinearityCtx is retained as a secondary Z3-integrated check for:
+// - Borrow tracking at call sites (ref / ref mut parameter handling)
+// - Consume tracking within Z3 symbolic execution (ensures __alive_ bools)
+// - Violation accumulation for the Phase 5b linearity report
 //
-// 将来の拡張:
-// - atom のパラメータに `consume` 修飾子を追加
-//   例: atom take_ownership(resource: T) consume resource;
-// - Z3 上で is_alive フラグをシンボリック Bool として表現し、
-//   consume 後のアクセスを ¬is_alive(x) として検出
-
+// Future: Once MIR borrow tracking is implemented (Phase 5), LinearityCtx
+// can be fully removed.
+//
 /// 変数の線形性（所有権）追跡コンテキスト
 ///
 /// 所有権（Ownership）と借用（Borrowing）の両方を追跡する。
 /// - consume: 所有権を消費（移動）。消費後のアクセスは Use-After-Free。
 /// - borrow: 読み取り専用の借用。借用中は所有者が consume/free できない。
 /// - release_borrow: 借用を解放。
+///
+/// NOTE: Primary move analysis is now handled by MIR MoveAnalysis (Plan 19).
+/// This struct is kept for Z3-level borrow/consume tracking during symbolic
+/// execution. See src/mir_analysis.rs for the MIR-based replacement.
 #[derive(Debug, Clone, Default)]
 pub struct LinearityCtx {
     /// 変数名 → 生存状態（true = alive, false = consumed）
@@ -4440,19 +4457,118 @@ fn verify_inner(
                         )));
                     }
                     crate::mir_analysis::TemporalViolationKind::ConflictingState => {
-                        // Delegate to Z3 for conflicting states at merge points.
-                        // For now, report as warning (Z3 integration is future work).
-                        eprintln!(
-                            "  \u{26a0}\u{fe0f}  Temporal effect warning: '{}' has conflicting states \
-                             at merge point (block {}): '{}' vs '{}'. \
-                             Z3 constraint delegation pending.",
-                            v.effect, v.block_id, v.expected_state, v.actual_state
-                        );
-                        // TODO: Generate Z3 Int Sort constraints for conflicting state resolution:
-                        // - Each state = integer (e.g., Open=0, Closed=1)
-                        // - Create Z3 variables: __effect_state_{effect}_{block_id}
-                        // - Assert transition constraints and merge constraints
-                        // - Check constraint_budget before adding constraints
+                        // Plan 20: Z3 Int Sort constraint generation for conflicting
+                        // states at merge points.  We encode each state as an integer
+                        // and ask Z3 whether both predecessor states can be satisfied
+                        // simultaneously — if UNSAT the conflict is irreconcilable.
+
+                        // Look up the state machine for this effect.
+                        if let Some(sm) = state_machines.get(&v.effect) {
+                            let expected_int = encode_effect_state(sm, &v.expected_state);
+                            let actual_int = encode_effect_state(sm, &v.actual_state);
+
+                            // Only proceed if both states are known.
+                            if expected_int >= 0 && actual_int >= 0 {
+                                // Check constraint budget: each Z3 probe costs ~4
+                                // assertions (variable, branch-a, branch-b, equality).
+                                // Phase 1i runs before the main solver is created, so
+                                // we use mir_body complexity as a proxy budget check.
+                                let budget_ok = mir_body.complexity() < DEFAULT_CONSTRAINT_BUDGET;
+
+                                if budget_ok {
+                                    // Create a scoped Z3 context + solver for this probe.
+                                    let z3_cfg = Config::new();
+                                    let z3_ctx = Context::new(&z3_cfg);
+                                    let z3_solver = Solver::new(&z3_ctx);
+
+                                    // Z3 Int variable: __effect_state_{effect}_{block_id}
+                                    let var_name =
+                                        format!("__effect_state_{}_{}", v.effect, v.block_id);
+                                    let state_var = Int::new_const(&z3_ctx, var_name.as_str());
+
+                                    // Assert: state_var == expected (from one branch)
+                                    let eq_expected =
+                                        state_var._eq(&Int::from_i64(&z3_ctx, expected_int));
+                                    // Assert: state_var == actual (from other branch)
+                                    let eq_actual =
+                                        state_var._eq(&Int::from_i64(&z3_ctx, actual_int));
+
+                                    // Both must hold simultaneously at the merge point.
+                                    z3_solver.assert(&eq_expected);
+                                    z3_solver.assert(&eq_actual);
+
+                                    // Also constrain variable to valid state range.
+                                    let num_states = sm.states.len() as i64;
+                                    z3_solver.assert(&state_var.ge(&Int::from_i64(&z3_ctx, 0)));
+                                    z3_solver
+                                        .assert(&state_var.lt(&Int::from_i64(&z3_ctx, num_states)));
+
+                                    match z3_solver.check() {
+                                        SatResult::Unsat => {
+                                            // Irreconcilable: the two branches require
+                                            // mutually exclusive states → hard error.
+                                            return Err(MumeiError::verification(format!(
+                                                "Temporal effect conflict (Z3 UNSAT): effect '{}' \
+                                                 has irreconcilable states at merge point (block {}): \
+                                                 '{}' (={}) vs '{}' (={}). \
+                                                 The conflict cannot be resolved.",
+                                                v.effect, v.block_id,
+                                                v.expected_state, expected_int,
+                                                v.actual_state, actual_int,
+                                            )));
+                                        }
+                                        SatResult::Sat => {
+                                            // SAT means the states are actually compatible
+                                            // (should not normally happen for truly different
+                                            // states, but could occur with aliased encodings).
+                                            // Emit info diagnostic.
+                                            eprintln!(
+                                                "  \u{2139}\u{fe0f}  Temporal effect info: '{}' conflicting states \
+                                                 at block {} resolved by Z3 (SAT): '{}' vs '{}'.",
+                                                v.effect, v.block_id,
+                                                v.expected_state, v.actual_state
+                                            );
+                                        }
+                                        SatResult::Unknown => {
+                                            // Solver timeout / unknown — keep as warning.
+                                            eprintln!(
+                                                "  \u{26a0}\u{fe0f}  Temporal effect warning: '{}' conflicting states \
+                                                 at block {}: Z3 returned Unknown for '{}' vs '{}'.",
+                                                v.effect, v.block_id,
+                                                v.expected_state, v.actual_state
+                                            );
+                                        }
+                                    }
+                                } else {
+                                    // Budget exceeded — fall back to warning.
+                                    eprintln!(
+                                        "  \u{26a0}\u{fe0f}  Temporal effect warning: '{}' has conflicting states \
+                                         at merge point (block {}): '{}' vs '{}'. \
+                                         Constraint budget exceeded, Z3 probe skipped.",
+                                        v.effect, v.block_id,
+                                        v.expected_state, v.actual_state
+                                    );
+                                }
+                            } else {
+                                // Unknown state name — fall back to warning.
+                                eprintln!(
+                                    "  \u{26a0}\u{fe0f}  Temporal effect warning: '{}' has conflicting states \
+                                     at merge point (block {}): '{}' vs '{}'. \
+                                     State encoding failed.",
+                                    v.effect, v.block_id,
+                                    v.expected_state, v.actual_state
+                                );
+                            }
+                        } else {
+                            // No state machine found — fall back to warning.
+                            eprintln!(
+                                "  \u{26a0}\u{fe0f}  Temporal effect warning: '{}' has conflicting states \
+                                 at merge point (block {}): '{}' vs '{}'. \
+                                 No state machine found.",
+                                v.effect, v.block_id,
+                                v.expected_state, v.actual_state
+                            );
+                        }
                     }
                     crate::mir_analysis::TemporalViolationKind::UnexpectedFinalState => {
                         // Hard error: effect left in unexpected state at exit
@@ -4468,8 +4584,10 @@ fn verify_inner(
     }
     metrics.record_phase("Phase 1i: temporal effects", phase_start.elapsed());
 
-    // TODO: Phase 4c — Replace HIR-level LinearityCtx with MIR-based MoveAnalysis
-    // once MIR lowering covers all expression forms (Match, Lambda, Async, etc.)
+    // ✅ Phase 4c complete (Plan 19): MIR lowering now covers all expression forms
+    // (Match, Lambda, Async, Await, Task, TaskGroup, ChanSend, ChanRecv, etc.).
+    // Primary move analysis is handled by Phase 1h above (MIR MoveAnalysis).
+    // LinearityCtx below is retained only for Z3-level borrow/consume tracking.
 
     // Sort-aware timeout: if has_string_constraints is true, double the timeout.
     // Z3 String Sort is now integrated for effect parameter constraints.
@@ -7829,6 +7947,77 @@ mod tests {
             elapsed.as_millis() < 500,
             "String Sort constraint solving took {}ms, expected < 500ms",
             elapsed.as_millis()
+        );
+    }
+
+    // =========================================================================
+    // Plan 20: Temporal Effect Z3 Integration — Tests
+    // =========================================================================
+
+    #[test]
+    fn test_encode_effect_state_basic() {
+        use crate::mir_analysis::EffectStateMachine;
+
+        let sm = EffectStateMachine {
+            effect_name: "FileIO".to_string(),
+            states: vec![
+                "Open".to_string(),
+                "Reading".to_string(),
+                "Closed".to_string(),
+            ],
+            transitions: std::collections::HashMap::new(),
+            initial_state: "Closed".to_string(),
+        };
+
+        assert_eq!(encode_effect_state(&sm, "Open"), 0);
+        assert_eq!(encode_effect_state(&sm, "Reading"), 1);
+        assert_eq!(encode_effect_state(&sm, "Closed"), 2);
+        assert_eq!(encode_effect_state(&sm, "Unknown"), -1);
+    }
+
+    #[test]
+    fn test_z3_conflicting_state_unsat() {
+        // Two different states at the same merge point should be UNSAT.
+        let cfg = z3::Config::new();
+        let ctx = z3::Context::new(&cfg);
+        let solver = z3::Solver::new(&ctx);
+
+        let state_var = Int::new_const(&ctx, "__effect_state_FileIO_3");
+
+        // Branch A says state = 0 (Open)
+        solver.assert(&state_var._eq(&Int::from_i64(&ctx, 0)));
+        // Branch B says state = 2 (Closed)
+        solver.assert(&state_var._eq(&Int::from_i64(&ctx, 2)));
+        // Valid range: 0..3
+        solver.assert(&state_var.ge(&Int::from_i64(&ctx, 0)));
+        solver.assert(&state_var.lt(&Int::from_i64(&ctx, 3)));
+
+        assert_eq!(
+            solver.check(),
+            z3::SatResult::Unsat,
+            "Different states at merge point should be UNSAT"
+        );
+    }
+
+    #[test]
+    fn test_z3_conflicting_state_sat_same() {
+        // Same state from both branches should be SAT.
+        let cfg = z3::Config::new();
+        let ctx = z3::Context::new(&cfg);
+        let solver = z3::Solver::new(&ctx);
+
+        let state_var = Int::new_const(&ctx, "__effect_state_FileIO_3");
+
+        // Both branches say state = 1 (Reading)
+        solver.assert(&state_var._eq(&Int::from_i64(&ctx, 1)));
+        solver.assert(&state_var._eq(&Int::from_i64(&ctx, 1)));
+        solver.assert(&state_var.ge(&Int::from_i64(&ctx, 0)));
+        solver.assert(&state_var.lt(&Int::from_i64(&ctx, 3)));
+
+        assert_eq!(
+            solver.check(),
+            z3::SatResult::Sat,
+            "Same state from both branches should be SAT"
         );
     }
 }

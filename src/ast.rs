@@ -685,6 +685,7 @@ impl Monomorphizer {
             max_unroll: generic.max_unroll,
             invariant: generic.invariant.clone(),
             effects: mono_effects,
+            return_type: generic.return_type.clone(),
             span: generic.span.clone(),
         })
     }

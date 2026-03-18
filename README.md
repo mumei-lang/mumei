@@ -13,6 +13,12 @@ atom increment(n: Nat)
   requires: n >= 0;
   ensures: result >= 1;
   body: n + 1;
+
+// Explicit return types for Str, f64, enums (Plan 18)
+atom greet(name: Str) -> Str
+  requires: true;
+  ensures: true;
+  body: "Hello, " + name;
 ```
 
 ```mumei
@@ -102,6 +108,9 @@ mumei build src/main.mm -o dist/output
 | `mumei setup` | Download Z3 + LLVM toolchain |
 | `mumei inspect` | Show development environment |
 | `mumei infer-effects <file>` | Infer required effects (JSON output) |
+| `mumei infer-contracts <file>` | Infer contracts for all atoms (JSON output) |
+| `mumei repl` | Interactive REPL |
+| `mumei doc <file> -o <dir>` | Generate HTML/Markdown documentation |
 | `mumei lsp` | Start LSP server |
 
 ---
@@ -110,15 +119,16 @@ mumei build src/main.mm -o dist/output
 
 | Category | Highlights |
 |----------|-----------|
-| **Types** | Refinement types (`i64 where v >= 0`), Structs, Enums (ADT), Generics |
-| **Verification** | Pre/postconditions, [loop invariants + termination proof](docs/LANGUAGE.md#termination-checking), `forall`/`exists` quantifiers |
+| **Types** | Refinement types (`i64 where v >= 0`), Structs, Enums (ADT), Generics, explicit return types (`-> Str`) |
+| **Verification** | Pre/postconditions, [loop invariants + termination proof](docs/LANGUAGE.md#termination-checking), `forall`/`exists` quantifiers, [temporal effect Z3 probes](docs/ARCHITECTURE.md#stateful-effects-temporal-effect-verification) |
 | **Traits** | [Algebraic laws verified by Z3](docs/LANGUAGE.md#trait-definitions-with-laws) (`law reflexive: leq(x, x) == true`) |
-| **Ownership** | [`ref` / `ref mut` / `consume`](docs/LANGUAGE.md#ownership-and-borrowing) with Z3 aliasing prevention |
+| **Ownership** | [`ref` / `ref mut` / `consume`](docs/LANGUAGE.md#ownership-and-borrowing) with Z3 aliasing prevention, MIR-based move analysis |
 | **Concurrency** | `async`/`await`, `task_group:all`/`task_group:any`, [deadlock-free proof via resource hierarchy](docs/LANGUAGE.md#asyncawait-and-resource-hierarchy) |
-| **Effects** | Compile-time side-effect verification, `perform`/`effects:`, effect hierarchy, parameterized effects, [effect polymorphism (`<E: Effect>`)](docs/LANGUAGE.md), [capability security](docs/CAPABILITY_SECURITY.md) |
+| **Effects** | Compile-time side-effect verification, `perform`/`effects:`, effect hierarchy, parameterized effects, [effect polymorphism (`<E: Effect>`)](docs/LANGUAGE.md), [capability security](docs/CAPABILITY_SECURITY.md), stateful effects with temporal ordering |
 | **Lambda** | First-class closures `\|x, y\| x + y`, capture analysis, transpiles to Rust / TS / Go |
 | **Safety** | `trusted` / `unverified` atoms, taint analysis, BMC + inductive invariant, [`call_with_contract`](docs/LANGUAGE.md#higher-order-functions-phase-a) for higher-order function verification |
-| **Std Library** | Option, Result, List, BoundedArray, Vector, HashMap, sort algorithms, effect definitions |
+| **FFI** | `extern "Rust"` / `extern "C"` blocks, handle-based memory management (`json_free`, `http_free`), Str type interop |
+| **Std Library** | Option, Result, List, BoundedArray, Vector, HashMap, JSON, HTTP, sort algorithms, effect definitions |
 | **Output** | LLVM IR + Rust + Go + TypeScript transpiler |
 | **Tooling** | LSP server, VS Code extension, `mumei.toml` manifest, dependency manager, MCP server, Streamlit Visualizer, semantic feedback (bilingual EN/JP) |
 

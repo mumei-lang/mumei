@@ -170,17 +170,26 @@ pub fn transpile_to_rust(hir_atom: &HirAtom) -> String {
 
     let body = format_hir_stmt_rust(&hir_atom.body);
 
-    // 戻り値型の推論: ボディに f64 リテラルや f64 パラメータが含まれていれば f64
-    let has_float_param = atom.params.iter().any(|p| {
-        p.type_name
-            .as_deref()
-            .map(|t| resolve_base_type(t) == "f64")
-            .unwrap_or(false)
-    });
-    let return_type = if has_float_param || hir_stmt_contains_float(&hir_atom.body) {
-        "f64"
+    // Plan 18: Use explicit return_type annotation if available, otherwise fall back
+    // to the heuristic (f64 params or body contains float → f64).
+    let return_type = if let Some(ref ret) = atom.return_type {
+        match resolve_base_type(ret).as_str() {
+            "f64" => "f64",
+            "Str" => "&str",
+            _ => "i64",
+        }
     } else {
-        "i64"
+        let has_float_param = atom.params.iter().any(|p| {
+            p.type_name
+                .as_deref()
+                .map(|t| resolve_base_type(t) == "f64")
+                .unwrap_or(false)
+        });
+        if has_float_param || hir_stmt_contains_float(&hir_atom.body) {
+            "f64"
+        } else {
+            "i64"
+        }
     };
 
     let async_keyword = if atom.is_async { "async " } else { "" };

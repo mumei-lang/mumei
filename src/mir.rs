@@ -9,6 +9,12 @@
 //   - Explicit control flow: if/else and while become BasicBlock graphs.
 //   - Suitable for lifetime/borrow analysis and drop insertion in future phases.
 //
+// Expression coverage (Plan 19 — Phase 4c complete):
+//   All HirExpr forms are lowered: Number, Float, StringLit, Variable,
+//   BinaryOp, Call, IfThenElse, StructInit, FieldAccess, Perform,
+//   ArrayAccess, Match, AtomRef, CallRef, Lambda, Async, Await,
+//   Task, TaskGroup, ChanSend, ChanRecv, VariantInit.
+//
 // See also: docs/ROADMAP.md "Multi-Stage IR Roadmap" section.
 // =============================================================================
 
@@ -785,6 +791,7 @@ mod tests {
             max_unroll: None,
             invariant: None,
             effects: vec![],
+            return_type: None,
             span: Span::new("", 1, 1, 0),
         }
     }
