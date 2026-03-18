@@ -119,6 +119,8 @@ pub fn declare_extern_functions<'ctx>(
 }
 
 /// Plan 18: Resolve the LLVM return type for an atom based on its `return_type` annotation.
+/// When `return_type` is None, falls back to parameter-based heuristic: if any parameter
+/// is f64, assume f64 return (backward compatible with pre-Plan 18 behavior).
 fn resolve_return_type<'a>(
     context: &'a Context,
     atom: &crate::parser::Atom,
@@ -138,7 +140,19 @@ fn resolve_return_type<'a>(
             }
         }
     } else {
-        context.i64_type().into()
+        // Fallback heuristic: if any parameter is f64, assume f64 return type.
+        // This preserves backward compatibility for atoms without explicit -> Type.
+        let has_float = atom.params.iter().any(|p| {
+            p.type_name
+                .as_deref()
+                .map(|t| module_env.resolve_base_type(t) == "f64")
+                .unwrap_or(false)
+        });
+        if has_float {
+            context.f64_type().into()
+        } else {
+            context.i64_type().into()
+        }
     }
 }
 
@@ -1009,7 +1023,9 @@ fn compile_hir_expr<'a>(
                     .iter()
                     .map(|p| resolve_param_type(context, p.type_name.as_deref(), module_env).into())
                     .collect();
-                let fn_type = context.i64_type().fn_type(&callee_param_types, false);
+                // Plan 18: Use resolve_return_type for consistent type resolution
+                let callee_ret = resolve_return_type(context, callee_atom, module_env);
+                let fn_type = callee_ret.fn_type(&callee_param_types, false);
                 module.add_function(name, fn_type, Some(inkwell::module::Linkage::External))
             } else {
                 return Err(MumeiError::codegen(format!(
@@ -1060,16 +1076,32 @@ fn compile_hir_expr<'a>(
                 .map(|v| {
                     if v.is_float_value() {
                         context.f64_type().into()
+                    } else if v.is_pointer_value() {
+                        context.ptr_type(AddressSpace::default()).into()
                     } else {
                         context.i64_type().into()
                     }
                 })
                 .collect();
-            let has_float_arg = arg_vals.iter().any(|v| v.is_float_value());
-            let fn_type = if has_float_arg {
-                context.f64_type().fn_type(&param_types, false)
+            // Plan 18: Try to resolve return type from callee atom definition.
+            // For indirect calls via AtomRef, look up the atom name in module_env.
+            let indirect_ret_type = if let HirExpr::AtomRef { name } = callee.as_ref() {
+                module_env
+                    .get_atom(name)
+                    .map(|a| resolve_return_type(context, a, module_env))
             } else {
-                context.i64_type().fn_type(&param_types, false)
+                None
+            };
+            let fn_type = if let Some(ret) = indirect_ret_type {
+                ret.fn_type(&param_types, false)
+            } else {
+                // Fallback: infer from argument types (no atom definition available)
+                let has_float_arg = arg_vals.iter().any(|v| v.is_float_value());
+                if has_float_arg {
+                    context.f64_type().fn_type(&param_types, false)
+                } else {
+                    context.i64_type().fn_type(&param_types, false)
+                }
             };
             let fn_ptr = llvm!(builder.build_int_to_ptr(
                 callee_int,

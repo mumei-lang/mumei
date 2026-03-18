@@ -335,16 +335,14 @@ pub extern "C" fn mumei_str_free(handle: i64) -> i64 {
 /// FFI entry point: Get a raw C string pointer from a STRING_STORE handle.
 /// Returns null if the handle is invalid.
 ///
-/// # Safety
-/// The returned pointer is only valid as long as the handle is not freed via
-/// `string_free` / `mumei_str_free`. The caller must ensure the handle remains
-/// alive while the pointer is in use. In concurrent contexts, a racing
-/// `string_free` call would invalidate the pointer.
+/// The returned pointer is an independent copy (via alloc_string_result) that
+/// remains valid even if the handle is subsequently freed. The caller owns the
+/// returned memory (it is leaked intentionally, same as other FFI string returns).
 #[no_mangle]
 pub extern "C" fn mumei_str_get(handle: i64) -> *const c_char {
     let store = STRING_STORE.lock().unwrap();
     match store.get(&handle) {
-        Some(cs) => cs.as_ptr(),
+        Some(cs) => alloc_string_result(cs.to_str().unwrap_or("")),
         None => std::ptr::null(),
     }
 }
