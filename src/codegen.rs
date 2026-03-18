@@ -944,17 +944,31 @@ fn compile_hir_expr<'a>(
                 incoming.push((body_val, body_end));
             }
 
-            builder.position_at_end(unreachable_block);
-            let unreachable_val: BasicValueEnum = context.i64_type().const_int(0, false).into();
-            llvm!(builder.build_unconditional_branch(merge_block));
-            incoming.push((unreachable_val, unreachable_block));
-
-            builder.position_at_end(merge_block);
             // Plan 18: Infer phi type from the first arm's body value type
+            // (must be determined before creating the unreachable block value)
             let phi_type = incoming
                 .first()
                 .map(|(v, _)| v.get_type())
                 .unwrap_or_else(|| context.i64_type().into());
+
+            builder.position_at_end(unreachable_block);
+            // Create a zero/null value matching the inferred phi type
+            let unreachable_val: BasicValueEnum = if phi_type.is_float_type() {
+                context.f64_type().const_float(0.0).into()
+            } else if phi_type.is_pointer_type() {
+                context
+                    .ptr_type(AddressSpace::default())
+                    .const_null()
+                    .into()
+            } else if phi_type.is_struct_type() {
+                phi_type.into_struct_type().get_undef().into()
+            } else {
+                context.i64_type().const_int(0, false).into()
+            };
+            llvm!(builder.build_unconditional_branch(merge_block));
+            incoming.push((unreachable_val, unreachable_block));
+
+            builder.position_at_end(merge_block);
             let phi = llvm!(builder.build_phi(phi_type, "match_result"));
             for (val, block) in &incoming {
                 phi.add_incoming(&[(val, *block)]);

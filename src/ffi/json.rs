@@ -309,9 +309,9 @@ pub extern "C" fn string_free(handle: i64) -> i64 {
 pub fn mumei_str_alloc_internal(s: &str) -> i64 {
     let mut store = STRING_STORE.lock().unwrap();
     let mut next = NEXT_STRING_HANDLE.lock().unwrap();
-    let handle = *next;
-    *next += 1;
     if let Ok(cs) = CString::new(s) {
+        let handle = *next;
+        *next += 1;
         store.insert(handle, cs);
         handle
     } else {
@@ -334,6 +334,12 @@ pub extern "C" fn mumei_str_free(handle: i64) -> i64 {
 
 /// FFI entry point: Get a raw C string pointer from a STRING_STORE handle.
 /// Returns null if the handle is invalid.
+///
+/// # Safety
+/// The returned pointer is only valid as long as the handle is not freed via
+/// `string_free` / `mumei_str_free`. The caller must ensure the handle remains
+/// alive while the pointer is in use. In concurrent contexts, a racing
+/// `string_free` call would invalidate the pointer.
 #[no_mangle]
 pub extern "C" fn mumei_str_get(handle: i64) -> *const c_char {
     let store = STRING_STORE.lock().unwrap();
