@@ -1062,26 +1062,29 @@ struct VCtx<'a> {
 // 線形性チェック（Linear Types / Ownership Tracking）
 // =============================================================================
 //
-// 動的メモリ管理における二重解放・Use-After-Free を防ぐために、
-// 変数の「生存状態」を追跡する。
+// NOTE (Plan 19 — Phase 4c complete): The primary ownership/move analysis has
+// been migrated to MIR-based MoveAnalysis (src/mir_analysis.rs).  Phase 1h in
+// verify() now runs forward dataflow move analysis on the MIR CFG and reports
+// UseAfterMove, DoubleMove, and ConflictingMerge as hard errors.
 //
-// 設計:
-// - LinearityCtx が各変数の生存フラグ (is_alive) を管理
-// - consume(x) 呼び出し時に x を「消費済み」としてマーク
-// - 消費済み変数へのアクセスはコンパイルエラー
+// LinearityCtx is retained as a secondary Z3-integrated check for:
+// - Borrow tracking at call sites (ref / ref mut parameter handling)
+// - Consume tracking within Z3 symbolic execution (ensures __alive_ bools)
+// - Violation accumulation for the Phase 5b linearity report
 //
-// 将来の拡張:
-// - atom のパラメータに `consume` 修飾子を追加
-//   例: atom take_ownership(resource: T) consume resource;
-// - Z3 上で is_alive フラグをシンボリック Bool として表現し、
-//   consume 後のアクセスを ¬is_alive(x) として検出
-
+// Future: Once MIR borrow tracking is implemented (Phase 5), LinearityCtx
+// can be fully removed.
+//
 /// 変数の線形性（所有権）追跡コンテキスト
 ///
 /// 所有権（Ownership）と借用（Borrowing）の両方を追跡する。
 /// - consume: 所有権を消費（移動）。消費後のアクセスは Use-After-Free。
 /// - borrow: 読み取り専用の借用。借用中は所有者が consume/free できない。
 /// - release_borrow: 借用を解放。
+///
+/// NOTE: Primary move analysis is now handled by MIR MoveAnalysis (Plan 19).
+/// This struct is kept for Z3-level borrow/consume tracking during symbolic
+/// execution. See src/mir_analysis.rs for the MIR-based replacement.
 #[derive(Debug, Clone, Default)]
 pub struct LinearityCtx {
     /// 変数名 → 生存状態（true = alive, false = consumed）
@@ -4468,8 +4471,10 @@ fn verify_inner(
     }
     metrics.record_phase("Phase 1i: temporal effects", phase_start.elapsed());
 
-    // TODO: Phase 4c — Replace HIR-level LinearityCtx with MIR-based MoveAnalysis
-    // once MIR lowering covers all expression forms (Match, Lambda, Async, etc.)
+    // ✅ Phase 4c complete (Plan 19): MIR lowering now covers all expression forms
+    // (Match, Lambda, Async, Await, Task, TaskGroup, ChanSend, ChanRecv, etc.).
+    // Primary move analysis is handled by Phase 1h above (MIR MoveAnalysis).
+    // LinearityCtx below is retained only for Z3-level borrow/consume tracking.
 
     // Sort-aware timeout: if has_string_constraints is true, double the timeout.
     // Z3 String Sort is now integrated for effect parameter constraints.
