@@ -567,6 +567,11 @@ fn cmd_verify(input: &str, generate_proof_cert: bool, cert_output: Option<&str>)
                         if cached_entry.proof_hash == proof_hash {
                             println!("  ⚖️  '{}': skipped (unchanged, cached) ⏩", atom.name);
                             module_env.mark_verified(&atom.name);
+                            // Plan 11B: Record cached atoms as "unsat" (proven) for proof certificate
+                            cert_results.insert(
+                                atom.name.clone(),
+                                ("unsat".to_string(), "verified".to_string()),
+                            );
                             skipped += 1;
                             continue;
                         }
@@ -1117,6 +1122,7 @@ fn cmd_inspect() {
 // =============================================================================
 
 fn cmd_inspect_file(input: &str, ai: bool, format: &str) {
+    check_z3_available();
     let (items, mut module_env, _imports, _source) = load_and_prepare(input);
 
     // Run verification to get results

@@ -2253,6 +2253,22 @@ fn evaluate_string_constraint(constraint_expr: &str, _param_name: &str, value: &
         }
     }
 
+    // matches(param, "regex") — use Rust regex crate for evaluation
+    if let Some(inner) = trimmed.strip_prefix("matches(") {
+        if let Some(inner) = inner.strip_suffix(')') {
+            // Extract the regex pattern (last quoted string)
+            if let Some(last_quote_end) = inner.rfind('"') {
+                let before = &inner[..last_quote_end];
+                if let Some(last_quote_start) = before.rfind('"') {
+                    let pattern = &inner[last_quote_start + 1..last_quote_end];
+                    if let Ok(re) = regex::Regex::new(pattern) {
+                        return re.is_match(value);
+                    }
+                }
+            }
+        }
+    }
+
     // Unknown constraint — conservatively allow (will be checked by Z3 if symbolic)
     true
 }
@@ -2339,10 +2355,19 @@ fn parse_constraint_to_z3_string<'ctx>(
         if let Some(pattern) = extract_string_arg(trimmed) {
             // Try to approximate the regex pattern with Z3 String constraints
             let stripped = pattern.as_str();
+            // Helper: check if a literal fragment contains regex metacharacters
+            // that would make it unsafe to treat as a Z3 literal string.
+            let is_literal = |s: &str| -> bool {
+                !s.contains('*')
+                    && !s.contains('?')
+                    && !s.contains('[')
+                    && !s.contains('.')
+                    && !s.contains('\\')
+            };
             // ^prefix.* → starts_with(param, prefix)
             if stripped.starts_with('^') && stripped.ends_with(".*") {
                 let prefix = &stripped[1..stripped.len() - 2];
-                if !prefix.contains('*') && !prefix.contains('?') && !prefix.contains('[') {
+                if is_literal(prefix) {
                     let prefix_z3 = Z3String::from_str(ctx, prefix).ok()?;
                     return Some(prefix_z3.prefix(param_z3));
                 }
@@ -2350,7 +2375,7 @@ fn parse_constraint_to_z3_string<'ctx>(
             // .*suffix$ → ends_with(param, suffix)
             if stripped.starts_with(".*") && stripped.ends_with('$') {
                 let suffix = &stripped[2..stripped.len() - 1];
-                if !suffix.contains('*') && !suffix.contains('?') && !suffix.contains('[') {
+                if is_literal(suffix) {
                     let suffix_z3 = Z3String::from_str(ctx, suffix).ok()?;
                     return Some(suffix_z3.suffix(param_z3));
                 }
@@ -2358,7 +2383,7 @@ fn parse_constraint_to_z3_string<'ctx>(
             // .*substr.* → contains(param, substr)
             if stripped.starts_with(".*") && stripped.ends_with(".*") && stripped.len() > 4 {
                 let substr = &stripped[2..stripped.len() - 2];
-                if !substr.contains('*') && !substr.contains('?') && !substr.contains('[') {
+                if is_literal(substr) {
                     let substr_z3 = Z3String::from_str(ctx, substr).ok()?;
                     return Some(param_z3.contains(&substr_z3));
                 }
