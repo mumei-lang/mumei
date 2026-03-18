@@ -29,6 +29,78 @@ atom classify_int(x)
     }
 ```
 Exhaustiveness checking uses SMT solving, not syntactic analysis.
+
+### Enum Payloads (Tagged Unions)
+```mumei
+enum Shape {
+    Circle(i64),
+    Rectangle(i64, i64)
+}
+
+atom area(s: Shape)
+    requires: true;
+    ensures: result >= 0;
+    body: {
+        match s {
+            Circle(r) => r * r * 3,
+            Rectangle(w, h) => w * h
+        }
+    }
+```
+
+---
+## Atom Syntax
+### Basic Atom
+```mumei
+atom name(param: Type, ...)
+    requires: precondition;
+    ensures: postcondition;
+    body: expression;
+```
+
+### Explicit Return Type (`-> Type`)
+
+By default, atoms return `i64`. Use `-> Type` to declare a different return type:
+
+```mumei
+// Returns Str (pointer type in LLVM IR)
+atom greet(name: Str) -> Str
+    requires: true;
+    ensures: true;
+    body: "Hello, " + name
+
+// Returns f64
+atom circle_area(r: f64) -> f64
+    requires: r > 0.0;
+    ensures: result > 0.0;
+    body: r * r * 3.14159
+
+// No annotation = defaults to i64
+atom add(a: i64, b: i64)
+    requires: true;
+    ensures: result == a + b;
+    body: a + b
+```
+
+Supported return types: `i64` (default), `f64`, `Str`, `[i64]`, enum types.
+
+### Str Type
+
+First-class string type. String literals are `Str` values. Supported operations:
+
+| Operation | Syntax | Result Type |
+|---|---|---|
+| Concatenation | `a + b` | `Str` |
+| Equality | `a == b` | `i64` (0 or 1) |
+| Inequality | `a != b` | `i64` (0 or 1) |
+
+```mumei
+atom is_same(a: Str, b: Str)
+    requires: true;
+    ensures: result >= 0 && result <= 1;
+    body: { if a == b { 1 } else { 0 } }
+```
+
 ---
 ## Generics and Trait Bounds
 ### Generics (Monomorphization)
@@ -170,6 +242,63 @@ atom demo_apply()
 ```
 
 > **Phase A limitation**: When `call(f, x)` uses a function-type *parameter* `f` (not a literal `atom_ref(name)`), the verifier returns an unconstrained symbolic value. Such atoms must be marked `trusted`. Phase B will resolve this with `call_with_contract`.
+
+---
+## FFI (Foreign Function Interface)
+
+### extern Blocks
+
+Declare external functions implemented in Rust or C:
+
+```mumei
+extern "Rust" {
+    fn json_parse(input: Str) -> i64;
+    fn json_stringify(handle: i64) -> Str;
+    fn json_free(handle: i64) -> i64;
+}
+```
+
+Extern functions are auto-registered as `trusted` atoms. The `return_type` annotation is propagated to LLVM codegen via `resolve_return_type()`.
+
+### Memory Management
+
+FFI handle stores (JSON, HTTP, String) support explicit deallocation:
+
+```mumei
+import "std/json" as json;
+
+atom process_json(input: Str)
+    requires: true;
+    ensures: result >= 0;
+    body: {
+        let obj = json::parse(input);
+        let value = json::get_int(obj, "key");
+        let _ = json::free(obj);
+        value
+    }
+```
+
+| Function | Description |
+|---|---|
+| `json::free(handle)` | Release JSON handle (1=success, 0=invalid) |
+| `json::str_free(handle)` | Release string handle |
+| `http::free(handle)` | Release HTTP response handle |
+
+---
+## Stateful Effects (Temporal Ordering)
+
+Effects can define states and transitions verified at compile time:
+
+```mumei
+effect File
+    states: [Closed, Open];
+    initial: Closed;
+    transition open: Closed -> Open;
+    transition write: Open -> Open;
+    transition close: Open -> Closed;
+```
+
+The compiler uses forward dataflow analysis on the MIR CFG to verify operations occur in valid states. Conflicting states at merge points (e.g., `if/else` leaving a file in different states) are checked via Z3 Int Sort probes.
 
 ---
 ## Trust Boundary
