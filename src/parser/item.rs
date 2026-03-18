@@ -1230,6 +1230,14 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
         })
         .collect();
 
+    // Plan 18: Parse optional return type annotation (e.g., `-> Str`)
+    let return_type = if ctx.peek() == &Token::Arrow {
+        ctx.advance();
+        Some(ctx.expect_ident())
+    } else {
+        None
+    };
+
     let mut requires_raw = "true".to_string();
     let mut ensures = "true".to_string();
     let mut body_raw = String::new();
@@ -1389,6 +1397,7 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
         max_unroll,
         invariant,
         effects,
+        return_type,
         span: span_from_token(start_tok),
     }
 }

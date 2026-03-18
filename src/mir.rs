@@ -785,6 +785,7 @@ mod tests {
             max_unroll: None,
             invariant: None,
             effects: vec![],
+            return_type: None,
             span: Span::new("", 1, 1, 0),
         }
     }

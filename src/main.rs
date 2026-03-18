@@ -373,6 +373,7 @@ fn load_and_prepare(input: &str) -> (Vec<Item>, verification::ModuleEnv, Vec<Imp
                         max_unroll: None,
                         invariant: None,
                         effects: vec![],
+                        return_type: Some(ext_fn.return_type.clone()),
                         span: ext_fn.span.clone(),
                     };
                     module_env.register_atom(&atom);
@@ -1762,6 +1763,7 @@ fn cmd_repl() {
                                     max_unroll: None,
                                     invariant: None,
                                     effects: vec![],
+                                    return_type: Some(ext_fn.return_type.clone()),
                                     span: ext_fn.span.clone(),
                                 };
                                 module_env.register_atom(&atom);
@@ -2628,6 +2630,7 @@ atom main() -> i64
                             max_unroll: None,
                             invariant: None,
                             effects: vec![],
+                            return_type: Some(ext_fn.return_type.clone()),
                             span: ext_fn.span.clone(),
                         };
                         module_env.register_atom(&atom);

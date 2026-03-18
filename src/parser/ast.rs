@@ -352,6 +352,8 @@ pub struct Atom {
     pub max_unroll: Option<usize>,
     pub invariant: Option<String>,
     pub effects: Vec<Effect>,
+    /// Plan 18: Explicit return type annotation (e.g., `-> Str`). Defaults to None (i64).
+    pub return_type: Option<String>,
     pub span: Span,
     // TODO: Task 3 future extension — Modular Verification with effect pre/post state.
     // When atom A calls atom B and B uses a stateful effect, A needs to know

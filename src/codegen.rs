@@ -4,7 +4,7 @@ use crate::verification::{ModuleEnv, MumeiError, MumeiResult};
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Module;
-use inkwell::types::BasicMetadataTypeEnum;
+use inkwell::types::{BasicMetadataTypeEnum, BasicType};
 use inkwell::values::{AnyValue, BasicMetadataValueEnum, BasicValueEnum, FunctionValue, PhiValue};
 use inkwell::AddressSpace;
 use inkwell::FloatPredicate;
@@ -118,6 +118,30 @@ pub fn declare_extern_functions<'ctx>(
     }
 }
 
+/// Plan 18: Resolve the LLVM return type for an atom based on its `return_type` annotation.
+fn resolve_return_type<'a>(
+    context: &'a Context,
+    atom: &crate::parser::Atom,
+    module_env: &ModuleEnv,
+) -> inkwell::types::BasicTypeEnum<'a> {
+    if let Some(ref ret_type) = atom.return_type {
+        let base = module_env.resolve_base_type(ret_type);
+        match base.as_str() {
+            "f64" => context.f64_type().into(),
+            "Str" => context.ptr_type(AddressSpace::default()).into(),
+            "[i64]" => array_struct_type(context).into(),
+            _ => {
+                if let Some(enum_def) = module_env.get_enum(&base) {
+                    return enum_llvm_type(context, enum_def).into();
+                }
+                context.i64_type().into()
+            }
+        }
+    } else {
+        context.i64_type().into()
+    }
+}
+
 pub fn compile(
     hir_atom: &HirAtom,
     output_path: &Path,
@@ -132,18 +156,15 @@ pub fn compile(
     // Declare all extern functions before compiling the atom body
     declare_extern_functions(&context, &module, extern_blocks, module_env);
 
-    let i64_type = context.i64_type();
-
     // パラメータ型を精緻型から解決
     let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = atom
         .params
         .iter()
         .map(|p| resolve_param_type(&context, p.type_name.as_deref(), module_env).into())
         .collect();
-    // NOTE: Atom return type is hardcoded to i64. If an atom's body returns a Str
-    // (pointer) or f64 value, this will cause an LLVM IR type mismatch.
-    // TODO: Infer or declare atom return types and use the appropriate LLVM type here.
-    let fn_type = i64_type.fn_type(&param_types, false);
+    // Plan 18: Use resolved return type instead of hardcoded i64
+    let ret_type = resolve_return_type(&context, atom, module_env);
+    let fn_type = ret_type.fn_type(&param_types, false);
     let function = module.add_function(&atom.name, fn_type, None);
 
     let entry_block = context.append_basic_block(function, "entry");
@@ -486,23 +507,10 @@ fn compile_hir_expr<'a>(
                         })
                         .collect();
 
-                    let has_float = callee.params.iter().any(|p| {
-                        p.type_name
-                            .as_deref()
-                            .map(|t| module_env.resolve_base_type(t) == "f64")
-                            .unwrap_or(false)
-                    });
-                    let callee_fn = if has_float {
-                        let fn_type = context.f64_type().fn_type(&callee_param_types, false);
-                        module.get_function(name).unwrap_or_else(|| {
-                            module.add_function(
-                                name,
-                                fn_type,
-                                Some(inkwell::module::Linkage::External),
-                            )
-                        })
-                    } else {
-                        let fn_type = context.i64_type().fn_type(&callee_param_types, false);
+                    // Plan 18: Resolve callee return type from its return_type annotation
+                    let callee_ret_type = resolve_return_type(context, callee, module_env);
+                    let callee_fn = {
+                        let fn_type = callee_ret_type.fn_type(&callee_param_types, false);
                         module.get_function(name).unwrap_or_else(|| {
                             module.add_function(
                                 name,
@@ -524,10 +532,9 @@ fn compile_hir_expr<'a>(
                     let call_result =
                         llvm!(builder.build_call(callee_fn, &arg_vals, &format!("call_{}", name)));
                     let result = call_result.as_any_value_enum();
-                    if has_float {
+                    if result.is_float_value() {
                         Ok(result.into_float_value().into())
                     } else if result.is_pointer_value() {
-                        // Plan 9: Handle Str (pointer) return type from extern functions
                         Ok(result.into_pointer_value().into())
                     } else {
                         Ok(result.into_int_value().into())
@@ -623,14 +630,12 @@ fn compile_hir_expr<'a>(
                     }
                     Op::Eq | Op::Neq => {
                         // Call runtime helper mumei_str_eq(a, b) -> i64 (0 or 1)
-                        let str_eq_fn =
-                            module.get_function("mumei_str_eq").unwrap_or_else(|| {
-                                let fn_type = context.i64_type().fn_type(
-                                    &[ptr_type.into(), ptr_type.into()],
-                                    false,
-                                );
-                                module.add_function("mumei_str_eq", fn_type, None)
-                            });
+                        let str_eq_fn = module.get_function("mumei_str_eq").unwrap_or_else(|| {
+                            let fn_type = context
+                                .i64_type()
+                                .fn_type(&[ptr_type.into(), ptr_type.into()], false);
+                            module.add_function("mumei_str_eq", fn_type, None)
+                        });
                         let result = llvm!(builder.build_call(
                             str_eq_fn,
                             &[lhs.into(), rhs.into()],
@@ -945,11 +950,12 @@ fn compile_hir_expr<'a>(
             incoming.push((unreachable_val, unreachable_block));
 
             builder.position_at_end(merge_block);
-            // NOTE: phi type is hardcoded to i64. If match arms return Str (pointer) or
-            // enum struct values, this will cause an LLVM type mismatch panic.
-            // TODO: Infer the phi type from the first arm's body value type, similar to
-            // how IfThenElse uses `then_val.get_type()` for its phi node.
-            let phi = llvm!(builder.build_phi(context.i64_type(), "match_result"));
+            // Plan 18: Infer phi type from the first arm's body value type
+            let phi_type = incoming
+                .first()
+                .map(|(v, _)| v.get_type())
+                .unwrap_or_else(|| context.i64_type().into());
+            let phi = llvm!(builder.build_phi(phi_type, "match_result"));
             for (val, block) in &incoming {
                 phi.add_incoming(&[(val, *block)]);
             }

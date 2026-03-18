@@ -330,6 +330,7 @@ fn register_imported_items(items: &[Item], alias: Option<&str>, module_env: &mut
                         max_unroll: None,
                         invariant: None,
                         effects: vec![],
+                        return_type: Some(ext_fn.return_type.clone()),
                         span: ext_fn.span.clone(),
                     };
                     module_env.register_atom(&atom);
