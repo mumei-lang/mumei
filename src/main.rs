@@ -5,12 +5,14 @@ mod codegen;
 #[allow(dead_code)]
 mod ffi;
 mod hir;
+mod inspect;
 mod lsp;
 #[allow(dead_code)]
 mod manifest;
 mod mir;
 mod mir_analysis;
 mod parser;
+mod proof_cert;
 mod registry;
 mod resolver;
 mod setup;
@@ -105,6 +107,12 @@ enum Command {
     Verify {
         /// Input .mm file
         input: String,
+        /// Generate Z3 proof certificate (.proof.json)
+        #[arg(long)]
+        proof_cert: bool,
+        /// Output path for proof certificate (default: <input>.proof.json)
+        #[arg(long)]
+        output: Option<String>,
     },
     /// Parse + resolve + monomorphize only (no Z3, fast syntax check)
     Check {
@@ -117,7 +125,16 @@ enum Command {
         name: String,
     },
     /// Inspect development environment (Z3, LLVM, std library)
-    Inspect,
+    Inspect {
+        /// Input .mm file for structured report (optional)
+        input: Option<String>,
+        /// Output as structured JSON for AI agents
+        #[arg(long)]
+        ai: bool,
+        /// Output format: json or text (default: text)
+        #[arg(long, default_value = "text")]
+        format: String,
+    },
     /// Download and configure Z3 + LLVM toolchain into ~/.mumei/
     Setup {
         /// Force re-download even if already installed
@@ -160,6 +177,13 @@ enum Command {
         /// Input .mm file
         input: String,
     },
+    /// Verify a proof certificate against current source
+    VerifyCert {
+        /// Proof certificate file (.proof.json)
+        cert: String,
+        /// Source .mm file to verify against
+        input: String,
+    },
 }
 
 fn main() {
@@ -177,8 +201,12 @@ fn main() {
         Some(Command::Build { input, output }) => {
             cmd_build(&input, &output);
         }
-        Some(Command::Verify { input }) => {
-            cmd_verify(&input);
+        Some(Command::Verify {
+            input,
+            proof_cert,
+            output,
+        }) => {
+            cmd_verify(&input, proof_cert, output.as_deref());
         }
         Some(Command::Check { input }) => {
             cmd_check(&input);
@@ -186,8 +214,12 @@ fn main() {
         Some(Command::Init { name }) => {
             cmd_init(&name);
         }
-        Some(Command::Inspect) => {
-            cmd_inspect();
+        Some(Command::Inspect { input, ai, format }) => {
+            if let Some(ref file) = input {
+                cmd_inspect_file(file, ai, &format);
+            } else {
+                cmd_inspect();
+            }
         }
         Some(Command::Setup { force }) => {
             setup::run(force);
@@ -216,6 +248,9 @@ fn main() {
         }
         Some(Command::InferContracts { input }) => {
             cmd_infer_contracts(&input);
+        }
+        Some(Command::VerifyCert { cert, input }) => {
+            cmd_verify_cert(&cert, &input);
         }
         None => {
             // 後方互換: `mumei input.mm -o dist/katana` → build として実行
@@ -470,7 +505,7 @@ fn cmd_check(input: &str) {
 // mumei verify — Z3 verification only (no codegen, no transpile)
 // =============================================================================
 
-fn cmd_verify(input: &str) {
+fn cmd_verify(input: &str, generate_proof_cert: bool, cert_output: Option<&str>) {
     check_z3_available();
     println!("🗡️  Mumei verify: verifying '{}'...", input);
     let (items, mut module_env, _imports, source) = load_and_prepare(input);
@@ -481,6 +516,10 @@ fn cmd_verify(input: &str) {
     let mut verified = 0;
     let mut failed = 0;
     let mut skipped = 0;
+
+    // Plan 11B: Track per-atom verification results for proof certificates
+    let mut cert_results: std::collections::HashMap<String, (String, String)> =
+        std::collections::HashMap::new();
 
     // Feature 2: Register dependencies for all atoms before verification
     for item in &items {
@@ -565,6 +604,11 @@ fn cmd_verify(input: &str) {
                         Ok(_) => {
                             println!("  ⚖️  '{}': verified ✅", atom.name);
                             module_env.mark_verified(&atom.name);
+                            // Plan 11B: Record "unsat" (proven) for proof certificate
+                            cert_results.insert(
+                                atom.name.clone(),
+                                ("unsat".to_string(), "verified".to_string()),
+                            );
                             verification_cache.insert(
                                 atom.name.clone(),
                                 resolver::VerificationCacheEntry {
@@ -587,6 +631,11 @@ fn cmd_verify(input: &str) {
                             let resolved = resolve_source_for_span(&source, &atom.span);
                             let e = e.with_source(&resolved, &atom.span);
                             eprintln!("{:?}", miette::Report::new(e));
+                            // Plan 11B: Record "sat" (counter-example found) for proof certificate
+                            cert_results.insert(
+                                atom.name.clone(),
+                                ("sat".to_string(), "failed".to_string()),
+                            );
                             // 検証失敗した atom はキャッシュから除外
                             verification_cache.remove(&atom.name);
                             failed += 1;
@@ -604,6 +653,35 @@ fn cmd_verify(input: &str) {
     // If a callee's contract changes, all callers will have different proof hashes
     // and be re-verified automatically.
     resolver::save_verification_cache(base_dir, &verification_cache);
+
+    // Plan 11B: Generate proof certificate if requested
+    if generate_proof_cert {
+        let atom_refs: Vec<&parser::Atom> = items
+            .iter()
+            .filter_map(|item| {
+                if let Item::Atom(a) = item {
+                    Some(a)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let cert = proof_cert::generate_certificate(input, &atom_refs, &cert_results);
+        let cert_path = if let Some(output) = cert_output {
+            std::path::PathBuf::from(output)
+        } else {
+            let stem = Path::new(input).file_stem().unwrap_or_default();
+            Path::new(".").join(format!("{}.proof.json", stem.to_string_lossy()))
+        };
+        match proof_cert::save_certificate(&cert, &cert_path) {
+            Ok(()) => {
+                println!("  📜 Proof certificate written to: {}", cert_path.display());
+            }
+            Err(e) => {
+                eprintln!("  ⚠️  Failed to write proof certificate: {}", e);
+            }
+        }
+    }
 
     println!();
     if failed > 0 {
@@ -1031,6 +1109,203 @@ fn cmd_inspect() {
         );
     } else {
         println!("✅ Inspect: {} ok — all tools available", ok_count);
+    }
+}
+
+// =============================================================================
+// mumei inspect <file.mm> --ai — Structured JSON inspection report (Plan 11A)
+// =============================================================================
+
+fn cmd_inspect_file(input: &str, ai: bool, format: &str) {
+    let (items, mut module_env, _imports, _source) = load_and_prepare(input);
+
+    // Run verification to get results
+    let output_dir = Path::new(".");
+    let mut verification_results: std::collections::HashMap<String, bool> =
+        std::collections::HashMap::new();
+
+    // Register dependencies
+    for item in &items {
+        if let Item::Atom(atom) = item {
+            let callees = resolver::collect_callees_from_body(&atom.body_expr);
+            module_env.register_dependencies(&atom.name, callees);
+        }
+    }
+
+    // Try Z3 verification for each atom
+    for item in &items {
+        if let Item::Atom(atom) = item {
+            if module_env.is_verified(&atom.name) {
+                verification_results.insert(atom.name.clone(), true);
+                continue;
+            }
+            let hir_atom = lower_atom_to_hir_with_env(atom, Some(&module_env));
+            match verification::verify(&hir_atom, output_dir, &module_env) {
+                Ok(_) => {
+                    module_env.mark_verified(&atom.name);
+                    verification_results.insert(atom.name.clone(), true);
+                }
+                Err(_) => {
+                    verification_results.insert(atom.name.clone(), false);
+                }
+            }
+        }
+    }
+
+    let report = inspect::generate_report(input, &items, &module_env, &verification_results);
+
+    if ai || format == "json" {
+        // JSON output for AI agents
+        match serde_json::to_string_pretty(&report) {
+            Ok(json) => println!("{}", json),
+            Err(e) => {
+                eprintln!("Failed to serialize report: {}", e);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        // Human-readable text output
+        println!("🔍 Mumei Inspect: {}", input);
+        println!("  Version: {}", report.version);
+        println!();
+        println!("  Atoms ({}):", report.atoms.len());
+        for atom in &report.atoms {
+            let status_icon = match atom.verification_status.as_str() {
+                "verified" => "✅",
+                "failed" => "❌",
+                _ => "⏭️",
+            };
+            println!(
+                "    {} {} ({})",
+                status_icon, atom.name, atom.verification_status
+            );
+            if atom.requires != "true" {
+                println!("      requires: {}", atom.requires);
+            }
+            if atom.ensures != "true" {
+                println!("      ensures: {}", atom.ensures);
+            }
+            if !atom.effects.is_empty() {
+                println!("      effects: {}", atom.effects.join(", "));
+            }
+        }
+        if !report.enums.is_empty() {
+            println!();
+            println!("  Enums ({}):", report.enums.len());
+            for e in &report.enums {
+                println!(
+                    "    {} (variants: {})",
+                    e.name,
+                    e.variants
+                        .iter()
+                        .map(|v| v.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+        }
+        if !report.structs.is_empty() {
+            println!();
+            println!("  Structs ({}):", report.structs.len());
+            for s in &report.structs {
+                println!(
+                    "    {} (fields: {})",
+                    s.name,
+                    s.fields
+                        .iter()
+                        .map(|f| f.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+        }
+        println!();
+        println!(
+            "  Verification: {} total, {} verified, {} failed, {} skipped",
+            report.verification.total_atoms,
+            report.verification.verified,
+            report.verification.failed,
+            report.verification.skipped
+        );
+    }
+}
+
+// =============================================================================
+// mumei verify-cert — Verify proof certificate against current source (Plan 11B)
+// =============================================================================
+
+fn cmd_verify_cert(cert_path: &str, input: &str) {
+    println!(
+        "🔍 Mumei verify-cert: checking '{}' against '{}'...",
+        cert_path, input
+    );
+
+    let cert = match proof_cert::load_certificate(Path::new(cert_path)) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("❌ {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    let (items, _module_env, _imports, _source) = load_and_prepare(input);
+
+    let atom_refs: Vec<&parser::Atom> = items
+        .iter()
+        .filter_map(|item| {
+            if let Item::Atom(a) = item {
+                Some(a)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let results = proof_cert::verify_certificate(&cert, &atom_refs);
+
+    let mut proven = 0;
+    let mut changed = 0;
+    let mut unproven = 0;
+    let mut missing = 0;
+
+    for (name, status) in &results {
+        let icon = match status.as_str() {
+            "proven" => {
+                proven += 1;
+                "✅"
+            }
+            "changed" => {
+                changed += 1;
+                "⚠️"
+            }
+            "unproven" => {
+                unproven += 1;
+                "❓"
+            }
+            _ => {
+                missing += 1;
+                "❌"
+            }
+        };
+        println!("  {} {}: {}", icon, name, status);
+    }
+
+    println!();
+    println!(
+        "Certificate: {} (generated {} by mumei v{})",
+        cert_path, cert.timestamp, cert.mumei_version
+    );
+    println!(
+        "Results: {} proven, {} changed, {} unproven, {} missing",
+        proven, changed, unproven, missing
+    );
+
+    if changed > 0 {
+        println!();
+        println!("⚠️  {} atom(s) have changed since certification. Re-run `mumei verify --proof-cert` to update.", changed);
+    }
+    if unproven > 0 || missing > 0 {
+        std::process::exit(1);
     }
 }
 
