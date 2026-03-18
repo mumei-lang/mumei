@@ -12,6 +12,9 @@
 | `mumei publish` | ✅ | Publish to local registry (`~/.mumei/packages/`) |
 | `mumei setup` | ✅ | Download & configure Z3 + LLVM into `~/.mumei/toolchains/` |
 | `mumei inspect` | ✅ | Inspect development environment (Z3, LLVM, std library, toolchains) |
+| `mumei inspect <file> --ai` | ✅ | Structured JSON inspection report for AI agents (Plan 11) |
+| `mumei verify --proof-cert` | ✅ | Generate Z3 proof certificate (.proof.json) (Plan 11) |
+| `mumei verify-cert` | ✅ | Verify proof certificate against current source (Plan 11) |
 | `mumei infer-effects` | ✅ | Infer required effects (JSON output for MCP) |
 | `mumei lsp` | ✅ | Language Server Protocol (hover, diagnostics) |
 
@@ -213,6 +216,55 @@ Inspects all tools with multi-path std library search (cwd → exe dir → `MUME
 - [ ] LSP completion + definition jump (⏸ Deferred)
 - [ ] Counter-example highlighting in editors (⏸ Deferred)
 - [ ] Rich Diagnostics (miette/ariadne)
-- [ ] `mumei inspect --ai` (structured JSON output for AI agents)
-- [ ] Z3 proof certificates in published packages
+- [x] `mumei inspect --ai` (structured JSON output for AI agents) — **Plan 11 implemented**
+- [x] Z3 proof certificates in published packages — **Plan 11 implemented**
 - [ ] Task Refinement: return type inference, result binding, cancellation, channel type (`chan<T>`)
+
+---
+
+## Plan 11: New CLI Commands
+
+### `mumei inspect <file.mm> --ai`
+
+Generates a structured JSON inspection report of a Mumei source file:
+
+```bash
+mumei inspect examples/demo.mm --ai          # JSON output for AI agents
+mumei inspect examples/demo.mm               # Human-readable text output
+mumei inspect examples/demo.mm --format json  # Explicit JSON format
+```
+
+JSON output includes:
+- All atoms with requires/ensures/effects/verification_status
+- All enum definitions with variants and fields
+- All struct definitions with fields
+- All effect definitions
+- Verification summary (total, verified, failed, skipped)
+
+### `mumei verify --proof-cert`
+
+Generates a Z3 proof certificate alongside verification:
+
+```bash
+mumei verify examples/demo.mm --proof-cert                    # → demo.proof.json
+mumei verify examples/demo.mm --proof-cert --output my.json   # Custom output path
+```
+
+The `.proof.json` file contains:
+- Certificate version and timestamp
+- Mumei compiler version and Z3 solver version
+- Per-atom verification results (z3_check_result: "unsat"/"sat"/"unknown")
+- Per-atom content hash (SHA-256 of requires + ensures + body)
+
+### `mumei verify-cert`
+
+Verifies a proof certificate against the current source:
+
+```bash
+mumei verify-cert demo.proof.json examples/demo.mm
+```
+
+Reports per-atom status:
+- **proven**: Content hash matches and Z3 result was "unsat"
+- **changed**: Content hash differs (re-verification needed)
+- **unproven**: Z3 result was not "unsat"
