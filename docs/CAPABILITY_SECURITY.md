@@ -14,10 +14,10 @@
 
 ### Weaknesses
 
-- **Limited to string constraints**: Current `check_constant_constraint()` supports only `starts_with`, `contains`, `ends_with`, and `not_contains`. No regex, glob, or arithmetic path operations.
+- **Limited to string constraints**: Current `check_constant_constraint()` supports `starts_with`, `contains`, `ends_with`, `not_contains`, and `matches()` (regex). No glob or arithmetic path operations.
 - **No dynamic capability delegation**: An atom cannot pass a subset of its capabilities to a callee at the call site. Capabilities are statically declared per atom.
 - **No capability revocation**: Once an effect is declared, it cannot be narrowed or revoked within a scope.
-- **Z3 String Sort not yet integrated**: Path constraints are verified via constant folding (Rust-side) and symbolic Int IDs (Z3-side). The Z3 native `String` sort would unlock free-form string operations but is not yet wired in (see ROADMAP.md "TODO: Z3 String Sort Migration").
+- **Z3 String Sort integrated**: Path constraints are verified via constant folding (Rust-side) for constants and Z3 String Sort for symbolic/dynamic paths. Dynamic string concatenation (e.g., `"/tmp/" + var + "/file.txt"`) is verified against constraints like `starts_with(path, "/tmp/")` by Z3.
 - **No first-class capability objects**: Effects are names, not values. They cannot be stored in variables, passed as arguments, or pattern-matched.
 
 ### Supported Constraint Functions
@@ -30,6 +30,7 @@ From `check_constant_constraint()` in `src/verification.rs`:
 | `contains(path, substr)` | `path` contains `substr` | `contains(url, "api.example.com")` |
 | `ends_with(path, suffix)` | `path` ends with `suffix` | `ends_with(file, ".txt")` |
 | `not_contains(path, substr)` | `path` does NOT contain `substr` | `not_contains(path, "..")` |
+| `matches(path, regex)` | `path` matches `regex` pattern | `matches(path, "^/tmp/.*")` |
 
 ## 2. Evaluation Criteria
 
@@ -96,14 +97,28 @@ atom delegator(filename: Str)
 **Scenario**: `"/tmp/" + user_id + "/config.txt"` verification.
 
 ```mumei
-atom read_user_config(user_id: i64)
+atom read_user_config(user_id: Str)
     effects: [FileRead];
-    requires: user_id >= 0;
+    requires: starts_with(user_id, "user_");
     ensures: result >= 0;
-    body: { 0 };  // Cannot construct dynamic path string yet
+    body: {
+        let path = "/tmp/" + user_id + "/config.txt";
+        perform FileRead.read(path);
+        0
+    };
 ```
 
-**Result**: NOT supported. The current system cannot verify string concatenation results. This requires Z3 String Sort integration (see ROADMAP.md). The path would need to be verified as `starts_with(concat("/tmp/", to_string(user_id), "/config.txt"), "/tmp/")`, which requires native Z3 string operations.
+**Result**: Supported (Plan 10). Z3 String Sort verifies that dynamically constructed paths satisfy effect constraints. The Perform handler uses `arg_z3_values[i]` directly when the argument has Z3 String Sort, enabling concat expressions to be checked against `starts_with`/`ends_with`/`contains` constraints.
+
+### 2.6 Regex Policy Support
+
+**Scenario**: Restrict file paths using regex patterns.
+
+```mumei
+effect FileRead(path: Str) where matches(path, "^/tmp/[a-z]+/.*");
+```
+
+**Result**: Supported (Plan 10). The `matches()` constraint function uses Rust's `regex` crate for constant path verification and approximates common regex patterns (anchored prefix/suffix/contains) via Z3 String Sort for symbolic verification.
 
 ## 3. Object-Based Capability Model (Alternative)
 
@@ -154,10 +169,10 @@ The current approach is sufficient for the primary use cases:
 4. The implicit capability narrowing through `requires` contracts provides adequate delegation semantics.
 
 **Next Steps**:
-1. Complete Z3 String Sort integration (ROADMAP.md Phase P4) to unlock dynamic path verification
-2. Add `regex_match` constraint function once Z3 String Sort is available
+1. ~~Complete Z3 String Sort integration~~ (Done: Plan 5 + Plan 10)
+2. ~~Add `matches()` regex constraint function~~ (Done: Plan 10)
 3. Monitor user feedback for capability delegation needs
-4. Re-evaluate after Z3 String Sort migration is complete
+4. Explore full Z3 regex API (`str.in_re`) when z3 crate exposes it
 
 ## 5. Test Results
 

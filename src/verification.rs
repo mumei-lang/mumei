@@ -2327,6 +2327,47 @@ fn parse_constraint_to_z3_string<'ctx>(
         }
     }
 
+    // Plan 10: matches(param, "regex_pattern") → approximate via prefix/suffix/contains
+    // The z3 crate v0.12 does not expose str.in_re / re.from_str API directly.
+    // We approximate common regex patterns using Z3 String prefix/suffix/contains:
+    //   - "^prefix.*"  → starts_with
+    //   - ".*suffix$"  → ends_with
+    //   - ".*substr.*" → contains
+    // For patterns that cannot be approximated, we return None (constraint not enforceable
+    // at Z3 level; constant checking via Rust regex crate handles the rest).
+    if trimmed.starts_with("matches(") {
+        if let Some(pattern) = extract_string_arg(trimmed) {
+            // Try to approximate the regex pattern with Z3 String constraints
+            let stripped = pattern.as_str();
+            // ^prefix.* → starts_with(param, prefix)
+            if stripped.starts_with('^') && stripped.ends_with(".*") {
+                let prefix = &stripped[1..stripped.len() - 2];
+                if !prefix.contains('*') && !prefix.contains('?') && !prefix.contains('[') {
+                    let prefix_z3 = Z3String::from_str(ctx, prefix).ok()?;
+                    return Some(prefix_z3.prefix(param_z3));
+                }
+            }
+            // .*suffix$ → ends_with(param, suffix)
+            if stripped.starts_with(".*") && stripped.ends_with('$') {
+                let suffix = &stripped[2..stripped.len() - 1];
+                if !suffix.contains('*') && !suffix.contains('?') && !suffix.contains('[') {
+                    let suffix_z3 = Z3String::from_str(ctx, suffix).ok()?;
+                    return Some(suffix_z3.suffix(param_z3));
+                }
+            }
+            // .*substr.* → contains(param, substr)
+            if stripped.starts_with(".*") && stripped.ends_with(".*") && stripped.len() > 4 {
+                let substr = &stripped[2..stripped.len() - 2];
+                if !substr.contains('*') && !substr.contains('?') && !substr.contains('[') {
+                    let substr_z3 = Z3String::from_str(ctx, substr).ok()?;
+                    return Some(param_z3.contains(&substr_z3));
+                }
+            }
+            // For complex regex patterns, Z3 String Sort cannot directly verify;
+            // constant checking via Rust regex crate will handle these cases.
+        }
+    }
+
     None
 }
 
@@ -4045,6 +4086,14 @@ fn check_constant_constraint(value: &str, constraint: &str) -> bool {
     if constraint.starts_with("not_contains(") {
         if let Some(arg) = extract_string_arg(constraint) {
             return !value.contains(&arg);
+        }
+    }
+    // Plan 10: matches() 制約 — Rust regex crate による定数パスの正規表現マッチング
+    if constraint.starts_with("matches(") {
+        if let Some(pattern) = extract_string_arg(constraint) {
+            if let Ok(re) = regex::Regex::new(&pattern) {
+                return re.is_match(value);
+            }
         }
     }
     // 不明な制約は false を返す（安全側に倒す — 検証できない場合は拒否）
@@ -6231,7 +6280,7 @@ fn expr_to_z3<'a>(
                             // in verify_effect_params (Phase 1g). Skip Z3 String here.
                             continue;
                         }
-                        // Symbolic argument: create Z3 String variable and assert constraint
+                        // Symbolic argument: verify constraint using Z3 String Sort
                         if let Some(solver) = solver_opt {
                             let param_name =
                                 def.params.get(i).map(|p| p.name.as_str()).unwrap_or("arg");
@@ -6247,22 +6296,41 @@ fn expr_to_z3<'a>(
                                 effect, operation, param_name, unique_id
                             );
 
-                            // Create Z3 String variable for the symbolic argument
-                            let param_z3_str = Z3String::new_const(ctx, z3_str_name.as_str());
-
-                            // If the argument has a `requires` constraint in the env
-                            // (e.g., from atom parameter refinements), propagate it.
-                            // Check if there's a string variable in the env for this arg.
-                            if let Expr::Variable(var_name) = arg {
-                                let str_env_key = format!("__str_{}", var_name);
-                                if let Some(existing) = env.get(&str_env_key) {
-                                    // Bind the param to the existing string variable
-                                    if let Some(existing_str) = existing.as_string() {
-                                        let eq_constraint = param_z3_str._eq(&existing_str);
-                                        solver.assert(&eq_constraint);
+                            // Plan 10: Use arg_z3_values[i] directly when it has Z3 String Sort.
+                            // This enables dynamically constructed strings (e.g., "/tmp/" + var + "/file.txt")
+                            // to be directly checked against constraints like starts_with(path, "/tmp/").
+                            let param_z3_str = if i < arg_z3_values.len() {
+                                if let Some(existing_str) = arg_z3_values[i].as_string() {
+                                    // The argument was already evaluated to a Z3 String by expr_to_z3.
+                                    // Use it directly — this preserves concat/variable relationships.
+                                    existing_str
+                                } else {
+                                    // Non-string Z3 value: create a fresh Z3 String variable
+                                    // and try to connect it to any known string variable in env.
+                                    let fresh = Z3String::new_const(ctx, z3_str_name.as_str());
+                                    if let Expr::Variable(var_name) = arg {
+                                        let str_env_key = format!("__str_{}", var_name);
+                                        if let Some(existing) = env.get(&str_env_key) {
+                                            if let Some(existing_s) = existing.as_string() {
+                                                solver.assert(&fresh._eq(&existing_s));
+                                            }
+                                        }
+                                    }
+                                    fresh
+                                }
+                            } else {
+                                // Fallback: create a fresh Z3 String variable
+                                let fresh = Z3String::new_const(ctx, z3_str_name.as_str());
+                                if let Expr::Variable(var_name) = arg {
+                                    let str_env_key = format!("__str_{}", var_name);
+                                    if let Some(existing) = env.get(&str_env_key) {
+                                        if let Some(existing_s) = existing.as_string() {
+                                            solver.assert(&fresh._eq(&existing_s));
+                                        }
                                     }
                                 }
-                            }
+                                fresh
+                            };
 
                             // Parse the constraint and assert it
                             if let Some(constraint_bool) =
