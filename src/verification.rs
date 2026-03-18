@@ -2269,7 +2269,15 @@ fn evaluate_string_constraint(constraint_expr: &str, _param_name: &str, value: &
         }
     }
 
-    // Unknown constraint — conservatively allow (will be checked by Z3 if symbolic)
+    // Unknown constraint — conservatively allow (will be checked by Z3 if symbolic).
+    //
+    // NOTE: This returns `true` (allow) for unknown constraints, which differs from
+    // `check_constant_constraint()` which returns `false` (reject) for unknowns.
+    // This is intentional: `evaluate_string_constraint` is used by SecurityPolicy
+    // (advisory layer with Z3 fallback for symbolic params), so unknown constraints
+    // are deferred to Z3. `check_constant_constraint` is used by verify_effect_params
+    // (authoritative constant-folding fast-path), where unknown constraints must be
+    // rejected to prevent unverified values from passing through.
     true
 }
 
@@ -2363,6 +2371,12 @@ fn parse_constraint_to_z3_string<'ctx>(
                     && !s.contains('[')
                     && !s.contains('.')
                     && !s.contains('\\')
+                    && !s.contains('+')
+                    && !s.contains('(')
+                    && !s.contains(')')
+                    && !s.contains('|')
+                    && !s.contains('{')
+                    && !s.contains('}')
             };
             // ^prefix.* → starts_with(param, prefix)
             if stripped.starts_with('^') && stripped.ends_with(".*") {
