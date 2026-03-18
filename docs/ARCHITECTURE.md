@@ -29,7 +29,7 @@ source.mm → parse → resolve → monomorphize → lower_to_hir → verify (Z3
 | `src/ast.rs` | `TypeRef`, `Monomorphizer` — generic type expansion engine |
 | `src/resolver.rs` | Import resolution, circular detection, prelude auto-load, incremental build cache |
 | `src/verification.rs` | Z3 verification, `ModuleEnv`, `LinearityCtx`, law expansion, equality propagation, resource hierarchy, BMC, async recursion depth, inductive invariant, trust boundary, `call_with_contract` (Phase B higher-order function verification) |
-| `src/codegen.rs` | LLVM IR generation — Pattern Matrix, StructType, malloc/free, nested extract_value |
+| `src/codegen.rs` | LLVM IR generation — `resolve_return_type()`, Pattern Matrix, StructType, malloc/free, nested extract_value |
 | `src/hir.rs` | HIR (High-level IR) definitions, AST → HIR lowering, `HirEffectSet` on `HirAtom`/`HirExpr::Call`/`HirExpr::Perform` |
 | `src/transpiler/` | Multi-target: Rust (`&T`), Go (interface), TypeScript (`/* readonly */`) |
 | `src/main.rs` | CLI orchestrator — `build`/`verify`/`check`/`init` with incremental cache |
@@ -94,7 +94,7 @@ pub struct LinearityCtx {
 1f. Effect containment verification
 1g. Effect parameter constraint verification (constant folding)
 1h. MIR-based move analysis (UseAfterMove, DoubleMove, ConflictingMerge → warnings)
-1i. Temporal effect verification (stateful effects — forward dataflow state tracking)
+1i. Temporal effect verification (stateful effects — forward dataflow state tracking + Z3 Int Sort conflict probes)
 2. Quantifier constraints (`forall`/`exists`)
 2b. Refinement type injection (params → Z3 symbolic variables)
 2c. Struct field constraints (recursive for nested structs)
@@ -642,7 +642,7 @@ The temporal effect verifier uses **forward dataflow analysis** on the MIR CFG:
 2. **Forward Dataflow**: Worklist algorithm tracks effect state at each basic block entry/exit
 3. **Violation Detection**:
    - `InvalidPreState`: Operation performed in wrong state (e.g., write when Closed)
-   - `ConflictingState`: Merge point has conflicting states from different branches
+   - `ConflictingState`: Merge point has conflicting states from different branches (Z3 Int Sort probe: UNSAT → hard error, SAT → info, Unknown → warning)
    - `UnexpectedFinalState`: Function exits with effect in unexpected state
 
 **Explosion Prevention**:
