@@ -4,13 +4,15 @@
 // std.http を使用した HTTP リクエストのデモ。
 // GET リクエストを送信し、レスポンスのステータス・ボディ・JSON を取得する。
 //
+// Plan 17: URL パラメータを Str 型に移行
+//
 // Usage:
 //   mumei check examples/http_demo.mm
 
 import "std/http" as http;
 
 // --- GET リクエストのステータスコードを取得 ---
-atom fetch_status(url: i64)
+atom fetch_status(url: Str)
     requires: true;
     ensures: result >= 0;
     body: {
@@ -19,7 +21,7 @@ atom fetch_status(url: i64)
     }
 
 // --- GET リクエストのボディを取得 ---
-atom fetch_body(url: i64)
+atom fetch_body(url: Str)
     requires: true;
     ensures: true;
     body: {
@@ -28,7 +30,7 @@ atom fetch_body(url: i64)
     }
 
 // --- GET リクエストのボディを JSON としてパース ---
-atom fetch_json(url: i64)
+atom fetch_json(url: Str)
     requires: true;
     ensures: result >= 0;
     body: {
@@ -37,7 +39,7 @@ atom fetch_json(url: i64)
     }
 
 // --- レスポンスの成功/失敗を判定 ---
-atom check_ok(url: i64)
+atom check_ok(url: Str)
     requires: true;
     ensures: result >= 0 && result <= 1;
     body: {

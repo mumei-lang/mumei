@@ -4,18 +4,20 @@
 // std.json を使用した JSON 操作のデモ。
 // オブジェクト構築、配列操作、パース・シリアライズを示す。
 //
+// Plan 17: 文字列パラメータを Str 型に移行
+//
 // Usage:
 //   mumei check examples/json_demo.mm
 
 import "std/json" as json;
 
 // --- JSON オブジェクトを構築する ---
-atom build_user(name: i64, age: i64)
+atom build_user(name: Str, age: i64)
     requires: age >= 0;
     ensures: result >= 0;
     body: {
         let obj = json::object_new();
-        let name_val = json::from_int(name);
+        let name_val = json::from_str(name);
         let age_val = json::from_int(age);
         let obj = json::object_set(obj, "name", name_val);
         let obj = json::object_set(obj, "age", age_val);
@@ -23,7 +25,7 @@ atom build_user(name: i64, age: i64)
     }
 
 // --- JSON 文字列をパースして整数値を取得 ---
-atom parse_and_get_int(input: i64, key: i64)
+atom parse_and_get_int(input: Str, key: Str)
     requires: true;
     ensures: true;
     body: {
@@ -45,7 +47,7 @@ atom build_array(a: i64, b: i64)
     }
 
 // --- JSON オブジェクトを構築して文字列化する ---
-atom build_and_stringify(key: i64, value: i64)
+atom build_and_stringify(key: Str, value: i64)
     requires: true;
     ensures: true;
     body: {
