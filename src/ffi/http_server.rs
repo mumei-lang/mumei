@@ -59,6 +59,20 @@ pub extern "C" fn http_server_bind(addr: *const c_char) -> i64 {
     }
 }
 
+/// Mark a bound server as listening. Since Rust's TcpListener::bind() already
+/// puts the socket into listening state, this is a logical no-op that exists
+/// solely to satisfy the HttpServer state machine transition (Bound → Listening).
+/// Returns 1 if the server handle exists, 0 otherwise.
+#[no_mangle]
+pub extern "C" fn http_server_listen(server_handle: i64) -> i64 {
+    let store = SERVER_STORE.lock().unwrap();
+    if store.contains_key(&server_handle) {
+        1
+    } else {
+        0
+    }
+}
+
 /// Accept a connection, parse the HTTP request line, return a request handle.
 /// Blocks until a connection arrives. Returns 0 on error.
 #[no_mangle]

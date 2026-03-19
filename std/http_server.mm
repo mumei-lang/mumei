@@ -8,6 +8,7 @@
 //   import "std/http_server" as server;
 //
 //   let srv = server::bind_server("127.0.0.1:8080");
+//   let ok  = server::listen_server(srv);
 //   let req = server::accept_request(srv);
 //   let ok  = server::send_response(req, 200, "Hello");
 //
@@ -29,6 +30,7 @@ effect HttpServer
 // --- extern declarations: Rust FFI backend ---
 extern "Rust" {
     fn http_server_bind(addr: Str) -> i64;
+    fn http_server_listen(server_handle: i64) -> i64;
     fn http_server_accept(server_handle: i64) -> i64;
     fn http_request_path(req_handle: i64) -> Str;
     fn http_request_method(req_handle: i64) -> Str;
@@ -49,6 +51,19 @@ atom bind_server(addr: Str)
     body: {
         perform HttpServer.bind(addr);
         http_server_bind(addr)
+    }
+
+// Start listening on a bound server. Transitions Bound → Listening.
+// Since Rust's TcpListener::bind() already listens, this is a logical
+// state transition that enables accept_request to be called.
+// Returns 1 if server handle is valid, 0 otherwise.
+atom listen_server(server_handle: i64)
+    effects: [HttpServer]
+    requires: server_handle > 0;
+    ensures: result >= 0;
+    body: {
+        perform HttpServer.listen(server_handle);
+        http_server_listen(server_handle)
     }
 
 // Accept an incoming request. Blocks until a connection arrives.
