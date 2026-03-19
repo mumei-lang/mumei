@@ -6480,9 +6480,24 @@ fn expr_to_z3<'a>(
                 }
             }
 
-            // Return a symbolic result value
+            // Return a symbolic result value.
+            // Use Z3 String Sort if the effect has Str-typed parameters,
+            // since the operation may return a string (e.g., http_request_path).
+            // Otherwise default to Int (status codes, handles, etc.).
             let result_name = format!("__perform_{}_{}", effect, operation);
-            Ok(Int::new_const(ctx, result_name.as_str()).into())
+            let has_str_params = effect_def
+                .as_ref()
+                .map(|def| {
+                    def.params
+                        .iter()
+                        .any(|p| p.type_name.as_deref() == Some("Str"))
+                })
+                .unwrap_or(false);
+            if has_str_params {
+                Ok(Z3String::new_const(ctx, result_name.as_str()).into())
+            } else {
+                Ok(Int::new_const(ctx, result_name.as_str()).into())
+            }
         }
 
         Expr::Async { body } => {
