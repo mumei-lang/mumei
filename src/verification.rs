@@ -8764,20 +8764,24 @@ mod tests {
         let ce = serde_json::json!({
             "path": "/tmp/../etc/passwd"
         });
-        let dummy_atom = crate::hir::Atom {
+        let dummy_atom = crate::parser::ast::Atom {
             name: "test_atom".to_string(),
-            params: vec![],
-            return_type: None,
-            requires: String::new(),
-            ensures: String::new(),
-            body: vec![],
-            effects: vec![],
-            span: Span::default(),
-            decorators: vec![],
-            is_ghost: false,
-            is_unsafe: false,
             type_params: vec![],
-            where_clauses: vec![],
+            where_bounds: vec![],
+            params: vec![],
+            requires: String::new(),
+            forall_constraints: vec![],
+            ensures: String::new(),
+            body_expr: String::new(),
+            consumed_params: vec![],
+            resources: vec![],
+            is_async: false,
+            trust_level: crate::parser::ast::TrustLevel::Verified,
+            max_unroll: None,
+            invariant: None,
+            effects: vec![],
+            return_type: None,
+            span: Span::default(),
         };
         let feedback = build_semantic_feedback(
             &mappings,
