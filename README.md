@@ -189,6 +189,32 @@ See [Language Reference](docs/LANGUAGE.md) for full syntax documentation.
 
 ### Rich Diagnostics
 
+Multi-span diagnostics powered by [miette](https://crates.io/crates/miette) — multiple related source locations, compound constraint decomposition, and expression-level dataflow tracking on every error.
+
+**Multi-span output** — primary error + related constraint/dataflow locations:
+
+```
+  × Verification Error: Effect constraint not satisfied for 'perform SafeFileRead.read(path)'
+   ╭─[examples/server.mm:15:9]
+14 │         let path = "/tmp/" + user_id + "/config.txt";
+15 │         perform SafeFileRead.read(path);
+   ·         ─────────────────────────────── constraint violated here
+16 │
+   ╰────
+   ╭─[examples/server.mm:14:20]
+14 │         let path = "/tmp/" + user_id + "/config.txt";
+   ·                    ──────────────────────────────────── path constructed here
+   ╰────
+   ╭─[std/file.mm:3:5]
+ 3 │     where starts_with(path, "/tmp/") && not_contains(path, "..");
+   ·           ──────────────────────────────────────────────────────── constraint defined here
+   ╰────
+  help: Sub-constraint [2/2] 'not_contains(path, "..")' may be violated.
+        user_id に ".." が含まれていないか確認してください。
+```
+
+**Compound constraint decomposition** — each `&&`-joined sub-constraint is individually evaluated:
+
 ```
   × Verification Error: Postcondition (ensures) is not satisfied.
    ╭─[examples/basic.mm:5:1]
@@ -197,16 +223,44 @@ See [Language Reference](docs/LANGUAGE.md) for full syntax documentation.
    ·   ──────────── verification failed here
  6 │
    ╰────
-  help: Check the ensures condition.
+  help: ensures の条件を確認してください。body の返り値が事後条件を満たすか検討してください
 ```
 
-Powered by [miette](https://crates.io/crates/miette) — source location, underline highlighting, and actionable suggestions on every error.
+**MCP JSON output** — structured data for AI agent consumption:
+
+```json
+{
+  "failure_type": "precondition_violated",
+  "semantic_feedback": {
+    "violated_constraints": [{
+      "param": "path",
+      "constraint": "starts_with(path, \"/tmp/\") && not_contains(path, \"..\")",
+      "sub_constraints": [
+        {"index": 0, "raw": "starts_with(path, \"/tmp/\")", "satisfied": true},
+        {"index": 1, "raw": "not_contains(path, \"..\")", "satisfied": false,
+         "explanation": "'path' must not contain \"..\""}
+      ]
+    }],
+    "data_flow": [
+      {"step": "concat", "line": 14, "col": 20},
+      {"step": "perform", "line": 15, "col": 9,
+       "constraint": "starts_with(path, \"/tmp/\") && not_contains(path, \"..\")"}
+    ],
+    "related_locations": [
+      {"file": "examples/server.mm", "line": 14, "label": "path constructed here"},
+      {"file": "std/file.mm", "line": 3, "label": "constraint defined here"}
+    ]
+  }
+}
+```
+
+LSP diagnostics include `relatedInformation` for multi-location errors, enabling IDE inline display of all related spans.
 
 ---
 
 ## Self-Healing Loop (AI + Z3)
 
-Mumei's Self-Healing loop combines AI (LLM) and Z3 formal verification to automatically fix code.
+Mumei's Self-Healing loop combines AI (LLM) and Z3 formal verification to automatically fix code. Rich Diagnostics provide the AI with structured semantic feedback — including sub-constraint decomposition, dataflow traces, and multi-span source locations — enabling precise, targeted repairs.
 
 ### E2E Flow
 
@@ -214,9 +268,13 @@ Mumei's Self-Healing loop combines AI (LLM) and Z3 formal verification to automa
 AI generates .mm code
         |
         v
-validate_logic (Z3 verification)
+validate_logic (Z3 verification + Rich Diagnostics)
         |
-   [fail?] -----> AI analyzes counter-example -> generates fix -> re-verify (loop)
+   [fail?] -----> AI receives semantic feedback JSON
+        |              - violated_constraints with sub_constraints (satisfied/violated)
+        |              - data_flow trace (expression-level source locations)
+        |              - related_locations (constraint definition sites)
+        |         AI analyzes structured feedback -> generates targeted fix -> re-verify (loop)
         |
    [pass!]
         v
@@ -231,8 +289,9 @@ The E2E flow and Visualizer serve complementary but independent roles:
 |---|---|---|
 | **Purpose** | Data channel for AI to autonomously run verify-fix loops | Observation tool for humans to visually inspect verification state |
 | **Consumer** | AI (Claude Desktop, etc.) | Human (developer) |
-| **Data Source** | JSON + stderr included in MCP responses | Reads report.json file |
+| **Data Source** | Rich Diagnostics JSON + stderr in MCP responses | Reads report.json file |
 | **Real-time** | Immediate on every tool call | Streamlit page reload / rerun |
+| **Rich Diagnostics** | `sub_constraints`, `data_flow`, `related_locations` in JSON | Constraint mappings + counterexample display |
 
 **Recommended Architecture:**
 
@@ -243,16 +302,19 @@ AI (Claude Desktop etc.)
 validate_logic / execute_mm / forge_blade
   |
   v
-mumei compiler (Z3 verification)
+mumei compiler (Z3 verification + Rich Diagnostics)
   |
-  +---> [Always] Include verification results + counter-examples in MCP response
+  +---> [Always] Include verification results + semantic feedback in MCP response
+  |              - violated_constraints with sub_constraint decomposition
+  |              - data_flow trace for expression-level tracking
+  |              - related_locations for multi-span context
   |              -> AI can run autonomous fix loops with this alone
   |
   +---> [Optional] Copy to visualizer/report.json
               -> Streamlit dashboard for human state inspection
 ```
 
-### Demo: Self-Healing of safe_divide
+### Demo 1: Self-Healing of safe_divide (Division by Zero)
 
 **Step a.** AI generates initial code (insufficient precondition):
 
@@ -265,18 +327,34 @@ atom safe_divide(a: Nat, b: Nat)
   body: { a / b };
 ```
 
-**Step b.** `validate_logic` runs Z3 verification -> fails:
+**Step b.** `validate_logic` runs Z3 verification -> fails with Rich Diagnostics:
 
 ```
 $ mumei verify input.mm
 
-  x Verification Error: Potential division by zero.
+  × Verification Error: Potential division by zero.
+   ╭─[input.mm:6:11]
+ 5 │   ensures: result >= 0;
+ 6 │   body: { a / b };
+   ·           ─────── division by zero possible here
+ 7 │
+   ╰────
   help: Add a condition divisor != 0 to requires
 
   Verification: 0 passed, 1 failed
 ```
 
-**Step c-d.** AI analyzes counter-example (`b = 0` causes division by zero) and generates fix:
+**Step c-d.** AI receives semantic feedback JSON and generates fix:
+
+```json
+{
+  "failure_type": "division_by_zero",
+  "semantic_feedback": {
+    "counter_example": {"dividend": "0", "divisor": "0"},
+    "suggestion": "Add a condition divisor != 0 to requires"
+  }
+}
+```
 
 ```mumei
 atom safe_divide(a: Nat, b: Nat)
@@ -302,6 +380,86 @@ $ mumei build input.mm -o katana
   Blade forged successfully with 1 atoms.
   Done. Created: katana.rs, katana.go, katana.ts
 ```
+
+### Demo 2: Self-Healing with Compound Constraint Decomposition (Path Safety)
+
+**Step a.** AI generates code with compound constraint violation:
+
+```mumei
+type SafePath = Str where starts_with(v, "/tmp/") && not_contains(v, "..");
+
+effect SafeFileRead;
+
+atom read_config(user_id: Str)
+    effects: [SafeFileRead];
+    requires: true;
+    ensures: true;
+    body: {
+        let path = "/tmp/" + user_id + "/config.txt";
+        perform SafeFileRead.read(path);
+    };
+```
+
+**Step b.** `validate_logic` returns Rich Diagnostics with multi-span + sub-constraint decomposition:
+
+```
+  × Verification Error: Effect constraint not satisfied for 'perform SafeFileRead.read(path)'
+   ╭─[input.mm:11:9]
+10 │         let path = "/tmp/" + user_id + "/config.txt";
+11 │         perform SafeFileRead.read(path);
+   ·         ─────────────────────────────── constraint violated here
+   ╰────
+   ╭─[input.mm:10:20]
+10 │         let path = "/tmp/" + user_id + "/config.txt";
+   ·                    ──────────────────────────────────── path constructed here
+   ╰────
+  help: Sub-constraint [2/2] 'not_contains(path, "..")' may be violated.
+        user_id に ".." が含まれていないか確認してください。
+```
+
+**Step c.** AI receives structured semantic feedback JSON:
+
+```json
+{
+  "failure_type": "precondition_violated",
+  "semantic_feedback": {
+    "violated_constraints": [{
+      "param": "path",
+      "constraint": "starts_with(path, \"/tmp/\") && not_contains(path, \"..\")",
+      "sub_constraints": [
+        {"index": 0, "raw": "starts_with(path, \"/tmp/\")", "satisfied": true},
+        {"index": 1, "raw": "not_contains(path, \"..\")", "satisfied": false,
+         "explanation": "'path' must not contain \"..\""}
+      ]
+    }],
+    "data_flow": [
+      {"step": "concat", "line": 10, "col": 20},
+      {"step": "perform", "line": 11, "col": 9,
+       "constraint": "starts_with(path, \"/tmp/\") && not_contains(path, \"..\")"}
+    ],
+    "related_locations": [
+      {"file": "input.mm", "line": 10, "label": "path constructed here"}
+    ]
+  }
+}
+```
+
+AI identifies: sub-constraint `[1/2]` is satisfied (path starts with "/tmp/"), but `[2/2]` is violated (user_id could contain ".."). Fix: add requires clause to validate user_id.
+
+**Step d.** AI generates fix:
+
+```mumei
+atom read_config(user_id: Str)
+    effects: [SafeFileRead];
+    requires: not_contains(user_id, "..");   // <- fix: validate user_id
+    ensures: true;
+    body: {
+        let path = "/tmp/" + user_id + "/config.txt";
+        perform SafeFileRead.read(path);
+    };
+```
+
+**Step e.** Re-verify -> passes.
 
 ### Setup
 
@@ -369,11 +527,11 @@ streamlit run visualizer/app.py
 
 **Demo Recording:**
 
-[MCP Demo](https://github.com/user-attachments/assets/0f0594a4-8946-422c-9d54-bd81af45fc14)
+[MCP + Rich Diagnostics Demo](https://github.com/user-attachments/assets/0f0594a4-8946-422c-9d54-bd81af45fc14)
 
 [Visualizer Demo](https://github.com/user-attachments/assets/b36271b7-eeb0-452c-97ca-4045babd23a4)
 
-> The Visualizer is a monitoring tool for the E2E flow. Since AI completes its work via MCP responses alone, it does not depend on the Visualizer. Use it only when a human wants to observe.
+> The Visualizer is a monitoring tool for the E2E flow. Since AI completes its work via MCP responses alone (including Rich Diagnostics JSON with `sub_constraints`, `data_flow`, and `related_locations`), it does not depend on the Visualizer. Use it only when a human wants to observe.
 
 ---
 
