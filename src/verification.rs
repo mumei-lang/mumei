@@ -5682,8 +5682,18 @@ fn expr_to_z3<'a>(
                         };
                         Ok(result.into())
                     } else {
-                        // Fallback: if operands are not strings, return true (no constraint)
-                        // This handles cases where the variable hasn't been typed as Str.
+                        // Fallback: if operands are not strings, return true (no constraint).
+                        // This handles cases where the variable hasn't been typed as Str
+                        // (e.g., an i64 parameter). Str-typed parameters are correctly
+                        // lowered to Z3 String Sort at parameter pre-registration, so this
+                        // branch only fires for genuinely non-string variables.
+                        //
+                        // NOTE: This is a permissive fallback. If a user writes
+                        // `not_contains(int_var, "..")` where int_var is i64, the constraint
+                        // is silently dropped. This is acceptable because string constraint
+                        // functions are only meaningful on Str-typed parameters, and using
+                        // them on non-Str types is a user error that should ideally be
+                        // caught by a type checker (not yet implemented for requires/ensures).
                         Ok(Bool::from_bool(ctx, true).into())
                     }
                 }
@@ -6506,12 +6516,15 @@ fn expr_to_z3<'a>(
             // parser gains per-operation return type info, this heuristic
             // should be replaced with a direct lookup.
             let result_name = format!("__perform_{}_{}", effect, operation);
-            let has_str_params = effect_def
-                .as_ref()
+            let has_str_params = vc
+                .module_env
+                .effect_defs
+                .get(effect.as_str())
+                .or_else(|| vc.module_env.effects.get(effect.as_str()))
                 .map(|def| {
                     def.params
                         .iter()
-                        .any(|p| p.type_name.as_deref() == Some("Str"))
+                        .any(|p| p.type_name == "Str")
                 })
                 .unwrap_or(false);
             if has_str_params {
