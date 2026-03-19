@@ -2214,6 +2214,10 @@ fn evaluate_string_constraint(constraint_expr: &str, _param_name: &str, value: &
     let trimmed = constraint_expr.trim();
 
     // Compound constraint: split on && and check all sub-constraints
+    // NOTE: This naive split does not respect && inside quoted strings
+    // (e.g., not_contains(path, "a&&b") would be incorrectly split).
+    // This is an acceptable limitation since constraint string arguments
+    // are path patterns that should never contain "&&".
     if trimmed.contains("&&") {
         return trimmed
             .split("&&")
@@ -2315,6 +2319,10 @@ fn parse_constraint_to_z3_string<'ctx>(
 
     // Compound constraint: "constraint1 && constraint2"
     // Must be checked BEFORE individual constraint checks to avoid partial matches.
+    // NOTE: This naive split does not respect && inside quoted strings
+    // (e.g., not_contains(path, "a&&b") would be incorrectly split).
+    // This is an acceptable limitation since constraint string arguments
+    // are path patterns that should never contain "&&".
     if trimmed.contains("&&") {
         let parts: Vec<&str> = trimmed.split("&&").collect();
         let mut bools: Vec<Bool<'ctx>> = Vec::new();
@@ -4118,6 +4126,10 @@ fn verify_effect_consistency(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult
 /// 定数パスに対する制約を Rust 側で直接検証する。
 fn check_constant_constraint(value: &str, constraint: &str) -> bool {
     // Compound constraint: split on && and check all sub-constraints
+    // NOTE: This naive split does not respect && inside quoted strings
+    // (e.g., not_contains(path, "a&&b") would be incorrectly split).
+    // This is an acceptable limitation since constraint string arguments
+    // are path patterns that should never contain "&&".
     if constraint.contains("&&") {
         return constraint
             .split("&&")

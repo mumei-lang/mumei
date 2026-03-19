@@ -93,7 +93,7 @@ atom remove(path: i64)
 // Returns 1 as a placeholder status code.
 atom safe_read_file(path: Str)
     effects: [SafeFileRead(path)]
-    requires: true;
+    requires: starts_with(path, "/tmp/") && not_contains(path, "..");
     ensures: result >= 0;
     body: {
         perform SafeFileRead.read(path);
