@@ -1,8 +1,10 @@
 # Phase 4c+ Roadmap — Session Plans
 
-These are 8 sequential implementation plans for Phase 4c and beyond.
+These are sequential implementation plans for Phase 4c and beyond.
 Each plan is a self-contained session prompt with full context, implementation details, affected files, and acceptance criteria.
 Plans should be executed in priority order (Plan 1 first).
+
+> **Status**: Plans 1–8 completed. Plans 9–11 completed in PR (Plans 9-11). Plans 15–20 completed in PR #83. Plan 21 completed in PR #85.
 
 ---
 
@@ -304,4 +306,110 @@ concurrency 機能の以下の未実装項目を実装する:
 - cancellation が動作する
 - `chan<T>` で send/recv が可能
 - `cargo test` が全て通る
+- `cargo fmt` 適用済み
+
+---
+
+## Plan 9: Enum Payload 型の正確な LLVM 型解決
+
+### 目的
+
+codegen.rs のハードコードされた i64 ペイロードスロットを、EnumVariant.field_types に基づく正しい LLVM 型（f64, ptr for Str, struct for enums）に修正する。
+
+### 背景
+
+`enum_llvm_type()` は全てのペイロードスロットを `context.i64_type()` で生成していた。
+Str フィールドを持つ enum バリアントは `ptr` 型を使う必要があり、f64 フィールドは `f64_type()` を使う必要がある。
+
+### 実装内容
+
+1. **`enum_llvm_type()` (L37-81):** `module_env` パラメータを追加し、`resolve_param_type()` を使用して各スロット位置の実際のフィールド型を解決。バリアント間で型が異なる場合は最大互換型を使用。
+2. **Call-site の更新:** `enum_llvm_type()` の全呼び出し箇所に `Some(module_env)` を渡すよう更新。
+3. **StructInit field types (L860-867):** `resolve_param_type()` を使用した一貫した型解決に変更。
+
+### 対象ファイル
+
+- `src/codegen.rs`: enum_llvm_type(), StructInit field types
+
+### 受け入れ基準
+
+- `cargo test` が全て通る（201 tests）
+- Str ペイロードフィールドを持つ enum が正しい LLVM IR を生成（ptr type, not i64）
+- `cargo fmt` 適用済み
+
+---
+
+## Plan 10: エフェクト検証 Future Unlocks — 動的パス構築検証 + Regex ポリシー
+
+### 目的
+
+Z3 が動的に構築された文字列（連結による）がエフェクト where 句制約を満たすことを検証できるようにし、正規表現ベースの制約サポートを追加する。
+
+### 背景
+
+Perform ハンドラは各引数に対して新しい Z3 String 変数を作成し、Variable 引数のみ `__str_{var_name}` 環境ルックアップで接続していた。
+`"/tmp/" + user_id + "/log.txt"` のような動的構築文字列は、`starts_with(path, "/tmp/")` に対して直接検証できなかった。
+
+### 実装内容
+
+1. **Perform handler (L6250-6285):** `arg_z3_values[i]` が Z3 String Sort を持つ場合、直接使用。新しい非接続変数の作成を回避。
+2. **`parse_constraint_to_z3_string()` (L2330-2369):** `matches()` サポートを追加。Z3 String の prefix/suffix/contains による正規表現パターン近似。
+3. **`check_constant_constraint()` (L4091-4098):** Rust regex crate による `matches()` サポートを追加。
+4. **テストファイル:** `tests/test_dynamic_path_verification.mm`, `tests/test_regex_constraint.mm` を追加。
+5. **ドキュメント:** `docs/CAPABILITY_SECURITY.md` を更新。
+
+### 対象ファイル
+
+- `src/verification.rs`: Perform handler, parse_constraint_to_z3_string, check_constant_constraint
+- `tests/test_dynamic_path_verification.mm` (新規)
+- `tests/test_regex_constraint.mm` (新規)
+- `docs/CAPABILITY_SECURITY.md`
+
+### 受け入れ基準
+
+- `"/tmp/" + var + "/file.txt"` が Z3 により `starts_with(path, "/tmp/")` を満たすことが証明される
+- `matches()` が定数・変数文字列パスで動作する
+- 既存の starts_with/ends_with/contains/not_contains テストが引き続きパスする
+- `cargo test` が全て通る（201 tests）
+- `cargo fmt` 適用済み
+
+---
+
+## Plan 11: Deferred ツーリング — mumei inspect --ai + Z3 Proof Certificates
+
+### 目的
+
+AI エージェント向けの構造化 JSON 出力 `mumei inspect --ai` と、検証済み atom の Z3 Proof Certificates を実装する。
+
+### 背景
+
+AI エージェント（MCP サーバー経由）がコードベースの検証状態を構造化データとして取得するには、JSON 形式の検査レポートが必要。
+Z3 Proof Certificates は、検証結果の暗号学的検証可能な証拠を提供し、オフラインでの証明妥当性確認を可能にする。
+
+### 実装内容
+
+**Part A: mumei inspect --ai**
+1. **`src/inspect.rs` (新規):** InspectReport, AtomReport, EffectReport, EnumReport, StructReport, VerificationSummary 構造体を `#[derive(Serialize)]` で定義。`generate_report()` が ModuleEnv と検証結果から InspectReport を生成。
+2. **`src/main.rs`:** inspect サブコマンドを拡張: `mumei inspect <file.mm> [--ai] [--format json|text]`
+
+**Part B: Z3 Proof Certificates**
+3. **`src/proof_cert.rs` (新規):** ProofCertificate, AtomCertificate 構造体を Serialize/Deserialize で定義。バージョン、タイムスタンプ、mumei バージョン、Z3 バージョン、ファイルパス、atom ごとの検証結果（z3_check_result, content_hash: SHA-256）を含む。
+4. **`src/main.rs`:** `--proof-cert` フラグを verify コマンドに追加。`verify-cert` サブコマンドを追加。
+5. **`docs/TOOLCHAIN.md`:** 新しい CLI コマンドのドキュメントを追加。Deferred セクションを更新。
+
+### 対象ファイル
+
+- `src/inspect.rs` (新規): InspectReport 生成
+- `src/proof_cert.rs` (新規): ProofCertificate 生成・検証
+- `src/main.rs`: inspect/verify/verify-cert サブコマンド
+- `docs/TOOLCHAIN.md`: CLI ドキュメント更新
+
+### 受け入れ基準
+
+- `mumei inspect examples/demo.mm --ai` が有効な JSON を stdout に出力
+- JSON に全 atom の requires/ensures/effects/verification_status が含まれる
+- `mumei verify examples/demo.mm --proof-cert` が .proof.json を生成
+- .proof.json に atom ごとの z3_check_result と content_hash が含まれる
+- `mumei verify-cert` がソース未変更の atom を "proven" と報告
+- `cargo test` が全て通る（201 tests）
 - `cargo fmt` 適用済み

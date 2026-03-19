@@ -308,6 +308,13 @@ Wraps Rust `serde_json` behind a handle-based API.
 | `json::from_str(value)` | `true` | `result >= 0` | Create JSON value from string |
 | `json::from_bool(value)` | `value in {0,1}` | `result >= 0` | Create JSON value from boolean |
 
+### Memory Management (Plan 16)
+
+| Atom | Requires | Ensures | Description |
+|---|---|---|---|
+| `json::free(handle)` | `handle >= 0` | `result in {0,1}` | Release JSON handle (1=success, 0=invalid) |
+| `json::str_free(handle)` | `handle >= 0` | `result in {0,1}` | Release string handle (1=success, 0=invalid) |
+
 ---
 
 ## std/http.mm — HTTP Client
@@ -344,6 +351,12 @@ Can be combined with `task_group` for parallel requests.
 |---|---|---|---|
 | `http::header_get(handle, name)` | `handle >= 0` | `result >= 0` | Get header value |
 | `http::header_set(handle, name, value)` | `handle >= 0` | `result >= 0` | Set header value |
+
+### Memory Management (Plan 16)
+
+| Atom | Requires | Ensures | Description |
+|---|---|---|---|
+| `http::free(handle)` | `handle >= 0` | `result in {0,1}` | Release HTTP response handle (1=success, 0=invalid) |
 
 ---
 

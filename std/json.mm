@@ -40,6 +40,9 @@ extern "Rust" {
     fn json_from_int(value: i64) -> i64;
     fn json_from_str(value: Str) -> i64;
     fn json_from_bool(value: i64) -> i64;
+    // Plan 16: Memory management
+    fn json_free(handle: i64) -> i64;
+    fn string_free(handle: i64) -> i64;
 }
 
 // =============================================================
@@ -214,4 +217,24 @@ atom from_bool(value: i64)
     ensures: result >= 0;
     body: {
         json_from_bool(value)
+    }
+
+// =============================================================
+// Plan 16: Memory Management
+// =============================================================
+
+// JSON ハンドルを解放する（1=成功, 0=無効なハンドル）
+atom free(handle: i64)
+    requires: handle >= 0;
+    ensures: result >= 0 && result <= 1;
+    body: {
+        json_free(handle)
+    }
+
+// 文字列ハンドルを解放する（1=成功, 0=無効なハンドル）
+atom str_free(handle: i64)
+    requires: handle >= 0;
+    ensures: result >= 0 && result <= 1;
+    body: {
+        string_free(handle)
     }

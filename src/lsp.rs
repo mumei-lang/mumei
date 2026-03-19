@@ -207,7 +207,9 @@ fn diagnose(uri: &str, source: &str) -> Vec<serde_json::Value> {
                 // Span が不明な場合、atom の Span にフォールバック
                 find_error_position(&items, &detail.message)
             };
-            diagnostics.push(serde_json::json!({
+            // Feature 3f: Build relatedInformation from MumeiError's #[related] field
+            let related_info = build_related_information(uri, &e);
+            let mut diag = serde_json::json!({
                 "range": {
                     "start": { "line": line, "character": col },
                     "end": { "line": line, "character": col + 1 }
@@ -215,7 +217,11 @@ fn diagnose(uri: &str, source: &str) -> Vec<serde_json::Value> {
                 "severity": 1,
                 "source": "mumei-z3",
                 "message": format!("{}", detail)
-            }));
+            });
+            if !related_info.is_empty() {
+                diag["relatedInformation"] = serde_json::json!(related_info);
+            }
+            diagnostics.push(diag);
         }
     }
 
@@ -301,6 +307,86 @@ fn verify_source_for_lsp(
     }
 
     Ok(())
+}
+
+/// Feature 3f: Extract related diagnostic information from MumeiError for LSP relatedInformation.
+/// Maps RelatedDiagnostic entries to LSP DiagnosticRelatedInformation format.
+///
+/// Uses `RelatedDiagnostic.original_span` (parser::Span with 1-indexed line/col) for precise
+/// positioning. This works even when source text is empty (e.g., in the LSP path where
+/// `with_source()` has not been called), because line/col are resolved directly from the
+/// parser Span without needing to scan source text.
+fn build_related_information(
+    uri: &str,
+    error: &verification::MumeiError,
+) -> Vec<serde_json::Value> {
+    let related_spans = match error {
+        verification::MumeiError::VerificationError { related, .. }
+        | verification::MumeiError::CodegenError { related, .. }
+        | verification::MumeiError::TypeError { related, .. } => related,
+    };
+    related_spans
+        .iter()
+        .map(|r| {
+            // Use original_span (parser::Span) for line/col resolution.
+            // parser::Span is 1-indexed; LSP expects 0-indexed.
+            let (line, character) = if r.original_span.line > 0 {
+                (
+                    r.original_span.line.saturating_sub(1),
+                    r.original_span.col.saturating_sub(1),
+                )
+            } else {
+                // Fallback: try byte offset conversion from source text
+                let source_text = r.src.inner().as_str();
+                let byte_offset = r.span.offset();
+                byte_offset_to_line_col(source_text, byte_offset)
+            };
+            // Use the RelatedDiagnostic's own file name when available,
+            // falling back to the primary diagnostic's URI for same-file spans.
+            let related_uri = {
+                let name = r.original_span.file.as_str();
+                if !name.is_empty() {
+                    format!("file://{}", name)
+                } else {
+                    let src_name = r.src.name();
+                    if !src_name.is_empty() && src_name != "<unknown>" {
+                        format!("file://{}", src_name)
+                    } else {
+                        uri.to_string()
+                    }
+                }
+            };
+            serde_json::json!({
+                "location": {
+                    "uri": related_uri,
+                    "range": {
+                        "start": { "line": line, "character": character },
+                        "end": { "line": line, "character": character + 1 }
+                    }
+                },
+                "message": format!("{}: {}", r.label, r.msg)
+            })
+        })
+        .collect()
+}
+
+/// Convert a byte offset within `source` to a 0-indexed (line, character) pair.
+/// Falls back to (0, 0) when the source is empty or the offset is out of range.
+fn byte_offset_to_line_col(source: &str, byte_offset: usize) -> (usize, usize) {
+    let mut line: usize = 0;
+    let mut col: usize = 0;
+    for (idx, ch) in source.char_indices() {
+        if idx >= byte_offset {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            col = 0;
+        } else {
+            col += 1;
+        }
+    }
+    (line, col)
 }
 
 /// Hover 用: 指定行付近の atom を探し、requires/ensures を markdown で返す

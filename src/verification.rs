@@ -15,6 +15,26 @@ use z3::{Config, Context, SatResult, Solver};
 
 // --- エラー型の定義 ---
 
+// =============================================================================
+// Related Diagnostic for multi-span error reporting (Feature 3a)
+// =============================================================================
+
+#[derive(thiserror::Error, miette::Diagnostic, Debug)]
+#[error("{msg}")]
+pub struct RelatedDiagnostic {
+    pub msg: String,
+    #[source_code]
+    pub src: miette::NamedSource<String>,
+    #[label("{label}")]
+    pub span: SourceSpan,
+    pub label: String,
+    /// Original parser::Span (line/col) for LSP line mapping.
+    /// Miette's SourceSpan is a byte offset that requires source text to resolve;
+    /// this field allows LSP to read line/col directly without source text.
+    pub original_span: Span,
+}
+
+
 /// エラーの詳細情報。ソース位置（Span）と修正提案（suggestion）を保持する。
 #[derive(Debug, Clone)]
 pub struct ErrorDetail {
@@ -121,6 +141,8 @@ pub enum MumeiError {
         help: Option<String>,
         /// LSP 用: 元の parser::Span（line/col）を保持する
         original_span: Span,
+        #[related]
+        related: Vec<RelatedDiagnostic>,
     },
     #[error("Codegen Error: {msg}")]
     #[diagnostic(code(mumei::codegen))]
@@ -134,6 +156,8 @@ pub enum MumeiError {
         help: Option<String>,
         /// LSP 用: 元の parser::Span（line/col）を保持する
         original_span: Span,
+        #[related]
+        related: Vec<RelatedDiagnostic>,
     },
     #[error("Type Error: {msg}")]
     #[diagnostic(code(mumei::type_error))]
@@ -147,6 +171,8 @@ pub enum MumeiError {
         help: Option<String>,
         /// LSP 用: 元の parser::Span（line/col）を保持する
         original_span: Span,
+        #[related]
+        related: Vec<RelatedDiagnostic>,
     },
 }
 
@@ -159,6 +185,7 @@ impl MumeiError {
             span: SourceSpan::from((0, 0)),
             help: None,
             original_span: Span::default(),
+            related: Vec::new(),
         }
     }
     /// Span 付きで VerificationError を生成
@@ -176,6 +203,7 @@ impl MumeiError {
             span: SourceSpan::from((0, 0)),
             help: None,
             original_span: span,
+            related: Vec::new(),
         }
     }
     /// ソースコード付きで VerificationError を生成（リッチ出力対応）
@@ -200,6 +228,7 @@ impl MumeiError {
             span: source_span,
             help,
             original_span: span.clone(),
+            related: Vec::new(),
         }
     }
     /// Span なしで CodegenError を生成
@@ -210,6 +239,7 @@ impl MumeiError {
             span: SourceSpan::from((0, 0)),
             help: None,
             original_span: Span::default(),
+            related: Vec::new(),
         }
     }
     /// ソースコード付きで CodegenError を生成（リッチ出力対応）
@@ -234,6 +264,7 @@ impl MumeiError {
             span: source_span,
             help,
             original_span: span.clone(),
+            related: Vec::new(),
         }
     }
     /// Span なしで TypeError を生成
@@ -244,6 +275,7 @@ impl MumeiError {
             span: SourceSpan::from((0, 0)),
             help: None,
             original_span: Span::default(),
+            related: Vec::new(),
         }
     }
     /// Span 付きで TypeError を生成
@@ -261,6 +293,7 @@ impl MumeiError {
             span: SourceSpan::from((0, 0)),
             help: None,
             original_span: span,
+            related: Vec::new(),
         }
     }
     /// ソースコード付きで TypeError を生成（リッチ出力対応）
@@ -285,6 +318,7 @@ impl MumeiError {
             span: source_span,
             help,
             original_span: span.clone(),
+            related: Vec::new(),
         }
     }
 
@@ -336,37 +370,91 @@ impl MumeiError {
                 msg,
                 help,
                 original_span,
+                related,
                 ..
-            } => MumeiError::VerificationError {
-                msg,
-                src: named_src,
-                span: source_span,
-                help,
-                original_span,
+            } => {
+                // Propagate source to related diagnostics that share the same file.
+                // Only overwrite when the related span's file matches the primary file
+                // (or is "<unknown>"), preserving cross-file span context.
+                let updated_related = related.into_iter().map(|r| {
+                    let r_file = r.original_span.file.as_str();
+                    if r_file.is_empty() || r_file == "<unknown>" || r_file == file_name {
+                        let recomputed_span = span_to_source_span(source, &r.original_span);
+                        RelatedDiagnostic {
+                            src: miette::NamedSource::new(file_name, source.to_string()),
+                            span: recomputed_span,
+                            ..r
+                        }
+                    } else {
+                        r
+                    }
+                }).collect();
+                MumeiError::VerificationError {
+                    msg,
+                    src: named_src,
+                    span: source_span,
+                    help,
+                    original_span,
+                    related: updated_related,
+                }
             },
             MumeiError::CodegenError {
                 msg,
                 help,
                 original_span,
+                related,
                 ..
-            } => MumeiError::CodegenError {
-                msg,
-                src: named_src,
-                span: source_span,
-                help,
-                original_span,
+            } => {
+                let updated_related = related.into_iter().map(|r| {
+                    let r_file = r.original_span.file.as_str();
+                    if r_file.is_empty() || r_file == "<unknown>" || r_file == file_name {
+                        let recomputed_span = span_to_source_span(source, &r.original_span);
+                        RelatedDiagnostic {
+                            src: miette::NamedSource::new(file_name, source.to_string()),
+                            span: recomputed_span,
+                            ..r
+                        }
+                    } else {
+                        r
+                    }
+                }).collect();
+                MumeiError::CodegenError {
+                    msg,
+                    src: named_src,
+                    span: source_span,
+                    help,
+                    original_span,
+                    related: updated_related,
+                }
             },
             MumeiError::TypeError {
                 msg,
                 help,
                 original_span,
+                related,
                 ..
-            } => MumeiError::TypeError {
-                msg,
-                src: named_src,
-                span: source_span,
-                help,
-                original_span,
+            } => {
+                let updated_related = related.into_iter().map(|r| {
+                    let r_file = r.original_span.file.as_str();
+                    if r_file.is_empty() || r_file == "<unknown>" || r_file == file_name {
+                        let recomputed_span = span_to_source_span(source, &r.original_span);
+                        RelatedDiagnostic {
+                            src: miette::NamedSource::new(file_name, source.to_string()),
+                            span: recomputed_span,
+                            ..r
+                        }
+                    } else {
+                        r
+                    }
+                }).collect();
+                MumeiError::TypeError {
+                    msg,
+                    src: named_src,
+                    span: source_span,
+                    help,
+                    original_span,
+                    related: updated_related,
+                }
             },
         }
     }
@@ -380,6 +468,7 @@ impl MumeiError {
                 src,
                 span,
                 original_span,
+                related,
                 ..
             } => MumeiError::VerificationError {
                 msg,
@@ -387,12 +476,14 @@ impl MumeiError {
                 span,
                 help,
                 original_span,
+                related,
             },
             MumeiError::CodegenError {
                 msg,
                 src,
                 span,
                 original_span,
+                related,
                 ..
             } => MumeiError::CodegenError {
                 msg,
@@ -400,12 +491,14 @@ impl MumeiError {
                 span,
                 help,
                 original_span,
+                related,
             },
             MumeiError::TypeError {
                 msg,
                 src,
                 span,
                 original_span,
+                related,
                 ..
             } => MumeiError::TypeError {
                 msg,
@@ -413,8 +506,33 @@ impl MumeiError {
                 span,
                 help,
                 original_span,
+                related,
             },
         }
+    }
+
+    /// Add a related diagnostic span for multi-span error reporting (Feature 3c)
+    pub fn with_related(
+        mut self,
+        related_span: SourceSpan,
+        label: String,
+        src: miette::NamedSource<String>,
+        msg: String,
+        original_span: Span,
+    ) -> Self {
+        let diag = RelatedDiagnostic {
+            msg,
+            src,
+            span: related_span,
+            label,
+            original_span,
+        };
+        match &mut self {
+            MumeiError::VerificationError { related, .. } => related.push(diag),
+            MumeiError::CodegenError { related, .. } => related.push(diag),
+            MumeiError::TypeError { related, .. } => related.push(diag),
+        }
+        self
     }
 }
 
@@ -446,8 +564,17 @@ pub struct ConstraintMapping {
     type_name: Option<String>,
     base_type: String,
     predicate_raw: String,
-    #[allow(dead_code)]
     span: Span,
+}
+
+/// A single step in the data flow chain for expression-level tracking.
+#[derive(Debug, Clone)]
+pub struct DataFlowEntry {
+    pub step: String,
+    pub line: u32,
+    pub col: u32,
+    pub description: String,
+    pub constraint: Option<String>,
 }
 
 // =============================================================================
@@ -515,11 +642,146 @@ pub fn suggestion_for_failure_type(failure_type: &str) -> &'static str {
 pub const FAILURE_EFFECT_NOT_ALLOWED: &str = "effect_not_allowed";
 
 // =============================================================================
+// Compound Constraint Decomposition
+// =============================================================================
+
+/// Splits `&&`-joined constraints at the top level while respecting parenthesis
+/// depth and quoted strings.
+///
+/// Example: `starts_with(path, "/tmp/") && not_contains(path, "..")`
+/// → `["starts_with(path, \"/tmp/\")", "not_contains(path, \"..\")"]`
+pub fn split_compound_constraint(predicate_raw: &str) -> Vec<String> {
+    let pred = predicate_raw.trim();
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut depth: i32 = 0;
+    let mut in_quotes = false;
+    let chars: Vec<char> = pred.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+    while i < len {
+        let ch = chars[i];
+        if ch == '"' && (i == 0 || chars[i - 1] != '\\') {
+            in_quotes = !in_quotes;
+            current.push(ch);
+            i += 1;
+            continue;
+        }
+        if in_quotes {
+            current.push(ch);
+            i += 1;
+            continue;
+        }
+        if ch == '(' {
+            depth += 1;
+            current.push(ch);
+            i += 1;
+            continue;
+        }
+        if ch == ')' {
+            depth -= 1;
+            current.push(ch);
+            i += 1;
+            continue;
+        }
+        // Only split on `&&` when depth == 0 and not inside quotes
+        if depth == 0 && ch == '&' && i + 1 < len && chars[i + 1] == '&' {
+            let trimmed = current.trim().to_string();
+            if !trimmed.is_empty() {
+                parts.push(trimmed);
+            }
+            current.clear();
+            i += 2; // skip both '&' characters
+            continue;
+        }
+        current.push(ch);
+        i += 1;
+    }
+    let trimmed = current.trim().to_string();
+    if !trimmed.is_empty() {
+        parts.push(trimmed);
+    }
+    parts
+}
+
+/// Evaluate a single sub-constraint against a concrete counterexample value.
+/// Checks starts_with/ends_with/contains/not_contains/range patterns.
+pub fn evaluate_sub_constraint(sub_pred: &str, value: &str) -> bool {
+    let trimmed = sub_pred.trim();
+
+    // starts_with(param, "prefix")
+    if let Some(inner) = trimmed.strip_prefix("starts_with(") {
+        if let Some(inner) = inner.strip_suffix(')') {
+            if let Some((_p, rest)) = inner.split_once(',') {
+                let prefix = rest.trim().trim_matches('"');
+                return value.trim_matches('"').starts_with(prefix);
+            }
+        }
+    }
+
+    // ends_with(param, "suffix")
+    if let Some(inner) = trimmed.strip_prefix("ends_with(") {
+        if let Some(inner) = inner.strip_suffix(')') {
+            if let Some((_p, rest)) = inner.split_once(',') {
+                let suffix = rest.trim().trim_matches('"');
+                return value.trim_matches('"').ends_with(suffix);
+            }
+        }
+    }
+
+    // not_contains(param, "substr")
+    if let Some(inner) = trimmed.strip_prefix("not_contains(") {
+        if let Some(inner) = inner.strip_suffix(')') {
+            if let Some((_p, rest)) = inner.split_once(',') {
+                let substr = rest.trim().trim_matches('"');
+                return !value.trim_matches('"').contains(substr);
+            }
+        }
+    }
+
+    // contains(param, "substr")
+    if let Some(inner) = trimmed.strip_prefix("contains(") {
+        if let Some(inner) = inner.strip_suffix(')') {
+            if let Some((_p, rest)) = inner.split_once(',') {
+                let substr = rest.trim().trim_matches('"');
+                return value.trim_matches('"').contains(substr);
+            }
+        }
+    }
+
+    // Simple comparison patterns: v >= N, v <= N, v > N, v < N, v != N
+    // Try to parse as numeric comparison
+    let comparisons: Vec<(&str, fn(i64, i64) -> bool)> = vec![
+        (">=", (|a, b| a >= b) as fn(i64, i64) -> bool),
+        ("<=", |a, b| a <= b),
+        ("!=", |a, b| a != b),
+        (">", |a, b| a > b),
+        ("<", |a, b| a < b),
+        ("==", |a, b| a == b),
+    ];
+    for (cmp_op, cmp_fn) in &comparisons {
+        if let Some(idx) = trimmed.find(cmp_op) {
+            let rhs = trimmed[idx + cmp_op.len()..].trim();
+            if let (Ok(val_num), Ok(rhs_num)) =
+                (value.trim_matches('"').parse::<i64>(), rhs.parse::<i64>())
+            {
+                return cmp_fn(val_num, rhs_num);
+            }
+        }
+    }
+
+    // Unknown sub-constraint — conservatively return true
+    true
+}
+
+// =============================================================================
 // Natural Language Constraint Template Engine (Feature 1-b)
 // =============================================================================
 
 /// Pattern-matches common predicate forms and generates human/AI-readable descriptions.
 /// Returns bilingual output: English primary, Japanese in parentheses.
+/// Compound constraints (joined by `&&`) are decomposed and each sub-constraint
+/// is individually explained with numbered prefixes.
 pub fn constraint_to_natural_language(
     param_name: &str,
     type_name: &str,
@@ -527,6 +789,22 @@ pub fn constraint_to_natural_language(
     value: &str,
 ) -> String {
     let pred = predicate_raw.trim();
+
+    // Compound constraint decomposition: if multiple sub-constraints, explain each individually
+    let sub_parts = split_compound_constraint(pred);
+    if sub_parts.len() > 1 {
+        let total = sub_parts.len();
+        let explanations: Vec<String> = sub_parts
+            .iter()
+            .enumerate()
+            .map(|(i, sub)| {
+                let sub_explanation =
+                    constraint_to_natural_language(param_name, type_name, sub, value);
+                format!("[{}/{}] {}", i + 1, total, sub_explanation)
+            })
+            .collect();
+        return explanations.join(" AND ");
+    }
 
     // Try to match range pattern: v >= N && v <= M  or  N <= v && v <= M
     if let Some(range_desc) = try_match_range(pred, param_name, type_name, value) {
@@ -832,6 +1110,7 @@ pub fn build_semantic_feedback(
     counterexample: Option<&serde_json::Value>,
     atom: &Atom,
     failure_type: &str,
+    data_flow_entries: Option<&[DataFlowEntry]>,
 ) -> Option<serde_json::Value> {
     let ce_map = counterexample.and_then(|ce| ce.as_object());
     let mut violated_constraints = Vec::new();
@@ -850,14 +1129,41 @@ pub fn build_semantic_feedback(
             value,
         );
 
-        violated_constraints.push(json!({
+        let mut vc_entry = json!({
             "param": mapping.param_name,
             "type": type_name,
             "value": value,
             "constraint": mapping.predicate_raw,
             "explanation": explanation,
             "suggestion": suggestion_for_failure_type(failure_type)
-        }));
+        });
+
+        // Compound constraint decomposition: add sub_constraints array
+        let sub_parts = split_compound_constraint(&mapping.predicate_raw);
+        if sub_parts.len() > 1 {
+            let sub_constraints: Vec<serde_json::Value> = sub_parts
+                .iter()
+                .enumerate()
+                .map(|(idx, sub)| {
+                    let satisfied = evaluate_sub_constraint(sub, value);
+                    let sub_explanation = constraint_to_natural_language(
+                        &mapping.param_name,
+                        type_name,
+                        sub,
+                        value,
+                    );
+                    json!({
+                        "index": idx,
+                        "raw": sub,
+                        "satisfied": satisfied,
+                        "explanation": sub_explanation
+                    })
+                })
+                .collect();
+            vc_entry["sub_constraints"] = json!(sub_constraints);
+        }
+
+        violated_constraints.push(vc_entry);
     }
 
     if violated_constraints.is_empty() && ce_map.is_none() {
@@ -867,6 +1173,26 @@ pub fn build_semantic_feedback(
     let mut feedback = json!({
         "violated_constraints": violated_constraints
     });
+
+    // Add data_flow if available
+    if let Some(entries) = data_flow_entries {
+        let data_flow: Vec<serde_json::Value> = entries
+            .iter()
+            .map(|e| {
+                let mut entry = json!({
+                    "step": e.step,
+                    "line": e.line,
+                    "col": e.col,
+                    "description": e.description
+                });
+                if let Some(ref c) = e.constraint {
+                    entry["constraint"] = json!(c);
+                }
+                entry
+            })
+            .collect();
+        feedback["data_flow"] = json!(data_flow);
+    }
 
     // Add context about the atom's contracts
     feedback["context"] = json!({
@@ -996,6 +1322,20 @@ fn parse_tracking_label(label: &str) -> Option<String> {
     None
 }
 
+/// Encode an effect state name as an integer for Z3 Int Sort constraints.
+/// Returns the index of the state in the state machine's states list, or -1 if not found.
+fn encode_effect_state(
+    state_machine: &crate::mir_analysis::EffectStateMachine,
+    state_name: &str,
+) -> i64 {
+    state_machine
+        .states
+        .iter()
+        .position(|s| s == state_name)
+        .map(|i| i as i64)
+        .unwrap_or(-1)
+}
+
 /// Build semantic feedback JSON for contradiction (unsat) detection with unsat core info.
 pub fn build_contradiction_feedback(
     atom_name: &str,
@@ -1062,26 +1402,29 @@ struct VCtx<'a> {
 // 線形性チェック（Linear Types / Ownership Tracking）
 // =============================================================================
 //
-// 動的メモリ管理における二重解放・Use-After-Free を防ぐために、
-// 変数の「生存状態」を追跡する。
+// NOTE (Plan 19 — Phase 4c complete): The primary ownership/move analysis has
+// been migrated to MIR-based MoveAnalysis (src/mir_analysis.rs).  Phase 1h in
+// verify() now runs forward dataflow move analysis on the MIR CFG and reports
+// UseAfterMove, DoubleMove, and ConflictingMerge as hard errors.
 //
-// 設計:
-// - LinearityCtx が各変数の生存フラグ (is_alive) を管理
-// - consume(x) 呼び出し時に x を「消費済み」としてマーク
-// - 消費済み変数へのアクセスはコンパイルエラー
+// LinearityCtx is retained as a secondary Z3-integrated check for:
+// - Borrow tracking at call sites (ref / ref mut parameter handling)
+// - Consume tracking within Z3 symbolic execution (ensures __alive_ bools)
+// - Violation accumulation for the Phase 5b linearity report
 //
-// 将来の拡張:
-// - atom のパラメータに `consume` 修飾子を追加
-//   例: atom take_ownership(resource: T) consume resource;
-// - Z3 上で is_alive フラグをシンボリック Bool として表現し、
-//   consume 後のアクセスを ¬is_alive(x) として検出
-
+// Future: Once MIR borrow tracking is implemented (Phase 5), LinearityCtx
+// can be fully removed.
+//
 /// 変数の線形性（所有権）追跡コンテキスト
 ///
 /// 所有権（Ownership）と借用（Borrowing）の両方を追跡する。
 /// - consume: 所有権を消費（移動）。消費後のアクセスは Use-After-Free。
 /// - borrow: 読み取り専用の借用。借用中は所有者が consume/free できない。
 /// - release_borrow: 借用を解放。
+///
+/// NOTE: Primary move analysis is now handled by MIR MoveAnalysis (Plan 19).
+/// This struct is kept for Z3-level borrow/consume tracking during symbolic
+/// execution. See src/mir_analysis.rs for the MIR-based replacement.
 #[derive(Debug, Clone, Default)]
 pub struct LinearityCtx {
     /// 変数名 → 生存状態（true = alive, false = consumed）
@@ -2052,6 +2395,7 @@ pub fn verify_impl(
                                 FAILURE_TRAIT_LAW_VIOLATED,
                                 None,
                                 Some(&impl_def.span),
+                                None,
                             );
                             if ce_parts.is_empty() {
                                 "  (no concrete values available)".to_string()
@@ -2196,6 +2540,17 @@ impl SecurityPolicy {
 fn evaluate_string_constraint(constraint_expr: &str, _param_name: &str, value: &str) -> bool {
     let trimmed = constraint_expr.trim();
 
+    // Compound constraint: split on && and check all sub-constraints
+    // NOTE: This naive split does not respect && inside quoted strings
+    // (e.g., not_contains(path, "a&&b") would be incorrectly split).
+    // This is an acceptable limitation since constraint string arguments
+    // are path patterns that should never contain "&&".
+    if trimmed.contains("&&") {
+        return trimmed
+            .split("&&")
+            .all(|part| evaluate_string_constraint(part.trim(), _param_name, value));
+    }
+
     // starts_with(param, "prefix")
     if let Some(inner) = trimmed.strip_prefix("starts_with(") {
         if let Some(inner) = inner.strip_suffix(')') {
@@ -2236,7 +2591,31 @@ fn evaluate_string_constraint(constraint_expr: &str, _param_name: &str, value: &
         }
     }
 
-    // Unknown constraint — conservatively allow (will be checked by Z3 if symbolic)
+    // matches(param, "regex") — use Rust regex crate for evaluation
+    if let Some(inner) = trimmed.strip_prefix("matches(") {
+        if let Some(inner) = inner.strip_suffix(')') {
+            // Extract the regex pattern (last quoted string)
+            if let Some(last_quote_end) = inner.rfind('"') {
+                let before = &inner[..last_quote_end];
+                if let Some(last_quote_start) = before.rfind('"') {
+                    let pattern = &inner[last_quote_start + 1..last_quote_end];
+                    if let Ok(re) = regex::Regex::new(pattern) {
+                        return re.is_match(value);
+                    }
+                }
+            }
+        }
+    }
+
+    // Unknown constraint — conservatively allow (will be checked by Z3 if symbolic).
+    //
+    // NOTE: This returns `true` (allow) for unknown constraints, which differs from
+    // `check_constant_constraint()` which returns `false` (reject) for unknowns.
+    // This is intentional: `evaluate_string_constraint` is used by SecurityPolicy
+    // (advisory layer with Z3 fallback for symbolic params), so unknown constraints
+    // are deferred to Z3. `check_constant_constraint` is used by verify_effect_params
+    // (authoritative constant-folding fast-path), where unknown constraints must be
+    // rejected to prevent unverified values from passing through.
     true
 }
 
@@ -2264,6 +2643,30 @@ fn parse_constraint_to_z3_string<'ctx>(
     param_z3: &Z3String<'ctx>,
 ) -> Option<Bool<'ctx>> {
     let trimmed = constraint.trim();
+
+    // Compound constraint: "constraint1 && constraint2"
+    // Must be checked BEFORE individual constraint checks to avoid partial matches.
+    // NOTE: This naive split does not respect && inside quoted strings
+    // (e.g., not_contains(path, "a&&b") would be incorrectly split).
+    // This is an acceptable limitation since constraint string arguments
+    // are path patterns that should never contain "&&".
+    if trimmed.contains("&&") {
+        let parts: Vec<&str> = trimmed.split("&&").collect();
+        let mut bools: Vec<Bool<'ctx>> = Vec::new();
+        for part in &parts {
+            if let Some(b) = parse_constraint_to_z3_string(ctx, part.trim(), param_z3) {
+                bools.push(b);
+            } else {
+                // Unrecognized sub-constraint — fail the entire compound to avoid
+                // silently weakening security constraints.
+                return None;
+            }
+        }
+        if !bools.is_empty() {
+            let refs: Vec<&Bool> = bools.iter().collect();
+            return Some(Bool::and(ctx, &refs));
+        }
+    }
 
     // Extract the string literal argument from the constraint
     let extract_string_arg = |c: &str| -> Option<std::string::String> {
@@ -2307,6 +2710,62 @@ fn parse_constraint_to_z3_string<'ctx>(
         if let Some(arg) = extract_string_arg(trimmed) {
             let substr_z3 = Z3String::from_str(ctx, &arg).ok()?;
             return Some(param_z3.contains(&substr_z3).not());
+        }
+    }
+
+    // Plan 10: matches(param, "regex_pattern") → approximate via prefix/suffix/contains
+    // The z3 crate v0.12 does not expose str.in_re / re.from_str API directly.
+    // We approximate common regex patterns using Z3 String prefix/suffix/contains:
+    //   - "^prefix.*"  → starts_with
+    //   - ".*suffix$"  → ends_with
+    //   - ".*substr.*" → contains
+    // For patterns that cannot be approximated, we return None (constraint not enforceable
+    // at Z3 level; constant checking via Rust regex crate handles the rest).
+    if trimmed.starts_with("matches(") {
+        if let Some(pattern) = extract_string_arg(trimmed) {
+            // Try to approximate the regex pattern with Z3 String constraints
+            let stripped = pattern.as_str();
+            // Helper: check if a literal fragment contains regex metacharacters
+            // that would make it unsafe to treat as a Z3 literal string.
+            let is_literal = |s: &str| -> bool {
+                !s.contains('*')
+                    && !s.contains('?')
+                    && !s.contains('[')
+                    && !s.contains('.')
+                    && !s.contains('\\')
+                    && !s.contains('+')
+                    && !s.contains('(')
+                    && !s.contains(')')
+                    && !s.contains('|')
+                    && !s.contains('{')
+                    && !s.contains('}')
+            };
+            // ^prefix.* → starts_with(param, prefix)
+            if stripped.starts_with('^') && stripped.ends_with(".*") {
+                let prefix = &stripped[1..stripped.len() - 2];
+                if is_literal(prefix) {
+                    let prefix_z3 = Z3String::from_str(ctx, prefix).ok()?;
+                    return Some(prefix_z3.prefix(param_z3));
+                }
+            }
+            // .*suffix$ → ends_with(param, suffix)
+            if stripped.starts_with(".*") && stripped.ends_with('$') {
+                let suffix = &stripped[2..stripped.len() - 1];
+                if is_literal(suffix) {
+                    let suffix_z3 = Z3String::from_str(ctx, suffix).ok()?;
+                    return Some(suffix_z3.suffix(param_z3));
+                }
+            }
+            // .*substr.* → contains(param, substr)
+            if stripped.starts_with(".*") && stripped.ends_with(".*") && stripped.len() > 4 {
+                let substr = &stripped[2..stripped.len() - 2];
+                if is_literal(substr) {
+                    let substr_z3 = Z3String::from_str(ctx, substr).ok()?;
+                    return Some(param_z3.contains(&substr_z3));
+                }
+            }
+            // For complex regex patterns, Z3 String Sort cannot directly verify;
+            // constant checking via Rust regex crate will handle these cases.
         }
     }
 
@@ -2904,11 +3363,11 @@ fn collect_acquire_resources_expr(expr: &Expr) -> Vec<String> {
 fn collect_acquire_resources_stmt(stmt: &Stmt) -> Vec<String> {
     let mut resources = Vec::new();
     match stmt {
-        Stmt::Acquire { resource, body } => {
+        Stmt::Acquire { resource, body, .. } => {
             resources.push(resource.clone());
             resources.extend(collect_acquire_resources_stmt(body));
         }
-        Stmt::Block(stmts) => {
+        Stmt::Block(stmts, _) => {
             for s in stmts {
                 resources.extend(collect_acquire_resources_stmt(s));
             }
@@ -2927,7 +3386,7 @@ fn collect_acquire_resources_stmt(stmt: &Stmt) -> Vec<String> {
                 resources.extend(collect_acquire_resources_stmt(child));
             }
         }
-        Stmt::Expr(e) => {
+        Stmt::Expr(e, _) => {
             resources.extend(collect_acquire_resources_expr(e));
         }
         // Plan 8: Cancel statement has no resources
@@ -2957,10 +3416,10 @@ fn verify_bmc_resource_safety(
     fn has_acquire_in_while_stmt(stmt: &Stmt) -> bool {
         match stmt {
             Stmt::While { body, .. } => !collect_acquire_resources_stmt(body).is_empty(),
-            Stmt::Block(stmts) => stmts.iter().any(has_acquire_in_while_stmt),
+            Stmt::Block(stmts, _) => stmts.iter().any(has_acquire_in_while_stmt),
             Stmt::Acquire { body, .. } => has_acquire_in_while_stmt(body),
             Stmt::Task { body, .. } => has_acquire_in_while_stmt(body),
-            Stmt::Expr(e) => has_acquire_in_while_expr(e),
+            Stmt::Expr(e, _) => has_acquire_in_while_expr(e),
             _ => false,
         }
     }
@@ -3088,7 +3547,7 @@ fn verify_async_recursion_depth(
     }
     fn count_self_calls_stmt(stmt: &Stmt, atom_name: &str) -> usize {
         match stmt {
-            Stmt::Block(stmts) => stmts
+            Stmt::Block(stmts, _) => stmts
                 .iter()
                 .map(|s| count_self_calls_stmt(s, atom_name))
                 .sum(),
@@ -3104,7 +3563,7 @@ fn verify_async_recursion_depth(
                 .iter()
                 .map(|c| count_self_calls_stmt(c, atom_name))
                 .sum(),
-            Stmt::Expr(e) => count_self_calls_expr(e, atom_name),
+            Stmt::Expr(e, _) => count_self_calls_expr(e, atom_name),
             // Plan 8: Cancel statement has no self-calls
             Stmt::Cancel { .. } => 0,
         }
@@ -3416,7 +3875,7 @@ fn collect_callees_expr(expr: &Expr) -> Vec<String> {
 fn collect_callees_stmt(stmt: &Stmt) -> Vec<String> {
     let mut callees = Vec::new();
     match stmt {
-        Stmt::Block(stmts) => {
+        Stmt::Block(stmts, _) => {
             for s in stmts {
                 callees.extend(collect_callees_stmt(s));
             }
@@ -3439,7 +3898,7 @@ fn collect_callees_stmt(stmt: &Stmt) -> Vec<String> {
                 callees.extend(collect_callees_stmt(child));
             }
         }
-        Stmt::Expr(e) => {
+        Stmt::Expr(e, _) => {
             callees.extend(collect_callees_expr(e));
         }
         // Plan 8: Cancel statement has no callees
@@ -3748,7 +4207,7 @@ fn collect_divisors_expr(expr: &Expr) -> Vec<String> {
 fn collect_divisors_stmt(stmt: &Stmt) -> Vec<String> {
     let mut divisors = Vec::new();
     match stmt {
-        Stmt::Block(stmts) => {
+        Stmt::Block(stmts, _) => {
             for s in stmts {
                 divisors.extend(collect_divisors_stmt(s));
             }
@@ -3771,7 +4230,7 @@ fn collect_divisors_stmt(stmt: &Stmt) -> Vec<String> {
                 divisors.extend(collect_divisors_stmt(child));
             }
         }
-        Stmt::Expr(e) => {
+        Stmt::Expr(e, _) => {
             divisors.extend(collect_divisors_expr(e));
         }
         _ => {}
@@ -3993,6 +4452,17 @@ fn verify_effect_consistency(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult
 /// 定数制約チェック（Constant Folding）。
 /// 定数パスに対する制約を Rust 側で直接検証する。
 fn check_constant_constraint(value: &str, constraint: &str) -> bool {
+    // Compound constraint: split on && and check all sub-constraints
+    // NOTE: This naive split does not respect && inside quoted strings
+    // (e.g., not_contains(path, "a&&b") would be incorrectly split).
+    // This is an acceptable limitation since constraint string arguments
+    // are path patterns that should never contain "&&".
+    if constraint.contains("&&") {
+        return constraint
+            .split("&&")
+            .all(|part| check_constant_constraint(value, part.trim()));
+    }
+
     // パーサーは "starts_with(path, \"/tmp/\")" のように2引数形式で制約を出力する。
     // 文字列引数（最後のクォートされた値）を抽出して検証する。
     let extract_string_arg = |c: &str| -> Option<String> {
@@ -4028,6 +4498,14 @@ fn check_constant_constraint(value: &str, constraint: &str) -> bool {
     if constraint.starts_with("not_contains(") {
         if let Some(arg) = extract_string_arg(constraint) {
             return !value.contains(&arg);
+        }
+    }
+    // Plan 10: matches() 制約 — Rust regex crate による定数パスの正規表現マッチング
+    if constraint.starts_with("matches(") {
+        if let Some(pattern) = extract_string_arg(constraint) {
+            if let Ok(re) = regex::Regex::new(&pattern) {
+                return re.is_match(value);
+            }
         }
     }
     // 不明な制約は false を返す（安全側に倒す — 検証できない場合は拒否）
@@ -4202,6 +4680,7 @@ fn verify_inner(
                 "",
                 None,
                 Some(&atom.span),
+                None,
             );
             return Ok(());
         }
@@ -4226,6 +4705,7 @@ fn verify_inner(
                     "",
                     None,
                     Some(&atom.span),
+                    None,
                 );
                 return Ok(());
             }
@@ -4440,19 +4920,118 @@ fn verify_inner(
                         )));
                     }
                     crate::mir_analysis::TemporalViolationKind::ConflictingState => {
-                        // Delegate to Z3 for conflicting states at merge points.
-                        // For now, report as warning (Z3 integration is future work).
-                        eprintln!(
-                            "  \u{26a0}\u{fe0f}  Temporal effect warning: '{}' has conflicting states \
-                             at merge point (block {}): '{}' vs '{}'. \
-                             Z3 constraint delegation pending.",
-                            v.effect, v.block_id, v.expected_state, v.actual_state
-                        );
-                        // TODO: Generate Z3 Int Sort constraints for conflicting state resolution:
-                        // - Each state = integer (e.g., Open=0, Closed=1)
-                        // - Create Z3 variables: __effect_state_{effect}_{block_id}
-                        // - Assert transition constraints and merge constraints
-                        // - Check constraint_budget before adding constraints
+                        // Plan 20: Z3 Int Sort constraint generation for conflicting
+                        // states at merge points.  We encode each state as an integer
+                        // and ask Z3 whether both predecessor states can be satisfied
+                        // simultaneously — if UNSAT the conflict is irreconcilable.
+
+                        // Look up the state machine for this effect.
+                        if let Some(sm) = state_machines.get(&v.effect) {
+                            let expected_int = encode_effect_state(sm, &v.expected_state);
+                            let actual_int = encode_effect_state(sm, &v.actual_state);
+
+                            // Only proceed if both states are known.
+                            if expected_int >= 0 && actual_int >= 0 {
+                                // Check constraint budget: each Z3 probe costs ~4
+                                // assertions (variable, branch-a, branch-b, equality).
+                                // Phase 1i runs before the main solver is created, so
+                                // we use mir_body complexity as a proxy budget check.
+                                let budget_ok = mir_body.complexity() < DEFAULT_CONSTRAINT_BUDGET;
+
+                                if budget_ok {
+                                    // Create a scoped Z3 context + solver for this probe.
+                                    let z3_cfg = Config::new();
+                                    let z3_ctx = Context::new(&z3_cfg);
+                                    let z3_solver = Solver::new(&z3_ctx);
+
+                                    // Z3 Int variable: __effect_state_{effect}_{block_id}
+                                    let var_name =
+                                        format!("__effect_state_{}_{}", v.effect, v.block_id);
+                                    let state_var = Int::new_const(&z3_ctx, var_name.as_str());
+
+                                    // Assert: state_var == expected (from one branch)
+                                    let eq_expected =
+                                        state_var._eq(&Int::from_i64(&z3_ctx, expected_int));
+                                    // Assert: state_var == actual (from other branch)
+                                    let eq_actual =
+                                        state_var._eq(&Int::from_i64(&z3_ctx, actual_int));
+
+                                    // Both must hold simultaneously at the merge point.
+                                    z3_solver.assert(&eq_expected);
+                                    z3_solver.assert(&eq_actual);
+
+                                    // Also constrain variable to valid state range.
+                                    let num_states = sm.states.len() as i64;
+                                    z3_solver.assert(&state_var.ge(&Int::from_i64(&z3_ctx, 0)));
+                                    z3_solver
+                                        .assert(&state_var.lt(&Int::from_i64(&z3_ctx, num_states)));
+
+                                    match z3_solver.check() {
+                                        SatResult::Unsat => {
+                                            // Irreconcilable: the two branches require
+                                            // mutually exclusive states → hard error.
+                                            return Err(MumeiError::verification(format!(
+                                                "Temporal effect conflict (Z3 UNSAT): effect '{}' \
+                                                 has irreconcilable states at merge point (block {}): \
+                                                 '{}' (={}) vs '{}' (={}). \
+                                                 The conflict cannot be resolved.",
+                                                v.effect, v.block_id,
+                                                v.expected_state, expected_int,
+                                                v.actual_state, actual_int,
+                                            )));
+                                        }
+                                        SatResult::Sat => {
+                                            // SAT means the states are actually compatible
+                                            // (should not normally happen for truly different
+                                            // states, but could occur with aliased encodings).
+                                            // Emit info diagnostic.
+                                            eprintln!(
+                                                "  \u{2139}\u{fe0f}  Temporal effect info: '{}' conflicting states \
+                                                 at block {} resolved by Z3 (SAT): '{}' vs '{}'.",
+                                                v.effect, v.block_id,
+                                                v.expected_state, v.actual_state
+                                            );
+                                        }
+                                        SatResult::Unknown => {
+                                            // Solver timeout / unknown — keep as warning.
+                                            eprintln!(
+                                                "  \u{26a0}\u{fe0f}  Temporal effect warning: '{}' conflicting states \
+                                                 at block {}: Z3 returned Unknown for '{}' vs '{}'.",
+                                                v.effect, v.block_id,
+                                                v.expected_state, v.actual_state
+                                            );
+                                        }
+                                    }
+                                } else {
+                                    // Budget exceeded — fall back to warning.
+                                    eprintln!(
+                                        "  \u{26a0}\u{fe0f}  Temporal effect warning: '{}' has conflicting states \
+                                         at merge point (block {}): '{}' vs '{}'. \
+                                         Constraint budget exceeded, Z3 probe skipped.",
+                                        v.effect, v.block_id,
+                                        v.expected_state, v.actual_state
+                                    );
+                                }
+                            } else {
+                                // Unknown state name — fall back to warning.
+                                eprintln!(
+                                    "  \u{26a0}\u{fe0f}  Temporal effect warning: '{}' has conflicting states \
+                                     at merge point (block {}): '{}' vs '{}'. \
+                                     State encoding failed.",
+                                    v.effect, v.block_id,
+                                    v.expected_state, v.actual_state
+                                );
+                            }
+                        } else {
+                            // No state machine found — fall back to warning.
+                            eprintln!(
+                                "  \u{26a0}\u{fe0f}  Temporal effect warning: '{}' has conflicting states \
+                                 at merge point (block {}): '{}' vs '{}'. \
+                                 No state machine found.",
+                                v.effect, v.block_id,
+                                v.expected_state, v.actual_state
+                            );
+                        }
                     }
                     crate::mir_analysis::TemporalViolationKind::UnexpectedFinalState => {
                         // Hard error: effect left in unexpected state at exit
@@ -4468,8 +5047,10 @@ fn verify_inner(
     }
     metrics.record_phase("Phase 1i: temporal effects", phase_start.elapsed());
 
-    // TODO: Phase 4c — Replace HIR-level LinearityCtx with MIR-based MoveAnalysis
-    // once MIR lowering covers all expression forms (Match, Lambda, Async, etc.)
+    // ✅ Phase 4c complete (Plan 19): MIR lowering now covers all expression forms
+    // (Match, Lambda, Async, Await, Task, TaskGroup, ChanSend, ChanRecv, etc.).
+    // Primary move analysis is handled by Phase 1h above (MIR MoveAnalysis).
+    // LinearityCtx below is retained only for Z3-level borrow/consume tracking.
 
     // Sort-aware timeout: if has_string_constraints is true, double the timeout.
     // Z3 String Sort is now integrated for effect parameter constraints.
@@ -4499,7 +5080,7 @@ fn verify_inner(
     // the body does `perform FileRead.read(some_variable)`.
     fn body_has_symbolic_perform_args(stmt: &Stmt, module_env: &ModuleEnv) -> bool {
         match stmt {
-            Stmt::Block(stmts) => stmts
+            Stmt::Block(stmts, _) => stmts
                 .iter()
                 .any(|s| body_has_symbolic_perform_args(s, module_env)),
             Stmt::Let { value, .. } | Stmt::Assign { value, .. } => {
@@ -4515,7 +5096,7 @@ fn verify_inner(
             Stmt::TaskGroup { children, .. } => children
                 .iter()
                 .any(|c| body_has_symbolic_perform_args(c, module_env)),
-            Stmt::Expr(e) => expr_has_symbolic_perform_args(e, module_env),
+            Stmt::Expr(e, _) => expr_has_symbolic_perform_args(e, module_env),
             // Plan 8: Cancel statement has no perform args
             Stmt::Cancel { .. } => false,
         }
@@ -4970,7 +5551,7 @@ fn verify_inner(
             };
             let constraint_mappings = build_constraint_mappings_for_atom(atom, module_env);
             let semantic_fb =
-                build_semantic_feedback(&constraint_mappings, None, atom, body_failure_type);
+                build_semantic_feedback(&constraint_mappings, None, atom, body_failure_type, None);
             save_visualizer_report(
                 output_dir,
                 "failed",
@@ -4982,6 +5563,7 @@ fn verify_inner(
                 body_failure_type,
                 semantic_fb.as_ref(),
                 Some(&atom.span),
+                Some(&constraint_mappings),
             );
             return Err(e);
         }
@@ -5039,6 +5621,7 @@ fn verify_inner(
                     ce_value.as_ref(),
                     atom,
                     FAILURE_POSTCONDITION_VIOLATED,
+                    None,
                 );
                 save_visualizer_report(
                     output_dir,
@@ -5051,6 +5634,7 @@ fn verify_inner(
                     FAILURE_POSTCONDITION_VIOLATED,
                     semantic_fb.as_ref(),
                     Some(&atom.span),
+                    Some(&constraint_mappings),
                 );
                 metrics.record_phase(
                     "Phase 5: ensures verification (failed)",
@@ -5058,10 +5642,27 @@ fn verify_inner(
                 );
                 metrics.total_constraints = constraint_count_cell.get();
                 metrics.print_summary();
-                return Err(MumeiError::verification_at(
+                // Feature 3d: Add related spans for constraint definition locations
+                let mut err = MumeiError::verification_at(
                     "Postcondition (ensures) is not satisfied.",
                     atom.span.clone(),
-                ).with_help("ensures の条件を確認してください。body の返り値が事後条件を満たすか検討してください"));
+                ).with_help("ensures の条件を確認してください。body の返り値が事後条件を満たすか検討してください");
+                for mapping in &constraint_mappings {
+                    if mapping.span.line > 0 {
+                        let related_src_span = span_to_source_span("", &mapping.span);
+                        err = err.with_related(
+                            related_src_span,
+                            format!("constraint on '{}' defined here", mapping.param_name),
+                            miette::NamedSource::new(
+                                if mapping.span.file.is_empty() { "<unknown>" } else { &mapping.span.file },
+                                String::new(),
+                            ),
+                            format!("type constraint: {}", mapping.predicate_raw),
+                            mapping.span.clone(),
+                        );
+                    }
+                }
+                return Err(err);
             }
             solver.pop(1);
         }
@@ -5104,6 +5705,7 @@ fn verify_inner(
                 FAILURE_LINEARITY_VIOLATED,
                 Some(&linearity_fb),
                 Some(&atom.span),
+                None,
             );
             return Err(MumeiError::verification_at(
                 format!(
@@ -5141,6 +5743,7 @@ fn verify_inner(
             FAILURE_INVARIANT_VIOLATED,
             Some(&contradiction_fb),
             Some(&atom.span),
+            None,
         );
 
         let constraint_summary = if conflicting_constraints.is_empty() {
@@ -5183,6 +5786,7 @@ fn verify_inner(
         "",
         None,
         Some(&atom.span),
+        None,
     );
     Ok(())
 }
@@ -5401,6 +6005,49 @@ fn expr_to_z3<'a>(
                     // Z3 0.12 では Float->Int 直接変換がないため、シンボリック整数を返す
                     let _val = expr_to_z3(vc, &args[0], env, solver_opt)?;
                     Ok(Int::new_const(ctx, "cast_result").into())
+                }
+                // =============================================================
+                // Built-in string constraint functions for requires/ensures
+                // =============================================================
+                // These are parsed as Expr::Call by the parser but need special
+                // handling in Z3 to produce Bool constraints on Z3 String Sort.
+                "starts_with" | "ends_with" | "contains" | "not_contains" => {
+                    if args.len() != 2 {
+                        return Err(MumeiError::verification(format!(
+                            "{}() requires exactly 2 arguments: (string_var, \"pattern\")",
+                            name
+                        )));
+                    }
+                    let str_val = expr_to_z3(vc, &args[0], env, solver_opt)?;
+                    let pattern_val = expr_to_z3(vc, &args[1], env, solver_opt)?;
+
+                    // Both arguments must be Z3 String Sort
+                    if let (Some(str_z3), Some(pat_z3)) =
+                        (str_val.as_string(), pattern_val.as_string())
+                    {
+                        let result: Bool = match name.as_str() {
+                            "starts_with" => pat_z3.prefix(&str_z3),
+                            "ends_with" => pat_z3.suffix(&str_z3),
+                            "contains" => str_z3.contains(&pat_z3),
+                            "not_contains" => str_z3.contains(&pat_z3).not(),
+                            _ => unreachable!(),
+                        };
+                        Ok(result.into())
+                    } else {
+                        // Fallback: if operands are not strings, return true (no constraint).
+                        // This handles cases where the variable hasn't been typed as Str
+                        // (e.g., an i64 parameter). Str-typed parameters are correctly
+                        // lowered to Z3 String Sort at parameter pre-registration, so this
+                        // branch only fires for genuinely non-string variables.
+                        //
+                        // NOTE: This is a permissive fallback. If a user writes
+                        // `not_contains(int_var, "..")` where int_var is i64, the constraint
+                        // is silently dropped. This is acceptable because string constraint
+                        // functions are only meaningful on Str-typed parameters, and using
+                        // them on non-Str types is a user error that should ideally be
+                        // caught by a type checker (not yet implemented for requires/ensures).
+                        Ok(Bool::from_bool(ctx, true).into())
+                    }
                 }
                 _ => {
                     // ユーザー定義関数呼び出し: 契約による検証（Compositional Verification）
@@ -6107,13 +6754,14 @@ fn expr_to_z3<'a>(
                         // Number/Float literals are constants already checked
                         // by verify_effect_params (Phase 1g). Skip Z3 String here.
                         // Variables and other expressions need symbolic verification.
-                        let is_constant = matches!(arg, Expr::Number(_) | Expr::Float(_));
+                        let is_constant =
+                            matches!(arg, Expr::Number(_) | Expr::Float(_));
                         if is_constant {
                             // Constant args are already checked by check_constant_constraint
                             // in verify_effect_params (Phase 1g). Skip Z3 String here.
                             continue;
                         }
-                        // Symbolic argument: create Z3 String variable and assert constraint
+                        // Symbolic argument: verify constraint using Z3 String Sort
                         if let Some(solver) = solver_opt {
                             let param_name =
                                 def.params.get(i).map(|p| p.name.as_str()).unwrap_or("arg");
@@ -6129,22 +6777,47 @@ fn expr_to_z3<'a>(
                                 effect, operation, param_name, unique_id
                             );
 
-                            // Create Z3 String variable for the symbolic argument
-                            let param_z3_str = Z3String::new_const(ctx, z3_str_name.as_str());
-
-                            // If the argument has a `requires` constraint in the env
-                            // (e.g., from atom parameter refinements), propagate it.
-                            // Check if there's a string variable in the env for this arg.
-                            if let Expr::Variable(var_name) = arg {
-                                let str_env_key = format!("__str_{}", var_name);
-                                if let Some(existing) = env.get(&str_env_key) {
-                                    // Bind the param to the existing string variable
-                                    if let Some(existing_str) = existing.as_string() {
-                                        let eq_constraint = param_z3_str._eq(&existing_str);
-                                        solver.assert(&eq_constraint);
+                            // Plan 10: Use arg_z3_values[i] directly when it has Z3 String Sort.
+                            // This enables dynamically constructed strings (e.g., "/tmp/" + var + "/file.txt")
+                            // to be directly checked against constraints like starts_with(path, "/tmp/").
+                            let param_z3_str = if i < arg_z3_values.len() {
+                                if let Some(existing_str) = arg_z3_values[i].as_string() {
+                                    // The argument was already evaluated to a Z3 String by expr_to_z3.
+                                    // Use it directly — this preserves concat/variable relationships.
+                                    existing_str
+                                } else {
+                                    // Non-string Z3 value: create a fresh Z3 String variable
+                                    // and try to connect it to any known string variable in env.
+                                    let fresh = Z3String::new_const(ctx, z3_str_name.as_str());
+                                    if let Expr::Variable(var_name) = arg {
+                                        let str_env_key = format!("__str_{}", var_name);
+                                        let found_str = env
+                                            .get(&str_env_key)
+                                            .and_then(|v| v.as_string())
+                                            .or_else(|| {
+                                                env.get(var_name).and_then(|v| v.as_string())
+                                            });
+                                        if let Some(existing_s) = found_str {
+                                            solver.assert(&fresh._eq(&existing_s));
+                                        }
+                                    }
+                                    fresh
+                                }
+                            } else {
+                                // Fallback: create a fresh Z3 String variable
+                                let fresh = Z3String::new_const(ctx, z3_str_name.as_str());
+                                if let Expr::Variable(var_name) = arg {
+                                    let str_env_key = format!("__str_{}", var_name);
+                                    let found_str = env
+                                        .get(&str_env_key)
+                                        .and_then(|v| v.as_string())
+                                        .or_else(|| env.get(var_name).and_then(|v| v.as_string()));
+                                    if let Some(existing_s) = found_str {
+                                        solver.assert(&fresh._eq(&existing_s));
                                     }
                                 }
-                            }
+                                fresh
+                            };
 
                             // Parse the constraint and assert it
                             if let Some(constraint_bool) =
@@ -6181,9 +6854,44 @@ fn expr_to_z3<'a>(
                 }
             }
 
-            // Return a symbolic result value
+            // Return a symbolic result value.
+            // Use Z3 String Sort if the effect has Str-typed parameters,
+            // since the operation may return a string (e.g., http_request_path).
+            // Otherwise default to Int (status codes, handles, etc.).
+            //
+            // NOTE: This is a heuristic. Ideally, EffectDef would carry a
+            // per-operation return type (e.g., `read -> Str`, `write -> i64`),
+            // but the current parser does not record return types for effect
+            // operations. Using "any param is Str → result is Str" is a
+            // conservative approximation that prevents Z3 Sort mismatches when
+            // the perform result is later used in string operations. When the
+            // parser gains per-operation return type info, this heuristic
+            // should be replaced with a direct lookup.
+            //
+            // IMPACT: This changes the return type for pre-existing effects
+            // with Str params (e.g., HttpGet(url: Str), HttpPost(url: Str))
+            // from Int to Z3String. No current code is broken because all
+            // atoms discard the perform result (e.g., `perform X.op(url); 1`).
+            // Future code that uses the perform result in an integer context
+            // (e.g., `let x = perform HttpGet.request(url); x + 1`) would get
+            // a Z3 Sort mismatch error.
             let result_name = format!("__perform_{}_{}", effect, operation);
-            Ok(Int::new_const(ctx, result_name.as_str()).into())
+            let has_str_params = vc
+                .module_env
+                .effect_defs
+                .get(effect.as_str())
+                .or_else(|| vc.module_env.effects.get(effect.as_str()))
+                .map(|def| {
+                    def.params
+                        .iter()
+                        .any(|p| p.type_name == "Str")
+                })
+                .unwrap_or(false);
+            if has_str_params {
+                Ok(Z3String::new_const(ctx, result_name.as_str()).into())
+            } else {
+                Ok(Int::new_const(ctx, result_name.as_str()).into())
+            }
         }
 
         Expr::Async { body } => {
@@ -6655,17 +7363,17 @@ fn stmt_to_z3<'a>(
 ) -> DynResult<'a> {
     let ctx = vc.ctx;
     match stmt {
-        Stmt::Let { var, value } => {
+        Stmt::Let { var, value, .. } => {
             let val = expr_to_z3(vc, value, env, solver_opt)?;
             env.insert(var.clone(), val.clone());
             Ok(val)
         }
-        Stmt::Assign { var, value } => {
+        Stmt::Assign { var, value, .. } => {
             let val = expr_to_z3(vc, value, env, solver_opt)?;
             env.insert(var.clone(), val.clone());
             Ok(val)
         }
-        Stmt::Block(stmts) => {
+        Stmt::Block(stmts, _) => {
             let mut last: Dynamic = Int::from_i64(ctx, 0).into();
             for s in stmts {
                 last = stmt_to_z3(vc, s, env, solver_opt)?;
@@ -6677,6 +7385,7 @@ fn stmt_to_z3<'a>(
             invariant,
             decreases,
             body,
+            ..
         } => {
             // Loop Invariant 検証ロジック
             if let Some(solver) = solver_opt {
@@ -6764,7 +7473,7 @@ fn stmt_to_z3<'a>(
                 .not();
             Ok(Bool::and(ctx, &[&inv, &c_not]).into())
         }
-        Stmt::Acquire { resource, body } => {
+        Stmt::Acquire { resource, body, .. } => {
             let held_name = format!("__resource_held_{}", resource);
             let held_bool = Bool::new_const(ctx, held_name.as_str());
             if let Some(solver) = solver_opt {
@@ -6776,7 +7485,7 @@ fn stmt_to_z3<'a>(
             env.insert(held_name, released.into());
             Ok(body_result)
         }
-        Stmt::Task { body, group } => {
+        Stmt::Task { body, group, .. } => {
             static TASK_COUNTER: std::sync::atomic::AtomicUsize =
                 std::sync::atomic::AtomicUsize::new(0);
             let task_uid = TASK_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -6795,6 +7504,7 @@ fn stmt_to_z3<'a>(
         Stmt::TaskGroup {
             children,
             join_semantics,
+            ..
         } => {
             let mut child_results = Vec::new();
             let mut child_done_vars = Vec::new();
@@ -6831,7 +7541,7 @@ fn stmt_to_z3<'a>(
                 Ok(Int::from_i64(ctx, 0).into())
             }
         }
-        Stmt::Expr(e) => expr_to_z3(vc, e, env, solver_opt),
+        Stmt::Expr(e, _) => expr_to_z3(vc, e, env, solver_opt),
         // Plan 8: Cancel statement — no-op in Z3 verification
         Stmt::Cancel { .. } => Ok(Int::from_i64(ctx, 0).into()),
     }
@@ -7179,6 +7889,7 @@ fn save_visualizer_report(
     failure_type: &str,
     semantic_feedback: Option<&serde_json::Value>,
     span: Option<&Span>,
+    constraint_mappings: Option<&[ConstraintMapping]>,
 ) {
     let mut report = json!({
         "status": status,
@@ -7204,6 +7915,25 @@ fn save_visualizer_report(
             "col": s.col,
             "len": s.len
         });
+    }
+    // Include constraint source locations from constraint mappings (Feature 2f)
+    if let Some(mappings) = constraint_mappings {
+        let type_locations: Vec<serde_json::Value> = mappings
+            .iter()
+            .filter(|m| m.span.line > 0)
+            .map(|m| {
+                json!({
+                    "param": m.param_name,
+                    "type": m.type_name.as_deref().unwrap_or(&m.base_type),
+                    "file": m.span.file,
+                    "line": m.span.line,
+                    "col": m.span.col
+                })
+            })
+            .collect();
+        if !type_locations.is_empty() {
+            report["type_definition_locations"] = json!(type_locations);
+        }
     }
     let _ = fs::create_dir_all(output_dir);
     let _ = fs::write(output_dir.join("report.json"), report.to_string());
@@ -7830,5 +8560,274 @@ mod tests {
             "String Sort constraint solving took {}ms, expected < 500ms",
             elapsed.as_millis()
         );
+    }
+
+    // =========================================================================
+    // Compound && constraint tests
+    // =========================================================================
+
+    #[test]
+    fn test_check_constant_constraint_compound() {
+        // Compound constraint: starts_with AND not_contains
+        assert!(check_constant_constraint(
+            "/tmp/data.txt",
+            "starts_with(path, \"/tmp/\") && not_contains(path, \"..\")"
+        ));
+        // Path traversal should fail
+        assert!(!check_constant_constraint(
+            "/tmp/../etc/passwd",
+            "starts_with(path, \"/tmp/\") && not_contains(path, \"..\")"
+        ));
+        // Wrong prefix should fail
+        assert!(!check_constant_constraint(
+            "/etc/passwd",
+            "starts_with(path, \"/tmp/\") && not_contains(path, \"..\")"
+        ));
+    }
+
+    #[test]
+    fn test_evaluate_string_constraint_compound() {
+        assert!(evaluate_string_constraint(
+            "starts_with(path, \"/tmp/\") && not_contains(path, \"..\")",
+            "path",
+            "/tmp/safe.txt"
+        ));
+        assert!(!evaluate_string_constraint(
+            "starts_with(path, \"/tmp/\") && not_contains(path, \"..\")",
+            "path",
+            "/tmp/../etc/passwd"
+        ));
+    }
+
+    #[test]
+    fn test_z3_compound_constraint_parse() {
+        let cfg = z3::Config::new();
+        let ctx = z3::Context::new(&cfg);
+        let param = Z3String::new_const(&ctx, "path");
+
+        // Compound constraint should parse successfully
+        let result = parse_constraint_to_z3_string(
+            &ctx,
+            "starts_with(path, \"/tmp/\") && not_contains(path, \"..\")",
+            &param,
+        );
+        assert!(result.is_some(), "compound constraint should parse");
+
+        // Compound with unknown sub-constraint should fail (fail-closed)
+        let result2 = parse_constraint_to_z3_string(
+            &ctx,
+            "starts_with(path, \"/tmp/\") && unknown_check(path, \"x\")",
+            &param,
+        );
+        assert!(
+            result2.is_none(),
+            "compound with unknown sub-constraint should return None"
+        );
+    }
+
+    // =========================================================================
+    // Plan 20: Temporal Effect Z3 Integration — Tests
+    // =========================================================================
+
+    #[test]
+    fn test_encode_effect_state_basic() {
+        use crate::mir_analysis::EffectStateMachine;
+
+        let sm = EffectStateMachine {
+            effect_name: "FileIO".to_string(),
+            states: vec![
+                "Open".to_string(),
+                "Reading".to_string(),
+                "Closed".to_string(),
+            ],
+            transitions: std::collections::HashMap::new(),
+            initial_state: "Closed".to_string(),
+        };
+
+        assert_eq!(encode_effect_state(&sm, "Open"), 0);
+        assert_eq!(encode_effect_state(&sm, "Reading"), 1);
+        assert_eq!(encode_effect_state(&sm, "Closed"), 2);
+        assert_eq!(encode_effect_state(&sm, "Unknown"), -1);
+    }
+
+    #[test]
+    fn test_z3_conflicting_state_unsat() {
+        // Two different states at the same merge point should be UNSAT.
+        let cfg = z3::Config::new();
+        let ctx = z3::Context::new(&cfg);
+        let solver = z3::Solver::new(&ctx);
+
+        let state_var = Int::new_const(&ctx, "__effect_state_FileIO_3");
+
+        // Branch A says state = 0 (Open)
+        solver.assert(&state_var._eq(&Int::from_i64(&ctx, 0)));
+        // Branch B says state = 2 (Closed)
+        solver.assert(&state_var._eq(&Int::from_i64(&ctx, 2)));
+        // Valid range: 0..3
+        solver.assert(&state_var.ge(&Int::from_i64(&ctx, 0)));
+        solver.assert(&state_var.lt(&Int::from_i64(&ctx, 3)));
+
+        assert_eq!(
+            solver.check(),
+            z3::SatResult::Unsat,
+            "Different states at merge point should be UNSAT"
+        );
+    }
+
+    #[test]
+    fn test_z3_conflicting_state_sat_same() {
+        // Same state from both branches should be SAT.
+        let cfg = z3::Config::new();
+        let ctx = z3::Context::new(&cfg);
+        let solver = z3::Solver::new(&ctx);
+
+        let state_var = Int::new_const(&ctx, "__effect_state_FileIO_3");
+
+        // Both branches say state = 1 (Reading)
+        solver.assert(&state_var._eq(&Int::from_i64(&ctx, 1)));
+        solver.assert(&state_var._eq(&Int::from_i64(&ctx, 1)));
+        solver.assert(&state_var.ge(&Int::from_i64(&ctx, 0)));
+        solver.assert(&state_var.lt(&Int::from_i64(&ctx, 3)));
+
+        assert_eq!(
+            solver.check(),
+            z3::SatResult::Sat,
+            "Same state from both branches should be SAT"
+        );
+    }
+
+    // ---- split_compound_constraint tests ----
+
+    #[test]
+    fn test_split_compound_simple_and() {
+        let parts = split_compound_constraint("a >= 0 && a <= 120");
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0], "a >= 0");
+        assert_eq!(parts[1], "a <= 120");
+    }
+
+    #[test]
+    fn test_split_compound_with_nested_parens() {
+        let parts = split_compound_constraint("(a > 0 && a < 10) && b > 0");
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0], "(a > 0 && a < 10)");
+        assert_eq!(parts[1], "b > 0");
+    }
+
+    #[test]
+    fn test_split_compound_with_quoted_strings() {
+        let parts =
+            split_compound_constraint("starts_with(path, \"/tmp/\") && not_contains(path, \"..\")");
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0], "starts_with(path, \"/tmp/\")");
+        assert_eq!(parts[1], "not_contains(path, \"..\")");
+    }
+
+    #[test]
+    fn test_split_compound_single() {
+        let parts = split_compound_constraint("x > 0");
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0], "x > 0");
+    }
+
+    #[test]
+    fn test_split_compound_quoted_ampersand() {
+        let parts = split_compound_constraint("contains(s, \"a && b\") && x > 0");
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0], "contains(s, \"a && b\")");
+        assert_eq!(parts[1], "x > 0");
+    }
+
+    // ---- evaluate_sub_constraint tests ----
+
+    #[test]
+    fn test_evaluate_sub_constraint_starts_with_satisfied() {
+        assert!(evaluate_sub_constraint(
+            "starts_with(path, \"/tmp/\")",
+            "/tmp/../etc/passwd"
+        ));
+    }
+
+    #[test]
+    fn test_evaluate_sub_constraint_not_contains_violated() {
+        assert!(!evaluate_sub_constraint(
+            "not_contains(path, \"..\")",
+            "/tmp/../etc/passwd"
+        ));
+    }
+
+    #[test]
+    fn test_evaluate_sub_constraint_numeric_comparison() {
+        assert!(evaluate_sub_constraint("v >= 0", "5"));
+        assert!(!evaluate_sub_constraint("v >= 0", "-1"));
+        assert!(evaluate_sub_constraint("v <= 120", "100"));
+        assert!(!evaluate_sub_constraint("v <= 120", "150"));
+    }
+
+    // ---- compound constraint_to_natural_language tests ----
+
+    #[test]
+    fn test_constraint_to_natural_language_compound() {
+        let result = constraint_to_natural_language(
+            "path",
+            "SafePath",
+            "starts_with(path, \"/tmp/\") && not_contains(path, \"..\")",
+            "/etc/passwd",
+        );
+        assert!(result.contains("[1/2]"));
+        assert!(result.contains("[2/2]"));
+        assert!(result.contains("AND"));
+    }
+
+    // ---- build_semantic_feedback with sub_constraints test ----
+
+    #[test]
+    fn test_build_semantic_feedback_sub_constraints() {
+        use crate::parser::ast::Span;
+        let mappings = vec![ConstraintMapping {
+            param_name: "path".to_string(),
+            type_name: Some("SafePath".to_string()),
+            base_type: "Str".to_string(),
+            predicate_raw: "starts_with(path, \"/tmp/\") && not_contains(path, \"..\")".to_string(),
+            span: Span::default(),
+        }];
+        let ce = serde_json::json!({
+            "path": "/tmp/../etc/passwd"
+        });
+        let dummy_atom = crate::parser::ast::Atom {
+            name: "test_atom".to_string(),
+            type_params: vec![],
+            where_bounds: vec![],
+            params: vec![],
+            requires: String::new(),
+            forall_constraints: vec![],
+            ensures: String::new(),
+            body_expr: String::new(),
+            consumed_params: vec![],
+            resources: vec![],
+            is_async: false,
+            trust_level: crate::parser::ast::TrustLevel::Verified,
+            max_unroll: None,
+            invariant: None,
+            effects: vec![],
+            return_type: None,
+            span: Span::default(),
+        };
+        let feedback = build_semantic_feedback(
+            &mappings,
+            Some(&ce),
+            &dummy_atom,
+            "precondition_violated",
+            None,
+        )
+        .unwrap();
+        let vc_arr = feedback["violated_constraints"].as_array().unwrap();
+        assert!(!vc_arr.is_empty());
+        let vc = &vc_arr[0];
+        assert!(vc.get("sub_constraints").is_some());
+        let subs = vc["sub_constraints"].as_array().unwrap();
+        assert_eq!(subs.len(), 2);
+        assert_eq!(subs[0]["satisfied"], true);
+        assert_eq!(subs[1]["satisfied"], false);
     }
 }

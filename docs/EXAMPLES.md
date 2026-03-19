@@ -114,6 +114,204 @@ mumei build examples/higher_order_demo.mm -o dist/higher_order_demo
 ```
 
 ---
+## Str Type Demo (`examples/str_demo.mm`)
+
+Demonstrates `Str` type string operations with `-> Str` return type annotation (Plan 9 + Plan 18):
+
+```mumei
+atom greet(name: Str) -> Str
+    requires: true;
+    ensures: true;
+    body: "Hello, " + name
+
+atom is_same(a: Str, b: Str)
+    requires: true;
+    ensures: result >= 0 && result <= 1;
+    body: { if a == b { 1 } else { 0 } }
+```
+
+---
+## Enum Payload Demo (`examples/enum_payload.mm`)
+
+Demonstrates tagged unions with payload data and `match` pattern matching (Plan 14):
+
+```mumei
+enum Shape {
+    Circle(i64),
+    Rectangle(i64, i64)
+}
+
+atom area(s: Shape)
+    requires: true;
+    ensures: result >= 0;
+    body: {
+        match s {
+            Circle(r) => r * r * 3,
+            Rectangle(w, h) => w * h
+        }
+    }
+```
+
+---
+## JSON Demo (`examples/json_demo.mm`)
+
+Demonstrates `std.json` operations — object construction, array manipulation, and stringify (Plan 10 + Plan 17):
+
+```mumei
+import "std/json" as json;
+
+atom build_user(name: Str, age: i64)
+    requires: age >= 0;
+    ensures: result >= 0;
+    body: {
+        let obj = json::object_new();
+        let name_val = json::from_str(name);
+        let age_val = json::from_int(age);
+        let obj = json::object_set(obj, "name", name_val);
+        let obj = json::object_set(obj, "age", age_val);
+        obj
+    }
+```
+
+---
+## HTTP Demo (`examples/http_demo.mm`)
+
+Demonstrates `std.http` GET requests and response processing (Plan 11 + Plan 17):
+
+```mumei
+import "std/http" as http;
+
+atom fetch_status(url: Str)
+    requires: true;
+    ensures: result >= 0;
+    body: {
+        let response = http::get(url);
+        http::status(response)
+    }
+```
+
+---
+## Concurrent HTTP Demo (`examples/concurrent_http.mm`)
+
+Demonstrates `task_group` for parallel HTTP requests (Plan 8 + Plan 11):
+
+```mumei
+import "std/http" as http;
+
+atom fetch_all(url1: Str, url2: Str)
+    requires: true;
+    ensures: result >= 0;
+    body: {
+        task_group(all) {
+            task { fetch_one(url1) },
+            task { fetch_one(url2) }
+        }
+    }
+```
+
+---
+## Path Safety Demo (`examples/path_safety.mm`)
+
+Demonstrates compile-time directory traversal prevention using parameterized effects with compound `&&` constraints:
+
+```mumei
+// Security policy: only /tmp/ paths, no ".." allowed
+effect SafeFileRead(path: Str) where starts_with(path, "/tmp/") && not_contains(path, "..");
+
+// SAFE: user_id is constrained — passes verification
+atom safe_read(user_id: Str)
+    effects: [SafeFileRead(path)]
+    requires: not_contains(user_id, "..") && not_contains(user_id, "\0");
+    ensures: result >= 0;
+    body: {
+        let path = "/tmp/" + user_id + "/log.txt";
+        perform SafeFileRead.read(path);
+        1
+    }
+
+// UNSAFE: user_id unconstrained — compile error
+atom unsafe_read(user_id: Str)
+    effects: [SafeFileRead(path)]
+    requires: true;
+    ensures: result >= 0;
+    body: {
+        let path = "/tmp/" + user_id + "/log.txt";
+        perform SafeFileRead.read(path);
+        1
+    }
+```
+
+### Verified Properties
+| Atom | Verification |
+|---|---|
+| `safe_read` | Path starts with `/tmp/`, no `..` traversal (Z3 String constraints) |
+| `unsafe_read` | **Rejected** — Z3 finds counterexample: `user_id = ".."` |
+
+---
+## Verified HTTP Server Demo (`examples/verified_server.mm`)
+
+Combines path safety with temporal effect verification for a mathematically verified HTTP server:
+
+```mumei
+effect SafeFileRead(path: Str) where starts_with(path, "/tmp/") && not_contains(path, "..");
+
+effect HttpServer
+    states: [Init, Bound, Listening, Responding];
+    initial: Init;
+    transition bind: Init -> Bound;
+    transition listen: Bound -> Listening;
+    transition accept: Listening -> Responding;
+    transition respond: Responding -> Listening;
+    transition close: Listening -> Init;
+
+// SAFE: constrained path + correct temporal ordering
+atom serve_safe_file(req_path: Str)
+    effects: [SafeFileRead(path), HttpServer]
+    requires: not_contains(req_path, "..") && not_contains(req_path, "\0");
+    ensures: result >= 0;
+    body: {
+        let path = "/tmp/public/" + req_path;
+        perform SafeFileRead.read(path);
+        1
+    }
+
+// Double response — compile error (temporal violation)
+atom double_respond(req: i64)
+    effects: [HttpServer]
+    requires: req > 0;
+    ensures: result >= 0;
+    body: {
+        perform HttpServer.respond(req);
+        perform HttpServer.respond(req);
+        1
+    }
+```
+
+### Verified Properties
+| Atom | Verification |
+|---|---|
+| `serve_safe_file` | Path safety (Z3 String) + temporal ordering |
+| `serve_unsafe_file` | **Rejected** — path traversal possible |
+| `double_respond` | **Rejected** — temporal violation (respond from Listening state) |
+
+---
+## E2E Verification Tests
+
+| File | Tests |
+|---|---|
+| `tests/test_str_type.mm` | Str concat, equality, inequality, empty string |
+| `tests/test_enum_payload.mm` | Match variants, wildcards, nested match |
+| `tests/test_json_operations.mm` | Object roundtrip, array ops, type checks |
+| `tests/test_path_safety.mm` | Safe read, literal path, concat prefix |
+| `tests/test_verified_server.mm` | Safe file serving, server bind, combined effects |
+
+```bash
+for f in tests/test_*.mm; do
+    mumei check "$f" && echo "PASS ✓" || echo "FAIL ✗"
+done
+```
+
+---
 ## Negative Test Suite
 | File | Expected Error | Category |
 |---|---|---|
