@@ -369,7 +369,12 @@ impl MumeiError {
                 related,
                 ..
             } => {
-                // Propagate source to related diagnostics that share the same file
+                // Propagate source to related diagnostics that share the same file.
+                // TODO: This unconditionally overwrites all related diagnostics' source to
+                // the primary file. Cross-file related spans (e.g., constraint defined in
+                // std/file.mm) lose their original file context. Fix by adding
+                // `original_span: parser::Span` to RelatedDiagnostic and only overwriting
+                // when the related span's file matches the primary file (or is "<unknown>").
                 let updated_related = related.into_iter().map(|r| {
                     RelatedDiagnostic {
                         src: miette::NamedSource::new(file_name, source.to_string()),

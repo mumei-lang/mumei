@@ -311,6 +311,17 @@ fn verify_source_for_lsp(
 
 /// Feature 3f: Extract related diagnostic information from MumeiError for LSP relatedInformation.
 /// Maps RelatedDiagnostic entries to LSP DiagnosticRelatedInformation format.
+///
+/// Known limitation: RelatedDiagnostic currently only stores a miette SourceSpan (byte offset)
+/// and the source text may be empty when `with_source()` has not been called (which is the case
+/// in the LSP path — `verify_source_for_lsp` does not call `with_source()`). When source text
+/// is empty, `byte_offset_to_line_col` returns (0, 0) for all related spans.
+///
+/// TODO: Add `original_span: parser::Span` to `RelatedDiagnostic` (mirroring `MumeiError`'s
+/// pattern) so that line/col can be resolved directly without depending on source text.
+/// This also fixes the `with_source()` issue where all related diagnostics are overwritten
+/// to the primary file's source, losing cross-file span information.
+/// See: https://github.com/mumei-lang/mumei/issues/XXX
 fn build_related_information(
     uri: &str,
     error: &verification::MumeiError,
