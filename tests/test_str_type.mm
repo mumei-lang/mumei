@@ -36,3 +36,16 @@ atom test_empty_str()
     body: {
         if "" == "" { 1 } else { 0 }
     }
+
+// --- Test 5: String concat result propagation to effect parameter ---
+// Validates that a concat result stored via `let` is properly bound
+// to the effect parameter (not a fresh unconstrained variable).
+atom test_concat_propagation(user_id: Str)
+    effects: [HttpGet(url)]
+    requires: true;
+    ensures: result >= 0;
+    body: {
+        let url = "https://api.example.com/" + user_id;
+        perform HttpGet.request(url);
+        1
+    }

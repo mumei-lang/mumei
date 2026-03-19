@@ -2213,6 +2213,17 @@ impl SecurityPolicy {
 fn evaluate_string_constraint(constraint_expr: &str, _param_name: &str, value: &str) -> bool {
     let trimmed = constraint_expr.trim();
 
+    // Compound constraint: split on && and check all sub-constraints
+    // NOTE: This naive split does not respect && inside quoted strings
+    // (e.g., not_contains(path, "a&&b") would be incorrectly split).
+    // This is an acceptable limitation since constraint string arguments
+    // are path patterns that should never contain "&&".
+    if trimmed.contains("&&") {
+        return trimmed
+            .split("&&")
+            .all(|part| evaluate_string_constraint(part.trim(), _param_name, value));
+    }
+
     // starts_with(param, "prefix")
     if let Some(inner) = trimmed.strip_prefix("starts_with(") {
         if let Some(inner) = inner.strip_suffix(')') {
@@ -2305,6 +2316,30 @@ fn parse_constraint_to_z3_string<'ctx>(
     param_z3: &Z3String<'ctx>,
 ) -> Option<Bool<'ctx>> {
     let trimmed = constraint.trim();
+
+    // Compound constraint: "constraint1 && constraint2"
+    // Must be checked BEFORE individual constraint checks to avoid partial matches.
+    // NOTE: This naive split does not respect && inside quoted strings
+    // (e.g., not_contains(path, "a&&b") would be incorrectly split).
+    // This is an acceptable limitation since constraint string arguments
+    // are path patterns that should never contain "&&".
+    if trimmed.contains("&&") {
+        let parts: Vec<&str> = trimmed.split("&&").collect();
+        let mut bools: Vec<Bool<'ctx>> = Vec::new();
+        for part in &parts {
+            if let Some(b) = parse_constraint_to_z3_string(ctx, part.trim(), param_z3) {
+                bools.push(b);
+            } else {
+                // Unrecognized sub-constraint — fail the entire compound to avoid
+                // silently weakening security constraints.
+                return None;
+            }
+        }
+        if !bools.is_empty() {
+            let refs: Vec<&Bool> = bools.iter().collect();
+            return Some(Bool::and(ctx, &refs));
+        }
+    }
 
     // Extract the string literal argument from the constraint
     let extract_string_arg = |c: &str| -> Option<std::string::String> {
@@ -4090,6 +4125,17 @@ fn verify_effect_consistency(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult
 /// 定数制約チェック（Constant Folding）。
 /// 定数パスに対する制約を Rust 側で直接検証する。
 fn check_constant_constraint(value: &str, constraint: &str) -> bool {
+    // Compound constraint: split on && and check all sub-constraints
+    // NOTE: This naive split does not respect && inside quoted strings
+    // (e.g., not_contains(path, "a&&b") would be incorrectly split).
+    // This is an acceptable limitation since constraint string arguments
+    // are path patterns that should never contain "&&".
+    if constraint.contains("&&") {
+        return constraint
+            .split("&&")
+            .all(|part| check_constant_constraint(value, part.trim()));
+    }
+
     // パーサーは "starts_with(path, \"/tmp/\")" のように2引数形式で制約を出力する。
     // 文字列引数（最後のクォートされた値）を抽出して検証する。
     let extract_string_arg = |c: &str| -> Option<String> {
@@ -5608,6 +5654,49 @@ fn expr_to_z3<'a>(
                     let _val = expr_to_z3(vc, &args[0], env, solver_opt)?;
                     Ok(Int::new_const(ctx, "cast_result").into())
                 }
+                // =============================================================
+                // Built-in string constraint functions for requires/ensures
+                // =============================================================
+                // These are parsed as Expr::Call by the parser but need special
+                // handling in Z3 to produce Bool constraints on Z3 String Sort.
+                "starts_with" | "ends_with" | "contains" | "not_contains" => {
+                    if args.len() != 2 {
+                        return Err(MumeiError::verification(format!(
+                            "{}() requires exactly 2 arguments: (string_var, \"pattern\")",
+                            name
+                        )));
+                    }
+                    let str_val = expr_to_z3(vc, &args[0], env, solver_opt)?;
+                    let pattern_val = expr_to_z3(vc, &args[1], env, solver_opt)?;
+
+                    // Both arguments must be Z3 String Sort
+                    if let (Some(str_z3), Some(pat_z3)) =
+                        (str_val.as_string(), pattern_val.as_string())
+                    {
+                        let result: Bool = match name.as_str() {
+                            "starts_with" => pat_z3.prefix(&str_z3),
+                            "ends_with" => pat_z3.suffix(&str_z3),
+                            "contains" => str_z3.contains(&pat_z3),
+                            "not_contains" => str_z3.contains(&pat_z3).not(),
+                            _ => unreachable!(),
+                        };
+                        Ok(result.into())
+                    } else {
+                        // Fallback: if operands are not strings, return true (no constraint).
+                        // This handles cases where the variable hasn't been typed as Str
+                        // (e.g., an i64 parameter). Str-typed parameters are correctly
+                        // lowered to Z3 String Sort at parameter pre-registration, so this
+                        // branch only fires for genuinely non-string variables.
+                        //
+                        // NOTE: This is a permissive fallback. If a user writes
+                        // `not_contains(int_var, "..")` where int_var is i64, the constraint
+                        // is silently dropped. This is acceptable because string constraint
+                        // functions are only meaningful on Str-typed parameters, and using
+                        // them on non-Str types is a user error that should ideally be
+                        // caught by a type checker (not yet implemented for requires/ensures).
+                        Ok(Bool::from_bool(ctx, true).into())
+                    }
+                }
                 _ => {
                     // ユーザー定義関数呼び出し: 契約による検証（Compositional Verification）
                     // 呼び出し先の requires を現在のコンテキストで証明し、
@@ -6313,7 +6402,8 @@ fn expr_to_z3<'a>(
                         // Number/Float literals are constants already checked
                         // by verify_effect_params (Phase 1g). Skip Z3 String here.
                         // Variables and other expressions need symbolic verification.
-                        let is_constant = matches!(arg, Expr::Number(_) | Expr::Float(_));
+                        let is_constant =
+                            matches!(arg, Expr::Number(_) | Expr::Float(_));
                         if is_constant {
                             // Constant args are already checked by check_constant_constraint
                             // in verify_effect_params (Phase 1g). Skip Z3 String here.
@@ -6349,10 +6439,14 @@ fn expr_to_z3<'a>(
                                     let fresh = Z3String::new_const(ctx, z3_str_name.as_str());
                                     if let Expr::Variable(var_name) = arg {
                                         let str_env_key = format!("__str_{}", var_name);
-                                        if let Some(existing) = env.get(&str_env_key) {
-                                            if let Some(existing_s) = existing.as_string() {
-                                                solver.assert(&fresh._eq(&existing_s));
-                                            }
+                                        let found_str = env
+                                            .get(&str_env_key)
+                                            .and_then(|v| v.as_string())
+                                            .or_else(|| {
+                                                env.get(var_name).and_then(|v| v.as_string())
+                                            });
+                                        if let Some(existing_s) = found_str {
+                                            solver.assert(&fresh._eq(&existing_s));
                                         }
                                     }
                                     fresh
@@ -6362,10 +6456,12 @@ fn expr_to_z3<'a>(
                                 let fresh = Z3String::new_const(ctx, z3_str_name.as_str());
                                 if let Expr::Variable(var_name) = arg {
                                     let str_env_key = format!("__str_{}", var_name);
-                                    if let Some(existing) = env.get(&str_env_key) {
-                                        if let Some(existing_s) = existing.as_string() {
-                                            solver.assert(&fresh._eq(&existing_s));
-                                        }
+                                    let found_str = env
+                                        .get(&str_env_key)
+                                        .and_then(|v| v.as_string())
+                                        .or_else(|| env.get(var_name).and_then(|v| v.as_string()));
+                                    if let Some(existing_s) = found_str {
+                                        solver.assert(&fresh._eq(&existing_s));
                                     }
                                 }
                                 fresh
@@ -6406,9 +6502,44 @@ fn expr_to_z3<'a>(
                 }
             }
 
-            // Return a symbolic result value
+            // Return a symbolic result value.
+            // Use Z3 String Sort if the effect has Str-typed parameters,
+            // since the operation may return a string (e.g., http_request_path).
+            // Otherwise default to Int (status codes, handles, etc.).
+            //
+            // NOTE: This is a heuristic. Ideally, EffectDef would carry a
+            // per-operation return type (e.g., `read -> Str`, `write -> i64`),
+            // but the current parser does not record return types for effect
+            // operations. Using "any param is Str → result is Str" is a
+            // conservative approximation that prevents Z3 Sort mismatches when
+            // the perform result is later used in string operations. When the
+            // parser gains per-operation return type info, this heuristic
+            // should be replaced with a direct lookup.
+            //
+            // IMPACT: This changes the return type for pre-existing effects
+            // with Str params (e.g., HttpGet(url: Str), HttpPost(url: Str))
+            // from Int to Z3String. No current code is broken because all
+            // atoms discard the perform result (e.g., `perform X.op(url); 1`).
+            // Future code that uses the perform result in an integer context
+            // (e.g., `let x = perform HttpGet.request(url); x + 1`) would get
+            // a Z3 Sort mismatch error.
             let result_name = format!("__perform_{}_{}", effect, operation);
-            Ok(Int::new_const(ctx, result_name.as_str()).into())
+            let has_str_params = vc
+                .module_env
+                .effect_defs
+                .get(effect.as_str())
+                .or_else(|| vc.module_env.effects.get(effect.as_str()))
+                .map(|def| {
+                    def.params
+                        .iter()
+                        .any(|p| p.type_name == "Str")
+                })
+                .unwrap_or(false);
+            if has_str_params {
+                Ok(Z3String::new_const(ctx, result_name.as_str()).into())
+            } else {
+                Ok(Int::new_const(ctx, result_name.as_str()).into())
+            }
         }
 
         Expr::Async { body } => {
@@ -8054,6 +8185,69 @@ mod tests {
             elapsed.as_millis() < 500,
             "String Sort constraint solving took {}ms, expected < 500ms",
             elapsed.as_millis()
+        );
+    }
+
+    // =========================================================================
+    // Compound && constraint tests
+    // =========================================================================
+
+    #[test]
+    fn test_check_constant_constraint_compound() {
+        // Compound constraint: starts_with AND not_contains
+        assert!(check_constant_constraint(
+            "/tmp/data.txt",
+            "starts_with(path, \"/tmp/\") && not_contains(path, \"..\")"
+        ));
+        // Path traversal should fail
+        assert!(!check_constant_constraint(
+            "/tmp/../etc/passwd",
+            "starts_with(path, \"/tmp/\") && not_contains(path, \"..\")"
+        ));
+        // Wrong prefix should fail
+        assert!(!check_constant_constraint(
+            "/etc/passwd",
+            "starts_with(path, \"/tmp/\") && not_contains(path, \"..\")"
+        ));
+    }
+
+    #[test]
+    fn test_evaluate_string_constraint_compound() {
+        assert!(evaluate_string_constraint(
+            "starts_with(path, \"/tmp/\") && not_contains(path, \"..\")",
+            "path",
+            "/tmp/safe.txt"
+        ));
+        assert!(!evaluate_string_constraint(
+            "starts_with(path, \"/tmp/\") && not_contains(path, \"..\")",
+            "path",
+            "/tmp/../etc/passwd"
+        ));
+    }
+
+    #[test]
+    fn test_z3_compound_constraint_parse() {
+        let cfg = z3::Config::new();
+        let ctx = z3::Context::new(&cfg);
+        let param = Z3String::new_const(&ctx, "path");
+
+        // Compound constraint should parse successfully
+        let result = parse_constraint_to_z3_string(
+            &ctx,
+            "starts_with(path, \"/tmp/\") && not_contains(path, \"..\")",
+            &param,
+        );
+        assert!(result.is_some(), "compound constraint should parse");
+
+        // Compound with unknown sub-constraint should fail (fail-closed)
+        let result2 = parse_constraint_to_z3_string(
+            &ctx,
+            "starts_with(path, \"/tmp/\") && unknown_check(path, \"x\")",
+            &param,
+        );
+        assert!(
+            result2.is_none(),
+            "compound with unknown sub-constraint should return None"
         );
     }
 

@@ -5,4 +5,5 @@
 // and std/http.mm extern declarations.
 
 pub mod http;
+pub mod http_server;
 pub mod json;
