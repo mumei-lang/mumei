@@ -75,6 +75,15 @@ impl ParseContext {
         self.pos
     }
 
+    /// Get a Span from the current token position.
+    pub fn current_span(&self) -> crate::parser::Span {
+        if let Some(tok) = self.tokens.get(self.pos) {
+            crate::parser::Span::new("", tok.line, tok.col, tok.len)
+        } else {
+            crate::parser::Span::default()
+        }
+    }
+
     pub fn expect_ident(&mut self) -> String {
         match self.peek().clone() {
             Token::Ident(s) => {
@@ -737,7 +746,7 @@ atom transfer(x: i64)
     fn test_parse_body_block() {
         let stmt = parse_body_expr("{ let x = 1; x + 1 }");
         match stmt {
-            Stmt::Block(stmts) => assert_eq!(stmts.len(), 2),
+            Stmt::Block(stmts, _) => assert_eq!(stmts.len(), 2),
             _ => panic!("Expected Block"),
         }
     }
@@ -746,7 +755,7 @@ atom transfer(x: i64)
     fn test_parse_body_if() {
         let stmt = parse_body_expr("if x > 0 { x } else { 0 }");
         match stmt {
-            Stmt::Expr(Expr::IfThenElse { .. }) => {}
+            Stmt::Expr(Expr::IfThenElse { .. }, _) => {}
             _ => panic!("Expected IfThenElse"),
         }
     }
@@ -755,7 +764,7 @@ atom transfer(x: i64)
     fn test_parse_body_match() {
         let stmt = parse_body_expr("match x { 0 => 1, _ => 2 }");
         match stmt {
-            Stmt::Expr(Expr::Match { arms, .. }) => assert_eq!(arms.len(), 2),
+            Stmt::Expr(Expr::Match { arms, .. }, _) => assert_eq!(arms.len(), 2),
             _ => panic!("Expected Match"),
         }
     }
@@ -764,7 +773,7 @@ atom transfer(x: i64)
     fn test_parse_body_while() {
         let stmt = parse_body_expr("{ while x > 0 invariant: x >= 0 { x = x - 1 } }");
         match stmt {
-            Stmt::Block(stmts) => {
+            Stmt::Block(stmts, _) => {
                 assert!(matches!(stmts[0], Stmt::While { .. }));
             }
             _ => panic!("Expected Block with While"),
@@ -1046,7 +1055,7 @@ extern "Rust" {
         // Keywords used as variable names must support assignment
         let stmt = parse_body_expr("{ mode = mode - 1 }");
         match stmt {
-            Stmt::Block(stmts) => {
+            Stmt::Block(stmts, _) => {
                 assert_eq!(stmts.len(), 1);
                 match &stmts[0] {
                     Stmt::Assign { var, .. } => assert_eq!(var, "mode"),
@@ -1131,7 +1140,7 @@ extern "Rust" {
                 assert_eq!(params.len(), 1);
                 assert_eq!(params[0].name, "x");
                 match *body {
-                    Stmt::Block(_) => {}
+                    Stmt::Block(..) => {}
                     _ => panic!("Expected Block body"),
                 }
             }

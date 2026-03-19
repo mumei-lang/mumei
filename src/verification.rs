@@ -15,6 +15,26 @@ use z3::{Config, Context, SatResult, Solver};
 
 // --- エラー型の定義 ---
 
+// =============================================================================
+// Related Diagnostic for multi-span error reporting (Feature 3a)
+// =============================================================================
+
+#[derive(thiserror::Error, miette::Diagnostic, Debug)]
+#[error("{msg}")]
+pub struct RelatedDiagnostic {
+    pub msg: String,
+    #[source_code]
+    pub src: miette::NamedSource<String>,
+    #[label("{label}")]
+    pub span: SourceSpan,
+    pub label: String,
+    /// Original parser::Span (line/col) for LSP line mapping.
+    /// Miette's SourceSpan is a byte offset that requires source text to resolve;
+    /// this field allows LSP to read line/col directly without source text.
+    pub original_span: Span,
+}
+
+
 /// エラーの詳細情報。ソース位置（Span）と修正提案（suggestion）を保持する。
 #[derive(Debug, Clone)]
 pub struct ErrorDetail {
@@ -121,6 +141,8 @@ pub enum MumeiError {
         help: Option<String>,
         /// LSP 用: 元の parser::Span（line/col）を保持する
         original_span: Span,
+        #[related]
+        related: Vec<RelatedDiagnostic>,
     },
     #[error("Codegen Error: {msg}")]
     #[diagnostic(code(mumei::codegen))]
@@ -134,6 +156,8 @@ pub enum MumeiError {
         help: Option<String>,
         /// LSP 用: 元の parser::Span（line/col）を保持する
         original_span: Span,
+        #[related]
+        related: Vec<RelatedDiagnostic>,
     },
     #[error("Type Error: {msg}")]
     #[diagnostic(code(mumei::type_error))]
@@ -147,6 +171,8 @@ pub enum MumeiError {
         help: Option<String>,
         /// LSP 用: 元の parser::Span（line/col）を保持する
         original_span: Span,
+        #[related]
+        related: Vec<RelatedDiagnostic>,
     },
 }
 
@@ -159,6 +185,7 @@ impl MumeiError {
             span: SourceSpan::from((0, 0)),
             help: None,
             original_span: Span::default(),
+            related: Vec::new(),
         }
     }
     /// Span 付きで VerificationError を生成
@@ -176,6 +203,7 @@ impl MumeiError {
             span: SourceSpan::from((0, 0)),
             help: None,
             original_span: span,
+            related: Vec::new(),
         }
     }
     /// ソースコード付きで VerificationError を生成（リッチ出力対応）
@@ -200,6 +228,7 @@ impl MumeiError {
             span: source_span,
             help,
             original_span: span.clone(),
+            related: Vec::new(),
         }
     }
     /// Span なしで CodegenError を生成
@@ -210,6 +239,7 @@ impl MumeiError {
             span: SourceSpan::from((0, 0)),
             help: None,
             original_span: Span::default(),
+            related: Vec::new(),
         }
     }
     /// ソースコード付きで CodegenError を生成（リッチ出力対応）
@@ -234,6 +264,7 @@ impl MumeiError {
             span: source_span,
             help,
             original_span: span.clone(),
+            related: Vec::new(),
         }
     }
     /// Span なしで TypeError を生成
@@ -244,6 +275,7 @@ impl MumeiError {
             span: SourceSpan::from((0, 0)),
             help: None,
             original_span: Span::default(),
+            related: Vec::new(),
         }
     }
     /// Span 付きで TypeError を生成
@@ -261,6 +293,7 @@ impl MumeiError {
             span: SourceSpan::from((0, 0)),
             help: None,
             original_span: span,
+            related: Vec::new(),
         }
     }
     /// ソースコード付きで TypeError を生成（リッチ出力対応）
@@ -285,6 +318,7 @@ impl MumeiError {
             span: source_span,
             help,
             original_span: span.clone(),
+            related: Vec::new(),
         }
     }
 
@@ -336,37 +370,91 @@ impl MumeiError {
                 msg,
                 help,
                 original_span,
+                related,
                 ..
-            } => MumeiError::VerificationError {
-                msg,
-                src: named_src,
-                span: source_span,
-                help,
-                original_span,
+            } => {
+                // Propagate source to related diagnostics that share the same file.
+                // Only overwrite when the related span's file matches the primary file
+                // (or is "<unknown>"), preserving cross-file span context.
+                let updated_related = related.into_iter().map(|r| {
+                    let r_file = r.original_span.file.as_str();
+                    if r_file.is_empty() || r_file == "<unknown>" || r_file == file_name {
+                        let recomputed_span = span_to_source_span(source, &r.original_span);
+                        RelatedDiagnostic {
+                            src: miette::NamedSource::new(file_name, source.to_string()),
+                            span: recomputed_span,
+                            ..r
+                        }
+                    } else {
+                        r
+                    }
+                }).collect();
+                MumeiError::VerificationError {
+                    msg,
+                    src: named_src,
+                    span: source_span,
+                    help,
+                    original_span,
+                    related: updated_related,
+                }
             },
             MumeiError::CodegenError {
                 msg,
                 help,
                 original_span,
+                related,
                 ..
-            } => MumeiError::CodegenError {
-                msg,
-                src: named_src,
-                span: source_span,
-                help,
-                original_span,
+            } => {
+                let updated_related = related.into_iter().map(|r| {
+                    let r_file = r.original_span.file.as_str();
+                    if r_file.is_empty() || r_file == "<unknown>" || r_file == file_name {
+                        let recomputed_span = span_to_source_span(source, &r.original_span);
+                        RelatedDiagnostic {
+                            src: miette::NamedSource::new(file_name, source.to_string()),
+                            span: recomputed_span,
+                            ..r
+                        }
+                    } else {
+                        r
+                    }
+                }).collect();
+                MumeiError::CodegenError {
+                    msg,
+                    src: named_src,
+                    span: source_span,
+                    help,
+                    original_span,
+                    related: updated_related,
+                }
             },
             MumeiError::TypeError {
                 msg,
                 help,
                 original_span,
+                related,
                 ..
-            } => MumeiError::TypeError {
-                msg,
-                src: named_src,
-                span: source_span,
-                help,
-                original_span,
+            } => {
+                let updated_related = related.into_iter().map(|r| {
+                    let r_file = r.original_span.file.as_str();
+                    if r_file.is_empty() || r_file == "<unknown>" || r_file == file_name {
+                        let recomputed_span = span_to_source_span(source, &r.original_span);
+                        RelatedDiagnostic {
+                            src: miette::NamedSource::new(file_name, source.to_string()),
+                            span: recomputed_span,
+                            ..r
+                        }
+                    } else {
+                        r
+                    }
+                }).collect();
+                MumeiError::TypeError {
+                    msg,
+                    src: named_src,
+                    span: source_span,
+                    help,
+                    original_span,
+                    related: updated_related,
+                }
             },
         }
     }
@@ -380,6 +468,7 @@ impl MumeiError {
                 src,
                 span,
                 original_span,
+                related,
                 ..
             } => MumeiError::VerificationError {
                 msg,
@@ -387,12 +476,14 @@ impl MumeiError {
                 span,
                 help,
                 original_span,
+                related,
             },
             MumeiError::CodegenError {
                 msg,
                 src,
                 span,
                 original_span,
+                related,
                 ..
             } => MumeiError::CodegenError {
                 msg,
@@ -400,12 +491,14 @@ impl MumeiError {
                 span,
                 help,
                 original_span,
+                related,
             },
             MumeiError::TypeError {
                 msg,
                 src,
                 span,
                 original_span,
+                related,
                 ..
             } => MumeiError::TypeError {
                 msg,
@@ -413,8 +506,33 @@ impl MumeiError {
                 span,
                 help,
                 original_span,
+                related,
             },
         }
+    }
+
+    /// Add a related diagnostic span for multi-span error reporting (Feature 3c)
+    pub fn with_related(
+        mut self,
+        related_span: SourceSpan,
+        label: String,
+        src: miette::NamedSource<String>,
+        msg: String,
+        original_span: Span,
+    ) -> Self {
+        let diag = RelatedDiagnostic {
+            msg,
+            src,
+            span: related_span,
+            label,
+            original_span,
+        };
+        match &mut self {
+            MumeiError::VerificationError { related, .. } => related.push(diag),
+            MumeiError::CodegenError { related, .. } => related.push(diag),
+            MumeiError::TypeError { related, .. } => related.push(diag),
+        }
+        self
     }
 }
 
@@ -446,8 +564,17 @@ pub struct ConstraintMapping {
     type_name: Option<String>,
     base_type: String,
     predicate_raw: String,
-    #[allow(dead_code)]
     span: Span,
+}
+
+/// A single step in the data flow chain for expression-level tracking.
+#[derive(Debug, Clone)]
+pub struct DataFlowEntry {
+    pub step: String,
+    pub line: u32,
+    pub col: u32,
+    pub description: String,
+    pub constraint: Option<String>,
 }
 
 // =============================================================================
@@ -515,11 +642,146 @@ pub fn suggestion_for_failure_type(failure_type: &str) -> &'static str {
 pub const FAILURE_EFFECT_NOT_ALLOWED: &str = "effect_not_allowed";
 
 // =============================================================================
+// Compound Constraint Decomposition
+// =============================================================================
+
+/// Splits `&&`-joined constraints at the top level while respecting parenthesis
+/// depth and quoted strings.
+///
+/// Example: `starts_with(path, "/tmp/") && not_contains(path, "..")`
+/// → `["starts_with(path, \"/tmp/\")", "not_contains(path, \"..\")"]`
+pub fn split_compound_constraint(predicate_raw: &str) -> Vec<String> {
+    let pred = predicate_raw.trim();
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut depth: i32 = 0;
+    let mut in_quotes = false;
+    let chars: Vec<char> = pred.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+    while i < len {
+        let ch = chars[i];
+        if ch == '"' && (i == 0 || chars[i - 1] != '\\') {
+            in_quotes = !in_quotes;
+            current.push(ch);
+            i += 1;
+            continue;
+        }
+        if in_quotes {
+            current.push(ch);
+            i += 1;
+            continue;
+        }
+        if ch == '(' {
+            depth += 1;
+            current.push(ch);
+            i += 1;
+            continue;
+        }
+        if ch == ')' {
+            depth -= 1;
+            current.push(ch);
+            i += 1;
+            continue;
+        }
+        // Only split on `&&` when depth == 0 and not inside quotes
+        if depth == 0 && ch == '&' && i + 1 < len && chars[i + 1] == '&' {
+            let trimmed = current.trim().to_string();
+            if !trimmed.is_empty() {
+                parts.push(trimmed);
+            }
+            current.clear();
+            i += 2; // skip both '&' characters
+            continue;
+        }
+        current.push(ch);
+        i += 1;
+    }
+    let trimmed = current.trim().to_string();
+    if !trimmed.is_empty() {
+        parts.push(trimmed);
+    }
+    parts
+}
+
+/// Evaluate a single sub-constraint against a concrete counterexample value.
+/// Checks starts_with/ends_with/contains/not_contains/range patterns.
+pub fn evaluate_sub_constraint(sub_pred: &str, value: &str) -> bool {
+    let trimmed = sub_pred.trim();
+
+    // starts_with(param, "prefix")
+    if let Some(inner) = trimmed.strip_prefix("starts_with(") {
+        if let Some(inner) = inner.strip_suffix(')') {
+            if let Some((_p, rest)) = inner.split_once(',') {
+                let prefix = rest.trim().trim_matches('"');
+                return value.trim_matches('"').starts_with(prefix);
+            }
+        }
+    }
+
+    // ends_with(param, "suffix")
+    if let Some(inner) = trimmed.strip_prefix("ends_with(") {
+        if let Some(inner) = inner.strip_suffix(')') {
+            if let Some((_p, rest)) = inner.split_once(',') {
+                let suffix = rest.trim().trim_matches('"');
+                return value.trim_matches('"').ends_with(suffix);
+            }
+        }
+    }
+
+    // not_contains(param, "substr")
+    if let Some(inner) = trimmed.strip_prefix("not_contains(") {
+        if let Some(inner) = inner.strip_suffix(')') {
+            if let Some((_p, rest)) = inner.split_once(',') {
+                let substr = rest.trim().trim_matches('"');
+                return !value.trim_matches('"').contains(substr);
+            }
+        }
+    }
+
+    // contains(param, "substr")
+    if let Some(inner) = trimmed.strip_prefix("contains(") {
+        if let Some(inner) = inner.strip_suffix(')') {
+            if let Some((_p, rest)) = inner.split_once(',') {
+                let substr = rest.trim().trim_matches('"');
+                return value.trim_matches('"').contains(substr);
+            }
+        }
+    }
+
+    // Simple comparison patterns: v >= N, v <= N, v > N, v < N, v != N
+    // Try to parse as numeric comparison
+    let comparisons: Vec<(&str, fn(i64, i64) -> bool)> = vec![
+        (">=", (|a, b| a >= b) as fn(i64, i64) -> bool),
+        ("<=", |a, b| a <= b),
+        ("!=", |a, b| a != b),
+        (">", |a, b| a > b),
+        ("<", |a, b| a < b),
+        ("==", |a, b| a == b),
+    ];
+    for (cmp_op, cmp_fn) in &comparisons {
+        if let Some(idx) = trimmed.find(cmp_op) {
+            let rhs = trimmed[idx + cmp_op.len()..].trim();
+            if let (Ok(val_num), Ok(rhs_num)) =
+                (value.trim_matches('"').parse::<i64>(), rhs.parse::<i64>())
+            {
+                return cmp_fn(val_num, rhs_num);
+            }
+        }
+    }
+
+    // Unknown sub-constraint — conservatively return true
+    true
+}
+
+// =============================================================================
 // Natural Language Constraint Template Engine (Feature 1-b)
 // =============================================================================
 
 /// Pattern-matches common predicate forms and generates human/AI-readable descriptions.
 /// Returns bilingual output: English primary, Japanese in parentheses.
+/// Compound constraints (joined by `&&`) are decomposed and each sub-constraint
+/// is individually explained with numbered prefixes.
 pub fn constraint_to_natural_language(
     param_name: &str,
     type_name: &str,
@@ -527,6 +789,22 @@ pub fn constraint_to_natural_language(
     value: &str,
 ) -> String {
     let pred = predicate_raw.trim();
+
+    // Compound constraint decomposition: if multiple sub-constraints, explain each individually
+    let sub_parts = split_compound_constraint(pred);
+    if sub_parts.len() > 1 {
+        let total = sub_parts.len();
+        let explanations: Vec<String> = sub_parts
+            .iter()
+            .enumerate()
+            .map(|(i, sub)| {
+                let sub_explanation =
+                    constraint_to_natural_language(param_name, type_name, sub, value);
+                format!("[{}/{}] {}", i + 1, total, sub_explanation)
+            })
+            .collect();
+        return explanations.join(" AND ");
+    }
 
     // Try to match range pattern: v >= N && v <= M  or  N <= v && v <= M
     if let Some(range_desc) = try_match_range(pred, param_name, type_name, value) {
@@ -832,6 +1110,7 @@ pub fn build_semantic_feedback(
     counterexample: Option<&serde_json::Value>,
     atom: &Atom,
     failure_type: &str,
+    data_flow_entries: Option<&[DataFlowEntry]>,
 ) -> Option<serde_json::Value> {
     let ce_map = counterexample.and_then(|ce| ce.as_object());
     let mut violated_constraints = Vec::new();
@@ -850,14 +1129,41 @@ pub fn build_semantic_feedback(
             value,
         );
 
-        violated_constraints.push(json!({
+        let mut vc_entry = json!({
             "param": mapping.param_name,
             "type": type_name,
             "value": value,
             "constraint": mapping.predicate_raw,
             "explanation": explanation,
             "suggestion": suggestion_for_failure_type(failure_type)
-        }));
+        });
+
+        // Compound constraint decomposition: add sub_constraints array
+        let sub_parts = split_compound_constraint(&mapping.predicate_raw);
+        if sub_parts.len() > 1 {
+            let sub_constraints: Vec<serde_json::Value> = sub_parts
+                .iter()
+                .enumerate()
+                .map(|(idx, sub)| {
+                    let satisfied = evaluate_sub_constraint(sub, value);
+                    let sub_explanation = constraint_to_natural_language(
+                        &mapping.param_name,
+                        type_name,
+                        sub,
+                        value,
+                    );
+                    json!({
+                        "index": idx,
+                        "raw": sub,
+                        "satisfied": satisfied,
+                        "explanation": sub_explanation
+                    })
+                })
+                .collect();
+            vc_entry["sub_constraints"] = json!(sub_constraints);
+        }
+
+        violated_constraints.push(vc_entry);
     }
 
     if violated_constraints.is_empty() && ce_map.is_none() {
@@ -867,6 +1173,26 @@ pub fn build_semantic_feedback(
     let mut feedback = json!({
         "violated_constraints": violated_constraints
     });
+
+    // Add data_flow if available
+    if let Some(entries) = data_flow_entries {
+        let data_flow: Vec<serde_json::Value> = entries
+            .iter()
+            .map(|e| {
+                let mut entry = json!({
+                    "step": e.step,
+                    "line": e.line,
+                    "col": e.col,
+                    "description": e.description
+                });
+                if let Some(ref c) = e.constraint {
+                    entry["constraint"] = json!(c);
+                }
+                entry
+            })
+            .collect();
+        feedback["data_flow"] = json!(data_flow);
+    }
 
     // Add context about the atom's contracts
     feedback["context"] = json!({
@@ -2069,6 +2395,7 @@ pub fn verify_impl(
                                 FAILURE_TRAIT_LAW_VIOLATED,
                                 None,
                                 Some(&impl_def.span),
+                                None,
                             );
                             if ce_parts.is_empty() {
                                 "  (no concrete values available)".to_string()
@@ -3036,11 +3363,11 @@ fn collect_acquire_resources_expr(expr: &Expr) -> Vec<String> {
 fn collect_acquire_resources_stmt(stmt: &Stmt) -> Vec<String> {
     let mut resources = Vec::new();
     match stmt {
-        Stmt::Acquire { resource, body } => {
+        Stmt::Acquire { resource, body, .. } => {
             resources.push(resource.clone());
             resources.extend(collect_acquire_resources_stmt(body));
         }
-        Stmt::Block(stmts) => {
+        Stmt::Block(stmts, _) => {
             for s in stmts {
                 resources.extend(collect_acquire_resources_stmt(s));
             }
@@ -3059,7 +3386,7 @@ fn collect_acquire_resources_stmt(stmt: &Stmt) -> Vec<String> {
                 resources.extend(collect_acquire_resources_stmt(child));
             }
         }
-        Stmt::Expr(e) => {
+        Stmt::Expr(e, _) => {
             resources.extend(collect_acquire_resources_expr(e));
         }
         // Plan 8: Cancel statement has no resources
@@ -3089,10 +3416,10 @@ fn verify_bmc_resource_safety(
     fn has_acquire_in_while_stmt(stmt: &Stmt) -> bool {
         match stmt {
             Stmt::While { body, .. } => !collect_acquire_resources_stmt(body).is_empty(),
-            Stmt::Block(stmts) => stmts.iter().any(has_acquire_in_while_stmt),
+            Stmt::Block(stmts, _) => stmts.iter().any(has_acquire_in_while_stmt),
             Stmt::Acquire { body, .. } => has_acquire_in_while_stmt(body),
             Stmt::Task { body, .. } => has_acquire_in_while_stmt(body),
-            Stmt::Expr(e) => has_acquire_in_while_expr(e),
+            Stmt::Expr(e, _) => has_acquire_in_while_expr(e),
             _ => false,
         }
     }
@@ -3220,7 +3547,7 @@ fn verify_async_recursion_depth(
     }
     fn count_self_calls_stmt(stmt: &Stmt, atom_name: &str) -> usize {
         match stmt {
-            Stmt::Block(stmts) => stmts
+            Stmt::Block(stmts, _) => stmts
                 .iter()
                 .map(|s| count_self_calls_stmt(s, atom_name))
                 .sum(),
@@ -3236,7 +3563,7 @@ fn verify_async_recursion_depth(
                 .iter()
                 .map(|c| count_self_calls_stmt(c, atom_name))
                 .sum(),
-            Stmt::Expr(e) => count_self_calls_expr(e, atom_name),
+            Stmt::Expr(e, _) => count_self_calls_expr(e, atom_name),
             // Plan 8: Cancel statement has no self-calls
             Stmt::Cancel { .. } => 0,
         }
@@ -3548,7 +3875,7 @@ fn collect_callees_expr(expr: &Expr) -> Vec<String> {
 fn collect_callees_stmt(stmt: &Stmt) -> Vec<String> {
     let mut callees = Vec::new();
     match stmt {
-        Stmt::Block(stmts) => {
+        Stmt::Block(stmts, _) => {
             for s in stmts {
                 callees.extend(collect_callees_stmt(s));
             }
@@ -3571,7 +3898,7 @@ fn collect_callees_stmt(stmt: &Stmt) -> Vec<String> {
                 callees.extend(collect_callees_stmt(child));
             }
         }
-        Stmt::Expr(e) => {
+        Stmt::Expr(e, _) => {
             callees.extend(collect_callees_expr(e));
         }
         // Plan 8: Cancel statement has no callees
@@ -3880,7 +4207,7 @@ fn collect_divisors_expr(expr: &Expr) -> Vec<String> {
 fn collect_divisors_stmt(stmt: &Stmt) -> Vec<String> {
     let mut divisors = Vec::new();
     match stmt {
-        Stmt::Block(stmts) => {
+        Stmt::Block(stmts, _) => {
             for s in stmts {
                 divisors.extend(collect_divisors_stmt(s));
             }
@@ -3903,7 +4230,7 @@ fn collect_divisors_stmt(stmt: &Stmt) -> Vec<String> {
                 divisors.extend(collect_divisors_stmt(child));
             }
         }
-        Stmt::Expr(e) => {
+        Stmt::Expr(e, _) => {
             divisors.extend(collect_divisors_expr(e));
         }
         _ => {}
@@ -4353,6 +4680,7 @@ fn verify_inner(
                 "",
                 None,
                 Some(&atom.span),
+                None,
             );
             return Ok(());
         }
@@ -4377,6 +4705,7 @@ fn verify_inner(
                     "",
                     None,
                     Some(&atom.span),
+                    None,
                 );
                 return Ok(());
             }
@@ -4751,7 +5080,7 @@ fn verify_inner(
     // the body does `perform FileRead.read(some_variable)`.
     fn body_has_symbolic_perform_args(stmt: &Stmt, module_env: &ModuleEnv) -> bool {
         match stmt {
-            Stmt::Block(stmts) => stmts
+            Stmt::Block(stmts, _) => stmts
                 .iter()
                 .any(|s| body_has_symbolic_perform_args(s, module_env)),
             Stmt::Let { value, .. } | Stmt::Assign { value, .. } => {
@@ -4767,7 +5096,7 @@ fn verify_inner(
             Stmt::TaskGroup { children, .. } => children
                 .iter()
                 .any(|c| body_has_symbolic_perform_args(c, module_env)),
-            Stmt::Expr(e) => expr_has_symbolic_perform_args(e, module_env),
+            Stmt::Expr(e, _) => expr_has_symbolic_perform_args(e, module_env),
             // Plan 8: Cancel statement has no perform args
             Stmt::Cancel { .. } => false,
         }
@@ -5222,7 +5551,7 @@ fn verify_inner(
             };
             let constraint_mappings = build_constraint_mappings_for_atom(atom, module_env);
             let semantic_fb =
-                build_semantic_feedback(&constraint_mappings, None, atom, body_failure_type);
+                build_semantic_feedback(&constraint_mappings, None, atom, body_failure_type, None);
             save_visualizer_report(
                 output_dir,
                 "failed",
@@ -5234,6 +5563,7 @@ fn verify_inner(
                 body_failure_type,
                 semantic_fb.as_ref(),
                 Some(&atom.span),
+                Some(&constraint_mappings),
             );
             return Err(e);
         }
@@ -5291,6 +5621,7 @@ fn verify_inner(
                     ce_value.as_ref(),
                     atom,
                     FAILURE_POSTCONDITION_VIOLATED,
+                    None,
                 );
                 save_visualizer_report(
                     output_dir,
@@ -5303,6 +5634,7 @@ fn verify_inner(
                     FAILURE_POSTCONDITION_VIOLATED,
                     semantic_fb.as_ref(),
                     Some(&atom.span),
+                    Some(&constraint_mappings),
                 );
                 metrics.record_phase(
                     "Phase 5: ensures verification (failed)",
@@ -5310,10 +5642,27 @@ fn verify_inner(
                 );
                 metrics.total_constraints = constraint_count_cell.get();
                 metrics.print_summary();
-                return Err(MumeiError::verification_at(
+                // Feature 3d: Add related spans for constraint definition locations
+                let mut err = MumeiError::verification_at(
                     "Postcondition (ensures) is not satisfied.",
                     atom.span.clone(),
-                ).with_help("ensures の条件を確認してください。body の返り値が事後条件を満たすか検討してください"));
+                ).with_help("ensures の条件を確認してください。body の返り値が事後条件を満たすか検討してください");
+                for mapping in &constraint_mappings {
+                    if mapping.span.line > 0 {
+                        let related_src_span = span_to_source_span("", &mapping.span);
+                        err = err.with_related(
+                            related_src_span,
+                            format!("constraint on '{}' defined here", mapping.param_name),
+                            miette::NamedSource::new(
+                                if mapping.span.file.is_empty() { "<unknown>" } else { &mapping.span.file },
+                                String::new(),
+                            ),
+                            format!("type constraint: {}", mapping.predicate_raw),
+                            mapping.span.clone(),
+                        );
+                    }
+                }
+                return Err(err);
             }
             solver.pop(1);
         }
@@ -5356,6 +5705,7 @@ fn verify_inner(
                 FAILURE_LINEARITY_VIOLATED,
                 Some(&linearity_fb),
                 Some(&atom.span),
+                None,
             );
             return Err(MumeiError::verification_at(
                 format!(
@@ -5393,6 +5743,7 @@ fn verify_inner(
             FAILURE_INVARIANT_VIOLATED,
             Some(&contradiction_fb),
             Some(&atom.span),
+            None,
         );
 
         let constraint_summary = if conflicting_constraints.is_empty() {
@@ -5435,6 +5786,7 @@ fn verify_inner(
         "",
         None,
         Some(&atom.span),
+        None,
     );
     Ok(())
 }
@@ -7011,17 +7363,17 @@ fn stmt_to_z3<'a>(
 ) -> DynResult<'a> {
     let ctx = vc.ctx;
     match stmt {
-        Stmt::Let { var, value } => {
+        Stmt::Let { var, value, .. } => {
             let val = expr_to_z3(vc, value, env, solver_opt)?;
             env.insert(var.clone(), val.clone());
             Ok(val)
         }
-        Stmt::Assign { var, value } => {
+        Stmt::Assign { var, value, .. } => {
             let val = expr_to_z3(vc, value, env, solver_opt)?;
             env.insert(var.clone(), val.clone());
             Ok(val)
         }
-        Stmt::Block(stmts) => {
+        Stmt::Block(stmts, _) => {
             let mut last: Dynamic = Int::from_i64(ctx, 0).into();
             for s in stmts {
                 last = stmt_to_z3(vc, s, env, solver_opt)?;
@@ -7033,6 +7385,7 @@ fn stmt_to_z3<'a>(
             invariant,
             decreases,
             body,
+            ..
         } => {
             // Loop Invariant 検証ロジック
             if let Some(solver) = solver_opt {
@@ -7120,7 +7473,7 @@ fn stmt_to_z3<'a>(
                 .not();
             Ok(Bool::and(ctx, &[&inv, &c_not]).into())
         }
-        Stmt::Acquire { resource, body } => {
+        Stmt::Acquire { resource, body, .. } => {
             let held_name = format!("__resource_held_{}", resource);
             let held_bool = Bool::new_const(ctx, held_name.as_str());
             if let Some(solver) = solver_opt {
@@ -7132,7 +7485,7 @@ fn stmt_to_z3<'a>(
             env.insert(held_name, released.into());
             Ok(body_result)
         }
-        Stmt::Task { body, group } => {
+        Stmt::Task { body, group, .. } => {
             static TASK_COUNTER: std::sync::atomic::AtomicUsize =
                 std::sync::atomic::AtomicUsize::new(0);
             let task_uid = TASK_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -7151,6 +7504,7 @@ fn stmt_to_z3<'a>(
         Stmt::TaskGroup {
             children,
             join_semantics,
+            ..
         } => {
             let mut child_results = Vec::new();
             let mut child_done_vars = Vec::new();
@@ -7187,7 +7541,7 @@ fn stmt_to_z3<'a>(
                 Ok(Int::from_i64(ctx, 0).into())
             }
         }
-        Stmt::Expr(e) => expr_to_z3(vc, e, env, solver_opt),
+        Stmt::Expr(e, _) => expr_to_z3(vc, e, env, solver_opt),
         // Plan 8: Cancel statement — no-op in Z3 verification
         Stmt::Cancel { .. } => Ok(Int::from_i64(ctx, 0).into()),
     }
@@ -7535,6 +7889,7 @@ fn save_visualizer_report(
     failure_type: &str,
     semantic_feedback: Option<&serde_json::Value>,
     span: Option<&Span>,
+    constraint_mappings: Option<&[ConstraintMapping]>,
 ) {
     let mut report = json!({
         "status": status,
@@ -7560,6 +7915,25 @@ fn save_visualizer_report(
             "col": s.col,
             "len": s.len
         });
+    }
+    // Include constraint source locations from constraint mappings (Feature 2f)
+    if let Some(mappings) = constraint_mappings {
+        let type_locations: Vec<serde_json::Value> = mappings
+            .iter()
+            .filter(|m| m.span.line > 0)
+            .map(|m| {
+                json!({
+                    "param": m.param_name,
+                    "type": m.type_name.as_deref().unwrap_or(&m.base_type),
+                    "file": m.span.file,
+                    "line": m.span.line,
+                    "col": m.span.col
+                })
+            })
+            .collect();
+        if !type_locations.is_empty() {
+            report["type_definition_locations"] = json!(type_locations);
+        }
     }
     let _ = fs::create_dir_all(output_dir);
     let _ = fs::write(output_dir.join("report.json"), report.to_string());
@@ -8320,5 +8694,140 @@ mod tests {
             z3::SatResult::Sat,
             "Same state from both branches should be SAT"
         );
+    }
+
+    // ---- split_compound_constraint tests ----
+
+    #[test]
+    fn test_split_compound_simple_and() {
+        let parts = split_compound_constraint("a >= 0 && a <= 120");
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0], "a >= 0");
+        assert_eq!(parts[1], "a <= 120");
+    }
+
+    #[test]
+    fn test_split_compound_with_nested_parens() {
+        let parts = split_compound_constraint("(a > 0 && a < 10) && b > 0");
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0], "(a > 0 && a < 10)");
+        assert_eq!(parts[1], "b > 0");
+    }
+
+    #[test]
+    fn test_split_compound_with_quoted_strings() {
+        let parts =
+            split_compound_constraint("starts_with(path, \"/tmp/\") && not_contains(path, \"..\")");
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0], "starts_with(path, \"/tmp/\")");
+        assert_eq!(parts[1], "not_contains(path, \"..\")");
+    }
+
+    #[test]
+    fn test_split_compound_single() {
+        let parts = split_compound_constraint("x > 0");
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0], "x > 0");
+    }
+
+    #[test]
+    fn test_split_compound_quoted_ampersand() {
+        let parts = split_compound_constraint("contains(s, \"a && b\") && x > 0");
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0], "contains(s, \"a && b\")");
+        assert_eq!(parts[1], "x > 0");
+    }
+
+    // ---- evaluate_sub_constraint tests ----
+
+    #[test]
+    fn test_evaluate_sub_constraint_starts_with_satisfied() {
+        assert!(evaluate_sub_constraint(
+            "starts_with(path, \"/tmp/\")",
+            "/tmp/../etc/passwd"
+        ));
+    }
+
+    #[test]
+    fn test_evaluate_sub_constraint_not_contains_violated() {
+        assert!(!evaluate_sub_constraint(
+            "not_contains(path, \"..\")",
+            "/tmp/../etc/passwd"
+        ));
+    }
+
+    #[test]
+    fn test_evaluate_sub_constraint_numeric_comparison() {
+        assert!(evaluate_sub_constraint("v >= 0", "5"));
+        assert!(!evaluate_sub_constraint("v >= 0", "-1"));
+        assert!(evaluate_sub_constraint("v <= 120", "100"));
+        assert!(!evaluate_sub_constraint("v <= 120", "150"));
+    }
+
+    // ---- compound constraint_to_natural_language tests ----
+
+    #[test]
+    fn test_constraint_to_natural_language_compound() {
+        let result = constraint_to_natural_language(
+            "path",
+            "SafePath",
+            "starts_with(path, \"/tmp/\") && not_contains(path, \"..\")",
+            "/etc/passwd",
+        );
+        assert!(result.contains("[1/2]"));
+        assert!(result.contains("[2/2]"));
+        assert!(result.contains("AND"));
+    }
+
+    // ---- build_semantic_feedback with sub_constraints test ----
+
+    #[test]
+    fn test_build_semantic_feedback_sub_constraints() {
+        use crate::parser::ast::Span;
+        let mappings = vec![ConstraintMapping {
+            param_name: "path".to_string(),
+            type_name: Some("SafePath".to_string()),
+            base_type: "Str".to_string(),
+            predicate_raw: "starts_with(path, \"/tmp/\") && not_contains(path, \"..\")".to_string(),
+            span: Span::default(),
+        }];
+        let ce = serde_json::json!({
+            "path": "/tmp/../etc/passwd"
+        });
+        let dummy_atom = crate::parser::ast::Atom {
+            name: "test_atom".to_string(),
+            type_params: vec![],
+            where_bounds: vec![],
+            params: vec![],
+            requires: String::new(),
+            forall_constraints: vec![],
+            ensures: String::new(),
+            body_expr: String::new(),
+            consumed_params: vec![],
+            resources: vec![],
+            is_async: false,
+            trust_level: crate::parser::ast::TrustLevel::Verified,
+            max_unroll: None,
+            invariant: None,
+            effects: vec![],
+            return_type: None,
+            span: Span::default(),
+        };
+        let feedback = build_semantic_feedback(
+            &mappings,
+            Some(&ce),
+            &dummy_atom,
+            "precondition_violated",
+            None,
+        )
+        .unwrap();
+        let vc_arr = feedback["violated_constraints"].as_array().unwrap();
+        assert!(!vc_arr.is_empty());
+        let vc = &vc_arr[0];
+        assert!(vc.get("sub_constraints").is_some());
+        let subs = vc["sub_constraints"].as_array().unwrap();
+        assert_eq!(subs.len(), 2);
+        assert_eq!(subs[0]["satisfied"], true);
+        assert_eq!(subs[1]["satisfied"], false);
     }
 }

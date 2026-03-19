@@ -392,7 +392,7 @@ impl Monomorphizer {
             Stmt::Let { value, .. } | Stmt::Assign { value, .. } => {
                 self.collect_from_expr(value);
             }
-            Stmt::Block(stmts) => {
+            Stmt::Block(stmts, _) => {
                 for s in stmts {
                     self.collect_from_stmt(s);
                 }
@@ -402,6 +402,7 @@ impl Monomorphizer {
                 invariant,
                 decreases,
                 body,
+                ..
             } => {
                 self.collect_from_expr(cond);
                 self.collect_from_expr(invariant);
@@ -423,7 +424,7 @@ impl Monomorphizer {
             }
             // Plan 8: Cancel statement — no generic types to collect
             Stmt::Cancel { .. } => {}
-            Stmt::Expr(expr) => {
+            Stmt::Expr(expr, _) => {
                 self.collect_from_expr(expr);
             }
         }
