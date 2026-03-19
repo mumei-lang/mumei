@@ -349,7 +349,8 @@ fn parse_prefix(ctx: &mut ParseContext) -> Expr {
             let body = if ctx.peek() == &Token::LBrace {
                 parse_block_or_stmt(ctx)
             } else {
-                Stmt::Expr(parse_expr(ctx, 0), Span::default())
+                let body_span = ctx.current_span();
+                Stmt::Expr(parse_expr(ctx, 0), body_span)
             };
             Expr::Lambda {
                 params,
@@ -435,11 +436,14 @@ fn parse_ident_continuation(ctx: &mut ParseContext, name: String) -> Expr {
 fn parse_match_arm_body(ctx: &mut ParseContext) -> Stmt {
     if ctx.peek() == &Token::LBrace {
         parse_block_or_stmt(ctx)
-    } else if ctx.peek() == &Token::Match || ctx.peek() == &Token::If {
-        Stmt::Expr(parse_expr(ctx, 0), Span::default())
     } else {
-        // Parse at binding power 3, above => (l_bp=1) so => is not consumed
-        Stmt::Expr(parse_expr(ctx, 3), Span::default())
+        let arm_span = ctx.current_span();
+        if ctx.peek() == &Token::Match || ctx.peek() == &Token::If {
+            Stmt::Expr(parse_expr(ctx, 0), arm_span)
+        } else {
+            // Parse at binding power 3, above => (l_bp=1) so => is not consumed
+            Stmt::Expr(parse_expr(ctx, 3), arm_span)
+        }
     }
 }
 

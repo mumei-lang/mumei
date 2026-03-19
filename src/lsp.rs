@@ -323,21 +323,42 @@ fn build_related_information(
     related_spans
         .iter()
         .map(|r| {
-            // Use the RelatedDiagnostic's source span offset to approximate line/col.
-            // Since we store SourceSpan (byte offset), we approximate using offset 0.
-            let offset = r.span.offset();
+            // Convert byte offset from SourceSpan to 0-indexed line/character
+            // by scanning the source text stored in the RelatedDiagnostic.
+            let source_text = r.src.inner().as_str();
+            let byte_offset = r.span.offset();
+            let (line, character) = byte_offset_to_line_col(source_text, byte_offset);
             serde_json::json!({
                 "location": {
                     "uri": uri,
                     "range": {
-                        "start": { "line": offset, "character": 0 },
-                        "end": { "line": offset, "character": 1 }
+                        "start": { "line": line, "character": character },
+                        "end": { "line": line, "character": character + 1 }
                     }
                 },
                 "message": format!("{}: {}", r.label, r.msg)
             })
         })
         .collect()
+}
+
+/// Convert a byte offset within `source` to a 0-indexed (line, character) pair.
+/// Falls back to (0, 0) when the source is empty or the offset is out of range.
+fn byte_offset_to_line_col(source: &str, byte_offset: usize) -> (usize, usize) {
+    let mut line: usize = 0;
+    let mut col: usize = 0;
+    for (idx, ch) in source.char_indices() {
+        if idx >= byte_offset {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            col = 0;
+        } else {
+            col += 1;
+        }
+    }
+    (line, col)
 }
 
 /// Hover 用: 指定行付近の atom を探し、requires/ensures を markdown で返す
