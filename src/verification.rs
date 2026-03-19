@@ -5642,6 +5642,39 @@ fn expr_to_z3<'a>(
                     let _val = expr_to_z3(vc, &args[0], env, solver_opt)?;
                     Ok(Int::new_const(ctx, "cast_result").into())
                 }
+                // =============================================================
+                // Built-in string constraint functions for requires/ensures
+                // =============================================================
+                // These are parsed as Expr::Call by the parser but need special
+                // handling in Z3 to produce Bool constraints on Z3 String Sort.
+                "starts_with" | "ends_with" | "contains" | "not_contains" => {
+                    if args.len() != 2 {
+                        return Err(MumeiError::verification(format!(
+                            "{}() requires exactly 2 arguments: (string_var, \"pattern\")",
+                            name
+                        )));
+                    }
+                    let str_val = expr_to_z3(vc, &args[0], env, solver_opt)?;
+                    let pattern_val = expr_to_z3(vc, &args[1], env, solver_opt)?;
+
+                    // Both arguments must be Z3 String Sort
+                    if let (Some(str_z3), Some(pat_z3)) =
+                        (str_val.as_string(), pattern_val.as_string())
+                    {
+                        let result: Bool = match name.as_str() {
+                            "starts_with" => pat_z3.prefix(&str_z3),
+                            "ends_with" => pat_z3.suffix(&str_z3),
+                            "contains" => str_z3.contains(&pat_z3),
+                            "not_contains" => str_z3.contains(&pat_z3).not(),
+                            _ => unreachable!(),
+                        };
+                        Ok(result.into())
+                    } else {
+                        // Fallback: if operands are not strings, return true (no constraint)
+                        // This handles cases where the variable hasn't been typed as Str.
+                        Ok(Bool::from_bool(ctx, true).into())
+                    }
+                }
                 _ => {
                     // ユーザー定義関数呼び出し: 契約による検証（Compositional Verification）
                     // 呼び出し先の requires を現在のコンテキストで証明し、
@@ -8095,6 +8128,69 @@ mod tests {
             elapsed.as_millis() < 500,
             "String Sort constraint solving took {}ms, expected < 500ms",
             elapsed.as_millis()
+        );
+    }
+
+    // =========================================================================
+    // Compound && constraint tests
+    // =========================================================================
+
+    #[test]
+    fn test_check_constant_constraint_compound() {
+        // Compound constraint: starts_with AND not_contains
+        assert!(check_constant_constraint(
+            "/tmp/data.txt",
+            "starts_with(path, \"/tmp/\") && not_contains(path, \"..\")"
+        ));
+        // Path traversal should fail
+        assert!(!check_constant_constraint(
+            "/tmp/../etc/passwd",
+            "starts_with(path, \"/tmp/\") && not_contains(path, \"..\")"
+        ));
+        // Wrong prefix should fail
+        assert!(!check_constant_constraint(
+            "/etc/passwd",
+            "starts_with(path, \"/tmp/\") && not_contains(path, \"..\")"
+        ));
+    }
+
+    #[test]
+    fn test_evaluate_string_constraint_compound() {
+        assert!(evaluate_string_constraint(
+            "starts_with(path, \"/tmp/\") && not_contains(path, \"..\")",
+            "path",
+            "/tmp/safe.txt"
+        ));
+        assert!(!evaluate_string_constraint(
+            "starts_with(path, \"/tmp/\") && not_contains(path, \"..\")",
+            "path",
+            "/tmp/../etc/passwd"
+        ));
+    }
+
+    #[test]
+    fn test_z3_compound_constraint_parse() {
+        let cfg = z3::Config::new();
+        let ctx = z3::Context::new(&cfg);
+        let param = Z3String::new_const(&ctx, "path");
+
+        // Compound constraint should parse successfully
+        let result = parse_constraint_to_z3_string(
+            &ctx,
+            "starts_with(path, \"/tmp/\") && not_contains(path, \"..\")",
+            &param,
+        );
+        assert!(result.is_some(), "compound constraint should parse");
+
+        // Compound with unknown sub-constraint should fail (fail-closed)
+        let result2 = parse_constraint_to_z3_string(
+            &ctx,
+            "starts_with(path, \"/tmp/\") && unknown_check(path, \"x\")",
+            &param,
+        );
+        assert!(
+            result2.is_none(),
+            "compound with unknown sub-constraint should return None"
         );
     }
 
