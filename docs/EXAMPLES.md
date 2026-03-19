@@ -302,6 +302,8 @@ atom double_respond(req: i64)
 | `tests/test_str_type.mm` | Str concat, equality, inequality, empty string |
 | `tests/test_enum_payload.mm` | Match variants, wildcards, nested match |
 | `tests/test_json_operations.mm` | Object roundtrip, array ops, type checks |
+| `tests/test_path_safety.mm` | Safe read, literal path, concat prefix |
+| `tests/test_verified_server.mm` | Safe file serving, server bind, combined effects |
 
 ```bash
 for f in tests/test_*.mm; do
