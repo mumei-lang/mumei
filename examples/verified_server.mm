@@ -56,13 +56,16 @@ atom serve_unsafe_file(req_path: Str)
 
 // Double response — compile error (temporal violation)
 // The HttpServer state machine only allows one respond per accept cycle:
-//   accept -> Responding, respond -> Listening
-// A second respond from Listening state is invalid (no transition defined).
+//   bind → listen → accept → respond (OK, Responding → Listening)
+//   → respond again (FAIL, no transition from Listening → Responding for respond)
 atom double_respond(req: i64)
     effects: [HttpServer]
     requires: req > 0;
     ensures: result >= 0;
     body: {
+        perform HttpServer.bind(req);
+        perform HttpServer.listen(req);
+        perform HttpServer.accept(req);
         perform HttpServer.respond(req);
         perform HttpServer.respond(req);
         1

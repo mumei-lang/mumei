@@ -42,11 +42,15 @@ atom test_server_bind(addr: Str)
     }
 
 // --- Test 3: Combined path safety and server effects ---
+// Exercises the full lifecycle: bind → listen → accept → read file → respond
 atom test_combined(req_path: Str)
     effects: [SafeFileRead(path), HttpServer]
     requires: not_contains(req_path, "..") && not_contains(req_path, "\0");
     ensures: result >= 0;
     body: {
+        perform HttpServer.bind(1);
+        perform HttpServer.listen(1);
+        perform HttpServer.accept(1);
         let path = "/tmp/public/" + req_path;
         perform SafeFileRead.read(path);
         perform HttpServer.respond(1);
