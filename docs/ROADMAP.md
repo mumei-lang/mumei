@@ -437,7 +437,7 @@ The hybrid approach (Constant Folding + Z3 String Sort) is now active:
 - `path_id_map` / `prefix_ranges` retained as `#[allow(dead_code)]` for future Int encoding fallback
 
 **Future Unlocks**:
-- Free-form path construction: `"/tmp/" + user_id + "/log.txt"` verification
+- ~~Free-form path construction: `"/tmp/" + user_id + "/log.txt"` verification~~ ✅ Implemented (Plan 21)
 - Regex-based path policies: `matches(path, "/tmp/[a-z]+\\.txt")`
 - URL validation for std.http effects: `starts_with(url, "https://")`
 
@@ -498,6 +498,7 @@ Detailed session plans for the next 8 implementation priorities are documented i
 | 12 | Plan 18: Codegen return types | ✅ `resolve_return_type()`, `-> Type` syntax |
 | 13 | Plan 19: MIR Phase 4c completion | ✅ MoveAnalysis is primary engine |
 | 14 | Plan 20: Z3 temporal effect integration | ✅ `encode_effect_state()`, ConflictingState Z3 probes |
+| 15 | Plan 21: Verified HTTP Server + Path Safety | ✅ SafeFileRead/SafeFileWrite effects, `&&` compound constraints, HTTP server FFI, HttpServer stateful effect, path traversal prevention demo |
 
 ---
 

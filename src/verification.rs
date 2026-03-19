@@ -2306,6 +2306,22 @@ fn parse_constraint_to_z3_string<'ctx>(
 ) -> Option<Bool<'ctx>> {
     let trimmed = constraint.trim();
 
+    // Compound constraint: "constraint1 && constraint2"
+    // Must be checked BEFORE individual constraint checks to avoid partial matches.
+    if trimmed.contains("&&") {
+        let parts: Vec<&str> = trimmed.split("&&").collect();
+        let mut bools: Vec<Bool<'ctx>> = Vec::new();
+        for part in parts {
+            if let Some(b) = parse_constraint_to_z3_string(ctx, part.trim(), param_z3) {
+                bools.push(b);
+            }
+        }
+        if !bools.is_empty() {
+            let refs: Vec<&Bool> = bools.iter().collect();
+            return Some(Bool::and(ctx, &refs));
+        }
+    }
+
     // Extract the string literal argument from the constraint
     let extract_string_arg = |c: &str| -> Option<std::string::String> {
         if let Some(last_quote_end) = c.rfind('"') {
@@ -6313,7 +6329,8 @@ fn expr_to_z3<'a>(
                         // Number/Float literals are constants already checked
                         // by verify_effect_params (Phase 1g). Skip Z3 String here.
                         // Variables and other expressions need symbolic verification.
-                        let is_constant = matches!(arg, Expr::Number(_) | Expr::Float(_));
+                        let is_constant =
+                            matches!(arg, Expr::Number(_) | Expr::Float(_) | Expr::StringLit(_));
                         if is_constant {
                             // Constant args are already checked by check_constant_constraint
                             // in verify_effect_params (Phase 1g). Skip Z3 String here.
@@ -6349,10 +6366,14 @@ fn expr_to_z3<'a>(
                                     let fresh = Z3String::new_const(ctx, z3_str_name.as_str());
                                     if let Expr::Variable(var_name) = arg {
                                         let str_env_key = format!("__str_{}", var_name);
-                                        if let Some(existing) = env.get(&str_env_key) {
-                                            if let Some(existing_s) = existing.as_string() {
-                                                solver.assert(&fresh._eq(&existing_s));
-                                            }
+                                        let found_str = env
+                                            .get(&str_env_key)
+                                            .and_then(|v| v.as_string())
+                                            .or_else(|| {
+                                                env.get(var_name).and_then(|v| v.as_string())
+                                            });
+                                        if let Some(existing_s) = found_str {
+                                            solver.assert(&fresh._eq(&existing_s));
                                         }
                                     }
                                     fresh
@@ -6362,10 +6383,12 @@ fn expr_to_z3<'a>(
                                 let fresh = Z3String::new_const(ctx, z3_str_name.as_str());
                                 if let Expr::Variable(var_name) = arg {
                                     let str_env_key = format!("__str_{}", var_name);
-                                    if let Some(existing) = env.get(&str_env_key) {
-                                        if let Some(existing_s) = existing.as_string() {
-                                            solver.assert(&fresh._eq(&existing_s));
-                                        }
+                                    let found_str = env
+                                        .get(&str_env_key)
+                                        .and_then(|v| v.as_string())
+                                        .or_else(|| env.get(var_name).and_then(|v| v.as_string()));
+                                    if let Some(existing_s) = found_str {
+                                        solver.assert(&fresh._eq(&existing_s));
                                     }
                                 }
                                 fresh

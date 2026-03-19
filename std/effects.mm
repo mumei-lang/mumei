@@ -40,6 +40,12 @@ effect HttpDelete(url: Str);
 //   effect FileWrite(path: Str);
 //   effect HttpGet(url: Str) where starts_with(url, "https://");
 
+// --- Parameterized File Effects with Path Constraints ---
+// SafeFileRead/SafeFileWrite restrict paths to /tmp/ and disallow ".." traversal.
+// Used by security policies to enforce safe file access at compile time.
+effect SafeFileRead(path: Str) where starts_with(path, "/tmp/") && not_contains(path, "..");
+effect SafeFileWrite(path: Str) where starts_with(path, "/tmp/") && not_contains(path, "..");
+
 // --- Composite Effects ---
 // IO includes file I/O and console access
 effect IO includes: [FileRead, FileWrite, Console];

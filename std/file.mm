@@ -81,3 +81,21 @@ atom remove(path: i64)
         perform FileWrite.write(path);
         file_delete(path)
     }
+
+// =============================================================
+// Public API: Safe File Read (Parameterized Effect)
+// =============================================================
+
+// Read file contents with compile-time path safety enforcement.
+// Uses SafeFileRead parameterized effect which verifies:
+//   - Path starts with /tmp/
+//   - Path does not contain ".." (directory traversal prevention)
+// Returns 1 as a placeholder status code.
+atom safe_read_file(path: Str)
+    effects: [SafeFileRead(path)]
+    requires: true;
+    ensures: result >= 0;
+    body: {
+        perform SafeFileRead.read(path);
+        1
+    }

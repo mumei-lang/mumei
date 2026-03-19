@@ -210,6 +210,91 @@ atom fetch_all(url1: Str, url2: Str)
 ```
 
 ---
+## Path Safety Demo (`examples/path_safety.mm`)
+
+Demonstrates compile-time directory traversal prevention using parameterized effects with compound `&&` constraints:
+
+```mumei
+// Security policy: only /tmp/ paths, no ".." allowed
+effect SafeFileRead(path: Str) where starts_with(path, "/tmp/") && not_contains(path, "..");
+
+// SAFE: user_id is constrained — passes verification
+atom safe_read(user_id: Str)
+    effects: [SafeFileRead(path)]
+    requires: not_contains(user_id, "..") && not_contains(user_id, "\0");
+    ensures: result >= 0;
+    body: {
+        let path = "/tmp/" + user_id + "/log.txt";
+        perform SafeFileRead.read(path);
+        1
+    }
+
+// UNSAFE: user_id unconstrained — compile error
+atom unsafe_read(user_id: Str)
+    effects: [SafeFileRead(path)]
+    requires: true;
+    ensures: result >= 0;
+    body: {
+        let path = "/tmp/" + user_id + "/log.txt";
+        perform SafeFileRead.read(path);
+        1
+    }
+```
+
+### Verified Properties
+| Atom | Verification |
+|---|---|
+| `safe_read` | Path starts with `/tmp/`, no `..` traversal (Z3 String constraints) |
+| `unsafe_read` | **Rejected** — Z3 finds counterexample: `user_id = ".."` |
+
+---
+## Verified HTTP Server Demo (`examples/verified_server.mm`)
+
+Combines path safety with temporal effect verification for a mathematically verified HTTP server:
+
+```mumei
+effect SafeFileRead(path: Str) where starts_with(path, "/tmp/") && not_contains(path, "..");
+
+effect HttpServer
+    states: [Init, Bound, Listening, Responding];
+    initial: Init;
+    transition bind: Init -> Bound;
+    transition listen: Bound -> Listening;
+    transition accept: Listening -> Responding;
+    transition respond: Responding -> Listening;
+    transition close: Listening -> Init;
+
+// SAFE: constrained path + correct temporal ordering
+atom serve_safe_file(req_path: Str)
+    effects: [SafeFileRead(path), HttpServer]
+    requires: not_contains(req_path, "..") && not_contains(req_path, "\0");
+    ensures: result >= 0;
+    body: {
+        let path = "/tmp/public/" + req_path;
+        perform SafeFileRead.read(path);
+        1
+    }
+
+// Double response — compile error (temporal violation)
+atom double_respond(req: i64)
+    effects: [HttpServer]
+    requires: req > 0;
+    ensures: result >= 0;
+    body: {
+        perform HttpServer.respond(req);
+        perform HttpServer.respond(req);
+        1
+    }
+```
+
+### Verified Properties
+| Atom | Verification |
+|---|---|
+| `serve_safe_file` | Path safety (Z3 String) + temporal ordering |
+| `serve_unsafe_file` | **Rejected** — path traversal possible |
+| `double_respond` | **Rejected** — temporal violation (respond from Listening state) |
+
+---
 ## E2E Verification Tests
 
 | File | Tests |
