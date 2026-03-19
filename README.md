@@ -529,6 +529,8 @@ streamlit run visualizer/app.py
 
 [MCP + Rich Diagnostics Demo](https://github.com/user-attachments/assets/0f0594a4-8946-422c-9d54-bd81af45fc14)
 
+[Demo 2: Compound Constraint Decomposition (Path Safety)](docs/assets/demo2_compound_constraint_decomposition.mp4)
+
 [Visualizer Demo](https://github.com/user-attachments/assets/b36271b7-eeb0-452c-97ca-4045babd23a4)
 
 > The Visualizer is a monitoring tool for the E2E flow. Since AI completes its work via MCP responses alone (including Rich Diagnostics JSON with `sub_constraints`, `data_flow`, and `related_locations`), it does not depend on the Visualizer. Use it only when a human wants to observe.
