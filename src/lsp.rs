@@ -328,9 +328,19 @@ fn build_related_information(
             let source_text = r.src.inner().as_str();
             let byte_offset = r.span.offset();
             let (line, character) = byte_offset_to_line_col(source_text, byte_offset);
+            // Use the RelatedDiagnostic's own file name when available,
+            // falling back to the primary diagnostic's URI for same-file spans.
+            let related_uri = {
+                let name = r.src.name();
+                if !name.is_empty() && name != "<unknown>" {
+                    format!("file://{}", name)
+                } else {
+                    uri.to_string()
+                }
+            };
             serde_json::json!({
                 "location": {
-                    "uri": uri,
+                    "uri": related_uri,
                     "range": {
                         "start": { "line": line, "character": character },
                         "end": { "line": line, "character": character + 1 }
