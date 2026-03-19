@@ -6484,6 +6484,15 @@ fn expr_to_z3<'a>(
             // Use Z3 String Sort if the effect has Str-typed parameters,
             // since the operation may return a string (e.g., http_request_path).
             // Otherwise default to Int (status codes, handles, etc.).
+            //
+            // NOTE: This is a heuristic. Ideally, EffectDef would carry a
+            // per-operation return type (e.g., `read -> Str`, `write -> i64`),
+            // but the current parser does not record return types for effect
+            // operations. Using "any param is Str → result is Str" is a
+            // conservative approximation that prevents Z3 Sort mismatches when
+            // the perform result is later used in string operations. When the
+            // parser gains per-operation return type info, this heuristic
+            // should be replaced with a direct lookup.
             let result_name = format!("__perform_{}_{}", effect, operation);
             let has_str_params = effect_def
                 .as_ref()
