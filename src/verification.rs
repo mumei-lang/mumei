@@ -2213,6 +2213,13 @@ impl SecurityPolicy {
 fn evaluate_string_constraint(constraint_expr: &str, _param_name: &str, value: &str) -> bool {
     let trimmed = constraint_expr.trim();
 
+    // Compound constraint: split on && and check all sub-constraints
+    if trimmed.contains("&&") {
+        return trimmed
+            .split("&&")
+            .all(|part| evaluate_string_constraint(part.trim(), _param_name, value));
+    }
+
     // starts_with(param, "prefix")
     if let Some(inner) = trimmed.strip_prefix("starts_with(") {
         if let Some(inner) = inner.strip_suffix(')') {
@@ -2311,9 +2318,13 @@ fn parse_constraint_to_z3_string<'ctx>(
     if trimmed.contains("&&") {
         let parts: Vec<&str> = trimmed.split("&&").collect();
         let mut bools: Vec<Bool<'ctx>> = Vec::new();
-        for part in parts {
+        for part in &parts {
             if let Some(b) = parse_constraint_to_z3_string(ctx, part.trim(), param_z3) {
                 bools.push(b);
+            } else {
+                // Unrecognized sub-constraint — fail the entire compound to avoid
+                // silently weakening security constraints.
+                return None;
             }
         }
         if !bools.is_empty() {
@@ -4106,6 +4117,13 @@ fn verify_effect_consistency(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult
 /// 定数制約チェック（Constant Folding）。
 /// 定数パスに対する制約を Rust 側で直接検証する。
 fn check_constant_constraint(value: &str, constraint: &str) -> bool {
+    // Compound constraint: split on && and check all sub-constraints
+    if constraint.contains("&&") {
+        return constraint
+            .split("&&")
+            .all(|part| check_constant_constraint(value, part.trim()));
+    }
+
     // パーサーは "starts_with(path, \"/tmp/\")" のように2引数形式で制約を出力する。
     // 文字列引数（最後のクォートされた値）を抽出して検証する。
     let extract_string_arg = |c: &str| -> Option<String> {
@@ -6330,7 +6348,7 @@ fn expr_to_z3<'a>(
                         // by verify_effect_params (Phase 1g). Skip Z3 String here.
                         // Variables and other expressions need symbolic verification.
                         let is_constant =
-                            matches!(arg, Expr::Number(_) | Expr::Float(_) | Expr::StringLit(_));
+                            matches!(arg, Expr::Number(_) | Expr::Float(_));
                         if is_constant {
                             // Constant args are already checked by check_constant_constraint
                             // in verify_effect_params (Phase 1g). Skip Z3 String here.

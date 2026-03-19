@@ -138,7 +138,9 @@ pub extern "C" fn http_server_respond(req_handle: i64, status: i64, body: *const
     let body_str = unsafe { c_str_to_str(body) };
     let mut store = REQUEST_STORE.lock().unwrap();
     if let Some(req) = store.get_mut(&req_handle) {
-        if let Some(ref mut stream) = req.stream {
+        // Take the stream so that a second call to respond on the same handle
+        // will find None and return 0 (single-response enforcement at runtime).
+        if let Some(mut stream) = req.stream.take() {
             let status_text = match status {
                 200 => "OK",
                 201 => "Created",
