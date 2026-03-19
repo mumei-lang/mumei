@@ -129,8 +129,8 @@ Examples of rich error output powered by miette:
 3. **Expression-Level Dataflow Tracking**: ✅ Implemented — `Span` added to `Stmt` variants, `DataFlowEntry` struct for tracking data flow chains, included in semantic feedback JSON.
 4. **Snapshot tests**: Regression tests for miette output formatting
 5. **Enhanced LSP integration**: ✅ Implemented — LSP diagnostics include `relatedInformation` for multi-location errors via `build_related_information()` in `lsp.rs`.
-6. **RelatedDiagnostic precise line mapping**: `RelatedDiagnostic` currently stores only `miette::SourceSpan` (byte offset). In the LSP path, source text is not propagated to related diagnostics, so `relatedInformation` positions fall back to (0, 0). Fix: add `original_span: parser::Span` to `RelatedDiagnostic` and use it directly in `build_related_information()`. This also enables `with_source()` to selectively propagate source only to same-file related spans, preserving cross-file context.
-7. **Cross-file related diagnostics**: `with_source()` currently overwrites all `RelatedDiagnostic` entries with the primary file's source, losing cross-file span information. Requires `original_span` on `RelatedDiagnostic` to conditionally propagate.
+6. **RelatedDiagnostic precise line mapping**: ✅ Implemented — `original_span: parser::Span` added to `RelatedDiagnostic`. LSP `build_related_information()` reads line/col directly from `original_span` without depending on source text.
+7. **Cross-file related diagnostics**: ✅ Implemented — `with_source()` now only overwrites same-file related diagnostics (matching by `original_span.file`), preserving cross-file span context. `SourceSpan` is recomputed from source text for same-file spans.
 
 ## Design Principles
 

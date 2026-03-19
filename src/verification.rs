@@ -28,6 +28,10 @@ pub struct RelatedDiagnostic {
     #[label("{label}")]
     pub span: SourceSpan,
     pub label: String,
+    /// Original parser::Span (line/col) for LSP line mapping.
+    /// Miette's SourceSpan is a byte offset that requires source text to resolve;
+    /// this field allows LSP to read line/col directly without source text.
+    pub original_span: Span,
 }
 
 
@@ -370,15 +374,19 @@ impl MumeiError {
                 ..
             } => {
                 // Propagate source to related diagnostics that share the same file.
-                // TODO: This unconditionally overwrites all related diagnostics' source to
-                // the primary file. Cross-file related spans (e.g., constraint defined in
-                // std/file.mm) lose their original file context. Fix by adding
-                // `original_span: parser::Span` to RelatedDiagnostic and only overwriting
-                // when the related span's file matches the primary file (or is "<unknown>").
+                // Only overwrite when the related span's file matches the primary file
+                // (or is "<unknown>"), preserving cross-file span context.
                 let updated_related = related.into_iter().map(|r| {
-                    RelatedDiagnostic {
-                        src: miette::NamedSource::new(file_name, source.to_string()),
-                        ..r
+                    let r_file = r.original_span.file.as_str();
+                    if r_file.is_empty() || r_file == "<unknown>" || r_file == file_name {
+                        let recomputed_span = span_to_source_span(source, &r.original_span);
+                        RelatedDiagnostic {
+                            src: miette::NamedSource::new(file_name, source.to_string()),
+                            span: recomputed_span,
+                            ..r
+                        }
+                    } else {
+                        r
                     }
                 }).collect();
                 MumeiError::VerificationError {
@@ -398,9 +406,16 @@ impl MumeiError {
                 ..
             } => {
                 let updated_related = related.into_iter().map(|r| {
-                    RelatedDiagnostic {
-                        src: miette::NamedSource::new(file_name, source.to_string()),
-                        ..r
+                    let r_file = r.original_span.file.as_str();
+                    if r_file.is_empty() || r_file == "<unknown>" || r_file == file_name {
+                        let recomputed_span = span_to_source_span(source, &r.original_span);
+                        RelatedDiagnostic {
+                            src: miette::NamedSource::new(file_name, source.to_string()),
+                            span: recomputed_span,
+                            ..r
+                        }
+                    } else {
+                        r
                     }
                 }).collect();
                 MumeiError::CodegenError {
@@ -420,9 +435,16 @@ impl MumeiError {
                 ..
             } => {
                 let updated_related = related.into_iter().map(|r| {
-                    RelatedDiagnostic {
-                        src: miette::NamedSource::new(file_name, source.to_string()),
-                        ..r
+                    let r_file = r.original_span.file.as_str();
+                    if r_file.is_empty() || r_file == "<unknown>" || r_file == file_name {
+                        let recomputed_span = span_to_source_span(source, &r.original_span);
+                        RelatedDiagnostic {
+                            src: miette::NamedSource::new(file_name, source.to_string()),
+                            span: recomputed_span,
+                            ..r
+                        }
+                    } else {
+                        r
                     }
                 }).collect();
                 MumeiError::TypeError {
@@ -496,12 +518,14 @@ impl MumeiError {
         label: String,
         src: miette::NamedSource<String>,
         msg: String,
+        original_span: Span,
     ) -> Self {
         let diag = RelatedDiagnostic {
             msg,
             src,
             span: related_span,
             label,
+            original_span,
         };
         match &mut self {
             MumeiError::VerificationError { related, .. } => related.push(diag),
@@ -5634,6 +5658,7 @@ fn verify_inner(
                                 String::new(),
                             ),
                             format!("type constraint: {}", mapping.predicate_raw),
+                            mapping.span.clone(),
                         );
                     }
                 }

@@ -312,16 +312,10 @@ fn verify_source_for_lsp(
 /// Feature 3f: Extract related diagnostic information from MumeiError for LSP relatedInformation.
 /// Maps RelatedDiagnostic entries to LSP DiagnosticRelatedInformation format.
 ///
-/// Known limitation: RelatedDiagnostic currently only stores a miette SourceSpan (byte offset)
-/// and the source text may be empty when `with_source()` has not been called (which is the case
-/// in the LSP path — `verify_source_for_lsp` does not call `with_source()`). When source text
-/// is empty, `byte_offset_to_line_col` returns (0, 0) for all related spans.
-///
-/// TODO: Add `original_span: parser::Span` to `RelatedDiagnostic` (mirroring `MumeiError`'s
-/// pattern) so that line/col can be resolved directly without depending on source text.
-/// This also fixes the `with_source()` issue where all related diagnostics are overwritten
-/// to the primary file's source, losing cross-file span information.
-/// See: https://github.com/mumei-lang/mumei/issues/XXX
+/// Uses `RelatedDiagnostic.original_span` (parser::Span with 1-indexed line/col) for precise
+/// positioning. This works even when source text is empty (e.g., in the LSP path where
+/// `with_source()` has not been called), because line/col are resolved directly from the
+/// parser Span without needing to scan source text.
 fn build_related_information(
     uri: &str,
     error: &verification::MumeiError,
@@ -334,19 +328,32 @@ fn build_related_information(
     related_spans
         .iter()
         .map(|r| {
-            // Convert byte offset from SourceSpan to 0-indexed line/character
-            // by scanning the source text stored in the RelatedDiagnostic.
-            let source_text = r.src.inner().as_str();
-            let byte_offset = r.span.offset();
-            let (line, character) = byte_offset_to_line_col(source_text, byte_offset);
+            // Use original_span (parser::Span) for line/col resolution.
+            // parser::Span is 1-indexed; LSP expects 0-indexed.
+            let (line, character) = if r.original_span.line > 0 {
+                (
+                    r.original_span.line.saturating_sub(1),
+                    r.original_span.col.saturating_sub(1),
+                )
+            } else {
+                // Fallback: try byte offset conversion from source text
+                let source_text = r.src.inner().as_str();
+                let byte_offset = r.span.offset();
+                byte_offset_to_line_col(source_text, byte_offset)
+            };
             // Use the RelatedDiagnostic's own file name when available,
             // falling back to the primary diagnostic's URI for same-file spans.
             let related_uri = {
-                let name = r.src.name();
-                if !name.is_empty() && name != "<unknown>" {
+                let name = r.original_span.file.as_str();
+                if !name.is_empty() {
                     format!("file://{}", name)
                 } else {
-                    uri.to_string()
+                    let src_name = r.src.name();
+                    if !src_name.is_empty() && src_name != "<unknown>" {
+                        format!("file://{}", src_name)
+                    } else {
+                        uri.to_string()
+                    }
                 }
             };
             serde_json::json!({
