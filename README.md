@@ -529,7 +529,7 @@ streamlit run visualizer/app.py
 
 [MCP + Rich Diagnostics Demo](https://github.com/user-attachments/assets/0f0594a4-8946-422c-9d54-bd81af45fc14)
 
-[Demo 2: Compound Constraint Decomposition (Path Safety)](docs/assets/demo2_compound_constraint_decomposition.mp4)
+[Demo 2: Compound Constraint Decomposition (Path Safety)](https://github.com/user-attachments/assets/cc5f7d93-a759-418d-9b46-520500c38672)
 
 [Visualizer Demo](https://github.com/user-attachments/assets/b36271b7-eeb0-452c-97ca-4045babd23a4)
 
