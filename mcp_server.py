@@ -97,6 +97,21 @@ def _format_semantic_feedback(report_json: str) -> str:
             parts.append(f"  - {explanation}")
         if suggestion:
             parts.append(f"  - Suggestion: {suggestion}")
+        # Sub-constraint decomposition display
+        sub_constraints = vc.get("sub_constraints", [])
+        if sub_constraints:
+            for sc in sub_constraints:
+                sc_idx = sc.get("index", 0)
+                sc_total = len(sub_constraints)
+                sc_raw = sc.get("raw", "")
+                sc_satisfied = sc.get("satisfied", False)
+                sc_explanation = sc.get("explanation", "")
+                status_icon = "\u2705" if sc_satisfied else "\u274c"
+                status_text = "satisfied" if sc_satisfied else "violated"
+                line = f"  - Sub-constraint [{sc_idx + 1}/{sc_total}] `{sc_raw}`: {status_icon} {status_text}"
+                if not sc_satisfied and sc_explanation:
+                    line += f" \u2014 {sc_explanation}"
+                parts.append(line)
 
     # Unsat core: conflicting constraints (contradiction detection)
     conflicting = feedback.get("conflicting_constraints", [])
@@ -136,6 +151,33 @@ def _format_semantic_feedback(report_json: str) -> str:
         parts.append(f"- Attempted effect: `{feedback.get('attempted_effect', '?')}`")
         parts.append(f"- Allowed effects: {feedback.get('allowed_effects', [])}")
         parts.append(f"- Missing effects: {feedback.get('missing_effects', [])}")
+
+    # Data flow display (Feature 2e)
+    data_flow = feedback.get("data_flow", [])
+    if data_flow:
+        parts.append("\n**Data Flow:**")
+        for entry in data_flow:
+            step = entry.get("step", "?")
+            line = entry.get("line", 0)
+            col = entry.get("col", 0)
+            desc = entry.get("description", "")
+            constraint = entry.get("constraint", "")
+            flow_line = f"- [{step}] line {line}:{col}"
+            if desc:
+                flow_line += f" — {desc}"
+            if constraint:
+                flow_line += f" (constraint: `{constraint}`)"
+            parts.append(flow_line)
+
+    # Related locations display (Feature 3g)
+    related_locations = feedback.get("related_locations", [])
+    if related_locations:
+        parts.append("\n**Related Locations:**")
+        for loc in related_locations:
+            loc_file = loc.get("file", "?")
+            loc_line = loc.get("line", 0)
+            loc_label = loc.get("label", "")
+            parts.append(f"- {loc_file}:{loc_line} — {loc_label}")
 
     ctx = feedback.get("context", {})
     if ctx:
@@ -190,6 +232,9 @@ def _build_machine_readable(report: dict, feedback: dict) -> "dict | None":
                 "current_value": vc.get("value", ""),
                 "constraint": vc.get("constraint", ""),
             }
+            # Include sub_constraints in machine-readable output
+            if vc.get("sub_constraints"):
+                action["sub_constraints"] = vc["sub_constraints"]
             actions.append(action)
         result["actions"] = actions
 
@@ -200,6 +245,16 @@ def _build_machine_readable(report: dict, feedback: dict) -> "dict | None":
     if conflicting:
         result["conflicting_constraints"] = conflicting
         result["raw_unsat_core"] = feedback.get("raw_unsat_core", [])
+
+    # Include data_flow in machine-readable output (Feature 2e)
+    data_flow = feedback.get("data_flow", [])
+    if data_flow:
+        result["data_flow"] = data_flow
+
+    # Include related_locations in machine-readable output (Feature 3g)
+    related_locations = feedback.get("related_locations", [])
+    if related_locations:
+        result["related_locations"] = related_locations
 
     result["suggestion"] = report.get("suggestion", "")
     return result

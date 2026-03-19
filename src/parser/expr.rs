@@ -5,6 +5,7 @@
 use super::pattern::parse_pattern;
 use super::token::Token;
 use super::ParseContext;
+use crate::parser::ast::Span;
 use crate::parser::{Expr, JoinSemantics, LambdaParam, MatchArm, Op, Stmt};
 
 /// Pratt parser binding power for binary operators.
@@ -348,7 +349,7 @@ fn parse_prefix(ctx: &mut ParseContext) -> Expr {
             let body = if ctx.peek() == &Token::LBrace {
                 parse_block_or_stmt(ctx)
             } else {
-                Stmt::Expr(parse_expr(ctx, 0))
+                Stmt::Expr(parse_expr(ctx, 0), Span::default())
             };
             Expr::Lambda {
                 params,
@@ -435,16 +436,17 @@ fn parse_match_arm_body(ctx: &mut ParseContext) -> Stmt {
     if ctx.peek() == &Token::LBrace {
         parse_block_or_stmt(ctx)
     } else if ctx.peek() == &Token::Match || ctx.peek() == &Token::If {
-        Stmt::Expr(parse_expr(ctx, 0))
+        Stmt::Expr(parse_expr(ctx, 0), Span::default())
     } else {
         // Parse at binding power 3, above => (l_bp=1) so => is not consumed
-        Stmt::Expr(parse_expr(ctx, 3))
+        Stmt::Expr(parse_expr(ctx, 3), Span::default())
     }
 }
 
 /// Parse a block or single statement.
 pub fn parse_block_or_stmt(ctx: &mut ParseContext) -> Stmt {
     if ctx.peek() == &Token::LBrace {
+        let span = ctx.current_span();
         ctx.advance(); // {
         let mut stmts = Vec::new();
         while ctx.peek() != &Token::RBrace && ctx.peek() != &Token::Eof {
@@ -456,7 +458,7 @@ pub fn parse_block_or_stmt(ctx: &mut ParseContext) -> Stmt {
         if ctx.peek() == &Token::RBrace {
             ctx.advance();
         }
-        Stmt::Block(stmts)
+        Stmt::Block(stmts, span)
     } else {
         parse_statement(ctx)
     }
@@ -464,6 +466,7 @@ pub fn parse_block_or_stmt(ctx: &mut ParseContext) -> Stmt {
 
 /// Parse a single statement.
 pub fn parse_statement(ctx: &mut ParseContext) -> Stmt {
+    let stmt_span = ctx.current_span();
     match ctx.peek().clone() {
         Token::Let => {
             ctx.advance();
@@ -475,6 +478,7 @@ pub fn parse_statement(ctx: &mut ParseContext) -> Stmt {
             Stmt::Let {
                 var,
                 value: Box::new(value),
+                span: stmt_span,
             }
         }
 
@@ -502,6 +506,7 @@ pub fn parse_statement(ctx: &mut ParseContext) -> Stmt {
                     invariant: Box::new(inv),
                     decreases,
                     body: Box::new(body),
+                    span: stmt_span,
                 }
             } else {
                 panic!("Mumei loops require an 'invariant'.");
@@ -515,6 +520,7 @@ pub fn parse_statement(ctx: &mut ParseContext) -> Stmt {
             Stmt::Acquire {
                 resource,
                 body: Box::new(body),
+                span: stmt_span,
             }
         }
 
@@ -542,7 +548,7 @@ pub fn parse_statement(ctx: &mut ParseContext) -> Stmt {
                 JoinSemantics::All
             };
             let body = parse_block_or_stmt(ctx);
-            let children = if let Stmt::Block(stmts) = body {
+            let children = if let Stmt::Block(stmts, _) = body {
                 stmts
             } else {
                 vec![body]
@@ -550,6 +556,7 @@ pub fn parse_statement(ctx: &mut ParseContext) -> Stmt {
             Stmt::TaskGroup {
                 children,
                 join_semantics,
+                span: stmt_span,
             }
         }
 
@@ -569,6 +576,7 @@ pub fn parse_statement(ctx: &mut ParseContext) -> Stmt {
             Stmt::Task {
                 body: Box::new(body),
                 group,
+                span: stmt_span,
             }
         }
 
@@ -576,7 +584,7 @@ pub fn parse_statement(ctx: &mut ParseContext) -> Stmt {
         Token::Cancel => {
             ctx.advance();
             let target = ctx.expect_ident();
-            Stmt::Cancel { target }
+            Stmt::Cancel { target, span: stmt_span }
         }
 
         // Check for assignment: ident = expr
@@ -595,9 +603,10 @@ pub fn parse_statement(ctx: &mut ParseContext) -> Stmt {
                 Stmt::Assign {
                     var: name_clone,
                     value: Box::new(value),
+                    span: stmt_span,
                 }
             } else {
-                Stmt::Expr(parse_expr(ctx, 0))
+                Stmt::Expr(parse_expr(ctx, 0), stmt_span)
             }
         }
 
@@ -619,9 +628,10 @@ pub fn parse_statement(ctx: &mut ParseContext) -> Stmt {
                 Stmt::Assign {
                     var: name,
                     value: Box::new(value),
+                    span: stmt_span,
                 }
             } else {
-                Stmt::Expr(parse_expr(ctx, 0))
+                Stmt::Expr(parse_expr(ctx, 0), stmt_span)
             }
         }
     }

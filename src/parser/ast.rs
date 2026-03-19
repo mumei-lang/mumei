@@ -214,37 +214,60 @@ pub enum Stmt {
     Let {
         var: String,
         value: Box<Expr>,
+        span: Span,
     },
     Assign {
         var: String,
         value: Box<Expr>,
+        span: Span,
     },
-    Block(Vec<Stmt>),
+    Block(Vec<Stmt>, Span),
     While {
         cond: Box<Expr>,
         invariant: Box<Expr>,
         decreases: Option<Box<Expr>>,
         body: Box<Stmt>,
+        span: Span,
     },
     Acquire {
         resource: String,
         body: Box<Stmt>,
+        span: Span,
     },
     Task {
         body: Box<Stmt>,
         group: Option<String>,
+        span: Span,
     },
     TaskGroup {
         children: Vec<Stmt>,
         join_semantics: JoinSemantics,
+        span: Span,
     },
     // Plan 8: Cancel statement — `cancel task_group_name;`
     // NOTE: Cancel is constructed by the parser when `cancel` keyword is encountered.
     #[allow(dead_code)]
     Cancel {
         target: String,
+        span: Span,
     },
-    Expr(Expr),
+    Expr(Expr, Span),
+}
+
+impl Stmt {
+    /// Get the Span associated with this statement.
+    pub fn span(&self) -> &Span {
+        match self {
+            Stmt::Let { span, .. }
+            | Stmt::Assign { span, .. }
+            | Stmt::While { span, .. }
+            | Stmt::Acquire { span, .. }
+            | Stmt::Task { span, .. }
+            | Stmt::TaskGroup { span, .. }
+            | Stmt::Cancel { span, .. } => span,
+            Stmt::Block(_, span) | Stmt::Expr(_, span) => span,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

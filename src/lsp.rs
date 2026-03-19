@@ -207,7 +207,9 @@ fn diagnose(uri: &str, source: &str) -> Vec<serde_json::Value> {
                 // Span が不明な場合、atom の Span にフォールバック
                 find_error_position(&items, &detail.message)
             };
-            diagnostics.push(serde_json::json!({
+            // Feature 3f: Build relatedInformation from MumeiError's #[related] field
+            let related_info = build_related_information(uri, &e);
+            let mut diag = serde_json::json!({
                 "range": {
                     "start": { "line": line, "character": col },
                     "end": { "line": line, "character": col + 1 }
@@ -215,7 +217,11 @@ fn diagnose(uri: &str, source: &str) -> Vec<serde_json::Value> {
                 "severity": 1,
                 "source": "mumei-z3",
                 "message": format!("{}", detail)
-            }));
+            });
+            if !related_info.is_empty() {
+                diag["relatedInformation"] = serde_json::json!(related_info);
+            }
+            diagnostics.push(diag);
         }
     }
 
@@ -301,6 +307,37 @@ fn verify_source_for_lsp(
     }
 
     Ok(())
+}
+
+/// Feature 3f: Extract related diagnostic information from MumeiError for LSP relatedInformation.
+/// Maps RelatedDiagnostic entries to LSP DiagnosticRelatedInformation format.
+fn build_related_information(
+    uri: &str,
+    error: &verification::MumeiError,
+) -> Vec<serde_json::Value> {
+    let related_spans = match error {
+        verification::MumeiError::VerificationError { related, .. }
+        | verification::MumeiError::CodegenError { related, .. }
+        | verification::MumeiError::TypeError { related, .. } => related,
+    };
+    related_spans
+        .iter()
+        .map(|r| {
+            // Use the RelatedDiagnostic's source span offset to approximate line/col.
+            // Since we store SourceSpan (byte offset), we approximate using offset 0.
+            let offset = r.span.offset();
+            serde_json::json!({
+                "location": {
+                    "uri": uri,
+                    "range": {
+                        "start": { "line": offset, "character": 0 },
+                        "end": { "line": offset, "character": 1 }
+                    }
+                },
+                "message": format!("{}: {}", r.label, r.msg)
+            })
+        })
+        .collect()
 }
 
 /// Hover 用: 指定行付近の atom を探し、requires/ensures を markdown で返す

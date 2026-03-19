@@ -75,6 +75,15 @@ impl ParseContext {
         self.pos
     }
 
+    /// Get a Span from the current token position.
+    pub fn current_span(&self) -> crate::parser::Span {
+        if let Some(tok) = self.tokens.get(self.pos) {
+            crate::parser::Span::new("", tok.line, tok.col, tok.len)
+        } else {
+            crate::parser::Span::default()
+        }
+    }
+
     pub fn expect_ident(&mut self) -> String {
         match self.peek().clone() {
             Token::Ident(s) => {

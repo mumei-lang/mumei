@@ -487,16 +487,16 @@ pub fn lower_stmt_with_env(
     module_env: Option<&crate::verification::ModuleEnv>,
 ) -> HirStmt {
     match stmt {
-        Stmt::Let { var, value } => HirStmt::Let {
+        Stmt::Let { var, value, .. } => HirStmt::Let {
             var: var.clone(),
             ty: None, // TODO: type inference
             value: Box::new(lower_expr_with_env(value, module_env)),
         },
-        Stmt::Assign { var, value } => HirStmt::Assign {
+        Stmt::Assign { var, value, .. } => HirStmt::Assign {
             var: var.clone(),
             value: Box::new(lower_expr_with_env(value, module_env)),
         },
-        Stmt::Block(stmts) => {
+        Stmt::Block(stmts, _) => {
             if stmts.is_empty() {
                 HirStmt::Block {
                     stmts: vec![],
@@ -527,6 +527,7 @@ pub fn lower_stmt_with_env(
             invariant,
             decreases,
             body,
+            ..
         } => HirStmt::While {
             cond: Box::new(lower_expr_with_env(cond, module_env)),
             invariant: Box::new(lower_expr_with_env(invariant, module_env)),
@@ -535,17 +536,18 @@ pub fn lower_stmt_with_env(
                 .map(|d| Box::new(lower_expr_with_env(d, module_env))),
             body: Box::new(lower_stmt_with_env(body, module_env)),
         },
-        Stmt::Acquire { resource, body } => HirStmt::Acquire {
+        Stmt::Acquire { resource, body, .. } => HirStmt::Acquire {
             resource: resource.clone(),
             body: Box::new(lower_stmt_with_env(body, module_env)),
         },
-        Stmt::Task { body, group } => HirStmt::Expr(HirExpr::Task {
+        Stmt::Task { body, group, .. } => HirStmt::Expr(HirExpr::Task {
             body: Box::new(lower_stmt_with_env(body, module_env)),
             group: group.clone(),
         }),
         Stmt::TaskGroup {
             children,
             join_semantics,
+            ..
         } => HirStmt::Expr(HirExpr::TaskGroup {
             children: children
                 .iter()
@@ -554,12 +556,12 @@ pub fn lower_stmt_with_env(
             join_semantics: join_semantics.clone(),
         }),
         // Plan 8: Cancel statement lowering
-        Stmt::Cancel { target } => HirStmt::Expr(HirExpr::Call {
+        Stmt::Cancel { target, .. } => HirStmt::Expr(HirExpr::Call {
             name: format!("__cancel_{}", target),
             args: vec![],
             callee_effects: None,
         }),
-        Stmt::Expr(expr) => HirStmt::Expr(lower_expr_with_env(expr, module_env)),
+        Stmt::Expr(expr, _) => HirStmt::Expr(lower_expr_with_env(expr, module_env)),
     }
 }
 
