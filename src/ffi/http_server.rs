@@ -31,6 +31,10 @@ lazy_static::lazy_static! {
     static ref NEXT_REQUEST_HANDLE: Mutex<i64> = Mutex::new(1);
 }
 
+/// Allocate a C string result. Delegates to json::alloc_string_result which
+/// uses CString::into_raw() (leaked memory). For a long-running HTTP server,
+/// repeated calls to http_request_path/http_request_method will leak memory.
+/// New code should prefer mumei_str_alloc() with managed lifetime.
 fn alloc_string_result(s: &str) -> *const c_char {
     super::json::alloc_string_result(s)
 }

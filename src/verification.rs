@@ -6515,6 +6515,14 @@ fn expr_to_z3<'a>(
             // the perform result is later used in string operations. When the
             // parser gains per-operation return type info, this heuristic
             // should be replaced with a direct lookup.
+            //
+            // IMPACT: This changes the return type for pre-existing effects
+            // with Str params (e.g., HttpGet(url: Str), HttpPost(url: Str))
+            // from Int to Z3String. No current code is broken because all
+            // atoms discard the perform result (e.g., `perform X.op(url); 1`).
+            // Future code that uses the perform result in an integer context
+            // (e.g., `let x = perform HttpGet.request(url); x + 1`) would get
+            // a Z3 Sort mismatch error.
             let result_name = format!("__perform_{}_{}", effect, operation);
             let has_str_params = vc
                 .module_env
