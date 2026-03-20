@@ -113,6 +113,12 @@ enum Command {
         /// Output path for proof certificate (default: <input>.proof.json)
         #[arg(long)]
         output: Option<String>,
+        /// Directory to write report.json into (default: current directory)
+        #[arg(long)]
+        report_dir: Option<String>,
+        /// Output verification report as JSON to stdout
+        #[arg(long)]
+        json: bool,
     },
     /// Parse + resolve + monomorphize only (no Z3, fast syntax check)
     Check {
@@ -205,8 +211,16 @@ fn main() {
             input,
             proof_cert,
             output,
+            report_dir,
+            json,
         }) => {
-            cmd_verify(&input, proof_cert, output.as_deref());
+            cmd_verify(
+                &input,
+                proof_cert,
+                output.as_deref(),
+                report_dir.as_deref(),
+                json,
+            );
         }
         Some(Command::Check { input }) => {
             cmd_check(&input);
@@ -350,7 +364,7 @@ fn load_and_prepare(input: &str) -> (Vec<Item>, verification::ModuleEnv, Vec<Imp
     mono.collect(&items);
     let items = if mono.has_generics() {
         let mono_items = mono.monomorphize(&items, Some(&module_env));
-        println!(
+        eprintln!(
             "  🔬 Monomorphization: {} generic instance(s) expanded.",
             mono.instances().len()
         );
@@ -410,10 +424,12 @@ fn load_and_prepare(input: &str) -> (Vec<Item>, verification::ModuleEnv, Vec<Imp
                         effects: vec![],
                         return_type: Some(ext_fn.return_type.clone()),
                         span: ext_fn.span.clone(),
+                        effect_pre: std::collections::HashMap::new(),
+                        effect_post: std::collections::HashMap::new(),
                     };
                     module_env.register_atom(&atom);
                 }
-                println!(
+                eprintln!(
                     "  🔗 FFI Bridge: registered {} extern function(s) from \"{}\" block",
                     extern_block.functions.len(),
                     extern_block.language
@@ -505,12 +521,27 @@ fn cmd_check(input: &str) {
 // mumei verify — Z3 verification only (no codegen, no transpile)
 // =============================================================================
 
-fn cmd_verify(input: &str, generate_proof_cert: bool, cert_output: Option<&str>) {
+fn cmd_verify(
+    input: &str,
+    generate_proof_cert: bool,
+    cert_output: Option<&str>,
+    report_dir: Option<&str>,
+    json_output: bool,
+) {
     check_z3_available();
-    println!("🗡️  Mumei verify: verifying '{}'...", input);
+    if !json_output {
+        println!("🗡️  Mumei verify: verifying '{}'...", input);
+    }
     let (items, mut module_env, _imports, source) = load_and_prepare(input);
 
-    let output_dir = Path::new(".");
+    let output_dir = match report_dir {
+        Some(dir) => Path::new(dir),
+        None => Path::new("."),
+    };
+    // Ensure report directory exists when explicitly specified
+    if report_dir.is_some() {
+        let _ = std::fs::create_dir_all(output_dir);
+    }
     let input_path = Path::new(input);
     let base_dir = input_path.parent().unwrap_or(Path::new("."));
     let mut verified = 0;
@@ -536,36 +567,46 @@ fn cmd_verify(input: &str, generate_proof_cert: bool, cert_output: Option<&str>)
     for item in &items {
         match item {
             Item::ImplDef(impl_def) => {
-                println!(
-                    "  🔧 Verifying impl {} for {}...",
-                    impl_def.trait_name, impl_def.target_type
-                );
+                if !json_output {
+                    println!(
+                        "  🔧 Verifying impl {} for {}...",
+                        impl_def.trait_name, impl_def.target_type
+                    );
+                }
                 match verification::verify_impl(impl_def, &module_env, output_dir) {
                     Ok(_) => {
-                        println!("    ✅ Laws verified");
+                        if !json_output {
+                            println!("    ✅ Laws verified");
+                        }
                         verified += 1;
                     }
                     Err(e) => {
-                        let resolved = resolve_source_for_span(&source, &impl_def.span);
-                        let e = e.with_source(&resolved, &impl_def.span);
-                        eprintln!("{:?}", miette::Report::new(e));
+                        if !json_output {
+                            let resolved = resolve_source_for_span(&source, &impl_def.span);
+                            let e = e.with_source(&resolved, &impl_def.span);
+                            eprintln!("{:?}", miette::Report::new(e));
+                        }
                         failed += 1;
                     }
                 }
             }
             Item::Atom(atom) => {
                 if module_env.is_verified(&atom.name) {
-                    println!(
-                        "  ⚖️  '{}': skipped (imported, contract-trusted)",
-                        atom.name
-                    );
+                    if !json_output {
+                        println!(
+                            "  ⚖️  '{}': skipped (imported, contract-trusted)",
+                            atom.name
+                        );
+                    }
                 } else {
                     // Feature 2: Use compute_proof_hash with dependency-aware hashing
                     let proof_hash = resolver::compute_proof_hash(atom, &module_env);
 
                     if let Some(cached_entry) = verification_cache.get(&atom.name) {
                         if cached_entry.proof_hash == proof_hash {
-                            println!("  ⚖️  '{}': skipped (unchanged, cached) ⏩", atom.name);
+                            if !json_output {
+                                println!("  ⚖️  '{}': skipped (unchanged, cached) ⏩", atom.name);
+                            }
                             module_env.mark_verified(&atom.name);
                             // Plan 11B: Record cached atoms as "unsat" (proven) for proof certificate
                             cert_results.insert(
@@ -607,7 +648,9 @@ fn cmd_verify(input: &str, generate_proof_cert: bool, cert_output: Option<&str>)
 
                     match verification::verify(&hir_atom, output_dir, &module_env) {
                         Ok(_) => {
-                            println!("  ⚖️  '{}': verified ✅", atom.name);
+                            if !json_output {
+                                println!("  ⚖️  '{}': verified ✅", atom.name);
+                            }
                             module_env.mark_verified(&atom.name);
                             // Plan 11B: Record "unsat" (proven) for proof certificate
                             cert_results.insert(
@@ -633,9 +676,11 @@ fn cmd_verify(input: &str, generate_proof_cert: bool, cert_output: Option<&str>)
                             verified += 1;
                         }
                         Err(e) => {
-                            let resolved = resolve_source_for_span(&source, &atom.span);
-                            let e = e.with_source(&resolved, &atom.span);
-                            eprintln!("{:?}", miette::Report::new(e));
+                            if !json_output {
+                                let resolved = resolve_source_for_span(&source, &atom.span);
+                                let e = e.with_source(&resolved, &atom.span);
+                                eprintln!("{:?}", miette::Report::new(e));
+                            }
                             // Plan 11B: Record "sat" (counter-example found) for proof certificate
                             cert_results.insert(
                                 atom.name.clone(),
@@ -680,29 +725,57 @@ fn cmd_verify(input: &str, generate_proof_cert: bool, cert_output: Option<&str>)
         };
         match proof_cert::save_certificate(&cert, &cert_path) {
             Ok(()) => {
-                println!("  📜 Proof certificate written to: {}", cert_path.display());
+                if !json_output {
+                    println!("  📜 Proof certificate written to: {}", cert_path.display());
+                }
             }
             Err(e) => {
-                eprintln!("  ⚠️  Failed to write proof certificate: {}", e);
+                if !json_output {
+                    eprintln!("  ⚠️  Failed to write proof certificate: {}", e);
+                }
             }
         }
     }
 
-    println!();
-    if failed > 0 {
-        eprintln!(
-            "❌ Verification: {} passed, {} failed, {} skipped (cached)",
-            verified, failed, skipped
-        );
-        std::process::exit(1);
-    }
-    if skipped > 0 {
-        println!(
-            "✅ Verification passed: {} verified, {} skipped (unchanged) ⚡",
-            verified, skipped
-        );
+    // Proposal B: --json outputs report.json content to stdout
+    if json_output {
+        let report_path = output_dir.join("report.json");
+        if report_path.exists() {
+            match std::fs::read_to_string(&report_path) {
+                Ok(content) => println!("{}", content),
+                Err(e) => {
+                    eprintln!("Failed to read report.json: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        } else {
+            // No report.json produced — emit minimal JSON status
+            let status = if failed > 0 { "failed" } else { "passed" };
+            println!(
+                "{{\"status\":\"{}\",\"verified\":{},\"failed\":{},\"skipped\":{}}}",
+                status, verified, failed, skipped
+            );
+        }
+        if failed > 0 {
+            std::process::exit(1);
+        }
     } else {
-        println!("✅ Verification passed: {} item(s) verified", verified);
+        println!();
+        if failed > 0 {
+            eprintln!(
+                "❌ Verification: {} passed, {} failed, {} skipped (cached)",
+                verified, failed, skipped
+            );
+            std::process::exit(1);
+        }
+        if skipped > 0 {
+            println!(
+                "✅ Verification passed: {} verified, {} skipped (unchanged) ⚡",
+                verified, skipped
+            );
+        } else {
+            println!("✅ Verification passed: {} item(s) verified", verified);
+        }
     }
 }
 
@@ -2046,6 +2119,8 @@ fn cmd_repl() {
                                     effects: vec![],
                                     return_type: Some(ext_fn.return_type.clone()),
                                     span: ext_fn.span.clone(),
+                                    effect_pre: std::collections::HashMap::new(),
+                                    effect_post: std::collections::HashMap::new(),
                                 };
                                 module_env.register_atom(&atom);
                                 count += 1;
@@ -2913,6 +2988,8 @@ atom main() -> i64
                             effects: vec![],
                             return_type: Some(ext_fn.return_type.clone()),
                             span: ext_fn.span.clone(),
+                            effect_pre: std::collections::HashMap::new(),
+                            effect_post: std::collections::HashMap::new(),
                         };
                         module_env.register_atom(&atom);
                     }

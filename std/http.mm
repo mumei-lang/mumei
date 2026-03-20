@@ -171,3 +171,13 @@ atom free(handle: i64)
     body: {
         http_free(handle)
     }
+
+// =============================================================
+// Plan 23: HTTPS-only Variants (Secure HTTP)
+// =============================================================
+// SecureHttpGet/SecureHttpPost enforce HTTPS URLs at compile time
+// via starts_with(url, "https://") constraint.
+// Existing HttpGet/HttpPost remain for backward compatibility.
+
+effect SecureHttpGet(url: Str) where starts_with(url, "https://");
+effect SecureHttpPost(url: Str) where starts_with(url, "https://");

@@ -688,6 +688,30 @@ impl Monomorphizer {
             effects: mono_effects,
             return_type: generic.return_type.clone(),
             span: generic.span.clone(),
+            effect_pre: generic
+                .effect_pre
+                .iter()
+                .map(|(k, v)| {
+                    let new_key = if let Some(concrete) = type_map.get(k) {
+                        concrete.name.clone()
+                    } else {
+                        k.clone()
+                    };
+                    (new_key, v.clone())
+                })
+                .collect(),
+            effect_post: generic
+                .effect_post
+                .iter()
+                .map(|(k, v)| {
+                    let new_key = if let Some(concrete) = type_map.get(k) {
+                        concrete.name.clone()
+                    } else {
+                        k.clone()
+                    };
+                    (new_key, v.clone())
+                })
+                .collect(),
         })
     }
 

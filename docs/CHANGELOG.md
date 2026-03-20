@@ -2,6 +2,57 @@
 
 ---
 
+### Proposal A: `--report-dir` option for `mumei verify`
+
+- Added `--report-dir <dir>` CLI option to `mumei verify` to specify report.json output directory
+- Eliminates race condition when multiple concurrent verify calls write to the same cwd
+- Creates the target directory automatically when `--report-dir` is specified
+- Updated `mcp_server.py` to use `--report-dir` in all verify call sites (`validate_logic`, `execute_mm`, `self_heal_with_effects`)
+- Backward compatible: defaults to current directory when `--report-dir` is omitted
+
+### Proposal B: `--json` option for `mumei verify`
+
+- Added `--json` flag to `mumei verify` for stdout JSON output
+- When `--json` is active, all human-readable output (emoji, miette diagnostics) is suppressed
+- Informational messages in `load_and_prepare` (monomorphization, FFI Bridge) use `eprintln!` to avoid stdout corruption
+- Outputs report.json content to stdout, or minimal JSON status if no report file is produced
+- Enables pipeline integration: `mumei verify --json file.mm | jq '.semantic_feedback'`
+- Follows same pattern as existing `cmd_inspect_file --json` implementation
+
+### Plan 22: PII Data Pipeline Example
+
+- Added `examples/pii_pipeline.mm`: Valid PII anonymization pipeline demonstrating compile-time enforcement
+- Added `examples/pii_pipeline_error.mm`: Intentionally invalid pipeline showing `InvalidPreState` detection
+- Added `tests/test_pii_pipeline.mm`: E2E integration test for PII pipeline
+- Added 3 unit tests in `src/mir_analysis.rs` for DataPipeline state machine verification
+
+### Plan 23: Regex Path Policies + URL Validation
+
+- Added `RegexSafeFileRead(path: Str) where matches(path, "^/tmp/[a-z]+/.*")` to `std/effects.mm`
+- Added `SecureHttpGet`/`SecureHttpPost` with `starts_with(url, "https://")` constraint to `std/http.mm`
+- Added `examples/regex_path_policy.mm`: Regex-based path constraint demo
+- Added `examples/secure_http.mm`: HTTPS enforcement demo
+- Added `tests/test_regex_policy.mm`: E2E test for regex path validation
+- Added `tests/test_url_validation.mm`: E2E test for URL validation
+- Improved Z3 regex approximation: exact match (`^literal$`) and prefix+suffix (`^prefix.*suffix$`) patterns
+
+### Plan 24: Modular Verification (effect_pre / effect_post)
+
+- Added `effect_pre`/`effect_post` fields to `Atom` struct in `src/parser/ast.rs`
+- Added parser support for `effect_pre: { Key: Value };` / `effect_post: { Key: Value };` syntax
+- Updated all Atom construction sites across codebase (main.rs, resolver.rs, ast.rs, mir.rs, mir_analysis.rs, verification.rs)
+- `effect_pre` overrides initial state of state machines during temporal verification
+- `effect_post` checked against exit states; mismatch emits `UnexpectedFinalState` error
+- Invalid state names in `effect_pre`/`effect_post` now produce hard errors (not silently ignored)
+- Missing state machines emit warnings; missing exit states (no perform ops) emit warnings
+- Monomorphizer substitutes effect type variables in `effect_pre`/`effect_post` keys (e.g., `{ E: Closed }` → `{ FileWrite: Closed }`)
+- Added 3 unit tests for modular verification in `src/mir_analysis.rs`
+- Added 3 parser tests for effect_pre/effect_post in `src/parser/mod.rs`
+- Added `tests/test_modular_verification.mm`: E2E test with File effect contracts (includes NOTE about cross-atom composition limitation)
+- Updated `docs/ARCHITECTURE.md`: "Modular Verification (Future)" → "Modular Verification (Implemented)"
+
+---
+
 ## PR #83: Plans 15–20 — Examples, FFI Memory, Str Migration, Codegen Types, MIR Migration, Z3 Integration
 
 ### Summary

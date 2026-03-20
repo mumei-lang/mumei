@@ -332,6 +332,8 @@ fn register_imported_items(items: &[Item], alias: Option<&str>, module_env: &mut
                         effects: vec![],
                         return_type: Some(ext_fn.return_type.clone()),
                         span: ext_fn.span.clone(),
+                        effect_pre: std::collections::HashMap::new(),
+                        effect_post: std::collections::HashMap::new(),
                     };
                     module_env.register_atom(&atom);
                     if let Some(prefix) = alias {

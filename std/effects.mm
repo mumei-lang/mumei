@@ -74,3 +74,9 @@ effect FullAccess includes: [IO, NetworkIO, Network, Log];
 //   perform File.write(x);  // OK: Open -> Open
 //   perform File.close(x);  // OK: Open -> Closed
 //   perform File.write(x);  // ERROR: InvalidPreState (expected Open, got Closed)
+
+// --- Regex-based Path Policy (Plan 23) ---
+// Regex-constrained effect: only /tmp/ with lowercase directory names.
+// The matches() constraint uses Rust regex for constant paths and
+// Z3 String Sort approximation for symbolic paths.
+effect RegexSafeFileRead(path: Str) where matches(path, "^/tmp/[a-z]+/.*");

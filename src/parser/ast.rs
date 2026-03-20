@@ -6,6 +6,7 @@
 // This file contains all the core data structures used by the parser.
 
 use crate::ast::TypeRef;
+use std::collections::HashMap;
 
 // --- 0. Source position information (Span) ---
 
@@ -245,7 +246,8 @@ pub enum Stmt {
         span: Span,
     },
     // Plan 8: Cancel statement — `cancel task_group_name;`
-    // NOTE: Cancel is constructed by the parser when `cancel` keyword is encountered.
+    // NOTE: Cancel is constructed by the parser when `cancel` keyword is encountered
+    // but not yet used in verification/codegen pipelines.
     #[allow(dead_code)]
     Cancel {
         target: String,
@@ -256,6 +258,8 @@ pub enum Stmt {
 
 impl Stmt {
     /// Get the Span associated with this statement.
+    // NOTE: span() is infrastructure for future diagnostic passes that need statement-level source locations.
+    #[allow(dead_code)]
     pub fn span(&self) -> &Span {
         match self {
             Stmt::Let { span, .. }
@@ -378,13 +382,12 @@ pub struct Atom {
     /// Plan 18: Explicit return type annotation (e.g., `-> Str`). Defaults to None (i64).
     pub return_type: Option<String>,
     pub span: Span,
-    // TODO: Task 3 future extension — Modular Verification with effect pre/post state.
-    // When atom A calls atom B and B uses a stateful effect, A needs to know
-    // B's effect state contract (pre-state and post-state) to verify temporal ordering.
-    //   pub effect_pre: HashMap<String, String>,   // effect_name → required pre-state
-    //   pub effect_post: HashMap<String, String>,   // effect_name → guaranteed post-state
-    // This enables modular verification: each atom is verified independently using
-    // its own pre/post contracts, without analyzing the full CFG across call boundaries.
+    /// Modular Verification: required effect pre-states
+    /// e.g., { "File" => "Open" } means File must be in Open state before this atom
+    pub effect_pre: HashMap<String, String>,
+    /// Modular Verification: guaranteed effect post-states
+    /// e.g., { "File" => "Closed" } means File will be in Closed state after this atom
+    pub effect_post: HashMap<String, String>,
 }
 
 // =============================================================================

@@ -34,7 +34,6 @@ pub struct RelatedDiagnostic {
     pub original_span: Span,
 }
 
-
 /// エラーの詳細情報。ソース位置（Span）と修正提案（suggestion）を保持する。
 #[derive(Debug, Clone)]
 pub struct ErrorDetail {
@@ -376,19 +375,22 @@ impl MumeiError {
                 // Propagate source to related diagnostics that share the same file.
                 // Only overwrite when the related span's file matches the primary file
                 // (or is "<unknown>"), preserving cross-file span context.
-                let updated_related = related.into_iter().map(|r| {
-                    let r_file = r.original_span.file.as_str();
-                    if r_file.is_empty() || r_file == "<unknown>" || r_file == file_name {
-                        let recomputed_span = span_to_source_span(source, &r.original_span);
-                        RelatedDiagnostic {
-                            src: miette::NamedSource::new(file_name, source.to_string()),
-                            span: recomputed_span,
-                            ..r
+                let updated_related = related
+                    .into_iter()
+                    .map(|r| {
+                        let r_file = r.original_span.file.as_str();
+                        if r_file.is_empty() || r_file == "<unknown>" || r_file == file_name {
+                            let recomputed_span = span_to_source_span(source, &r.original_span);
+                            RelatedDiagnostic {
+                                src: miette::NamedSource::new(file_name, source.to_string()),
+                                span: recomputed_span,
+                                ..r
+                            }
+                        } else {
+                            r
                         }
-                    } else {
-                        r
-                    }
-                }).collect();
+                    })
+                    .collect();
                 MumeiError::VerificationError {
                     msg,
                     src: named_src,
@@ -397,7 +399,7 @@ impl MumeiError {
                     original_span,
                     related: updated_related,
                 }
-            },
+            }
             MumeiError::CodegenError {
                 msg,
                 help,
@@ -405,19 +407,22 @@ impl MumeiError {
                 related,
                 ..
             } => {
-                let updated_related = related.into_iter().map(|r| {
-                    let r_file = r.original_span.file.as_str();
-                    if r_file.is_empty() || r_file == "<unknown>" || r_file == file_name {
-                        let recomputed_span = span_to_source_span(source, &r.original_span);
-                        RelatedDiagnostic {
-                            src: miette::NamedSource::new(file_name, source.to_string()),
-                            span: recomputed_span,
-                            ..r
+                let updated_related = related
+                    .into_iter()
+                    .map(|r| {
+                        let r_file = r.original_span.file.as_str();
+                        if r_file.is_empty() || r_file == "<unknown>" || r_file == file_name {
+                            let recomputed_span = span_to_source_span(source, &r.original_span);
+                            RelatedDiagnostic {
+                                src: miette::NamedSource::new(file_name, source.to_string()),
+                                span: recomputed_span,
+                                ..r
+                            }
+                        } else {
+                            r
                         }
-                    } else {
-                        r
-                    }
-                }).collect();
+                    })
+                    .collect();
                 MumeiError::CodegenError {
                     msg,
                     src: named_src,
@@ -426,7 +431,7 @@ impl MumeiError {
                     original_span,
                     related: updated_related,
                 }
-            },
+            }
             MumeiError::TypeError {
                 msg,
                 help,
@@ -434,19 +439,22 @@ impl MumeiError {
                 related,
                 ..
             } => {
-                let updated_related = related.into_iter().map(|r| {
-                    let r_file = r.original_span.file.as_str();
-                    if r_file.is_empty() || r_file == "<unknown>" || r_file == file_name {
-                        let recomputed_span = span_to_source_span(source, &r.original_span);
-                        RelatedDiagnostic {
-                            src: miette::NamedSource::new(file_name, source.to_string()),
-                            span: recomputed_span,
-                            ..r
+                let updated_related = related
+                    .into_iter()
+                    .map(|r| {
+                        let r_file = r.original_span.file.as_str();
+                        if r_file.is_empty() || r_file == "<unknown>" || r_file == file_name {
+                            let recomputed_span = span_to_source_span(source, &r.original_span);
+                            RelatedDiagnostic {
+                                src: miette::NamedSource::new(file_name, source.to_string()),
+                                span: recomputed_span,
+                                ..r
+                            }
+                        } else {
+                            r
                         }
-                    } else {
-                        r
-                    }
-                }).collect();
+                    })
+                    .collect();
                 MumeiError::TypeError {
                     msg,
                     src: named_src,
@@ -455,7 +463,7 @@ impl MumeiError {
                     original_span,
                     related: updated_related,
                 }
-            },
+            }
         }
     }
 
@@ -751,6 +759,7 @@ pub fn evaluate_sub_constraint(sub_pred: &str, value: &str) -> bool {
 
     // Simple comparison patterns: v >= N, v <= N, v > N, v < N, v != N
     // Try to parse as numeric comparison
+    #[allow(clippy::type_complexity)]
     let comparisons: Vec<(&str, fn(i64, i64) -> bool)> = vec![
         (">=", (|a, b| a >= b) as fn(i64, i64) -> bool),
         ("<=", |a, b| a <= b),
@@ -1146,12 +1155,8 @@ pub fn build_semantic_feedback(
                 .enumerate()
                 .map(|(idx, sub)| {
                     let satisfied = evaluate_sub_constraint(sub, value);
-                    let sub_explanation = constraint_to_natural_language(
-                        &mapping.param_name,
-                        type_name,
-                        sub,
-                        value,
-                    );
+                    let sub_explanation =
+                        constraint_to_natural_language(&mapping.param_name, type_name, sub, value);
                     json!({
                         "index": idx,
                         "raw": sub,
@@ -2762,6 +2767,29 @@ fn parse_constraint_to_z3_string<'ctx>(
                 if is_literal(substr) {
                     let substr_z3 = Z3String::from_str(ctx, substr).ok()?;
                     return Some(param_z3.contains(&substr_z3));
+                }
+            }
+            // Plan 23: Exact match — ^literal$ (no metacharacters) → eq(param, "literal")
+            if stripped.starts_with('^') && stripped.ends_with('$') && stripped.len() > 2 {
+                let literal = &stripped[1..stripped.len() - 1];
+                if is_literal(literal) {
+                    let literal_z3 = Z3String::from_str(ctx, literal).ok()?;
+                    return Some(param_z3._eq(&literal_z3));
+                }
+            }
+            // Plan 23: Prefix + suffix — ^prefix.*suffix$ → starts_with && ends_with
+            if stripped.starts_with('^') && stripped.ends_with('$') && stripped.contains(".*") {
+                let inner = &stripped[1..stripped.len() - 1];
+                if let Some(dot_star_pos) = inner.find(".*") {
+                    let prefix = &inner[..dot_star_pos];
+                    let suffix = &inner[dot_star_pos + 2..];
+                    if is_literal(prefix) && is_literal(suffix) && !suffix.is_empty() {
+                        let prefix_z3 = Z3String::from_str(ctx, prefix).ok()?;
+                        let suffix_z3 = Z3String::from_str(ctx, suffix).ok()?;
+                        let prefix_check = prefix_z3.prefix(param_z3);
+                        let suffix_check = suffix_z3.suffix(param_z3);
+                        return Some(Bool::and(ctx, &[&prefix_check, &suffix_check]));
+                    }
                 }
             }
             // For complex regex patterns, Z3 String Sort cannot directly verify;
@@ -4905,6 +4933,25 @@ fn verify_inner(
             }
         }
 
+        // Modular Verification: Override initial states from effect_pre contracts
+        for (effect_name, pre_state) in &atom.effect_pre {
+            if let Some(sm) = state_machines.get_mut(effect_name) {
+                if sm.states.contains(pre_state) {
+                    sm.initial_state = pre_state.clone();
+                } else {
+                    return Err(MumeiError::verification(format!(
+                        "effect_pre: state '{}' is not a valid state for effect '{}' (valid states: {:?})",
+                        pre_state, effect_name, sm.states
+                    )));
+                }
+            } else {
+                eprintln!(
+                    "  ⚠️  effect_pre: no state machine found for effect '{}' (stateless effects are ignored)",
+                    effect_name
+                );
+            }
+        }
+
         if !state_machines.is_empty() && mir_body.check_analysis_budget().is_ok() {
             let temporal_result =
                 crate::mir_analysis::analyze_temporal_effects(&mir_body, &state_machines);
@@ -5036,10 +5083,58 @@ fn verify_inner(
                     crate::mir_analysis::TemporalViolationKind::UnexpectedFinalState => {
                         // Hard error: effect left in unexpected state at exit
                         return Err(MumeiError::verification(format!(
-                            "Temporal effect violation: '{}' is in state '{}' at function exit, \
-                             expected '{}' (block {})",
+                            "Temporal effect violation: effect '{}' has final state '{}' \
+                             but effect_post declares '{}' (block {})",
                             v.effect, v.actual_state, v.expected_state, v.block_id
                         )));
+                    }
+                }
+            }
+
+            // Modular Verification: Check effect_post contracts against exit states
+            if !atom.effect_post.is_empty() {
+                for (effect_name, expected_post) in &atom.effect_post {
+                    // Validate that the effect has a state machine
+                    if !state_machines.contains_key(effect_name) {
+                        eprintln!(
+                            "  ⚠️  effect_post: no state machine found for effect '{}' (stateless effects are ignored)",
+                            effect_name
+                        );
+                        continue;
+                    }
+                    // Validate that the expected post-state is a valid state
+                    if let Some(sm) = state_machines.get(effect_name) {
+                        if !sm.states.contains(expected_post) {
+                            return Err(MumeiError::verification(format!(
+                                "effect_post: state '{}' is not a valid state for effect '{}' (valid states: {:?})",
+                                expected_post, effect_name, sm.states
+                            )));
+                        }
+                    }
+                    // Find the exit state for this effect from the last basic block(s)
+                    // that have a Return terminator
+                    let mut found_exit = false;
+                    for (block_id, exit_map) in &temporal_result.exit_states {
+                        let block = &mir_body.blocks[*block_id];
+                        if matches!(block.terminator, crate::mir::Terminator::Return(_)) {
+                            if let Some(actual_state) = exit_map.get(effect_name) {
+                                found_exit = true;
+                                if actual_state != expected_post {
+                                    return Err(MumeiError::verification(format!(
+                                        "Temporal effect violation: effect '{}' has final state '{}' \
+                                         but effect_post declares '{}' (block {})",
+                                        effect_name, actual_state, expected_post, block_id
+                                    )));
+                                }
+                            }
+                        }
+                    }
+                    if !found_exit {
+                        eprintln!(
+                            "  ⚠️  effect_post: effect '{}' has no tracked exit state \
+                             (no perform operations for this effect in the body)",
+                            effect_name
+                        );
                     }
                 }
             }
@@ -5654,7 +5749,11 @@ fn verify_inner(
                             related_src_span,
                             format!("constraint on '{}' defined here", mapping.param_name),
                             miette::NamedSource::new(
-                                if mapping.span.file.is_empty() { "<unknown>" } else { &mapping.span.file },
+                                if mapping.span.file.is_empty() {
+                                    "<unknown>"
+                                } else {
+                                    &mapping.span.file
+                                },
                                 String::new(),
                             ),
                             format!("type constraint: {}", mapping.predicate_raw),
@@ -6754,8 +6853,7 @@ fn expr_to_z3<'a>(
                         // Number/Float literals are constants already checked
                         // by verify_effect_params (Phase 1g). Skip Z3 String here.
                         // Variables and other expressions need symbolic verification.
-                        let is_constant =
-                            matches!(arg, Expr::Number(_) | Expr::Float(_));
+                        let is_constant = matches!(arg, Expr::Number(_) | Expr::Float(_));
                         if is_constant {
                             // Constant args are already checked by check_constant_constraint
                             // in verify_effect_params (Phase 1g). Skip Z3 String here.
@@ -6881,11 +6979,7 @@ fn expr_to_z3<'a>(
                 .effect_defs
                 .get(effect.as_str())
                 .or_else(|| vc.module_env.effects.get(effect.as_str()))
-                .map(|def| {
-                    def.params
-                        .iter()
-                        .any(|p| p.type_name == "Str")
-                })
+                .map(|def| def.params.iter().any(|p| p.type_name == "Str"))
                 .unwrap_or(false);
             if has_str_params {
                 Ok(Z3String::new_const(ctx, result_name.as_str()).into())
@@ -8812,6 +8906,8 @@ mod tests {
             effects: vec![],
             return_type: None,
             span: Span::default(),
+            effect_pre: std::collections::HashMap::new(),
+            effect_post: std::collections::HashMap::new(),
         };
         let feedback = build_semantic_feedback(
             &mappings,
