@@ -58,39 +58,43 @@ jobs:
           sudo apt-get install -y llvm-17-dev libclang-17-dev libpolly-17-dev
           echo "LLVM_SYS_170_PREFIX=/usr/lib/llvm-17" >> $GITHUB_ENV
           echo "LIBCLANG_PATH=/usr/lib/llvm-17/lib" >> $GITHUB_ENV
-      # Plan 7: musl static linking dependencies
-      # Z3 is built from source by z3-sys via the `static-link-z3` Cargo feature.
-      # This avoids the glibc/musl incompatibility of apt's libz3-dev.
-      # LLVM 17 headers are still needed for llvm-sys bindings generation.
-      - name: Install system dependencies (Ubuntu musl)
+      # Plan 7: musl static linking — build inside Alpine Docker container.
+      # apt's LLVM/Z3 are compiled against glibc and cannot be linked into a
+      # musl binary.  Alpine provides musl-native packages for both.
+      - name: Build release binary (musl via Alpine Docker)
         if: contains(matrix.target, 'musl')
         run: |
-          sudo apt-get update
-          sudo apt-get install -y musl-tools pkg-config libssl-dev libzstd-dev cmake
-          # LLVM 17 from official apt repo (headers + static libs for llvm-sys)
-          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
-          codename=$(lsb_release -cs)
-          echo "deb http://apt.llvm.org/${codename}/ llvm-toolchain-${codename}-17 main" | sudo tee /etc/apt/sources.list.d/llvm-17.list > /dev/null
-          sudo apt-get update
-          sudo apt-get install -y llvm-17-dev libclang-17-dev libpolly-17-dev
-          echo "LLVM_SYS_170_PREFIX=/usr/lib/llvm-17" >> $GITHUB_ENV
-          echo "LIBCLANG_PATH=/usr/lib/llvm-17/lib" >> $GITHUB_ENV
-          echo "CC=musl-gcc" >> $GITHUB_ENV
-          # Use system g++ as CXX compiler for Z3 source build (musl-tools does not ship a C++ compiler)
-          echo "CXX=g++" >> $GITHUB_ENV
-          echo "RUSTFLAGS=-C target-feature=+crt-static" >> $GITHUB_ENV
-      # Cache the Z3 source build (takes ~15 min without cache)
-      - name: Cache Cargo build artifacts (musl)
-        if: contains(matrix.target, 'musl')
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: musl-z3-static-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            musl-z3-static-
+          docker run --rm \
+            -v "${GITHUB_WORKSPACE}:/workspace" \
+            -w /workspace \
+            alpine:3.21 sh -c '
+              set -ex
+              # Install musl-native build dependencies
+              apk add --no-cache \
+                gcc g++ musl-dev make cmake pkgconf \
+                llvm17-dev llvm17-static clang17-dev \
+                z3-dev \
+                curl bash perl linux-headers \
+                libffi-dev zlib-dev zlib-static \
+                zstd-dev zstd-static \
+                ncurses-dev libxml2-dev \
+                openssl-dev openssl-libs-static
+
+              # Install Rust inside the container
+              curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+              export PATH="/root/.cargo/bin:$PATH"
+              rustup target add x86_64-unknown-linux-musl
+
+              # Point llvm-sys / z3-sys at Alpine packages
+              export LLVM_SYS_170_PREFIX=/usr/lib/llvm17
+              export LIBCLANG_PATH=/usr/lib/llvm17/lib
+
+              # Build fully-static musl binary
+              # Use --features z3/static-link-z3 to build Z3 from source with
+              # musl-native g++ (Alpine z3-dev headers help cmake find deps)
+              cargo build --release --target x86_64-unknown-linux-musl \
+                --features z3/static-link-z3
+            '
       - name: Install system dependencies (macOS)
         if: runner.os == 'macOS'
         run: |
@@ -100,16 +104,37 @@ jobs:
           echo "Z3_SYS_Z3_HEADER=$(brew --prefix z3)/include/z3.h" >> $GITHUB_ENV
           echo "Z3_SYS_Z3_LIB_DIR=$(brew --prefix z3)/lib" >> $GITHUB_ENV
       # Plan 7: Windows dependencies
+      # Download LLVM 17 directly from GitHub releases and install to a
+      # dedicated directory.  This avoids conflicts with the newer LLVM that
+      # may be pre-installed on the runner image (choco --force is unreliable
+      # when the existing install was not managed by Chocolatey).
       - name: Install system dependencies (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          # Install LLVM 17 via Chocolatey
-          # Use --force --allow-downgrade because the runner may have a newer LLVM pre-installed
-          choco install llvm --version=17.0.6 -y --force --allow-downgrade
-          $llvmPath = "C:\Program Files\LLVM"
-          echo "LLVM_SYS_170_PREFIX=$llvmPath" >> $env:GITHUB_ENV
-          echo "LIBCLANG_PATH=$llvmPath\lib" >> $env:GITHUB_ENV
+          # Download LLVM 17 installer directly from upstream
+          $llvmVersion = "17.0.6"
+          $llvmUrl = "https://github.com/llvm/llvm-project/releases/download/llvmorg-$llvmVersion/LLVM-$llvmVersion-win64.exe"
+          $installerPath = "$env:RUNNER_TEMP\LLVM-$llvmVersion-win64.exe"
+          Write-Host "Downloading LLVM $llvmVersion ..."
+          # Suppress progress bar to speed up download in CI
+          $ProgressPreference = 'SilentlyContinue'
+          Invoke-WebRequest -Uri $llvmUrl -OutFile $installerPath
+          # Install to a clean directory separate from the pre-installed LLVM
+          $llvmDir = "C:\LLVM17"
+          Write-Host "Installing LLVM $llvmVersion to $llvmDir ..."
+          Start-Process -Wait -FilePath $installerPath -ArgumentList "/S /D=$llvmDir"
+          # Verify installation
+          $llvmConfig = "$llvmDir\bin\llvm-config.exe"
+          if (Test-Path $llvmConfig) {
+            $ver = & $llvmConfig --version
+            Write-Host "LLVM installed: $ver"
+          } else {
+            Write-Host "WARNING: llvm-config not found at $llvmConfig, listing $llvmDir"
+            Get-ChildItem -Path $llvmDir -Recurse -Depth 2 | Select-Object FullName
+          }
+          echo "LLVM_SYS_170_PREFIX=$llvmDir" >> $env:GITHUB_ENV
+          echo "LIBCLANG_PATH=$llvmDir\lib" >> $env:GITHUB_ENV
           # Install Z3 pre-built release (faster than vcpkg source build)
           $z3Version = "4.13.4"
           $z3Archive = "z3-$z3Version-x64-win"
@@ -121,7 +146,8 @@ jobs:
           echo "Z3_SYS_Z3_HEADER=$z3Root\include\z3.h" >> $env:GITHUB_ENV
           echo "Z3_SYS_Z3_LIB_DIR=$z3Root\bin" >> $env:GITHUB_ENV
       - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }} ${{ contains(matrix.target, 'musl') && '--features z3/static-link-z3' || '' }}
+        if: "!contains(matrix.target, 'musl')"
+        run: cargo build --release --target ${{ matrix.target }}
       # Plan 7: Verify musl binary is statically linked
       - name: Verify static linking (musl)
         if: contains(matrix.target, 'musl')
