@@ -324,7 +324,8 @@ Improve the practicality of `task` / `task_group` introduced in PR-C.
   - `src/resolver.rs`: `resolve_imports_recursive`, `register_imported_items`
   - `src/lsp.rs`: `verify_source_for_lsp`
 - When adding `Item::EffectDef`, ensure match arms exist in all locations listed above.
-- When constructing `Atom` instances (including extern → atom conversion), always include `effects: vec![]` as default.
+- When constructing `Atom` instances (including extern → atom conversion), always include `effects: vec![]` as default. Also include `effect_pre: std::collections::HashMap::new(), effect_post: std::collections::HashMap::new()` for modular verification fields.
+- The `effect_pre` / `effect_post` syntax in `.mm` files: `effect_pre: { EffectName: StateName };` `effect_post: { EffectName: StateName };` — parsed as `HashMap<String, String>`. Default is empty HashMap if omitted.
 - When using `#[allow(dead_code)]`, always add a NOTE comment explaining the reason.
 
 ---

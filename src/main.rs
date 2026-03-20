@@ -410,6 +410,8 @@ fn load_and_prepare(input: &str) -> (Vec<Item>, verification::ModuleEnv, Vec<Imp
                         effects: vec![],
                         return_type: Some(ext_fn.return_type.clone()),
                         span: ext_fn.span.clone(),
+                        effect_pre: std::collections::HashMap::new(),
+                        effect_post: std::collections::HashMap::new(),
                     };
                     module_env.register_atom(&atom);
                 }
@@ -2046,6 +2048,8 @@ fn cmd_repl() {
                                     effects: vec![],
                                     return_type: Some(ext_fn.return_type.clone()),
                                     span: ext_fn.span.clone(),
+                                    effect_pre: std::collections::HashMap::new(),
+                                    effect_post: std::collections::HashMap::new(),
                                 };
                                 module_env.register_atom(&atom);
                                 count += 1;
@@ -2913,6 +2917,8 @@ atom main() -> i64
                             effects: vec![],
                             return_type: Some(ext_fn.return_type.clone()),
                             span: ext_fn.span.clone(),
+                            effect_pre: std::collections::HashMap::new(),
+                            effect_post: std::collections::HashMap::new(),
                         };
                         module_env.register_atom(&atom);
                     }

@@ -1247,6 +1247,10 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
     let mut invariant: Option<String> = None;
     let mut effects: Vec<Effect> = Vec::new();
     let mut contracts: Vec<(String, Option<String>, Option<String>)> = Vec::new();
+    let mut effect_pre: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    let mut effect_post: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
 
     loop {
         match ctx.peek().clone() {
@@ -1349,6 +1353,19 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
                 let (fn_req, fn_ens) = parse_contract_clauses(&clauses);
                 contracts.push((param_name, fn_req, fn_ens));
             }
+            Token::Ident(ref s) if s == "effect_pre" || s == "effect_post" => {
+                let is_pre = s == "effect_pre";
+                ctx.advance();
+                ctx.expect(Token::Colon);
+                // Parse { EffectName: StateName, EffectName2: StateName2 }
+                let map = parse_effect_state_map(ctx);
+                ctx.expect(Token::Semicolon);
+                if is_pre {
+                    effect_pre = map;
+                } else {
+                    effect_post = map;
+                }
+            }
             Token::Atom
             | Token::Async
             | Token::Trusted
@@ -1399,7 +1416,34 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
         effects,
         return_type,
         span: span_from_token(start_tok),
+        effect_pre,
+        effect_post,
     }
+}
+
+/// Parse a { Key: Value, Key2: Value2 } map for effect_pre/effect_post.
+fn parse_effect_state_map(ctx: &mut ParseContext) -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    if ctx.peek() != &Token::LBrace {
+        return map;
+    }
+    ctx.advance(); // consume '{'
+    loop {
+        if ctx.peek() == &Token::RBrace || ctx.peek() == &Token::Eof {
+            break;
+        }
+        let key = ctx.expect_ident();
+        ctx.expect(Token::Colon);
+        let value = ctx.expect_ident();
+        map.insert(key, value);
+        if ctx.peek() == &Token::Comma {
+            ctx.advance();
+        } else {
+            break;
+        }
+    }
+    ctx.expect(Token::RBrace);
+    map
 }
 
 // =============================================================================

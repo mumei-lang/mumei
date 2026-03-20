@@ -688,6 +688,8 @@ impl Monomorphizer {
             effects: mono_effects,
             return_type: generic.return_type.clone(),
             span: generic.span.clone(),
+            effect_pre: generic.effect_pre.clone(),
+            effect_post: generic.effect_post.clone(),
         })
     }
 

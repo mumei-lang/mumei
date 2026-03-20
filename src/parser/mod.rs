@@ -1406,4 +1406,69 @@ effect Connection
         assert_eq!(effects[0].initial_state, Some("Disconnected".to_string()));
         assert!(effects[0].transitions.is_empty());
     }
+
+    // =========================================================================
+    // Parser tests for effect_pre / effect_post (Plan 24)
+    // =========================================================================
+
+    #[test]
+    fn test_parse_effect_pre_single() {
+        let source = r#"
+atom open_file(x: i64)
+    effects: [File];
+    effect_pre: { File: Open };
+    requires: x >= 0;
+    ensures: result >= 0;
+    body: { x };
+"#;
+        let items = parse_module(source);
+        let atoms: Vec<_> = items
+            .iter()
+            .filter_map(|i| if let Item::Atom(a) = i { Some(a) } else { None })
+            .collect();
+        assert_eq!(atoms.len(), 1);
+        assert_eq!(atoms[0].effect_pre.len(), 1);
+        assert_eq!(atoms[0].effect_pre.get("File").unwrap(), "Open");
+        assert!(atoms[0].effect_post.is_empty());
+    }
+
+    #[test]
+    fn test_parse_effect_post_multiple() {
+        let source = r#"
+atom close_all(x: i64)
+    effects: [File, Db];
+    effect_post: { File: Closed, Db: Connected };
+    requires: x >= 0;
+    ensures: result >= 0;
+    body: { x };
+"#;
+        let items = parse_module(source);
+        let atoms: Vec<_> = items
+            .iter()
+            .filter_map(|i| if let Item::Atom(a) = i { Some(a) } else { None })
+            .collect();
+        assert_eq!(atoms.len(), 1);
+        assert!(atoms[0].effect_pre.is_empty());
+        assert_eq!(atoms[0].effect_post.len(), 2);
+        assert_eq!(atoms[0].effect_post.get("File").unwrap(), "Closed");
+        assert_eq!(atoms[0].effect_post.get("Db").unwrap(), "Connected");
+    }
+
+    #[test]
+    fn test_parse_effect_pre_post_omitted_backward_compat() {
+        let source = r#"
+atom simple(x: i64)
+    requires: x >= 0;
+    ensures: result >= 0;
+    body: { x };
+"#;
+        let items = parse_module(source);
+        let atoms: Vec<_> = items
+            .iter()
+            .filter_map(|i| if let Item::Atom(a) = i { Some(a) } else { None })
+            .collect();
+        assert_eq!(atoms.len(), 1);
+        assert!(atoms[0].effect_pre.is_empty());
+        assert!(atoms[0].effect_post.is_empty());
+    }
 }

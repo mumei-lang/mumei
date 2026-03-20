@@ -987,8 +987,8 @@ pub enum TemporalViolationKind {
     /// Different branches produce different effect states at a merge point
     ConflictingState,
     /// Effect is in unexpected state at function exit (e.g., file left Open)
-    // NOTE: UnexpectedFinalState is reserved for future modular verification when
-    // effect_pre/effect_post contracts specify expected final states at function exit.
+    /// Used by modular verification when effect_post contracts specify expected final states.
+    /// NOTE: Not constructed in MIR analysis; checked in verification.rs via exit_states comparison.
     #[allow(dead_code)]
     UnexpectedFinalState,
 }
@@ -1215,7 +1215,7 @@ pub fn analyze_temporal_effects(
 mod tests {
     use super::*;
     use crate::hir::lower_atom_to_hir;
-    use crate::mir::{lower_hir_to_mir, BasicBlock, LocalDecl, Terminator};
+    use crate::mir::{lower_hir_to_mir, BasicBlock, LocalDecl, MirConstant, Terminator};
     use crate::parser::{self, Atom, Param, Span, TrustLevel};
 
     /// Helper: create a minimal Atom with given body expression and params.
@@ -1238,6 +1238,8 @@ mod tests {
             effects: vec![],
             return_type: None,
             span: Span::new("", 1, 1, 0),
+            effect_pre: std::collections::HashMap::new(),
+            effect_post: std::collections::HashMap::new(),
         }
     }
 
@@ -2906,5 +2908,157 @@ mod tests {
             "ConflictingState should be at block 3 (merge point)"
         );
         assert_eq!(conflict_violations[0].effect, "DataPipeline");
+    }
+
+    // =========================================================================
+    // Modular Verification (effect_pre / effect_post) tests — Plan 24
+    // =========================================================================
+
+    fn make_file_effect_sm() -> EffectStateMachine {
+        let def = make_file_effect_def();
+        EffectStateMachine::from_effect_def(&def).unwrap()
+    }
+
+    #[test]
+    fn test_modular_verification_valid_chain() {
+        // Two atoms with matching pre/post contracts called in sequence — no violations.
+        // open_file: effect_pre={File:Closed}, effect_post={File:Open}
+        //   body: perform File.open
+        // We verify open_file body with initial state overridden to Closed.
+        let mut sm = make_file_effect_sm();
+        // Override initial state per effect_pre: File=Closed (already default)
+        sm.initial_state = "Closed".to_string();
+
+        let body = MirBody {
+            name: "test_modular_valid".to_string(),
+            locals: vec![LocalDecl {
+                local: Local(0),
+                name: Some("_ret".to_string()),
+                ty: None,
+                movability: Movability::Move,
+            }],
+            blocks: vec![BasicBlock {
+                id: 0,
+                statements: vec![MirStatement::Assign(
+                    Place::Local(Local(0)),
+                    Rvalue::Perform {
+                        effect: "File".to_string(),
+                        operation: "open".to_string(),
+                        args: vec![],
+                    },
+                )],
+                terminator: Terminator::Return(Operand::Constant(MirConstant::Int(0))),
+            }],
+            entry_block: 0,
+        };
+        let mut machines = HashMap::new();
+        machines.insert("File".to_string(), sm);
+        let result = analyze_temporal_effects(&body, &machines);
+        assert!(
+            result.violations.is_empty(),
+            "open_file body with effect_pre={{File:Closed}} should have no violations"
+        );
+        // Check exit state is Open (matching effect_post)
+        if let Some(exit_map) = result.exit_states.get(&0) {
+            assert_eq!(exit_map.get("File").unwrap(), "Open");
+        }
+    }
+
+    #[test]
+    fn test_modular_verification_pre_mismatch() {
+        // Caller's current state doesn't match callee's effect_pre — InvalidPreState.
+        // Atom declares effect_pre={File:Open} but body starts with File.open
+        // which requires Closed state. We override initial to Open (per effect_pre).
+        let mut sm = make_file_effect_sm();
+        sm.initial_state = "Open".to_string(); // effect_pre says File must be Open
+
+        let body = MirBody {
+            name: "test_modular_pre_mismatch".to_string(),
+            locals: vec![LocalDecl {
+                local: Local(0),
+                name: Some("_ret".to_string()),
+                ty: None,
+                movability: Movability::Move,
+            }],
+            blocks: vec![BasicBlock {
+                id: 0,
+                statements: vec![
+                    // open requires Closed, but we're in Open → InvalidPreState
+                    MirStatement::Assign(
+                        Place::Local(Local(0)),
+                        Rvalue::Perform {
+                            effect: "File".to_string(),
+                            operation: "open".to_string(),
+                            args: vec![],
+                        },
+                    ),
+                ],
+                terminator: Terminator::Return(Operand::Constant(MirConstant::Int(0))),
+            }],
+            entry_block: 0,
+        };
+        let mut machines = HashMap::new();
+        machines.insert("File".to_string(), sm);
+        let result = analyze_temporal_effects(&body, &machines);
+        assert!(
+            !result.violations.is_empty(),
+            "Should detect InvalidPreState when open is called in Open state"
+        );
+        assert_eq!(
+            result.violations[0].kind,
+            TemporalViolationKind::InvalidPreState
+        );
+        assert_eq!(result.violations[0].operation, "open");
+    }
+
+    #[test]
+    fn test_modular_verification_post_check() {
+        // Atom body's final state doesn't match declared effect_post.
+        // effect_pre={File:Closed}, effect_post={File:Closed}
+        // body: perform File.open (leaves File in Open, not Closed)
+        let mut sm = make_file_effect_sm();
+        sm.initial_state = "Closed".to_string();
+
+        let body = MirBody {
+            name: "test_modular_post_check".to_string(),
+            locals: vec![LocalDecl {
+                local: Local(0),
+                name: Some("_ret".to_string()),
+                ty: None,
+                movability: Movability::Move,
+            }],
+            blocks: vec![BasicBlock {
+                id: 0,
+                statements: vec![
+                    MirStatement::Assign(
+                        Place::Local(Local(0)),
+                        Rvalue::Perform {
+                            effect: "File".to_string(),
+                            operation: "open".to_string(),
+                            args: vec![],
+                        },
+                    ),
+                    // File is now Open, but effect_post expects Closed
+                ],
+                terminator: Terminator::Return(Operand::Constant(MirConstant::Int(0))),
+            }],
+            entry_block: 0,
+        };
+        let mut machines = HashMap::new();
+        machines.insert("File".to_string(), sm);
+        let result = analyze_temporal_effects(&body, &machines);
+        assert!(
+            result.violations.is_empty(),
+            "No inline violations (open from Closed is valid)"
+        );
+        // Check exit state is Open (not Closed) — verification pipeline would
+        // detect mismatch with effect_post={File:Closed}
+        if let Some(exit_map) = result.exit_states.get(&0) {
+            assert_eq!(
+                exit_map.get("File").unwrap(),
+                "Open",
+                "Exit state should be Open, mismatching effect_post Closed"
+            );
+        }
     }
 }

@@ -120,6 +120,35 @@ effect FileRead(path: Str) where matches(path, "^/tmp/[a-z]+/.*");
 
 **Result**: Supported (Plan 10). The `matches()` constraint function uses Rust's `regex` crate for constant path verification and approximates common regex patterns (anchored prefix/suffix/contains) via Z3 String Sort for symbolic verification.
 
+### 2.7 URL Validation
+
+**Scenario**: Enforce HTTPS-only URLs for HTTP effects.
+
+```mumei
+effect SecureHttpGet(url: Str) where starts_with(url, "https://");
+effect SecureHttpPost(url: Str) where starts_with(url, "https://");
+
+atom fetch_api()
+    effects: [SecureHttpGet(url)]
+    requires: true;
+    ensures: result >= 0;
+    body: {
+        perform SecureHttpGet.get("https://api.example.com/users");
+        1
+    };
+
+atom fetch_variable(api_url: Str)
+    effects: [SecureHttpGet(url)]
+    requires: starts_with(api_url, "https://");
+    ensures: result >= 0;
+    body: {
+        perform SecureHttpGet.get(api_url);
+        1
+    };
+```
+
+**Result**: Supported (Plan 23). `SecureHttpGet` and `SecureHttpPost` are defined in `std/http.mm` with `starts_with(url, "https://")` constraints. For literal URLs, the Rust-side `check_constant_constraint()` verifies the prefix. For variable URLs, Z3 String Sort verifies that the `requires` clause implies the effect constraint. Existing `HttpGet`/`HttpPost` (without constraints) remain for backward compatibility.
+
 ## 3. Object-Based Capability Model (Alternative)
 
 If the current approach proves insufficient, an object-based capability model could be introduced:

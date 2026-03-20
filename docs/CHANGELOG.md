@@ -9,6 +9,28 @@
 - Added `tests/test_pii_pipeline.mm`: E2E integration test for PII pipeline
 - Added 3 unit tests in `src/mir_analysis.rs` for DataPipeline state machine verification
 
+### Plan 23: Regex Path Policies + URL Validation
+
+- Added `RegexSafeFileRead(path: Str) where matches(path, "^/tmp/[a-z]+/.*")` to `std/effects.mm`
+- Added `SecureHttpGet`/`SecureHttpPost` with `starts_with(url, "https://")` constraint to `std/http.mm`
+- Added `examples/regex_path_policy.mm`: Regex-based path constraint demo
+- Added `examples/secure_http.mm`: HTTPS enforcement demo
+- Added `tests/test_regex_policy.mm`: E2E test for regex path validation
+- Added `tests/test_url_validation.mm`: E2E test for URL validation
+- Improved Z3 regex approximation: exact match (`^literal$`) and prefix+suffix (`^prefix.*suffix$`) patterns
+
+### Plan 24: Modular Verification (effect_pre / effect_post)
+
+- Added `effect_pre`/`effect_post` fields to `Atom` struct in `src/parser/ast.rs`
+- Added parser support for `effect_pre: { Key: Value };` / `effect_post: { Key: Value };` syntax
+- Updated all Atom construction sites across codebase (main.rs, resolver.rs, ast.rs, mir.rs, mir_analysis.rs, verification.rs)
+- `effect_pre` overrides initial state of state machines during temporal verification
+- `effect_post` checked against exit states; mismatch emits `UnexpectedFinalState` error
+- Added 3 unit tests for modular verification in `src/mir_analysis.rs`
+- Added 3 parser tests for effect_pre/effect_post in `src/parser/mod.rs`
+- Added `tests/test_modular_verification.mm`: E2E test with File effect contracts
+- Updated `docs/ARCHITECTURE.md`: "Modular Verification (Future)" → "Modular Verification (Implemented)"
+
 ---
 
 ## PR #83: Plans 15–20 — Examples, FFI Memory, Str Migration, Codegen Types, MIR Migration, Z3 Integration

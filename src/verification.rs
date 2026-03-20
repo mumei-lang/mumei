@@ -2769,6 +2769,29 @@ fn parse_constraint_to_z3_string<'ctx>(
                     return Some(param_z3.contains(&substr_z3));
                 }
             }
+            // Plan 23: Exact match — ^literal$ (no metacharacters) → eq(param, "literal")
+            if stripped.starts_with('^') && stripped.ends_with('$') && stripped.len() > 2 {
+                let literal = &stripped[1..stripped.len() - 1];
+                if is_literal(literal) {
+                    let literal_z3 = Z3String::from_str(ctx, literal).ok()?;
+                    return Some(param_z3._eq(&literal_z3));
+                }
+            }
+            // Plan 23: Prefix + suffix — ^prefix.*suffix$ → starts_with && ends_with
+            if stripped.starts_with('^') && stripped.ends_with('$') && stripped.contains(".*") {
+                let inner = &stripped[1..stripped.len() - 1];
+                if let Some(dot_star_pos) = inner.find(".*") {
+                    let prefix = &inner[..dot_star_pos];
+                    let suffix = &inner[dot_star_pos + 2..];
+                    if is_literal(prefix) && is_literal(suffix) && !suffix.is_empty() {
+                        let prefix_z3 = Z3String::from_str(ctx, prefix).ok()?;
+                        let suffix_z3 = Z3String::from_str(ctx, suffix).ok()?;
+                        let prefix_check = prefix_z3.prefix(param_z3);
+                        let suffix_check = suffix_z3.suffix(param_z3);
+                        return Some(Bool::and(ctx, &[&prefix_check, &suffix_check]));
+                    }
+                }
+            }
             // For complex regex patterns, Z3 String Sort cannot directly verify;
             // constant checking via Rust regex crate will handle these cases.
         }
@@ -4910,6 +4933,15 @@ fn verify_inner(
             }
         }
 
+        // Modular Verification: Override initial states from effect_pre contracts
+        for (effect_name, pre_state) in &atom.effect_pre {
+            if let Some(sm) = state_machines.get_mut(effect_name) {
+                if sm.states.contains(pre_state) {
+                    sm.initial_state = pre_state.clone();
+                }
+            }
+        }
+
         if !state_machines.is_empty() && mir_body.check_analysis_budget().is_ok() {
             let temporal_result =
                 crate::mir_analysis::analyze_temporal_effects(&mir_body, &state_machines);
@@ -5041,10 +5073,32 @@ fn verify_inner(
                     crate::mir_analysis::TemporalViolationKind::UnexpectedFinalState => {
                         // Hard error: effect left in unexpected state at exit
                         return Err(MumeiError::verification(format!(
-                            "Temporal effect violation: '{}' is in state '{}' at function exit, \
-                             expected '{}' (block {})",
+                            "Temporal effect violation: effect '{}' has final state '{}' \
+                             but effect_post declares '{}' (block {})",
                             v.effect, v.actual_state, v.expected_state, v.block_id
                         )));
+                    }
+                }
+            }
+
+            // Modular Verification: Check effect_post contracts against exit states
+            if !atom.effect_post.is_empty() {
+                for (effect_name, expected_post) in &atom.effect_post {
+                    // Find the exit state for this effect from the last basic block(s)
+                    // that have a Return terminator
+                    for (block_id, exit_map) in &temporal_result.exit_states {
+                        let block = &mir_body.blocks[*block_id];
+                        if matches!(block.terminator, crate::mir::Terminator::Return(_)) {
+                            if let Some(actual_state) = exit_map.get(effect_name) {
+                                if actual_state != expected_post {
+                                    return Err(MumeiError::verification(format!(
+                                        "Temporal effect violation: effect '{}' has final state '{}' \
+                                         but effect_post declares '{}' (block {})",
+                                        effect_name, actual_state, expected_post, block_id
+                                    )));
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -8816,6 +8870,8 @@ mod tests {
             effects: vec![],
             return_type: None,
             span: Span::default(),
+            effect_pre: std::collections::HashMap::new(),
+            effect_post: std::collections::HashMap::new(),
         };
         let feedback = build_semantic_feedback(
             &mappings,
