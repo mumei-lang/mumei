@@ -417,8 +417,8 @@ def validate_logic(source_code: str) -> str:
     No code generation — returns verification results and counter-examples.
     Used as the verification step when AI iteratively fixes .mm code.
 
-    Note: The verify command always writes report.json to the compiler's cwd.
-    Concurrent calls may read stale data. Use forge_blade for concurrent-safe operation.
+    Uses --report-dir to write report.json directly into a per-request temp
+    directory, making concurrent calls safe.
     """
     root_dir = Path(__file__).parent.absolute()
 
@@ -515,8 +515,8 @@ def execute_mm(
     command: "build" (default) for full build, "verify" for verification only, "check" for syntax check only.
     Returns build results, generated code, and verification report.
 
-    Note: Only "build" is concurrent-safe (report isolated via -o).
-    "verify" and "check" write report.json to cwd, so concurrent calls may race.
+    Note: "build" and "verify" are concurrent-safe (report isolated via -o / --report-dir).
+    "check" still writes report.json to cwd, so concurrent calls may race.
     """
     root_dir = Path(__file__).parent.absolute()
 
@@ -815,7 +815,9 @@ def self_heal_with_effects(
                 source_path.write_text(current_code, encoding="utf-8")
 
                 compile_result = subprocess.run(
-                    ["cargo", "run", "--", "verify", str(source_path)],
+                    ["cargo", "run", "--", "verify",
+                     "--report-dir", str(tmp_path),
+                     str(source_path)],
                     cwd=root_dir,
                     capture_output=True,
                     text=True,
@@ -833,8 +835,8 @@ def self_heal_with_effects(
                 error_log = compile_result.stderr or compile_result.stdout or ""
                 results.append(f"```\n{error_log}\n```")
 
-                # Read report.json from compiler cwd (before it gets moved)
-                report_file = root_dir / "report.json"
+                # Read report.json from per-request temp directory (concurrent-safe)
+                report_file = tmp_path / "report.json"
                 report_data = {}
                 if report_file.exists():
                     try:
