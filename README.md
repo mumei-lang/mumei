@@ -564,4 +564,4 @@ cargo clippy
 
 ## License
 
-[MIT](LICENSE)
+[Apache-2.0 license](LICENSE)
