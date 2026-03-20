@@ -427,9 +427,12 @@ def validate_logic(source_code: str) -> str:
         source_path = tmp_path / "input.mm"
         source_path.write_text(source_code, encoding="utf-8")
 
-        # Run mumei verify (Z3 verification only, no codegen)
+        # Run mumei verify with --report-dir to write report.json directly
+        # into the per-request temp directory (concurrent-safe).
         result = subprocess.run(
-            ["cargo", "run", "--", "verify", str(source_path)],
+            ["cargo", "run", "--", "verify",
+             "--report-dir", str(tmp_path),
+             str(source_path)],
             cwd=root_dir,
             capture_output=True,
             text=True
@@ -444,20 +447,7 @@ def validate_logic(source_code: str) -> str:
                 f"### Effect Boundary\n{effects_ctx['summary']}\n"
             )
 
-        # TODO: The verify command writes report.json to cwd because it does not
-        #   support -o. This means concurrent calls race on the same file.
-        #   shutil.move (instead of copy) minimises the window, but does not
-        #   eliminate it. To fully fix this, add -o / --report-dir support to
-        #   `mumei verify` on the Rust side so the report can be written
-        #   directly into the per-request temp directory.
         report_file = tmp_path / "report.json"
-        cwd_report = root_dir / "report.json"
-        if cwd_report.exists():
-            try:
-                shutil.move(str(cwd_report), str(report_file))
-            except OSError:
-                # Another request may have moved it already
-                pass
         if report_file.exists():
             report_data = report_file.read_text(encoding="utf-8")
             response_parts.append(
@@ -546,6 +536,10 @@ def execute_mm(
         cmd_args = ["cargo", "run", "--", command, str(source_path)]
         if command == "build":
             cmd_args.extend(["-o", str(output_base)])
+        elif command == "verify":
+            # Use --report-dir to write report.json directly into the
+            # per-request temp directory (concurrent-safe).
+            cmd_args.extend(["--report-dir", str(tmp_path)])
 
         result = subprocess.run(
             cmd_args,
@@ -558,13 +552,10 @@ def execute_mm(
         response_parts = []
 
         # For "build", report.json is written to tmp_path (via -o).
-        # TODO: For "verify"/"check", report.json is written to cwd because
-        #   those commands do not support -o. shutil.move minimises the race
-        #   window but does not eliminate it. To fully fix, add -o /
-        #   --report-dir support to `mumei verify` and `mumei check` on the
-        #   Rust side.
+        # For "verify", report.json is written to tmp_path (via --report-dir).
+        # For "check", report.json is still written to cwd (no --report-dir yet).
         report_file = tmp_path / "report.json"
-        if not report_file.exists() and command != "build":
+        if not report_file.exists() and command == "check":
             cwd_report = root_dir / "report.json"
             if cwd_report.exists():
                 try:

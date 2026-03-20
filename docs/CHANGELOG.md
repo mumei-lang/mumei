@@ -2,6 +2,22 @@
 
 ---
 
+### Proposal A: `--report-dir` option for `mumei verify`
+
+- Added `--report-dir <dir>` CLI option to `mumei verify` to specify report.json output directory
+- Eliminates race condition when multiple concurrent verify calls write to the same cwd
+- Creates the target directory automatically when `--report-dir` is specified
+- Updated `mcp_server.py` to use `--report-dir` instead of the `shutil.move` workaround
+- Backward compatible: defaults to current directory when `--report-dir` is omitted
+
+### Proposal B: `--json` option for `mumei verify`
+
+- Added `--json` flag to `mumei verify` for stdout JSON output
+- When `--json` is active, all human-readable output (emoji, miette diagnostics) is suppressed
+- Outputs report.json content to stdout, or minimal JSON status if no report file is produced
+- Enables pipeline integration: `mumei verify --json file.mm | jq '.semantic_feedback'`
+- Follows same pattern as existing `cmd_inspect_file --json` implementation
+
 ### Plan 22: PII Data Pipeline Example
 
 - Added `examples/pii_pipeline.mm`: Valid PII anonymization pipeline demonstrating compile-time enforcement
