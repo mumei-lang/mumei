@@ -14,8 +14,8 @@ External tools (e.g., [mumei-agent](https://github.com/mumei-lang/mumei-agent)) 
 |---|---|---|---|
 | `status` | `"success" \| "failed"` | Yes | Verification result |
 | `atom` | `string` | Yes | Atom name being verified |
-| `input_a` | `string` | Yes | First input description |
-| `input_b` | `string` | Yes | Second input description |
+| `input_a` | `string` | No | First input description (legacy; prefer `counterexample`) |
+| `input_b` | `string` | No | Second input description (legacy; prefer `counterexample`) |
 | `reason` | `string` | Yes | Human-readable result description |
 | `violation_type` | `string` | No | `"effect_mismatch"`, `"effect_propagation"`, etc. |
 | `effect_violation` | `object` | No | Effect violation details (see below) |
