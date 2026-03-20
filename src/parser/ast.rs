@@ -211,7 +211,6 @@ pub enum Expr {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub enum Stmt {
     Let {
         var: String,
@@ -247,7 +246,9 @@ pub enum Stmt {
         span: Span,
     },
     // Plan 8: Cancel statement — `cancel task_group_name;`
-    // NOTE: Cancel is constructed by the parser when `cancel` keyword is encountered.
+    // NOTE: Cancel is constructed by the parser when `cancel` keyword is encountered
+    // but not yet used in verification/codegen pipelines.
+    #[allow(dead_code)]
     Cancel {
         target: String,
         span: Span,
@@ -257,6 +258,7 @@ pub enum Stmt {
 
 impl Stmt {
     /// Get the Span associated with this statement.
+    // NOTE: span() is infrastructure for future diagnostic passes that need statement-level source locations.
     #[allow(dead_code)]
     pub fn span(&self) -> &Span {
         match self {
