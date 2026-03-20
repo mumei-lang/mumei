@@ -7,7 +7,7 @@
 - Added `--report-dir <dir>` CLI option to `mumei verify` to specify report.json output directory
 - Eliminates race condition when multiple concurrent verify calls write to the same cwd
 - Creates the target directory automatically when `--report-dir` is specified
-- Updated `mcp_server.py` to use `--report-dir` in all verify call sites (`validate_logic`, `execute_mm`, `self_heal_with_effects`)
+- Updated `mcp_server.py` to use `--report-dir` in all verify call sites (`validate_logic`, `execute_mm`)
 - Backward compatible: defaults to current directory when `--report-dir` is omitted
 
 ### Proposal B: `--json` option for `mumei verify`

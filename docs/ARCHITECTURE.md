@@ -537,7 +537,7 @@ runtime implementation of each effect.
 
 ### Error Reporting
 
-Effect violations produce structured JSON in `report.json` for self-healing integration:
+Effect violations produce structured JSON in `report.json` (see [REPORT_SCHEMA.md](REPORT_SCHEMA.md)):
 
 ```json
 {
