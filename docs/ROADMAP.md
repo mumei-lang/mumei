@@ -438,8 +438,8 @@ The hybrid approach (Constant Folding + Z3 String Sort) is now active:
 
 **Future Unlocks**:
 - ~~Free-form path construction: `"/tmp/" + user_id + "/log.txt"` verification~~ ✅ Implemented (Plan 21)
-- Regex-based path policies: `matches(path, "/tmp/[a-z]+\\.txt")`
-- URL validation for std.http effects: `starts_with(url, "https://")`
+- ~~Regex-based path policies: `matches(path, "/tmp/[a-z]+\\.txt")`~~ ✅ Implemented (Plan 23)
+- ~~URL validation for std.http effects: `starts_with(url, "https://")`~~ ✅ Implemented (Plan 23)
 
 ### Effect Hierarchy Extensions
 
@@ -467,6 +467,7 @@ Extensions to the effect subtyping system:
 | Phase 5 | HIR Effect Type Information | ✅ Done | HirEffectSet on HirAtom/HirExpr, lower_atom_to_hir_with_env |
 | Phase 6 | Capability Security evaluation | ✅ Done | See docs/CAPABILITY_SECURITY.md |
 | Phase 7 | Temporal Effect Verification (Stateful Effects) | ✅ Done | EffectStateMachine, forward dataflow, Phase 1i |
+| Phase 8 | Modular Verification (effect_pre / effect_post) | ✅ Done | Cross-atom temporal effect state tracking via contracts |
 
 ### Why Phases 2–5 Are Deferred
 
@@ -499,6 +500,76 @@ Detailed session plans for the next 8 implementation priorities are documented i
 | 13 | Plan 19: MIR Phase 4c completion | ✅ MoveAnalysis is primary engine |
 | 14 | Plan 20: Z3 temporal effect integration | ✅ `encode_effect_state()`, ConflictingState Z3 probes |
 | 15 | Plan 21: Verified HTTP Server + Path Safety | ✅ SafeFileRead/SafeFileWrite effects, `&&` compound constraints, HTTP server FFI, HttpServer stateful effect, path traversal prevention demo |
+| 16 | Plan 22: PII Pipeline Example | ✅ DataPipeline temporal effect demo + E2E tests |
+| 17 | Plan 23: Regex Path Policies + URL Validation | ✅ RegexSafeFileRead, SecureHttpGet/Post, Z3 approximation improvements |
+| 18 | Plan 24: Modular Verification | ✅ effect_pre/effect_post contracts, cross-atom temporal state tracking |
+
+### Plan 22: PII Pipeline Example
+
+A practical demonstration of Temporal Effect Verification applied to data privacy enforcement.
+The `DataPipeline` stateful effect defines `Raw` and `Anonymized` states with transitions
+`load: Raw → Raw`, `anonymize: Raw → Anonymized`, and `log: Anonymized → Anonymized`.
+This ensures that personal data **must** pass through anonymization before it can be logged —
+any attempt to log raw data is caught at compile time as an `InvalidPreState` violation.
+
+**Files**:
+- `examples/pii_pipeline.mm` — Valid pipeline demonstrating correct load → anonymize → log sequence
+- `examples/pii_pipeline_error.mm` — Invalid pipeline (skips anonymize) showing compile-time rejection
+- `tests/test_pii_pipeline.mm` — E2E integration test with multiple valid pipeline patterns
+- `src/mir_analysis.rs` — 3 unit tests: valid sequence, skip anonymize (InvalidPreState), branch conflict (ConflictingState)
+
+### Plan 23: Regex Path Policies + URL Validation
+
+Extends the P4 effect system with regex-based path constraints and HTTPS URL validation.
+
+**Regex Path Policies**:
+- `RegexSafeFileRead(path: Str) where matches(path, "^/tmp/[a-z]+/.*")` in `std/effects.mm`
+- Z3 approximation improvements: exact match (`^literal$`) and prefix+suffix (`^prefix.*suffix$`) patterns
+
+**URL Validation**:
+- `SecureHttpGet(url: Str) where starts_with(url, "https://")` in `std/http.mm`
+- `SecureHttpPost(url: Str) where starts_with(url, "https://")` in `std/http.mm`
+- Backward compatible: existing `HttpGet`/`HttpPost` unchanged
+
+**Files**:
+- `std/effects.mm` — Added `RegexSafeFileRead` effect definition
+- `std/http.mm` — Added `SecureHttpGet`/`SecureHttpPost` effect definitions
+- `examples/regex_path_policy.mm` — Regex path constraint demo
+- `examples/secure_http.mm` — HTTPS enforcement demo
+- `tests/test_regex_policy.mm` — E2E test for regex path validation
+- `tests/test_url_validation.mm` — E2E test for URL validation
+- `src/verification.rs` — Z3 regex approximation improvements (exact match, prefix+suffix)
+
+### Plan 24: Modular Verification (effect_pre / effect_post)
+
+Adds cross-atom temporal effect state tracking via `effect_pre`/`effect_post` contracts.
+
+**Syntax**:
+```
+atom open_file(x: i64)
+    effects: [File];
+    effect_pre: { File: Closed };
+    effect_post: { File: Open };
+    ...
+```
+
+**Implementation**:
+- `effect_pre` overrides initial state of corresponding state machines
+- `effect_post` is checked against exit states; mismatch emits `UnexpectedFinalState`
+- Invalid state names in `effect_pre`/`effect_post` produce hard errors; missing state machines emit warnings
+- Monomorphizer substitutes effect type variables in keys (e.g., `{ E: Closed }` → `{ FileWrite: Closed }`)
+- All Atom construction sites updated with default empty `HashMap`
+- Parser extension for `{ Key: Value, Key2: Value2 }` syntax
+- Cross-atom contract composition at call sites is not yet implemented (each atom verified independently)
+
+**Files**:
+- `src/parser/ast.rs` — Added `effect_pre`/`effect_post` fields to `Atom` struct
+- `src/parser/item.rs` — Parser for `effect_pre:`/`effect_post:` clauses
+- `src/verification.rs` — Initial state override + final state check
+- `src/main.rs`, `src/resolver.rs`, `src/ast.rs`, `src/mir.rs`, `src/mir_analysis.rs` — Updated Atom construction sites
+- `tests/test_modular_verification.mm` — E2E test with File effect contracts
+- `src/mir_analysis.rs` — 3 unit tests for modular verification
+- `src/parser/mod.rs` — 3 parser tests for effect_pre/effect_post
 
 ---
 

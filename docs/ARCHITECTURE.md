@@ -651,11 +651,18 @@ The temporal effect verifier uses **forward dataflow analysis** on the MIR CFG:
 - Abstract interpretation (Rust-side) before Z3 — Z3 reserved for ConflictingState cases
 - Per-atom constraint budget applies to temporal Z3 constraints
 
-#### Modular Verification (Future)
+#### Modular Verification (Implemented)
 
-Atom-level `effect_pre` / `effect_post` contracts will enable verifying atoms independently:
+Atom-level `effect_pre` / `effect_post` contracts enable verifying atoms independently:
 - Each atom declares required pre-state and guaranteed post-state for each stateful effect
 - Callers verify against the callee's contract without analyzing the callee's body
+- `effect_pre` overrides the initial state of corresponding state machines during verification
+- `effect_post` is checked against the exit states of the atom's body; mismatch emits `UnexpectedFinalState`
+- Syntax: `effect_pre: { File: Closed }; effect_post: { File: Open };`
+- Default: empty `HashMap` (backward compatible with all existing atoms)
+- **Validation**: Invalid state names produce hard errors; missing state machines emit warnings
+- **Monomorphization**: Effect type variables in keys are substituted (e.g., `{ E: Closed }` → `{ FileWrite: Closed }`)
+- **Limitation**: Cross-atom contract composition at call sites is not yet implemented — each atom is verified independently
 
 ### Standard Library
 

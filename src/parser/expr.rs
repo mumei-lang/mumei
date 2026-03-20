@@ -5,7 +5,6 @@
 use super::pattern::parse_pattern;
 use super::token::Token;
 use super::ParseContext;
-use crate::parser::ast::Span;
 use crate::parser::{Expr, JoinSemantics, LambdaParam, MatchArm, Op, Stmt};
 
 /// Pratt parser binding power for binary operators.
@@ -588,7 +587,10 @@ pub fn parse_statement(ctx: &mut ParseContext) -> Stmt {
         Token::Cancel => {
             ctx.advance();
             let target = ctx.expect_ident();
-            Stmt::Cancel { target, span: stmt_span }
+            Stmt::Cancel {
+                target,
+                span: stmt_span,
+            }
         }
 
         // Check for assignment: ident = expr

@@ -793,6 +793,8 @@ mod tests {
             effects: vec![],
             return_type: None,
             span: Span::new("", 1, 1, 0),
+            effect_pre: std::collections::HashMap::new(),
+            effect_post: std::collections::HashMap::new(),
         }
     }
 
