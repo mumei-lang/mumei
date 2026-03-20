@@ -1,4 +1,3 @@
-import os
 import re
 import shutil
 import subprocess
@@ -6,12 +5,7 @@ import json
 import tempfile
 from pathlib import Path
 from mcp.server.fastmcp import FastMCP
-from dotenv import load_dotenv
 
-# Load environment variables
-load_dotenv()
-
-# Initialize MCP server
 mcp = FastMCP("Mumei-Forge")
 
 # Module-level session state for effect boundary overrides
@@ -20,55 +14,6 @@ _session_effects: dict = {
     "denied": [],
     "source": "default",  # "default" | "mumei.toml" | "session_override"
 }
-
-# Visualizer sync config
-# true: also copy report.json to visualizer/ (for Streamlit dashboard)
-# false: MCP response only (default)
-VISUALIZER_SYNC = os.getenv("ENABLE_VISUALIZER_SYNC", "false").lower() == "true"
-HISTORY_FILE = Path(__file__).parent.absolute() / "visualizer" / "report_history.json"
-
-
-def _sync_to_visualizer(report_file: Path, root_dir: Path) -> None:
-    """Copy report.json to visualizer/ and append to history.
-
-    NOTE: Nearly identical logic exists in self_healing.py (sync_to_visualizer).
-    If you change this, update self_healing.py as well (or extract into a shared
-    module in the future).
-    """
-    if not VISUALIZER_SYNC:
-        return
-    if not report_file.exists():
-        return
-
-    vis_dir = root_dir / "visualizer"
-    vis_dir.mkdir(exist_ok=True)
-    shutil.copy(report_file, vis_dir / "report.json")
-
-    # Append to history (with file lock to prevent corruption when
-    # mcp_server.py and self_healing.py run concurrently)
-    import datetime
-    import fcntl
-
-    entry = json.loads(report_file.read_text(encoding="utf-8"))
-    entry["timestamp"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-
-    lock_file = HISTORY_FILE.parent / ".report_history.lock"
-    lock_file.parent.mkdir(exist_ok=True)
-    with open(lock_file, "w") as lf:
-        fcntl.flock(lf, fcntl.LOCK_EX)
-        try:
-            history = []
-            if HISTORY_FILE.exists():
-                try:
-                    history = json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
-                except (json.JSONDecodeError, OSError):
-                    history = []
-            history.append(entry)
-            HISTORY_FILE.write_text(
-                json.dumps(history, indent=2, ensure_ascii=False), encoding="utf-8"
-            )
-        finally:
-            fcntl.flock(lf, fcntl.LOCK_UN)
 
 def _format_semantic_feedback(report_json: str) -> str:
     """Parse report.json and format semantic_feedback into a readable section.
@@ -356,10 +301,6 @@ def forge_blade(source_code: str, output_name: str = "katana") -> str:
             ef_section = _format_effect_feedback(report_data)
             if ef_section:
                 response_parts.append(ef_section)
-            try:
-                _sync_to_visualizer(report_file, root_dir)
-            except Exception:
-                pass
         else:
             response_parts.append(
                 '### Semantic Feedback\n'
@@ -385,30 +326,6 @@ def forge_blade(source_code: str, output_name: str = "katana") -> str:
                 response_parts.append(f"\n### Error Details\n{result.stderr}")
 
             return "\n".join(response_parts)
-
-@mcp.tool()
-def self_heal_loop() -> str:
-    """
-    Run self_healing.py to start an AI-driven autonomous fix loop (targeting sword_test.mm).
-    """
-    root_dir = Path(__file__).parent.absolute()
-
-    try:
-        result = subprocess.run(
-            ["python", "self_healing.py"],
-            cwd=root_dir,
-            capture_output=True,
-            text=True,
-            timeout=300
-        )
-        if result.returncode == 0:
-            return f"Self-healing completed:\n{result.stdout}"
-        else:
-            return f"Self-healing failed:\n{result.stderr}\n{result.stdout}"
-    except subprocess.TimeoutExpired:
-        return "Error: Self-healing loop timed out (300s)."
-    except Exception as e:
-        return f"Execution error: {str(e)}"
 
 @mcp.tool()
 def validate_logic(source_code: str) -> str:
@@ -467,10 +384,6 @@ def validate_logic(source_code: str) -> str:
             ef_section = _format_effect_feedback(report_data)
             if ef_section:
                 response_parts.append(ef_section)
-            try:
-                _sync_to_visualizer(report_file, root_dir)
-            except Exception:
-                pass
         else:
             # No report file — still include semantic feedback status
             response_parts.append(
@@ -580,10 +493,6 @@ def execute_mm(
             ef_section = _format_effect_feedback(report_data)
             if ef_section:
                 response_parts.append(ef_section)
-            try:
-                _sync_to_visualizer(report_file, root_dir)
-            except Exception:
-                pass
         else:
             response_parts.append(
                 '### Semantic Feedback\n'
@@ -771,121 +680,6 @@ def set_allowed_effects(
         },
         indent=2,
     )
-
-
-@mcp.tool()
-def self_heal_with_effects(
-    source_code: str,
-    allowed_effects: "list[str] | None" = None,
-    max_attempts: int = 5,
-) -> str:
-    """
-    Run an effect-aware self-healing loop on the given source code.
-
-    1. Validates the code with Z3 (including effect verification)
-    2. If effect violations are found, generates fixes using logical resolution paths
-    3. Re-validates until the code passes or max_attempts is reached
-
-    The allowed_effects parameter restricts which effects the healed code may use.
-    If empty or None, no effect restrictions are applied.
-    """
-    if allowed_effects is None:
-        allowed_effects = []
-
-    results = []
-    current_code = source_code
-
-    # Temporarily set session effects if provided
-    if allowed_effects:
-        set_allowed_effects(allowed=allowed_effects)
-        results.append(
-            f"### Effect Boundary: {allowed_effects}\n"
-        )
-
-    root_dir = Path(__file__).parent.absolute()
-
-    try:
-        for attempt in range(max_attempts):
-            # Run validation — this writes report.json to root_dir (compiler cwd)
-            # then validate_logic moves it into a temp directory.  We run the
-            # compiler directly here so we can read report.json before it is moved.
-            with tempfile.TemporaryDirectory() as tmpdir:
-                tmp_path = Path(tmpdir)
-                source_path = tmp_path / "input.mm"
-                source_path.write_text(current_code, encoding="utf-8")
-
-                compile_result = subprocess.run(
-                    ["cargo", "run", "--", "verify",
-                     "--report-dir", str(tmp_path),
-                     str(source_path)],
-                    cwd=root_dir,
-                    capture_output=True,
-                    text=True,
-                )
-
-                if compile_result.returncode == 0:
-                    results.append(f"### Attempt {attempt + 1}: PASSED")
-                    results.append("Verification passed: no logical flaws detected.")
-                    results.append(
-                        f"\n### Final Code\n```mumei\n{current_code}\n```"
-                    )
-                    return "\n".join(results)
-
-                results.append(f"### Attempt {attempt + 1}: FAILED")
-                error_log = compile_result.stderr or compile_result.stdout or ""
-                results.append(f"```\n{error_log}\n```")
-
-                # Read report.json from per-request temp directory (concurrent-safe)
-                report_file = tmp_path / "report.json"
-                report_data = {}
-                if report_file.exists():
-                    try:
-                        report_data = json.loads(
-                            report_file.read_text(encoding="utf-8")
-                        )
-                    except (json.JSONDecodeError, OSError):
-                        pass
-
-                # Generate fix suggestion based on violation type
-                violation_type = report_data.get("violation_type", "")
-                ev = report_data.get("effect_violation", {})
-
-                if violation_type == "effect_mismatch":
-                    fix_hint = (
-                        f"Effect mismatch: '{ev.get('source_operation', '')}' "
-                        f"requires [{ev.get('required_effect', '')}]. "
-                        f"Resolution: {ev.get('resolution_paths', [{}])[0].get('description', '')}"
-                    )
-                    results.append(f"\n**Fix hint**: {fix_hint}")
-                elif violation_type == "effect_propagation":
-                    fix_hint = (
-                        f"Propagation: '{ev.get('caller', '')}' missing "
-                        f"{ev.get('missing_effects', [])}. "
-                        f"Resolution: {ev.get('resolution_paths', [{}])[0].get('description', '')}"
-                    )
-                    results.append(f"\n**Fix hint**: {fix_hint}")
-
-                # Use self_healing.get_fix_from_ai to generate a fix and update current_code
-                try:
-                    from self_healing import get_fix_from_ai
-
-                    fixed_code = get_fix_from_ai(current_code, error_log, report_data)
-                    if fixed_code and fixed_code != current_code:
-                        current_code = fixed_code
-                        results.append("AI-generated fix applied. Retrying...\n")
-                    else:
-                        results.append("AI could not generate a different fix.\n")
-                        break
-                except Exception as exc:
-                    results.append(f"AI fix generation failed: {exc}\n")
-                    break
-
-        results.append("Self-healing exhausted max attempts.")
-        return "\n".join(results)
-    finally:
-        # Always reset session effects, even on exception
-        if allowed_effects:
-            set_allowed_effects()
 
 
 if __name__ == "__main__":
