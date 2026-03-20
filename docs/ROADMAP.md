@@ -556,8 +556,11 @@ atom open_file(x: i64)
 **Implementation**:
 - `effect_pre` overrides initial state of corresponding state machines
 - `effect_post` is checked against exit states; mismatch emits `UnexpectedFinalState`
+- Invalid state names in `effect_pre`/`effect_post` produce hard errors; missing state machines emit warnings
+- Monomorphizer substitutes effect type variables in keys (e.g., `{ E: Closed }` → `{ FileWrite: Closed }`)
 - All Atom construction sites updated with default empty `HashMap`
 - Parser extension for `{ Key: Value, Key2: Value2 }` syntax
+- Cross-atom contract composition at call sites is not yet implemented (each atom verified independently)
 
 **Files**:
 - `src/parser/ast.rs` — Added `effect_pre`/`effect_post` fields to `Atom` struct

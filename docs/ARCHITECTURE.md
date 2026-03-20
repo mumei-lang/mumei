@@ -660,6 +660,9 @@ Atom-level `effect_pre` / `effect_post` contracts enable verifying atoms indepen
 - `effect_post` is checked against the exit states of the atom's body; mismatch emits `UnexpectedFinalState`
 - Syntax: `effect_pre: { File: Closed }; effect_post: { File: Open };`
 - Default: empty `HashMap` (backward compatible with all existing atoms)
+- **Validation**: Invalid state names produce hard errors; missing state machines emit warnings
+- **Monomorphization**: Effect type variables in keys are substituted (e.g., `{ E: Closed }` → `{ FileWrite: Closed }`)
+- **Limitation**: Cross-atom contract composition at call sites is not yet implemented — each atom is verified independently
 
 ### Standard Library
 

@@ -7,13 +7,14 @@
 - Added `--report-dir <dir>` CLI option to `mumei verify` to specify report.json output directory
 - Eliminates race condition when multiple concurrent verify calls write to the same cwd
 - Creates the target directory automatically when `--report-dir` is specified
-- Updated `mcp_server.py` to use `--report-dir` instead of the `shutil.move` workaround
+- Updated `mcp_server.py` to use `--report-dir` in all verify call sites (`validate_logic`, `execute_mm`, `self_heal_with_effects`)
 - Backward compatible: defaults to current directory when `--report-dir` is omitted
 
 ### Proposal B: `--json` option for `mumei verify`
 
 - Added `--json` flag to `mumei verify` for stdout JSON output
 - When `--json` is active, all human-readable output (emoji, miette diagnostics) is suppressed
+- Informational messages in `load_and_prepare` (monomorphization, FFI Bridge) use `eprintln!` to avoid stdout corruption
 - Outputs report.json content to stdout, or minimal JSON status if no report file is produced
 - Enables pipeline integration: `mumei verify --json file.mm | jq '.semantic_feedback'`
 - Follows same pattern as existing `cmd_inspect_file --json` implementation
@@ -42,9 +43,12 @@
 - Updated all Atom construction sites across codebase (main.rs, resolver.rs, ast.rs, mir.rs, mir_analysis.rs, verification.rs)
 - `effect_pre` overrides initial state of state machines during temporal verification
 - `effect_post` checked against exit states; mismatch emits `UnexpectedFinalState` error
+- Invalid state names in `effect_pre`/`effect_post` now produce hard errors (not silently ignored)
+- Missing state machines emit warnings; missing exit states (no perform ops) emit warnings
+- Monomorphizer substitutes effect type variables in `effect_pre`/`effect_post` keys (e.g., `{ E: Closed }` → `{ FileWrite: Closed }`)
 - Added 3 unit tests for modular verification in `src/mir_analysis.rs`
 - Added 3 parser tests for effect_pre/effect_post in `src/parser/mod.rs`
-- Added `tests/test_modular_verification.mm`: E2E test with File effect contracts
+- Added `tests/test_modular_verification.mm`: E2E test with File effect contracts (includes NOTE about cross-atom composition limitation)
 - Updated `docs/ARCHITECTURE.md`: "Modular Verification (Future)" → "Modular Verification (Implemented)"
 
 ---
