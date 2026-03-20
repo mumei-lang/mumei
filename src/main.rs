@@ -364,7 +364,7 @@ fn load_and_prepare(input: &str) -> (Vec<Item>, verification::ModuleEnv, Vec<Imp
     mono.collect(&items);
     let items = if mono.has_generics() {
         let mono_items = mono.monomorphize(&items, Some(&module_env));
-        println!(
+        eprintln!(
             "  🔬 Monomorphization: {} generic instance(s) expanded.",
             mono.instances().len()
         );
@@ -429,7 +429,7 @@ fn load_and_prepare(input: &str) -> (Vec<Item>, verification::ModuleEnv, Vec<Imp
                     };
                     module_env.register_atom(&atom);
                 }
-                println!(
+                eprintln!(
                     "  🔗 FFI Bridge: registered {} extern function(s) from \"{}\" block",
                     extern_block.functions.len(),
                     extern_block.language

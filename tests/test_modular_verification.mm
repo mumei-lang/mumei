@@ -35,8 +35,17 @@ atom write_and_close(x: i64)
         x
     };
 
-// This should verify successfully: open_file transitions File Closed->Open,
-// then write_and_close transitions File Open->Closed
+// This verifies successfully because each atom (open_file, write_and_close)
+// is independently verified against its own effect_pre/effect_post contracts.
+//
+// NOTE: Cross-atom contract composition is NOT yet implemented in the MIR
+// temporal analysis. The calls to open_file(x) and write_and_close(x) are
+// regular Call operations in MIR, not Perform operations, so no temporal
+// state transitions are tracked within full_pipeline's body. This atom
+// passes trivially (no temporal violations detected) rather than by
+// composing callee contracts at call sites. Future work: when encountering
+// a Call to an atom with effect_pre/effect_post, apply the callee's
+// post-state as the new current state for the effect.
 atom full_pipeline(x: i64)
     effects: [File];
     requires: x >= 0;

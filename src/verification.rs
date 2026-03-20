@@ -4938,7 +4938,17 @@ fn verify_inner(
             if let Some(sm) = state_machines.get_mut(effect_name) {
                 if sm.states.contains(pre_state) {
                     sm.initial_state = pre_state.clone();
+                } else {
+                    return Err(MumeiError::verification(format!(
+                        "effect_pre: state '{}' is not a valid state for effect '{}' (valid states: {:?})",
+                        pre_state, effect_name, sm.states
+                    )));
                 }
+            } else {
+                eprintln!(
+                    "  ⚠️  effect_pre: no state machine found for effect '{}' (stateless effects are ignored)",
+                    effect_name
+                );
             }
         }
 
@@ -5084,12 +5094,31 @@ fn verify_inner(
             // Modular Verification: Check effect_post contracts against exit states
             if !atom.effect_post.is_empty() {
                 for (effect_name, expected_post) in &atom.effect_post {
+                    // Validate that the effect has a state machine
+                    if !state_machines.contains_key(effect_name) {
+                        eprintln!(
+                            "  ⚠️  effect_post: no state machine found for effect '{}' (stateless effects are ignored)",
+                            effect_name
+                        );
+                        continue;
+                    }
+                    // Validate that the expected post-state is a valid state
+                    if let Some(sm) = state_machines.get(effect_name) {
+                        if !sm.states.contains(expected_post) {
+                            return Err(MumeiError::verification(format!(
+                                "effect_post: state '{}' is not a valid state for effect '{}' (valid states: {:?})",
+                                expected_post, effect_name, sm.states
+                            )));
+                        }
+                    }
                     // Find the exit state for this effect from the last basic block(s)
                     // that have a Return terminator
+                    let mut found_exit = false;
                     for (block_id, exit_map) in &temporal_result.exit_states {
                         let block = &mir_body.blocks[*block_id];
                         if matches!(block.terminator, crate::mir::Terminator::Return(_)) {
                             if let Some(actual_state) = exit_map.get(effect_name) {
+                                found_exit = true;
                                 if actual_state != expected_post {
                                     return Err(MumeiError::verification(format!(
                                         "Temporal effect violation: effect '{}' has final state '{}' \
@@ -5099,6 +5128,13 @@ fn verify_inner(
                                 }
                             }
                         }
+                    }
+                    if !found_exit {
+                        eprintln!(
+                            "  ⚠️  effect_post: effect '{}' has no tracked exit state \
+                             (no perform operations for this effect in the body)",
+                            effect_name
+                        );
                     }
                 }
             }
