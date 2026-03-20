@@ -499,6 +499,21 @@ Detailed session plans for the next 8 implementation priorities are documented i
 | 13 | Plan 19: MIR Phase 4c completion | ✅ MoveAnalysis is primary engine |
 | 14 | Plan 20: Z3 temporal effect integration | ✅ `encode_effect_state()`, ConflictingState Z3 probes |
 | 15 | Plan 21: Verified HTTP Server + Path Safety | ✅ SafeFileRead/SafeFileWrite effects, `&&` compound constraints, HTTP server FFI, HttpServer stateful effect, path traversal prevention demo |
+| 16 | Plan 22: PII Pipeline Example | ✅ DataPipeline temporal effect demo + E2E tests |
+
+### Plan 22: PII Pipeline Example
+
+A practical demonstration of Temporal Effect Verification applied to data privacy enforcement.
+The `DataPipeline` stateful effect defines `Raw` and `Anonymized` states with transitions
+`load: Raw → Raw`, `anonymize: Raw → Anonymized`, and `log: Anonymized → Anonymized`.
+This ensures that personal data **must** pass through anonymization before it can be logged —
+any attempt to log raw data is caught at compile time as an `InvalidPreState` violation.
+
+**Files**:
+- `examples/pii_pipeline.mm` — Valid pipeline demonstrating correct load → anonymize → log sequence
+- `examples/pii_pipeline_error.mm` — Invalid pipeline (skips anonymize) showing compile-time rejection
+- `tests/test_pii_pipeline.mm` — E2E integration test with multiple valid pipeline patterns
+- `src/mir_analysis.rs` — 3 unit tests: valid sequence, skip anonymize (InvalidPreState), branch conflict (ConflictingState)
 
 ---
 

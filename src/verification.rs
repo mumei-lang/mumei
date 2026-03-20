@@ -34,7 +34,6 @@ pub struct RelatedDiagnostic {
     pub original_span: Span,
 }
 
-
 /// エラーの詳細情報。ソース位置（Span）と修正提案（suggestion）を保持する。
 #[derive(Debug, Clone)]
 pub struct ErrorDetail {
@@ -376,19 +375,22 @@ impl MumeiError {
                 // Propagate source to related diagnostics that share the same file.
                 // Only overwrite when the related span's file matches the primary file
                 // (or is "<unknown>"), preserving cross-file span context.
-                let updated_related = related.into_iter().map(|r| {
-                    let r_file = r.original_span.file.as_str();
-                    if r_file.is_empty() || r_file == "<unknown>" || r_file == file_name {
-                        let recomputed_span = span_to_source_span(source, &r.original_span);
-                        RelatedDiagnostic {
-                            src: miette::NamedSource::new(file_name, source.to_string()),
-                            span: recomputed_span,
-                            ..r
+                let updated_related = related
+                    .into_iter()
+                    .map(|r| {
+                        let r_file = r.original_span.file.as_str();
+                        if r_file.is_empty() || r_file == "<unknown>" || r_file == file_name {
+                            let recomputed_span = span_to_source_span(source, &r.original_span);
+                            RelatedDiagnostic {
+                                src: miette::NamedSource::new(file_name, source.to_string()),
+                                span: recomputed_span,
+                                ..r
+                            }
+                        } else {
+                            r
                         }
-                    } else {
-                        r
-                    }
-                }).collect();
+                    })
+                    .collect();
                 MumeiError::VerificationError {
                     msg,
                     src: named_src,
@@ -397,7 +399,7 @@ impl MumeiError {
                     original_span,
                     related: updated_related,
                 }
-            },
+            }
             MumeiError::CodegenError {
                 msg,
                 help,
@@ -405,19 +407,22 @@ impl MumeiError {
                 related,
                 ..
             } => {
-                let updated_related = related.into_iter().map(|r| {
-                    let r_file = r.original_span.file.as_str();
-                    if r_file.is_empty() || r_file == "<unknown>" || r_file == file_name {
-                        let recomputed_span = span_to_source_span(source, &r.original_span);
-                        RelatedDiagnostic {
-                            src: miette::NamedSource::new(file_name, source.to_string()),
-                            span: recomputed_span,
-                            ..r
+                let updated_related = related
+                    .into_iter()
+                    .map(|r| {
+                        let r_file = r.original_span.file.as_str();
+                        if r_file.is_empty() || r_file == "<unknown>" || r_file == file_name {
+                            let recomputed_span = span_to_source_span(source, &r.original_span);
+                            RelatedDiagnostic {
+                                src: miette::NamedSource::new(file_name, source.to_string()),
+                                span: recomputed_span,
+                                ..r
+                            }
+                        } else {
+                            r
                         }
-                    } else {
-                        r
-                    }
-                }).collect();
+                    })
+                    .collect();
                 MumeiError::CodegenError {
                     msg,
                     src: named_src,
@@ -426,7 +431,7 @@ impl MumeiError {
                     original_span,
                     related: updated_related,
                 }
-            },
+            }
             MumeiError::TypeError {
                 msg,
                 help,
@@ -434,19 +439,22 @@ impl MumeiError {
                 related,
                 ..
             } => {
-                let updated_related = related.into_iter().map(|r| {
-                    let r_file = r.original_span.file.as_str();
-                    if r_file.is_empty() || r_file == "<unknown>" || r_file == file_name {
-                        let recomputed_span = span_to_source_span(source, &r.original_span);
-                        RelatedDiagnostic {
-                            src: miette::NamedSource::new(file_name, source.to_string()),
-                            span: recomputed_span,
-                            ..r
+                let updated_related = related
+                    .into_iter()
+                    .map(|r| {
+                        let r_file = r.original_span.file.as_str();
+                        if r_file.is_empty() || r_file == "<unknown>" || r_file == file_name {
+                            let recomputed_span = span_to_source_span(source, &r.original_span);
+                            RelatedDiagnostic {
+                                src: miette::NamedSource::new(file_name, source.to_string()),
+                                span: recomputed_span,
+                                ..r
+                            }
+                        } else {
+                            r
                         }
-                    } else {
-                        r
-                    }
-                }).collect();
+                    })
+                    .collect();
                 MumeiError::TypeError {
                     msg,
                     src: named_src,
@@ -455,7 +463,7 @@ impl MumeiError {
                     original_span,
                     related: updated_related,
                 }
-            },
+            }
         }
     }
 
@@ -751,6 +759,7 @@ pub fn evaluate_sub_constraint(sub_pred: &str, value: &str) -> bool {
 
     // Simple comparison patterns: v >= N, v <= N, v > N, v < N, v != N
     // Try to parse as numeric comparison
+    #[allow(clippy::type_complexity)]
     let comparisons: Vec<(&str, fn(i64, i64) -> bool)> = vec![
         (">=", (|a, b| a >= b) as fn(i64, i64) -> bool),
         ("<=", |a, b| a <= b),
@@ -1146,12 +1155,8 @@ pub fn build_semantic_feedback(
                 .enumerate()
                 .map(|(idx, sub)| {
                     let satisfied = evaluate_sub_constraint(sub, value);
-                    let sub_explanation = constraint_to_natural_language(
-                        &mapping.param_name,
-                        type_name,
-                        sub,
-                        value,
-                    );
+                    let sub_explanation =
+                        constraint_to_natural_language(&mapping.param_name, type_name, sub, value);
                     json!({
                         "index": idx,
                         "raw": sub,
@@ -5654,7 +5659,11 @@ fn verify_inner(
                             related_src_span,
                             format!("constraint on '{}' defined here", mapping.param_name),
                             miette::NamedSource::new(
-                                if mapping.span.file.is_empty() { "<unknown>" } else { &mapping.span.file },
+                                if mapping.span.file.is_empty() {
+                                    "<unknown>"
+                                } else {
+                                    &mapping.span.file
+                                },
                                 String::new(),
                             ),
                             format!("type constraint: {}", mapping.predicate_raw),
@@ -6754,8 +6763,7 @@ fn expr_to_z3<'a>(
                         // Number/Float literals are constants already checked
                         // by verify_effect_params (Phase 1g). Skip Z3 String here.
                         // Variables and other expressions need symbolic verification.
-                        let is_constant =
-                            matches!(arg, Expr::Number(_) | Expr::Float(_));
+                        let is_constant = matches!(arg, Expr::Number(_) | Expr::Float(_));
                         if is_constant {
                             // Constant args are already checked by check_constant_constraint
                             // in verify_effect_params (Phase 1g). Skip Z3 String here.
@@ -6881,11 +6889,7 @@ fn expr_to_z3<'a>(
                 .effect_defs
                 .get(effect.as_str())
                 .or_else(|| vc.module_env.effects.get(effect.as_str()))
-                .map(|def| {
-                    def.params
-                        .iter()
-                        .any(|p| p.type_name == "Str")
-                })
+                .map(|def| def.params.iter().any(|p| p.type_name == "Str"))
                 .unwrap_or(false);
             if has_str_params {
                 Ok(Z3String::new_const(ctx, result_name.as_str()).into())

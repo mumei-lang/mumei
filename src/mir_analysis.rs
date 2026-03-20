@@ -2653,4 +2653,258 @@ mod tests {
             result.violations
         );
     }
+
+    // =========================================================================
+    // PII Pipeline Tests (Plan 22)
+    // =========================================================================
+
+    /// Helper: create a DataPipeline effect with states [Raw, Anonymized].
+    fn make_data_pipeline_effect_def() -> crate::parser::EffectDef {
+        use crate::parser::EffectTransition;
+        crate::parser::EffectDef {
+            name: "DataPipeline".to_string(),
+            params: vec![],
+            constraint: None,
+            includes: vec![],
+            refinement: None,
+            parent: vec![],
+            span: Span::default(),
+            states: vec!["Raw".to_string(), "Anonymized".to_string()],
+            transitions: vec![
+                EffectTransition {
+                    operation: "load".to_string(),
+                    from_state: "Raw".to_string(),
+                    to_state: "Raw".to_string(),
+                },
+                EffectTransition {
+                    operation: "anonymize".to_string(),
+                    from_state: "Raw".to_string(),
+                    to_state: "Anonymized".to_string(),
+                },
+                EffectTransition {
+                    operation: "log".to_string(),
+                    from_state: "Anonymized".to_string(),
+                    to_state: "Anonymized".to_string(),
+                },
+            ],
+            initial_state: Some("Raw".to_string()),
+        }
+    }
+
+    #[test]
+    fn test_pii_pipeline_valid_sequence() {
+        // load → anonymize → log (valid sequence)
+        let def = make_data_pipeline_effect_def();
+        let sm = EffectStateMachine::from_effect_def(&def).unwrap();
+        let mut sms = HashMap::new();
+        sms.insert("DataPipeline".to_string(), sm);
+
+        let body = MirBody {
+            name: "test_pii_valid".to_string(),
+            locals: vec![LocalDecl {
+                local: Local(0),
+                name: Some("_ret".to_string()),
+                ty: None,
+                movability: Movability::Move,
+            }],
+            blocks: vec![BasicBlock {
+                id: 0,
+                statements: vec![
+                    MirStatement::Assign(
+                        Place::Local(Local(0)),
+                        Rvalue::Perform {
+                            effect: "DataPipeline".to_string(),
+                            operation: "load".to_string(),
+                            args: vec![],
+                        },
+                    ),
+                    MirStatement::Assign(
+                        Place::Local(Local(0)),
+                        Rvalue::Perform {
+                            effect: "DataPipeline".to_string(),
+                            operation: "anonymize".to_string(),
+                            args: vec![],
+                        },
+                    ),
+                    MirStatement::Assign(
+                        Place::Local(Local(0)),
+                        Rvalue::Perform {
+                            effect: "DataPipeline".to_string(),
+                            operation: "log".to_string(),
+                            args: vec![],
+                        },
+                    ),
+                ],
+                terminator: Terminator::Return(Operand::Constant(crate::mir::MirConstant::Int(0))),
+            }],
+            entry_block: 0,
+        };
+
+        let result = analyze_temporal_effects(&body, &sms);
+        assert!(
+            result.violations.is_empty(),
+            "Valid PII pipeline (load → anonymize → log) should have no violations, got: {:?}",
+            result.violations
+        );
+    }
+
+    #[test]
+    fn test_pii_pipeline_skip_anonymize() {
+        // load → log (skipping anonymize) → InvalidPreState
+        let def = make_data_pipeline_effect_def();
+        let sm = EffectStateMachine::from_effect_def(&def).unwrap();
+        let mut sms = HashMap::new();
+        sms.insert("DataPipeline".to_string(), sm);
+
+        let body = MirBody {
+            name: "test_pii_skip_anonymize".to_string(),
+            locals: vec![LocalDecl {
+                local: Local(0),
+                name: Some("_ret".to_string()),
+                ty: None,
+                movability: Movability::Move,
+            }],
+            blocks: vec![BasicBlock {
+                id: 0,
+                statements: vec![
+                    MirStatement::Assign(
+                        Place::Local(Local(0)),
+                        Rvalue::Perform {
+                            effect: "DataPipeline".to_string(),
+                            operation: "load".to_string(),
+                            args: vec![],
+                        },
+                    ),
+                    MirStatement::Assign(
+                        Place::Local(Local(0)),
+                        Rvalue::Perform {
+                            effect: "DataPipeline".to_string(),
+                            operation: "log".to_string(),
+                            args: vec![],
+                        },
+                    ),
+                ],
+                terminator: Terminator::Return(Operand::Constant(crate::mir::MirConstant::Int(0))),
+            }],
+            entry_block: 0,
+        };
+
+        let result = analyze_temporal_effects(&body, &sms);
+        assert_eq!(
+            result.violations.len(),
+            1,
+            "Should have exactly 1 violation for skipping anonymize, got: {:?}",
+            result.violations
+        );
+        assert_eq!(
+            result.violations[0].kind,
+            TemporalViolationKind::InvalidPreState
+        );
+        assert_eq!(result.violations[0].effect, "DataPipeline");
+        assert_eq!(result.violations[0].operation, "log");
+        assert_eq!(result.violations[0].actual_state, "Raw");
+        assert!(
+            result.violations[0].expected_state.contains("Anonymized"),
+            "Expected state should mention 'Anonymized', got: {}",
+            result.violations[0].expected_state
+        );
+    }
+
+    #[test]
+    fn test_pii_pipeline_branch_conflict() {
+        // Branch: one side performs anonymize, other does not, then both merge to log
+        // → ConflictingState at merge point
+        let def = make_data_pipeline_effect_def();
+        let sm = EffectStateMachine::from_effect_def(&def).unwrap();
+        let mut sms = HashMap::new();
+        sms.insert("DataPipeline".to_string(), sm);
+
+        let body = MirBody {
+            name: "test_pii_branch_conflict".to_string(),
+            locals: vec![
+                LocalDecl {
+                    local: Local(0),
+                    name: Some("_ret".to_string()),
+                    ty: None,
+                    movability: Movability::Move,
+                },
+                LocalDecl {
+                    local: Local(1),
+                    name: Some("cond".to_string()),
+                    ty: None,
+                    movability: Movability::Move,
+                },
+            ],
+            blocks: vec![
+                // Block 0: load, then branch
+                BasicBlock {
+                    id: 0,
+                    statements: vec![MirStatement::Assign(
+                        Place::Local(Local(0)),
+                        Rvalue::Perform {
+                            effect: "DataPipeline".to_string(),
+                            operation: "load".to_string(),
+                            args: vec![],
+                        },
+                    )],
+                    terminator: Terminator::SwitchInt {
+                        discr: Operand::Place(Place::Local(Local(1))),
+                        targets: vec![(1, 1)],
+                        otherwise: 2,
+                    },
+                },
+                // Block 1: anonymize (DataPipeline goes to Anonymized)
+                BasicBlock {
+                    id: 1,
+                    statements: vec![MirStatement::Assign(
+                        Place::Local(Local(0)),
+                        Rvalue::Perform {
+                            effect: "DataPipeline".to_string(),
+                            operation: "anonymize".to_string(),
+                            args: vec![],
+                        },
+                    )],
+                    terminator: Terminator::Goto(3),
+                },
+                // Block 2: no anonymize (DataPipeline stays Raw)
+                BasicBlock {
+                    id: 2,
+                    statements: vec![],
+                    terminator: Terminator::Goto(3),
+                },
+                // Block 3: merge point → log
+                BasicBlock {
+                    id: 3,
+                    statements: vec![MirStatement::Assign(
+                        Place::Local(Local(0)),
+                        Rvalue::Perform {
+                            effect: "DataPipeline".to_string(),
+                            operation: "log".to_string(),
+                            args: vec![],
+                        },
+                    )],
+                    terminator: Terminator::Return(Operand::Constant(
+                        crate::mir::MirConstant::Int(0),
+                    )),
+                },
+            ],
+            entry_block: 0,
+        };
+
+        let result = analyze_temporal_effects(&body, &sms);
+        let conflict_violations: Vec<_> = result
+            .violations
+            .iter()
+            .filter(|v| v.kind == TemporalViolationKind::ConflictingState)
+            .collect();
+        assert!(
+            !conflict_violations.is_empty(),
+            "Should detect ConflictingState at merge point (one branch Anonymized, other Raw)"
+        );
+        assert_eq!(
+            conflict_violations[0].block_id, 3,
+            "ConflictingState should be at block 3 (merge point)"
+        );
+        assert_eq!(conflict_violations[0].effect, "DataPipeline");
+    }
 }

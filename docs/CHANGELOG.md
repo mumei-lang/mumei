@@ -2,6 +2,15 @@
 
 ---
 
+### Plan 22: PII Data Pipeline Example
+
+- Added `examples/pii_pipeline.mm`: Valid PII anonymization pipeline demonstrating compile-time enforcement
+- Added `examples/pii_pipeline_error.mm`: Intentionally invalid pipeline showing `InvalidPreState` detection
+- Added `tests/test_pii_pipeline.mm`: E2E integration test for PII pipeline
+- Added 3 unit tests in `src/mir_analysis.rs` for DataPipeline state machine verification
+
+---
+
 ## PR #83: Plans 15–20 — Examples, FFI Memory, Str Migration, Codegen Types, MIR Migration, Z3 Integration
 
 ### Summary
