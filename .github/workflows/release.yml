@@ -134,6 +134,12 @@ jobs:
             Write-Host "WARNING: llvm-config not found at $llvmConfig"
             Get-ChildItem -Path $llvmDir -Recurse -Depth 2 | Select-Object FullName
           }
+          # Fail early if LLVM dev libs are missing (required by llvm-sys)
+          $libDir = "$llvmDir/lib"
+          if (-not (Test-Path $libDir)) {
+            Write-Error "LLVM lib directory not found at $libDir — install-llvm-action may have used a different layout"
+            exit 1
+          }
           echo "LLVM_SYS_170_PREFIX=$llvmDir" >> $env:GITHUB_ENV
           echo "LIBCLANG_PATH=$llvmDir/lib" >> $env:GITHUB_ENV
           # Install Z3 pre-built release (faster than vcpkg source build)
