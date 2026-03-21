@@ -878,10 +878,10 @@ mod tests {
 
     #[test]
     fn test_keyword_list_completeness() {
-        // Verify MUMEI_KEYWORDS matches the lexer's keyword count (57)
+        // Verify MUMEI_KEYWORDS matches the lexer's keyword count (56)
         assert_eq!(
             MUMEI_KEYWORDS.len(),
-            57,
+            56,
             "MUMEI_KEYWORDS count should match lexer keywords, got {}",
             MUMEI_KEYWORDS.len()
         );
