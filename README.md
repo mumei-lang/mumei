@@ -292,6 +292,37 @@ python mcp_server.py
 
 [Demo 2: Compound Constraint Decomposition (Path Safety)](https://github.com/user-attachments/assets/cc5f7d93-a759-418d-9b46-520500c38672)
 
+### Multi-Agent Collaboration
+
+The MCP Server (`mcp_server.py`) is implemented as **FastMCP("Mumei-Forge")** and exposes mumei's formal verification capabilities to any MCP-compatible AI agent — Claude Code, Devin, Codex, Qwen, and others — without requiring agent-specific integration work.
+
+```mermaid
+graph TD
+    D1["Claude Code"] -->|"MCP"| M["mcp_server.py (Mumei-Forge)"]
+    D2["Devin"] -->|"MCP"| M
+    D3["Codex"] -->|"MCP"| M
+    D4["Qwen (via MCP client)"] -->|"MCP"| M
+    M -->|"validate_logic"| V["mumei verify"]
+    M -->|"forge_blade"| B["mumei build"]
+    M -->|"get_inferred_effects"| I["mumei infer-effects"]
+```
+
+#### AI Agent Features
+
+- **Machine-readable output**: `_build_machine_readable()` parses `report.json` and returns structured JSON containing `failure_type`, `actions`, `counter_example`, `conflicting_constraints`, `data_flow`, `related_locations`, and more — ready for programmatic consumption by any agent.
+- **Concurrent-safe verification**: `validate_logic` uses `mumei verify --report-dir` with a unique temporary directory per invocation, enabling multiple agents to run verification in parallel without conflicts.
+- **Zero-configuration usage**: Any MCP-compatible agent can start using mumei's verification, build, and effect inference capabilities by simply connecting to `python mcp_server.py`.
+
+#### mumei-agent vs. MCP Server
+
+| | MCP Server (`mcp_server.py`) | [mumei-agent](https://github.com/mumei-lang/mumei-agent) |
+|---|---|---|
+| **Approach** | Generic interface — the agent's own LLM decides how to fix issues | Turnkey solution — LLM call + verification + retry integrated in one loop |
+| **Integration** | Any MCP-compatible agent (Claude Code, Devin, Codex, Qwen, etc.) | Standalone CLI: `python -m agent file.mm` |
+| **LLM** | Agent brings its own | Configurable via `.env` (Ollama, OpenAI, DashScope, etc.) |
+
+The two approaches are **complementary**: the MCP Server enables any agent to access mumei's verification without requiring mumei-agent, while mumei-agent provides an out-of-the-box autonomous fix loop for users who want a single-command experience.
+
 ---
 
 ## Documentation
