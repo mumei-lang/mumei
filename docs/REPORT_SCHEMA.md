@@ -26,6 +26,20 @@ External tools (e.g., [mumei-agent](https://github.com/mumei-lang/mumei-agent)) 
 | `span` | `object` | No | Source location (`file`, `line`, `col`, `len`) |
 | `type_definition_locations` | `array` | No | Constraint source locations |
 
+## semantic_feedback.structured_unsat_core
+
+When `failure_type` is `"invariant_violated"`, the `semantic_feedback` object includes a `structured_unsat_core` array. Each element is a `StructuredLabel` object:
+
+| Field | Type | Description |
+|---|---|---|
+| `constraint_type` | `string` | One of: `"requires"`, `"refined_type"`, `"struct_field"`, `"quantifier"`, `"u64_nonneg"` |
+| `param` | `string \| null` | Parameter name (for `refined_type`, `struct_field`, `u64_nonneg`) |
+| `type_name` | `string \| null` | Type name (for `refined_type`) |
+| `field` | `string \| null` | Field name (for `struct_field`) |
+| `description` | `string` | Human-readable bilingual description |
+
+The existing `conflicting_constraints` (array of description strings) and `raw_unsat_core` (array of raw Z3 label strings) fields are preserved for backward compatibility.
+
 ## semantic_feedback Object
 
 | Field | Type | Description |
