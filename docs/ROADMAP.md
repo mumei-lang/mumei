@@ -577,7 +577,7 @@ atom open_file(x: i64)
 Unfreezes the LSP server and adds two major features: textDocument/completion and textDocument/definition.
 
 **textDocument/completion**:
-- 56 mumei keywords returned as CompletionItem (kind=14 Keyword)
+- 57 mumei keywords returned as CompletionItem (kind=14 Keyword)
 - Atom names extracted from parsed items cache (kind=3 Function)
 - Effect names from EffectDef items (kind=8 Interface)
 - Type/struct/enum names from TypeDef/StructDef/EnumDef items (kind=7 Class)
@@ -585,7 +585,7 @@ Unfreezes the LSP server and adds two major features: textDocument/completion an
 
 **textDocument/definition**:
 - Extract word at cursor position from document text
-- Search all cached parsed items for matching definitions (atom, type, struct, enum, effect)
+- Search all cached parsed items for matching definitions (atom, type, struct, enum, effect, trait, resource)
 - Return Location (URI + range) based on item's Span
 
 **Performance: Parsed items cache**:

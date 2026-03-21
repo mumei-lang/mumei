@@ -4,8 +4,8 @@ The Mumei language server (`mumei lsp`) communicates via JSON-RPC over stdio and
 
 - **Diagnostics** — parse errors and Z3 verification errors
 - **Hover** — atom requires/ensures/effects display
-- **Completion** — keywords, atom names, effect names, type/struct/enum names
-- **Go to Definition** — jump to atom, type, struct, enum, and effect definitions
+- **Completion** — keywords, atom names, effect names, trait names, resource names, type/struct/enum names
+- **Go to Definition** — jump to atom, type, struct, enum, effect, trait, and resource definitions
 
 ## Neovim
 

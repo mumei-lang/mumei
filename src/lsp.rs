@@ -607,6 +607,18 @@ fn build_completion_list(
                         "kind": 7
                     }));
                 }
+                parser::Item::TraitDef(t) => {
+                    items.push(serde_json::json!({
+                        "label": t.name,
+                        "kind": 8
+                    }));
+                }
+                parser::Item::ResourceDef(r) => {
+                    items.push(serde_json::json!({
+                        "label": r.name,
+                        "kind": 7
+                    }));
+                }
                 _ => {}
             }
         }
@@ -663,6 +675,8 @@ fn find_definition(
                 parser::Item::StructDef(s) => (&s.name, &s.span),
                 parser::Item::EnumDef(e) => (&e.name, &e.span),
                 parser::Item::EffectDef(e) => (&e.name, &e.span),
+                parser::Item::TraitDef(t) => (&t.name, &t.span),
+                parser::Item::ResourceDef(r) => (&r.name, &r.span),
                 _ => continue,
             };
             if item_name == name {
@@ -864,10 +878,11 @@ mod tests {
 
     #[test]
     fn test_keyword_list_completeness() {
-        // Verify MUMEI_KEYWORDS contains the expected count from the lexer
-        assert!(
-            MUMEI_KEYWORDS.len() >= 50,
-            "Should have at least 50 keywords, got {}",
+        // Verify MUMEI_KEYWORDS matches the lexer's keyword count (57)
+        assert_eq!(
+            MUMEI_KEYWORDS.len(),
+            57,
+            "MUMEI_KEYWORDS count should match lexer keywords, got {}",
             MUMEI_KEYWORDS.len()
         );
         // Verify no duplicates
