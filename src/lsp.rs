@@ -629,6 +629,10 @@ fn extract_word_at(source: &str, line: usize, character: usize) -> String {
     if character >= chars.len() {
         return String::new();
     }
+    // Only extract a word if the cursor is on an identifier character
+    if !chars[character].is_alphanumeric() && chars[character] != '_' {
+        return String::new();
+    }
     // Scan backward to find word start
     let mut start = character;
     while start > 0 && (chars[start - 1].is_alphanumeric() || chars[start - 1] == '_') {
@@ -818,6 +822,17 @@ mod tests {
         assert_eq!(extract_word_at(source, 0, 0), "atom");
         assert_eq!(extract_word_at(source, 0, 5), "inc");
         assert_eq!(extract_word_at(source, 0, 9), "n");
+    }
+
+    #[test]
+    fn test_extract_word_at_non_identifier() {
+        let source = "atom inc(n: i64)";
+        // Position 8 is '(' — should return empty, not "inc"
+        assert_eq!(extract_word_at(source, 0, 8), "");
+        // Position 4 is ' ' — should return empty, not "atom"
+        assert_eq!(extract_word_at(source, 0, 4), "");
+        // Position 11 is ':' — should return empty, not "n"
+        assert_eq!(extract_word_at(source, 0, 11), "");
     }
 
     #[test]
