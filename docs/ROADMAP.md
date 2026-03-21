@@ -611,3 +611,4 @@ Unfreezes the LSP server and adds two major features: textDocument/completion an
 - [`docs/STDLIB.md`](STDLIB.md) — Standard library reference (Phase B/C additions)
 - [`docs/TOOLCHAIN.md`](TOOLCHAIN.md) — CLI commands and distribution
 - [`instruction.md`](../instruction.md) — Development guidelines and priorities
+- [`docs/CROSS_PROJECT_ROADMAP.md`](CROSS_PROJECT_ROADMAP.md) — Cross-project roadmap for mumei + mumei-agent (2026-03〜)
