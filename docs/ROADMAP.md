@@ -503,6 +503,7 @@ Detailed session plans for the next 8 implementation priorities are documented i
 | 16 | Plan 22: PII Pipeline Example | ✅ DataPipeline temporal effect demo + E2E tests |
 | 17 | Plan 23: Regex Path Policies + URL Validation | ✅ RegexSafeFileRead, SecureHttpGet/Post, Z3 approximation improvements |
 | 18 | Plan 24: Modular Verification | ✅ effect_pre/effect_post contracts, cross-atom temporal state tracking |
+| 19 | Plan 25: LSP Completion & Definition | ✅ textDocument/completion, textDocument/definition, multi-editor docs |
 
 ### Plan 22: PII Pipeline Example
 
@@ -570,6 +571,36 @@ atom open_file(x: i64)
 - `tests/test_modular_verification.mm` — E2E test with File effect contracts
 - `src/mir_analysis.rs` — 3 unit tests for modular verification
 - `src/parser/mod.rs` — 3 parser tests for effect_pre/effect_post
+
+### Plan 25: LSP Completion & Definition
+
+Unfreezes the LSP server and adds two major features: textDocument/completion and textDocument/definition.
+
+**textDocument/completion**:
+- 56 mumei keywords returned as CompletionItem (kind=14 Keyword)
+- Atom names extracted from parsed items cache (kind=3 Function)
+- Effect names from EffectDef items (kind=8 Interface)
+- Type/struct/enum names from TypeDef/StructDef/EnumDef items (kind=7 Class)
+- Trigger characters: `.`, `:`
+
+**textDocument/definition**:
+- Extract word at cursor position from document text
+- Search all cached parsed items for matching definitions (atom, type, struct, enum, effect)
+- Return Location (URI + range) based on item's Span
+
+**Performance: Parsed items cache**:
+- `HashMap<String, Vec<Item>>` alongside existing `documents` HashMap
+- Updated on every didOpen/didChange (reuses parse result from diagnose)
+- Used for completion and definition lookups without re-parsing
+
+**Multi-editor configuration docs**:
+- `docs/EDITORS.md` with setup examples for Neovim, Helix, Emacs, Sublime Text, and Zed
+
+**Files**:
+- `src/lsp.rs` — Completion handler, definition handler, parsed items cache, keyword list, helper functions, unit tests
+- `docs/EDITORS.md` — Editor configuration documentation (5 editors)
+- `instruction.md` — §11 LSP status changed from "Frozen" to "Active"
+- `docs/ROADMAP.md` — This plan entry
 
 ---
 

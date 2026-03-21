@@ -226,22 +226,23 @@ Mumei caches verification results per-atom in `.mumei/cache/verification_cache.j
 
 > Details: [`docs/ROADMAP.md`](docs/ROADMAP.md)
 
-### LSP Status: Frozen
+### LSP Status: Active
 
-The LSP server (`mumei lsp`) has the following features implemented and is **considered complete for now**:
+The LSP server (`mumei lsp`) has the following features implemented:
 
 - `textDocument/didOpen` / `textDocument/didChange` → parse error diagnostics
 - `textDocument/hover` → atom requires/ensures display
 - Z3 verification error diagnostics (with Span-based position info)
+- `textDocument/completion` → keyword, atom, effect, type/struct/enum completion (trigger characters: `.`, `:`)
+- `textDocument/definition` → jump to atom, type, struct, enum, and effect definitions
 - `shutdown` / `exit` handling
+- Parsed items cache for efficient completion and definition lookups
 
-**Deferred items** (to be addressed when time permits):
-- `textDocument/completion` (keyword/atom name completion)
-- `textDocument/definition` (jump to definition)
+Editor configuration examples: [`docs/EDITORS.md`](docs/EDITORS.md)
+
+**Deferred items**:
 - Counter-example highlighting in editors
 - VS Code Marketplace publishing
-
-Rationale: We are shifting focus from editor tooling to **strategic language evolution**.
 
 ### Strategic Vision: From Experimental to Practical
 

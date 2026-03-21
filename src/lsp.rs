@@ -3,16 +3,14 @@
 //! `mumei lsp` コマンドの実装。
 //! JSON-RPC over stdio で Language Server Protocol を提供する。
 //!
-//! ## 対応機能（Phase 1: 最小実装）
+//! ## 対応機能
 //! - `initialize` / `initialized` ハンドシェイク
 //! - `textDocument/didOpen` / `textDocument/didChange` → パースして diagnostics 送信
-//! - `shutdown` / `exit`
-//!
-//! ## 将来の拡張（Phase 2+）
 //! - `textDocument/hover` — atom の requires/ensures 表示
-//! - `textDocument/completion` — キーワード・atom 名補完
-//! - `textDocument/publishDiagnostics` — Z3 検証エラーのリアルタイム表示
+//! - `textDocument/completion` — キーワード・atom・effect・type 名補完
 //! - `textDocument/definition` — 定義ジャンプ
+//! - `textDocument/publishDiagnostics` — Z3 検証エラーのリアルタイム表示
+//! - `shutdown` / `exit`
 use crate::parser;
 use crate::verification;
 use std::collections::HashMap;
@@ -29,6 +27,8 @@ pub fn run() {
     let mut writer = stdout.lock();
     // ファイル URI → ソースコード のキャッシュ
     let mut documents: HashMap<String, String> = HashMap::new();
+    // ファイル URI → パース済みアイテム のキャッシュ（completion/definition 用）
+    let mut parsed_items: HashMap<String, Vec<parser::Item>> = HashMap::new();
     loop {
         // LSP メッセージを読み取り
         let message = match read_message(&mut reader) {
@@ -54,7 +54,10 @@ pub fn run() {
                     "capabilities": {
                         "textDocumentSync": 1,
                         "hoverProvider": true,
-                        "completionProvider": null
+                        "completionProvider": {
+                            "triggerCharacters": [".", ":"]
+                        },
+                        "definitionProvider": true
                     },
                     "serverInfo": {
                         "name": "mumei-lsp",
@@ -74,6 +77,8 @@ pub fn run() {
                         let uri = td.get("uri").and_then(|u| u.as_str()).unwrap_or("");
                         let text = td.get("text").and_then(|t| t.as_str()).unwrap_or("");
                         documents.insert(uri.to_string(), text.to_string());
+                        let items = parser::parse_module(text);
+                        parsed_items.insert(uri.to_string(), items);
                         let diagnostics = diagnose(uri, text);
                         send_diagnostics(&mut writer, uri, &diagnostics);
                     }
@@ -90,6 +95,8 @@ pub fn run() {
                             if let Some(change) = changes.first() {
                                 if let Some(text) = change.get("text").and_then(|t| t.as_str()) {
                                     documents.insert(uri.to_string(), text.to_string());
+                                    let items = parser::parse_module(text);
+                                    parsed_items.insert(uri.to_string(), items);
                                     let diagnostics = diagnose(uri, text);
                                     send_diagnostics(&mut writer, uri, &diagnostics);
                                 }
@@ -103,6 +110,7 @@ pub fn run() {
                     if let Some(td) = params.get("textDocument") {
                         let uri = td.get("uri").and_then(|u| u.as_str()).unwrap_or("");
                         documents.remove(uri);
+                        parsed_items.remove(uri);
                         // diagnostics をクリア
                         send_diagnostics(&mut writer, uri, &[]);
                     }
@@ -141,6 +149,55 @@ pub fn run() {
                     serde_json::Value::Null
                 };
 
+                if let Some(id) = id {
+                    send_response(&mut writer, id, result);
+                }
+            }
+            "textDocument/completion" => {
+                let result = if let Some(params) = json.get("params") {
+                    let uri = params
+                        .get("textDocument")
+                        .and_then(|td| td.get("uri"))
+                        .and_then(|u| u.as_str())
+                        .unwrap_or("");
+                    build_completion_list(&parsed_items, uri)
+                } else {
+                    serde_json::json!([])
+                };
+                if let Some(id) = id {
+                    send_response(&mut writer, id, result);
+                }
+            }
+            "textDocument/definition" => {
+                let result = if let Some(params) = json.get("params") {
+                    let uri = params
+                        .get("textDocument")
+                        .and_then(|td| td.get("uri"))
+                        .and_then(|u| u.as_str())
+                        .unwrap_or("");
+                    let line = params
+                        .get("position")
+                        .and_then(|p| p.get("line"))
+                        .and_then(|l| l.as_u64())
+                        .unwrap_or(0) as usize;
+                    let character = params
+                        .get("position")
+                        .and_then(|p| p.get("character"))
+                        .and_then(|c| c.as_u64())
+                        .unwrap_or(0) as usize;
+                    if let Some(text) = documents.get(uri) {
+                        let word = extract_word_at(text, line, character);
+                        if word.is_empty() {
+                            serde_json::Value::Null
+                        } else {
+                            find_definition(&parsed_items, &word)
+                        }
+                    } else {
+                        serde_json::Value::Null
+                    }
+                } else {
+                    serde_json::Value::Null
+                };
                 if let Some(id) = id {
                     send_response(&mut writer, id, result);
                 }
@@ -432,6 +489,202 @@ fn build_hover(source: &str, line: usize) -> Option<String> {
 }
 
 // =============================================================================
+// Completion (textDocument/completion)
+// =============================================================================
+
+/// All mumei keywords (from src/parser/lexer.rs read_identifier)
+const MUMEI_KEYWORDS: &[&str] = &[
+    "atom",
+    "atom_ref",
+    "task_group",
+    "task",
+    "max_unroll",
+    "let",
+    "if",
+    "else",
+    "while",
+    "match",
+    "fn",
+    "struct",
+    "enum",
+    "trait",
+    "impl",
+    "import",
+    "type",
+    "where",
+    "requires",
+    "ensures",
+    "body",
+    "true",
+    "false",
+    "trusted",
+    "unverified",
+    "async",
+    "await",
+    "acquire",
+    "resource",
+    "effect",
+    "extern",
+    "consume",
+    "invariant",
+    "decreases",
+    "effects",
+    "resources",
+    "for",
+    "forall",
+    "exists",
+    "ref",
+    "mut",
+    "call",
+    "perform",
+    "law",
+    "priority",
+    "mode",
+    "exclusive",
+    "shared",
+    "includes",
+    "parent",
+    "as",
+    "contract",
+    "chan",
+    "send",
+    "recv",
+    "cancel",
+];
+
+/// Build a CompletionItem list from keywords + cached parsed items.
+fn build_completion_list(
+    parsed_items: &HashMap<String, Vec<parser::Item>>,
+    _current_uri: &str,
+) -> serde_json::Value {
+    let mut items: Vec<serde_json::Value> = Vec::new();
+
+    // 1) Keywords (kind = 14)
+    for kw in MUMEI_KEYWORDS {
+        items.push(serde_json::json!({
+            "label": kw,
+            "kind": 14
+        }));
+    }
+
+    // 2) Names from parsed items across all open documents
+    for doc_items in parsed_items.values() {
+        for item in doc_items {
+            match item {
+                parser::Item::Atom(a) => {
+                    items.push(serde_json::json!({
+                        "label": a.name,
+                        "kind": 3,
+                        "detail": format!(
+                            "atom {}  requires: {}  ensures: {}",
+                            a.name,
+                            a.requires.trim(),
+                            a.ensures.trim()
+                        )
+                    }));
+                }
+                parser::Item::EffectDef(e) => {
+                    items.push(serde_json::json!({
+                        "label": e.name,
+                        "kind": 8
+                    }));
+                }
+                parser::Item::TypeDef(t) => {
+                    items.push(serde_json::json!({
+                        "label": t.name,
+                        "kind": 7
+                    }));
+                }
+                parser::Item::StructDef(s) => {
+                    items.push(serde_json::json!({
+                        "label": s.name,
+                        "kind": 7
+                    }));
+                }
+                parser::Item::EnumDef(e) => {
+                    items.push(serde_json::json!({
+                        "label": e.name,
+                        "kind": 7
+                    }));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    serde_json::json!(items)
+}
+
+// =============================================================================
+// Definition (textDocument/definition)
+// =============================================================================
+
+/// Extract the identifier word at a given (0-indexed) line and character position.
+fn extract_word_at(source: &str, line: usize, character: usize) -> String {
+    let target_line = match source.lines().nth(line) {
+        Some(l) => l,
+        None => return String::new(),
+    };
+    let chars: Vec<char> = target_line.chars().collect();
+    if character >= chars.len() {
+        return String::new();
+    }
+    // Scan backward to find word start
+    let mut start = character;
+    while start > 0 && (chars[start - 1].is_alphanumeric() || chars[start - 1] == '_') {
+        start -= 1;
+    }
+    // Scan forward to find word end
+    let mut end = character;
+    while end < chars.len() && (chars[end].is_alphanumeric() || chars[end] == '_') {
+        end += 1;
+    }
+    if start == end {
+        return String::new();
+    }
+    chars[start..end].iter().collect()
+}
+
+/// Search all cached parsed items for a definition matching the given name.
+/// Returns a Location JSON value or Null if not found.
+fn find_definition(
+    parsed_items: &HashMap<String, Vec<parser::Item>>,
+    name: &str,
+) -> serde_json::Value {
+    for (uri, doc_items) in parsed_items {
+        for item in doc_items {
+            let (item_name, span) = match item {
+                parser::Item::Atom(a) => (&a.name, &a.span),
+                parser::Item::TypeDef(t) => (&t.name, &t.span),
+                parser::Item::StructDef(s) => (&s.name, &s.span),
+                parser::Item::EnumDef(e) => (&e.name, &e.span),
+                parser::Item::EffectDef(e) => (&e.name, &e.span),
+                _ => continue,
+            };
+            if item_name == name {
+                // Span is 1-indexed; LSP expects 0-indexed
+                let def_line = span.line.saturating_sub(1);
+                let def_col = span.col.saturating_sub(1);
+                // Use the span's file if it has a path, otherwise use the document URI
+                let def_uri = if !span.file.is_empty() {
+                    format!("file://{}", span.file)
+                } else {
+                    uri.clone()
+                };
+                return serde_json::json!({
+                    "uri": def_uri,
+                    "range": {
+                        "start": { "line": def_line, "character": def_col },
+                        "end": { "line": def_line, "character": def_col + span.len }
+                    }
+                });
+            }
+        }
+    }
+    serde_json::Value::Null
+}
+
+// =============================================================================
 // LSP JSON-RPC I/O
 // =============================================================================
 /// LSP メッセージを stdin から読み取る（Content-Length ヘッダ付き）
@@ -504,4 +757,108 @@ fn send_message(writer: &mut impl Write, message: &serde_json::Value) {
     let _ = writer.write_all(header.as_bytes());
     let _ = writer.write_all(body.as_bytes());
     let _ = writer.flush();
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_completion_includes_keywords() {
+        let parsed_items: HashMap<String, Vec<parser::Item>> = HashMap::new();
+        let result = build_completion_list(&parsed_items, "file:///test.mm");
+        let items = result.as_array().expect("should be array");
+        let labels: Vec<&str> = items
+            .iter()
+            .filter_map(|i| i.get("label").and_then(|l| l.as_str()))
+            .collect();
+        assert!(labels.contains(&"atom"));
+        assert!(labels.contains(&"requires"));
+        assert!(labels.contains(&"ensures"));
+        assert!(labels.contains(&"effect"));
+        assert!(labels.contains(&"struct"));
+        assert!(labels.contains(&"import"));
+        // Check keyword kind = 14
+        let atom_item = items
+            .iter()
+            .find(|i| i.get("label").and_then(|l| l.as_str()) == Some("atom"))
+            .unwrap();
+        assert_eq!(atom_item.get("kind").and_then(|k| k.as_u64()), Some(14));
+    }
+
+    #[test]
+    fn test_completion_includes_atoms_from_cache() {
+        let mut parsed_items: HashMap<String, Vec<parser::Item>> = HashMap::new();
+        let source = "atom inc(n: i64) requires: n >= 0; ensures: result == n + 1; body: n + 1;";
+        let items = parser::parse_module(source);
+        assert!(!items.is_empty(), "should parse at least one item");
+        parsed_items.insert("file:///test.mm".to_string(), items);
+
+        let result = build_completion_list(&parsed_items, "file:///test.mm");
+        let completion_items = result.as_array().expect("should be array");
+        let labels: Vec<&str> = completion_items
+            .iter()
+            .filter_map(|i| i.get("label").and_then(|l| l.as_str()))
+            .collect();
+        assert!(labels.contains(&"inc"), "should contain atom name 'inc'");
+        // Atom kind = 3 (Function)
+        let inc_item = completion_items
+            .iter()
+            .find(|i| i.get("label").and_then(|l| l.as_str()) == Some("inc"))
+            .unwrap();
+        assert_eq!(inc_item.get("kind").and_then(|k| k.as_u64()), Some(3));
+    }
+
+    #[test]
+    fn test_extract_word_at_basic() {
+        let source = "atom inc(n: i64)";
+        assert_eq!(extract_word_at(source, 0, 0), "atom");
+        assert_eq!(extract_word_at(source, 0, 5), "inc");
+        assert_eq!(extract_word_at(source, 0, 9), "n");
+    }
+
+    #[test]
+    fn test_extract_word_at_out_of_bounds() {
+        let source = "hello";
+        assert_eq!(extract_word_at(source, 1, 0), "");
+        assert_eq!(extract_word_at(source, 0, 100), "");
+    }
+
+    #[test]
+    fn test_find_definition_atom() {
+        let mut parsed_items: HashMap<String, Vec<parser::Item>> = HashMap::new();
+        let source = "atom inc(n: i64) requires: n >= 0; ensures: result == n + 1; body: n + 1;";
+        let items = parser::parse_module(source);
+        parsed_items.insert("file:///test.mm".to_string(), items);
+
+        let result = find_definition(&parsed_items, "inc");
+        assert!(!result.is_null(), "should find definition for 'inc'");
+        assert!(result.get("uri").is_some());
+        assert!(result.get("range").is_some());
+    }
+
+    #[test]
+    fn test_find_definition_not_found() {
+        let parsed_items: HashMap<String, Vec<parser::Item>> = HashMap::new();
+        let result = find_definition(&parsed_items, "nonexistent");
+        assert!(result.is_null());
+    }
+
+    #[test]
+    fn test_keyword_list_completeness() {
+        // Verify MUMEI_KEYWORDS contains the expected count from the lexer
+        assert!(
+            MUMEI_KEYWORDS.len() >= 50,
+            "Should have at least 50 keywords, got {}",
+            MUMEI_KEYWORDS.len()
+        );
+        // Verify no duplicates
+        let mut seen = std::collections::HashSet::new();
+        for kw in MUMEI_KEYWORDS {
+            assert!(seen.insert(kw), "Duplicate keyword: {}", kw);
+        }
+    }
 }
