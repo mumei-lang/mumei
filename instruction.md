@@ -234,7 +234,7 @@ The LSP server (`mumei lsp`) has the following features implemented:
 - `textDocument/hover` → atom requires/ensures display
 - Z3 verification error diagnostics (with Span-based position info)
 - `textDocument/completion` → keyword, atom, effect, type/struct/enum completion (trigger characters: `.`, `:`)
-- `textDocument/definition` → jump to atom, type, struct, enum, and effect definitions
+- `textDocument/definition` → jump to atom, type, struct, enum, effect, trait, and resource definitions
 - `shutdown` / `exit` handling
 - Parsed items cache for efficient completion and definition lookups
 
