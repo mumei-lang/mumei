@@ -92,6 +92,12 @@ jobs:
               # Build fully-static musl binary
               # Use --features z3/static-link-z3 to build Z3 from source with
               # musl-native g++ (Alpine z3-dev headers help cmake find deps)
+              #
+              # Use target-specific RUSTFLAGS so that -C target-feature=+crt-static
+              # only applies to the final musl binary, NOT to build scripts.
+              # Build scripts (compiled for the host) must remain dynamically
+              # linked so that z3-sys/bindgen can dlopen libclang.so.
+              export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C target-feature=+crt-static"
               cargo build --release --target x86_64-unknown-linux-musl \
                 --features z3/static-link-z3
             '
@@ -104,37 +110,38 @@ jobs:
           echo "Z3_SYS_Z3_HEADER=$(brew --prefix z3)/include/z3.h" >> $GITHUB_ENV
           echo "Z3_SYS_Z3_LIB_DIR=$(brew --prefix z3)/lib" >> $GITHUB_ENV
       # Plan 7: Windows dependencies
-      # Download LLVM 17 directly from GitHub releases and install to a
-      # dedicated directory.  This avoids conflicts with the newer LLVM that
-      # may be pre-installed on the runner image (choco --force is unreliable
-      # when the existing install was not managed by Chocolatey).
-      - name: Install system dependencies (Windows)
+      # Use KyleMayes/install-llvm-action to get LLVM 17 with full
+      # development libraries (static .lib files, CMake config, llvm-config)
+      # required by the llvm-sys crate.  The old LLVM-17.0.6-win64.exe NSIS
+      # installer only shipped compiler binaries (clang, etc.).
+      - name: Install LLVM 17 (Windows)
+        if: runner.os == 'Windows'
+        uses: KyleMayes/install-llvm-action@v2
+        with:
+          version: "17.0"
+          directory: ${{ runner.temp }}/llvm
+      - name: Set LLVM environment variables (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          # Download LLVM 17 installer directly from upstream
-          $llvmVersion = "17.0.6"
-          $llvmUrl = "https://github.com/llvm/llvm-project/releases/download/llvmorg-$llvmVersion/LLVM-$llvmVersion-win64.exe"
-          $installerPath = "$env:RUNNER_TEMP\LLVM-$llvmVersion-win64.exe"
-          Write-Host "Downloading LLVM $llvmVersion ..."
-          # Suppress progress bar to speed up download in CI
-          $ProgressPreference = 'SilentlyContinue'
-          Invoke-WebRequest -Uri $llvmUrl -OutFile $installerPath
-          # Install to a clean directory separate from the pre-installed LLVM
-          $llvmDir = "C:\LLVM17"
-          Write-Host "Installing LLVM $llvmVersion to $llvmDir ..."
-          Start-Process -Wait -FilePath $installerPath -ArgumentList "/S /D=$llvmDir"
-          # Verify installation
-          $llvmConfig = "$llvmDir\bin\llvm-config.exe"
+          $llvmDir = "$env:RUNNER_TEMP/llvm"
+          # Verify that development libraries are present
+          $llvmConfig = "$llvmDir/bin/llvm-config.exe"
           if (Test-Path $llvmConfig) {
             $ver = & $llvmConfig --version
-            Write-Host "LLVM installed: $ver"
+            Write-Host "LLVM installed (with dev libs): $ver"
           } else {
-            Write-Host "WARNING: llvm-config not found at $llvmConfig, listing $llvmDir"
+            Write-Host "WARNING: llvm-config not found at $llvmConfig"
             Get-ChildItem -Path $llvmDir -Recurse -Depth 2 | Select-Object FullName
           }
+          # Fail early if LLVM dev libs are missing (required by llvm-sys)
+          $libDir = "$llvmDir/lib"
+          if (-not (Test-Path $libDir)) {
+            Write-Error "LLVM lib directory not found at $libDir — install-llvm-action may have used a different layout"
+            exit 1
+          }
           echo "LLVM_SYS_170_PREFIX=$llvmDir" >> $env:GITHUB_ENV
-          echo "LIBCLANG_PATH=$llvmDir\lib" >> $env:GITHUB_ENV
+          echo "LIBCLANG_PATH=$llvmDir/lib" >> $env:GITHUB_ENV
           # Install Z3 pre-built release (faster than vcpkg source build)
           $z3Version = "4.13.4"
           $z3Archive = "z3-$z3Version-x64-win"

@@ -1284,45 +1284,82 @@ pub fn build_effect_feedback(
 // Unsat Core: Tracking Label Parsing & Contradiction Feedback
 // =============================================================================
 
-/// Parse a Z3 tracking label into a human-readable constraint description.
+/// Structured representation of a Z3 tracking label.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct StructuredLabel {
+    pub constraint_type: String,
+    pub param: Option<String>,
+    pub type_name: Option<String>,
+    pub field: Option<String>,
+    pub description: String,
+}
+
+/// Parse a Z3 tracking label into a StructuredLabel.
 /// Returns None for unrecognized labels (internal bookkeeping variables).
-fn parse_tracking_label(label: &str) -> Option<String> {
+fn parse_tracking_label(label: &str) -> Option<StructuredLabel> {
     if label == "track_requires" {
-        return Some("Precondition (requires) / 前提条件 (requires)".to_string());
+        return Some(StructuredLabel {
+            constraint_type: "requires".to_string(),
+            param: None,
+            type_name: None,
+            field: None,
+            description: "Precondition (requires) / 前提条件 (requires)".to_string(),
+        });
     }
     if let Some(rest) = label.strip_prefix("track_refined_type_") {
         // format: track_refined_type_{var}::{type}
         if let Some(idx) = rest.find("::") {
             let var = &rest[..idx];
-            let type_name = &rest[idx + 2..];
-            return Some(format!(
-                "Refined type constraint: {} ({}) / 精緻型制約: {} ({})",
-                var, type_name, var, type_name
-            ));
+            let tn = &rest[idx + 2..];
+            return Some(StructuredLabel {
+                constraint_type: "refined_type".to_string(),
+                param: Some(var.to_string()),
+                type_name: Some(tn.to_string()),
+                field: None,
+                description: format!(
+                    "Refined type constraint: {} ({}) / 精緻型制約: {} ({})",
+                    var, tn, var, tn
+                ),
+            });
         }
     }
     if let Some(rest) = label.strip_prefix("track_struct_field_") {
         // format: track_struct_field_{param}::{field}
         if let Some(idx) = rest.find("::") {
             let param = &rest[..idx];
-            let field = &rest[idx + 2..];
-            return Some(format!(
-                "Struct field constraint: {}.{} / 構造体フィールド制約: {}.{}",
-                param, field, param, field
-            ));
+            let fld = &rest[idx + 2..];
+            return Some(StructuredLabel {
+                constraint_type: "struct_field".to_string(),
+                param: Some(param.to_string()),
+                type_name: None,
+                field: Some(fld.to_string()),
+                description: format!(
+                    "Struct field constraint: {}.{} / 構造体フィールド制約: {}.{}",
+                    param, fld, param, fld
+                ),
+            });
         }
     }
     if let Some(rest) = label.strip_prefix("track_quantifier_") {
-        return Some(format!(
-            "Quantifier constraint #{} / 量子化制約 #{}",
-            rest, rest
-        ));
+        return Some(StructuredLabel {
+            constraint_type: "quantifier".to_string(),
+            param: None,
+            type_name: None,
+            field: None,
+            description: format!("Quantifier constraint #{} / 量子化制約 #{}", rest, rest),
+        });
     }
     if let Some(rest) = label.strip_prefix("track_u64_nonneg_") {
-        return Some(format!(
-            "Non-negative constraint: {} (u64) / 非負制約: {} (u64)",
-            rest, rest
-        ));
+        return Some(StructuredLabel {
+            constraint_type: "u64_nonneg".to_string(),
+            param: Some(rest.to_string()),
+            type_name: None,
+            field: None,
+            description: format!(
+                "Non-negative constraint: {} (u64) / 非負制約: {} (u64)",
+                rest, rest
+            ),
+        });
     }
     None
 }
@@ -1346,6 +1383,7 @@ pub fn build_contradiction_feedback(
     atom_name: &str,
     conflicting_constraints: &[String],
     raw_labels: &[String],
+    structured_labels: &[StructuredLabel],
 ) -> serde_json::Value {
     let explanation = if conflicting_constraints.is_empty() {
         "The constraints are mutually contradictory, but the specific conflicting set could not be determined. \
@@ -1364,6 +1402,7 @@ pub fn build_contradiction_feedback(
         "atom": atom_name,
         "conflicting_constraints": conflicting_constraints,
         "raw_unsat_core": raw_labels,
+        "structured_unsat_core": structured_labels,
         "explanation": explanation,
         "suggestion": suggestion_for_failure_type(FAILURE_INVARIANT_VIOLATED)
     })
@@ -5823,13 +5862,22 @@ fn verify_inner(
         let unsat_core = solver.get_unsat_core();
         let core_labels: Vec<String> = unsat_core.iter().map(|b| format!("{}", b)).collect();
 
-        let conflicting_constraints: Vec<String> = core_labels
+        let structured_labels: Vec<StructuredLabel> = core_labels
             .iter()
             .filter_map(|label| parse_tracking_label(label))
             .collect();
 
-        let contradiction_fb =
-            build_contradiction_feedback(&atom.name, &conflicting_constraints, &core_labels);
+        let conflicting_constraints: Vec<String> = structured_labels
+            .iter()
+            .map(|sl| sl.description.clone())
+            .collect();
+
+        let contradiction_fb = build_contradiction_feedback(
+            &atom.name,
+            &conflicting_constraints,
+            &core_labels,
+            &structured_labels,
+        );
 
         save_visualizer_report(
             output_dir,
@@ -8300,67 +8348,89 @@ mod tests {
     fn test_parse_tracking_label_requires() {
         let result = parse_tracking_label("track_requires");
         assert!(result.is_some());
-        let msg = result.unwrap();
-        assert!(msg.contains("requires"));
-        assert!(msg.contains("前提条件"));
+        let sl = result.unwrap();
+        assert_eq!(sl.constraint_type, "requires");
+        assert!(sl.param.is_none());
+        assert!(sl.type_name.is_none());
+        assert!(sl.field.is_none());
+        assert!(sl.description.contains("requires"));
+        assert!(sl.description.contains("前提条件"));
     }
 
     #[test]
     fn test_parse_tracking_label_refined_type() {
         let result = parse_tracking_label("track_refined_type_n::Nat");
         assert!(result.is_some());
-        let msg = result.unwrap();
-        assert!(msg.contains("n"));
-        assert!(msg.contains("Nat"));
-        assert!(msg.contains("精緻型"));
+        let sl = result.unwrap();
+        assert_eq!(sl.constraint_type, "refined_type");
+        assert_eq!(sl.param.as_deref(), Some("n"));
+        assert_eq!(sl.type_name.as_deref(), Some("Nat"));
+        assert!(sl.field.is_none());
+        assert!(sl.description.contains("n"));
+        assert!(sl.description.contains("Nat"));
+        assert!(sl.description.contains("精緻型"));
     }
 
     #[test]
     fn test_parse_tracking_label_refined_type_underscore_var() {
         let result = parse_tracking_label("track_refined_type_my_var::Pos");
         assert!(result.is_some());
-        let msg = result.unwrap();
-        assert!(msg.contains("my_var"));
-        assert!(msg.contains("Pos"));
-        assert!(msg.contains("精緻型"));
+        let sl = result.unwrap();
+        assert_eq!(sl.constraint_type, "refined_type");
+        assert_eq!(sl.param.as_deref(), Some("my_var"));
+        assert_eq!(sl.type_name.as_deref(), Some("Pos"));
+        assert!(sl.description.contains("my_var"));
+        assert!(sl.description.contains("Pos"));
+        assert!(sl.description.contains("精緻型"));
     }
 
     #[test]
     fn test_parse_tracking_label_struct_field() {
         let result = parse_tracking_label("track_struct_field_p::age");
         assert!(result.is_some());
-        let msg = result.unwrap();
-        assert!(msg.contains("p"));
-        assert!(msg.contains("age"));
-        assert!(msg.contains("構造体フィールド"));
+        let sl = result.unwrap();
+        assert_eq!(sl.constraint_type, "struct_field");
+        assert_eq!(sl.param.as_deref(), Some("p"));
+        assert_eq!(sl.field.as_deref(), Some("age"));
+        assert!(sl.type_name.is_none());
+        assert!(sl.description.contains("p"));
+        assert!(sl.description.contains("age"));
+        assert!(sl.description.contains("構造体フィールド"));
     }
 
     #[test]
     fn test_parse_tracking_label_struct_field_underscore() {
         let result = parse_tracking_label("track_struct_field_my_obj::my_field");
         assert!(result.is_some());
-        let msg = result.unwrap();
-        assert!(msg.contains("my_obj"));
-        assert!(msg.contains("my_field"));
-        assert!(msg.contains("構造体フィールド"));
+        let sl = result.unwrap();
+        assert_eq!(sl.constraint_type, "struct_field");
+        assert_eq!(sl.param.as_deref(), Some("my_obj"));
+        assert_eq!(sl.field.as_deref(), Some("my_field"));
+        assert!(sl.description.contains("my_obj"));
+        assert!(sl.description.contains("my_field"));
+        assert!(sl.description.contains("構造体フィールド"));
     }
 
     #[test]
     fn test_parse_tracking_label_quantifier() {
         let result = parse_tracking_label("track_quantifier_0");
         assert!(result.is_some());
-        let msg = result.unwrap();
-        assert!(msg.contains("#0"));
-        assert!(msg.contains("量子化"));
+        let sl = result.unwrap();
+        assert_eq!(sl.constraint_type, "quantifier");
+        assert!(sl.param.is_none());
+        assert!(sl.description.contains("#0"));
+        assert!(sl.description.contains("量子化"));
     }
 
     #[test]
     fn test_parse_tracking_label_u64_nonneg() {
         let result = parse_tracking_label("track_u64_nonneg_x");
         assert!(result.is_some());
-        let msg = result.unwrap();
-        assert!(msg.contains("x"));
-        assert!(msg.contains("u64"));
+        let sl = result.unwrap();
+        assert_eq!(sl.constraint_type, "u64_nonneg");
+        assert_eq!(sl.param.as_deref(), Some("x"));
+        assert!(sl.description.contains("x"));
+        assert!(sl.description.contains("u64"));
     }
 
     #[test]
@@ -8382,7 +8452,11 @@ mod tests {
             "track_requires".to_string(),
             "track_refined_type_n::Nat".to_string(),
         ];
-        let feedback = build_contradiction_feedback("test_atom", &constraints, &raw);
+        let structured: Vec<StructuredLabel> = raw
+            .iter()
+            .filter_map(|label| parse_tracking_label(label))
+            .collect();
+        let feedback = build_contradiction_feedback("test_atom", &constraints, &raw, &structured);
         assert_eq!(feedback["failure_type"], FAILURE_INVARIANT_VIOLATED);
         assert_eq!(feedback["atom"], "test_atom");
         assert!(feedback["conflicting_constraints"].is_array());
@@ -8394,6 +8468,13 @@ mod tests {
             2
         );
         assert!(feedback["raw_unsat_core"].is_array());
+        assert!(feedback["structured_unsat_core"].is_array());
+        let suc = feedback["structured_unsat_core"].as_array().unwrap();
+        assert_eq!(suc.len(), 2);
+        assert_eq!(suc[0]["constraint_type"], "requires");
+        assert_eq!(suc[1]["constraint_type"], "refined_type");
+        assert_eq!(suc[1]["param"], "n");
+        assert_eq!(suc[1]["type_name"], "Nat");
         assert!(feedback["explanation"]
             .as_str()
             .unwrap()
@@ -8402,9 +8483,13 @@ mod tests {
 
     #[test]
     fn test_build_contradiction_feedback_empty() {
-        let feedback = build_contradiction_feedback("test_atom", &[], &[]);
+        let feedback = build_contradiction_feedback("test_atom", &[], &[], &[]);
         assert_eq!(feedback["atom"], "test_atom");
         assert!(feedback["conflicting_constraints"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert!(feedback["structured_unsat_core"]
             .as_array()
             .unwrap()
             .is_empty());
