@@ -577,7 +577,7 @@ atom open_file(x: i64)
 Unfreezes the LSP server and adds two major features: textDocument/completion and textDocument/definition.
 
 **textDocument/completion**:
-- 57 mumei keywords returned as CompletionItem (kind=14 Keyword)
+- 56 mumei keywords returned as CompletionItem (kind=14 Keyword)
 - Atom names extracted from parsed items cache (kind=3 Function)
 - Effect names from EffectDef items (kind=8 Interface)
 - Type/struct/enum names from TypeDef/StructDef/EnumDef items (kind=7 Class)
