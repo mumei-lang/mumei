@@ -1291,29 +1291,61 @@ fn cmd_inspect_file(input: &str, ai: bool, format: &str) {
 
     // Register dependencies
     for item in &items {
-        if let Item::Atom(atom) = item {
-            let callees = resolver::collect_callees_from_body(&atom.body_expr);
-            module_env.register_dependencies(&atom.name, callees);
+        match item {
+            Item::Atom(atom) => {
+                let callees = resolver::collect_callees_from_body(&atom.body_expr);
+                module_env.register_dependencies(&atom.name, callees);
+            }
+            Item::ImplBlock(impl_block) => {
+                for method in &impl_block.methods {
+                    let qualified_name = format!("{}::{}", impl_block.struct_name, method.name);
+                    let callees = resolver::collect_callees_from_body(&method.body_expr);
+                    module_env.register_dependencies(&qualified_name, callees);
+                }
+            }
+            _ => {}
         }
     }
 
     // Try Z3 verification for each atom
     for item in &items {
-        if let Item::Atom(atom) = item {
-            if module_env.is_verified(&atom.name) {
-                verification_results.insert(atom.name.clone(), true);
-                continue;
-            }
-            let hir_atom = lower_atom_to_hir_with_env(atom, Some(&module_env));
-            match verification::verify(&hir_atom, output_dir, &module_env) {
-                Ok(_) => {
-                    module_env.mark_verified(&atom.name);
+        match item {
+            Item::Atom(atom) => {
+                if module_env.is_verified(&atom.name) {
                     verification_results.insert(atom.name.clone(), true);
+                    continue;
                 }
-                Err(_) => {
-                    verification_results.insert(atom.name.clone(), false);
+                let hir_atom = lower_atom_to_hir_with_env(atom, Some(&module_env));
+                match verification::verify(&hir_atom, output_dir, &module_env) {
+                    Ok(_) => {
+                        module_env.mark_verified(&atom.name);
+                        verification_results.insert(atom.name.clone(), true);
+                    }
+                    Err(_) => {
+                        verification_results.insert(atom.name.clone(), false);
+                    }
                 }
             }
+            Item::ImplBlock(impl_block) => {
+                for method in &impl_block.methods {
+                    let qualified_name = format!("{}::{}", impl_block.struct_name, method.name);
+                    if module_env.is_verified(&qualified_name) {
+                        verification_results.insert(qualified_name, true);
+                        continue;
+                    }
+                    let hir_atom = lower_atom_to_hir_with_env(method, Some(&module_env));
+                    match verification::verify(&hir_atom, output_dir, &module_env) {
+                        Ok(_) => {
+                            module_env.mark_verified(&qualified_name);
+                            verification_results.insert(qualified_name, true);
+                        }
+                        Err(_) => {
+                            verification_results.insert(qualified_name, false);
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -2025,25 +2057,51 @@ fn cmd_publish(proof_only: bool) {
     let mut failed = 0;
 
     for item in &items {
-        if let Item::Atom(atom) = item {
-            if module_env.is_verified(&atom.name) {
-                atom_count += 1;
-                continue;
-            }
-            let hir_atom = lower_atom_to_hir_with_env(atom, Some(&module_env));
-            match verification::verify(&hir_atom, output_dir, &module_env) {
-                Ok(_) => {
-                    println!("  ⚖️  '{}': verified ✅", atom.name);
-                    module_env.mark_verified(&atom.name);
+        match item {
+            Item::Atom(atom) => {
+                if module_env.is_verified(&atom.name) {
                     atom_count += 1;
+                    continue;
                 }
-                Err(e) => {
-                    let resolved = resolve_source_for_span(&source, &atom.span);
-                    let e = e.with_source(&resolved, &atom.span);
-                    eprintln!("{:?}", miette::Report::new(e));
-                    failed += 1;
+                let hir_atom = lower_atom_to_hir_with_env(atom, Some(&module_env));
+                match verification::verify(&hir_atom, output_dir, &module_env) {
+                    Ok(_) => {
+                        println!("  ⚖️  '{}': verified ✅", atom.name);
+                        module_env.mark_verified(&atom.name);
+                        atom_count += 1;
+                    }
+                    Err(e) => {
+                        let resolved = resolve_source_for_span(&source, &atom.span);
+                        let e = e.with_source(&resolved, &atom.span);
+                        eprintln!("{:?}", miette::Report::new(e));
+                        failed += 1;
+                    }
                 }
             }
+            Item::ImplBlock(impl_block) => {
+                for method in &impl_block.methods {
+                    let qualified_name = format!("{}::{}", impl_block.struct_name, method.name);
+                    if module_env.is_verified(&qualified_name) {
+                        atom_count += 1;
+                        continue;
+                    }
+                    let hir_atom = lower_atom_to_hir_with_env(method, Some(&module_env));
+                    match verification::verify(&hir_atom, output_dir, &module_env) {
+                        Ok(_) => {
+                            println!("  ⚖️  '{}': verified ✅", qualified_name);
+                            module_env.mark_verified(&qualified_name);
+                            atom_count += 1;
+                        }
+                        Err(e) => {
+                            let resolved = resolve_source_for_span(&source, &method.span);
+                            let e = e.with_source(&resolved, &method.span);
+                            eprintln!("{:?}", miette::Report::new(e));
+                            failed += 1;
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
