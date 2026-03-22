@@ -1,15 +1,15 @@
 // =============================================================
-// HTTP E2E Demo: Verified HTTP Client with FFI
+// HTTP E2E Demo: Verified HTTP Client with Contracts
 // =============================================================
-// Demonstrates mumei's verified FFI layer for real-world HTTP usage.
+// Demonstrates mumei's contract-based verification for HTTP usage.
 // Each atom has formal contracts (requires/ensures) that Z3 verifies
 // at compile time, ensuring safety properties hold before execution.
 //
 // This demo shows:
-//   1. Extern function declarations with verified contracts
-//   2. Safe wrappers that satisfy extern preconditions
+//   1. HTTP operations via std/http with formal contracts
+//   2. Safe wrappers with input validation via requires clauses
 //   3. Unsafe callers that violate contracts (caught at compile time)
-//   4. Composition of verified HTTP operations
+//   4. Composition of verified HTTP operations with JSON parsing
 //
 // Usage:
 //   mumei check examples/http_e2e_demo.mm
@@ -22,6 +22,8 @@
 
 import "std/http" as http;
 import "std/json" as json;
+
+// Note: json import used in fetch_and_parse_user for body_json parsing
 
 // --- Safe HTTP GET: URL is guaranteed non-empty ---
 atom fetch_user_safe(username: Str)
@@ -52,8 +54,10 @@ atom fetch_and_parse_user(username: Str)
     body: {
         let url = "https://api.github.com/users/" + username;
         let response = http::get(url);
-        let data = http::body_json(response);
-        data
+        let json_handle = http::body_json(response);
+        let name_key = json::from_str(0);
+        let name_val = json::object_get(json_handle, name_key);
+        name_val
     }
 
 // --- Status code validation ---
