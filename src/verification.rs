@@ -2411,32 +2411,6 @@ pub fn verify_impl(
         // "true" リテラルを登録
         env.insert("true".to_string(), Bool::from_bool(&ctx, true).into());
 
-        // P2-B: trait method の param_constraints を solver に assert する。
-        // law 検証時にメソッドのパラメータ制約（例: div の第2引数 != 0）を
-        // 前提条件として注入し、制約下での law 成立を検証する。
-        for method in &trait_def.methods {
-            let param_names: Vec<String> = (0..method.param_types.len())
-                .map(|i| {
-                    let names = ["a", "b", "c", "d", "e", "f"];
-                    names.get(i).unwrap_or(&"x").to_string()
-                })
-                .collect();
-            for (i, constraint_opt) in method.param_constraints.iter().enumerate() {
-                if let Some(constraint_str) = constraint_opt {
-                    if let Some(param_name) = param_names.get(i) {
-                        let concrete: String = constraint_str.replace("v", param_name);
-                        let constraint_ast = parse_expression(&concrete);
-                        if let Ok(constraint_z3) = expr_to_z3(&vc, &constraint_ast, &mut env, None)
-                        {
-                            if let Some(constraint_bool) = constraint_z3.as_bool() {
-                                solver.assert(&constraint_bool);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
         // law 式をパースして検証
         let law_ast = parse_expression(&substituted);
         let verify_result = expr_to_z3(&vc, &law_ast, &mut env, None);
@@ -2444,6 +2418,43 @@ pub fn verify_impl(
             Ok(law_z3) => {
                 if let Some(law_bool) = law_z3.as_bool() {
                     solver.push();
+
+                    // P2-B: trait method の param_constraints を solver に assert する。
+                    // law 検証時にメソッドのパラメータ制約（例: div の第2引数 != 0）を
+                    // 前提条件として注入し、制約下での law 成立を検証する。
+                    // NOTE: push/pop スコープ内で assert することで、制約が
+                    // 他の law 検証に漏れないようにする。
+                    // TODO: 将来的には、law_expr に実際に含まれるメソッドの
+                    // 制約のみを注入するようフィルタリングすべき。
+                    for method in &trait_def.methods {
+                        // Only inject constraints for methods that appear in this law
+                        if !law_expr.contains(&method.name) {
+                            continue;
+                        }
+                        let param_names: Vec<String> = (0..method.param_types.len())
+                            .map(|i| {
+                                let names = ["a", "b", "c", "d", "e", "f"];
+                                names.get(i).unwrap_or(&"x").to_string()
+                            })
+                            .collect();
+                        for (i, constraint_opt) in method.param_constraints.iter().enumerate() {
+                            if let Some(constraint_str) = constraint_opt {
+                                if let Some(param_name) = param_names.get(i) {
+                                    let concrete: String =
+                                        constraint_str.replace("v", param_name);
+                                    let constraint_ast = parse_expression(&concrete);
+                                    if let Ok(constraint_z3) =
+                                        expr_to_z3(&vc, &constraint_ast, &mut env, None)
+                                    {
+                                        if let Some(constraint_bool) = constraint_z3.as_bool() {
+                                            solver.assert(&constraint_bool);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     solver.assert(&law_bool.not());
                     if solver.check() == SatResult::Sat {
                         // 反例（Counter-example）を Z3 model から取得
