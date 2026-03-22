@@ -124,8 +124,17 @@ pub fn resolve_prelude(base_dir: &Path, module_env: &mut ModuleEnv) -> MumeiResu
 
     // prelude の atom を検証済みとしてマーク
     for item in &prelude_items {
-        if let Item::Atom(atom) = item {
-            module_env.mark_verified(&atom.name);
+        match item {
+            Item::Atom(atom) => {
+                module_env.mark_verified(&atom.name);
+            }
+            Item::ImplBlock(ib) => {
+                for method in &ib.methods {
+                    let qualified_name = format!("{}::{}", ib.struct_name, method.name);
+                    module_env.mark_verified(&qualified_name);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -211,6 +220,18 @@ fn resolve_imports_recursive(
                     Item::Import(_) => {}
                     Item::ExternBlock(_) => {}
                     Item::EffectDef(_) => {}
+                    Item::ImplBlock(ib) => {
+                        for method in &ib.methods {
+                            let qualified_name = format!("{}::{}", ib.struct_name, method.name);
+                            module_env.mark_verified(&qualified_name);
+                            verified_atoms.push(qualified_name.clone());
+                            if let Some(prefix) = alias_prefix {
+                                let fqn = format!("{}::{}::{}", prefix, ib.struct_name, method.name);
+                                module_env.mark_verified(&fqn);
+                                verified_atoms.push(fqn);
+                            }
+                        }
+                    }
                 }
             }
 
@@ -304,7 +325,7 @@ fn register_imported_items(items: &[Item], alias: Option<&str>, module_env: &mut
                         .iter()
                         .enumerate()
                         .map(|(i, ty)| crate::parser::Param {
-                            name: format!("arg{}", i),
+                            name: ext_fn.param_names.get(i).cloned().unwrap_or_else(|| format!("arg{}", i)),
                             type_name: Some(ty.clone()),
                             type_ref: Some(crate::parser::parse_type_ref(ty)),
                             is_ref: false,
@@ -319,9 +340,12 @@ fn register_imported_items(items: &[Item], alias: Option<&str>, module_env: &mut
                         type_params: vec![],
                         where_bounds: vec![],
                         params,
-                        requires: "true".to_string(),
+                        requires: ext_fn
+                            .requires
+                            .clone()
+                            .unwrap_or_else(|| "true".to_string()),
                         forall_constraints: vec![],
-                        ensures: "true".to_string(),
+                        ensures: ext_fn.ensures.clone().unwrap_or_else(|| "true".to_string()),
                         body_expr: String::new(),
                         consumed_params: vec![],
                         resources: vec![],
@@ -339,6 +363,18 @@ fn register_imported_items(items: &[Item], alias: Option<&str>, module_env: &mut
                     if let Some(prefix) = alias {
                         let mut fqn_atom = atom.clone();
                         fqn_atom.name = format!("{}::{}", prefix, ext_fn.name);
+                        module_env.register_atom(&fqn_atom);
+                    }
+                }
+            }
+            Item::ImplBlock(impl_block) => {
+                for method in &impl_block.methods {
+                    let mut qualified = method.clone();
+                    qualified.name = format!("{}::{}", impl_block.struct_name, method.name);
+                    module_env.register_atom(&qualified);
+                    if let Some(prefix) = alias {
+                        let mut fqn_atom = method.clone();
+                        fqn_atom.name = format!("{}::{}::{}", prefix, impl_block.struct_name, method.name);
                         module_env.register_atom(&fqn_atom);
                     }
                 }
@@ -475,10 +511,21 @@ pub fn resolve_manifest_dependencies(
                 save_cache(&cache_path, &cache);
                 register_imported_items(&items, Some(dep_name), module_env);
                 for item in &items {
-                    if let Item::Atom(atom) = item {
-                        module_env.mark_verified(&atom.name);
-                        let fqn = format!("{}::{}", dep_name, atom.name);
-                        module_env.mark_verified(&fqn);
+                    match item {
+                        Item::Atom(atom) => {
+                            module_env.mark_verified(&atom.name);
+                            let fqn = format!("{}::{}", dep_name, atom.name);
+                            module_env.mark_verified(&fqn);
+                        }
+                        Item::ImplBlock(ib) => {
+                            for method in &ib.methods {
+                                let qualified = format!("{}::{}", ib.struct_name, method.name);
+                                module_env.mark_verified(&qualified);
+                                let fqn = format!("{}::{}::{}", dep_name, ib.struct_name, method.name);
+                                module_env.mark_verified(&fqn);
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 println!(
@@ -579,10 +626,21 @@ pub fn resolve_manifest_dependencies(
                 save_cache(&cache_path, &cache);
                 register_imported_items(&items, Some(dep_name), module_env);
                 for item in &items {
-                    if let Item::Atom(atom) = item {
-                        module_env.mark_verified(&atom.name);
-                        let fqn = format!("{}::{}", dep_name, atom.name);
-                        module_env.mark_verified(&fqn);
+                    match item {
+                        Item::Atom(atom) => {
+                            module_env.mark_verified(&atom.name);
+                            let fqn = format!("{}::{}", dep_name, atom.name);
+                            module_env.mark_verified(&fqn);
+                        }
+                        Item::ImplBlock(ib) => {
+                            for method in &ib.methods {
+                                let qualified = format!("{}::{}", ib.struct_name, method.name);
+                                module_env.mark_verified(&qualified);
+                                let fqn = format!("{}::{}::{}", dep_name, ib.struct_name, method.name);
+                                module_env.mark_verified(&fqn);
+                            }
+                        }
+                        _ => {}
                     }
                 }
             } else {
@@ -626,10 +684,21 @@ pub fn resolve_manifest_dependencies(
                     save_cache(&cache_path, &cache);
                     register_imported_items(&items, Some(dep_name), module_env);
                     for item in &items {
-                        if let Item::Atom(atom) = item {
-                            module_env.mark_verified(&atom.name);
-                            let fqn = format!("{}::{}", dep_name, atom.name);
-                            module_env.mark_verified(&fqn);
+                        match item {
+                            Item::Atom(atom) => {
+                                module_env.mark_verified(&atom.name);
+                                let fqn = format!("{}::{}", dep_name, atom.name);
+                                module_env.mark_verified(&fqn);
+                            }
+                            Item::ImplBlock(ib) => {
+                                for method in &ib.methods {
+                                    let qualified = format!("{}::{}", ib.struct_name, method.name);
+                                    module_env.mark_verified(&qualified);
+                                    let fqn = format!("{}::{}::{}", dep_name, ib.struct_name, method.name);
+                                    module_env.mark_verified(&fqn);
+                                }
+                            }
+                            _ => {}
                         }
                     }
                     println!(
@@ -1129,9 +1198,9 @@ extern "Rust" {
 
         let atom = module_env.get_atom("http_post").unwrap();
         assert_eq!(atom.params.len(), 2);
-        assert_eq!(atom.params[0].name, "arg0");
+        assert_eq!(atom.params[0].name, "url");
         assert_eq!(atom.params[0].type_name, Some("String".to_string()));
-        assert_eq!(atom.params[1].name, "arg1");
+        assert_eq!(atom.params[1].name, "body");
         assert_eq!(atom.params[1].type_name, Some("String".to_string()));
         assert_eq!(atom.requires, "true");
         assert_eq!(atom.ensures, "true");

@@ -28,6 +28,23 @@ extern "Rust" {
 | `"Rust"` / `"C"` | Target language name |
 | `fn name(params) -> RetType;` | Function signature declaration |
 
+### Verified FFI Contracts
+
+Extern functions can optionally declare `requires` and `ensures` contracts.
+These contracts are **not** body-verified (the body is external), but they **are**
+checked at every call site by Z3 — the caller must satisfy `requires`, and may
+assume `ensures` holds after the call.
+
+```mumei
+extern "Rust" {
+    fn sqrt(x: f64) -> f64
+        requires: x >= 0.0;
+        ensures: result >= 0.0;
+}
+```
+
+If no contracts are specified, they default to `true` (backward compatible).
+
 ### AST Representation (implemented)
 
 ```rust
@@ -35,7 +52,9 @@ pub struct ExternFn {
     pub name: String,
     pub param_types: Vec<String>,
     pub return_type: String,
-    pub span: Span,             // source location
+    pub requires: Option<String>,   // verified FFI contract
+    pub ensures: Option<String>,    // verified FFI contract
+    pub span: Span,                 // source location
 }
 
 pub struct ExternBlock {
@@ -53,7 +72,8 @@ Handled in all match blocks in `main.rs`, `resolver.rs`, `lsp.rs`.
 | Item | Status |
 |---|---|
 | extern block syntax parsing | ✅ Implemented |
-| `ExternFn` / `ExternBlock` AST | ✅ Implemented (with Span) |
+| Verified FFI contracts (`requires`/`ensures` on extern fns) | ✅ Implemented |
+| `ExternFn` / `ExternBlock` AST | ✅ Implemented (with Span + contracts) |
 | `Item::ExternBlock` variant | ✅ Implemented (all match arms) |
 | Parser tests | ✅ Implemented (`test_parse_extern_block`, `test_parse_extern_block_c`) |
 | trusted atom auto-registration | ✅ Implemented (PR #32: extern → ModuleEnv auto-registration) |

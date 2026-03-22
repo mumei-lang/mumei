@@ -134,6 +134,28 @@ pub fn generate_report(
                 };
                 atoms.push(atom_to_report(atom, status));
             }
+            Item::ImplBlock(impl_block) => {
+                for method in &impl_block.methods {
+                    let qualified_name = format!("{}::{}", impl_block.struct_name, method.name);
+                    let status = match verification_results.get(&qualified_name) {
+                        Some(true) => {
+                            verified += 1;
+                            "verified"
+                        }
+                        Some(false) => {
+                            failed += 1;
+                            "failed"
+                        }
+                        None => {
+                            skipped += 1;
+                            "skipped"
+                        }
+                    };
+                    let mut report = atom_to_report(method, status);
+                    report.name = qualified_name;
+                    atoms.push(report);
+                }
+            }
             Item::EnumDef(enum_def) => {
                 enums.push(enum_to_report(enum_def));
             }
