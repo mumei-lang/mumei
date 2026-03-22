@@ -834,7 +834,7 @@ fn cmd_verify(
 
     // Plan 11B: Generate proof certificate if requested
     if generate_proof_cert {
-        let atom_refs: Vec<&parser::Atom> = items
+        let mut atom_refs: Vec<&parser::Atom> = items
             .iter()
             .filter_map(|item| {
                 if let Item::Atom(a) = item {
@@ -844,6 +844,14 @@ fn cmd_verify(
                 }
             })
             .collect();
+        // Also include ImplBlock methods in the certificate
+        for item in &items {
+            if let Item::ImplBlock(ib) = item {
+                for method in &ib.methods {
+                    atom_refs.push(method);
+                }
+            }
+        }
         let cert = proof_cert::generate_certificate(input, &atom_refs, &cert_results);
         let cert_path = if let Some(output) = cert_output {
             std::path::PathBuf::from(output)
@@ -1447,7 +1455,7 @@ fn cmd_verify_cert(cert_path: &str, input: &str) {
 
     let (items, _module_env, _imports, _source) = load_and_prepare(input);
 
-    let atom_refs: Vec<&parser::Atom> = items
+    let mut atom_refs: Vec<&parser::Atom> = items
         .iter()
         .filter_map(|item| {
             if let Item::Atom(a) = item {
@@ -1457,6 +1465,14 @@ fn cmd_verify_cert(cert_path: &str, input: &str) {
             }
         })
         .collect();
+    // Also include ImplBlock methods for certificate verification
+    for item in &items {
+        if let Item::ImplBlock(ib) = item {
+            for method in &ib.methods {
+                atom_refs.push(method);
+            }
+        }
+    }
 
     let results = proof_cert::verify_certificate(&cert, &atom_refs);
 
