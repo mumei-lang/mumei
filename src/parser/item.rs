@@ -1460,6 +1460,7 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
             | Token::Extern
             | Token::Resource
             | Token::Effect
+            | Token::RBrace
             | Token::Eof => break,
             _ => {
                 ctx.advance();

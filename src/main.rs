@@ -521,6 +521,7 @@ fn cmd_check(input: &str) {
                 println!("  ⚡ Effect: '{}'", e.name);
             }
             Item::ImplBlock(ib) => {
+                atom_count += ib.methods.len();
                 println!(
                     "  🔧 ImplBlock: {} ({} method(s))",
                     ib.struct_name,
