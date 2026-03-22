@@ -1351,7 +1351,9 @@ fn cmd_inspect_file(input: &str, ai: bool, format: &str) {
                         verification_results.insert(qualified_name, true);
                         continue;
                     }
-                    let hir_atom = lower_atom_to_hir_with_env(method, Some(&module_env));
+                    let mut qualified_method = method.clone();
+                    qualified_method.name = qualified_name.clone();
+                    let hir_atom = lower_atom_to_hir_with_env(&qualified_method, Some(&module_env));
                     match verification::verify(&hir_atom, output_dir, &module_env) {
                         Ok(_) => {
                             module_env.mark_verified(&qualified_name);
@@ -2122,7 +2124,9 @@ fn cmd_publish(proof_only: bool) {
                         atom_count += 1;
                         continue;
                     }
-                    let hir_atom = lower_atom_to_hir_with_env(method, Some(&module_env));
+                    let mut qualified_method = method.clone();
+                    qualified_method.name = qualified_name.clone();
+                    let hir_atom = lower_atom_to_hir_with_env(&qualified_method, Some(&module_env));
                     match verification::verify(&hir_atom, output_dir, &module_env) {
                         Ok(_) => {
                             println!("  ⚖️  '{}': verified ✅", qualified_name);
