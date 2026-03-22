@@ -581,8 +581,7 @@ fn cmd_verify(
                 for method in &impl_block.methods {
                     let qualified_name = format!("{}::{}", impl_block.struct_name, method.name);
                     let callees = resolver::collect_callees_from_body(&method.body_expr);
-                    module_env.register_dependencies(&qualified_name, callees.clone());
-                    module_env.register_dependencies(&method.name, callees);
+                    module_env.register_dependencies(&qualified_name, callees);
                 }
             }
             _ => {}
@@ -733,7 +732,12 @@ fn cmd_verify(
                             );
                         }
                     } else {
-                        let proof_hash = resolver::compute_proof_hash(method, &module_env);
+                        // Clone method with qualified name for consistent naming
+                        // throughout HIR lowering, proof hash, and cache lookup
+                        let mut qualified_method = method.clone();
+                        qualified_method.name = qualified_name.clone();
+
+                        let proof_hash = resolver::compute_proof_hash(&qualified_method, &module_env);
 
                         if let Some(cached_entry) = verification_cache.get(&qualified_name) {
                             if cached_entry.proof_hash == proof_hash {
@@ -762,7 +766,7 @@ fn cmd_verify(
                             .filter(|tn| module_env.get_type(tn).is_some())
                             .collect();
 
-                        let hir_atom = lower_atom_to_hir_with_env(method, Some(&module_env));
+                        let hir_atom = lower_atom_to_hir_with_env(&qualified_method, Some(&module_env));
 
                         let mir_body = mir::lower_hir_to_mir(&hir_atom);
                         match mir_body.check_analysis_budget() {
@@ -1579,8 +1583,7 @@ fn cmd_build(input: &str, output: &str) {
                 for method in &impl_block.methods {
                     let qualified_name = format!("{}::{}", impl_block.struct_name, method.name);
                     let callees = resolver::collect_callees_from_body(&method.body_expr);
-                    module_env.register_dependencies(&qualified_name, callees.clone());
-                    module_env.register_dependencies(&method.name, callees);
+                    module_env.register_dependencies(&qualified_name, callees);
                 }
             }
             _ => {}
@@ -1717,7 +1720,12 @@ fn cmd_build(input: &str, output: &str) {
                         qualified_name
                     );
 
-                    let hir_atom = lower_atom_to_hir_with_env(method, Some(&module_env));
+                    // Clone method with qualified name for consistent naming
+                    // throughout HIR lowering, codegen, proof hash, and cache
+                    let mut qualified_method = method.clone();
+                    qualified_method.name = qualified_name.clone();
+
+                    let hir_atom = lower_atom_to_hir_with_env(&qualified_method, Some(&module_env));
 
                     let mir_body = mir::lower_hir_to_mir(&hir_atom);
                     match mir_body.check_analysis_budget() {
@@ -1737,7 +1745,7 @@ fn cmd_build(input: &str, output: &str) {
                     } else if module_env.is_verified(&qualified_name) {
                         println!("  ⚖️  [2/3] Verification: Skipped (imported, contract-trusted).");
                     } else {
-                        let proof_hash = resolver::compute_proof_hash(method, &module_env);
+                        let proof_hash = resolver::compute_proof_hash(&qualified_method, &module_env);
 
                         let cache_hit = verification_cache
                             .get(&qualified_name)
