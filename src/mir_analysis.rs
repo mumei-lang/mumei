@@ -1032,22 +1032,46 @@ fn merge_effect_states(
     (merged, conflicts)
 }
 
-/// Extract Perform operations from a block's statements.
-/// Returns (effect_name, operation_name) pairs in order.
-fn extract_performs(block: &BasicBlock) -> Vec<(String, String)> {
-    let mut performs = Vec::new();
+/// Callee effect contract for cross-atom composition.
+/// Maps effect name to (pre_state, post_state).
+#[derive(Debug, Clone)]
+pub struct AtomEffectContract {
+    pub effect_pre: HashMap<String, String>,
+    pub effect_post: HashMap<String, String>,
+}
+
+/// Describes a statement-level operation relevant to temporal analysis.
+/// Either a direct `perform` or a `call` to an atom with effect contracts.
+enum TemporalOp {
+    Perform { effect: String, operation: String },
+    Call { callee: String },
+}
+
+/// Extract Perform and Call operations from a block's statements in order.
+fn extract_temporal_ops(block: &BasicBlock) -> Vec<TemporalOp> {
+    let mut ops = Vec::new();
     for stmt in &block.statements {
-        if let MirStatement::Assign(
-            _,
-            Rvalue::Perform {
-                effect, operation, ..
-            },
-        ) = stmt
-        {
-            performs.push((effect.clone(), operation.clone()));
+        match stmt {
+            MirStatement::Assign(
+                _,
+                Rvalue::Perform {
+                    effect, operation, ..
+                },
+            ) => {
+                ops.push(TemporalOp::Perform {
+                    effect: effect.clone(),
+                    operation: operation.clone(),
+                });
+            }
+            MirStatement::Assign(_, Rvalue::Call { func, .. }) => {
+                ops.push(TemporalOp::Call {
+                    callee: func.clone(),
+                });
+            }
+            _ => {}
         }
     }
-    performs
+    ops
 }
 
 /// Perform forward dataflow analysis for temporal effect verification.
@@ -1056,11 +1080,27 @@ fn extract_performs(block: &BasicBlock) -> Vec<(String, String)> {
 /// 1. Initialize entry block with all effects' initial states
 /// 2. Process each block: check perform operations against current state
 /// 3. At merge points: detect conflicting states from different branches
+/// 4. Cross-atom composition: when a Call to an atom with effect_pre/effect_post
+///    is encountered, verify pre-state and apply post-state transition.
+///
+/// The `callee_contracts` parameter maps atom names to their effect contracts.
+/// When None, only Perform operations are tracked (backward-compatible).
 ///
 /// Iteration bound: block_count * max(state_machines.len(), 10)
+#[allow(dead_code)]
 pub fn analyze_temporal_effects(
     body: &MirBody,
     state_machines: &HashMap<String, EffectStateMachine>,
+) -> TemporalEffectResult {
+    analyze_temporal_effects_with_contracts(body, state_machines, None)
+}
+
+/// Extended version of analyze_temporal_effects that supports cross-atom
+/// contract composition via callee_contracts.
+pub fn analyze_temporal_effects_with_contracts(
+    body: &MirBody,
+    state_machines: &HashMap<String, EffectStateMachine>,
+    callee_contracts: Option<&HashMap<String, AtomEffectContract>>,
 ) -> TemporalEffectResult {
     if state_machines.is_empty() {
         return TemporalEffectResult {
@@ -1116,44 +1156,71 @@ pub fn analyze_temporal_effects(
             None => continue,
         };
 
-        // Process perform operations in this block
-        for (effect, operation) in extract_performs(block) {
-            if let Some(sm) = state_machines.get(&effect) {
-                if let Some(cur_state) = current.get(&effect).cloned() {
-                    if let Some(next) = sm.next_state(&operation, &cur_state) {
-                        current.insert(effect.clone(), next.clone());
-                    } else {
-                        // Invalid pre-state: operation not valid in current state
-                        // Find which states this operation is valid from
-                        let valid_states: Vec<&str> = sm
-                            .transitions
-                            .keys()
-                            .filter(|(op, _)| op == &operation)
-                            .map(|(_, s)| s.as_str())
-                            .collect();
-                        let expected = if valid_states.is_empty() {
-                            "no valid state".to_string()
-                        } else {
-                            valid_states.join(" or ")
-                        };
-                        violations.push(TemporalEffectViolation {
-                            block_id,
-                            effect: effect.clone(),
-                            operation: operation.clone(),
-                            expected_state: expected,
-                            actual_state: cur_state.clone(),
-                            kind: TemporalViolationKind::InvalidPreState,
-                        });
-                        // Error recovery: assume the transition succeeded from a valid
-                        // state to avoid cascading false violations on subsequent
-                        // operations in the same block. Pick the first valid from_state
-                        // and use its target as the new current state.
-                        if let Some((_, first_valid_from)) =
-                            sm.transitions.keys().find(|(op, _)| op == &operation)
-                        {
-                            if let Some(recovery_next) = sm.next_state(&operation, first_valid_from)
-                            {
-                                current.insert(effect.clone(), recovery_next.clone());
+        // Process perform and call operations in this block
+        for op in extract_temporal_ops(block) {
+            match op {
+                TemporalOp::Perform { effect, operation } => {
+                    if let Some(sm) = state_machines.get(&effect) {
+                        if let Some(cur_state) = current.get(&effect).cloned() {
+                            if let Some(next) = sm.next_state(&operation, &cur_state) {
+                                current.insert(effect.clone(), next.clone());
+                            } else {
+                                // Invalid pre-state: operation not valid in current state
+                                let valid_states: Vec<&str> = sm
+                                    .transitions
+                                    .keys()
+                                    .filter(|(op, _)| op == &operation)
+                                    .map(|(_, s)| s.as_str())
+                                    .collect();
+                                let expected = if valid_states.is_empty() {
+                                    "no valid state".to_string()
+                                } else {
+                                    valid_states.join(" or ")
+                                };
+                                violations.push(TemporalEffectViolation {
+                                    block_id,
+                                    effect: effect.clone(),
+                                    operation: operation.clone(),
+                                    expected_state: expected,
+                                    actual_state: cur_state.clone(),
+                                    kind: TemporalViolationKind::InvalidPreState,
+                                });
+                                // Error recovery: assume the transition succeeded
+                                if let Some((_, first_valid_from)) =
+                                    sm.transitions.keys().find(|(op, _)| op == &operation)
+                                {
+                                    if let Some(recovery_next) =
+                                        sm.next_state(&operation, first_valid_from)
+                                    {
+                                        current.insert(effect.clone(), recovery_next.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                TemporalOp::Call { callee } => {
+                    // Cross-atom contract composition: apply callee's effect contracts
+                    if let Some(contracts) = callee_contracts {
+                        if let Some(contract) = contracts.get(&callee) {
+                            // Verify effect_pre: current state must match callee's requirements
+                            for (effect_name, required_pre) in &contract.effect_pre {
+                                if let Some(cur_state) = current.get(effect_name) {
+                                    if cur_state != required_pre {
+                                        violations.push(TemporalEffectViolation {
+                                            block_id,
+                                            effect: effect_name.clone(),
+                                            operation: format!("call {}", callee),
+                                            expected_state: required_pre.clone(),
+                                            actual_state: cur_state.clone(),
+                                            kind: TemporalViolationKind::InvalidPreState,
+                                        });
+                                    }
+                                }
+                            }
+                            // Apply effect_post: update current state to callee's post-state
+                            for (effect_name, post_state) in &contract.effect_post {
+                                current.insert(effect_name.clone(), post_state.clone());
                             }
                         }
                     }
@@ -3060,5 +3127,189 @@ mod tests {
                 "Exit state should be Open, mismatching effect_post Closed"
             );
         }
+    }
+
+    // =========================================================================
+    // Cross-atom contract composition tests (P2-A)
+    // =========================================================================
+
+    /// Helper: build callee contracts for open_file and write_and_close atoms.
+    fn make_file_callee_contracts() -> HashMap<String, AtomEffectContract> {
+        let mut contracts = HashMap::new();
+        // open_file: effect_pre={File:Closed}, effect_post={File:Open}
+        let mut open_pre = HashMap::new();
+        open_pre.insert("File".to_string(), "Closed".to_string());
+        let mut open_post = HashMap::new();
+        open_post.insert("File".to_string(), "Open".to_string());
+        contracts.insert(
+            "open_file".to_string(),
+            AtomEffectContract {
+                effect_pre: open_pre,
+                effect_post: open_post,
+            },
+        );
+        // write_and_close: effect_pre={File:Open}, effect_post={File:Closed}
+        let mut wc_pre = HashMap::new();
+        wc_pre.insert("File".to_string(), "Open".to_string());
+        let mut wc_post = HashMap::new();
+        wc_post.insert("File".to_string(), "Closed".to_string());
+        contracts.insert(
+            "write_and_close".to_string(),
+            AtomEffectContract {
+                effect_pre: wc_pre,
+                effect_post: wc_post,
+            },
+        );
+        contracts
+    }
+
+    #[test]
+    fn test_cross_atom_composition_valid() {
+        // full_pipeline: open_file → write_and_close (correct order)
+        // File starts at Closed, open_file requires Closed and produces Open,
+        // write_and_close requires Open and produces Closed.
+        let sm = make_file_effect_sm();
+        let contracts = make_file_callee_contracts();
+
+        let body = MirBody {
+            name: "full_pipeline".to_string(),
+            locals: vec![LocalDecl {
+                local: Local(0),
+                name: Some("_ret".to_string()),
+                ty: None,
+                movability: Movability::Move,
+            }],
+            blocks: vec![BasicBlock {
+                id: 0,
+                statements: vec![
+                    MirStatement::Assign(
+                        Place::Local(Local(0)),
+                        Rvalue::Call {
+                            func: "open_file".to_string(),
+                            args: vec![Operand::Constant(MirConstant::Int(1))],
+                        },
+                    ),
+                    MirStatement::Assign(
+                        Place::Local(Local(0)),
+                        Rvalue::Call {
+                            func: "write_and_close".to_string(),
+                            args: vec![Operand::Constant(MirConstant::Int(1))],
+                        },
+                    ),
+                ],
+                terminator: Terminator::Return(Operand::Constant(MirConstant::Int(0))),
+            }],
+            entry_block: 0,
+        };
+        let mut machines = HashMap::new();
+        machines.insert("File".to_string(), sm);
+        let result = analyze_temporal_effects_with_contracts(&body, &machines, Some(&contracts));
+        assert!(
+            result.violations.is_empty(),
+            "open_file → write_and_close should have no violations, got: {:?}",
+            result.violations
+        );
+        // Exit state should be Closed (write_and_close's effect_post)
+        if let Some(exit_map) = result.exit_states.get(&0) {
+            assert_eq!(exit_map.get("File").unwrap(), "Closed");
+        }
+    }
+
+    #[test]
+    fn test_cross_atom_composition_invalid_order() {
+        // bad_pipeline: write_and_close → open_file (wrong order)
+        // File starts at Closed, write_and_close requires Open → InvalidPreState
+        let sm = make_file_effect_sm();
+        let contracts = make_file_callee_contracts();
+
+        let body = MirBody {
+            name: "bad_pipeline".to_string(),
+            locals: vec![LocalDecl {
+                local: Local(0),
+                name: Some("_ret".to_string()),
+                ty: None,
+                movability: Movability::Move,
+            }],
+            blocks: vec![BasicBlock {
+                id: 0,
+                statements: vec![
+                    // write_and_close requires File:Open but current is Closed
+                    MirStatement::Assign(
+                        Place::Local(Local(0)),
+                        Rvalue::Call {
+                            func: "write_and_close".to_string(),
+                            args: vec![Operand::Constant(MirConstant::Int(1))],
+                        },
+                    ),
+                    MirStatement::Assign(
+                        Place::Local(Local(0)),
+                        Rvalue::Call {
+                            func: "open_file".to_string(),
+                            args: vec![Operand::Constant(MirConstant::Int(1))],
+                        },
+                    ),
+                ],
+                terminator: Terminator::Return(Operand::Constant(MirConstant::Int(0))),
+            }],
+            entry_block: 0,
+        };
+        let mut machines = HashMap::new();
+        machines.insert("File".to_string(), sm);
+        let result = analyze_temporal_effects_with_contracts(&body, &machines, Some(&contracts));
+        assert!(
+            !result.violations.is_empty(),
+            "write_and_close before open_file should produce InvalidPreState"
+        );
+        assert_eq!(
+            result.violations[0].kind,
+            TemporalViolationKind::InvalidPreState
+        );
+        assert!(result.violations[0].operation.contains("write_and_close"));
+    }
+
+    #[test]
+    fn test_cross_atom_composition_no_contracts() {
+        // Atoms without effect_pre/effect_post should pass through without violations.
+        let sm = make_file_effect_sm();
+        // No callee contracts — acts like plain calls with no effect tracking
+        let contracts: HashMap<String, AtomEffectContract> = HashMap::new();
+
+        let body = MirBody {
+            name: "no_contract_pipeline".to_string(),
+            locals: vec![LocalDecl {
+                local: Local(0),
+                name: Some("_ret".to_string()),
+                ty: None,
+                movability: Movability::Move,
+            }],
+            blocks: vec![BasicBlock {
+                id: 0,
+                statements: vec![
+                    MirStatement::Assign(
+                        Place::Local(Local(0)),
+                        Rvalue::Call {
+                            func: "some_function".to_string(),
+                            args: vec![Operand::Constant(MirConstant::Int(1))],
+                        },
+                    ),
+                    MirStatement::Assign(
+                        Place::Local(Local(0)),
+                        Rvalue::Call {
+                            func: "another_function".to_string(),
+                            args: vec![Operand::Constant(MirConstant::Int(2))],
+                        },
+                    ),
+                ],
+                terminator: Terminator::Return(Operand::Constant(MirConstant::Int(0))),
+            }],
+            entry_block: 0,
+        };
+        let mut machines = HashMap::new();
+        machines.insert("File".to_string(), sm);
+        let result = analyze_temporal_effects_with_contracts(&body, &machines, Some(&contracts));
+        assert!(
+            result.violations.is_empty(),
+            "Calls without effect contracts should produce no violations"
+        );
     }
 }

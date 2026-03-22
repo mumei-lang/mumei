@@ -2,6 +2,7 @@
 // tests/test_modular_verification.mm — Modular Verification E2E Test
 // =============================================================
 // Integration test for effect_pre / effect_post contracts (Plan 24).
+// Includes cross-atom contract composition (P2-A).
 // Usage: mumei check tests/test_modular_verification.mm
 
 effect File
@@ -35,17 +36,12 @@ atom write_and_close(x: i64)
         x
     };
 
-// This verifies successfully because each atom (open_file, write_and_close)
-// is independently verified against its own effect_pre/effect_post contracts.
-//
-// NOTE: Cross-atom contract composition is NOT yet implemented in the MIR
-// temporal analysis. The calls to open_file(x) and write_and_close(x) are
-// regular Call operations in MIR, not Perform operations, so no temporal
-// state transitions are tracked within full_pipeline's body. This atom
-// passes trivially (no temporal violations detected) rather than by
-// composing callee contracts at call sites. Future work: when encountering
-// a Call to an atom with effect_pre/effect_post, apply the callee's
-// post-state as the new current state for the effect.
+// Cross-atom contract composition (P2-A):
+// The calls to open_file(x) and write_and_close(x) are now tracked
+// as temporal state transitions via their effect_pre/effect_post contracts.
+// open_file requires File:Closed (initial state) and produces File:Open.
+// write_and_close requires File:Open and produces File:Closed.
+// This sequence is valid: Closed -> Open -> Closed.
 atom full_pipeline(x: i64)
     effects: [File];
     requires: x >= 0;
@@ -53,5 +49,18 @@ atom full_pipeline(x: i64)
     body: {
         open_file(x);
         write_and_close(x);
+        x
+    };
+
+// Invalid cross-atom composition: write_and_close is called first,
+// but it requires File:Open while the initial state is File:Closed.
+// This should produce an InvalidPreState verification error.
+atom bad_pipeline(x: i64)
+    effects: [File];
+    requires: x >= 0;
+    ensures: result >= 0;
+    body: {
+        write_and_close(x);
+        open_file(x);
         x
     };

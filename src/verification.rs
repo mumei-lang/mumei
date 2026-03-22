@@ -2,7 +2,7 @@ use crate::hir::HirAtom;
 use crate::parser::{
     parse_body_expr, parse_expression, Atom, Effect, EffectDef, EnumDef, Expr, ImplDef, Item,
     JoinSemantics, MatchArm, Op, Pattern, QuantifierType, RefinedType, ResourceDef, ResourceMode,
-    Span, Stmt, StructDef, TraitDef, TrustLevel,
+    Span, Stmt, StructDef, TraitDef, TraitMethod, TrustLevel,
 };
 use miette::SourceSpan;
 use serde_json::json;
@@ -1729,6 +1729,19 @@ impl ModuleEnv {
             .find(|i| i.trait_name == trait_name && i.target_type == target_type)
     }
 
+    /// メソッド名からトレイト定義とメソッドのparam_constraintsを取得する
+    /// Returns (trait_name, &TraitMethod) if found.
+    pub fn get_trait_for_method(&self, method_name: &str) -> Option<(&str, &TraitMethod)> {
+        for (trait_name, trait_def) in &self.traits {
+            for method in &trait_def.methods {
+                if method.name == method_name {
+                    return Some((trait_name.as_str(), method));
+                }
+            }
+        }
+        None
+    }
+
     /// 指定した型がトレイト境界を全て満たしているか検証する
     pub fn check_trait_bounds(&self, type_name: &str, bounds: &[String]) -> Result<(), String> {
         for bound in bounds {
@@ -2036,6 +2049,12 @@ pub fn register_builtin_traits(module_env: &mut ModuleEnv) {
                 return_type: "Self".into(),
                 param_constraints: vec![None, None],
             },
+            TraitMethod {
+                name: "div".to_string(),
+                param_types: vec!["Self".into(), "Self".into()],
+                return_type: "Self".into(),
+                param_constraints: vec![None, Some("v != 0".to_string())],
+            },
         ],
         laws: vec![("commutative_add".into(), "add(a, b) == add(b, a)".into())],
         span: Span::default(),
@@ -2062,6 +2081,7 @@ pub fn register_builtin_traits(module_env: &mut ModuleEnv) {
                 ("add".into(), "a + b".into()),
                 ("sub".into(), "a - b".into()),
                 ("mul".into(), "a * b".into()),
+                ("div".into(), "a / b".into()),
             ],
             span: Span::default(),
         });
@@ -2390,6 +2410,32 @@ pub fn verify_impl(
         }
         // "true" リテラルを登録
         env.insert("true".to_string(), Bool::from_bool(&ctx, true).into());
+
+        // P2-B: trait method の param_constraints を solver に assert する。
+        // law 検証時にメソッドのパラメータ制約（例: div の第2引数 != 0）を
+        // 前提条件として注入し、制約下での law 成立を検証する。
+        for method in &trait_def.methods {
+            let param_names: Vec<String> = (0..method.param_types.len())
+                .map(|i| {
+                    let names = ["a", "b", "c", "d", "e", "f"];
+                    names.get(i).unwrap_or(&"x").to_string()
+                })
+                .collect();
+            for (i, constraint_opt) in method.param_constraints.iter().enumerate() {
+                if let Some(constraint_str) = constraint_opt {
+                    if let Some(param_name) = param_names.get(i) {
+                        let concrete: String = constraint_str.replace("v", param_name);
+                        let constraint_ast = parse_expression(&concrete);
+                        if let Ok(constraint_z3) = expr_to_z3(&vc, &constraint_ast, &mut env, None)
+                        {
+                            if let Some(constraint_bool) = constraint_z3.as_bool() {
+                                solver.assert(&constraint_bool);
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         // law 式をパースして検証
         let law_ast = parse_expression(&substituted);
@@ -4992,8 +5038,31 @@ fn verify_inner(
         }
 
         if !state_machines.is_empty() && mir_body.check_analysis_budget().is_ok() {
-            let temporal_result =
-                crate::mir_analysis::analyze_temporal_effects(&mir_body, &state_machines);
+            // Build callee effect contracts for cross-atom composition
+            let mut callee_contracts: std::collections::HashMap<
+                String,
+                crate::mir_analysis::AtomEffectContract,
+            > = std::collections::HashMap::new();
+            for (atom_name, callee_atom) in &module_env.atoms {
+                if !callee_atom.effect_pre.is_empty() || !callee_atom.effect_post.is_empty() {
+                    callee_contracts.insert(
+                        atom_name.clone(),
+                        crate::mir_analysis::AtomEffectContract {
+                            effect_pre: callee_atom.effect_pre.clone(),
+                            effect_post: callee_atom.effect_post.clone(),
+                        },
+                    );
+                }
+            }
+            let temporal_result = crate::mir_analysis::analyze_temporal_effects_with_contracts(
+                &mir_body,
+                &state_machines,
+                if callee_contracts.is_empty() {
+                    None
+                } else {
+                    Some(&callee_contracts)
+                },
+            );
 
             for v in &temporal_result.violations {
                 match v.kind {
@@ -6282,6 +6351,62 @@ fn expr_to_z3<'a>(
                                         ).with_help("呼び出し元で事前条件を満たしていません。引数の制約を確認してください"));
                                     }
                                     solver.pop(1);
+                                }
+                            }
+                        }
+
+                        // Trait method param_constraints の検証:
+                        // 呼び出し先がトレイトメソッドの実装である場合、param_constraints を
+                        // 呼び出し元のコンテキストで検証する
+                        if let Some(solver) = solver_opt {
+                            if let Some((_trait_name, trait_method)) =
+                                vc.module_env.get_trait_for_method(name)
+                            {
+                                for (i, constraint_opt) in
+                                    trait_method.param_constraints.iter().enumerate()
+                                {
+                                    if let Some(constraint) = constraint_opt {
+                                        if let Some(arg_val) = arg_vals.get(i) {
+                                            // Replace 'v' in constraint with actual parameter
+                                            let param_name = callee
+                                                .params
+                                                .get(i)
+                                                .map(|p| p.name.as_str())
+                                                .unwrap_or("v");
+                                            let concrete_constraint: String =
+                                                constraint.replace("v", param_name);
+                                            let mut constraint_env: Env = env.clone();
+                                            constraint_env
+                                                .insert(param_name.to_string(), arg_val.clone());
+                                            let constraint_ast =
+                                                parse_expression(&concrete_constraint);
+                                            if let Ok(constraint_z3) = expr_to_z3(
+                                                vc,
+                                                &constraint_ast,
+                                                &mut constraint_env,
+                                                None,
+                                            ) {
+                                                if let Some(constraint_bool) =
+                                                    constraint_z3.as_bool()
+                                                {
+                                                    solver.push();
+                                                    solver.assert(&constraint_bool.not());
+                                                    if solver.check() == SatResult::Sat {
+                                                        solver.pop(1);
+                                                        return Err(MumeiError::verification(
+                                                            format!(
+                                                                "Call to '{}': trait method parameter constraint '{}' not satisfied for argument {}",
+                                                                name, constraint, i
+                                                            )
+                                                        ).with_help(
+                                                            "トレイトメソッドのパラメータ制約が満たされていません。引数の値を確認してください"
+                                                        ));
+                                                    }
+                                                    solver.pop(1);
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
