@@ -1731,6 +1731,14 @@ impl ModuleEnv {
 
     /// メソッド名からトレイト定義とメソッドのparam_constraintsを取得する
     /// Returns (trait_name, &TraitMethod) if found.
+    ///
+    /// NOTE: Returns the first match from HashMap iteration. If multiple traits
+    /// define a method with the same name, the result is non-deterministic.
+    /// Currently safe because builtin trait methods have unique names
+    /// (eq, leq, add, sub, mul, div). User-defined traits with duplicate
+    /// method names could cause the wrong trait's constraints to be applied.
+    /// TODO: Use a dedicated method→trait index (e.g., HashMap<method_name, Vec<trait_name>>)
+    /// for deterministic and complete lookup.
     pub fn get_trait_for_method(&self, method_name: &str) -> Option<(&str, &TraitMethod)> {
         for (trait_name, trait_def) in &self.traits {
             for method in &trait_def.methods {
@@ -6380,9 +6388,16 @@ fn expr_to_z3<'a>(
                                 vc.module_env.get_trait_for_method(name)
                             {
                                 // Guard: only apply trait constraints if the callee's parameter
-                                // type actually implements this trait. Without this check, a
-                                // user-defined `atom div(a: i64, b: i64)` would incorrectly
-                                // have Numeric's `b != 0` constraint applied.
+                                // type actually implements this trait.
+                                // KNOWN LIMITATION: This guard is ineffective for builtin types
+                                // (i64, u64, f64) because register_builtin_traits() registers
+                                // Numeric impl for all three. A user-defined `atom div(a: i64, b: i64)`
+                                // with body `a + b` would still have `b != 0` applied. The correct
+                                // fix requires tracking whether the callee atom is actually a trait
+                                // method implementation (not just whether its parameter type implements
+                                // the trait), which needs an `is_trait_impl` flag on Atom or a reverse
+                                // lookup from atom name to ImplDef. For now, this guard only prevents
+                                // false matches on custom types that don't implement the trait.
                                 let callee_type = callee
                                     .params
                                     .first()
