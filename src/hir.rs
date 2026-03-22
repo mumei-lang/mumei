@@ -219,6 +219,8 @@ pub enum HirStmt {
 }
 
 #[derive(Debug, Clone)]
+// NOTE: HirLambdaParam is constructed via lower_expr(Expr::Lambda) → HirExpr::Lambda.
+// Fields are used by Lambda variant but not yet consumed by codegen passes.
 #[allow(dead_code)]
 pub struct HirLambdaParam {
     pub name: String,
