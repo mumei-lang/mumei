@@ -383,6 +383,19 @@ fn load_and_prepare(input: &str) -> (Vec<Item>, verification::ModuleEnv, Vec<Imp
             Item::ImplDef(_) => {}
             Item::ResourceDef(resource_def) => module_env.register_resource(resource_def),
             Item::EffectDef(_) => {}
+            Item::ImplBlock(impl_block) => {
+                for method in &impl_block.methods {
+                    // Register each method with qualified name: StructName::method_name
+                    let mut qualified = method.clone();
+                    qualified.name = format!("{}::{}", impl_block.struct_name, method.name);
+                    module_env.register_atom(&qualified);
+                }
+                eprintln!(
+                    "  🔧 ImplBlock: registered {} method(s) for struct '{}'",
+                    impl_block.methods.len(),
+                    impl_block.struct_name
+                );
+            }
             Item::ExternBlock(extern_block) => {
                 for ext_fn in &extern_block.functions {
                     // ExternFn → trusted Atom に変換して ModuleEnv に登録
@@ -391,7 +404,11 @@ fn load_and_prepare(input: &str) -> (Vec<Item>, verification::ModuleEnv, Vec<Imp
                         .iter()
                         .enumerate()
                         .map(|(i, ty)| parser::Param {
-                            name: format!("arg{}", i),
+                            name: ext_fn
+                                .param_names
+                                .get(i)
+                                .cloned()
+                                .unwrap_or_else(|| format!("arg{}", i)),
                             type_name: Some(ty.clone()),
                             type_ref: Some(parser::parse_type_ref(ty)),
                             is_ref: false,
@@ -406,9 +423,12 @@ fn load_and_prepare(input: &str) -> (Vec<Item>, verification::ModuleEnv, Vec<Imp
                         type_params: vec![],
                         where_bounds: vec![],
                         params,
-                        requires: "true".to_string(),
+                        requires: ext_fn
+                            .requires
+                            .clone()
+                            .unwrap_or_else(|| "true".to_string()),
                         forall_constraints: vec![],
-                        ensures: "true".to_string(),
+                        ensures: ext_fn.ensures.clone().unwrap_or_else(|| "true".to_string()),
                         body_expr: String::new(),
                         consumed_params: vec![],
                         resources: vec![],
@@ -504,6 +524,14 @@ fn cmd_check(input: &str) {
             Item::EffectDef(e) => {
                 println!("  ⚡ Effect: '{}'", e.name);
             }
+            Item::ImplBlock(ib) => {
+                atom_count += ib.methods.len();
+                println!(
+                    "  🔧 ImplBlock: {} ({} method(s))",
+                    ib.struct_name,
+                    ib.methods.len()
+                );
+            }
         }
     }
     println!(
@@ -549,9 +577,19 @@ fn cmd_verify(
 
     // Feature 2: Register dependencies for all atoms before verification
     for item in &items {
-        if let Item::Atom(atom) = item {
-            let callees = resolver::collect_callees_from_body(&atom.body_expr);
-            module_env.register_dependencies(&atom.name, callees);
+        match item {
+            Item::Atom(atom) => {
+                let callees = resolver::collect_callees_from_body(&atom.body_expr);
+                module_env.register_dependencies(&atom.name, callees);
+            }
+            Item::ImplBlock(impl_block) => {
+                for method in &impl_block.methods {
+                    let qualified_name = format!("{}::{}", impl_block.struct_name, method.name);
+                    let callees = resolver::collect_callees_from_body(&method.body_expr);
+                    module_env.register_dependencies(&qualified_name, callees);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -688,6 +726,115 @@ fn cmd_verify(
                     }
                 }
             }
+            Item::ImplBlock(impl_block) => {
+                for method in &impl_block.methods {
+                    let qualified_name = format!("{}::{}", impl_block.struct_name, method.name);
+                    if module_env.is_verified(&qualified_name) {
+                        if !json_output {
+                            println!(
+                                "  ⚖️  '{}': skipped (imported, contract-trusted)",
+                                qualified_name
+                            );
+                        }
+                    } else {
+                        // Clone method with qualified name for consistent naming
+                        // throughout HIR lowering, proof hash, and cache lookup
+                        let mut qualified_method = method.clone();
+                        qualified_method.name = qualified_name.clone();
+
+                        let proof_hash =
+                            resolver::compute_proof_hash(&qualified_method, &module_env);
+
+                        if let Some(cached_entry) = verification_cache.get(&qualified_name) {
+                            if cached_entry.proof_hash == proof_hash {
+                                if !json_output {
+                                    println!(
+                                        "  ⚖️  '{}': skipped (unchanged, cached) ⏩",
+                                        qualified_name
+                                    );
+                                }
+                                module_env.mark_verified(&qualified_name);
+                                cert_results.insert(
+                                    qualified_name.clone(),
+                                    ("unsat".to_string(), "verified".to_string()),
+                                );
+                                skipped += 1;
+                                continue;
+                            }
+                        }
+
+                        let deps: Vec<String> = module_env
+                            .dependency_graph
+                            .get(&qualified_name)
+                            .map(|s| s.iter().cloned().collect())
+                            .unwrap_or_default();
+                        let type_deps: Vec<String> = method
+                            .params
+                            .iter()
+                            .filter_map(|p| p.type_ref.as_ref().map(|tr| tr.name.clone()))
+                            .filter(|tn| module_env.get_type(tn).is_some())
+                            .collect();
+
+                        let hir_atom =
+                            lower_atom_to_hir_with_env(&qualified_method, Some(&module_env));
+
+                        let mir_body = mir::lower_hir_to_mir(&hir_atom);
+                        match mir_body.check_analysis_budget() {
+                            Ok(()) => {
+                                let liveness = mir_analysis::compute_liveness(&mir_body);
+                                let mut mir_body_mut = mir_body;
+                                mir_analysis::insert_drops(&mut mir_body_mut, &liveness);
+                            }
+                            Err(msg) => {
+                                eprintln!("  ⚠️  {}", msg);
+                            }
+                        }
+
+                        match verification::verify(&hir_atom, output_dir, &module_env) {
+                            Ok(_) => {
+                                if !json_output {
+                                    println!("  ⚖️  '{}': verified ✅", qualified_name);
+                                }
+                                module_env.mark_verified(&qualified_name);
+                                cert_results.insert(
+                                    qualified_name.clone(),
+                                    ("unsat".to_string(), "verified".to_string()),
+                                );
+                                verification_cache.insert(
+                                    qualified_name.clone(),
+                                    resolver::VerificationCacheEntry {
+                                        proof_hash,
+                                        result: "verified".to_string(),
+                                        dependencies: deps,
+                                        type_deps,
+                                        timestamp: format!(
+                                            "{}s",
+                                            std::time::SystemTime::now()
+                                                .duration_since(std::time::UNIX_EPOCH)
+                                                .unwrap_or_default()
+                                                .as_secs()
+                                        ),
+                                    },
+                                );
+                                verified += 1;
+                            }
+                            Err(e) => {
+                                if !json_output {
+                                    let resolved = resolve_source_for_span(&source, &method.span);
+                                    let e = e.with_source(&resolved, &method.span);
+                                    eprintln!("{:?}", miette::Report::new(e));
+                                }
+                                cert_results.insert(
+                                    qualified_name.clone(),
+                                    ("sat".to_string(), "failed".to_string()),
+                                );
+                                verification_cache.remove(&qualified_name);
+                                failed += 1;
+                            }
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -701,7 +848,7 @@ fn cmd_verify(
 
     // Plan 11B: Generate proof certificate if requested
     if generate_proof_cert {
-        let atom_refs: Vec<&parser::Atom> = items
+        let mut atom_refs: Vec<&parser::Atom> = items
             .iter()
             .filter_map(|item| {
                 if let Item::Atom(a) = item {
@@ -711,6 +858,20 @@ fn cmd_verify(
                 }
             })
             .collect();
+        // Also include ImplBlock methods in the certificate (with qualified names)
+        let mut qualified_methods: Vec<parser::Atom> = Vec::new();
+        for item in &items {
+            if let Item::ImplBlock(ib) = item {
+                for method in &ib.methods {
+                    let mut qualified = method.clone();
+                    qualified.name = format!("{}::{}", ib.struct_name, method.name);
+                    qualified_methods.push(qualified);
+                }
+            }
+        }
+        for qm in &qualified_methods {
+            atom_refs.push(qm);
+        }
         let cert = proof_cert::generate_certificate(input, &atom_refs, &cert_results);
         let cert_path = if let Some(output) = cert_output {
             std::path::PathBuf::from(output)
@@ -1158,29 +1319,63 @@ fn cmd_inspect_file(input: &str, ai: bool, format: &str) {
 
     // Register dependencies
     for item in &items {
-        if let Item::Atom(atom) = item {
-            let callees = resolver::collect_callees_from_body(&atom.body_expr);
-            module_env.register_dependencies(&atom.name, callees);
+        match item {
+            Item::Atom(atom) => {
+                let callees = resolver::collect_callees_from_body(&atom.body_expr);
+                module_env.register_dependencies(&atom.name, callees);
+            }
+            Item::ImplBlock(impl_block) => {
+                for method in &impl_block.methods {
+                    let qualified_name = format!("{}::{}", impl_block.struct_name, method.name);
+                    let callees = resolver::collect_callees_from_body(&method.body_expr);
+                    module_env.register_dependencies(&qualified_name, callees);
+                }
+            }
+            _ => {}
         }
     }
 
     // Try Z3 verification for each atom
     for item in &items {
-        if let Item::Atom(atom) = item {
-            if module_env.is_verified(&atom.name) {
-                verification_results.insert(atom.name.clone(), true);
-                continue;
-            }
-            let hir_atom = lower_atom_to_hir_with_env(atom, Some(&module_env));
-            match verification::verify(&hir_atom, output_dir, &module_env) {
-                Ok(_) => {
-                    module_env.mark_verified(&atom.name);
+        match item {
+            Item::Atom(atom) => {
+                if module_env.is_verified(&atom.name) {
                     verification_results.insert(atom.name.clone(), true);
+                    continue;
                 }
-                Err(_) => {
-                    verification_results.insert(atom.name.clone(), false);
+                let hir_atom = lower_atom_to_hir_with_env(atom, Some(&module_env));
+                match verification::verify(&hir_atom, output_dir, &module_env) {
+                    Ok(_) => {
+                        module_env.mark_verified(&atom.name);
+                        verification_results.insert(atom.name.clone(), true);
+                    }
+                    Err(_) => {
+                        verification_results.insert(atom.name.clone(), false);
+                    }
                 }
             }
+            Item::ImplBlock(impl_block) => {
+                for method in &impl_block.methods {
+                    let qualified_name = format!("{}::{}", impl_block.struct_name, method.name);
+                    if module_env.is_verified(&qualified_name) {
+                        verification_results.insert(qualified_name, true);
+                        continue;
+                    }
+                    let mut qualified_method = method.clone();
+                    qualified_method.name = qualified_name.clone();
+                    let hir_atom = lower_atom_to_hir_with_env(&qualified_method, Some(&module_env));
+                    match verification::verify(&hir_atom, output_dir, &module_env) {
+                        Ok(_) => {
+                            module_env.mark_verified(&qualified_name);
+                            verification_results.insert(qualified_name, true);
+                        }
+                        Err(_) => {
+                            verification_results.insert(qualified_name, false);
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1282,7 +1477,7 @@ fn cmd_verify_cert(cert_path: &str, input: &str) {
 
     let (items, _module_env, _imports, _source) = load_and_prepare(input);
 
-    let atom_refs: Vec<&parser::Atom> = items
+    let mut atom_refs: Vec<&parser::Atom> = items
         .iter()
         .filter_map(|item| {
             if let Item::Atom(a) = item {
@@ -1292,6 +1487,20 @@ fn cmd_verify_cert(cert_path: &str, input: &str) {
             }
         })
         .collect();
+    // Also include ImplBlock methods for certificate verification (with qualified names)
+    let mut qualified_methods: Vec<parser::Atom> = Vec::new();
+    for item in &items {
+        if let Item::ImplBlock(ib) = item {
+            for method in &ib.methods {
+                let mut qualified = method.clone();
+                qualified.name = format!("{}::{}", ib.struct_name, method.name);
+                qualified_methods.push(qualified);
+            }
+        }
+    }
+    for qm in &qualified_methods {
+        atom_refs.push(qm);
+    }
 
     let results = proof_cert::verify_certificate(&cert, &atom_refs);
 
@@ -1364,7 +1573,7 @@ fn cmd_build(input: &str, output: &str) {
         )
     };
 
-    let (items, mut module_env, imports, source) = load_and_prepare(input);
+    let (items, mut module_env, _imports, source) = load_and_prepare(input);
 
     let output_path = Path::new(output);
     let output_dir = output_path.parent().unwrap_or(Path::new("."));
@@ -1377,9 +1586,19 @@ fn cmd_build(input: &str, output: &str) {
 
     // Feature 2: Register dependencies for all atoms before verification
     for item in &items {
-        if let Item::Atom(atom) = item {
-            let callees = resolver::collect_callees_from_body(&atom.body_expr);
-            module_env.register_dependencies(&atom.name, callees);
+        match item {
+            Item::Atom(atom) => {
+                let callees = resolver::collect_callees_from_body(&atom.body_expr);
+                module_env.register_dependencies(&atom.name, callees);
+            }
+            Item::ImplBlock(impl_block) => {
+                for method in &impl_block.methods {
+                    let qualified_name = format!("{}::{}", impl_block.struct_name, method.name);
+                    let callees = resolver::collect_callees_from_body(&method.body_expr);
+                    module_env.register_dependencies(&qualified_name, callees);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1496,6 +1715,133 @@ fn cmd_build(input: &str, output: &str) {
             // --- エフェクト定義 ---
             Item::EffectDef(effect_def) => {
                 println!("  ⚡ Effect: '{}'", effect_def.name);
+            }
+
+            // --- impl ブロック (struct method) ---
+            Item::ImplBlock(ib) => {
+                println!(
+                    "  🔧 ImplBlock: {} ({} method(s))",
+                    ib.struct_name,
+                    ib.methods.len()
+                );
+                for method in &ib.methods {
+                    atom_count += 1;
+                    let qualified_name = format!("{}::{}", ib.struct_name, method.name);
+                    println!(
+                        "  ✨ [1/3] Polishing Syntax: Atom '{}' identified.",
+                        qualified_name
+                    );
+
+                    // Clone method with qualified name for consistent naming
+                    // throughout HIR lowering, codegen, proof hash, and cache
+                    let mut qualified_method = method.clone();
+                    qualified_method.name = qualified_name.clone();
+
+                    let hir_atom = lower_atom_to_hir_with_env(&qualified_method, Some(&module_env));
+
+                    let mir_body = mir::lower_hir_to_mir(&hir_atom);
+                    match mir_body.check_analysis_budget() {
+                        Ok(()) => {
+                            let liveness = mir_analysis::compute_liveness(&mir_body);
+                            let mut mir_body_mut = mir_body;
+                            mir_analysis::insert_drops(&mut mir_body_mut, &liveness);
+                        }
+                        Err(msg) => {
+                            eprintln!("  ⚠️  {}", msg);
+                        }
+                    }
+
+                    if skip_verify {
+                        println!("  ⚖️  [2/3] Verification: Skipped (verify=false in mumei.toml).");
+                        module_env.mark_verified(&qualified_name);
+                    } else if module_env.is_verified(&qualified_name) {
+                        println!("  ⚖️  [2/3] Verification: Skipped (imported, contract-trusted).");
+                    } else {
+                        let proof_hash =
+                            resolver::compute_proof_hash(&qualified_method, &module_env);
+
+                        let cache_hit = verification_cache
+                            .get(&qualified_name)
+                            .is_some_and(|entry| entry.proof_hash == proof_hash);
+
+                        if cache_hit {
+                            println!("  ⚖️  [2/3] Verification: Skipped (unchanged, cached) ⏩");
+                            module_env.mark_verified(&qualified_name);
+                        } else {
+                            match verification::verify_with_config(
+                                &hir_atom,
+                                output_dir,
+                                &module_env,
+                                proof_cfg.timeout_ms,
+                                build_cfg.max_unroll,
+                            ) {
+                                Ok(_) => {
+                                    println!(
+                                        "  ⚖️  [2/3] Verification: Passed. Logic verified with Z3."
+                                    );
+                                    module_env.mark_verified(&qualified_name);
+                                    let deps: Vec<String> = module_env
+                                        .dependency_graph
+                                        .get(&qualified_name)
+                                        .map(|s| s.iter().cloned().collect())
+                                        .unwrap_or_default();
+                                    let type_deps: Vec<String> = method
+                                        .params
+                                        .iter()
+                                        .filter_map(|p| {
+                                            p.type_ref.as_ref().map(|tr| tr.name.clone())
+                                        })
+                                        .filter(|tn| module_env.get_type(tn).is_some())
+                                        .collect();
+                                    verification_cache_new.insert(
+                                        qualified_name.clone(),
+                                        resolver::VerificationCacheEntry {
+                                            proof_hash,
+                                            result: "verified".to_string(),
+                                            dependencies: deps,
+                                            type_deps,
+                                            timestamp: format!(
+                                                "{}s",
+                                                std::time::SystemTime::now()
+                                                    .duration_since(std::time::UNIX_EPOCH)
+                                                    .unwrap_or_default()
+                                                    .as_secs()
+                                            ),
+                                        },
+                                    );
+                                }
+                                Err(e) => {
+                                    let resolved = resolve_source_for_span(&source, &method.span);
+                                    let e = e.with_source(&resolved, &method.span);
+                                    eprintln!("{:?}", miette::Report::new(e));
+                                    verification_cache_new.remove(&qualified_name);
+                                    std::process::exit(1);
+                                }
+                            }
+                        }
+                    }
+
+                    let safe_name = qualified_name.replace("::", "__");
+                    let atom_output_path = output_dir.join(format!("{}_{}", file_stem, safe_name));
+                    let extern_blocks = collect_extern_blocks(&items);
+                    match codegen::compile(
+                        &hir_atom,
+                        &atom_output_path,
+                        &module_env,
+                        &extern_blocks,
+                    ) {
+                        Ok(_) => println!(
+                            "  ⚙️  [3/3] Tempering: Done. Compiled '{}' to LLVM IR.",
+                            qualified_name
+                        ),
+                        Err(e) => {
+                            let resolved = resolve_source_for_span(&source, &method.span);
+                            let e = e.with_source(&resolved, &method.span);
+                            eprintln!("{:?}", miette::Report::new(e));
+                            std::process::exit(1);
+                        }
+                    }
+                }
             }
 
             // --- Atom の処理 ---
@@ -1759,25 +2105,53 @@ fn cmd_publish(proof_only: bool) {
     let mut failed = 0;
 
     for item in &items {
-        if let Item::Atom(atom) = item {
-            if module_env.is_verified(&atom.name) {
-                atom_count += 1;
-                continue;
-            }
-            let hir_atom = lower_atom_to_hir_with_env(atom, Some(&module_env));
-            match verification::verify(&hir_atom, output_dir, &module_env) {
-                Ok(_) => {
-                    println!("  ⚖️  '{}': verified ✅", atom.name);
-                    module_env.mark_verified(&atom.name);
+        match item {
+            Item::Atom(atom) => {
+                if module_env.is_verified(&atom.name) {
                     atom_count += 1;
+                    continue;
                 }
-                Err(e) => {
-                    let resolved = resolve_source_for_span(&source, &atom.span);
-                    let e = e.with_source(&resolved, &atom.span);
-                    eprintln!("{:?}", miette::Report::new(e));
-                    failed += 1;
+                let hir_atom = lower_atom_to_hir_with_env(atom, Some(&module_env));
+                match verification::verify(&hir_atom, output_dir, &module_env) {
+                    Ok(_) => {
+                        println!("  ⚖️  '{}': verified ✅", atom.name);
+                        module_env.mark_verified(&atom.name);
+                        atom_count += 1;
+                    }
+                    Err(e) => {
+                        let resolved = resolve_source_for_span(&source, &atom.span);
+                        let e = e.with_source(&resolved, &atom.span);
+                        eprintln!("{:?}", miette::Report::new(e));
+                        failed += 1;
+                    }
                 }
             }
+            Item::ImplBlock(impl_block) => {
+                for method in &impl_block.methods {
+                    let qualified_name = format!("{}::{}", impl_block.struct_name, method.name);
+                    if module_env.is_verified(&qualified_name) {
+                        atom_count += 1;
+                        continue;
+                    }
+                    let mut qualified_method = method.clone();
+                    qualified_method.name = qualified_name.clone();
+                    let hir_atom = lower_atom_to_hir_with_env(&qualified_method, Some(&module_env));
+                    match verification::verify(&hir_atom, output_dir, &module_env) {
+                        Ok(_) => {
+                            println!("  ⚖️  '{}': verified ✅", qualified_name);
+                            module_env.mark_verified(&qualified_name);
+                            atom_count += 1;
+                        }
+                        Err(e) => {
+                            let resolved = resolve_source_for_span(&source, &method.span);
+                            let e = e.with_source(&resolved, &method.span);
+                            eprintln!("{:?}", miette::Report::new(e));
+                            failed += 1;
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1933,7 +2307,11 @@ fn cmd_repl() {
                                     .iter()
                                     .enumerate()
                                     .map(|(i, ty)| parser::Param {
-                                        name: format!("arg{}", i),
+                                        name: ext_fn
+                                            .param_names
+                                            .get(i)
+                                            .cloned()
+                                            .unwrap_or_else(|| format!("arg{}", i)),
                                         type_name: Some(ty.clone()),
                                         type_ref: Some(parser::parse_type_ref(ty)),
                                         is_ref: false,
@@ -1947,9 +2325,15 @@ fn cmd_repl() {
                                     type_params: vec![],
                                     where_bounds: vec![],
                                     params,
-                                    requires: "true".to_string(),
+                                    requires: ext_fn
+                                        .requires
+                                        .clone()
+                                        .unwrap_or_else(|| "true".to_string()),
                                     forall_constraints: vec![],
-                                    ensures: "true".to_string(),
+                                    ensures: ext_fn
+                                        .ensures
+                                        .clone()
+                                        .unwrap_or_else(|| "true".to_string()),
                                     body_expr: String::new(),
                                     consumed_params: vec![],
                                     resources: vec![],
@@ -1969,6 +2353,14 @@ fn cmd_repl() {
                         }
                         parser::Item::Import(_) => {}
                         parser::Item::EffectDef(e) => module_env.register_effect(e),
+                        parser::Item::ImplBlock(ib) => {
+                            for method in &ib.methods {
+                                let mut qualified = method.clone();
+                                qualified.name = format!("{}::{}", ib.struct_name, method.name);
+                                module_env.register_atom(&qualified);
+                                count += 1;
+                            }
+                        }
                     }
                 }
                 println!("  ✅ Loaded {} definition(s) from '{}'", count, file);
@@ -2802,7 +3194,11 @@ atom main() -> i64
                             .iter()
                             .enumerate()
                             .map(|(i, ty)| parser::Param {
-                                name: format!("arg{}", i),
+                                name: ext_fn
+                                    .param_names
+                                    .get(i)
+                                    .cloned()
+                                    .unwrap_or_else(|| format!("arg{}", i)),
                                 type_name: Some(ty.clone()),
                                 type_ref: Some(parser::parse_type_ref(ty)),
                                 is_ref: false,

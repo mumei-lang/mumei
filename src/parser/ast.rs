@@ -414,9 +414,9 @@ pub struct StructDef {
     pub name: String,
     pub type_params: Vec<String>,
     pub fields: Vec<StructField>,
-    // NOTE: method_names tracks struct-associated atoms (e.g., "Stack::push") for future method resolution
-    #[allow(dead_code)]
     pub method_names: Vec<String>,
+    /// Methods defined in `impl StructName { atom ... }` blocks
+    pub methods: Vec<Atom>,
     pub span: Span,
 }
 
@@ -434,6 +434,10 @@ pub struct TypeParamBound {
 }
 
 #[derive(Debug, Clone)]
+// NOTE: TraitMethod is constructed by the parser and accessed via TraitDef.methods
+// in law verification and trait impl expansion. Struct-level allow(dead_code)
+// suppresses warnings on fields not yet consumed by all downstream passes.
+#[allow(dead_code)]
 pub struct TraitMethod {
     pub name: String,
     pub param_types: Vec<String>,
@@ -472,28 +476,45 @@ pub enum Item {
     ResourceDef(ResourceDef),
     ExternBlock(ExternBlock),
     EffectDef(EffectDef),
+    /// `impl StructName { atom method(...) ... }` block
+    ImplBlock(ImplBlock),
 }
 
 // =============================================================================
 // FFI Bridge (extern blocks)
 // =============================================================================
 
-// NOTE: ExternFn fields will be used when auto-registering extern functions as trusted atoms in ModuleEnv
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct ExternFn {
     pub name: String,
+    pub param_names: Vec<String>,
     pub param_types: Vec<String>,
     pub return_type: String,
+    /// Optional requires contract for verified FFI
+    pub requires: Option<String>,
+    /// Optional ensures contract for verified FFI
+    pub ensures: Option<String>,
     pub span: Span,
 }
 
-// NOTE: ExternBlock span will be used for error reporting in future extern function validation
 #[derive(Debug, Clone)]
+// NOTE: ExternBlock is constructed by the parser and consumed in load_and_prepare/register_imported_items.
+// The `language` and `span` fields trigger dead_code warnings as they are only accessed via pattern matching.
 #[allow(dead_code)]
 pub struct ExternBlock {
     pub language: String,
     pub functions: Vec<ExternFn>,
+    pub span: Span,
+}
+
+/// `impl StructName { atom method1(...) ... atom method2(...) ... }` block
+#[derive(Debug, Clone)]
+// NOTE: ImplBlock is constructed by the parser and matched in load_and_prepare, cmd_build, verify_source_for_lsp.
+// The `span` field triggers dead_code warning as it is only used indirectly.
+#[allow(dead_code)]
+pub struct ImplBlock {
+    pub struct_name: String,
+    pub methods: Vec<Atom>,
     pub span: Span,
 }
 

@@ -510,7 +510,8 @@ impl Monomorphizer {
             name: mono_name,
             type_params: vec![], // 単相化後は型パラメータなし
             fields,
-            method_names: vec![],
+            method_names: generic.method_names.clone(),
+            methods: generic.methods.clone(),
             span: generic.span.clone(),
         })
     }
