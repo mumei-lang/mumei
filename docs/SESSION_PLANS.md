@@ -295,7 +295,7 @@ concurrency 機能の以下の未実装項目を実装する:
 - `src/ast.rs`: Monomorphizer 更新
 - `src/codegen.rs`: LLVM codegen
 - `src/mir.rs`: MIR lowering
-- `src/transpiler/rust.rs`, `golang.rs`, `typescript.rs`: 各言語トランスパイラ
+
 - `src/verification.rs`: Z3 検証、各種 collect 関数
 - `instruction.md`: セマンティクス文書化
 

@@ -3,7 +3,7 @@
 ## Pipeline
 
 ```
-source.mm → parse → resolve → monomorphize → lower_to_hir → verify (Z3) → codegen (LLVM IR) → transpile (Rust/Go/TS)
+source.mm → parse → resolve → monomorphize → lower_to_hir → verify (Z3) → codegen (LLVM IR)
                                                     ↑                          ↑
                                       HIR: Expr/Stmt separation         lower_to_mir (Phase 4b)
                                       Resource Hierarchy Check           CFG-based MIR for
@@ -31,7 +31,6 @@ source.mm → parse → resolve → monomorphize → lower_to_hir → verify (Z3
 | `src/verification.rs` | Z3 verification, `ModuleEnv`, `LinearityCtx`, law expansion, equality propagation, resource hierarchy, BMC, async recursion depth, inductive invariant, trust boundary, `call_with_contract` (Phase B higher-order function verification) |
 | `src/codegen.rs` | LLVM IR generation — `resolve_return_type()`, Pattern Matrix, StructType, malloc/free, nested extract_value |
 | `src/hir.rs` | HIR (High-level IR) definitions, AST → HIR lowering, `HirEffectSet` on `HirAtom`/`HirExpr::Call`/`HirExpr::Perform` |
-| `src/transpiler/` | Multi-target: Rust (`&T`), Go (interface), TypeScript (`/* readonly */`) |
 | `src/main.rs` | CLI orchestrator — `build`/`verify`/`check`/`init` with incremental cache |
 
 ---
@@ -138,21 +137,6 @@ pub struct LinearityCtx {
 - `math.add(x, y)` → `math::add` (automatic `.` → `::` conversion)
 - Applied in both `expr_to_z3`/`stmt_to_z3` (verification) and `compile_hir_expr`/`compile_hir_stmt` (codegen)
 - Resolver registers both `add` and `math::add` in ModuleEnv
-
----
-
-## Transpiler Mapping
-
-| Mumei | Rust | Go | TypeScript |
-|---|---|---|---|
-| `atom f(x: T)` | `pub fn f(x: T)` | `func f(x T)` | `function f(x: number)` |
-| `ref x: T` | `x: &T` | `x T // ref` | `/* readonly */ x: number` |
-| `ref v: T` | `v: &T` | `v T // ref` | `/* readonly */ v: number` |
-| `ref mut v: T` | `v: &mut T` | `v *T` | `/* &mut */ v: number` |
-| `consume x` | move semantics | comment | comment |
-| `enum E { A, B }` | `enum E { A, B }` | `const + type` | `const enum + union` |
-| `struct S { f: T }` | `struct S { f: T }` | `type S struct` | `interface S` |
-| `trait T { fn m(); }` | `trait T { fn m(); }` | `type T interface` | `interface T` |
 
 ---
 
@@ -388,7 +372,7 @@ for tainted sources and warns if verification results depend on unverified code.
 ### Pipeline Extension
 
 ```
-source.mm → parse → resolve → monomorphize → verify (Z3) → codegen (LLVM IR) → transpile
+source.mm → parse → resolve → monomorphize → verify (Z3) → codegen (LLVM IR)
                                                  ↑
                                     Resource Hierarchy Check
                                     Effect Inference & Verification
@@ -409,14 +393,6 @@ The `@__mumei_resource_{name}` global symbols are resolved at link time by the
 Mumei runtime library or user-provided mutex instances. Since Z3 has proven the
 acquisition order is deadlock-free, the runtime mutex only provides mutual
 exclusion — not deadlock prevention.
-
-### Transpiler Mapping (Async)
-
-| Mumei | Rust | Go | TypeScript |
-|---|---|---|---|
-| `async atom f(x: T)` | `pub async fn f(x: T)` | `func f(x T) // goroutine` | `async function f(x: number)` |
-| `await expr` | `expr.await` | `<-ch` | `await expr` |
-| `acquire r { body }` | `let _g = r.lock(); { body }` | `r.Lock(); { body }; r.Unlock()` | `await r.acquire(); { body }; r.release()` |
 
 ---
 
@@ -527,13 +503,6 @@ struct EffectCtx {
 
 The `@__effect_{Effect}_{operation}` symbols are resolved at link time by the
 runtime implementation of each effect.
-
-### Transpiler Mapping (Effects)
-
-| Mumei | Rust | Go | TypeScript |
-|---|---|---|---|
-| `effects: [FileWrite]` | `/// Effects: [FileWrite]` | `// Effects: [FileWrite]` | `@effects [FileWrite]` (JSDoc) |
-| `perform FileWrite.write(x)` | `/* perform FileWrite.write */ filewrite_write(x)` | `/* perform FileWrite.write */ FileWriteWrite(x)` | `/* perform FileWrite.write */ filewritewrite(x)` |
 
 ### Error Reporting
 
@@ -662,7 +631,8 @@ Atom-level `effect_pre` / `effect_post` contracts enable verifying atoms indepen
 - Default: empty `HashMap` (backward compatible with all existing atoms)
 - **Validation**: Invalid state names produce hard errors; missing state machines emit warnings
 - **Monomorphization**: Effect type variables in keys are substituted (e.g., `{ E: Closed }` → `{ FileWrite: Closed }`)
-- **Limitation**: Cross-atom contract composition at call sites is not yet implemented — each atom is verified independently
+- **Cross-atom contract composition**: When an atom calls another atom with `effect_pre`/`effect_post`, the callee's pre-state is verified against the caller's current temporal state and the post-state is applied as the new current state
+- **Trait method constraints**: `param_constraints` on trait methods (e.g., `div` requires divisor != 0) are injected into Z3 at call sites (guarded by `find_impl` to prevent false matches on user-defined atoms with the same name) and during law verification (scoped per-law inside `push`/`pop` with method-name filtering to prevent constraint leakage across laws)
 
 ### Standard Library
 

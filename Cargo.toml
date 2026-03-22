@@ -2,7 +2,7 @@
 name = "mumei"
 version = "0.2.0"
 edition = "2021"
-description = "Mathematical Proof-Driven Programming Language — formally verified with Z3, compiled to LLVM IR, transpiled to Rust/Go/TypeScript"
+description = "Mathematical Proof-Driven Programming Language — formally verified with Z3, compiled to LLVM IR"
 license = "MIT"
 repository = "https://github.com/mumei-lang/mumei"
 homepage = "https://github.com/mumei-lang/mumei"
