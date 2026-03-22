@@ -78,7 +78,7 @@ atom safe_https_fetch(api_path: Str)
 
 // Composition: read + fetch + write pipeline, all capabilities satisfied
 atom sandboxed_pipeline(user_id: Str, api_path: Str, report_name: Str)
-    effects: [SafeFileRead(path), SecureHttpGet(url), SafeFileWrite(path)]
+    effects: [SafeFileRead(read_path), SecureHttpGet(url), SafeFileWrite(write_path)]
     requires: not_contains(user_id, "..") && not_contains(user_id, "/") && not_contains(user_id, "\0")
            && not_contains(api_path, "..") && not_contains(api_path, " ")
            && not_contains(report_name, "..") && not_contains(report_name, "/") && not_contains(report_name, "\0");

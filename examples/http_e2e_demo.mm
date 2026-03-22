@@ -17,13 +17,15 @@
 //
 // Expected results:
 //   - fetch_user_safe: PASS (url precondition satisfied)
-//   - fetch_user_unsafe: FAIL (url may be empty)
+//   - fetch_user_unsafe: FAIL (unconstrained url not proven to be https://)
+//   - fetch_and_parse_user: PASS (JSON parse pipeline with contracts)
 //   - fetch_and_check: PASS (status code contract propagated)
+//   - compare_users: PASS (composition of verified fetches)
 
 import "std/http" as http;
 import "std/json" as json;
 
-// Note: json import used in fetch_and_parse_user for body_json parsing
+// Note: json import used in fetch_and_parse_user for JSON field extraction
 
 // --- Safe HTTP GET: URL is guaranteed non-empty ---
 atom fetch_user_safe(username: Str)
@@ -35,16 +37,16 @@ atom fetch_user_safe(username: Str)
         http::status(response)
     }
 
-// --- Unsafe HTTP GET: no constraint on username ---
-// Should FAIL verification: len(username) could be 0,
-// producing url = "https://api.github.com/users/" + "" which
-// violates the semantic expectation of a valid API endpoint.
+// --- Unsafe HTTP GET: no constraint on URL ---
+// Should FAIL verification: username is unconstrained, so Z3 cannot
+// prove starts_with(username, "https://") required by SecureHttpGet.
 atom fetch_user_unsafe(username: Str)
+    effects: [SecureHttpGet(url)]
     requires: true;
     ensures: result >= 0;
     body: {
-        let response = http::get(username);
-        http::status(response)
+        perform SecureHttpGet.get(username);
+        1
     }
 
 // --- Safe fetch + JSON parse pipeline ---
@@ -55,8 +57,7 @@ atom fetch_and_parse_user(username: Str)
         let url = "https://api.github.com/users/" + username;
         let response = http::get(url);
         let json_handle = http::body_json(response);
-        let name_key = json::from_str(0);
-        let name_val = json::object_get(json_handle, name_key);
+        let name_val = json::get(json_handle, "name");
         name_val
     }
 
