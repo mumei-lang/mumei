@@ -5,7 +5,7 @@
 use crate::ast::TypeRef;
 use crate::parser::{
     Atom, Effect, EffectDef, EffectDefParam, EffectParam, EnumDef, EnumVariant, ExternBlock,
-    ExternFn, ImplDef, ImportDecl, Item, Param, Quantifier, QuantifierType, RefinedType,
+    ExternFn, ImplBlock, ImplDef, ImportDecl, Item, Param, Quantifier, QuantifierType, RefinedType,
     ResourceDef, ResourceMode, Span, StructDef, StructField, TraitDef, TraitMethod, TrustLevel,
     TypeParamBound,
 };
@@ -773,6 +773,7 @@ pub fn parse_module_from_tokens(ctx: &mut ParseContext) -> Vec<Item> {
                     type_params,
                     fields,
                     method_names: vec![],
+                    methods: vec![],
                     span: span_from_token(&start_tok),
                 }));
             }
@@ -854,41 +855,91 @@ pub fn parse_module_from_tokens(ctx: &mut ParseContext) -> Vec<Item> {
 
             Token::Impl => {
                 let start_tok = ctx.advance().clone();
-                let trait_name = ctx.expect_ident();
+                let first_name = ctx.expect_ident();
+
+                // Distinguish: `impl Trait for Type { fn ... }` vs `impl StructName { atom ... }`
                 if ctx.peek() == &Token::For {
+                    // --- trait impl: `impl Trait for Type { fn ... }` ---
                     ctx.advance();
-                }
-                let target_type = ctx.expect_ident();
-                if ctx.peek() == &Token::LBrace {
-                    ctx.advance();
-                }
-                let mut method_bodies = Vec::new();
-                while ctx.peek() != &Token::RBrace && ctx.peek() != &Token::Eof {
-                    if ctx.peek() == &Token::Fn {
-                        ctx.advance();
-                        let method_name = ctx.expect_ident();
-                        if ctx.peek() == &Token::LParen {
-                            skip_balanced(ctx, Token::LParen, Token::RParen);
-                        }
-                        if ctx.peek() == &Token::Arrow {
-                            ctx.advance();
-                            ctx.expect_ident();
-                        }
-                        let method_body = collect_braced_block(ctx);
-                        method_bodies.push((method_name, method_body));
-                    } else {
+                    let target_type = ctx.expect_ident();
+                    if ctx.peek() == &Token::LBrace {
                         ctx.advance();
                     }
+                    let mut method_bodies = Vec::new();
+                    while ctx.peek() != &Token::RBrace && ctx.peek() != &Token::Eof {
+                        if ctx.peek() == &Token::Fn {
+                            ctx.advance();
+                            let method_name = ctx.expect_ident();
+                            if ctx.peek() == &Token::LParen {
+                                skip_balanced(ctx, Token::LParen, Token::RParen);
+                            }
+                            if ctx.peek() == &Token::Arrow {
+                                ctx.advance();
+                                ctx.expect_ident();
+                            }
+                            let method_body = collect_braced_block(ctx);
+                            method_bodies.push((method_name, method_body));
+                        } else {
+                            ctx.advance();
+                        }
+                    }
+                    if ctx.peek() == &Token::RBrace {
+                        ctx.advance();
+                    }
+                    items.push(Item::ImplDef(ImplDef {
+                        trait_name: first_name,
+                        target_type,
+                        method_bodies,
+                        span: span_from_token(&start_tok),
+                    }));
+                } else {
+                    // --- struct impl block: `impl StructName { atom method(...) ... }` ---
+                    let struct_name = first_name;
+                    if ctx.peek() == &Token::LBrace {
+                        ctx.advance();
+                    }
+                    let mut methods = Vec::new();
+                    while ctx.peek() != &Token::RBrace && ctx.peek() != &Token::Eof {
+                        // Parse optional modifiers (async, trusted, unverified)
+                        let mut is_async = false;
+                        let mut trust_level = TrustLevel::Verified;
+                        loop {
+                            match ctx.peek() {
+                                Token::Async => {
+                                    is_async = true;
+                                    ctx.advance();
+                                }
+                                Token::Trusted => {
+                                    trust_level = TrustLevel::Trusted;
+                                    ctx.advance();
+                                }
+                                Token::Unverified => {
+                                    trust_level = TrustLevel::Unverified;
+                                    ctx.advance();
+                                }
+                                _ => break,
+                            }
+                        }
+                        if ctx.peek() == &Token::Atom {
+                            let atom_tok = ctx.tokens_ref()[ctx.pos()].clone();
+                            ctx.advance(); // consume `atom`
+                            let mut atom = parse_atom_body(ctx, &atom_tok);
+                            atom.is_async = is_async;
+                            atom.trust_level = trust_level;
+                            methods.push(atom);
+                        } else {
+                            ctx.advance();
+                        }
+                    }
+                    if ctx.peek() == &Token::RBrace {
+                        ctx.advance();
+                    }
+                    items.push(Item::ImplBlock(ImplBlock {
+                        struct_name,
+                        methods,
+                        span: span_from_token(&start_tok),
+                    }));
                 }
-                if ctx.peek() == &Token::RBrace {
-                    ctx.advance();
-                }
-                items.push(Item::ImplDef(ImplDef {
-                    trait_name,
-                    target_type,
-                    method_bodies,
-                    span: span_from_token(&start_tok),
-                }));
             }
 
             Token::Resource => {
@@ -1111,11 +1162,36 @@ pub fn parse_module_from_tokens(ctx: &mut ParseContext) -> Vec<Item> {
                         } else {
                             "i64".to_string()
                         };
-                        ctx.expect(Token::Semicolon);
+                        // Parse optional requires/ensures contracts for verified FFI
+                        let mut ext_requires: Option<String> = None;
+                        let mut ext_ensures: Option<String> = None;
+                        loop {
+                            match ctx.peek() {
+                                Token::Requires => {
+                                    ctx.advance();
+                                    ctx.expect(Token::Colon);
+                                    ext_requires = Some(collect_until_semicolon(ctx));
+                                    ctx.expect(Token::Semicolon);
+                                }
+                                Token::Ensures => {
+                                    ctx.advance();
+                                    ctx.expect(Token::Colon);
+                                    ext_ensures = Some(collect_until_semicolon(ctx));
+                                    ctx.expect(Token::Semicolon);
+                                }
+                                _ => break,
+                            }
+                        }
+                        // If no contracts were parsed, consume the trailing semicolon
+                        if ext_requires.is_none() && ext_ensures.is_none() {
+                            ctx.expect(Token::Semicolon);
+                        }
                         functions.push(ExternFn {
                             name: fn_name,
                             param_types,
                             return_type,
+                            requires: ext_requires,
+                            ensures: ext_ensures,
                             span: span_from_token(&fn_tok),
                         });
                     } else {

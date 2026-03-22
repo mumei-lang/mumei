@@ -383,6 +383,21 @@ fn load_and_prepare(input: &str) -> (Vec<Item>, verification::ModuleEnv, Vec<Imp
             Item::ImplDef(_) => {}
             Item::ResourceDef(resource_def) => module_env.register_resource(resource_def),
             Item::EffectDef(_) => {}
+            Item::ImplBlock(impl_block) => {
+                for method in &impl_block.methods {
+                    // Register each method with qualified name: StructName::method_name
+                    let mut qualified = method.clone();
+                    qualified.name = format!("{}::{}", impl_block.struct_name, method.name);
+                    module_env.register_atom(&qualified);
+                    // Also register with unqualified name for convenience
+                    module_env.register_atom(method);
+                }
+                eprintln!(
+                    "  🔧 ImplBlock: registered {} method(s) for struct '{}'",
+                    impl_block.methods.len(),
+                    impl_block.struct_name
+                );
+            }
             Item::ExternBlock(extern_block) => {
                 for ext_fn in &extern_block.functions {
                     // ExternFn → trusted Atom に変換して ModuleEnv に登録
@@ -406,9 +421,12 @@ fn load_and_prepare(input: &str) -> (Vec<Item>, verification::ModuleEnv, Vec<Imp
                         type_params: vec![],
                         where_bounds: vec![],
                         params,
-                        requires: "true".to_string(),
+                        requires: ext_fn
+                            .requires
+                            .clone()
+                            .unwrap_or_else(|| "true".to_string()),
                         forall_constraints: vec![],
-                        ensures: "true".to_string(),
+                        ensures: ext_fn.ensures.clone().unwrap_or_else(|| "true".to_string()),
                         body_expr: String::new(),
                         consumed_params: vec![],
                         resources: vec![],
@@ -503,6 +521,13 @@ fn cmd_check(input: &str) {
             }
             Item::EffectDef(e) => {
                 println!("  ⚡ Effect: '{}'", e.name);
+            }
+            Item::ImplBlock(ib) => {
+                println!(
+                    "  🔧 ImplBlock: {} ({} method(s))",
+                    ib.struct_name,
+                    ib.methods.len()
+                );
             }
         }
     }
@@ -1498,6 +1523,15 @@ fn cmd_build(input: &str, output: &str) {
                 println!("  ⚡ Effect: '{}'", effect_def.name);
             }
 
+            // --- impl ブロック (struct method) ---
+            Item::ImplBlock(ib) => {
+                println!(
+                    "  🔧 ImplBlock: {} ({} method(s))",
+                    ib.struct_name,
+                    ib.methods.len()
+                );
+            }
+
             // --- Atom の処理 ---
             Item::Atom(atom) => {
                 atom_count += 1;
@@ -1947,9 +1981,15 @@ fn cmd_repl() {
                                     type_params: vec![],
                                     where_bounds: vec![],
                                     params,
-                                    requires: "true".to_string(),
+                                    requires: ext_fn
+                                        .requires
+                                        .clone()
+                                        .unwrap_or_else(|| "true".to_string()),
                                     forall_constraints: vec![],
-                                    ensures: "true".to_string(),
+                                    ensures: ext_fn
+                                        .ensures
+                                        .clone()
+                                        .unwrap_or_else(|| "true".to_string()),
                                     body_expr: String::new(),
                                     consumed_params: vec![],
                                     resources: vec![],
@@ -1969,6 +2009,15 @@ fn cmd_repl() {
                         }
                         parser::Item::Import(_) => {}
                         parser::Item::EffectDef(e) => module_env.register_effect(e),
+                        parser::Item::ImplBlock(ib) => {
+                            for method in &ib.methods {
+                                let mut qualified = method.clone();
+                                qualified.name = format!("{}::{}", ib.struct_name, method.name);
+                                module_env.register_atom(&qualified);
+                                module_env.register_atom(method);
+                                count += 1;
+                            }
+                        }
                     }
                 }
                 println!("  ✅ Loaded {} definition(s) from '{}'", count, file);

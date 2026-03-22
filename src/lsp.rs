@@ -348,6 +348,14 @@ fn verify_source_for_lsp(
             crate::parser::Item::Import(_) => {}
             crate::parser::Item::ExternBlock(_) => {}
             crate::parser::Item::EffectDef(e) => module_env.register_effect(e),
+            crate::parser::Item::ImplBlock(ib) => {
+                for method in &ib.methods {
+                    let mut qualified = method.clone();
+                    qualified.name = format!("{}::{}", ib.struct_name, method.name);
+                    module_env.register_atom(&qualified);
+                    module_env.register_atom(method);
+                }
+            }
         }
     }
 

@@ -414,9 +414,9 @@ pub struct StructDef {
     pub name: String,
     pub type_params: Vec<String>,
     pub fields: Vec<StructField>,
-    // NOTE: method_names tracks struct-associated atoms (e.g., "Stack::push") for future method resolution
-    #[allow(dead_code)]
     pub method_names: Vec<String>,
+    /// Methods defined in `impl StructName { atom ... }` blocks
+    pub methods: Vec<Atom>,
     pub span: Span,
 }
 
@@ -472,28 +472,38 @@ pub enum Item {
     ResourceDef(ResourceDef),
     ExternBlock(ExternBlock),
     EffectDef(EffectDef),
+    /// `impl StructName { atom method(...) ... }` block
+    ImplBlock(ImplBlock),
 }
 
 // =============================================================================
 // FFI Bridge (extern blocks)
 // =============================================================================
 
-// NOTE: ExternFn fields will be used when auto-registering extern functions as trusted atoms in ModuleEnv
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct ExternFn {
     pub name: String,
     pub param_types: Vec<String>,
     pub return_type: String,
+    /// Optional requires contract for verified FFI
+    pub requires: Option<String>,
+    /// Optional ensures contract for verified FFI
+    pub ensures: Option<String>,
     pub span: Span,
 }
 
-// NOTE: ExternBlock span will be used for error reporting in future extern function validation
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ExternBlock {
     pub language: String,
     pub functions: Vec<ExternFn>,
+    pub span: Span,
+}
+
+/// `impl StructName { atom method1(...) ... atom method2(...) ... }` block
+#[derive(Debug, Clone)]
+pub struct ImplBlock {
+    pub struct_name: String,
+    pub methods: Vec<Atom>,
     pub span: Span,
 }
 

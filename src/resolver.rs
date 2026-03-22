@@ -211,6 +211,7 @@ fn resolve_imports_recursive(
                     Item::Import(_) => {}
                     Item::ExternBlock(_) => {}
                     Item::EffectDef(_) => {}
+                    Item::ImplBlock(_) => {}
                 }
             }
 
@@ -319,9 +320,12 @@ fn register_imported_items(items: &[Item], alias: Option<&str>, module_env: &mut
                         type_params: vec![],
                         where_bounds: vec![],
                         params,
-                        requires: "true".to_string(),
+                        requires: ext_fn
+                            .requires
+                            .clone()
+                            .unwrap_or_else(|| "true".to_string()),
                         forall_constraints: vec![],
-                        ensures: "true".to_string(),
+                        ensures: ext_fn.ensures.clone().unwrap_or_else(|| "true".to_string()),
                         body_expr: String::new(),
                         consumed_params: vec![],
                         resources: vec![],
@@ -339,6 +343,19 @@ fn register_imported_items(items: &[Item], alias: Option<&str>, module_env: &mut
                     if let Some(prefix) = alias {
                         let mut fqn_atom = atom.clone();
                         fqn_atom.name = format!("{}::{}", prefix, ext_fn.name);
+                        module_env.register_atom(&fqn_atom);
+                    }
+                }
+            }
+            Item::ImplBlock(impl_block) => {
+                for method in &impl_block.methods {
+                    let mut qualified = method.clone();
+                    qualified.name = format!("{}::{}", impl_block.struct_name, method.name);
+                    module_env.register_atom(&qualified);
+                    module_env.register_atom(method);
+                    if let Some(prefix) = alias {
+                        let mut fqn_atom = method.clone();
+                        fqn_atom.name = format!("{}::{}", prefix, method.name);
                         module_env.register_atom(&fqn_atom);
                     }
                 }

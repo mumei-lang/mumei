@@ -68,12 +68,25 @@ CHANGELOGで「pipeline integration pending」と記載:
 - `TraitMethod.param_constraints` が `verify_impl` と inter-atom calls で Z3 に注入されていない
 - `Numeric` trait の `div(a: Self, b: Self where v != 0)` が呼び出し元で自動的にチェックされるようにする
 
-### P2-C: Struct method parsing（`impl Struct { atom ... }` 構文）
+### P2-C: Struct method parsing（`impl Struct { atom ... }` 構文） ✅ Implemented
 
 **Repository**: `mumei-lang/mumei`
 
-- `StructDef.method_names` は存在するが、`impl Stack { atom push(...) }` 構文のパーサーが未実装
-- OOP的なメソッド呼び出し `stack.push(x)` を可能にし、実用的なデータ構造定義を支援
+- ~~`StructDef.method_names` は存在するが、`impl Stack { atom push(...) }` 構文のパーサーが未実装~~
+- ~~OOP的なメソッド呼び出し `stack.push(x)` を可能にし、実用的なデータ構造定義を支援~~
+- ✅ `ImplBlock` AST node added (`Item::ImplBlock` variant)
+- ✅ `impl StructName { atom method(...) ... }` syntax parsing implemented
+- ✅ Methods registered in `ModuleEnv` with qualified names (`StructName::method_name`)
+- ✅ Handled in all match arms (`main.rs`, `resolver.rs`, `lsp.rs`, `cmd_build`, `cmd_check`, REPL)
+
+### Verified FFI Layer ✅ Implemented
+
+**Repository**: `mumei-lang/mumei`
+
+- ✅ `ExternFn` extended with optional `requires`/`ensures` fields
+- ✅ Extern function contracts propagated to `Atom` registration (no more hardcoded `"true"`)
+- ✅ Contracts verified at call sites by Z3 (callers must satisfy `requires`)
+- ✅ Backward compatible: omitted contracts default to `"true"`
 
 ---
 
