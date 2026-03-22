@@ -226,7 +226,8 @@ fn resolve_imports_recursive(
                             module_env.mark_verified(&qualified_name);
                             verified_atoms.push(qualified_name.clone());
                             if let Some(prefix) = alias_prefix {
-                                let fqn = format!("{}::{}::{}", prefix, ib.struct_name, method.name);
+                                let fqn =
+                                    format!("{}::{}::{}", prefix, ib.struct_name, method.name);
                                 module_env.mark_verified(&fqn);
                                 verified_atoms.push(fqn);
                             }
@@ -325,7 +326,11 @@ fn register_imported_items(items: &[Item], alias: Option<&str>, module_env: &mut
                         .iter()
                         .enumerate()
                         .map(|(i, ty)| crate::parser::Param {
-                            name: ext_fn.param_names.get(i).cloned().unwrap_or_else(|| format!("arg{}", i)),
+                            name: ext_fn
+                                .param_names
+                                .get(i)
+                                .cloned()
+                                .unwrap_or_else(|| format!("arg{}", i)),
                             type_name: Some(ty.clone()),
                             type_ref: Some(crate::parser::parse_type_ref(ty)),
                             is_ref: false,
@@ -374,7 +379,8 @@ fn register_imported_items(items: &[Item], alias: Option<&str>, module_env: &mut
                     module_env.register_atom(&qualified);
                     if let Some(prefix) = alias {
                         let mut fqn_atom = method.clone();
-                        fqn_atom.name = format!("{}::{}::{}", prefix, impl_block.struct_name, method.name);
+                        fqn_atom.name =
+                            format!("{}::{}::{}", prefix, impl_block.struct_name, method.name);
                         module_env.register_atom(&fqn_atom);
                     }
                 }
@@ -521,7 +527,8 @@ pub fn resolve_manifest_dependencies(
                             for method in &ib.methods {
                                 let qualified = format!("{}::{}", ib.struct_name, method.name);
                                 module_env.mark_verified(&qualified);
-                                let fqn = format!("{}::{}::{}", dep_name, ib.struct_name, method.name);
+                                let fqn =
+                                    format!("{}::{}::{}", dep_name, ib.struct_name, method.name);
                                 module_env.mark_verified(&fqn);
                             }
                         }
@@ -636,7 +643,8 @@ pub fn resolve_manifest_dependencies(
                             for method in &ib.methods {
                                 let qualified = format!("{}::{}", ib.struct_name, method.name);
                                 module_env.mark_verified(&qualified);
-                                let fqn = format!("{}::{}::{}", dep_name, ib.struct_name, method.name);
+                                let fqn =
+                                    format!("{}::{}::{}", dep_name, ib.struct_name, method.name);
                                 module_env.mark_verified(&fqn);
                             }
                         }
@@ -694,7 +702,10 @@ pub fn resolve_manifest_dependencies(
                                 for method in &ib.methods {
                                     let qualified = format!("{}::{}", ib.struct_name, method.name);
                                     module_env.mark_verified(&qualified);
-                                    let fqn = format!("{}::{}::{}", dep_name, ib.struct_name, method.name);
+                                    let fqn = format!(
+                                        "{}::{}::{}",
+                                        dep_name, ib.struct_name, method.name
+                                    );
                                     module_env.mark_verified(&fqn);
                                 }
                             }
