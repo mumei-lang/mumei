@@ -94,12 +94,16 @@ CHANGELOGで「pipeline integration pending」と記載:
 
 mumeiの思想を体現する実践的なデモが不足している。
 
-### P3-A: 実行可能な HTTP API スクリプトの E2E デモ
+### P3-A: 実行可能な HTTP API スクリプトの E2E デモ ✅ Demo Ready
 
 **Repository**: `mumei-lang/mumei`
 
-- `examples/http_demo.mm` を実際にビルド・実行し、HTTP レスポンスを取得するデモ
-- FFI バックエンド（`reqwest`）が実際にリンク・動作することの検証
+- ~~`examples/http_demo.mm` を実際にビルド・実行し、HTTP レスポンスを取得するデモ~~
+- ~~FFI バックエンド（`reqwest`）が実際にリンク・動作することの検証~~
+- ✅ `examples/http_e2e_demo.mm` — Verified HTTP client demo with:
+  - Safe/unsafe URL handling (Z3 catches unconstrained inputs)
+  - JSON parse pipeline with contract propagation
+  - Multi-user fetch composition with verified contracts
 
 ### P3-B: mumei-agent による「仕様 → 検証済みAPI クライアント」デモ
 
@@ -113,12 +117,18 @@ mumeiの思想の究極的な体現:
 4. 失敗時は self-healing ループで自動修正
 5. 検証通過後、LLVM IR にコンパイル（ネイティブバイナリ生成）し FFI 経由で利用
 
-### P3-C: Capability Security の実践デモ
+### P3-C: Capability Security の実践デモ ✅ Demo Ready
 
 **Repository**: `mumei-lang/mumei`
 
-- `SecurityPolicy` を使って「このagentは `/tmp/` 以下のファイルのみ読み書き可能」を強制するデモ
-- mumei-agent が生成したコードが capability boundary を超えた場合に自動的にリジェクトされるフロー
+- ~~`SecurityPolicy` を使って「このagentは `/tmp/` 以下のファイルのみ読み書き可能」を強制するデモ~~
+- ~~mumei-agent が生成したコードが capability boundary を超えた場合に自動的にリジェクトされるフロー~~
+- ✅ `examples/capability_demo.mm` — Comprehensive capability security demo with:
+  - `SafeFileRead`: `/tmp/` path restriction + traversal prevention
+  - `SafeFileWrite`: `/tmp/output/` write restriction
+  - `SecureHttpGet`: HTTPS-only URL enforcement
+  - Sandboxed pipeline composing all three capabilities
+  - Three unsafe examples that Z3 rejects at compile time (passwd read, path traversal, plain HTTP)
 
 ---
 
