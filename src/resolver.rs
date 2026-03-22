@@ -124,8 +124,17 @@ pub fn resolve_prelude(base_dir: &Path, module_env: &mut ModuleEnv) -> MumeiResu
 
     // prelude の atom を検証済みとしてマーク
     for item in &prelude_items {
-        if let Item::Atom(atom) = item {
-            module_env.mark_verified(&atom.name);
+        match item {
+            Item::Atom(atom) => {
+                module_env.mark_verified(&atom.name);
+            }
+            Item::ImplBlock(ib) => {
+                for method in &ib.methods {
+                    let qualified_name = format!("{}::{}", ib.struct_name, method.name);
+                    module_env.mark_verified(&qualified_name);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -211,7 +220,18 @@ fn resolve_imports_recursive(
                     Item::Import(_) => {}
                     Item::ExternBlock(_) => {}
                     Item::EffectDef(_) => {}
-                    Item::ImplBlock(_) => {}
+                    Item::ImplBlock(ib) => {
+                        for method in &ib.methods {
+                            let qualified_name = format!("{}::{}", ib.struct_name, method.name);
+                            module_env.mark_verified(&qualified_name);
+                            verified_atoms.push(qualified_name.clone());
+                            if let Some(prefix) = alias_prefix {
+                                let fqn = format!("{}::{}::{}", prefix, ib.struct_name, method.name);
+                                module_env.mark_verified(&fqn);
+                                verified_atoms.push(fqn);
+                            }
+                        }
+                    }
                 }
             }
 
@@ -491,10 +511,21 @@ pub fn resolve_manifest_dependencies(
                 save_cache(&cache_path, &cache);
                 register_imported_items(&items, Some(dep_name), module_env);
                 for item in &items {
-                    if let Item::Atom(atom) = item {
-                        module_env.mark_verified(&atom.name);
-                        let fqn = format!("{}::{}", dep_name, atom.name);
-                        module_env.mark_verified(&fqn);
+                    match item {
+                        Item::Atom(atom) => {
+                            module_env.mark_verified(&atom.name);
+                            let fqn = format!("{}::{}", dep_name, atom.name);
+                            module_env.mark_verified(&fqn);
+                        }
+                        Item::ImplBlock(ib) => {
+                            for method in &ib.methods {
+                                let qualified = format!("{}::{}", ib.struct_name, method.name);
+                                module_env.mark_verified(&qualified);
+                                let fqn = format!("{}::{}::{}", dep_name, ib.struct_name, method.name);
+                                module_env.mark_verified(&fqn);
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 println!(
@@ -595,10 +626,21 @@ pub fn resolve_manifest_dependencies(
                 save_cache(&cache_path, &cache);
                 register_imported_items(&items, Some(dep_name), module_env);
                 for item in &items {
-                    if let Item::Atom(atom) = item {
-                        module_env.mark_verified(&atom.name);
-                        let fqn = format!("{}::{}", dep_name, atom.name);
-                        module_env.mark_verified(&fqn);
+                    match item {
+                        Item::Atom(atom) => {
+                            module_env.mark_verified(&atom.name);
+                            let fqn = format!("{}::{}", dep_name, atom.name);
+                            module_env.mark_verified(&fqn);
+                        }
+                        Item::ImplBlock(ib) => {
+                            for method in &ib.methods {
+                                let qualified = format!("{}::{}", ib.struct_name, method.name);
+                                module_env.mark_verified(&qualified);
+                                let fqn = format!("{}::{}::{}", dep_name, ib.struct_name, method.name);
+                                module_env.mark_verified(&fqn);
+                            }
+                        }
+                        _ => {}
                     }
                 }
             } else {
@@ -642,10 +684,21 @@ pub fn resolve_manifest_dependencies(
                     save_cache(&cache_path, &cache);
                     register_imported_items(&items, Some(dep_name), module_env);
                     for item in &items {
-                        if let Item::Atom(atom) = item {
-                            module_env.mark_verified(&atom.name);
-                            let fqn = format!("{}::{}", dep_name, atom.name);
-                            module_env.mark_verified(&fqn);
+                        match item {
+                            Item::Atom(atom) => {
+                                module_env.mark_verified(&atom.name);
+                                let fqn = format!("{}::{}", dep_name, atom.name);
+                                module_env.mark_verified(&fqn);
+                            }
+                            Item::ImplBlock(ib) => {
+                                for method in &ib.methods {
+                                    let qualified = format!("{}::{}", ib.struct_name, method.name);
+                                    module_env.mark_verified(&qualified);
+                                    let fqn = format!("{}::{}::{}", dep_name, ib.struct_name, method.name);
+                                    module_env.mark_verified(&fqn);
+                                }
+                            }
+                            _ => {}
                         }
                     }
                     println!(

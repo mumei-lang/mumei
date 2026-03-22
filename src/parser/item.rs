@@ -672,7 +672,8 @@ fn collect_body(ctx: &mut ParseContext) -> String {
                     | Token::Async
                     | Token::Trusted
                     | Token::Unverified
-                    | Token::Semicolon => break,
+                    | Token::Semicolon
+                    | Token::RBrace => break,
                     _ => {}
                 }
             }

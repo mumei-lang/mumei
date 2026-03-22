@@ -844,13 +844,19 @@ fn cmd_verify(
                 }
             })
             .collect();
-        // Also include ImplBlock methods in the certificate
+        // Also include ImplBlock methods in the certificate (with qualified names)
+        let mut qualified_methods: Vec<parser::Atom> = Vec::new();
         for item in &items {
             if let Item::ImplBlock(ib) = item {
                 for method in &ib.methods {
-                    atom_refs.push(method);
+                    let mut qualified = method.clone();
+                    qualified.name = format!("{}::{}", ib.struct_name, method.name);
+                    qualified_methods.push(qualified);
                 }
             }
+        }
+        for qm in &qualified_methods {
+            atom_refs.push(qm);
         }
         let cert = proof_cert::generate_certificate(input, &atom_refs, &cert_results);
         let cert_path = if let Some(output) = cert_output {
@@ -1465,13 +1471,19 @@ fn cmd_verify_cert(cert_path: &str, input: &str) {
             }
         })
         .collect();
-    // Also include ImplBlock methods for certificate verification
+    // Also include ImplBlock methods for certificate verification (with qualified names)
+    let mut qualified_methods: Vec<parser::Atom> = Vec::new();
     for item in &items {
         if let Item::ImplBlock(ib) = item {
             for method in &ib.methods {
-                atom_refs.push(method);
+                let mut qualified = method.clone();
+                qualified.name = format!("{}::{}", ib.struct_name, method.name);
+                qualified_methods.push(qualified);
             }
         }
+    }
+    for qm in &qualified_methods {
+        atom_refs.push(qm);
     }
 
     let results = proof_cert::verify_certificate(&cert, &atom_refs);
@@ -1789,8 +1801,9 @@ fn cmd_build(input: &str, output: &str) {
                         }
                     }
 
+                    let safe_name = qualified_name.replace("::", "__");
                     let atom_output_path =
-                        output_dir.join(format!("{}_{}", file_stem, method.name));
+                        output_dir.join(format!("{}_{}", file_stem, safe_name));
                     let extern_blocks = collect_extern_blocks(&items);
                     match codegen::compile(
                         &hir_atom,
