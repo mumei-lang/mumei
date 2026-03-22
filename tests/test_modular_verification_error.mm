@@ -1,9 +1,10 @@
 // =============================================================
-// tests/test_modular_verification.mm — Modular Verification E2E Test
+// tests/test_modular_verification_error.mm — Cross-atom Error Test
 // =============================================================
-// Integration test for effect_pre / effect_post contracts (Plan 24).
-// Includes cross-atom contract composition (P2-A).
-// Usage: mumei check tests/test_modular_verification.mm
+// Integration test for invalid cross-atom contract composition (P2-A).
+// This file is expected to FAIL verification.
+// Usage: mumei check tests/test_modular_verification_error.mm
+// Expected: InvalidPreState error for bad_pipeline
 
 effect File
     states: [Closed, Open];
@@ -36,22 +37,15 @@ atom write_and_close(x: i64)
         x
     };
 
-// Cross-atom contract composition (P2-A):
-// The calls to open_file(x) and write_and_close(x) are now tracked
-// as temporal state transitions via their effect_pre/effect_post contracts.
-// open_file requires File:Closed (initial state) and produces File:Open.
-// write_and_close requires File:Open and produces File:Closed.
-// This sequence is valid: Closed -> Open -> Closed.
-atom full_pipeline(x: i64)
+// Invalid cross-atom composition: write_and_close is called first,
+// but it requires File:Open while the initial state is File:Closed.
+// This should produce an InvalidPreState verification error.
+atom bad_pipeline(x: i64)
     effects: [File];
     requires: x >= 0;
     ensures: result >= 0;
     body: {
-        open_file(x);
         write_and_close(x);
+        open_file(x);
         x
     };
-
-// NOTE: The invalid cross-atom composition test (bad_pipeline) has been moved
-// to tests/test_modular_verification_error.mm to prevent this file from failing
-// when processed by `mumei check` (which expects all atoms in the file to pass).

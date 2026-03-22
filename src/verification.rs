@@ -2440,6 +2440,8 @@ pub fn verify_impl(
                         for (i, constraint_opt) in method.param_constraints.iter().enumerate() {
                             if let Some(constraint_str) = constraint_opt {
                                 if let Some(param_name) = param_names.get(i) {
+                                    // TODO: naive .replace("v", ...) — see call-site TODO for details.
+                                    // Safe for current "v != 0" but fragile for future constraints.
                                     let concrete: String =
                                         constraint_str.replace("v", param_name);
                                     let constraint_ast = parse_expression(&concrete);
@@ -6368,17 +6370,42 @@ fn expr_to_z3<'a>(
 
                         // Trait method param_constraints の検証:
                         // 呼び出し先がトレイトメソッドの実装である場合、param_constraints を
-                        // 呼び出し元のコンテキストで検証する
+                        // 呼び出し元のコンテキストで検証する。
+                        // NOTE: get_trait_for_method はメソッド名でグローバル検索するため、
+                        // ユーザー定義 atom が builtin メソッド名（div, add 等）と衝突する可能性がある。
+                        // find_impl で呼び出し先の型に対して実際にトレイトが impl されているか確認し、
+                        // 無関係な atom への誤適用を防ぐ。
                         if let Some(solver) = solver_opt {
-                            if let Some((_trait_name, trait_method)) =
+                            if let Some((trait_name, trait_method)) =
                                 vc.module_env.get_trait_for_method(name)
                             {
+                                // Guard: only apply trait constraints if the callee's parameter
+                                // type actually implements this trait. Without this check, a
+                                // user-defined `atom div(a: i64, b: i64)` would incorrectly
+                                // have Numeric's `b != 0` constraint applied.
+                                let callee_type = callee
+                                    .params
+                                    .first()
+                                    .and_then(|p| p.type_name.as_deref())
+                                    .unwrap_or("i64");
+                                let has_impl =
+                                    vc.module_env.find_impl(trait_name, callee_type).is_some();
+                                if !has_impl {
+                                    // Callee is not a trait impl — skip param_constraints
+                                } else {
                                 for (i, constraint_opt) in
                                     trait_method.param_constraints.iter().enumerate()
                                 {
                                     if let Some(constraint) = constraint_opt {
                                         if let Some(arg_val) = arg_vals.get(i) {
-                                            // Replace 'v' in constraint with actual parameter
+                                            // Replace 'v' in constraint with actual parameter.
+                                            // TODO: This naive .replace("v", ...) will corrupt constraints
+                                            // containing 'v' as part of longer identifiers (e.g., "value != 0"
+                                            // → "balue != 0" when param_name is "b"). Currently safe because
+                                            // the only constraint is "v != 0" where 'v' is standalone.
+                                            // When adding constraints like "divisor != 0", use a word-boundary-
+                                            // aware replacement (e.g., regex \bv\b) or a dedicated placeholder
+                                            // like "${v}" instead.
                                             let param_name = callee
                                                 .params
                                                 .get(i)
@@ -6419,6 +6446,7 @@ fn expr_to_z3<'a>(
                                         }
                                     }
                                 }
+                                } // end else (has_impl)
                             }
                         }
 
