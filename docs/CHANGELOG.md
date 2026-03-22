@@ -11,7 +11,8 @@
 - New `analyze_temporal_effects_with_contracts()` function: forward dataflow analysis now verifies callee `effect_pre` against caller's current temporal state and applies `effect_post` as state transition
 - Updated `src/verification.rs` to build `callee_contracts` map from `ModuleEnv` and pass to the new analysis function
 - Added 3 unit tests: `test_cross_atom_composition_valid`, `test_cross_atom_composition_invalid_order`, `test_cross_atom_composition_no_contracts`
-- Updated `tests/test_modular_verification.mm`: added `bad_pipeline` atom (invalid order test case), updated comments for `full_pipeline`
+- Updated `tests/test_modular_verification.mm`: updated comments for `full_pipeline`
+- Added `tests/test_modular_verification_error.mm`: `bad_pipeline` atom (invalid order test case) in separate file
 
 #### Trait Method Constraints Z3 Injection (P2-B)
 - Added `div` method to `Numeric` trait with `param_constraints: vec![None, Some("v != 0")]`
@@ -20,9 +21,15 @@
 - Implemented param_constraints injection in `verify_impl()`: asserts method parameter constraints as solver preconditions during law verification
 - Added `tests/test_trait_constraints.mm` with `SafeDiv` trait, `safe_divide` (should pass), and `unsafe_divide` (should fail)
 
+#### Review Fixes
+- **Law verification soundness**: Moved `param_constraints` injection inside `solver.push()`/`solver.pop()` scope per law, and added `law_expr.contains(&method.name)` filter to prevent unrelated constraints (e.g., `div`'s `b != 0`) from weakening verification of laws like `commutative_add`
+- **Trait method name collision guard**: Added `find_impl(trait_name, callee_type)` check at call sites to prevent user-defined atoms named `div`, `add`, etc. from having builtin trait constraints spuriously applied
+- **E2E test separation**: Moved `bad_pipeline` (intentionally failing atom) to `tests/test_modular_verification_error.mm` to prevent `mumei check` from failing on the main test file
+- **Naive string replace TODO**: Documented fragility of `constraint.replace("v", param_name)` at both injection sites with TODO for future word-boundary-aware replacement
+
 #### Documentation
 - Updated `docs/ARCHITECTURE.md`: Modular Verification section now documents cross-atom composition and trait method constraints
-- Updated `docs/CHANGELOG.md`: this entry
+- Updated `docs/CHANGELOG.md`: this entry (with review fixes)
 
 ---
 
