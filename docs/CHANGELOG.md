@@ -2,6 +2,21 @@
 
 ---
 
+### P2-A: Cross-atom Contract Composition (enhanced) — Chained Calls & E2E Tests
+
+#### New unit tests
+- `test_cross_atom_composition_chained_abc`: verifies chained A→B→C call propagation (open_file → read_file → write_and_close)
+- `test_cross_atom_composition_effect_post_available_to_caller`: verifies callee's `effect_post` is available to caller's subsequent `perform` operations
+
+#### New E2E test
+- `tests/test_cross_atom_chain.mm`: chained cross-atom composition with 3-atom pipeline (open_file → read_file → write_and_close)
+
+#### Documentation
+- Updated `docs/CROSS_PROJECT_ROADMAP.md`: P2-A marked as ✅ Implemented with full feature list
+- Updated `docs/ROADMAP.md` Plan 24: "not yet implemented" → "now implemented via `analyze_temporal_effects_with_contracts()`"
+
+---
+
 ### P2-A: Cross-atom Contract Composition + P2-B: Trait Method Constraints Z3 Injection
 
 #### Cross-atom Contract Composition (P2-A)

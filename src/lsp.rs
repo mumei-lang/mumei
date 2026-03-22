@@ -378,13 +378,7 @@ fn verify_source_for_lsp(
                     let mut qualified_method = method.clone();
                     qualified_method.name = qualified_name.clone();
                     let hir_atom = crate::hir::lower_atom_to_hir(&qualified_method);
-                    verification::verify_with_config(
-                        &hir_atom,
-                        output_dir,
-                        &module_env,
-                        5000,
-                        3,
-                    )?;
+                    verification::verify_with_config(&hir_atom, output_dir, &module_env, 5000, 3)?;
                     module_env.mark_verified(&qualified_name);
                 }
             }

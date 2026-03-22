@@ -404,7 +404,11 @@ fn load_and_prepare(input: &str) -> (Vec<Item>, verification::ModuleEnv, Vec<Imp
                         .iter()
                         .enumerate()
                         .map(|(i, ty)| parser::Param {
-                            name: ext_fn.param_names.get(i).cloned().unwrap_or_else(|| format!("arg{}", i)),
+                            name: ext_fn
+                                .param_names
+                                .get(i)
+                                .cloned()
+                                .unwrap_or_else(|| format!("arg{}", i)),
                             type_name: Some(ty.clone()),
                             type_ref: Some(parser::parse_type_ref(ty)),
                             is_ref: false,
@@ -738,12 +742,16 @@ fn cmd_verify(
                         let mut qualified_method = method.clone();
                         qualified_method.name = qualified_name.clone();
 
-                        let proof_hash = resolver::compute_proof_hash(&qualified_method, &module_env);
+                        let proof_hash =
+                            resolver::compute_proof_hash(&qualified_method, &module_env);
 
                         if let Some(cached_entry) = verification_cache.get(&qualified_name) {
                             if cached_entry.proof_hash == proof_hash {
                                 if !json_output {
-                                    println!("  ⚖️  '{}': skipped (unchanged, cached) ⏩", qualified_name);
+                                    println!(
+                                        "  ⚖️  '{}': skipped (unchanged, cached) ⏩",
+                                        qualified_name
+                                    );
                                 }
                                 module_env.mark_verified(&qualified_name);
                                 cert_results.insert(
@@ -767,7 +775,8 @@ fn cmd_verify(
                             .filter(|tn| module_env.get_type(tn).is_some())
                             .collect();
 
-                        let hir_atom = lower_atom_to_hir_with_env(&qualified_method, Some(&module_env));
+                        let hir_atom =
+                            lower_atom_to_hir_with_env(&qualified_method, Some(&module_env));
 
                         let mir_body = mir::lower_hir_to_mir(&hir_atom);
                         match mir_body.check_analysis_budget() {
@@ -1564,7 +1573,7 @@ fn cmd_build(input: &str, output: &str) {
         )
     };
 
-    let (items, mut module_env, imports, source) = load_and_prepare(input);
+    let (items, mut module_env, _imports, source) = load_and_prepare(input);
 
     let output_path = Path::new(output);
     let output_dir = output_path.parent().unwrap_or(Path::new("."));
@@ -1748,7 +1757,8 @@ fn cmd_build(input: &str, output: &str) {
                     } else if module_env.is_verified(&qualified_name) {
                         println!("  ⚖️  [2/3] Verification: Skipped (imported, contract-trusted).");
                     } else {
-                        let proof_hash = resolver::compute_proof_hash(&qualified_method, &module_env);
+                        let proof_hash =
+                            resolver::compute_proof_hash(&qualified_method, &module_env);
 
                         let cache_hit = verification_cache
                             .get(&qualified_name)
@@ -1801,8 +1811,7 @@ fn cmd_build(input: &str, output: &str) {
                                     );
                                 }
                                 Err(e) => {
-                                    let resolved =
-                                        resolve_source_for_span(&source, &method.span);
+                                    let resolved = resolve_source_for_span(&source, &method.span);
                                     let e = e.with_source(&resolved, &method.span);
                                     eprintln!("{:?}", miette::Report::new(e));
                                     verification_cache_new.remove(&qualified_name);
@@ -1813,8 +1822,7 @@ fn cmd_build(input: &str, output: &str) {
                     }
 
                     let safe_name = qualified_name.replace("::", "__");
-                    let atom_output_path =
-                        output_dir.join(format!("{}_{}", file_stem, safe_name));
+                    let atom_output_path = output_dir.join(format!("{}_{}", file_stem, safe_name));
                     let extern_blocks = collect_extern_blocks(&items);
                     match codegen::compile(
                         &hir_atom,
@@ -2299,7 +2307,11 @@ fn cmd_repl() {
                                     .iter()
                                     .enumerate()
                                     .map(|(i, ty)| parser::Param {
-                                        name: ext_fn.param_names.get(i).cloned().unwrap_or_else(|| format!("arg{}", i)),
+                                        name: ext_fn
+                                            .param_names
+                                            .get(i)
+                                            .cloned()
+                                            .unwrap_or_else(|| format!("arg{}", i)),
                                         type_name: Some(ty.clone()),
                                         type_ref: Some(parser::parse_type_ref(ty)),
                                         is_ref: false,
@@ -3182,7 +3194,11 @@ atom main() -> i64
                             .iter()
                             .enumerate()
                             .map(|(i, ty)| parser::Param {
-                                name: ext_fn.param_names.get(i).cloned().unwrap_or_else(|| format!("arg{}", i)),
+                                name: ext_fn
+                                    .param_names
+                                    .get(i)
+                                    .cloned()
+                                    .unwrap_or_else(|| format!("arg{}", i)),
                                 type_name: Some(ty.clone()),
                                 type_ref: Some(parser::parse_type_ref(ty)),
                                 is_ref: false,

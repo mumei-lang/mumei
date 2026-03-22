@@ -434,6 +434,7 @@ pub struct TypeParamBound {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct TraitMethod {
     pub name: String,
     pub param_types: Vec<String>,
@@ -494,6 +495,7 @@ pub struct ExternFn {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ExternBlock {
     pub language: String,
     pub functions: Vec<ExternFn>,
@@ -502,6 +504,7 @@ pub struct ExternBlock {
 
 /// `impl StructName { atom method1(...) ... atom method2(...) ... }` block
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ImplBlock {
     pub struct_name: String,
     pub methods: Vec<Atom>,

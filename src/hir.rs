@@ -150,6 +150,9 @@ pub enum HirExpr {
         join_semantics: JoinSemantics,
     },
     /// Lambda 式（クロージャ変換前）
+    // NOTE: Lambda is constructed via lower_expr(Expr::Lambda) → HirExpr::Lambda.
+    // return_type is parsed but not yet consumed by codegen passes.
+    #[allow(dead_code)]
     Lambda {
         params: Vec<HirLambdaParam>,
         return_type: Option<String>,
@@ -216,6 +219,7 @@ pub enum HirStmt {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct HirLambdaParam {
     pub name: String,
     pub type_ref: Option<crate::ast::TypeRef>,

@@ -561,7 +561,7 @@ atom open_file(x: i64)
 - Monomorphizer substitutes effect type variables in keys (e.g., `{ E: Closed }` → `{ FileWrite: Closed }`)
 - All Atom construction sites updated with default empty `HashMap`
 - Parser extension for `{ Key: Value, Key2: Value2 }` syntax
-- Cross-atom contract composition at call sites is not yet implemented (each atom verified independently)
+- Cross-atom contract composition at call sites is now implemented via `analyze_temporal_effects_with_contracts()` (P2-A)
 
 **Files**:
 - `src/parser/ast.rs` — Added `effect_pre`/`effect_post` fields to `Atom` struct

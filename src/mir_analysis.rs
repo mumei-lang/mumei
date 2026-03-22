@@ -3312,4 +3312,128 @@ mod tests {
             "Calls without effect contracts should produce no violations"
         );
     }
+
+    #[test]
+    fn test_cross_atom_composition_chained_abc() {
+        // Chained calls: A → B → C (open_file → read_file → write_and_close)
+        // File starts at Closed.
+        // open_file: pre=Closed, post=Open
+        // read_file: pre=Open, post=Open
+        // write_and_close: pre=Open, post=Closed
+        // Chain: Closed → Open → Open → Closed (valid)
+        let sm = make_file_effect_sm();
+        let mut contracts = make_file_callee_contracts();
+        // Add read_file: effect_pre={File:Open}, effect_post={File:Open}
+        let mut read_pre = HashMap::new();
+        read_pre.insert("File".to_string(), "Open".to_string());
+        let mut read_post = HashMap::new();
+        read_post.insert("File".to_string(), "Open".to_string());
+        contracts.insert(
+            "read_file".to_string(),
+            AtomEffectContract {
+                effect_pre: read_pre,
+                effect_post: read_post,
+            },
+        );
+
+        let body = MirBody {
+            name: "chained_abc".to_string(),
+            locals: vec![LocalDecl {
+                local: Local(0),
+                name: Some("_ret".to_string()),
+                ty: None,
+                movability: Movability::Move,
+            }],
+            blocks: vec![BasicBlock {
+                id: 0,
+                statements: vec![
+                    MirStatement::Assign(
+                        Place::Local(Local(0)),
+                        Rvalue::Call {
+                            func: "open_file".to_string(),
+                            args: vec![Operand::Constant(MirConstant::Int(1))],
+                        },
+                    ),
+                    MirStatement::Assign(
+                        Place::Local(Local(0)),
+                        Rvalue::Call {
+                            func: "read_file".to_string(),
+                            args: vec![Operand::Constant(MirConstant::Int(1))],
+                        },
+                    ),
+                    MirStatement::Assign(
+                        Place::Local(Local(0)),
+                        Rvalue::Call {
+                            func: "write_and_close".to_string(),
+                            args: vec![Operand::Constant(MirConstant::Int(1))],
+                        },
+                    ),
+                ],
+                terminator: Terminator::Return(Operand::Constant(MirConstant::Int(0))),
+            }],
+            entry_block: 0,
+        };
+        let mut machines = HashMap::new();
+        machines.insert("File".to_string(), sm);
+        let result = analyze_temporal_effects_with_contracts(&body, &machines, Some(&contracts));
+        assert!(
+            result.violations.is_empty(),
+            "open_file → read_file → write_and_close should have no violations, got: {:?}",
+            result.violations
+        );
+        // Exit state should be Closed (write_and_close's effect_post)
+        if let Some(exit_map) = result.exit_states.get(&0) {
+            assert_eq!(exit_map.get("File").unwrap(), "Closed");
+        }
+    }
+
+    #[test]
+    fn test_cross_atom_composition_effect_post_available_to_caller() {
+        // After calling open_file (post=Open), a direct perform File.write should succeed
+        // because the caller now sees File:Open from the callee's effect_post.
+        let sm = make_file_effect_sm();
+        let contracts = make_file_callee_contracts();
+
+        let body = MirBody {
+            name: "post_available".to_string(),
+            locals: vec![LocalDecl {
+                local: Local(0),
+                name: Some("_ret".to_string()),
+                ty: None,
+                movability: Movability::Move,
+            }],
+            blocks: vec![BasicBlock {
+                id: 0,
+                statements: vec![
+                    // Call open_file: Closed → Open
+                    MirStatement::Assign(
+                        Place::Local(Local(0)),
+                        Rvalue::Call {
+                            func: "open_file".to_string(),
+                            args: vec![Operand::Constant(MirConstant::Int(1))],
+                        },
+                    ),
+                    // Direct perform File.write — valid because open_file's effect_post set File to Open
+                    MirStatement::Assign(
+                        Place::Local(Local(0)),
+                        Rvalue::Perform {
+                            effect: "File".to_string(),
+                            operation: "write".to_string(),
+                            args: vec![],
+                        },
+                    ),
+                ],
+                terminator: Terminator::Return(Operand::Constant(MirConstant::Int(0))),
+            }],
+            entry_block: 0,
+        };
+        let mut machines = HashMap::new();
+        machines.insert("File".to_string(), sm);
+        let result = analyze_temporal_effects_with_contracts(&body, &machines, Some(&contracts));
+        assert!(
+            result.violations.is_empty(),
+            "perform File.write after open_file should succeed (effect_post = Open), got: {:?}",
+            result.violations
+        );
+    }
 }
