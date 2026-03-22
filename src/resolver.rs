@@ -305,7 +305,7 @@ fn register_imported_items(items: &[Item], alias: Option<&str>, module_env: &mut
                         .iter()
                         .enumerate()
                         .map(|(i, ty)| crate::parser::Param {
-                            name: format!("arg{}", i),
+                            name: ext_fn.param_names.get(i).cloned().unwrap_or_else(|| format!("arg{}", i)),
                             type_name: Some(ty.clone()),
                             type_ref: Some(crate::parser::parse_type_ref(ty)),
                             is_ref: false,

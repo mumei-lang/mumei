@@ -361,13 +361,33 @@ fn verify_source_for_lsp(
 
     let output_dir = std::path::Path::new(".");
     for item in &items {
-        if let crate::parser::Item::Atom(atom) = item {
-            if module_env.is_verified(&atom.name) {
-                continue;
+        match item {
+            crate::parser::Item::Atom(atom) => {
+                if module_env.is_verified(&atom.name) {
+                    continue;
+                }
+                let hir_atom = crate::hir::lower_atom_to_hir(atom);
+                verification::verify_with_config(&hir_atom, output_dir, &module_env, 5000, 3)?;
+                module_env.mark_verified(&atom.name);
             }
-            let hir_atom = crate::hir::lower_atom_to_hir(atom);
-            verification::verify_with_config(&hir_atom, output_dir, &module_env, 5000, 3)?;
-            module_env.mark_verified(&atom.name);
+            crate::parser::Item::ImplBlock(ib) => {
+                for method in &ib.methods {
+                    let qualified_name = format!("{}::{}", ib.struct_name, method.name);
+                    if module_env.is_verified(&qualified_name) {
+                        continue;
+                    }
+                    let hir_atom = crate::hir::lower_atom_to_hir(method);
+                    verification::verify_with_config(
+                        &hir_atom,
+                        output_dir,
+                        &module_env,
+                        5000,
+                        3,
+                    )?;
+                    module_env.mark_verified(&qualified_name);
+                }
+            }
+            _ => {}
         }
     }
 

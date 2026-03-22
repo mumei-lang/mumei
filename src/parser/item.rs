@@ -1141,16 +1141,20 @@ pub fn parse_module_from_tokens(ctx: &mut ParseContext) -> Vec<Item> {
                         let fn_tok = ctx.advance().clone();
                         let fn_name = ctx.expect_ident();
                         ctx.expect(Token::LParen);
+                        let mut param_names = Vec::new();
                         let mut param_types = Vec::new();
                         while ctx.peek() != &Token::RParen && ctx.peek() != &Token::Eof {
                             let first = ctx.expect_ident();
-                            let type_name = if ctx.peek() == &Token::Colon {
+                            if ctx.peek() == &Token::Colon {
                                 ctx.advance();
-                                ctx.expect_ident()
+                                let type_name = ctx.expect_ident();
+                                param_names.push(first);
+                                param_types.push(type_name);
                             } else {
-                                first
-                            };
-                            param_types.push(type_name);
+                                // No colon: treat as type-only (no name)
+                                param_names.push(format!("arg{}", param_types.len()));
+                                param_types.push(first);
+                            }
                             if ctx.peek() == &Token::Comma {
                                 ctx.advance();
                             }
@@ -1188,6 +1192,7 @@ pub fn parse_module_from_tokens(ctx: &mut ParseContext) -> Vec<Item> {
                         }
                         functions.push(ExternFn {
                             name: fn_name,
+                            param_names,
                             param_types,
                             return_type,
                             requires: ext_requires,

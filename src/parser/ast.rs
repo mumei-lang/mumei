@@ -483,6 +483,7 @@ pub enum Item {
 #[derive(Debug, Clone)]
 pub struct ExternFn {
     pub name: String,
+    pub param_names: Vec<String>,
     pub param_types: Vec<String>,
     pub return_type: String,
     /// Optional requires contract for verified FFI
