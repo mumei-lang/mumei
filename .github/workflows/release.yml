@@ -93,11 +93,10 @@ jobs:
               # Use --features z3/static-link-z3 to build Z3 from source with
               # musl-native g++ (Alpine z3-dev headers help cmake find deps)
               #
-              # Use target-specific RUSTFLAGS so that -C target-feature=+crt-static
-              # only applies to the final musl binary, NOT to build scripts.
+              # musl targets default to +crt-static, so no explicit RUSTFLAGS
+              # are needed for the final binary.
               # Build scripts (compiled for the host) must remain dynamically
               # linked so that z3-sys/bindgen can dlopen libclang.so.
-              export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C target-feature=+crt-static"
               export CARGO_HOST_RUSTFLAGS="-C target-feature=-crt-static"
               cargo build --release --target x86_64-unknown-linux-musl \
                 --features z3/static-link-z3
@@ -158,19 +157,25 @@ jobs:
           cmake --build $buildDir --config Release --target install -- /m
 
           Write-Host "LLVM installed to $installDir"
-          & "$installDir\bin\llvm-config.exe" --version
+          if (Test-Path "$installDir\lib\cmake\llvm\LLVMConfig.cmake") {
+            Write-Host "LLVM development files installed successfully"
+          } else {
+            Write-Error "LLVM development files not found at $installDir"
+            exit 1
+          }
       - name: Set LLVM & Z3 environment variables (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $llvmDir = "C:\LLVM17"
           # Verify that development libraries are present
-          $llvmConfig = "$llvmDir\bin\llvm-config.exe"
-          if (Test-Path $llvmConfig) {
-            $ver = & $llvmConfig --version
-            Write-Host "LLVM installed (with dev libs): $ver"
+          # llvm-config.exe is not produced by the Visual Studio generator;
+          # llvm-sys finds LLVM via LLVM_SYS_170_PREFIX, so check cmake files instead.
+          $llvmCmake = "$llvmDir\lib\cmake\llvm\LLVMConfig.cmake"
+          if (Test-Path $llvmCmake) {
+            Write-Host "LLVM development files found at $llvmDir"
           } else {
-            Write-Error "llvm-config not found at $llvmConfig — LLVM build may have failed"
+            Write-Error "LLVM development files not found at $llvmDir — LLVM build may have failed"
             exit 1
           }
           echo "LLVM_SYS_170_PREFIX=$llvmDir" >> $env:GITHUB_ENV
