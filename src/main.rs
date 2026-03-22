@@ -994,46 +994,7 @@ fn cmd_inspect() {
         fail_count += 1;
     }
 
-    // --- 4. Rust toolchain ---
-    match Cmd::new("rustc").arg("--version").output() {
-        Ok(output) => {
-            let version = String::from_utf8_lossy(&output.stdout);
-            println!("  ✅ Rust: {}", version.trim());
-            ok_count += 1;
-        }
-        Err(_) => {
-            println!("  ⚠️  Rust: not found (optional, for generated .rs syntax check)");
-            warn_count += 1;
-        }
-    }
-
-    // --- 5. Go toolchain ---
-    match Cmd::new("go").arg("version").output() {
-        Ok(output) => {
-            let version = String::from_utf8_lossy(&output.stdout);
-            println!("  ✅ Go: {}", version.trim());
-            ok_count += 1;
-        }
-        Err(_) => {
-            println!("  ⚠️  Go: not found (optional, for generated .go compilation)");
-            warn_count += 1;
-        }
-    }
-
-    // --- 6. Node.js / TypeScript ---
-    match Cmd::new("node").arg("--version").output() {
-        Ok(output) => {
-            let version = String::from_utf8_lossy(&output.stdout);
-            println!("  ✅ Node.js: {}", version.trim());
-            ok_count += 1;
-        }
-        Err(_) => {
-            println!("  ⚠️  Node.js: not found (optional, for generated .ts execution)");
-            warn_count += 1;
-        }
-    }
-
-    // --- 7. std library ---
+    // --- 4. std library ---
     // resolver と同じ探索順序: cwd → exe隣 → MUMEI_STD_PATH
     let std_modules = [
         "prelude.mm",
@@ -1126,9 +1087,7 @@ fn cmd_inspect() {
                             .join(", ")
                     );
                 }
-                if !m.build.targets.is_empty() {
-                    println!("     targets: {}", m.build.targets.join(", "));
-                }
+
                 ok_count += 1;
             }
             Err(e) => {
@@ -1549,7 +1508,7 @@ fn cmd_build(input: &str, output: &str) {
                     String::new()
                 };
                 println!(
-                    "  ✨ [1/4] Polishing Syntax: Atom '{}'{}{} identified.",
+                    "  ✨ [1/3] Polishing Syntax: Atom '{}'{}{} identified.",
                     atom.name, async_marker, res_marker
                 );
 
@@ -1571,11 +1530,11 @@ fn cmd_build(input: &str, output: &str) {
 
                 // --- 2. Verification (形式検証: Z3 + StdLib) ---
                 if skip_verify {
-                    println!("  ⚖️  [2/4] Verification: Skipped (verify=false in mumei.toml).");
+                    println!("  ⚖️  [2/3] Verification: Skipped (verify=false in mumei.toml).");
                     module_env.mark_verified(&atom.name);
                 } else if module_env.is_verified(&atom.name) {
                     // インポートされた atom は検証済み（契約のみ信頼）なのでスキップ
-                    println!("  ⚖️  [2/4] Verification: Skipped (imported, contract-trusted).");
+                    println!("  ⚖️  [2/3] Verification: Skipped (imported, contract-trusted).");
                 } else {
                     // Feature 2: Use compute_proof_hash with dependency-aware hashing
                     let proof_hash = resolver::compute_proof_hash(atom, &module_env);
@@ -1585,7 +1544,7 @@ fn cmd_build(input: &str, output: &str) {
                         .is_some_and(|entry| entry.proof_hash == proof_hash);
 
                     if cache_hit {
-                        println!("  ⚖️  [2/4] Verification: Skipped (unchanged, cached) ⏩");
+                        println!("  ⚖️  [2/3] Verification: Skipped (unchanged, cached) ⏩");
                         module_env.mark_verified(&atom.name);
                     } else {
                         match verification::verify_with_config(
@@ -1597,7 +1556,7 @@ fn cmd_build(input: &str, output: &str) {
                         ) {
                             Ok(_) => {
                                 println!(
-                                    "  ⚖️  [2/4] Verification: Passed. Logic verified with Z3."
+                                    "  ⚖️  [2/3] Verification: Passed. Logic verified with Z3."
                                 );
                                 module_env.mark_verified(&atom.name);
                                 // Collect dependency info for cache entry
@@ -1646,7 +1605,7 @@ fn cmd_build(input: &str, output: &str) {
                 let extern_blocks = collect_extern_blocks(&items);
                 match codegen::compile(&hir_atom, &atom_output_path, &module_env, &extern_blocks) {
                     Ok(_) => println!(
-                        "  ⚙️  [3/4] Tempering: Done. Compiled '{}' to LLVM IR.",
+                        "  ⚙️  [3/3] Tempering: Done. Compiled '{}' to LLVM IR.",
                         atom.name
                     ),
                     Err(e) => {

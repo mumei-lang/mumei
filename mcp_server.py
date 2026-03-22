@@ -309,12 +309,10 @@ def forge_blade(source_code: str, output_name: str = "katana") -> str:
 
         if result.returncode == 0:
             response_parts.insert(0, f"Forge succeeded: '{output_name}'")
-            # Collect generated artifacts
-            for ext in [".ll"]:
-                gen_file = tmp_path / f"{output_name}{ext}"
-                if gen_file.exists():
-                    content = gen_file.read_text(encoding="utf-8")
-                    response_parts.append(f"\n### Generated: {output_name}{ext}\n```rust\n{content}\n```")
+            # Collect generated per-atom LLVM IR artifacts (e.g. katana_increment.ll)
+            for ll_file in sorted(tmp_path.glob(f"{output_name}*.ll")):
+                content = ll_file.read_text(encoding="utf-8")
+                response_parts.append(f"\n### Generated: {ll_file.name}\n```llvm\n{content}\n```")
 
             return "\n".join(response_parts)
         else:
@@ -499,15 +497,13 @@ def execute_mm(
 
         if result.returncode == 0:
             response_parts.insert(0, f"{command} succeeded: '{output_name}'")
-            # Collect generated artifacts
-            for ext in [".ll"]:
-                gen_file = tmp_path / f"{output_name}{ext}"
-                if gen_file.exists():
-                    content = gen_file.read_text(encoding="utf-8")
-                    response_parts.append(
-                        f"\n### Generated: {output_name}{ext}"
-                        f"\n```rust\n{content}\n```"
-                    )
+            # Collect generated per-atom LLVM IR artifacts (e.g. katana_increment.ll)
+            for ll_file in sorted(tmp_path.glob(f"{output_name}*.ll")):
+                content = ll_file.read_text(encoding="utf-8")
+                response_parts.append(
+                    f"\n### Generated: {ll_file.name}"
+                    f"\n```llvm\n{content}\n```"
+                )
         else:
             response_parts.insert(0, f"{command} failed")
             if result.stderr:
