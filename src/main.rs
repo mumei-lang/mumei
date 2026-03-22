@@ -2246,7 +2246,6 @@ fn cmd_repl() {
                                 let mut qualified = method.clone();
                                 qualified.name = format!("{}::{}", ib.struct_name, method.name);
                                 module_env.register_atom(&qualified);
-                                module_env.register_atom(method);
                                 count += 1;
                             }
                         }
@@ -3083,7 +3082,7 @@ atom main() -> i64
                             .iter()
                             .enumerate()
                             .map(|(i, ty)| parser::Param {
-                                name: format!("arg{}", i),
+                                name: ext_fn.param_names.get(i).cloned().unwrap_or_else(|| format!("arg{}", i)),
                                 type_name: Some(ty.clone()),
                                 type_ref: Some(parser::parse_type_ref(ty)),
                                 is_ref: false,

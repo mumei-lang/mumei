@@ -352,10 +352,9 @@ fn register_imported_items(items: &[Item], alias: Option<&str>, module_env: &mut
                     let mut qualified = method.clone();
                     qualified.name = format!("{}::{}", impl_block.struct_name, method.name);
                     module_env.register_atom(&qualified);
-                    module_env.register_atom(method);
                     if let Some(prefix) = alias {
                         let mut fqn_atom = method.clone();
-                        fqn_atom.name = format!("{}::{}", prefix, method.name);
+                        fqn_atom.name = format!("{}::{}::{}", prefix, impl_block.struct_name, method.name);
                         module_env.register_atom(&fqn_atom);
                     }
                 }
@@ -1146,9 +1145,9 @@ extern "Rust" {
 
         let atom = module_env.get_atom("http_post").unwrap();
         assert_eq!(atom.params.len(), 2);
-        assert_eq!(atom.params[0].name, "arg0");
+        assert_eq!(atom.params[0].name, "url");
         assert_eq!(atom.params[0].type_name, Some("String".to_string()));
-        assert_eq!(atom.params[1].name, "arg1");
+        assert_eq!(atom.params[1].name, "body");
         assert_eq!(atom.params[1].type_name, Some("String".to_string()));
         assert_eq!(atom.requires, "true");
         assert_eq!(atom.ensures, "true");

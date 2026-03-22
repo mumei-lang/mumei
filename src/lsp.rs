@@ -353,7 +353,6 @@ fn verify_source_for_lsp(
                     let mut qualified = method.clone();
                     qualified.name = format!("{}::{}", ib.struct_name, method.name);
                     module_env.register_atom(&qualified);
-                    module_env.register_atom(method);
                 }
             }
         }
