@@ -662,7 +662,8 @@ Atom-level `effect_pre` / `effect_post` contracts enable verifying atoms indepen
 - Default: empty `HashMap` (backward compatible with all existing atoms)
 - **Validation**: Invalid state names produce hard errors; missing state machines emit warnings
 - **Monomorphization**: Effect type variables in keys are substituted (e.g., `{ E: Closed }` → `{ FileWrite: Closed }`)
-- **Limitation**: Cross-atom contract composition at call sites is not yet implemented — each atom is verified independently
+- **Cross-atom contract composition**: When an atom calls another atom with `effect_pre`/`effect_post`, the callee's pre-state is verified against the caller's current temporal state and the post-state is applied as the new current state
+- **Trait method constraints**: `param_constraints` on trait methods (e.g., `div` requires divisor != 0) are injected into Z3 at call sites (guarded by `find_impl` to prevent false matches on user-defined atoms with the same name) and during law verification (scoped per-law inside `push`/`pop` with method-name filtering to prevent constraint leakage across laws)
 
 ### Standard Library
 

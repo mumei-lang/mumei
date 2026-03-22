@@ -2,6 +2,37 @@
 
 ---
 
+### P2-A: Cross-atom Contract Composition + P2-B: Trait Method Constraints Z3 Injection
+
+#### Cross-atom Contract Composition (P2-A)
+- Extended `analyze_temporal_effects()` in `src/mir_analysis.rs` to handle `Rvalue::Call` statements
+- Added `AtomEffectContract` struct mapping effect names to (pre_state, post_state) pairs
+- Added `TemporalOp` enum to distinguish between `Perform` and `Call` operations
+- New `analyze_temporal_effects_with_contracts()` function: forward dataflow analysis now verifies callee `effect_pre` against caller's current temporal state and applies `effect_post` as state transition
+- Updated `src/verification.rs` to build `callee_contracts` map from `ModuleEnv` and pass to the new analysis function
+- Added 3 unit tests: `test_cross_atom_composition_valid`, `test_cross_atom_composition_invalid_order`, `test_cross_atom_composition_no_contracts`
+- Updated `tests/test_modular_verification.mm`: updated comments for `full_pipeline`
+- Added `tests/test_modular_verification_error.mm`: `bad_pipeline` atom (invalid order test case) in separate file
+
+#### Trait Method Constraints Z3 Injection (P2-B)
+- Added `div` method to `Numeric` trait with `param_constraints: vec![None, Some("v != 0")]`
+- Added `get_trait_for_method()` helper to `ModuleEnv` for looking up trait method constraints by method name
+- Implemented param_constraints injection in `expr_to_z3()` for inter-atom calls: detects trait impl methods, substitutes constraint variables, and verifies with Z3 solver (push/assert(not)/check/pop pattern)
+- Implemented param_constraints injection in `verify_impl()`: asserts method parameter constraints as solver preconditions during law verification
+- Added `tests/test_trait_constraints.mm` with `SafeDiv` trait, `safe_divide` (should pass), and `unsafe_divide` (should fail)
+
+#### Review Fixes
+- **Law verification soundness**: Moved `param_constraints` injection inside `solver.push()`/`solver.pop()` scope per law, and added `law_expr.contains(&method.name)` filter to prevent unrelated constraints (e.g., `div`'s `b != 0`) from weakening verification of laws like `commutative_add`
+- **Trait method name collision guard**: Added `find_impl(trait_name, callee_type)` check at call sites to prevent user-defined atoms named `div`, `add`, etc. from having builtin trait constraints spuriously applied
+- **E2E test separation**: Moved `bad_pipeline` (intentionally failing atom) to `tests/test_modular_verification_error.mm` to prevent `mumei check` from failing on the main test file
+- **Naive string replace TODO**: Documented fragility of `constraint.replace("v", param_name)` at both injection sites with TODO for future word-boundary-aware replacement
+
+#### Documentation
+- Updated `docs/ARCHITECTURE.md`: Modular Verification section now documents cross-atom composition and trait method constraints
+- Updated `docs/CHANGELOG.md`: this entry (with review fixes)
+
+---
+
 ### Proposal A: `--report-dir` option for `mumei verify`
 
 - Added `--report-dir <dir>` CLI option to `mumei verify` to specify report.json output directory
