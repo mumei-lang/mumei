@@ -151,9 +151,6 @@ Understand the following characteristics of the code exported by Mumei:
 | Language | Characteristics | Ownership Mapping | Primary Use Case |
 | --- | --- | --- | --- |
 | **LLVM IR** | Fast, Native Execution | `alloc_raw` → `malloc`, `dealloc_raw` → `free` | Performance-critical core logic |
-| **Rust** | Ownership & Type Safety | `ref` → `&T`, `consume` → move semantics | Integration into high-reliability systems |
-| **Go** | Simplicity & Concurrency | Comment-based documentation | Microservices and Backend systems |
-| **TypeScript** | Flexible & Web-Friendly | `ref` → `/* readonly */` annotation | Frontend and Edge computing |
 
 ---
 
