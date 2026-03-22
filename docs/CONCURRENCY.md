@@ -151,9 +151,6 @@ Verifies that consumed variables before `await` are not accessed after `await`.
 | Z3 join constraints (symbolic Bool) | ✅ Implemented (parent_done ⇒ child_done) |
 | Full AST walker support | ✅ Implemented (collect_callees, count_self_calls, collect_acquire_resources, collect_from_expr) |
 | LLVM codegen | ✅ Implemented (body compiled synchronously) |
-| Rust transpile | ✅ Implemented (tokio::spawn / tokio::join!) |
-| Go transpile | ✅ Implemented (goroutine + channel) |
-| TypeScript transpile | ✅ Implemented (async/Promise.all) |
 | Parser tests | ✅ Implemented (6 tests: task, task_group, :all, :any, unknown panic) |
 | Unique ID (Task) | ✅ Implemented (TASK_COUNTER prevents env key collision) |
 | Runtime scheduler | ❌ Not implemented |
@@ -206,6 +203,3 @@ task_group:all {
 - `src/verification.rs` — Z3 structured concurrency verification (symbolic Bool, join constraints)
 - `src/ast.rs` — `collect_from_expr` traverses generics within Task/TaskGroup
 - `src/codegen.rs` — Task/TaskGroup LLVM IR generation (synchronous compilation)
-- `src/transpiler/rust.rs` — `tokio::spawn` / `tokio::join!`
-- `src/transpiler/golang.rs` — goroutine + channel pattern
-- `src/transpiler/typescript.rs` — `async` IIFE / `Promise.all`

@@ -63,9 +63,6 @@ fi
 echo ""
 echo "=== Main Suite Results ==="
 echo "📍 LLVM IR  : $(ls dist/katana_*.ll 2>/dev/null | tr '\n' ' ')"
-echo "📍 Rust     : dist/katana.rs"
-echo "📍 Go       : dist/katana.go"
-echo "📍 TS       : dist/katana.ts"
 echo ""
 
 # --- 6. Example テスト ---
@@ -155,17 +152,6 @@ fi
 
 echo ""
 echo "  Examples: $EXAMPLES_PASSED passed, $EXAMPLES_FAILED failed"
-
-# --- 7. 生成された Rust コードの構文チェック (オプション) ---
-if command -v rustc >/dev/null 2>&1; then
-    echo ""
-    echo "🦀 Checking generated Rust syntax..."
-    if rustc --crate-type lib dist/katana.rs --out-dir dist/ 2>/dev/null; then
-        echo "  ✅ Rust syntax is valid."
-    else
-        echo "  ⚠️  Rust syntax check failed (non-critical)."
-    fi
-fi
 
 echo ""
 echo "=== Verified Properties ==="

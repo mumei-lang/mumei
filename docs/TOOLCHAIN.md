@@ -4,7 +4,7 @@
 
 | Command | Status | Description |
 |---|---|---|
-| `mumei build` | ✅ | Full pipeline: verify + codegen + transpile (reads `mumei.toml` settings) |
+| `mumei build` | ✅ | Full pipeline: verify + codegen (reads `mumei.toml` settings) |
 | `mumei verify` | ✅ | Z3 verification only |
 | `mumei check` | ✅ | Parse + resolve + monomorphize (no Z3) |
 | `mumei init` | ✅ | Project scaffolding with `mumei.toml` + example atoms |
@@ -53,7 +53,6 @@ utils = { git = "https://github.com/user/utils-mm", tag = "v1.0.0" }
 crypto = "0.2.0"
 
 [build]
-targets = ["rust", "go", "typescript"]  # transpile targets
 verify = true                           # enable Z3 verification
 max_unroll = 3                          # BMC unroll depth
 

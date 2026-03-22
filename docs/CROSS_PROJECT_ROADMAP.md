@@ -98,7 +98,7 @@ mumeiの思想の究極的な体現:
 2. mumei-agent が `atom` を生成（`effects: [SecureHttpGet]`, `requires`/`ensures` 付き）
 3. `mumei verify` で検証
 4. 失敗時は self-healing ループで自動修正
-5. 検証通過後、Rust/Go/TypeScript にトランスパイル
+5. 検証通過後、LLVM IR にコンパイル（ネイティブバイナリ生成）し FFI 経由で利用
 
 ### P3-C: Capability Security の実践デモ
 
