@@ -55,20 +55,6 @@ atom atm_transition(state, action, balance: Balance)
         }
     }
 ```
-### Transpiler Output
-**Rust:**
-```rust
-pub enum AtmState { Idle, Authenticated, Dispensing, Error }
-```
-**Go:**
-```go
-type AtmState int64
-const ( Idle AtmState = iota; Authenticated; Dispensing; Error )
-```
-**TypeScript:**
-```typescript
-export const enum AtmStateTag { Idle, Authenticated, Dispensing, Error }
-```
 ---
 ## Inter-atom Call Test (`examples/call_test.mm`)
 ```mumei
@@ -334,6 +320,3 @@ done
 | Output | Path | Contents |
 |---|---|---|
 | LLVM IR | `dist/katana_<AtomName>.ll` | Pattern Matrix match, StructType |
-| Rust | `dist/katana.rs` | `enum` + `struct` + `fn` with `match` |
-| Go | `dist/katana.go` | `const+type` + `struct` + `func` with `switch` |
-| TypeScript | `dist/katana.ts` | `const enum` + `interface` + `function` |

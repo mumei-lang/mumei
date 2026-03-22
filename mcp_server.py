@@ -502,18 +502,13 @@ def execute_mm(
         if result.returncode == 0:
             response_parts.insert(0, f"{command} succeeded: '{output_name}'")
             # Collect generated artifacts
-            for ext in [".rs", ".go", ".ts", ".ll"]:
+            for ext in [".ll"]:
                 gen_file = tmp_path / f"{output_name}{ext}"
                 if gen_file.exists():
-                    lang = (
-                        "rust" if ext in [".rs", ".ll"]
-                        else "go" if ext == ".go"
-                        else "typescript"
-                    )
                     content = gen_file.read_text(encoding="utf-8")
                     response_parts.append(
                         f"\n### Generated: {output_name}{ext}"
-                        f"\n```{lang}\n{content}\n```"
+                        f"\n```rust\n{content}\n```"
                     )
         else:
             response_parts.insert(0, f"{command} failed")

@@ -135,7 +135,7 @@ pub enum HirExpr {
     },
     /// task { body }
     // NOTE: Task is constructed via lower_stmt(Stmt::Task) → HirStmt::Expr(HirExpr::Task),
-    // but codegen/transpiler match on HirExpr::Task directly. The variant is reachable at runtime;
+    // but codegen matches on HirExpr::Task directly. The variant is reachable at runtime;
     // dead_code warning is a false positive from the compiler not tracing through HirStmt::Expr.
     #[allow(dead_code)]
     Task {

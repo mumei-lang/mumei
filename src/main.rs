@@ -16,17 +16,12 @@ mod proof_cert;
 mod registry;
 mod resolver;
 mod setup;
-mod transpiler;
 mod verification;
 
 #[cfg(test)]
 use crate::hir::lower_atom_to_hir;
 use crate::hir::lower_atom_to_hir_with_env;
 use crate::parser::{ImportDecl, Item};
-use crate::transpiler::{
-    transpile, transpile_enum, transpile_impl, transpile_module_header, transpile_struct,
-    transpile_trait, TargetLanguage,
-};
 use clap::{Parser, Subcommand};
 use std::fs;
 use std::path::Path;
@@ -65,7 +60,7 @@ fn collect_extern_blocks(items: &[Item]) -> Vec<parser::ExternBlock> {
 // =============================================================================
 //
 // Usage:
-//   mumei build input.mm -o dist/katana   # verify + codegen + transpile (default)
+//   mumei build input.mm -o dist/katana   # verify + codegen (default)
 //   mumei verify input.mm                 # Z3 verification only
 //   mumei check input.mm                  # parse + resolve + monomorphize (no Z3)
 //   mumei init my_project                 # generate project template
@@ -78,7 +73,7 @@ fn collect_extern_blocks(items: &[Item]) -> Vec<parser::ExternBlock> {
     name = "mumei",
     version = env!("CARGO_PKG_VERSION"),
     about = "🗡️ Mumei — Mathematical Proof-Driven Programming Language",
-    long_about = "Formally verified language: parse → resolve → monomorphize → verify (Z3) → codegen (LLVM IR) → transpile (Rust/Go/TypeScript)"
+    long_about = "Formally verified language: parse → resolve → monomorphize → verify (Z3) → codegen (LLVM IR)"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -88,14 +83,14 @@ struct Cli {
     #[arg(global = false)]
     input: Option<String>,
 
-    /// Output base name (for .ll, .rs, .go, .ts)
+    /// Output base name (for .ll)
     #[arg(short, long, default_value = "katana")]
     output: String,
 }
 
 #[derive(Subcommand)]
 enum Command {
-    /// Verify + compile to LLVM IR + transpile to Rust/Go/TypeScript (default)
+    /// Verify + compile to LLVM IR (default)
     Build {
         /// Input .mm file
         input: String,
@@ -103,7 +98,7 @@ enum Command {
         #[arg(short, long, default_value = "katana")]
         output: String,
     },
-    /// Z3 formal verification only (no codegen, no transpile)
+    /// Z3 formal verification only (no codegen)
     Verify {
         /// Input .mm file
         input: String,
@@ -272,7 +267,7 @@ fn main() {
                 cmd_build(input, &cli.output);
             } else {
                 eprintln!("Usage: mumei <COMMAND> or mumei <input.mm>");
-                eprintln!("  build   Verify + compile + transpile (default)");
+                eprintln!("  build   Verify + compile (default)");
                 eprintln!("  verify  Z3 formal verification only");
                 eprintln!("  check   Parse + resolve only (fast syntax check)");
                 eprintln!("  init    Generate a new project template");
@@ -518,7 +513,7 @@ fn cmd_check(input: &str) {
 }
 
 // =============================================================================
-// mumei verify — Z3 verification only (no codegen, no transpile)
+// mumei verify — Z3 verification only (no codegen)
 // =============================================================================
 
 fn cmd_verify(
@@ -810,7 +805,6 @@ version = "0.1.0"
 # example = {{ path = "./libs/example" }}
 # math = {{ git = "https://github.com/mumei-lang/math-mm", tag = "v1.0.0" }}
 [build]
-targets = ["rust", "go", "typescript"]
 verify = true
 max_unroll = 3
 [proof]
@@ -1389,7 +1383,7 @@ fn cmd_verify_cert(cert_path: &str, input: &str) {
 }
 
 // =============================================================================
-// mumei build — full pipeline (verify + codegen + transpile)
+// mumei build — full pipeline (verify + codegen)
 // =============================================================================
 
 fn cmd_build(input: &str, output: &str) {
@@ -1439,33 +1433,9 @@ fn cmd_build(input: &str, output: &str) {
     };
     let mut verification_cache_new = verification_cache.clone();
 
-    // [build] targets から有効なトランスパイル言語を決定
-    let enable_rust = build_cfg.targets.iter().any(|t| t == "rust");
-    let enable_go = build_cfg.targets.iter().any(|t| t == "go");
-    let enable_ts = build_cfg
-        .targets
-        .iter()
-        .any(|t| t == "typescript" || t == "ts");
     let skip_verify = !build_cfg.verify;
 
     let mut atom_count = 0;
-
-    // Transpiler バンドル初期化（有効な言語のみ）
-    let mut rust_bundle = if enable_rust {
-        transpile_module_header(&imports, file_stem, TargetLanguage::Rust)
-    } else {
-        String::new()
-    };
-    let mut go_bundle = if enable_go {
-        transpile_module_header(&imports, file_stem, TargetLanguage::Go)
-    } else {
-        String::new()
-    };
-    let mut ts_bundle = if enable_ts {
-        transpile_module_header(&imports, file_stem, TargetLanguage::TypeScript)
-    } else {
-        String::new()
-    };
 
     for item in &items {
         match item {
@@ -1483,7 +1453,7 @@ fn cmd_build(input: &str, output: &str) {
                 );
             }
 
-            // --- 構造体定義の登録 + トランスパイル ---
+            // --- 構造体定義の登録 ---
             Item::StructDef(struct_def) => {
                 let field_names: Vec<&str> =
                     struct_def.fields.iter().map(|f| f.name.as_str()).collect();
@@ -1492,22 +1462,9 @@ fn cmd_build(input: &str, output: &str) {
                     struct_def.name,
                     field_names.join(", ")
                 );
-                // 構造体定義をトランスパイル出力に含める（有効な言語のみ）
-                if enable_rust {
-                    rust_bundle.push_str(&transpile_struct(struct_def, TargetLanguage::Rust));
-                    rust_bundle.push_str("\n\n");
-                }
-                if enable_go {
-                    go_bundle.push_str(&transpile_struct(struct_def, TargetLanguage::Go));
-                    go_bundle.push_str("\n\n");
-                }
-                if enable_ts {
-                    ts_bundle.push_str(&transpile_struct(struct_def, TargetLanguage::TypeScript));
-                    ts_bundle.push_str("\n\n");
-                }
             }
 
-            // --- Enum 定義の登録 + トランスパイル ---
+            // --- Enum 定義の登録 ---
             Item::EnumDef(enum_def) => {
                 let variant_names: Vec<&str> =
                     enum_def.variants.iter().map(|v| v.name.as_str()).collect();
@@ -1516,21 +1473,9 @@ fn cmd_build(input: &str, output: &str) {
                     enum_def.name,
                     variant_names.join(", ")
                 );
-                if enable_rust {
-                    rust_bundle.push_str(&transpile_enum(enum_def, TargetLanguage::Rust));
-                    rust_bundle.push_str("\n\n");
-                }
-                if enable_go {
-                    go_bundle.push_str(&transpile_enum(enum_def, TargetLanguage::Go));
-                    go_bundle.push_str("\n\n");
-                }
-                if enable_ts {
-                    ts_bundle.push_str(&transpile_enum(enum_def, TargetLanguage::TypeScript));
-                    ts_bundle.push_str("\n\n");
-                }
             }
 
-            // --- トレイト定義 + トランスパイル ---
+            // --- トレイト定義 ---
             Item::TraitDef(trait_def) => {
                 let method_names: Vec<&str> =
                     trait_def.methods.iter().map(|m| m.name.as_str()).collect();
@@ -1541,21 +1486,9 @@ fn cmd_build(input: &str, output: &str) {
                     method_names.join(", "),
                     law_names.join(", ")
                 );
-                if enable_rust {
-                    rust_bundle.push_str(&transpile_trait(trait_def, TargetLanguage::Rust));
-                    rust_bundle.push_str("\n\n");
-                }
-                if enable_go {
-                    go_bundle.push_str(&transpile_trait(trait_def, TargetLanguage::Go));
-                    go_bundle.push_str("\n\n");
-                }
-                if enable_ts {
-                    ts_bundle.push_str(&transpile_trait(trait_def, TargetLanguage::TypeScript));
-                    ts_bundle.push_str("\n\n");
-                }
             }
 
-            // --- トレイト実装の登録 + 法則検証 + トランスパイル ---
+            // --- トレイト実装の登録 + 法則検証 ---
             Item::ImplDef(impl_def) => {
                 println!(
                     "  🔧 Registered Impl: {} for {}",
@@ -1577,19 +1510,6 @@ fn cmd_build(input: &str, output: &str) {
                             std::process::exit(1);
                         }
                     }
-                }
-                // impl 定義をトランスパイル出力に含める（有効な言語のみ）
-                if enable_rust {
-                    rust_bundle.push_str(&transpile_impl(impl_def, TargetLanguage::Rust));
-                    rust_bundle.push_str("\n\n");
-                }
-                if enable_go {
-                    go_bundle.push_str(&transpile_impl(impl_def, TargetLanguage::Go));
-                    go_bundle.push_str("\n\n");
-                }
-                if enable_ts {
-                    ts_bundle.push_str(&transpile_impl(impl_def, TargetLanguage::TypeScript));
-                    ts_bundle.push_str("\n\n");
                 }
             }
 
@@ -1736,49 +1656,11 @@ fn cmd_build(input: &str, output: &str) {
                         std::process::exit(1);
                     }
                 }
-
-                // --- 4. Transpile (多言語エクスポート) ---
-                // バンドル用に各言語のコードを生成（有効な言語のみ）
-                if enable_rust {
-                    rust_bundle.push_str(&transpile(&hir_atom, TargetLanguage::Rust));
-                    rust_bundle.push_str("\n\n");
-                }
-                if enable_go {
-                    go_bundle.push_str(&transpile(&hir_atom, TargetLanguage::Go));
-                    go_bundle.push_str("\n\n");
-                }
-                if enable_ts {
-                    ts_bundle.push_str(&transpile(&hir_atom, TargetLanguage::TypeScript));
-                    ts_bundle.push_str("\n\n");
-                }
             }
         }
     }
 
-    // 各言語のファイルを一括書き出し（有効な言語のみ）
     if atom_count > 0 {
-        println!("  🌍 [4/4] Sharpening: Exporting verified sources...");
-
-        let mut created_files = Vec::new();
-        let files: Vec<(&str, &str, bool)> = vec![
-            (&rust_bundle, "rs", enable_rust),
-            (&go_bundle, "go", enable_go),
-            (&ts_bundle, "ts", enable_ts),
-        ];
-
-        for (code, ext, enabled) in files {
-            if !enabled {
-                continue;
-            }
-            let out_filename = format!("{}.{}", file_stem, ext);
-            let out_full_path = output_dir.join(&out_filename);
-            if let Err(e) = fs::write(&out_full_path, code) {
-                eprintln!("  ❌ Failed to write {}: {}", out_filename, e);
-                std::process::exit(1);
-            }
-            created_files.push(out_filename);
-        }
-        println!("  ✅ Done. Created: {}", created_files.join(", "));
         println!("🎉 Blade forged successfully with {} atoms.", atom_count);
     } else {
         println!("⚠️  Warning: No atoms found in the source file.");

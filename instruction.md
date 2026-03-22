@@ -183,7 +183,7 @@ Mumei serves as a bridge between heavyweight formal proof assistants and modern 
 | **Difficulty** | Very High (Requires learning tactics) | Very High (Requires math background) | **Moderate (Close to standard coding)** |
 | **Verif. Engine** | Custom Kernel / Lean Checker | Coq Kernel | **Z3 SMT Solver (Automated priority)** |
 | **Automation** | Partially automated, mainly manual | Mainly manual (via Ltac, etc.) | **Fully Automated (requires/ensures)** |
-| **Target Output** | Lean runtime, C | OCaml, Haskell, Scheme, etc. | **LLVM IR, Rust, Go, TypeScript** |
+| **Target Output** | Lean runtime, C | OCaml, Haskell, Scheme, etc. | **LLVM IR (native binary)** |
 | **Memory Safety** | GC / managed | GC / extracted | **Ownership + Borrowing (Z3-verified)** |
 | **AI Synergy** | Research stage (LLM tactics) | Research stage | **Native (JSON reports / Self-healing)** |
 | **Design Logic** | Expressing math through code | Building proofs as programs | **Preventing "unforged" (unsafe) code** |
@@ -306,7 +306,7 @@ Improve the practicality of `task` / `task_group` introduced in PR-C.
 - Task return type inference — type checker infers return type from `task { expr }` block's final expression; `await` yields the correct type from the task handle
 - Syntax for binding `task_group` results to variables — `let results = task_group { ... }` binds the collection of individual task return types
 - Task cancellation semantics — `cancel group_name;` statement cancels pending tasks in a task_group; task_group scope exit implicitly cancels all pending tasks via cancellation token mechanism
-- Channel type (`chan<T>`) — built-in generic type with `send(ch, value)` and `recv(ch)` operations; requires `Chan` effect annotation; implemented in parser (`send`/`recv` keywords), AST (`ChanSend`/`ChanRecv`), HIR, MIR, codegen, transpilers, and Z3 verification (channel and value sub-expressions are fully traversed)
+- Channel type (`chan<T>`) — built-in generic type with `send(ch, value)` and `recv(ch)` operations; requires `Chan` effect annotation; implemented in parser (`send`/`recv` keywords), AST (`ChanSend`/`ChanRecv`), HIR, MIR, codegen, and Z3 verification (channel and value sub-expressions are fully traversed)
 
 ---
 
@@ -319,7 +319,6 @@ Improve the practicality of `task` / `task_group` introduced in PR-C.
   - `src/hir.rs`: `collect_free_variables_expr`, `collect_free_variables_stmt`
   - `src/codegen.rs`: `compile_hir_expr`, `compile_hir_stmt`
   - `src/mir.rs`: `lower_expr`, `lower_stmt`
-  - `src/transpiler/rust.rs`, `golang.rs`, `typescript.rs`: `format_hir_expr_*`, `format_hir_stmt_*`
 - When adding a new `Item` variant, add match arms in **all** of these locations:
   - `src/main.rs`: `load_and_prepare`, `cmd_check`, `cmd_build`
   - `src/resolver.rs`: `resolve_imports_recursive`, `register_imported_items`

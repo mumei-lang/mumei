@@ -2,9 +2,9 @@
 
 **Mathematical Proof-Driven Programming Language**
 
-Mumei formally verifies every function with Z3 before compiling to LLVM IR and transpiling to Rust / Go / TypeScript.
+Mumei formally verifies every function with Z3 before compiling to LLVM IR.
 
-> parse → resolve → monomorphize → lower_to_hir → **verify (Z3)** → codegen (LLVM IR) → transpile
+> parse → resolve → monomorphize → lower_to_hir → **verify (Z3)** → codegen (LLVM IR)
 
 ```mumei
 type Nat = i64 where v >= 0;
@@ -99,7 +99,7 @@ mumei build src/main.mm -o dist/output
 
 | Command | Description |
 |---------|-------------|
-| `mumei build <file> -o <out>` | Verify + codegen + transpile |
+| `mumei build <file> -o <out>` | Verify + codegen |
 | `mumei verify <file>` | Z3 verification only |
 | `mumei check <file>` | Parse + resolve (fast, no Z3) |
 | `mumei init <name>` | Generate project template |
@@ -125,11 +125,11 @@ mumei build src/main.mm -o dist/output
 | **Ownership** | [`ref` / `ref mut` / `consume`](docs/LANGUAGE.md#ownership-and-borrowing) with Z3 aliasing prevention, MIR-based move analysis |
 | **Concurrency** | `async`/`await`, `task_group:all`/`task_group:any`, [deadlock-free proof via resource hierarchy](docs/LANGUAGE.md#asyncawait-and-resource-hierarchy) |
 | **Effects** | Compile-time side-effect verification, `perform`/`effects:`, effect hierarchy, parameterized effects, [effect polymorphism (`<E: Effect>`)](docs/LANGUAGE.md), [capability security](docs/CAPABILITY_SECURITY.md), stateful effects with temporal ordering |
-| **Lambda** | First-class closures `\|x, y\| x + y`, capture analysis, transpiles to Rust / TS / Go |
+| **Lambda** | First-class closures `\|x, y\| x + y`, capture analysis |
 | **Safety** | `trusted` / `unverified` atoms, taint analysis, BMC + inductive invariant, [`call_with_contract`](docs/LANGUAGE.md#higher-order-functions-phase-a) for higher-order function verification |
 | **FFI** | `extern "Rust"` / `extern "C"` blocks, handle-based memory management (`json_free`, `http_free`), Str type interop |
 | **Std Library** | Option, Result, List, BoundedArray, Vector, HashMap, JSON, HTTP, sort algorithms, effect definitions |
-| **Output** | LLVM IR + Rust + Go + TypeScript transpiler |
+| **Output** | LLVM IR (native binary) |
 | **Tooling** | LSP server, VS Code extension, `mumei.toml` manifest, dependency manager, MCP server, semantic feedback (bilingual EN/JP) |
 
 <details>

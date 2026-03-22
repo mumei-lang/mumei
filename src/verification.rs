@@ -1603,7 +1603,7 @@ impl LinearityCtx {
 
 /// モジュール単位の環境。型定義・構造体定義・atom 定義・enum 定義を保持する。
 /// グローバル static Mutex を廃止し、この構造体で一元管理する。
-/// main.rs で構築し、verify() / codegen / transpiler に参照渡しする。
+/// main.rs で構築し、verify() / codegen に参照渡しする。
 #[derive(Debug, Clone, Default)]
 pub struct ModuleEnv {
     /// 精緻型定義（FQN キー: 例 "math::Nat" or 自モジュールなら "Nat"）
@@ -2450,8 +2450,7 @@ pub fn verify_impl(
                                 if let Some(param_name) = param_names.get(i) {
                                     // TODO: naive .replace("v", ...) — see call-site TODO for details.
                                     // Safe for current "v != 0" but fragile for future constraints.
-                                    let concrete: String =
-                                        constraint_str.replace("v", param_name);
+                                    let concrete: String = constraint_str.replace("v", param_name);
                                     let constraint_ast = parse_expression(&concrete);
                                     if let Ok(constraint_z3) =
                                         expr_to_z3(&vc, &constraint_ast, &mut env, None)
@@ -6408,45 +6407,47 @@ fn expr_to_z3<'a>(
                                 if !has_impl {
                                     // Callee is not a trait impl — skip param_constraints
                                 } else {
-                                for (i, constraint_opt) in
-                                    trait_method.param_constraints.iter().enumerate()
-                                {
-                                    if let Some(constraint) = constraint_opt {
-                                        if let Some(arg_val) = arg_vals.get(i) {
-                                            // Replace 'v' in constraint with actual parameter.
-                                            // TODO: This naive .replace("v", ...) will corrupt constraints
-                                            // containing 'v' as part of longer identifiers (e.g., "value != 0"
-                                            // → "balue != 0" when param_name is "b"). Currently safe because
-                                            // the only constraint is "v != 0" where 'v' is standalone.
-                                            // When adding constraints like "divisor != 0", use a word-boundary-
-                                            // aware replacement (e.g., regex \bv\b) or a dedicated placeholder
-                                            // like "${v}" instead.
-                                            let param_name = callee
-                                                .params
-                                                .get(i)
-                                                .map(|p| p.name.as_str())
-                                                .unwrap_or("v");
-                                            let concrete_constraint: String =
-                                                constraint.replace("v", param_name);
-                                            let mut constraint_env: Env = env.clone();
-                                            constraint_env
-                                                .insert(param_name.to_string(), arg_val.clone());
-                                            let constraint_ast =
-                                                parse_expression(&concrete_constraint);
-                                            if let Ok(constraint_z3) = expr_to_z3(
-                                                vc,
-                                                &constraint_ast,
-                                                &mut constraint_env,
-                                                None,
-                                            ) {
-                                                if let Some(constraint_bool) =
-                                                    constraint_z3.as_bool()
-                                                {
-                                                    solver.push();
-                                                    solver.assert(&constraint_bool.not());
-                                                    if solver.check() == SatResult::Sat {
-                                                        solver.pop(1);
-                                                        return Err(MumeiError::verification(
+                                    for (i, constraint_opt) in
+                                        trait_method.param_constraints.iter().enumerate()
+                                    {
+                                        if let Some(constraint) = constraint_opt {
+                                            if let Some(arg_val) = arg_vals.get(i) {
+                                                // Replace 'v' in constraint with actual parameter.
+                                                // TODO: This naive .replace("v", ...) will corrupt constraints
+                                                // containing 'v' as part of longer identifiers (e.g., "value != 0"
+                                                // → "balue != 0" when param_name is "b"). Currently safe because
+                                                // the only constraint is "v != 0" where 'v' is standalone.
+                                                // When adding constraints like "divisor != 0", use a word-boundary-
+                                                // aware replacement (e.g., regex \bv\b) or a dedicated placeholder
+                                                // like "${v}" instead.
+                                                let param_name = callee
+                                                    .params
+                                                    .get(i)
+                                                    .map(|p| p.name.as_str())
+                                                    .unwrap_or("v");
+                                                let concrete_constraint: String =
+                                                    constraint.replace("v", param_name);
+                                                let mut constraint_env: Env = env.clone();
+                                                constraint_env.insert(
+                                                    param_name.to_string(),
+                                                    arg_val.clone(),
+                                                );
+                                                let constraint_ast =
+                                                    parse_expression(&concrete_constraint);
+                                                if let Ok(constraint_z3) = expr_to_z3(
+                                                    vc,
+                                                    &constraint_ast,
+                                                    &mut constraint_env,
+                                                    None,
+                                                ) {
+                                                    if let Some(constraint_bool) =
+                                                        constraint_z3.as_bool()
+                                                    {
+                                                        solver.push();
+                                                        solver.assert(&constraint_bool.not());
+                                                        if solver.check() == SatResult::Sat {
+                                                            solver.pop(1);
+                                                            return Err(MumeiError::verification(
                                                             format!(
                                                                 "Call to '{}': trait method parameter constraint '{}' not satisfied for argument {}",
                                                                 name, constraint, i
@@ -6454,13 +6455,13 @@ fn expr_to_z3<'a>(
                                                         ).with_help(
                                                             "トレイトメソッドのパラメータ制約が満たされていません。引数の値を確認してください"
                                                         ));
+                                                        }
+                                                        solver.pop(1);
                                                     }
-                                                    solver.pop(1);
                                                 }
                                             }
                                         }
                                     }
-                                }
                                 } // end else (has_impl)
                             }
                         }

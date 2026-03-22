@@ -5,7 +5,7 @@
 //! ## 対応セクション
 //! - `[package]`: プロジェクトメタデータ（name, version, authors, description）
 //! - `[dependencies]`: パッケージ依存（path / git / version）
-//! - `[build]`: ビルド設定（targets, verify, max_unroll）
+//! - `[build]`: ビルド設定（verify, max_unroll）
 //! - `[proof]`: 検証設定（cache, timeout_ms）
 //! - `[effects]`: エフェクト境界設定（allowed, denied）
 use serde::Deserialize;
@@ -63,9 +63,6 @@ pub struct DependencyDetail {
 /// [build] セクション
 #[derive(Debug, Clone, Deserialize)]
 pub struct BuildConfig {
-    /// トランスパイル対象言語（デフォルト: ["rust", "go", "typescript"]）
-    #[serde(default = "default_targets")]
-    pub targets: Vec<String>,
     /// Z3 検証を実行するか（デフォルト: true）
     #[serde(default = "default_true")]
     pub verify: bool,
@@ -76,7 +73,6 @@ pub struct BuildConfig {
 impl Default for BuildConfig {
     fn default() -> Self {
         Self {
-            targets: default_targets(),
             verify: true,
             max_unroll: 3,
         }
@@ -114,13 +110,6 @@ pub struct EffectsConfig {
 // =============================================================================
 // デフォルト値ヘルパー
 // =============================================================================
-fn default_targets() -> Vec<String> {
-    vec![
-        "rust".to_string(),
-        "go".to_string(),
-        "typescript".to_string(),
-    ]
-}
 fn default_true() -> bool {
     true
 }
