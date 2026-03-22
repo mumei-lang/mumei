@@ -278,7 +278,7 @@ jobs:
             <meta name="twitter:title" content="Mumei — Mathematical Proof-Driven Programming Language">
             <meta name="twitter:description" content="Formally verified with Z3, compiled to LLVM IR.">
             <!-- Additional SEO -->
-            <meta name="keywords" content="mumei, programming language, formal verification, Z3, LLVM, Rust, Go, TypeScript, proof-driven, mathematical verification">
+            <meta name="keywords" content="mumei, programming language, formal verification, Z3, LLVM, proof-driven, mathematical verification">
             <meta name="author" content="mumei-lang">
             <meta name="robots" content="index, follow">
             <link rel="sitemap" type="application/xml" href="/mumei/sitemap.xml">
