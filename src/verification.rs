@@ -13,6 +13,13 @@ use std::path::Path;
 use z3::ast::{Array, Ast, Bool, Dynamic, Float, Int, String as Z3String};
 use z3::{Config, Context, SatResult, Solver};
 
+/// Word-boundary-aware replacement of the placeholder `v` in constraint strings.
+/// Uses regex `\bv\b` to avoid corrupting identifiers like "value" or "divisor".
+fn replace_constraint_placeholder(constraint: &str, replacement: &str) -> String {
+    let re = regex::Regex::new(r"\bv\b").unwrap();
+    re.replace_all(constraint, replacement).to_string()
+}
+
 // --- エラー型の定義 ---
 
 // =============================================================================
@@ -1792,6 +1799,10 @@ pub struct ModuleEnv {
     pub reverse_deps: HashMap<String, HashSet<String>>,
     /// Security policy for effect parameter constraint enforcement
     pub security_policy: Option<SecurityPolicy>,
+    /// メソッド名 → Vec<(トレイト名, メソッドインデックス)> の逆引きインデックス。
+    /// `register_trait()` 時に構築され、`get_traits_for_method()` で使用する。
+    /// HashMap iteration の非決定性を排除し、同名メソッドを持つ複数トレイトを正しく解決する。
+    pub method_trait_index: HashMap<String, Vec<(String, usize)>>,
 }
 
 impl ModuleEnv {
@@ -1854,6 +1865,13 @@ impl ModuleEnv {
     }
 
     pub fn register_trait(&mut self, trait_def: &TraitDef) {
+        // メソッド→トレイト逆引きインデックスを構築
+        for (idx, method) in trait_def.methods.iter().enumerate() {
+            self.method_trait_index
+                .entry(method.name.clone())
+                .or_default()
+                .push((trait_def.name.clone(), idx));
+        }
         self.traits
             .insert(trait_def.name.clone(), trait_def.clone());
     }
@@ -1873,25 +1891,29 @@ impl ModuleEnv {
             .find(|i| i.trait_name == trait_name && i.target_type == target_type)
     }
 
-    /// メソッド名からトレイト定義とメソッドのparam_constraintsを取得する
-    /// Returns (trait_name, &TraitMethod) if found.
-    ///
-    /// NOTE: Returns the first match from HashMap iteration. If multiple traits
-    /// define a method with the same name, the result is non-deterministic.
-    /// Currently safe because builtin trait methods have unique names
-    /// (eq, leq, add, sub, mul, div). User-defined traits with duplicate
-    /// method names could cause the wrong trait's constraints to be applied.
-    /// TODO: Use a dedicated method→trait index (e.g., HashMap<method_name, Vec<trait_name>>)
-    /// for deterministic and complete lookup.
-    pub fn get_trait_for_method(&self, method_name: &str) -> Option<(&str, &TraitMethod)> {
-        for (trait_name, trait_def) in &self.traits {
-            for method in &trait_def.methods {
-                if method.name == method_name {
-                    return Some((trait_name.as_str(), method));
+    /// メソッド名からトレイト定義とメソッドのparam_constraintsを取得する（全候補版）。
+    /// Returns Vec<(trait_name, &TraitMethod)> for all traits defining this method.
+    /// Uses the `method_trait_index` for deterministic, O(1) lookup.
+    pub fn get_traits_for_method(&self, method_name: &str) -> Vec<(&str, &TraitMethod)> {
+        let mut results = Vec::new();
+        if let Some(entries) = self.method_trait_index.get(method_name) {
+            for (trait_name, method_idx) in entries {
+                if let Some(trait_def) = self.traits.get(trait_name) {
+                    if let Some(method) = trait_def.methods.get(*method_idx) {
+                        results.push((trait_name.as_str(), method));
+                    }
                 }
             }
         }
-        None
+        results
+    }
+
+    /// 後方互換ラッパー: 候補が1つの場合は従来通りの動作を維持。
+    /// 複数候補がある場合は最初の候補を返す（呼び出し元で find_impl による絞り込みを推奨）。
+    #[allow(dead_code)]
+    pub fn get_trait_for_method(&self, method_name: &str) -> Option<(&str, &TraitMethod)> {
+        let candidates = self.get_traits_for_method(method_name);
+        candidates.into_iter().next()
     }
 
     /// 指定した型がトレイト境界を全て満たしているか検証する
@@ -2592,9 +2614,8 @@ pub fn verify_impl(
                         for (i, constraint_opt) in method.param_constraints.iter().enumerate() {
                             if let Some(constraint_str) = constraint_opt {
                                 if let Some(param_name) = param_names.get(i) {
-                                    // TODO: naive .replace("v", ...) — see call-site TODO for details.
-                                    // Safe for current "v != 0" but fragile for future constraints.
-                                    let concrete: String = constraint_str.replace("v", param_name);
+                                    let concrete: String =
+                                        replace_constraint_placeholder(constraint_str, param_name);
                                     let constraint_ast = parse_expression(&concrete);
                                     if let Ok(constraint_z3) =
                                         expr_to_z3(&vc, &constraint_ast, &mut env, None)
@@ -4081,6 +4102,144 @@ fn verify_atom_invariant(
 // サイクルが検出された場合、invariant の記述を要求するか、
 // BMC の深度制限を適用する。
 
+/// Expr を簡易的にソース文字列に復元する（requires 置換用）。
+fn expr_to_source_string(expr: &Expr) -> String {
+    match expr {
+        Expr::Number(n) => n.to_string(),
+        Expr::Float(f) => format!("{}", f),
+        Expr::StringLit(s) => format!("\"{}\"", s),
+        Expr::Variable(v) => v.clone(),
+        Expr::BinaryOp(l, op, r) => {
+            let op_str = match op {
+                Op::Add => "+",
+                Op::Sub => "-",
+                Op::Mul => "*",
+                Op::Div => "/",
+                Op::Eq => "==",
+                Op::Neq => "!=",
+                Op::Gt => ">",
+                Op::Lt => "<",
+                Op::Ge => ">=",
+                Op::Le => "<=",
+                Op::And => "&&",
+                Op::Or => "||",
+                Op::Implies => "==>",
+            };
+            format!(
+                "({} {} {})",
+                expr_to_source_string(l),
+                op_str,
+                expr_to_source_string(r)
+            )
+        }
+        Expr::Call(name, args) => {
+            let args_str: Vec<String> = args.iter().map(expr_to_source_string).collect();
+            format!("{}({})", name, args_str.join(", "))
+        }
+        Expr::FieldAccess(e, field) => format!("{}.{}", expr_to_source_string(e), field),
+        Expr::ArrayAccess(name, idx) => format!("{}[{}]", name, expr_to_source_string(idx)),
+        _ => format!("{:?}", expr),
+    }
+}
+
+/// body 内の全 Call 式から呼び出し先の atom 名と引数を収集する。
+fn collect_callees_with_args_expr(expr: &Expr) -> Vec<(String, Vec<Expr>)> {
+    let mut callees = Vec::new();
+    match expr {
+        Expr::Call(name, args) => {
+            callees.push((name.clone(), args.clone()));
+            for arg in args {
+                callees.extend(collect_callees_with_args_expr(arg));
+            }
+        }
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            callees.extend(collect_callees_with_args_expr(cond));
+            callees.extend(collect_callees_with_args_stmt(then_branch));
+            callees.extend(collect_callees_with_args_stmt(else_branch));
+        }
+        Expr::BinaryOp(l, _, r) => {
+            callees.extend(collect_callees_with_args_expr(l));
+            callees.extend(collect_callees_with_args_expr(r));
+        }
+        Expr::Async { body } => {
+            callees.extend(collect_callees_with_args_stmt(body));
+        }
+        Expr::Await { expr } => {
+            callees.extend(collect_callees_with_args_expr(expr));
+        }
+        Expr::Match { target, arms } => {
+            callees.extend(collect_callees_with_args_expr(target));
+            for arm in arms {
+                callees.extend(collect_callees_with_args_stmt(&arm.body));
+                if let Some(guard) = &arm.guard {
+                    callees.extend(collect_callees_with_args_expr(guard));
+                }
+            }
+        }
+        Expr::CallRef { callee, args } => {
+            callees.extend(collect_callees_with_args_expr(callee));
+            for arg in args {
+                callees.extend(collect_callees_with_args_expr(arg));
+            }
+        }
+        Expr::Perform { args, .. } => {
+            for arg in args {
+                callees.extend(collect_callees_with_args_expr(arg));
+            }
+        }
+        Expr::Lambda { body, .. } => {
+            callees.extend(collect_callees_with_args_stmt(body));
+        }
+        Expr::ChanSend { channel, value } => {
+            callees.extend(collect_callees_with_args_expr(channel));
+            callees.extend(collect_callees_with_args_expr(value));
+        }
+        Expr::ChanRecv { channel } => {
+            callees.extend(collect_callees_with_args_expr(channel));
+        }
+        _ => {}
+    }
+    callees
+}
+
+fn collect_callees_with_args_stmt(stmt: &Stmt) -> Vec<(String, Vec<Expr>)> {
+    let mut callees = Vec::new();
+    match stmt {
+        Stmt::Block(stmts, _) => {
+            for s in stmts {
+                callees.extend(collect_callees_with_args_stmt(s));
+            }
+        }
+        Stmt::Let { value, .. } | Stmt::Assign { value, .. } => {
+            callees.extend(collect_callees_with_args_expr(value));
+        }
+        Stmt::While { cond, body, .. } => {
+            callees.extend(collect_callees_with_args_expr(cond));
+            callees.extend(collect_callees_with_args_stmt(body));
+        }
+        Stmt::Acquire { body, .. } => {
+            callees.extend(collect_callees_with_args_stmt(body));
+        }
+        Stmt::Task { body, .. } => {
+            callees.extend(collect_callees_with_args_stmt(body));
+        }
+        Stmt::TaskGroup { children, .. } => {
+            for child in children {
+                callees.extend(collect_callees_with_args_stmt(child));
+            }
+        }
+        Stmt::Expr(e, _) => {
+            callees.extend(collect_callees_with_args_expr(e));
+        }
+        Stmt::Cancel { .. } => {}
+    }
+    callees
+}
+
 /// body 内の全 Call 式から呼び出し先の atom 名を収集する。
 fn collect_callees_expr(expr: &Expr) -> Vec<String> {
     let mut callees = Vec::new();
@@ -4548,21 +4707,27 @@ fn infer_requires(atom: &Atom, module_env: &ModuleEnv) -> Vec<String> {
         }
     }
 
-    // 2. Callee requires propagation
-    // NOTE: Callee requires are propagated verbatim without substituting the callee's
-    // parameter names for the caller's actual arguments. For example, if `callee(x)` has
-    // `requires: x > 0` and the caller invokes `callee(a + b)`, the inferred requires
-    // would be `x > 0` — referencing `x` which may not exist in the caller's scope.
-    // TODO: Parse the call site arguments, map callee param names to caller expressions,
-    // and substitute before propagating. This requires tracking which arguments are passed
-    // to each callee call site.
-    let callees = collect_callees_stmt(&body_stmt);
-    for callee_name in &callees {
+    // 2. Callee requires propagation with argument substitution
+    // callee の param_name → caller の引数式文字列のマッピングを構築し、
+    // callee の requires 内のパラメータ名を caller の引数式で置換してから伝播する。
+    let callees_with_args = collect_callees_with_args_stmt(&body_stmt);
+    for (callee_name, call_args) in &callees_with_args {
         if let Some(callee_atom) = module_env.get_atom(callee_name) {
             if callee_atom.requires != "true" && !callee_atom.requires.is_empty() {
-                let callee_req = callee_atom.requires.clone();
-                if seen.insert(callee_req.clone()) {
-                    requires.push(callee_req);
+                let mut substituted_req = callee_atom.requires.clone();
+                // callee の仮引数名と呼び出し引数を zip して置換
+                for (param, arg_expr) in callee_atom.params.iter().zip(call_args.iter()) {
+                    let arg_str = expr_to_source_string(arg_expr);
+                    substituted_req = replace_constraint_placeholder(&substituted_req, &arg_str);
+                    // パラメータ名が "v" 以外の場合もワード境界置換
+                    let param_re =
+                        regex::Regex::new(&format!(r"\b{}\b", regex::escape(&param.name))).unwrap();
+                    substituted_req = param_re
+                        .replace_all(&substituted_req, arg_str.as_str())
+                        .to_string();
+                }
+                if seen.insert(substituted_req.clone()) {
+                    requires.push(substituted_req);
                 }
             }
         }
@@ -6522,76 +6687,53 @@ fn expr_to_z3<'a>(
                         // Trait method param_constraints の検証:
                         // 呼び出し先がトレイトメソッドの実装である場合、param_constraints を
                         // 呼び出し元のコンテキストで検証する。
-                        // NOTE: get_trait_for_method はメソッド名でグローバル検索するため、
-                        // ユーザー定義 atom が builtin メソッド名（div, add 等）と衝突する可能性がある。
-                        // find_impl で呼び出し先の型に対して実際にトレイトが impl されているか確認し、
-                        // 無関係な atom への誤適用を防ぐ。
+                        // get_traits_for_method で全候補を取得し、find_impl で callee の型に
+                        // 対して実際にトレイトが impl されている候補のみ適用する。
                         if let Some(solver) = solver_opt {
-                            if let Some((trait_name, trait_method)) =
-                                vc.module_env.get_trait_for_method(name)
-                            {
-                                // Guard: only apply trait constraints if the callee's parameter
-                                // type actually implements this trait.
-                                // KNOWN LIMITATION: This guard is ineffective for builtin types
-                                // (i64, u64, f64) because register_builtin_traits() registers
-                                // Numeric impl for all three. A user-defined `atom div(a: i64, b: i64)`
-                                // with body `a + b` would still have `b != 0` applied. The correct
-                                // fix requires tracking whether the callee atom is actually a trait
-                                // method implementation (not just whether its parameter type implements
-                                // the trait), which needs an `is_trait_impl` flag on Atom or a reverse
-                                // lookup from atom name to ImplDef. For now, this guard only prevents
-                                // false matches on custom types that don't implement the trait.
-                                let callee_type = callee
-                                    .params
-                                    .first()
-                                    .and_then(|p| p.type_name.as_deref())
-                                    .unwrap_or("i64");
-                                let has_impl =
-                                    vc.module_env.find_impl(trait_name, callee_type).is_some();
-                                if !has_impl {
-                                    // Callee is not a trait impl — skip param_constraints
-                                } else {
-                                    for (i, constraint_opt) in
-                                        trait_method.param_constraints.iter().enumerate()
-                                    {
-                                        if let Some(constraint) = constraint_opt {
-                                            if let Some(arg_val) = arg_vals.get(i) {
-                                                // Replace 'v' in constraint with actual parameter.
-                                                // TODO: This naive .replace("v", ...) will corrupt constraints
-                                                // containing 'v' as part of longer identifiers (e.g., "value != 0"
-                                                // → "balue != 0" when param_name is "b"). Currently safe because
-                                                // the only constraint is "v != 0" where 'v' is standalone.
-                                                // When adding constraints like "divisor != 0", use a word-boundary-
-                                                // aware replacement (e.g., regex \bv\b) or a dedicated placeholder
-                                                // like "${v}" instead.
-                                                let param_name = callee
-                                                    .params
-                                                    .get(i)
-                                                    .map(|p| p.name.as_str())
-                                                    .unwrap_or("v");
-                                                let concrete_constraint: String =
-                                                    constraint.replace("v", param_name);
-                                                let mut constraint_env: Env = env.clone();
-                                                constraint_env.insert(
-                                                    param_name.to_string(),
-                                                    arg_val.clone(),
+                            let callee_type = callee
+                                .params
+                                .first()
+                                .and_then(|p| p.type_name.as_deref())
+                                .unwrap_or("i64");
+                            let candidates = vc.module_env.get_traits_for_method(name);
+                            // find_impl で正しいトレイトを絞り込む
+                            let matched = candidates
+                                .iter()
+                                .find(|(tn, _)| vc.module_env.find_impl(tn, callee_type).is_some());
+                            if let Some((_trait_name, trait_method)) = matched {
+                                for (i, constraint_opt) in
+                                    trait_method.param_constraints.iter().enumerate()
+                                {
+                                    if let Some(constraint) = constraint_opt {
+                                        if let Some(arg_val) = arg_vals.get(i) {
+                                            let param_name = callee
+                                                .params
+                                                .get(i)
+                                                .map(|p| p.name.as_str())
+                                                .unwrap_or("v");
+                                            let concrete_constraint: String =
+                                                replace_constraint_placeholder(
+                                                    constraint, param_name,
                                                 );
-                                                let constraint_ast =
-                                                    parse_expression(&concrete_constraint);
-                                                if let Ok(constraint_z3) = expr_to_z3(
-                                                    vc,
-                                                    &constraint_ast,
-                                                    &mut constraint_env,
-                                                    None,
-                                                ) {
-                                                    if let Some(constraint_bool) =
-                                                        constraint_z3.as_bool()
-                                                    {
-                                                        solver.push();
-                                                        solver.assert(&constraint_bool.not());
-                                                        if solver.check() == SatResult::Sat {
-                                                            solver.pop(1);
-                                                            return Err(MumeiError::verification(
+                                            let mut constraint_env: Env = env.clone();
+                                            constraint_env
+                                                .insert(param_name.to_string(), arg_val.clone());
+                                            let constraint_ast =
+                                                parse_expression(&concrete_constraint);
+                                            if let Ok(constraint_z3) = expr_to_z3(
+                                                vc,
+                                                &constraint_ast,
+                                                &mut constraint_env,
+                                                None,
+                                            ) {
+                                                if let Some(constraint_bool) =
+                                                    constraint_z3.as_bool()
+                                                {
+                                                    solver.push();
+                                                    solver.assert(&constraint_bool.not());
+                                                    if solver.check() == SatResult::Sat {
+                                                        solver.pop(1);
+                                                        return Err(MumeiError::verification(
                                                             format!(
                                                                 "Call to '{}': trait method parameter constraint '{}' not satisfied for argument {}",
                                                                 name, constraint, i
@@ -6599,14 +6741,13 @@ fn expr_to_z3<'a>(
                                                         ).with_help(
                                                             "トレイトメソッドのパラメータ制約が満たされていません。引数の値を確認してください"
                                                         ));
-                                                        }
-                                                        solver.pop(1);
                                                     }
+                                                    solver.pop(1);
                                                 }
                                             }
                                         }
                                     }
-                                } // end else (has_impl)
+                                }
                             }
                         }
 
@@ -8417,6 +8558,7 @@ fn save_visualizer_report(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::{Atom, ImplDef, Param, Span, TraitDef, TraitMethod, TrustLevel};
 
     // ---- constraint_to_natural_language tests ----
 
@@ -9469,5 +9611,239 @@ mod tests {
         let result = build_contextual_suggestion("unknown_type", Some(&json!({"x": "1"})), None);
         let fallback = suggestion_for_failure_type("unknown_type");
         assert_eq!(result, fallback);
+    }
+
+    // ---- 3-a: replace_constraint_placeholder tests ----
+
+    #[test]
+    fn test_replace_constraint_placeholder_standalone_v() {
+        // "v != 0" → "b != 0" (standalone v is replaced)
+        let result = replace_constraint_placeholder("v != 0", "b");
+        assert_eq!(result, "b != 0");
+    }
+
+    #[test]
+    fn test_replace_constraint_placeholder_does_not_corrupt_value() {
+        // "value != 0" should NOT become "balue != 0"
+        let result = replace_constraint_placeholder("value != 0", "b");
+        assert_eq!(result, "value != 0");
+    }
+
+    #[test]
+    fn test_replace_constraint_placeholder_does_not_corrupt_divisor() {
+        // "divisor > v" should replace only standalone v
+        let result = replace_constraint_placeholder("divisor > v", "x");
+        assert_eq!(result, "divisor > x");
+    }
+
+    #[test]
+    fn test_replace_constraint_placeholder_multiple_v() {
+        // "v > 0 && v < 100" → "param > 0 && param < 100"
+        let result = replace_constraint_placeholder("v > 0 && v < 100", "param");
+        assert_eq!(result, "param > 0 && param < 100");
+    }
+
+    // ---- 3-b: get_traits_for_method / method_trait_index tests ----
+
+    #[test]
+    fn test_get_traits_for_method_single_trait() {
+        let mut env = ModuleEnv::new();
+        env.register_trait(&TraitDef {
+            name: "Numeric".to_string(),
+            methods: vec![TraitMethod {
+                name: "div".to_string(),
+                param_types: vec!["i64".to_string(), "i64".to_string()],
+                return_type: "i64".to_string(),
+                param_constraints: vec![None, Some("v != 0".to_string())],
+            }],
+            laws: vec![],
+            span: Span::new("", 0, 0, 0),
+        });
+        let results = env.get_traits_for_method("div");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "Numeric");
+        assert_eq!(results[0].1.name, "div");
+    }
+
+    #[test]
+    fn test_get_traits_for_method_multiple_traits_same_method() {
+        let mut env = ModuleEnv::new();
+        env.register_trait(&TraitDef {
+            name: "TraitA".to_string(),
+            methods: vec![TraitMethod {
+                name: "process".to_string(),
+                param_types: vec!["i64".to_string()],
+                return_type: "i64".to_string(),
+                param_constraints: vec![Some("v > 0".to_string())],
+            }],
+            laws: vec![],
+            span: Span::new("", 0, 0, 0),
+        });
+        env.register_trait(&TraitDef {
+            name: "TraitB".to_string(),
+            methods: vec![TraitMethod {
+                name: "process".to_string(),
+                param_types: vec!["i64".to_string()],
+                return_type: "i64".to_string(),
+                param_constraints: vec![None],
+            }],
+            laws: vec![],
+            span: Span::new("", 0, 0, 0),
+        });
+        // Both traits should be returned
+        let results = env.get_traits_for_method("process");
+        assert_eq!(results.len(), 2);
+        let trait_names: Vec<&str> = results.iter().map(|(tn, _)| *tn).collect();
+        assert!(trait_names.contains(&"TraitA"));
+        assert!(trait_names.contains(&"TraitB"));
+    }
+
+    #[test]
+    fn test_get_traits_for_method_selects_correct_with_find_impl() {
+        let mut env = ModuleEnv::new();
+        env.register_trait(&TraitDef {
+            name: "TraitA".to_string(),
+            methods: vec![TraitMethod {
+                name: "process".to_string(),
+                param_types: vec!["i64".to_string()],
+                return_type: "i64".to_string(),
+                param_constraints: vec![Some("v > 0".to_string())],
+            }],
+            laws: vec![],
+            span: Span::new("", 0, 0, 0),
+        });
+        env.register_trait(&TraitDef {
+            name: "TraitB".to_string(),
+            methods: vec![TraitMethod {
+                name: "process".to_string(),
+                param_types: vec!["Str".to_string()],
+                return_type: "Str".to_string(),
+                param_constraints: vec![None],
+            }],
+            laws: vec![],
+            span: Span::new("", 0, 0, 0),
+        });
+        // Only TraitA has an impl for i64
+        env.register_impl(&ImplDef {
+            trait_name: "TraitA".to_string(),
+            target_type: "i64".to_string(),
+            method_bodies: vec![],
+            span: Span::new("", 0, 0, 0),
+        });
+        let candidates = env.get_traits_for_method("process");
+        let matched = candidates
+            .iter()
+            .find(|(tn, _)| env.find_impl(tn, "i64").is_some());
+        assert!(matched.is_some());
+        assert_eq!(matched.unwrap().0, "TraitA");
+    }
+
+    // ---- 3-c: infer_requires callee argument substitution tests ----
+
+    #[test]
+    fn test_infer_requires_substitutes_callee_params() {
+        use std::collections::HashMap;
+        let mut env = ModuleEnv::new();
+        // Register callee atom with requires: x > 0
+        env.register_atom(&Atom {
+            name: "callee".to_string(),
+            type_params: vec![],
+            where_bounds: vec![],
+            params: vec![Param {
+                name: "x".to_string(),
+                type_name: Some("i64".to_string()),
+                type_ref: None,
+                is_ref: false,
+                is_ref_mut: false,
+                fn_contract_requires: None,
+                fn_contract_ensures: None,
+            }],
+            requires: "x > 0".to_string(),
+            forall_constraints: vec![],
+            ensures: "true".to_string(),
+            body_expr: "x + 1".to_string(),
+            consumed_params: vec![],
+            resources: vec![],
+            is_async: false,
+            trust_level: TrustLevel::Verified,
+            max_unroll: None,
+            invariant: None,
+            effects: vec![],
+            return_type: None,
+            span: Span::new("", 0, 0, 0),
+            effect_pre: HashMap::new(),
+            effect_post: HashMap::new(),
+        });
+        // Caller atom that calls callee(a + b)
+        let caller = Atom {
+            name: "caller".to_string(),
+            type_params: vec![],
+            where_bounds: vec![],
+            params: vec![
+                Param {
+                    name: "a".to_string(),
+                    type_name: Some("i64".to_string()),
+                    type_ref: None,
+                    is_ref: false,
+                    is_ref_mut: false,
+                    fn_contract_requires: None,
+                    fn_contract_ensures: None,
+                },
+                Param {
+                    name: "b".to_string(),
+                    type_name: Some("i64".to_string()),
+                    type_ref: None,
+                    is_ref: false,
+                    is_ref_mut: false,
+                    fn_contract_requires: None,
+                    fn_contract_ensures: None,
+                },
+            ],
+            requires: "true".to_string(),
+            forall_constraints: vec![],
+            ensures: "true".to_string(),
+            body_expr: "callee(a + b)".to_string(),
+            consumed_params: vec![],
+            resources: vec![],
+            is_async: false,
+            trust_level: TrustLevel::Verified,
+            max_unroll: None,
+            invariant: None,
+            effects: vec![],
+            return_type: None,
+            span: Span::new("", 0, 0, 0),
+            effect_pre: HashMap::new(),
+            effect_post: HashMap::new(),
+        };
+        let inferred = infer_requires(&caller, &env);
+        // Should contain "(a + b) > 0" not "x > 0"
+        assert!(
+            inferred
+                .iter()
+                .any(|r| r.contains("a + b") && r.contains("> 0")),
+            "Expected substituted requires with 'a + b', got: {:?}",
+            inferred
+        );
+        assert!(
+            !inferred.iter().any(|r| r == "x > 0"),
+            "Should not contain raw callee param 'x > 0', got: {:?}",
+            inferred
+        );
+    }
+
+    // ---- expr_to_source_string tests ----
+
+    #[test]
+    fn test_expr_to_source_string_basic() {
+        assert_eq!(expr_to_source_string(&Expr::Number(42)), "42");
+        assert_eq!(expr_to_source_string(&Expr::Variable("x".to_string())), "x");
+        assert_eq!(
+            expr_to_source_string(&Expr::BinaryOp(
+                Box::new(Expr::Variable("a".to_string())),
+                Op::Add,
+                Box::new(Expr::Variable("b".to_string())),
+            )),
+            "(a + b)"
+        );
     }
 }
