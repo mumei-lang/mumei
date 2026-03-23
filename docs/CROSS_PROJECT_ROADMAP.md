@@ -137,7 +137,7 @@ mumeiの思想の究極的な体現:
 
 mumei のコード生成バックエンドをプラグイン化し、LLVM IR 以外のターゲットへの出力を可能にするアーキテクチャ。
 
-### Phase 1 (Current — PR scope)
+### Phase 1 (Current — PR scope) ✅ Implemented
 
 - `Emitter` trait と enum ベースの静的ディスパッチを mumei core に追加
 - 既存の `codegen::compile()` (LLVM IR バックエンド) を `LlvmEmitter` としてトレイトを実装
@@ -145,6 +145,9 @@ mumei のコード生成バックエンドをプラグイン化し、LLVM IR 以
 - `mumei build` コマンドに `--emit` CLI フラグを追加（値: `llvm-ir` (デフォルト), `c-header`）
 - すべてのエミッターは mumei バイナリクレート内で `pub(crate)` のまま
 - ワークスペース再構成は不要
+- ✅ `Artifact` 抽象化: `Emitter` trait の戻り値を `MumeiResult<Vec<Artifact>>` に変更。`Artifact` 構造体（`name`, `data`, `kind`）と `ArtifactKind` enum (`Binary`, `Source`, `Header`) を追加。ファイル書き出しを `cmd_build` 側に移動
+- ✅ `CHeaderEmitter` の Doxygen 形式強化: `/* requires: ... */` → `/** @pre ... */`, `/* ensures: ... */` → `/** @post ... */`, `@brief` コメント自動生成
+- ✅ 型マッピング拡充: `i32` → `int32_t`, `u32` → `uint32_t`, `f32` → `float`
 
 ### Phase 2 (Future — 3+ emitters exist 時)
 
