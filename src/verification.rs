@@ -650,6 +650,144 @@ pub fn suggestion_for_failure_type(failure_type: &str) -> &'static str {
 pub const FAILURE_EFFECT_NOT_ALLOWED: &str = "effect_not_allowed";
 
 // =============================================================================
+// Contextual Suggestion Generation (Dynamic)
+// =============================================================================
+
+/// Build a contextual suggestion using failure_type, counterexample, and
+/// structured_unsat_core. Falls back to `suggestion_for_failure_type()` when
+/// the inputs are insufficient for a more specific message.
+pub fn build_contextual_suggestion(
+    failure_type: &str,
+    counterexample: Option<&serde_json::Value>,
+    structured_unsat_core: Option<&serde_json::Value>,
+) -> String {
+    let ce_map = counterexample.and_then(|ce| ce.as_object());
+
+    // Try to extract a violated constraint description from unsat core
+    let violated_constraint = structured_unsat_core
+        .and_then(|core| core.as_array())
+        .and_then(|arr| {
+            arr.iter().find_map(|entry| {
+                entry
+                    .get("description")
+                    .and_then(|d| d.as_str())
+                    .map(|s| s.to_string())
+            })
+        });
+
+    match failure_type {
+        FAILURE_PRECONDITION_VIOLATED => {
+            if let Some(ce) = ce_map {
+                // Find which parameter(s) have problematic values
+                let bindings: Vec<String> = ce
+                    .iter()
+                    .map(|(k, v)| {
+                        format!(
+                            "{} = {}",
+                            k,
+                            v.as_str()
+                                .or_else(|| v.as_i64().map(|_| ""))
+                                .unwrap_or(&v.to_string())
+                        )
+                    })
+                    .collect();
+                let bindings_str = if bindings.is_empty() {
+                    String::new()
+                } else {
+                    format!(" (counterexample: {})", bindings.join(", "))
+                };
+                if let Some(ref vc) = violated_constraint {
+                    format!(
+                        "Add a precondition to guard against this case: '{}'{} \
+                         (この場合を防ぐ事前条件を追加してください: '{}'{})",
+                        vc, bindings_str, vc, bindings_str
+                    )
+                } else {
+                    // Try to infer from counterexample values
+                    let param_hints: Vec<String> = ce
+                        .iter()
+                        .filter(|(_, v)| {
+                            v.as_str().map(|s| s == "0").unwrap_or(false)
+                                || v.as_i64().map(|n| n == 0).unwrap_or(false)
+                        })
+                        .map(|(k, _)| format!("{} != 0", k))
+                        .collect();
+                    if !param_hints.is_empty() {
+                        format!(
+                            "Add 'requires: {}' to the atom's precondition \
+                             (atom の事前条件に 'requires: {}' を追加してください)",
+                            param_hints.join(" && "),
+                            param_hints.join(" && ")
+                        )
+                    } else {
+                        suggestion_for_failure_type(failure_type).to_string()
+                    }
+                }
+            } else {
+                suggestion_for_failure_type(failure_type).to_string()
+            }
+        }
+        FAILURE_POSTCONDITION_VIOLATED => {
+            if let Some(ce) = ce_map {
+                let bindings: Vec<String> =
+                    ce.iter().map(|(k, v)| format!("{} = {}", k, v)).collect();
+                let bindings_str = bindings.join(", ");
+                format!(
+                    "The ensures clause is not satisfied when {}. \
+                     Adjust the body or relax ensures \
+                     ({} のとき ensures 句が満たされません。\
+                     本体を修正するか ensures を緩和してください)",
+                    bindings_str, bindings_str
+                )
+            } else {
+                suggestion_for_failure_type(failure_type).to_string()
+            }
+        }
+        FAILURE_DIVISION_BY_ZERO => {
+            if let Some(ce) = ce_map {
+                // Find the zero-valued parameter
+                let zero_params: Vec<&String> = ce
+                    .iter()
+                    .filter(|(_, v)| {
+                        v.as_str().map(|s| s == "0").unwrap_or(false)
+                            || v.as_i64().map(|n| n == 0).unwrap_or(false)
+                    })
+                    .map(|(k, _)| k)
+                    .collect();
+                if !zero_params.is_empty() {
+                    let guards: Vec<String> =
+                        zero_params.iter().map(|p| format!("{} != 0", p)).collect();
+                    format!(
+                        "Add 'requires: {}' to prevent division by zero \
+                         (ゼロ除算を防ぐため 'requires: {}' を追加してください)",
+                        guards.join(" && "),
+                        guards.join(" && ")
+                    )
+                } else {
+                    suggestion_for_failure_type(failure_type).to_string()
+                }
+            } else {
+                suggestion_for_failure_type(failure_type).to_string()
+            }
+        }
+        FAILURE_INVARIANT_VIOLATED => {
+            if let Some(ref vc) = violated_constraint {
+                format!(
+                    "The invariant is violated because of constraint: '{}'. \
+                     Strengthen the invariant or fix the loop body \
+                     (制約 '{}' により不変条件が破られています。\
+                     不変条件を強化するかループ本体を修正してください)",
+                    vc, vc
+                )
+            } else {
+                suggestion_for_failure_type(failure_type).to_string()
+            }
+        }
+        _ => suggestion_for_failure_type(failure_type).to_string(),
+    }
+}
+
+// =============================================================================
 // Compound Constraint Decomposition
 // =============================================================================
 
@@ -1144,7 +1282,7 @@ pub fn build_semantic_feedback(
             "value": value,
             "constraint": mapping.predicate_raw,
             "explanation": explanation,
-            "suggestion": suggestion_for_failure_type(failure_type)
+            "suggestion": build_contextual_suggestion(failure_type, counterexample, None)
         });
 
         // Compound constraint decomposition: add sub_constraints array
@@ -8229,7 +8367,13 @@ fn save_visualizer_report(
     if let Some(sf) = semantic_feedback {
         report["semantic_feedback"] = sf.clone();
     }
-    report["suggestion"] = json!(suggestion_for_failure_type(failure_type));
+    // Use contextual suggestion when counterexample/unsat_core available, fallback to static
+    let structured_unsat_core = semantic_feedback.and_then(|sf| sf.get("structured_unsat_core"));
+    report["suggestion"] = json!(build_contextual_suggestion(
+        failure_type,
+        counterexample,
+        structured_unsat_core,
+    ));
     if let Some(s) = span {
         report["span"] = json!({
             "file": s.file,
@@ -9190,5 +9334,98 @@ mod tests {
         assert_eq!(subs.len(), 2);
         assert_eq!(subs[0]["satisfied"], true);
         assert_eq!(subs[1]["satisfied"], false);
+    }
+
+    // ---- build_contextual_suggestion tests ----
+
+    #[test]
+    fn test_contextual_suggestion_precondition_with_zero_counterexample() {
+        let ce = json!({"b": "0"});
+        let result = build_contextual_suggestion(FAILURE_PRECONDITION_VIOLATED, Some(&ce), None);
+        assert!(
+            result.contains("b != 0"),
+            "should suggest b != 0 guard: {}",
+            result
+        );
+        assert!(
+            result.contains("requires"),
+            "should mention requires: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_contextual_suggestion_precondition_with_violated_constraint() {
+        let ce = json!({"b": "0"});
+        let unsat_core = json!([{"description": "b != 0"}]);
+        let result = build_contextual_suggestion(
+            FAILURE_PRECONDITION_VIOLATED,
+            Some(&ce),
+            Some(&unsat_core),
+        );
+        assert!(
+            result.contains("b != 0"),
+            "should reference violated constraint: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_contextual_suggestion_postcondition_with_counterexample() {
+        let ce = json!({"x": "-1"});
+        let result = build_contextual_suggestion(FAILURE_POSTCONDITION_VIOLATED, Some(&ce), None);
+        assert!(
+            result.contains("x = \"-1\"") || result.contains("x = -1"),
+            "should mention x = -1: {}",
+            result
+        );
+        assert!(
+            result.contains("ensures"),
+            "should mention ensures: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_contextual_suggestion_division_by_zero_with_counterexample() {
+        let ce = json!({"divisor": "0"});
+        let result = build_contextual_suggestion(FAILURE_DIVISION_BY_ZERO, Some(&ce), None);
+        assert!(
+            result.contains("divisor != 0"),
+            "should suggest divisor != 0: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_contextual_suggestion_invariant_with_unsat_core() {
+        let unsat_core = json!([{"description": "i >= 0"}]);
+        let result =
+            build_contextual_suggestion(FAILURE_INVARIANT_VIOLATED, None, Some(&unsat_core));
+        assert!(
+            result.contains("i >= 0"),
+            "should reference constraint: {}",
+            result
+        );
+        assert!(
+            result.contains("invariant") || result.contains("不変条件"),
+            "should mention invariant: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_contextual_suggestion_fallback_no_counterexample() {
+        let result = build_contextual_suggestion(FAILURE_PRECONDITION_VIOLATED, None, None);
+        // Should fall back to suggestion_for_failure_type
+        let fallback = suggestion_for_failure_type(FAILURE_PRECONDITION_VIOLATED);
+        assert_eq!(result, fallback);
+    }
+
+    #[test]
+    fn test_contextual_suggestion_unknown_failure_type() {
+        let result = build_contextual_suggestion("unknown_type", Some(&json!({"x": "1"})), None);
+        let fallback = suggestion_for_failure_type("unknown_type");
+        assert_eq!(result, fallback);
     }
 }

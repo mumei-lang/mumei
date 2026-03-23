@@ -1850,7 +1850,21 @@ fn cmd_build(input: &str, output: &str, emit_target: &emitter::EmitTarget) {
                         &module_env,
                         &extern_blocks,
                     ) {
-                        Ok(_) => {
+                        Ok(artifacts) => {
+                            for artifact in &artifacts {
+                                // LlvmEmitter already writes the .ll file internally (Phase 1),
+                                // so we only write non-LLVM artifacts here.
+                                if artifact.kind != emitter::ArtifactKind::Source {
+                                    if let Err(e) = std::fs::write(&artifact.name, &artifact.data) {
+                                        eprintln!(
+                                            "Failed to write artifact '{}': {}",
+                                            artifact.name.display(),
+                                            e
+                                        );
+                                        std::process::exit(1);
+                                    }
+                                }
+                            }
                             let target_desc = match emit_target {
                                 emitter::EmitTarget::LlvmIr => "LLVM IR",
                                 emitter::EmitTarget::CHeader => "C header",
@@ -1982,7 +1996,21 @@ fn cmd_build(input: &str, output: &str, emit_target: &emitter::EmitTarget) {
                     &module_env,
                     &extern_blocks,
                 ) {
-                    Ok(_) => {
+                    Ok(artifacts) => {
+                        for artifact in &artifacts {
+                            // LlvmEmitter already writes the .ll file internally (Phase 1),
+                            // so we only write non-LLVM artifacts here.
+                            if artifact.kind != emitter::ArtifactKind::Source {
+                                if let Err(e) = std::fs::write(&artifact.name, &artifact.data) {
+                                    eprintln!(
+                                        "Failed to write artifact '{}': {}",
+                                        artifact.name.display(),
+                                        e
+                                    );
+                                    std::process::exit(1);
+                                }
+                            }
+                        }
                         let target_desc = match emit_target {
                             emitter::EmitTarget::LlvmIr => "LLVM IR",
                             emitter::EmitTarget::CHeader => "C header",
