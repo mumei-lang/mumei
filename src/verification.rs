@@ -682,13 +682,11 @@ pub fn build_contextual_suggestion(
                 let bindings: Vec<String> = ce
                     .iter()
                     .map(|(k, v)| {
-                        format!(
-                            "{} = {}",
-                            k,
-                            v.as_str()
-                                .or_else(|| v.as_i64().map(|_| ""))
-                                .unwrap_or(&v.to_string())
-                        )
+                        let val = v
+                            .as_str()
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| v.to_string());
+                        format!("{} = {}", k, val)
                     })
                     .collect();
                 let bindings_str = if bindings.is_empty() {
@@ -729,8 +727,16 @@ pub fn build_contextual_suggestion(
         }
         FAILURE_POSTCONDITION_VIOLATED => {
             if let Some(ce) = ce_map {
-                let bindings: Vec<String> =
-                    ce.iter().map(|(k, v)| format!("{} = {}", k, v)).collect();
+                let bindings: Vec<String> = ce
+                    .iter()
+                    .map(|(k, v)| {
+                        let val = v
+                            .as_str()
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| v.to_string());
+                        format!("{} = {}", k, val)
+                    })
+                    .collect();
                 let bindings_str = bindings.join(", ");
                 format!(
                     "The ensures clause is not satisfied when {}. \
@@ -9375,7 +9381,7 @@ mod tests {
         let ce = json!({"x": "-1"});
         let result = build_contextual_suggestion(FAILURE_POSTCONDITION_VIOLATED, Some(&ce), None);
         assert!(
-            result.contains("x = \"-1\"") || result.contains("x = -1"),
+            result.contains("x = -1"),
             "should mention x = -1: {}",
             result
         );
@@ -9410,6 +9416,42 @@ mod tests {
         assert!(
             result.contains("invariant") || result.contains("不変条件"),
             "should mention invariant: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_contextual_suggestion_precondition_with_integer_counterexample() {
+        // Regression test: JSON integer values (not strings) must be rendered correctly
+        let ce = json!({"b": 0});
+        let result = build_contextual_suggestion(FAILURE_PRECONDITION_VIOLATED, Some(&ce), None);
+        assert!(
+            result.contains("b != 0"),
+            "should suggest b != 0 guard: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_contextual_suggestion_postcondition_with_integer_counterexample() {
+        // Regression test: JSON integer values in postcondition branch
+        let ce = json!({"x": -1});
+        let result = build_contextual_suggestion(FAILURE_POSTCONDITION_VIOLATED, Some(&ce), None);
+        assert!(
+            result.contains("x = -1"),
+            "should mention x = -1: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_contextual_suggestion_division_by_zero_with_integer_counterexample() {
+        // Regression test: JSON integer values in division-by-zero branch
+        let ce = json!({"divisor": 0});
+        let result = build_contextual_suggestion(FAILURE_DIVISION_BY_ZERO, Some(&ce), None);
+        assert!(
+            result.contains("divisor != 0"),
+            "should suggest divisor != 0: {}",
             result
         );
     }
