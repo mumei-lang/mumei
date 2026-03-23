@@ -21,6 +21,7 @@ use std::path::Path;
 
 /// Classification of emitted artifacts.
 #[derive(Clone, Debug, PartialEq, Eq)]
+// NOTE: Binary variant is reserved for future native binary output (Phase 2+); not yet produced by any emitter
 #[allow(dead_code)]
 pub(crate) enum ArtifactKind {
     Binary,
@@ -71,7 +72,13 @@ impl Emitter for LlvmEmitter {
         // We read the generated file back as an Artifact.
         crate::codegen::compile(hir_atom, output_path, module_env, extern_blocks)?;
         let ll_path = output_path.with_extension("ll");
-        let data = std::fs::read(&ll_path).unwrap_or_default();
+        let data = std::fs::read(&ll_path).map_err(|e| {
+            crate::verification::MumeiError::codegen(format!(
+                "Failed to read generated LLVM IR '{}': {}",
+                ll_path.display(),
+                e
+            ))
+        })?;
         Ok(vec![Artifact {
             name: ll_path,
             data,
