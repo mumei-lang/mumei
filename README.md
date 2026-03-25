@@ -4,7 +4,7 @@
 
 Mumei formally verifies every function with Z3 before compiling to LLVM IR.
 
-> parse → resolve → monomorphize → lower_to_hir → **verify (Z3)** → codegen (LLVM IR)
+> parse → resolve → monomorphize → lower_to_hir → **verify (Z3)** → emit (LLVM IR / C Header / Verified JSON)
 
 ```mumei
 type Nat = i64 where v >= 0;
@@ -99,7 +99,7 @@ mumei build src/main.mm -o dist/output
 
 | Command | Description |
 |---------|-------------|
-| `mumei build <file> -o <out>` | Verify + codegen |
+| `mumei build <file> -o <out>` | Verify + codegen (`--emit llvm-ir` (default) / `c-header` / `verified-json`) |
 | `mumei verify <file>` | Z3 verification only |
 | `mumei check <file>` | Parse + resolve (fast, no Z3) |
 | `mumei init <name>` | Generate project template |
@@ -129,7 +129,7 @@ mumei build src/main.mm -o dist/output
 | **Safety** | `trusted` / `unverified` atoms, taint analysis, BMC + inductive invariant, [`call_with_contract`](docs/LANGUAGE.md#higher-order-functions-phase-a) for higher-order function verification |
 | **FFI** | `extern "Rust"` / `extern "C"` blocks, handle-based memory management (`json_free`, `http_free`), Str type interop |
 | **Std Library** | Option, Result, List, BoundedArray, Vector, HashMap, JSON, HTTP, sort algorithms, effect definitions |
-| **Output** | LLVM IR (native binary) |
+| **Output** | LLVM IR (native binary), C header (`.h`) via `--emit c-header`, verified JSON metadata via `--emit verified-json`. Cargo workspace with emitter plugin architecture (`mumei-core`, `mumei-emit-llvm`, `mumei-emit-json`) — see [Roadmap](docs/CROSS_PROJECT_ROADMAP.md) |
 | **Tooling** | LSP server, VS Code extension, `mumei.toml` manifest, dependency manager, MCP server, semantic feedback (bilingual EN/JP) |
 
 <details>
@@ -339,6 +339,21 @@ The two approaches are **complementary**: the MCP Server enables any agent to ac
 | [Changelog](docs/CHANGELOG.md) | Release history |
 
 ---
+
+## Project Structure
+
+Mumei is organized as a Cargo workspace:
+
+```
+mumei/
+├── mumei-core/          # Core library: parser, HIR, verification, MIR, emitter trait
+├── mumei-emit-llvm/     # LLVM IR emitter (LlvmEmitter + codegen)
+├── mumei-emit-json/     # Verified JSON metadata emitter (VerifiedJsonEmitter)
+├── src/                 # CLI binary (main.rs, lsp.rs, setup.rs)
+├── std/                 # Standard library (.mm files)
+├── examples/            # Example programs
+└── tests/               # Integration tests (.mm files)
+```
 
 ## Development
 

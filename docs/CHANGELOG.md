@@ -2,6 +2,35 @@
 
 ---
 
+### Emitter Artifact Abstraction + CHeaderEmitter Doxygen + Contextual Suggestions
+
+#### Task A: Emitter trait Artifact abstraction (Roadmap #5 Phase 1)
+- Added `Artifact` struct (`name: PathBuf`, `data: Vec<u8>`, `kind: ArtifactKind`) and `ArtifactKind` enum (`Binary`, `Source`, `Header`) to `mumei-core/src/emitter.rs`
+- Changed `Emitter` trait return type from `MumeiResult<()>` to `MumeiResult<Vec<Artifact>>`
+- `LlvmEmitter::emit()`: reads generated `.ll` file back as `Artifact` (Phase 1 — `codegen::compile()` internals unchanged)
+- `CHeaderEmitter::emit()`: removed `std::fs::write()`, returns content as `Artifact`
+- `cmd_build` in `src/main.rs`: receives `Vec<Artifact>` and writes each artifact to disk
+
+#### Task B: CHeaderEmitter Doxygen format enhancement
+- Changed comment format: `/* requires: ... */` → `/** @pre ... */`, `/* ensures: ... */` → `/** @post ... */`
+- Added `@brief` auto-generated from atom name
+- Expanded `mumei_type_to_c()`: added `i32` → `int32_t`, `u32` → `uint32_t`, `f32` → `float`
+
+#### Task C: Dynamic suggestion generation (report.json accuracy)
+- Added `build_contextual_suggestion()` in `mumei-core/src/verification.rs`: generates context-aware fix suggestions from `failure_type`, `counterexample`, and `structured_unsat_core`
+- Integrated into `save_visualizer_report()` and `build_semantic_feedback()` with `suggestion_for_failure_type()` fallback
+
+#### Tests
+- `mumei-core/src/emitter.rs`: 8 unit tests (type mappings, Doxygen format, artifact kind/path, header guard, full output format)
+- `mumei-core/src/verification.rs`: 7 unit tests for `build_contextual_suggestion()` (precondition/postcondition/division-by-zero/invariant with counterexamples, fallback behavior)
+
+#### Documentation
+- Updated `docs/CROSS_PROJECT_ROADMAP.md`: Phase 1 marked as ✅ Implemented with Artifact abstraction and Doxygen details
+- Updated `docs/REPORT_SCHEMA.md`: `suggestion` field description updated to note dynamic suggestions
+- Updated `docs/CHANGELOG.md`
+
+---
+
 ### P2-A: Cross-atom Contract Composition (enhanced) — Chained Calls & E2E Tests
 
 #### New unit tests
@@ -20,7 +49,7 @@
 ### P2-A: Cross-atom Contract Composition + P2-B: Trait Method Constraints Z3 Injection
 
 #### Cross-atom Contract Composition (P2-A)
-- Extended `analyze_temporal_effects()` in `src/mir_analysis.rs` to handle `Rvalue::Call` statements
+- Extended `analyze_temporal_effects()` in `mumei-core/src/mir_analysis.rs` to handle `Rvalue::Call` statements
 - Added `AtomEffectContract` struct mapping effect names to (pre_state, post_state) pairs
 - Added `TemporalOp` enum to distinguish between `Perform` and `Call` operations
 - New `analyze_temporal_effects_with_contracts()` function: forward dataflow analysis now verifies callee `effect_pre` against caller's current temporal state and applies `effect_post` as state transition

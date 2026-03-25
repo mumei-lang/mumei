@@ -1,0 +1,11 @@
+[package]
+name = "mumei-emit-llvm"
+version = "0.2.0"
+edition = "2021"
+description = "LLVM IR emitter for the Mumei compiler"
+license = "MIT"
+repository = "https://github.com/mumei-lang/mumei"
+
+[dependencies]
+mumei-core = { path = "../mumei-core" }
+inkwell = { version = "0.5.0", features = ["llvm17-0"] }

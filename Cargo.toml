@@ -1,3 +1,6 @@
+[workspace]
+members = ["mumei-core", "mumei-emit-llvm", "mumei-emit-json"]
+
 [package]
 name = "mumei"
 version = "0.2.0"
@@ -16,42 +19,12 @@ name = "mumei"
 path = "src/main.rs"
 
 [dependencies]
-# CLI解析: サブコマンド対応（build, verify, init, check）
+mumei-core = { path = "mumei-core" }
+mumei-emit-llvm = { path = "mumei-emit-llvm" }
+mumei-emit-json = { path = "mumei-emit-json" }
 clap = { version = "4.4", features = ["derive"] }
-
-# 構文解析: 正規表現ベースの高速な字句解析
-regex = "1.10"
-
-# 形式検証: Z3 SMTソルバによる数学的証明
-# 注意: システムに libz3-dev 等のインストールが必要です
-z3 = "0.12"
-
-# コード生成: LLVM IR 生成用の低レイヤライブラリ
-inkwell = { version = "0.5.0", features = ["llvm17-0"] }
-
-# HTTP クライアント: std.http の FFI バックエンド
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
-
-# レポート出力: 検証結果の JSON 書き出し
-serde_json = "1.0"
-
-# シリアライズ: 検証キャッシュの永続化
-serde = { version = "1.0", features = ["derive"] }
-
-# ハッシュ: ソースファイルの変更検出
-sha2 = "0.10"
-
-# マニフェスト: mumei.toml の解析
 toml = "0.8"
-
-# ディレクトリ操作: ~/.mumei/ のパス解決
 dirs = "5.0"
-
-# リッチ診断出力: カラー表示・ソースコードハイライト・サジェスト
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 miette = { version = "7", features = ["fancy"] }
-
-# エラー型の ergonomic な derive マクロ
-thiserror = "2"
-
-# Plan 10/11: グローバルハンドルストア用 lazy_static
-lazy_static = "1.4"

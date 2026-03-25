@@ -13,6 +13,13 @@ use std::path::Path;
 use z3::ast::{Array, Ast, Bool, Dynamic, Float, Int, String as Z3String};
 use z3::{Config, Context, SatResult, Solver};
 
+/// Word-boundary-aware replacement of the placeholder `v` in constraint strings.
+/// Uses regex `\bv\b` to avoid corrupting identifiers like "value" or "divisor".
+fn replace_constraint_placeholder(constraint: &str, replacement: &str) -> String {
+    let re = regex::Regex::new(r"\bv\b").unwrap();
+    re.replace_all(constraint, replacement).to_string()
+}
+
 // --- エラー型の定義 ---
 
 // =============================================================================
@@ -650,6 +657,150 @@ pub fn suggestion_for_failure_type(failure_type: &str) -> &'static str {
 pub const FAILURE_EFFECT_NOT_ALLOWED: &str = "effect_not_allowed";
 
 // =============================================================================
+// Contextual Suggestion Generation (Dynamic)
+// =============================================================================
+
+/// Build a contextual suggestion using failure_type, counterexample, and
+/// structured_unsat_core. Falls back to `suggestion_for_failure_type()` when
+/// the inputs are insufficient for a more specific message.
+pub fn build_contextual_suggestion(
+    failure_type: &str,
+    counterexample: Option<&serde_json::Value>,
+    structured_unsat_core: Option<&serde_json::Value>,
+) -> String {
+    let ce_map = counterexample.and_then(|ce| ce.as_object());
+
+    // Try to extract a violated constraint description from unsat core
+    let violated_constraint = structured_unsat_core
+        .and_then(|core| core.as_array())
+        .and_then(|arr| {
+            arr.iter().find_map(|entry| {
+                entry
+                    .get("description")
+                    .and_then(|d| d.as_str())
+                    .map(|s| s.to_string())
+            })
+        });
+
+    match failure_type {
+        FAILURE_PRECONDITION_VIOLATED => {
+            if let Some(ce) = ce_map {
+                // Find which parameter(s) have problematic values
+                let bindings: Vec<String> = ce
+                    .iter()
+                    .map(|(k, v)| {
+                        let val = v
+                            .as_str()
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| v.to_string());
+                        format!("{} = {}", k, val)
+                    })
+                    .collect();
+                let bindings_str = if bindings.is_empty() {
+                    String::new()
+                } else {
+                    format!(" (counterexample: {})", bindings.join(", "))
+                };
+                if let Some(ref vc) = violated_constraint {
+                    format!(
+                        "Add a precondition to guard against this case: '{}'{} \
+                         (この場合を防ぐ事前条件を追加してください: '{}'{})",
+                        vc, bindings_str, vc, bindings_str
+                    )
+                } else {
+                    // Try to infer from counterexample values
+                    let param_hints: Vec<String> = ce
+                        .iter()
+                        .filter(|(_, v)| {
+                            v.as_str().map(|s| s == "0").unwrap_or(false)
+                                || v.as_i64().map(|n| n == 0).unwrap_or(false)
+                        })
+                        .map(|(k, _)| format!("{} != 0", k))
+                        .collect();
+                    if !param_hints.is_empty() {
+                        format!(
+                            "Add 'requires: {}' to the atom's precondition \
+                             (atom の事前条件に 'requires: {}' を追加してください)",
+                            param_hints.join(" && "),
+                            param_hints.join(" && ")
+                        )
+                    } else {
+                        suggestion_for_failure_type(failure_type).to_string()
+                    }
+                }
+            } else {
+                suggestion_for_failure_type(failure_type).to_string()
+            }
+        }
+        FAILURE_POSTCONDITION_VIOLATED => {
+            if let Some(ce) = ce_map {
+                let bindings: Vec<String> = ce
+                    .iter()
+                    .map(|(k, v)| {
+                        let val = v
+                            .as_str()
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| v.to_string());
+                        format!("{} = {}", k, val)
+                    })
+                    .collect();
+                let bindings_str = bindings.join(", ");
+                format!(
+                    "The ensures clause is not satisfied when {}. \
+                     Adjust the body or relax ensures \
+                     ({} のとき ensures 句が満たされません。\
+                     本体を修正するか ensures を緩和してください)",
+                    bindings_str, bindings_str
+                )
+            } else {
+                suggestion_for_failure_type(failure_type).to_string()
+            }
+        }
+        FAILURE_DIVISION_BY_ZERO => {
+            if let Some(ce) = ce_map {
+                // Find the zero-valued parameter
+                let zero_params: Vec<&String> = ce
+                    .iter()
+                    .filter(|(_, v)| {
+                        v.as_str().map(|s| s == "0").unwrap_or(false)
+                            || v.as_i64().map(|n| n == 0).unwrap_or(false)
+                    })
+                    .map(|(k, _)| k)
+                    .collect();
+                if !zero_params.is_empty() {
+                    let guards: Vec<String> =
+                        zero_params.iter().map(|p| format!("{} != 0", p)).collect();
+                    format!(
+                        "Add 'requires: {}' to prevent division by zero \
+                         (ゼロ除算を防ぐため 'requires: {}' を追加してください)",
+                        guards.join(" && "),
+                        guards.join(" && ")
+                    )
+                } else {
+                    suggestion_for_failure_type(failure_type).to_string()
+                }
+            } else {
+                suggestion_for_failure_type(failure_type).to_string()
+            }
+        }
+        FAILURE_INVARIANT_VIOLATED => {
+            if let Some(ref vc) = violated_constraint {
+                format!(
+                    "The invariant is violated because of constraint: '{}'. \
+                     Strengthen the invariant or fix the loop body \
+                     (制約 '{}' により不変条件が破られています。\
+                     不変条件を強化するかループ本体を修正してください)",
+                    vc, vc
+                )
+            } else {
+                suggestion_for_failure_type(failure_type).to_string()
+            }
+        }
+        _ => suggestion_for_failure_type(failure_type).to_string(),
+    }
+}
+
+// =============================================================================
 // Compound Constraint Decomposition
 // =============================================================================
 
@@ -1144,7 +1295,7 @@ pub fn build_semantic_feedback(
             "value": value,
             "constraint": mapping.predicate_raw,
             "explanation": explanation,
-            "suggestion": suggestion_for_failure_type(failure_type)
+            "suggestion": build_contextual_suggestion(failure_type, counterexample, None)
         });
 
         // Compound constraint decomposition: add sub_constraints array
@@ -1447,7 +1598,7 @@ struct VCtx<'a> {
 // =============================================================================
 //
 // NOTE (Plan 19 — Phase 4c complete): The primary ownership/move analysis has
-// been migrated to MIR-based MoveAnalysis (src/mir_analysis.rs).  Phase 1h in
+// been migrated to MIR-based MoveAnalysis (mumei-core/src/mir_analysis.rs).  Phase 1h in
 // verify() now runs forward dataflow move analysis on the MIR CFG and reports
 // UseAfterMove, DoubleMove, and ConflictingMerge as hard errors.
 //
@@ -1468,7 +1619,7 @@ struct VCtx<'a> {
 ///
 /// NOTE: Primary move analysis is now handled by MIR MoveAnalysis (Plan 19).
 /// This struct is kept for Z3-level borrow/consume tracking during symbolic
-/// execution. See src/mir_analysis.rs for the MIR-based replacement.
+/// execution. See mumei-core/src/mir_analysis.rs for the MIR-based replacement.
 #[derive(Debug, Clone, Default)]
 pub struct LinearityCtx {
     /// 変数名 → 生存状態（true = alive, false = consumed）
@@ -1648,6 +1799,10 @@ pub struct ModuleEnv {
     pub reverse_deps: HashMap<String, HashSet<String>>,
     /// Security policy for effect parameter constraint enforcement
     pub security_policy: Option<SecurityPolicy>,
+    /// メソッド名 → Vec<(トレイト名, メソッドインデックス)> の逆引きインデックス。
+    /// `register_trait()` 時に構築され、`get_traits_for_method()` で使用する。
+    /// HashMap iteration の非決定性を排除し、同名メソッドを持つ複数トレイトを正しく解決する。
+    pub method_trait_index: HashMap<String, Vec<(String, usize)>>,
 }
 
 impl ModuleEnv {
@@ -1710,6 +1865,17 @@ impl ModuleEnv {
     }
 
     pub fn register_trait(&mut self, trait_def: &TraitDef) {
+        // メソッド→トレイト逆引きインデックスを構築
+        // 再登録時は旧エントリを除去してから追加（冪等性を維持）
+        for entries in self.method_trait_index.values_mut() {
+            entries.retain(|(tn, _)| tn != &trait_def.name);
+        }
+        for (idx, method) in trait_def.methods.iter().enumerate() {
+            self.method_trait_index
+                .entry(method.name.clone())
+                .or_default()
+                .push((trait_def.name.clone(), idx));
+        }
         self.traits
             .insert(trait_def.name.clone(), trait_def.clone());
     }
@@ -1729,25 +1895,29 @@ impl ModuleEnv {
             .find(|i| i.trait_name == trait_name && i.target_type == target_type)
     }
 
-    /// メソッド名からトレイト定義とメソッドのparam_constraintsを取得する
-    /// Returns (trait_name, &TraitMethod) if found.
-    ///
-    /// NOTE: Returns the first match from HashMap iteration. If multiple traits
-    /// define a method with the same name, the result is non-deterministic.
-    /// Currently safe because builtin trait methods have unique names
-    /// (eq, leq, add, sub, mul, div). User-defined traits with duplicate
-    /// method names could cause the wrong trait's constraints to be applied.
-    /// TODO: Use a dedicated method→trait index (e.g., HashMap<method_name, Vec<trait_name>>)
-    /// for deterministic and complete lookup.
-    pub fn get_trait_for_method(&self, method_name: &str) -> Option<(&str, &TraitMethod)> {
-        for (trait_name, trait_def) in &self.traits {
-            for method in &trait_def.methods {
-                if method.name == method_name {
-                    return Some((trait_name.as_str(), method));
+    /// メソッド名からトレイト定義とメソッドのparam_constraintsを取得する（全候補版）。
+    /// Returns Vec<(trait_name, &TraitMethod)> for all traits defining this method.
+    /// Uses the `method_trait_index` for deterministic, O(1) lookup.
+    pub fn get_traits_for_method(&self, method_name: &str) -> Vec<(&str, &TraitMethod)> {
+        let mut results = Vec::new();
+        if let Some(entries) = self.method_trait_index.get(method_name) {
+            for (trait_name, method_idx) in entries {
+                if let Some(trait_def) = self.traits.get(trait_name) {
+                    if let Some(method) = trait_def.methods.get(*method_idx) {
+                        results.push((trait_name.as_str(), method));
+                    }
                 }
             }
         }
-        None
+        results
+    }
+
+    /// 後方互換ラッパー: 候補が1つの場合は従来通りの動作を維持。
+    /// 複数候補がある場合は最初の候補を返す（呼び出し元で find_impl による絞り込みを推奨）。
+    #[allow(dead_code)]
+    pub fn get_trait_for_method(&self, method_name: &str) -> Option<(&str, &TraitMethod)> {
+        let candidates = self.get_traits_for_method(method_name);
+        candidates.into_iter().next()
     }
 
     /// 指定した型がトレイト境界を全て満たしているか検証する
@@ -2448,9 +2618,8 @@ pub fn verify_impl(
                         for (i, constraint_opt) in method.param_constraints.iter().enumerate() {
                             if let Some(constraint_str) = constraint_opt {
                                 if let Some(param_name) = param_names.get(i) {
-                                    // TODO: naive .replace("v", ...) — see call-site TODO for details.
-                                    // Safe for current "v != 0" but fragile for future constraints.
-                                    let concrete: String = constraint_str.replace("v", param_name);
+                                    let concrete: String =
+                                        replace_constraint_placeholder(constraint_str, param_name);
                                     let constraint_ast = parse_expression(&concrete);
                                     if let Ok(constraint_z3) =
                                         expr_to_z3(&vc, &constraint_ast, &mut env, None)
@@ -3937,6 +4106,147 @@ fn verify_atom_invariant(
 // サイクルが検出された場合、invariant の記述を要求するか、
 // BMC の深度制限を適用する。
 
+/// Expr を簡易的にソース文字列に復元する（requires 置換用）。
+fn expr_to_source_string(expr: &Expr) -> String {
+    match expr {
+        Expr::Number(n) => n.to_string(),
+        Expr::Float(f) => format!("{}", f),
+        Expr::StringLit(s) => format!("\"{}\"", s),
+        Expr::Variable(v) => v.clone(),
+        Expr::BinaryOp(l, op, r) => {
+            let op_str = match op {
+                Op::Add => "+",
+                Op::Sub => "-",
+                Op::Mul => "*",
+                Op::Div => "/",
+                Op::Eq => "==",
+                Op::Neq => "!=",
+                Op::Gt => ">",
+                Op::Lt => "<",
+                Op::Ge => ">=",
+                Op::Le => "<=",
+                Op::And => "&&",
+                Op::Or => "||",
+                Op::Implies => "==>",
+            };
+            format!(
+                "({} {} {})",
+                expr_to_source_string(l),
+                op_str,
+                expr_to_source_string(r)
+            )
+        }
+        Expr::Call(name, args) => {
+            let args_str: Vec<String> = args.iter().map(expr_to_source_string).collect();
+            format!("{}({})", name, args_str.join(", "))
+        }
+        Expr::FieldAccess(e, field) => format!("{}.{}", expr_to_source_string(e), field),
+        Expr::ArrayAccess(name, idx) => format!("{}[{}]", name, expr_to_source_string(idx)),
+        _ => format!("{:?}", expr),
+    }
+}
+
+/// body 内の全 Call 式から呼び出し先の atom 名と引数を収集する。
+fn collect_callees_with_args_expr(expr: &Expr) -> Vec<(String, Vec<Expr>)> {
+    let mut callees = Vec::new();
+    match expr {
+        Expr::Call(name, args) => {
+            callees.push((name.clone(), args.clone()));
+            for arg in args {
+                callees.extend(collect_callees_with_args_expr(arg));
+            }
+        }
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            callees.extend(collect_callees_with_args_expr(cond));
+            callees.extend(collect_callees_with_args_stmt(then_branch));
+            callees.extend(collect_callees_with_args_stmt(else_branch));
+        }
+        Expr::BinaryOp(l, _, r) => {
+            callees.extend(collect_callees_with_args_expr(l));
+            callees.extend(collect_callees_with_args_expr(r));
+        }
+        Expr::Async { body } => {
+            callees.extend(collect_callees_with_args_stmt(body));
+        }
+        Expr::Await { expr } => {
+            callees.extend(collect_callees_with_args_expr(expr));
+        }
+        Expr::Match { target, arms } => {
+            callees.extend(collect_callees_with_args_expr(target));
+            for arm in arms {
+                callees.extend(collect_callees_with_args_stmt(&arm.body));
+                if let Some(guard) = &arm.guard {
+                    callees.extend(collect_callees_with_args_expr(guard));
+                }
+            }
+        }
+        Expr::CallRef { callee, args } => {
+            if let Expr::AtomRef { name } = callee.as_ref() {
+                callees.push((name.clone(), args.clone()));
+            }
+            callees.extend(collect_callees_with_args_expr(callee));
+            for arg in args {
+                callees.extend(collect_callees_with_args_expr(arg));
+            }
+        }
+        Expr::Perform { args, .. } => {
+            for arg in args {
+                callees.extend(collect_callees_with_args_expr(arg));
+            }
+        }
+        Expr::Lambda { body, .. } => {
+            callees.extend(collect_callees_with_args_stmt(body));
+        }
+        Expr::ChanSend { channel, value } => {
+            callees.extend(collect_callees_with_args_expr(channel));
+            callees.extend(collect_callees_with_args_expr(value));
+        }
+        Expr::ChanRecv { channel } => {
+            callees.extend(collect_callees_with_args_expr(channel));
+        }
+        _ => {}
+    }
+    callees
+}
+
+fn collect_callees_with_args_stmt(stmt: &Stmt) -> Vec<(String, Vec<Expr>)> {
+    let mut callees = Vec::new();
+    match stmt {
+        Stmt::Block(stmts, _) => {
+            for s in stmts {
+                callees.extend(collect_callees_with_args_stmt(s));
+            }
+        }
+        Stmt::Let { value, .. } | Stmt::Assign { value, .. } => {
+            callees.extend(collect_callees_with_args_expr(value));
+        }
+        Stmt::While { cond, body, .. } => {
+            callees.extend(collect_callees_with_args_expr(cond));
+            callees.extend(collect_callees_with_args_stmt(body));
+        }
+        Stmt::Acquire { body, .. } => {
+            callees.extend(collect_callees_with_args_stmt(body));
+        }
+        Stmt::Task { body, .. } => {
+            callees.extend(collect_callees_with_args_stmt(body));
+        }
+        Stmt::TaskGroup { children, .. } => {
+            for child in children {
+                callees.extend(collect_callees_with_args_stmt(child));
+            }
+        }
+        Stmt::Expr(e, _) => {
+            callees.extend(collect_callees_with_args_expr(e));
+        }
+        Stmt::Cancel { .. } => {}
+    }
+    callees
+}
+
 /// body 内の全 Call 式から呼び出し先の atom 名を収集する。
 fn collect_callees_expr(expr: &Expr) -> Vec<String> {
     let mut callees = Vec::new();
@@ -4404,21 +4714,37 @@ fn infer_requires(atom: &Atom, module_env: &ModuleEnv) -> Vec<String> {
         }
     }
 
-    // 2. Callee requires propagation
-    // NOTE: Callee requires are propagated verbatim without substituting the callee's
-    // parameter names for the caller's actual arguments. For example, if `callee(x)` has
-    // `requires: x > 0` and the caller invokes `callee(a + b)`, the inferred requires
-    // would be `x > 0` — referencing `x` which may not exist in the caller's scope.
-    // TODO: Parse the call site arguments, map callee param names to caller expressions,
-    // and substitute before propagating. This requires tracking which arguments are passed
-    // to each callee call site.
-    let callees = collect_callees_stmt(&body_stmt);
-    for callee_name in &callees {
+    // 2. Callee requires propagation with argument substitution
+    // callee の param_name → caller の引数式文字列のマッピングを構築し、
+    // callee の requires 内のパラメータ名を caller の引数式で置換してから伝播する。
+    let callees_with_args = collect_callees_with_args_stmt(&body_stmt);
+    for (callee_name, call_args) in &callees_with_args {
         if let Some(callee_atom) = module_env.get_atom(callee_name) {
             if callee_atom.requires != "true" && !callee_atom.requires.is_empty() {
-                let callee_req = callee_atom.requires.clone();
-                if seen.insert(callee_req.clone()) {
-                    requires.push(callee_req);
+                let mut substituted_req = callee_atom.requires.clone();
+                // callee の仮引数名と呼び出し引数を zip して置換
+                // 同時置換: まずパラメータ名をユニークなプレースホルダに置換し、
+                // 次にプレースホルダを引数式に置換する。
+                // これにより逐次置換の衝突（例: a→b, b→a で a>b が a>a になる）を防ぐ。
+                // First pass: param names → unique placeholders
+                for (i, param) in callee_atom.params.iter().enumerate() {
+                    let param_re =
+                        regex::Regex::new(&format!(r"\b{}\b", regex::escape(&param.name))).unwrap();
+                    substituted_req = param_re
+                        .replace_all(
+                            &substituted_req,
+                            regex::NoExpand(&format!("__PARAM_{}__", i)),
+                        )
+                        .to_string();
+                }
+                // Second pass: placeholders → argument expressions
+                for (i, arg_expr) in call_args.iter().enumerate() {
+                    let arg_str = expr_to_source_string(arg_expr);
+                    substituted_req =
+                        substituted_req.replace(&format!("__PARAM_{}__", i), &arg_str);
+                }
+                if seen.insert(substituted_req.clone()) {
+                    requires.push(substituted_req);
                 }
             }
         }
@@ -6090,6 +6416,141 @@ fn apply_refinement_constraint<'a>(
     Ok(())
 }
 
+// =============================================================================
+// Subsumption Check: atom_ref contract implication
+// =============================================================================
+//
+// When `atom_ref(concrete)` is passed to a parameter with `contract(f)`,
+// verify that the concrete atom's ensures clause *implies* the contract's
+// ensures clause under the concrete atom's precondition.  This is a
+// universal validity check:
+//
+//   ∀ params. (concrete.requires ∧ concrete.ensures) ⇒ contract.ensures
+//
+// If the implication does not hold, a **warning** (not a hard error) is
+// emitted to stderr.  This preserves backward compatibility while giving
+// the user early feedback about potential contract mismatches.
+
+/// Check that `concrete_atom.requires ∧ concrete_atom.ensures` implies
+/// `contract_ensures`.
+///
+/// Uses a Z3 solver scope (push/pop) to avoid polluting the caller's context.
+/// Emits `eprintln!` warnings on subsumption failure or evaluation errors.
+///
+/// Returns `true` if the subsumption holds (or is trivially skipped),
+/// `false` if a warning was emitted (implication does not hold).
+#[allow(clippy::too_many_arguments)]
+fn check_contract_subsumption(
+    vc: &VCtx<'_>,
+    concrete_atom: &Atom,
+    contract_ensures: &str,
+    _contract_requires: Option<&str>, // reserved for future use
+    callee_name: &str,
+    param_name: &str,
+    solver: &Solver<'_>,
+    ctx: &Context,
+) -> bool {
+    // Skip when the contract requires nothing — any ensures trivially implies "true".
+    // NOTE: We intentionally do NOT skip when concrete_atom.ensures == "true".
+    // An atom with ensures: true guarantees nothing, so it cannot imply a
+    // non-trivial contract like `result >= 0`. The Z3 check below will correctly
+    // find a counterexample and emit a warning in that case.
+    if contract_ensures.trim() == "true" {
+        return true;
+    }
+
+    // Build an environment mapping concrete atom's parameters to fresh Z3
+    // variables so that we universally quantify over the parameter space.
+    // Only the concrete atom's own parameter names are bound — no hardcoded
+    // aliases — so there is no risk of accidental name collisions.
+    let mut sub_env: Env<'_> = HashMap::new();
+    for (i, param) in concrete_atom.params.iter().enumerate() {
+        let z3_var: Dynamic =
+            Int::new_const(ctx, format!("__sub_p{}_{}", i, param.name).as_str()).into();
+        sub_env.insert(param.name.clone(), z3_var);
+    }
+
+    // Create a fresh symbolic result that both ensures clauses reference.
+    let result_var: Dynamic = Int::new_const(ctx, "__sub_result").into();
+    sub_env.insert("result".to_string(), result_var);
+
+    // The parser represents `true` / `false` as Expr::Variable("true"|"false").
+    // Pre-bind them to Z3 Bool constants so expr_to_z3 produces Bool sort
+    // instead of an unbound Int, which would fail the as_bool() gate below.
+    sub_env.insert(
+        "true".to_string(),
+        z3::ast::Bool::from_bool(ctx, true).into(),
+    );
+    sub_env.insert(
+        "false".to_string(),
+        z3::ast::Bool::from_bool(ctx, false).into(),
+    );
+
+    // --- Assert concrete atom's requires clause (precondition) ---
+    // Without this, the check would ask "for ALL params, does ensures ⇒
+    // contract?" which is too strong. We need "for params satisfying
+    // requires, does ensures ⇒ contract?".
+    let concrete_req = concrete_atom.requires.trim();
+    let requires_bool_opt = if concrete_req != "true" && !concrete_req.is_empty() {
+        let req_ast = parse_expression(concrete_req);
+        match expr_to_z3(vc, &req_ast, &mut sub_env, None) {
+            Ok(v) => v.as_bool(),
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+
+    // Parse and evaluate the concrete atom's ensures.
+    let concrete_ens_ast = parse_expression(&concrete_atom.ensures);
+    let concrete_ens_z3 = match expr_to_z3(vc, &concrete_ens_ast, &mut sub_env, None) {
+        Ok(v) => v,
+        Err(_e) => {
+            return true;
+        }
+    };
+
+    // Parse and evaluate the contract's ensures.
+    let contract_ens_ast = parse_expression(contract_ensures);
+    let contract_ens_z3 = match expr_to_z3(vc, &contract_ens_ast, &mut sub_env, None) {
+        Ok(v) => v,
+        Err(_e) => {
+            return true;
+        }
+    };
+
+    // Both must be booleans for an implication check.
+    let (concrete_bool, contract_bool) =
+        match (concrete_ens_z3.as_bool(), contract_ens_z3.as_bool()) {
+            (Some(c), Some(ct)) => (c, ct),
+            _ => return true, // non-boolean ensures — cannot check subsumption
+        };
+
+    // Check: requires ∧ concrete_ensures ∧ ¬contract_ensures is UNSAT
+    //        ⟺  (requires ∧ concrete_ensures) ⇒ contract_ensures
+    solver.push();
+    if let Some(ref req_bool) = requires_bool_opt {
+        solver.assert(req_bool);
+    }
+    solver.assert(&concrete_bool);
+    solver.assert(&contract_bool.not());
+    let sat_result = solver.check();
+    solver.pop(1);
+
+    if sat_result == SatResult::Sat {
+        eprintln!(
+            "\u{26a0}\u{fe0f}  Subsumption warning: atom_ref({}) passed to {}.{} \u{2014} \
+             concrete ensures '{}' may not imply contract ensures '{}'",
+            concrete_atom.name, callee_name, param_name, concrete_atom.ensures, contract_ensures
+        );
+        return false;
+    }
+    // NOTE: SatResult::Unknown (e.g., Z3 timeout) falls through to `true` here.
+    // This is the conservative choice for a warning-only check: we only warn when
+    // we have a definite counterexample (SAT), never on inconclusive results.
+    true
+}
+
 fn expr_to_z3<'a>(
     vc: &VCtx<'a>,
     expr: &Expr,
@@ -6378,76 +6839,53 @@ fn expr_to_z3<'a>(
                         // Trait method param_constraints の検証:
                         // 呼び出し先がトレイトメソッドの実装である場合、param_constraints を
                         // 呼び出し元のコンテキストで検証する。
-                        // NOTE: get_trait_for_method はメソッド名でグローバル検索するため、
-                        // ユーザー定義 atom が builtin メソッド名（div, add 等）と衝突する可能性がある。
-                        // find_impl で呼び出し先の型に対して実際にトレイトが impl されているか確認し、
-                        // 無関係な atom への誤適用を防ぐ。
+                        // get_traits_for_method で全候補を取得し、find_impl で callee の型に
+                        // 対して実際にトレイトが impl されている候補のみ適用する。
                         if let Some(solver) = solver_opt {
-                            if let Some((trait_name, trait_method)) =
-                                vc.module_env.get_trait_for_method(name)
-                            {
-                                // Guard: only apply trait constraints if the callee's parameter
-                                // type actually implements this trait.
-                                // KNOWN LIMITATION: This guard is ineffective for builtin types
-                                // (i64, u64, f64) because register_builtin_traits() registers
-                                // Numeric impl for all three. A user-defined `atom div(a: i64, b: i64)`
-                                // with body `a + b` would still have `b != 0` applied. The correct
-                                // fix requires tracking whether the callee atom is actually a trait
-                                // method implementation (not just whether its parameter type implements
-                                // the trait), which needs an `is_trait_impl` flag on Atom or a reverse
-                                // lookup from atom name to ImplDef. For now, this guard only prevents
-                                // false matches on custom types that don't implement the trait.
-                                let callee_type = callee
-                                    .params
-                                    .first()
-                                    .and_then(|p| p.type_name.as_deref())
-                                    .unwrap_or("i64");
-                                let has_impl =
-                                    vc.module_env.find_impl(trait_name, callee_type).is_some();
-                                if !has_impl {
-                                    // Callee is not a trait impl — skip param_constraints
-                                } else {
-                                    for (i, constraint_opt) in
-                                        trait_method.param_constraints.iter().enumerate()
-                                    {
-                                        if let Some(constraint) = constraint_opt {
-                                            if let Some(arg_val) = arg_vals.get(i) {
-                                                // Replace 'v' in constraint with actual parameter.
-                                                // TODO: This naive .replace("v", ...) will corrupt constraints
-                                                // containing 'v' as part of longer identifiers (e.g., "value != 0"
-                                                // → "balue != 0" when param_name is "b"). Currently safe because
-                                                // the only constraint is "v != 0" where 'v' is standalone.
-                                                // When adding constraints like "divisor != 0", use a word-boundary-
-                                                // aware replacement (e.g., regex \bv\b) or a dedicated placeholder
-                                                // like "${v}" instead.
-                                                let param_name = callee
-                                                    .params
-                                                    .get(i)
-                                                    .map(|p| p.name.as_str())
-                                                    .unwrap_or("v");
-                                                let concrete_constraint: String =
-                                                    constraint.replace("v", param_name);
-                                                let mut constraint_env: Env = env.clone();
-                                                constraint_env.insert(
-                                                    param_name.to_string(),
-                                                    arg_val.clone(),
+                            let callee_type = callee
+                                .params
+                                .first()
+                                .and_then(|p| p.type_name.as_deref())
+                                .unwrap_or("i64");
+                            let candidates = vc.module_env.get_traits_for_method(name);
+                            // find_impl で正しいトレイトを絞り込む
+                            let matched = candidates
+                                .iter()
+                                .find(|(tn, _)| vc.module_env.find_impl(tn, callee_type).is_some());
+                            if let Some((_trait_name, trait_method)) = matched {
+                                for (i, constraint_opt) in
+                                    trait_method.param_constraints.iter().enumerate()
+                                {
+                                    if let Some(constraint) = constraint_opt {
+                                        if let Some(arg_val) = arg_vals.get(i) {
+                                            let param_name = callee
+                                                .params
+                                                .get(i)
+                                                .map(|p| p.name.as_str())
+                                                .unwrap_or("v");
+                                            let concrete_constraint: String =
+                                                replace_constraint_placeholder(
+                                                    constraint, param_name,
                                                 );
-                                                let constraint_ast =
-                                                    parse_expression(&concrete_constraint);
-                                                if let Ok(constraint_z3) = expr_to_z3(
-                                                    vc,
-                                                    &constraint_ast,
-                                                    &mut constraint_env,
-                                                    None,
-                                                ) {
-                                                    if let Some(constraint_bool) =
-                                                        constraint_z3.as_bool()
-                                                    {
-                                                        solver.push();
-                                                        solver.assert(&constraint_bool.not());
-                                                        if solver.check() == SatResult::Sat {
-                                                            solver.pop(1);
-                                                            return Err(MumeiError::verification(
+                                            let mut constraint_env: Env = env.clone();
+                                            constraint_env
+                                                .insert(param_name.to_string(), arg_val.clone());
+                                            let constraint_ast =
+                                                parse_expression(&concrete_constraint);
+                                            if let Ok(constraint_z3) = expr_to_z3(
+                                                vc,
+                                                &constraint_ast,
+                                                &mut constraint_env,
+                                                None,
+                                            ) {
+                                                if let Some(constraint_bool) =
+                                                    constraint_z3.as_bool()
+                                                {
+                                                    solver.push();
+                                                    solver.assert(&constraint_bool.not());
+                                                    if solver.check() == SatResult::Sat {
+                                                        solver.pop(1);
+                                                        return Err(MumeiError::verification(
                                                             format!(
                                                                 "Call to '{}': trait method parameter constraint '{}' not satisfied for argument {}",
                                                                 name, constraint, i
@@ -6455,14 +6893,13 @@ fn expr_to_z3<'a>(
                                                         ).with_help(
                                                             "トレイトメソッドのパラメータ制約が満たされていません。引数の値を確認してください"
                                                         ));
-                                                        }
-                                                        solver.pop(1);
                                                     }
+                                                    solver.pop(1);
                                                 }
                                             }
                                         }
                                     }
-                                } // end else (has_impl)
+                                }
                             }
                         }
 
@@ -6579,6 +7016,40 @@ fn expr_to_z3<'a>(
                                 if param.is_ref || param.is_ref_mut {
                                     if let Some(Expr::Variable(arg_name)) = args.get(i) {
                                         lctx_cell.borrow_mut().release_borrow(arg_name, name);
+                                    }
+                                }
+                            }
+                        }
+
+                        // =============================================================
+                        // Subsumption Check: atom_ref argument vs contract ensures
+                        // =============================================================
+                        // When a callee parameter has fn_contract_ensures and the
+                        // corresponding argument is atom_ref(concrete_name), verify
+                        // that the concrete atom's ensures implies the contract's
+                        // ensures.  Emit a warning (not a hard error) to maintain
+                        // backward compatibility.
+                        if let Some(solver) = solver_opt {
+                            for (i, param) in callee.params.iter().enumerate() {
+                                if let Some(ref contract_ensures) = param.fn_contract_ensures {
+                                    if let Some(Expr::AtomRef {
+                                        name: ref concrete_name,
+                                    }) = args.get(i)
+                                    {
+                                        if let Some(concrete_atom) =
+                                            vc.module_env.get_atom(concrete_name).cloned()
+                                        {
+                                            check_contract_subsumption(
+                                                vc,
+                                                &concrete_atom,
+                                                contract_ensures,
+                                                param.fn_contract_requires.as_deref(),
+                                                name,
+                                                &param.name,
+                                                solver,
+                                                ctx,
+                                            );
+                                        }
                                     }
                                 }
                             }
@@ -8229,7 +8700,13 @@ fn save_visualizer_report(
     if let Some(sf) = semantic_feedback {
         report["semantic_feedback"] = sf.clone();
     }
-    report["suggestion"] = json!(suggestion_for_failure_type(failure_type));
+    // Use contextual suggestion when counterexample/unsat_core available, fallback to static
+    let structured_unsat_core = semantic_feedback.and_then(|sf| sf.get("structured_unsat_core"));
+    report["suggestion"] = json!(build_contextual_suggestion(
+        failure_type,
+        counterexample,
+        structured_unsat_core,
+    ));
     if let Some(s) = span {
         report["span"] = json!({
             "file": s.file,
@@ -8267,6 +8744,7 @@ fn save_visualizer_report(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::{Atom, ImplDef, Param, Span, TraitDef, TraitMethod, TrustLevel};
 
     // ---- constraint_to_natural_language tests ----
 
@@ -9190,5 +9668,712 @@ mod tests {
         assert_eq!(subs.len(), 2);
         assert_eq!(subs[0]["satisfied"], true);
         assert_eq!(subs[1]["satisfied"], false);
+    }
+
+    // ---- build_contextual_suggestion tests ----
+
+    #[test]
+    fn test_contextual_suggestion_precondition_with_zero_counterexample() {
+        let ce = json!({"b": "0"});
+        let result = build_contextual_suggestion(FAILURE_PRECONDITION_VIOLATED, Some(&ce), None);
+        assert!(
+            result.contains("b != 0"),
+            "should suggest b != 0 guard: {}",
+            result
+        );
+        assert!(
+            result.contains("requires"),
+            "should mention requires: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_contextual_suggestion_precondition_with_violated_constraint() {
+        let ce = json!({"b": "0"});
+        let unsat_core = json!([{"description": "b != 0"}]);
+        let result = build_contextual_suggestion(
+            FAILURE_PRECONDITION_VIOLATED,
+            Some(&ce),
+            Some(&unsat_core),
+        );
+        assert!(
+            result.contains("b != 0"),
+            "should reference violated constraint: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_contextual_suggestion_postcondition_with_counterexample() {
+        let ce = json!({"x": "-1"});
+        let result = build_contextual_suggestion(FAILURE_POSTCONDITION_VIOLATED, Some(&ce), None);
+        assert!(
+            result.contains("x = -1"),
+            "should mention x = -1: {}",
+            result
+        );
+        assert!(
+            result.contains("ensures"),
+            "should mention ensures: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_contextual_suggestion_division_by_zero_with_counterexample() {
+        let ce = json!({"divisor": "0"});
+        let result = build_contextual_suggestion(FAILURE_DIVISION_BY_ZERO, Some(&ce), None);
+        assert!(
+            result.contains("divisor != 0"),
+            "should suggest divisor != 0: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_contextual_suggestion_invariant_with_unsat_core() {
+        let unsat_core = json!([{"description": "i >= 0"}]);
+        let result =
+            build_contextual_suggestion(FAILURE_INVARIANT_VIOLATED, None, Some(&unsat_core));
+        assert!(
+            result.contains("i >= 0"),
+            "should reference constraint: {}",
+            result
+        );
+        assert!(
+            result.contains("invariant") || result.contains("不変条件"),
+            "should mention invariant: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_contextual_suggestion_precondition_with_integer_counterexample() {
+        // Regression test: JSON integer values (not strings) must be rendered correctly
+        let ce = json!({"b": 0});
+        let result = build_contextual_suggestion(FAILURE_PRECONDITION_VIOLATED, Some(&ce), None);
+        assert!(
+            result.contains("b != 0"),
+            "should suggest b != 0 guard: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_contextual_suggestion_postcondition_with_integer_counterexample() {
+        // Regression test: JSON integer values in postcondition branch
+        let ce = json!({"x": -1});
+        let result = build_contextual_suggestion(FAILURE_POSTCONDITION_VIOLATED, Some(&ce), None);
+        assert!(
+            result.contains("x = -1"),
+            "should mention x = -1: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_contextual_suggestion_division_by_zero_with_integer_counterexample() {
+        // Regression test: JSON integer values in division-by-zero branch
+        let ce = json!({"divisor": 0});
+        let result = build_contextual_suggestion(FAILURE_DIVISION_BY_ZERO, Some(&ce), None);
+        assert!(
+            result.contains("divisor != 0"),
+            "should suggest divisor != 0: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_contextual_suggestion_fallback_no_counterexample() {
+        let result = build_contextual_suggestion(FAILURE_PRECONDITION_VIOLATED, None, None);
+        // Should fall back to suggestion_for_failure_type
+        let fallback = suggestion_for_failure_type(FAILURE_PRECONDITION_VIOLATED);
+        assert_eq!(result, fallback);
+    }
+
+    #[test]
+    fn test_contextual_suggestion_unknown_failure_type() {
+        let result = build_contextual_suggestion("unknown_type", Some(&json!({"x": "1"})), None);
+        let fallback = suggestion_for_failure_type("unknown_type");
+        assert_eq!(result, fallback);
+    }
+
+    // ---- Subsumption check unit tests ----
+
+    #[test]
+    fn test_subsumption_check_holds_with_requires() {
+        // increment: requires x >= 0, ensures result == x + 1
+        // contract: ensures result >= 0
+        // With requires x >= 0: result == x + 1 ≥ 1 ≥ 0, so subsumption holds.
+        let cfg = Config::new();
+        let ctx = Context::new(&cfg);
+        let solver = Solver::new(&ctx);
+        let int_sort = z3::Sort::int(&ctx);
+        let arr = Array::new_const(&ctx, "arr", &int_sort, &int_sort);
+        let module_env = ModuleEnv::new();
+        let vc = VCtx {
+            ctx: &ctx,
+            arr: &arr,
+            module_env: &module_env,
+            current_atom: None,
+            linearity_ctx: None,
+            effect_ctx: None,
+            constraint_count: None,
+            constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
+            has_string_constraints: None,
+        };
+        let concrete = Atom {
+            name: "increment".to_string(),
+            type_params: vec![],
+            where_bounds: vec![],
+            params: vec![Param {
+                name: "x".to_string(),
+                type_name: Some("i64".to_string()),
+                type_ref: None,
+                is_ref: false,
+                is_ref_mut: false,
+                fn_contract_requires: None,
+                fn_contract_ensures: None,
+            }],
+            requires: "x >= 0".to_string(),
+            forall_constraints: vec![],
+            ensures: "result == x + 1".to_string(),
+            body_expr: "x + 1".to_string(),
+            consumed_params: vec![],
+            resources: vec![],
+            is_async: false,
+            trust_level: TrustLevel::Verified,
+            max_unroll: None,
+            invariant: None,
+            effects: vec![],
+            return_type: None,
+            span: Span::default(),
+            effect_pre: std::collections::HashMap::new(),
+            effect_post: std::collections::HashMap::new(),
+        };
+        let result = check_contract_subsumption(
+            &vc,
+            &concrete,
+            "result >= 0",
+            None,
+            "apply",
+            "f",
+            &solver,
+            &ctx,
+        );
+        assert!(
+            result,
+            "subsumption should hold: x >= 0 ∧ result == x + 1 ⇒ result >= 0"
+        );
+    }
+
+    #[test]
+    fn test_subsumption_check_fails_without_requires() {
+        // negate: requires x >= 0, ensures result == 0 - x
+        // contract: ensures result >= 0
+        // Even with requires x >= 0, result == -x ≤ 0 when x > 0, so subsumption fails.
+        let cfg = Config::new();
+        let ctx = Context::new(&cfg);
+        let solver = Solver::new(&ctx);
+        let int_sort = z3::Sort::int(&ctx);
+        let arr = Array::new_const(&ctx, "arr", &int_sort, &int_sort);
+        let module_env = ModuleEnv::new();
+        let vc = VCtx {
+            ctx: &ctx,
+            arr: &arr,
+            module_env: &module_env,
+            current_atom: None,
+            linearity_ctx: None,
+            effect_ctx: None,
+            constraint_count: None,
+            constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
+            has_string_constraints: None,
+        };
+        let concrete = Atom {
+            name: "negate".to_string(),
+            type_params: vec![],
+            where_bounds: vec![],
+            params: vec![Param {
+                name: "x".to_string(),
+                type_name: Some("i64".to_string()),
+                type_ref: None,
+                is_ref: false,
+                is_ref_mut: false,
+                fn_contract_requires: None,
+                fn_contract_ensures: None,
+            }],
+            requires: "x >= 0".to_string(),
+            forall_constraints: vec![],
+            ensures: "result == 0 - x".to_string(),
+            body_expr: "0 - x".to_string(),
+            consumed_params: vec![],
+            resources: vec![],
+            is_async: false,
+            trust_level: TrustLevel::Verified,
+            max_unroll: None,
+            invariant: None,
+            effects: vec![],
+            return_type: None,
+            span: Span::default(),
+            effect_pre: std::collections::HashMap::new(),
+            effect_post: std::collections::HashMap::new(),
+        };
+        let result = check_contract_subsumption(
+            &vc,
+            &concrete,
+            "result >= 0",
+            None,
+            "apply",
+            "f",
+            &solver,
+            &ctx,
+        );
+        assert!(
+            !result,
+            "subsumption should fail: x >= 0 ∧ result == -x does NOT imply result >= 0"
+        );
+    }
+
+    #[test]
+    fn test_subsumption_check_crossed_param_names() {
+        // Regression test: atom compute(y: i64, x: i64) with ensures: result == y / x
+        // Contract: ensures result >= 0
+        // Without the alias-collision fix, both "x" and "y" would map to the same
+        // Z3 variable, making result == var/var == 1, trivially passing.
+        // With the fix, y and x are independent, so y=-1, x=1 → result=-1 is a
+        // valid counterexample and subsumption should fail.
+        let cfg = Config::new();
+        let ctx = Context::new(&cfg);
+        let solver = Solver::new(&ctx);
+        let int_sort = z3::Sort::int(&ctx);
+        let arr = Array::new_const(&ctx, "arr", &int_sort, &int_sort);
+        let module_env = ModuleEnv::new();
+        let vc = VCtx {
+            ctx: &ctx,
+            arr: &arr,
+            module_env: &module_env,
+            current_atom: None,
+            linearity_ctx: None,
+            effect_ctx: None,
+            constraint_count: None,
+            constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
+            has_string_constraints: None,
+        };
+        let concrete = Atom {
+            name: "compute".to_string(),
+            type_params: vec![],
+            where_bounds: vec![],
+            params: vec![
+                Param {
+                    name: "y".to_string(),
+                    type_name: Some("i64".to_string()),
+                    type_ref: None,
+                    is_ref: false,
+                    is_ref_mut: false,
+                    fn_contract_requires: None,
+                    fn_contract_ensures: None,
+                },
+                Param {
+                    name: "x".to_string(),
+                    type_name: Some("i64".to_string()),
+                    type_ref: None,
+                    is_ref: false,
+                    is_ref_mut: false,
+                    fn_contract_requires: None,
+                    fn_contract_ensures: None,
+                },
+            ],
+            requires: "x != 0".to_string(),
+            forall_constraints: vec![],
+            ensures: "result == y / x".to_string(),
+            body_expr: "y / x".to_string(),
+            consumed_params: vec![],
+            resources: vec![],
+            is_async: false,
+            trust_level: TrustLevel::Verified,
+            max_unroll: None,
+            invariant: None,
+            effects: vec![],
+            return_type: None,
+            span: Span::default(),
+            effect_pre: std::collections::HashMap::new(),
+            effect_post: std::collections::HashMap::new(),
+        };
+        let result = check_contract_subsumption(
+            &vc,
+            &concrete,
+            "result >= 0",
+            None,
+            "apply",
+            "f",
+            &solver,
+            &ctx,
+        );
+        assert!(
+            !result,
+            "subsumption should fail: y/x can be negative (e.g. y=-1, x=1)"
+        );
+    }
+
+    #[test]
+    fn test_subsumption_check_trivial_contract_ensures_skipped() {
+        // If contract_ensures is "true", subsumption is trivially satisfied
+        // (the contract requires nothing).
+        let cfg = Config::new();
+        let ctx = Context::new(&cfg);
+        let solver = Solver::new(&ctx);
+        let int_sort = z3::Sort::int(&ctx);
+        let arr = Array::new_const(&ctx, "arr", &int_sort, &int_sort);
+        let module_env = ModuleEnv::new();
+        let vc = VCtx {
+            ctx: &ctx,
+            arr: &arr,
+            module_env: &module_env,
+            current_atom: None,
+            linearity_ctx: None,
+            effect_ctx: None,
+            constraint_count: None,
+            constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
+            has_string_constraints: None,
+        };
+        let concrete = Atom {
+            name: "something".to_string(),
+            type_params: vec![],
+            where_bounds: vec![],
+            params: vec![Param {
+                name: "x".to_string(),
+                type_name: Some("i64".to_string()),
+                type_ref: None,
+                is_ref: false,
+                is_ref_mut: false,
+                fn_contract_requires: None,
+                fn_contract_ensures: None,
+            }],
+            requires: "true".to_string(),
+            forall_constraints: vec![],
+            ensures: "result == x".to_string(),
+            body_expr: "x".to_string(),
+            consumed_params: vec![],
+            resources: vec![],
+            is_async: false,
+            trust_level: TrustLevel::Verified,
+            max_unroll: None,
+            invariant: None,
+            effects: vec![],
+            return_type: None,
+            span: Span::default(),
+            effect_pre: std::collections::HashMap::new(),
+            effect_post: std::collections::HashMap::new(),
+        };
+        // contract ensures is "true" → trivially satisfied, skip check
+        let result =
+            check_contract_subsumption(&vc, &concrete, "true", None, "apply", "f", &solver, &ctx);
+        assert!(
+            result,
+            "trivial contract ensures 'true' should be skipped (returns true)"
+        );
+    }
+
+    #[test]
+    fn test_subsumption_check_concrete_true_ensures_warns() {
+        // If concrete_atom.ensures is "true" but contract requires "result >= 0",
+        // the concrete atom guarantees nothing → subsumption should FAIL (warn).
+        let cfg = Config::new();
+        let ctx = Context::new(&cfg);
+        let solver = Solver::new(&ctx);
+        let int_sort = z3::Sort::int(&ctx);
+        let arr = Array::new_const(&ctx, "arr", &int_sort, &int_sort);
+        let module_env = ModuleEnv::new();
+        let vc = VCtx {
+            ctx: &ctx,
+            arr: &arr,
+            module_env: &module_env,
+            current_atom: None,
+            linearity_ctx: None,
+            effect_ctx: None,
+            constraint_count: None,
+            constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
+            has_string_constraints: None,
+        };
+        let concrete = Atom {
+            name: "no_guarantee".to_string(),
+            type_params: vec![],
+            where_bounds: vec![],
+            params: vec![Param {
+                name: "x".to_string(),
+                type_name: Some("i64".to_string()),
+                type_ref: None,
+                is_ref: false,
+                is_ref_mut: false,
+                fn_contract_requires: None,
+                fn_contract_ensures: None,
+            }],
+            requires: "true".to_string(),
+            forall_constraints: vec![],
+            ensures: "true".to_string(),
+            body_expr: "x".to_string(),
+            consumed_params: vec![],
+            resources: vec![],
+            is_async: false,
+            trust_level: TrustLevel::Verified,
+            max_unroll: None,
+            invariant: None,
+            effects: vec![],
+            return_type: None,
+            span: Span::default(),
+            effect_pre: std::collections::HashMap::new(),
+            effect_post: std::collections::HashMap::new(),
+        };
+        // concrete ensures is "true" but contract requires "result >= 0"
+        // → subsumption should fail because "true" does not imply "result >= 0"
+        let result = check_contract_subsumption(
+            &vc,
+            &concrete,
+            "result >= 0",
+            None,
+            "apply",
+            "f",
+            &solver,
+            &ctx,
+        );
+        assert!(
+            !result,
+            "concrete ensures 'true' cannot imply 'result >= 0' — should warn (return false)"
+        );
+    }
+
+    // ---- 3-a: replace_constraint_placeholder tests ----
+
+    #[test]
+    fn test_replace_constraint_placeholder_standalone_v() {
+        // "v != 0" → "b != 0" (standalone v is replaced)
+        let result = replace_constraint_placeholder("v != 0", "b");
+        assert_eq!(result, "b != 0");
+    }
+
+    #[test]
+    fn test_replace_constraint_placeholder_does_not_corrupt_value() {
+        // "value != 0" should NOT become "balue != 0"
+        let result = replace_constraint_placeholder("value != 0", "b");
+        assert_eq!(result, "value != 0");
+    }
+
+    #[test]
+    fn test_replace_constraint_placeholder_does_not_corrupt_divisor() {
+        // "divisor > v" should replace only standalone v
+        let result = replace_constraint_placeholder("divisor > v", "x");
+        assert_eq!(result, "divisor > x");
+    }
+
+    #[test]
+    fn test_replace_constraint_placeholder_multiple_v() {
+        // "v > 0 && v < 100" → "param > 0 && param < 100"
+        let result = replace_constraint_placeholder("v > 0 && v < 100", "param");
+        assert_eq!(result, "param > 0 && param < 100");
+    }
+
+    // ---- 3-b: get_traits_for_method / method_trait_index tests ----
+
+    #[test]
+    fn test_get_traits_for_method_single_trait() {
+        let mut env = ModuleEnv::new();
+        env.register_trait(&TraitDef {
+            name: "Numeric".to_string(),
+            methods: vec![TraitMethod {
+                name: "div".to_string(),
+                param_types: vec!["i64".to_string(), "i64".to_string()],
+                return_type: "i64".to_string(),
+                param_constraints: vec![None, Some("v != 0".to_string())],
+            }],
+            laws: vec![],
+            span: Span::new("", 0, 0, 0),
+        });
+        let results = env.get_traits_for_method("div");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "Numeric");
+        assert_eq!(results[0].1.name, "div");
+    }
+
+    #[test]
+    fn test_get_traits_for_method_multiple_traits_same_method() {
+        let mut env = ModuleEnv::new();
+        env.register_trait(&TraitDef {
+            name: "TraitA".to_string(),
+            methods: vec![TraitMethod {
+                name: "process".to_string(),
+                param_types: vec!["i64".to_string()],
+                return_type: "i64".to_string(),
+                param_constraints: vec![Some("v > 0".to_string())],
+            }],
+            laws: vec![],
+            span: Span::new("", 0, 0, 0),
+        });
+        env.register_trait(&TraitDef {
+            name: "TraitB".to_string(),
+            methods: vec![TraitMethod {
+                name: "process".to_string(),
+                param_types: vec!["i64".to_string()],
+                return_type: "i64".to_string(),
+                param_constraints: vec![None],
+            }],
+            laws: vec![],
+            span: Span::new("", 0, 0, 0),
+        });
+        // Both traits should be returned
+        let results = env.get_traits_for_method("process");
+        assert_eq!(results.len(), 2);
+        let trait_names: Vec<&str> = results.iter().map(|(tn, _)| *tn).collect();
+        assert!(trait_names.contains(&"TraitA"));
+        assert!(trait_names.contains(&"TraitB"));
+    }
+
+    #[test]
+    fn test_get_traits_for_method_selects_correct_with_find_impl() {
+        let mut env = ModuleEnv::new();
+        env.register_trait(&TraitDef {
+            name: "TraitA".to_string(),
+            methods: vec![TraitMethod {
+                name: "process".to_string(),
+                param_types: vec!["i64".to_string()],
+                return_type: "i64".to_string(),
+                param_constraints: vec![Some("v > 0".to_string())],
+            }],
+            laws: vec![],
+            span: Span::new("", 0, 0, 0),
+        });
+        env.register_trait(&TraitDef {
+            name: "TraitB".to_string(),
+            methods: vec![TraitMethod {
+                name: "process".to_string(),
+                param_types: vec!["Str".to_string()],
+                return_type: "Str".to_string(),
+                param_constraints: vec![None],
+            }],
+            laws: vec![],
+            span: Span::new("", 0, 0, 0),
+        });
+        // Only TraitA has an impl for i64
+        env.register_impl(&ImplDef {
+            trait_name: "TraitA".to_string(),
+            target_type: "i64".to_string(),
+            method_bodies: vec![],
+            span: Span::new("", 0, 0, 0),
+        });
+        let candidates = env.get_traits_for_method("process");
+        let matched = candidates
+            .iter()
+            .find(|(tn, _)| env.find_impl(tn, "i64").is_some());
+        assert!(matched.is_some());
+        assert_eq!(matched.unwrap().0, "TraitA");
+    }
+
+    // ---- 3-c: infer_requires callee argument substitution tests ----
+
+    #[test]
+    fn test_infer_requires_substitutes_callee_params() {
+        use std::collections::HashMap;
+        let mut env = ModuleEnv::new();
+        // Register callee atom with requires: x > 0
+        env.register_atom(&Atom {
+            name: "callee".to_string(),
+            type_params: vec![],
+            where_bounds: vec![],
+            params: vec![Param {
+                name: "x".to_string(),
+                type_name: Some("i64".to_string()),
+                type_ref: None,
+                is_ref: false,
+                is_ref_mut: false,
+                fn_contract_requires: None,
+                fn_contract_ensures: None,
+            }],
+            requires: "x > 0".to_string(),
+            forall_constraints: vec![],
+            ensures: "true".to_string(),
+            body_expr: "x + 1".to_string(),
+            consumed_params: vec![],
+            resources: vec![],
+            is_async: false,
+            trust_level: TrustLevel::Verified,
+            max_unroll: None,
+            invariant: None,
+            effects: vec![],
+            return_type: None,
+            span: Span::new("", 0, 0, 0),
+            effect_pre: HashMap::new(),
+            effect_post: HashMap::new(),
+        });
+        // Caller atom that calls callee(a + b)
+        let caller = Atom {
+            name: "caller".to_string(),
+            type_params: vec![],
+            where_bounds: vec![],
+            params: vec![
+                Param {
+                    name: "a".to_string(),
+                    type_name: Some("i64".to_string()),
+                    type_ref: None,
+                    is_ref: false,
+                    is_ref_mut: false,
+                    fn_contract_requires: None,
+                    fn_contract_ensures: None,
+                },
+                Param {
+                    name: "b".to_string(),
+                    type_name: Some("i64".to_string()),
+                    type_ref: None,
+                    is_ref: false,
+                    is_ref_mut: false,
+                    fn_contract_requires: None,
+                    fn_contract_ensures: None,
+                },
+            ],
+            requires: "true".to_string(),
+            forall_constraints: vec![],
+            ensures: "true".to_string(),
+            body_expr: "callee(a + b)".to_string(),
+            consumed_params: vec![],
+            resources: vec![],
+            is_async: false,
+            trust_level: TrustLevel::Verified,
+            max_unroll: None,
+            invariant: None,
+            effects: vec![],
+            return_type: None,
+            span: Span::new("", 0, 0, 0),
+            effect_pre: HashMap::new(),
+            effect_post: HashMap::new(),
+        };
+        let inferred = infer_requires(&caller, &env);
+        // Should contain "(a + b) > 0" not "x > 0"
+        assert!(
+            inferred
+                .iter()
+                .any(|r| r.contains("a + b") && r.contains("> 0")),
+            "Expected substituted requires with 'a + b', got: {:?}",
+            inferred
+        );
+        assert!(
+            !inferred.iter().any(|r| r == "x > 0"),
+            "Should not contain raw callee param 'x > 0', got: {:?}",
+            inferred
+        );
+    }
+
+    // ---- expr_to_source_string tests ----
+
+    #[test]
+    fn test_expr_to_source_string_basic() {
+        assert_eq!(expr_to_source_string(&Expr::Number(42)), "42");
+        assert_eq!(expr_to_source_string(&Expr::Variable("x".to_string())), "x");
+        assert_eq!(
+            expr_to_source_string(&Expr::BinaryOp(
+                Box::new(Expr::Variable("a".to_string())),
+                Op::Add,
+                Box::new(Expr::Variable("b".to_string())),
+            )),
+            "(a + b)"
+        );
     }
 }

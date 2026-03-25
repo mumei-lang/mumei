@@ -1,28 +1,18 @@
 #![allow(clippy::result_large_err)]
 
-mod ast;
-mod codegen;
-#[allow(dead_code)]
-mod ffi;
-mod hir;
-mod inspect;
 mod lsp;
-#[allow(dead_code)]
-mod manifest;
-mod mir;
-mod mir_analysis;
-mod parser;
-mod proof_cert;
-mod registry;
-mod resolver;
 mod setup;
-mod verification;
 
-#[cfg(test)]
-use crate::hir::lower_atom_to_hir;
-use crate::hir::lower_atom_to_hir_with_env;
-use crate::parser::{ImportDecl, Item};
 use clap::{Parser, Subcommand};
+use mumei_core::emitter::Emitter;
+#[cfg(test)]
+use mumei_core::hir::lower_atom_to_hir;
+use mumei_core::hir::lower_atom_to_hir_with_env;
+use mumei_core::parser::{ImportDecl, Item};
+use mumei_core::{
+    ast, emitter, hir, inspect, manifest, mir, mir_analysis, parser, proof_cert, registry,
+    resolver, verification,
+};
 use std::fs;
 use std::path::Path;
 
@@ -97,6 +87,9 @@ enum Command {
         /// Output base name
         #[arg(short, long, default_value = "katana")]
         output: String,
+        /// Emit target: llvm-ir (default), c-header, or verified-json
+        #[arg(long, default_value = "llvm-ir")]
+        emit: String,
     },
     /// Z3 formal verification only (no codegen)
     Verify {
@@ -199,8 +192,24 @@ fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Some(Command::Build { input, output }) => {
-            cmd_build(&input, &output);
+        Some(Command::Build {
+            input,
+            output,
+            emit,
+        }) => {
+            let emit_target = match emit.as_str() {
+                "llvm-ir" => emitter::EmitTarget::LlvmIr,
+                "c-header" => emitter::EmitTarget::CHeader,
+                "verified-json" => emitter::EmitTarget::VerifiedJson,
+                other => {
+                    eprintln!(
+                        "\u{274c} Error: Unknown emit target '{}'. Valid values: llvm-ir, c-header, verified-json",
+                        other
+                    );
+                    std::process::exit(1);
+                }
+            };
+            cmd_build(&input, &output, &emit_target);
         }
         Some(Command::Verify {
             input,
@@ -264,7 +273,7 @@ fn main() {
         None => {
             // 後方互換: `mumei input.mm -o dist/katana` → build として実行
             if let Some(ref input) = cli.input {
-                cmd_build(input, &cli.output);
+                cmd_build(input, &cli.output, &emitter::EmitTarget::LlvmIr);
             } else {
                 eprintln!("Usage: mumei <COMMAND> or mumei <input.mm>");
                 eprintln!("  build   Verify + compile (default)");
@@ -1551,10 +1560,37 @@ fn cmd_verify_cert(cert_path: &str, input: &str) {
 }
 
 // =============================================================================
+// Emitter dispatch — routes to the correct emitter crate
+// =============================================================================
+
+fn dispatch_emit(
+    target: &emitter::EmitTarget,
+    hir_atom: &hir::HirAtom,
+    output_path: &std::path::Path,
+    module_env: &verification::ModuleEnv,
+    extern_blocks: &[parser::ExternBlock],
+) -> verification::MumeiResult<Vec<emitter::Artifact>> {
+    match target {
+        emitter::EmitTarget::LlvmIr => {
+            mumei_emit_llvm::LlvmEmitter.emit(hir_atom, output_path, module_env, extern_blocks)
+        }
+        emitter::EmitTarget::CHeader => {
+            emitter::CHeaderEmitter.emit(hir_atom, output_path, module_env, extern_blocks)
+        }
+        emitter::EmitTarget::VerifiedJson => mumei_emit_json::VerifiedJsonEmitter.emit(
+            hir_atom,
+            output_path,
+            module_env,
+            extern_blocks,
+        ),
+    }
+}
+
+// =============================================================================
 // mumei build — full pipeline (verify + codegen)
 // =============================================================================
 
-fn cmd_build(input: &str, output: &str) {
+fn cmd_build(input: &str, output: &str, emit_target: &emitter::EmitTarget) {
     check_z3_available();
     println!("🗡️  Mumei: Forging the blade (Type System 2.0 + Generics enabled)...");
 
@@ -1824,16 +1860,42 @@ fn cmd_build(input: &str, output: &str) {
                     let safe_name = qualified_name.replace("::", "__");
                     let atom_output_path = output_dir.join(format!("{}_{}", file_stem, safe_name));
                     let extern_blocks = collect_extern_blocks(&items);
-                    match codegen::compile(
+                    match dispatch_emit(
+                        emit_target,
                         &hir_atom,
                         &atom_output_path,
                         &module_env,
                         &extern_blocks,
                     ) {
-                        Ok(_) => println!(
-                            "  ⚙️  [3/3] Tempering: Done. Compiled '{}' to LLVM IR.",
-                            qualified_name
-                        ),
+                        Ok(artifacts) => {
+                            for artifact in &artifacts {
+                                let should_write = match emit_target {
+                                    emitter::EmitTarget::LlvmIr => {
+                                        artifact.kind != emitter::ArtifactKind::Source
+                                    }
+                                    _ => true,
+                                };
+                                if should_write {
+                                    if let Err(e) = std::fs::write(&artifact.name, &artifact.data) {
+                                        eprintln!(
+                                            "Failed to write artifact '{}': {}",
+                                            artifact.name.display(),
+                                            e
+                                        );
+                                        std::process::exit(1);
+                                    }
+                                }
+                            }
+                            let target_desc = match emit_target {
+                                emitter::EmitTarget::LlvmIr => "LLVM IR",
+                                emitter::EmitTarget::CHeader => "C header",
+                                emitter::EmitTarget::VerifiedJson => "Verified JSON",
+                            };
+                            println!(
+                                "  ⚙️  [3/3] Tempering: Done. Compiled '{}' to {}.",
+                                qualified_name, target_desc
+                            );
+                        }
                         Err(e) => {
                             let resolved = resolve_source_for_span(&source, &method.span);
                             let e = e.with_source(&resolved, &method.span);
@@ -1945,15 +2007,46 @@ fn cmd_build(input: &str, output: &str) {
                     }
                 }
 
-                // --- 3. Codegen (LLVM 18 + Floating Point) ---
-                // 各 Atom ごとに .ll ファイルを生成（またはモジュールを統合する拡張も可能）
+                // --- 3. Codegen / Emit ---
+                // 各 Atom ごとにターゲット形式のファイルを生成
                 let atom_output_path = output_dir.join(format!("{}_{}", file_stem, atom.name));
                 let extern_blocks = collect_extern_blocks(&items);
-                match codegen::compile(&hir_atom, &atom_output_path, &module_env, &extern_blocks) {
-                    Ok(_) => println!(
-                        "  ⚙️  [3/3] Tempering: Done. Compiled '{}' to LLVM IR.",
-                        atom.name
-                    ),
+                match dispatch_emit(
+                    emit_target,
+                    &hir_atom,
+                    &atom_output_path,
+                    &module_env,
+                    &extern_blocks,
+                ) {
+                    Ok(artifacts) => {
+                        for artifact in &artifacts {
+                            let should_write = match emit_target {
+                                emitter::EmitTarget::LlvmIr => {
+                                    artifact.kind != emitter::ArtifactKind::Source
+                                }
+                                _ => true,
+                            };
+                            if should_write {
+                                if let Err(e) = std::fs::write(&artifact.name, &artifact.data) {
+                                    eprintln!(
+                                        "Failed to write artifact '{}': {}",
+                                        artifact.name.display(),
+                                        e
+                                    );
+                                    std::process::exit(1);
+                                }
+                            }
+                        }
+                        let target_desc = match emit_target {
+                            emitter::EmitTarget::LlvmIr => "LLVM IR",
+                            emitter::EmitTarget::CHeader => "C header",
+                            emitter::EmitTarget::VerifiedJson => "Verified JSON",
+                        };
+                        println!(
+                            "  ⚙️  [3/3] Tempering: Done. Compiled '{}' to {}.",
+                            atom.name, target_desc
+                        );
+                    }
                     Err(e) => {
                         let resolved = resolve_source_for_span(&source, &atom.span);
                         let e = e.with_source(&resolved, &atom.span);
@@ -3387,6 +3480,113 @@ atom apply_no_contract(x: i64, f: atom_ref(i64) -> i64)
         assert!(
             result.is_err(),
             "apply without contract(f) should fail: result is unconstrained"
+        );
+    }
+
+    // --- Subsumption check tests ---
+
+    #[test]
+    fn test_subsumption_check_no_warning_when_implies() {
+        // Integration test: increment ensures: result == x + 1, with x >= 0
+        // this implies result >= 0. Subsumption holds, so no warning is emitted.
+        // The full verification pipeline should succeed for both atoms.
+        //
+        // NOTE: The subsumption check return value is tested directly in
+        // mumei-core/src/verification.rs::tests::test_subsumption_check_holds_with_requires.
+        let source = r#"
+atom increment(x: i64)
+    requires: x >= 0;
+    ensures: result == x + 1;
+    body: x + 1;
+
+atom apply(x: i64, f: atom_ref(i64) -> i64)
+    requires: x >= 0;
+    ensures: result >= 0;
+    contract(f): ensures: result >= 0;
+    body: call(f, x);
+
+atom test_apply()
+    requires: true;
+    ensures: result >= 0;
+    body: apply(5, atom_ref(increment));
+"#;
+        // Both apply and test_apply should verify successfully
+        assert!(
+            verify_atom_from_source(source, "apply").is_ok(),
+            "apply should verify with contract(f)"
+        );
+        assert!(
+            verify_atom_from_source(source, "test_apply").is_ok(),
+            "test_apply with atom_ref(increment) should verify (subsumption holds)"
+        );
+    }
+
+    #[test]
+    fn test_subsumption_check_warning_when_not_implies() {
+        // Integration test: negate ensures: result == 0 - x, which does NOT
+        // imply result >= 0 even under requires: x >= 0.
+        // The subsumption check emits a warning to stderr, but verification
+        // of the caller still passes because the contract is trusted
+        // (warning only, not a hard error).
+        //
+        // NOTE: The subsumption check return value (false = warning emitted)
+        // is tested directly in
+        // mumei-core/src/verification.rs::tests::test_subsumption_check_fails_without_requires.
+        let source = r#"
+atom negate(x: i64)
+    requires: x >= 0;
+    ensures: result == 0 - x;
+    body: 0 - x;
+
+atom apply(x: i64, f: atom_ref(i64) -> i64)
+    requires: x >= 0;
+    ensures: result >= 0;
+    contract(f): ensures: result >= 0;
+    body: call(f, x);
+
+atom test_apply_negate()
+    requires: true;
+    ensures: result >= 0;
+    body: apply(5, atom_ref(negate));
+"#;
+        // test_apply_negate should still verify (subsumption is a warning, not error)
+        // The compositional verification trusts the contract's ensures.
+        let result = verify_atom_from_source(source, "test_apply_negate");
+        assert!(
+            result.is_ok(),
+            "test_apply_negate should verify (subsumption warning only, not error): {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_subsumption_existing_tests_still_pass() {
+        // Regression guard: Ensure the basic call_with_contract_basic_ensures
+        // scenario still works after subsumption check integration.
+        let source = r#"
+atom add(a: i64, b: i64)
+    requires: a >= 0 && b >= 0;
+    ensures: result == a + b;
+    body: a + b;
+
+atom fold_two(a: i64, b: i64, f: atom_ref(i64, i64) -> i64)
+    requires: a >= 0 && b >= 0;
+    ensures: result >= 0;
+    contract(f): ensures: result >= 0;
+    body: call(f, a, b);
+
+atom test_fold()
+    requires: true;
+    ensures: result >= 0;
+    body: fold_two(3, 4, atom_ref(add));
+"#;
+        assert!(
+            verify_atom_from_source(source, "fold_two").is_ok(),
+            "fold_two should still verify after subsumption integration"
+        );
+        assert!(
+            verify_atom_from_source(source, "test_fold").is_ok(),
+            "test_fold with atom_ref(add) should still verify"
         );
     }
 

@@ -22,7 +22,7 @@ External tools (e.g., [mumei-agent](https://github.com/mumei-lang/mumei-agent)) 
 | `semantic_feedback` | `object` | No | Rich diagnostics (see below) |
 | `counterexample` | `object` | No | Z3 counter-example values |
 | `failure_type` | `string` | No | Failure category code |
-| `suggestion` | `string` | No | Fix suggestion text |
+| `suggestion` | `string` | No | Fix suggestion text (counterexample や unsat core を踏まえた動的な修正提案が含まれる場合がある) |
 | `span` | `object` | No | Source location (`file`, `line`, `col`, `len`) |
 | `type_definition_locations` | `array` | No | Constraint source locations |
 

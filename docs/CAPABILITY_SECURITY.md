@@ -22,7 +22,7 @@
 
 ### Supported Constraint Functions
 
-From `check_constant_constraint()` in `src/verification.rs`:
+From `check_constant_constraint()` in `mumei-core/src/verification.rs`:
 
 | Function | Semantics | Example |
 |---|---|---|

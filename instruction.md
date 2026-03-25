@@ -89,7 +89,7 @@ atom apply(x: i64, f: atom_ref(i64) -> i64)
 
 This mechanism replaces the need for `trusted` on higher-order functions like `map`, `fold_left`, and `result_map`.
 
-**Important limitation**: When calling `apply(5, atom_ref(increment))`, the verifier does **not** check that `increment`'s actual contract (`ensures: result == x + 1`) implies the declared `contract(f): ensures: result >= 0`. The caller is responsible for passing only functions that satisfy the declared contract. Passing a function that violates the contract will not be caught at the call site (the verifier trusts the declared contract unconditionally). A subsumption check may be added in a future version.
+**Subsumption warning**: When calling `apply(5, atom_ref(increment))`, the verifier now performs a subsumption check: it verifies that `increment`'s actual ensures clause, under its requires precondition, implies the declared `contract(f): ensures`. Formally: `(concrete.requires ∧ concrete.ensures) ⇒ contract.ensures`. If the implication does not hold, a **warning** is emitted to stderr (not a hard error, to maintain backward compatibility). For example, if `increment` has `requires: x >= 0` and `ensures: result == x + 1` and the contract declares `ensures: result >= 0`, no warning is emitted because `x >= 0 ∧ result == x + 1` implies `result >= 0`. However, if the concrete atom's ensures does not imply the contract's ensures (even under its precondition), a warning like `⚠️ Subsumption warning: atom_ref(foo) passed to apply.f — concrete ensures '...' may not imply contract ensures '...'` will be printed.
 
 ### 3.6 Effect-Polymorphic Higher-Order Functions
 
@@ -311,14 +311,14 @@ Improve the practicality of `task` / `task_group` introduced in PR-C.
 
 - Always run `cargo fmt` before committing.
 - When adding a new `Expr` variant, add match arms in **all** of these locations:
-  - `src/verification.rs`: `expr_to_z3`, `stmt_to_z3`, `collect_callees_expr`, `collect_callees_stmt`, `count_self_calls_expr`, `count_self_calls_stmt`, `collect_acquire_resources_expr`, `collect_acquire_resources_stmt`, `expr_has_symbolic_perform_args`, `body_has_symbolic_perform_args`, `has_acquire_in_while_expr`
-  - `src/ast.rs`: `collect_from_expr`, `collect_from_stmt`
-  - `src/hir.rs`: `collect_free_variables_expr`, `collect_free_variables_stmt`
-  - `src/codegen.rs`: `compile_hir_expr`, `compile_hir_stmt`
-  - `src/mir.rs`: `lower_expr`, `lower_stmt`
+  - `mumei-core/src/verification.rs`: `expr_to_z3`, `stmt_to_z3`, `collect_callees_expr`, `collect_callees_stmt`, `count_self_calls_expr`, `count_self_calls_stmt`, `collect_acquire_resources_expr`, `collect_acquire_resources_stmt`, `expr_has_symbolic_perform_args`, `body_has_symbolic_perform_args`, `has_acquire_in_while_expr`
+  - `mumei-core/src/ast.rs`: `collect_from_expr`, `collect_from_stmt`
+  - `mumei-core/src/hir.rs`: `collect_free_variables_expr`, `collect_free_variables_stmt`
+  - `mumei-emit-llvm/src/codegen.rs`: `compile_hir_expr`, `compile_hir_stmt`
+  - `mumei-core/src/mir.rs`: `lower_expr`, `lower_stmt`
 - When adding a new `Item` variant, add match arms in **all** of these locations:
   - `src/main.rs`: `load_and_prepare`, `cmd_check`, `cmd_build`
-  - `src/resolver.rs`: `resolve_imports_recursive`, `register_imported_items`
+  - `mumei-core/src/resolver.rs`: `resolve_imports_recursive`, `register_imported_items`
   - `src/lsp.rs`: `verify_source_for_lsp`
 - When adding `Item::EffectDef`, ensure match arms exist in all locations listed above.
 - When constructing `Atom` instances (including extern → atom conversion), always include `effects: vec![]` as default. Also include `effect_pre: std::collections::HashMap::new(), effect_post: std::collections::HashMap::new()` for modular verification fields.

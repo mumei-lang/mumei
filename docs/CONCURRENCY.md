@@ -199,7 +199,7 @@ task_group:all {
 
 ## Related Files
 
-- `src/parser.rs` — `Task`, `TaskGroup`, `JoinSemantics` definitions + parsing + tests
-- `src/verification.rs` — Z3 structured concurrency verification (symbolic Bool, join constraints)
-- `src/ast.rs` — `collect_from_expr` traverses generics within Task/TaskGroup
-- `src/codegen.rs` — Task/TaskGroup LLVM IR generation (synchronous compilation)
+- `mumei-core/src/parser/` — `Task`, `TaskGroup`, `JoinSemantics` definitions + parsing + tests
+- `mumei-core/src/verification.rs` — Z3 structured concurrency verification (symbolic Bool, join constraints)
+- `mumei-core/src/ast.rs` — `collect_from_expr` traverses generics within Task/TaskGroup
+- `mumei-emit-llvm/src/codegen.rs` — Task/TaskGroup LLVM IR generation (synchronous compilation)

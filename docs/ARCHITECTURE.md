@@ -12,26 +12,40 @@ source.mm → parse → resolve → monomorphize → lower_to_hir → verify (Z3
                                       LinearityCtx wiring (Phase 4a)
 ```
 
+## Workspace Structure (Phase 2)
+
+The repository is a Cargo workspace with 3 library crates + 1 CLI binary:
+
+| Crate | Role |
+|---|---|
+| `mumei-core` | Core library: parser, HIR, verification, MIR, emitter trait, resolver, manifest, registry, FFI |
+| `mumei-emit-llvm` | LLVM IR emitter (`LlvmEmitter` + `codegen.rs`) |
+| `mumei-emit-json` | Verified JSON metadata emitter (`VerifiedJsonEmitter`, `--emit verified-json`) |
+| `mumei` (root) | CLI binary (`main.rs`, `lsp.rs`, `setup.rs`) |
+
 ## Source Files
 
 | File | Role |
 |---|---|
-| `src/parser/` | Modular recursive descent parser with proper lexer |
-| `src/parser/mod.rs` | Public API (`parse_module`, `parse_expression`, `parse_body_expr`, `parse_atom`, `tokenize`), `ParseContext` struct |
-| `src/parser/token.rs` | `Token` enum (60+ variants), `SpannedToken` with line/col/len tracking |
-| `src/parser/lexer.rs` | `Lexer` struct — converts source string to `Vec<SpannedToken>` with span info |
-| `src/parser/ast.rs` | All AST type definitions (`Expr`, `Stmt`, `Item`, `Atom`, `StructDef`, `EnumDef`, etc.) |
-| `src/parser/expr.rs` | Expression/statement parsing with Pratt parser (operator precedence via binding power table) |
-| `src/parser/item.rs` | Top-level item parsing — fully migrated to recursive descent (no regex), `contract()` clause parsing for higher-order function parameters |
-| `src/mir.rs` | MIR (Mid-level IR) definitions — CFG-based BasicBlocks, three-address code, basic HIR → MIR lowering |
-| `src/mir_analysis.rs` | MIR dataflow analyses — liveness (backward), drop insertion, move analysis (forward), ConflictingMerge detection |
-| `src/parser/pattern.rs` | Pattern parsing for match arms |
-| `src/ast.rs` | `TypeRef`, `Monomorphizer` — generic type expansion engine |
-| `src/resolver.rs` | Import resolution, circular detection, prelude auto-load, incremental build cache |
-| `src/verification.rs` | Z3 verification, `ModuleEnv`, `LinearityCtx`, law expansion, equality propagation, resource hierarchy, BMC, async recursion depth, inductive invariant, trust boundary, `call_with_contract` (Phase B higher-order function verification) |
-| `src/codegen.rs` | LLVM IR generation — `resolve_return_type()`, Pattern Matrix, StructType, malloc/free, nested extract_value |
-| `src/hir.rs` | HIR (High-level IR) definitions, AST → HIR lowering, `HirEffectSet` on `HirAtom`/`HirExpr::Call`/`HirExpr::Perform` |
-| `src/main.rs` | CLI orchestrator — `build`/`verify`/`check`/`init` with incremental cache |
+| `mumei-core/src/parser/` | Modular recursive descent parser with proper lexer |
+| `mumei-core/src/parser/mod.rs` | Public API (`parse_module`, `parse_expression`, `parse_body_expr`, `parse_atom`, `tokenize`), `ParseContext` struct |
+| `mumei-core/src/parser/token.rs` | `Token` enum (60+ variants), `SpannedToken` with line/col/len tracking |
+| `mumei-core/src/parser/lexer.rs` | `Lexer` struct — converts source string to `Vec<SpannedToken>` with span info |
+| `mumei-core/src/parser/ast.rs` | All AST type definitions (`Expr`, `Stmt`, `Item`, `Atom`, `StructDef`, `EnumDef`, etc.) |
+| `mumei-core/src/parser/expr.rs` | Expression/statement parsing with Pratt parser (operator precedence via binding power table) |
+| `mumei-core/src/parser/item.rs` | Top-level item parsing — fully migrated to recursive descent (no regex), `contract()` clause parsing for higher-order function parameters |
+| `mumei-core/src/mir.rs` | MIR (Mid-level IR) definitions — CFG-based BasicBlocks, three-address code, basic HIR → MIR lowering |
+| `mumei-core/src/mir_analysis.rs` | MIR dataflow analyses — liveness (backward), drop insertion, move analysis (forward), ConflictingMerge detection |
+| `mumei-core/src/parser/pattern.rs` | Pattern parsing for match arms |
+| `mumei-core/src/ast.rs` | `TypeRef`, `Monomorphizer` — generic type expansion engine |
+| `mumei-core/src/resolver.rs` | Import resolution, circular detection, prelude auto-load, incremental build cache |
+| `mumei-core/src/verification.rs` | Z3 verification, `ModuleEnv`, `LinearityCtx`, law expansion, equality propagation, resource hierarchy, BMC, async recursion depth, inductive invariant, trust boundary, `call_with_contract` (Phase B higher-order function verification) |
+| `mumei-emit-llvm/src/codegen.rs` | LLVM IR generation — `resolve_return_type()`, Pattern Matrix, StructType, malloc/free, nested extract_value |
+| `mumei-core/src/hir.rs` | HIR (High-level IR) definitions, AST → HIR lowering, `HirEffectSet` on `HirAtom`/`HirExpr::Call`/`HirExpr::Perform` |
+| `mumei-core/src/emitter.rs` | `Emitter` trait, `Artifact`, `ArtifactKind`, `EmitTarget`, `CHeaderEmitter` |
+| `mumei-emit-llvm/src/lib.rs` | `LlvmEmitter` — wraps `codegen::compile()` |
+| `mumei-emit-json/src/lib.rs` | `VerifiedJsonEmitter` — produces `.verified.json` metadata |
+| `src/main.rs` | CLI orchestrator — `build`/`verify`/`check`/`init` with incremental cache, `dispatch_emit()` |
 
 ---
 
