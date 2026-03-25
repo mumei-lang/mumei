@@ -4185,6 +4185,9 @@ fn collect_callees_with_args_expr(expr: &Expr) -> Vec<(String, Vec<Expr>)> {
             }
         }
         Expr::CallRef { callee, args } => {
+            if let Expr::AtomRef { name } = callee.as_ref() {
+                callees.push((name.clone(), args.clone()));
+            }
             callees.extend(collect_callees_with_args_expr(callee));
             for arg in args {
                 callees.extend(collect_callees_with_args_expr(arg));
