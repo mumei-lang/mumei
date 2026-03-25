@@ -1598,7 +1598,7 @@ struct VCtx<'a> {
 // =============================================================================
 //
 // NOTE (Plan 19 — Phase 4c complete): The primary ownership/move analysis has
-// been migrated to MIR-based MoveAnalysis (src/mir_analysis.rs).  Phase 1h in
+// been migrated to MIR-based MoveAnalysis (mumei-core/src/mir_analysis.rs).  Phase 1h in
 // verify() now runs forward dataflow move analysis on the MIR CFG and reports
 // UseAfterMove, DoubleMove, and ConflictingMerge as hard errors.
 //
@@ -1619,7 +1619,7 @@ struct VCtx<'a> {
 ///
 /// NOTE: Primary move analysis is now handled by MIR MoveAnalysis (Plan 19).
 /// This struct is kept for Z3-level borrow/consume tracking during symbolic
-/// execution. See src/mir_analysis.rs for the MIR-based replacement.
+/// execution. See mumei-core/src/mir_analysis.rs for the MIR-based replacement.
 #[derive(Debug, Clone, Default)]
 pub struct LinearityCtx {
     /// 変数名 → 生存状態（true = alive, false = consumed）

@@ -13,7 +13,7 @@
 // MIR (Mid-level IR) — CFG ベースの中間表現
 // =============================================================================
 // Phase 4b: MIR data structures and basic HIR → MIR lowering are now defined
-// in src/mir.rs. The lowering covers:
+// in mumei-core/src/mir.rs. The lowering covers:
 //   - Let / Assign → MirStatement::Assign + StorageLive
 //   - BinaryOp → flattened temporaries + Rvalue::BinaryOp
 //   - IfThenElse → 3+ BasicBlocks with SwitchInt terminator
