@@ -3460,8 +3460,12 @@ atom apply_no_contract(x: i64, f: atom_ref(i64) -> i64)
 
     #[test]
     fn test_subsumption_check_no_warning_when_implies() {
-        // increment ensures: result == x + 1, with x >= 0 this implies result >= 0
-        // So no warning should be emitted and verification should pass.
+        // Integration test: increment ensures: result == x + 1, with x >= 0
+        // this implies result >= 0. Subsumption holds, so no warning is emitted.
+        // The full verification pipeline should succeed for both atoms.
+        //
+        // NOTE: The subsumption check return value is tested directly in
+        // src/verification.rs::tests::test_subsumption_check_holds_with_requires.
         let source = r#"
 atom increment(x: i64)
     requires: x >= 0;
@@ -3492,10 +3496,15 @@ atom test_apply()
 
     #[test]
     fn test_subsumption_check_warning_when_not_implies() {
-        // negate ensures: result == 0 - x, which does NOT imply result >= 0
-        // when x > 0. The subsumption check should emit a warning to stderr.
-        // Verification of the caller still passes because the contract is
-        // trusted (warning only, not a hard error).
+        // Integration test: negate ensures: result == 0 - x, which does NOT
+        // imply result >= 0 even under requires: x >= 0.
+        // The subsumption check emits a warning to stderr, but verification
+        // of the caller still passes because the contract is trusted
+        // (warning only, not a hard error).
+        //
+        // NOTE: The subsumption check return value (false = warning emitted)
+        // is tested directly in
+        // src/verification.rs::tests::test_subsumption_check_fails_without_requires.
         let source = r#"
 atom negate(x: i64)
     requires: x >= 0;
@@ -3525,8 +3534,8 @@ atom test_apply_negate()
 
     #[test]
     fn test_subsumption_existing_tests_still_pass() {
-        // Ensure the basic call_with_contract_basic_ensures scenario still works
-        // after subsumption check integration (regression guard).
+        // Regression guard: Ensure the basic call_with_contract_basic_ensures
+        // scenario still works after subsumption check integration.
         let source = r#"
 atom add(a: i64, b: i64)
     requires: a >= 0 && b >= 0;
