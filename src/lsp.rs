@@ -11,8 +11,8 @@
 //! - `textDocument/definition` — 定義ジャンプ
 //! - `textDocument/publishDiagnostics` — Z3 検証エラーのリアルタイム表示
 //! - `shutdown` / `exit`
-use crate::parser;
-use crate::verification;
+use mumei_core::parser;
+use mumei_core::verification;
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
 // =============================================================================
@@ -315,7 +315,7 @@ fn verify_source_for_lsp(
     path: &std::path::Path,
     source: &str,
 ) -> Result<(), verification::MumeiError> {
-    let items = crate::parser::parse_module(source);
+    let items = parser::parse_module(source);
     if items.is_empty() {
         return Ok(());
     }
@@ -326,29 +326,32 @@ fn verify_source_for_lsp(
 
     // mumei.toml を探してプロジェクトルートを決定
     let base_dir = path.parent().unwrap_or(std::path::Path::new("."));
-    let _ = crate::resolver::resolve_prelude(base_dir, &mut module_env);
+    let _ = mumei_core::resolver::resolve_prelude(base_dir, &mut module_env);
 
     // mumei.toml があれば依存パッケージも解決（ジャンプ先の定義が利用可能になる）
-    if let Some((proj_dir, manifest)) = crate::manifest::find_and_load() {
-        let _ =
-            crate::resolver::resolve_manifest_dependencies(&manifest, &proj_dir, &mut module_env);
+    if let Some((proj_dir, manifest)) = mumei_core::manifest::find_and_load() {
+        let _ = mumei_core::resolver::resolve_manifest_dependencies(
+            &manifest,
+            &proj_dir,
+            &mut module_env,
+        );
     }
 
-    let _ = crate::resolver::resolve_imports(&items, base_dir, &mut module_env);
+    let _ = mumei_core::resolver::resolve_imports(&items, base_dir, &mut module_env);
 
     for item in &items {
         match item {
-            crate::parser::Item::TypeDef(t) => module_env.register_type(t),
-            crate::parser::Item::StructDef(s) => module_env.register_struct(s),
-            crate::parser::Item::EnumDef(e) => module_env.register_enum(e),
-            crate::parser::Item::Atom(a) => module_env.register_atom(a),
-            crate::parser::Item::TraitDef(t) => module_env.register_trait(t),
-            crate::parser::Item::ImplDef(i) => module_env.register_impl(i),
-            crate::parser::Item::ResourceDef(r) => module_env.register_resource(r),
-            crate::parser::Item::Import(_) => {}
-            crate::parser::Item::ExternBlock(_) => {}
-            crate::parser::Item::EffectDef(e) => module_env.register_effect(e),
-            crate::parser::Item::ImplBlock(ib) => {
+            parser::Item::TypeDef(t) => module_env.register_type(t),
+            parser::Item::StructDef(s) => module_env.register_struct(s),
+            parser::Item::EnumDef(e) => module_env.register_enum(e),
+            parser::Item::Atom(a) => module_env.register_atom(a),
+            parser::Item::TraitDef(t) => module_env.register_trait(t),
+            parser::Item::ImplDef(i) => module_env.register_impl(i),
+            parser::Item::ResourceDef(r) => module_env.register_resource(r),
+            parser::Item::Import(_) => {}
+            parser::Item::ExternBlock(_) => {}
+            parser::Item::EffectDef(e) => module_env.register_effect(e),
+            parser::Item::ImplBlock(ib) => {
                 for method in &ib.methods {
                     let mut qualified = method.clone();
                     qualified.name = format!("{}::{}", ib.struct_name, method.name);
@@ -361,15 +364,15 @@ fn verify_source_for_lsp(
     let output_dir = std::path::Path::new(".");
     for item in &items {
         match item {
-            crate::parser::Item::Atom(atom) => {
+            parser::Item::Atom(atom) => {
                 if module_env.is_verified(&atom.name) {
                     continue;
                 }
-                let hir_atom = crate::hir::lower_atom_to_hir(atom);
+                let hir_atom = mumei_core::hir::lower_atom_to_hir(atom);
                 verification::verify_with_config(&hir_atom, output_dir, &module_env, 5000, 3)?;
                 module_env.mark_verified(&atom.name);
             }
-            crate::parser::Item::ImplBlock(ib) => {
+            parser::Item::ImplBlock(ib) => {
                 for method in &ib.methods {
                     let qualified_name = format!("{}::{}", ib.struct_name, method.name);
                     if module_env.is_verified(&qualified_name) {
@@ -377,7 +380,7 @@ fn verify_source_for_lsp(
                     }
                     let mut qualified_method = method.clone();
                     qualified_method.name = qualified_name.clone();
-                    let hir_atom = crate::hir::lower_atom_to_hir(&qualified_method);
+                    let hir_atom = mumei_core::hir::lower_atom_to_hir(&qualified_method);
                     verification::verify_with_config(&hir_atom, output_dir, &module_env, 5000, 3)?;
                     module_env.mark_verified(&qualified_name);
                 }
@@ -471,7 +474,7 @@ fn byte_offset_to_line_col(source: &str, byte_offset: usize) -> (usize, usize) {
 
 /// Hover 用: 指定行付近の atom を探し、requires/ensures を markdown で返す
 fn build_hover(source: &str, line: usize) -> Option<String> {
-    let items = crate::parser::parse_module(source);
+    let items = parser::parse_module(source);
     let lines: Vec<&str> = source.lines().collect();
     let target_line = lines.get(line).copied().unwrap_or("");
 
@@ -488,7 +491,7 @@ fn build_hover(source: &str, line: usize) -> Option<String> {
     // 2) パース済み items から契約を拾う
     if let Some(name) = atom_name {
         for it in &items {
-            if let crate::parser::Item::Atom(a) = it {
+            if let parser::Item::Atom(a) = it {
                 if a.name == name {
                     let mut md = format!(
                         "### atom {}\n\n**requires**:\n```\n{}\n```\n\n**ensures**:\n```\n{}\n```",

@@ -1,6 +1,3 @@
-use crate::hir::{HirAtom, HirExpr, HirStmt};
-use crate::parser::{Op, Pattern};
-use crate::verification::{ModuleEnv, MumeiError, MumeiResult};
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Module;
@@ -9,6 +6,9 @@ use inkwell::values::{AnyValue, BasicMetadataValueEnum, BasicValueEnum, Function
 use inkwell::AddressSpace;
 use inkwell::FloatPredicate;
 use inkwell::IntPredicate;
+use mumei_core::hir::{HirAtom, HirExpr, HirStmt};
+use mumei_core::parser::{Op, Pattern};
+use mumei_core::verification::{ModuleEnv, MumeiError, MumeiResult};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -36,7 +36,7 @@ fn array_struct_type(context: &Context) -> inkwell::types::StructType<'_> {
 /// appropriate LLVM type (f64_type, ptr_type, etc.) for each payload slot.
 fn enum_llvm_type<'a>(
     context: &'a Context,
-    enum_def: &crate::parser::EnumDef,
+    enum_def: &mumei_core::parser::EnumDef,
     module_env: Option<&ModuleEnv>,
 ) -> inkwell::types::StructType<'a> {
     let max_fields = enum_def
@@ -113,7 +113,7 @@ fn resolve_param_type<'a>(
 pub fn declare_extern_functions<'ctx>(
     context: &'ctx Context,
     module: &Module<'ctx>,
-    extern_blocks: &[crate::parser::ExternBlock],
+    extern_blocks: &[mumei_core::parser::ExternBlock],
     module_env: &ModuleEnv,
 ) {
     for eb in extern_blocks {
@@ -152,7 +152,7 @@ pub fn declare_extern_functions<'ctx>(
 /// is f64, assume f64 return (backward compatible with pre-Plan 18 behavior).
 fn resolve_return_type<'a>(
     context: &'a Context,
-    atom: &crate::parser::Atom,
+    atom: &mumei_core::parser::Atom,
     module_env: &ModuleEnv,
 ) -> inkwell::types::BasicTypeEnum<'a> {
     if let Some(ref ret_type) = atom.return_type {
@@ -189,7 +189,7 @@ pub fn compile(
     hir_atom: &HirAtom,
     output_path: &Path,
     module_env: &ModuleEnv,
-    extern_blocks: &[crate::parser::ExternBlock],
+    extern_blocks: &[mumei_core::parser::ExternBlock],
 ) -> MumeiResult<()> {
     let atom = &hir_atom.atom;
     let context = Context::create();

@@ -1,10 +1,11 @@
 // =============================================================================
-// Emitter Plugin Architecture — Phase 1
+// Emitter Plugin Architecture — Phase 2
 // =============================================================================
-// Defines the `Emitter` trait and enum-based static dispatch for code generation
-// backends. Phase 1 includes:
-//   - `LlvmEmitter`: wraps existing `codegen::compile()` (LLVM IR backend)
+// Defines the `Emitter` trait and core types for code generation backends.
+// Phase 2: workspace split with pub types for external emitter crates.
 //   - `CHeaderEmitter`: generates `.h` header files from verified `HirAtom`
+//   - `LlvmEmitter`: moved to `mumei-emit-llvm` crate
+//   - `VerifiedJsonEmitter`: moved to `mumei-emit-json` crate
 //
 // See docs/CROSS_PROJECT_ROADMAP.md "Emitter Plugin Architecture" section for
 // the full 3-phase plan.
@@ -21,9 +22,8 @@ use std::path::Path;
 
 /// Classification of emitted artifacts.
 #[derive(Clone, Debug, PartialEq, Eq)]
-// NOTE: Binary variant is reserved for future native binary output (Phase 2+); not yet produced by any emitter
-#[allow(dead_code)]
-pub(crate) enum ArtifactKind {
+pub enum ArtifactKind {
+    /// Reserved for future native binary output
     Binary,
     Source,
     Header,
@@ -31,7 +31,7 @@ pub(crate) enum ArtifactKind {
 
 /// A single output artifact produced by an emitter.
 #[derive(Clone, Debug)]
-pub(crate) struct Artifact {
+pub struct Artifact {
     pub name: std::path::PathBuf,
     pub data: Vec<u8>,
     pub kind: ArtifactKind,
@@ -40,7 +40,7 @@ pub(crate) struct Artifact {
 /// Trait for code generation backends (emitter plugins).
 /// Each emitter receives a verified HirAtom and produces output in its target format.
 /// Returns a list of `Artifact`s; the caller is responsible for persisting them.
-pub(crate) trait Emitter {
+pub trait Emitter {
     fn emit(
         &self,
         hir_atom: &HirAtom,
@@ -52,45 +52,17 @@ pub(crate) trait Emitter {
 
 /// Available emit targets, selected via --emit CLI flag.
 #[derive(Clone, Debug, Default)]
-pub(crate) enum EmitTarget {
+pub enum EmitTarget {
     #[default]
     LlvmIr,
     CHeader,
+    VerifiedJson,
 }
 
-pub(crate) struct LlvmEmitter;
-
-impl Emitter for LlvmEmitter {
-    fn emit(
-        &self,
-        hir_atom: &HirAtom,
-        output_path: &Path,
-        module_env: &ModuleEnv,
-        extern_blocks: &[ExternBlock],
-    ) -> MumeiResult<Vec<Artifact>> {
-        // Phase 1: codegen::compile() still writes the .ll file internally.
-        // We read the generated file back as an Artifact.
-        crate::codegen::compile(hir_atom, output_path, module_env, extern_blocks)?;
-        let ll_path = output_path.with_extension("ll");
-        let data = std::fs::read(&ll_path).map_err(|e| {
-            crate::verification::MumeiError::codegen(format!(
-                "Failed to read generated LLVM IR '{}': {}",
-                ll_path.display(),
-                e
-            ))
-        })?;
-        Ok(vec![Artifact {
-            name: ll_path,
-            data,
-            kind: ArtifactKind::Source,
-        }])
-    }
-}
-
-pub(crate) struct CHeaderEmitter;
+pub struct CHeaderEmitter;
 
 /// Map a mumei type name to its C equivalent.
-fn mumei_type_to_c(type_name: &str) -> &str {
+pub fn mumei_type_to_c(type_name: &str) -> &str {
     match type_name {
         "i64" => "int64_t",
         "i32" => "int32_t",
@@ -106,7 +78,7 @@ fn mumei_type_to_c(type_name: &str) -> &str {
 }
 
 /// Map a mumei return type to its C equivalent, defaulting to int64_t.
-fn mumei_return_type_to_c(type_name: Option<&str>, module_env: &ModuleEnv) -> String {
+pub fn mumei_return_type_to_c(type_name: Option<&str>, module_env: &ModuleEnv) -> String {
     match type_name {
         Some(name) => {
             let base = module_env.resolve_base_type(name);
@@ -209,23 +181,6 @@ impl Emitter for CHeaderEmitter {
             data: content.into_bytes(),
             kind: ArtifactKind::Header,
         }])
-    }
-}
-
-/// Dispatch to the appropriate emitter based on target.
-/// Returns a list of artifacts; the caller is responsible for writing them to disk.
-pub(crate) fn emit(
-    target: &EmitTarget,
-    hir_atom: &HirAtom,
-    output_path: &Path,
-    module_env: &ModuleEnv,
-    extern_blocks: &[ExternBlock],
-) -> MumeiResult<Vec<Artifact>> {
-    match target {
-        EmitTarget::LlvmIr => LlvmEmitter.emit(hir_atom, output_path, module_env, extern_blocks),
-        EmitTarget::CHeader => {
-            CHeaderEmitter.emit(hir_atom, output_path, module_env, extern_blocks)
-        }
     }
 }
 

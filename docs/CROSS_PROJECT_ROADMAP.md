@@ -153,12 +153,13 @@ mumei のコード生成バックエンドをプラグイン化し、LLVM IR 以
 - ✅ `CHeaderEmitter` の Doxygen 形式強化: `/* requires: ... */` → `/** @pre ... */`, `/* ensures: ... */` → `/** @post ... */`, `@brief` コメント自動生成
 - ✅ 型マッピング拡充: `i32` → `int32_t`, `u32` → `uint32_t`, `f32` → `float`
 
-### Phase 2 (Future — 3+ emitters exist 時)
+### Phase 2 (Future — 3+ emitters exist 時) ✅ Implemented
 
-- `mumei-core` 共有クレートを抽出: `HirAtom`, `ModuleEnv`, `Emitter` trait, 関連型を含む
-- リポジトリを Cargo ワークスペース構造に変換 (`mumei-core`, `mumei-emit-llvm`, `mumei-cli`)
-- `Emitter` trait とコア型を `pub` にし、外部クレートがエミッターを実装可能にする
-- 外部プラグインリポジトリ (例: `mumei-emit-wasm`) が可能になる
+- ✅ `mumei-core` 共有クレートを抽出: `HirAtom`, `ModuleEnv`, `Emitter` trait, 関連型を含む
+- ✅ リポジトリを Cargo ワークスペース構造に変換 (`mumei-core`, `mumei-emit-llvm`, `mumei-cli`)
+- ✅ `Emitter` trait とコア型を `pub` にし、外部クレートがエミッターを実装可能にする
+- ✅ 外部プラグインリポジトリ (例: `mumei-emit-wasm`) が可能になる
+- ✅ `VerifiedJsonEmitter` を第3のエミッターとして追加 (`--emit verified-json`)
 
 ### Phase 3 (Future — ecosystem growth)
 
