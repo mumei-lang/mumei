@@ -1866,6 +1866,10 @@ impl ModuleEnv {
 
     pub fn register_trait(&mut self, trait_def: &TraitDef) {
         // メソッド→トレイト逆引きインデックスを構築
+        // 再登録時は旧エントリを除去してから追加（冪等性を維持）
+        for entries in self.method_trait_index.values_mut() {
+            entries.retain(|(tn, _)| tn != &trait_def.name);
+        }
         for (idx, method) in trait_def.methods.iter().enumerate() {
             self.method_trait_index
                 .entry(method.name.clone())
@@ -4716,15 +4720,26 @@ fn infer_requires(atom: &Atom, module_env: &ModuleEnv) -> Vec<String> {
             if callee_atom.requires != "true" && !callee_atom.requires.is_empty() {
                 let mut substituted_req = callee_atom.requires.clone();
                 // callee の仮引数名と呼び出し引数を zip して置換
-                for (param, arg_expr) in callee_atom.params.iter().zip(call_args.iter()) {
-                    let arg_str = expr_to_source_string(arg_expr);
-                    substituted_req = replace_constraint_placeholder(&substituted_req, &arg_str);
-                    // パラメータ名が "v" 以外の場合もワード境界置換
+                // 同時置換: まずパラメータ名をユニークなプレースホルダに置換し、
+                // 次にプレースホルダを引数式に置換する。
+                // これにより逐次置換の衝突（例: a→b, b→a で a>b が a>a になる）を防ぐ。
+                // First pass: param names → unique placeholders
+                for (i, param) in callee_atom.params.iter().enumerate() {
                     let param_re =
-                        regex::Regex::new(&format!(r"\b{}\b", regex::escape(&param.name))).unwrap();
+                        regex::Regex::new(&format!(r"\b{}\b", regex::escape(&param.name)))
+                            .unwrap();
                     substituted_req = param_re
-                        .replace_all(&substituted_req, arg_str.as_str())
+                        .replace_all(
+                            &substituted_req,
+                            regex::NoExpand(&format!("__PARAM_{}__", i)),
+                        )
                         .to_string();
+                }
+                // Second pass: placeholders → argument expressions
+                for (i, arg_expr) in call_args.iter().enumerate() {
+                    let arg_str = expr_to_source_string(arg_expr);
+                    substituted_req = substituted_req
+                        .replace(&format!("__PARAM_{}__", i), &arg_str);
                 }
                 if seen.insert(substituted_req.clone()) {
                     requires.push(substituted_req);
