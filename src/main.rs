@@ -1,29 +1,18 @@
 #![allow(clippy::result_large_err)]
 
-mod ast;
-mod codegen;
-mod emitter;
-#[allow(dead_code)]
-mod ffi;
-mod hir;
-mod inspect;
 mod lsp;
-#[allow(dead_code)]
-mod manifest;
-mod mir;
-mod mir_analysis;
-mod parser;
-mod proof_cert;
-mod registry;
-mod resolver;
 mod setup;
-mod verification;
 
-#[cfg(test)]
-use crate::hir::lower_atom_to_hir;
-use crate::hir::lower_atom_to_hir_with_env;
-use crate::parser::{ImportDecl, Item};
 use clap::{Parser, Subcommand};
+use mumei_core::emitter::Emitter;
+#[cfg(test)]
+use mumei_core::hir::lower_atom_to_hir;
+use mumei_core::hir::lower_atom_to_hir_with_env;
+use mumei_core::parser::{ImportDecl, Item};
+use mumei_core::{
+    ast, emitter, hir, inspect, manifest, mir, mir_analysis, parser, proof_cert, registry,
+    resolver, verification,
+};
 use std::fs;
 use std::path::Path;
 
@@ -98,7 +87,7 @@ enum Command {
         /// Output base name
         #[arg(short, long, default_value = "katana")]
         output: String,
-        /// Emit target: llvm-ir (default) or c-header
+        /// Emit target: llvm-ir (default), c-header, or verified-json
         #[arg(long, default_value = "llvm-ir")]
         emit: String,
     },
@@ -211,9 +200,10 @@ fn main() {
             let emit_target = match emit.as_str() {
                 "llvm-ir" => emitter::EmitTarget::LlvmIr,
                 "c-header" => emitter::EmitTarget::CHeader,
+                "verified-json" => emitter::EmitTarget::VerifiedJson,
                 other => {
                     eprintln!(
-                        "\u{274c} Error: Unknown emit target '{}'. Valid values: llvm-ir, c-header",
+                        "\u{274c} Error: Unknown emit target '{}'. Valid values: llvm-ir, c-header, verified-json",
                         other
                     );
                     std::process::exit(1);
@@ -1570,6 +1560,33 @@ fn cmd_verify_cert(cert_path: &str, input: &str) {
 }
 
 // =============================================================================
+// Emitter dispatch — routes to the correct emitter crate
+// =============================================================================
+
+fn dispatch_emit(
+    target: &emitter::EmitTarget,
+    hir_atom: &hir::HirAtom,
+    output_path: &std::path::Path,
+    module_env: &verification::ModuleEnv,
+    extern_blocks: &[parser::ExternBlock],
+) -> verification::MumeiResult<Vec<emitter::Artifact>> {
+    match target {
+        emitter::EmitTarget::LlvmIr => {
+            mumei_emit_llvm::LlvmEmitter.emit(hir_atom, output_path, module_env, extern_blocks)
+        }
+        emitter::EmitTarget::CHeader => {
+            emitter::CHeaderEmitter.emit(hir_atom, output_path, module_env, extern_blocks)
+        }
+        emitter::EmitTarget::VerifiedJson => mumei_emit_json::VerifiedJsonEmitter.emit(
+            hir_atom,
+            output_path,
+            module_env,
+            extern_blocks,
+        ),
+    }
+}
+
+// =============================================================================
 // mumei build — full pipeline (verify + codegen)
 // =============================================================================
 
@@ -1843,7 +1860,7 @@ fn cmd_build(input: &str, output: &str, emit_target: &emitter::EmitTarget) {
                     let safe_name = qualified_name.replace("::", "__");
                     let atom_output_path = output_dir.join(format!("{}_{}", file_stem, safe_name));
                     let extern_blocks = collect_extern_blocks(&items);
-                    match emitter::emit(
+                    match dispatch_emit(
                         emit_target,
                         &hir_atom,
                         &atom_output_path,
@@ -1852,9 +1869,13 @@ fn cmd_build(input: &str, output: &str, emit_target: &emitter::EmitTarget) {
                     ) {
                         Ok(artifacts) => {
                             for artifact in &artifacts {
-                                // LlvmEmitter already writes the .ll file internally (Phase 1),
-                                // so we only write non-LLVM artifacts here.
-                                if artifact.kind != emitter::ArtifactKind::Source {
+                                let should_write = match emit_target {
+                                    emitter::EmitTarget::LlvmIr => {
+                                        artifact.kind != emitter::ArtifactKind::Source
+                                    }
+                                    _ => true,
+                                };
+                                if should_write {
                                     if let Err(e) = std::fs::write(&artifact.name, &artifact.data) {
                                         eprintln!(
                                             "Failed to write artifact '{}': {}",
@@ -1868,6 +1889,7 @@ fn cmd_build(input: &str, output: &str, emit_target: &emitter::EmitTarget) {
                             let target_desc = match emit_target {
                                 emitter::EmitTarget::LlvmIr => "LLVM IR",
                                 emitter::EmitTarget::CHeader => "C header",
+                                emitter::EmitTarget::VerifiedJson => "Verified JSON",
                             };
                             println!(
                                 "  ⚙️  [3/3] Tempering: Done. Compiled '{}' to {}.",
@@ -1989,7 +2011,7 @@ fn cmd_build(input: &str, output: &str, emit_target: &emitter::EmitTarget) {
                 // 各 Atom ごとにターゲット形式のファイルを生成
                 let atom_output_path = output_dir.join(format!("{}_{}", file_stem, atom.name));
                 let extern_blocks = collect_extern_blocks(&items);
-                match emitter::emit(
+                match dispatch_emit(
                     emit_target,
                     &hir_atom,
                     &atom_output_path,
@@ -1998,9 +2020,13 @@ fn cmd_build(input: &str, output: &str, emit_target: &emitter::EmitTarget) {
                 ) {
                     Ok(artifacts) => {
                         for artifact in &artifacts {
-                            // LlvmEmitter already writes the .ll file internally (Phase 1),
-                            // so we only write non-LLVM artifacts here.
-                            if artifact.kind != emitter::ArtifactKind::Source {
+                            let should_write = match emit_target {
+                                emitter::EmitTarget::LlvmIr => {
+                                    artifact.kind != emitter::ArtifactKind::Source
+                                }
+                                _ => true,
+                            };
+                            if should_write {
                                 if let Err(e) = std::fs::write(&artifact.name, &artifact.data) {
                                     eprintln!(
                                         "Failed to write artifact '{}': {}",
@@ -2014,6 +2040,7 @@ fn cmd_build(input: &str, output: &str, emit_target: &emitter::EmitTarget) {
                         let target_desc = match emit_target {
                             emitter::EmitTarget::LlvmIr => "LLVM IR",
                             emitter::EmitTarget::CHeader => "C header",
+                            emitter::EmitTarget::VerifiedJson => "Verified JSON",
                         };
                         println!(
                             "  ⚙️  [3/3] Tempering: Done. Compiled '{}' to {}.",
@@ -3465,7 +3492,7 @@ atom apply_no_contract(x: i64, f: atom_ref(i64) -> i64)
         // The full verification pipeline should succeed for both atoms.
         //
         // NOTE: The subsumption check return value is tested directly in
-        // src/verification.rs::tests::test_subsumption_check_holds_with_requires.
+        // mumei-core/src/verification.rs::tests::test_subsumption_check_holds_with_requires.
         let source = r#"
 atom increment(x: i64)
     requires: x >= 0;
@@ -3504,7 +3531,7 @@ atom test_apply()
         //
         // NOTE: The subsumption check return value (false = warning emitted)
         // is tested directly in
-        // src/verification.rs::tests::test_subsumption_check_fails_without_requires.
+        // mumei-core/src/verification.rs::tests::test_subsumption_check_fails_without_requires.
         let source = r#"
 atom negate(x: i64)
     requires: x >= 0;

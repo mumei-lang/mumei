@@ -311,14 +311,14 @@ Improve the practicality of `task` / `task_group` introduced in PR-C.
 
 - Always run `cargo fmt` before committing.
 - When adding a new `Expr` variant, add match arms in **all** of these locations:
-  - `src/verification.rs`: `expr_to_z3`, `stmt_to_z3`, `collect_callees_expr`, `collect_callees_stmt`, `count_self_calls_expr`, `count_self_calls_stmt`, `collect_acquire_resources_expr`, `collect_acquire_resources_stmt`, `expr_has_symbolic_perform_args`, `body_has_symbolic_perform_args`, `has_acquire_in_while_expr`
-  - `src/ast.rs`: `collect_from_expr`, `collect_from_stmt`
-  - `src/hir.rs`: `collect_free_variables_expr`, `collect_free_variables_stmt`
-  - `src/codegen.rs`: `compile_hir_expr`, `compile_hir_stmt`
-  - `src/mir.rs`: `lower_expr`, `lower_stmt`
+  - `mumei-core/src/verification.rs`: `expr_to_z3`, `stmt_to_z3`, `collect_callees_expr`, `collect_callees_stmt`, `count_self_calls_expr`, `count_self_calls_stmt`, `collect_acquire_resources_expr`, `collect_acquire_resources_stmt`, `expr_has_symbolic_perform_args`, `body_has_symbolic_perform_args`, `has_acquire_in_while_expr`
+  - `mumei-core/src/ast.rs`: `collect_from_expr`, `collect_from_stmt`
+  - `mumei-core/src/hir.rs`: `collect_free_variables_expr`, `collect_free_variables_stmt`
+  - `mumei-emit-llvm/src/codegen.rs`: `compile_hir_expr`, `compile_hir_stmt`
+  - `mumei-core/src/mir.rs`: `lower_expr`, `lower_stmt`
 - When adding a new `Item` variant, add match arms in **all** of these locations:
   - `src/main.rs`: `load_and_prepare`, `cmd_check`, `cmd_build`
-  - `src/resolver.rs`: `resolve_imports_recursive`, `register_imported_items`
+  - `mumei-core/src/resolver.rs`: `resolve_imports_recursive`, `register_imported_items`
   - `src/lsp.rs`: `verify_source_for_lsp`
 - When adding `Item::EffectDef`, ensure match arms exist in all locations listed above.
 - When constructing `Atom` instances (including extern → atom conversion), always include `effects: vec![]` as default. Also include `effect_pre: std::collections::HashMap::new(), effect_post: std::collections::HashMap::new()` for modular verification fields.

@@ -158,10 +158,10 @@ Completing the FFI Bridge is the top priority as a prerequisite for std.http / s
 
 **Files modified**:
 - `src/main.rs` — ExternBlock → atom conversion in `load_and_prepare()`
-- `src/verification.rs` — trusted verification for extern atoms
-- `src/codegen.rs` — `declare_extern_functions()`, `resolve_return_type()`, LLVM `declare` + `call` generation
-- `src/ffi/json.rs` — JSON FFI backend + memory management (`json_free`, `string_free`, `mumei_str_alloc/free/get`)
-- `src/ffi/http.rs` — HTTP FFI backend + memory management (`http_free`)
+- `mumei-core/src/verification.rs` — trusted verification for extern atoms
+- `mumei-emit-llvm/src/codegen.rs` — `declare_extern_functions()`, `resolve_return_type()`, LLVM `declare` + `call` generation
+- `mumei-core/src/ffi/json.rs` — JSON FFI backend + memory management (`json_free`, `string_free`, `mumei_str_alloc/free/get`)
+- `mumei-core/src/ffi/http.rs` — HTTP FFI backend + memory management (`http_free`)
 
 ### Other Extensions
 
@@ -173,6 +173,6 @@ Completing the FFI Bridge is the top priority as a prerequisite for std.http / s
 
 ## Related Files
 
-- `src/parser.rs` — `ExternFn`, `ExternBlock` struct definitions + parsing
-- `src/verification.rs` — Verification skip via `TrustLevel::Trusted`
-- `src/codegen.rs` — External function call generation in LLVM IR (pending)
+- `mumei-core/src/parser/` — `ExternFn`, `ExternBlock` struct definitions + parsing
+- `mumei-core/src/verification.rs` — Verification skip via `TrustLevel::Trusted`
+- `mumei-emit-llvm/src/codegen.rs` — External function call generation in LLVM IR
