@@ -3492,7 +3492,7 @@ atom apply_no_contract(x: i64, f: atom_ref(i64) -> i64)
         // The full verification pipeline should succeed for both atoms.
         //
         // NOTE: The subsumption check return value is tested directly in
-        // src/verification.rs::tests::test_subsumption_check_holds_with_requires.
+        // mumei-core/src/verification.rs::tests::test_subsumption_check_holds_with_requires.
         let source = r#"
 atom increment(x: i64)
     requires: x >= 0;
@@ -3531,7 +3531,7 @@ atom test_apply()
         //
         // NOTE: The subsumption check return value (false = warning emitted)
         // is tested directly in
-        // src/verification.rs::tests::test_subsumption_check_fails_without_requires.
+        // mumei-core/src/verification.rs::tests::test_subsumption_check_fails_without_requires.
         let source = r#"
 atom negate(x: i64)
     requires: x >= 0;
