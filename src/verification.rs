@@ -6462,17 +6462,31 @@ fn check_contract_subsumption(
     // This is safe (no false errors) but means subsumption is only effective
     // for integer-typed atoms.
     let mut sub_env: Env<'_> = HashMap::new();
+    let param_names: HashSet<String> =
+        concrete_atom.params.iter().map(|p| p.name.clone()).collect();
     for (i, param) in concrete_atom.params.iter().enumerate() {
         let z3_var: Dynamic =
             Int::new_const(ctx, format!("__sub_p{}_{}", i, param.name).as_str()).into();
         sub_env.insert(param.name.clone(), z3_var.clone());
-        // Also bind common aliases used in contract clauses (x, y, arg0, arg1)
+        // Also bind common aliases used in contract clauses (x, y, arg0, arg1),
+        // but only if the alias name is not already an actual parameter name.
+        // Without this guard, `atom compute(y: i64, x: i64)` would have the
+        // alias for param index 1 ("y") overwrite the actual binding for param
+        // index 0 ("y"), making both variables map to the same Z3 constant.
         if i == 0 {
-            sub_env.insert("x".to_string(), z3_var.clone());
-            sub_env.insert("arg0".to_string(), z3_var);
+            if !param_names.contains("x") {
+                sub_env.insert("x".to_string(), z3_var.clone());
+            }
+            if !param_names.contains("arg0") {
+                sub_env.insert("arg0".to_string(), z3_var);
+            }
         } else if i == 1 {
-            sub_env.insert("y".to_string(), z3_var.clone());
-            sub_env.insert("arg1".to_string(), z3_var);
+            if !param_names.contains("y") {
+                sub_env.insert("y".to_string(), z3_var.clone());
+            }
+            if !param_names.contains("arg1") {
+                sub_env.insert("arg1".to_string(), z3_var);
+            }
         }
     }
 
@@ -6533,6 +6547,9 @@ fn check_contract_subsumption(
         );
         return false;
     }
+    // NOTE: SatResult::Unknown (e.g., Z3 timeout) falls through to `true` here.
+    // This is the conservative choice for a warning-only check: we only warn when
+    // we have a definite counterexample (SAT), never on inconclusive results.
     true
 }
 
@@ -9917,6 +9934,87 @@ mod tests {
         assert!(
             !result,
             "subsumption should fail: x >= 0 ∧ result == -x does NOT imply result >= 0"
+        );
+    }
+
+    #[test]
+    fn test_subsumption_check_crossed_param_names() {
+        // Regression test: atom compute(y: i64, x: i64) with ensures: result == y / x
+        // Contract: ensures result >= 0
+        // Without the alias-collision fix, both "x" and "y" would map to the same
+        // Z3 variable, making result == var/var == 1, trivially passing.
+        // With the fix, y and x are independent, so y=-1, x=1 → result=-1 is a
+        // valid counterexample and subsumption should fail.
+        let cfg = Config::new();
+        let ctx = Context::new(&cfg);
+        let solver = Solver::new(&ctx);
+        let int_sort = z3::Sort::int(&ctx);
+        let arr = Array::new_const(&ctx, "arr", &int_sort, &int_sort);
+        let module_env = ModuleEnv::new();
+        let vc = VCtx {
+            ctx: &ctx,
+            arr: &arr,
+            module_env: &module_env,
+            current_atom: None,
+            linearity_ctx: None,
+            effect_ctx: None,
+            constraint_count: None,
+            constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
+            has_string_constraints: None,
+        };
+        let concrete = Atom {
+            name: "compute".to_string(),
+            type_params: vec![],
+            where_bounds: vec![],
+            params: vec![
+                Param {
+                    name: "y".to_string(),
+                    type_name: Some("i64".to_string()),
+                    type_ref: None,
+                    is_ref: false,
+                    is_ref_mut: false,
+                    fn_contract_requires: None,
+                    fn_contract_ensures: None,
+                },
+                Param {
+                    name: "x".to_string(),
+                    type_name: Some("i64".to_string()),
+                    type_ref: None,
+                    is_ref: false,
+                    is_ref_mut: false,
+                    fn_contract_requires: None,
+                    fn_contract_ensures: None,
+                },
+            ],
+            requires: "x != 0".to_string(),
+            forall_constraints: vec![],
+            ensures: "result == y / x".to_string(),
+            body_expr: "y / x".to_string(),
+            consumed_params: vec![],
+            resources: vec![],
+            is_async: false,
+            trust_level: TrustLevel::Verified,
+            max_unroll: None,
+            invariant: None,
+            effects: vec![],
+            return_type: None,
+            span: Span::default(),
+            effect_pre: std::collections::HashMap::new(),
+            effect_post: std::collections::HashMap::new(),
+        };
+        let result = check_contract_subsumption(
+            &vc,
+            &concrete,
+            "result >= 0",
+            None,
+            "apply",
+            "f",
+            &solver,
+            &ctx,
+        );
+        assert!(
+            !result,
+            "subsumption should fail: y/x can be negative (e.g. y=-1, x=1)"
         );
     }
 
