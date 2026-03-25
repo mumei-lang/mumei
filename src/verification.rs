@@ -6464,8 +6464,6 @@ fn check_contract_subsumption(
     // Only the concrete atom's own parameter names are bound — no hardcoded
     // aliases — so there is no risk of accidental name collisions.
     let mut sub_env: Env<'_> = HashMap::new();
-    let param_names: HashSet<String> =
-        concrete_atom.params.iter().map(|p| p.name.clone()).collect();
     for (i, param) in concrete_atom.params.iter().enumerate() {
         let z3_var: Dynamic =
             Int::new_const(ctx, format!("__sub_p{}_{}", i, param.name).as_str()).into();
@@ -6475,6 +6473,18 @@ fn check_contract_subsumption(
     // Create a fresh symbolic result that both ensures clauses reference.
     let result_var: Dynamic = Int::new_const(ctx, "__sub_result").into();
     sub_env.insert("result".to_string(), result_var);
+
+    // The parser represents `true` / `false` as Expr::Variable("true"|"false").
+    // Pre-bind them to Z3 Bool constants so expr_to_z3 produces Bool sort
+    // instead of an unbound Int, which would fail the as_bool() gate below.
+    sub_env.insert(
+        "true".to_string(),
+        z3::ast::Bool::from_bool(ctx, true).into(),
+    );
+    sub_env.insert(
+        "false".to_string(),
+        z3::ast::Bool::from_bool(ctx, false).into(),
+    );
 
     // --- Assert concrete atom's requires clause (precondition) ---
     // Without this, the check would ask "for ALL params, does ensures ⇒
@@ -6496,7 +6506,7 @@ fn check_contract_subsumption(
     let concrete_ens_z3 = match expr_to_z3(vc, &concrete_ens_ast, &mut sub_env, None) {
         Ok(v) => v,
         Err(_e) => {
-            return;
+            return true;
         }
     };
 
@@ -6505,7 +6515,7 @@ fn check_contract_subsumption(
     let contract_ens_z3 = match expr_to_z3(vc, &contract_ens_ast, &mut sub_env, None) {
         Ok(v) => v,
         Err(_e) => {
-            return;
+            return true;
         }
     };
 
@@ -10057,16 +10067,8 @@ mod tests {
             effect_post: std::collections::HashMap::new(),
         };
         // contract ensures is "true" → trivially satisfied, skip check
-        let result = check_contract_subsumption(
-            &vc,
-            &concrete,
-            "true",
-            None,
-            "apply",
-            "f",
-            &solver,
-            &ctx,
-        );
+        let result =
+            check_contract_subsumption(&vc, &concrete, "true", None, "apply", "f", &solver, &ctx);
         assert!(
             result,
             "trivial contract ensures 'true' should be skipped (returns true)"
