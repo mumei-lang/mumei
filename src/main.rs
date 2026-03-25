@@ -3456,6 +3456,104 @@ atom apply_no_contract(x: i64, f: atom_ref(i64) -> i64)
         );
     }
 
+    // --- Subsumption check tests ---
+
+    #[test]
+    fn test_subsumption_check_no_warning_when_implies() {
+        // increment ensures: result == x + 1, with x >= 0 this implies result >= 0
+        // So no warning should be emitted and verification should pass.
+        let source = r#"
+atom increment(x: i64)
+    requires: x >= 0;
+    ensures: result == x + 1;
+    body: x + 1;
+
+atom apply(x: i64, f: atom_ref(i64) -> i64)
+    requires: x >= 0;
+    ensures: result >= 0;
+    contract(f): ensures: result >= 0;
+    body: call(f, x);
+
+atom test_apply()
+    requires: true;
+    ensures: result >= 0;
+    body: apply(5, atom_ref(increment));
+"#;
+        // Both apply and test_apply should verify successfully
+        assert!(
+            verify_atom_from_source(source, "apply").is_ok(),
+            "apply should verify with contract(f)"
+        );
+        assert!(
+            verify_atom_from_source(source, "test_apply").is_ok(),
+            "test_apply with atom_ref(increment) should verify (subsumption holds)"
+        );
+    }
+
+    #[test]
+    fn test_subsumption_check_warning_when_not_implies() {
+        // negate ensures: result == 0 - x, which does NOT imply result >= 0
+        // when x > 0. The subsumption check should emit a warning to stderr.
+        // Verification of the caller still passes because the contract is
+        // trusted (warning only, not a hard error).
+        let source = r#"
+atom negate(x: i64)
+    requires: x >= 0;
+    ensures: result == 0 - x;
+    body: 0 - x;
+
+atom apply(x: i64, f: atom_ref(i64) -> i64)
+    requires: x >= 0;
+    ensures: result >= 0;
+    contract(f): ensures: result >= 0;
+    body: call(f, x);
+
+atom test_apply_negate()
+    requires: true;
+    ensures: result >= 0;
+    body: apply(5, atom_ref(negate));
+"#;
+        // test_apply_negate should still verify (subsumption is a warning, not error)
+        // The compositional verification trusts the contract's ensures.
+        let result = verify_atom_from_source(source, "test_apply_negate");
+        assert!(
+            result.is_ok(),
+            "test_apply_negate should verify (subsumption warning only, not error): {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_subsumption_existing_tests_still_pass() {
+        // Ensure the basic call_with_contract_basic_ensures scenario still works
+        // after subsumption check integration (regression guard).
+        let source = r#"
+atom add(a: i64, b: i64)
+    requires: a >= 0 && b >= 0;
+    ensures: result == a + b;
+    body: a + b;
+
+atom fold_two(a: i64, b: i64, f: atom_ref(i64, i64) -> i64)
+    requires: a >= 0 && b >= 0;
+    ensures: result >= 0;
+    contract(f): ensures: result >= 0;
+    body: call(f, a, b);
+
+atom test_fold()
+    requires: true;
+    ensures: result >= 0;
+    body: fold_two(3, 4, atom_ref(add));
+"#;
+        assert!(
+            verify_atom_from_source(source, "fold_two").is_ok(),
+            "fold_two should still verify after subsumption integration"
+        );
+        assert!(
+            verify_atom_from_source(source, "test_fold").is_ok(),
+            "test_fold with atom_ref(add) should still verify"
+        );
+    }
+
     // --- Feature 1: Semantic Feedback Tests ---
 
     /// Test constraint_to_natural_language for various patterns

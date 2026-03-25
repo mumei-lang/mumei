@@ -4729,8 +4729,7 @@ fn infer_requires(atom: &Atom, module_env: &ModuleEnv) -> Vec<String> {
                 // First pass: param names → unique placeholders
                 for (i, param) in callee_atom.params.iter().enumerate() {
                     let param_re =
-                        regex::Regex::new(&format!(r"\b{}\b", regex::escape(&param.name)))
-                            .unwrap();
+                        regex::Regex::new(&format!(r"\b{}\b", regex::escape(&param.name))).unwrap();
                     substituted_req = param_re
                         .replace_all(
                             &substituted_req,
@@ -4741,8 +4740,8 @@ fn infer_requires(atom: &Atom, module_env: &ModuleEnv) -> Vec<String> {
                 // Second pass: placeholders → argument expressions
                 for (i, arg_expr) in call_args.iter().enumerate() {
                     let arg_str = expr_to_source_string(arg_expr);
-                    substituted_req = substituted_req
-                        .replace(&format!("__PARAM_{}__", i), &arg_str);
+                    substituted_req =
+                        substituted_req.replace(&format!("__PARAM_{}__", i), &arg_str);
                 }
                 if seen.insert(substituted_req.clone()) {
                     requires.push(substituted_req);
@@ -6417,6 +6416,105 @@ fn apply_refinement_constraint<'a>(
     Ok(())
 }
 
+// =============================================================================
+// Subsumption Check: atom_ref contract implication
+// =============================================================================
+//
+// When `atom_ref(concrete)` is passed to a parameter with `contract(f)`,
+// verify that the concrete atom's ensures clause *implies* the contract's
+// ensures clause.  This is a universal validity check:
+//
+//   ∀ params. concrete.ensures ⇒ contract.ensures
+//
+// If the implication does not hold, a **warning** (not a hard error) is
+// emitted to stderr.  This preserves backward compatibility while giving
+// the user early feedback about potential contract mismatches.
+
+/// Check that `concrete_atom.ensures` implies `contract_ensures`.
+///
+/// Uses a fresh Z3 solver scope to avoid polluting the caller's context.
+/// Emits `eprintln!` warnings on subsumption failure or evaluation errors.
+#[allow(clippy::too_many_arguments)]
+fn check_contract_subsumption(
+    vc: &VCtx<'_>,
+    concrete_atom: &Atom,
+    contract_ensures: &str,
+    _contract_requires: Option<&str>,
+    callee_name: &str,
+    param_name: &str,
+    solver: &Solver<'_>,
+    ctx: &Context,
+) {
+    // Skip trivial ensures — nothing to check.
+    if concrete_atom.ensures.trim() == "true" || contract_ensures.trim() == "true" {
+        return;
+    }
+
+    // Build an environment mapping concrete atom's parameters to fresh Z3
+    // variables so that we universally quantify over the parameter space.
+    let mut sub_env: Env<'_> = HashMap::new();
+    for (i, param) in concrete_atom.params.iter().enumerate() {
+        let z3_var: Dynamic =
+            Int::new_const(ctx, format!("__sub_p{}_{}", i, param.name).as_str()).into();
+        sub_env.insert(param.name.clone(), z3_var.clone());
+        // Also bind common aliases used in contract clauses (x, y, arg0, arg1)
+        if i == 0 {
+            sub_env.insert("x".to_string(), z3_var.clone());
+            sub_env.insert("arg0".to_string(), z3_var);
+        } else if i == 1 {
+            sub_env.insert("y".to_string(), z3_var.clone());
+            sub_env.insert("arg1".to_string(), z3_var);
+        }
+    }
+
+    // Create a fresh symbolic result that both ensures clauses reference.
+    let result_var: Dynamic = Int::new_const(ctx, "__sub_result").into();
+    sub_env.insert("result".to_string(), result_var);
+
+    // Parse and evaluate the concrete atom's ensures.
+    let concrete_ens_ast = parse_expression(&concrete_atom.ensures);
+    let concrete_ens_z3 = match expr_to_z3(vc, &concrete_ens_ast, &mut sub_env, None) {
+        Ok(v) => v,
+        Err(_e) => {
+            // Cannot evaluate concrete ensures — skip silently.
+            return;
+        }
+    };
+
+    // Parse and evaluate the contract's ensures.
+    let contract_ens_ast = parse_expression(contract_ensures);
+    let contract_ens_z3 = match expr_to_z3(vc, &contract_ens_ast, &mut sub_env, None) {
+        Ok(v) => v,
+        Err(_e) => {
+            // Cannot evaluate contract ensures — skip silently.
+            return;
+        }
+    };
+
+    // Both must be booleans for an implication check.
+    let (concrete_bool, contract_bool) =
+        match (concrete_ens_z3.as_bool(), contract_ens_z3.as_bool()) {
+            (Some(c), Some(ct)) => (c, ct),
+            _ => return, // non-boolean ensures — cannot check subsumption
+        };
+
+    // Check: concrete_ensures ∧ ¬contract_ensures is UNSAT
+    //        ⟺  concrete_ensures ⇒ contract_ensures (universally valid)
+    solver.push();
+    solver.assert(&concrete_bool);
+    solver.assert(&contract_bool.not());
+    let sat_result = solver.check();
+    solver.pop(1);
+
+    if sat_result == SatResult::Sat {
+        eprintln!(
+            "\u{26a0}\u{fe0f}  Subsumption warning: atom_ref({}) passed to {}.{} \u{2014} \
+             concrete ensures '{}' may not imply contract ensures '{}'",
+            concrete_atom.name, callee_name, param_name, concrete_atom.ensures, contract_ensures
+        );
+    }
+}
+
 fn expr_to_z3<'a>(
     vc: &VCtx<'a>,
     expr: &Expr,
@@ -6882,6 +6980,40 @@ fn expr_to_z3<'a>(
                                 if param.is_ref || param.is_ref_mut {
                                     if let Some(Expr::Variable(arg_name)) = args.get(i) {
                                         lctx_cell.borrow_mut().release_borrow(arg_name, name);
+                                    }
+                                }
+                            }
+                        }
+
+                        // =============================================================
+                        // Subsumption Check: atom_ref argument vs contract ensures
+                        // =============================================================
+                        // When a callee parameter has fn_contract_ensures and the
+                        // corresponding argument is atom_ref(concrete_name), verify
+                        // that the concrete atom's ensures implies the contract's
+                        // ensures.  Emit a warning (not a hard error) to maintain
+                        // backward compatibility.
+                        if let Some(solver) = solver_opt {
+                            for (i, param) in callee.params.iter().enumerate() {
+                                if let Some(ref contract_ensures) = param.fn_contract_ensures {
+                                    if let Some(Expr::AtomRef {
+                                        name: ref concrete_name,
+                                    }) = args.get(i)
+                                    {
+                                        if let Some(concrete_atom) =
+                                            vc.module_env.get_atom(concrete_name).cloned()
+                                        {
+                                            check_contract_subsumption(
+                                                vc,
+                                                &concrete_atom,
+                                                contract_ensures,
+                                                param.fn_contract_requires.as_deref(),
+                                                name,
+                                                &param.name,
+                                                solver,
+                                                ctx,
+                                            );
+                                        }
                                     }
                                 }
                             }

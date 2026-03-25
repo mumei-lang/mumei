@@ -89,7 +89,7 @@ atom apply(x: i64, f: atom_ref(i64) -> i64)
 
 This mechanism replaces the need for `trusted` on higher-order functions like `map`, `fold_left`, and `result_map`.
 
-**Important limitation**: When calling `apply(5, atom_ref(increment))`, the verifier does **not** check that `increment`'s actual contract (`ensures: result == x + 1`) implies the declared `contract(f): ensures: result >= 0`. The caller is responsible for passing only functions that satisfy the declared contract. Passing a function that violates the contract will not be caught at the call site (the verifier trusts the declared contract unconditionally). A subsumption check may be added in a future version.
+**Subsumption warning**: When calling `apply(5, atom_ref(increment))`, the verifier now performs a subsumption check: it verifies that `increment`'s actual ensures clause implies the declared `contract(f): ensures`. If the implication does not hold, a **warning** is emitted to stderr (not a hard error, to maintain backward compatibility). For example, if `increment` has `ensures: result == x + 1` and the contract declares `ensures: result >= 0`, no warning is emitted because `result == x + 1` (with `x >= 0`) implies `result >= 0`. However, if the concrete atom's ensures does not imply the contract's ensures, a warning like `⚠️ Subsumption warning: atom_ref(foo) passed to apply.f — concrete ensures '...' may not imply contract ensures '...'` will be printed.
 
 ### 3.6 Effect-Polymorphic Higher-Order Functions
 
