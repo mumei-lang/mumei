@@ -87,7 +87,7 @@ enum Command {
         /// Output base name
         #[arg(short, long, default_value = "katana")]
         output: String,
-        /// Emit target: llvm-ir (default) or c-header
+        /// Emit target: llvm-ir (default), c-header, or verified-json
         #[arg(long, default_value = "llvm-ir")]
         emit: String,
     },

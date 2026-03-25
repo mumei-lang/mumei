@@ -4,6 +4,7 @@
 
 pub mod ast;
 pub mod emitter;
+// NOTE: ffi module contains HTTP/JSON/server FFI backends not yet wired into the public API
 #[allow(dead_code)]
 pub mod ffi;
 pub mod hir;

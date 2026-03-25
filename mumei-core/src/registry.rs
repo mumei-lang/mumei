@@ -34,7 +34,7 @@ pub struct VersionEntry {
 }
 /// レジストリファイルのパスを返す
 pub fn registry_path() -> PathBuf {
-    super::manifest::mumei_home().join("registry.json")
+    crate::manifest::mumei_home().join("registry.json")
 }
 /// レジストリを読み込む。存在しない場合は空のレジストリを返す。
 pub fn load() -> Registry {
