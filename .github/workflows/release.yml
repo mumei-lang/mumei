@@ -77,7 +77,7 @@ jobs:
                 curl bash perl linux-headers \
                 libffi-dev zlib-dev zlib-static \
                 zstd-dev zstd-static \
-                ncurses-dev libxml2-dev \
+                ncurses-dev libxml2-dev libxml2-static \
                 openssl-dev openssl-libs-static
 
               # Install Rust inside the container
@@ -93,13 +93,18 @@ jobs:
               # Use --features z3/static-link-z3 to build Z3 from source with
               # musl-native g++ (Alpine z3-dev headers help cmake find deps)
               #
-              # musl targets default to +crt-static, so no explicit RUSTFLAGS
-              # are needed for the final binary.
-              # Build scripts (compiled for the host) must remain dynamically
-              # linked so that z3-sys/bindgen can dlopen libclang.so.
+              # Inside Alpine, host == target (both musl).  By default Cargo
+              # does not separate host/target flags when they share the same
+              # triple.  We enable target-applies-to-host = false (stable
+              # since Rust 1.82) so that CARGO_HOST_RUSTFLAGS only affects
+              # build-scripts (keeping them dynamically linked for dlopen)
+              # while the final binary stays fully static (+crt-static).
+              mkdir -p .cargo
+              printf "[build]\ntarget-applies-to-host = false\n" > .cargo/config.toml
               export CARGO_HOST_RUSTFLAGS="-C target-feature=-crt-static"
               cargo build --release --target x86_64-unknown-linux-musl \
                 --features z3/static-link-z3
+              rm -f .cargo/config.toml
             '
       - name: Install system dependencies (macOS)
         if: runner.os == 'macOS'
@@ -120,7 +125,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: C:\LLVM17
-          key: llvm-17.0.6-win64-msvc-release-v1
+          key: llvm-17.0.6-win64-msvc-release-v2
       - name: Build LLVM 17 from source (Windows)
         if: runner.os == 'Windows' && steps.cache-llvm-win.outputs.cache-hit != 'true'
         shell: pwsh
@@ -141,17 +146,17 @@ jobs:
           $installDir = "C:\LLVM17"
 
           Write-Host "Configuring LLVM (Release, host only)..."
-          cmake -S "$srcDir\llvm" -B $buildDir -G "Visual Studio 17 2022" -A x64 `
-            -DCMAKE_BUILD_TYPE=Release `
-            -DCMAKE_INSTALL_PREFIX=$installDir `
-            -DLLVM_ENABLE_PROJECTS="clang" `
-            -DLLVM_TARGETS_TO_BUILD="X86" `
-            -DLLVM_ENABLE_ZLIB=OFF `
-            -DLLVM_ENABLE_ZSTD=OFF `
-            -DLLVM_ENABLE_TERMINFO=OFF `
-            -DLLVM_INCLUDE_TESTS=OFF `
-            -DLLVM_INCLUDE_BENCHMARKS=OFF `
-            -DLLVM_INCLUDE_EXAMPLES=OFF
+          cmake -S "$srcDir\llvm" -B "$buildDir" -G "Visual Studio 17 2022" -A x64 `
+            "-DCMAKE_BUILD_TYPE=Release" `
+            "-DCMAKE_INSTALL_PREFIX=$installDir" `
+            "-DLLVM_ENABLE_PROJECTS=clang" `
+            "-DLLVM_TARGETS_TO_BUILD=X86" `
+            "-DLLVM_ENABLE_ZLIB=OFF" `
+            "-DLLVM_ENABLE_ZSTD=OFF" `
+            "-DLLVM_ENABLE_TERMINFO=OFF" `
+            "-DLLVM_INCLUDE_TESTS=OFF" `
+            "-DLLVM_INCLUDE_BENCHMARKS=OFF" `
+            "-DLLVM_INCLUDE_EXAMPLES=OFF"
 
           Write-Host "Building LLVM (this will take a while)..."
           cmake --build $buildDir --config Release --target install -- /m
