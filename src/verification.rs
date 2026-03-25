@@ -6430,7 +6430,8 @@ fn apply_refinement_constraint<'a>(
 // emitted to stderr.  This preserves backward compatibility while giving
 // the user early feedback about potential contract mismatches.
 
-/// Check that `concrete_atom.ensures` implies `contract_ensures`.
+/// Check that `concrete_atom.requires ∧ concrete_atom.ensures` implies
+/// `contract_ensures`.
 ///
 /// Uses a fresh Z3 solver scope to avoid polluting the caller's context.
 /// Emits `eprintln!` warnings on subsumption failure or evaluation errors.
@@ -6452,31 +6453,39 @@ fn check_contract_subsumption(
 
     // Build an environment mapping concrete atom's parameters to fresh Z3
     // variables so that we universally quantify over the parameter space.
+    // Only the concrete atom's own parameter names are bound — no hardcoded
+    // aliases — so there is no risk of accidental name collisions.
     let mut sub_env: Env<'_> = HashMap::new();
     for (i, param) in concrete_atom.params.iter().enumerate() {
         let z3_var: Dynamic =
             Int::new_const(ctx, format!("__sub_p{}_{}", i, param.name).as_str()).into();
-        sub_env.insert(param.name.clone(), z3_var.clone());
-        // Also bind common aliases used in contract clauses (x, y, arg0, arg1)
-        if i == 0 {
-            sub_env.insert("x".to_string(), z3_var.clone());
-            sub_env.insert("arg0".to_string(), z3_var);
-        } else if i == 1 {
-            sub_env.insert("y".to_string(), z3_var.clone());
-            sub_env.insert("arg1".to_string(), z3_var);
-        }
+        sub_env.insert(param.name.clone(), z3_var);
     }
 
     // Create a fresh symbolic result that both ensures clauses reference.
     let result_var: Dynamic = Int::new_const(ctx, "__sub_result").into();
     sub_env.insert("result".to_string(), result_var);
 
+    // --- Assert concrete atom's requires clause (precondition) ---
+    // Without this, the check would ask "for ALL params, does ensures ⇒
+    // contract?" which is too strong. We need "for params satisfying
+    // requires, does ensures ⇒ contract?".
+    let concrete_req = concrete_atom.requires.trim();
+    let requires_bool_opt = if concrete_req != "true" && !concrete_req.is_empty() {
+        let req_ast = parse_expression(concrete_req);
+        match expr_to_z3(vc, &req_ast, &mut sub_env, None) {
+            Ok(v) => v.as_bool(),
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+
     // Parse and evaluate the concrete atom's ensures.
     let concrete_ens_ast = parse_expression(&concrete_atom.ensures);
     let concrete_ens_z3 = match expr_to_z3(vc, &concrete_ens_ast, &mut sub_env, None) {
         Ok(v) => v,
         Err(_e) => {
-            // Cannot evaluate concrete ensures — skip silently.
             return;
         }
     };
@@ -6486,7 +6495,6 @@ fn check_contract_subsumption(
     let contract_ens_z3 = match expr_to_z3(vc, &contract_ens_ast, &mut sub_env, None) {
         Ok(v) => v,
         Err(_e) => {
-            // Cannot evaluate contract ensures — skip silently.
             return;
         }
     };
@@ -6498,9 +6506,12 @@ fn check_contract_subsumption(
             _ => return, // non-boolean ensures — cannot check subsumption
         };
 
-    // Check: concrete_ensures ∧ ¬contract_ensures is UNSAT
-    //        ⟺  concrete_ensures ⇒ contract_ensures (universally valid)
+    // Check: requires ∧ concrete_ensures ∧ ¬contract_ensures is UNSAT
+    //        ⟺  (requires ∧ concrete_ensures) ⇒ contract_ensures
     solver.push();
+    if let Some(ref req_bool) = requires_bool_opt {
+        solver.assert(req_bool);
+    }
     solver.assert(&concrete_bool);
     solver.assert(&contract_bool.not());
     let sat_result = solver.check();
