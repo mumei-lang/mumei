@@ -21,6 +21,8 @@ use std::path::Path;
 // =============================================================================
 
 /// Classification of emitted artifacts.
+// TODO: Consider adding a `Metadata` variant when more non-source emitters are added
+// (e.g., Phase 3 Wasm). Currently `VerifiedJsonEmitter` uses `Source` as the closest match.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ArtifactKind {
     /// Reserved for future native binary output
