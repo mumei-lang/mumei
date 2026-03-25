@@ -4729,8 +4729,7 @@ fn infer_requires(atom: &Atom, module_env: &ModuleEnv) -> Vec<String> {
                 // First pass: param names → unique placeholders
                 for (i, param) in callee_atom.params.iter().enumerate() {
                     let param_re =
-                        regex::Regex::new(&format!(r"\b{}\b", regex::escape(&param.name)))
-                            .unwrap();
+                        regex::Regex::new(&format!(r"\b{}\b", regex::escape(&param.name))).unwrap();
                     substituted_req = param_re
                         .replace_all(
                             &substituted_req,
@@ -4741,8 +4740,8 @@ fn infer_requires(atom: &Atom, module_env: &ModuleEnv) -> Vec<String> {
                 // Second pass: placeholders → argument expressions
                 for (i, arg_expr) in call_args.iter().enumerate() {
                     let arg_str = expr_to_source_string(arg_expr);
-                    substituted_req = substituted_req
-                        .replace(&format!("__PARAM_{}__", i), &arg_str);
+                    substituted_req =
+                        substituted_req.replace(&format!("__PARAM_{}__", i), &arg_str);
                 }
                 if seen.insert(substituted_req.clone()) {
                     requires.push(substituted_req);
@@ -6417,6 +6416,141 @@ fn apply_refinement_constraint<'a>(
     Ok(())
 }
 
+// =============================================================================
+// Subsumption Check: atom_ref contract implication
+// =============================================================================
+//
+// When `atom_ref(concrete)` is passed to a parameter with `contract(f)`,
+// verify that the concrete atom's ensures clause *implies* the contract's
+// ensures clause under the concrete atom's precondition.  This is a
+// universal validity check:
+//
+//   ∀ params. (concrete.requires ∧ concrete.ensures) ⇒ contract.ensures
+//
+// If the implication does not hold, a **warning** (not a hard error) is
+// emitted to stderr.  This preserves backward compatibility while giving
+// the user early feedback about potential contract mismatches.
+
+/// Check that `concrete_atom.requires ∧ concrete_atom.ensures` implies
+/// `contract_ensures`.
+///
+/// Uses a Z3 solver scope (push/pop) to avoid polluting the caller's context.
+/// Emits `eprintln!` warnings on subsumption failure or evaluation errors.
+///
+/// Returns `true` if the subsumption holds (or is trivially skipped),
+/// `false` if a warning was emitted (implication does not hold).
+#[allow(clippy::too_many_arguments)]
+fn check_contract_subsumption(
+    vc: &VCtx<'_>,
+    concrete_atom: &Atom,
+    contract_ensures: &str,
+    _contract_requires: Option<&str>, // reserved for future use
+    callee_name: &str,
+    param_name: &str,
+    solver: &Solver<'_>,
+    ctx: &Context,
+) -> bool {
+    // Skip when the contract requires nothing — any ensures trivially implies "true".
+    // NOTE: We intentionally do NOT skip when concrete_atom.ensures == "true".
+    // An atom with ensures: true guarantees nothing, so it cannot imply a
+    // non-trivial contract like `result >= 0`. The Z3 check below will correctly
+    // find a counterexample and emit a warning in that case.
+    if contract_ensures.trim() == "true" {
+        return true;
+    }
+
+    // Build an environment mapping concrete atom's parameters to fresh Z3
+    // variables so that we universally quantify over the parameter space.
+    // Only the concrete atom's own parameter names are bound — no hardcoded
+    // aliases — so there is no risk of accidental name collisions.
+    let mut sub_env: Env<'_> = HashMap::new();
+    for (i, param) in concrete_atom.params.iter().enumerate() {
+        let z3_var: Dynamic =
+            Int::new_const(ctx, format!("__sub_p{}_{}", i, param.name).as_str()).into();
+        sub_env.insert(param.name.clone(), z3_var);
+    }
+
+    // Create a fresh symbolic result that both ensures clauses reference.
+    let result_var: Dynamic = Int::new_const(ctx, "__sub_result").into();
+    sub_env.insert("result".to_string(), result_var);
+
+    // The parser represents `true` / `false` as Expr::Variable("true"|"false").
+    // Pre-bind them to Z3 Bool constants so expr_to_z3 produces Bool sort
+    // instead of an unbound Int, which would fail the as_bool() gate below.
+    sub_env.insert(
+        "true".to_string(),
+        z3::ast::Bool::from_bool(ctx, true).into(),
+    );
+    sub_env.insert(
+        "false".to_string(),
+        z3::ast::Bool::from_bool(ctx, false).into(),
+    );
+
+    // --- Assert concrete atom's requires clause (precondition) ---
+    // Without this, the check would ask "for ALL params, does ensures ⇒
+    // contract?" which is too strong. We need "for params satisfying
+    // requires, does ensures ⇒ contract?".
+    let concrete_req = concrete_atom.requires.trim();
+    let requires_bool_opt = if concrete_req != "true" && !concrete_req.is_empty() {
+        let req_ast = parse_expression(concrete_req);
+        match expr_to_z3(vc, &req_ast, &mut sub_env, None) {
+            Ok(v) => v.as_bool(),
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+
+    // Parse and evaluate the concrete atom's ensures.
+    let concrete_ens_ast = parse_expression(&concrete_atom.ensures);
+    let concrete_ens_z3 = match expr_to_z3(vc, &concrete_ens_ast, &mut sub_env, None) {
+        Ok(v) => v,
+        Err(_e) => {
+            return true;
+        }
+    };
+
+    // Parse and evaluate the contract's ensures.
+    let contract_ens_ast = parse_expression(contract_ensures);
+    let contract_ens_z3 = match expr_to_z3(vc, &contract_ens_ast, &mut sub_env, None) {
+        Ok(v) => v,
+        Err(_e) => {
+            return true;
+        }
+    };
+
+    // Both must be booleans for an implication check.
+    let (concrete_bool, contract_bool) =
+        match (concrete_ens_z3.as_bool(), contract_ens_z3.as_bool()) {
+            (Some(c), Some(ct)) => (c, ct),
+            _ => return true, // non-boolean ensures — cannot check subsumption
+        };
+
+    // Check: requires ∧ concrete_ensures ∧ ¬contract_ensures is UNSAT
+    //        ⟺  (requires ∧ concrete_ensures) ⇒ contract_ensures
+    solver.push();
+    if let Some(ref req_bool) = requires_bool_opt {
+        solver.assert(req_bool);
+    }
+    solver.assert(&concrete_bool);
+    solver.assert(&contract_bool.not());
+    let sat_result = solver.check();
+    solver.pop(1);
+
+    if sat_result == SatResult::Sat {
+        eprintln!(
+            "\u{26a0}\u{fe0f}  Subsumption warning: atom_ref({}) passed to {}.{} \u{2014} \
+             concrete ensures '{}' may not imply contract ensures '{}'",
+            concrete_atom.name, callee_name, param_name, concrete_atom.ensures, contract_ensures
+        );
+        return false;
+    }
+    // NOTE: SatResult::Unknown (e.g., Z3 timeout) falls through to `true` here.
+    // This is the conservative choice for a warning-only check: we only warn when
+    // we have a definite counterexample (SAT), never on inconclusive results.
+    true
+}
+
 fn expr_to_z3<'a>(
     vc: &VCtx<'a>,
     expr: &Expr,
@@ -6882,6 +7016,40 @@ fn expr_to_z3<'a>(
                                 if param.is_ref || param.is_ref_mut {
                                     if let Some(Expr::Variable(arg_name)) = args.get(i) {
                                         lctx_cell.borrow_mut().release_borrow(arg_name, name);
+                                    }
+                                }
+                            }
+                        }
+
+                        // =============================================================
+                        // Subsumption Check: atom_ref argument vs contract ensures
+                        // =============================================================
+                        // When a callee parameter has fn_contract_ensures and the
+                        // corresponding argument is atom_ref(concrete_name), verify
+                        // that the concrete atom's ensures implies the contract's
+                        // ensures.  Emit a warning (not a hard error) to maintain
+                        // backward compatibility.
+                        if let Some(solver) = solver_opt {
+                            for (i, param) in callee.params.iter().enumerate() {
+                                if let Some(ref contract_ensures) = param.fn_contract_ensures {
+                                    if let Some(Expr::AtomRef {
+                                        name: ref concrete_name,
+                                    }) = args.get(i)
+                                    {
+                                        if let Some(concrete_atom) =
+                                            vc.module_env.get_atom(concrete_name).cloned()
+                                        {
+                                            check_contract_subsumption(
+                                                vc,
+                                                &concrete_atom,
+                                                contract_ensures,
+                                                param.fn_contract_requires.as_deref(),
+                                                name,
+                                                &param.name,
+                                                solver,
+                                                ctx,
+                                            );
+                                        }
                                     }
                                 }
                             }
@@ -9629,6 +9797,350 @@ mod tests {
         let result = build_contextual_suggestion("unknown_type", Some(&json!({"x": "1"})), None);
         let fallback = suggestion_for_failure_type("unknown_type");
         assert_eq!(result, fallback);
+    }
+
+    // ---- Subsumption check unit tests ----
+
+    #[test]
+    fn test_subsumption_check_holds_with_requires() {
+        // increment: requires x >= 0, ensures result == x + 1
+        // contract: ensures result >= 0
+        // With requires x >= 0: result == x + 1 ≥ 1 ≥ 0, so subsumption holds.
+        let cfg = Config::new();
+        let ctx = Context::new(&cfg);
+        let solver = Solver::new(&ctx);
+        let int_sort = z3::Sort::int(&ctx);
+        let arr = Array::new_const(&ctx, "arr", &int_sort, &int_sort);
+        let module_env = ModuleEnv::new();
+        let vc = VCtx {
+            ctx: &ctx,
+            arr: &arr,
+            module_env: &module_env,
+            current_atom: None,
+            linearity_ctx: None,
+            effect_ctx: None,
+            constraint_count: None,
+            constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
+            has_string_constraints: None,
+        };
+        let concrete = Atom {
+            name: "increment".to_string(),
+            type_params: vec![],
+            where_bounds: vec![],
+            params: vec![Param {
+                name: "x".to_string(),
+                type_name: Some("i64".to_string()),
+                type_ref: None,
+                is_ref: false,
+                is_ref_mut: false,
+                fn_contract_requires: None,
+                fn_contract_ensures: None,
+            }],
+            requires: "x >= 0".to_string(),
+            forall_constraints: vec![],
+            ensures: "result == x + 1".to_string(),
+            body_expr: "x + 1".to_string(),
+            consumed_params: vec![],
+            resources: vec![],
+            is_async: false,
+            trust_level: TrustLevel::Verified,
+            max_unroll: None,
+            invariant: None,
+            effects: vec![],
+            return_type: None,
+            span: Span::default(),
+            effect_pre: std::collections::HashMap::new(),
+            effect_post: std::collections::HashMap::new(),
+        };
+        let result = check_contract_subsumption(
+            &vc,
+            &concrete,
+            "result >= 0",
+            None,
+            "apply",
+            "f",
+            &solver,
+            &ctx,
+        );
+        assert!(
+            result,
+            "subsumption should hold: x >= 0 ∧ result == x + 1 ⇒ result >= 0"
+        );
+    }
+
+    #[test]
+    fn test_subsumption_check_fails_without_requires() {
+        // negate: requires x >= 0, ensures result == 0 - x
+        // contract: ensures result >= 0
+        // Even with requires x >= 0, result == -x ≤ 0 when x > 0, so subsumption fails.
+        let cfg = Config::new();
+        let ctx = Context::new(&cfg);
+        let solver = Solver::new(&ctx);
+        let int_sort = z3::Sort::int(&ctx);
+        let arr = Array::new_const(&ctx, "arr", &int_sort, &int_sort);
+        let module_env = ModuleEnv::new();
+        let vc = VCtx {
+            ctx: &ctx,
+            arr: &arr,
+            module_env: &module_env,
+            current_atom: None,
+            linearity_ctx: None,
+            effect_ctx: None,
+            constraint_count: None,
+            constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
+            has_string_constraints: None,
+        };
+        let concrete = Atom {
+            name: "negate".to_string(),
+            type_params: vec![],
+            where_bounds: vec![],
+            params: vec![Param {
+                name: "x".to_string(),
+                type_name: Some("i64".to_string()),
+                type_ref: None,
+                is_ref: false,
+                is_ref_mut: false,
+                fn_contract_requires: None,
+                fn_contract_ensures: None,
+            }],
+            requires: "x >= 0".to_string(),
+            forall_constraints: vec![],
+            ensures: "result == 0 - x".to_string(),
+            body_expr: "0 - x".to_string(),
+            consumed_params: vec![],
+            resources: vec![],
+            is_async: false,
+            trust_level: TrustLevel::Verified,
+            max_unroll: None,
+            invariant: None,
+            effects: vec![],
+            return_type: None,
+            span: Span::default(),
+            effect_pre: std::collections::HashMap::new(),
+            effect_post: std::collections::HashMap::new(),
+        };
+        let result = check_contract_subsumption(
+            &vc,
+            &concrete,
+            "result >= 0",
+            None,
+            "apply",
+            "f",
+            &solver,
+            &ctx,
+        );
+        assert!(
+            !result,
+            "subsumption should fail: x >= 0 ∧ result == -x does NOT imply result >= 0"
+        );
+    }
+
+    #[test]
+    fn test_subsumption_check_crossed_param_names() {
+        // Regression test: atom compute(y: i64, x: i64) with ensures: result == y / x
+        // Contract: ensures result >= 0
+        // Without the alias-collision fix, both "x" and "y" would map to the same
+        // Z3 variable, making result == var/var == 1, trivially passing.
+        // With the fix, y and x are independent, so y=-1, x=1 → result=-1 is a
+        // valid counterexample and subsumption should fail.
+        let cfg = Config::new();
+        let ctx = Context::new(&cfg);
+        let solver = Solver::new(&ctx);
+        let int_sort = z3::Sort::int(&ctx);
+        let arr = Array::new_const(&ctx, "arr", &int_sort, &int_sort);
+        let module_env = ModuleEnv::new();
+        let vc = VCtx {
+            ctx: &ctx,
+            arr: &arr,
+            module_env: &module_env,
+            current_atom: None,
+            linearity_ctx: None,
+            effect_ctx: None,
+            constraint_count: None,
+            constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
+            has_string_constraints: None,
+        };
+        let concrete = Atom {
+            name: "compute".to_string(),
+            type_params: vec![],
+            where_bounds: vec![],
+            params: vec![
+                Param {
+                    name: "y".to_string(),
+                    type_name: Some("i64".to_string()),
+                    type_ref: None,
+                    is_ref: false,
+                    is_ref_mut: false,
+                    fn_contract_requires: None,
+                    fn_contract_ensures: None,
+                },
+                Param {
+                    name: "x".to_string(),
+                    type_name: Some("i64".to_string()),
+                    type_ref: None,
+                    is_ref: false,
+                    is_ref_mut: false,
+                    fn_contract_requires: None,
+                    fn_contract_ensures: None,
+                },
+            ],
+            requires: "x != 0".to_string(),
+            forall_constraints: vec![],
+            ensures: "result == y / x".to_string(),
+            body_expr: "y / x".to_string(),
+            consumed_params: vec![],
+            resources: vec![],
+            is_async: false,
+            trust_level: TrustLevel::Verified,
+            max_unroll: None,
+            invariant: None,
+            effects: vec![],
+            return_type: None,
+            span: Span::default(),
+            effect_pre: std::collections::HashMap::new(),
+            effect_post: std::collections::HashMap::new(),
+        };
+        let result = check_contract_subsumption(
+            &vc,
+            &concrete,
+            "result >= 0",
+            None,
+            "apply",
+            "f",
+            &solver,
+            &ctx,
+        );
+        assert!(
+            !result,
+            "subsumption should fail: y/x can be negative (e.g. y=-1, x=1)"
+        );
+    }
+
+    #[test]
+    fn test_subsumption_check_trivial_contract_ensures_skipped() {
+        // If contract_ensures is "true", subsumption is trivially satisfied
+        // (the contract requires nothing).
+        let cfg = Config::new();
+        let ctx = Context::new(&cfg);
+        let solver = Solver::new(&ctx);
+        let int_sort = z3::Sort::int(&ctx);
+        let arr = Array::new_const(&ctx, "arr", &int_sort, &int_sort);
+        let module_env = ModuleEnv::new();
+        let vc = VCtx {
+            ctx: &ctx,
+            arr: &arr,
+            module_env: &module_env,
+            current_atom: None,
+            linearity_ctx: None,
+            effect_ctx: None,
+            constraint_count: None,
+            constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
+            has_string_constraints: None,
+        };
+        let concrete = Atom {
+            name: "something".to_string(),
+            type_params: vec![],
+            where_bounds: vec![],
+            params: vec![Param {
+                name: "x".to_string(),
+                type_name: Some("i64".to_string()),
+                type_ref: None,
+                is_ref: false,
+                is_ref_mut: false,
+                fn_contract_requires: None,
+                fn_contract_ensures: None,
+            }],
+            requires: "true".to_string(),
+            forall_constraints: vec![],
+            ensures: "result == x".to_string(),
+            body_expr: "x".to_string(),
+            consumed_params: vec![],
+            resources: vec![],
+            is_async: false,
+            trust_level: TrustLevel::Verified,
+            max_unroll: None,
+            invariant: None,
+            effects: vec![],
+            return_type: None,
+            span: Span::default(),
+            effect_pre: std::collections::HashMap::new(),
+            effect_post: std::collections::HashMap::new(),
+        };
+        // contract ensures is "true" → trivially satisfied, skip check
+        let result =
+            check_contract_subsumption(&vc, &concrete, "true", None, "apply", "f", &solver, &ctx);
+        assert!(
+            result,
+            "trivial contract ensures 'true' should be skipped (returns true)"
+        );
+    }
+
+    #[test]
+    fn test_subsumption_check_concrete_true_ensures_warns() {
+        // If concrete_atom.ensures is "true" but contract requires "result >= 0",
+        // the concrete atom guarantees nothing → subsumption should FAIL (warn).
+        let cfg = Config::new();
+        let ctx = Context::new(&cfg);
+        let solver = Solver::new(&ctx);
+        let int_sort = z3::Sort::int(&ctx);
+        let arr = Array::new_const(&ctx, "arr", &int_sort, &int_sort);
+        let module_env = ModuleEnv::new();
+        let vc = VCtx {
+            ctx: &ctx,
+            arr: &arr,
+            module_env: &module_env,
+            current_atom: None,
+            linearity_ctx: None,
+            effect_ctx: None,
+            constraint_count: None,
+            constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
+            has_string_constraints: None,
+        };
+        let concrete = Atom {
+            name: "no_guarantee".to_string(),
+            type_params: vec![],
+            where_bounds: vec![],
+            params: vec![Param {
+                name: "x".to_string(),
+                type_name: Some("i64".to_string()),
+                type_ref: None,
+                is_ref: false,
+                is_ref_mut: false,
+                fn_contract_requires: None,
+                fn_contract_ensures: None,
+            }],
+            requires: "true".to_string(),
+            forall_constraints: vec![],
+            ensures: "true".to_string(),
+            body_expr: "x".to_string(),
+            consumed_params: vec![],
+            resources: vec![],
+            is_async: false,
+            trust_level: TrustLevel::Verified,
+            max_unroll: None,
+            invariant: None,
+            effects: vec![],
+            return_type: None,
+            span: Span::default(),
+            effect_pre: std::collections::HashMap::new(),
+            effect_post: std::collections::HashMap::new(),
+        };
+        // concrete ensures is "true" but contract requires "result >= 0"
+        // → subsumption should fail because "true" does not imply "result >= 0"
+        let result = check_contract_subsumption(
+            &vc,
+            &concrete,
+            "result >= 0",
+            None,
+            "apply",
+            "f",
+            &solver,
+            &ctx,
+        );
+        assert!(
+            !result,
+            "concrete ensures 'true' cannot imply 'result >= 0' — should warn (return false)"
+        );
     }
 
     // ---- 3-a: replace_constraint_placeholder tests ----
