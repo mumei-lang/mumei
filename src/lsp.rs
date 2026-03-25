@@ -518,7 +518,7 @@ fn build_hover(source: &str, line: usize) -> Option<String> {
 // Completion (textDocument/completion)
 // =============================================================================
 
-/// All mumei keywords (from src/parser/lexer.rs read_identifier)
+/// All mumei keywords (from mumei-core/src/parser/lexer.rs read_identifier)
 const MUMEI_KEYWORDS: &[&str] = &[
     "atom",
     "atom_ref",
