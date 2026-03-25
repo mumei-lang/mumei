@@ -52,8 +52,8 @@ This is the **prerequisite** for std.http / std.json.
 
 **Files to modify**:
 - `src/main.rs` — ExternBlock → atom conversion in `load_and_prepare()`
-- `src/verification.rs` — trusted verification for extern atoms
-- `src/codegen.rs` — LLVM `declare` + `call` generation
+- `mumei-core/src/verification.rs` — trusted verification for extern atoms
+- `mumei-emit-llvm/src/codegen.rs` — LLVM `declare` + `call` generation
 - `docs/FFI.md` — implementation status update
 
 ### Phase B: std.json
@@ -80,7 +80,7 @@ let age = json.get_int(data, "age");
 
 **Files to create/modify**:
 - `std/json.mm` — JSON operation atom definitions
-- `src/parser.rs` — string literal type extension (if needed)
+- `mumei-core/src/parser/` — string literal type extension (if needed)
 - `docs/STDLIB.md` — std.json reference
 
 ### Phase C: std.http (Client)
@@ -564,13 +564,13 @@ atom open_file(x: i64)
 - Cross-atom contract composition at call sites is now implemented via `analyze_temporal_effects_with_contracts()` (P2-A)
 
 **Files**:
-- `src/parser/ast.rs` — Added `effect_pre`/`effect_post` fields to `Atom` struct
-- `src/parser/item.rs` — Parser for `effect_pre:`/`effect_post:` clauses
-- `src/verification.rs` — Initial state override + final state check
-- `src/main.rs`, `src/resolver.rs`, `src/ast.rs`, `src/mir.rs`, `src/mir_analysis.rs` — Updated Atom construction sites
+- `mumei-core/src/parser/ast.rs` — Added `effect_pre`/`effect_post` fields to `Atom` struct
+- `mumei-core/src/parser/item.rs` — Parser for `effect_pre:`/`effect_post:` clauses
+- `mumei-core/src/verification.rs` — Initial state override + final state check
+- `src/main.rs`, `mumei-core/src/resolver.rs`, `mumei-core/src/ast.rs`, `mumei-core/src/mir.rs`, `mumei-core/src/mir_analysis.rs` — Updated Atom construction sites
 - `tests/test_modular_verification.mm` — E2E test with File effect contracts
-- `src/mir_analysis.rs` — 3 unit tests for modular verification
-- `src/parser/mod.rs` — 3 parser tests for effect_pre/effect_post
+- `mumei-core/src/mir_analysis.rs` — 3 unit tests for modular verification
+- `mumei-core/src/parser/mod.rs` — 3 parser tests for effect_pre/effect_post
 
 ### Plan 25: LSP Completion & Definition
 

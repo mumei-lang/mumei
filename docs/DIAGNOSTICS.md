@@ -10,7 +10,7 @@ The Mumei compiler adopts a diagnostics-driven design where source location info
 
 | Item | Status |
 |---|---|
-| `Span` struct | ✅ Implemented (`src/parser.rs`) |
+| `Span` struct | ✅ Implemented (`mumei-core/src/parser/ast.rs`) |
 | `span` field on all AST Item types | ✅ Implemented (Atom, StructDef, EnumDef, TraitDef, ImplDef, ResourceDef, ImportDecl, RefinedType, ExternBlock, ExternFn) |
 | `MumeiError` with Span integration | ✅ Implemented (`VerificationError { msg, span, original_span }` etc.) |
 | `ErrorDetail` struct | ✅ Implemented (message + span + suggestion) |
@@ -142,6 +142,7 @@ Examples of rich error output powered by miette:
 
 ## Related Files
 
-- `src/parser.rs` — `Span` struct definition, `offset_to_line_col`, `span_from_offset` helpers
-- `src/verification.rs` — `MumeiError`, `ErrorDetail`, `span_to_source_span`, Span-aware error constructors
+- `mumei-core/src/parser/ast.rs` — `Span` struct definition
+- `mumei-core/src/parser/mod.rs` — `offset_to_line_col`, `span_from_offset` helpers
+- `mumei-core/src/verification.rs` — `MumeiError`, `ErrorDetail`, `span_to_source_span`, Span-aware error constructors
 - `src/lsp.rs` — `find_error_position`, `verify_source_for_lsp`

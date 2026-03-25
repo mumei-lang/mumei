@@ -75,6 +75,9 @@ impl Emitter for VerifiedJsonEmitter {
             ))
         })?;
 
+        // NOTE: with_extension replaces the last extension. If atom.name contains a dot
+        // (e.g., "net.get"), the output path may lose part of the name. This is a pre-existing
+        // architectural pattern shared with LlvmEmitter (.ll) and CHeaderEmitter (.h).
         let json_path = output_path.with_extension("verified.json");
 
         Ok(vec![Artifact {
