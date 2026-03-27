@@ -77,7 +77,7 @@ struct Vector<T> {
 | `alloc_raw(size)` | `size > 0` | `result >= -1` | Allocate heap memory |
 | `dealloc_raw(ptr)` | `ptr >= 0` | `result >= 0` | Free heap memory |
 | `vec_new(cap)` | `cap > 0` | `result >= 0` | Create empty vector |
-| `vec_push(len, cap)` | `len >= 0 && cap > 0 && len < cap` | `result <= cap && result == len + 1` | Push element (precise length) |
+| `vec_push(len, cap)` | `len >= 0 && cap > 0 && len < cap` | `result >= 0 && result <= cap && result == len + 1` | Push element (precise length) |
 | `vec_get(len, index)` | `len > 0 && index >= 0 && index < len` | `result >= 0` | Get element (bounds-checked) |
 | `vec_len(len)` | `len >= 0` | `result == len` | Get length |
 | `vec_is_empty(len)` | `len >= 0` | `0 or 1` | Check if empty |
@@ -86,9 +86,9 @@ struct Vector<T> {
 | `vec_push_safe(len, cap)` | `len >= 0 && cap > 0` | `0=Ok, 1=Err` | Safe push with capacity check |
 | `vec_set(len, index, value)` | `len > 0 && index >= 0 && index < len && value >= 0` | `result >= 0` | Set element (bounds-checked) |
 | `vec_swap(len, i, j)` | `len > 0 && i >= 0 && i < len && j >= 0 && j < len` | `result >= 0` | Swap two elements (bounds-checked) |
-| `vec_slice(len, start, end)` | `len >= 0 && start >= 0 && end >= start && end <= len` | `result == end - start` | Slice (range-checked) |
-| `vec_insert(len, cap, index)` | `len >= 0 && cap > 0 && len < cap && index >= 0 && index <= len` | `result == len + 1` | Insert at index (bounds + capacity) |
-| `vec_remove(len, index)` | `len > 0 && index >= 0 && index < len` | `result == len - 1` | Remove at index (bounds-checked) |
+| `vec_slice(len, start, end)` | `len >= 0 && start >= 0 && end >= start && end <= len` | `result >= 0 && result == end - start` | Slice (range-checked) |
+| `vec_insert(len, cap, index)` | `len >= 0 && cap > 0 && len < cap && index >= 0 && index <= len` | `result >= 0 && result == len + 1` | Insert at index (bounds + capacity) |
+| `vec_remove(len, index)` | `len > 0 && index >= 0 && index < len` | `result >= 0 && result == len - 1` | Remove at index (bounds-checked) |
 
 ### HashMap\<K, V\>
 
@@ -255,7 +255,7 @@ struct VerifiedVector { len: i64 where v >= 0, cap: i64 where v > 0 }
 |---|---|---|---|
 | `vvec_sum(n)` | `n >= 0 && forall(arr[i] >= 0)` | `result >= 0` | Sum all non-negative elements |
 | `vvec_all_bounded(n, upper)` | `n >= 0 && upper >= 0 && forall(0 <= arr[i] <= upper)` | `result == 1` | Check all elements within bound |
-| `vvec_push_n(len, cap, count)` | `len >= 0 && cap > 0 && count >= 0 && len + count <= cap` | `result == len + count` | Batch push with length guarantee |
+| `vvec_push_n(len, cap, count)` | `len >= 0 && cap > 0 && count >= 0 && len + count <= cap` | `result >= 0 && result == len + count` | Batch push with length guarantee |
 | `vvec_range_check(len, start, end)` | `len > 0 && start >= 0 && end > start && end <= len` | `result == 1` | Validate index range |
 | `vvec_binary_search(n, target)` | `n >= 0 && forall(sorted)` | `result >= -1 && result < n` | Binary search (sorted precondition) |
 

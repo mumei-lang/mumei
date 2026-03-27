@@ -6,7 +6,7 @@ import "std/alloc" as alloc;
 // Test: vec_push followed by vec_get is safe
 // Verifies: push(0, cap) satisfies vec_get requires (len > 0)
 atom test_push_then_get(cap: i64)
-    requires: cap > 1;
+    requires: cap > 0;
     ensures: result >= 0;
     body: {
         let len = alloc.vec_push(0, cap);
@@ -14,7 +14,7 @@ atom test_push_then_get(cap: i64)
     }
 
 // Test: vec_insert after vec_push — both operations compose safely
-// Verifies: push ensures (result >= 0 && result <= cap) satisfies insert requires
+// Verifies: push ensures (result == len + 1) satisfies insert requires (len < cap)
 atom test_insert_length(len: i64, cap: i64)
     requires: len >= 0 && cap > 0 && len + 1 < cap;
     ensures: result >= 0;
@@ -24,7 +24,7 @@ atom test_insert_length(len: i64, cap: i64)
     }
 
 // Test: vec_remove after push — composition is safe
-// Verifies: push ensures (result >= 0) satisfies remove requires (len > 0)
+// Verifies: push ensures (result == len + 1 >= 1) satisfies remove requires (len > 0)
 atom test_push_remove_identity(len: i64, cap: i64)
     requires: len >= 0 && cap > 0 && len < cap;
     ensures: result >= 0;
