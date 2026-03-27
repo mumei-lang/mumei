@@ -160,6 +160,7 @@ mumei のコード生成バックエンドをプラグイン化し、LLVM IR 以
 - ✅ `Emitter` trait とコア型を `pub` にし、外部クレートがエミッターを実装可能にする
 - ✅ 外部プラグインリポジトリ (例: `mumei-emit-wasm`) が可能になる
 - ✅ `VerifiedJsonEmitter` を第3のエミッターとして追加 (`--emit verified-json`)
+- ✅ `ProofBookEmitter` を第4のエミッターとして追加 (`--emit proof-book`) — 検証済み Atom から人間可読な Markdown 証明書ドキュメントを生成
 
 ### Phase 3 (Future — ecosystem growth)
 
