@@ -11,6 +11,7 @@
 | `std/result.mm` | ❌ `import "std/result"` | `Result<T, E>` operations |
 | `std/list.mm` | ❌ `import "std/list"` | Recursive list ADT + Sort algorithms |
 | `std/container/bounded_array.mm` | ❌ `import "std/container/bounded_array"` | Bounded array with sorted operations |
+| `std/container/verified_vector.mm` | ❌ `import "std/container/verified_vector"` | Verified vector with quantifier-based contracts |
 
 ---
 
@@ -25,7 +26,7 @@ The prelude is automatically loaded by the compiler. No `import` statement neede
 | **Eq** | `eq(a, b) -> bool` | reflexive, symmetric | Equality |
 | **Ord** | `leq(a, b) -> bool` | reflexive, transitive | Total ordering |
 | **Numeric** | `add`, `sub`, `mul`, `div(b where v!=0)` | commutative_add | Arithmetic with zero-division prevention |
-| **Sequential** | `seq_len(s) -> i64`, `seq_get(s, i) -> i64` | non_negative_length | Abstract collection interface |
+| **Sequential** | `seq_len(s) -> i64`, `seq_get(s, i) -> i64` | non_negative_length, bounds_safe | Abstract collection interface |
 | **Hashable** | `hash(a) -> i64` | deterministic | Hash key constraint |
 | **Owned** | `is_alive(a) -> bool`, `consume(a) -> Self` | alive_before_consume | Ownership tracking |
 
@@ -76,13 +77,18 @@ struct Vector<T> {
 | `alloc_raw(size)` | `size > 0` | `result >= -1` | Allocate heap memory |
 | `dealloc_raw(ptr)` | `ptr >= 0` | `result >= 0` | Free heap memory |
 | `vec_new(cap)` | `cap > 0` | `result >= 0` | Create empty vector |
-| `vec_push(len, cap)` | `len >= 0 && cap > 0 && len < cap` | `result <= cap` | Push element |
+| `vec_push(len, cap)` | `len >= 0 && cap > 0 && len < cap` | `result >= 0 && result <= cap && result == len + 1` | Push element (precise length) |
 | `vec_get(len, index)` | `len > 0 && index >= 0 && index < len` | `result >= 0` | Get element (bounds-checked) |
 | `vec_len(len)` | `len >= 0` | `result == len` | Get length |
 | `vec_is_empty(len)` | `len >= 0` | `0 or 1` | Check if empty |
 | `vec_grow(old, new)` | `old > 0 && new > old` | `result > old` | Grow capacity |
 | `vec_drop(len, ptr)` | `len >= 0 && ptr >= 0` | `result >= 0` | Free vector |
 | `vec_push_safe(len, cap)` | `len >= 0 && cap > 0` | `0=Ok, 1=Err` | Safe push with capacity check |
+| `vec_set(len, index, value)` | `len > 0 && index >= 0 && index < len && value >= 0` | `result >= 0` | Set element (bounds-checked) |
+| `vec_swap(len, i, j)` | `len > 0 && i >= 0 && i < len && j >= 0 && j < len` | `result >= 0` | Swap two elements (bounds-checked) |
+| `vec_slice(len, start, end)` | `len >= 0 && start >= 0 && end >= start && end <= len` | `result >= 0 && result == end - start` | Slice (range-checked) |
+| `vec_insert(len, cap, index)` | `len >= 0 && cap > 0 && len < cap && index >= 0 && index <= len` | `result >= 0 && result == len + 1` | Insert at index (bounds + capacity) |
+| `vec_remove(len, index)` | `len > 0 && index >= 0 && index < len` | `result >= 0 && result == len - 1` | Remove at index (bounds-checked) |
 
 ### HashMap\<K, V\>
 
@@ -232,6 +238,26 @@ enum List { Nil, Cons(i64, Self) }
 | `verified_merge_sort(n)` | `n >= 0` | `result == n && forall(i, 0, result-1, arr[i] <= arr[i+1])` | Trusted: sorted output guarantee |
 | `binary_search(n, target)` | `n >= 0` | `result >= -1 && result < n` | Binary search with termination proof |
 | `binary_search_sorted(n, target)` | `n >= 0 && forall(...)` | `result >= -1 && result < n` | Binary search with sorted precondition |
+
+---
+
+## std/container/verified\_vector.mm
+
+```mumei
+import "std/container/verified_vector" as vvec;
+```
+
+```mumei
+struct VerifiedVector { len: i64 where v >= 0, cap: i64 where v > 0 }
+```
+
+| Atom | Requires | Ensures | Description |
+|---|---|---|---|
+| `vvec_sum(n)` | `n >= 0 && forall(arr[i] >= 0)` | `result >= 0` | Sum all non-negative elements |
+| `vvec_all_bounded(n, upper)` | `n >= 0 && upper >= 0 && forall(0 <= arr[i] <= upper)` | `result == 1` | Check all elements within bound |
+| `vvec_push_n(len, cap, count)` | `len >= 0 && cap > 0 && count >= 0 && len + count <= cap` | `result >= 0 && result == len + count` | Batch push with length guarantee |
+| `vvec_range_check(len, start, end)` | `len > 0 && start >= 0 && end > start && end <= len` | `result == 1` | Validate index range |
+| `vvec_binary_search(n, target)` | `n >= 0 && forall(sorted)` | `result >= -1 && result < n` | Binary search (sorted precondition) |
 
 ---
 
