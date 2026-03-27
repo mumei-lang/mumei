@@ -146,6 +146,8 @@ enum Command {
         #[arg(long)]
         proof_only: bool,
     },
+    /// List available packages in the local registry
+    List,
     /// Start Language Server Protocol server (stdio mode)
     Lsp,
     /// Interactive REPL (Read-Eval-Print Loop)
@@ -248,6 +250,9 @@ fn main() {
         }
         Some(Command::Publish { proof_only }) => {
             cmd_publish(proof_only);
+        }
+        Some(Command::List) => {
+            cmd_list();
         }
         Some(Command::Lsp) => {
             lsp::run();
@@ -2121,8 +2126,8 @@ fn cmd_add(dep: &str) {
         let toml_line = format!("{} = {{ path = \"{}\" }}", pkg_name, dep);
         println!("📦 Adding local dependency: {} → {}", pkg_name, dep);
         (pkg_name, toml_line)
-    } else if dep.contains("github.com") || dep.contains("gitlab.com") {
-        // Git URL 依存
+    } else if dep.contains("github.com") || dep.contains("gitlab.com") || dep.ends_with(".git") {
+        // Git URL 依存 — clone to ~/.mumei/packages/<name>/
         let pkg_name = dep
             .split('/')
             .next_back()
@@ -2131,15 +2136,78 @@ fn cmd_add(dep: &str) {
             .replace('-', "_");
         let toml_line = format!("{} = {{ git = \"{}\" }}", pkg_name, dep);
         println!("📦 Adding git dependency: {} → {}", pkg_name, dep);
+
+        // Pre-clone the repository so it's available for build
+        let packages_dir = manifest::mumei_home().join("packages");
+        let clone_dir = packages_dir.join(&pkg_name);
+        if !clone_dir.exists() {
+            let _ = fs::create_dir_all(&packages_dir);
+            println!("   Cloning {}...", dep);
+            let status = std::process::Command::new("git")
+                .args(["clone", "--depth", "1", dep, &clone_dir.to_string_lossy()])
+                .status();
+            match status {
+                Ok(s) if s.success() => {
+                    println!("   ✅ Cloned to {}", clone_dir.display());
+                }
+                _ => {
+                    eprintln!(
+                        "  ⚠️  Warning: git clone failed. The dependency will be cloned at build time."
+                    );
+                }
+            }
+        } else {
+            println!("   Using cached clone at {}", clone_dir.display());
+        }
+
         (pkg_name, toml_line)
     } else {
-        // パッケージ名のみ（レジストリ依存 — 将来対応）
-        let toml_line = format!("{} = \"*\"", dep);
-        println!(
-            "📦 Adding dependency: {} (registry lookup not yet implemented)",
-            dep
-        );
-        (dep.to_string(), toml_line)
+        // パッケージ名のみ（レジストリ依存）
+        // ~/.mumei/registry.json から検索
+        let reg = registry::load();
+        if let Some(pkg_entry) = reg.packages.get(dep) {
+            let version = &pkg_entry.latest;
+            let toml_line = format!("{} = \"{}\"", dep, version);
+            println!("📦 Adding registry dependency: {} v{}", dep, version);
+
+            // Show available versions
+            if pkg_entry.versions.len() > 1 {
+                let versions: Vec<&String> = pkg_entry.versions.keys().collect();
+                println!(
+                    "   Available versions: {}",
+                    versions
+                        .iter()
+                        .map(|v| v.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+
+            // Verify the package path exists
+            if let Some(ver_entry) = pkg_entry.versions.get(version.as_str()) {
+                if !Path::new(&ver_entry.path).exists() {
+                    eprintln!(
+                        "  ⚠️  Warning: Package directory '{}' does not exist. It may have been removed.",
+                        ver_entry.path
+                    );
+                }
+                if ver_entry.verified {
+                    println!("   ✅ Package is verified ({} atoms)", ver_entry.atom_count);
+                }
+            }
+
+            (dep.to_string(), toml_line)
+        } else {
+            // Not found in registry — add with wildcard version
+            let toml_line = format!("{} = \"*\"", dep);
+            eprintln!(
+                "⚠️  Package '{}' not found in local registry (~/.mumei/registry.json).",
+                dep
+            );
+            eprintln!("   The dependency will be added with version \"*\".");
+            eprintln!("   To publish a package: cd <package-dir> && mumei publish");
+            (dep.to_string(), toml_line)
+        }
     };
 
     // mumei.toml に追記
@@ -2205,12 +2273,18 @@ fn cmd_publish(proof_only: bool) {
     let output_dir = Path::new(".");
     let mut atom_count = 0;
     let mut failed = 0;
+    let mut verification_results: std::collections::HashMap<String, (String, String)> =
+        std::collections::HashMap::new();
 
     for item in &items {
         match item {
             Item::Atom(atom) => {
                 if module_env.is_verified(&atom.name) {
                     atom_count += 1;
+                    verification_results.insert(
+                        atom.name.clone(),
+                        ("unsat".to_string(), "verified".to_string()),
+                    );
                     continue;
                 }
                 let hir_atom = lower_atom_to_hir_with_env(atom, Some(&module_env));
@@ -2219,11 +2293,17 @@ fn cmd_publish(proof_only: bool) {
                         println!("  ⚖️  '{}': verified ✅", atom.name);
                         module_env.mark_verified(&atom.name);
                         atom_count += 1;
+                        verification_results.insert(
+                            atom.name.clone(),
+                            ("unsat".to_string(), "verified".to_string()),
+                        );
                     }
                     Err(e) => {
                         let resolved = resolve_source_for_span(&source, &atom.span);
                         let e = e.with_source(&resolved, &atom.span);
                         eprintln!("{:?}", miette::Report::new(e));
+                        verification_results
+                            .insert(atom.name.clone(), ("sat".to_string(), "failed".to_string()));
                         failed += 1;
                     }
                 }
@@ -2233,6 +2313,10 @@ fn cmd_publish(proof_only: bool) {
                     let qualified_name = format!("{}::{}", impl_block.struct_name, method.name);
                     if module_env.is_verified(&qualified_name) {
                         atom_count += 1;
+                        verification_results.insert(
+                            qualified_name.clone(),
+                            ("unsat".to_string(), "verified".to_string()),
+                        );
                         continue;
                     }
                     let mut qualified_method = method.clone();
@@ -2243,11 +2327,19 @@ fn cmd_publish(proof_only: bool) {
                             println!("  ⚖️  '{}': verified ✅", qualified_name);
                             module_env.mark_verified(&qualified_name);
                             atom_count += 1;
+                            verification_results.insert(
+                                qualified_name.clone(),
+                                ("unsat".to_string(), "verified".to_string()),
+                            );
                         }
                         Err(e) => {
                             let resolved = resolve_source_for_span(&source, &method.span);
                             let e = e.with_source(&resolved, &method.span);
                             eprintln!("{:?}", miette::Report::new(e));
+                            verification_results.insert(
+                                qualified_name.clone(),
+                                ("sat".to_string(), "failed".to_string()),
+                            );
                             failed += 1;
                         }
                     }
@@ -2309,7 +2401,49 @@ fn cmd_publish(proof_only: bool) {
         println!("  📁 Copied proof cache only to {}", pkg_dir.display());
     }
 
-    // 5. registry.json に登録
+    // 5. Generate proof certificate for the published package
+    {
+        let all_atoms: Vec<&parser::Atom> = items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Atom(atom) => Some(atom),
+                _ => None,
+            })
+            .collect();
+        // Also collect impl block methods as atoms for the certificate
+        let impl_atoms: Vec<parser::Atom> = items
+            .iter()
+            .filter_map(|item| match item {
+                Item::ImplBlock(ib) => Some(ib.methods.iter().map(|m| {
+                    let mut qualified = m.clone();
+                    qualified.name = format!("{}::{}", ib.struct_name, m.name);
+                    qualified
+                })),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        let mut cert_atoms: Vec<&parser::Atom> = all_atoms;
+        let impl_refs: Vec<&parser::Atom> = impl_atoms.iter().collect();
+        cert_atoms.extend(impl_refs);
+
+        let cert = proof_cert::generate_certificate(entry, &cert_atoms, &verification_results);
+        let cert_path = pkg_dir.join("proof_certificate.json");
+        match proof_cert::save_certificate(&cert, &cert_path) {
+            Ok(()) => {
+                println!(
+                    "  📜 Proof certificate saved ({} atoms): {}",
+                    cert.atoms.len(),
+                    cert_path.display()
+                );
+            }
+            Err(e) => {
+                eprintln!("  ⚠️  Failed to save proof certificate: {}", e);
+            }
+        }
+    }
+
+    // 6. registry.json に登録
     if let Err(e) = registry::register(pkg_name, pkg_version, &pkg_dir, atom_count, true) {
         eprintln!("  ⚠️  Registry update warning: {}", e);
     }
@@ -2323,6 +2457,64 @@ fn cmd_publish(proof_only: bool) {
         "   Other projects can now use: {} = \"{}\"",
         pkg_name, pkg_version
     );
+}
+
+// =============================================================================
+// mumei list — List available packages in local registry
+// =============================================================================
+
+fn cmd_list() {
+    let packages = registry::list_packages();
+
+    if packages.is_empty() {
+        println!("📦 No packages in local registry (~/.mumei/registry.json).");
+        println!();
+        println!("   To publish a package:");
+        println!("     cd <your-project>");
+        println!("     mumei publish");
+        return;
+    }
+
+    println!("📦 Local Registry — {} package(s):", packages.len());
+    println!();
+
+    for (name, entry) in &packages {
+        let verified_icon = entry
+            .versions
+            .get(&entry.latest)
+            .map(|v| if v.verified { " ✅" } else { "" })
+            .unwrap_or("");
+        println!("  {} v{}{}", name, entry.latest, verified_icon);
+
+        // Show all versions with details
+        let mut versions: Vec<(&String, &registry::VersionEntry)> = entry.versions.iter().collect();
+        versions.sort_by(|a, b| a.0.cmp(b.0));
+
+        for (ver, ver_entry) in &versions {
+            let current = if *ver == &entry.latest {
+                " (latest)"
+            } else {
+                ""
+            };
+            let verified = if ver_entry.verified {
+                "verified"
+            } else {
+                "unverified"
+            };
+            let path_exists = if Path::new(&ver_entry.path).exists() {
+                ""
+            } else {
+                " [missing]"
+            };
+            println!(
+                "    v{}: {} atoms, {}, published {}{}{}",
+                ver, ver_entry.atom_count, verified, ver_entry.published_at, current, path_exists
+            );
+        }
+        println!();
+    }
+
+    println!("   Registry path: {}", registry::registry_path().display());
 }
 
 // =============================================================================
