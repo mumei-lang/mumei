@@ -72,6 +72,9 @@ atom vec_push_safe(vec_len: i64, vec_cap: i64)
     }
 
 // 境界チェック付き要素設定
+// NOTE: value >= 0 は vec_get の ensures: result >= 0 との整合性のために必要。
+// ベクター要素は非負整数に制限される（現行の検証フレームワークの設計上の制約）。
+// 将来、任意の i64 値をサポートする場合は vec_get の ensures も同時に緩和すること。
 atom vec_set(vec_len: i64, index: i64, value: i64)
     requires: vec_len > 0 && index >= 0 && index < vec_len && value >= 0;
     ensures: result >= 0;

@@ -89,7 +89,12 @@ enum List<T> {
 
 // --- Sequential: 順序付きコレクション ---
 // Vector<T> の抽象インターフェース。
-// law により長さの非負性を型レベルで保証する。
+// law により長さの非負性と境界安全性を型レベルで保証する。
+//
+// NOTE: bounds_safe は「有効なインデックスで取得した要素は非負」を要求する。
+// これは std/alloc.mm の vec_get (ensures: result >= 0) および
+// vec_set (requires: value >= 0) と整合する設計判断である。
+// 将来、負の要素値をサポートする場合はこの law も緩和すること。
 //
 // 将来の alloc 導入時:
 //   impl Sequential for Vector<T> { ... }
