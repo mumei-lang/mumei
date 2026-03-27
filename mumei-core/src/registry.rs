@@ -66,14 +66,14 @@ pub fn resolve(name: &str, version: Option<&str>) -> Option<PathBuf> {
     let resolved_version = match version {
         None | Some("*") => entry.latest.clone(),
         Some(v) if v.starts_with('^') => {
-            // Semver-compatible: ^x.y.z matches any version with same major
+            // Semver-compatible: ^x.y.z respects left-most non-zero digit
             let base = v.trim_start_matches('^');
-            find_compatible_version(entry, base).unwrap_or_else(|| entry.latest.clone())
+            find_compatible_version(entry, base)?
         }
         Some(v) if v.starts_with('~') => {
             // Tilde: ~x.y.z matches any version with same major.minor
             let base = v.trim_start_matches('~');
-            find_tilde_compatible_version(entry, base).unwrap_or_else(|| entry.latest.clone())
+            find_tilde_compatible_version(entry, base)?
         }
         Some(v) => v.to_string(),
     };
@@ -126,16 +126,28 @@ fn parse_semver(v: &str) -> Option<(u64, u64, u64)> {
         _ => None,
     }
 }
-/// Find the highest version compatible with ^base (same major, >= base).
+/// Find the highest version compatible with ^base.
+/// Semver caret semantics respect the left-most non-zero digit:
+///   ^X.Y.Z (X>0): same major, >= base  (i.e. >=X.Y.Z, <(X+1).0.0)
+///   ^0.Y.Z (Y>0): same major.minor, >= base  (i.e. >=0.Y.Z, <0.(Y+1).0)
+///   ^0.0.Z:       exact patch  (i.e. ==0.0.Z)
 fn find_compatible_version(entry: &PackageEntry, base: &str) -> Option<String> {
     let (base_major, base_minor, base_patch) = parse_semver(base)?;
     let mut best: Option<(u64, u64, u64, String)> = None;
     for ver_str in entry.versions.keys() {
         if let Some((major, minor, patch)) = parse_semver(ver_str) {
-            if major == base_major
-                && (minor > base_minor || (minor == base_minor && patch >= base_patch))
-                && best.as_ref().is_none_or(|b| (minor, patch) > (b.1, b.2))
-            {
+            let compatible = if base_major != 0 {
+                // ^X.Y.Z (X>0): same major, >= base
+                major == base_major
+                    && (minor > base_minor || (minor == base_minor && patch >= base_patch))
+            } else if base_minor != 0 {
+                // ^0.Y.Z (Y>0): same major.minor, >= base
+                major == 0 && minor == base_minor && patch >= base_patch
+            } else {
+                // ^0.0.Z: exact match on major.minor.patch
+                major == 0 && minor == 0 && patch == base_patch
+            };
+            if compatible && best.as_ref().is_none_or(|b| (minor, patch) > (b.1, b.2)) {
                 best = Some((major, minor, patch, ver_str.clone()));
             }
         }

@@ -2210,6 +2210,24 @@ fn cmd_add(dep: &str) {
         }
     };
 
+    // 重複チェック: 同じ依存名が既に存在する場合は警告して終了
+    {
+        let dep_name = &dep_entry.0;
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with(&format!("{} ", dep_name))
+                || trimmed.starts_with(&format!("{}=", dep_name))
+                || trimmed.starts_with(&format!("{} =", dep_name))
+            {
+                eprintln!(
+                    "⚠️  Dependency '{}' already exists in mumei.toml. Remove the existing entry first or edit it manually.",
+                    dep_name
+                );
+                std::process::exit(1);
+            }
+        }
+    }
+
     // mumei.toml に追記
     let new_content = if content.contains("[dependencies]") {
         // [dependencies] セクションが既にある場合、その直後に追記
