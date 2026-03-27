@@ -98,7 +98,7 @@ trait Sequential {
     fn seq_len(s: Self) -> i64;
     fn seq_get(s: Self, index: i64) -> i64;
     law non_negative_length: seq_len(x) >= 0;
-    law bounds_safe: index >= 0 && index < seq_len(s) => seq_get(s, index) >= 0;
+    law bounds_safe: a >= 0 && a < seq_len(x) => seq_get(x, a) >= 0;
 }
 
 // --- Hashable: ハッシュ可能な型 ---
