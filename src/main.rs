@@ -201,9 +201,10 @@ fn main() {
                 "llvm-ir" => emitter::EmitTarget::LlvmIr,
                 "c-header" => emitter::EmitTarget::CHeader,
                 "verified-json" => emitter::EmitTarget::VerifiedJson,
+                "proof-book" => emitter::EmitTarget::ProofBook,
                 other => {
                     eprintln!(
-                        "\u{274c} Error: Unknown emit target '{}'. Valid values: llvm-ir, c-header, verified-json",
+                        "\u{274c} Error: Unknown emit target '{}'. Valid values: llvm-ir, c-header, verified-json, proof-book",
                         other
                     );
                     std::process::exit(1);
@@ -1583,6 +1584,12 @@ fn dispatch_emit(
             module_env,
             extern_blocks,
         ),
+        emitter::EmitTarget::ProofBook => mumei_emit_proofbook::ProofBookEmitter.emit(
+            hir_atom,
+            output_path,
+            module_env,
+            extern_blocks,
+        ),
     }
 }
 
@@ -1890,6 +1897,7 @@ fn cmd_build(input: &str, output: &str, emit_target: &emitter::EmitTarget) {
                                 emitter::EmitTarget::LlvmIr => "LLVM IR",
                                 emitter::EmitTarget::CHeader => "C header",
                                 emitter::EmitTarget::VerifiedJson => "Verified JSON",
+                                emitter::EmitTarget::ProofBook => "Proof-Book",
                             };
                             println!(
                                 "  ⚙️  [3/3] Tempering: Done. Compiled '{}' to {}.",
@@ -2041,6 +2049,7 @@ fn cmd_build(input: &str, output: &str, emit_target: &emitter::EmitTarget) {
                             emitter::EmitTarget::LlvmIr => "LLVM IR",
                             emitter::EmitTarget::CHeader => "C header",
                             emitter::EmitTarget::VerifiedJson => "Verified JSON",
+                            emitter::EmitTarget::ProofBook => "Proof-Book",
                         };
                         println!(
                             "  ⚙️  [3/3] Tempering: Done. Compiled '{}' to {}.",

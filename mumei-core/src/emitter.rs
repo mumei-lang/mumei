@@ -59,6 +59,7 @@ pub enum EmitTarget {
     LlvmIr,
     CHeader,
     VerifiedJson,
+    ProofBook,
 }
 
 pub struct CHeaderEmitter;

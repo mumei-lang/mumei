@@ -1,0 +1,11 @@
+[package]
+name = "mumei-emit-proofbook"
+version = "0.2.0"
+edition = "2021"
+description = "Proof-Book Markdown emitter for the Mumei compiler"
+license = "MIT"
+repository = "https://github.com/mumei-lang/mumei"
+
+[dependencies]
+mumei-core = { path = "../mumei-core" }
+sha2 = "0.10"
