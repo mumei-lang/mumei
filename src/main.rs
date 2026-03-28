@@ -3189,6 +3189,8 @@ fn cmd_repl() {
                 for eval_item in &eval_items {
                     if let parser::Item::Atom(atom) = eval_item {
                         let hir_atom = lower_atom_to_hir_with_env(atom, Some(&module_env));
+                        // Precautionary cleanup of any stale __repl_eval from previous failures
+                        engine.remove_function("__repl_eval");
                         match engine.compile_atom(&hir_atom, &module_env, &extern_blocks_repl) {
                             Ok(()) => {
                                 // Determine return type to pick execute_i64 vs execute_f64
@@ -3207,7 +3209,10 @@ fn cmd_repl() {
                                 }
                                 engine.remove_function("__repl_eval");
                             }
-                            Err(e) => eprintln!("  ❌ JIT compile error: {}", e),
+                            Err(e) => {
+                                engine.remove_function("__repl_eval");
+                                eprintln!("  ❌ JIT compile error: {}", e);
+                            }
                         }
                     }
                 }
@@ -3240,6 +3245,8 @@ fn cmd_repl() {
                                     println!("  ✅ Verification passed");
                                     // P7-A: If verification passes, also JIT execute and show result
                                     if let Some(ref engine) = jit_engine {
+                                        // Precautionary cleanup of any stale __repl_eval
+                                        engine.remove_function("__repl_eval");
                                         match engine.compile_atom(
                                             &hir_atom,
                                             &module_env,
@@ -3274,6 +3281,7 @@ fn cmd_repl() {
                                                 engine.remove_function("__repl_eval");
                                             }
                                             Err(e) => {
+                                                engine.remove_function("__repl_eval");
                                                 eprintln!("  ⚠️  JIT compile warning: {}", e)
                                             }
                                         }
@@ -3308,6 +3316,8 @@ fn cmd_repl() {
                                 Ok(()) => {
                                     // JIT execute
                                     if let Some(ref engine) = jit_engine {
+                                        // Precautionary cleanup of any stale __repl_eval
+                                        engine.remove_function("__repl_eval");
                                         match engine.compile_atom(
                                             &hir_atom,
                                             &module_env,
@@ -3342,6 +3352,7 @@ fn cmd_repl() {
                                                 engine.remove_function("__repl_eval");
                                             }
                                             Err(e) => {
+                                                engine.remove_function("__repl_eval");
                                                 eprintln!("  ⚠️  JIT compile warning: {}", e)
                                             }
                                         }

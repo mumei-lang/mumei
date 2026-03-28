@@ -622,6 +622,12 @@ Enables mumei's verified code to actually run — both interactively in the REPL
 - FFI warning: extern blocks trigger a warning about runtime library requirement
 - Examples: `examples/run_demo.mm`, `examples/run_with_calls.mm`
 
+**Known Limitations**:
+- **MCJIT incremental compilation**: The JIT engine uses MCJIT, which finalizes the entire module on first `get_function` call. Defining multiple interdependent atoms across REPL iterations and then calling them may fail. Single-eval usage (`:eval`, `:verify`, bare expressions) works correctly. A future migration to ORC JIT would resolve this.
+- **Binary compilation: top-level atoms only**: `mumei run` and `mumei build --emit binary` only compile top-level `atom` definitions. `impl` block methods are not included in the binary. Programs using struct methods will fail to link.
+- **Self-recursive `main` atom**: The rename strategy (`main` → `__mumei_user_main`) does not rename recursive calls inside the body. If `main` calls itself, the call target will reference the C wrapper instead.
+- **`find_clang()` is Unix-only**: Uses the `which` command, which is not available on Windows.
+
 **P7-C: Wasm Target** — Deferred
 - WebAssembly compilation target for browser/edge execution
 - Will be implemented after P7-A/B stabilize

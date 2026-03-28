@@ -88,10 +88,21 @@ pub fn compile_atoms_to_binary_ll(
         .left()
         .ok_or_else(|| MumeiError::codegen("main() must return a value".to_string()))?;
 
-    // Truncate i64 result to i32 for C-compatible process exit code
-    let exit_code = builder
-        .build_int_truncate(result.into_int_value(), i32_type, "exit_code")
-        .map_err(|e| MumeiError::codegen(format!("Failed to build truncate: {}", e)))?;
+    // Convert result to i32 for C-compatible process exit code.
+    // Handle both integer and float return types from __mumei_user_main.
+    let exit_code = if result.is_int_value() {
+        builder
+            .build_int_truncate(result.into_int_value(), i32_type, "exit_code")
+            .map_err(|e| MumeiError::codegen(format!("Failed to build truncate: {}", e)))?
+    } else if result.is_float_value() {
+        builder
+            .build_float_to_signed_int(result.into_float_value(), i32_type, "exit_code")
+            .map_err(|e| MumeiError::codegen(format!("Failed to build float to int: {}", e)))?
+    } else {
+        return Err(MumeiError::codegen(
+            "main() must return an integer or float type for binary compilation".to_string(),
+        ));
+    };
     builder
         .build_return(Some(&exit_code))
         .map_err(|e| MumeiError::codegen(format!("Failed to build return: {}", e)))?;
