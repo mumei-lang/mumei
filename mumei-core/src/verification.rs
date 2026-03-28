@@ -1943,6 +1943,13 @@ impl ModuleEnv {
         self.verified_cache.contains(atom_name)
     }
 
+    /// P5-C: Set the trust level of a registered atom (for taint analysis on unverified imports)
+    pub fn set_trust_level(&mut self, atom_name: &str, level: TrustLevel) {
+        if let Some(atom) = self.atoms.get_mut(atom_name) {
+            atom.trust_level = level;
+        }
+    }
+
     /// リソース定義を登録する
     pub fn register_resource(&mut self, resource_def: &ResourceDef) {
         self.resources

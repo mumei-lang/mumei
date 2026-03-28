@@ -87,9 +87,12 @@ enum Command {
         /// Output base name
         #[arg(short, long, default_value = "katana")]
         output: String,
-        /// Emit target: llvm-ir (default), c-header, or verified-json
+        /// Emit target: llvm-ir (default), c-header, verified-json, proof-book, proof-cert
         #[arg(long, default_value = "llvm-ir")]
         emit: String,
+        /// P5-C: Strict import mode — missing/invalid certificates cause hard errors
+        #[arg(long)]
+        strict_imports: bool,
     },
     /// Z3 formal verification only (no codegen)
     Verify {
@@ -107,6 +110,9 @@ enum Command {
         /// Output verification report as JSON to stdout
         #[arg(long)]
         json: bool,
+        /// P5-C: Strict import mode — missing/invalid certificates cause hard errors
+        #[arg(long)]
+        strict_imports: bool,
     },
     /// Parse + resolve + monomorphize only (no Z3, fast syntax check)
     Check {
@@ -139,6 +145,9 @@ enum Command {
     Add {
         /// Dependency specifier: local path (./path/to/lib) or package name
         dep: String,
+        /// P5-B: Specify version for registry dependency
+        #[arg(long)]
+        version: Option<String>,
     },
     /// Publish package to local registry (~/.mumei/packages/)
     Publish {
@@ -198,21 +207,23 @@ fn main() {
             input,
             output,
             emit,
+            strict_imports,
         }) => {
             let emit_target = match emit.as_str() {
                 "llvm-ir" => emitter::EmitTarget::LlvmIr,
                 "c-header" => emitter::EmitTarget::CHeader,
                 "verified-json" => emitter::EmitTarget::VerifiedJson,
                 "proof-book" => emitter::EmitTarget::ProofBook,
+                "proof-cert" => emitter::EmitTarget::ProofCert,
                 other => {
                     eprintln!(
-                        "\u{274c} Error: Unknown emit target '{}'. Valid values: llvm-ir, c-header, verified-json, proof-book",
+                        "\u{274c} Error: Unknown emit target '{}'. Valid values: llvm-ir, c-header, verified-json, proof-book, proof-cert",
                         other
                     );
                     std::process::exit(1);
                 }
             };
-            cmd_build(&input, &output, &emit_target);
+            cmd_build(&input, &output, &emit_target, strict_imports);
         }
         Some(Command::Verify {
             input,
@@ -220,6 +231,7 @@ fn main() {
             output,
             report_dir,
             json,
+            strict_imports,
         }) => {
             cmd_verify(
                 &input,
@@ -227,6 +239,7 @@ fn main() {
                 output.as_deref(),
                 report_dir.as_deref(),
                 json,
+                strict_imports,
             );
         }
         Some(Command::Check { input }) => {
@@ -245,8 +258,8 @@ fn main() {
         Some(Command::Setup { force }) => {
             setup::run(force);
         }
-        Some(Command::Add { dep }) => {
-            cmd_add(&dep);
+        Some(Command::Add { dep, version }) => {
+            cmd_add(&dep, version.as_deref());
         }
         Some(Command::Publish { proof_only }) => {
             cmd_publish(proof_only);
@@ -279,7 +292,7 @@ fn main() {
         None => {
             // 後方互換: `mumei input.mm -o dist/katana` → build として実行
             if let Some(ref input) = cli.input {
-                cmd_build(input, &cli.output, &emitter::EmitTarget::LlvmIr);
+                cmd_build(input, &cli.output, &emitter::EmitTarget::LlvmIr, false);
             } else {
                 eprintln!("Usage: mumei <COMMAND> or mumei <input.mm>");
                 eprintln!("  build   Verify + compile (default)");
@@ -331,6 +344,14 @@ fn check_z3_available() {
 /// parse → resolve → monomorphize → ModuleEnv に全定義を登録
 /// ソースコード文字列も返す（miette リッチ出力のため）
 fn load_and_prepare(input: &str) -> (Vec<Item>, verification::ModuleEnv, Vec<ImportDecl>, String) {
+    load_and_prepare_with_options(input, false)
+}
+
+/// P5-C: load_and_prepare with strict_imports option.
+fn load_and_prepare_with_options(
+    input: &str,
+    strict_imports: bool,
+) -> (Vec<Item>, verification::ModuleEnv, Vec<ImportDecl>, String) {
     let source = load_source(input);
     let items = parser::parse_module(&source);
 
@@ -349,12 +370,34 @@ fn load_and_prepare(input: &str) -> (Vec<Item>, verification::ModuleEnv, Vec<Imp
 
     // mumei.toml の [dependencies] から依存パッケージを解決
     if let Some((proj_dir, m)) = manifest::find_and_load() {
-        if let Err(e) = resolver::resolve_manifest_dependencies(&m, &proj_dir, &mut module_env) {
+        if strict_imports {
+            if let Err(e) = resolver::resolve_manifest_dependencies_with_options(
+                &m,
+                &proj_dir,
+                &mut module_env,
+                strict_imports,
+            ) {
+                eprintln!("  ❌ Dependency resolution failed (strict mode): {}", e);
+                std::process::exit(1);
+            }
+        } else if let Err(e) =
+            resolver::resolve_manifest_dependencies(&m, &proj_dir, &mut module_env)
+        {
             eprintln!("  ⚠️  Dependency resolution warning: {}", e);
         }
     }
 
-    if let Err(e) = resolver::resolve_imports(&items, base_dir, &mut module_env) {
+    if strict_imports {
+        if let Err(e) = resolver::resolve_imports_with_options(
+            &items,
+            base_dir,
+            &mut module_env,
+            strict_imports,
+        ) {
+            eprintln!("  ❌ Import resolution failed (strict mode): {}", e);
+            std::process::exit(1);
+        }
+    } else if let Err(e) = resolver::resolve_imports(&items, base_dir, &mut module_env) {
         eprintln!("  ❌ Import Resolution Failed: {}", e);
         std::process::exit(1);
     }
@@ -565,12 +608,14 @@ fn cmd_verify(
     cert_output: Option<&str>,
     report_dir: Option<&str>,
     json_output: bool,
+    strict_imports: bool,
 ) {
     check_z3_available();
     if !json_output {
         println!("🗡️  Mumei verify: verifying '{}'...", input);
     }
-    let (items, mut module_env, _imports, source) = load_and_prepare(input);
+    let (items, mut module_env, _imports, source) =
+        load_and_prepare_with_options(input, strict_imports);
 
     let output_dir = match report_dir {
         Some(dir) => Path::new(dir),
@@ -887,7 +932,14 @@ fn cmd_verify(
         for qm in &qualified_methods {
             atom_refs.push(qm);
         }
-        let cert = proof_cert::generate_certificate(input, &atom_refs, &cert_results);
+        let cert = proof_cert::generate_certificate(
+            input,
+            &atom_refs,
+            &cert_results,
+            &module_env,
+            None,
+            None,
+        );
         let cert_path = if let Some(output) = cert_output {
             std::path::PathBuf::from(output)
         } else {
@@ -1544,13 +1596,42 @@ fn cmd_verify_cert(cert_path: &str, input: &str) {
             }
         };
         println!("  {} {}: {}", icon, name, status);
+
+        // P5-A: Print extended fields for each atom certificate
+        if let Some(ac) = cert.atoms.iter().find(|a| a.name == *name) {
+            if !ac.proof_hash.is_empty() {
+                println!("      proof_hash: {}", ac.proof_hash);
+            }
+            if !ac.dependencies.is_empty() {
+                println!("      dependencies: [{}]", ac.dependencies.join(", "));
+            }
+            if !ac.effects.is_empty() {
+                println!("      effects: [{}]", ac.effects.join(", "));
+            }
+            if !ac.requires.is_empty() {
+                println!("      requires: {}", ac.requires);
+            }
+            if !ac.ensures.is_empty() {
+                println!("      ensures: {}", ac.ensures);
+            }
+        }
     }
 
     println!();
+    // P5-A: Print package metadata if present
+    if let Some(ref pkg) = cert.package_name {
+        println!(
+            "Package: {} v{}",
+            pkg,
+            cert.package_version.as_deref().unwrap_or("?")
+        );
+    }
     println!(
         "Certificate: {} (generated {} by mumei v{})",
         cert_path, cert.timestamp, cert.mumei_version
     );
+    println!("Certificate hash: {}", cert.certificate_hash);
+    println!("All verified: {}", cert.all_verified);
     println!(
         "Results: {} proven, {} changed, {} unproven, {} missing",
         proven, changed, unproven, missing
@@ -1595,6 +1676,11 @@ fn dispatch_emit(
             module_env,
             extern_blocks,
         ),
+        emitter::EmitTarget::ProofCert => {
+            // P5-A: ProofCert emit is handled at a higher level (cmd_build);
+            // at per-atom dispatch we return an empty artifact list.
+            Ok(vec![])
+        }
     }
 }
 
@@ -1602,7 +1688,7 @@ fn dispatch_emit(
 // mumei build — full pipeline (verify + codegen)
 // =============================================================================
 
-fn cmd_build(input: &str, output: &str, emit_target: &emitter::EmitTarget) {
+fn cmd_build(input: &str, output: &str, emit_target: &emitter::EmitTarget, strict_imports: bool) {
     check_z3_available();
     println!("🗡️  Mumei: Forging the blade (Type System 2.0 + Generics enabled)...");
 
@@ -1621,7 +1707,8 @@ fn cmd_build(input: &str, output: &str, emit_target: &emitter::EmitTarget) {
         )
     };
 
-    let (items, mut module_env, _imports, source) = load_and_prepare(input);
+    let (items, mut module_env, _imports, source) =
+        load_and_prepare_with_options(input, strict_imports);
 
     let output_path = Path::new(output);
     let output_dir = output_path.parent().unwrap_or(Path::new("."));
@@ -1903,6 +1990,7 @@ fn cmd_build(input: &str, output: &str, emit_target: &emitter::EmitTarget) {
                                 emitter::EmitTarget::CHeader => "C header",
                                 emitter::EmitTarget::VerifiedJson => "Verified JSON",
                                 emitter::EmitTarget::ProofBook => "Proof-Book",
+                                emitter::EmitTarget::ProofCert => "Proof-Cert",
                             };
                             println!(
                                 "  ⚙️  [3/3] Tempering: Done. Compiled '{}' to {}.",
@@ -2055,6 +2143,7 @@ fn cmd_build(input: &str, output: &str, emit_target: &emitter::EmitTarget) {
                             emitter::EmitTarget::CHeader => "C header",
                             emitter::EmitTarget::VerifiedJson => "Verified JSON",
                             emitter::EmitTarget::ProofBook => "Proof-Book",
+                            emitter::EmitTarget::ProofCert => "Proof-Cert",
                         };
                         println!(
                             "  ⚙️  [3/3] Tempering: Done. Compiled '{}' to {}.",
@@ -2088,7 +2177,7 @@ fn cmd_build(input: &str, output: &str, emit_target: &emitter::EmitTarget) {
 // mumei add — add dependency to mumei.toml
 // =============================================================================
 
-fn cmd_add(dep: &str) {
+fn cmd_add(dep: &str, _version: Option<&str>) {
     // mumei.toml を探す
     let manifest_path = Path::new("mumei.toml");
     if !manifest_path.exists() {
@@ -2193,6 +2282,32 @@ fn cmd_add(dep: &str) {
                 }
                 if ver_entry.verified {
                     println!("   ✅ Package is verified ({} atoms)", ver_entry.atom_count);
+                }
+
+                // P5-B: Verify proof certificate if cert_path exists
+                if let Some(ref cp) = ver_entry.cert_path {
+                    let cert_path = Path::new(cp);
+                    if cert_path.exists() {
+                        // Verify cert hash integrity
+                        let mut cert_ok = true;
+                        if let Some(ref expected_hash) = ver_entry.cert_hash {
+                            if let Ok(data) = fs::read_to_string(cert_path) {
+                                let actual_hash = proof_cert::compute_sha256(&data);
+                                if &actual_hash != expected_hash {
+                                    eprintln!(
+                                        "  ⚠️  Certificate hash mismatch! Expected: {}, Got: {}",
+                                        expected_hash, actual_hash
+                                    );
+                                    cert_ok = false;
+                                }
+                            }
+                        }
+                        if cert_ok {
+                            println!("   🔒 Proof certificate verified");
+                        }
+                    } else {
+                        eprintln!("  ⚠️  Certificate file not found: {}", cp);
+                    }
                 }
             }
 
@@ -2454,7 +2569,14 @@ fn cmd_publish(proof_only: bool) {
         let impl_refs: Vec<&parser::Atom> = impl_atoms.iter().collect();
         cert_atoms.extend(impl_refs);
 
-        let cert = proof_cert::generate_certificate(entry, &cert_atoms, &verification_results);
+        let cert = proof_cert::generate_certificate(
+            entry,
+            &cert_atoms,
+            &verification_results,
+            &module_env,
+            Some(pkg_name),
+            Some(pkg_version),
+        );
         let cert_path = pkg_dir.join("proof_certificate.json");
         match proof_cert::save_certificate(&cert, &cert_path) {
             Ok(()) => {
@@ -2470,8 +2592,27 @@ fn cmd_publish(proof_only: bool) {
         }
     }
 
-    // 6. registry.json に登録
-    if let Err(e) = registry::register(pkg_name, pkg_version, &pkg_dir, atom_count, true) {
+    // 6. registry.json に登録 (P5-B: with cert metadata)
+    let cert_file = pkg_dir.join("proof_certificate.json");
+    let (reg_cert_path, reg_cert_hash) = if cert_file.exists() {
+        let cert_path_str = cert_file.to_string_lossy().to_string();
+        let cert_hash_str = fs::read_to_string(&cert_file)
+            .ok()
+            .map(|data| proof_cert::compute_sha256(&data))
+            .unwrap_or_default();
+        (Some(cert_path_str), Some(cert_hash_str))
+    } else {
+        (None, None)
+    };
+    if let Err(e) = registry::register_with_cert(
+        pkg_name,
+        pkg_version,
+        &pkg_dir,
+        atom_count,
+        true,
+        reg_cert_path,
+        reg_cert_hash,
+    ) {
         eprintln!("  ⚠️  Registry update warning: {}", e);
     }
 

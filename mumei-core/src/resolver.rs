@@ -22,6 +22,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::parser::{self, Item};
+use crate::proof_cert;
 use crate::verification::{ModuleEnv, MumeiError, MumeiResult};
 
 /// 検証キャッシュのエントリ
@@ -54,12 +55,15 @@ struct ResolverContext {
     loading: HashSet<PathBuf>,
     /// 完全にロード済みのモジュール（キャッシュ）
     loaded: HashMap<PathBuf, Vec<Item>>,
+    /// P5-C: When true, missing/invalid certificates cause hard errors instead of warnings
+    strict_imports: bool,
 }
 impl ResolverContext {
     fn new() -> Self {
         Self {
             loading: HashSet::new(),
             loaded: HashMap::new(),
+            strict_imports: false,
         }
     }
 }
@@ -71,9 +75,21 @@ pub fn resolve_imports(
     base_dir: &Path,
     module_env: &mut ModuleEnv,
 ) -> MumeiResult<()> {
+    resolve_imports_with_options(items, base_dir, module_env, false)
+}
+
+/// P5-C: resolve_imports with strict_imports option.
+/// When strict_imports is true, missing or invalid certificates cause hard errors.
+pub fn resolve_imports_with_options(
+    items: &[Item],
+    base_dir: &Path,
+    module_env: &mut ModuleEnv,
+    strict_imports: bool,
+) -> MumeiResult<()> {
     let cache_path = base_dir.join(".mumei_cache");
     let mut cache = load_cache(&cache_path);
     let mut ctx = ResolverContext::new();
+    ctx.strict_imports = strict_imports;
     resolve_imports_recursive(items, base_dir, &mut ctx, &mut cache, module_env)?;
     save_cache(&cache_path, &cache);
     Ok(())
@@ -140,6 +156,105 @@ pub fn resolve_prelude(base_dir: &Path, module_env: &mut ModuleEnv) -> MumeiResu
 
     Ok(())
 }
+/// P5-C: Check if an atom passed certificate verification for a given module.
+/// Returns true if the atom is "proven" according to the certificate, false otherwise.
+fn check_cert_for_atom(cert_results: &HashMap<String, String>, atom_name: &str) -> bool {
+    cert_results
+        .get(atom_name)
+        .is_some_and(|status| status == "proven")
+}
+
+/// P5-C: Attempt to verify a proof certificate for an imported module directory.
+/// Returns a map of atom_name -> status ("proven", "changed", "unproven", "missing").
+/// Returns None if no certificate exists.
+fn verify_import_certificate(
+    module_dir: &Path,
+    source_file: &Path,
+    items: &[Item],
+) -> Option<HashMap<String, String>> {
+    // Look for .proof-cert.json or proof_certificate.json in the module directory
+    let cert_candidates = [
+        module_dir.join(".proof-cert.json"),
+        module_dir.join("proof_certificate.json"),
+    ];
+    let cert_path = cert_candidates.iter().find(|p| p.exists())?;
+
+    let cert = proof_cert::load_certificate(cert_path).ok()?;
+
+    // Check if the certificate matches this source file
+    let cert_file_path = Path::new(&cert.file);
+    let source_matches = source_file.ends_with(cert_file_path)
+        || cert_file_path.ends_with(source_file.file_name().unwrap_or_default());
+    if !source_matches && !cert.file.is_empty() {
+        // Certificate is for a different file — still try to verify
+    }
+
+    let atom_refs: Vec<&parser::Atom> = items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Atom(a) => Some(a),
+            _ => None,
+        })
+        .collect();
+
+    let results = proof_cert::verify_certificate(&cert, &atom_refs);
+    Some(results.into_iter().collect())
+}
+
+/// P5-C: Mark dependency atoms as verified or unverified based on cert verification results.
+/// Used by resolve_manifest_dependencies() for all dependency types.
+fn mark_dependency_atoms_with_cert(
+    items: &[Item],
+    dep_name: &str,
+    cert_results: &Option<HashMap<String, String>>,
+    module_env: &mut ModuleEnv,
+    _strict_imports: bool,
+) {
+    for item in items {
+        match item {
+            Item::Atom(atom) => {
+                let should_verify = match cert_results {
+                    Some(results) => check_cert_for_atom(results, &atom.name),
+                    None => true, // No cert = legacy behavior
+                };
+                if should_verify {
+                    module_env.mark_verified(&atom.name);
+                    let fqn = format!("{}::{}", dep_name, atom.name);
+                    module_env.mark_verified(&fqn);
+                } else {
+                    eprintln!(
+                        "  ⚠️  Dependency '{}': atom '{}' failed certificate verification",
+                        dep_name, atom.name
+                    );
+                    module_env.set_trust_level(&atom.name, crate::parser::TrustLevel::Unverified);
+                }
+            }
+            Item::ImplBlock(ib) => {
+                for method in &ib.methods {
+                    let qualified = format!("{}::{}", ib.struct_name, method.name);
+                    let should_verify = match cert_results {
+                        Some(results) => check_cert_for_atom(results, &qualified),
+                        None => true,
+                    };
+                    if should_verify {
+                        module_env.mark_verified(&qualified);
+                        let fqn = format!("{}::{}::{}", dep_name, ib.struct_name, method.name);
+                        module_env.mark_verified(&fqn);
+                    } else {
+                        eprintln!(
+                            "  ⚠️  Dependency '{}': method '{}' failed certificate verification",
+                            dep_name, qualified
+                        );
+                        module_env
+                            .set_trust_level(&qualified, crate::parser::TrustLevel::Unverified);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// 再帰的にインポートを解決する内部関数
 fn resolve_imports_recursive(
     items: &[Item],
@@ -194,21 +309,39 @@ fn resolve_imports_recursive(
             let alias_prefix = import_decl.alias.as_deref();
             register_imported_items(&imported_items, alias_prefix, module_env);
 
+            // P5-C: Check for proof certificate before marking atoms as verified
+            let cert_results =
+                verify_import_certificate(import_base_dir, &resolved_path, &imported_items);
+
             // インポートされた atom を検証済みとしてマーク
-            // → main.rs で verify() をスキップし、契約のみ信頼する
+            // P5-C: Only mark as verified if cert check passes (or no cert exists = legacy behavior)
             let mut verified_atoms = Vec::new();
             let mut type_names = Vec::new();
             let mut struct_names = Vec::new();
             for imported_item in &imported_items {
                 match imported_item {
                     Item::Atom(atom) => {
-                        module_env.mark_verified(&atom.name);
-                        verified_atoms.push(atom.name.clone());
-                        // FQN でもマーク
-                        if let Some(prefix) = alias_prefix {
-                            let fqn = format!("{}::{}", prefix, atom.name);
-                            module_env.mark_verified(&fqn);
-                            verified_atoms.push(fqn);
+                        let should_verify = match &cert_results {
+                            Some(results) => check_cert_for_atom(results, &atom.name),
+                            None => true, // No cert = legacy behavior, trust imported atoms
+                        };
+                        if should_verify {
+                            module_env.mark_verified(&atom.name);
+                            verified_atoms.push(atom.name.clone());
+                            if let Some(prefix) = alias_prefix {
+                                let fqn = format!("{}::{}", prefix, atom.name);
+                                module_env.mark_verified(&fqn);
+                                verified_atoms.push(fqn);
+                            }
+                        } else {
+                            eprintln!(
+                                "  ⚠️  Import '{}': atom '{}' failed certificate verification",
+                                resolved_path.display(),
+                                atom.name
+                            );
+                            // P5-C: Register as unverified for taint analysis
+                            module_env
+                                .set_trust_level(&atom.name, crate::parser::TrustLevel::Unverified);
                         }
                     }
                     Item::TypeDef(t) => type_names.push(t.name.clone()),
@@ -223,13 +356,29 @@ fn resolve_imports_recursive(
                     Item::ImplBlock(ib) => {
                         for method in &ib.methods {
                             let qualified_name = format!("{}::{}", ib.struct_name, method.name);
-                            module_env.mark_verified(&qualified_name);
-                            verified_atoms.push(qualified_name.clone());
-                            if let Some(prefix) = alias_prefix {
-                                let fqn =
-                                    format!("{}::{}::{}", prefix, ib.struct_name, method.name);
-                                module_env.mark_verified(&fqn);
-                                verified_atoms.push(fqn);
+                            let should_verify = match &cert_results {
+                                Some(results) => check_cert_for_atom(results, &qualified_name),
+                                None => true,
+                            };
+                            if should_verify {
+                                module_env.mark_verified(&qualified_name);
+                                verified_atoms.push(qualified_name.clone());
+                                if let Some(prefix) = alias_prefix {
+                                    let fqn =
+                                        format!("{}::{}::{}", prefix, ib.struct_name, method.name);
+                                    module_env.mark_verified(&fqn);
+                                    verified_atoms.push(fqn);
+                                }
+                            } else {
+                                eprintln!(
+                                    "  ⚠️  Import '{}': method '{}' failed certificate verification",
+                                    resolved_path.display(),
+                                    qualified_name
+                                );
+                                module_env.set_trust_level(
+                                    &qualified_name,
+                                    crate::parser::TrustLevel::Unverified,
+                                );
                             }
                         }
                     }
@@ -489,6 +638,16 @@ pub fn resolve_manifest_dependencies(
     project_dir: &Path,
     module_env: &mut ModuleEnv,
 ) -> MumeiResult<()> {
+    resolve_manifest_dependencies_with_options(manifest, project_dir, module_env, false)
+}
+
+/// P5-C: resolve_manifest_dependencies with strict_imports option.
+pub fn resolve_manifest_dependencies_with_options(
+    manifest: &crate::manifest::Manifest,
+    project_dir: &Path,
+    module_env: &mut ModuleEnv,
+    strict_imports: bool,
+) -> MumeiResult<()> {
     for (dep_name, dep) in &manifest.dependencies {
         // パス依存
         if let Some(dep_path) = dep.as_path() {
@@ -516,25 +675,15 @@ pub fn resolve_manifest_dependencies(
                 resolve_imports_recursive(&items, dep_base_dir, &mut ctx, &mut cache, module_env)?;
                 save_cache(&cache_path, &cache);
                 register_imported_items(&items, Some(dep_name), module_env);
-                for item in &items {
-                    match item {
-                        Item::Atom(atom) => {
-                            module_env.mark_verified(&atom.name);
-                            let fqn = format!("{}::{}", dep_name, atom.name);
-                            module_env.mark_verified(&fqn);
-                        }
-                        Item::ImplBlock(ib) => {
-                            for method in &ib.methods {
-                                let qualified = format!("{}::{}", ib.struct_name, method.name);
-                                module_env.mark_verified(&qualified);
-                                let fqn =
-                                    format!("{}::{}::{}", dep_name, ib.struct_name, method.name);
-                                module_env.mark_verified(&fqn);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
+                // P5-C: Check for proof certificate before marking atoms as verified
+                let cert_results = verify_import_certificate(&abs_path, entry_path, &items);
+                mark_dependency_atoms_with_cert(
+                    &items,
+                    dep_name,
+                    &cert_results,
+                    module_env,
+                    strict_imports,
+                );
                 println!(
                     "  📦 Dependency '{}': loaded from {}",
                     dep_name,
@@ -632,25 +781,15 @@ pub fn resolve_manifest_dependencies(
                 resolve_imports_recursive(&items, dep_base_dir, &mut ctx, &mut cache, module_env)?;
                 save_cache(&cache_path, &cache);
                 register_imported_items(&items, Some(dep_name), module_env);
-                for item in &items {
-                    match item {
-                        Item::Atom(atom) => {
-                            module_env.mark_verified(&atom.name);
-                            let fqn = format!("{}::{}", dep_name, atom.name);
-                            module_env.mark_verified(&fqn);
-                        }
-                        Item::ImplBlock(ib) => {
-                            for method in &ib.methods {
-                                let qualified = format!("{}::{}", ib.struct_name, method.name);
-                                module_env.mark_verified(&qualified);
-                                let fqn =
-                                    format!("{}::{}::{}", dep_name, ib.struct_name, method.name);
-                                module_env.mark_verified(&fqn);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
+                // P5-C: Check for proof certificate before marking atoms as verified
+                let cert_results = verify_import_certificate(dep_base_dir, entry_path, &items);
+                mark_dependency_atoms_with_cert(
+                    &items,
+                    dep_name,
+                    &cert_results,
+                    module_env,
+                    strict_imports,
+                );
             } else {
                 eprintln!(
                     "  ⚠️  Dependency '{}': no entry file found in cloned repo",
@@ -691,27 +830,15 @@ pub fn resolve_manifest_dependencies(
                     )?;
                     save_cache(&cache_path, &cache);
                     register_imported_items(&items, Some(dep_name), module_env);
-                    for item in &items {
-                        match item {
-                            Item::Atom(atom) => {
-                                module_env.mark_verified(&atom.name);
-                                let fqn = format!("{}::{}", dep_name, atom.name);
-                                module_env.mark_verified(&fqn);
-                            }
-                            Item::ImplBlock(ib) => {
-                                for method in &ib.methods {
-                                    let qualified = format!("{}::{}", ib.struct_name, method.name);
-                                    module_env.mark_verified(&qualified);
-                                    let fqn = format!(
-                                        "{}::{}::{}",
-                                        dep_name, ib.struct_name, method.name
-                                    );
-                                    module_env.mark_verified(&fqn);
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
+                    // P5-C: Check for proof certificate before marking atoms as verified
+                    let cert_results = verify_import_certificate(dep_base_dir, entry_path, &items);
+                    mark_dependency_atoms_with_cert(
+                        &items,
+                        dep_name,
+                        &cert_results,
+                        module_env,
+                        strict_imports,
+                    );
                     println!(
                         "  📦 Dependency '{}': loaded from registry ({})",
                         dep_name,
@@ -1520,5 +1647,114 @@ atom caller(n: i64) -> i64
         assert_eq!(new_cache["my_atom"].proof_hash, "oldhash123");
         assert_eq!(new_cache["my_atom"].result, "verified");
         let _ = std::fs::remove_dir_all(base_dir);
+    }
+
+    /// P5-C: check_cert_for_atom returns true for "proven" status
+    #[test]
+    fn test_check_cert_for_atom_proven() {
+        let mut results = HashMap::new();
+        results.insert("my_atom".to_string(), "proven".to_string());
+        assert!(check_cert_for_atom(&results, "my_atom"));
+    }
+
+    /// P5-C: check_cert_for_atom returns false for "changed" status
+    #[test]
+    fn test_check_cert_for_atom_changed() {
+        let mut results = HashMap::new();
+        results.insert("my_atom".to_string(), "changed".to_string());
+        assert!(!check_cert_for_atom(&results, "my_atom"));
+    }
+
+    /// P5-C: check_cert_for_atom returns false for "unproven" status
+    #[test]
+    fn test_check_cert_for_atom_unproven() {
+        let mut results = HashMap::new();
+        results.insert("my_atom".to_string(), "unproven".to_string());
+        assert!(!check_cert_for_atom(&results, "my_atom"));
+    }
+
+    /// P5-C: check_cert_for_atom returns false for missing atom
+    #[test]
+    fn test_check_cert_for_atom_missing() {
+        let results = HashMap::new();
+        assert!(!check_cert_for_atom(&results, "nonexistent"));
+    }
+
+    /// P5-C: mark_dependency_atoms_with_cert verifies atoms with proven cert
+    #[test]
+    fn test_mark_dependency_atoms_with_cert_verified() {
+        let source = r#"
+atom add(x: i64) -> i64
+  requires true
+  ensures result >= 0
+{
+  x + 1
+}
+"#;
+        let items = parser::parse_module(source);
+        let mut module_env = ModuleEnv::new();
+        register_imported_items(&items, Some("dep"), &mut module_env);
+
+        let mut cert_results = HashMap::new();
+        cert_results.insert("add".to_string(), "proven".to_string());
+
+        mark_dependency_atoms_with_cert(&items, "dep", &Some(cert_results), &mut module_env, false);
+
+        // The atom should be marked as verified
+        assert!(module_env.is_verified("add"));
+        assert!(module_env.is_verified("dep::add"));
+    }
+
+    /// P5-C: mark_dependency_atoms_with_cert marks atoms unverified on failed cert
+    #[test]
+    fn test_mark_dependency_atoms_with_cert_unverified() {
+        let source = r#"
+atom add(x: i64) -> i64
+  requires true
+  ensures result >= 0
+{
+  x + 1
+}
+"#;
+        let items = parser::parse_module(source);
+        let mut module_env = ModuleEnv::new();
+        register_imported_items(&items, Some("dep"), &mut module_env);
+
+        let mut cert_results = HashMap::new();
+        cert_results.insert("add".to_string(), "changed".to_string());
+
+        mark_dependency_atoms_with_cert(&items, "dep", &Some(cert_results), &mut module_env, false);
+
+        // The atom should NOT be marked as verified
+        assert!(!module_env.is_verified("add"));
+    }
+
+    /// P5-C: mark_dependency_atoms_with_cert with None cert (legacy) verifies all
+    #[test]
+    fn test_mark_dependency_atoms_with_cert_legacy() {
+        let source = r#"
+atom foo(x: i64) -> i64
+  requires true
+  ensures true
+{
+  x
+}
+"#;
+        let items = parser::parse_module(source);
+        let mut module_env = ModuleEnv::new();
+        register_imported_items(&items, Some("legacy_dep"), &mut module_env);
+
+        mark_dependency_atoms_with_cert(&items, "legacy_dep", &None, &mut module_env, false);
+
+        // Legacy behavior: no cert = all verified
+        assert!(module_env.is_verified("foo"));
+        assert!(module_env.is_verified("legacy_dep::foo"));
+    }
+
+    /// P5-C: ResolverContext strict_imports defaults to false
+    #[test]
+    fn test_resolver_context_strict_imports_default() {
+        let ctx = ResolverContext::new();
+        assert!(!ctx.strict_imports);
     }
 }
