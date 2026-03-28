@@ -190,13 +190,28 @@ fn verify_import_certificate(
         return None;
     }
 
-    let atom_refs: Vec<&parser::Atom> = items
+    let mut atom_refs: Vec<&parser::Atom> = items
         .iter()
         .filter_map(|item| match item {
             Item::Atom(a) => Some(a),
             _ => None,
         })
         .collect();
+
+    // Also collect ImplBlock methods with qualified names for cert verification
+    let mut qualified_methods: Vec<parser::Atom> = Vec::new();
+    for item in items {
+        if let Item::ImplBlock(ib) = item {
+            for method in &ib.methods {
+                let mut qualified = method.clone();
+                qualified.name = format!("{}::{}", ib.struct_name, method.name);
+                qualified_methods.push(qualified);
+            }
+        }
+    }
+    for qm in &qualified_methods {
+        atom_refs.push(qm);
+    }
 
     let results = proof_cert::verify_certificate(&cert, &atom_refs);
     Some(results.into_iter().collect())
@@ -388,7 +403,8 @@ fn resolve_imports_recursive(
                                 .set_trust_level(&atom.name, crate::parser::TrustLevel::Unverified);
                             if let Some(prefix) = alias_prefix {
                                 let fqn = format!("{}::{}", prefix, atom.name);
-                                module_env.set_trust_level(&fqn, crate::parser::TrustLevel::Unverified);
+                                module_env
+                                    .set_trust_level(&fqn, crate::parser::TrustLevel::Unverified);
                             }
                         }
                     }
@@ -437,7 +453,10 @@ fn resolve_imports_recursive(
                                 if let Some(prefix) = alias_prefix {
                                     let fqn =
                                         format!("{}::{}::{}", prefix, ib.struct_name, method.name);
-                                    module_env.set_trust_level(&fqn, crate::parser::TrustLevel::Unverified);
+                                    module_env.set_trust_level(
+                                        &fqn,
+                                        crate::parser::TrustLevel::Unverified,
+                                    );
                                 }
                             }
                         }
@@ -1762,7 +1781,8 @@ atom add(x: i64) -> i64
         let mut cert_results = HashMap::new();
         cert_results.insert("add".to_string(), "proven".to_string());
 
-        mark_dependency_atoms_with_cert(&items, "dep", &Some(cert_results), &mut module_env, false).unwrap();
+        mark_dependency_atoms_with_cert(&items, "dep", &Some(cert_results), &mut module_env, false)
+            .unwrap();
 
         // The atom should be marked as verified
         assert!(module_env.is_verified("add"));
@@ -1787,7 +1807,8 @@ atom add(x: i64) -> i64
         let mut cert_results = HashMap::new();
         cert_results.insert("add".to_string(), "changed".to_string());
 
-        mark_dependency_atoms_with_cert(&items, "dep", &Some(cert_results), &mut module_env, false).unwrap();
+        mark_dependency_atoms_with_cert(&items, "dep", &Some(cert_results), &mut module_env, false)
+            .unwrap();
 
         // The atom should NOT be marked as verified
         assert!(!module_env.is_verified("add"));
@@ -1808,7 +1829,8 @@ atom foo(x: i64) -> i64
         let mut module_env = ModuleEnv::new();
         register_imported_items(&items, Some("legacy_dep"), &mut module_env);
 
-        mark_dependency_atoms_with_cert(&items, "legacy_dep", &None, &mut module_env, false).unwrap();
+        mark_dependency_atoms_with_cert(&items, "legacy_dep", &None, &mut module_env, false)
+            .unwrap();
 
         // Legacy behavior: no cert = all verified
         assert!(module_env.is_verified("foo"));
@@ -1820,5 +1842,93 @@ atom foo(x: i64) -> i64
     fn test_resolver_context_strict_imports_default() {
         let ctx = ResolverContext::new();
         assert!(!ctx.strict_imports);
+    }
+
+    /// Verify that verify_import_certificate logic collects ImplBlock methods
+    /// with qualified names so they match cert entries like "Stack::push".
+    #[test]
+    fn test_verify_import_cert_collects_impl_block_methods() {
+        use crate::proof_cert;
+
+        // Source with an impl block containing a method
+        let source = r#"
+struct Stack { top: i64 }
+impl Stack {
+    atom push(self, val: i64) -> i64
+      requires true
+      ensures result >= 0
+    {
+      val
+    }
+}
+"#;
+        let items = parser::parse_module(source);
+
+        // Replicate the collection logic from verify_import_certificate
+        let mut atom_refs: Vec<&parser::Atom> = items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Atom(a) => Some(a),
+                _ => None,
+            })
+            .collect();
+
+        let mut qualified_methods: Vec<parser::Atom> = Vec::new();
+        for item in &items {
+            if let Item::ImplBlock(ib) = item {
+                for method in &ib.methods {
+                    let mut qualified = method.clone();
+                    qualified.name = format!("{}::{}", ib.struct_name, method.name);
+                    qualified_methods.push(qualified);
+                }
+            }
+        }
+        for qm in &qualified_methods {
+            atom_refs.push(qm);
+        }
+
+        // The collected refs should contain "Stack::push"
+        let names: Vec<&str> = atom_refs.iter().map(|a| a.name.as_str()).collect();
+        assert!(
+            names.contains(&"Stack::push"),
+            "Expected 'Stack::push' in atom_refs, got: {:?}",
+            names
+        );
+
+        // Generate a cert from these atoms, then verify it recognizes the method
+        let mut cert_results = std::collections::HashMap::new();
+        for a in &atom_refs {
+            cert_results.insert(
+                a.name.clone(),
+                ("unsat".to_string(), "verified".to_string()),
+            );
+        }
+        let module_env = crate::resolver::ModuleEnv::new();
+        let cert = proof_cert::generate_certificate(
+            "test_impl.mm",
+            &atom_refs,
+            &cert_results,
+            &module_env,
+            None,
+            None,
+        );
+
+        // Verify that the cert contains the qualified method name
+        let cert_names: Vec<&str> = cert.atoms.iter().map(|a| a.name.as_str()).collect();
+        assert!(
+            cert_names.contains(&"Stack::push"),
+            "Expected 'Stack::push' in cert atoms, got: {:?}",
+            cert_names
+        );
+
+        // Now verify_certificate should report "proven" for "Stack::push"
+        let results = proof_cert::verify_certificate(&cert, &atom_refs);
+        let result_map: std::collections::HashMap<String, String> = results.into_iter().collect();
+        assert_eq!(
+            result_map.get("Stack::push").map(|s| s.as_str()),
+            Some("proven"),
+            "Expected 'Stack::push' to be 'proven', got: {:?}",
+            result_map.get("Stack::push")
+        );
     }
 }

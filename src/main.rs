@@ -2200,7 +2200,10 @@ fn cmd_build(input: &str, output: &str, emit_target: &emitter::EmitTarget, stric
         }
 
         let (pkg_name, pkg_version) = if let Some((ref _proj_dir, ref m)) = manifest_config {
-            (Some(m.package.name.as_str()), Some(m.package.version.as_str()))
+            (
+                Some(m.package.name.as_str()),
+                Some(m.package.version.as_str()),
+            )
         } else {
             (None, None)
         };
@@ -2336,7 +2339,10 @@ fn cmd_add(dep: &str, version: Option<&str>) {
                 None => pkg_entry.latest.clone(),
             };
             let toml_line = format!("{} = \"{}\"", dep, resolved_version);
-            println!("📦 Adding registry dependency: {} v{}", dep, resolved_version);
+            println!(
+                "📦 Adding registry dependency: {} v{}",
+                dep, resolved_version
+            );
 
             // Show available versions
             if pkg_entry.versions.len() > 1 {
