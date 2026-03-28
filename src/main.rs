@@ -2210,14 +2210,23 @@ fn cmd_add(dep: &str) {
         }
     };
 
-    // 重複チェック: 同じ依存名が既に存在する場合は警告して終了
+    // 重複チェック: [dependencies] セクション内に同じ依存名が既に存在する場合は警告して終了
     {
         let dep_name = &dep_entry.0;
+        let mut in_deps_section = false;
         for line in content.lines() {
             let trimmed = line.trim();
-            if trimmed.starts_with(&format!("{} ", dep_name))
-                || trimmed.starts_with(&format!("{}=", dep_name))
-                || trimmed.starts_with(&format!("{} =", dep_name))
+            if trimmed == "[dependencies]" {
+                in_deps_section = true;
+                continue;
+            }
+            if in_deps_section && trimmed.starts_with('[') {
+                break; // reached next section
+            }
+            if in_deps_section
+                && (trimmed.starts_with(&format!("{} ", dep_name))
+                    || trimmed.starts_with(&format!("{}=", dep_name))
+                    || trimmed.starts_with(&format!("{} =", dep_name)))
             {
                 eprintln!(
                     "⚠️  Dependency '{}' already exists in mumei.toml. Remove the existing entry first or edit it manually.",
