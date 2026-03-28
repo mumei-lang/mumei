@@ -177,101 +177,257 @@ mumei のコード生成バックエンドをプラグイン化し、LLVM IR 以
 
 ---
 
-## Priority 5: Verified Asset Distribution（検証済み資産の配布）
+## Priority 5: 検証済み資産の流通基盤 (Verified Asset Distribution) ✅ Implemented
 
-mumeiの「検証済みコード」を安全にパッケージ化・配布・消費するためのインフラストラクチャ。
+mumeiの思想「AI生成コード → 検証済み資産への変換」の次段階。検証済み資産を流通・消費できるエコシステムの構築。
 
-### P5-A: Proof Certificate Chain ✅ Implemented
-
-**Repository**: `mumei-lang/mumei`
-
-- ✅ `AtomCertificate` extended with `proof_hash`, `dependencies`, `effects`, `requires`, `ensures`
-- ✅ `ProofCertificate` extended with `package_name`, `package_version`, `certificate_hash`, `all_verified`
-- ✅ `generate_certificate()` accepts `ModuleEnv` parameter — fills proof_hash via `compute_proof_hash()`, dependencies from `dependency_graph`, effects/contracts from atom fields
-- ✅ `EmitTarget::ProofCert` variant added — `--emit proof-cert` generates `.proof-cert.json`
-- ✅ `mumei verify-cert <path>` CLI command — loads cert, verifies against source, prints per-atom status
-- ✅ `compute_sha256()` utility in `proof_cert.rs` for certificate hash computation
-- ✅ Unit tests: extended fields, change detection, hash determinism, SHA-256 utility, all_verified flag, JSON roundtrip
-
-### P5-B: Package Registry Certificate Integration ✅ Implemented
+### P5-A: Proof Certificate Chain（証明書チェーン） ✅ Implemented
 
 **Repository**: `mumei-lang/mumei`
 
-- ✅ `VersionEntry` extended with `cert_path: Option<String>` and `cert_hash: Option<String>` (backward compatible via `#[serde(default)]`)
-- ✅ `register_with_cert()` function stores certificate metadata in registry
-- ✅ `cmd_publish` generates proof certificate and registers with cert_path/cert_hash
-- ✅ `cmd_add` verifies proof certificate when resolving packages from registry
-- ✅ Unit tests: serialization with cert fields, backward compatibility, skip_serializing_if None
+- ✅ `AtomCertificate` 拡張: `proof_hash`, `dependencies`, `effects`, `requires`, `ensures` フィールド追加
+- ✅ `ProofCertificate` 拡張: `package_name`, `package_version`, `certificate_hash`, `all_verified` フィールド追加
+- ✅ `generate_certificate()` が `ModuleEnv` を活用して推移的ハッシュ・依存関係グラフを埋める
+- ✅ `mumei verify-cert <path>` CLI コマンド: 証明書の整合性検証
+- ✅ `--emit proof-cert` フラグ: `.proof-cert.json` 出力
 
-### P5-C: Verified Import ✅ Implemented
+### P5-B: パッケージレジストリの実装 ✅ Implemented
 
 **Repository**: `mumei-lang/mumei`
 
-- ✅ `resolve_imports_recursive()` checks `.proof-cert.json` for imported modules — proven atoms get `mark_verified()`, changed/unproven atoms get warnings
-- ✅ `resolve_manifest_dependencies()` applies cert verification to path, git, and registry dependencies
-- ✅ `--strict-imports` CLI flag for `verify` and `build` commands — missing/invalid certs become hard errors
-- ✅ Taint integration: unverified imported atoms registered with `TrustLevel::Unverified` via `set_trust_level()`
-- ✅ `mark_dependency_atoms_with_cert()` helper consolidates cert verification logic for all dependency types
-- ✅ Unit tests: check_cert_for_atom (proven/changed/unproven/missing), mark_dependency_atoms_with_cert (verified/unverified/legacy), ResolverContext strict_imports
+- ✅ `VersionEntry` 拡張: `cert_path`, `cert_hash` フィールド追加
+- ✅ `mumei publish`: 検証 → 証明書自動生成 → レジストリ登録
+- ✅ `mumei add`: レジストリ解決 → 証明書検証 → `mumei.toml` 自動追記
+
+### P5-C: Verified Import（検証済みインポート） ✅ Implemented
+
+**Repository**: `mumei-lang/mumei`
+
+- ✅ インポート時の `.proof-cert.json` 自動検証
+- ✅ 証明書なし/期限切れのインポートは taint analysis 対象
+- ✅ `--strict-imports` フラグ: 証明書なしインポートをハードエラーに
 
 ---
 
-## Priority 4: エコシステム・DX の成熟
+## Priority 6: エージェントの自律性深化 (Agent Autonomy Deepening) ✅ Implemented
 
-### P4-A: VS Code Extension の Marketplace 公開
+### P6-A: Multi-atom / Multi-file 生成 ✅ Implemented
+
+**Repository**: `mumei-lang/mumei-agent`
+
+- ✅ Multi-atom spec JSON フォーマット (`atoms: [...]` 配列)
+- ✅ `generate_multi_atom()`: 依存関係検出・ソート・一括生成・atom 単位 retry
+- ✅ 既存 single-atom spec との後方互換性維持
+
+### P6-B: Pattern Library の学習型拡張 ✅ Implemented
+
+**Repository**: `mumei-lang/mumei-agent`
+
+- ✅ `FixPattern` に `applied_count` / `success_count` フィールド追加
+- ✅ `try_pattern_fix()`: 成功率ベースのパターン自動適用（LLM バイパス）
+- ✅ `lookup()` の成功率ランキング
+- ✅ `Metrics` に `pattern_attempts` / `pattern_successes` 追加
+
+### P6-C: Specification Refinement Loop ✅ Implemented
+
+**Repository**: `mumei-lang/mumei-agent`
+
+- ✅ `spec_refinement.py`: 検証失敗時に仕様（requires/ensures）自体の修正を提案
+- ✅ `RetryHistory.is_same_error_repeating()` トリガーで仕様洗練モードに切り替え
+- ✅ `mumei infer-contracts` 結果を活用した仕様推論
+
+---
+
+## Priority 7: 実行基盤の完成 (Runtime Completion)
+
+### P7-A: REPL 実行エンジン
 
 **Repository**: `mumei-lang/mumei`
+
+inkwell の ExecutionEngine (MCJIT) を使用した JIT 実行:
+
+- `inc(5)` → `= 6` のような即時評価
+- atom 定義 → JIT コンパイル → 式評価の連続フロー
+- FFI 関数（`json_parse`, `http_get` 等）の JIT 内シンボル解決
+- `mumei-emit-llvm/src/jit.rs` に `JitEngine` / `compile_to_module()` を追加
+- `cmd_repl()` に `ReplContext` 構造体を導入
+
+### P7-B: End-to-End バイナリ実行
+
+**Repository**: `mumei-lang/mumei`
+
+- `mumei run src/main.mm` コマンド: verify → codegen → link → execute を一括実行
+- `--emit binary` フラグ: 全 atom を単一 LLVM Module にコンパイル → `clang` でリンク → 実行可能バイナリ
+- `atom main()` をエントリポイントとして C の `main` にエクスポート
+- ランタイムライブラリ: `@__mumei_resource_{name}` mutex / `@__effect_{name}` ハンドラのスタブ
+
+### P7-C: Wasm ターゲット — ⏸️ Deferred
+
+**Repository**: `mumei-lang/mumei`
+
+**意図的に保留**。Emitter Plugin Architecture (Phase 3) により、`mumei-emit-wasm` を外部プラグインとして core に触れずに後から追加可能。P7-A/P7-B の実行基盤が安定した後に検討する。
+
+---
+
+## Priority 8: DX の成熟 (Developer Experience) — ⏸️ Deferred
+
+P7 完了後に着手。
+
+### P8-A: VS Code Extension の Marketplace 公開
 
 LSP は completion/definition まで実装済み。公開すれば採用障壁が大幅に下がる。
 
-### P4-B: パッケージレジストリの実用化
+### P8-B: Counter-example Visualizer in Editor
 
-**Repository**: `mumei-lang/mumei`
-
-`mumei publish` / `mumei add` コマンドは存在するが、レジストリの実体が不明。
-
-- ローカルレジストリ or GitHub-based レジストリの実装
-- `mumei.toml` の依存関係解決の実動作確認
-
-### P4-C: REPL の実行エンジン
-
-**Repository**: `mumei-lang/mumei`
-
-- `inc(5)` → `= 6` のような即時評価
-- HTTP リクエストの REPL 内実行
+LSP の `relatedInformation` を活用し、Z3 counter-example をエディタ内でインライン表示。
 
 ---
 
-## 優先度マトリクス
+## Strategic Initiatives: 「信頼のインフラ」への道筋
 
-| 優先度 | 項目 | リポジトリ | 思想との整合性 | 実用的インパクト |
-|--------|------|-----------|---------------|----------------|
-| **最高** | P1-A: Generate Mode 強化 | mumei-agent | ★★★ AI→検証済み資産の核心 | ★★★ |
-| **最高** | P1-B: structured_unsat_core 活用 | mumei-agent | ★★★ 検証フィードバックの精度向上 | ★★☆ |
-| **高** | P1-C: Agent CI/テスト整備 | mumei-agent | ★★☆ 品質保証 | ★★★ |
-| **高** | P2-A: Cross-atom composition | mumei | ★★★ モジュラー検証の完成 | ★★☆ |
-| **中** | P2-B: Trait constraints Z3注入 | mumei | ★★☆ 型安全性の深化 | ★★☆ |
-| **中** | P2-C: Struct method parsing | mumei | ★☆☆ 利便性 | ★★☆ |
-| **中** | P3-A/B: 実世界E2Eデモ | 両方 | ★★★ 思想の証明 | ★★★ |
-| **中** | Emitter Plugin Architecture | mumei | ★★☆ 拡張性・多ターゲット対応 | ★★☆ |
-| **低** | P4-A: VS Code公開 | mumei | ★☆☆ DX | ★★☆ |
-| **低** | P4-B: パッケージレジストリ | mumei | ★☆☆ エコシステム | ★☆☆ |
+> mumei は「あらゆる言語、プラットフォーム、そして AI エージェントに対して『数学的真理』を供給するインフラ」という独自の頂点を目指す。以下は、その実現に向けた戦略的イニシアチブの評価と推奨順序。
+
+### SI-1: Zero-Human Challenge（自律性の証明）— 推奨度: 最高
+
+**目的**: mumei-agent に難易度の高い課題を与え、人間が一切介入せずに検証をパスするまでのログを公開する。
+
+**思想との整合性: ★★★** — mumei の根幹思想「AI生成コード → 検証済み資産への変換」の直接的な証明。
+
+**既存インフラ**: ほぼ完備
+- mumei-agent の generate mode + self-healing loop + pattern library + retry history
+- `mumei verify --json` による構造化フィードバック
+- P6-A (Multi-atom 生成) による複数 atom モジュール生成
+
+**推奨課題**:
+- **100% 安全なキュー**: `enqueue`/`dequeue` の overflow/underflow 防止（`std/container/bounded_array.mm` の `bounded_push`/`bounded_pop` と同等の難易度）
+- **Verified JSON validator**: FFI + capability security の組み合わせ
+- **Deadlock-free producer-consumer**: resource hierarchy による deadlock-free 証明
+
+**追加実装**: ほぼゼロ。spec JSON を書いて実行し、ログを記録するだけ。
+
+**成果物**:
+- `examples/challenges/` ディレクトリに課題 spec + 生成ログ + 最終検証済みコード
+- `docs/ZERO_HUMAN_CHALLENGE.md` にチャレンジ結果のドキュメント
+
+---
+
+### SI-2: Verified FFI Boundary（安全でない関数を安全に使う）— 推奨度: 最高
+
+**目的**: C 標準ライブラリ（`memcpy`, `strlen`, `malloc` 等）を mumei から呼ぶ際、厳格な事前条件を課した検証済みラッパーを量産する。
+
+**思想との整合性: ★★★** — mumei の Verified FFI Contracts (`extern "C"` + `requires`/`ensures`) の実践的活用。
+
+**既存インフラ**: 完備
+- `extern "C"` ブロックに `requires`/`ensures` 契約を付与し、Z3 が呼び出し元で検証する仕組みが実装済み
+- `--emit c-header` で Doxygen `@pre`/`@post` 付き `.h` ファイルを自動生成
+- ExternFn → trusted atom への自動変換が実装済み
+
+**実装内容**:
+- `std/libc.mm` モジュールを新規作成
+- `memcpy`, `strlen`, `malloc`, `free`, `printf`, `snprintf` 等の検証済みラッパー
+- 各ラッパーに現実的な `requires`/`ensures` 契約（例: `memcpy` の `requires: n >= 0 && dst_size >= n && src_size >= n`）
+- `--emit c-header` で生成される `.h` を C プロジェクトが直接利用可能
+
+**追加実装**: コンパイラ側の変更は不要。`std/libc.mm` の作成のみ。
+
+---
+
+### SI-3: Autonomous Delivery Flow（完全自律型デリバリー）— 推奨度: 高（中期目標）
+
+**目的**: mumei-agent が mumei コードを書く → 検証 → Rust/Python ラッパーを自動生成 → PR を出す、完全自律パイプライン。
+
+**思想との整合性: ★★★** — 「生成 → 検証 → 流通」パイプラインの完成形。
+
+**既存インフラとのギャップ**:
+
+| 必要な機能 | 現状 |
+|-----------|------|
+| mumei コード生成 + 検証 | ✅ generate mode + self-healing |
+| C ラッパー生成 | ✅ `--emit c-header` |
+| Rust ラッパー生成 | ❌ 新しい emitter が必要 |
+| Python ラッパー生成 | ❌ 新しい emitter が必要 |
+| PR 自動作成 | ❌ GitHub API 連携が必要 |
+
+**実現ステップ**:
+1. `RustWrapperEmitter` + `PythonWrapperEmitter` を emitter plugin として追加（`CHeaderEmitter` パターンを踏襲）
+2. mumei-agent に `--publish` モードを追加（生成 → 検証 → ラッパー生成 → git commit → PR）
+3. GitHub Actions で PR の CI テスト（Rust/Python からラッパーを呼び出し、契約が守られることを確認）
+
+**前提条件**: SI-1 (Zero-Human Challenge) と SI-2 (Verified FFI Boundary) の完了
+
+---
+
+### SI-4: no_std Ecosystem（ベアメタル）— ⏸️ Deferred
+
+**目的**: no_std 環境での動作を安定させ、マイコン等で「スタックオーバーフローが物理的に起きない」制御ソフトのデモを作る。
+
+**思想との整合性: ★★☆** — 検証の価値は高いが、現在の mumei の強みはアプリケーションレベルの検証。
+
+**保留理由**:
+- ランタイムが `reqwest`, `serde_json`, `pthread` に依存しており、no_std 化には大幅な再設計が必要
+- std ライブラリ（Vector, HashMap, JSON, HTTP）がすべて allocator 前提
+- 静的スタックサイズ解析が未実装
+- P7（実行基盤の完成）が完了し、リンカーパイプラインが安定した後に検討すべき
+
+---
+
+### Strategic Initiatives 推奨実行順序
+
+```mermaid
+graph TD
+    SI1["SI-1: Zero-Human Challenge\n(即座に実行可能)"] --> SI2["SI-2: Verified FFI Boundary\n(std/libc.mm 作成)"]
+    SI2 --> SI3_E["SI-3a: Rust/Python\nWrapper Emitter"]
+    SI3_E --> SI3["SI-3b: Autonomous\nDelivery Flow"]
+    SI1 --> SI3
+    SI4["SI-4: no_std Ecosystem\n⏸️ P7完了後に検討"]
+    style SI4 stroke-dasharray: 5 5
+```
+
+| 順序 | イニシアチブ | 理由 |
+|------|------------|------|
+| **1** | SI-1: Zero-Human Challenge | 追加実装ゼロ。mumei の思想を最も直接的に証明。マーケティング効果大 |
+| **2** | SI-2: Verified FFI Boundary | `std/libc.mm` の作成のみ。C header emitter との相乗効果。実用的価値が高い |
+| **3** | SI-3: Autonomous Delivery Flow | Rust/Python emitter の追加が必要だが、既存の `CHeaderEmitter` パターンを踏襲可能 |
+| **保留** | SI-4: no_std Ecosystem | P7 完了後。ランタイム・リンカー・std の大幅な再設計が必要 |
+
+---
+
+## 優先度マトリクス（更新版）
+
+| 優先度 | 項目 | リポジトリ | 状態 |
+|--------|------|-----------|------|
+| ~~最高~~ | P1-A/B/C: Agent 実用化 | mumei-agent | ✅ Complete |
+| ~~高~~ | P2-A/B/C: 検証能力深化 | mumei | ✅ Complete |
+| ~~中~~ | P3-A/B/C: 実世界デモ | 両方 | ✅ Complete |
+| ~~中~~ | Emitter Plugin Phase 1-2 | mumei | ✅ Complete |
+| ~~最高~~ | P5-A/B/C: 検証済み資産の流通 | mumei | ✅ Complete |
+| ~~最高~~ | P6-A/B/C: エージェント自律性深化 | mumei-agent | ✅ Complete |
+| **高** | P7-A: REPL 実行エンジン | mumei | 🔧 Planned |
+| **高** | P7-B: E2E バイナリ実行 | mumei | 🔧 Planned |
+| **高** | SI-1: Zero-Human Challenge | mumei-agent | 📋 Next |
+| **高** | SI-2: Verified FFI Boundary | mumei | 📋 Next |
+| **中** | SI-3: Autonomous Delivery Flow | 両方 | 📋 After SI-1/SI-2 |
+| ⏸️ | P7-C: Wasm ターゲット | mumei | Deferred |
+| ⏸️ | P8-A/B: DX の成熟 | mumei | Deferred |
+| ⏸️ | SI-4: no_std Ecosystem | mumei | Deferred |
 
 ## 推奨実行順序
 
 ```mermaid
 graph TD
-    P1A["P1-A: Generate Mode強化\n(mumei-agent)"] --> P3B["P3-B: 仕様→検証済みコード\nE2Eデモ"]
-    P1B["P1-B: structured_unsat_core\n活用(mumei-agent)"] --> P1A
-    P1C["P1-C: Agent CI整備\n(mumei-agent)"] --> P1A
-    P2A["P2-A: Cross-atom\ncomposition(mumei)"] --> P3B
-    P2B["P2-B: Trait constraints\nZ3注入(mumei)"] --> P2C["P2-C: Struct method\nparsing(mumei)"]
-    P3A["P3-A: HTTP E2Eデモ\n(mumei)"] --> P3B
-    P3B --> P4A["P4-A: VS Code公開"]
-    P3B --> P4B["P4-B: パッケージレジストリ"]
+    P5["P5: 検証済み資産の流通\n✅ Complete"] --> P7["P7: 実行基盤の完成\n🔧 Planned"]
+    P6["P6: エージェント自律性深化\n✅ Complete"] --> SI1["SI-1: Zero-Human\nChallenge"]
+    SI1 --> SI2["SI-2: Verified FFI\nBoundary"]
+    P7 --> SI2
+    SI2 --> SI3["SI-3: Autonomous\nDelivery Flow"]
+    SI1 --> SI3
+    P7C["P7-C: Wasm ⏸️"]
+    P8["P8: DX ⏸️"]
+    SI4["SI-4: no_std ⏸️"]
+    style P7C stroke-dasharray: 5 5
+    style P8 stroke-dasharray: 5 5
+    style SI4 stroke-dasharray: 5 5
 ```
-
-**最初に着手すべきは P1-C → P1-B → P1-A の順**。mumei-agent のテスト基盤を固め、structured_unsat_core を活用してプロンプト精度を上げ、その上で Generate Mode を強化する。並行して mumei 側では P2-A（cross-atom composition）を進める。これらが揃った時点で P3-B の「仕様 → 検証済みコード」E2E デモが実現可能になり、mumei の思想を最も強力に体現するショーケースとなる。
 
 ---
 
@@ -281,3 +437,4 @@ graph TD
 - [`docs/SESSION_PLANS.md`](SESSION_PLANS.md) — Detailed session plans for compiler phases
 - [mumei-agent `docs/ROADMAP.md`](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md) — Agent-specific roadmap
 - [`instruction.md`](../instruction.md) — Development guidelines and priorities
+- [`docs/ZERO_HUMAN_CHALLENGE.md`](ZERO_HUMAN_CHALLENGE.md) — Zero-Human Challenge results (planned)
