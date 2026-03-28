@@ -186,7 +186,8 @@ fn verify_import_certificate(
     let source_matches = source_file.ends_with(cert_file_path)
         || cert_file_path.ends_with(source_file.file_name().unwrap_or_default());
     if !source_matches && !cert.file.is_empty() {
-        // Certificate is for a different file — still try to verify
+        // Certificate is for a different file — reject to prevent cross-file atom name collisions
+        return None;
     }
 
     let atom_refs: Vec<&parser::Atom> = items
@@ -203,30 +204,48 @@ fn verify_import_certificate(
 
 /// P5-C: Mark dependency atoms as verified or unverified based on cert verification results.
 /// Used by resolve_manifest_dependencies() for all dependency types.
+/// When strict_imports is true and no cert exists or cert verification fails, returns an error.
 fn mark_dependency_atoms_with_cert(
     items: &[Item],
     dep_name: &str,
     cert_results: &Option<HashMap<String, String>>,
     module_env: &mut ModuleEnv,
-    _strict_imports: bool,
-) {
+    strict_imports: bool,
+) -> MumeiResult<()> {
+    // P5-C: In strict mode, missing certificates are hard errors
+    if strict_imports && cert_results.is_none() {
+        return Err(MumeiError::verification(format!(
+            "Strict imports: dependency '{}' has no proof certificate. \
+             Provide a .proof-cert.json or proof_certificate.json in the package root.",
+            dep_name
+        )));
+    }
+
     for item in items {
         match item {
             Item::Atom(atom) => {
                 let should_verify = match cert_results {
                     Some(results) => check_cert_for_atom(results, &atom.name),
-                    None => true, // No cert = legacy behavior
+                    None => true, // No cert = legacy behavior (only reachable when !strict_imports)
                 };
                 if should_verify {
                     module_env.mark_verified(&atom.name);
                     let fqn = format!("{}::{}", dep_name, atom.name);
                     module_env.mark_verified(&fqn);
                 } else {
+                    if strict_imports {
+                        return Err(MumeiError::verification(format!(
+                            "Strict imports: dependency '{}': atom '{}' failed certificate verification",
+                            dep_name, atom.name
+                        )));
+                    }
                     eprintln!(
                         "  ⚠️  Dependency '{}': atom '{}' failed certificate verification",
                         dep_name, atom.name
                     );
                     module_env.set_trust_level(&atom.name, crate::parser::TrustLevel::Unverified);
+                    let fqn = format!("{}::{}", dep_name, atom.name);
+                    module_env.set_trust_level(&fqn, crate::parser::TrustLevel::Unverified);
                 }
             }
             Item::ImplBlock(ib) => {
@@ -241,18 +260,27 @@ fn mark_dependency_atoms_with_cert(
                         let fqn = format!("{}::{}::{}", dep_name, ib.struct_name, method.name);
                         module_env.mark_verified(&fqn);
                     } else {
+                        if strict_imports {
+                            return Err(MumeiError::verification(format!(
+                                "Strict imports: dependency '{}': method '{}' failed certificate verification",
+                                dep_name, qualified
+                            )));
+                        }
                         eprintln!(
                             "  ⚠️  Dependency '{}': method '{}' failed certificate verification",
                             dep_name, qualified
                         );
                         module_env
                             .set_trust_level(&qualified, crate::parser::TrustLevel::Unverified);
+                        let fqn = format!("{}::{}::{}", dep_name, ib.struct_name, method.name);
+                        module_env.set_trust_level(&fqn, crate::parser::TrustLevel::Unverified);
                     }
                 }
             }
             _ => {}
         }
     }
+    Ok(())
 }
 
 /// 再帰的にインポートを解決する内部関数
@@ -313,6 +341,15 @@ fn resolve_imports_recursive(
             let cert_results =
                 verify_import_certificate(import_base_dir, &resolved_path, &imported_items);
 
+            // P5-C: In strict mode, missing certificates are hard errors
+            if ctx.strict_imports && cert_results.is_none() {
+                return Err(MumeiError::verification(format!(
+                    "Strict imports: imported module '{}' has no proof certificate. \
+                     Provide a .proof-cert.json or proof_certificate.json in the module directory.",
+                    resolved_path.display()
+                )));
+            }
+
             // インポートされた atom を検証済みとしてマーク
             // P5-C: Only mark as verified if cert check passes (or no cert exists = legacy behavior)
             let mut verified_atoms = Vec::new();
@@ -334,6 +371,13 @@ fn resolve_imports_recursive(
                                 verified_atoms.push(fqn);
                             }
                         } else {
+                            if ctx.strict_imports {
+                                return Err(MumeiError::verification(format!(
+                                    "Strict imports: import '{}': atom '{}' failed certificate verification",
+                                    resolved_path.display(),
+                                    atom.name
+                                )));
+                            }
                             eprintln!(
                                 "  ⚠️  Import '{}': atom '{}' failed certificate verification",
                                 resolved_path.display(),
@@ -342,6 +386,10 @@ fn resolve_imports_recursive(
                             // P5-C: Register as unverified for taint analysis
                             module_env
                                 .set_trust_level(&atom.name, crate::parser::TrustLevel::Unverified);
+                            if let Some(prefix) = alias_prefix {
+                                let fqn = format!("{}::{}", prefix, atom.name);
+                                module_env.set_trust_level(&fqn, crate::parser::TrustLevel::Unverified);
+                            }
                         }
                     }
                     Item::TypeDef(t) => type_names.push(t.name.clone()),
@@ -370,6 +418,13 @@ fn resolve_imports_recursive(
                                     verified_atoms.push(fqn);
                                 }
                             } else {
+                                if ctx.strict_imports {
+                                    return Err(MumeiError::verification(format!(
+                                        "Strict imports: import '{}': method '{}' failed certificate verification",
+                                        resolved_path.display(),
+                                        qualified_name
+                                    )));
+                                }
                                 eprintln!(
                                     "  ⚠️  Import '{}': method '{}' failed certificate verification",
                                     resolved_path.display(),
@@ -379,6 +434,11 @@ fn resolve_imports_recursive(
                                     &qualified_name,
                                     crate::parser::TrustLevel::Unverified,
                                 );
+                                if let Some(prefix) = alias_prefix {
+                                    let fqn =
+                                        format!("{}::{}::{}", prefix, ib.struct_name, method.name);
+                                    module_env.set_trust_level(&fqn, crate::parser::TrustLevel::Unverified);
+                                }
                             }
                         }
                     }
@@ -683,7 +743,7 @@ pub fn resolve_manifest_dependencies_with_options(
                     &cert_results,
                     module_env,
                     strict_imports,
-                );
+                )?;
                 println!(
                     "  📦 Dependency '{}': loaded from {}",
                     dep_name,
@@ -782,14 +842,16 @@ pub fn resolve_manifest_dependencies_with_options(
                 save_cache(&cache_path, &cache);
                 register_imported_items(&items, Some(dep_name), module_env);
                 // P5-C: Check for proof certificate before marking atoms as verified
-                let cert_results = verify_import_certificate(dep_base_dir, entry_path, &items);
+                // Use clone_dir (package root) instead of dep_base_dir (entry file parent)
+                // because cmd_publish saves certificates to the package root.
+                let cert_results = verify_import_certificate(&clone_dir, entry_path, &items);
                 mark_dependency_atoms_with_cert(
                     &items,
                     dep_name,
                     &cert_results,
                     module_env,
                     strict_imports,
-                );
+                )?;
             } else {
                 eprintln!(
                     "  ⚠️  Dependency '{}': no entry file found in cloned repo",
@@ -831,14 +893,16 @@ pub fn resolve_manifest_dependencies_with_options(
                     save_cache(&cache_path, &cache);
                     register_imported_items(&items, Some(dep_name), module_env);
                     // P5-C: Check for proof certificate before marking atoms as verified
-                    let cert_results = verify_import_certificate(dep_base_dir, entry_path, &items);
+                    // Use pkg_dir (package root) instead of dep_base_dir (entry file parent)
+                    // because cmd_publish saves certificates to the package root.
+                    let cert_results = verify_import_certificate(&pkg_dir, entry_path, &items);
                     mark_dependency_atoms_with_cert(
                         &items,
                         dep_name,
                         &cert_results,
                         module_env,
                         strict_imports,
-                    );
+                    )?;
                     println!(
                         "  📦 Dependency '{}': loaded from registry ({})",
                         dep_name,

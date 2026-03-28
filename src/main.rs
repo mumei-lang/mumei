@@ -2161,6 +2161,70 @@ fn cmd_build(input: &str, output: &str, emit_target: &emitter::EmitTarget, stric
         }
     }
 
+    // P5-A: Generate proof certificate when --emit proof-cert is requested
+    if matches!(emit_target, emitter::EmitTarget::ProofCert) && atom_count > 0 {
+        let mut cert_atoms: Vec<&parser::Atom> = items
+            .iter()
+            .filter_map(|item| {
+                if let Item::Atom(a) = item {
+                    Some(a)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let mut qualified_methods: Vec<parser::Atom> = Vec::new();
+        for item in &items {
+            if let Item::ImplBlock(ib) = item {
+                for method in &ib.methods {
+                    let mut qualified = method.clone();
+                    qualified.name = format!("{}::{}", ib.struct_name, method.name);
+                    qualified_methods.push(qualified);
+                }
+            }
+        }
+        for qm in &qualified_methods {
+            cert_atoms.push(qm);
+        }
+
+        // Collect verification results (all atoms that passed verification)
+        let mut cert_results: std::collections::HashMap<String, (String, String)> =
+            std::collections::HashMap::new();
+        for atom_ref in &cert_atoms {
+            if module_env.is_verified(&atom_ref.name) {
+                cert_results.insert(
+                    atom_ref.name.clone(),
+                    ("unsat".to_string(), "verified".to_string()),
+                );
+            }
+        }
+
+        let (pkg_name, pkg_version) = if let Some((ref _proj_dir, ref m)) = manifest_config {
+            (Some(m.package.name.as_str()), Some(m.package.version.as_str()))
+        } else {
+            (None, None)
+        };
+
+        let cert = proof_cert::generate_certificate(
+            input,
+            &cert_atoms,
+            &cert_results,
+            &module_env,
+            pkg_name,
+            pkg_version,
+        );
+
+        let cert_path = output_dir.join(format!("{}.proof-cert.json", file_stem));
+        match proof_cert::save_certificate(&cert, &cert_path) {
+            Ok(()) => {
+                println!("  📜 Proof certificate written to: {}", cert_path.display());
+            }
+            Err(e) => {
+                eprintln!("  ⚠️  Failed to write proof certificate: {}", e);
+            }
+        }
+    }
+
     if atom_count > 0 {
         println!("🎉 Blade forged successfully with {} atoms.", atom_count);
     } else {
@@ -2177,7 +2241,7 @@ fn cmd_build(input: &str, output: &str, emit_target: &emitter::EmitTarget, stric
 // mumei add — add dependency to mumei.toml
 // =============================================================================
 
-fn cmd_add(dep: &str, _version: Option<&str>) {
+fn cmd_add(dep: &str, version: Option<&str>) {
     // mumei.toml を探す
     let manifest_path = Path::new("mumei.toml");
     if !manifest_path.exists() {
@@ -2255,9 +2319,24 @@ fn cmd_add(dep: &str, _version: Option<&str>) {
         // ~/.mumei/registry.json から検索
         let reg = registry::load();
         if let Some(pkg_entry) = reg.packages.get(dep) {
-            let version = &pkg_entry.latest;
-            let toml_line = format!("{} = \"{}\"", dep, version);
-            println!("📦 Adding registry dependency: {} v{}", dep, version);
+            // P5-B: Use --version if specified, otherwise use latest
+            let resolved_version = match version {
+                Some(v) => {
+                    // Verify the specified version exists
+                    if !pkg_entry.versions.contains_key(v) {
+                        let available: Vec<&String> = pkg_entry.versions.keys().collect();
+                        eprintln!(
+                            "❌ Error: Version '{}' not found for package '{}'. Available versions: {:?}",
+                            v, dep, available
+                        );
+                        std::process::exit(1);
+                    }
+                    v.to_string()
+                }
+                None => pkg_entry.latest.clone(),
+            };
+            let toml_line = format!("{} = \"{}\"", dep, resolved_version);
+            println!("📦 Adding registry dependency: {} v{}", dep, resolved_version);
 
             // Show available versions
             if pkg_entry.versions.len() > 1 {
@@ -2273,7 +2352,7 @@ fn cmd_add(dep: &str, _version: Option<&str>) {
             }
 
             // Verify the package path exists
-            if let Some(ver_entry) = pkg_entry.versions.get(version.as_str()) {
+            if let Some(ver_entry) = pkg_entry.versions.get(resolved_version.as_str()) {
                 if !Path::new(&ver_entry.path).exists() {
                     eprintln!(
                         "  ⚠️  Warning: Package directory '{}' does not exist. It may have been removed.",
