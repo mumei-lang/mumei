@@ -185,28 +185,30 @@ fn resolve_return_type<'a>(
     }
 }
 
-pub fn compile(
+/// P7-A: Compile an HirAtom into an in-memory LLVM Module (no file I/O).
+/// The caller provides a pre-created Context and Module so that lifetimes
+/// can be managed externally (e.g. by JitEngine which owns the Context).
+pub fn compile_atom_into_module<'ctx>(
+    context: &'ctx Context,
+    module: &Module<'ctx>,
     hir_atom: &HirAtom,
-    output_path: &Path,
     module_env: &ModuleEnv,
     extern_blocks: &[mumei_core::parser::ExternBlock],
 ) -> MumeiResult<()> {
     let atom = &hir_atom.atom;
-    let context = Context::create();
-    let module = context.create_module(&atom.name);
     let builder = context.create_builder();
 
     // Declare all extern functions before compiling the atom body
-    declare_extern_functions(&context, &module, extern_blocks, module_env);
+    declare_extern_functions(context, module, extern_blocks, module_env);
 
     // パラメータ型を精緻型から解決
     let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = atom
         .params
         .iter()
-        .map(|p| resolve_param_type(&context, p.type_name.as_deref(), module_env).into())
+        .map(|p| resolve_param_type(context, p.type_name.as_deref(), module_env).into())
         .collect();
     // Plan 18: Use resolved return type instead of hardcoded i64
-    let ret_type = resolve_return_type(&context, atom, module_env);
+    let ret_type = resolve_return_type(context, atom, module_env);
     let fn_type = ret_type.fn_type(&param_types, false);
     let function = module.add_function(&atom.name, fn_type, None);
 
@@ -214,7 +216,7 @@ pub fn compile(
     builder.position_at_end(entry_block);
 
     let mut variables = HashMap::new();
-    let mut array_ptrs: HashMap<String, (BasicValueEnum, BasicValueEnum)> = HashMap::new(); // name -> (len, data_ptr)
+    let mut array_ptrs: HashMap<String, (BasicValueEnum, BasicValueEnum)> = HashMap::new();
 
     for (i, param) in atom.params.iter().enumerate() {
         let val = function.get_nth_param(i as u32).unwrap();
@@ -226,21 +228,67 @@ pub fn compile(
             let data_ptr =
                 llvm!(builder.build_extract_value(struct_val, 1, &format!("{}_data", param.name)));
             array_ptrs.insert(param.name.clone(), (len_val, data_ptr));
-            variables.insert(param.name.clone(), len_val); // デフォルトでは len を返す
+            variables.insert(param.name.clone(), len_val);
         } else {
             variables.insert(param.name.clone(), val);
         }
     }
 
+    let result_val = compile_hir_stmt(
+        context,
+        &builder,
+        module,
+        &function,
+        &hir_atom.body,
+        &mut variables,
+        &array_ptrs,
+        module_env,
+    )?;
+
+    llvm!(builder.build_return(Some(&result_val)));
+
+    Ok(())
+}
+
+/// P7-A: Compile an HirAtom into a standalone in-memory LLVM Module.
+/// Creates its own Context and Module, compiles the atom, and returns
+/// the LLVM IR as a string (detached from Context lifetime).
+pub fn compile_to_module(
+    hir_atom: &HirAtom,
+    module_env: &ModuleEnv,
+    extern_blocks: &[mumei_core::parser::ExternBlock],
+) -> MumeiResult<String> {
+    let atom = &hir_atom.atom;
+    let context = Context::create();
+    let module = context.create_module(&atom.name);
+
+    compile_atom_into_module(&context, &module, hir_atom, module_env, extern_blocks)?;
+
+    // Return the module IR as a string (detached from Context lifetime)
+    Ok(module.print_to_string().to_string())
+}
+
+/// Original compile function — calls compile_atom_into_module then writes .ll file.
+/// Preserves existing behavior including effects comment insertion.
+pub fn compile(
+    hir_atom: &HirAtom,
+    output_path: &Path,
+    module_env: &ModuleEnv,
+    extern_blocks: &[mumei_core::parser::ExternBlock],
+) -> MumeiResult<()> {
+    let atom = &hir_atom.atom;
+    let context = Context::create();
+    let module = context.create_module(&atom.name);
+
+    compile_atom_into_module(&context, &module, hir_atom, module_env, extern_blocks)?;
+
     // エフェクト情報を .ll ファイル先頭にコメントとして追記する（後処理）
-    // HIR の effect_set から読み取る（パラメータ付きエフェクトは atom.effects にフォールバック）
     let effects_comment = if !hir_atom.effect_set.effects.is_empty() {
         let effects_str: Vec<String> = hir_atom
             .effect_set
             .effects
             .iter()
             .map(|name| {
-                // パラメータ付きエフェクトの詳細は atom.effects から取得
                 if let Some(e) = atom.effects.iter().find(|e| &e.name == name) {
                     if e.params.is_empty() {
                         name.clone()
@@ -261,19 +309,6 @@ pub fn compile(
     } else {
         None
     };
-
-    let result_val = compile_hir_stmt(
-        &context,
-        &builder,
-        &module,
-        &function,
-        &hir_atom.body,
-        &mut variables,
-        &array_ptrs,
-        module_env,
-    )?;
-
-    llvm!(builder.build_return(Some(&result_val)));
 
     let path_with_ext = output_path.with_extension("ll");
     module

@@ -602,6 +602,45 @@ Unfreezes the LSP server and adds two major features: textDocument/completion an
 - `instruction.md` — §11 LSP status changed from "Frozen" to "Active"
 - `docs/ROADMAP.md` — This plan entry
 
+### P7: Runtime Completion (REPL JIT + Binary Execution)
+
+Enables mumei's verified code to actually run — both interactively in the REPL and as standalone native binaries.
+
+**P7-A: REPL Execution Engine (JIT)** — ✅ Implemented
+- `mumei-emit-llvm/src/jit.rs` — JitEngine struct wrapping inkwell's ExecutionEngine (MCJIT)
+- Refactored `codegen::compile()` into `compile_atom_into_module()` (in-memory) + `compile()` (file-based)
+- `compile_to_module()` returns LLVM IR as string for standalone use
+- REPL (`cmd_repl()`) enhanced with JIT: atom definitions are verified then JIT-compiled; expressions are wrapped as `__repl_eval` atoms, verified, executed, and results displayed
+- `:eval <expr>` command for unverified JIT execution (debugging)
+- `:load` now also compiles loaded atoms into the JIT module
+
+**P7-B: End-to-End Binary Execution** — ✅ Implemented
+- `EmitTarget::Binary` variant added to emitter
+- `src/linker.rs` — finds clang and links LLVM IR to native binary (`clang -O2 -o <output> <merged.ll> -lm -lpthread`)
+- `mumei-emit-llvm/src/binary.rs` — `compile_atoms_to_binary_ll()` merges all atoms into single LLVM module with C-compatible `main` wrapper
+- `mumei run <file.mm>` CLI command: verify → compile → link → execute → cleanup
+- FFI warning: extern blocks trigger a warning about runtime library requirement
+- Examples: `examples/run_demo.mm`, `examples/run_with_calls.mm`
+
+**P7-C: Wasm Target** — Deferred
+- WebAssembly compilation target for browser/edge execution
+- Will be implemented after P7-A/B stabilize
+
+**P8: Developer Experience** — Deferred
+- Enhanced error messages, IDE integration improvements, debugging tools
+- Will be implemented after runtime completion is stable
+
+**Files**:
+- `mumei-emit-llvm/src/jit.rs` — JIT execution engine (5 unit tests)
+- `mumei-emit-llvm/src/binary.rs` — Binary compilation pipeline
+- `mumei-emit-llvm/src/codegen.rs` — Refactored compile functions
+- `mumei-emit-llvm/src/lib.rs` — Module exports + LlvmContext re-export
+- `mumei-core/src/emitter.rs` — EmitTarget::Binary variant
+- `src/linker.rs` — Clang linker pipeline
+- `src/main.rs` — `cmd_run()`, REPL JIT enhancements, `Run` command variant
+- `examples/run_demo.mm` — Simple binary execution demo
+- `examples/run_with_calls.mm` — Multi-atom binary execution demo
+
 ---
 
 ## Related Documents
