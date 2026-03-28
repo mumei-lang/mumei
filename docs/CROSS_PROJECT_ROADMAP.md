@@ -177,6 +177,45 @@ mumei のコード生成バックエンドをプラグイン化し、LLVM IR 以
 
 ---
 
+## Priority 5: Verified Asset Distribution（検証済み資産の配布）
+
+mumeiの「検証済みコード」を安全にパッケージ化・配布・消費するためのインフラストラクチャ。
+
+### P5-A: Proof Certificate Chain ✅ Implemented
+
+**Repository**: `mumei-lang/mumei`
+
+- ✅ `AtomCertificate` extended with `proof_hash`, `dependencies`, `effects`, `requires`, `ensures`
+- ✅ `ProofCertificate` extended with `package_name`, `package_version`, `certificate_hash`, `all_verified`
+- ✅ `generate_certificate()` accepts `ModuleEnv` parameter — fills proof_hash via `compute_proof_hash()`, dependencies from `dependency_graph`, effects/contracts from atom fields
+- ✅ `EmitTarget::ProofCert` variant added — `--emit proof-cert` generates `.proof-cert.json`
+- ✅ `mumei verify-cert <path>` CLI command — loads cert, verifies against source, prints per-atom status
+- ✅ `compute_sha256()` utility in `proof_cert.rs` for certificate hash computation
+- ✅ Unit tests: extended fields, change detection, hash determinism, SHA-256 utility, all_verified flag, JSON roundtrip
+
+### P5-B: Package Registry Certificate Integration ✅ Implemented
+
+**Repository**: `mumei-lang/mumei`
+
+- ✅ `VersionEntry` extended with `cert_path: Option<String>` and `cert_hash: Option<String>` (backward compatible via `#[serde(default)]`)
+- ✅ `register_with_cert()` function stores certificate metadata in registry
+- ✅ `cmd_publish` generates proof certificate and registers with cert_path/cert_hash
+- ✅ `cmd_add` verifies proof certificate when resolving packages from registry
+- ✅ Unit tests: serialization with cert fields, backward compatibility, skip_serializing_if None
+
+### P5-C: Verified Import ✅ Implemented
+
+**Repository**: `mumei-lang/mumei`
+
+- ✅ `resolve_imports_recursive()` checks `.proof-cert.json` for imported modules — proven atoms get `mark_verified()`, changed/unproven atoms get warnings
+- ✅ `resolve_manifest_dependencies()` applies cert verification to path, git, and registry dependencies
+- ✅ `--strict-imports` CLI flag for `verify` and `build` commands — missing/invalid certs become hard errors
+- ✅ Taint integration: unverified imported atoms registered with `TrustLevel::Unverified` via `set_trust_level()`
+- ✅ `mark_dependency_atoms_with_cert()` helper consolidates cert verification logic for all dependency types
+- ✅ Unit tests: check_cert_for_atom (proven/changed/unproven/missing), mark_dependency_atoms_with_cert (verified/unverified/legacy), ResolverContext strict_imports
+
+---
+
 ## Priority 4: エコシステム・DX の成熟
 
 ### P4-A: VS Code Extension の Marketplace 公開

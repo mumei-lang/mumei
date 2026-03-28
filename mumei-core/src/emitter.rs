@@ -60,6 +60,8 @@ pub enum EmitTarget {
     CHeader,
     VerifiedJson,
     ProofBook,
+    /// P5-A: Generate .proof-cert.json alongside build output
+    ProofCert,
 }
 
 pub struct CHeaderEmitter;

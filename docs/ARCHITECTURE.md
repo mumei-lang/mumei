@@ -144,6 +144,18 @@ pub struct LinearityCtx {
 - **Failure** → remove from cache (force re-verify next time)
 - **Migration**: Old `.mumei_build_cache` files are automatically migrated to the new format
 
+## Proof Certificate Chain (P5-A)
+
+Proof certificates (`.proof-cert.json`) provide a portable, cryptographically verifiable record of verification results:
+
+- **Generation**: `generate_certificate()` in `proof_cert.rs` accepts `ModuleEnv` to populate extended fields
+- **AtomCertificate** fields: `proof_hash` (from `compute_proof_hash()`), `dependencies` (from `dependency_graph`), `effects`, `requires`, `ensures`, `content_hash`, `status`
+- **ProofCertificate** fields: `package_name`, `package_version`, `certificate_hash` (SHA-256 of serialized cert), `all_verified` (summary flag)
+- **Verification**: `verify_certificate()` re-hashes source and compares against stored `content_hash` — reports "proven", "changed", or "unproven" per atom
+- **CLI**: `mumei verify-cert <path>` loads and verifies a certificate; `--emit proof-cert` generates one during build
+- **Import verification** (P5-C): `resolve_imports_recursive()` and `resolve_manifest_dependencies()` check `.proof-cert.json` for imported modules — proven atoms get `mark_verified()`, others get warnings (or hard errors with `--strict-imports`)
+- See [`docs/PROOF_CERTIFICATE.md`](PROOF_CERTIFICATE.md) for full format specification
+
 ---
 
 ## FQN Resolution

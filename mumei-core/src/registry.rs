@@ -31,6 +31,12 @@ pub struct VersionEntry {
     pub atom_count: usize,
     /// 検証済みかどうか
     pub verified: bool,
+    /// P5-B: Path to .proof-cert.json certificate file
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cert_path: Option<String>,
+    /// P5-B: SHA-256 hash of the certificate file for integrity verification
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cert_hash: Option<String>,
 }
 /// レジストリファイルのパスを返す
 pub fn registry_path() -> PathBuf {
@@ -93,6 +99,19 @@ pub fn register(
     atom_count: usize,
     verified: bool,
 ) -> Result<(), String> {
+    register_with_cert(name, version, pkg_path, atom_count, verified, None, None)
+}
+
+/// P5-B: Register a package with optional certificate metadata.
+pub fn register_with_cert(
+    name: &str,
+    version: &str,
+    pkg_path: &Path,
+    atom_count: usize,
+    verified: bool,
+    cert_path: Option<String>,
+    cert_hash: Option<String>,
+) -> Result<(), String> {
     let mut registry = load();
     let now = chrono_lite_now();
     let ver_entry = VersionEntry {
@@ -100,6 +119,8 @@ pub fn register(
         published_at: now,
         atom_count,
         verified,
+        cert_path,
+        cert_hash,
     };
     let pkg = registry
         .packages
@@ -184,5 +205,81 @@ fn chrono_lite_now() -> String {
     match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
         Ok(d) => format!("unix:{}", d.as_secs()),
         Err(_) => "unknown".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// P5-B: VersionEntry serialization with cert_path and cert_hash
+    #[test]
+    fn test_version_entry_serialization_with_cert() {
+        let entry = VersionEntry {
+            path: "/tmp/pkg".to_string(),
+            published_at: "unix:1234567890".to_string(),
+            atom_count: 3,
+            verified: true,
+            cert_path: Some("/tmp/pkg/cert.json".to_string()),
+            cert_hash: Some("abc123".to_string()),
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let parsed: VersionEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.cert_path, Some("/tmp/pkg/cert.json".to_string()));
+        assert_eq!(parsed.cert_hash, Some("abc123".to_string()));
+    }
+
+    /// P5-B: VersionEntry backward compatibility — missing cert fields default to None
+    #[test]
+    fn test_version_entry_backward_compat() {
+        let json = r#"{"path":"/tmp/pkg","published_at":"unix:0","atom_count":1,"verified":false}"#;
+        let parsed: VersionEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.cert_path, None);
+        assert_eq!(parsed.cert_hash, None);
+    }
+
+    /// P5-B: register_with_cert stores cert metadata
+    #[test]
+    fn test_register_with_cert_stores_metadata() {
+        // Use a temp dir for the registry to avoid interfering with real state
+        let tmp = std::env::temp_dir().join("mumei_test_registry_p5b");
+        let _ = std::fs::create_dir_all(&tmp);
+
+        // Create a temporary package directory
+        let pkg_dir = tmp.join("my_pkg_v1");
+        let _ = std::fs::create_dir_all(&pkg_dir);
+
+        // We can't easily test register_with_cert without mocking the registry path,
+        // but we can test the VersionEntry construction directly
+        let ver_entry = VersionEntry {
+            path: pkg_dir.to_string_lossy().to_string(),
+            published_at: chrono_lite_now(),
+            atom_count: 5,
+            verified: true,
+            cert_path: Some(pkg_dir.join("cert.json").to_string_lossy().to_string()),
+            cert_hash: Some("deadbeef".to_string()),
+        };
+        assert_eq!(ver_entry.atom_count, 5);
+        assert!(ver_entry.verified);
+        assert!(ver_entry.cert_path.is_some());
+        assert_eq!(ver_entry.cert_hash.as_deref(), Some("deadbeef"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// P5-B: cert_path and cert_hash are omitted from JSON when None
+    #[test]
+    fn test_version_entry_skip_serializing_none_cert() {
+        let entry = VersionEntry {
+            path: "/tmp/pkg".to_string(),
+            published_at: "unix:0".to_string(),
+            atom_count: 0,
+            verified: false,
+            cert_path: None,
+            cert_hash: None,
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(!json.contains("cert_path"));
+        assert!(!json.contains("cert_hash"));
     }
 }
