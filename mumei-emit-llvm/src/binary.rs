@@ -64,11 +64,11 @@ pub fn compile_atoms_to_binary_ll(
     }
 
     // Generate C-compatible main wrapper
-    let i64_type = context.i64_type();
     let i32_type = context.i32_type();
     let ptr_type = context.ptr_type(inkwell::AddressSpace::default());
 
-    let c_main_fn_type = i64_type.fn_type(&[i32_type.into(), ptr_type.into()], false);
+    // C standard requires main to return int (i32)
+    let c_main_fn_type = i32_type.fn_type(&[i32_type.into(), ptr_type.into()], false);
     let real_main = merged_module.add_function("main", c_main_fn_type, None);
     let entry = context.append_basic_block(real_main, "entry");
     let builder = context.create_builder();
@@ -88,15 +88,12 @@ pub fn compile_atoms_to_binary_ll(
         .left()
         .ok_or_else(|| MumeiError::codegen("main() must return a value".to_string()))?;
 
-    // Truncate i64 result to i32 for process exit code, then extend back to i64
+    // Truncate i64 result to i32 for C-compatible process exit code
     let exit_code = builder
         .build_int_truncate(result.into_int_value(), i32_type, "exit_code")
         .map_err(|e| MumeiError::codegen(format!("Failed to build truncate: {}", e)))?;
-    let exit_i64 = builder
-        .build_int_z_extend(exit_code, i64_type, "exit_i64")
-        .map_err(|e| MumeiError::codegen(format!("Failed to build zext: {}", e)))?;
     builder
-        .build_return(Some(&exit_i64))
+        .build_return(Some(&exit_code))
         .map_err(|e| MumeiError::codegen(format!("Failed to build return: {}", e)))?;
 
     // Write merged module to .ll file

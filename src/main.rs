@@ -311,6 +311,7 @@ fn main() {
                 eprintln!("  build   Verify + compile (default)");
                 eprintln!("  verify  Z3 formal verification only");
                 eprintln!("  check   Parse + resolve only (fast syntax check)");
+                eprintln!("  run     Build and run a mumei program as a native binary");
                 eprintln!("  init    Generate a new project template");
                 eprintln!("  setup   Download & configure Z3 + LLVM toolchain");
                 eprintln!("  add     Add a dependency to mumei.toml");
@@ -1696,8 +1697,8 @@ fn dispatch_emit(
         }
         emitter::EmitTarget::Binary => {
             // P7-B: Binary emit is handled at a higher level (cmd_build);
-            // at per-atom dispatch we compile to LLVM IR (same as LlvmIr target).
-            mumei_emit_llvm::LlvmEmitter.emit(hir_atom, output_path, module_env, extern_blocks)
+            // at per-atom dispatch we return an empty artifact list.
+            Ok(vec![])
         }
     }
 }
@@ -2181,6 +2182,49 @@ fn cmd_build(input: &str, output: &str, emit_target: &emitter::EmitTarget, stric
         }
     }
 
+    // P7-B: When --emit binary is requested, merge all atoms into a single
+    // LLVM module with a C-compatible main wrapper and link to a native binary.
+    if matches!(emit_target, emitter::EmitTarget::Binary) && atom_count > 0 {
+        // Collect all verified HirAtoms
+        let mut hir_atoms = Vec::new();
+        let extern_blocks = collect_extern_blocks(&items);
+        for item in &items {
+            if let Item::Atom(atom) = item {
+                let hir_atom = lower_atom_to_hir_with_env(atom, Some(&module_env));
+                hir_atoms.push(hir_atom);
+            }
+        }
+
+        let ll_path = output_dir.join(format!("{}_merged.ll", file_stem));
+        if let Err(e) = mumei_emit_llvm::binary::compile_atoms_to_binary_ll(
+            &hir_atoms,
+            &module_env,
+            &extern_blocks,
+            &ll_path,
+        ) {
+            eprintln!("❌ Binary codegen failed: {}", e);
+            std::process::exit(1);
+        }
+
+        let binary_output = output_dir.join(file_stem);
+        println!(
+            "  🔗 Linking {} atom(s) to native binary...",
+            hir_atoms.len()
+        );
+        if let Err(e) =
+            linker::link_to_binary(std::slice::from_ref(&ll_path), &binary_output, None)
+        {
+            eprintln!("❌ Linking failed: {}", e);
+            std::process::exit(1);
+        }
+        println!(
+            "  ✅ Binary written to: {}",
+            binary_output.display()
+        );
+        // Clean up intermediate .ll file
+        let _ = fs::remove_file(&ll_path);
+    }
+
     // P5-A: Generate proof certificate when --emit proof-cert is requested
     if matches!(emit_target, emitter::EmitTarget::ProofCert) && atom_count > 0 {
         let mut cert_atoms: Vec<&parser::Atom> = items
@@ -2330,6 +2374,7 @@ fn cmd_run(input: &str, args: &[String]) {
             let hir_atom = lower_atom_to_hir_with_env(atom, Some(&module_env));
             match verification::verify(&hir_atom, Path::new("."), &module_env) {
                 Ok(()) => {
+                    module_env.mark_verified(&atom.name);
                     println!("  ✅ Verified: {}", atom.name);
                 }
                 Err(e) => {
@@ -3201,14 +3246,28 @@ fn cmd_repl() {
                                             &extern_blocks_repl,
                                         ) {
                                             Ok(()) => {
-                                                match engine.execute_i64("__repl_eval") {
-                                                    Ok(v) => println!("  = {}", v),
-                                                    Err(_) => {
-                                                        // Try f64
-                                                        if let Ok(v) =
-                                                            engine.execute_f64("__repl_eval")
-                                                        {
-                                                            println!("  = {}", v);
+                                                let is_f64 = atom
+                                                    .return_type
+                                                    .as_deref()
+                                                    .is_some_and(|rt| rt == "f64");
+                                                if is_f64 {
+                                                    match engine.execute_f64("__repl_eval") {
+                                                        Ok(v) => println!("  = {}", v),
+                                                        Err(e) => {
+                                                            eprintln!(
+                                                                "  ❌ Execution error: {}",
+                                                                e
+                                                            )
+                                                        }
+                                                    }
+                                                } else {
+                                                    match engine.execute_i64("__repl_eval") {
+                                                        Ok(v) => println!("  = {}", v),
+                                                        Err(e) => {
+                                                            eprintln!(
+                                                                "  ❌ Execution error: {}",
+                                                                e
+                                                            )
                                                         }
                                                     }
                                                 }
@@ -3255,13 +3314,28 @@ fn cmd_repl() {
                                             &extern_blocks_repl,
                                         ) {
                                             Ok(()) => {
-                                                match engine.execute_i64("__repl_eval") {
-                                                    Ok(v) => println!("  = {}", v),
-                                                    Err(_) => {
-                                                        if let Ok(v) =
-                                                            engine.execute_f64("__repl_eval")
-                                                        {
-                                                            println!("  = {}", v);
+                                                let is_f64 = atom
+                                                    .return_type
+                                                    .as_deref()
+                                                    .is_some_and(|rt| rt == "f64");
+                                                if is_f64 {
+                                                    match engine.execute_f64("__repl_eval") {
+                                                        Ok(v) => println!("  = {}", v),
+                                                        Err(e) => {
+                                                            eprintln!(
+                                                                "  ❌ Execution error: {}",
+                                                                e
+                                                            )
+                                                        }
+                                                    }
+                                                } else {
+                                                    match engine.execute_i64("__repl_eval") {
+                                                        Ok(v) => println!("  = {}", v),
+                                                        Err(e) => {
+                                                            eprintln!(
+                                                                "  ❌ Execution error: {}",
+                                                                e
+                                                            )
                                                         }
                                                     }
                                                 }
