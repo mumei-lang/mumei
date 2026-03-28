@@ -1762,7 +1762,7 @@ atom add(x: i64) -> i64
         let mut cert_results = HashMap::new();
         cert_results.insert("add".to_string(), "proven".to_string());
 
-        mark_dependency_atoms_with_cert(&items, "dep", &Some(cert_results), &mut module_env, false);
+        mark_dependency_atoms_with_cert(&items, "dep", &Some(cert_results), &mut module_env, false).unwrap();
 
         // The atom should be marked as verified
         assert!(module_env.is_verified("add"));
@@ -1787,7 +1787,7 @@ atom add(x: i64) -> i64
         let mut cert_results = HashMap::new();
         cert_results.insert("add".to_string(), "changed".to_string());
 
-        mark_dependency_atoms_with_cert(&items, "dep", &Some(cert_results), &mut module_env, false);
+        mark_dependency_atoms_with_cert(&items, "dep", &Some(cert_results), &mut module_env, false).unwrap();
 
         // The atom should NOT be marked as verified
         assert!(!module_env.is_verified("add"));
@@ -1808,7 +1808,7 @@ atom foo(x: i64) -> i64
         let mut module_env = ModuleEnv::new();
         register_imported_items(&items, Some("legacy_dep"), &mut module_env);
 
-        mark_dependency_atoms_with_cert(&items, "legacy_dep", &None, &mut module_env, false);
+        mark_dependency_atoms_with_cert(&items, "legacy_dep", &None, &mut module_env, false).unwrap();
 
         // Legacy behavior: no cert = all verified
         assert!(module_env.is_verified("foo"));
