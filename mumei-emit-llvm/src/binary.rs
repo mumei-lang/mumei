@@ -29,12 +29,23 @@ pub fn compile_atoms_to_binary_ll(
     let context = Context::create();
     let merged_module = context.create_module("mumei_merged");
 
-    // Check that a "main" atom exists before compiling
-    let has_main = hir_atoms.iter().any(|h| h.atom.name == "main");
-    if !has_main {
-        return Err(MumeiError::codegen(
-            "No `atom main()` found. A main atom is required for binary compilation.".to_string(),
-        ));
+    // Check that a "main" atom exists and takes no parameters
+    let main_atom = hir_atoms.iter().find(|h| h.atom.name == "main");
+    match main_atom {
+        None => {
+            return Err(MumeiError::codegen(
+                "No `atom main()` found. A main atom is required for binary compilation."
+                    .to_string(),
+            ));
+        }
+        Some(m) if !m.atom.params.is_empty() => {
+            return Err(MumeiError::codegen(format!(
+                "atom main() must take no parameters for binary compilation, but found {} parameter(s). \
+                 Define main as: atom main() requires: ...; ensures: ...; body: {{ ... }}",
+                m.atom.params.len()
+            )));
+        }
+        _ => {}
     }
 
     // Compile all atoms into the merged module.

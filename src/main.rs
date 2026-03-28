@@ -2326,17 +2326,28 @@ fn cmd_run(input: &str, args: &[String]) {
     let (items, mut module_env, _imports, _source) = load_and_prepare(input);
     let extern_blocks = collect_extern_blocks(&items);
 
-    // Check that a main atom exists
-    let has_main = items
+    // Check that a main atom exists and takes no parameters
+    let main_atom = items
         .iter()
-        .any(|item| matches!(item, Item::Atom(atom) if atom.name == "main"));
-    if !has_main {
-        eprintln!(
-            "❌ Error: No `atom main()` found in '{}'. A main atom is required for `mumei run`.",
-            input
-        );
-        let _ = fs::remove_dir_all(&tmp_dir);
-        std::process::exit(1);
+        .find(|item| matches!(item, Item::Atom(atom) if atom.name == "main"));
+    match main_atom {
+        None => {
+            eprintln!(
+                "❌ Error: No `atom main()` found in '{}'. A main atom is required for `mumei run`.",
+                input
+            );
+            let _ = fs::remove_dir_all(&tmp_dir);
+            std::process::exit(1);
+        }
+        Some(Item::Atom(atom)) if !atom.params.is_empty() => {
+            eprintln!(
+                "❌ Error: atom main() must take no parameters for `mumei run`, but found {} parameter(s).",
+                atom.params.len()
+            );
+            let _ = fs::remove_dir_all(&tmp_dir);
+            std::process::exit(1);
+        }
+        _ => {}
     }
 
     // Check for extern "Rust" blocks and warn
