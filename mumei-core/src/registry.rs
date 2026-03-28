@@ -57,12 +57,27 @@ pub fn save(registry: &Registry) -> Result<(), String> {
     Ok(())
 }
 /// パッケージ名とバージョン（省略時は latest）でパスを解決する。
+/// バージョンが "*" の場合は latest を使用する。
+/// バージョンが "^x.y.z" の場合は semver 互換の最新バージョンを使用する。
 /// 見つからなければ None を返す。
 pub fn resolve(name: &str, version: Option<&str>) -> Option<PathBuf> {
     let registry = load();
     let entry = registry.packages.get(name)?;
-    let ver = version.unwrap_or(&entry.latest);
-    let ver_entry = entry.versions.get(ver)?;
+    let resolved_version = match version {
+        None | Some("*") => entry.latest.clone(),
+        Some(v) if v.starts_with('^') => {
+            // Semver-compatible: ^x.y.z respects left-most non-zero digit
+            let base = v.trim_start_matches('^');
+            find_compatible_version(entry, base)?
+        }
+        Some(v) if v.starts_with('~') => {
+            // Tilde: ~x.y.z matches any version with same major.minor
+            let base = v.trim_start_matches('~');
+            find_tilde_compatible_version(entry, base)?
+        }
+        Some(v) => v.to_string(),
+    };
+    let ver_entry = entry.versions.get(&resolved_version)?;
     let p = PathBuf::from(&ver_entry.path);
     if p.exists() {
         Some(p)
@@ -96,6 +111,72 @@ pub fn register(
     pkg.versions.insert(version.to_string(), ver_entry);
     pkg.latest = version.to_string();
     save(&registry)
+}
+/// Parse a version string "x.y.z" into (major, minor, patch).
+fn parse_semver(v: &str) -> Option<(u64, u64, u64)> {
+    let parts: Vec<&str> = v.split('.').collect();
+    match parts.len() {
+        1 => Some((parts[0].parse().ok()?, 0, 0)),
+        2 => Some((parts[0].parse().ok()?, parts[1].parse().ok()?, 0)),
+        3.. => Some((
+            parts[0].parse().ok()?,
+            parts[1].parse().ok()?,
+            parts[2].parse().ok()?,
+        )),
+        _ => None,
+    }
+}
+/// Find the highest version compatible with ^base.
+/// Semver caret semantics respect the left-most non-zero digit:
+///   ^X.Y.Z (X>0): same major, >= base  (i.e. >=X.Y.Z, <(X+1).0.0)
+///   ^0.Y.Z (Y>0): same major.minor, >= base  (i.e. >=0.Y.Z, <0.(Y+1).0)
+///   ^0.0.Z:       exact patch  (i.e. ==0.0.Z)
+fn find_compatible_version(entry: &PackageEntry, base: &str) -> Option<String> {
+    let (base_major, base_minor, base_patch) = parse_semver(base)?;
+    let mut best: Option<(u64, u64, u64, String)> = None;
+    for ver_str in entry.versions.keys() {
+        if let Some((major, minor, patch)) = parse_semver(ver_str) {
+            let compatible = if base_major != 0 {
+                // ^X.Y.Z (X>0): same major, >= base
+                major == base_major
+                    && (minor > base_minor || (minor == base_minor && patch >= base_patch))
+            } else if base_minor != 0 {
+                // ^0.Y.Z (Y>0): same major.minor, >= base
+                major == 0 && minor == base_minor && patch >= base_patch
+            } else {
+                // ^0.0.Z: exact match on major.minor.patch
+                major == 0 && minor == 0 && patch == base_patch
+            };
+            if compatible && best.as_ref().is_none_or(|b| (minor, patch) > (b.1, b.2)) {
+                best = Some((major, minor, patch, ver_str.clone()));
+            }
+        }
+    }
+    best.map(|b| b.3)
+}
+/// Find the highest version compatible with ~base (same major.minor, >= base).
+fn find_tilde_compatible_version(entry: &PackageEntry, base: &str) -> Option<String> {
+    let (base_major, base_minor, base_patch) = parse_semver(base)?;
+    let mut best: Option<(u64, u64, u64, String)> = None;
+    for ver_str in entry.versions.keys() {
+        if let Some((major, minor, patch)) = parse_semver(ver_str) {
+            if major == base_major
+                && minor == base_minor
+                && patch >= base_patch
+                && best.as_ref().is_none_or(|b| patch > b.2)
+            {
+                best = Some((major, minor, patch, ver_str.clone()));
+            }
+        }
+    }
+    best.map(|b| b.3)
+}
+/// List all packages in the registry.
+pub fn list_packages() -> Vec<(String, PackageEntry)> {
+    let registry = load();
+    let mut packages: Vec<(String, PackageEntry)> = registry.packages.into_iter().collect();
+    packages.sort_by(|a, b| a.0.cmp(&b.0));
+    packages
 }
 /// 簡易タイムスタンプ（外部クレート不要）
 fn chrono_lite_now() -> String {
