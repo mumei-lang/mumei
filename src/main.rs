@@ -2025,6 +2025,8 @@ fn cmd_build(input: &str, output: &str, emit_target: &emitter::EmitTarget, stric
                                 emitter::EmitTarget::ProofBook => "Proof-Book",
                                 emitter::EmitTarget::ProofCert => "Proof-Cert",
                                 emitter::EmitTarget::Binary => "Binary",
+                                emitter::EmitTarget::RustWrapper => "Rust wrapper",
+                                emitter::EmitTarget::PythonWrapper => "Python wrapper",
                             };
                             println!(
                                 "  ⚙️  [3/3] Tempering: Done. Compiled '{}' to {}.",
@@ -2179,6 +2181,8 @@ fn cmd_build(input: &str, output: &str, emit_target: &emitter::EmitTarget, stric
                             emitter::EmitTarget::ProofBook => "Proof-Book",
                             emitter::EmitTarget::ProofCert => "Proof-Cert",
                             emitter::EmitTarget::Binary => "Binary",
+                            emitter::EmitTarget::RustWrapper => "Rust wrapper",
+                            emitter::EmitTarget::PythonWrapper => "Python wrapper",
                         };
                         println!(
                             "  ⚙️  [3/3] Tempering: Done. Compiled '{}' to {}.",
