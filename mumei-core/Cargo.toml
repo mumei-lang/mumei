@@ -18,3 +18,6 @@ lazy_static = "1.4"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 toml = "0.8"
 dirs = "5.0"
+
+[features]
+static-link-z3 = ["z3/static-link-z3"]
