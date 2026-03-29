@@ -19,7 +19,7 @@ atom calc_subtotal(price: i64, quantity: i64)
 // --- 税額計算 ---
 // tax_rate_pct は 0〜100 のパーセンテージ
 atom calc_tax(amount: i64, tax_rate_pct: i64)
-    requires: amount >= 0 && tax_rate_pct >= 0 && tax_rate_pct <= 100;
+    requires: amount >= 0 && amount <= 10000000000 && tax_rate_pct >= 0 && tax_rate_pct <= 100;
     ensures: result >= 0 && result == amount * tax_rate_pct / 100;
     body: { amount * tax_rate_pct / 100 };
 
