@@ -1,80 +1,71 @@
 // =============================================================
-// Tests for std/libc.mm — Verified C Library Wrappers
+// tests/test_libc.mm — Verified C Library Wrapper Tests
 // =============================================================
 // safe_* ラッパーを呼び出す atom を定義し、
 // 呼び出し元の requires が Z3 により検証されることをテストする。
 //
-// Usage: mumei verify tests/test_libc_contracts.mm
+// Usage: mumei verify tests/test_libc.mm
 // Expected: all atoms pass verification.
 
 import "std/libc" as libc;
 
 // --- memcpy ---
-// 既知のバッファサイズでコピーする（安全）
-atom test_memcpy_safe()
+atom test_safe_memcpy()
     requires: true;
     ensures: result >= 0;
     body: libc::safe_memcpy(100, 100, 50);
 
 // --- memmove ---
-// オーバーラップ許容の安全なメモリ移動
-atom test_memmove_safe()
+atom test_safe_memmove()
     requires: true;
     ensures: result >= 0;
     body: libc::safe_memmove(200, 200, 100);
 
 // --- memset ---
-// バッファサイズと値の範囲を満たす呼び出し（安全）
-atom test_memset_safe()
+atom test_safe_memset()
     requires: true;
     ensures: result >= 0;
     body: libc::safe_memset(128, 0, 128);
 
 // --- strlen ---
-// 正のバッファサイズで呼ぶ（安全）
-atom test_strlen_safe()
+atom test_safe_strlen()
     requires: true;
     ensures: result >= 0 && result < 256;
     body: libc::safe_strlen(256);
 
 // --- malloc ---
-// 正のサイズで呼ぶ（安全）
-atom test_malloc_safe()
+atom test_safe_malloc()
     requires: true;
     ensures: result >= -1;
-    body: libc::safe_malloc(64);
+    body: libc::safe_malloc(1024);
 
 // --- free ---
-// 非負ポインタで呼ぶ（安全）
-atom test_free_safe()
+atom test_safe_free()
     requires: true;
     ensures: result >= 0;
-    body: libc::safe_free(1024);
+    body: libc::safe_free(42);
 
 // --- calloc ---
-// 正の count と size で呼ぶ（安全）
-atom test_calloc_safe()
+atom test_safe_calloc()
     requires: true;
     ensures: result >= -1;
     body: libc::safe_calloc(10, 64);
 
 // --- realloc ---
-// 有効なポインタと正の新サイズで呼ぶ（安全）
-atom test_realloc_safe()
+atom test_safe_realloc()
     requires: true;
     ensures: result >= -1;
-    body: libc::safe_realloc(0, 0, 128);
+    body: libc::safe_realloc(0, 0, 256);
 
 // --- snprintf ---
-// バッファサイズ制約を満たす呼び出し（安全）
-atom test_snprintf_safe()
+atom test_safe_snprintf()
     requires: true;
     ensures: result >= 0;
     body: libc::safe_snprintf(256, 128);
 
 // --- 組み合わせテスト ---
-// malloc → memcpy の安全な組み合わせ
-atom test_alloc_and_copy(src_size: i64, n: i64)
+// malloc → memcpy パイプライン
+atom test_alloc_copy_pipeline(src_size: i64, n: i64)
     requires: src_size >= 0 && n >= 0 && n <= src_size && n <= 1024;
     ensures: result >= 0;
     body: {
@@ -82,10 +73,16 @@ atom test_alloc_and_copy(src_size: i64, n: i64)
         libc::safe_memcpy(buf_size, src_size, n)
     };
 
-// calloc → memset → free の安全な組み合わせ
-atom test_calloc_memset_free()
+// calloc → memset パイプライン
+atom test_calloc_memset_pipeline()
     requires: true;
     ensures: result >= 0;
     body: {
         libc::safe_memset(256, 42, 128)
     };
+
+// memmove with exact buffer sizes
+atom test_memmove_exact()
+    requires: true;
+    ensures: result >= 0;
+    body: libc::safe_memmove(64, 64, 64);

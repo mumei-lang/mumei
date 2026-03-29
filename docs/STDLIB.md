@@ -11,6 +11,7 @@
 | `std/result.mm` | ❌ `import "std/result"` | `Result<T, E>` operations |
 | `std/list.mm` | ❌ `import "std/list"` | Recursive list ADT + Sort algorithms |
 | `std/container/bounded_array.mm` | ❌ `import "std/container/bounded_array"` | Bounded array with sorted operations |
+| `std/libc.mm` | ❌ `import "std/libc"` | Verified C standard library wrappers |
 | `std/container/verified_vector.mm` | ❌ `import "std/container/verified_vector"` | Verified vector with quantifier-based contracts |
 
 ---
@@ -279,6 +280,53 @@ struct BoundedArray { len: i64 where v >= 0, cap: i64 where v > 0 }
 | `bounded_is_full(len, cap)` | `len >= 0 && cap > 0` | `0 or 1` | Check if full |
 | `sorted_identity(n)` | `n >= 0 && forall(sorted)` | `result == n && forall(sorted)` | Sorted invariant preservation |
 | `sorted_insert_len(n, cap)` | `n >= 0 && cap > 0 && n < cap` | `result == n + 1` | Sorted insert (length tracking) |
+
+---
+
+## std/libc.mm — Verified C Library Wrappers
+
+```mumei
+import "std/libc" as libc;
+```
+
+Verified wrappers for C standard library functions via `extern "C"` FFI.
+Each extern function declares strict `requires`/`ensures` contracts verified by Z3 at call sites.
+Parameters use mumei's abstract size representation (i64) rather than raw pointers.
+
+### Memory Operations
+
+| Atom | Requires | Ensures | Description |
+|---|---|---|---|
+| `libc::safe_memcpy(dst_size, src_size, n)` | `n >= 0 && dst_size >= n && src_size >= n` | `result >= 0` | Copy n bytes (no overlap) |
+| `libc::safe_memmove(dst_size, src_size, n)` | `n >= 0 && dst_size >= n && src_size >= n` | `result >= 0` | Move n bytes (overlap safe) |
+| `libc::safe_memset(buf_size, value, n)` | `n >= 0 && buf_size >= n && value >= 0 && value <= 255` | `result >= 0` | Fill n bytes with value |
+
+### String Operations
+
+| Atom | Requires | Ensures | Description |
+|---|---|---|---|
+| `libc::safe_strlen(buf_size)` | `buf_size > 0` | `result >= 0 && result < buf_size` | Get string length (bounded) |
+| `libc::safe_snprintf(buf_size, n)` | `buf_size > 0 && n > 0 && n <= buf_size` | `result >= 0` | Formatted print to buffer |
+
+### Memory Allocation
+
+| Atom | Requires | Ensures | Description |
+|---|---|---|---|
+| `libc::safe_malloc(size)` | `size > 0` | `result >= -1` | Allocate memory (-1 = failure) |
+| `libc::safe_calloc(count, size)` | `count > 0 && size > 0` | `result >= -1` | Allocate zeroed memory (-1 = failure) |
+| `libc::safe_realloc(ptr, old_size, new_size)` | `ptr >= 0 && old_size >= 0 && new_size > 0` | `result >= -1` | Reallocate memory (-1 = failure) |
+| `libc::safe_free(ptr)` | `ptr >= 0` | `result >= 0` | Free allocated memory |
+
+### C Header Generation
+
+`mumei build std/libc.mm --emit c-header` generates a `.h` file with Doxygen `@pre`/`@post` annotations:
+
+```c
+/** @brief safe_memcpy */
+/** @pre n >= 0 && dst_size >= n && src_size >= n */
+/** @post result >= 0 */
+int64_t safe_memcpy(int64_t dst_size, int64_t src_size, int64_t n);
+```
 
 ---
 
