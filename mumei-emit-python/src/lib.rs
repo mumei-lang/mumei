@@ -27,6 +27,7 @@ fn mumei_type_to_ctypes(type_name: &str) -> &str {
         "f32" => "c_float",
         "bool" => "c_int64", // mumei compiles bool to i64 in LLVM IR
         "Str" | "String" => "c_char_p",
+        "[i64]" => "POINTER(c_int64)",
         _ => "c_int64", // default fallback for refined types based on i64
     }
 }
@@ -38,6 +39,7 @@ fn mumei_type_to_python_annotation(type_name: &str) -> &str {
         "f64" | "f32" => "float",
         "bool" => "bool",
         "Str" | "String" => "bytes",
+        "[i64]" => "ctypes.Array",
         _ => "int",
     }
 }
@@ -99,9 +101,22 @@ impl Emitter for PythonWrapperEmitter {
         let ret_resolved = module_env.resolve_base_type(ret_type_name);
         let ret_ctype = mumei_type_to_ctypes(&ret_resolved).to_string();
         ctypes_needed.push(ret_ctype.clone());
-        ctypes_needed.sort();
-        ctypes_needed.dedup();
-        py.push_str(&ctypes_needed.join(", "));
+        // Expand composite ctypes (e.g., "POINTER(c_int64)") into individual imports
+        let mut import_names: Vec<String> = Vec::new();
+        for ct in &ctypes_needed {
+            if ct.starts_with("POINTER(") {
+                import_names.push("POINTER".to_string());
+                if let Some(inner) = ct.strip_prefix("POINTER(").and_then(|s| s.strip_suffix(')'))
+                {
+                    import_names.push(inner.to_string());
+                }
+            } else {
+                import_names.push(ct.clone());
+            }
+        }
+        import_names.sort();
+        import_names.dedup();
+        py.push_str(&import_names.join(", "));
         py.push_str("\n\n");
 
         // Library loading
@@ -206,6 +221,7 @@ impl Emitter for PythonWrapperEmitter {
 /// - `||` → `or`
 /// - `!` (prefix negation) → `not `
 /// - `!=` is preserved (not affected by `!` replacement)
+/// - `true` / `false` → `True` / `False` (standalone tokens only)
 /// - `result` → kept as-is (local variable in wrapper)
 ///
 /// NOTE: `=>` (implication) is not yet handled and will produce invalid Python.
@@ -217,9 +233,14 @@ fn translate_contract_to_python(contract: &str) -> String {
         .replace("!=", "\x00NEQ\x00")
         .replace('!', "not ")
         .replace("\x00NEQ\x00", "!=");
-    // Normalize whitespace (collapse multiple spaces)
+    // Normalize whitespace and translate boolean literals
     result
         .split_whitespace()
+        .map(|t| match t {
+            "true" => "True",
+            "false" => "False",
+            other => other,
+        })
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -357,6 +378,15 @@ mod tests {
             translate_contract_to_python("!(x != 0)"),
             "not (x != 0)"
         );
+        // Boolean literals: true/false → True/False
+        assert_eq!(
+            translate_contract_to_python("result == true"),
+            "result == True"
+        );
+        assert_eq!(
+            translate_contract_to_python("result == false || x > 0"),
+            "result == False or x > 0"
+        );
     }
 
     #[test]
@@ -366,6 +396,7 @@ mod tests {
         assert_eq!(mumei_type_to_ctypes("u64"), "c_uint64");
         assert_eq!(mumei_type_to_ctypes("bool"), "c_int64");
         assert_eq!(mumei_type_to_ctypes("Str"), "c_char_p");
+        assert_eq!(mumei_type_to_ctypes("[i64]"), "POINTER(c_int64)");
         assert_eq!(mumei_type_to_ctypes("UnknownType"), "c_int64");
     }
 

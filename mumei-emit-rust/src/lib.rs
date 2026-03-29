@@ -28,6 +28,7 @@ fn mumei_type_to_rust(type_name: &str) -> &str {
         "f32" => "f32",
         "bool" => "i64", // mumei compiles bool to i64 in LLVM IR
         "Str" | "String" => "*const std::os::raw::c_char",
+        "[i64]" => "*const i64",
         _ => "i64", // default fallback for refined types based on i64
     }
 }
@@ -293,6 +294,7 @@ mod tests {
         assert_eq!(mumei_type_to_rust("u64"), "u64");
         assert_eq!(mumei_type_to_rust("bool"), "i64");
         assert_eq!(mumei_type_to_rust("Str"), "*const std::os::raw::c_char");
+        assert_eq!(mumei_type_to_rust("[i64]"), "*const i64");
         assert_eq!(mumei_type_to_rust("UnknownType"), "i64");
     }
 }
