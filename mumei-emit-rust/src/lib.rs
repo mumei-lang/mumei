@@ -26,7 +26,7 @@ fn mumei_type_to_rust(type_name: &str) -> &str {
         "u32" => "u32",
         "f64" => "f64",
         "f32" => "f32",
-        "bool" => "bool",
+        "bool" => "i64", // mumei compiles bool to i64 in LLVM IR
         "Str" | "String" => "*const std::os::raw::c_char",
         _ => "i64", // default fallback for refined types based on i64
     }
@@ -47,6 +47,9 @@ impl Emitter for RustWrapperEmitter {
         _extern_blocks: &[ExternBlock],
     ) -> MumeiResult<Vec<Artifact>> {
         let atom = &hir_atom.atom;
+        // Sanitize qualified names (e.g., "MyStruct::my_method" → "MyStruct__my_method")
+        // to produce valid Rust identifiers, matching CHeaderEmitter behavior.
+        let fn_name = atom.name.replace("::", "__");
         let mut rs = String::new();
 
         // File header
@@ -80,7 +83,7 @@ impl Emitter for RustWrapperEmitter {
             .collect();
         rs.push_str(&format!(
             "    fn {}(\n{}\n    ) -> {};\n",
-            atom.name,
+            fn_name,
             extern_params.join(",\n"),
             return_type
         ));
@@ -112,7 +115,7 @@ impl Emitter for RustWrapperEmitter {
             .collect();
         rs.push_str(&format!(
             "pub fn {}_safe({}) -> {} {{\n",
-            atom.name,
+            fn_name,
             fn_params.join(", "),
             return_type
         ));
@@ -129,7 +132,7 @@ impl Emitter for RustWrapperEmitter {
         // Unsafe FFI call
         rs.push_str(&format!(
             "    let result = unsafe {{ {}({}) }};\n",
-            atom.name,
+            fn_name,
             params
                 .iter()
                 .map(|(name, _)| name.as_str())
@@ -288,7 +291,7 @@ mod tests {
         assert_eq!(mumei_type_to_rust("i64"), "i64");
         assert_eq!(mumei_type_to_rust("i32"), "i32");
         assert_eq!(mumei_type_to_rust("u64"), "u64");
-        assert_eq!(mumei_type_to_rust("bool"), "bool");
+        assert_eq!(mumei_type_to_rust("bool"), "i64");
         assert_eq!(mumei_type_to_rust("Str"), "*const std::os::raw::c_char");
         assert_eq!(mumei_type_to_rust("UnknownType"), "i64");
     }

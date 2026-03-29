@@ -25,7 +25,7 @@ fn mumei_type_to_ctypes(type_name: &str) -> &str {
         "u32" => "c_uint32",
         "f64" => "c_double",
         "f32" => "c_float",
-        "bool" => "c_int",
+        "bool" => "c_int64", // mumei compiles bool to i64 in LLVM IR
         "Str" | "String" => "c_char_p",
         _ => "c_int64", // default fallback for refined types based on i64
     }
@@ -57,6 +57,9 @@ impl Emitter for PythonWrapperEmitter {
         _extern_blocks: &[ExternBlock],
     ) -> MumeiResult<Vec<Artifact>> {
         let atom = &hir_atom.atom;
+        // Sanitize qualified names (e.g., "MyStruct::my_method" → "MyStruct__my_method")
+        // to produce valid Python identifiers, matching CHeaderEmitter behavior.
+        let fn_name = atom.name.replace("::", "__");
         let mut py = String::new();
 
         // Module header
@@ -125,11 +128,11 @@ impl Emitter for PythonWrapperEmitter {
         let ret_annotation = mumei_type_to_python_annotation(&ret_resolved);
 
         // Configure ctypes argtypes and restype
-        py.push_str(&format!("_lib.{}.argtypes = [", atom.name));
+        py.push_str(&format!("_lib.{}.argtypes = [", fn_name));
         let argtypes: Vec<String> = params.iter().map(|(_, ctype, _)| ctype.clone()).collect();
         py.push_str(&argtypes.join(", "));
         py.push_str("]\n");
-        py.push_str(&format!("_lib.{}.restype = {}\n\n", atom.name, ret_ctype));
+        py.push_str(&format!("_lib.{}.restype = {}\n\n", fn_name, ret_ctype));
 
         // Python wrapper function
         let fn_params: Vec<String> = params
@@ -138,7 +141,7 @@ impl Emitter for PythonWrapperEmitter {
             .collect();
         py.push_str(&format!(
             "def {}({}) -> {}:\n",
-            atom.name,
+            fn_name,
             fn_params.join(", "),
             ret_annotation
         ));
@@ -171,7 +174,7 @@ impl Emitter for PythonWrapperEmitter {
         let call_args: Vec<String> = params.iter().map(|(name, _, _)| name.clone()).collect();
         py.push_str(&format!(
             "    result = _lib.{}({})\n",
-            atom.name,
+            fn_name,
             call_args.join(", ")
         ));
 
@@ -201,9 +204,24 @@ impl Emitter for PythonWrapperEmitter {
 /// Handles common patterns:
 /// - `&&` → `and`
 /// - `||` → `or`
+/// - `!` (prefix negation) → `not `
+/// - `!=` is preserved (not affected by `!` replacement)
 /// - `result` → kept as-is (local variable in wrapper)
+///
+/// NOTE: `=>` (implication) is not yet handled and will produce invalid Python.
 fn translate_contract_to_python(contract: &str) -> String {
-    contract.replace("&&", "and").replace("||", "or")
+    // First replace multi-char operators to avoid partial matches
+    let result = contract.replace("&&", " and ").replace("||", " or ");
+    // Replace `!=` with a placeholder, then `!` with `not `, then restore `!=`
+    let result = result
+        .replace("!=", "\x00NEQ\x00")
+        .replace('!', "not ")
+        .replace("\x00NEQ\x00", "!=");
+    // Normalize whitespace (collapse multiple spaces)
+    result
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(test)]
@@ -324,6 +342,21 @@ mod tests {
             "x > 0 or y > 0"
         );
         assert_eq!(translate_contract_to_python("result == 42"), "result == 42");
+        // Negation: ! → not
+        assert_eq!(
+            translate_contract_to_python("!(x < 0)"),
+            "not (x < 0)"
+        );
+        // != must be preserved
+        assert_eq!(
+            translate_contract_to_python("x != 0"),
+            "x != 0"
+        );
+        // Combined: negation + !=
+        assert_eq!(
+            translate_contract_to_python("!(x != 0)"),
+            "not (x != 0)"
+        );
     }
 
     #[test]
@@ -331,7 +364,7 @@ mod tests {
         assert_eq!(mumei_type_to_ctypes("i64"), "c_int64");
         assert_eq!(mumei_type_to_ctypes("i32"), "c_int32");
         assert_eq!(mumei_type_to_ctypes("u64"), "c_uint64");
-        assert_eq!(mumei_type_to_ctypes("bool"), "c_int");
+        assert_eq!(mumei_type_to_ctypes("bool"), "c_int64");
         assert_eq!(mumei_type_to_ctypes("Str"), "c_char_p");
         assert_eq!(mumei_type_to_ctypes("UnknownType"), "c_int64");
     }
