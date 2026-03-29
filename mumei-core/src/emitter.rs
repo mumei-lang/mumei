@@ -64,6 +64,10 @@ pub enum EmitTarget {
     ProofCert,
     /// P7-B: Compile to standalone native binary via clang
     Binary,
+    /// FFI glue code for Rust (NOT a transpiler — generates extern "C" bindings + safe wrappers)
+    RustWrapper,
+    /// FFI glue code for Python (NOT a transpiler — generates ctypes-based wrappers)
+    PythonWrapper,
 }
 
 pub struct CHeaderEmitter;
