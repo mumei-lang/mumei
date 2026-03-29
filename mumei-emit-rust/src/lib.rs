@@ -47,9 +47,9 @@ impl Emitter for RustWrapperEmitter {
         _extern_blocks: &[ExternBlock],
     ) -> MumeiResult<Vec<Artifact>> {
         let atom = &hir_atom.atom;
-        // Sanitize qualified names (e.g., "MyStruct::my_method" → "MyStruct__my_method")
+        // Sanitize qualified names (e.g., "MyStruct::my_method" → "MyStruct_my_method")
         // to produce valid Rust identifiers, matching CHeaderEmitter behavior.
-        let fn_name = atom.name.replace("::", "__");
+        let fn_name = atom.name.replace("::", "_");
         let mut rs = String::new();
 
         // File header
