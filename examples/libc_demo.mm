@@ -62,14 +62,18 @@ atom demo_realloc_grow(ptr: i64, old_size: i64, new_size: i64)
 
 // 8. メモリ確保 → 使用 → 解放パイプライン
 //    malloc でバッファ確保 → memset でゼロクリア → free で解放
+//    malloc は -1（確保失敗）を返す可能性があるため、ガードが必要
 atom demo_alloc_use_free_pipeline()
     requires: true;
-    ensures: result >= 0;
+    ensures: result >= -1;
     body: {
-        // memset でバッファをゼロクリア（サイズ検証済み）
-        let cleared = libc::safe_memset(256, 0, 256);
-        // free で解放（非負ポインタ）
-        libc::safe_free(cleared)
+        // malloc でバッファ確保（result >= -1）
+        let ptr = libc::safe_malloc(256);
+        // 確保成功時のみ memset → free を実行
+        if ptr >= 0 then {
+            let cleared = libc::safe_memset(256, 0, 256);
+            libc::safe_free(ptr)
+        } else ptr
     };
 
 // 9. 安全な snprintf

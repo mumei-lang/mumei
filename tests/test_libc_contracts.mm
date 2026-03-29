@@ -83,9 +83,15 @@ atom test_alloc_and_copy(src_size: i64, n: i64)
     };
 
 // calloc → memset → free の安全な組み合わせ
+// calloc で確保 → memset でフィル → free で解放
+// calloc/malloc は -1 を返す可能性があるためガード付き
 atom test_calloc_memset_free()
     requires: true;
-    ensures: result >= 0;
+    ensures: result >= -1;
     body: {
-        libc::safe_memset(256, 42, 128)
+        let ptr = libc::safe_calloc(4, 64);
+        if ptr >= 0 then {
+            let filled = libc::safe_memset(256, 42, 128);
+            libc::safe_free(ptr)
+        } else ptr
     };

@@ -66,7 +66,7 @@ atom bad_calloc_zero_count()
     ensures: result >= -1;
     body: libc::safe_calloc(0, 64);
 
-// --- realloc: negative new_size ---
+// --- realloc: new_size == 0 ---
 // safe_realloc requires: new_size > 0
 // Here new_size=0 — should fail.
 atom bad_realloc_zero_size()

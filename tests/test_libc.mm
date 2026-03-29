@@ -74,11 +74,15 @@ atom test_alloc_copy_pipeline(src_size: i64, n: i64)
     };
 
 // calloc → memset パイプライン
+// calloc で確保 → memset でフィル（確保失敗時はガード）
 atom test_calloc_memset_pipeline()
     requires: true;
-    ensures: result >= 0;
+    ensures: result >= -1;
     body: {
-        libc::safe_memset(256, 42, 128)
+        let ptr = libc::safe_calloc(4, 64);
+        if ptr >= 0 then
+            libc::safe_memset(256, 42, 128)
+        else ptr
     };
 
 // memmove with exact buffer sizes

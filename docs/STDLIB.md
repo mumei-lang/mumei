@@ -322,10 +322,12 @@ Parameters use mumei's abstract size representation (i64) rather than raw pointe
 `mumei build std/libc.mm --emit c-header` generates a `.h` file with Doxygen `@pre`/`@post` annotations:
 
 ```c
-/** @brief safe_memcpy */
-/** @pre n >= 0 && dst_size >= n && src_size >= n */
-/** @post result >= 0 */
-int64_t safe_memcpy(int64_t dst_size, int64_t src_size, int64_t n);
+/**
+ * @brief safe_memcpy
+ * @pre n >= 0 && dst_size >= n && src_size >= n
+ * @post result >= 0
+ */
+extern int64_t safe_memcpy(int64_t dst_size, int64_t src_size, int64_t n);
 ```
 
 ---
