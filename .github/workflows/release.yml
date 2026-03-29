@@ -103,7 +103,7 @@ jobs:
               printf "[build]\ntarget-applies-to-host = false\n" > .cargo/config.toml
               export CARGO_HOST_RUSTFLAGS="-C target-feature=-crt-static"
               cargo build --release --target x86_64-unknown-linux-musl \
-                --features z3/static-link-z3
+                --features static-link-z3
               rm -f .cargo/config.toml
             '
       - name: Install system dependencies (macOS)
@@ -194,7 +194,19 @@ jobs:
           Expand-Archive -Path "$env:RUNNER_TEMP\z3.zip" -DestinationPath $z3Dir -Force
           $z3Root = (Get-ChildItem -Path $z3Dir -Directory | Select-Object -First 1).FullName
           echo "Z3_SYS_Z3_HEADER=$z3Root\include\z3.h" >> $env:GITHUB_ENV
-          echo "Z3_SYS_Z3_LIB_DIR=$z3Root\bin" >> $env:GITHUB_ENV
+          # The .lib import library is typically in lib/, while .dll is in bin/
+          if (Test-Path "$z3Root\lib\libz3.lib") {
+            $z3LibDir = "$z3Root\lib"
+          } elseif (Test-Path "$z3Root\bin\libz3.lib") {
+            $z3LibDir = "$z3Root\bin"
+          } else {
+            Write-Error "libz3.lib not found in $z3Root"
+            Get-ChildItem -Recurse $z3Root | Select-Object FullName
+            exit 1
+          }
+          echo "Z3_SYS_Z3_LIB_DIR=$z3LibDir" >> $env:GITHUB_ENV
+          # Save z3Root for later DLL copy step
+          echo "Z3_ROOT=$z3Root" >> $env:GITHUB_ENV
       - name: Build release binary
         if: "!contains(matrix.target, 'musl')"
         run: cargo build --release --target ${{ matrix.target }}
@@ -221,6 +233,14 @@ jobs:
           New-Item -ItemType Directory -Force -Path release-pkg/std
           Copy-Item "target/${{ matrix.target }}/release/mumei.exe" "release-pkg/"
           Copy-Item -Recurse "std/*" "release-pkg/std/"
+          # Include libz3.dll so the binary can find it at runtime
+          $z3Bin = "$env:Z3_ROOT\bin\libz3.dll"
+          if (Test-Path $z3Bin) {
+            Copy-Item $z3Bin "release-pkg/"
+            Write-Host "Included libz3.dll in release package"
+          } else {
+            Write-Warning "libz3.dll not found at $z3Bin — runtime may fail"
+          }
           Compress-Archive -Path "release-pkg/*" -DestinationPath "${{ matrix.name }}.zip"
       - name: Upload artifact (Unix)
         if: runner.os != 'Windows'
