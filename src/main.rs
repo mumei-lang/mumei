@@ -225,9 +225,11 @@ fn main() {
                 "proof-book" => emitter::EmitTarget::ProofBook,
                 "proof-cert" => emitter::EmitTarget::ProofCert,
                 "binary" => emitter::EmitTarget::Binary,
+                "rust-wrapper" => emitter::EmitTarget::RustWrapper,
+                "python-wrapper" => emitter::EmitTarget::PythonWrapper,
                 other => {
                     eprintln!(
-                        "\u{274c} Error: Unknown emit target '{}'. Valid values: llvm-ir, c-header, verified-json, proof-book, proof-cert, binary",
+                        "\u{274c} Error: Unknown emit target '{}'. Valid values: llvm-ir, c-header, verified-json, proof-book, proof-cert, binary, rust-wrapper, python-wrapper",
                         other
                     );
                     std::process::exit(1);
@@ -1700,6 +1702,18 @@ fn dispatch_emit(
             // at per-atom dispatch we return an empty artifact list.
             Ok(vec![])
         }
+        emitter::EmitTarget::RustWrapper => mumei_emit_rust::RustWrapperEmitter.emit(
+            hir_atom,
+            output_path,
+            module_env,
+            extern_blocks,
+        ),
+        emitter::EmitTarget::PythonWrapper => mumei_emit_python::PythonWrapperEmitter.emit(
+            hir_atom,
+            output_path,
+            module_env,
+            extern_blocks,
+        ),
     }
 }
 
@@ -2211,16 +2225,12 @@ fn cmd_build(input: &str, output: &str, emit_target: &emitter::EmitTarget, stric
             "  🔗 Linking {} atom(s) to native binary...",
             hir_atoms.len()
         );
-        if let Err(e) =
-            linker::link_to_binary(std::slice::from_ref(&ll_path), &binary_output, None)
+        if let Err(e) = linker::link_to_binary(std::slice::from_ref(&ll_path), &binary_output, None)
         {
             eprintln!("❌ Linking failed: {}", e);
             std::process::exit(1);
         }
-        println!(
-            "  ✅ Binary written to: {}",
-            binary_output.display()
-        );
+        println!("  ✅ Binary written to: {}", binary_output.display());
         // Clean up intermediate .ll file
         let _ = fs::remove_file(&ll_path);
     }
@@ -3272,20 +3282,14 @@ fn cmd_repl() {
                                                     match engine.execute_f64("__repl_eval") {
                                                         Ok(v) => println!("  = {}", v),
                                                         Err(e) => {
-                                                            eprintln!(
-                                                                "  ❌ Execution error: {}",
-                                                                e
-                                                            )
+                                                            eprintln!("  ❌ Execution error: {}", e)
                                                         }
                                                     }
                                                 } else {
                                                     match engine.execute_i64("__repl_eval") {
                                                         Ok(v) => println!("  = {}", v),
                                                         Err(e) => {
-                                                            eprintln!(
-                                                                "  ❌ Execution error: {}",
-                                                                e
-                                                            )
+                                                            eprintln!("  ❌ Execution error: {}", e)
                                                         }
                                                     }
                                                 }
@@ -3343,20 +3347,14 @@ fn cmd_repl() {
                                                     match engine.execute_f64("__repl_eval") {
                                                         Ok(v) => println!("  = {}", v),
                                                         Err(e) => {
-                                                            eprintln!(
-                                                                "  ❌ Execution error: {}",
-                                                                e
-                                                            )
+                                                            eprintln!("  ❌ Execution error: {}", e)
                                                         }
                                                     }
                                                 } else {
                                                     match engine.execute_i64("__repl_eval") {
                                                         Ok(v) => println!("  = {}", v),
                                                         Err(e) => {
-                                                            eprintln!(
-                                                                "  ❌ Execution error: {}",
-                                                                e
-                                                            )
+                                                            eprintln!("  ❌ Execution error: {}", e)
                                                         }
                                                     }
                                                 }
