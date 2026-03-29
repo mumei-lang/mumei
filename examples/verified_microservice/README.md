@@ -66,8 +66,9 @@ python examples/verified_microservice/demo_ffi.py
 ### 4. Demo (real FFI — requires compiled binary)
 
 ```bash
-# After building, compile to shared library
-gcc -shared -fPIC -o payment.so katana.c
+# After building, write a C implementation using the generated katana_*.h headers,
+# then compile to a shared library:
+gcc -shared -fPIC -o payment.so payment_impl.c
 python examples/verified_microservice/demo_ffi.py ./payment.so
 ```
 

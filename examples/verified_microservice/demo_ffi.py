@@ -10,8 +10,8 @@ Prerequisites:
     2. Build the shared library with C header:
        mumei build examples/verified_microservice/payment.mm --emit c-header
 
-    3. Compile the generated C to a shared library (example with gcc):
-       gcc -shared -fPIC -o payment.so katana.c  # actual compilation may vary
+    3. Write a C implementation using the generated katana_*.h headers and compile:
+       gcc -shared -fPIC -o payment.so payment_impl.c  # actual compilation may vary
 
 Usage:
     python examples/verified_microservice/demo_ffi.py
@@ -23,17 +23,14 @@ import os
 import sys
 
 
-def load_payment_library(lib_path: str = "./payment.so") -> ctypes.CDLL:
+def load_payment_library(lib_path: str = "./payment.so") -> ctypes.CDLL | None:
     """Load the compiled mumei payment shared library.
 
     Args:
         lib_path: Path to the compiled shared library (.so/.dll).
 
     Returns:
-        ctypes.CDLL handle to the library.
-
-    Raises:
-        FileNotFoundError: If the library file does not exist.
+        ctypes.CDLL handle to the library, or None if the file is not found.
     """
     if not os.path.exists(lib_path):
         print(f"Library not found: {lib_path}")
