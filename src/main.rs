@@ -1,5 +1,6 @@
 #![allow(clippy::result_large_err)]
 
+mod linker;
 mod lsp;
 mod setup;
 
@@ -189,6 +190,14 @@ enum Command {
         /// Source .mm file to verify against
         input: String,
     },
+    /// P7-B: Build and run a mumei program as a native binary
+    Run {
+        /// Input .mm file
+        input: String,
+        /// Arguments to pass to the compiled program
+        #[arg(trailing_var_arg = true)]
+        args: Vec<String>,
+    },
 }
 
 fn main() {
@@ -215,9 +224,10 @@ fn main() {
                 "verified-json" => emitter::EmitTarget::VerifiedJson,
                 "proof-book" => emitter::EmitTarget::ProofBook,
                 "proof-cert" => emitter::EmitTarget::ProofCert,
+                "binary" => emitter::EmitTarget::Binary,
                 other => {
                     eprintln!(
-                        "\u{274c} Error: Unknown emit target '{}'. Valid values: llvm-ir, c-header, verified-json, proof-book, proof-cert",
+                        "\u{274c} Error: Unknown emit target '{}'. Valid values: llvm-ir, c-header, verified-json, proof-book, proof-cert, binary",
                         other
                     );
                     std::process::exit(1);
@@ -289,6 +299,9 @@ fn main() {
         Some(Command::VerifyCert { cert, input }) => {
             cmd_verify_cert(&cert, &input);
         }
+        Some(Command::Run { input, args }) => {
+            cmd_run(&input, &args);
+        }
         None => {
             // 後方互換: `mumei input.mm -o dist/katana` → build として実行
             if let Some(ref input) = cli.input {
@@ -298,6 +311,7 @@ fn main() {
                 eprintln!("  build   Verify + compile (default)");
                 eprintln!("  verify  Z3 formal verification only");
                 eprintln!("  check   Parse + resolve only (fast syntax check)");
+                eprintln!("  run     Build and run a mumei program as a native binary");
                 eprintln!("  init    Generate a new project template");
                 eprintln!("  setup   Download & configure Z3 + LLVM toolchain");
                 eprintln!("  add     Add a dependency to mumei.toml");
@@ -1681,6 +1695,11 @@ fn dispatch_emit(
             // at per-atom dispatch we return an empty artifact list.
             Ok(vec![])
         }
+        emitter::EmitTarget::Binary => {
+            // P7-B: Binary emit is handled at a higher level (cmd_build);
+            // at per-atom dispatch we return an empty artifact list.
+            Ok(vec![])
+        }
     }
 }
 
@@ -1991,6 +2010,7 @@ fn cmd_build(input: &str, output: &str, emit_target: &emitter::EmitTarget, stric
                                 emitter::EmitTarget::VerifiedJson => "Verified JSON",
                                 emitter::EmitTarget::ProofBook => "Proof-Book",
                                 emitter::EmitTarget::ProofCert => "Proof-Cert",
+                                emitter::EmitTarget::Binary => "Binary",
                             };
                             println!(
                                 "  ⚙️  [3/3] Tempering: Done. Compiled '{}' to {}.",
@@ -2144,6 +2164,7 @@ fn cmd_build(input: &str, output: &str, emit_target: &emitter::EmitTarget, stric
                             emitter::EmitTarget::VerifiedJson => "Verified JSON",
                             emitter::EmitTarget::ProofBook => "Proof-Book",
                             emitter::EmitTarget::ProofCert => "Proof-Cert",
+                            emitter::EmitTarget::Binary => "Binary",
                         };
                         println!(
                             "  ⚙️  [3/3] Tempering: Done. Compiled '{}' to {}.",
@@ -2159,6 +2180,49 @@ fn cmd_build(input: &str, output: &str, emit_target: &emitter::EmitTarget, stric
                 }
             }
         }
+    }
+
+    // P7-B: When --emit binary is requested, merge all atoms into a single
+    // LLVM module with a C-compatible main wrapper and link to a native binary.
+    if matches!(emit_target, emitter::EmitTarget::Binary) && atom_count > 0 {
+        // Collect all verified HirAtoms
+        let mut hir_atoms = Vec::new();
+        let extern_blocks = collect_extern_blocks(&items);
+        for item in &items {
+            if let Item::Atom(atom) = item {
+                let hir_atom = lower_atom_to_hir_with_env(atom, Some(&module_env));
+                hir_atoms.push(hir_atom);
+            }
+        }
+
+        let ll_path = output_dir.join(format!("{}_merged.ll", file_stem));
+        if let Err(e) = mumei_emit_llvm::binary::compile_atoms_to_binary_ll(
+            &hir_atoms,
+            &module_env,
+            &extern_blocks,
+            &ll_path,
+        ) {
+            eprintln!("❌ Binary codegen failed: {}", e);
+            std::process::exit(1);
+        }
+
+        let binary_output = output_dir.join(file_stem);
+        println!(
+            "  🔗 Linking {} atom(s) to native binary...",
+            hir_atoms.len()
+        );
+        if let Err(e) =
+            linker::link_to_binary(std::slice::from_ref(&ll_path), &binary_output, None)
+        {
+            eprintln!("❌ Linking failed: {}", e);
+            std::process::exit(1);
+        }
+        println!(
+            "  ✅ Binary written to: {}",
+            binary_output.display()
+        );
+        // Clean up intermediate .ll file
+        let _ = fs::remove_file(&ll_path);
     }
 
     // P5-A: Generate proof certificate when --emit proof-cert is requested
@@ -2238,6 +2302,143 @@ fn cmd_build(input: &str, output: &str, emit_target: &emitter::EmitTarget, stric
     if proof_cfg.cache {
         resolver::save_verification_cache(build_base_dir, &verification_cache_new);
     }
+}
+
+// =============================================================================
+// P7-B: mumei run — build and execute a native binary
+// =============================================================================
+
+fn cmd_run(input: &str, args: &[String]) {
+    use std::process::Command;
+
+    let tmp_dir = std::env::temp_dir().join(format!("mumei_run_{}", std::process::id()));
+    if let Err(e) = fs::create_dir_all(&tmp_dir) {
+        eprintln!("❌ Failed to create temp directory: {}", e);
+        std::process::exit(1);
+    }
+
+    let binary_path = tmp_dir.join("mumei_output");
+
+    // Build with Binary emit target (reuse cmd_build pipeline logic)
+    check_z3_available();
+    println!("🗡️  Mumei Run: Building and executing...");
+
+    let (items, mut module_env, _imports, _source) = load_and_prepare(input);
+    let extern_blocks = collect_extern_blocks(&items);
+
+    // Check that a main atom exists and takes no parameters
+    let main_atom = items
+        .iter()
+        .find(|item| matches!(item, Item::Atom(atom) if atom.name == "main"));
+    match main_atom {
+        None => {
+            eprintln!(
+                "❌ Error: No `atom main()` found in '{}'. A main atom is required for `mumei run`.",
+                input
+            );
+            let _ = fs::remove_dir_all(&tmp_dir);
+            std::process::exit(1);
+        }
+        Some(Item::Atom(atom)) if !atom.params.is_empty() => {
+            eprintln!(
+                "❌ Error: atom main() must take no parameters for `mumei run`, but found {} parameter(s).",
+                atom.params.len()
+            );
+            let _ = fs::remove_dir_all(&tmp_dir);
+            std::process::exit(1);
+        }
+        _ => {}
+    }
+
+    // Check for extern "Rust" blocks and warn
+    for item in &items {
+        if let Item::ExternBlock(eb) = item {
+            eprintln!(
+                "  ⚠️  Warning: extern \"{}\" block detected. FFI functions require the mumei runtime library and may not link.",
+                eb.language
+            );
+        }
+    }
+
+    // Register dependencies for all atoms
+    for item in &items {
+        match item {
+            Item::Atom(atom) => {
+                let callees = resolver::collect_callees_from_body(&atom.body_expr);
+                module_env.register_dependencies(&atom.name, callees);
+            }
+            Item::ImplBlock(impl_block) => {
+                for method in &impl_block.methods {
+                    let qualified_name = format!("{}::{}", impl_block.struct_name, method.name);
+                    let callees = resolver::collect_callees_from_body(&method.body_expr);
+                    module_env.register_dependencies(&qualified_name, callees);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Verify and collect all atoms
+    let mut hir_atoms = Vec::new();
+    for item in &items {
+        if let Item::Atom(atom) = item {
+            let hir_atom = lower_atom_to_hir_with_env(atom, Some(&module_env));
+            match verification::verify(&hir_atom, Path::new("."), &module_env) {
+                Ok(()) => {
+                    module_env.mark_verified(&atom.name);
+                    println!("  ✅ Verified: {}", atom.name);
+                }
+                Err(e) => {
+                    eprintln!("  ❌ Verification failed for '{}': {}", atom.name, e);
+                    let _ = fs::remove_dir_all(&tmp_dir);
+                    std::process::exit(1);
+                }
+            }
+            hir_atoms.push(hir_atom);
+        }
+    }
+
+    // Use the binary compilation pipeline from mumei-emit-llvm
+    let ll_path = tmp_dir.join("merged.ll");
+    if let Err(e) = mumei_emit_llvm::binary::compile_atoms_to_binary_ll(
+        &hir_atoms,
+        &module_env,
+        &extern_blocks,
+        &ll_path,
+    ) {
+        eprintln!("❌ Codegen failed: {}", e);
+        let _ = fs::remove_dir_all(&tmp_dir);
+        std::process::exit(1);
+    }
+
+    // Link to binary
+    println!(
+        "  🔗 Linking {} atom(s) to native binary...",
+        hir_atoms.len()
+    );
+    if let Err(e) = linker::link_to_binary(std::slice::from_ref(&ll_path), &binary_path, None) {
+        eprintln!("❌ Linking failed: {}", e);
+        let _ = fs::remove_dir_all(&tmp_dir);
+        std::process::exit(1);
+    }
+
+    println!("  🚀 Running...\n");
+
+    // Execute the binary
+    let status = Command::new(&binary_path)
+        .args(args)
+        .status()
+        .unwrap_or_else(|e| {
+            eprintln!("❌ Failed to execute binary: {}", e);
+            let _ = fs::remove_dir_all(&tmp_dir);
+            std::process::exit(1);
+        });
+
+    // Clean up
+    let _ = fs::remove_dir_all(&tmp_dir);
+
+    // Exit with the child's exit code
+    std::process::exit(status.code().unwrap_or(1));
 }
 
 // =============================================================================
@@ -2775,9 +2976,12 @@ fn cmd_list() {
 // =============================================================================
 
 fn cmd_repl() {
-    println!("🗡️  Mumei REPL v{}", env!("CARGO_PKG_VERSION"));
+    println!(
+        "🗡️  Mumei REPL v{} (JIT enabled)",
+        env!("CARGO_PKG_VERSION")
+    );
     println!("  Type expressions or atom definitions to evaluate.");
-    println!("  Commands: :help, :check <expr>, :verify <expr>, :load <file>, :quit");
+    println!("  Commands: :help, :check <expr>, :verify <expr>, :eval <expr>, :load <file>, :quit");
     println!();
 
     let mut module_env = verification::ModuleEnv::new();
@@ -2790,6 +2994,17 @@ fn cmd_repl() {
             eprintln!("  ⚠️  Prelude load warning: {}", e);
         }
     }
+
+    // P7-A: Initialize JIT execution engine
+    let jit_context = mumei_emit_llvm::LlvmContext::create();
+    let jit_engine = match mumei_emit_llvm::jit::JitEngine::new(&jit_context) {
+        Ok(engine) => Some(engine),
+        Err(e) => {
+            eprintln!("  ⚠️  JIT engine unavailable: {}. Execution disabled.", e);
+            None
+        }
+    };
+    let mut extern_blocks_repl: Vec<parser::ExternBlock> = Vec::new();
 
     let stdin = std::io::stdin();
     let mut line_buf = String::new();
@@ -2819,6 +3034,7 @@ fn cmd_repl() {
             ":help" | ":h" => {
                 println!("  :check <expr>  — Parse and type-check an expression");
                 println!("  :verify <expr> — Formally verify an expression with Z3");
+                println!("  :eval <expr>   — JIT compile and execute (skip verification)");
                 println!("  :load <file>   — Load and register a .mm file");
                 println!("  :env           — Show registered atoms and types");
                 println!("  :quit          — Exit the REPL");
@@ -2839,6 +3055,18 @@ fn cmd_repl() {
                     match item {
                         parser::Item::Atom(atom) => {
                             module_env.register_atom(atom);
+                            // P7-A: Compile loaded atoms into JIT module
+                            if let Some(ref engine) = jit_engine {
+                                let hir_atom = lower_atom_to_hir_with_env(atom, Some(&module_env));
+                                if let Err(e) =
+                                    engine.compile_atom(&hir_atom, &module_env, &extern_blocks_repl)
+                                {
+                                    eprintln!(
+                                        "  ⚠️  JIT compile warning for '{}': {}",
+                                        atom.name, e
+                                    );
+                                }
+                            }
                             count += 1;
                         }
                         parser::Item::TypeDef(t) => module_env.register_type(t),
@@ -2848,6 +3076,7 @@ fn cmd_repl() {
                         parser::Item::ImplDef(i) => module_env.register_impl(i),
                         parser::Item::ResourceDef(r) => module_env.register_resource(r),
                         parser::Item::ExternBlock(eb) => {
+                            extern_blocks_repl.push(eb.clone());
                             for ext_fn in &eb.functions {
                                 let params: Vec<parser::Param> = ext_fn
                                     .param_types
@@ -2950,6 +3179,55 @@ fn cmd_repl() {
                     println!("    enum {}", name);
                 }
             }
+            // P7-A: :eval command — skip verification, directly JIT compile and execute
+            _ if input.starts_with(":eval ") => {
+                let expr_str = input.strip_prefix(":eval ").unwrap().trim();
+                if jit_engine.is_none() {
+                    eprintln!("  ❌ JIT engine not available");
+                    continue;
+                }
+                let engine = jit_engine.as_ref().unwrap();
+
+                let wrapped = format!(
+                    "atom __repl_eval()\n  requires: true;\n  ensures: true;\n  body: {{\n    {}\n  }}",
+                    expr_str
+                );
+                let eval_items = parser::parse_module(&wrapped);
+                if eval_items.is_empty() {
+                    eprintln!("  ❌ Parse error");
+                    continue;
+                }
+                for eval_item in &eval_items {
+                    if let parser::Item::Atom(atom) = eval_item {
+                        let hir_atom = lower_atom_to_hir_with_env(atom, Some(&module_env));
+                        // Precautionary cleanup of any stale __repl_eval from previous failures
+                        engine.remove_function("__repl_eval");
+                        match engine.compile_atom(&hir_atom, &module_env, &extern_blocks_repl) {
+                            Ok(()) => {
+                                // Determine return type to pick execute_i64 vs execute_f64
+                                let is_f64 =
+                                    atom.return_type.as_deref().is_some_and(|rt| rt == "f64");
+                                if is_f64 {
+                                    match engine.execute_f64("__repl_eval") {
+                                        Ok(v) => println!("  = {}", v),
+                                        Err(e) => eprintln!("  ❌ Execution error: {}", e),
+                                    }
+                                } else {
+                                    match engine.execute_i64("__repl_eval") {
+                                        Ok(v) => println!("  = {}", v),
+                                        Err(e) => eprintln!("  ❌ Execution error: {}", e),
+                                    }
+                                }
+                                engine.remove_function("__repl_eval");
+                            }
+                            Err(e) => {
+                                engine.remove_function("__repl_eval");
+                                eprintln!("  ❌ JIT compile error: {}", e);
+                            }
+                        }
+                    }
+                }
+            }
             _ if input.starts_with(":check ") || input.starts_with(":verify ") => {
                 let is_verify = input.starts_with(":verify ");
                 let expr_str = if is_verify {
@@ -2974,7 +3252,52 @@ fn cmd_repl() {
                         if is_verify {
                             let hir_atom = lower_atom_to_hir_with_env(atom, Some(&module_env));
                             match verification::verify(&hir_atom, Path::new("."), &module_env) {
-                                Ok(()) => println!("  ✅ Verification passed"),
+                                Ok(()) => {
+                                    println!("  ✅ Verification passed");
+                                    // P7-A: If verification passes, also JIT execute and show result
+                                    if let Some(ref engine) = jit_engine {
+                                        // Precautionary cleanup of any stale __repl_eval
+                                        engine.remove_function("__repl_eval");
+                                        match engine.compile_atom(
+                                            &hir_atom,
+                                            &module_env,
+                                            &extern_blocks_repl,
+                                        ) {
+                                            Ok(()) => {
+                                                let is_f64 = atom
+                                                    .return_type
+                                                    .as_deref()
+                                                    .is_some_and(|rt| rt == "f64");
+                                                if is_f64 {
+                                                    match engine.execute_f64("__repl_eval") {
+                                                        Ok(v) => println!("  = {}", v),
+                                                        Err(e) => {
+                                                            eprintln!(
+                                                                "  ❌ Execution error: {}",
+                                                                e
+                                                            )
+                                                        }
+                                                    }
+                                                } else {
+                                                    match engine.execute_i64("__repl_eval") {
+                                                        Ok(v) => println!("  = {}", v),
+                                                        Err(e) => {
+                                                            eprintln!(
+                                                                "  ❌ Execution error: {}",
+                                                                e
+                                                            )
+                                                        }
+                                                    }
+                                                }
+                                                engine.remove_function("__repl_eval");
+                                            }
+                                            Err(e) => {
+                                                engine.remove_function("__repl_eval");
+                                                eprintln!("  ⚠️  JIT compile warning: {}", e)
+                                            }
+                                        }
+                                    }
+                                }
                                 Err(e) => eprintln!("  ❌ Verification failed: {}", e),
                             }
                         }
@@ -2982,17 +3305,111 @@ fn cmd_repl() {
                 }
             }
             _ => {
-                // atom 定義またはその他の宣言として解釈
+                // Try parsing as atom definition or other declaration
                 let items = parser::parse_module(input);
                 if items.is_empty() {
-                    eprintln!("  ❌ Could not parse input. Try :help for commands.");
+                    // P7-A: Try parsing as expression for JIT evaluation
+                    // Wrap as __repl_eval atom and attempt verify + execute
+                    let wrapped = format!(
+                        "atom __repl_eval()\n  requires: true;\n  ensures: true;\n  body: {{\n    {}\n  }}",
+                        input
+                    );
+                    let eval_items = parser::parse_module(&wrapped);
+                    if eval_items.is_empty() {
+                        eprintln!("  ❌ Could not parse input. Try :help for commands.");
+                        continue;
+                    }
+                    for eval_item in &eval_items {
+                        if let parser::Item::Atom(atom) = eval_item {
+                            let hir_atom = lower_atom_to_hir_with_env(atom, Some(&module_env));
+                            // Verify first
+                            match verification::verify(&hir_atom, Path::new("."), &module_env) {
+                                Ok(()) => {
+                                    // JIT execute
+                                    if let Some(ref engine) = jit_engine {
+                                        // Precautionary cleanup of any stale __repl_eval
+                                        engine.remove_function("__repl_eval");
+                                        match engine.compile_atom(
+                                            &hir_atom,
+                                            &module_env,
+                                            &extern_blocks_repl,
+                                        ) {
+                                            Ok(()) => {
+                                                let is_f64 = atom
+                                                    .return_type
+                                                    .as_deref()
+                                                    .is_some_and(|rt| rt == "f64");
+                                                if is_f64 {
+                                                    match engine.execute_f64("__repl_eval") {
+                                                        Ok(v) => println!("  = {}", v),
+                                                        Err(e) => {
+                                                            eprintln!(
+                                                                "  ❌ Execution error: {}",
+                                                                e
+                                                            )
+                                                        }
+                                                    }
+                                                } else {
+                                                    match engine.execute_i64("__repl_eval") {
+                                                        Ok(v) => println!("  = {}", v),
+                                                        Err(e) => {
+                                                            eprintln!(
+                                                                "  ❌ Execution error: {}",
+                                                                e
+                                                            )
+                                                        }
+                                                    }
+                                                }
+                                                engine.remove_function("__repl_eval");
+                                            }
+                                            Err(e) => {
+                                                engine.remove_function("__repl_eval");
+                                                eprintln!("  ⚠️  JIT compile warning: {}", e)
+                                            }
+                                        }
+                                    } else {
+                                        println!("  ✅ Verification passed (JIT unavailable)");
+                                    }
+                                }
+                                Err(e) => eprintln!("  ❌ Verification failed: {}", e),
+                            }
+                        }
+                    }
                     continue;
                 }
                 for item in &items {
                     match item {
                         parser::Item::Atom(atom) => {
                             module_env.register_atom(atom);
-                            println!("  ✅ Registered atom '{}'", atom.name);
+                            // P7-A: Verify and compile atom into JIT module
+                            let hir_atom = lower_atom_to_hir_with_env(atom, Some(&module_env));
+                            match verification::verify(&hir_atom, Path::new("."), &module_env) {
+                                Ok(()) => {
+                                    if let Some(ref engine) = jit_engine {
+                                        if let Err(e) = engine.compile_atom(
+                                            &hir_atom,
+                                            &module_env,
+                                            &extern_blocks_repl,
+                                        ) {
+                                            eprintln!(
+                                                "  ⚠️  JIT compile warning for '{}': {}",
+                                                atom.name, e
+                                            );
+                                        }
+                                    }
+                                    println!("  ✅ Verified: {}", atom.name);
+                                }
+                                Err(e) => {
+                                    eprintln!(
+                                        "  ❌ Verification failed for '{}': {}",
+                                        atom.name, e
+                                    );
+                                    println!(
+                                        "  ℹ️  Atom '{}' registered but not JIT-compiled",
+                                        atom.name
+                                    );
+                                }
+                            }
                         }
                         parser::Item::TypeDef(t) => {
                             module_env.register_type(t);

@@ -62,6 +62,8 @@ pub enum EmitTarget {
     ProofBook,
     /// P5-A: Generate .proof-cert.json alongside build output
     ProofCert,
+    /// P7-B: Compile to standalone native binary via clang
+    Binary,
 }
 
 pub struct CHeaderEmitter;

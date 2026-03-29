@@ -1,6 +1,12 @@
 #![allow(clippy::result_large_err)]
 
+pub mod binary;
 pub mod codegen;
+pub mod jit;
+
+/// Re-export inkwell's Context so downstream crates (e.g. the CLI binary)
+/// can create a Context for the JIT engine without depending on inkwell directly.
+pub use inkwell::context::Context as LlvmContext;
 
 use mumei_core::emitter::{Artifact, ArtifactKind, Emitter};
 use mumei_core::hir::HirAtom;
