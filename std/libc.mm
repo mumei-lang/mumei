@@ -34,7 +34,7 @@ extern "C" {
 
     fn snprintf(buf_size: i64, n: i64) -> i64
         requires: buf_size > 0 && n > 0 && n <= buf_size;
-        ensures: result >= 0 && result < n;
+        ensures: result >= 0;
 }
 
 // =============================================================
@@ -73,8 +73,8 @@ atom safe_free(ptr: i64)
     body: free(ptr);
 
 // safe_snprintf: バッファサイズ制約を検証した上で snprintf を呼ぶ
-// ensures: 書き込みバイト数は 0 以上かつ n 未満
+// ensures: 書き込みバイト数は 0 以上（truncation 時は n 以上を返す可能性あり）
 atom safe_snprintf(buf_size: i64, n: i64)
     requires: buf_size > 0 && n > 0 && n <= buf_size;
-    ensures: result >= 0 && result < n;
+    ensures: result >= 0;
     body: snprintf(buf_size, n);

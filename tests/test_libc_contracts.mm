@@ -38,7 +38,7 @@ atom test_free_safe()
 // バッファサイズ制約を満たす呼び出し（安全）
 atom test_snprintf_safe()
     requires: true;
-    ensures: result >= 0 && result < 128;
+    ensures: result >= 0;
     body: libc::safe_snprintf(256, 128);
 
 // --- 組み合わせテスト ---
