@@ -32,6 +32,11 @@ extern "Rust" {
 }
 
 // --- Parameterized Effects: HTTPS URL 制約 ---
+// NOTE: SecureHttpGet/SecureHttpPost は std/http.mm にも定義されている。
+// mumei のエフェクトはグローバル名前空間で管理されるため、両モジュールを
+// 同時にインポートした場合は後勝ち（サイレント上書き）となる。
+// 制約は同一なので現在は問題ないが、将来的には std/http.mm 側の定義を
+// 削除し、本モジュールに一元化することを推奨する。
 effect SecureHttpGet(url: Str) where starts_with(url, "https://");
 effect SecureHttpPost(url: Str) where starts_with(url, "https://");
 effect SecureHttpPut(url: Str) where starts_with(url, "https://");

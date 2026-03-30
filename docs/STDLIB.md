@@ -490,7 +490,7 @@ struct FixedPoint { value: i64 where v >= -999999999999 && v <= 999999999999 }
 |---|---|---|---|
 | `fp_add(a, b)` | overflow-safe range | `result == a + b` | Addition |
 | `fp_sub(a, b)` | overflow-safe range | `result == a - b` | Subtraction |
-| `fp_mul(a, b)` | range + `b != 0` | `true` | Multiplication (a * b / 10000) |
+| `fp_mul(a, b)` | range | `true` | Multiplication (a * b / 10000) |
 | `fp_div(a, b)` | range + `b != 0` | `true` | Division (a * 10000 / b) |
 | `fp_from_int(n)` | `n >= -99999999 && n <= 99999999` | `result == n * 10000` | Integer to fixed-point |
 | `fp_to_int(fp_val)` | range | `true` | Fixed-point to integer |
