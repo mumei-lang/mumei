@@ -624,9 +624,14 @@ Enables mumei's verified code to actually run — both interactively in the REPL
 
 **Known Limitations**:
 - **MCJIT incremental compilation**: The JIT engine uses MCJIT, which finalizes the entire module on first `get_function` call. Defining multiple interdependent atoms across REPL iterations and then calling them may fail. Single-eval usage (`:eval`, `:verify`, bare expressions) works correctly. A future migration to ORC JIT would resolve this.
-- **Binary compilation: top-level atoms only**: `mumei run` and `mumei build --emit binary` only compile top-level `atom` definitions. `impl` block methods are not included in the binary. Programs using struct methods will fail to link.
-- **Self-recursive `main` atom**: The rename strategy (`main` → `__mumei_user_main`) does not rename recursive calls inside the body. If `main` calls itself, the call target will reference the C wrapper instead.
-- **`find_clang()` is Unix-only**: Uses the `which` command, which is not available on Windows.
+- ~~**Binary compilation: top-level atoms only**: `mumei run` and `mumei build --emit binary` only compile top-level `atom` definitions. `impl` block methods are not included in the binary. Programs using struct methods will fail to link.~~ **Fixed**: `impl` block methods are now included in binary compilation with qualified names (`StructName::method_name`).
+- ~~**Self-recursive `main` atom**: The rename strategy (`main` → `__mumei_user_main`) does not rename recursive calls inside the body. If `main` calls itself, the call target will reference the C wrapper instead.~~ **Fixed**: `rename_calls_in_hir_stmt/expr` now recursively renames all `main` calls to `__mumei_user_main` in the HIR tree.
+- ~~**`find_clang()` is Unix-only**: Uses the `which` command, which is not available on Windows.~~ **Fixed**: `find_on_path()` helper uses `which` on Unix and `where` on Windows, with `clang.exe` fallback for Windows toolchain paths.
+
+**Verification Domain Extension Patterns**:
+- ✅ Verified Configuration Pattern (`examples/verified_config.mm`) — refinement types for configuration validation
+- ✅ Verified State Machine Pattern (`examples/order_state_machine.mm`) — temporal effects for business process modeling
+- See [`docs/PATTERNS.md`](PATTERNS.md) for detailed pattern documentation
 
 **P7-C: Wasm Target** — Deferred
 - WebAssembly compilation target for browser/edge execution

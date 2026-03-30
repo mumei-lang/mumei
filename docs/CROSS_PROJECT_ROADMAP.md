@@ -424,10 +424,10 @@ graph TD
 | ~~中~~ | Emitter Plugin Phase 1-2 | mumei | ✅ Complete |
 | ~~最高~~ | P5-A/B/C: 検証済み資産の流通 | mumei | ✅ Complete |
 | ~~最高~~ | P6-A/B/C: エージェント自律性深化 | mumei-agent | ✅ Complete |
-| **高** | P7-A: REPL 実行エンジン | mumei | 🔧 Planned |
-| **高** | P7-B: E2E バイナリ実行 | mumei | 🔧 Planned |
-| **高** | SI-1: Zero-Human Challenge | mumei-agent | 📋 Next |
-| **高** | SI-2: Verified FFI Boundary | mumei | ✅ Implemented |
+| ~~高~~ | P7-A: REPL 実行エンジン | mumei | ✅ Implemented |
+| ~~高~~ | P7-B: E2E バイナリ実行 | mumei | ✅ Implemented (Known Limitations fixed) |
+| **高** | SI-1: Zero-Human Challenge | mumei-agent | 🔧 In Progress |
+| ~~高~~ | SI-2: Verified FFI Boundary | mumei | ✅ Implemented |
 | **中** | SI-3: Autonomous Delivery Flow | 両方 | 🔧 In Progress |
 | ⏸️ | P7-C: Wasm ターゲット | mumei | Deferred |
 | ⏸️ | P8-A/B: DX の成熟 | mumei | Deferred |

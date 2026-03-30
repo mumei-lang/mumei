@@ -106,7 +106,9 @@ impl Emitter for PythonWrapperEmitter {
         for ct in &ctypes_needed {
             if ct.starts_with("POINTER(") {
                 import_names.push("POINTER".to_string());
-                if let Some(inner) = ct.strip_prefix("POINTER(").and_then(|s| s.strip_suffix(')'))
+                if let Some(inner) = ct
+                    .strip_prefix("POINTER(")
+                    .and_then(|s| s.strip_suffix(')'))
                 {
                     import_names.push(inner.to_string());
                 }
@@ -122,9 +124,7 @@ impl Emitter for PythonWrapperEmitter {
         // Library loading
         py.push_str("# Load the compiled mumei binary.\n");
         py.push_str("# Adjust the path to your compiled .so/.dll/.dylib as needed.\n");
-        py.push_str(&format!(
-            "_LIB_PATH = os.environ.get(\"MUMEI_LIB_PATH\", \"./libmumei.so\")\n"
-        ));
+        py.push_str("_LIB_PATH = os.environ.get(\"MUMEI_LIB_PATH\", \"./libmumei.so\")\n");
         py.push_str("_lib = ctypes.CDLL(_LIB_PATH)\n\n");
 
         // Build parameter info
@@ -364,20 +364,11 @@ mod tests {
         );
         assert_eq!(translate_contract_to_python("result == 42"), "result == 42");
         // Negation: ! → not
-        assert_eq!(
-            translate_contract_to_python("!(x < 0)"),
-            "not (x < 0)"
-        );
+        assert_eq!(translate_contract_to_python("!(x < 0)"), "not (x < 0)");
         // != must be preserved
-        assert_eq!(
-            translate_contract_to_python("x != 0"),
-            "x != 0"
-        );
+        assert_eq!(translate_contract_to_python("x != 0"), "x != 0");
         // Combined: negation + !=
-        assert_eq!(
-            translate_contract_to_python("!(x != 0)"),
-            "not (x != 0)"
-        );
+        assert_eq!(translate_contract_to_python("!(x != 0)"), "not (x != 0)");
         // Boolean literals: true/false → True/False
         assert_eq!(
             translate_contract_to_python("result == true"),

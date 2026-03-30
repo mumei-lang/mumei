@@ -172,10 +172,9 @@ impl Emitter for RustWrapperEmitter {
 fn translate_contract_to_rust(contract: &str, _params: &[(String, String)]) -> String {
     // mumei contract syntax is close to Rust — &&, ||, ==, !=, >=, <= all work.
     // The main translation needed is `=>` (implication) to `!a || b`.
-    let result = contract.to_string();
     // For now, simple contracts pass through directly.
     // Complex contracts with `=>` would need transformation.
-    result
+    contract.to_string()
 }
 
 #[cfg(test)]

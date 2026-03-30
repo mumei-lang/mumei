@@ -5,11 +5,35 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Cross-platform helper to find an executable on PATH.
+/// Uses `which` on Unix and `where` on Windows.
+fn find_on_path(name: &str) -> Option<PathBuf> {
+    #[cfg(windows)]
+    let cmd = "where";
+    #[cfg(not(windows))]
+    let cmd = "which";
+
+    if let Ok(output) = Command::new(cmd).arg(name).output() {
+        if output.status.success() {
+            let path = String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if !path.is_empty() {
+                return Some(PathBuf::from(path));
+            }
+        }
+    }
+    None
+}
+
 /// Find a working clang binary. Checks:
 /// 1. $LLVM_SYS_170_PREFIX/bin/clang
 /// 2. clang-17 on $PATH
 /// 3. clang on $PATH
-/// 4. ~/.mumei/toolchains/bin/clang
+/// 4. ~/.mumei/toolchains/bin/clang (clang.exe on Windows)
 fn find_clang() -> Result<PathBuf, String> {
     // 1. Check LLVM_SYS_170_PREFIX
     if let Ok(prefix) = std::env::var("LLVM_SYS_170_PREFIX") {
@@ -19,25 +43,23 @@ fn find_clang() -> Result<PathBuf, String> {
         }
     }
 
-    // 2. Check clang-17 on PATH
-    if let Ok(output) = Command::new("which").arg("clang-17").output() {
-        if output.status.success() {
-            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            return Ok(PathBuf::from(path));
-        }
+    // 2. Check clang-17 on PATH (cross-platform)
+    if let Some(path) = find_on_path("clang-17") {
+        return Ok(path);
     }
 
-    // 3. Check clang on PATH
-    if let Ok(output) = Command::new("which").arg("clang").output() {
-        if output.status.success() {
-            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            return Ok(PathBuf::from(path));
-        }
+    // 3. Check clang on PATH (cross-platform)
+    if let Some(path) = find_on_path("clang") {
+        return Ok(path);
     }
 
-    // 4. Check ~/.mumei/toolchains/
+    // 4. Check ~/.mumei/toolchains/ (use clang.exe on Windows)
     if let Some(home) = dirs::home_dir() {
-        let clang = home.join(".mumei/toolchains/bin/clang");
+        #[cfg(windows)]
+        let clang_name = "clang.exe";
+        #[cfg(not(windows))]
+        let clang_name = "clang";
+        let clang = home.join(".mumei/toolchains/bin").join(clang_name);
         if clang.exists() {
             return Ok(clang);
         }

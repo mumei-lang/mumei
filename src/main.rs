@@ -2207,9 +2207,20 @@ fn cmd_build(input: &str, output: &str, emit_target: &emitter::EmitTarget, stric
         let mut hir_atoms = Vec::new();
         let extern_blocks = collect_extern_blocks(&items);
         for item in &items {
-            if let Item::Atom(atom) = item {
-                let hir_atom = lower_atom_to_hir_with_env(atom, Some(&module_env));
-                hir_atoms.push(hir_atom);
+            match item {
+                Item::Atom(atom) => {
+                    let hir_atom = lower_atom_to_hir_with_env(atom, Some(&module_env));
+                    hir_atoms.push(hir_atom);
+                }
+                Item::ImplBlock(impl_block) => {
+                    for method in &impl_block.methods {
+                        let mut qualified = method.clone();
+                        qualified.name = format!("{}::{}", impl_block.struct_name, method.name);
+                        let hir_atom = lower_atom_to_hir_with_env(&qualified, Some(&module_env));
+                        hir_atoms.push(hir_atom);
+                    }
+                }
+                _ => {}
             }
         }
 
@@ -2395,20 +2406,42 @@ fn cmd_run(input: &str, args: &[String]) {
     // Verify and collect all atoms
     let mut hir_atoms = Vec::new();
     for item in &items {
-        if let Item::Atom(atom) = item {
-            let hir_atom = lower_atom_to_hir_with_env(atom, Some(&module_env));
-            match verification::verify(&hir_atom, Path::new("."), &module_env) {
-                Ok(()) => {
-                    module_env.mark_verified(&atom.name);
-                    println!("  ✅ Verified: {}", atom.name);
+        match item {
+            Item::Atom(atom) => {
+                let hir_atom = lower_atom_to_hir_with_env(atom, Some(&module_env));
+                match verification::verify(&hir_atom, Path::new("."), &module_env) {
+                    Ok(()) => {
+                        module_env.mark_verified(&atom.name);
+                        println!("  ✅ Verified: {}", atom.name);
+                    }
+                    Err(e) => {
+                        eprintln!("  ❌ Verification failed for '{}': {}", atom.name, e);
+                        let _ = fs::remove_dir_all(&tmp_dir);
+                        std::process::exit(1);
+                    }
                 }
-                Err(e) => {
-                    eprintln!("  ❌ Verification failed for '{}': {}", atom.name, e);
-                    let _ = fs::remove_dir_all(&tmp_dir);
-                    std::process::exit(1);
+                hir_atoms.push(hir_atom);
+            }
+            Item::ImplBlock(impl_block) => {
+                for method in &impl_block.methods {
+                    let mut qualified = method.clone();
+                    qualified.name = format!("{}::{}", impl_block.struct_name, method.name);
+                    let hir_atom = lower_atom_to_hir_with_env(&qualified, Some(&module_env));
+                    match verification::verify(&hir_atom, Path::new("."), &module_env) {
+                        Ok(()) => {
+                            module_env.mark_verified(&qualified.name);
+                            println!("  ✅ Verified: {}", qualified.name);
+                        }
+                        Err(e) => {
+                            eprintln!("  ❌ Verification failed for '{}': {}", qualified.name, e);
+                            let _ = fs::remove_dir_all(&tmp_dir);
+                            std::process::exit(1);
+                        }
+                    }
+                    hir_atoms.push(hir_atom);
                 }
             }
-            hir_atoms.push(hir_atom);
+            _ => {}
         }
     }
 
