@@ -433,6 +433,32 @@ graph TD
 | ⏸️ | P8-A/B: DX の成熟 | mumei | Deferred |
 | ⏸️ | SI-4: no_std Ecosystem | mumei | Deferred |
 
+## vStd: Verified Standard Library Expansion
+
+検証済み標準ライブラリの拡張。AI エージェントが再利用可能な検証済み部品を発見・活用するための基盤。
+
+### vStd-1: std/contracts.mm — Verified Contract Catalog
+
+汎用の精緻型（`Port`, `Percentage`, `Byte`, `HttpStatus` 等）と検証済みバリデータ（`clamp`, `abs_val`, `safe_divide` 等）のカタログ。AI エージェントが新規コード生成前に再利用可能な型とバリデーションロジックを発見するためのモジュール。
+
+### vStd-2: std/math/fixed_point.mm — Fixed-Point Arithmetic
+
+4 桁精度（スケールファクター 10000）の固定小数点演算モジュール。加減乗除、整数変換、述語チェックを提供し、すべての演算でオーバーフロー防止契約を Z3 で検証する。浮動小数点が使えない環境での金額計算等に有用。
+
+### vStd-3: std/container/safe_queue.mm — Verified FIFO Queue
+
+`std/container/bounded_array.mm` と同パターンの検証済み FIFO キュー。enqueue/dequeue のオーバーフロー/アンダーフロー防止、バッチ操作、安全な操作バリアントを提供。SI-1 Zero-Human Challenge の「100% 安全なキュー」課題の基盤。
+
+### vStd-4: std/http_secure.mm — HTTPS-only HTTP Client
+
+`std/http.mm` の FFI バックエンドを再利用しつつ、パラメタライズドエフェクト（`SecureHttpGet`, `SecureHttpPost`, `SecureHttpPut`, `SecureHttpDelete`）で `starts_with(url, "https://")` 制約をコンパイル時に強制する HTTPS 専用クライアント。
+
+### vStd-MCP: list_std_catalog ツール
+
+MCP サーバーに `list_std_catalog` ツールを追加。`std/` ディレクトリを再帰的にスキャンし、全モジュールの型定義・atom シグネチャ・構造体定義を JSON で返す。AI エージェントがコード生成前に既存の検証済み部品を発見するためのディスカバリ API。
+
+---
+
 ## 推奨実行順序
 
 ```mermaid

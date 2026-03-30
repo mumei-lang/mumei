@@ -13,6 +13,10 @@
 | `std/container/bounded_array.mm` | ❌ `import "std/container/bounded_array"` | Bounded array with sorted operations |
 | `std/libc.mm` | ❌ `import "std/libc"` | Verified C standard library wrappers |
 | `std/container/verified_vector.mm` | ❌ `import "std/container/verified_vector"` | Verified vector with quantifier-based contracts |
+| `std/contracts.mm` | ❌ `import "std/contracts"` | Verified contract catalog (types + validators) |
+| `std/math/fixed_point.mm` | ❌ `import "std/math/fixed_point"` | Fixed-point arithmetic (4 decimal places) |
+| `std/container/safe_queue.mm` | ❌ `import "std/container/safe_queue"` | Verified FIFO queue |
+| `std/http_secure.mm` | ❌ `import "std/http_secure"` | HTTPS-only HTTP client |
 
 ---
 
@@ -433,6 +437,126 @@ Can be combined with `task_group` for parallel requests.
 | Atom | Requires | Ensures | Description |
 |---|---|---|---|
 | `http::free(handle)` | `handle >= 0` | `result in {0,1}` | Release HTTP response handle (1=success, 0=invalid) |
+
+---
+
+## std/contracts.mm — Verified Contract Catalog
+
+```mumei
+import "std/contracts" as contracts;
+```
+
+### Refinement Types
+
+| Type | Definition | Description |
+|---|---|---|
+| `Port` | `i64 where v >= 1 && v <= 65535` | Valid TCP/UDP port number |
+| `Percentage` | `i64 where v >= 0 && v <= 100` | Percentage value (0-100) |
+| `PositiveAmount` | `i64 where v > 0` | Strictly positive integer |
+| `NonNegative` | `i64 where v >= 0` | Non-negative integer |
+| `Byte` | `i64 where v >= 0 && v <= 255` | Byte value (0-255) |
+| `HttpStatus` | `i64 where v >= 100 && v < 600` | HTTP status code |
+| `ExitCode` | `i64 where v >= 0 && v <= 255` | Process exit code |
+
+### Atoms
+
+| Atom | Requires | Ensures | Description |
+|---|---|---|---|
+| `is_within_range(val, min_val, max_val)` | `min_val <= max_val` | `0 or 1` | Range check |
+| `clamp(val, min_val, max_val)` | `min_val <= max_val` | `result >= min_val && result <= max_val` | Clamp value to range |
+| `abs_val(x)` | `true` | `result >= 0` | Absolute value |
+| `max_of(a, b)` | `true` | `result >= a && result >= b` | Max of two values |
+| `min_of(a, b)` | `true` | `result <= a && result <= b` | Min of two values |
+| `is_valid_port(port)` | `true` | `0 or 1` | Port validation (1-65535) |
+| `is_valid_http_status(status)` | `true` | `0 or 1` | HTTP status validation (100-599) |
+| `safe_divide(a, b)` | `b != 0` | `true` | Division (zero-division safe) |
+| `safe_modulo(a, b)` | `b > 0` | `result >= 0` | Modulo (positive divisor) |
+
+---
+
+## std/math/fixed\_point.mm — Fixed-Point Arithmetic
+
+```mumei
+import "std/math/fixed_point" as fp;
+```
+
+Scale factor: 10000 (4 decimal places). Example: 1.5 = 15000.
+
+```mumei
+struct FixedPoint { value: i64 where v >= -999999999999 && v <= 999999999999 }
+```
+
+| Atom | Requires | Ensures | Description |
+|---|---|---|---|
+| `fp_add(a, b)` | overflow-safe range | `result == a + b` | Addition |
+| `fp_sub(a, b)` | overflow-safe range | `result == a - b` | Subtraction |
+| `fp_mul(a, b)` | range + `b != 0` | `true` | Multiplication (a * b / 10000) |
+| `fp_div(a, b)` | range + `b != 0` | `true` | Division (a * 10000 / b) |
+| `fp_from_int(n)` | `n >= -99999999 && n <= 99999999` | `result == n * 10000` | Integer to fixed-point |
+| `fp_to_int(fp_val)` | range | `true` | Fixed-point to integer |
+| `fp_is_positive(fp_val)` | range | `0 or 1` | Positive check |
+| `fp_abs(fp_val)` | range | `result >= 0` | Absolute value |
+
+---
+
+## std/container/safe\_queue.mm — Verified FIFO Queue
+
+```mumei
+import "std/container/safe_queue" as queue;
+```
+
+```mumei
+struct SafeQueue { len: i64 where v >= 0, cap: i64 where v > 0, head: i64 where v >= 0, tail: i64 where v >= 0 }
+```
+
+| Atom | Requires | Ensures | Description |
+|---|---|---|---|
+| `enqueue(q_len, q_cap)` | `q_len >= 0 && q_cap > 0 && q_len < q_cap` | `result == q_len + 1` | Enqueue with overflow prevention |
+| `dequeue(q_len)` | `q_len > 0` | `result == q_len - 1` | Dequeue with underflow prevention |
+| `queue_is_empty(q_len)` | `q_len >= 0` | `0 or 1` | Check if empty |
+| `queue_is_full(q_len, q_cap)` | `q_len >= 0 && q_cap > 0` | `0 or 1` | Check if full |
+| `queue_remaining(q_len, q_cap)` | `q_len >= 0 && q_cap > 0 && q_len <= q_cap` | `result == q_cap - q_len` | Remaining capacity |
+| `enqueue_safe(q_len, q_cap)` | `q_len >= 0 && q_cap > 0` | `0=Ok, 1=Err` | Safe enqueue with capacity check |
+| `dequeue_safe(q_len)` | `q_len >= 0` | `0=Ok, 1=Err` | Safe dequeue with empty check |
+| `batch_enqueue(q_len, q_cap, count)` | `q_len >= 0 && q_cap > 0 && count >= 0 && q_len + count <= q_cap` | `result == q_len + count` | Batch enqueue |
+
+---
+
+## std/http\_secure.mm — HTTPS-only HTTP Client
+
+```mumei
+import "std/http_secure" as https;
+```
+
+HTTPS-only wrapper around `std/http.mm` FFI backend.
+Enforces `starts_with(url, "https://")` at compile time via parameterized effects.
+
+### Effects
+
+| Effect | Constraint | Description |
+|---|---|---|
+| `SecureHttpGet(url)` | `starts_with(url, "https://")` | HTTPS GET |
+| `SecureHttpPost(url)` | `starts_with(url, "https://")` | HTTPS POST |
+| `SecureHttpPut(url)` | `starts_with(url, "https://")` | HTTPS PUT |
+| `SecureHttpDelete(url)` | `starts_with(url, "https://")` | HTTPS DELETE |
+
+### Requests
+
+| Atom | Requires | Ensures | Description |
+|---|---|---|---|
+| `secure_get(url)` | `starts_with(url, "https://")` | `result >= 0` | HTTPS GET |
+| `secure_post(url, body)` | `starts_with(url, "https://")` | `result >= 0` | HTTPS POST |
+| `secure_put(url, body)` | `starts_with(url, "https://")` | `result >= 0` | HTTPS PUT |
+| `secure_delete(url)` | `starts_with(url, "https://")` | `result >= 0` | HTTPS DELETE |
+
+### Response
+
+| Atom | Requires | Ensures | Description |
+|---|---|---|---|
+| `status(handle)` | `handle >= 0` | `result >= 0` | Get status code |
+| `body(handle)` | `handle >= 0` | `true` | Get response body |
+| `is_ok(handle)` | `handle >= 0` | `result in {0,1}` | Check success (2xx) |
+| `free(handle)` | `handle >= 0` | `result in {0,1}` | Release handle |
 
 ---
 

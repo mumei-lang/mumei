@@ -671,5 +671,44 @@ def set_allowed_effects(
     )
 
 
+@mcp.tool()
+def list_std_catalog() -> str:
+    """List all available standard library modules and their verified atoms.
+    AI agents should call this to discover reusable verified components
+    before generating new code from scratch.
+    Returns JSON with module names, atom signatures, and refinement types."""
+    std_dir = Path(__file__).parent.absolute() / "std"
+    if not std_dir.exists():
+        return json.dumps({"error": "std/ directory not found"})
+
+    modules = []
+    for mm_file in sorted(std_dir.rglob("*.mm")):
+        rel_path = mm_file.relative_to(std_dir.parent)
+        import_path = str(rel_path).replace(".mm", "").replace("\\", "/")
+        content = mm_file.read_text(encoding="utf-8")
+
+        types = []
+        atoms = []
+        structs = []
+        for line in content.splitlines():
+            stripped = line.strip()
+            if re.match(r"^type \w+", stripped):
+                types.append(stripped.rstrip(";"))
+            elif re.match(r"^(trusted\s+)?atom \w+", stripped):
+                atoms.append(stripped.rstrip("{").strip())
+            elif re.match(r"^struct \w+", stripped):
+                structs.append(stripped.rstrip("{").strip())
+
+        modules.append({
+            "path": str(rel_path),
+            "import": import_path,
+            "types": types,
+            "atoms": atoms,
+            "structs": structs,
+        })
+
+    return json.dumps({"modules": modules}, indent=2, ensure_ascii=False)
+
+
 if __name__ == "__main__":
     mcp.run()
