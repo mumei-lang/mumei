@@ -94,9 +94,12 @@ pub fn link_to_binary(
         cmd.arg(ll);
     }
 
-    // Link math and pthread libraries
-    cmd.arg("-lm");
-    cmd.arg("-lpthread");
+    // Link math and pthread libraries (Unix only; Windows uses default CRT)
+    #[cfg(not(windows))]
+    {
+        cmd.arg("-lm");
+        cmd.arg("-lpthread");
+    }
 
     let output = cmd
         .output()

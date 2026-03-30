@@ -202,10 +202,18 @@ pub fn compile_atoms_to_binary_ll(
                 extern_blocks,
             )?;
         } else {
+            // Rename any calls to "main" in non-main atoms so they target
+            // __mumei_user_main instead of the C wrapper main(argc, argv).
+            let mut patched = hir_atom.clone();
+            rename_calls_in_hir_stmt(&mut patched.body, "main", "__mumei_user_main");
+            patched.atom.body_expr = patched
+                .atom
+                .body_expr
+                .replace("main(", "__mumei_user_main(");
             compile_atom_into_module(
                 &context,
                 &merged_module,
-                hir_atom,
+                &patched,
                 module_env,
                 extern_blocks,
             )?;
