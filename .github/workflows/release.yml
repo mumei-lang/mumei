@@ -72,7 +72,7 @@ jobs:
               # Install musl-native build dependencies
               apk add --no-cache \
                 gcc g++ musl-dev make cmake pkgconf \
-                llvm17-dev llvm17-static clang17-dev \
+                llvm17-dev llvm17-static clang17-dev clang17-static \
                 z3-dev \
                 curl bash perl linux-headers \
                 libffi-dev zlib-dev zlib-static \
@@ -88,6 +88,9 @@ jobs:
               # Point llvm-sys / z3-sys at Alpine packages
               export LLVM_SYS_170_PREFIX=/usr/lib/llvm17
               export LIBCLANG_PATH=/usr/lib/llvm17/lib
+              # Use static libclang so that bindgen does not need dlopen
+              # (musl static binaries do not support dynamic loading).
+              export LIBCLANG_STATIC=1
 
               # Build fully-static musl binary
               # Use --features z3/static-link-z3 to build Z3 from source with
@@ -205,6 +208,11 @@ jobs:
             exit 1
           }
           echo "Z3_SYS_Z3_LIB_DIR=$z3LibDir" >> $env:GITHUB_ENV
+          # z3-sys does not emit cargo:rustc-link-search for the Z3 lib
+          # directory in non-static mode; add it to the linker search path
+          # so the MSVC linker can find libz3.lib.
+          $currentLib = if ($env:LIB) { $env:LIB } else { "" }
+          echo "LIB=$z3LibDir;$currentLib" >> $env:GITHUB_ENV
           # Save z3Root for later DLL copy step
           echo "Z3_ROOT=$z3Root" >> $env:GITHUB_ENV
       - name: Build release binary
