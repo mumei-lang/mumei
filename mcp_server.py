@@ -747,9 +747,9 @@ def list_std_catalog() -> str:
                         if not next_line or next_line.startswith("//"):
                             k += 1
                             continue
-                        # Stateful effect body lines: states:, initial:, transition:
+                        # Stateful effect body lines: states:, initial:, transition <name>:
                         if re.match(
-                            r"^(states|initial|transition)\s*:", next_line,
+                            r"^(states|initial|transition)(\s+\w+)?\s*:", next_line,
                         ):
                             effect_lines.append(next_line.rstrip(";").strip())
                             k += 1

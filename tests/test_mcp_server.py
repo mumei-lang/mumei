@@ -94,6 +94,29 @@ class TestListStdCatalog:
         composite = [e for e in effects_mod["effects"] if "includes:" in e]
         assert len(composite) >= 3, f"Expected >=3 composite effects, got {composite}"
 
+    def test_http_server_stateful_effect_has_transitions(self) -> None:
+        """std/http_server.mm stateful effect includes all transition definitions."""
+        catalog = _get_catalog()
+        http_mod = next(
+            (m for m in catalog["modules"] if m["path"] == "std/http_server.mm"),
+            None,
+        )
+        assert http_mod is not None, "std/http_server.mm not found in catalog"
+        assert len(http_mod["effects"]) >= 1
+
+        # The HttpServer effect should be a single joined string
+        http_server_effect = http_mod["effects"][0]
+        assert "effect HttpServer" in http_server_effect
+        assert "states:" in http_server_effect
+        assert "initial: Init" in http_server_effect
+
+        # All 5 transitions must be present
+        assert "transition bind: Init -> Bound" in http_server_effect
+        assert "transition listen: Bound -> Listening" in http_server_effect
+        assert "transition accept: Listening -> Responding" in http_server_effect
+        assert "transition respond: Responding -> Listening" in http_server_effect
+        assert "transition close: Listening -> Init" in http_server_effect
+
     def test_http_secure_has_effects(self) -> None:
         """std/http_secure.mm has effect definitions."""
         catalog = _get_catalog()
