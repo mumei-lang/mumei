@@ -42,7 +42,7 @@
       "patterns": [
         {
           "name": "constant.numeric.mumei",
-          "match": "\\b\\d+\\b"
+          "match": "\\b\\d+(\\.\\d+)?\\b"
         }
       ]
     },
@@ -68,7 +68,7 @@
     "type-definition": {
       "patterns": [
         {
-          "match": "\\b(type|struct|enum)\\s+(\\w+)",
+          "match": "\\b(type|struct|enum|trait|impl)\\s+(\\w+)",
           "captures": {
             "1": { "name": "keyword.other.mumei" },
             "2": { "name": "entity.name.type.mumei" }
@@ -80,7 +80,7 @@
       "patterns": [
         {
           "name": "keyword.control.mumei",
-          "match": "\\b(atom|atom_ref|requires|ensures|body|if|else|while|match|let|import|as|perform|acquire|for|forall|exists|return|where|invariant|decreases|effects|resources|ref|mut|call|priority|mode|includes|parent|chan|send|recv|cancel|task_group|task|max_unroll|fn)\\b"
+          "match": "\\b(atom|atom_ref|requires|ensures|body|if|else|while|match|let|import|as|perform|acquire|for|forall|exists|where|invariant|decreases|effects|resources|ref|mut|call|priority|mode|includes|parent|chan|send|recv|cancel|task_group|task|max_unroll|fn)\\b"
         }
       ]
     },
