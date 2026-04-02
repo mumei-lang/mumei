@@ -676,7 +676,8 @@ def list_std_catalog() -> str:
     """List all available standard library modules and their verified atoms.
     AI agents should call this to discover reusable verified components
     before generating new code from scratch.
-    Returns JSON with module names, atom signatures, and refinement types."""
+    Returns JSON with module names, atom signatures, refinement types,
+    requires/ensures contracts, effects, and module descriptions."""
     std_dir = Path(__file__).parent.absolute() / "std"
     if not std_dir.exists():
         return json.dumps({"error": "std/ directory not found"})
@@ -686,26 +687,137 @@ def list_std_catalog() -> str:
         rel_path = mm_file.relative_to(std_dir.parent)
         import_path = str(rel_path).replace(".mm", "").replace("\\", "/")
         content = mm_file.read_text(encoding="utf-8")
+        lines = content.splitlines()
 
-        types = []
-        atoms = []
-        structs = []
-        for line in content.splitlines():
+        # Extract module description from leading comment block
+        description = ""
+        desc_lines: list[str] = []
+        for line in lines:
             stripped = line.strip()
+            if stripped.startswith("//"):
+                desc_lines.append(stripped.lstrip("/ ").strip())
+            elif stripped == "":
+                if desc_lines:
+                    continue  # skip blank lines within comment block
+            else:
+                break
+        if desc_lines:
+            # Use the first meaningful non-separator line as description
+            for dl in desc_lines:
+                if dl and not all(c in "=-" for c in dl):
+                    description = dl
+                    break
+
+        types: list[str] = []
+        atoms: list[dict] = []
+        structs: list[str] = []
+        effects: list[str] = []
+
+        i = 0
+        while i < len(lines):
+            stripped = lines[i].strip()
+
+            # Type definitions
             if re.match(r"^type \w+", stripped):
                 types.append(stripped.rstrip(";"))
-            elif re.match(r"^(trusted\s+)?atom \w+", stripped):
-                atoms.append(stripped.rstrip("{").strip())
-            elif re.match(r"^struct \w+", stripped):
-                structs.append(stripped.rstrip("{").strip())
+                i += 1
+                continue
 
-        modules.append({
+            # Struct definitions
+            if re.match(r"^struct \w+", stripped):
+                structs.append(stripped.rstrip("{").strip())
+                i += 1
+                continue
+
+            # Effect definitions: all forms
+            #   - Non-parameterized: effect FileRead;
+            #   - Parameterized: effect HttpGet(url: Str);
+            #   - Parameterized with constraint: effect SafeFileRead(path: Str) where ...;
+            #   - Composite: effect IO includes: [FileRead, FileWrite, Console];
+            #   - Stateful (multiline): effect HttpServer\n    states: [...]
+            if re.match(r"^effect\s+\w+", stripped):
+                # Collect the full effect definition (may span multiple lines)
+                effect_lines = [stripped.rstrip(";").strip()]
+                # Check if this is a multiline stateful effect (no semicolon,
+                # no 'includes:', no params — next lines have states:/transition:)
+                if not stripped.endswith(";") and "includes:" not in stripped:
+                    k = i + 1
+                    while k < len(lines) and k <= i + 20:
+                        next_line = lines[k].strip()
+                        if not next_line or next_line.startswith("//"):
+                            k += 1
+                            continue
+                        # Stateful effect body lines: states:, initial:, transition:
+                        if re.match(
+                            r"^(states|initial|transition)\s*:", next_line,
+                        ):
+                            effect_lines.append(next_line.rstrip(";").strip())
+                            k += 1
+                            continue
+                        break
+                effects.append(" ".join(effect_lines))
+                i += 1
+                continue
+
+            # Atom definitions
+            atom_match = re.match(r"^(trusted\s+)?atom\s+\w+", stripped)
+            if atom_match:
+                signature = stripped.rstrip("{").strip()
+                atom_entry: dict = {
+                    "signature": signature,
+                    "requires": "",
+                    "ensures": "",
+                    "effects": [],
+                }
+                # Scan the next lines for requires/ensures/effects
+                j = i + 1
+                while j < len(lines) and j <= i + 10:
+                    next_stripped = lines[j].strip()
+                    # Stop scanning at the next atom/type/struct/effect def
+                    if re.match(
+                        r"^(trusted\s+)?atom\s+\w+|^type\s+\w+|^struct\s+\w+|^effect\s+\w+",
+                        next_stripped,
+                    ):
+                        break
+
+                    req_match = re.match(r"requires\s*:\s*(.+?)\s*;", next_stripped)
+                    if req_match:
+                        atom_entry["requires"] = req_match.group(1).strip()
+                        j += 1
+                        continue
+
+                    ens_match = re.match(r"ensures\s*:\s*(.+?)\s*;", next_stripped)
+                    if ens_match:
+                        atom_entry["ensures"] = ens_match.group(1).strip()
+                        j += 1
+                        continue
+
+                    eff_match = re.match(r"effects\s*:\s*\[(.+?)\]", next_stripped)
+                    if eff_match:
+                        atom_entry["effects"] = [
+                            e.strip() for e in eff_match.group(1).split(",")
+                        ]
+                        j += 1
+                        continue
+
+                    j += 1
+
+                atoms.append(atom_entry)
+                i += 1
+                continue
+
+            i += 1
+
+        module_entry: dict = {
             "path": str(rel_path),
             "import": import_path,
+            "description": description,
             "types": types,
             "atoms": atoms,
             "structs": structs,
-        })
+            "effects": effects,
+        }
+        modules.append(module_entry)
 
     return json.dumps({"modules": modules}, indent=2, ensure_ascii=False)
 
