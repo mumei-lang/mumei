@@ -3,6 +3,7 @@
   "displayName": "Mumei Language",
   "description": "Language support for Mumei (.mm) — formally verified programming language with Z3",
   "version": "0.1.0",
+  "license": "Apache-2.0",
   "publisher": "mumei-lang",
   "icon": "icon.png",
   "keywords": ["mumei", "formal verification", "Z3", "proof", "LLVM", "verified"],
