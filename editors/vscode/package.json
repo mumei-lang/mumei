@@ -3,7 +3,14 @@
   "displayName": "Mumei Language",
   "description": "Language support for Mumei (.mm) — formally verified programming language with Z3",
   "version": "0.1.0",
-  "publisher": "mumei",
+  "license": "Apache-2.0",
+  "publisher": "mumei-lang",
+  "icon": "icon.png",
+  "keywords": ["mumei", "formal verification", "Z3", "proof", "LLVM", "verified"],
+  "bugs": {
+    "url": "https://github.com/mumei-lang/mumei/issues"
+  },
+  "homepage": "https://github.com/mumei-lang/mumei",
   "repository": {
     "type": "git",
     "url": "https://github.com/mumei-lang/mumei"
@@ -25,6 +32,13 @@
         "configuration": "./language-configuration.json"
       }
     ],
+    "grammars": [
+      {
+        "language": "mumei",
+        "scopeName": "source.mumei",
+        "path": "./syntaxes/mumei.tmLanguage.json"
+      }
+    ],
     "configuration": {
       "title": "Mumei",
       "properties": {
@@ -42,8 +56,7 @@
   },
   "devDependencies": {
     "@types/vscode": "^1.80.0",
-    "typescript": "^5.0.0",
-    "vscode-languageclient": "^9.0.1"
+    "typescript": "^5.0.0"
   },
   "dependencies": {
     "vscode-languageclient": "^9.0.1"
