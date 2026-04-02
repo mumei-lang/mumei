@@ -18,6 +18,10 @@ type NonNegative = i64 where v >= 0;
 type Byte = i64 where v >= 0 && v <= 255;
 type HttpStatus = i64 where v >= 100 && v < 600;
 type ExitCode = i64 where v >= 0 && v <= 255;
+type Latitude = i64 where v >= -90 && v <= 90;
+type Longitude = i64 where v >= -180 && v <= 180;
+type Priority = i64 where v >= 0 && v <= 10;
+type Ascii = i64 where v >= 0 && v <= 127;
 
 // =============================================================
 // Atoms: Range Validation（範囲検証）
@@ -103,4 +107,36 @@ atom safe_modulo(a: i64, b: i64)
     body: {
         let r = a - (a / b) * b;
         if r >= 0 { r } else { r + b }
+    };
+
+// 安全な減算（結果が非負であることを保証）
+atom safe_subtract(a: i64, b: i64)
+    requires: a >= b;
+    ensures: result >= 0 && result == a - b;
+    body: {
+        a - b
+    };
+
+// 上限付きインクリメント
+atom bounded_increment(val: i64, max_val: i64)
+    requires: val >= 0 && max_val > 0 && val <= max_val;
+    ensures: result >= val && result <= max_val;
+    body: {
+        if val < max_val { val + 1 } else { val }
+    };
+
+// 下限付きデクリメント
+atom bounded_decrement(val: i64, min_val: i64)
+    requires: val >= min_val && min_val >= 0;
+    ensures: result >= min_val && result <= val;
+    body: {
+        if val > min_val { val - 1 } else { val }
+    };
+
+// 符号関数
+atom sign(x: i64)
+    requires: true;
+    ensures: result >= -1 && result <= 1;
+    body: {
+        if x > 0 { 1 } else { if x < 0 { 0 - 1 } else { 0 } }
     };
