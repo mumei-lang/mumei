@@ -2,6 +2,8 @@
   "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
   "name": "Mumei",
   "scopeName": "source.mumei",
+
+  "comment": "Order matters: TextMate uses first-match-wins. atom-definition and type-definition must precede their generic keyword counterparts so that 'atom foo' and 'struct Bar' capture the name.",
   "patterns": [
     { "include": "#comments" },
     { "include": "#strings" },
@@ -104,7 +106,7 @@
       "patterns": [
         {
           "name": "keyword.operator.mumei",
-          "match": "(&&|\\|\\||==|!=|>=|<=|=>|->)"
+          "match": "(&&|\\|\\||\\|>|==|!=|>=|<=|=>|->|[+\\-*/%<>!])"
         }
       ]
     }
