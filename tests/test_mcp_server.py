@@ -68,6 +68,32 @@ class TestListStdCatalog:
         assert clamp["requires"] != ""
         assert clamp["ensures"] != ""
 
+    def test_effects_mm_has_all_effect_forms(self) -> None:
+        """std/effects.mm captures non-parameterized, parameterized, and composite effects."""
+        catalog = _get_catalog()
+        effects_mod = next(
+            (m for m in catalog["modules"] if m["path"] == "std/effects.mm"),
+            None,
+        )
+        assert effects_mod is not None, "std/effects.mm not found in catalog"
+
+        effect_names = [e.split("(")[0].split(" includes")[0].strip() for e in effects_mod["effects"]]
+
+        # Non-parameterized effects
+        assert "effect FileRead" in effect_names
+        assert "effect FileWrite" in effect_names
+        assert "effect Network" in effect_names
+        assert "effect Log" in effect_names
+        assert "effect Console" in effect_names
+
+        # Parameterized effects
+        assert "effect HttpGet" in effect_names
+        assert "effect HttpPost" in effect_names
+
+        # Composite effects
+        composite = [e for e in effects_mod["effects"] if "includes:" in e]
+        assert len(composite) >= 3, f"Expected >=3 composite effects, got {composite}"
+
     def test_http_secure_has_effects(self) -> None:
         """std/http_secure.mm has effect definitions."""
         catalog = _get_catalog()

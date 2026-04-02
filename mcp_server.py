@@ -729,12 +729,33 @@ def list_std_catalog() -> str:
                 i += 1
                 continue
 
-            # Effect definitions: effect Name(params) where constraint;
-            effect_match = re.match(
-                r"^effect\s+\w+\s*\(.*?\)(?:\s+where\s+.+?)?;?$", stripped,
-            )
-            if effect_match:
-                effects.append(stripped.rstrip(";"))
+            # Effect definitions: all forms
+            #   - Non-parameterized: effect FileRead;
+            #   - Parameterized: effect HttpGet(url: Str);
+            #   - Parameterized with constraint: effect SafeFileRead(path: Str) where ...;
+            #   - Composite: effect IO includes: [FileRead, FileWrite, Console];
+            #   - Stateful (multiline): effect HttpServer\n    states: [...]
+            if re.match(r"^effect\s+\w+", stripped):
+                # Collect the full effect definition (may span multiple lines)
+                effect_lines = [stripped.rstrip(";").strip()]
+                # Check if this is a multiline stateful effect (no semicolon,
+                # no 'includes:', no params — next lines have states:/transition:)
+                if not stripped.endswith(";") and "includes:" not in stripped:
+                    k = i + 1
+                    while k < len(lines) and k <= i + 20:
+                        next_line = lines[k].strip()
+                        if not next_line or next_line.startswith("//"):
+                            k += 1
+                            continue
+                        # Stateful effect body lines: states:, initial:, transition:
+                        if re.match(
+                            r"^(states|initial|transition)\s*:", next_line,
+                        ):
+                            effect_lines.append(next_line.rstrip(";").strip())
+                            k += 1
+                            continue
+                        break
+                effects.append(" ".join(effect_lines))
                 i += 1
                 continue
 
