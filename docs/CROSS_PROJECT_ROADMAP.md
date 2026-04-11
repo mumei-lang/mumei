@@ -269,13 +269,16 @@ inkwell の ExecutionEngine (MCJIT) を使用した JIT 実行:
 
 ---
 
-## Priority 8: DX の成熟 (Developer Experience) — ⏸️ Deferred
+## Priority 8: DX の成熟 (Developer Experience)
 
-P7 完了後に着手。
+### P8-A: VS Code Extension の Marketplace 公開 — ✅ Ready for Publish
 
-### P8-A: VS Code Extension の Marketplace 公開
-
-LSP は completion/definition まで実装済み。公開すれば採用障壁が大幅に下がる。
+LSP は completion/definition まで実装済み。Marketplace 公開に必要なファイル一式を整備完了:
+- TextMate grammar（全キーワード・契約・エフェクト・演算子対応）
+- language-configuration.json（ブロックコメント、折り畳み、自動閉じペア）
+- tsconfig.json / .vscodeignore / README.md / CHANGELOG.md / icon.png
+- `vsce package` で .vsix 生成可能な状態
+- 公開には Marketplace publisher アカウントと PAT が必要
 
 ### P8-B: Counter-example Visualizer in Editor
 
@@ -436,7 +439,8 @@ graph TD
 | ~~高~~ | SI-2: Verified FFI Boundary | mumei | ✅ Implemented |
 | ~~中~~ | SI-3: Autonomous Delivery Flow | 両方 | ✅ Complete (実地検証完了) |
 | ⏸️ | P7-C: Wasm ターゲット | mumei | Deferred |
-| ⏸️ | P8-A/B: DX の成熟 | mumei | Deferred |
+| ✅ | P8-A: VS Code Extension Marketplace 公開準備 | mumei | Ready for Publish |
+| ⏸️ | P8-B: Counter-example Visualizer | mumei | Deferred |
 | ⏸️ | SI-4: no_std Ecosystem | mumei | Deferred |
 
 ## vStd: Verified Standard Library Expansion
@@ -476,7 +480,7 @@ graph TD
     SI2 --> SI3["SI-3: Autonomous\nDelivery Flow"]
     SI1 --> SI3
     P7C["P7-C: Wasm ⏸️"]
-    P8["P8: DX ⏸️"]
+    P8["P8-A: VS Code ✅\nP8-B: Visualizer ⏸️"]
     SI4["SI-4: no_std ⏸️"]
     style P7C stroke-dasharray: 5 5
     style P8 stroke-dasharray: 5 5

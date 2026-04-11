@@ -6,7 +6,11 @@
   "license": "Apache-2.0",
   "publisher": "mumei-lang",
   "icon": "icon.png",
-  "keywords": ["mumei", "formal verification", "Z3", "proof", "LLVM", "verified"],
+  "keywords": ["mumei", "formal-verification", "z3", "proof", "language"],
+  "galleryBanner": {
+    "color": "#1e1e1e",
+    "theme": "dark"
+  },
   "bugs": {
     "url": "https://github.com/mumei-lang/mumei/issues"
   },
@@ -18,7 +22,7 @@
   "engines": {
     "vscode": "^1.80.0"
   },
-  "categories": ["Programming Languages"],
+  "categories": ["Programming Languages", "Linters"],
   "activationEvents": [
     "onLanguage:mumei"
   ],
