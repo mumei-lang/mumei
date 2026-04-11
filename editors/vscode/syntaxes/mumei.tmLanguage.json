@@ -22,6 +22,11 @@
         {
           "name": "comment.line.double-slash.mumei",
           "match": "//.*$"
+        },
+        {
+          "name": "comment.block.mumei",
+          "begin": "/\\*",
+          "end": "\\*/"
         }
       ]
     },
@@ -82,7 +87,7 @@
       "patterns": [
         {
           "name": "keyword.control.mumei",
-          "match": "\\b(atom|atom_ref|requires|ensures|body|if|else|while|match|let|import|as|perform|acquire|for|forall|exists|where|invariant|decreases|effects|resources|ref|mut|call|priority|mode|includes|parent|chan|send|recv|cancel|task_group|task|max_unroll|fn)\\b"
+          "match": "\\b(atom|atom_ref|requires|ensures|body|if|else|while|match|let|import|as|perform|acquire|release|for|forall|exists|where|invariant|decreases|effects|effect_pre|effect_post|resources|ref|mut|call|priority|mode|includes|parent|chan|send|recv|cancel|task_group|task|max_unroll|fn)\\b"
         }
       ]
     },
