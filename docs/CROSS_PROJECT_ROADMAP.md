@@ -441,6 +441,8 @@ graph TD
 | ⏸️ | P7-C: Wasm ターゲット | mumei | Deferred |
 | ✅ | P8-A: VS Code Extension Marketplace 公開準備 | mumei | Ready for Publish |
 | ⏸️ | P8-B: Counter-example Visualizer | mumei | Deferred |
+| 🔧 | P9: Autonomous Forge Mode | mumei-agent | Infrastructure Complete (PR #31) |
+| 📋 | vStd-5: SafeList | mumei | Planned (Forge target) |
 | ⏸️ | SI-4: no_std Ecosystem | mumei | Deferred |
 
 ## vStd: Verified Standard Library Expansion
@@ -466,6 +468,23 @@ graph TD
 ### vStd-MCP: list_std_catalog ツール
 
 MCP サーバーに `list_std_catalog` ツールを追加。`std/` ディレクトリを再帰的にスキャンし、全モジュールの型定義・atom シグネチャ・構造体定義を JSON で返す。AI エージェントがコード生成前に既存の検証済み部品を発見するためのディスカバリ API。
+
+### vStd-5: std/container/safe_list.mm — Verified SafeList
+
+境界チェックが数学的に証明されたリスト。`safe_get(index)` の `requires: 0 <= index < len` により Out of Bounds アクセスを完全に排除。`std/container/safe_queue.mm` / `std/container/bounded_array.mm` と同パターン。mumei-agent Forge モード（P9）による初の無人鍛造ターゲット。
+
+### Forge Mode Integration (mumei-agent P9)
+
+mumei-agent の forge モード（P9）により、vStd の各タスクを自律的に実行可能。タスク spec JSON → generate → verify → self-healing → commit の完全自律パイプライン。Z3 Logical Repair Protocol と Cross-file Context Loading により、複数 std ファイルをまたいだスタイル / 契約一貫性を担保する。
+
+| vStd 項目 | Forge タスク | 状態 |
+|-----------|-------------|------|
+| vStd-1: contracts.mm 拡張 | `vstd_safe_add.json` | 📋 Ready (forge_tasks/) |
+| vStd-2: fixed_point.mm | `vstd_fixed_point.json` | 📋 Planned |
+| vStd-3: safe_queue.mm | — | ✅ Already exists |
+| vStd-4: http_secure.mm | — | ✅ Already exists |
+| vStd-5: safe_list.mm | `vstd_safe_list.json` | 📋 Ready — 初回鍛造ターゲット |
+| vStd-MCP: list_std_catalog | — | ✅ Implemented |
 
 ---
 
