@@ -532,17 +532,21 @@ mumei-agent の forge モード（P9）により、vStd の各タスクを自律
 
 ### Phase 2: Planning & Generation Layer（計画 + 生成）
 
-#### Phase 2-A: Forge Task Spec 自動生成 — 📋 Planned
+#### Phase 2-A: Forge Task Spec 自動生成 — ✅ Implemented
 
 **Repository**: `mumei-lang/mumei-agent`
 
 `analyze_std_gaps` の JSON 提案を入力として、`forge_tasks/vstd_*.json` 形式の spec を自動生成する。`depends_on`、`difficulty`、`reason` フィールドから `requires`/`ensures` テンプレートと `import` プレアンブルを構築。
 
-#### Phase 2-B: Cross-file Context Loading の拡張 — 📋 Planned
+実装: `mumei-lang/mumei-agent` の `agent/propose.py` と `python -m agent propose` サブコマンド（`--gaps-json` / `--auto` / `--output-dir` / `--overwrite` / `--dry-run`）。`difficulty` → `max_retries`（low=3 / medium=5 / high=8）のスケーリング、`depends_on` → `import "<path>" as <alias>;` プレアンブル構築、`forge_discovery._load_task` 互換のラウンドトリップ検証を含む（mumei-agent PR #35）。
+
+#### Phase 2-B: Cross-file Context Loading の拡張 — ✅ Implemented
 
 **Repository**: `mumei-lang/mumei-agent`
 
 P9 の `Cross-file Context Loading` を拡張し、`std/core.mm` の公理型 / 安全 atom を常に LLM プロンプトのプレフィックスに注入する。新規 std モジュールが「公理の根」を自動的に再利用できるようにする。
+
+実装: `mumei-lang/mumei-agent` の `agent/strategies/generate_strategy.py` に `_is_std_module` / `_summarise_core_axioms` / `_load_core_axiom_context` / `_build_core_axiom_context` を追加し、単一 atom (`generate_code`) と複数 atom (`generate_multi_atom`) の両経路で `std/` 配下モジュール生成時に公理ブロックを注入。`AgentConfig.core_axiom_path` / `inject_core_axioms` (`CORE_AXIOM_PATH` / `INJECT_CORE_AXIOMS` 環境変数) で制御可能、`(path, mtime)` キーのキャッシュで繰り返し読み取りを回避（mumei-agent PR #35）。
 
 #### Phase 2-C: Self-Healing + Forge の統合ループ — 📋 Planned
 
