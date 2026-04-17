@@ -822,5 +822,305 @@ def list_std_catalog() -> str:
     return json.dumps({"modules": modules}, indent=2, ensure_ascii=False)
 
 
+# =============================================================
+# analyze_std_gaps — Autonomous Proliferation (SI-5) の基盤
+# =============================================================
+# list_std_catalog が「今ある部品」を列挙するのに対し、
+# analyze_std_gaps は「足りない部品」をヒューリスティクスで推論する。
+# AI エージェントが次に実装すべき std コンポーネントを
+# 自己判断するためのディスカバリ API。
+
+# std/ ディレクトリの「欠落コンポーネント」を推論するためのルール。
+# (condition_fn, proposal_factory) のタプルで、条件を満たすときに提案を生成する。
+_STD_GAP_RULES: list[dict] = [
+    {
+        "target": "std/iter.mm",
+        "reason": "コレクション走査の共通インターフェース。"
+        "std/list.mm / std/alloc.mm の Vector / HashMap に反復子がない。",
+        "depends_on": ["std/prelude.mm"],
+        "difficulty": "medium",
+        "trigger": {
+            "has_container_without_iter": [
+                "std/container",
+                "std/list.mm",
+                "std/alloc.mm",
+            ],
+            "missing": "std/iter.mm",
+        },
+    },
+    {
+        "target": "std/core.mm",
+        "reason": "型変換の安全性証明が散在している。"
+        "Size/Index/NonZero の公理と checked_add/sub/mul を一箇所に集約する。",
+        "depends_on": ["std/prelude.mm"],
+        "difficulty": "low",
+        "trigger": {"missing": "std/core.mm"},
+    },
+    {
+        "target": "std/trait/iterable.mm",
+        "reason": "Vector/List/BoundedArray の共通インターフェース。"
+        "Sequential トレイトを iterator と接続する。",
+        "depends_on": ["std/prelude.mm", "std/alloc.mm"],
+        "difficulty": "medium",
+        "trigger": {
+            "missing": "std/trait/iterable.mm",
+            "requires_present": ["std/alloc.mm"],
+        },
+    },
+    {
+        "target": "std/hash.mm",
+        "reason": "prelude.mm に Eq/Ord はあるが Hash の law が不完全。"
+        "Hashable トレイトの具体実装と衝突耐性の law を提供する。",
+        "depends_on": ["std/prelude.mm"],
+        "difficulty": "medium",
+        "trigger": {"missing": "std/hash.mm"},
+    },
+]
+
+
+def _scan_std_imports(std_dir: Path) -> dict:
+    """Scan all .mm files under std/ and build a dependency graph.
+    Returns a dict mapping each std/*.mm file path to a sorted list of
+    import targets (e.g., "std/prelude.mm"). Files with no imports map to [].
+    Only imports resolving to std/ modules are included.
+    """
+    if not std_dir.exists():
+        return {}
+
+    available: dict = {}
+    for mm_file in std_dir.rglob("*.mm"):
+        rel = str(mm_file.relative_to(std_dir.parent)).replace("\\", "/")
+        import_path = rel[: -len(".mm")]
+        available[import_path] = rel
+
+    dependency_graph: dict = {}
+    # Accept both `import "std/xxx" as alias;` and `import "std/xxx";`
+    import_re = re.compile(r'^\s*import\s+"([^"]+)"\s*(?:as\s+\w+\s*)?;')
+    for mm_file in sorted(std_dir.rglob("*.mm")):
+        rel = str(mm_file.relative_to(std_dir.parent)).replace("\\", "/")
+        try:
+            text = mm_file.read_text(encoding="utf-8")
+        except OSError:
+            dependency_graph[rel] = []
+            continue
+        deps: list = []
+        for line in text.splitlines():
+            m = import_re.match(line)
+            if not m:
+                continue
+            target = m.group(1).strip()
+            resolved = available.get(target)
+            if resolved and resolved != rel and resolved not in deps:
+                deps.append(resolved)
+        dependency_graph[rel] = sorted(deps)
+    return dependency_graph
+
+
+def _collect_trusted_atoms(std_dir: Path) -> list:
+    """Scan for `trusted atom <name>` and return one entry per occurrence.
+    Each entry contains file, atom, line number, and a short reason derived
+    from the surrounding comments or body if available.
+    """
+    results: list = []
+    trusted_re = re.compile(r"^\s*trusted\s+atom\s+(\w+)")
+    for mm_file in sorted(std_dir.rglob("*.mm")):
+        rel = str(mm_file.relative_to(std_dir.parent)).replace("\\", "/")
+        try:
+            lines = mm_file.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        for idx, line in enumerate(lines):
+            m = trusted_re.match(line)
+            if not m:
+                continue
+            atom_name = m.group(1)
+            # Heuristic reason extraction: grab the nearest preceding
+            # comment block (// ...) or note a stub/empty body.
+            reason = ""
+            look = idx - 1
+            while look >= 0 and lines[look].strip().startswith("//"):
+                reason = lines[look].strip().lstrip("/ ").strip()
+                look -= 1
+            if not reason:
+                # Peek up to 6 lines ahead for `body:` contents to detect stubs.
+                end = min(idx + 10, len(lines))
+                body_text = " ".join(l.strip() for l in lines[idx + 1 : end])
+                if re.search(r"body\s*:\s*\{\s*\}", body_text):
+                    reason = "body is stub"
+                else:
+                    reason = "trusted (proof hole)"
+            results.append(
+                {
+                    "file": rel,
+                    "atom": atom_name,
+                    "line": idx + 1,
+                    "reason": reason,
+                },
+            )
+    return results
+
+
+def _collect_todo_comments(std_dir: Path) -> list:
+    """Scan std/ for TODO/FIXME/XXX/HACK markers and 'Phase X' roadmap notes."""
+    results: list = []
+    marker_re = re.compile(
+        r"//.*?\b(TODO|FIXME|XXX|HACK|Phase\s+[A-Z0-9]+)\b[^\n]*",
+        re.IGNORECASE,
+    )
+    for mm_file in sorted(std_dir.rglob("*.mm")):
+        rel = str(mm_file.relative_to(std_dir.parent)).replace("\\", "/")
+        try:
+            lines = mm_file.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        for idx, line in enumerate(lines):
+            m = marker_re.search(line)
+            if not m:
+                continue
+            results.append(
+                {
+                    "file": rel,
+                    "line": idx + 1,
+                    "text": line.strip().lstrip("/ ").strip(),
+                },
+            )
+    return results
+
+
+def _atom_name_index(std_dir: Path) -> list:
+    """Return a sorted list of all atom names declared in std/.
+    Used to compute usage frequency across tests/ and examples/.
+    """
+    names: set = set()
+    atom_re = re.compile(r"^\s*(?:trusted\s+|async\s+)?atom\s+(\w+)")
+    for mm_file in std_dir.rglob("*.mm"):
+        try:
+            for line in mm_file.read_text(encoding="utf-8").splitlines():
+                m = atom_re.match(line)
+                if m:
+                    names.add(m.group(1))
+        except OSError:
+            continue
+    return sorted(names)
+
+
+def _count_usage(names: list, roots: list) -> dict:
+    """For each atom name, count identifier-like occurrences across all .mm
+    files under the given root directories. Skips the std/ directory itself.
+    """
+    counts: dict = {name: 0 for name in names}
+    if not names:
+        return counts
+    patterns: dict = {name: re.compile(rf"\b{re.escape(name)}\b") for name in names}
+    for root in roots:
+        if not root.exists():
+            continue
+        for mm_file in root.rglob("*.mm"):
+            try:
+                text = mm_file.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            for name, pat in patterns.items():
+                counts[name] += len(pat.findall(text))
+    return {k: v for k, v in counts.items() if v > 0}
+
+
+def _evaluate_rule(
+    rule: dict,
+    existing_paths: set,
+    std_dir: Path,
+) -> bool:
+    """Return True if the rule's trigger conditions apply (i.e., the
+    suggested component looks like a real gap worth proposing)."""
+    trigger = rule.get("trigger", {})
+    missing = trigger.get("missing")
+    if missing and missing in existing_paths:
+        return False
+    for required in trigger.get("requires_present", []):
+        if required not in existing_paths:
+            return False
+    container_check = trigger.get("has_container_without_iter")
+    if container_check:
+        has_container = any(
+            (std_dir.parent / path).exists()
+            or (path.endswith("/") and (std_dir.parent / path.rstrip("/")).exists())
+            for path in container_check
+        )
+        if not has_container:
+            return False
+    return True
+
+
+@mcp.tool()
+def analyze_std_gaps() -> str:
+    """Analyze the mumei std/ library for missing components and propose
+    next implementation targets. AI agents should call this before starting
+    autonomous std expansion work — it combines dependency graph analysis,
+    trusted-atom (proof hole) detection, TODO comment scanning, and usage
+    frequency across tests/ and examples/ to produce a ranked list of
+    proposed new std modules.
+
+    Returns JSON with: dependency_graph, trusted_atoms, todo_comments,
+    usage_frequency, and proposals (top 3 ranked by priority).
+    """
+    repo_root = Path(__file__).parent.absolute()
+    std_dir = repo_root / "std"
+    if not std_dir.exists():
+        return json.dumps({"error": "std/ directory not found"})
+
+    dependency_graph = _scan_std_imports(std_dir)
+    trusted_atoms = _collect_trusted_atoms(std_dir)
+    todo_comments = _collect_todo_comments(std_dir)
+
+    atom_names = _atom_name_index(std_dir)
+    usage_roots = [repo_root / "tests", repo_root / "examples"]
+    usage_frequency = _count_usage(atom_names, usage_roots)
+
+    existing_paths = set(dependency_graph.keys())
+
+    proposals: list = []
+    for rule in _STD_GAP_RULES:
+        if not _evaluate_rule(rule, existing_paths, std_dir):
+            continue
+        proposals.append(
+            {
+                "name": rule["target"],
+                "reason": rule["reason"],
+                "depends_on": rule["depends_on"],
+                "difficulty": rule["difficulty"],
+            },
+        )
+
+    # Assign priority. Lower difficulty and more existing dependencies
+    # (already-satisfied prerequisites) rank higher.
+    difficulty_weight = {"low": 0, "medium": 1, "high": 2}
+
+    def _rank_key(p: dict) -> tuple:
+        diff = difficulty_weight.get(p["difficulty"], 3)
+        unmet = sum(
+            1 for dep in p["depends_on"] if dep not in existing_paths
+        )
+        return (diff, unmet)
+
+    proposals.sort(key=_rank_key)
+    for i, p in enumerate(proposals[:3], start=1):
+        p["priority"] = i
+    proposals = proposals[:3]
+
+    # Stable order for JSON output.
+    usage_frequency_sorted = dict(
+        sorted(usage_frequency.items(), key=lambda kv: (-kv[1], kv[0])),
+    )
+
+    result = {
+        "dependency_graph": dependency_graph,
+        "trusted_atoms": trusted_atoms,
+        "todo_comments": todo_comments,
+        "usage_frequency": usage_frequency_sorted,
+        "proposals": proposals,
+    }
+    return json.dumps(result, indent=2, ensure_ascii=False)
+
+
 if __name__ == "__main__":
     mcp.run()
