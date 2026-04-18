@@ -1414,7 +1414,8 @@ def analyze_std_gaps() -> str:
         )
 
     # Stable tie-break: higher score first, then fewer unmet deps, then
-    # lower difficulty (so old behaviour is preserved when scores tie).
+    # lower difficulty. Note: the old sort key was (difficulty, unmet);
+    # the new key intentionally prioritises unmet deps over difficulty.
     difficulty_weight = {"low": 0, "medium": 1, "high": 2}
 
     def _rank_key(p: dict) -> tuple:
