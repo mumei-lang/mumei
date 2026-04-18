@@ -1,0 +1,78 @@
+name: Verify Standard Library
+
+# SI-5 Phase 3-B — verification gate for std/ changes.
+#
+# Every PR that touches std/ must re-verify the entire standard library
+# so that a new module cannot silently regress an existing proof.  This
+# is the safety net for PRs opened by the SI-5 Autonomous Proliferation
+# workflow in mumei-lang/mumei-agent.
+
+on:
+  pull_request:
+    paths:
+      - 'std/**'
+      - 'mumei-core/**'
+      - 'mumei-emit-**/**'
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/verify-std.yml'
+  workflow_dispatch:
+
+jobs:
+  verify-std:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libclang-dev libz3-dev z3 libzstd-dev
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
+          echo "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-17 main" \
+            | sudo tee /etc/apt/sources.list.d/llvm-17.list
+          sudo apt-get update
+          sudo apt-get install -y llvm-17-dev libpolly-17-dev
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-verify-std-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-verify-std-
+
+      - name: Build mumei
+        env:
+          LLVM_SYS_170_PREFIX: /usr/lib/llvm-17
+        run: cargo build --release
+
+      - name: Verify all std modules
+        env:
+          LLVM_SYS_170_PREFIX: /usr/lib/llvm-17
+        run: |
+          set +e
+          FAILED=0
+          TOTAL=0
+          # Use find so this works even if no files match a given glob
+          # (avoids literal "std/**/*.mm" being passed to the compiler).
+          while IFS= read -r f; do
+            TOTAL=$((TOTAL + 1))
+            echo "::group::Verifying $f"
+            if ./target/release/mumei verify "$f"; then
+              echo "OK: $f"
+            else
+              echo "::error file=$f::Verification failed"
+              FAILED=$((FAILED + 1))
+            fi
+            echo "::endgroup::"
+          done < <(find std -type f -name '*.mm' | sort)
+          echo "Verified $((TOTAL - FAILED))/$TOTAL std module(s)"
+          if [ $FAILED -gt 0 ]; then
+            echo "::error::$FAILED std module(s) failed verification"
+            exit 1
+          fi
