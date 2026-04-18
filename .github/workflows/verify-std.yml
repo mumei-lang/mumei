@@ -33,7 +33,6 @@ on:
       - 'mumei-emit-**/**'
       - 'src/**'
       - 'Cargo.toml'
-      - 'Cargo.lock'
       - '.github/workflows/verify-std.yml'
   workflow_dispatch:
 
@@ -62,7 +61,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cargo-verify-std-${{ hashFiles('Cargo.lock') }}
+          key: cargo-verify-std-${{ hashFiles('Cargo.toml', '**/Cargo.toml') }}
           restore-keys: |
             cargo-verify-std-
 
@@ -107,14 +106,26 @@ jobs:
             # Move std/ and the compiler workspace back to the base ref
             # without switching branches (keeps target/ intact so the next
             # `cargo build` is incremental rather than a full rebuild).
-            PATHS=(std Cargo.toml Cargo.lock)
-            for d in mumei-core src; do
-              [ -e "$d" ] && PATHS+=("$d")
+            # Only include paths that exist at the base ref — Cargo.lock
+            # is gitignored in this repo, for instance, so it must never
+            # be named in `git checkout --`.
+            PATHS=()
+            for p in std Cargo.toml mumei-core src; do
+              if git cat-file -e "origin/${BASE_REF}:${p}" 2>/dev/null; then
+                PATHS+=("$p")
+              fi
             done
             for d in mumei-emit-*; do
-              [ -e "$d" ] && PATHS+=("$d")
+              [ -e "$d" ] || continue
+              if git cat-file -e "origin/${BASE_REF}:${d}" 2>/dev/null; then
+                PATHS+=("$d")
+              fi
             done
-            git checkout "origin/${BASE_REF}" -- "${PATHS[@]}"
+            if [ ${#PATHS[@]} -gt 0 ]; then
+              git checkout "origin/${BASE_REF}" -- "${PATHS[@]}"
+            else
+              echo "No base-ref paths to restore."
+            fi
           else
             echo "No base ref available; skipping baseline (baseline == head)."
           fi
