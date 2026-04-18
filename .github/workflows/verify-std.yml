@@ -47,7 +47,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libclang-dev libz3-dev z3 libzstd-dev
+          sudo apt-get install -y libz3-dev z3 libzstd-dev
           # Use the signed-by pattern (apt-key is deprecated on Ubuntu 22.04+).
           # Matches release.yml for consistency.
           wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
@@ -55,7 +55,7 @@ jobs:
           echo "deb http://apt.llvm.org/${codename}/ llvm-toolchain-${codename}-17 main" \
             | sudo tee /etc/apt/sources.list.d/llvm-17.list > /dev/null
           sudo apt-get update
-          sudo apt-get install -y llvm-17-dev libpolly-17-dev
+          sudo apt-get install -y llvm-17-dev libclang-17-dev libpolly-17-dev
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -71,11 +71,13 @@ jobs:
       - name: Build mumei (PR head)
         env:
           LLVM_SYS_170_PREFIX: /usr/lib/llvm-17
+          LIBCLANG_PATH: /usr/lib/llvm-17/lib
         run: cargo build --release
 
       - name: Verify std on PR head
         env:
           LLVM_SYS_170_PREFIX: /usr/lib/llvm-17
+          LIBCLANG_PATH: /usr/lib/llvm-17/lib
         run: |
           mkdir -p /tmp/verify-std
           : > /tmp/verify-std/head_failures.txt
@@ -119,13 +121,23 @@ jobs:
                 PATHS+=("$p")
               fi
             done
+            # Discover mumei-emit-* dirs present in the working tree (PR head)
+            # that also exist on base → restore them.
             for d in mumei-emit-*; do
               [ -e "$d" ] || continue
               if git cat-file -e "origin/${BASE_REF}:${d}" 2>/dev/null; then
                 PATHS+=("$d")
               fi
             done
-            # Also note which mumei-emit-* dirs are PR-only (not on base)
+            # Discover mumei-emit-* dirs that exist ONLY on base (PR deleted
+            # them).  Without this, `cargo build` on the base Cargo.toml
+            # fails because it references a workspace member that is missing.
+            for p in $(git ls-tree --name-only "origin/${BASE_REF}" | grep '^mumei-emit-'); do
+              if [ ! -e "$p" ]; then
+                PATHS+=("$p")
+              fi
+            done
+            # Note which mumei-emit-* dirs are PR-only (not on base)
             # so we can clean them after checkout.
             PR_ONLY_EMIT=()
             for d in mumei-emit-*; do
@@ -161,12 +173,14 @@ jobs:
         if: env.SKIP_BASE != 'true'
         env:
           LLVM_SYS_170_PREFIX: /usr/lib/llvm-17
+          LIBCLANG_PATH: /usr/lib/llvm-17/lib
         run: cargo build --release
 
       - name: Verify std on PR base
         if: env.SKIP_BASE != 'true'
         env:
           LLVM_SYS_170_PREFIX: /usr/lib/llvm-17
+          LIBCLANG_PATH: /usr/lib/llvm-17/lib
         run: |
           : > /tmp/verify-std/base_failures.txt
           set +e
