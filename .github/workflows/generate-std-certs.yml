@@ -11,6 +11,13 @@ on:
       - 'std/**'
   workflow_dispatch:
 
+# Both generate-std-certs and update-metrics push back to the branch.
+# A shared concurrency group prevents non-fast-forward failures when both
+# workflows trigger from the same push event.
+concurrency:
+  group: std-auto-commit-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: write
 

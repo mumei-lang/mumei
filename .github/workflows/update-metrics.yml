@@ -13,6 +13,12 @@ on:
       - 'scripts/generate_stdlib_metrics.py'
   workflow_dispatch:
 
+# Shared concurrency group with generate-std-certs.yml — both workflows
+# commit+push back to the branch, so they must not run in parallel.
+concurrency:
+  group: std-auto-commit-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: write
 

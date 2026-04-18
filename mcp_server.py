@@ -1119,8 +1119,11 @@ def _compute_weighted_score(
     else:
         trusted_in_area = 0
     # Also account for trusted atoms in the immediate deps (shoring up
-    # holes in the foundations the proposal builds on).
+    # holes in the foundations the proposal builds on).  Skip deps already
+    # covered by the target_area prefix pass to avoid double-counting.
     for dep in deps:
+        if target_area and dep.startswith(target_area):
+            continue  # already counted in the target_area pass above
         trusted_in_area += sum(
             1 for t in trusted_atoms if t.get("file", "") == dep
         )
@@ -1131,9 +1134,10 @@ def _compute_weighted_score(
         0.5,
     )
 
-    # Weighted combination (weights sum to 1.0 among positive axes).
-    # Each axis is saturated at a reasonable ceiling before combining so a
-    # single runaway axis cannot dominate the score.
+    # Weighted combination (positive weights sum to 0.85; all four sum to
+    # 1.0 including the penalty weight). Each axis is saturated at a
+    # reasonable ceiling before combining so a single runaway axis cannot
+    # dominate the score.  Effective range is [~-0.09, ~0.85].
     w_usage, w_depth, w_trusted, w_diff = 0.30, 0.30, 0.25, 0.15
     usage_norm = min(usage_demand / 10.0, 1.0)
     depth_norm = min(dep_depth / 5.0, 1.0)
