@@ -582,11 +582,30 @@ CLI: `python -m agent health --mumei-repo <path> [--format json|table]`。失敗
 
 mumei 側の時系列記録（`docs/STDLIB_METRICS.md` 自動更新 CI）は後続タスクとして残置。
 
-#### Phase 3-B: Scheduled Autonomous Runs — 📋 Planned
+#### Phase 3-B: Scheduled Autonomous Runs — ✅ Implemented
 
-**Repository**: `mumei-lang/mumei-agent`
+**Repository**: `mumei-lang/mumei-agent` + `mumei-lang/mumei`
 
 週次の GitHub Actions で `analyze_std_gaps` → Forge → PR を自動実行。人間の介入なしで提案が実装され続ける定常ループを確立する。
+
+- ✅ `mumei-lang/mumei-agent` `.github/workflows/proliferate.yml`
+  - 毎週月曜 00:00 UTC (`cron: '0 0 * * 1'`) で自動起動 + `workflow_dispatch` で手動トリガー可
+  - mumei-agent と mumei の両リポジトリを checkout し、mumei コンパイラを `cargo build --release` でビルドして `PATH` に追加
+  - `python -m agent health` で pre/post-flight のヘルスチェックを JSON 出力
+  - `python -m agent proliferate --mumei-repo ../mumei --output-json /tmp/proliferate/summary.json` を実行
+  - 初期の安全柵として `schedule` 起動時と `workflow_dispatch` の `dry_run=true` デフォルトでは `--dry-run` を強制し、PR を作らずにパイプラインを検証
+  - 必要なシークレット: `MUMEI_REPO_TOKEN`（cross-repo で mumei に push/PR するため）、`OPENAI_API_KEY`
+  - 生成物: `pre_health.json` / `post_health.json` / `proliferate.log` / `summary.json` を artifact `proliferate-logs` として保存
+- ✅ `mumei-lang/mumei-agent` `agent/proliferate.py` の CI 対応強化
+  - `[PROLIFERATE] Step N/4: ...` 形式のステップログで CI 出力を人間が追いやすく
+  - `--output-json <path>` オプションで `timestamp` / `pre_health` / `post_health` / `proposals_processed` / `proposals_succeeded` / `proposals_failed` / `details[]` を構造化出力
+  - `publish()` に `pr_title_prefix` / `pr_body_extra` を渡し、自動生成 PR のタイトルに `[SI-5 Autonomous Proliferation]` を付与、description に提案・健全度 delta・検証サマリを含める
+- ✅ `mumei-lang/mumei` `.github/workflows/verify-std.yml`（回帰差分ゲート）
+  - `std/**` / コア / backend / `Cargo.*` に触れる PR で自動起動
+  - 同一 job 内で PR head と PR base の両方を `cargo build --release` → `find std -type f -name '*.mm'` で全件 `mumei verify` にかけ、それぞれの失敗集合を `/tmp/verify-std/{head,base}_failures.txt` に記録
+  - `comm -23 head base` で **新規に失敗したモジュールが 1 件以上あれば CI 失敗**、既に base で失敗していたモジュールは許容（develop 時点で 8 モジュールが未検証状態のため絶対基準では全 PR がブロックされてしまう問題への対応）
+  - artifact `verify-std-report` に `head_failures.txt` / `base_failures.txt` / `new_failures.txt` / `fixed_modules.txt` を出力し、pre-existing / 新規回帰 / 新規修復 を可視化
+  - proliferate が開いた PR が「既存の green だった std モジュールを red に戻す」事故を防ぐ安全柵として機能
 
 #### Phase 3-C: Cross-Project Proof Certificate Sharing — 📋 Planned
 
