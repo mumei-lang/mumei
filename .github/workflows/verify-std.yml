@@ -1,11 +1,29 @@
 name: Verify Standard Library
 
-# SI-5 Phase 3-B — verification gate for std/ changes.
+# SI-5 Phase 3-B — regression-diff verification gate for std/ changes.
 #
-# Every PR that touches std/ must re-verify the entire standard library
-# so that a new module cannot silently regress an existing proof.  This
-# is the safety net for PRs opened by the SI-5 Autonomous Proliferation
-# workflow in mumei-lang/mumei-agent.
+# Every PR that touches std/ (or the compiler) re-verifies the entire
+# standard library.  Rather than failing whenever *any* std/*.mm fails
+# verification (which would permanently block PRs whenever develop has
+# pre-existing failing modules), we compare the failure set of the PR
+# head against the failure set of the PR base and fail only when the
+# PR introduces *new* verification failures.
+#
+# Flow:
+#   1. Build the mumei compiler once on the PR head.
+#   2. Run `mumei verify` against every std/**/*.mm on the PR head and
+#      record the failure set as /tmp/verify-std/head_failures.txt.
+#   3. Switch the working tree to the PR base (git checkout origin/<base>
+#      -- std), rebuild only if compiler sources changed, and rerun
+#      `mumei verify` to record the baseline failure set as
+#      /tmp/verify-std/base_failures.txt.
+#   4. `comm -23 head_failures.txt base_failures.txt` yields the newly
+#      failing modules; if non-empty, fail the job.
+#
+# This matches the "don't regress already-green proofs" contract that
+# SI-5 Autonomous Proliferation promises: pre-existing red modules
+# stay red without blocking iteration, while any new red module the
+# PR introduces blocks merge.
 
 on:
   pull_request:
@@ -24,6 +42,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install system dependencies
         run: |
@@ -46,33 +66,133 @@ jobs:
           restore-keys: |
             cargo-verify-std-
 
-      - name: Build mumei
+      - name: Build mumei (PR head)
         env:
           LLVM_SYS_170_PREFIX: /usr/lib/llvm-17
         run: cargo build --release
 
-      - name: Verify all std modules
+      - name: Verify std on PR head
         env:
           LLVM_SYS_170_PREFIX: /usr/lib/llvm-17
         run: |
+          mkdir -p /tmp/verify-std
+          : > /tmp/verify-std/head_failures.txt
           set +e
-          FAILED=0
           TOTAL=0
-          # Use find so this works even if no files match a given glob
-          # (avoids literal "std/**/*.mm" being passed to the compiler).
+          FAILED=0
           while IFS= read -r f; do
             TOTAL=$((TOTAL + 1))
-            echo "::group::Verifying $f"
+            echo "::group::[head] Verifying $f"
             if ./target/release/mumei verify "$f"; then
               echo "OK: $f"
             else
-              echo "::error file=$f::Verification failed"
+              echo "::warning file=$f::Verification failed on PR head"
+              echo "$f" >> /tmp/verify-std/head_failures.txt
               FAILED=$((FAILED + 1))
             fi
             echo "::endgroup::"
           done < <(find std -type f -name '*.mm' | sort)
-          echo "Verified $((TOTAL - FAILED))/$TOTAL std module(s)"
-          if [ $FAILED -gt 0 ]; then
-            echo "::error::$FAILED std module(s) failed verification"
+          sort -u -o /tmp/verify-std/head_failures.txt /tmp/verify-std/head_failures.txt
+          echo "[head] $((TOTAL - FAILED))/$TOTAL verified"
+
+      - name: Check out PR base worktree
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -eux
+          # For pull_request events, actions/checkout already fetched the
+          # base branch under origin/<base>. For workflow_dispatch we fall
+          # back to the current commit (base == head) so the diff is empty.
+          if [ -n "${BASE_REF:-}" ] && git rev-parse --verify "origin/${BASE_REF}" >/dev/null 2>&1; then
+            # Move std/ and the compiler workspace back to the base ref
+            # without switching branches (keeps target/ intact so the next
+            # `cargo build` is incremental rather than a full rebuild).
+            PATHS=(std Cargo.toml Cargo.lock)
+            for d in mumei-core src; do
+              [ -e "$d" ] && PATHS+=("$d")
+            done
+            for d in mumei-emit-*; do
+              [ -e "$d" ] && PATHS+=("$d")
+            done
+            git checkout "origin/${BASE_REF}" -- "${PATHS[@]}"
+          else
+            echo "No base ref available; skipping baseline (baseline == head)."
+          fi
+
+      - name: Rebuild mumei (PR base)
+        env:
+          LLVM_SYS_170_PREFIX: /usr/lib/llvm-17
+        run: cargo build --release
+
+      - name: Verify std on PR base
+        env:
+          LLVM_SYS_170_PREFIX: /usr/lib/llvm-17
+        run: |
+          : > /tmp/verify-std/base_failures.txt
+          set +e
+          TOTAL=0
+          FAILED=0
+          while IFS= read -r f; do
+            TOTAL=$((TOTAL + 1))
+            echo "::group::[base] Verifying $f"
+            if ./target/release/mumei verify "$f"; then
+              echo "OK: $f"
+            else
+              echo "$f" >> /tmp/verify-std/base_failures.txt
+              FAILED=$((FAILED + 1))
+            fi
+            echo "::endgroup::"
+          done < <(find std -type f -name '*.mm' | sort)
+          sort -u -o /tmp/verify-std/base_failures.txt /tmp/verify-std/base_failures.txt
+          echo "[base] $((TOTAL - FAILED))/$TOTAL verified"
+
+      - name: Compute regression diff
+        id: regression
+        run: |
+          mkdir -p /tmp/verify-std
+          touch /tmp/verify-std/head_failures.txt /tmp/verify-std/base_failures.txt
+          # New failures = on head but not on base.
+          comm -23 /tmp/verify-std/head_failures.txt /tmp/verify-std/base_failures.txt \
+            > /tmp/verify-std/new_failures.txt || true
+          # Fixed modules = on base but not on head (informational).
+          comm -13 /tmp/verify-std/head_failures.txt /tmp/verify-std/base_failures.txt \
+            > /tmp/verify-std/fixed_modules.txt || true
+          NEW_COUNT=$(wc -l < /tmp/verify-std/new_failures.txt | tr -d ' ')
+          BASE_COUNT=$(wc -l < /tmp/verify-std/base_failures.txt | tr -d ' ')
+          HEAD_COUNT=$(wc -l < /tmp/verify-std/head_failures.txt | tr -d ' ')
+          FIXED_COUNT=$(wc -l < /tmp/verify-std/fixed_modules.txt | tr -d ' ')
+          echo "Pre-existing failures on base: $BASE_COUNT"
+          echo "Total failures on head:        $HEAD_COUNT"
+          echo "Newly failing on this PR:      $NEW_COUNT"
+          echo "Newly passing on this PR:      $FIXED_COUNT"
+          echo ""
+          if [ "$BASE_COUNT" != "0" ]; then
+            echo "--- Pre-existing failures (ignored) ---"
+            sed 's/^/  /' /tmp/verify-std/base_failures.txt
+          fi
+          if [ "$FIXED_COUNT" != "0" ]; then
+            echo "--- Newly passing (nice!) ---"
+            sed 's/^/  /' /tmp/verify-std/fixed_modules.txt
+          fi
+          if [ "$NEW_COUNT" != "0" ]; then
+            echo "--- Newly failing (blocking) ---"
+            while IFS= read -r f; do
+              [ -z "$f" ] && continue
+              echo "::error file=$f::This PR introduces a new verification failure"
+              echo "  $f"
+            done < /tmp/verify-std/new_failures.txt
+            echo "::error::$NEW_COUNT std module(s) regressed on this PR"
             exit 1
           fi
+          echo "No verification regressions."
+
+      - name: Upload verify-std report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verify-std-report
+          path: |
+            /tmp/verify-std/head_failures.txt
+            /tmp/verify-std/base_failures.txt
+            /tmp/verify-std/new_failures.txt
+            /tmp/verify-std/fixed_modules.txt
