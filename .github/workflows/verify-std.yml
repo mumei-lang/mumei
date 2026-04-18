@@ -135,13 +135,15 @@ jobs:
               fi
             done
             if [ ${#PATHS[@]} -gt 0 ]; then
+              # Delete std/ before restoring from base so that files added
+              # by the PR are completely removed.  `git checkout <tree> --
+              # std` only adds/overwrites entries present in the tree-ish;
+              # it does NOT remove index entries for PR-added files, so
+              # those would remain tracked and `git clean` would skip them.
+              # A clean rm + checkout guarantees the working tree and index
+              # match the base ref exactly for std/.
+              rm -rf std/
               git checkout "origin/${BASE_REF}" -- "${PATHS[@]}"
-              # Remove files that were added by the PR but don't exist at
-              # the base ref.  Without this, newly added .mm files persist
-              # into the base verification pass and appear in both
-              # head_failures.txt and base_failures.txt, causing comm -23
-              # to treat them as "pre-existing" rather than regressions.
-              git clean -fd std/
               # Remove PR-only mumei-emit-* crates so they don't affect
               # the base compiler build.
               for d in "${PR_ONLY_EMIT[@]}"; do
