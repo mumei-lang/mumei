@@ -27,6 +27,13 @@ if str(REPO_ROOT) not in sys.path:
 # Lazy-import helpers from mcp_server to avoid triggering FastMCP
 # initialisation (and requiring the `mcp` package) at module scope.
 # The actual import happens inside generate() where the helpers are needed.
+#
+# TODO: Extract the pure graph-analysis helpers (_scan_std_imports,
+#       _collect_trusted_atoms, _count_atoms_per_file, _render_std_graph_*,
+#       _trusted_by_file_counts) into a shared module (e.g. std_graph_lib.py)
+#       that does NOT depend on FastMCP.  Both mcp_server.py and this script
+#       would then import from that module, eliminating the tight coupling to
+#       mcp_server internals and the need for the lazy-import workaround.
 _mcp_helpers = None
 
 
