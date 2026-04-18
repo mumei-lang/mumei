@@ -72,7 +72,7 @@ jobs:
               # Install musl-native build dependencies
               apk add --no-cache \
                 gcc g++ musl-dev make cmake pkgconf \
-                llvm17-dev llvm17-static clang17-dev \
+                llvm17-dev llvm17-static clang17-dev clang17-static \
                 z3-dev \
                 curl bash perl linux-headers \
                 libffi-dev zlib-dev zlib-static \
@@ -88,6 +88,9 @@ jobs:
               # Point llvm-sys / z3-sys at Alpine packages
               export LLVM_SYS_170_PREFIX=/usr/lib/llvm17
               export LIBCLANG_PATH=/usr/lib/llvm17/lib
+              # Use static libclang so that bindgen does not need dlopen
+              # (musl static binaries do not support dynamic loading).
+              export LIBCLANG_STATIC=1
 
               # Build fully-static musl binary
               # Use --features z3/static-link-z3 to build Z3 from source with
@@ -205,6 +208,11 @@ jobs:
             exit 1
           }
           echo "Z3_SYS_Z3_LIB_DIR=$z3LibDir" >> $env:GITHUB_ENV
+          # z3-sys does not emit cargo:rustc-link-search for the Z3 lib
+          # directory in non-static mode; add it to the linker search path
+          # so the MSVC linker can find libz3.lib.
+          $currentLib = if ($env:LIB) { $env:LIB } else { "" }
+          echo "LIB=$z3LibDir;$currentLib" >> $env:GITHUB_ENV
           # Save z3Root for later DLL copy step
           echo "Z3_ROOT=$z3Root" >> $env:GITHUB_ENV
       - name: Build release binary
@@ -217,12 +225,45 @@ jobs:
           file target/${{ matrix.target }}/release/mumei
           # Should report "statically linked" or "not a dynamic executable"
           ldd target/${{ matrix.target }}/release/mumei 2>&1 || true
+      # SI-5 Phase 3-C: generate per-module proof certificates so downstream
+      # consumers (homebrew-mumei, vetted imports) can verify std atoms
+      # against a tagged, versioned certificate bundle.  Failures are
+      # tolerated per-file — a broken module should not block the release.
+      - name: Generate std/ proof certificates (Unix)
+        if: runner.os != 'Windows' && !contains(matrix.target, 'musl')
+        run: |
+          mkdir -p std/certs
+          find std -type f -name '*.mm' -print0 | while IFS= read -r -d '' f; do
+            rel="${f#std/}"
+            stem="${rel%.mm}"
+            outdir="std/certs/$(dirname "$stem")"
+            mkdir -p "$outdir"
+            out="std/certs/${stem}.proof.json"
+            ./target/${{ matrix.target }}/release/mumei verify --proof-cert \
+              --output "$out" "$f" \
+              || echo "::warning::verify failed for $f (continuing)"
+          done
+      - name: Bundle std/ proof certificates (Unix)
+        if: runner.os != 'Windows' && !contains(matrix.target, 'musl')
+        run: |
+          python3 scripts/bundle_std_certs.py \
+            --certs-dir std/certs \
+            --output std-proof-bundle.json \
+            --mumei-version "${GITHUB_REF_NAME#v}"
       - name: Package binary + std library (Unix)
         if: runner.os != 'Windows'
         run: |
           mkdir -p release-pkg/std
           cp target/${{ matrix.target }}/release/mumei release-pkg/
-          cp -r std/* release-pkg/std/
+          # Copy std/ but exclude certs/ — raw per-module .proof.json files
+          # are intermediate artefacts; the aggregated std-proof-bundle.json
+          # (copied below) is the only certificate consumers need.
+          rsync -a --exclude='certs' std/ release-pkg/std/
+          # SI-5 Phase 3-C: include the proof bundle in every Unix tarball
+          # (when present — musl & Alpine targets don't run the cert step).
+          if [ -f std-proof-bundle.json ]; then
+            cp std-proof-bundle.json release-pkg/
+          fi
           cd release-pkg
           tar czf ../${{ matrix.name }}.tar.gz .
       # Plan 7: Windows packaging uses .zip instead of .tar.gz
@@ -232,7 +273,12 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path release-pkg/std
           Copy-Item "target/${{ matrix.target }}/release/mumei.exe" "release-pkg/"
+          # Copy std/ but exclude certs/ (intermediate proof artefacts) to
+          # match Unix packaging which uses rsync --exclude='certs'.
           Copy-Item -Recurse "std/*" "release-pkg/std/"
+          if (Test-Path "release-pkg/std/certs") {
+            Remove-Item -Recurse -Force "release-pkg/std/certs"
+          }
           # Include libz3.dll so the binary can find it at runtime
           $z3Bin = "$env:Z3_ROOT\bin\libz3.dll"
           if (Test-Path $z3Bin) {
@@ -494,9 +540,21 @@ jobs:
               bin.install "mumei"
               (share/"mumei/std").install Dir["std/*"]
 
-              env_script = <<~EOS
-                export MUMEI_STD_PATH="#{share}/mumei/std"
-              EOS
+              # SI-5 Phase 3-C: install the std/ proof-certificate bundle when
+              # it ships with the release archive so downstream projects can
+              # verify imports against a trusted, versioned certificate set.
+              has_proof_bundle = File.exist?("std-proof-bundle.json")
+              if has_proof_bundle
+                (share/"mumei").install "std-proof-bundle.json"
+              end
+
+              # Only export MUMEI_PROOF_BUNDLE when the bundle was actually
+              # installed (musl / Alpine targets don't ship one).
+              env_lines = ["export MUMEI_STD_PATH=\"#{share}/mumei/std\""]
+              if has_proof_bundle
+                env_lines << "export MUMEI_PROOF_BUNDLE=\"#{share}/mumei/std-proof-bundle.json\""
+              end
+              env_script = env_lines.join("\n") + "\n"
               (etc/"mumei").mkpath
               (etc/"mumei/env.sh").write env_script
             end

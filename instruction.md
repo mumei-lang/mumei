@@ -215,6 +215,7 @@ Mumei caches verification results per-atom in `.mumei/cache/verification_cache.j
 | `docs/FFI.md` | FFI extern block design, implementation status, and bridge completion plan |
 | `docs/CONCURRENCY.md` | Structured concurrency (task/task_group) design, implementation status, and std.http integration plan |
 | `docs/TOOLCHAIN.md` | CLI commands, distribution, and future roadmap (3 priorities) |
+| `docs/PATTERNS.md` | Verification patterns — Verified Configuration, Verified State Machine |
 | `instruction.md` | This file — forging guidelines, development phase, coding conventions |
 
 ---

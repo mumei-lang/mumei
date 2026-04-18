@@ -1,0 +1,263 @@
+name: Verify Standard Library
+
+# SI-5 Phase 3-B — regression-diff verification gate for std/ changes.
+#
+# Every PR that touches std/ (or the compiler) re-verifies the entire
+# standard library.  Rather than failing whenever *any* std/*.mm fails
+# verification (which would permanently block PRs whenever develop has
+# pre-existing failing modules), we compare the failure set of the PR
+# head against the failure set of the PR base and fail only when the
+# PR introduces *new* verification failures.
+#
+# Flow:
+#   1. Build the mumei compiler once on the PR head.
+#   2. Run `mumei verify` against every std/**/*.mm on the PR head and
+#      record the failure set as /tmp/verify-std/head_failures.txt.
+#   3. Switch the working tree to the PR base (git checkout origin/<base>
+#      -- std), rebuild only if compiler sources changed, and rerun
+#      `mumei verify` to record the baseline failure set as
+#      /tmp/verify-std/base_failures.txt.
+#   4. `comm -23 head_failures.txt base_failures.txt` yields the newly
+#      failing modules; if non-empty, fail the job.
+#
+# This matches the "don't regress already-green proofs" contract that
+# SI-5 Autonomous Proliferation promises: pre-existing red modules
+# stay red without blocking iteration, while any new red module the
+# PR introduces blocks merge.
+
+on:
+  pull_request:
+    paths:
+      - 'std/**'
+      - 'mumei-core/**'
+      - 'mumei-emit-**/**'
+      - 'src/**'
+      - 'Cargo.toml'
+      - '.github/workflows/verify-std.yml'
+  workflow_dispatch:
+
+jobs:
+  verify-std:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libz3-dev z3 libzstd-dev
+          # Use the signed-by pattern (apt-key is deprecated on Ubuntu 22.04+).
+          # Matches release.yml for consistency.
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
+          codename=$(lsb_release -cs)
+          echo "deb http://apt.llvm.org/${codename}/ llvm-toolchain-${codename}-17 main" \
+            | sudo tee /etc/apt/sources.list.d/llvm-17.list > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y llvm-17-dev libclang-17-dev libpolly-17-dev
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-verify-std-${{ hashFiles('Cargo.toml', '**/Cargo.toml') }}
+          restore-keys: |
+            cargo-verify-std-
+
+      - name: Build mumei (PR head)
+        env:
+          LLVM_SYS_170_PREFIX: /usr/lib/llvm-17
+          LIBCLANG_PATH: /usr/lib/llvm-17/lib
+        run: cargo build --release
+
+      - name: Verify std on PR head
+        env:
+          LLVM_SYS_170_PREFIX: /usr/lib/llvm-17
+          LIBCLANG_PATH: /usr/lib/llvm-17/lib
+        run: |
+          mkdir -p /tmp/verify-std
+          : > /tmp/verify-std/head_failures.txt
+          set +e
+          TOTAL=0
+          FAILED=0
+          while IFS= read -r f; do
+            TOTAL=$((TOTAL + 1))
+            echo "::group::[head] Verifying $f"
+            if ./target/release/mumei verify "$f"; then
+              echo "OK: $f"
+            else
+              echo "::warning file=$f::Verification failed on PR head"
+              echo "$f" >> /tmp/verify-std/head_failures.txt
+              FAILED=$((FAILED + 1))
+            fi
+            echo "::endgroup::"
+          done < <(find std -type f -name '*.mm' | sort)
+          set -e
+          sort -u -o /tmp/verify-std/head_failures.txt /tmp/verify-std/head_failures.txt
+          echo "[head] $((TOTAL - FAILED))/$TOTAL verified"
+
+      - name: Check out PR base worktree
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -eux
+          # For pull_request events, actions/checkout already fetched the
+          # base branch under origin/<base>. For workflow_dispatch we fall
+          # back to the current commit (base == head) so the diff is empty.
+          if [ -n "${BASE_REF:-}" ] && git rev-parse --verify "origin/${BASE_REF}" >/dev/null 2>&1; then
+            # Move std/ and the compiler workspace back to the base ref
+            # without switching branches (keeps target/ intact so the next
+            # `cargo build` is incremental rather than a full rebuild).
+            # Only include paths that exist at the base ref — Cargo.lock
+            # is gitignored in this repo, for instance, so it must never
+            # be named in `git checkout --`.
+            PATHS=()
+            for p in std Cargo.toml mumei-core src; do
+              if git cat-file -e "origin/${BASE_REF}:${p}" 2>/dev/null; then
+                PATHS+=("$p")
+              fi
+            done
+            # Discover mumei-emit-* dirs present in the working tree (PR head)
+            # that also exist on base → restore them.
+            for d in mumei-emit-*; do
+              [ -e "$d" ] || continue
+              if git cat-file -e "origin/${BASE_REF}:${d}" 2>/dev/null; then
+                PATHS+=("$d")
+              fi
+            done
+            # Discover mumei-emit-* dirs that exist ONLY on base (PR deleted
+            # them).  Without this, `cargo build` on the base Cargo.toml
+            # fails because it references a workspace member that is missing.
+            for p in $(git ls-tree --name-only "origin/${BASE_REF}" | grep '^mumei-emit-'); do
+              if [ ! -e "$p" ]; then
+                PATHS+=("$p")
+              fi
+            done
+            # Note which mumei-emit-* dirs are PR-only (not on base)
+            # so we can clean them after checkout.
+            PR_ONLY_EMIT=()
+            for d in mumei-emit-*; do
+              [ -e "$d" ] || continue
+              if ! git cat-file -e "origin/${BASE_REF}:${d}" 2>/dev/null; then
+                PR_ONLY_EMIT+=("$d")
+              fi
+            done
+            if [ ${#PATHS[@]} -gt 0 ]; then
+              # Delete std/ before restoring from base so that files added
+              # by the PR are completely removed.  `git checkout <tree> --
+              # std` only adds/overwrites entries present in the tree-ish;
+              # it does NOT remove index entries for PR-added files, so
+              # those would remain tracked and `git clean` would skip them.
+              # A clean rm + checkout guarantees the working tree and index
+              # match the base ref exactly for std/.
+              rm -rf std/
+              git checkout "origin/${BASE_REF}" -- "${PATHS[@]}"
+              # Remove PR-only mumei-emit-* crates so they don't affect
+              # the base compiler build.
+              for d in "${PR_ONLY_EMIT[@]}"; do
+                rm -rf "$d"
+              done
+            else
+              echo "No base-ref paths to restore."
+            fi
+          else
+            echo "No base ref available; skipping baseline (baseline == head)."
+            echo "SKIP_BASE=true" >> "$GITHUB_ENV"
+          fi
+
+      - name: Rebuild mumei (PR base)
+        if: env.SKIP_BASE != 'true'
+        env:
+          LLVM_SYS_170_PREFIX: /usr/lib/llvm-17
+          LIBCLANG_PATH: /usr/lib/llvm-17/lib
+        run: cargo build --release
+
+      - name: Verify std on PR base
+        if: env.SKIP_BASE != 'true'
+        env:
+          LLVM_SYS_170_PREFIX: /usr/lib/llvm-17
+          LIBCLANG_PATH: /usr/lib/llvm-17/lib
+        run: |
+          : > /tmp/verify-std/base_failures.txt
+          set +e
+          TOTAL=0
+          FAILED=0
+          while IFS= read -r f; do
+            TOTAL=$((TOTAL + 1))
+            echo "::group::[base] Verifying $f"
+            if ./target/release/mumei verify "$f"; then
+              echo "OK: $f"
+            else
+              echo "$f" >> /tmp/verify-std/base_failures.txt
+              FAILED=$((FAILED + 1))
+            fi
+            echo "::endgroup::"
+          done < <(find std -type f -name '*.mm' | sort)
+          set -e
+          sort -u -o /tmp/verify-std/base_failures.txt /tmp/verify-std/base_failures.txt
+          echo "[base] $((TOTAL - FAILED))/$TOTAL verified"
+
+      - name: Copy head failures as base (workflow_dispatch)
+        if: env.SKIP_BASE == 'true'
+        run: |
+          # When there is no base ref (workflow_dispatch), baseline == head
+          # so the diff is always empty.
+          cp /tmp/verify-std/head_failures.txt /tmp/verify-std/base_failures.txt
+
+      - name: Compute regression diff
+        id: regression
+        run: |
+          mkdir -p /tmp/verify-std
+          touch /tmp/verify-std/head_failures.txt /tmp/verify-std/base_failures.txt
+          # New failures = on head but not on base.
+          comm -23 /tmp/verify-std/head_failures.txt /tmp/verify-std/base_failures.txt \
+            > /tmp/verify-std/new_failures.txt || true
+          # Fixed modules = on base but not on head (informational).
+          comm -13 /tmp/verify-std/head_failures.txt /tmp/verify-std/base_failures.txt \
+            > /tmp/verify-std/fixed_modules.txt || true
+          NEW_COUNT=$(wc -l < /tmp/verify-std/new_failures.txt | tr -d ' ')
+          BASE_COUNT=$(wc -l < /tmp/verify-std/base_failures.txt | tr -d ' ')
+          HEAD_COUNT=$(wc -l < /tmp/verify-std/head_failures.txt | tr -d ' ')
+          FIXED_COUNT=$(wc -l < /tmp/verify-std/fixed_modules.txt | tr -d ' ')
+          echo "Pre-existing failures on base: $BASE_COUNT"
+          echo "Total failures on head:        $HEAD_COUNT"
+          echo "Newly failing on this PR:      $NEW_COUNT"
+          echo "Newly passing on this PR:      $FIXED_COUNT"
+          echo ""
+          if [ "$BASE_COUNT" != "0" ]; then
+            echo "--- Pre-existing failures (ignored) ---"
+            sed 's/^/  /' /tmp/verify-std/base_failures.txt
+          fi
+          if [ "$FIXED_COUNT" != "0" ]; then
+            echo "--- Newly passing (nice!) ---"
+            sed 's/^/  /' /tmp/verify-std/fixed_modules.txt
+          fi
+          if [ "$NEW_COUNT" != "0" ]; then
+            echo "--- Newly failing (blocking) ---"
+            while IFS= read -r f; do
+              [ -z "$f" ] && continue
+              echo "::error file=$f::This PR introduces a new verification failure"
+              echo "  $f"
+            done < /tmp/verify-std/new_failures.txt
+            echo "::error::$NEW_COUNT std module(s) regressed on this PR"
+            exit 1
+          fi
+          echo "No verification regressions."
+
+      - name: Upload verify-std report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verify-std-report
+          path: |
+            /tmp/verify-std/head_failures.txt
+            /tmp/verify-std/base_failures.txt
+            /tmp/verify-std/new_failures.txt
+            /tmp/verify-std/fixed_modules.txt

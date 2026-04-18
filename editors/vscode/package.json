@@ -3,7 +3,18 @@
   "displayName": "Mumei Language",
   "description": "Language support for Mumei (.mm) — formally verified programming language with Z3",
   "version": "0.1.0",
-  "publisher": "mumei",
+  "license": "Apache-2.0",
+  "publisher": "mumei-lang",
+  "icon": "icon.png",
+  "keywords": ["mumei", "formal-verification", "z3", "proof", "language"],
+  "galleryBanner": {
+    "color": "#1e1e1e",
+    "theme": "dark"
+  },
+  "bugs": {
+    "url": "https://github.com/mumei-lang/mumei/issues"
+  },
+  "homepage": "https://github.com/mumei-lang/mumei",
   "repository": {
     "type": "git",
     "url": "https://github.com/mumei-lang/mumei"
@@ -11,7 +22,7 @@
   "engines": {
     "vscode": "^1.80.0"
   },
-  "categories": ["Programming Languages"],
+  "categories": ["Programming Languages", "Linters"],
   "activationEvents": [
     "onLanguage:mumei"
   ],
@@ -23,6 +34,13 @@
         "aliases": ["Mumei", "mumei"],
         "extensions": [".mm"],
         "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "mumei",
+        "scopeName": "source.mumei",
+        "path": "./syntaxes/mumei.tmLanguage.json"
       }
     ],
     "configuration": {
@@ -42,8 +60,7 @@
   },
   "devDependencies": {
     "@types/vscode": "^1.80.0",
-    "typescript": "^5.0.0",
-    "vscode-languageclient": "^9.0.1"
+    "typescript": "^5.0.0"
   },
   "dependencies": {
     "vscode-languageclient": "^9.0.1"
