@@ -255,7 +255,10 @@ jobs:
         run: |
           mkdir -p release-pkg/std
           cp target/${{ matrix.target }}/release/mumei release-pkg/
-          cp -r std/* release-pkg/std/
+          # Copy std/ but exclude certs/ — raw per-module .proof.json files
+          # are intermediate artefacts; the aggregated std-proof-bundle.json
+          # (copied below) is the only certificate consumers need.
+          rsync -a --exclude='certs' std/ release-pkg/std/
           # SI-5 Phase 3-C: include the proof bundle in every Unix tarball
           # (when present — musl & Alpine targets don't run the cert step).
           if [ -f std-proof-bundle.json ]; then

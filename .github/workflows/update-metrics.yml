@@ -62,4 +62,7 @@ jobs:
             exit 0
           fi
           git commit -m "docs(std): auto-update STDLIB_METRICS.md"
+          # Pull with rebase first — another workflow in the same
+          # concurrency group may have pushed since our checkout.
+          git pull --rebase origin "${GITHUB_REF_NAME}" || true
           git push origin HEAD:${GITHUB_REF_NAME}
