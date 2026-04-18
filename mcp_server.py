@@ -1070,7 +1070,7 @@ def _compute_weighted_score(
     dependency_graph: dict,
     trusted_atoms: list,
 ) -> float:
-    """Compute a weighted priority score for a proposal in [~0.0, ~1.0]."""
+    """Compute a weighted priority score for a proposal in [~-0.09, ~0.85]."""
 
     # --- Axis 1: Usage demand --------------------------------------------------
     deps = proposal.get("depends_on", []) or []

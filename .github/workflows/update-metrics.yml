@@ -49,7 +49,7 @@ jobs:
       - name: Regenerate STDLIB_METRICS.md
         run: |
           ./target/release/mumei --version || true
-          python scripts/generate_stdlib_metrics.py \
+          python3 scripts/generate_stdlib_metrics.py \
             --mumei-bin ./target/release/mumei \
             --output docs/STDLIB_METRICS.md
       - name: Commit updated metrics
