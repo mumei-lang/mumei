@@ -13,14 +13,6 @@ on:
       - 'scripts/generate_stdlib_metrics.py'
   workflow_dispatch:
 
-# Shared concurrency group with generate-std-certs.yml — both workflows
-# commit+push back to the branch, so they must not run in parallel.
-# git pull --rebase before push (see below) picks up any commits the
-# other workflow pushed while this one was building.
-concurrency:
-  group: std-auto-commit-${{ github.ref }}
-  cancel-in-progress: false
-
 permissions:
   contents: write
 
@@ -64,7 +56,7 @@ jobs:
             exit 0
           fi
           git commit -m "docs(std): auto-update STDLIB_METRICS.md"
-          # Pull with rebase first — another workflow in the same
-          # concurrency group may have pushed since our checkout.
+          # Pull with rebase in case the branch moved since checkout
+          # (e.g. a concurrent manual push).
           git pull --rebase origin "${GITHUB_REF_NAME}" || true
           git push origin HEAD:${GITHUB_REF_NAME}

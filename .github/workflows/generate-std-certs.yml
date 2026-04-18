@@ -1,9 +1,13 @@
 name: Generate std/ Proof Certificates
 
 # SI-5 Phase 3-C: Generate a per-module proof certificate (.proof.json) for
-# every file under std/ and commit them to std/certs/. These certificates
+# every file under std/ and upload them as a CI artifact. These certificates
 # are later fanned-in to a single std-proof-bundle.json by
 # scripts/bundle_std_certs.py and distributed via homebrew-mumei.
+#
+# std/certs/ is in .gitignore — raw per-module certs are intermediate
+# artefacts and are NOT committed to the repo. The artifact upload is the
+# sole distribution mechanism from this workflow.
 on:
   push:
     branches: [develop]
@@ -11,16 +15,8 @@ on:
       - 'std/**'
   workflow_dispatch:
 
-# Both generate-std-certs and update-metrics push back to the branch.
-# A shared concurrency group serializes the runs so they don't overlap;
-# git pull --rebase before push (see below) handles the case where the
-# second workflow checked out a stale commit.
-concurrency:
-  group: std-auto-commit-${{ github.ref }}
-  cancel-in-progress: false
-
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   generate-certs:
@@ -66,17 +62,3 @@ jobs:
         with:
           name: std-proof-certs
           path: std/certs/
-      - name: Commit certificates
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add std/certs/
-          if git diff --cached --quiet; then
-            echo "No certificate changes"
-            exit 0
-          fi
-          git commit -m "chore(std): update proof certificates"
-          # Pull with rebase first — another workflow in the same
-          # concurrency group may have pushed since our checkout.
-          git pull --rebase origin "${GITHUB_REF_NAME}" || true
-          git push origin HEAD:${GITHUB_REF_NAME}

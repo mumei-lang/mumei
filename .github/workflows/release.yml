@@ -273,7 +273,12 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path release-pkg/std
           Copy-Item "target/${{ matrix.target }}/release/mumei.exe" "release-pkg/"
+          # Copy std/ but exclude certs/ (intermediate proof artefacts) to
+          # match Unix packaging which uses rsync --exclude='certs'.
           Copy-Item -Recurse "std/*" "release-pkg/std/"
+          if (Test-Path "release-pkg/std/certs") {
+            Remove-Item -Recurse -Force "release-pkg/std/certs"
+          }
           # Include libz3.dll so the binary can find it at runtime
           $z3Bin = "$env:Z3_ROOT\bin\libz3.dll"
           if (Test-Path $z3Bin) {
@@ -538,14 +543,18 @@ jobs:
               # SI-5 Phase 3-C: install the std/ proof-certificate bundle when
               # it ships with the release archive so downstream projects can
               # verify imports against a trusted, versioned certificate set.
-              if File.exist?("std-proof-bundle.json")
+              has_proof_bundle = File.exist?("std-proof-bundle.json")
+              if has_proof_bundle
                 (share/"mumei").install "std-proof-bundle.json"
               end
 
-              env_script = <<~EOS
-                export MUMEI_STD_PATH="#{share}/mumei/std"
-                export MUMEI_PROOF_BUNDLE="#{share}/mumei/std-proof-bundle.json"
-              EOS
+              # Only export MUMEI_PROOF_BUNDLE when the bundle was actually
+              # installed (musl / Alpine targets don't ship one).
+              env_lines = ["export MUMEI_STD_PATH=\"#{share}/mumei/std\""]
+              if has_proof_bundle
+                env_lines << "export MUMEI_PROOF_BUNDLE=\"#{share}/mumei/std-proof-bundle.json\""
+              end
+              env_script = env_lines.join("\n") + "\n"
               (etc/"mumei").mkpath
               (etc/"mumei/env.sh").write env_script
             end

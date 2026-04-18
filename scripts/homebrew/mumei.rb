@@ -52,15 +52,19 @@ class Mumei < Formula
     (share/"mumei/std").install Dir["std/*"]
 
     # SI-5 Phase 3-C: install std/ proof-certificate bundle when present
-    if File.exist?("std-proof-bundle.json")
+    has_proof_bundle = File.exist?("std-proof-bundle.json")
+    if has_proof_bundle
       (share/"mumei").install "std-proof-bundle.json"
     end
 
-    # Set MUMEI_STD_PATH so mumei can find the standard library
-    env_script = <<~EOS
-      export MUMEI_STD_PATH="#{share}/mumei/std"
-      export MUMEI_PROOF_BUNDLE="#{share}/mumei/std-proof-bundle.json"
-    EOS
+    # Set MUMEI_STD_PATH so mumei can find the standard library.
+    # Only export MUMEI_PROOF_BUNDLE when the bundle was actually installed
+    # (musl / Alpine targets don't ship one).
+    env_lines = ["export MUMEI_STD_PATH=\"#{share}/mumei/std\""]
+    if has_proof_bundle
+      env_lines << "export MUMEI_PROOF_BUNDLE=\"#{share}/mumei/std-proof-bundle.json\""
+    end
+    env_script = env_lines.join("\n") + "\n"
     (etc/"mumei").mkpath
     (etc/"mumei/env.sh").write env_script
   end
