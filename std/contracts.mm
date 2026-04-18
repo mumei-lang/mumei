@@ -105,8 +105,7 @@ atom safe_modulo(a: i64, b: i64)
     requires: b > 0;
     ensures: result >= 0;
     body: {
-        let r = a - (a / b) * b;
-        if r >= 0 { r } else { r + b }
+        if a - (a / b) * b >= 0 { a - (a / b) * b } else { a - (a / b) * b + b }
     };
 
 // 安全な減算（結果が非負であることを保証）

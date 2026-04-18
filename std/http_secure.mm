@@ -47,7 +47,7 @@ effect SecureHttpDelete(url: Str) where starts_with(url, "https://");
 // =============================================================
 
 // HTTPS GET リクエストを送信し、レスポンスハンドルを返す。
-atom secure_get(url: Str)
+trusted atom secure_get(url: Str)
     effects: [SecureHttpGet(url)]
     requires: starts_with(url, "https://");
     ensures: result >= 0;
@@ -57,7 +57,7 @@ atom secure_get(url: Str)
     }
 
 // HTTPS POST リクエストを送信し、レスポンスハンドルを返す。
-atom secure_post(url: Str, body: Str)
+trusted atom secure_post(url: Str, body: Str)
     effects: [SecureHttpPost(url)]
     requires: starts_with(url, "https://");
     ensures: result >= 0;
@@ -67,7 +67,7 @@ atom secure_post(url: Str, body: Str)
     }
 
 // HTTPS PUT リクエストを送信し、レスポンスハンドルを返す。
-atom secure_put(url: Str, body: Str)
+trusted atom secure_put(url: Str, body: Str)
     effects: [SecureHttpPut(url)]
     requires: starts_with(url, "https://");
     ensures: result >= 0;
@@ -77,7 +77,7 @@ atom secure_put(url: Str, body: Str)
     }
 
 // HTTPS DELETE リクエストを送信し、レスポンスハンドルを返す。
-atom secure_delete(url: Str)
+trusted atom secure_delete(url: Str)
     effects: [SecureHttpDelete(url)]
     requires: starts_with(url, "https://");
     ensures: result >= 0;
@@ -91,7 +91,7 @@ atom secure_delete(url: Str)
 // =============================================================
 
 // レスポンスの HTTP ステータスコードを取得
-atom status(handle: i64)
+trusted atom status(handle: i64)
     requires: handle >= 0;
     ensures: result >= 0;
     body: {
@@ -99,7 +99,7 @@ atom status(handle: i64)
     }
 
 // レスポンスボディを Str として取得
-atom body(handle: i64)
+trusted atom body(handle: i64)
     requires: handle >= 0;
     ensures: true;
     body: {
@@ -107,7 +107,7 @@ atom body(handle: i64)
     }
 
 // レスポンスが成功（2xx）かどうかを判定（0=false, 1=true）
-atom is_ok(handle: i64)
+trusted atom is_ok(handle: i64)
     requires: handle >= 0;
     ensures: result >= 0 && result <= 1;
     body: {
@@ -119,7 +119,7 @@ atom is_ok(handle: i64)
 // =============================================================
 
 // HTTP レスポンスハンドルを解放する（1=成功, 0=無効なハンドル）
-atom free(handle: i64)
+trusted atom free(handle: i64)
     requires: handle >= 0;
     ensures: result >= 0 && result <= 1;
     body: {
