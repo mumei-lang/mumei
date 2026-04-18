@@ -24,15 +24,48 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-# Importing at module scope after sys.path manipulation is intentional.
-from mcp_server import (  # noqa: E402  (path setup must precede import)
-    _collect_trusted_atoms,
-    _count_atoms_per_file,
-    _render_std_graph_dot,
-    _render_std_graph_mermaid,
-    _scan_std_imports,
-    _trusted_by_file_counts,
-)
+# Lazy-import helpers from mcp_server to avoid triggering FastMCP
+# initialisation (and requiring the `mcp` package) at module scope.
+# The actual import happens inside generate() where the helpers are needed.
+_mcp_helpers = None
+
+
+def _get_helpers():
+    """Lazy-import graph helpers from mcp_server.
+
+    Deferred so that ``from mcp_server import …`` (which executes
+    ``mcp = FastMCP(…)`` at module scope) only runs when the helpers
+    are actually needed — not at import time of *this* module.  This
+    lets CI environments that lack the ``mcp`` package still import
+    ``generate_graph`` for testing without an immediate ImportError.
+    """
+    global _mcp_helpers
+    if _mcp_helpers is not None:
+        return _mcp_helpers
+    try:
+        from mcp_server import (  # noqa: E402
+            _collect_trusted_atoms,
+            _count_atoms_per_file,
+            _render_std_graph_dot,
+            _render_std_graph_mermaid,
+            _scan_std_imports,
+            _trusted_by_file_counts,
+        )
+    except ImportError as exc:
+        raise ImportError(
+            "Failed to import mcp_server helpers. "
+            "Ensure the `mcp` package is installed "
+            "(pip install -r requirements-mcp.txt)."
+        ) from exc
+    _mcp_helpers = {
+        "scan_std_imports": _scan_std_imports,
+        "collect_trusted_atoms": _collect_trusted_atoms,
+        "trusted_by_file_counts": _trusted_by_file_counts,
+        "count_atoms_per_file": _count_atoms_per_file,
+        "render_mermaid": _render_std_graph_mermaid,
+        "render_dot": _render_std_graph_dot,
+    }
+    return _mcp_helpers
 
 
 def _build_markdown(mermaid_source: str) -> str:
@@ -67,21 +100,22 @@ def generate(
     if not std_dir.exists():
         raise FileNotFoundError(f"std directory not found: {std_dir}")
 
-    dependency_graph = _scan_std_imports(std_dir)
-    trusted_atoms = _collect_trusted_atoms(std_dir)
-    trusted_by_file = _trusted_by_file_counts(trusted_atoms)
-    atoms_by_file = _count_atoms_per_file(std_dir)
+    h = _get_helpers()
+    dependency_graph = h["scan_std_imports"](std_dir)
+    trusted_atoms = h["collect_trusted_atoms"](std_dir)
+    trusted_by_file = h["trusted_by_file_counts"](trusted_atoms)
+    atoms_by_file = h["count_atoms_per_file"](std_dir)
     failed_files: set = set()
 
     if fmt == "mermaid":
-        return _render_std_graph_mermaid(
+        return h["render_mermaid"](
             dependency_graph,
             trusted_by_file,
             atoms_by_file,
             failed_files,
         )
     if fmt == "dot":
-        return _render_std_graph_dot(
+        return h["render_dot"](
             dependency_graph,
             trusted_by_file,
             atoms_by_file,

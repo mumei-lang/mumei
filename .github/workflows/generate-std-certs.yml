@@ -12,8 +12,9 @@ on:
   workflow_dispatch:
 
 # Both generate-std-certs and update-metrics push back to the branch.
-# A shared concurrency group prevents non-fast-forward failures when both
-# workflows trigger from the same push event.
+# A shared concurrency group serializes the runs so they don't overlap;
+# git pull --rebase before push (see below) handles the case where the
+# second workflow checked out a stale commit.
 concurrency:
   group: std-auto-commit-${{ github.ref }}
   cancel-in-progress: false
