@@ -1,0 +1,62 @@
+name: Update std/ Metrics
+
+# SI-5 Phase 3-A (mumei-side completion): keep docs/STDLIB_METRICS.md in
+# sync with the actual state of std/. On every push that touches std/, we
+# build mumei, verify each module, aggregate atom/trusted-atom/TODO counts
+# and regenerate the metrics table. If anything changed the workflow
+# commits the update back to the branch.
+on:
+  push:
+    branches: [develop]
+    paths:
+      - 'std/**'
+      - 'scripts/generate_stdlib_metrics.py'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update-metrics:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install system deps (LLVM 17, Z3)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libz3-dev pkg-config libssl-dev libzstd-dev z3
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
+            | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
+          codename=$(lsb_release -cs)
+          echo "deb http://apt.llvm.org/${codename}/ llvm-toolchain-${codename}-17 main" \
+            | sudo tee /etc/apt/sources.list.d/llvm-17.list > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y llvm-17-dev libclang-17-dev libpolly-17-dev
+          echo "LLVM_SYS_170_PREFIX=/usr/lib/llvm-17" >> "$GITHUB_ENV"
+          echo "LIBCLANG_PATH=/usr/lib/llvm-17/lib" >> "$GITHUB_ENV"
+      - name: Build mumei (release)
+        run: cargo build --release
+      - name: Regenerate STDLIB_METRICS.md
+        run: |
+          ./target/release/mumei --version || true
+          python3 scripts/generate_stdlib_metrics.py \
+            --mumei-bin ./target/release/mumei \
+            --output docs/STDLIB_METRICS.md
+      - name: Commit updated metrics
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/STDLIB_METRICS.md
+          if git diff --cached --quiet; then
+            echo "No metrics changes"
+            exit 0
+          fi
+          git commit -m "docs(std): auto-update STDLIB_METRICS.md"
+          # Pull with rebase in case the branch moved since checkout
+          # (e.g. a concurrent manual push).
+          git pull --rebase origin "${GITHUB_REF_NAME}" || true
+          git push origin HEAD:${GITHUB_REF_NAME}

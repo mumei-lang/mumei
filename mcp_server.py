@@ -1051,6 +1051,312 @@ def _evaluate_rule(
     return True
 
 
+# ---------------------------------------------------------------------------
+# Weighted scoring (SI-5 Phase 1-C)
+# ---------------------------------------------------------------------------
+# Higher scores = higher priority. Scoring balances four axes:
+#   * usage_demand: how often atoms from depended-on modules are referenced
+#     in tests/examples (heavy users of a module should be extended first)
+#   * dep_depth:    how many other std modules depend on the target area
+#     (lower-layer modules benefit more modules when improved)
+#   * trusted_density: how many trusted atoms (proof holes) live in the
+#     target area (more proof holes = higher priority to shore up)
+#   * difficulty_penalty: subtract a small amount for higher difficulty
+
+
+def _compute_weighted_score(
+    proposal: dict,
+    usage_frequency: dict,
+    dependency_graph: dict,
+    trusted_atoms: list,
+) -> float:
+    """Compute a weighted priority score for a proposal in [~-0.09, ~0.85]."""
+
+    # --- Axis 1: Usage demand --------------------------------------------------
+    deps = proposal.get("depends_on", []) or []
+    if deps:
+        # Atoms declared in dependency files are treated as proxies for
+        # "how heavily used is this area of std". We sum the usage frequency
+        # across all atoms declared in the dependency modules and normalize
+        # by the number of deps to get an average.
+        per_dep_demand = []
+        for dep in deps:
+            # usage_frequency is keyed by atom name, not module path, so
+            # approximate by summing frequency of atoms defined in `dep` —
+            # but we don't have that mapping readily. Instead, approximate
+            # by checking if any atom name substring matches the dep stem
+            # (common heuristic: std/list.mm -> list usage).
+            stem = dep.rsplit("/", 1)[-1].removesuffix(".mm")
+            per_dep_demand.append(
+                sum(v for k, v in usage_frequency.items() if stem and stem in k.lower()),
+            )
+        usage_demand = sum(per_dep_demand) / max(1, len(deps))
+    else:
+        usage_demand = 0.0
+
+    # --- Axis 2: Dependency depth ---------------------------------------------
+    # Count how many std files import any of the dep modules the proposal
+    # builds on. Higher = deeper in the dependency stack = bigger blast
+    # radius for improvements.
+    dep_depth = 0
+    for _file, imports in dependency_graph.items():
+        if any(d in imports for d in deps):
+            dep_depth += 1
+
+    # --- Axis 3: Trusted density ---------------------------------------------
+    # Count trusted atoms living in the proposal's "target area" — the
+    # directory of `name`. If the target has no directory component, fall
+    # back to counting trusted atoms in any dependency file area.
+    name = proposal.get("name", "")
+    target_area = ""
+    if "/" in name:
+        target_area = name.rsplit("/", 1)[0]
+
+    if target_area:
+        trusted_in_area = sum(
+            1 for t in trusted_atoms if t.get("file", "").startswith(target_area)
+        )
+    else:
+        trusted_in_area = 0
+    # Also account for trusted atoms in the immediate deps (shoring up
+    # holes in the foundations the proposal builds on).  Skip deps already
+    # covered by the target_area prefix pass to avoid double-counting.
+    for dep in deps:
+        if target_area and dep.startswith(target_area):
+            continue  # already counted in the target_area pass above
+        trusted_in_area += sum(
+            1 for t in trusted_atoms if t.get("file", "") == dep
+        )
+
+    # --- Axis 4: Difficulty penalty -------------------------------------------
+    diff_penalty = {"low": 0.0, "medium": 0.3, "high": 0.6}.get(
+        proposal.get("difficulty", ""),
+        0.5,
+    )
+
+    # Weighted combination (positive weights sum to 0.85; all four sum to
+    # 1.0 including the penalty weight). Each axis is saturated at a
+    # reasonable ceiling before combining so a single runaway axis cannot
+    # dominate the score.  Effective range is [~-0.09, ~0.85].
+    w_usage, w_depth, w_trusted, w_diff = 0.30, 0.30, 0.25, 0.15
+    usage_norm = min(usage_demand / 10.0, 1.0)
+    depth_norm = min(dep_depth / 5.0, 1.0)
+    trusted_norm = min(trusted_in_area / 3.0, 1.0)
+
+    return (
+        w_usage * usage_norm
+        + w_depth * depth_norm
+        + w_trusted * trusted_norm
+        - w_diff * diff_penalty
+    )
+
+
+# ---------------------------------------------------------------------------
+# Dependency graph rendering (SI-5 Phase 1-C)
+# ---------------------------------------------------------------------------
+# Converts the output of _scan_std_imports() + _collect_trusted_atoms()
+# into Mermaid or Graphviz-DOT source that can be rendered on GitHub or
+# piped through `dot`.
+
+
+def _sanitize_node_id(path: str) -> str:
+    """Return a Mermaid/DOT-safe identifier for a std file path."""
+    return re.sub(r"[^A-Za-z0-9_]", "_", path)
+
+
+def _count_atoms_per_file(std_dir: Path) -> dict:
+    """Return {rel_path: total_atom_count} for every .mm file in std/."""
+    atom_re = re.compile(r"^\s*(?:trusted\s+|async\s+)?atom\s+\w+")
+    counts: dict = {}
+    for mm_file in std_dir.rglob("*.mm"):
+        rel = str(mm_file.relative_to(std_dir.parent)).replace("\\", "/")
+        try:
+            text = mm_file.read_text(encoding="utf-8")
+        except OSError:
+            counts[rel] = 0
+            continue
+        counts[rel] = sum(1 for line in text.splitlines() if atom_re.match(line))
+    return counts
+
+
+def _classify_health(
+    rel_path: str,
+    trusted_by_file: dict,
+    failed_files: set,
+) -> str:
+    """Return one of "green", "yellow", "red" for a std file.
+
+    * "red"    — verification has failed or the file is explicitly marked broken.
+    * "yellow" — at least one trusted atom (proof hole) present.
+    * "green"  — fully verified, no trusted atoms.
+    """
+    if rel_path in failed_files:
+        return "red"
+    if trusted_by_file.get(rel_path, 0) > 0:
+        return "yellow"
+    return "green"
+
+
+def _render_std_graph_mermaid(
+    dependency_graph: dict,
+    trusted_by_file: dict,
+    atoms_by_file: dict,
+    failed_files: set,
+) -> str:
+    """Render the std/ dependency graph as Mermaid `graph TD` source."""
+    lines = ["graph TD"]
+    # Node declarations: shape carries health semantics.
+    #   green  -> rounded rectangle  id(label)
+    #   yellow -> hexagon            id{{label}}
+    #   red    -> doubled border     id[[label]]
+    for path in sorted(dependency_graph.keys()):
+        node_id = _sanitize_node_id(path)
+        atoms = atoms_by_file.get(path, 0)
+        trusted = trusted_by_file.get(path, 0)
+        label = f"{path}\\n{atoms} atoms, {trusted} trusted"
+        health = _classify_health(path, trusted_by_file, failed_files)
+        if health == "green":
+            lines.append(f'    {node_id}("{label}")')
+        elif health == "yellow":
+            lines.append(f'    {node_id}{{{{"{label}"}}}}')
+        else:  # red
+            lines.append(f'    {node_id}[["{label}"]]')
+
+    # Edges.
+    for path in sorted(dependency_graph.keys()):
+        for dep in dependency_graph[path]:
+            src = _sanitize_node_id(path)
+            dst = _sanitize_node_id(dep)
+            lines.append(f"    {src} --> {dst}")
+
+    # Color classes.
+    lines.append("    classDef green fill:#d4edda,stroke:#28a745,color:#155724;")
+    lines.append("    classDef yellow fill:#fff3cd,stroke:#ffc107,color:#856404;")
+    lines.append("    classDef red fill:#f8d7da,stroke:#dc3545,color:#721c24;")
+
+    green_nodes, yellow_nodes, red_nodes = [], [], []
+    for path in sorted(dependency_graph.keys()):
+        node_id = _sanitize_node_id(path)
+        health = _classify_health(path, trusted_by_file, failed_files)
+        if health == "green":
+            green_nodes.append(node_id)
+        elif health == "yellow":
+            yellow_nodes.append(node_id)
+        else:
+            red_nodes.append(node_id)
+    if green_nodes:
+        lines.append(f"    class {','.join(green_nodes)} green;")
+    if yellow_nodes:
+        lines.append(f"    class {','.join(yellow_nodes)} yellow;")
+    if red_nodes:
+        lines.append(f"    class {','.join(red_nodes)} red;")
+
+    return "\n".join(lines) + "\n"
+
+
+def _render_std_graph_dot(
+    dependency_graph: dict,
+    trusted_by_file: dict,
+    atoms_by_file: dict,
+    failed_files: set,
+) -> str:
+    """Render the std/ dependency graph as Graphviz DOT source."""
+    lines = ["digraph std_deps {", '    rankdir="TB";', '    node [shape=box, style=rounded];']
+    for path in sorted(dependency_graph.keys()):
+        node_id = _sanitize_node_id(path)
+        atoms = atoms_by_file.get(path, 0)
+        trusted = trusted_by_file.get(path, 0)
+        label = f"{path}\\n{atoms} atoms, {trusted} trusted"
+        health = _classify_health(path, trusted_by_file, failed_files)
+        if health == "green":
+            fill = "#d4edda"
+            shape = "box"
+            style = "rounded,filled"
+        elif health == "yellow":
+            fill = "#fff3cd"
+            shape = "hexagon"
+            style = "filled"
+        else:
+            fill = "#f8d7da"
+            shape = "box"
+            style = "rounded,filled,bold"
+        lines.append(
+            f'    {node_id} [label="{label}", shape={shape}, '
+            f'style="{style}", fillcolor="{fill}"];',
+        )
+    for path in sorted(dependency_graph.keys()):
+        for dep in dependency_graph[path]:
+            src = _sanitize_node_id(path)
+            dst = _sanitize_node_id(dep)
+            lines.append(f"    {src} -> {dst};")
+    lines.append("}")
+    return "\n".join(lines) + "\n"
+
+
+def _trusted_by_file_counts(trusted_atoms: list) -> dict:
+    """Aggregate _collect_trusted_atoms() output as {rel_path: trusted_count}."""
+    counts: dict = {}
+    for entry in trusted_atoms:
+        rel = entry.get("file", "")
+        if not rel:
+            continue
+        counts[rel] = counts.get(rel, 0) + 1
+    return counts
+
+
+@mcp.tool()
+def visualize_std_graph(format: str = "mermaid") -> str:
+    """Visualize the std/ dependency graph in Mermaid or DOT format.
+
+    Args:
+        format: "mermaid" (default) or "dot".
+
+    Returns:
+        Graph source text that can be rendered by Mermaid or Graphviz.
+        Nodes are colored by verification health:
+        - Green  (rounded)   — fully verified, no trusted atoms
+        - Yellow (hexagon)   — verified but has trusted atoms (proof holes)
+        - Red    (double)    — verification failed or missing
+
+    Node labels include "<path>\\n<N> atoms, <M> trusted" so the density of
+    proof holes is immediately visible. Intended to be consumed by SI-5
+    Phase 1-C visualizers and by AI agents planning std/ work.
+    """
+    repo_root = Path(__file__).parent.absolute()
+    std_dir = repo_root / "std"
+    if not std_dir.exists():
+        return json.dumps({"error": "std/ directory not found"})
+
+    fmt = (format or "mermaid").lower().strip()
+    if fmt not in {"mermaid", "dot"}:
+        return json.dumps(
+            {"error": f"unsupported format '{format}'. Use 'mermaid' or 'dot'."},
+        )
+
+    dependency_graph = _scan_std_imports(std_dir)
+    trusted_atoms = _collect_trusted_atoms(std_dir)
+    trusted_by_file = _trusted_by_file_counts(trusted_atoms)
+    atoms_by_file = _count_atoms_per_file(std_dir)
+    # No in-process verification is performed here; "red" is reserved for
+    # files that a downstream CI step has recorded as failing. Callers can
+    # enrich the graph via the visualizer/ generator.
+    failed_files: set = set()
+
+    if fmt == "mermaid":
+        return _render_std_graph_mermaid(
+            dependency_graph,
+            trusted_by_file,
+            atoms_by_file,
+            failed_files,
+        )
+    return _render_std_graph_dot(
+        dependency_graph,
+        trusted_by_file,
+        atoms_by_file,
+        failed_files,
+    )
+
+
 @mcp.tool()
 def analyze_std_gaps() -> str:
     """Analyze the mumei std/ library for missing components and propose
@@ -1062,6 +1368,10 @@ def analyze_std_gaps() -> str:
 
     Returns JSON with: dependency_graph, trusted_atoms, todo_comments,
     usage_frequency, and proposals (top 3 ranked by priority).
+
+    Each proposal carries a `score` field (higher = higher priority) computed
+    from four axes: usage demand, dependency depth, trusted density, and a
+    difficulty penalty (SI-5 Phase 1-C weighted scoring).
     """
     repo_root = Path(__file__).parent.absolute()
     std_dir = repo_root / "std"
@@ -1091,16 +1401,30 @@ def analyze_std_gaps() -> str:
             },
         )
 
-    # Assign priority. Lower difficulty and more existing dependencies
-    # (already-satisfied prerequisites) rank higher.
+    # SI-5 Phase 1-C: 3-axis weighted scoring. Higher score wins.
+    for p in proposals:
+        p["score"] = round(
+            _compute_weighted_score(
+                p,
+                usage_frequency,
+                dependency_graph,
+                trusted_atoms,
+            ),
+            4,
+        )
+
+    # Stable tie-break: higher score first, then fewer unmet deps, then
+    # lower difficulty. Note: the old sort key was (difficulty, unmet);
+    # the new key intentionally prioritises unmet deps over difficulty.
     difficulty_weight = {"low": 0, "medium": 1, "high": 2}
 
     def _rank_key(p: dict) -> tuple:
-        diff = difficulty_weight.get(p["difficulty"], 3)
         unmet = sum(
             1 for dep in p["depends_on"] if dep not in existing_paths
         )
-        return (diff, unmet)
+        diff = difficulty_weight.get(p["difficulty"], 3)
+        # Negate score so higher scores sort first under ascending sort.
+        return (-p["score"], unmet, diff)
 
     proposals.sort(key=_rank_key)
     for i, p in enumerate(proposals[:3], start=1):
