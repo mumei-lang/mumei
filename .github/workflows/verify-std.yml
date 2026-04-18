@@ -48,9 +48,12 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libclang-dev libz3-dev z3 libzstd-dev
-          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
-          echo "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-17 main" \
-            | sudo tee /etc/apt/sources.list.d/llvm-17.list
+          # Use the signed-by pattern (apt-key is deprecated on Ubuntu 22.04+).
+          # Matches release.yml for consistency.
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
+          codename=$(lsb_release -cs)
+          echo "deb http://apt.llvm.org/${codename}/ llvm-toolchain-${codename}-17 main" \
+            | sudo tee /etc/apt/sources.list.d/llvm-17.list > /dev/null
           sudo apt-get update
           sudo apt-get install -y llvm-17-dev libpolly-17-dev
 
@@ -91,6 +94,7 @@ jobs:
             fi
             echo "::endgroup::"
           done < <(find std -type f -name '*.mm' | sort)
+          set -e
           sort -u -o /tmp/verify-std/head_failures.txt /tmp/verify-std/head_failures.txt
           echo "[head] $((TOTAL - FAILED))/$TOTAL verified"
 
@@ -121,27 +125,44 @@ jobs:
                 PATHS+=("$d")
               fi
             done
+            # Also note which mumei-emit-* dirs are PR-only (not on base)
+            # so we can clean them after checkout.
+            PR_ONLY_EMIT=()
+            for d in mumei-emit-*; do
+              [ -e "$d" ] || continue
+              if ! git cat-file -e "origin/${BASE_REF}:${d}" 2>/dev/null; then
+                PR_ONLY_EMIT+=("$d")
+              fi
+            done
             if [ ${#PATHS[@]} -gt 0 ]; then
               git checkout "origin/${BASE_REF}" -- "${PATHS[@]}"
-              # Remove files in std/ that were added by the PR but don't
-              # exist at the base ref.  Without this, newly added .mm files
-              # persist into the base verification pass and appear in both
-              # head_failures.txt and base_failures.txt, causing comm -23 to
-              # treat them as "pre-existing" rather than regressions.
+              # Remove files that were added by the PR but don't exist at
+              # the base ref.  Without this, newly added .mm files persist
+              # into the base verification pass and appear in both
+              # head_failures.txt and base_failures.txt, causing comm -23
+              # to treat them as "pre-existing" rather than regressions.
               git clean -fd std/
+              # Remove PR-only mumei-emit-* crates so they don't affect
+              # the base compiler build.
+              for d in "${PR_ONLY_EMIT[@]}"; do
+                rm -rf "$d"
+              done
             else
               echo "No base-ref paths to restore."
             fi
           else
             echo "No base ref available; skipping baseline (baseline == head)."
+            echo "SKIP_BASE=true" >> "$GITHUB_ENV"
           fi
 
       - name: Rebuild mumei (PR base)
+        if: env.SKIP_BASE != 'true'
         env:
           LLVM_SYS_170_PREFIX: /usr/lib/llvm-17
         run: cargo build --release
 
       - name: Verify std on PR base
+        if: env.SKIP_BASE != 'true'
         env:
           LLVM_SYS_170_PREFIX: /usr/lib/llvm-17
         run: |
@@ -160,8 +181,16 @@ jobs:
             fi
             echo "::endgroup::"
           done < <(find std -type f -name '*.mm' | sort)
+          set -e
           sort -u -o /tmp/verify-std/base_failures.txt /tmp/verify-std/base_failures.txt
           echo "[base] $((TOTAL - FAILED))/$TOTAL verified"
+
+      - name: Copy head failures as base (workflow_dispatch)
+        if: env.SKIP_BASE == 'true'
+        run: |
+          # When there is no base ref (workflow_dispatch), baseline == head
+          # so the diff is always empty.
+          cp /tmp/verify-std/head_failures.txt /tmp/verify-std/base_failures.txt
 
       - name: Compute regression diff
         id: regression
