@@ -70,20 +70,24 @@ class Mumei < Formula
   end
 
   def caveats
-    <<~EOS
+    s = <<~EOS
       The Mumei standard library has been installed to:
         #{share}/mumei/std
 
-      The std/ proof-certificate bundle (SI-5 Phase 3-C) is at:
-        #{share}/mumei/std-proof-bundle.json
-
       To use it, add the following to your shell profile:
         export MUMEI_STD_PATH="#{share}/mumei/std"
-        export MUMEI_PROOF_BUNDLE="#{share}/mumei/std-proof-bundle.json"
 
       Or source the environment file:
         source #{etc}/mumei/env.sh
     EOS
+    if File.exist?("#{share}/mumei/std-proof-bundle.json")
+      s += <<~EOS
+
+        The std/ proof-certificate bundle (SI-5 Phase 3-C) is at:
+          #{share}/mumei/std-proof-bundle.json
+      EOS
+    end
+    s
   end
 
   test do
