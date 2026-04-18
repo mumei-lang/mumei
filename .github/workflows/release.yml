@@ -225,12 +225,42 @@ jobs:
           file target/${{ matrix.target }}/release/mumei
           # Should report "statically linked" or "not a dynamic executable"
           ldd target/${{ matrix.target }}/release/mumei 2>&1 || true
+      # SI-5 Phase 3-C: generate per-module proof certificates so downstream
+      # consumers (homebrew-mumei, vetted imports) can verify std atoms
+      # against a tagged, versioned certificate bundle.  Failures are
+      # tolerated per-file — a broken module should not block the release.
+      - name: Generate std/ proof certificates (Unix)
+        if: runner.os != 'Windows' && !contains(matrix.target, 'musl')
+        run: |
+          mkdir -p std/certs
+          find std -type f -name '*.mm' -print0 | while IFS= read -r -d '' f; do
+            rel="${f#std/}"
+            stem="${rel%.mm}"
+            outdir="std/certs/$(dirname "$stem")"
+            mkdir -p "$outdir"
+            out="std/certs/${stem}.proof.json"
+            ./target/${{ matrix.target }}/release/mumei verify --proof-cert \
+              --output "$out" "$f" \
+              || echo "::warning::verify failed for $f (continuing)"
+          done
+      - name: Bundle std/ proof certificates (Unix)
+        if: runner.os != 'Windows' && !contains(matrix.target, 'musl')
+        run: |
+          python3 scripts/bundle_std_certs.py \
+            --certs-dir std/certs \
+            --output std-proof-bundle.json \
+            --mumei-version "${GITHUB_REF_NAME#v}"
       - name: Package binary + std library (Unix)
         if: runner.os != 'Windows'
         run: |
           mkdir -p release-pkg/std
           cp target/${{ matrix.target }}/release/mumei release-pkg/
           cp -r std/* release-pkg/std/
+          # SI-5 Phase 3-C: include the proof bundle in every Unix tarball
+          # (when present — musl & Alpine targets don't run the cert step).
+          if [ -f std-proof-bundle.json ]; then
+            cp std-proof-bundle.json release-pkg/
+          fi
           cd release-pkg
           tar czf ../${{ matrix.name }}.tar.gz .
       # Plan 7: Windows packaging uses .zip instead of .tar.gz
@@ -502,8 +532,16 @@ jobs:
               bin.install "mumei"
               (share/"mumei/std").install Dir["std/*"]
 
+              # SI-5 Phase 3-C: install the std/ proof-certificate bundle when
+              # it ships with the release archive so downstream projects can
+              # verify imports against a trusted, versioned certificate set.
+              if File.exist?("std-proof-bundle.json")
+                (share/"mumei").install "std-proof-bundle.json"
+              end
+
               env_script = <<~EOS
                 export MUMEI_STD_PATH="#{share}/mumei/std"
+                export MUMEI_PROOF_BUNDLE="#{share}/mumei/std-proof-bundle.json"
               EOS
               (etc/"mumei").mkpath
               (etc/"mumei/env.sh").write env_script

@@ -1,0 +1,71 @@
+name: Generate std/ Proof Certificates
+
+# SI-5 Phase 3-C: Generate a per-module proof certificate (.proof.json) for
+# every file under std/ and commit them to std/certs/. These certificates
+# are later fanned-in to a single std-proof-bundle.json by
+# scripts/bundle_std_certs.py and distributed via homebrew-mumei.
+on:
+  push:
+    branches: [develop]
+    paths:
+      - 'std/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  generate-certs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install system deps (LLVM 17, Z3)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libz3-dev pkg-config libssl-dev libzstd-dev z3
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
+            | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
+          codename=$(lsb_release -cs)
+          echo "deb http://apt.llvm.org/${codename}/ llvm-toolchain-${codename}-17 main" \
+            | sudo tee /etc/apt/sources.list.d/llvm-17.list > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y llvm-17-dev libclang-17-dev libpolly-17-dev
+          echo "LLVM_SYS_170_PREFIX=/usr/lib/llvm-17" >> "$GITHUB_ENV"
+          echo "LIBCLANG_PATH=/usr/lib/llvm-17/lib" >> "$GITHUB_ENV"
+      - name: Build mumei (release)
+        run: cargo build --release
+      - name: Generate per-module certificates
+        run: |
+          set -u
+          mkdir -p std/certs
+          # Iterate every .mm file under std/, including nested subdirectories.
+          # Failures are tolerated per-file so one broken module doesn't block
+          # certificate generation for the rest.
+          find std -type f -name '*.mm' -print0 | while IFS= read -r -d '' f; do
+            rel="${f#std/}"            # e.g. container/safe_queue.mm
+            stem="${rel%.mm}"          # e.g. container/safe_queue
+            outdir="std/certs/$(dirname "$stem")"
+            mkdir -p "$outdir"
+            out="std/certs/${stem}.proof.json"
+            echo "Generating cert for $f -> $out"
+            ./target/release/mumei verify --proof-cert --output "$out" "$f" \
+              || echo "::warning::verify failed for $f (continuing)"
+          done
+      - name: Upload certificates artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: std-proof-certs
+          path: std/certs/
+      - name: Commit certificates
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add std/certs/
+          if git diff --cached --quiet; then
+            echo "No certificate changes"
+            exit 0
+          fi
+          git commit -m "chore(std): update proof certificates"
+          git push origin HEAD:${GITHUB_REF_NAME}

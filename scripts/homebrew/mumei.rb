@@ -51,9 +51,15 @@ class Mumei < Formula
     bin.install "mumei"
     (share/"mumei/std").install Dir["std/*"]
 
+    # SI-5 Phase 3-C: install std/ proof-certificate bundle when present
+    if File.exist?("std-proof-bundle.json")
+      (share/"mumei").install "std-proof-bundle.json"
+    end
+
     # Set MUMEI_STD_PATH so mumei can find the standard library
     env_script = <<~EOS
       export MUMEI_STD_PATH="#{share}/mumei/std"
+      export MUMEI_PROOF_BUNDLE="#{share}/mumei/std-proof-bundle.json"
     EOS
     (etc/"mumei").mkpath
     (etc/"mumei/env.sh").write env_script
@@ -64,8 +70,12 @@ class Mumei < Formula
       The Mumei standard library has been installed to:
         #{share}/mumei/std
 
+      The std/ proof-certificate bundle (SI-5 Phase 3-C) is at:
+        #{share}/mumei/std-proof-bundle.json
+
       To use it, add the following to your shell profile:
         export MUMEI_STD_PATH="#{share}/mumei/std"
+        export MUMEI_PROOF_BUNDLE="#{share}/mumei/std-proof-bundle.json"
 
       Or source the environment file:
         source #{etc}/mumei/env.sh
