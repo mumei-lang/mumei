@@ -123,6 +123,12 @@ jobs:
             done
             if [ ${#PATHS[@]} -gt 0 ]; then
               git checkout "origin/${BASE_REF}" -- "${PATHS[@]}"
+              # Remove files in std/ that were added by the PR but don't
+              # exist at the base ref.  Without this, newly added .mm files
+              # persist into the base verification pass and appear in both
+              # head_failures.txt and base_failures.txt, causing comm -23 to
+              # treat them as "pre-existing" rather than regressions.
+              git clean -fd std/
             else
               echo "No base-ref paths to restore."
             fi
