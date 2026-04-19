@@ -45,7 +45,8 @@ extern "Rust" {
 // GET リクエストを送信し、レスポンスハンドルを返す。
 // Plan 11: url を Str 型に変更
 // ネットワークエラー時はハンドル 0 を返す。
-atom get(url: Str)
+// FFI-backed: 契約は Rust ランタイムで担保される。
+trusted atom get(url: Str)
     effects: [HttpGet(url)]
     requires: true;
     ensures: result >= 0;
@@ -56,7 +57,8 @@ atom get(url: Str)
 
 // POST リクエストを送信し、レスポンスハンドルを返す。
 // Plan 11: url, body を Str 型に変更
-atom post(url: Str, body: Str)
+// FFI-backed: 契約は Rust ランタイムで担保される。
+trusted atom post(url: Str, body: Str)
     effects: [HttpPost(url)]
     requires: true;
     ensures: result >= 0;
@@ -67,7 +69,8 @@ atom post(url: Str, body: Str)
 
 // PUT リクエストを送信し、レスポンスハンドルを返す。
 // Plan 11: url, body を Str 型に変更
-atom put(url: Str, body: Str)
+// FFI-backed: 契約は Rust ランタイムで担保される。
+trusted atom put(url: Str, body: Str)
     effects: [HttpPut(url)]
     requires: true;
     ensures: result >= 0;
@@ -78,7 +81,8 @@ atom put(url: Str, body: Str)
 
 // DELETE リクエストを送信し、レスポンスハンドルを返す。
 // Plan 11: url を Str 型に変更
-atom delete(url: Str)
+// FFI-backed: 契約は Rust ランタイムで担保される。
+trusted atom delete(url: Str)
     effects: [HttpDelete(url)]
     requires: true;
     ensures: result >= 0;
@@ -92,7 +96,8 @@ atom delete(url: Str)
 // =============================================================
 
 // レスポンスの HTTP ステータスコードを取得（200, 404, 500 等）
-atom status(handle: i64)
+// FFI-backed: 契約は Rust ランタイムで担保される。
+trusted atom status(handle: i64)
     requires: handle >= 0;
     ensures: result >= 0;
     body: {
@@ -101,7 +106,8 @@ atom status(handle: i64)
 
 // レスポンスボディを Str として取得
 // Plan 11: 戻り値を Str に変更
-atom body(handle: i64)
+// FFI-backed: 契約は Rust ランタイムで担保される。
+trusted atom body(handle: i64)
     requires: handle >= 0;
     ensures: true;
     body: {
@@ -110,7 +116,8 @@ atom body(handle: i64)
 
 // レスポンスボディを JSON ハンドルとしてパースして取得
 // Content-Type が application/json の場合に使用
-atom body_json(handle: i64)
+// FFI-backed: 契約は Rust ランタイムで担保される。
+trusted atom body_json(handle: i64)
     requires: handle >= 0;
     ensures: result >= 0;
     body: {
@@ -123,7 +130,8 @@ atom body_json(handle: i64)
 
 // レスポンスヘッダーの値を取得
 // Plan 11: name を Str 型に変更、戻り値も Str
-atom header_get(handle: i64, name: Str)
+// FFI-backed: 契約は Rust ランタイムで担保される。
+trusted atom header_get(handle: i64, name: Str)
     requires: handle >= 0;
     ensures: true;
     body: {
@@ -132,7 +140,8 @@ atom header_get(handle: i64, name: Str)
 
 // リクエストヘッダーを設定（新しいハンドルを返す）
 // Plan 11: name, value を Str 型に変更
-atom header_set(handle: i64, name: Str, value: Str)
+// FFI-backed: 契約は Rust ランタイムで担保される。
+trusted atom header_set(handle: i64, name: Str, value: Str)
     requires: handle >= 0;
     ensures: result >= 0;
     body: {
@@ -144,7 +153,8 @@ atom header_set(handle: i64, name: Str, value: Str)
 // =============================================================
 
 // レスポンスが成功（2xx）かどうかを判定（0=false, 1=true）
-atom is_ok(handle: i64)
+// FFI-backed: 契約は Rust ランタイムで担保される。
+trusted atom is_ok(handle: i64)
     requires: handle >= 0;
     ensures: result >= 0 && result <= 1;
     body: {
@@ -153,7 +163,8 @@ atom is_ok(handle: i64)
 
 // レスポンスがエラーかどうかを判定（0=false, 1=true）
 // ハンドル 0（ネットワークエラー）も true を返す
-atom is_error(handle: i64)
+// FFI-backed: 契約は Rust ランタイムで担保される。
+trusted atom is_error(handle: i64)
     requires: handle >= 0;
     ensures: result >= 0 && result <= 1;
     body: {
@@ -165,7 +176,8 @@ atom is_error(handle: i64)
 // =============================================================
 
 // HTTP レスポンスハンドルを解放する（1=成功, 0=無効なハンドル）
-atom free(handle: i64)
+// FFI-backed: 契約は Rust ランタイムで担保される。
+trusted atom free(handle: i64)
     requires: handle >= 0;
     ensures: result >= 0 && result <= 1;
     body: {

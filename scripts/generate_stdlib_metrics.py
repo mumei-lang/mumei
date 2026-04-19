@@ -65,11 +65,21 @@ def _run_verify(mumei_bin: Path | None, mm_path: Path) -> str:
     return "OK" if proc.returncode == 0 else "FAIL"
 
 
+#: Credit awarded to ``trusted atom`` declarations. Trusted atoms are
+#: explicit, reviewed contracts — typically wrapping FFI-backed runtime
+#: calls or quantified predicates that Z3 cannot yet discharge. They are
+#: not the same as an unproven atom; the author has vouched for the
+#: contract in code review. We therefore award partial credit (0.8)
+#: instead of treating them as proof holes.
+TRUSTED_CREDIT = 0.8
+
+
 def _compute_health(atoms: int, trusted: int, todos: int, verified: str) -> float:
     if atoms == 0:
         base = 1.0
     else:
-        base = max(0.0, (atoms - trusted) / atoms)
+        proven = atoms - trusted
+        base = max(0.0, (proven + TRUSTED_CREDIT * trusted) / atoms)
     penalty = min(todos * 0.01, 0.2)
     score = base - penalty
     if verified == "FAIL":
@@ -146,8 +156,11 @@ def _render_markdown(rows: list[dict]) -> str:
         )
     lines.append("")
     lines.append(
-        "> Health = `(atoms - trusted) / atoms` − TODO penalty (1% per TODO, "
-        "capped 20%). Failing verification halves the score.",
+        "> Health = `(proven + 0.8 × trusted) / atoms` − TODO penalty "
+        "(1% per TODO, capped 20%). Failing verification halves the score. "
+        "Trusted atoms receive 0.8 credit because they are explicit, reviewed "
+        "contracts (typically FFI-backed or quantified predicates beyond Z3's "
+        "current reach), not unproven proof holes.",
     )
     lines.append("")
     return "\n".join(lines)

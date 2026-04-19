@@ -44,7 +44,8 @@ extern "Rust" {
 // =============================================================
 
 // Bind a server to the given address. Returns a server handle (>0) or 0 on error.
-atom bind_server(addr: Str)
+// FFI-backed + stateful effect: contract enforced by Rust runtime.
+trusted atom bind_server(addr: Str)
     effects: [HttpServer]
     requires: true;
     ensures: result >= 0;
@@ -57,7 +58,8 @@ atom bind_server(addr: Str)
 // Since Rust's TcpListener::bind() already listens, this is a logical
 // state transition that enables accept_request to be called.
 // Returns 1 if server handle is valid, 0 otherwise.
-atom listen_server(server_handle: i64)
+// FFI-backed + stateful effect: contract enforced by Rust runtime.
+trusted atom listen_server(server_handle: i64)
     effects: [HttpServer]
     requires: server_handle > 0;
     ensures: result >= 0;
@@ -68,7 +70,8 @@ atom listen_server(server_handle: i64)
 
 // Accept an incoming request. Blocks until a connection arrives.
 // Returns a request handle (>0) or 0 on error.
-atom accept_request(server_handle: i64)
+// FFI-backed + stateful effect: contract enforced by Rust runtime.
+trusted atom accept_request(server_handle: i64)
     effects: [HttpServer]
     requires: server_handle > 0;
     ensures: result >= 0;
@@ -79,7 +82,8 @@ atom accept_request(server_handle: i64)
 
 // Send an HTTP response with the given status code and body.
 // Returns 1 on success, 0 on failure.
-atom send_response(req_handle: i64, status: i64, body: Str)
+// FFI-backed + stateful effect: contract enforced by Rust runtime.
+trusted atom send_response(req_handle: i64, status: i64, body: Str)
     effects: [HttpServer]
     requires: req_handle > 0 && status >= 100 && status < 600;
     ensures: result >= 0;
