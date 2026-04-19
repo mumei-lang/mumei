@@ -24,6 +24,11 @@ dist/
 # be committed to the repo.
 std/certs/
 
+# VS Code extension build artefacts
+editors/vscode/node_modules/
+editors/vscode/out/
+editors/vscode/package-lock.json
+editors/vscode/*.vsix
+
 # テスト用一時ファイル
 sword_test.mm
-

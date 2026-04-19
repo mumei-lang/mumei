@@ -2,7 +2,10 @@
 
 All notable changes to the "Mumei Language" extension will be documented in this file.
 
-## [0.1.0] — 2024-XX-XX
+## [0.1.0] — 2026-04-19
+
+Initial release prepared for the Visual Studio Code Marketplace as part of
+SI-5 milestone **P8-A** (VS Code Extension → Published).
 
 ### Added
 
