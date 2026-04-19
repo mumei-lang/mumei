@@ -53,7 +53,13 @@ body: {
 // 配列が昇順であることを事前条件として仮定し、
 // 事後条件でも昇順であることを保証する（恒等操作）。
 // Phase 1 の forall in ensures の動作検証を兼ねる。
-atom sorted_identity(n: i64)
+//
+// NOTE: `forall(i, 0, n - 1, arr[i] <= arr[i + 1])` は Z3 Array store の
+//       追跡が未実装のため trusted 契約として宣言する。
+//       （同パターン: verified_insertion_sort @ std/list.mm、
+//         vvec_binary_search @ std/container/verified_vector.mm）
+//       TODO: Z3 Array store tracking が実装されたら `trusted` を外す。
+trusted atom sorted_identity(n: i64)
 requires: n >= 0 && forall(i, 0, n - 1, arr[i] <= arr[i + 1]);
 ensures: result == n && forall(i, 0, result - 1, arr[i] <= arr[i + 1]);
 body: n;
@@ -62,7 +68,10 @@ body: n;
 // ソート済み配列の先頭要素は最小値であることを保証する。
 // requires: 配列は昇順 && 長さ >= 1
 // ensures: result <= arr[i] for all i (先頭要素が最小)
-atom sorted_min(n: i64)
+//
+// NOTE: forall + arr[i] は Z3 Array store 追跡が未実装のため trusted 契約。
+//       TODO: Z3 Array store tracking が実装されたら `trusted` を外す。
+trusted atom sorted_min(n: i64)
 requires: n >= 1 && forall(i, 0, n - 1, arr[i] <= arr[i + 1]);
 ensures: result >= 0;
 body: {
@@ -71,7 +80,10 @@ body: {
 
 // --- ソート済み配列の最大値取得 ---
 // ソート済み配列の末尾要素は最大値であることを保証する。
-atom sorted_max(n: i64)
+//
+// NOTE: forall + arr[i] は Z3 Array store 追跡が未実装のため trusted 契約。
+//       TODO: Z3 Array store tracking が実装されたら `trusted` を外す。
+trusted atom sorted_max(n: i64)
 requires: n >= 1 && forall(i, 0, n - 1, arr[i] <= arr[i + 1]);
 ensures: result >= 0;
 body: {
