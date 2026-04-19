@@ -4592,11 +4592,7 @@ fn collect_divisors_expr(expr: &Expr) -> Vec<String> {
             // The right-hand side is a divisor
             match rhs.as_ref() {
                 Expr::Variable(name) => divisors.push(name.clone()),
-                Expr::Number(n) => {
-                    if *n == 0 {
-                        divisors.push("0".to_string());
-                    }
-                }
+                Expr::Number(n) if *n == 0 => divisors.push("0".to_string()),
                 _ => {}
             }
             // Also recurse into sub-expressions (both sides)

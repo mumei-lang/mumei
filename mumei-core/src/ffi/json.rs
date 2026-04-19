@@ -176,14 +176,8 @@ pub extern "C" fn json_is_null(handle: i64) -> i64 {
 pub extern "C" fn json_is_object(handle: i64) -> i64 {
     let store = JSON_STORE.lock().unwrap();
     match store.get(&handle) {
-        Some(val) => {
-            if val.is_object() {
-                1
-            } else {
-                0
-            }
-        }
-        None => 0,
+        Some(val) if val.is_object() => 1,
+        _ => 0,
     }
 }
 
@@ -191,14 +185,8 @@ pub extern "C" fn json_is_object(handle: i64) -> i64 {
 pub extern "C" fn json_is_array(handle: i64) -> i64 {
     let store = JSON_STORE.lock().unwrap();
     match store.get(&handle) {
-        Some(val) => {
-            if val.is_array() {
-                1
-            } else {
-                0
-            }
-        }
-        None => 0,
+        Some(val) if val.is_array() => 1,
+        _ => 0,
     }
 }
 
