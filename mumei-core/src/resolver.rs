@@ -221,17 +221,31 @@ fn verify_import_certificate(
         module_dir.join("proof_certificate.json"),
     ];
     if let Some(cert_path) = cert_candidates.iter().find(|p| p.exists()) {
-        if let Ok(cert) = proof_cert::load_certificate(cert_path) {
-            // Check if the certificate matches this source file.
-            let cert_file_path = Path::new(&cert.file);
-            let source_matches = source_file.ends_with(cert_file_path)
-                || cert_file_path.ends_with(source_file.file_name().unwrap_or_default());
-            if source_matches || cert.file.is_empty() {
-                let results = proof_cert::verify_certificate(&cert, &atom_refs);
-                return Some(results.into_iter().collect());
+        match proof_cert::load_certificate(cert_path) {
+            Ok(cert) => {
+                // Check if the certificate matches this source file.
+                let cert_file_path = Path::new(&cert.file);
+                let source_matches = source_file.ends_with(cert_file_path)
+                    || cert_file_path.ends_with(source_file.file_name().unwrap_or_default());
+                if source_matches || cert.file.is_empty() {
+                    let results = proof_cert::verify_certificate(&cert, &atom_refs);
+                    return Some(results.into_iter().collect());
+                }
+                // Certificate is for a different file — fall through to the
+                // bundle fallback rather than silently returning None.
             }
-            // Certificate is for a different file — fall through to the
-            // bundle fallback rather than silently returning None.
+            Err(err) => {
+                // Local cert exists but is corrupted/unparseable — do NOT
+                // fall through to the bundle, because that would silently
+                // paper over the problem (especially dangerous under
+                // strict_imports).
+                eprintln!(
+                    "  ⚠️  Local certificate {} could not be parsed: {}",
+                    cert_path.display(),
+                    err,
+                );
+                return None;
+            }
         }
     }
 
@@ -1985,12 +1999,12 @@ impl Stack {
     // SI-5 Phase 3-C: MUMEI_PROOF_BUNDLE fallback tests
     // =============================================================
     //
-    // These tests set and unset `MUMEI_PROOF_BUNDLE` inside a per-test
-    // scope. They never run in parallel with each other because they
-    // all mutate the same environment variable; cargo's default test
-    // runner will interleave them across threads though, so each test
-    // sets the variable deterministically and cleans up before
-    // returning.
+    // These tests mutate the process-wide `MUMEI_PROOF_BUNDLE` env var.
+    // `std::env::set_var` is not thread-safe, so we serialise access
+    // with a mutex to prevent races when cargo runs tests in parallel.
+
+    use std::sync::Mutex;
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     /// Helper: produce a bundle containing a single std/ module cert.
     fn make_bundle_with_module(
@@ -2054,6 +2068,8 @@ impl Stack {
     /// 3-C: bundle fallback is used when no local cert exists.
     #[test]
     fn test_verify_import_certificate_bundle_fallback() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
         let source = r#"
 atom add(x: i64, y: i64) -> i64
     requires: true;
@@ -2102,6 +2118,8 @@ atom add(x: i64, y: i64) -> i64
     /// 3-C: missing/invalid MUMEI_PROOF_BUNDLE path simply falls through.
     #[test]
     fn test_verify_import_certificate_bundle_missing() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
         let source = r#"
 atom sub(x: i64, y: i64) -> i64
     requires: true;
@@ -2134,6 +2152,8 @@ atom sub(x: i64, y: i64) -> i64
     /// 3-C: a local cert always wins against the bundle fallback.
     #[test]
     fn test_verify_import_certificate_local_takes_precedence() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
         let source = r#"
 atom mul(x: i64, y: i64) -> i64
     requires: true;
