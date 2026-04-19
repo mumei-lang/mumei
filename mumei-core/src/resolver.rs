@@ -164,32 +164,14 @@ fn check_cert_for_atom(cert_results: &HashMap<String, String>, atom_name: &str) 
         .is_some_and(|status| status == "proven")
 }
 
-/// P5-C: Attempt to verify a proof certificate for an imported module directory.
-/// Returns a map of atom_name -> status ("proven", "changed", "unproven", "missing").
-/// Returns None if no certificate exists.
-fn verify_import_certificate(
-    module_dir: &Path,
-    source_file: &Path,
-    items: &[Item],
-) -> Option<HashMap<String, String>> {
-    // Look for .proof-cert.json or proof_certificate.json in the module directory
-    let cert_candidates = [
-        module_dir.join(".proof-cert.json"),
-        module_dir.join("proof_certificate.json"),
-    ];
-    let cert_path = cert_candidates.iter().find(|p| p.exists())?;
-
-    let cert = proof_cert::load_certificate(cert_path).ok()?;
-
-    // Check if the certificate matches this source file
-    let cert_file_path = Path::new(&cert.file);
-    let source_matches = source_file.ends_with(cert_file_path)
-        || cert_file_path.ends_with(source_file.file_name().unwrap_or_default());
-    if !source_matches && !cert.file.is_empty() {
-        // Certificate is for a different file — reject to prevent cross-file atom name collisions
-        return None;
-    }
-
+/// Collect atom references (including ImplBlock methods with qualified names)
+/// from a parsed module. Shared between local certificate verification and
+/// SI-5 Phase 3-C bundle-fallback verification so both paths recognise
+/// methods like `Stack::push`.
+fn collect_atom_refs_with_methods<'a>(
+    items: &'a [Item],
+    qualified_methods: &'a mut Vec<parser::Atom>,
+) -> Vec<&'a parser::Atom> {
     let mut atom_refs: Vec<&parser::Atom> = items
         .iter()
         .filter_map(|item| match item {
@@ -198,8 +180,6 @@ fn verify_import_certificate(
         })
         .collect();
 
-    // Also collect ImplBlock methods with qualified names for cert verification
-    let mut qualified_methods: Vec<parser::Atom> = Vec::new();
     for item in items {
         if let Item::ImplBlock(ib) = item {
             for method in &ib.methods {
@@ -209,12 +189,81 @@ fn verify_import_certificate(
             }
         }
     }
-    for qm in &qualified_methods {
+    for qm in qualified_methods.iter() {
         atom_refs.push(qm);
     }
+    atom_refs
+}
 
-    let results = proof_cert::verify_certificate(&cert, &atom_refs);
-    Some(results.into_iter().collect())
+/// P5-C: Attempt to verify a proof certificate for an imported module directory.
+/// Returns a map of atom_name -> status ("proven", "changed", "unproven", "missing").
+/// Returns None if no certificate exists.
+///
+/// Search order:
+///   1. `module_dir/.proof-cert.json`
+///   2. `module_dir/proof_certificate.json`
+///   3. SI-5 Phase 3-C fallback: the bundle JSON referenced by the
+///      `MUMEI_PROOF_BUNDLE` environment variable. The bundle is produced
+///      by `scripts/bundle_std_certs.py` and distributed via
+///      `homebrew-mumei`, so downstream projects can verify `std/*`
+///      imports without shipping per-module `.proof-cert.json` files.
+fn verify_import_certificate(
+    module_dir: &Path,
+    source_file: &Path,
+    items: &[Item],
+) -> Option<HashMap<String, String>> {
+    let mut qualified_methods: Vec<parser::Atom> = Vec::new();
+    let atom_refs = collect_atom_refs_with_methods(items, &mut qualified_methods);
+
+    // 1. & 2. Local certificate in the module directory.
+    let cert_candidates = [
+        module_dir.join(".proof-cert.json"),
+        module_dir.join("proof_certificate.json"),
+    ];
+    if let Some(cert_path) = cert_candidates.iter().find(|p| p.exists()) {
+        if let Ok(cert) = proof_cert::load_certificate(cert_path) {
+            // Check if the certificate matches this source file.
+            let cert_file_path = Path::new(&cert.file);
+            let source_matches = source_file.ends_with(cert_file_path)
+                || cert_file_path.ends_with(source_file.file_name().unwrap_or_default());
+            if source_matches || cert.file.is_empty() {
+                let results = proof_cert::verify_certificate(&cert, &atom_refs);
+                return Some(results.into_iter().collect());
+            }
+            // Certificate is for a different file — fall through to the
+            // bundle fallback rather than silently returning None.
+        }
+    }
+
+    // 3. SI-5 Phase 3-C: MUMEI_PROOF_BUNDLE fallback.
+    if let Ok(bundle_path_str) = std::env::var("MUMEI_PROOF_BUNDLE") {
+        let bundle_path = Path::new(&bundle_path_str);
+        if bundle_path.exists() {
+            match proof_cert::load_bundle(bundle_path) {
+                Ok(bundle) => {
+                    if let Some(cert) = proof_cert::lookup_bundle_certificate(&bundle, source_file)
+                    {
+                        let results = proof_cert::verify_certificate(cert, &atom_refs);
+                        return Some(results.into_iter().collect());
+                    }
+                }
+                Err(err) => {
+                    eprintln!(
+                        "  ⚠️  MUMEI_PROOF_BUNDLE at {} could not be parsed: {}",
+                        bundle_path.display(),
+                        err,
+                    );
+                }
+            }
+        } else {
+            eprintln!(
+                "  ⚠️  MUMEI_PROOF_BUNDLE points to missing file: {}",
+                bundle_path.display(),
+            );
+        }
+    }
+
+    None
 }
 
 /// P5-C: Mark dependency atoms as verified or unverified based on cert verification results.
@@ -1930,5 +1979,214 @@ impl Stack {
             "Expected 'Stack::push' to be 'proven', got: {:?}",
             result_map.get("Stack::push")
         );
+    }
+
+    // =============================================================
+    // SI-5 Phase 3-C: MUMEI_PROOF_BUNDLE fallback tests
+    // =============================================================
+    //
+    // These tests set and unset `MUMEI_PROOF_BUNDLE` inside a per-test
+    // scope. They never run in parallel with each other because they
+    // all mutate the same environment variable; cargo's default test
+    // runner will interleave them across threads though, so each test
+    // sets the variable deterministically and cleans up before
+    // returning.
+
+    /// Helper: produce a bundle containing a single std/ module cert.
+    fn make_bundle_with_module(
+        module_key: &str,
+        source_file: &str,
+        atoms: &[&parser::Atom],
+    ) -> proof_cert::ProofBundle {
+        let mut results = HashMap::new();
+        for a in atoms {
+            results.insert(
+                a.name.clone(),
+                ("unsat".to_string(), "verified".to_string()),
+            );
+        }
+        let module_env = ModuleEnv::new();
+        let cert = proof_cert::generate_certificate(
+            source_file,
+            atoms,
+            &results,
+            &module_env,
+            Some("mumei-std"),
+            Some("0.0.0"),
+        );
+        let mut modules = HashMap::new();
+        modules.insert(module_key.to_string(), cert);
+        proof_cert::ProofBundle {
+            bundle_version: "1.0".to_string(),
+            generated_at: "2026-04-18T00:00:00Z".to_string(),
+            mumei_version: "test".to_string(),
+            modules,
+            summary: proof_cert::BundleSummary::default(),
+        }
+    }
+
+    fn write_bundle_to_tempfile(
+        bundle: &proof_cert::ProofBundle,
+        name: &str,
+    ) -> std::path::PathBuf {
+        let tmp = std::env::temp_dir().join(name);
+        let json = serde_json::to_string_pretty(bundle).unwrap();
+        fs::write(&tmp, json).unwrap();
+        tmp
+    }
+
+    /// 3-C: module_key_from_source strips `.mm` and keeps the `std/` prefix.
+    #[test]
+    fn test_module_key_from_source_extracts_std_path() {
+        let key =
+            proof_cert::module_key_from_source(Path::new("/opt/mumei/std/container/safe_list.mm"));
+        assert_eq!(key, Some("std/container/safe_list".to_string()));
+
+        let key = proof_cert::module_key_from_source(Path::new("std/core.mm"));
+        assert_eq!(key, Some("std/core".to_string()));
+
+        // A path without a `std/` segment returns None — bundles only
+        // carry std/ modules.
+        let key = proof_cert::module_key_from_source(Path::new("src/main.mm"));
+        assert_eq!(key, None);
+    }
+
+    /// 3-C: bundle fallback is used when no local cert exists.
+    #[test]
+    fn test_verify_import_certificate_bundle_fallback() {
+        let source = r#"
+atom add(x: i64, y: i64) -> i64
+    requires: true;
+    ensures: true;
+    body: { x + y };
+"#;
+        let items = parser::parse_module(source);
+        let atom_refs: Vec<&parser::Atom> = items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Atom(a) => Some(a),
+                _ => None,
+            })
+            .collect();
+
+        let bundle = make_bundle_with_module("std/dummy_math", "std/dummy_math.mm", &atom_refs);
+        let bundle_path = write_bundle_to_tempfile(&bundle, "mumei_test_bundle_ok.json");
+
+        // Ensure no local cert is present.
+        let module_dir = std::env::temp_dir().join("mumei_test_ws3_nocert");
+        let _ = fs::remove_dir_all(&module_dir);
+        fs::create_dir_all(&module_dir).unwrap();
+        let source_file = module_dir.join("dummy_math.mm");
+        fs::write(&source_file, source).unwrap();
+
+        // Point source_file at something that module_key_from_source can
+        // resolve to `std/dummy_math`.
+        let std_root = std::env::temp_dir().join("mumei_test_ws3_std/std");
+        let _ = fs::remove_dir_all(std_root.parent().unwrap());
+        fs::create_dir_all(&std_root).unwrap();
+        let logical_source = std_root.join("dummy_math.mm");
+        fs::write(&logical_source, source).unwrap();
+
+        std::env::set_var("MUMEI_PROOF_BUNDLE", &bundle_path);
+        let result = verify_import_certificate(&std_root, &logical_source, &items);
+        std::env::remove_var("MUMEI_PROOF_BUNDLE");
+
+        let result = result.expect("bundle fallback should produce cert results");
+        assert_eq!(result.get("add").map(|s| s.as_str()), Some("proven"));
+
+        let _ = fs::remove_file(&bundle_path);
+        let _ = fs::remove_dir_all(&module_dir);
+        let _ = fs::remove_dir_all(std_root.parent().unwrap());
+    }
+
+    /// 3-C: missing/invalid MUMEI_PROOF_BUNDLE path simply falls through.
+    #[test]
+    fn test_verify_import_certificate_bundle_missing() {
+        let source = r#"
+atom sub(x: i64, y: i64) -> i64
+    requires: true;
+    ensures: true;
+    body: { x - y };
+"#;
+        let items = parser::parse_module(source);
+
+        // Point MUMEI_PROOF_BUNDLE at a nonexistent path.
+        let bogus = std::env::temp_dir().join("mumei_test_ws3_missing.json");
+        let _ = fs::remove_file(&bogus);
+
+        let module_dir = std::env::temp_dir().join("mumei_test_ws3_missing_dir");
+        let _ = fs::remove_dir_all(&module_dir);
+        fs::create_dir_all(&module_dir).unwrap();
+        let source_file = module_dir.join("sub.mm");
+        fs::write(&source_file, source).unwrap();
+
+        std::env::set_var("MUMEI_PROOF_BUNDLE", &bogus);
+        let result = verify_import_certificate(&module_dir, &source_file, &items);
+        std::env::remove_var("MUMEI_PROOF_BUNDLE");
+
+        assert!(
+            result.is_none(),
+            "missing bundle must not synthesise verification results",
+        );
+        let _ = fs::remove_dir_all(&module_dir);
+    }
+
+    /// 3-C: a local cert always wins against the bundle fallback.
+    #[test]
+    fn test_verify_import_certificate_local_takes_precedence() {
+        let source = r#"
+atom mul(x: i64, y: i64) -> i64
+    requires: true;
+    ensures: true;
+    body: { x * y };
+"#;
+        let items = parser::parse_module(source);
+        let atom_refs: Vec<&parser::Atom> = items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Atom(a) => Some(a),
+                _ => None,
+            })
+            .collect();
+
+        // Bundle certifies `mul` as verified.
+        let std_root = std::env::temp_dir().join("mumei_test_ws3_prec/std");
+        let _ = fs::remove_dir_all(std_root.parent().unwrap());
+        fs::create_dir_all(&std_root).unwrap();
+        let logical_source = std_root.join("mul_mod.mm");
+        fs::write(&logical_source, source).unwrap();
+
+        let bundle = make_bundle_with_module("std/mul_mod", "std/mul_mod.mm", &atom_refs);
+        let bundle_path = write_bundle_to_tempfile(&bundle, "mumei_test_bundle_prec.json");
+
+        // Local cert marks `mul` as FAILED so we can detect which one won.
+        let mut local_results = HashMap::new();
+        local_results.insert("mul".to_string(), ("sat".to_string(), "failed".to_string()));
+        let local_env = ModuleEnv::new();
+        let local_cert = proof_cert::generate_certificate(
+            logical_source.to_str().unwrap(),
+            &atom_refs,
+            &local_results,
+            &local_env,
+            None,
+            None,
+        );
+        let local_cert_path = std_root.join(".proof-cert.json");
+        proof_cert::save_certificate(&local_cert, &local_cert_path).unwrap();
+
+        std::env::set_var("MUMEI_PROOF_BUNDLE", &bundle_path);
+        let result = verify_import_certificate(&std_root, &logical_source, &items);
+        std::env::remove_var("MUMEI_PROOF_BUNDLE");
+
+        let result = result.expect("local cert should produce results");
+        // Local cert marked mul as failed → status should not be "proven".
+        assert_ne!(
+            result.get("mul").map(|s| s.as_str()),
+            Some("proven"),
+            "local cert must take precedence over the bundle",
+        );
+
+        let _ = fs::remove_file(&bundle_path);
+        let _ = fs::remove_dir_all(std_root.parent().unwrap());
     }
 }
