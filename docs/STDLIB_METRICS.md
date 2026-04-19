@@ -11,7 +11,7 @@ fresh on every push to `std/`.
 ## Summary
 
 - **Modules:** 19 (19 OK / 0 FAIL / 0 SKIP)
-- **Atoms total:** 187
+- **Atoms total:** 187 (122 proven · 65 trusted)
 - **Trusted atoms (reviewed contracts):** 65
 - **TODO/FIXME/XXX/HACK markers:** 15
 - **Weighted health score:** 0.917 / 1.000
