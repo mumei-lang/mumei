@@ -439,10 +439,10 @@ graph TD
 | ~~高~~ | SI-2: Verified FFI Boundary | mumei | ✅ Implemented |
 | ~~中~~ | SI-3: Autonomous Delivery Flow | 両方 | ✅ Complete (実地検証完了) |
 | ⏸️ | P7-C: Wasm ターゲット | mumei | Deferred |
-| ✅ | P8-A: VS Code Extension Marketplace 公開準備 | mumei | Ready for Publish |
+| ✅ | P8-A: VS Code Extension Marketplace 公開準備 | mumei | Published workflow ready (PR #153) |
 | ⏸️ | P8-B: Counter-example Visualizer | mumei | Deferred |
-| 🔧 | P9: Autonomous Forge Mode | mumei-agent | Infrastructure Complete (PR #31) |
-| 📋 | vStd-5: SafeList | mumei | Planned (Forge target) |
+| ✅ | P9: Autonomous Forge Mode | mumei-agent | Complete (SI-5 統合、vStd-1/2/5 鍛造検証済) |
+| ✅ | vStd-5: SafeList | mumei | Forged (PR #151) |
 | ⏸️ | SI-4: no_std Ecosystem | mumei | Deferred |
 
 ## vStd: Verified Standard Library Expansion
@@ -487,11 +487,11 @@ mumei-agent の forge モード（P9）により、vStd の各タスクを自律
 
 | vStd 項目 | Forge タスク | 状態 |
 |-----------|-------------|------|
-| vStd-1: contracts.mm 拡張 | `vstd_safe_add.json` | 📋 Ready (forge_tasks/) |
-| vStd-2: fixed_point.mm | `vstd_fixed_point.json` | 📋 Planned |
+| vStd-1: contracts.mm 拡張 | `vstd_safe_add.json`, `vstd_safe_multiply.json` | ✅ Forged (PR #151 — `safe_add`, `safe_multiply`) |
+| vStd-2: fixed_point.mm | `vstd_fixed_point.json` | ✅ Forged (PR #151 — `fp_negate`, `fp_min`, `fp_max`, `fp_clamp`) |
 | vStd-3: safe_queue.mm | — | ✅ Already exists |
 | vStd-4: http_secure.mm | — | ✅ Already exists |
-| vStd-5: safe_list.mm | `vstd_safe_list.json` | 📋 Ready — 初回鍛造ターゲット |
+| vStd-5: safe_list.mm | `vstd_safe_list.json` | ✅ Forged (PR #151 — 初回鍛造完了) |
 | vStd-MCP: list_std_catalog | — | ✅ Implemented |
 | vStd-Core: std/core.mm | — | ✅ Implemented (SI-5 Phase 1-B 基盤) |
 | vStd-MCP-Gaps: analyze_std_gaps | — | ✅ Implemented (SI-5 Phase 1-A 基盤) |
@@ -534,6 +534,7 @@ mumei-agent の forge モード（P9）により、vStd の各タスクを自律
 - ✅ `mcp_server.py` に `visualize_std_graph(format)` MCP ツール追加。Mermaid / DOT 双方を生成し、ノードを健全度で色分け（green = 完全検証済 / yellow = trusted atom あり / red = 検証失敗予約）。ラベルに `<N> atoms, <M> trusted` を含める。
 - ✅ `mcp_server.py::analyze_std_gaps` の `_rank_key` を 3 軸加重スコア (`_compute_weighted_score`) に刷新。`usage_demand` × `dep_depth` × `trusted_density` − `difficulty_penalty` を 0.30 / 0.30 / 0.25 / 0.15 の重みで合成し、proposals に `score` フィールドを付加。`priority` は score 降順の連番として維持。
 - ✅ `visualizer/generate_graph.py` と `visualizer/std_graph.md` を追加。`mcp_server` 内のヘルパを再利用し、GitHub 上で直接レンダリングされる Mermaid を `std_graph.md` に書き出す。CI の `update-metrics.yml` / `proliferate.yml` から定期再生成可能。
+- ✅ ws5 (PR #154) で visualizer ヘルパを `std_graph_lib.py` に抽出 — `_scan_std_imports` / `_collect_trusted_atoms` / `_count_atoms_per_file` / `_trusted_by_file_counts` / `_classify_health` / `_sanitize_node_id` / `_render_std_graph_mermaid` / `_render_std_graph_dot` を純粋 Python モジュールに切り出し、`mcp_server.py` と `visualizer/generate_graph.py` の両方が直接 import する構成に統一。FastMCP 依存の lazy-import dance を排除。
 
 ### Phase 2: Planning & Generation Layer（計画 + 生成）
 
@@ -580,7 +581,7 @@ CLI: `python -m agent proliferate --mumei-repo <path> [--max-proposals 3] [--dry
 実装（エージェント側の定量測定層）: `mumei-lang/mumei-agent` の `agent/std_health.py` と `python -m agent health` サブコマンド。
 
 - `measure_health(mumei_client, std_dir)` — `std/` 配下の各 `.mm` を `mumei verify` で検証し、atom 数 / trusted atom 数 / TODO 数を集計。返却: `total_files` / `verified_files` / `failed_files` / `total_atoms` / `verified_atoms` / `trusted_atoms` / `health_score` / `todo_count` / `details[]`。
-- `compute_health_score(total, verified, trusted, todo)` — 0.0〜1.0 クランプされた健全度スコア。base = `(verified_atoms - trusted_atoms) / total_atoms`、TODO ペナルティは 1 件あたり 0.01（累積上限 0.2）、trusted atom は「信仰による証明」として差し引く設計。
+- `compute_health_score(total, verified, trusted, todo)` — 0.0〜1.0 クランプされた健全度スコア。base = `(proven_atoms + TRUSTED_CREDIT × trusted_atoms) / total_atoms`（proven = atoms - trusted, TRUSTED_CREDIT = 0.8）、TODO ペナルティは 1 件あたり 0.01（累積上限 0.2）、`mumei verify` が FAIL した場合は最終スコアを半減。ws1 (PR #150) で `trusted` は「レビュー済み契約」として 0.8 credit を与える設計に更新（旧式では FFI を trusted に変更すると score が下がる矛盾があった）。
 - `proliferate.py` からの統合 — 増殖ループの前後で `measure_health` を呼び出し、健全度 delta をログ表示（将来的なロールバック判定の基盤）。
 
 CLI: `python -m agent health --mumei-repo <path> [--format json|table]`。失敗ファイルが 1 件でもあれば exit code 2 を返し、CI ゲートとして使用可能（mumei-agent PR #36）。
@@ -623,7 +624,7 @@ mumei 側の時系列記録（`docs/STDLIB_METRICS.md` 自動更新 CI）は `.g
 - ✅ `mumei-lang/mumei` `scripts/bundle_std_certs.py` — `std/certs/` 配下の全 `.proof.json` を単一の `std-proof-bundle.json` に集約する CLI。bundle schema は `bundle_version` / `generated_at` / `mumei_version` / `modules` / `summary` (total_modules / all_verified / partial_verified / total_atoms / proven_atoms) を含む。
 - ✅ `mumei-lang/mumei` `.github/workflows/release.yml` — Unix ターゲット向けパッケージング直前に `mumei verify --proof-cert` で全 std モジュールの証明書を生成し、`bundle_std_certs.py` で `std-proof-bundle.json` を作成して release tarball に同梱。
 - ✅ `mumei-lang/homebrew-mumei` `Formula/mumei.rb` + `mumei-lang/mumei` `scripts/homebrew/mumei.rb` (テンプレート) — tarball に含まれる `std-proof-bundle.json` を `#{share}/mumei/std-proof-bundle.json` に install し、`MUMEI_PROOF_BUNDLE` を `etc/mumei/env.sh` から export。`caveats` にもパスを明示。
-- ℹ️ 下流プロジェクト側の取り込みは `mumei-core/src/resolver.rs::verify_import_certificate` の既存ディレクトリ探索 (`.proof-cert.json` / `proof_certificate.json`) と独立しており、バンドルはフォールバック候補として扱う前提。現時点では resolver は変更せず、`MUMEI_PROOF_BUNDLE` を参照する拡張は後続 PR 候補として残置。
+- ✅ `mumei-lang/mumei` `mumei-core/src/resolver.rs::verify_import_certificate` — `MUMEI_PROOF_BUNDLE` 環境変数を参照するフォールバックを追加 (PR #152)。ローカルの `.proof-cert.json` / `proof_certificate.json` を優先し、見つからない場合はバンドル内 `modules["std/<dir>/<stem>"]` を引く 3-tier 探索。`module_key_from_source()` がソースパスから正規キーを抽出し、`lookup_bundle_certificate()` が `ImplBlock` メソッドも含む qualified atom 名でも動作する。
 
 ### SI-5 推奨実行順序
 
@@ -671,6 +672,32 @@ graph TD
     style P8 stroke-dasharray: 5 5
     style SI4 stroke-dasharray: 5 5
 ```
+
+---
+
+## 残課題サマリー（SI-5 完了後）
+
+SI-5 Autonomous Proliferation が 9 フェーズ全て ✅ Implemented / Complete に到達した時点での残課題を整理する。ws1〜ws6 (PR #150〜#155) で多くの後続タスクを消化した後の現状スナップショット。
+
+### Active
+
+| 項目 | リポジトリ | 状態 | 備考 |
+|------|-----------|------|------|
+| std/ 健全度維持 (health 0.9+ 継続) | mumei | ✅ Achieved (0.917 @ ws1) | FFI + quantified-forall を trusted 化、TRUSTED_CREDIT = 0.8。Z3 Array store 追跡が入ったら trusted を外す `// TODO` コメントで逆転マーキング済 |
+| vStd 鍛造実績拡大 | mumei | ✅ Baseline (PR #151) | vStd-1/2/5 の初回鍛造完了。今後は forge_tasks/ を追加投入して proliferate ループ駆動 |
+| resolver.rs MUMEI_PROOF_BUNDLE フォールバック | mumei | ✅ Implemented (PR #152) | 3-tier 探索 (local `.proof-cert.json` → `proof_certificate.json` → bundle env) + `module_key_from_source()` / `lookup_bundle_certificate()` |
+| visualizer ヘルパ分離 (std_graph_lib.py) | mumei | ✅ Implemented (PR #154) | FastMCP lazy-import dance を排除、`mcp_server.py` / `visualizer/generate_graph.py` の両経路が直接 import |
+| VS Code Extension Marketplace 公開 | mumei | 🔧 Ready (PR #153) | workflow と package metadata は準備完了。`VSCE_PAT` シークレット投入 + `vscode-v0.1.0` タグ push で初回公開 |
+| STDLIB_METRICS.md 時系列推移の表示 | mumei | 📋 Planned | 現在は最新状態のスナップショットのみ。git log から過去メトリクスを参照するビューを追加する余地あり |
+| trusted atom の削減 (Z3 Array store 追跡) | mumei | 📋 Planned | `std/list.mm` / `bounded_array.mm` / `verified_vector.mm` の `forall + arr[i]` パターンを Z3 で閉じられるようになったら `// TODO: Remove trusted once …` の trusted 指定を外す |
+
+### Deferred
+
+| 項目 | リポジトリ | 備考 |
+|------|-----------|------|
+| P7-C: Wasm ターゲット | mumei | LLVM Wasm backend 依存 + ABI 設計が必要 |
+| P8-B: Counter-example Visualizer | mumei | VS Code Extension 拡張、Z3 反例の UI 表示 |
+| SI-4: no_std Ecosystem | mumei | embedded 向け、ランタイム・リンカ・std の再設計が必要 |
 
 ---
 
