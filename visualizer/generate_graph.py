@@ -1,9 +1,9 @@
 """Generate std/ dependency graph visualization (SI-5 Phase 1-C).
 
-Re-uses the helpers exposed by ``mcp_server.py`` so the output is exactly
-what the ``visualize_std_graph`` MCP tool returns. Intended to be run from
-CI (``proliferate.yml``, ``update-metrics.yml``, etc.) to keep a committed
-Mermaid rendering in sync with the live dependency graph.
+Re-uses the pure helpers exposed by :mod:`std_graph_lib` so the output is
+exactly what the ``visualize_std_graph`` MCP tool returns. Intended to be
+run from CI (``proliferate.yml``, ``update-metrics.yml``, etc.) to keep a
+committed Mermaid rendering in sync with the live dependency graph.
 
 Usage:
     python visualizer/generate_graph.py [--format mermaid|dot] \
@@ -20,59 +20,21 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-# Expose mcp_server on sys.path so running this script in isolation works.
+# Expose std_graph_lib on sys.path so running this script in isolation
+# (e.g. `python visualizer/generate_graph.py`) works from any CWD.
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-# Lazy-import helpers from mcp_server to avoid triggering FastMCP
-# initialisation (and requiring the `mcp` package) at module scope.
-# The actual import happens inside generate() where the helpers are needed.
-#
-# TODO: Extract the pure graph-analysis helpers (_scan_std_imports,
-#       _collect_trusted_atoms, _count_atoms_per_file, _render_std_graph_*,
-#       _trusted_by_file_counts) into a shared module (e.g. std_graph_lib.py)
-#       that does NOT depend on FastMCP.  Both mcp_server.py and this script
-#       would then import from that module, eliminating the tight coupling to
-#       mcp_server internals and the need for the lazy-import workaround.
-_mcp_helpers = None
-
-
-def _get_helpers():
-    """Lazy-import graph helpers from mcp_server.
-
-    Deferred so that ``from mcp_server import …`` (which executes
-    ``mcp = FastMCP(…)`` at module scope) only runs when the helpers
-    are actually needed — not at import time of *this* module.  This
-    lets CI environments that lack the ``mcp`` package still import
-    ``generate_graph`` for testing without an immediate ImportError.
-    """
-    global _mcp_helpers
-    if _mcp_helpers is not None:
-        return _mcp_helpers
-    try:
-        from mcp_server import (  # noqa: E402
-            _collect_trusted_atoms,
-            _count_atoms_per_file,
-            _render_std_graph_dot,
-            _render_std_graph_mermaid,
-            _scan_std_imports,
-            _trusted_by_file_counts,
-        )
-    except ImportError as exc:
-        raise ImportError(
-            "Failed to import mcp_server helpers. "
-            "Ensure the `mcp` package is installed "
-            "(pip install -r requirements-mcp.txt)."
-        ) from exc
-    _mcp_helpers = {
-        "scan_std_imports": _scan_std_imports,
-        "collect_trusted_atoms": _collect_trusted_atoms,
-        "trusted_by_file_counts": _trusted_by_file_counts,
-        "count_atoms_per_file": _count_atoms_per_file,
-        "render_mermaid": _render_std_graph_mermaid,
-        "render_dot": _render_std_graph_dot,
-    }
-    return _mcp_helpers
+# ws5 / SI-5 Phase 1-C follow-up: import the pure-Python graph helpers
+# directly from std_graph_lib — no more lazy FastMCP import dance.
+from std_graph_lib import (  # noqa: E402
+    collect_trusted_atoms,
+    count_atoms_per_file,
+    render_std_graph_dot,
+    render_std_graph_mermaid,
+    scan_std_imports,
+    trusted_by_file_counts,
+)
 
 
 def _build_markdown(mermaid_source: str) -> str:
@@ -107,22 +69,21 @@ def generate(
     if not std_dir.exists():
         raise FileNotFoundError(f"std directory not found: {std_dir}")
 
-    h = _get_helpers()
-    dependency_graph = h["scan_std_imports"](std_dir)
-    trusted_atoms = h["collect_trusted_atoms"](std_dir)
-    trusted_by_file = h["trusted_by_file_counts"](trusted_atoms)
-    atoms_by_file = h["count_atoms_per_file"](std_dir)
+    dependency_graph = scan_std_imports(std_dir)
+    trusted_atoms = collect_trusted_atoms(std_dir)
+    trusted_by_file = trusted_by_file_counts(trusted_atoms)
+    atoms_by_file = count_atoms_per_file(std_dir)
     failed_files: set = set()
 
     if fmt == "mermaid":
-        return h["render_mermaid"](
+        return render_std_graph_mermaid(
             dependency_graph,
             trusted_by_file,
             atoms_by_file,
             failed_files,
         )
     if fmt == "dot":
-        return h["render_dot"](
+        return render_std_graph_dot(
             dependency_graph,
             trusted_by_file,
             atoms_by_file,
