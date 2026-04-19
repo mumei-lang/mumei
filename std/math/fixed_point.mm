@@ -97,3 +97,42 @@ atom fp_abs(fp_val: i64)
     body: {
         if fp_val >= 0 { fp_val } else { 0 - fp_val }
     };
+
+// 符号反転: result = -fp_val（オーバーフローしない範囲内で保証）
+atom fp_negate(fp_val: i64)
+    requires: fp_val >= -999999999999 && fp_val <= 999999999999;
+    ensures: result >= -999999999999 && result <= 999999999999
+          && result == 0 - fp_val;
+    body: {
+        0 - fp_val
+    };
+
+// 2 つの固定小数点値の最小値
+atom fp_min(a: i64, b: i64)
+    requires: a >= -999999999999 && a <= 999999999999
+           && b >= -999999999999 && b <= 999999999999;
+    ensures: result <= a && result <= b;
+    body: {
+        if a <= b { a } else { b }
+    };
+
+// 2 つの固定小数点値の最大値
+atom fp_max(a: i64, b: i64)
+    requires: a >= -999999999999 && a <= 999999999999
+           && b >= -999999999999 && b <= 999999999999;
+    ensures: result >= a && result >= b;
+    body: {
+        if a >= b { a } else { b }
+    };
+
+// 指定区間に固定小数点値をクランプする
+atom fp_clamp(fp_val: i64, min_val: i64, max_val: i64)
+    requires: fp_val >= -999999999999 && fp_val <= 999999999999
+           && min_val >= -999999999999 && min_val <= 999999999999
+           && max_val >= -999999999999 && max_val <= 999999999999
+           && min_val <= max_val;
+    ensures: result >= min_val && result <= max_val;
+    body: {
+        if fp_val < min_val { min_val }
+        else { if fp_val > max_val { max_val } else { fp_val } }
+    };
