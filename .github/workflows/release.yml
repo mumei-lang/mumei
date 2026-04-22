@@ -3,6 +3,12 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry-run: build+verify only, skip GitHub Release upload"
+        type: boolean
+        default: true
 permissions:
   contents: write
   pages: write
@@ -368,6 +374,9 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
+    # Skip the GitHub Release upload on workflow_dispatch dry runs so the
+    # Windows / musl build jobs can be validated without cutting a tag.
+    if: github.event_name != 'workflow_dispatch' || inputs.dry_run != true
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -384,6 +393,7 @@ jobs:
   deploy-installer:
     needs: release
     runs-on: ubuntu-latest
+    if: github.event_name != 'workflow_dispatch' || inputs.dry_run != true
     steps:
       - uses: actions/checkout@v4
       - name: Prepare GitHub Pages content
