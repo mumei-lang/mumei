@@ -5888,24 +5888,27 @@ fn verify_inner(
 
         let quantifier_expr = match q.q_type {
             QuantifierType::ForAll => {
-                if !arr_accesses.is_empty() {
-                    // Build Z3 patterns for E-matching instantiation.
-                    let mut pattern_asts: Vec<Dynamic> = Vec::new();
-                    for idx_expr in &arr_accesses {
-                        if let Ok(idx_z3) = expr_to_z3(&vc, idx_expr, &mut env, None) {
-                            if let Some(idx_int) = idx_z3.as_int() {
-                                pattern_asts.push(arr.select(&idx_int));
-                            }
+                // Build Z3 patterns for E-matching instantiation. Only attach
+                // a pattern if at least one arr[idx_expr] successfully lowered
+                // to an int; Z3_mk_pattern requires a non-empty term slice and
+                // would otherwise be invalid.
+                let mut pattern_asts: Vec<Dynamic> = Vec::new();
+                for idx_expr in &arr_accesses {
+                    if let Ok(idx_z3) = expr_to_z3(&vc, idx_expr, &mut env, None) {
+                        if let Some(idx_int) = idx_z3.as_int() {
+                            pattern_asts.push(arr.select(&idx_int));
                         }
                     }
+                }
+                if pattern_asts.is_empty() {
+                    z3::ast::forall_const(&ctx, &[&i], &[], &body)
+                } else {
                     let pattern_refs: Vec<&dyn z3::ast::Ast> = pattern_asts
                         .iter()
                         .map(|d| d as &dyn z3::ast::Ast)
                         .collect();
                     let pattern = z3::Pattern::new(&ctx, &pattern_refs);
                     z3::ast::forall_const(&ctx, &[&i], &[&pattern], &body)
-                } else {
-                    z3::ast::forall_const(&ctx, &[&i], &[], &body)
                 }
             }
             QuantifierType::Exists => z3::ast::exists_const(&ctx, &[&i], &[], &body_exists),
@@ -5929,7 +5932,7 @@ fn verify_inner(
                 env.insert(len_name.to_string(), l.clone().into());
                 l
             };
-            for idx_expr in &arr_accesses {
+            for (access_index, idx_expr) in arr_accesses.iter().enumerate() {
                 if let Ok(idx_z3) = expr_to_z3(&vc, idx_expr, &mut env, None) {
                     if let Some(idx_int) = idx_z3.as_int() {
                         let body = range_cond.implies(&Bool::and(
@@ -5941,7 +5944,13 @@ fn verify_inner(
                             vec![&pattern_ast as &dyn z3::ast::Ast];
                         let pattern = z3::Pattern::new(&ctx, &pattern_refs);
                         let len_forall = z3::ast::forall_const(&ctx, &[&i], &[&pattern], &body);
-                        let track_label = format!("track_quantifier_{}_arr_len_bound", q_index);
+                        // Include `access_index` so that each arr[..] access in
+                        // a multi-access forall (e.g. `arr[i] <= arr[i + 1]`)
+                        // gets a distinct unsat-core tracking label.
+                        let track_label = format!(
+                            "track_quantifier_{}_arr_len_bound_{}",
+                            q_index, access_index
+                        );
                         let track_bool = Bool::new_const(&ctx, track_label.as_str());
                         solver.assert_and_track(&len_forall, &track_bool);
                     }
