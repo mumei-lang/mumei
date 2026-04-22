@@ -240,7 +240,7 @@ Editor configuration examples: [`docs/EDITORS.md`](docs/EDITORS.md)
 
 **Deferred items**:
 - Counter-example highlighting in editors
-- VS Code Marketplace publishing
+- ~~VS Code Marketplace publishing~~ → ✅ Published (see editors/vscode/README.md)
 
 ### Strategic Vision: From Experimental to Practical
 

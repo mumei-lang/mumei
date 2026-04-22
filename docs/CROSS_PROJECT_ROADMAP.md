@@ -687,7 +687,7 @@ SI-5 Autonomous Proliferation が 9 フェーズ全て ✅ Implemented / Complet
 | vStd 鍛造実績拡大 | mumei | ✅ Baseline (PR #151) | vStd-1/2/5 の初回鍛造完了。今後は forge_tasks/ を追加投入して proliferate ループ駆動 |
 | resolver.rs MUMEI_PROOF_BUNDLE フォールバック | mumei | ✅ Implemented (PR #152) | 3-tier 探索 (local `.proof-cert.json` → `proof_certificate.json` → bundle env) + `module_key_from_source()` / `lookup_bundle_certificate()` |
 | visualizer ヘルパ分離 (std_graph_lib.py) | mumei | ✅ Implemented (PR #154) | FastMCP lazy-import dance を排除、`mcp_server.py` / `visualizer/generate_graph.py` の両経路が直接 import |
-| VS Code Extension Marketplace 公開 | mumei | 🔧 Ready (PR #153) | workflow と package metadata は準備完了。`VSCE_PAT` シークレット投入 + `vscode-v0.1.0` タグ push で初回公開 |
+| VS Code Extension Marketplace 公開 | mumei | ✅ Published | `.github/workflows/publish-vscode.yml` 経由で [`mumei-lang.mumei`](https://marketplace.visualstudio.com/items?itemName=mumei-lang.mumei) を公開。`vscode-v*` タグ push で再発行可能 |
 | STDLIB_METRICS.md 時系列推移の表示 | mumei | 📋 Planned | 現在は最新状態のスナップショットのみ。git log から過去メトリクスを参照するビューを追加する余地あり |
 | trusted atom の削減 (Z3 Array store 追跡) | mumei | 📋 Planned | `std/list.mm` / `bounded_array.mm` / `verified_vector.mm` の `forall + arr[i]` パターンを Z3 で閉じられるようになったら `// TODO: Remove trusted once …` の trusted 指定を外す |
 

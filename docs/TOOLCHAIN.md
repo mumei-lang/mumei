@@ -211,7 +211,7 @@ Inspects all tools with multi-path std library search (cwd → exe dir → `MUME
 ### Deferred: Tooling
 
 - [ ] Remote package registry (central server for `mumei add <name>`)
-- [ ] VS Code Marketplace publishing
+- [x] VS Code Marketplace publishing
 - [ ] LSP completion + definition jump (⏸ Deferred)
 - [ ] Counter-example highlighting in editors (⏸ Deferred)
 - [ ] Rich Diagnostics (miette/ariadne)
