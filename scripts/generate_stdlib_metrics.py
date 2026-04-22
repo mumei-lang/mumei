@@ -114,7 +114,89 @@ def _scan_std(std_dir: Path, mumei_bin: Path | None) -> list[dict]:
     return rows
 
 
-def _render_markdown(rows: list[dict]) -> str:
+def _parse_summary(md_text: str, date: str) -> dict | None:
+    """Extract Summary numeric fields from a ``STDLIB_METRICS.md`` snapshot.
+
+    Returns ``None`` if required fields (atoms total and weighted health)
+    cannot be located — e.g. when the file predates the current layout.
+    """
+    atoms_m = re.search(
+        r"Atoms total:\*\*\s*(\d+)\s*\((\d+)\s*proven\s*[·\u00b7]\s*(\d+)\s*trusted\)",
+        md_text,
+    )
+    health_m = re.search(r"Weighted health score:\*\*\s*([\d.]+)", md_text)
+    modules_m = re.search(r"Modules:\*\*\s*(\d+)", md_text)
+    todos_m = re.search(r"TODO/FIXME/XXX/HACK markers:\*\*\s*(\d+)", md_text)
+    if not atoms_m or not health_m:
+        return None
+    return {
+        "date": date,
+        "modules": int(modules_m.group(1)) if modules_m else 0,
+        "atoms": int(atoms_m.group(1)),
+        "proven": int(atoms_m.group(2)),
+        "trusted": int(atoms_m.group(3)),
+        "todos": int(todos_m.group(1)) if todos_m else 0,
+        "health": float(health_m.group(1)),
+    }
+
+
+def _collect_history(
+    repo_root: Path,
+    metrics_file: str = "docs/STDLIB_METRICS.md",
+    max_entries: int = 20,
+) -> list[dict]:
+    """Collect past Summary values from ``metrics_file`` via ``git log``.
+
+    Walks the commit history of ``metrics_file`` and parses the Summary
+    section of each snapshot. Same-date entries are collapsed to the most
+    recent commit and the result is sorted in descending date order,
+    limited to ``max_entries`` rows.
+    """
+    log = subprocess.run(  # noqa: S603,S607 — static args, trusted cwd
+        ["git", "log", "--format=%H %ad", "--date=short", "--", metrics_file],
+        capture_output=True,
+        text=True,
+        cwd=repo_root,
+        check=False,
+    )
+    if log.returncode != 0:
+        return []
+
+    seen_dates: set[str] = set()
+    history: list[dict] = []
+    for line in log.stdout.splitlines():
+        parts = line.split(maxsplit=1)
+        if len(parts) < 2:
+            continue
+        sha, date = parts[0], parts[1].strip()
+        # `git log` already returns newest-first, so the first commit for
+        # a given date is the most recent — skip older same-date ones.
+        if date in seen_dates:
+            continue
+
+        show = subprocess.run(  # noqa: S603,S607
+            ["git", "show", f"{sha}:{metrics_file}"],
+            capture_output=True,
+            text=True,
+            cwd=repo_root,
+            check=False,
+        )
+        if show.returncode != 0:
+            continue
+
+        entry = _parse_summary(show.stdout, date)
+        if entry is None:
+            continue
+        seen_dates.add(date)
+        history.append(entry)
+        if len(history) >= max_entries:
+            break
+
+    history.sort(key=lambda h: h["date"], reverse=True)
+    return history
+
+
+def _render_markdown(rows: list[dict], history: list[dict] | None = None) -> str:
     generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     total_atoms = sum(r["atoms"] for r in rows)
     total_trusted = sum(r["trusted"] for r in rows)
@@ -170,6 +252,25 @@ def _render_markdown(rows: list[dict]) -> str:
         "current reach), not unproven proof holes.",
     )
     lines.append("")
+
+    lines.append("## History")
+    lines.append("")
+    if history:
+        lines.append(
+            "| Date | Modules | Atoms | Proven | Trusted | TODOs | Health |",
+        )
+        lines.append(
+            "|------|--------:|------:|-------:|--------:|------:|-------:|",
+        )
+        for h in history:
+            lines.append(
+                f"| {h['date']} | {h['modules']} | {h['atoms']} | "
+                f"{h['proven']} | {h['trusted']} | {h['todos']} | "
+                f"{h['health']:.3f} |",
+            )
+    else:
+        lines.append("_No history available._")
+    lines.append("")
     return "\n".join(lines)
 
 
@@ -198,6 +299,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Print to stdout instead of writing to --output.",
     )
+    parser.add_argument(
+        "--no-history",
+        action="store_true",
+        help="Skip git history collection (faster for local runs).",
+    )
     args = parser.parse_args(argv)
 
     mumei_bin = args.mumei_bin
@@ -207,7 +313,10 @@ def main(argv: list[str] | None = None) -> int:
         mumei_bin = None
 
     rows = _scan_std(args.std_dir, mumei_bin)
-    markdown = _render_markdown(rows)
+    history: list[dict] = []
+    if not args.stdout and not args.no_history:
+        history = _collect_history(REPO_ROOT)
+    markdown = _render_markdown(rows, history)
 
     if args.stdout:
         sys.stdout.write(markdown)
