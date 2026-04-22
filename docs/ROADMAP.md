@@ -179,9 +179,11 @@ One-command installation via `brew install mumei-lang/mumei`.
 **Implementation Plan**:
 
 ```
-1. Create mumei-lang/homebrew-mumei repository
-2. Create Formula (download from GitHub Releases)
-3. Auto-update Formula via CI (release.yml integration)
+1. ✅ Create mumei-lang/homebrew-mumei repository
+2. ✅ Create Formula (download from GitHub Releases)
+3. ✅ Auto-update Formula via CI (release.yml integration)
+   — Formula テンプレートは scripts/generate_formula.py に分離し、
+     update-homebrew ジョブから呼び出してローカルでも再現可能。
 ```
 
 **Formula example**:
