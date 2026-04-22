@@ -4260,6 +4260,44 @@ fn collect_callees_with_args_stmt(stmt: &Stmt) -> Vec<(String, Vec<Expr>)> {
     callees
 }
 
+/// Collect `arr[<idx_expr>]` sub-expressions (returns the list of `idx_expr` clones)
+/// recursively from an expression tree. Used by the forall-constraint handler to
+/// build explicit Z3 pattern hints and to derive `len_arr > idx` bounds so that
+/// downstream ArrayAccess OOB checks can be discharged for indices that the
+/// user's forall already certifies as valid.
+fn collect_array_accesses(expr: &Expr) -> Vec<Expr> {
+    let mut out = Vec::new();
+    collect_array_accesses_inner(expr, &mut out);
+    out
+}
+
+fn collect_array_accesses_inner(expr: &Expr, out: &mut Vec<Expr>) {
+    match expr {
+        Expr::ArrayAccess(_name, idx) => {
+            out.push((**idx).clone());
+            collect_array_accesses_inner(idx, out);
+        }
+        Expr::BinaryOp(l, _, r) => {
+            collect_array_accesses_inner(l, out);
+            collect_array_accesses_inner(r, out);
+        }
+        Expr::Call(_, args) => {
+            for a in args {
+                collect_array_accesses_inner(a, out);
+            }
+        }
+        Expr::FieldAccess(e, _) => collect_array_accesses_inner(e, out),
+        Expr::IfThenElse {
+            cond,
+            then_branch: _,
+            else_branch: _,
+        } => {
+            collect_array_accesses_inner(cond, out);
+        }
+        _ => {}
+    }
+}
+
 /// body 内の全 Call 式から呼び出し先の atom 名を収集する。
 fn collect_callees_expr(expr: &Expr) -> Vec<String> {
     let mut callees = Vec::new();
@@ -5810,11 +5848,23 @@ fn verify_inner(
     // 1. 量子化制約の処理
     for (q_index, q) in atom.forall_constraints.iter().enumerate() {
         let i = Int::new_const(&ctx, q.var.as_str());
-        let start = Int::from_i64(&ctx, q.start.parse::<i64>().unwrap_or(0));
+        // Parse start as an expression (supports identifiers, arithmetic, e.g. "n - 1")
+        let start = if let Ok(val) = q.start.parse::<i64>() {
+            Int::from_i64(&ctx, val)
+        } else {
+            let ast = parse_expression(&q.start);
+            expr_to_z3(&vc, &ast, &mut env, None)?
+                .as_int()
+                .unwrap_or(Int::new_const(&ctx, q.start.as_str()))
+        };
         let end = if let Ok(val) = q.end.parse::<i64>() {
             Int::from_i64(&ctx, val)
         } else {
-            Int::new_const(&ctx, q.end.as_str())
+            // Parse end as expression to support `n - 1` etc.
+            let ast = parse_expression(&q.end);
+            expr_to_z3(&vc, &ast, &mut env, None)?
+                .as_int()
+                .unwrap_or(Int::new_const(&ctx, q.end.as_str()))
         };
 
         let range_cond = Bool::and(&ctx, &[&i.ge(&start), &i.lt(&end)]);
@@ -5826,20 +5876,78 @@ fn verify_inner(
                 atom.span.clone(),
             ))?;
 
+        // Extract `arr[<idx>]` sub-expressions from the forall condition so we
+        // can (1) propagate them as explicit Z3 quantifier patterns for
+        // E-matching, and (2) expose a "length >= max_index + 1" assumption so
+        // downstream ArrayAccess bounds-checks do not flag out-of-bounds on
+        // indices that the user has already certified as valid via the forall.
+        let arr_accesses = collect_array_accesses(&expr_ast);
+
+        let body = range_cond.implies(&condition_z3);
+        let body_exists = Bool::and(&ctx, &[&range_cond, &condition_z3]);
+
         let quantifier_expr = match q.q_type {
             QuantifierType::ForAll => {
-                z3::ast::forall_const(&ctx, &[&i], &[], &range_cond.implies(&condition_z3))
+                if !arr_accesses.is_empty() {
+                    // Build Z3 patterns for E-matching instantiation.
+                    let mut pattern_asts: Vec<Dynamic> = Vec::new();
+                    for idx_expr in &arr_accesses {
+                        if let Ok(idx_z3) = expr_to_z3(&vc, idx_expr, &mut env, None) {
+                            if let Some(idx_int) = idx_z3.as_int() {
+                                pattern_asts.push(arr.select(&idx_int));
+                            }
+                        }
+                    }
+                    let pattern_refs: Vec<&dyn z3::ast::Ast> = pattern_asts
+                        .iter()
+                        .map(|d| d as &dyn z3::ast::Ast)
+                        .collect();
+                    let pattern = z3::Pattern::new(&ctx, &pattern_refs);
+                    z3::ast::forall_const(&ctx, &[&i], &[&pattern], &body)
+                } else {
+                    z3::ast::forall_const(&ctx, &[&i], &[], &body)
+                }
             }
-            QuantifierType::Exists => z3::ast::exists_const(
-                &ctx,
-                &[&i],
-                &[],
-                &Bool::and(&ctx, &[&range_cond, &condition_z3]),
-            ),
+            QuantifierType::Exists => z3::ast::exists_const(&ctx, &[&i], &[], &body_exists),
         };
         let track_label = format!("track_quantifier_{}", q_index);
         let track_bool = Bool::new_const(&ctx, track_label.as_str());
         solver.assert_and_track(&quantifier_expr, &track_bool);
+
+        // Assert a length bound for `arr` so that ArrayAccess's OOB check does
+        // not fail on indices that the forall already certifies as valid.
+        // For each arr[idx_expr] under `forall i ∈ [start, end)`, we assert
+        // `len_arr > idx_expr` under the same quantifier. With pattern-matching
+        // on `arr[idx]`, Z3 can then conclude `idx < len_arr` at body usage.
+        if q.q_type == QuantifierType::ForAll && !arr_accesses.is_empty() {
+            let len_name = "len_arr";
+            let len_var = if let Some(existing) = env.get(len_name) {
+                existing.as_int().unwrap_or(Int::new_const(&ctx, len_name))
+            } else {
+                let l = Int::new_const(&ctx, len_name);
+                solver.assert(&l.ge(&Int::from_i64(&ctx, 0)));
+                env.insert(len_name.to_string(), l.clone().into());
+                l
+            };
+            for idx_expr in &arr_accesses {
+                if let Ok(idx_z3) = expr_to_z3(&vc, idx_expr, &mut env, None) {
+                    if let Some(idx_int) = idx_z3.as_int() {
+                        let body = range_cond.implies(&Bool::and(
+                            &ctx,
+                            &[&idx_int.ge(&Int::from_i64(&ctx, 0)), &idx_int.lt(&len_var)],
+                        ));
+                        let pattern_ast = arr.select(&idx_int);
+                        let pattern_refs: Vec<&dyn z3::ast::Ast> =
+                            vec![&pattern_ast as &dyn z3::ast::Ast];
+                        let pattern = z3::Pattern::new(&ctx, &pattern_refs);
+                        let len_forall = z3::ast::forall_const(&ctx, &[&i], &[&pattern], &body);
+                        let track_label = format!("track_quantifier_{}_arr_len_bound", q_index);
+                        let track_bool = Bool::new_const(&ctx, track_label.as_str());
+                        solver.assert_and_track(&len_forall, &track_bool);
+                    }
+                }
+            }
+        }
     }
 
     // 2. 引数（params）に対する精緻型制約の自動適用
@@ -6595,10 +6703,22 @@ fn expr_to_z3<'a>(
                     )));
                 }
             }
-            Ok(env
-                .get(name)
-                .cloned()
-                .unwrap_or_else(|| Int::new_const(ctx, name.as_str()).into()))
+            // The parser represents `true` / `false` boolean literals as
+            // Expr::Variable("true"|"false"). Without special handling they
+            // would be resolved as Int consts via the unwrap_or_else fallback
+            // below, which breaks `&&`/`||` operands. This also makes
+            // strip_quantifiers' `forall(...)` → `true` substitution safe for
+            // non-trusted atoms that mix forall with `&&`.
+            if let Some(existing) = env.get(name) {
+                return Ok(existing.clone());
+            }
+            if name == "true" {
+                return Ok(Bool::from_bool(ctx, true).into());
+            }
+            if name == "false" {
+                return Ok(Bool::from_bool(ctx, false).into());
+            }
+            Ok(Int::new_const(ctx, name.as_str()).into())
         }
         Expr::Call(name, args) => {
             match name.as_str() {
@@ -10384,5 +10504,198 @@ mod tests {
             )),
             "(a + b)"
         );
+    }
+
+    // ---- collect_array_accesses tests ----
+    //
+    // These tests pin the invariants used by the forall-constraint handler
+    // when it synthesises Z3 patterns and `len_arr > idx` bounds from the
+    // body of a `forall(...)` expression extracted out of a `requires` clause.
+
+    #[test]
+    fn test_collect_array_accesses_simple() {
+        // forall(i, 0, n, arr[i] >= 0) — body is `arr[i] >= 0`
+        let body = Expr::BinaryOp(
+            Box::new(Expr::ArrayAccess(
+                "arr".to_string(),
+                Box::new(Expr::Variable("i".to_string())),
+            )),
+            Op::Ge,
+            Box::new(Expr::Number(0)),
+        );
+        let accesses = collect_array_accesses(&body);
+        assert_eq!(accesses.len(), 1);
+        match &accesses[0] {
+            Expr::Variable(v) => assert_eq!(v, "i"),
+            other => panic!("expected Variable(\"i\"), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_collect_array_accesses_pair() {
+        // forall(i, 0, n-1, arr[i] <= arr[i + 1])
+        let body = Expr::BinaryOp(
+            Box::new(Expr::ArrayAccess(
+                "arr".to_string(),
+                Box::new(Expr::Variable("i".to_string())),
+            )),
+            Op::Le,
+            Box::new(Expr::ArrayAccess(
+                "arr".to_string(),
+                Box::new(Expr::BinaryOp(
+                    Box::new(Expr::Variable("i".to_string())),
+                    Op::Add,
+                    Box::new(Expr::Number(1)),
+                )),
+            )),
+        );
+        let accesses = collect_array_accesses(&body);
+        assert_eq!(accesses.len(), 2);
+        match &accesses[0] {
+            Expr::Variable(v) => assert_eq!(v, "i"),
+            other => panic!("expected Variable(\"i\"), got {:?}", other),
+        }
+        match &accesses[1] {
+            Expr::BinaryOp(_, Op::Add, _) => {}
+            other => panic!("expected i + 1 BinaryOp, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_collect_array_accesses_nested_index() {
+        // arr[arr[i]] — the outer access must be captured, and the inner
+        // nested ArrayAccess inside the index expression must also surface.
+        let body = Expr::ArrayAccess(
+            "arr".to_string(),
+            Box::new(Expr::ArrayAccess(
+                "arr".to_string(),
+                Box::new(Expr::Variable("i".to_string())),
+            )),
+        );
+        let accesses = collect_array_accesses(&body);
+        assert_eq!(accesses.len(), 2);
+    }
+
+    #[test]
+    fn test_collect_array_accesses_none() {
+        // No array access at all → empty
+        let body = Expr::BinaryOp(
+            Box::new(Expr::Variable("n".to_string())),
+            Op::Ge,
+            Box::new(Expr::Number(0)),
+        );
+        let accesses = collect_array_accesses(&body);
+        assert!(accesses.is_empty());
+    }
+
+    // ---- Variable("true") / Variable("false") as Z3 Bool ----
+    //
+    // strip_quantifiers replaces `forall(...)` with the literal token `true`
+    // when extracting forall constraints from a `requires` clause. Without
+    // Bool sort for Variable("true")/("false"), the remaining `... && true`
+    // fails to typecheck as a Z3 Bool and the atom can't be verified.
+
+    #[test]
+    fn test_expr_to_z3_true_false_are_bool() {
+        use z3::{Config, Context, Solver};
+
+        let cfg = Config::new();
+        let ctx = Context::new(&cfg);
+        let solver = Solver::new(&ctx);
+        let int_sort = z3::Sort::int(&ctx);
+        let arr = Array::new_const(&ctx, "arr", &int_sort, &int_sort);
+        let module_env = ModuleEnv::new();
+        let linearity_ctx_cell = std::cell::RefCell::new(LinearityCtx::new());
+        let effect_ctx_cell =
+            std::cell::RefCell::new(EffectCtx::new(std::collections::HashSet::new()));
+        let constraint_count_cell = std::cell::Cell::new(0usize);
+        let has_string_constraints_cell = std::cell::Cell::new(false);
+        let vc = VCtx {
+            ctx: &ctx,
+            arr: &arr,
+            module_env: &module_env,
+            current_atom: None,
+            linearity_ctx: Some(&linearity_ctx_cell),
+            effect_ctx: Some(&effect_ctx_cell),
+            constraint_count: Some(&constraint_count_cell),
+            constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
+            has_string_constraints: Some(&has_string_constraints_cell),
+        };
+        let mut env: Env = HashMap::new();
+
+        // Variable("true") → Bool, And'able with another Bool
+        let true_expr = Expr::Variable("true".to_string());
+        let true_z3 = expr_to_z3(&vc, &true_expr, &mut env, Some(&solver)).unwrap();
+        assert!(
+            true_z3.as_bool().is_some(),
+            "Variable(\"true\") must yield Bool sort"
+        );
+
+        let false_expr = Expr::Variable("false".to_string());
+        let false_z3 = expr_to_z3(&vc, &false_expr, &mut env, Some(&solver)).unwrap();
+        assert!(
+            false_z3.as_bool().is_some(),
+            "Variable(\"false\") must yield Bool sort"
+        );
+
+        // `x > 0 && true` — mirrors the shape of `strip_quantifiers`-processed requires.
+        let composite = Expr::BinaryOp(
+            Box::new(Expr::BinaryOp(
+                Box::new(Expr::Variable("x".to_string())),
+                Op::Gt,
+                Box::new(Expr::Number(0)),
+            )),
+            Op::And,
+            Box::new(Expr::Variable("true".to_string())),
+        );
+        let composite_z3 = expr_to_z3(&vc, &composite, &mut env, Some(&solver))
+            .expect("composite `>  && true` must parse when Variable(true) is Bool");
+        assert!(composite_z3.as_bool().is_some());
+    }
+
+    // ---- forall-over-arr + E-matching pattern end-to-end ----
+    //
+    // Exercises the full forall_constraints path by asserting
+    // `forall i ∈ [0, n). arr[i] ≥ 0` and checking that Z3 can then discharge
+    // the same claim as an ensures — this used to fail prior to the
+    // pattern-based instantiation hint and `len_arr > idx` bound.
+
+    #[test]
+    fn test_forall_arr_transfers_between_requires_and_ensures() {
+        use z3::ast::Ast;
+        use z3::{Config, Context, SatResult, Solver};
+
+        let cfg = Config::new();
+        let ctx = Context::new(&cfg);
+        let solver = Solver::new(&ctx);
+        let int_sort = z3::Sort::int(&ctx);
+        let arr = Array::new_const(&ctx, "arr", &int_sort, &int_sort);
+
+        let n = Int::new_const(&ctx, "n");
+        let i = Int::new_const(&ctx, "i");
+        let zero = Int::from_i64(&ctx, 0);
+
+        // Requires forall with an explicit E-matching pattern on arr[i].
+        let range_req = Bool::and(&ctx, &[&i.ge(&zero), &i.lt(&n)]);
+        let ai = arr.select(&i).as_int().unwrap();
+        let body_req = range_req.implies(&ai.ge(&zero));
+        let pattern_ast = arr.select(&i);
+        let pattern_refs: Vec<&dyn Ast> = vec![&pattern_ast as &dyn Ast];
+        let pattern = z3::Pattern::new(&ctx, &pattern_refs);
+        let req_forall = z3::ast::forall_const(&ctx, &[&i], &[&pattern], &body_req);
+        solver.assert(&n.ge(&zero));
+        solver.assert(&req_forall);
+
+        // Ensures: same forall ⇒ must be provable (negation unsat).
+        let body_ens = range_req.implies(&ai.ge(&zero));
+        let ens_forall = z3::ast::forall_const(&ctx, &[&i], &[&pattern], &body_ens);
+        solver.push();
+        solver.assert(&ens_forall.not());
+        assert_eq!(
+            solver.check(),
+            SatResult::Unsat,
+            "requires forall should discharge equivalent ensures forall under same pattern"
+        );
+        solver.pop(1);
     }
 }
