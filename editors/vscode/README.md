@@ -52,6 +52,7 @@ atom increment(n: i64)
 
 ## Links
 
+- [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=mumei-lang.mumei)
 - [Mumei Language](https://github.com/mumei-lang/mumei)
 - [Issue Tracker](https://github.com/mumei-lang/mumei/issues)
 - [Changelog](CHANGELOG.md)
