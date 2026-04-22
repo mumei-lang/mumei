@@ -226,12 +226,12 @@ enum List { Nil, Cons(i64, Self) }
 
 | Atom | Requires | Ensures | Description |
 |---|---|---|---|
-| `fold_sum(n)` | `n >= 0` | `result >= 0` | Sum all elements |
-| `fold_count_gte(n, threshold)` | `n >= 0` | `0 <= result <= n` | Count elements ≥ threshold |
+| `fold_sum(n)` | `n >= 0 && forall(i, 0, n, arr[i] >= 0)` | `result >= 0` | Sum all elements |
+| `fold_count_gte(n, threshold)` | `n >= 0 && len(arr) >= n` | `0 <= result <= n` | Count elements ≥ threshold |
 | `fold_min_index(n)` | `n >= 0` | `-1 <= result < n` | Index of minimum element |
 | `fold_max_index(n)` | `n >= 0` | `-1 <= result < n` | Index of maximum element |
-| `fold_all_gte(n, threshold)` | `n >= 0` | `result ∈ {0,1}` | All elements ≥ threshold? (runtime forall) |
-| `fold_any_gte(n, threshold)` | `n >= 0` | `result ∈ {0,1}` | Any element ≥ threshold? (runtime exists) |
+| `fold_all_gte(n, threshold)` | `n >= 0 && len(arr) >= n` | `result ∈ {0,1}` | All elements ≥ threshold? (runtime forall) |
+| `fold_any_gte(n, threshold)` | `n >= 0 && len(arr) >= n` | `result ∈ {0,1}` | Any element ≥ threshold? (runtime exists) |
 
 ### Sort Algorithms (Verified)
 
@@ -239,8 +239,8 @@ enum List { Nil, Cons(i64, Self) }
 |---|---|---|---|
 | `insertion_sort(n)` | `n >= 0` | `result == n` | Insertion sort with termination proof |
 | `merge_sort(n)` | `n >= 0` | `result == n` | Merge sort with inductive invariant |
-| `verified_insertion_sort(n)` | `n >= 0` | `result == n && forall(i, 0, result-1, arr[i] <= arr[i+1])` | Trusted: sorted output guarantee |
-| `verified_merge_sort(n)` | `n >= 0` | `result == n && forall(i, 0, result-1, arr[i] <= arr[i+1])` | Trusted: sorted output guarantee |
+| `verified_insertion_sort(n)` | `n >= 0 && forall(i, 0, n-1, arr[i] <= arr[i+1])` | `result == n && forall(i, 0, result-1, arr[i] <= arr[i+1])` | Identity contract: sorted-in → sorted-out (real sort impl is future work) |
+| `verified_merge_sort(n)` | `n >= 0 && forall(i, 0, n-1, arr[i] <= arr[i+1])` | `result == n && forall(i, 0, result-1, arr[i] <= arr[i+1])` | Identity contract: sorted-in → sorted-out (real sort impl is future work) |
 | `binary_search(n, target)` | `n >= 0` | `result >= -1 && result < n` | Binary search with termination proof |
 | `binary_search_sorted(n, target)` | `n >= 0 && forall(...)` | `result >= -1 && result < n` | Binary search with sorted precondition |
 
