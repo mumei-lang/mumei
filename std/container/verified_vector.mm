@@ -13,19 +13,13 @@ struct VerifiedVector {
 }
 
 // 全要素が非負であることを前提とした合計
-// NOTE: forall in requires with arr[i] uses trusted contract
-//       (same pattern as verified_insertion_sort in std/list.mm).
-//       Full body-level proof requires Z3 Array store tracking (future).
-//       TODO: Remove `trusted` once Z3 Array store tracking is implemented.
-trusted atom vvec_sum(n: i64)
+atom vvec_sum(n: i64)
     requires: n >= 0 && forall(i, 0, n, arr[i] >= 0);
     ensures: result >= 0;
     body: { 0 }
 
 // 全要素が閾値以下であることを検証
-// NOTE: forall + arr[i] uses trusted contract (Z3 Array store tracking not yet implemented).
-//       TODO: Remove `trusted` once Z3 Array store tracking is implemented.
-trusted atom vvec_all_bounded(n: i64, upper: i64)
+atom vvec_all_bounded(n: i64, upper: i64)
     requires: n >= 0 && upper >= 0 && forall(i, 0, n, arr[i] >= 0 && arr[i] <= upper);
     ensures: result == 1;
     body: { 1 }
@@ -43,10 +37,7 @@ atom vvec_range_check(vec_len: i64, start: i64, end: i64)
     body: { 1 }
 
 // ソート済みベクターへの二分探索（境界安全）
-// NOTE: forall in requires with arr[i] uses trusted contract
-//       (same pattern as binary_search_sorted in std/list.mm).
-//       TODO: Remove `trusted` once Z3 Array store tracking is implemented.
-trusted atom vvec_binary_search(n: i64, target: i64)
+atom vvec_binary_search(n: i64, target: i64)
     requires: n >= 0 && forall(i, 0, n - 1, arr[i] <= arr[i + 1]);
     ensures: result >= 0 - 1 && result < n;
     body: { 0 - 1 }

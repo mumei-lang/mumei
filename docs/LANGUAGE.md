@@ -174,8 +174,10 @@ body: {
 ---
 ## Quantifiers in Contracts
 ```mumei
-trusted atom verified_insertion_sort(n: i64)
-requires: n >= 0;
+// Identity contract: requires sorted input, ensures sorted output.
+// (Real sort implementation requires Array::store tracking — future work.)
+atom verified_insertion_sort(n: i64)
+requires: n >= 0 && forall(i, 0, n - 1, arr[i] <= arr[i + 1]);
 ensures: result == n && forall(i, 0, result - 1, arr[i] <= arr[i + 1]);
 body: n;
 atom binary_search_sorted(n: i64, target: i64)
