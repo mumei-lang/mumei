@@ -180,6 +180,16 @@ else
     EXAMPLES_FAILED=$((EXAMPLES_FAILED + 1))
 fi
 
+# 6k. Multi-array store isolation (per-array __z3_arr_<name>)
+echo -n "  test_array_store_multi.mm ... "
+if $MUMEI verify tests/test_array_store_multi.mm 2>/dev/null; then
+    echo "✅"
+    EXAMPLES_PASSED=$((EXAMPLES_PASSED + 1))
+else
+    echo "❌"
+    EXAMPLES_FAILED=$((EXAMPLES_FAILED + 1))
+fi
+
 echo ""
 echo "  Examples: $EXAMPLES_PASSED passed, $EXAMPLES_FAILED failed"
 

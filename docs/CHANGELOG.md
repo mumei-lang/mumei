@@ -30,10 +30,14 @@
   2. Running the same OOB check used by `ArrayAccess` against `len_<name>` —
      any satisfiable `!(0 <= idx < len_<name>)` aborts with a targeted
      "Potential Out-of-Bounds store" error.
-  3. Updating the environment-stored Z3 array under the `__z3_arr` key using
-     `Array::store(current, idx, val)`. `expr_to_z3::ArrayAccess` now reads
-     `__z3_arr` from the env (falling back to `vc.arr`) so subsequent
-     `arr[j]` reads observe the store — `select(store(a, i, v), i) = v`.
+  3. Updating the environment-stored Z3 array under the **per-array**
+     `__z3_arr_<name>` key using `Array::store(current, idx, val)`.
+     `expr_to_z3::ArrayAccess` reads the matching `__z3_arr_<name>` key
+     (falling back to `vc.arr`) so subsequent `arr[j]` reads observe the
+     store — `select(store(a, i, v), i) = v`. Keying by name is required for
+     soundness when multiple arrays (e.g. `arr` and `aux`) appear in the same
+     body: a single shared key would let a store to `brr` pollute reads from
+     `arr`. Regression: `tests/test_array_store_multi.mm`.
 - All AST-`match` traversals in `verification.rs`
   (`collect_acquire_resources_stmt`, `collect_callees_with_args_stmt`,
   `collect_array_accesses_in_stmt`, `collect_callees_stmt`,

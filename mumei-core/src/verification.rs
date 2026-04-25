@@ -7323,11 +7323,16 @@ fn expr_to_z3<'a>(
                 }
                 solver.pop(1);
             }
-            // `__z3_arr` holds the latest logical array after any `Stmt::ArrayStore`
-            // updates performed earlier in the body; fall back to `vc.arr` when
-            // no store has occurred yet.
+            // `__z3_arr_<name>` holds the latest logical array for the *specific*
+            // array `name` after any `Stmt::ArrayStore` updates performed earlier
+            // in the body; fall back to `vc.arr` (the default symbolic handle) when
+            // no store has occurred yet. Keying per-name is required for soundness
+            // when multiple arrays (e.g. `arr` and `aux`) appear in the same body —
+            // a shared `__z3_arr` key would let a store to `brr` pollute reads
+            // from `arr`.
+            let arr_key = format!("__z3_arr_{}", name);
             let current_arr: Array<'_> = env
-                .get("__z3_arr")
+                .get(&arr_key)
                 .and_then(|d| d.as_array())
                 .unwrap_or_else(|| arr.clone());
             Ok(current_arr.select(&idx))
@@ -8434,18 +8439,20 @@ fn stmt_to_z3<'a>(
                 solver.pop(1);
             }
 
-            // Update the current Z3 array in the environment using `store`.
-            // `__z3_arr` is the single logical array handle — expr_to_z3's
-            // `Expr::ArrayAccess` branch reads from this key (falling back to
-            // `vc.arr` when unset) so downstream reads observe the updated
-            // element. This matches Z3's theory-of-arrays semantics:
+            // Update the logical Z3 array bound to *this* array name.
+            // `__z3_arr_<name>` isolates stores per-array so that a store to
+            // `brr` cannot pollute reads from `arr`. expr_to_z3's
+            // `Expr::ArrayAccess` branch mirrors this key (falling back to
+            // `vc.arr` when unset). This matches Z3's theory-of-arrays
+            // semantics locally for each named array:
             //   select(store(a, i, v), j) = if i == j then v else select(a, j)
+            let arr_key = format!("__z3_arr_{}", array);
             let current_arr: Array<'_> = env
-                .get("__z3_arr")
+                .get(&arr_key)
                 .and_then(|d| d.as_array())
                 .unwrap_or_else(|| vc.arr.clone());
             let new_arr = current_arr.store(&idx, &val);
-            env.insert("__z3_arr".to_string(), new_arr.into());
+            env.insert(arr_key, new_arr.into());
 
             Ok(val.into())
         }
