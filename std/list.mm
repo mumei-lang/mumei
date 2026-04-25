@@ -399,26 +399,88 @@ body: {
     }
 };
 
-// --- 挿入ソート（契約ベース identity）---
-// Phase 4: forall in ensures による昇順の完全な証明。
-// 証明する性質:
-//   1. 要素数保存: result == n
-//   2. 出力は昇順: forall(i, 0, result - 1, arr[i] <= arr[i + 1])
+// --- 挿入ソート（実 body + 要素数保存 ensures）---
+// Phase 4 / Plan 9-4: `arr[i] = val` 構文 + Z3 Array::store 追跡の導入により、
+// 実際の swap を伴う挿入ソートを body として持てるようになった。
 //
-// 備考: 現在の body は契約ベース identity（入力がソート済みならそのまま返す）。
-//   実際の swap を伴う挿入ソート実装は、パーサ/AST に `arr[i] = val` 構文を
-//   追加して Z3 Array::store 追跡と組み合わせて実現する将来課題。
-//   （本 PR では forall-over-arr の E-matching パターンと len_arr 境界を
-//    Z3 verifier 側に実装し、この identity 契約を証明可能にした。）
-atom verified_insertion_sort(n: i64)
+// 検証する性質（方針 A: trust の表面積を最小化）:
+//   1. 要素数保存: result == n のみを ensures とする
+//
+// 備考: 「出力が昇順 (forall(i, 0, result-1, arr[i] <= arr[i+1]))」の保証は
+//   Z3 Array + forall 量化子の自動証明が現状 timeout するため、虚偽の
+//   `trusted` 保証を避けて ensures から外した。ソート済み出力を契約として
+//   要求する用途には、下記の `verified_insertion_sort_identity`
+//   (sorted-in → sorted-out の証明可能な identity 版) を使用すること。
+//
+//   `trusted` は二重 while 内側ループでの `i = i + 1` の MIR move 解析
+//   false-positive（`insertion_sort` / `test_array_store_loop` と同根）を
+//   回避する目的で残している。move 解析が改善されたら `trusted` を外せる。
+trusted atom verified_insertion_sort(n: i64)
+requires: n >= 0;
+ensures: result == n;
+body: {
+    if n <= 1 { n }
+    else {
+        let i = 1;
+        while i < n
+        invariant: i >= 1 && i <= n
+        decreases: n - i
+        {
+            let key = arr[i];
+            let j = i;
+            while j > 0
+            invariant: j >= 0 && j <= i
+            decreases: j
+            {
+                if arr[j - 1] > key {
+                    arr[j] = arr[j - 1];
+                    j = j - 1
+                } else {
+                    j = 0
+                }
+            };
+            arr[j] = key;
+            i = i + 1
+        };
+        n
+    }
+};
+
+// --- 挿入ソート（identity 契約版・証明可能）---
+// 方針 B: 旧 PR #157 までの「sorted-in → sorted-out」の identity 契約を
+// `body: n` (恒等関数) として残す。入力がソート済みなら出力もソート済み
+// であることが Z3 で帰納的に証明可能（trusted 不要）。
+// ソート済み出力の契約保証が必要な下流ユーザはこちらを使用する。
+atom verified_insertion_sort_identity(n: i64)
 requires: n >= 0 && forall(i, 0, n - 1, arr[i] <= arr[i + 1]);
 ensures: result == n && forall(i, 0, result - 1, arr[i] <= arr[i + 1]);
 body: n;
 
-// --- マージソート（契約ベース identity）---
-// body は verified_insertion_sort と同様に identity。
-// 実際の分割統治実装は再帰 + 補助配列が必要で、将来対応。
-atom verified_merge_sort(n: i64)
+// --- マージソート（実 body 骨格 + 要素数保存 ensures）---
+// 再帰 + 補助配列が必要だが、現行 mumei には補助配列パラメータの
+// 標準表現がないため、分割統治の制御フローのみを記述する。
+//
+// 検証する性質（方針 A）: 要素数保存 (result == n) のみ。
+// 「出力が昇順」の保証はソート本体が省略されているため成立せず、
+// 偽の `trusted` 保証を避けて ensures から外した。`trusted` は再帰
+// async atom 解析の制限を回避するために残している。
+trusted atom verified_merge_sort(n: i64)
+requires: n >= 0;
+ensures: result == n;
+body: {
+    if n <= 1 { n }
+    else {
+        let mid = n / 2;
+        let left = verified_merge_sort(mid);
+        let right = verified_merge_sort(n - mid);
+        left + right
+    }
+};
+
+// --- マージソート（identity 契約版・証明可能）---
+// 方針 B: 旧 identity 契約を `body: n` で残す。sorted-in → sorted-out が
+// Z3 で証明可能（trusted 不要）。
+atom verified_merge_sort_identity(n: i64)
 requires: n >= 0 && forall(i, 0, n - 1, arr[i] <= arr[i + 1]);
 ensures: result == n && forall(i, 0, result - 1, arr[i] <= arr[i + 1]);
 body: n;

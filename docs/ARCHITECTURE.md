@@ -41,7 +41,7 @@ The repository is a Cargo workspace with 3 library crates + 1 CLI binary:
 | `mumei-core/src/resolver.rs` | Import resolution, circular detection, prelude auto-load, incremental build cache |
 | `mumei-core/src/verification.rs` | Z3 verification, `ModuleEnv`, `LinearityCtx`, law expansion, equality propagation, resource hierarchy, BMC, async recursion depth, inductive invariant, trust boundary, `call_with_contract` (Phase B higher-order function verification) |
 | `mumei-emit-llvm/src/codegen.rs` | LLVM IR generation — `resolve_return_type()`, Pattern Matrix, StructType, malloc/free, nested extract_value |
-| `mumei-core/src/hir.rs` | HIR (High-level IR) definitions, AST → HIR lowering, `HirEffectSet` on `HirAtom`/`HirExpr::Call`/`HirExpr::Perform` |
+| `mumei-core/src/hir.rs` | HIR (High-level IR) definitions, AST → HIR lowering, `HirEffectSet` on `HirAtom`/`HirExpr::Call`/`HirExpr::Perform`. Stmt variants: `Let`, `Assign`, `ArrayStore` (`arr[i] = v` — lowers to Z3 `Array::store`), `While`, `Block`, `Acquire`, `Expr`. |
 | `mumei-core/src/emitter.rs` | `Emitter` trait, `Artifact`, `ArtifactKind`, `EmitTarget`, `CHeaderEmitter` |
 | `mumei-emit-llvm/src/lib.rs` | `LlvmEmitter` — wraps `codegen::compile()` |
 | `mumei-emit-json/src/lib.rs` | `VerifiedJsonEmitter` — produces `.verified.json` metadata |

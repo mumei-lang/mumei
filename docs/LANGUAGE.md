@@ -174,9 +174,18 @@ body: {
 ---
 ## Quantifiers in Contracts
 ```mumei
-// Identity contract: requires sorted input, ensures sorted output.
-// (Real sort implementation requires Array::store tracking — future work.)
-atom verified_insertion_sort(n: i64)
+// Real insertion-sort body with `arr[i] = val` store syntax.
+// `trusted` for MIR move-analysis false-positive on inner-loop `i = i + 1`.
+// To minimize the trust surface, only element-count preservation is asserted
+// — sorted-output is NOT claimed here. Use `verified_insertion_sort_identity`
+// for a provable sorted-in → sorted-out contract.
+trusted atom verified_insertion_sort(n: i64)
+requires: n >= 0;
+ensures: result == n;
+body: { /* see std/list.mm */ };
+
+// Provable identity contract (no `trusted`):
+atom verified_insertion_sort_identity(n: i64)
 requires: n >= 0 && forall(i, 0, n - 1, arr[i] <= arr[i + 1]);
 ensures: result == n && forall(i, 0, result - 1, arr[i] <= arr[i + 1]);
 body: n;
@@ -185,6 +194,22 @@ requires: n >= 0 && forall(i, 0, n, arr[i] <= arr[i + 1]);
 ensures: result >= 0 - 1 && result < n;
 body: { ... };
 ```
+### Array Element Assignment (`arr[i] = v`)
+`arr[idx] = expr` は `Stmt::ArrayStore` としてパースされ、Z3 では
+`Array::store(arr, idx, expr)` でモデル化される。後続の `arr[j]` 読み取りは
+環境内の最新配列から `select` されるため、
+
+```mumei
+atom set_zero(n: i64)
+requires: n >= 1 && forall(i, 0, n, arr[i] >= 0);
+ensures: result == 0;
+body: {
+    arr[0] = 0;
+    arr[0]         // ==> 0 (store-then-select)
+};
+```
+のような「store → select」セマンティクスが検証段階で保持される。インデックスが
+`[0, len_<name>)` の範囲外になりうる場合は OOB エラーが報告される。
 ---
 ## Ownership and Borrowing
 | Modifier | Semantics | Z3 Tracking |

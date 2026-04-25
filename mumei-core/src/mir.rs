@@ -374,6 +374,29 @@ fn lower_stmt(ctx: &mut LowerCtx, stmt: &HirStmt) -> Option<Operand> {
             ctx.emit(MirStatement::Assign(place, Rvalue::Use(val_op)));
             None
         }
+        HirStmt::ArrayStore {
+            array,
+            index,
+            value,
+        } => {
+            // Evaluate value first (matches LLVM codegen / Z3 ordering).
+            let val_op = lower_expr(ctx, value);
+
+            // Materialize the index in a fresh local so it can be referenced
+            // from a `Place::Index` in the target place.
+            let idx_op = lower_expr(ctx, index);
+            let idx_local = ctx.alloc_temp();
+            ctx.emit(MirStatement::StorageLive(idx_local.clone()));
+            ctx.emit(MirStatement::Assign(
+                Place::Local(idx_local.clone()),
+                Rvalue::Use(idx_op),
+            ));
+
+            let arr_place = ctx.lookup_var(array);
+            let store_place = Place::Index(Box::new(arr_place), idx_local);
+            ctx.emit(MirStatement::Assign(store_place, Rvalue::Use(val_op)));
+            None
+        }
         HirStmt::Block { stmts, tail_expr } => {
             for s in stmts {
                 lower_stmt(ctx, s);
