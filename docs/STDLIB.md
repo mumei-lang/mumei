@@ -239,8 +239,8 @@ enum List { Nil, Cons(i64, Self) }
 |---|---|---|---|
 | `insertion_sort(n)` | `n >= 0` | `result == n` | Insertion sort with termination proof |
 | `merge_sort(n)` | `n >= 0` | `result == n` | Merge sort with inductive invariant |
-| `verified_insertion_sort(n)` | `n >= 0 && forall(i, 0, n-1, arr[i] <= arr[i+1])` | `result == n && forall(i, 0, result-1, arr[i] <= arr[i+1])` | Identity contract: sorted-in → sorted-out (real sort impl is future work) |
-| `verified_merge_sort(n)` | `n >= 0 && forall(i, 0, n-1, arr[i] <= arr[i+1])` | `result == n && forall(i, 0, result-1, arr[i] <= arr[i+1])` | Identity contract: sorted-in → sorted-out (real sort impl is future work) |
+| `verified_insertion_sort(n)` | `n >= 0` | `result == n && forall(i, 0, result-1, arr[i] <= arr[i+1])` | Real nested-while insertion sort body using `arr[i] = val` + Z3 `Array::store`. `trusted`: Z3 Array+forall timeout for full functional proof. |
+| `verified_merge_sort(n)` | `n >= 0` | `result == n && forall(i, 0, result-1, arr[i] <= arr[i+1])` | Divide-and-conquer skeleton (control flow only — no aux buffer). `trusted` for the sorted-output postcondition. |
 | `binary_search(n, target)` | `n >= 0` | `result >= -1 && result < n` | Binary search with termination proof |
 | `binary_search_sorted(n, target)` | `n >= 0 && forall(...)` | `result >= -1 && result < n` | Binary search with sorted precondition |
 

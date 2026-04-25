@@ -353,6 +353,59 @@ fn compile_hir_stmt<'a>(
             variables.insert(var.clone(), val);
             Ok(val)
         }
+        HirStmt::ArrayStore {
+            array,
+            index,
+            value,
+        } => {
+            let val = compile_hir_expr(
+                context, builder, module, function, value, variables, array_ptrs, module_env,
+            )?;
+            let idx = compile_hir_expr(
+                context, builder, module, function, index, variables, array_ptrs, module_env,
+            )?
+            .into_int_value();
+            if let Some((len_val, data_ptr_val)) = array_ptrs.get(array.as_str()) {
+                let data_ptr = data_ptr_val.into_pointer_value();
+                let len_int = len_val.into_int_value();
+
+                // Guard the GEP + store with an in-bounds check that mirrors
+                // ArrayAccess read-side handling. Out-of-bounds writes are
+                // skipped rather than crashing the process.
+                let in_bounds = llvm!(builder.build_int_compare(
+                    IntPredicate::SLT,
+                    idx,
+                    len_int,
+                    "store_bounds_check"
+                ));
+                let non_neg = llvm!(builder.build_int_compare(
+                    IntPredicate::SGE,
+                    idx,
+                    context.i64_type().const_int(0, false),
+                    "store_non_neg_check"
+                ));
+                let safe = llvm!(builder.build_and(in_bounds, non_neg, "store_safe"));
+
+                let safe_block = context.append_basic_block(*function, "arr.store.safe");
+                let merge_block = context.append_basic_block(*function, "arr.store.merge");
+                llvm!(builder.build_conditional_branch(safe, safe_block, merge_block));
+
+                builder.position_at_end(safe_block);
+                let elem_ptr = unsafe {
+                    llvm!(builder.build_gep(context.i64_type(), data_ptr, &[idx], "store_elem_ptr"))
+                };
+                llvm!(builder.build_store(elem_ptr, val.into_int_value()));
+                llvm!(builder.build_unconditional_branch(merge_block));
+
+                builder.position_at_end(merge_block);
+                Ok(val)
+            } else {
+                Err(MumeiError::codegen(format!(
+                    "Array '{}' not found as fat pointer parameter",
+                    array
+                )))
+            }
+        }
         HirStmt::While {
             cond,
             invariant: _,

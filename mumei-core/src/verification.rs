@@ -3693,6 +3693,10 @@ fn collect_acquire_resources_stmt(stmt: &Stmt) -> Vec<String> {
         Stmt::Let { value, .. } | Stmt::Assign { value, .. } => {
             resources.extend(collect_acquire_resources_expr(value));
         }
+        Stmt::ArrayStore { index, value, .. } => {
+            resources.extend(collect_acquire_resources_expr(index));
+            resources.extend(collect_acquire_resources_expr(value));
+        }
         Stmt::Task { body, .. } => {
             resources.extend(collect_acquire_resources_stmt(body));
         }
@@ -3868,6 +3872,9 @@ fn verify_async_recursion_depth(
                 .sum(),
             Stmt::Let { value, .. } | Stmt::Assign { value, .. } => {
                 count_self_calls_expr(value, atom_name)
+            }
+            Stmt::ArrayStore { index, value, .. } => {
+                count_self_calls_expr(index, atom_name) + count_self_calls_expr(value, atom_name)
             }
             Stmt::Acquire { body, .. } => count_self_calls_stmt(body, atom_name),
             Stmt::While { cond, body, .. } => {
@@ -4237,6 +4244,10 @@ fn collect_callees_with_args_stmt(stmt: &Stmt) -> Vec<(String, Vec<Expr>)> {
         Stmt::Let { value, .. } | Stmt::Assign { value, .. } => {
             callees.extend(collect_callees_with_args_expr(value));
         }
+        Stmt::ArrayStore { index, value, .. } => {
+            callees.extend(collect_callees_with_args_expr(index));
+            callees.extend(collect_callees_with_args_expr(value));
+        }
         Stmt::While { cond, body, .. } => {
             callees.extend(collect_callees_with_args_expr(cond));
             callees.extend(collect_callees_with_args_stmt(body));
@@ -4315,6 +4326,10 @@ fn collect_array_accesses_in_stmt(stmt: &Stmt, out: &mut Vec<(String, Expr)>) {
     match stmt {
         Stmt::Expr(e, _) => collect_array_accesses_inner(e, out),
         Stmt::Let { value, .. } | Stmt::Assign { value, .. } => {
+            collect_array_accesses_inner(value, out);
+        }
+        Stmt::ArrayStore { index, value, .. } => {
+            collect_array_accesses_inner(index, out);
             collect_array_accesses_inner(value, out);
         }
         Stmt::Block(stmts, _) => {
@@ -4409,6 +4424,10 @@ fn collect_callees_stmt(stmt: &Stmt) -> Vec<String> {
             }
         }
         Stmt::Let { value, .. } | Stmt::Assign { value, .. } => {
+            callees.extend(collect_callees_expr(value));
+        }
+        Stmt::ArrayStore { index, value, .. } => {
+            callees.extend(collect_callees_expr(index));
             callees.extend(collect_callees_expr(value));
         }
         Stmt::While { cond, body, .. } => {
@@ -4737,6 +4756,10 @@ fn collect_divisors_stmt(stmt: &Stmt) -> Vec<String> {
             }
         }
         Stmt::Let { value, .. } | Stmt::Assign { value, .. } => {
+            divisors.extend(collect_divisors_expr(value));
+        }
+        Stmt::ArrayStore { index, value, .. } => {
+            divisors.extend(collect_divisors_expr(index));
             divisors.extend(collect_divisors_expr(value));
         }
         Stmt::While { cond, body, .. } => {
@@ -5715,6 +5738,10 @@ fn verify_inner(
                 .any(|s| body_has_symbolic_perform_args(s, module_env)),
             Stmt::Let { value, .. } | Stmt::Assign { value, .. } => {
                 expr_has_symbolic_perform_args(value, module_env)
+            }
+            Stmt::ArrayStore { index, value, .. } => {
+                expr_has_symbolic_perform_args(index, module_env)
+                    || expr_has_symbolic_perform_args(value, module_env)
             }
             Stmt::While { cond, body, .. } => {
                 expr_has_symbolic_perform_args(cond, module_env)
@@ -7296,7 +7323,14 @@ fn expr_to_z3<'a>(
                 }
                 solver.pop(1);
             }
-            Ok(arr.select(&idx))
+            // `__z3_arr` holds the latest logical array after any `Stmt::ArrayStore`
+            // updates performed earlier in the body; fall back to `vc.arr` when
+            // no store has occurred yet.
+            let current_arr: Array<'_> = env
+                .get("__z3_arr")
+                .and_then(|d| d.as_array())
+                .unwrap_or_else(|| arr.clone());
+            Ok(current_arr.select(&idx))
         }
         Expr::BinaryOp(left, op, right) => {
             let l = expr_to_z3(vc, left, env, solver_opt)?;
@@ -8355,6 +8389,65 @@ fn stmt_to_z3<'a>(
             let val = expr_to_z3(vc, value, env, solver_opt)?;
             env.insert(var.clone(), val.clone());
             Ok(val)
+        }
+        Stmt::ArrayStore {
+            array,
+            index,
+            value,
+            ..
+        } => {
+            let idx = expr_to_z3(vc, index, env, solver_opt)?
+                .as_int()
+                .ok_or(MumeiError::type_error("Array index must be integer"))?;
+            let val = expr_to_z3(vc, value, env, solver_opt)?
+                .as_int()
+                .ok_or(MumeiError::type_error("Array store value must be integer"))?;
+
+            // OOB check mirrors `Expr::ArrayAccess`: store at an index that may
+            // fall outside `[0, len_<name>)` is flagged as a verification
+            // error with a counter-example hint.
+            if let Some(solver) = solver_opt {
+                let len_name = format!("len_{}", array);
+                let len = if let Some(existing) = env.get(&len_name) {
+                    existing
+                        .as_int()
+                        .unwrap_or_else(|| Int::new_const(ctx, len_name.as_str()))
+                } else {
+                    let l = Int::new_const(ctx, len_name.as_str());
+                    solver.assert(&l.ge(&Int::from_i64(ctx, 0)));
+                    env.insert(len_name.clone(), l.clone().into());
+                    l
+                };
+                let safe = Bool::and(ctx, &[&idx.ge(&Int::from_i64(ctx, 0)), &idx.lt(&len)]);
+                solver.push();
+                solver.assert(&safe.not());
+                if solver.check() == SatResult::Sat {
+                    solver.pop(1);
+                    return Err(MumeiError::verification(format!(
+                        "Potential Out-of-Bounds store on '{}' (index may be < 0 or >= len_{})",
+                        array, array
+                    ))
+                    .with_help(
+                        "requires にストアインデックスの範囲制約 (0 <= idx < len) を追加してください",
+                    ));
+                }
+                solver.pop(1);
+            }
+
+            // Update the current Z3 array in the environment using `store`.
+            // `__z3_arr` is the single logical array handle — expr_to_z3's
+            // `Expr::ArrayAccess` branch reads from this key (falling back to
+            // `vc.arr` when unset) so downstream reads observe the updated
+            // element. This matches Z3's theory-of-arrays semantics:
+            //   select(store(a, i, v), j) = if i == j then v else select(a, j)
+            let current_arr: Array<'_> = env
+                .get("__z3_arr")
+                .and_then(|d| d.as_array())
+                .unwrap_or_else(|| vc.arr.clone());
+            let new_arr = current_arr.store(&idx, &val);
+            env.insert("__z3_arr".to_string(), new_arr.into());
+
+            Ok(val.into())
         }
         Stmt::Block(stmts, _) => {
             let mut last: Dynamic = Int::from_i64(ctx, 0).into();

@@ -150,6 +150,36 @@ else
     EXAMPLES_PASSED=$((EXAMPLES_PASSED + 1))
 fi
 
+# 6h. Array store (arr[i] = val) positive test
+echo -n "  test_array_store.mm ... "
+if $MUMEI verify tests/test_array_store.mm 2>/dev/null; then
+    echo "✅"
+    EXAMPLES_PASSED=$((EXAMPLES_PASSED + 1))
+else
+    echo "❌"
+    EXAMPLES_FAILED=$((EXAMPLES_FAILED + 1))
+fi
+
+# 6i. Negative test: array store OOB (should FAIL)
+echo -n "  negative/array_store_oob.mm (expect fail) ... "
+if $MUMEI verify tests/negative/array_store_oob.mm 2>/dev/null; then
+    echo "❌ (unexpected pass)"
+    EXAMPLES_FAILED=$((EXAMPLES_FAILED + 1))
+else
+    echo "✅ (expected fail)"
+    EXAMPLES_PASSED=$((EXAMPLES_PASSED + 1))
+fi
+
+# 6j. Verified sort with real arr[i] = val body (trusted)
+echo -n "  test_verified_sort.mm ... "
+if $MUMEI verify tests/test_verified_sort.mm 2>/dev/null; then
+    echo "✅"
+    EXAMPLES_PASSED=$((EXAMPLES_PASSED + 1))
+else
+    echo "❌"
+    EXAMPLES_FAILED=$((EXAMPLES_FAILED + 1))
+fi
+
 echo ""
 echo "  Examples: $EXAMPLES_PASSED passed, $EXAMPLES_FAILED failed"
 

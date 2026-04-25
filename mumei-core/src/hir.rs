@@ -197,6 +197,14 @@ pub enum HirStmt {
     },
     /// 代入: var = expr
     Assign { var: String, value: Box<HirExpr> },
+    /// 配列要素代入: arr[idx] = value
+    /// Z3 レベルでは `Array::store(arr, idx, value)` でモデル化される。
+    /// LLVM codegen では GEP + store 命令を生成する。
+    ArrayStore {
+        array: String,
+        index: Box<HirExpr>,
+        value: Box<HirExpr>,
+    },
     /// While ループ
     While {
         cond: Box<HirExpr>,
@@ -502,6 +510,16 @@ pub fn lower_stmt_with_env(
             var: var.clone(),
             value: Box::new(lower_expr_with_env(value, module_env)),
         },
+        Stmt::ArrayStore {
+            array,
+            index,
+            value,
+            ..
+        } => HirStmt::ArrayStore {
+            array: array.clone(),
+            index: Box::new(lower_expr_with_env(index, module_env)),
+            value: Box::new(lower_expr_with_env(value, module_env)),
+        },
         Stmt::Block(stmts, _) => {
             if stmts.is_empty() {
                 HirStmt::Block {
@@ -600,6 +618,15 @@ fn collect_free_variables_stmt(stmt: &HirStmt) -> HashSet<String> {
         }
         HirStmt::Assign { var, value } => {
             vars.insert(var.clone());
+            vars.extend(collect_free_variables_expr(value));
+        }
+        HirStmt::ArrayStore {
+            array,
+            index,
+            value,
+        } => {
+            vars.insert(array.clone());
+            vars.extend(collect_free_variables_expr(index));
             vars.extend(collect_free_variables_expr(value));
         }
         HirStmt::While {

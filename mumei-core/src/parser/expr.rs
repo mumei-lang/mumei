@@ -593,10 +593,10 @@ pub fn parse_statement(ctx: &mut ParseContext) -> Stmt {
             }
         }
 
-        // Check for assignment: ident = expr
+        // Check for assignment: ident = expr (or array store: ident[idx] = expr)
         Token::Ident(ref name) => {
             let name_clone = name.clone();
-            // Peek ahead for assignment
+            // Peek ahead for direct variable assignment
             if ctx.peek_at(1).is_some_and(|t| *t == Token::Assign)
                 && ctx
                     .peek_at(2)
@@ -612,7 +612,11 @@ pub fn parse_statement(ctx: &mut ParseContext) -> Stmt {
                     span: stmt_span,
                 }
             } else {
-                Stmt::Expr(parse_expr(ctx, 0), stmt_span)
+                // Fall through to expression parsing, then detect array-store
+                // pattern: an expression that is `arr[idx]` followed by `=` is
+                // promoted from a statement-level expression to `Stmt::ArrayStore`.
+                let expr = parse_expr(ctx, 0);
+                try_promote_to_array_store(ctx, expr, stmt_span)
             }
         }
 
@@ -637,8 +641,33 @@ pub fn parse_statement(ctx: &mut ParseContext) -> Stmt {
                     span: stmt_span,
                 }
             } else {
-                Stmt::Expr(parse_expr(ctx, 0), stmt_span)
+                let expr = parse_expr(ctx, 0);
+                try_promote_to_array_store(ctx, expr, stmt_span)
             }
         }
     }
+}
+
+/// If `expr` is an `Expr::ArrayAccess(arr, idx)` and the next token is `=`
+/// (and not `==` / `=>`), consume the `=`, parse the RHS and produce
+/// `Stmt::ArrayStore`. Otherwise wrap `expr` in `Stmt::Expr` unchanged.
+fn try_promote_to_array_store(ctx: &mut ParseContext, expr: Expr, stmt_span: super::Span) -> Stmt {
+    let is_store = matches!(expr, Expr::ArrayAccess(_, _))
+        && ctx.peek() == &Token::Assign
+        && ctx
+            .peek_at(1)
+            .is_none_or(|t| *t != Token::Assign && *t != Token::Gt);
+    if is_store {
+        if let Expr::ArrayAccess(array, index) = expr {
+            ctx.advance(); // consume =
+            let value = parse_expr(ctx, 0);
+            return Stmt::ArrayStore {
+                array,
+                index,
+                value: Box::new(value),
+                span: stmt_span,
+            };
+        }
+    }
+    Stmt::Expr(expr, stmt_span)
 }

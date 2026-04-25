@@ -392,6 +392,10 @@ impl Monomorphizer {
             Stmt::Let { value, .. } | Stmt::Assign { value, .. } => {
                 self.collect_from_expr(value);
             }
+            Stmt::ArrayStore { index, value, .. } => {
+                self.collect_from_expr(index);
+                self.collect_from_expr(value);
+            }
             Stmt::Block(stmts, _) => {
                 for s in stmts {
                     self.collect_from_stmt(s);

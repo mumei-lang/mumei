@@ -2,6 +2,69 @@
 
 ---
 
+### `Stmt::ArrayStore`: first-class `arr[i] = v` across parser → verifier → codegen
+
+#### Language / AST
+- **`Stmt::ArrayStore { array, index, value, span }`**: new statement variant
+  for array-element assignment. `parser::expr::parse_statement` detects the
+  `<expr>[idx] = <expr>` pattern at statement level and promotes it from a
+  value expression to `Stmt::ArrayStore`.
+- `Stmt::span()` extended to cover the new variant.
+
+#### HIR / MIR / codegen
+- `HirStmt::ArrayStore` mirrors the AST variant; `lower_stmt_with_env` lowers
+  `Stmt::ArrayStore` into it.
+- `mumei-core/src/mir.rs` lowers `HirStmt::ArrayStore` into a fresh
+  `Place::Index(Place::Local(arr), idx_temp)` assignment, materializing the
+  index in a temporary local.
+- `mumei-emit-llvm/src/codegen.rs` emits a GEP + `store i64` guarded by a
+  signed-less-than / non-negative bounds check. OOB writes are skipped
+  (branch-to-merge) rather than aborting the process, matching the
+  `ArrayAccess` read-side fallback.
+- `mumei-emit-llvm/src/binary.rs::rename_calls_in_hir_stmt` learned the new
+  arm and recurses into `index` / `value`.
+
+#### Verification (Z3)
+- `stmt_to_z3` handles `Stmt::ArrayStore` by:
+  1. Lowering `index` / `value` to `z3::ast::Int`.
+  2. Running the same OOB check used by `ArrayAccess` against `len_<name>` —
+     any satisfiable `!(0 <= idx < len_<name>)` aborts with a targeted
+     "Potential Out-of-Bounds store" error.
+  3. Updating the environment-stored Z3 array under the `__z3_arr` key using
+     `Array::store(current, idx, val)`. `expr_to_z3::ArrayAccess` now reads
+     `__z3_arr` from the env (falling back to `vc.arr`) so subsequent
+     `arr[j]` reads observe the store — `select(store(a, i, v), i) = v`.
+- All AST-`match` traversals in `verification.rs`
+  (`collect_acquire_resources_stmt`, `collect_callees_with_args_stmt`,
+  `collect_array_accesses_in_stmt`, `collect_callees_stmt`,
+  `collect_divisors_stmt`, `body_has_symbolic_perform_args`, async-depth
+  self-call counter) grew `ArrayStore` arms that recurse into `index` and
+  `value`.
+- `ast::Monomorphizer::collect_from_stmt` and
+  `hir::collect_free_variables_stmt` gained matching arms so generics and
+  free-variable analysis still cover array-store bodies.
+
+#### Standard library
+- `std/list.mm`: `verified_insertion_sort` replaced with a real nested-while
+  insertion-sort body using `arr[i] = val` (key variable + inner-loop shift
+  + outer-loop increment). Marked `trusted` — the `arr[i] = val` store
+  tracking itself is checked, but full `forall(i, 0, n-1, arr[i] <= arr[i+1])`
+  functional correctness remains future work (Z3 Array + forall quantifiers
+  still timeout on this pattern). `verified_merge_sort` updated to a
+  divide-and-conquer skeleton with the same `trusted` boundary.
+
+#### Tests
+- `tests/test_array_store.mm`: 4 positive atoms (constant-index store,
+  ループ内 ゼロ埋め[trusted], swap, variable-index store) — all verified.
+- `tests/negative/array_store_oob.mm`: `arr[n] = 42` correctly rejected with
+  the new OOB-store error.
+- `tests/test_verified_sort.mm`: noop-sort and insertion-sort skeleton
+  (both `trusted`) — regression for parser / HIR / MIR / LLVM pipelines on
+  real nested-loop store bodies.
+- `build_and_run.sh`: three new example-test entries for the above files.
+
+---
+
 ### Plan 7 follow-up: Windows / musl release build stabilization
 
 #### Windows (`x86_64-pc-windows-msvc`)
