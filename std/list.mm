@@ -399,26 +399,25 @@ body: {
     }
 };
 
-// --- 挿入ソート（実 body + forall ensures）---
+// --- 挿入ソート（実 body + 要素数保存 ensures）---
 // Phase 4 / Plan 9-4: `arr[i] = val` 構文 + Z3 Array::store 追跡の導入により、
 // 実際の swap を伴う挿入ソートを body として持てるようになった。
 //
-// 証明する性質:
-//   1. 要素数保存: result == n
-//   2. 出力は昇順: forall(i, 0, result - 1, arr[i] <= arr[i + 1])
+// 検証する性質（方針 A: trust の表面積を最小化）:
+//   1. 要素数保存: result == n のみを ensures とする
 //
-// 備考: Z3 の Array theory + forall 量化子の組み合わせは solver timeout を
-//   起こしやすく、外側 while 内での `arr[0..i]` の昇順不変量を
-//   `forall(j, 0, i - 1, arr[j] <= arr[j + 1])` として帰納的に証明する
-//   完全自動化は今後の課題。本 PR では:
-//     - `arr[i] = val` のパース / HIR / MIR / LLVM 下降を完結させ、
-//     - Z3 verifier に Array::store 追跡を実装し、
-//     - insertion / merge sort を identity ではなく実 body に置き換えた
-//   上で `trusted` を付け、将来の solver 改善で `trusted` を外せる形に
-//   整える段階的アプローチを採る。
+// 備考: 「出力が昇順 (forall(i, 0, result-1, arr[i] <= arr[i+1]))」の保証は
+//   Z3 Array + forall 量化子の自動証明が現状 timeout するため、虚偽の
+//   `trusted` 保証を避けて ensures から外した。ソート済み出力を契約として
+//   要求する用途には、下記の `verified_insertion_sort_identity`
+//   (sorted-in → sorted-out の証明可能な identity 版) を使用すること。
+//
+//   `trusted` は二重 while 内側ループでの `i = i + 1` の MIR move 解析
+//   false-positive（`insertion_sort` / `test_array_store_loop` と同根）を
+//   回避する目的で残している。move 解析が改善されたら `trusted` を外せる。
 trusted atom verified_insertion_sort(n: i64)
 requires: n >= 0;
-ensures: result == n && forall(i, 0, result - 1, arr[i] <= arr[i + 1]);
+ensures: result == n;
 body: {
     if n <= 1 { n }
     else {
@@ -447,13 +446,27 @@ body: {
     }
 };
 
-// --- マージソート（実 body 骨格 + trusted）---
+// --- 挿入ソート（identity 契約版・証明可能）---
+// 方針 B: 旧 PR #157 までの「sorted-in → sorted-out」の identity 契約を
+// `body: n` (恒等関数) として残す。入力がソート済みなら出力もソート済み
+// であることが Z3 で帰納的に証明可能（trusted 不要）。
+// ソート済み出力の契約保証が必要な下流ユーザはこちらを使用する。
+atom verified_insertion_sort_identity(n: i64)
+requires: n >= 0 && forall(i, 0, n - 1, arr[i] <= arr[i + 1]);
+ensures: result == n && forall(i, 0, result - 1, arr[i] <= arr[i + 1]);
+body: n;
+
+// --- マージソート（実 body 骨格 + 要素数保存 ensures）---
 // 再帰 + 補助配列が必要だが、現行 mumei には補助配列パラメータの
-// 標準表現がないため、分割統治の制御フローのみを記述し、要素の並び替えは
-// 省略する。ensures（要素数保存 + 昇順）は `trusted` で保留する。
+// 標準表現がないため、分割統治の制御フローのみを記述する。
+//
+// 検証する性質（方針 A）: 要素数保存 (result == n) のみ。
+// 「出力が昇順」の保証はソート本体が省略されているため成立せず、
+// 偽の `trusted` 保証を避けて ensures から外した。`trusted` は再帰
+// async atom 解析の制限を回避するために残している。
 trusted atom verified_merge_sort(n: i64)
 requires: n >= 0;
-ensures: result == n && forall(i, 0, result - 1, arr[i] <= arr[i + 1]);
+ensures: result == n;
 body: {
     if n <= 1 { n }
     else {
@@ -463,6 +476,14 @@ body: {
         left + right
     }
 };
+
+// --- マージソート（identity 契約版・証明可能）---
+// 方針 B: 旧 identity 契約を `body: n` で残す。sorted-in → sorted-out が
+// Z3 で証明可能（trusted 不要）。
+atom verified_merge_sort_identity(n: i64)
+requires: n >= 0 && forall(i, 0, n - 1, arr[i] <= arr[i + 1]);
+ensures: result == n && forall(i, 0, result - 1, arr[i] <= arr[i + 1]);
+body: n;
 
 // --- 二分探索 ---
 // ソート済み配列に対する探索
