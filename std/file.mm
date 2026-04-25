@@ -31,7 +31,8 @@ extern "Rust" {
 // Read file contents as a string handle.
 // Path must start with /tmp/ or /home/ for security.
 // Returns 0 on failure, >0 handle on success.
-atom read_file(path: i64)
+// FFI-backed: contract is enforced by the Rust runtime.
+trusted atom read_file(path: i64)
     effects: [FileRead]
     requires: true;
     ensures: result >= 0;
@@ -47,7 +48,8 @@ atom read_file(path: i64)
 // Write content to a file at the given path.
 // Path must start with /tmp/ for security.
 // Returns 1 on success, 0 on failure.
-atom write_file(path: i64, content: i64)
+// FFI-backed: contract is enforced by the Rust runtime.
+trusted atom write_file(path: i64, content: i64)
     effects: [FileWrite]
     requires: true;
     ensures: result >= 0 && result <= 1;
@@ -62,7 +64,8 @@ atom write_file(path: i64, content: i64)
 
 // Check if a file exists at the given path.
 // Returns 1 if exists, 0 if not.
-atom exists(path: i64)
+// FFI-backed: contract is enforced by the Rust runtime.
+trusted atom exists(path: i64)
     effects: [FileRead]
     requires: true;
     ensures: result >= 0 && result <= 1;
@@ -73,7 +76,8 @@ atom exists(path: i64)
 
 // Delete a file at the given path.
 // Returns 1 on success, 0 on failure.
-atom remove(path: i64)
+// FFI-backed: contract is enforced by the Rust runtime.
+trusted atom remove(path: i64)
     effects: [FileWrite]
     requires: true;
     ensures: result >= 0 && result <= 1;

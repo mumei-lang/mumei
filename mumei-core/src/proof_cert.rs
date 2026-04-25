@@ -260,6 +260,159 @@ pub fn save_certificate(cert: &ProofCertificate, path: &Path) -> Result<(), Stri
     std::fs::write(path, json).map_err(|e| format!("Failed to write {}: {}", path.display(), e))
 }
 
+// =============================================================================
+// SI-5 Phase 3-C: Cross-Project Proof Certificate Bundles
+// =============================================================================
+//
+// `scripts/bundle_std_certs.py` aggregates every per-module
+// `.proof.json` into a single distributable `std-proof-bundle.json`
+// shipped via `homebrew-mumei`. Downstream projects then export the
+// bundle path as `MUMEI_PROOF_BUNDLE` and the resolver can verify
+// imports against a trusted, mumei-versioned certificate set without
+// needing a per-module cert in each module directory.
+
+/// Top-level SI-5 Phase 3-C proof bundle.
+///
+/// Bundles are produced by `scripts/bundle_std_certs.py` and consumed
+/// here as a fallback when a per-module certificate is missing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProofBundle {
+    /// Bundle schema version (currently `"1.0"`).
+    pub bundle_version: String,
+    /// ISO 8601 timestamp of bundle generation.
+    pub generated_at: String,
+    /// mumei version string the bundle was produced for.
+    pub mumei_version: String,
+    /// Module key → embedded ProofCertificate.
+    ///
+    /// Keys use the canonical `std/<dir>/<stem>` form, e.g.
+    /// `"std/core"`, `"std/container/safe_list"`. The trailing `.mm`
+    /// is stripped.
+    pub modules: HashMap<String, ProofCertificate>,
+    /// Aggregate statistics across all modules.
+    #[serde(default)]
+    pub summary: BundleSummary,
+}
+
+/// Aggregate statistics embedded in a [`ProofBundle`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BundleSummary {
+    pub total_modules: usize,
+    pub all_verified: usize,
+    pub partial_verified: usize,
+    pub total_atoms: usize,
+    pub proven_atoms: usize,
+}
+
+/// Simple ISO 8601 timestamp without external crate.
+fn chrono_like_now() -> String {
+    let duration = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = duration.as_secs();
+    // Simple UTC timestamp formatting
+    let days = secs / 86400;
+    let time_of_day = secs % 86400;
+    let hours = time_of_day / 3600;
+    let minutes = (time_of_day % 3600) / 60;
+    let seconds = time_of_day % 60;
+
+    // Approximate date calculation (good enough for timestamps)
+    let mut year = 1970i64;
+    let mut remaining_days = days as i64;
+    loop {
+        let days_in_year = if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) {
+            366
+        } else {
+            365
+        };
+        if remaining_days < days_in_year {
+            break;
+        }
+        remaining_days -= days_in_year;
+        year += 1;
+    }
+    let is_leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let month_days = [
+        31,
+        if is_leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    let mut month = 1;
+    for &md in &month_days {
+        if remaining_days < md {
+            break;
+        }
+        remaining_days -= md;
+        month += 1;
+    }
+    let day = remaining_days + 1;
+
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        year, month, day, hours, minutes, seconds
+    )
+}
+
+/// Load a proof bundle JSON produced by `bundle_std_certs.py`.
+pub fn load_bundle(path: &Path) -> Result<ProofBundle, String> {
+    let contents = std::fs::read_to_string(path)
+        .map_err(|e| format!("Failed to read bundle {}: {}", path.display(), e))?;
+    serde_json::from_str(&contents)
+        .map_err(|e| format!("Failed to parse bundle {}: {}", path.display(), e))
+}
+
+/// Derive the canonical bundle module key from a source file path.
+///
+/// Looks for the last `std/` segment in the path and returns
+/// `std/<rest-without-extension>`. Returns `None` if the path does not
+/// contain a `std/` segment — the bundle only carries `std/` modules.
+pub fn module_key_from_source(source_file: &Path) -> Option<String> {
+    let mut segments: Vec<&str> = Vec::new();
+    let mut seen_std = false;
+    for comp in source_file.components() {
+        if let std::path::Component::Normal(os_str) = comp {
+            let s = os_str.to_str()?;
+            if !seen_std {
+                if s == "std" {
+                    seen_std = true;
+                    segments.push("std");
+                }
+            } else {
+                segments.push(s);
+            }
+        }
+    }
+    if !seen_std || segments.len() < 2 {
+        return None;
+    }
+    // Strip the .mm extension on the final segment.
+    let last = segments.last_mut()?;
+    if let Some(stem) = last.strip_suffix(".mm") {
+        *last = stem;
+    }
+    Some(segments.join("/"))
+}
+
+/// Look up a certificate for `source_file` in the bundle. The lookup
+/// is keyed by [`module_key_from_source`].
+pub fn lookup_bundle_certificate<'a>(
+    bundle: &'a ProofBundle,
+    source_file: &Path,
+) -> Option<&'a ProofCertificate> {
+    let key = module_key_from_source(source_file)?;
+    bundle.modules.get(&key)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -442,63 +595,4 @@ mod tests {
 
         let _ = std::fs::remove_file(&tmp);
     }
-}
-
-/// Simple ISO 8601 timestamp without external crate.
-fn chrono_like_now() -> String {
-    let duration = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = duration.as_secs();
-    // Simple UTC timestamp formatting
-    let days = secs / 86400;
-    let time_of_day = secs % 86400;
-    let hours = time_of_day / 3600;
-    let minutes = (time_of_day % 3600) / 60;
-    let seconds = time_of_day % 60;
-
-    // Approximate date calculation (good enough for timestamps)
-    let mut year = 1970i64;
-    let mut remaining_days = days as i64;
-    loop {
-        let days_in_year = if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) {
-            366
-        } else {
-            365
-        };
-        if remaining_days < days_in_year {
-            break;
-        }
-        remaining_days -= days_in_year;
-        year += 1;
-    }
-    let is_leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
-    let month_days = [
-        31,
-        if is_leap { 29 } else { 28 },
-        31,
-        30,
-        31,
-        30,
-        31,
-        31,
-        30,
-        31,
-        30,
-        31,
-    ];
-    let mut month = 1;
-    for &md in &month_days {
-        if remaining_days < md {
-            break;
-        }
-        remaining_days -= md;
-        month += 1;
-    }
-    let day = remaining_days + 1;
-
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        year, month, day, hours, minutes, seconds
-    )
 }

@@ -191,14 +191,8 @@ pub extern "C" fn http_header_set(handle: i64, name: *const c_char, value: *cons
 pub extern "C" fn http_is_ok(handle: i64) -> i64 {
     let store = HTTP_STORE.lock().unwrap();
     match store.get(&handle) {
-        Some(resp) => {
-            if (200..300).contains(&resp.status) {
-                1
-            } else {
-                0
-            }
-        }
-        None => 0,
+        Some(resp) if (200..300).contains(&resp.status) => 1,
+        _ => 0,
     }
 }
 

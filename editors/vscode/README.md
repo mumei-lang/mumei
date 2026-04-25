@@ -52,9 +52,23 @@ atom increment(n: i64)
 
 ## Links
 
+- [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=mumei-lang.mumei)
 - [Mumei Language](https://github.com/mumei-lang/mumei)
 - [Issue Tracker](https://github.com/mumei-lang/mumei/issues)
 - [Changelog](CHANGELOG.md)
+
+## Publishing (maintainers)
+
+The extension is packaged and (optionally) published by the
+[`Publish VS Code Extension`](../../.github/workflows/publish-vscode.yml)
+workflow. It runs automatically when a tag matching `vscode-v*` is pushed,
+and can also be invoked manually from the Actions tab (`workflow_dispatch`).
+
+To actually push to the Marketplace, configure a repository secret named
+`VSCE_PAT` containing an Azure DevOps PAT with the "Marketplace → Manage"
+scope for the `mumei-lang` publisher. Without the secret the workflow
+still produces a `.vsix` artifact (suitable for manual upload via
+`Extensions: Install from VSIX…`) but skips `vsce publish`.
 
 ## License
 

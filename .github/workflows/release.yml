@@ -3,6 +3,12 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry-run: build+verify only, skip GitHub Release upload"
+        type: boolean
+        default: true
 permissions:
   contents: write
   pages: write
@@ -30,15 +36,11 @@ jobs:
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             name: mumei-x86_64-unknown-linux-musl
-          # Plan 7: Windows target
-          # NOTE: Windows builds depend on vcpkg Z3 compilation which can be
-          # slow/flaky. Allowed to fail to avoid blocking other releases.
+          # Plan 7: Windows target (LLVM built from source, Z3 prebuilt)
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             name: mumei-x86_64-pc-windows-msvc
-            allow-failure: true
     runs-on: ${{ matrix.os }}
-    continue-on-error: ${{ matrix.allow-failure || false }}
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust toolchain
@@ -61,6 +63,16 @@ jobs:
       # Plan 7: musl static linking — build inside Alpine Docker container.
       # apt's LLVM/Z3 are compiled against glibc and cannot be linked into a
       # musl binary.  Alpine provides musl-native packages for both.
+      #
+      # Host == target (both x86_64-unknown-linux-musl). Build scripts such as
+      # the one in z3-sys use bindgen, which dlopens libclang at build time.
+      # Fully static musl binaries cannot dlopen, so build scripts must be
+      # linked dynamically while the final binary stays statically linked.
+      #
+      # Cargo's [host]/[target.*] rustflags split requires the nightly
+      # `-Zhost-config` + `-Ztarget-applies-to-host` feature, so we install a
+      # nightly toolchain solely for this step. Stable is still used for
+      # resolving crates (Cargo.lock stays stable-compatible).
       - name: Build release binary (musl via Alpine Docker)
         if: contains(matrix.target, 'musl')
         run: |
@@ -74,39 +86,45 @@ jobs:
                 gcc g++ musl-dev make cmake pkgconf \
                 llvm17-dev llvm17-static clang17-dev clang17-static \
                 z3-dev \
-                curl bash perl linux-headers \
+                curl bash perl linux-headers file \
                 libffi-dev zlib-dev zlib-static \
                 zstd-dev zstd-static \
                 ncurses-dev libxml2-dev libxml2-static \
                 openssl-dev openssl-libs-static
 
-              # Install Rust inside the container
-              curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+              # Install Rust inside the container (stable + nightly).
+              curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs \
+                | sh -s -- -y --default-toolchain stable --profile minimal
               export PATH="/root/.cargo/bin:$PATH"
+              rustup toolchain install nightly --profile minimal
               rustup target add x86_64-unknown-linux-musl
+              rustup target add x86_64-unknown-linux-musl --toolchain nightly
 
-              # Point llvm-sys / z3-sys at Alpine packages
+              # Point llvm-sys / z3-sys at Alpine musl-native packages.
               export LLVM_SYS_170_PREFIX=/usr/lib/llvm17
               export LIBCLANG_PATH=/usr/lib/llvm17/lib
-              # Use static libclang so that bindgen does not need dlopen
-              # (musl static binaries do not support dynamic loading).
-              export LIBCLANG_STATIC=1
 
-              # Build fully-static musl binary
-              # Use --features z3/static-link-z3 to build Z3 from source with
-              # musl-native g++ (Alpine z3-dev headers help cmake find deps)
-              #
-              # Inside Alpine, host == target (both musl).  By default Cargo
-              # does not separate host/target flags when they share the same
-              # triple.  We enable target-applies-to-host = false (stable
-              # since Rust 1.82) so that CARGO_HOST_RUSTFLAGS only affects
-              # build-scripts (keeping them dynamically linked for dlopen)
-              # while the final binary stays fully static (+crt-static).
+              # Cargo config: split host (build-scripts / dynamic for dlopen)
+              # from target (final binary / +crt-static).
               mkdir -p .cargo
-              printf "[build]\ntarget-applies-to-host = false\n" > .cargo/config.toml
-              export CARGO_HOST_RUSTFLAGS="-C target-feature=-crt-static"
-              cargo build --release --target x86_64-unknown-linux-musl \
+              {
+                printf "[unstable]\n"
+                printf "host-config = true\n"
+                printf "target-applies-to-host = false\n\n"
+                printf "[host]\n"
+                printf "rustflags = [\"-C\", \"target-feature=-crt-static\"]\n\n"
+                printf "[target.x86_64-unknown-linux-musl]\n"
+                printf "rustflags = [\"-C\", \"target-feature=+crt-static\"]\n"
+              } > .cargo/config.toml
+              cat .cargo/config.toml
+
+              # Build with nightly-only flags; the resulting binary is still
+              # ABI-compatible with stable-produced code.
+              cargo +nightly build -Zhost-config -Ztarget-applies-to-host \
+                --release \
+                --target x86_64-unknown-linux-musl \
                 --features static-link-z3
+
               rm -f .cargo/config.toml
             '
       - name: Install system dependencies (macOS)
@@ -138,7 +156,26 @@ jobs:
           $srcUrl = "https://github.com/llvm/llvm-project/releases/download/llvmorg-$llvmVersion/llvm-project-$llvmVersion.src.tar.xz"
           $archivePath = "$env:RUNNER_TEMP\llvm-project.tar.xz"
           Write-Host "Downloading LLVM $llvmVersion source..."
-          Invoke-WebRequest -Uri $srcUrl -OutFile $archivePath
+          $maxAttempts = 5
+          for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+            try {
+              Invoke-WebRequest -Uri $srcUrl -OutFile $archivePath -TimeoutSec 600
+              if ((Get-Item $archivePath).Length -lt 10MB) {
+                throw "Downloaded file is suspiciously small"
+              }
+              Write-Host "LLVM source downloaded on attempt $attempt"
+              break
+            } catch {
+              Write-Host "Download attempt $attempt failed: $_"
+              if ($attempt -eq $maxAttempts) {
+                throw "Failed to download LLVM source after $maxAttempts attempts: $_"
+              }
+              Remove-Item -Force $archivePath -ErrorAction SilentlyContinue
+              $sleepSeconds = [math]::Pow(2, $attempt) * 5
+              Write-Host "Retrying in $sleepSeconds seconds..."
+              Start-Sleep -Seconds $sleepSeconds
+            }
+          }
 
           # Extract (tar.xz)
           cd $env:RUNNER_TEMP
@@ -193,8 +230,26 @@ jobs:
           $z3Archive = "z3-$z3Version-x64-win"
           $z3Url = "https://github.com/Z3Prover/z3/releases/download/z3-$z3Version/$z3Archive.zip"
           $z3Dir = "$env:RUNNER_TEMP\z3"
-          Invoke-WebRequest -Uri $z3Url -OutFile "$env:RUNNER_TEMP\z3.zip"
-          Expand-Archive -Path "$env:RUNNER_TEMP\z3.zip" -DestinationPath $z3Dir -Force
+          $z3ZipPath = "$env:RUNNER_TEMP\z3.zip"
+          $maxAttempts = 5
+          for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+            try {
+              Invoke-WebRequest -Uri $z3Url -OutFile $z3ZipPath -TimeoutSec 300
+              if ((Get-Item $z3ZipPath).Length -lt 1MB) {
+                throw "Downloaded Z3 archive is suspiciously small"
+              }
+              Write-Host "Z3 downloaded on attempt $attempt"
+              break
+            } catch {
+              Write-Host "Z3 download attempt $attempt failed: $_"
+              if ($attempt -eq $maxAttempts) {
+                throw "Failed to download Z3 after $maxAttempts attempts: $_"
+              }
+              Remove-Item -Force $z3ZipPath -ErrorAction SilentlyContinue
+              Start-Sleep -Seconds ([math]::Pow(2, $attempt) * 3)
+            }
+          }
+          Expand-Archive -Path $z3ZipPath -DestinationPath $z3Dir -Force
           $z3Root = (Get-ChildItem -Path $z3Dir -Directory | Select-Object -First 1).FullName
           echo "Z3_SYS_Z3_HEADER=$z3Root\include\z3.h" >> $env:GITHUB_ENV
           # The .lib import library is typically in lib/, while .dll is in bin/
@@ -218,13 +273,27 @@ jobs:
       - name: Build release binary
         if: "!contains(matrix.target, 'musl')"
         run: cargo build --release --target ${{ matrix.target }}
-      # Plan 7: Verify musl binary is statically linked
-      - name: Verify static linking (musl)
+      # Plan 7: Verify musl binary and record its dynamic dependencies.
+      #
+      # The `z3/static-link-z3` feature links libz3 statically. The musl libc
+      # itself uses `+crt-static`, so the final binary has no required
+      # dependency on the Alpine dynamic musl loader. A handful of system
+      # libraries used by LLVM (libffi, libz, libzstd) are still dynamically
+      # loaded because Alpine does not ship static variants of all of them;
+      # Alpine-based consumers have these installed by default.
+      - name: Verify musl binary
         if: contains(matrix.target, 'musl')
         run: |
-          file target/${{ matrix.target }}/release/mumei
-          # Should report "statically linked" or "not a dynamic executable"
-          ldd target/${{ matrix.target }}/release/mumei 2>&1 || true
+          docker run --rm \
+            -v "${GITHUB_WORKSPACE}:/workspace" \
+            -w /workspace \
+            alpine:3.21 sh -c '
+              apk add --no-cache file libffi libzstd zlib >/dev/null
+              bin=target/x86_64-unknown-linux-musl/release/mumei
+              file "$bin"
+              ldd "$bin" 2>&1 || true
+              "$bin" --version
+            '
       # SI-5 Phase 3-C: generate per-module proof certificates so downstream
       # consumers (homebrew-mumei, vetted imports) can verify std atoms
       # against a tagged, versioned certificate bundle.  Failures are
@@ -305,6 +374,9 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
+    # Skip the GitHub Release upload on workflow_dispatch dry runs so the
+    # Windows / musl build jobs can be validated without cutting a tag.
+    if: github.event_name != 'workflow_dispatch' || inputs.dry_run != true
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -321,6 +393,7 @@ jobs:
   deploy-installer:
     needs: release
     runs-on: ubuntu-latest
+    if: github.event_name != 'workflow_dispatch' || inputs.dry_run != true
     steps:
       - uses: actions/checkout@v4
       - name: Prepare GitHub Pages content
@@ -455,6 +528,8 @@ jobs:
     # Homebrew tap の更新失敗でリリース全体を失敗にしない
     continue-on-error: true
     steps:
+      - name: Checkout mumei (for generate_formula.py)
+        uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -502,81 +577,14 @@ jobs:
           SHA_LINUX_ARM: ${{ steps.sha256.outputs['mumei-aarch64-unknown-linux-gnu_sha256'] }}
           SHA_LINUX_X86: ${{ steps.sha256.outputs['mumei-x86_64-unknown-linux-gnu_sha256'] }}
         run: |
-          TAG="${VERSION}"
-          VER="${VERSION#v}"
           mkdir -p homebrew-mumei/Formula
-          cat > homebrew-mumei/Formula/mumei.rb <<FORMULA_END
-          # Homebrew Formula for Mumei — auto-generated by release workflow
-          class Mumei < Formula
-            desc "Mathematical Proof-Driven Programming Language — formally verified with Z3"
-            homepage "https://github.com/mumei-lang/mumei"
-            license "MIT"
-            version "${VER}"
-
-            on_macos do
-              if Hardware::CPU.arm?
-                url "https://github.com/mumei-lang/mumei/releases/download/${TAG}/mumei-aarch64-apple-darwin.tar.gz"
-                sha256 "${SHA_MACOS_ARM}"
-              else
-                url "https://github.com/mumei-lang/mumei/releases/download/${TAG}/mumei-x86_64-apple-darwin.tar.gz"
-                sha256 "${SHA_MACOS_X86}"
-              end
-            end
-
-            on_linux do
-              if Hardware::CPU.arm?
-                url "https://github.com/mumei-lang/mumei/releases/download/${TAG}/mumei-aarch64-unknown-linux-gnu.tar.gz"
-                sha256 "${SHA_LINUX_ARM}"
-              else
-                url "https://github.com/mumei-lang/mumei/releases/download/${TAG}/mumei-x86_64-unknown-linux-gnu.tar.gz"
-                sha256 "${SHA_LINUX_X86}"
-              end
-            end
-
-            depends_on "z3"
-            depends_on "llvm@17"
-
-            def install
-              bin.install "mumei"
-              (share/"mumei/std").install Dir["std/*"]
-
-              # SI-5 Phase 3-C: install the std/ proof-certificate bundle when
-              # it ships with the release archive so downstream projects can
-              # verify imports against a trusted, versioned certificate set.
-              has_proof_bundle = File.exist?("std-proof-bundle.json")
-              if has_proof_bundle
-                (share/"mumei").install "std-proof-bundle.json"
-              end
-
-              # Only export MUMEI_PROOF_BUNDLE when the bundle was actually
-              # installed (musl / Alpine targets don't ship one).
-              env_lines = ["export MUMEI_STD_PATH=\"#{share}/mumei/std\""]
-              if has_proof_bundle
-                env_lines << "export MUMEI_PROOF_BUNDLE=\"#{share}/mumei/std-proof-bundle.json\""
-              end
-              env_script = env_lines.join("\n") + "\n"
-              (etc/"mumei").mkpath
-              (etc/"mumei/env.sh").write env_script
-            end
-
-            def caveats
-              <<~EOS
-                The Mumei standard library has been installed to:
-                  #{share}/mumei/std
-
-                To use it, add the following to your shell profile:
-                  export MUMEI_STD_PATH="#{share}/mumei/std"
-
-                Or source the environment file:
-                  source #{etc}/mumei/env.sh
-              EOS
-            end
-
-            test do
-              assert_match version.to_s, shell_output("#{bin}/mumei --version")
-            end
-          end
-          FORMULA_END
+          python3 scripts/generate_formula.py \
+            --version "${VERSION}" \
+            --sha-x86-mac "${SHA_MACOS_X86}" \
+            --sha-arm-mac "${SHA_MACOS_ARM}" \
+            --sha-x86-linux "${SHA_LINUX_X86}" \
+            --sha-arm-linux "${SHA_LINUX_ARM}" \
+            --output homebrew-mumei/Formula/mumei.rb
       - name: Push formula to homebrew-mumei
         env:
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}

@@ -1,0 +1,91 @@
+name: Publish VS Code Extension
+
+# ws4 / SI-5 P8-A: Package (and optionally publish) the Mumei VS Code
+# extension to the Visual Studio Code Marketplace.
+#
+# Triggering
+# ----------
+# * `workflow_dispatch`           — manual runs; `publish=false` by default,
+#   so anyone can produce a `.vsix` artifact for smoke-testing without the
+#   Marketplace PAT.
+# * `push` of a tag matching      `vscode-v*` (e.g. `vscode-v0.1.0`) — always
+#   attempts to publish if the `VSCE_PAT` secret is available. If the secret
+#   is missing, the job still builds the `.vsix` and uploads it as an
+#   artifact, but skips `vsce publish` instead of failing the run.
+#
+# Secrets
+# -------
+# * `VSCE_PAT` — Azure DevOps Personal Access Token with "Marketplace >
+#   Manage" scope, created for the `mumei-lang` publisher. Configure this in
+#   the repository settings ("Settings → Secrets and variables → Actions").
+#   Without it, the workflow is a no-op for the publish step and only
+#   produces a packaged `.vsix` artifact.
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish to the VS Code Marketplace (requires VSCE_PAT secret)"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+  push:
+    tags:
+      - "vscode-v*"
+
+permissions:
+  contents: read
+
+jobs:
+  package-and-publish:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: editors/vscode
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Install @vscode/vsce
+        run: npm install --no-save @vscode/vsce
+
+      - name: Compile TypeScript
+        run: npm run compile
+
+      - name: Package extension (.vsix)
+        run: npx vsce package --out mumei.vsix
+
+      - name: Upload .vsix artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mumei-vsix
+          path: editors/vscode/mumei.vsix
+          if-no-files-found: error
+
+      # Publish is opt-in. On tag pushes it runs automatically when the
+      # secret is present; on workflow_dispatch it requires the `publish`
+      # input to be "true". In both cases a missing VSCE_PAT is a graceful
+      # skip rather than a hard failure, so the .vsix artifact is always
+      # available for manual upload as a fallback.
+      - name: Publish to Marketplace
+        if: >-
+          (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/vscode-v')) ||
+          (github.event_name == 'workflow_dispatch' && inputs.publish == 'true')
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: |
+          if [ -z "${VSCE_PAT:-}" ]; then
+            echo "::warning title=VSCE_PAT missing::Skipping vsce publish because the VSCE_PAT secret is not configured. The .vsix artifact has still been uploaded." >&2
+            exit 0
+          fi
+          npx vsce publish --packagePath mumei.vsix

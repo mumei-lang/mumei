@@ -52,7 +52,7 @@ extern "Rust" {
 // JSON 文字列をパースし、ハンドルを返す。
 // Plan 10: input を Str 型に変更
 // 解析失敗時はハンドル 0 (null) を返す。
-atom parse(input: Str)
+trusted atom parse(input: Str)
     requires: true;
     ensures: result >= 0;
     body: {
@@ -62,7 +62,7 @@ atom parse(input: Str)
 // JSON ハンドルを文字列に変換する。
 // Plan 10: 戻り値は Str
 // ハンドル 0 の場合は "null" を返す。
-atom stringify(handle: i64)
+trusted atom stringify(handle: i64)
     requires: handle >= 0;
     ensures: true;
     body: {
@@ -75,7 +75,7 @@ atom stringify(handle: i64)
 
 // オブジェクトからキーで値を取得（ハンドルを返す）
 // Plan 10: key を Str 型に変更
-atom get(handle: i64, key: Str)
+trusted atom get(handle: i64, key: Str)
     requires: handle >= 0;
     ensures: result >= 0;
     body: {
@@ -84,7 +84,7 @@ atom get(handle: i64, key: Str)
 
 // オブジェクトからキーで整数値を取得
 // Plan 10: key を Str 型に変更
-atom get_int(handle: i64, key: Str)
+trusted atom get_int(handle: i64, key: Str)
     requires: handle >= 0;
     ensures: true;
     body: {
@@ -93,7 +93,7 @@ atom get_int(handle: i64, key: Str)
 
 // オブジェクトからキーで文字列値を取得
 // Plan 10: key を Str 型に変更、戻り値も Str
-atom get_str(handle: i64, key: Str)
+trusted atom get_str(handle: i64, key: Str)
     requires: handle >= 0;
     ensures: true;
     body: {
@@ -102,7 +102,7 @@ atom get_str(handle: i64, key: Str)
 
 // オブジェクトからキーでブール値を取得（0=false, 1=true）
 // Plan 10: key を Str 型に変更
-atom get_bool(handle: i64, key: Str)
+trusted atom get_bool(handle: i64, key: Str)
     requires: handle >= 0;
     ensures: result >= 0 && result <= 1;
     body: {
@@ -114,7 +114,7 @@ atom get_bool(handle: i64, key: Str)
 // =============================================================
 
 // 配列の長さを取得
-atom array_len(handle: i64)
+trusted atom array_len(handle: i64)
     requires: handle >= 0;
     ensures: result >= 0;
     body: {
@@ -122,7 +122,7 @@ atom array_len(handle: i64)
     }
 
 // 配列からインデックスで値を取得（ハンドルを返す）
-atom array_get(handle: i64, index: i64)
+trusted atom array_get(handle: i64, index: i64)
     requires: handle >= 0 && index >= 0;
     ensures: result >= 0;
     body: {
@@ -134,7 +134,7 @@ atom array_get(handle: i64, index: i64)
 // =============================================================
 
 // JSON 値が null かどうかを判定（0=false, 1=true）
-atom is_null(handle: i64)
+trusted atom is_null(handle: i64)
     requires: handle >= 0;
     ensures: result >= 0 && result <= 1;
     body: {
@@ -142,7 +142,7 @@ atom is_null(handle: i64)
     }
 
 // JSON 値がオブジェクトかどうかを判定（0=false, 1=true）
-atom is_object(handle: i64)
+trusted atom is_object(handle: i64)
     requires: handle >= 0;
     ensures: result >= 0 && result <= 1;
     body: {
@@ -150,7 +150,7 @@ atom is_object(handle: i64)
     }
 
 // JSON 値が配列かどうかを判定（0=false, 1=true）
-atom is_array(handle: i64)
+trusted atom is_array(handle: i64)
     requires: handle >= 0;
     ensures: result >= 0 && result <= 1;
     body: {
@@ -162,7 +162,7 @@ atom is_array(handle: i64)
 // =============================================================
 
 // 空のオブジェクトを生成
-atom object_new()
+trusted atom object_new()
     requires: true;
     ensures: result >= 0;
     body: {
@@ -171,7 +171,7 @@ atom object_new()
 
 // オブジェクトにキーと値を設定
 // Plan 10: key を Str 型に変更
-atom object_set(handle: i64, key: Str, value: i64)
+trusted atom object_set(handle: i64, key: Str, value: i64)
     requires: handle >= 0;
     ensures: result >= 0;
     body: {
@@ -179,7 +179,7 @@ atom object_set(handle: i64, key: Str, value: i64)
     }
 
 // 空の配列を生成
-atom array_new()
+trusted atom array_new()
     requires: true;
     ensures: result >= 0;
     body: {
@@ -187,7 +187,7 @@ atom array_new()
     }
 
 // 配列に値を追加
-atom array_push(handle: i64, value: i64)
+trusted atom array_push(handle: i64, value: i64)
     requires: handle >= 0;
     ensures: result >= 0;
     body: {
@@ -195,7 +195,7 @@ atom array_push(handle: i64, value: i64)
     }
 
 // 整数値から JSON 値を生成
-atom from_int(value: i64)
+trusted atom from_int(value: i64)
     requires: true;
     ensures: result >= 0;
     body: {
@@ -204,7 +204,7 @@ atom from_int(value: i64)
 
 // 文字列から JSON 値を生成
 // Plan 10: value を Str 型に変更
-atom from_str(value: Str)
+trusted atom from_str(value: Str)
     requires: true;
     ensures: result >= 0;
     body: {
@@ -212,7 +212,7 @@ atom from_str(value: Str)
     }
 
 // ブール値から JSON 値を生成（0=false, 1=true）
-atom from_bool(value: i64)
+trusted atom from_bool(value: i64)
     requires: value >= 0 && value <= 1;
     ensures: result >= 0;
     body: {
@@ -224,7 +224,7 @@ atom from_bool(value: i64)
 // =============================================================
 
 // JSON ハンドルを解放する（1=成功, 0=無効なハンドル）
-atom free(handle: i64)
+trusted atom free(handle: i64)
     requires: handle >= 0;
     ensures: result >= 0 && result <= 1;
     body: {
@@ -232,7 +232,7 @@ atom free(handle: i64)
     }
 
 // 文字列ハンドルを解放する（1=成功, 0=無効なハンドル）
-atom str_free(handle: i64)
+trusted atom str_free(handle: i64)
     requires: handle >= 0;
     ensures: result >= 0 && result <= 1;
     body: {

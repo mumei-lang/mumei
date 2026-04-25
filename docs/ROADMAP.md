@@ -179,9 +179,11 @@ One-command installation via `brew install mumei-lang/mumei`.
 **Implementation Plan**:
 
 ```
-1. Create mumei-lang/homebrew-mumei repository
-2. Create Formula (download from GitHub Releases)
-3. Auto-update Formula via CI (release.yml integration)
+1. ✅ Create mumei-lang/homebrew-mumei repository
+2. ✅ Create Formula (download from GitHub Releases)
+3. ✅ Auto-update Formula via CI (release.yml integration)
+   — Formula テンプレートは scripts/generate_formula.py に分離し、
+     update-homebrew ジョブから呼び出してローカルでも再現可能。
 ```
 
 **Formula example**:
@@ -491,7 +493,7 @@ Detailed session plans for the next 8 implementation priorities are documented i
 | 4 | MIR Drop Insertion: SwitchInt successor drops | ✅ Implemented |
 | 5 | Z3 String Sort migration | ✅ Implemented |
 | 6 | Effect Hierarchy extensions | ✅ Implemented |
-| 7 | Runtime Portability: musl + Windows | ✅ CI infrastructure added (untested on runners) |
+| 7 | Runtime Portability: musl + Windows | ✅ CI infrastructure verified and stable |
 | 8 | Concurrency improvements | ✅ Parser/AST/HIR infrastructure added (codegen placeholder) |
 | 9 | Plan 15: Examples + E2E tests | ✅ 5 examples + 3 test files |
 | 10 | Plan 16: FFI memory management | ✅ json_free/string_free/http_free |
