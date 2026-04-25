@@ -2,6 +2,34 @@
 
 ---
 
+### Plan 7 follow-up: Windows / musl release build stabilization
+
+#### Windows (`x86_64-pc-windows-msvc`)
+- `release.yml`: LLVM 17 source tarball download now retries up to 5 times
+  with exponential backoff and a 10 MB minimum-size sanity check, addressing
+  intermittent 504 Gateway Timeout responses from the GitHub release CDN.
+- Z3 4.13.4 prebuilt download gained equivalent retry + size guard.
+
+#### musl (`x86_64-unknown-linux-musl`)
+- `release.yml`: Alpine Docker build now installs both stable and nightly
+  Rust toolchains and invokes `cargo +nightly build -Zhost-config
+  -Ztarget-applies-to-host` with a `.cargo/config.toml` that applies
+  `target-feature=-crt-static` to `[host]` (build scripts) and
+  `target-feature=+crt-static` to `[target.x86_64-unknown-linux-musl]`
+  (final binary).
+- This fixes the bindgen panic "Unable to find libclang: ... Dynamic loading
+  not supported" that previously occurred when the build script was linked
+  fully static and could not `dlopen` libclang inside Alpine musl.
+- `z3/static-link-z3` keeps libz3 statically linked into the final binary.
+
+#### CI
+- `allow-failure: true` removed from the Windows matrix entry; the
+  `continue-on-error: ${{ matrix.allow-failure || false }}` expression on
+  the job is also removed.  Both targets must now pass for the release job
+  to succeed.
+
+---
+
 ### Emitter Artifact Abstraction + CHeaderEmitter Doxygen + Contextual Suggestions
 
 #### Task A: Emitter trait Artifact abstraction (Roadmap #5 Phase 1)
