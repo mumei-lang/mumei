@@ -3492,7 +3492,12 @@ fn cmd_infer_contracts(input: &str) {
 // =============================================================================
 
 fn cmd_doc(input: &str, output_dir: &str, format: &str) {
-    println!(
+    // Plan 10 (Task 4E): when --format json is requested stdout must be
+    // valid JSON for piping (`mumei doc … --format json | jq …`). Route all
+    // human-readable progress/status messages to stderr so stdout carries
+    // only the JSON payload. For other formats the behaviour is identical
+    // (stderr is still displayed in interactive terminals).
+    eprintln!(
         "🗡️  Mumei doc: generating {} documentation for '{}'...",
         format, input
     );
@@ -3514,7 +3519,7 @@ fn cmd_doc(input: &str, output_dir: &str, format: &str) {
         std::process::exit(1);
     }
 
-    println!("  📄 Found {} file(s)", files.len());
+    eprintln!("  📄 Found {} file(s)", files.len());
 
     let mut all_docs: Vec<ModuleDoc> = Vec::new();
 
@@ -3667,7 +3672,7 @@ fn cmd_doc(input: &str, output_dir: &str, format: &str) {
         }
     }
 
-    println!("  ✅ Documentation generated in '{}'", out_path.display());
+    eprintln!("  ✅ Documentation generated in '{}'", out_path.display());
 }
 
 // --- doc ヘルパー構造体 ---

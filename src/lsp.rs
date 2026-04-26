@@ -289,7 +289,13 @@ fn diagnose(uri: &str, source: &str) -> Vec<serde_json::Value> {
                             format!("{} = {}", k, value_str)
                         })
                         .collect();
-                    if !ce_parts.is_empty() {
+                    // Some verification errors (trait law violation, match
+                    // exhaustiveness, division by zero) already embed a
+                    // "Counter-example: …" line in their `msg`. Skip appending
+                    // a second one to avoid duplicate output in editor
+                    // diagnostic panels. The structured `data.counterexample`
+                    // field is still attached below for VS Code decorations.
+                    if !ce_parts.is_empty() && !message.contains("Counter-example:") {
                         message.push_str(&format!("\n\nCounter-example: {}", ce_parts.join(", ")));
                     }
                 }
