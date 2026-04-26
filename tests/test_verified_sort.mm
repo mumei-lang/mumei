@@ -12,8 +12,11 @@
 // --- Test 1: 要素数保存（身元関数） ---
 // 実 body で `arr[i] = arr[i]` を走らせても、result == n が成立することを
 // 確認する。Z3 は店舗後の配列要素を要素そのものとして解釈できる。
-trusted atom verify_noop_sort(n: i64)
-requires: n >= 0;
+// trusted を外せるように len_arr >= n の forall 前提を追加。
+// MIR move 解析と path 条件伝播の修正により、要素数保存契約が
+// `trusted` 不要で証明できるようになった。
+atom verify_noop_sort(n: i64)
+requires: n >= 0 && forall(i, 0, n, arr[i] >= 0);
 ensures: result == n;
 body: {
     let i = 0;
@@ -27,11 +30,13 @@ body: {
     n
 };
 
-// --- Test 2: 挿入ソートの構造（trusted） ---
-// 実際の関数的正当性は Z3 が forall + store を扱いにくいため
-// `trusted` とする。構文解析 / HIR / MIR / LLVM が通ることの回帰試験。
-trusted atom verify_insertion_sort_skeleton(n: i64)
-requires: n >= 0;
+// --- Test 2: 挿入ソートの構造 ---
+// `arr[j-1]` の OOB を回避するため `forall(i, 0, n, arr[i] >= 0)` を
+// requires に付けて len_arr >= n を確保する。要素数保存契約は
+// MIR move 解析改善 + path 条件伝播 + forall パターン強化により
+// `trusted` 不要で証明できる。
+atom verify_insertion_sort_skeleton(n: i64)
+requires: n >= 0 && forall(i, 0, n, arr[i] >= 0);
 ensures: result == n;
 body: {
     if n <= 1 { n }

@@ -61,9 +61,11 @@ curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash
 # Homebrew
 brew install mumei-lang/mumei/mumei
 
-# Specific version
-curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash -s -- --version v0.2.0
+# Specific version (latest is v0.5.6)
+curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash -s -- --version v0.5.6
 ```
+
+See [Releases](https://github.com/mumei-lang/mumei/releases) for older versions and changelogs.
 
 No Rust toolchain required. Detects OS/arch automatically.
 
@@ -99,7 +101,7 @@ mumei build src/main.mm -o dist/output
 
 | Command | Description |
 |---------|-------------|
-| `mumei build <file> -o <out>` | Verify + codegen (`--emit llvm-ir` (default) / `c-header` / `verified-json` / `proof-book`) |
+| `mumei build <file> -o <out>` | Verify + codegen (`--emit llvm-ir` (default) / `c-header` / `verified-json` / `proof-book` / `rust` / `python`) |
 | `mumei verify <file>` | Z3 verification only |
 | `mumei check <file>` | Parse + resolve (fast, no Z3) |
 | `mumei init <name>` | Generate project template |
@@ -110,7 +112,7 @@ mumei build src/main.mm -o dist/output
 | `mumei infer-effects <file>` | Infer required effects (JSON output) |
 | `mumei infer-contracts <file>` | Infer contracts for all atoms (JSON output) |
 | `mumei repl` | Interactive REPL |
-| `mumei doc <file> -o <dir>` | Generate HTML/Markdown documentation |
+| `mumei doc <file> -o <dir>` | Generate documentation (`--format html` (default) / `markdown` / `json`); HTML output renders requires/ensures/effects contracts inline with syntax-highlighted bodies and a client-side search filter |
 | `mumei lsp` | Start LSP server |
 
 ---
@@ -129,8 +131,8 @@ mumei build src/main.mm -o dist/output
 | **Safety** | `trusted` / `unverified` atoms, taint analysis, BMC + inductive invariant, [`call_with_contract`](docs/LANGUAGE.md#higher-order-functions-phase-a) for higher-order function verification |
 | **FFI** | `extern "Rust"` / `extern "C"` blocks, handle-based memory management (`json_free`, `http_free`), Str type interop |
 | **Std Library** | Option, Result, List, BoundedArray, Vector, HashMap, JSON, HTTP, sort algorithms, effect definitions |
-| **Output** | LLVM IR (native binary), C header (`.h`) via `--emit c-header`, verified JSON metadata via `--emit verified-json`, Markdown proof certificates via `--emit proof-book`. Cargo workspace with emitter plugin architecture (`mumei-core`, `mumei-emit-llvm`, `mumei-emit-json`, `mumei-emit-proofbook`) — see [Roadmap](docs/CROSS_PROJECT_ROADMAP.md) |
-| **Tooling** | LSP server, VS Code extension, `mumei.toml` manifest, dependency manager, MCP server, semantic feedback (bilingual EN/JP) |
+| **Output** | LLVM IR (native binary), C header (`.h`) via `--emit c-header`, verified JSON metadata via `--emit verified-json`, Markdown proof certificates via `--emit proof-book`, Rust / Python FFI bindings via `--emit rust` / `--emit python`. Cargo workspace with emitter plugin architecture (`mumei-core`, `mumei-emit-llvm`, `mumei-emit-json`, `mumei-emit-proofbook`, `mumei-emit-rust`, `mumei-emit-python`) — see [Roadmap](docs/CROSS_PROJECT_ROADMAP.md) |
+| **Tooling** | LSP server, VS Code extension (counter-example ghost-text decorations — v0.2.0+), `mumei.toml` manifest, dependency manager, MCP server, contract-aware `mumei doc` (HTML / Markdown / JSON with client-side search), semantic feedback (bilingual EN/JP) |
 
 <details>
 <summary><b>More examples</b></summary>
@@ -346,13 +348,17 @@ Mumei is organized as a Cargo workspace:
 
 ```
 mumei/
-├── mumei-core/          # Core library: parser, HIR, verification, MIR, emitter trait
-├── mumei-emit-llvm/     # LLVM IR emitter (LlvmEmitter + codegen)
-├── mumei-emit-json/     # Verified JSON metadata emitter (VerifiedJsonEmitter)
-├── src/                 # CLI binary (main.rs, lsp.rs, setup.rs)
-├── std/                 # Standard library (.mm files)
-├── examples/            # Example programs
-└── tests/               # Integration tests (.mm files)
+├── mumei-core/             # Core library: parser, HIR, verification, MIR, emitter trait
+├── mumei-emit-llvm/        # LLVM IR emitter (LlvmEmitter + codegen)
+├── mumei-emit-json/        # Verified JSON metadata emitter (VerifiedJsonEmitter)
+├── mumei-emit-proofbook/   # Markdown proof-certificate emitter
+├── mumei-emit-rust/        # Rust FFI binding emitter
+├── mumei-emit-python/      # Python FFI binding emitter
+├── src/                    # CLI binary (main.rs, lsp.rs, setup.rs)
+├── std/                    # Standard library (.mm files)
+├── editors/vscode/         # VS Code extension (LSP client + counter-example decorations)
+├── examples/               # Example programs
+└── tests/                  # Integration tests (.mm files)
 ```
 
 ## Development

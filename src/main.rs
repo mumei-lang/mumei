@@ -3492,7 +3492,12 @@ fn cmd_infer_contracts(input: &str) {
 // =============================================================================
 
 fn cmd_doc(input: &str, output_dir: &str, format: &str) {
-    println!(
+    // Plan 10 (Task 4E): when --format json is requested stdout must be
+    // valid JSON for piping (`mumei doc … --format json | jq …`). Route all
+    // human-readable progress/status messages to stderr so stdout carries
+    // only the JSON payload. For other formats the behaviour is identical
+    // (stderr is still displayed in interactive terminals).
+    eprintln!(
         "🗡️  Mumei doc: generating {} documentation for '{}'...",
         format, input
     );
@@ -3514,7 +3519,7 @@ fn cmd_doc(input: &str, output_dir: &str, format: &str) {
         std::process::exit(1);
     }
 
-    println!("  📄 Found {} file(s)", files.len());
+    eprintln!("  📄 Found {} file(s)", files.len());
 
     let mut all_docs: Vec<ModuleDoc> = Vec::new();
 
@@ -3562,6 +3567,13 @@ fn cmd_doc(input: &str, output_dir: &str, format: &str) {
                             .collect(),
                         trust_level: format!("{:?}", atom.trust_level),
                         is_async: atom.is_async,
+                        // Plan 10 (Task 4A): expose contract metadata so the
+                        // generated docs (HTML / Markdown / JSON) can render
+                        // requires/ensures/body/effects alongside each atom.
+                        requires: atom.requires.clone(),
+                        ensures: atom.ensures.clone(),
+                        body_expr: atom.body_expr.clone(),
+                        effects: atom.effects.iter().map(|e| e.name.clone()).collect(),
                     });
                 }
                 parser::Item::TypeDef(t) => {
@@ -3603,16 +3615,64 @@ fn cmd_doc(input: &str, output_dir: &str, format: &str) {
     match format {
         "html" => generate_html_docs(&all_docs, out_path),
         "markdown" | "md" => generate_markdown_docs(&all_docs, out_path),
+        "json" => {
+            // Plan 10 (Task 4E): structured documentation output for tooling.
+            // Emits the full set of contract metadata for every atom so that
+            // downstream consumers (LSP, web frontends, code generators) can
+            // ingest the docs without re-parsing Mumei source.
+            let json_docs: Vec<serde_json::Value> = all_docs
+                .iter()
+                .map(|doc| {
+                    serde_json::json!({
+                        "name": doc.name,
+                        "file_path": doc.file_path,
+                        "atoms": doc.atoms.iter().map(|a| serde_json::json!({
+                            "name": a.name,
+                            "comment": a.comment,
+                            "params": a.params,
+                            "trust_level": a.trust_level,
+                            "is_async": a.is_async,
+                            "requires": a.requires,
+                            "ensures": a.ensures,
+                            "body_expr": a.body_expr,
+                            "effects": a.effects,
+                        })).collect::<Vec<_>>(),
+                        "types": doc.types.iter().map(|t| serde_json::json!({
+                            "name": t.name,
+                            "comment": t.comment,
+                        })).collect::<Vec<_>>(),
+                        "structs": doc.structs.iter().map(|s| serde_json::json!({
+                            "name": s.name,
+                            "comment": s.comment,
+                        })).collect::<Vec<_>>(),
+                        "enums": doc.enums.iter().map(|e| serde_json::json!({
+                            "name": e.name,
+                            "comment": e.comment,
+                        })).collect::<Vec<_>>(),
+                        "traits": doc.traits.iter().map(|t| serde_json::json!({
+                            "name": t.name,
+                            "comment": t.comment,
+                        })).collect::<Vec<_>>(),
+                    })
+                })
+                .collect();
+            let payload =
+                serde_json::to_string_pretty(&json_docs).unwrap_or_else(|_| "[]".to_string());
+            // Both stream to stdout (for piping) and write to <out>/docs.json
+            // so the same invocation works for CLI scripting and static hosting.
+            println!("{}", payload);
+            let _ = fs::write(out_path.join("docs.json"), payload);
+        }
         _ => {
             eprintln!(
-                "  ❌ Unknown format '{}'. Use 'html' or 'markdown'.",
+                "  ❌ Unknown format '{}'. Use 'html', 'markdown', or 'json'.",
                 format
             );
             std::process::exit(1);
         }
     }
 
-    println!("  ✅ Documentation generated in '{}'", out_path.display());
+    eprintln!("  ✅ Documentation generated in '{}'", out_path.display());
 }
 
 // --- doc ヘルパー構造体 ---
@@ -3633,6 +3693,14 @@ struct ItemDoc {
     params: Vec<String>,
     trust_level: String,
     is_async: bool,
+    /// `requires` clause source text, e.g. `"len > 0 && idx < len"`.
+    requires: String,
+    /// `ensures` clause source text.
+    ensures: String,
+    /// Body expression source text, used for browser-side display.
+    body_expr: String,
+    /// Declared effect names (e.g. `["FileRead"]`).
+    effects: Vec<String>,
 }
 
 struct TypeDoc {
@@ -3640,14 +3708,38 @@ struct TypeDoc {
     comment: String,
 }
 
-/// ソース行から指定行の直前にあるコメント群を抽出する
+/// ソース行から指定行の直前にあるコメント群を抽出する。
+///
+/// Plan 10 (Task 4B): Prefer `///` doc comments when present and fall back
+/// to ordinary `//` comments otherwise. This keeps backward compatibility
+/// with existing source files while letting authors opt into Rust-style
+/// doc comments for richer output.
 fn extract_comment_before(lines: &[&str], target_line: usize) -> String {
     if target_line == 0 || target_line > lines.len() {
         return String::new();
     }
+
+    // First pass: walk upward collecting `///` doc comments only.
+    let mut doc_comments = Vec::new();
+    let mut i = target_line.saturating_sub(1);
+    while i > 0 {
+        let prev = i - 1;
+        let line = lines[prev].trim();
+        if line.starts_with("///") {
+            doc_comments.push(line.trim_start_matches("///").trim().to_string());
+            i = prev;
+        } else {
+            break;
+        }
+    }
+    if !doc_comments.is_empty() {
+        doc_comments.reverse();
+        return doc_comments.join("\n");
+    }
+
+    // Fallback: any `//` comment block immediately above the item.
     let mut comments = Vec::new();
-    let mut i = target_line.saturating_sub(1); // 0-indexed
-                                               // 上に向かってコメント行を収集
+    let mut i = target_line.saturating_sub(1);
     loop {
         if i == 0 && !lines[0].trim().starts_with("//") {
             break;
@@ -3693,6 +3785,83 @@ fn html_escape(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
+/// Plan 10 (Task 4D): minimal token-level highlighter for Mumei source.
+///
+/// This is intentionally not a full parser — it just decorates the most
+/// recognizable lexical classes (keywords, built-in types, operators,
+/// numeric literals, string literals, line comments) so the generated
+/// HTML docs render contracts and bodies with readable color cues.
+///
+/// The implementation runs a single tokenizing pass over the (unescaped)
+/// source so we never accidentally match operator characters inside
+/// already-emitted HTML such as `class="kw"`. Each matched token is
+/// individually HTML-escaped and wrapped in a `<span class="…">`; the
+/// gaps between matches are escaped verbatim.
+fn highlight_mumei_code(code: &str) -> String {
+    use regex::Regex;
+    use std::sync::OnceLock;
+
+    static TOKEN: OnceLock<Regex> = OnceLock::new();
+
+    let token = TOKEN.get_or_init(|| {
+        Regex::new(concat!(
+            // line comments
+            r"(?P<cm>//[^\n]*)",
+            r"|",
+            // strings
+            r#"(?P<str>"(?:[^"\\]|\\.)*")"#,
+            r"|",
+            // keywords (word boundary)
+            r"(?P<kw>\b(?:atom|struct|trait|impl|enum|extern|import|match|if|else|let|mut|return|while|for|in|async|await|unverified|trusted|verified|requires|ensures|body|invariant|where|effects|effect_pre|effect_post|resource|acquire|release|fn|true|false|consume|ref|perform)\b)",
+            r"|",
+            // builtin types
+            r"(?P<ty>\b(?:i32|i64|u32|u64|f32|f64|bool|String|Str|Self)\b)",
+            r"|",
+            // numbers
+            r"(?P<num>\b\d+(?:\.\d+)?\b)",
+            r"|",
+            // multi-char operators first, then single-char
+            r"(?P<op>&&|\|\||==|!=|>=|<=|=>|->|\|>|\+|-|\*|/|%|>|<|=)",
+        ))
+        .expect("highlight_mumei_code regex must compile")
+    });
+
+    let mut out = String::with_capacity(code.len());
+    let mut last_end = 0usize;
+    for caps in token.captures_iter(code) {
+        let m = caps.get(0).unwrap();
+        // Emit the gap before this match, HTML-escaped.
+        if m.start() > last_end {
+            out.push_str(&html_escape(&code[last_end..m.start()]));
+        }
+        let (class, text) = if let Some(t) = caps.name("cm") {
+            ("cm", t.as_str())
+        } else if let Some(t) = caps.name("str") {
+            ("str", t.as_str())
+        } else if let Some(t) = caps.name("kw") {
+            ("kw", t.as_str())
+        } else if let Some(t) = caps.name("ty") {
+            ("ty", t.as_str())
+        } else if let Some(t) = caps.name("num") {
+            ("num", t.as_str())
+        } else if let Some(t) = caps.name("op") {
+            ("op", t.as_str())
+        } else {
+            ("", m.as_str())
+        };
+        out.push_str(&format!(
+            "<span class=\"{}\">{}</span>",
+            class,
+            html_escape(text)
+        ));
+        last_end = m.end();
+    }
+    if last_end < code.len() {
+        out.push_str(&html_escape(&code[last_end..]));
+    }
+    out
+}
+
 /// HTML ドキュメントを生成
 fn generate_html_docs(docs: &[ModuleDoc], out_dir: &Path) {
     // index.html
@@ -3722,12 +3891,26 @@ a:hover { text-decoration: underline; }
 .badge.verified { background: #1a4040; color: #4ecdc4; }
 .badge.async { background: #3d1a60; color: #c084fc; }
 .type-def { background: #16213e; padding: 8px 16px; margin: 8px 0; border-radius: 6px; border-left: 3px solid #4ecdc4; }
+.contract { font-family: monospace; padding: 4px 16px; margin: 2px 0; font-size: 0.9em; }
+.contract .label { font-weight: bold; }
+.contract.requires { color: #f0a500; }
+.contract.ensures { color: #4ecdc4; }
+.contract.effects { color: #c084fc; }
+.contract.body { color: #a0d2db; }
+.kw { color: #e94560; }
+.ty { color: #4ecdc4; }
+.op { color: #f0a500; }
+.num { color: #a0d2db; }
+.str { color: #98c379; }
+.cm { color: #666; font-style: italic; }
+#search { width: 100%; padding: 8px; margin: 10px 0; background: #16213e; color: #e0e0e0; border: 1px solid #e94560; border-radius: 4px; box-sizing: border-box; }
 </style>
 </head>
 <body>
 <div class="container">
 <h1>&#x1F5E1; Mumei Documentation</h1>
 <p>Auto-generated from source comments.</p>
+<input type="text" id="search" placeholder="Search atoms, types…">
 <h2>Modules</h2>
 <ul class="module-list">
 "#,
@@ -3741,7 +3924,22 @@ a:hover { text-decoration: underline; }
             html_escape(&doc.file_path)
         ));
     }
-    index.push_str("</ul>\n</div>\n</body>\n</html>\n");
+    index.push_str(
+        r#"</ul>
+<script>
+// Plan 10 (Task 4F): client-side search filter for the module index.
+document.getElementById('search').addEventListener('input', function (e) {
+    var q = e.target.value.toLowerCase();
+    document.querySelectorAll('.module-list li').forEach(function (li) {
+        li.style.display = li.textContent.toLowerCase().includes(q) ? '' : 'none';
+    });
+});
+</script>
+</div>
+</body>
+</html>
+"#,
+    );
     let _ = fs::write(out_dir.join("index.html"), &index);
 
     // 各モジュールのページ
@@ -3769,6 +3967,18 @@ a:hover {{ text-decoration: underline; }}
 .badge.verified {{ background: #1a4040; color: #4ecdc4; }}
 .badge.async {{ background: #3d1a60; color: #c084fc; }}
 .type-def {{ background: #16213e; padding: 8px 16px; margin: 8px 0; border-radius: 6px; border-left: 3px solid #4ecdc4; }}
+.contract {{ font-family: monospace; padding: 4px 16px; margin: 2px 0; font-size: 0.9em; }}
+.contract .label {{ font-weight: bold; }}
+.contract.requires {{ color: #f0a500; }}
+.contract.ensures {{ color: #4ecdc4; }}
+.contract.effects {{ color: #c084fc; }}
+.contract.body {{ color: #a0d2db; }}
+.kw {{ color: #e94560; }}
+.ty {{ color: #4ecdc4; }}
+.op {{ color: #f0a500; }}
+.num {{ color: #a0d2db; }}
+.str {{ color: #98c379; }}
+.cm {{ color: #666; font-style: italic; }}
 </style>
 </head>
 <body>
@@ -3808,6 +4018,36 @@ a:hover {{ text-decoration: underline; }}
                     page.push_str(&format!(
                         "  <div class=\"comment\">{}</div>\n",
                         html_escape(&atom.comment).replace('\n', "<br>")
+                    ));
+                }
+                // Plan 10 (Task 4C): inline contract metadata (requires /
+                // ensures / effects / body) below each atom. Skip trivial
+                // `requires: true` / `ensures: true` clauses to keep the
+                // page noise-free.
+                if !atom.requires.is_empty() && atom.requires != "true" {
+                    page.push_str(&format!(
+                        "  <div class=\"contract requires\"><span class=\"label\">requires:</span> <code>{}</code></div>\n",
+                        highlight_mumei_code(&atom.requires)
+                    ));
+                }
+                if !atom.ensures.is_empty() && atom.ensures != "true" {
+                    page.push_str(&format!(
+                        "  <div class=\"contract ensures\"><span class=\"label\">ensures:</span> <code>{}</code></div>\n",
+                        highlight_mumei_code(&atom.ensures)
+                    ));
+                }
+                if !atom.effects.is_empty() {
+                    let effects_html: Vec<String> =
+                        atom.effects.iter().map(|e| html_escape(e)).collect();
+                    page.push_str(&format!(
+                        "  <div class=\"contract effects\"><span class=\"label\">effects:</span> <code>[{}]</code></div>\n",
+                        effects_html.join(", ")
+                    ));
+                }
+                if !atom.body_expr.is_empty() {
+                    page.push_str(&format!(
+                        "  <div class=\"contract body\"><span class=\"label\">body:</span> <code>{}</code></div>\n",
+                        highlight_mumei_code(&atom.body_expr)
                     ));
                 }
                 page.push_str("</div>\n");
@@ -3921,6 +4161,29 @@ fn generate_markdown_docs(docs: &[ModuleDoc], out_dir: &Path) {
                 ));
                 if !atom.comment.is_empty() {
                     md.push_str(&format!("{}\n\n", atom.comment));
+                }
+                // Plan 10 (Task 4C): emit contract metadata as fenced
+                // blocks under each atom. Mirrors the HTML output so that
+                // markdown consumers (GitHub Pages, mdbook, etc.) see the
+                // same information.
+                if !atom.requires.is_empty() && atom.requires != "true" {
+                    md.push_str(&format!("- **requires**: ```{}```\n", atom.requires));
+                }
+                if !atom.ensures.is_empty() && atom.ensures != "true" {
+                    md.push_str(&format!("- **ensures**: ```{}```\n", atom.ensures));
+                }
+                if !atom.effects.is_empty() {
+                    md.push_str(&format!("- **effects**: `[{}]`\n", atom.effects.join(", ")));
+                }
+                if !atom.body_expr.is_empty() {
+                    md.push_str(&format!("- **body**: ```{}```\n", atom.body_expr));
+                }
+                if !atom.requires.is_empty()
+                    || !atom.ensures.is_empty()
+                    || !atom.effects.is_empty()
+                    || !atom.body_expr.is_empty()
+                {
+                    md.push('\n');
                 }
             }
         }
@@ -4086,6 +4349,10 @@ atom json_parse(input: String) -> String
                     params: atom.params.iter().map(|p| p.name.clone()).collect(),
                     trust_level: format!("{:?}", atom.trust_level),
                     is_async: atom.is_async,
+                    requires: atom.requires.clone(),
+                    ensures: atom.ensures.clone(),
+                    body_expr: atom.body_expr.clone(),
+                    effects: atom.effects.iter().map(|e| e.name.clone()).collect(),
                 });
             }
         }

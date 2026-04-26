@@ -351,10 +351,13 @@ body: {
 //   2. 停止性（decreases: n - i, decreases: j）
 //   3. ループ不変量の帰納的証明
 //
-// NOTE: 二重 while の内側ループで `i` の move 解析が早期停止するため trusted 契約。
-//       契約ベースの要素数保存証明は verified_insertion_sort で代替している。
-//       TODO: 内側ループでの borrow/move 解析が改善されたら `trusted` を外す。
-trusted atom insertion_sort(n: i64)
+// NOTE: 旧来は二重 while 内側ループで `i` の MIR move 解析が
+//       false-positive を出していたため `trusted` を付けていたが、
+//       (a) `let i = …` の数値リテラル初期化から型を推論して `Movability::Copy`
+//       を立てる修正と、(b) `if n <= 1 { … } else { … }` の path 条件を
+//       内側 while の不変量初期検査に伝播する修正により、`trusted` 不要で
+//       要素数保存契約 (`result == n`) が証明できるようになった。
+atom insertion_sort(n: i64)
 requires: n >= 0;
 ensures: result == n;
 max_unroll: 5;

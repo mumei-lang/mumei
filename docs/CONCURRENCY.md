@@ -150,12 +150,14 @@ Verifies that consumed variables before `await` are not accessed after `await`.
 | `task` / `task_group` parsing | ✅ Implemented (`:all` / `:any` support, invalid token detection) |
 | Z3 join constraints (symbolic Bool) | ✅ Implemented (parent_done ⇒ child_done) |
 | Full AST walker support | ✅ Implemented (collect_callees, count_self_calls, collect_acquire_resources, collect_from_expr) |
-| LLVM codegen | ✅ Implemented (body compiled synchronously) |
+| LLVM codegen — `task` / `task_group` | ✅ Implemented (Plan 21: each `task` lowers to a `__mumei_task_<atom>_<N>` wrapper invoked via `pthread_create` + `pthread_join`; i64 captures marshalled through a stack-allocated args struct; result read back from the struct's tail slot. See [`compile_task_spawn`](../mumei-emit-llvm/src/codegen.rs).) |
+| LLVM codegen — `chan` send/recv | ✅ Implemented (Plan 21: `send` / `recv` lower to `__mumei_chan_send` / `__mumei_chan_recv` runtime calls, backed by `pthread_mutex_t` + `pthread_cond_t` in [`runtime/mumei_runtime.c`](../runtime/mumei_runtime.c).) |
 | Parser tests | ✅ Implemented (6 tests: task, task_group, :all, :any, unknown panic) |
 | Unique ID (Task) | ✅ Implemented (TASK_COUNTER prevents env key collision) |
-| Runtime scheduler | ❌ Not implemented |
+| Runtime scheduler | ✅ Implemented (Plan 21: pthread-backed; one OS thread per `task`; channel rendezvous via single-slot mutex/condvar in `mumei_runtime.c`) |
 | Task cancellation | ❌ Not implemented |
-| Channel types | ❌ Not implemented |
+| Channel types | ✅ Implemented (Plan 21: i64 handles + runtime mutex/condvar; full polymorphic `chan<T>` payload-marshalling is a follow-up) |
+| `task_group:any` (atomic completion flag) | ❌ Not implemented (currently lowers identically to `:all`) |
 
 ## Safety Guarantees
 

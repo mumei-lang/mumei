@@ -50,6 +50,9 @@ pub struct ErrorDetail {
     pub span: Span,
     /// 修正提案（例: "型を i64 に変更してください"）
     pub suggestion: Option<String>,
+    /// Z3 から抽出した反例（counter-example）。
+    /// エディタや LSP がインライン装飾で表示するために利用する。
+    pub counterexample: Option<serde_json::Value>,
 }
 
 impl ErrorDetail {
@@ -60,6 +63,7 @@ impl ErrorDetail {
             message: msg.into(),
             span: Span::default(),
             suggestion: None,
+            counterexample: None,
         }
     }
 
@@ -70,6 +74,7 @@ impl ErrorDetail {
             message: msg.into(),
             span,
             suggestion: None,
+            counterexample: None,
         }
     }
 }
@@ -149,6 +154,9 @@ pub enum MumeiError {
         original_span: Span,
         #[related]
         related: Vec<RelatedDiagnostic>,
+        /// Z3 から抽出した反例（counter-example）。
+        /// エディタや LSP がインライン装飾用に取り出して表示する。
+        counterexample: Option<serde_json::Value>,
     },
     #[error("Codegen Error: {msg}")]
     #[diagnostic(code(mumei::codegen))]
@@ -192,6 +200,7 @@ impl MumeiError {
             help: None,
             original_span: Span::default(),
             related: Vec::new(),
+            counterexample: None,
         }
     }
     /// Span 付きで VerificationError を生成
@@ -210,6 +219,7 @@ impl MumeiError {
             help: None,
             original_span: span,
             related: Vec::new(),
+            counterexample: None,
         }
     }
     /// ソースコード付きで VerificationError を生成（リッチ出力対応）
@@ -235,6 +245,7 @@ impl MumeiError {
             help,
             original_span: span.clone(),
             related: Vec::new(),
+            counterexample: None,
         }
     }
     /// Span なしで CodegenError を生成
@@ -328,15 +339,22 @@ impl MumeiError {
         }
     }
 
-    /// ErrorDetail を取得する（Span 情報を保持）
+    /// ErrorDetail を取得する（Span 情報と counter-example を保持）
     pub fn to_detail(&self) -> ErrorDetail {
         match self {
             MumeiError::VerificationError {
-                msg, original_span, ..
-            } => ErrorDetail::with_span(
-                format!("Verification Error: {}", msg),
-                original_span.clone(),
-            ),
+                msg,
+                original_span,
+                counterexample,
+                ..
+            } => {
+                let mut detail = ErrorDetail::with_span(
+                    format!("Verification Error: {}", msg),
+                    original_span.clone(),
+                );
+                detail.counterexample = counterexample.clone();
+                detail
+            }
             MumeiError::CodegenError {
                 msg, original_span, ..
             } => ErrorDetail::with_span(format!("Codegen Error: {}", msg), original_span.clone()),
@@ -344,6 +362,14 @@ impl MumeiError {
                 msg, original_span, ..
             } => ErrorDetail::with_span(format!("Type Error: {}", msg), original_span.clone()),
         }
+    }
+
+    /// Z3 反例（counter-example）をエラーに附与する。VerificationError 以外の variant では no-op。
+    pub fn with_counterexample(mut self, ce: Option<serde_json::Value>) -> Self {
+        if let MumeiError::VerificationError { counterexample, .. } = &mut self {
+            *counterexample = ce;
+        }
+        self
     }
 
     /// ソースコードを設定してリッチ出力を有効にする
@@ -377,6 +403,7 @@ impl MumeiError {
                 help,
                 original_span,
                 related,
+                counterexample,
                 ..
             } => {
                 // Propagate source to related diagnostics that share the same file.
@@ -405,6 +432,7 @@ impl MumeiError {
                     help,
                     original_span,
                     related: updated_related,
+                    counterexample,
                 }
             }
             MumeiError::CodegenError {
@@ -484,6 +512,7 @@ impl MumeiError {
                 span,
                 original_span,
                 related,
+                counterexample,
                 ..
             } => MumeiError::VerificationError {
                 msg,
@@ -492,6 +521,7 @@ impl MumeiError {
                 help,
                 original_span,
                 related,
+                counterexample,
             },
             MumeiError::CodegenError {
                 msg,
@@ -1591,6 +1621,30 @@ struct VCtx<'a> {
     /// Z3 String Sort 統合時にここを有効化する
     #[allow(dead_code)]
     has_string_constraints: Option<&'a std::cell::Cell<bool>>,
+    /// Stack of path conditions accumulated while descending into nested
+    /// `if … else …` branches. These are *not* asserted on the persistent
+    /// solver — instead, intermediate check sites (loop-invariant base
+    /// case / preservation, decreases monotonicity, …) conjoin the stack
+    /// with the negated check so that branch-local guards (e.g. the `n > 1`
+    /// implied by being in the `else` of `if n <= 1`) participate in the
+    /// satisfiability query without leaking into sibling branches.
+    path_cond_stack: std::cell::RefCell<Vec<Bool<'a>>>,
+}
+
+impl<'a> VCtx<'a> {
+    /// Conjunction of the current branch path conditions (or `true` if
+    /// no enclosing `if/else` has narrowed the path). Used at intermediate
+    /// check sites (see `path_cond_stack` doc) so that branch guards
+    /// participate in the SAT query.
+    fn path_cond_conj(&self) -> Bool<'a> {
+        let stack = self.path_cond_stack.borrow();
+        if stack.is_empty() {
+            Bool::from_bool(self.ctx, true)
+        } else {
+            let refs: Vec<&Bool<'a>> = stack.iter().collect();
+            Bool::and(self.ctx, &refs)
+        }
+    }
 }
 
 // =============================================================================
@@ -2585,6 +2639,7 @@ pub fn verify_impl(
             constraint_count: None,
             constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
             has_string_constraints: None,
+            path_cond_stack: std::cell::RefCell::new(Vec::new()),
         };
 
         let mut env: Env = HashMap::new();
@@ -2690,22 +2745,26 @@ pub fn verify_impl(
                                 None,
                             );
                             if ce_parts.is_empty() {
-                                "  (no concrete values available)".to_string()
+                                ("  (no concrete values available)".to_string(), ce_value)
                             } else {
-                                format!("  Counter-example: {}", ce_parts.join(", "))
+                                (
+                                    format!("  Counter-example: {}", ce_parts.join(", ")),
+                                    ce_value,
+                                )
                             }
                         } else {
-                            "  (could not retrieve model)".to_string()
+                            ("  (could not retrieve model)".to_string(), None)
                         };
                         solver.pop(1);
+                        let (ce_text, ce_data) = counterexample;
                         return Err(MumeiError::verification_at(
                             format!(
                                 "impl {} for {}: law '{}' (defined in trait at {}) is not satisfied\n  Law: {}\n  Expanded: {}\n{}",
                                 impl_def.trait_name, impl_def.target_type,
-                                law_name, trait_def.span, law_expr, substituted, counterexample
+                                law_name, trait_def.span, law_expr, substituted, ce_text
                             ),
                             impl_def.span.clone()
-                        ));
+                        ).with_counterexample(ce_data));
                     }
                     solver.pop(1);
                 }
@@ -3979,6 +4038,7 @@ fn verify_atom_invariant(
         constraint_count: None,
         constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
         has_string_constraints: None,
+        path_cond_stack: std::cell::RefCell::new(Vec::new()),
     };
 
     let mut env: Env = HashMap::new();
@@ -5829,8 +5889,20 @@ fn verify_inner(
     {
         has_string_constraints_cell_pre.set(true);
     }
+    // Detect array-heavy forall constraints (forall over `arr[...]` accesses).
+    // These benefit from a longer timeout and model-based quantifier
+    // instantiation, mirroring the way String-Sort constraints already
+    // double the timeout above.
+    let has_array_forall = atom.forall_constraints.iter().any(|q| {
+        // Cheap textual heuristic: the parsed condition string contains a
+        // `<name>[` token. Avoids paying parse cost twice and matches the
+        // common `arr[i]`, `data[k]` shapes used in the std lib.
+        q.condition.contains('[')
+    });
     let effective_timeout = if has_string_constraints_cell_pre.get() {
         timeout_ms * 2
+    } else if has_array_forall {
+        timeout_ms * 3
     } else {
         timeout_ms
     };
@@ -5839,6 +5911,24 @@ fn verify_inner(
     cfg.set_timeout_msec(effective_timeout);
     let ctx = Context::new(&cfg);
     let solver = Solver::new(&ctx);
+    if has_array_forall {
+        // Enable model-based quantifier instantiation so that
+        // `forall(i, …, arr[i] …)` pattern triggers fire under post-store
+        // array states. `mbqi` is a module-level (`smt.*`) param so it
+        // must be set on the solver via `Params`, not on `Config` (which
+        // only accepts global Z3 parameters).
+        //
+        // We deliberately do NOT also tune `qi.eager_threshold` here:
+        // empirically, the z3-rs binding (0.12) silently drops the
+        // surrounding solver assertions when an unrecognized solver
+        // param is set, which would erase the requires-side forall and
+        // make every quantified ensures fail. `mbqi` alone is enough to
+        // recover post-store ensures verification on top of the pattern
+        // extraction below.
+        let mut params = z3::Params::new(&ctx);
+        params.set_bool("mbqi", true);
+        solver.set_params(&params);
+    }
 
     let int_sort = z3::Sort::int(&ctx);
     let arr = Array::new_const(&ctx, "arr", &int_sort, &int_sort);
@@ -5863,6 +5953,7 @@ fn verify_inner(
         constraint_count: Some(&constraint_count_cell),
         constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
         has_string_constraints: Some(&has_string_constraints_cell),
+        path_cond_stack: std::cell::RefCell::new(Vec::new()),
     };
 
     let mut env: Env = HashMap::new();
@@ -6400,7 +6491,9 @@ fn verify_inner(
                 let mut err = MumeiError::verification_at(
                     "Postcondition (ensures) is not satisfied.",
                     atom.span.clone(),
-                ).with_help("ensures の条件を確認してください。body の返り値が事後条件を満たすか検討してください");
+                )
+                .with_help("ensures の条件を確認してください。body の返り値が事後条件を満たすか検討してください")
+                .with_counterexample(ce_value.clone());
                 for mapping in &constraint_mappings {
                     if mapping.span.line > 0 {
                         let related_src_span = span_to_source_span("", &mapping.span);
@@ -6645,15 +6738,15 @@ fn apply_refinement_constraint<'a>(
 /// Returns `true` if the subsumption holds (or is trivially skipped),
 /// `false` if a warning was emitted (implication does not hold).
 #[allow(clippy::too_many_arguments)]
-fn check_contract_subsumption(
-    vc: &VCtx<'_>,
+fn check_contract_subsumption<'a>(
+    vc: &VCtx<'a>,
     concrete_atom: &Atom,
     contract_ensures: &str,
     _contract_requires: Option<&str>, // reserved for future use
     callee_name: &str,
     param_name: &str,
-    solver: &Solver<'_>,
-    ctx: &Context,
+    solver: &Solver<'a>,
+    ctx: &'a Context,
 ) -> bool {
     // Skip when the contract requires nothing — any ensures trivially implies "true".
     // NOTE: We intentionally do NOT skip when concrete_atom.ensures == "true".
@@ -6866,12 +6959,58 @@ fn expr_to_z3<'a>(
 
                     let quantifier_expr = if name == "forall" {
                         // ∀ var ∈ [start, end). condition
-                        z3::ast::forall_const(
-                            ctx,
-                            &[&bound_var],
-                            &[],
-                            &range_cond.implies(&condition_z3),
-                        )
+                        // Build E-matching patterns from `arr[idx]` accesses
+                        // inside the condition. Mirrors the requires-side
+                        // pattern extraction at L5950-5979 so that array-
+                        // heavy `ensures` / loop invariants instantiate the
+                        // same way as their requires counterparts. Each
+                        // access uses `__z3_arr_<name>` when present so that
+                        // patterns refer to the post-store array state seen
+                        // by the body of the forall.
+                        let arr_accesses = collect_array_accesses(&args[3]);
+                        let mut pattern_asts: Vec<Dynamic> = Vec::new();
+                        // Re-bind the quantified variable while we lower
+                        // index expressions so that they see `var_name`.
+                        let var_re = match &args[0] {
+                            Expr::Variable(v) => v.clone(),
+                            _ => String::new(),
+                        };
+                        let saved = if !var_re.is_empty() {
+                            env.insert(var_re.clone(), bound_var.clone().into())
+                        } else {
+                            None
+                        };
+                        for (arr_name, idx_expr) in &arr_accesses {
+                            if let Ok(idx_z3) = expr_to_z3(vc, idx_expr, env, None) {
+                                if let Some(idx_int) = idx_z3.as_int() {
+                                    let arr_key = format!("__z3_arr_{}", arr_name);
+                                    let current_arr: Array<'_> = env
+                                        .get(&arr_key)
+                                        .and_then(|d| d.as_array())
+                                        .unwrap_or_else(|| vc.arr.clone());
+                                    pattern_asts.push(current_arr.select(&idx_int));
+                                }
+                            }
+                        }
+                        // Restore env for var_re
+                        if !var_re.is_empty() {
+                            if let Some(old) = saved {
+                                env.insert(var_re, old);
+                            } else {
+                                env.remove(&var_re);
+                            }
+                        }
+                        let body = range_cond.implies(&condition_z3);
+                        if pattern_asts.is_empty() {
+                            z3::ast::forall_const(ctx, &[&bound_var], &[], &body)
+                        } else {
+                            let pattern_refs: Vec<&dyn z3::ast::Ast> = pattern_asts
+                                .iter()
+                                .map(|d| d as &dyn z3::ast::Ast)
+                                .collect();
+                            let pattern = z3::Pattern::new(ctx, &pattern_refs);
+                            z3::ast::forall_const(ctx, &[&bound_var], &[&pattern], &body)
+                        }
                     } else {
                         // ∃ var ∈ [start, end). condition
                         z3::ast::exists_const(
@@ -7043,10 +7182,34 @@ fn expr_to_z3<'a>(
                                     solver.push();
                                     solver.assert(&req_bool.not());
                                     if solver.check() == SatResult::Sat {
+                                        // Extract counterexample: concrete argument values
+                                        // that violate the callee's precondition.
+                                        let ce_value = if let Some(model) = solver.get_model() {
+                                            let mut ce_json = serde_json::Map::new();
+                                            for (i, param) in callee.params.iter().enumerate() {
+                                                if let Some(arg_val) = arg_vals.get(i) {
+                                                    if let Some(val) = model.eval(arg_val, true) {
+                                                        let val_str = format!("{}", val);
+                                                        ce_json.insert(
+                                                            param.name.clone(),
+                                                            json!(val_str),
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                            if ce_json.is_empty() {
+                                                None
+                                            } else {
+                                                Some(serde_json::Value::Object(ce_json))
+                                            }
+                                        } else {
+                                            None
+                                        };
                                         solver.pop(1);
                                         return Err(MumeiError::verification(
                                             format!("Call to '{}': precondition (requires) not satisfied at call site", name)
-                                        ).with_help("呼び出し元で事前条件を満たしていません。引数の制約を確認してください"));
+                                        ).with_help("呼び出し元で事前条件を満たしていません。引数の制約を確認してください")
+                                        .with_counterexample(ce_value));
                                     }
                                     solver.pop(1);
                                 }
@@ -7466,12 +7629,29 @@ fn expr_to_z3<'a>(
                                     .as_ref()
                                     .map(|fb| format!(" [semantic_feedback: {}]", fb))
                                     .unwrap_or_default();
+                                let ce_value = if let Some(model) = solver.get_model() {
+                                    let dividend_val = model
+                                        .eval(&li, true)
+                                        .map(|v| format!("{}", v))
+                                        .unwrap_or_else(|| "?".to_string());
+                                    let divisor_val = model
+                                        .eval(&ri, true)
+                                        .map(|v| format!("{}", v))
+                                        .unwrap_or_else(|| "0".to_string());
+                                    Some(serde_json::json!({
+                                        "dividend": dividend_val,
+                                        "divisor": divisor_val,
+                                    }))
+                                } else {
+                                    None
+                                };
                                 solver.pop(1);
                                 return Err(MumeiError::verification(format!(
                                     "Potential division by zero.{}{}",
                                     ce_hint, feedback_hint
                                 ))
-                                .with_help("Add a condition divisor != 0 to requires"));
+                                .with_help("Add a condition divisor != 0 to requires")
+                                .with_counterexample(ce_value));
                             }
                             solver.pop(1);
                         }
@@ -7498,8 +7678,23 @@ fn expr_to_z3<'a>(
             let c = expr_to_z3(vc, cond, env, solver_opt)?
                 .as_bool()
                 .ok_or(MumeiError::type_error("If condition must be boolean"))?;
-            let t = stmt_to_z3(vc, then_branch, env, solver_opt)?;
-            let e = stmt_to_z3(vc, else_branch, env, solver_opt)?;
+            // Track the path condition for sub-statements that need it
+            // (currently only the loop-invariant base case inside the
+            // branch), without touching the solver's persistent assertion
+            // stack. This lets, e.g., `if n <= 1 { n } else { let i = 1;
+            // while i < n invariant: i >= 1 && i <= n … }` verify because
+            // the inner invariant base case can rely on `n > 1` from the
+            // surrounding else-guard, while still keeping `let left =
+            // merge_sort(mid)` ensures-asserts (`left == mid`) live for the
+            // outer postcondition check.
+            vc.path_cond_stack.borrow_mut().push(c.clone());
+            let t = stmt_to_z3(vc, then_branch, env, solver_opt);
+            vc.path_cond_stack.borrow_mut().pop();
+            let t = t?;
+            vc.path_cond_stack.borrow_mut().push(c.not());
+            let e = stmt_to_z3(vc, else_branch, env, solver_opt);
+            vc.path_cond_stack.borrow_mut().pop();
+            let e = e?;
             Ok(c.ite(&t, &e))
         }
 
@@ -7613,12 +7808,15 @@ fn expr_to_z3<'a>(
                             "unknown value".to_string()
                         };
                         solver.pop(1);
+                        let ce_value = serde_json::json!({
+                            "target": counterexample,
+                        });
                         return Err(MumeiError::verification(
                             format!(
                                 "Match is not exhaustive: the following value is not covered by any arm:\n  Counter-example: {}",
                                 counterexample
                             )
-                        ));
+                        ).with_counterexample(Some(ce_value)));
                     }
                     solver.pop(1);
                     return Err(MumeiError::verification(
@@ -8476,9 +8674,13 @@ fn stmt_to_z3<'a>(
                     .as_bool()
                     .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
 
-                // Base case
+                // Base case — conjoin path conditions from any enclosing
+                // `if/else` branches so that loop bodies inside e.g. the
+                // `else` of `if n <= 1 { … } else { let i = 1; while … }`
+                // can rely on the corresponding guard (here `n > 1`).
+                let path_cond = vc.path_cond_conj();
                 solver.push();
-                solver.assert(&inv.not());
+                solver.assert(&Bool::and(ctx, &[&path_cond, &inv.not()]));
                 if solver.check() == SatResult::Sat {
                     solver.pop(1);
                     return Err(MumeiError::verification("Invariant fails initially"));
@@ -9471,6 +9673,7 @@ mod tests {
             constraint_count: Some(&count_cell),
             constraint_budget: 5, // Very low budget
             has_string_constraints: Some(&has_string_cell),
+            path_cond_stack: std::cell::RefCell::new(Vec::new()),
         };
 
         // Each call increments and checks
@@ -9506,6 +9709,7 @@ mod tests {
             constraint_count: None,
             constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
             has_string_constraints: None,
+            path_cond_stack: std::cell::RefCell::new(Vec::new()),
         };
 
         // Should always succeed when no constraint tracking
@@ -10112,6 +10316,7 @@ mod tests {
             constraint_count: None,
             constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
             has_string_constraints: None,
+            path_cond_stack: std::cell::RefCell::new(Vec::new()),
         };
         let concrete = Atom {
             name: "increment".to_string(),
@@ -10179,6 +10384,7 @@ mod tests {
             constraint_count: None,
             constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
             has_string_constraints: None,
+            path_cond_stack: std::cell::RefCell::new(Vec::new()),
         };
         let concrete = Atom {
             name: "negate".to_string(),
@@ -10249,6 +10455,7 @@ mod tests {
             constraint_count: None,
             constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
             has_string_constraints: None,
+            path_cond_stack: std::cell::RefCell::new(Vec::new()),
         };
         let concrete = Atom {
             name: "compute".to_string(),
@@ -10326,6 +10533,7 @@ mod tests {
             constraint_count: None,
             constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
             has_string_constraints: None,
+            path_cond_stack: std::cell::RefCell::new(Vec::new()),
         };
         let concrete = Atom {
             name: "something".to_string(),
@@ -10385,6 +10593,7 @@ mod tests {
             constraint_count: None,
             constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
             has_string_constraints: None,
+            path_cond_stack: std::cell::RefCell::new(Vec::new()),
         };
         let concrete = Atom {
             name: "no_guarantee".to_string(),
@@ -10806,6 +11015,7 @@ mod tests {
             constraint_count: Some(&constraint_count_cell),
             constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
             has_string_constraints: Some(&has_string_constraints_cell),
+            path_cond_stack: std::cell::RefCell::new(Vec::new()),
         };
         let mut env: Env = HashMap::new();
 

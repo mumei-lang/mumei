@@ -6,8 +6,8 @@ use inkwell::values::{AnyValue, BasicMetadataValueEnum, BasicValueEnum, Function
 use inkwell::AddressSpace;
 use inkwell::FloatPredicate;
 use inkwell::IntPredicate;
-use mumei_core::hir::{HirAtom, HirExpr, HirStmt};
-use mumei_core::parser::{Op, Pattern};
+use mumei_core::hir::{collect_free_variables_stmt, HirAtom, HirExpr, HirStmt};
+use mumei_core::parser::{JoinSemantics, Op, Pattern};
 use mumei_core::verification::{ModuleEnv, MumeiError, MumeiResult};
 use std::collections::HashMap;
 use std::path::Path;
@@ -1117,15 +1117,55 @@ fn compile_hir_expr<'a>(
             context, builder, module, function, await_expr, variables, array_ptrs, module_env,
         ),
 
-        HirExpr::Task { body, .. } => compile_hir_stmt(
-            context, builder, module, function, body, variables, array_ptrs, module_env,
+        // Plan 21 — concurrency runtime: spawn the task body on its own
+        // pthread, join it, and return the joined i64 result. See
+        // `compile_task_spawn` for layout / capture details.
+        HirExpr::Task { body, .. } => compile_task_spawn(
+            context, builder, module, function, body, variables, module_env,
         ),
-        HirExpr::TaskGroup { children, .. } => {
-            let mut last_val: BasicValueEnum = context.i64_type().const_int(0, false).into();
+        HirExpr::TaskGroup {
+            children,
+            join_semantics,
+        } => {
+            // Plan 21 — concurrency runtime: `task_group:all` spawns every
+            // child on its own pthread *first*, then joins them in
+            // declaration order. Splitting spawn from join is what makes
+            // the children actually concurrent — the previous
+            // spawn-join-spawn-join layout was sequential and
+            // deadlocked simple `recv`/`send` rendezvous patterns
+            // because the second task wasn't created until the first
+            // had already returned. `JoinSemantics::Any` (atomic
+            // completion flag, cancel-the-rest semantics) is still a
+            // follow-up; today it lowers identically to `:all`.
+            //
+            // Each child is constructed in `hir::lower_stmt` as
+            // `HirStmt::Expr(HirExpr::Task { body, … })`. We unwrap
+            // that here so `emit_task_spawn_only` operates on the
+            // *task body*, not the surrounding `Task` expression —
+            // otherwise we'd emit two nested pthread spawns per child.
+            if matches!(join_semantics, JoinSemantics::Any) {
+                let parent_label = function.get_name().to_str().unwrap_or("anon");
+                eprintln!(
+                    "[mumei codegen] warning: in atom '{}', `task_group:any` is \
+                     not yet implemented and currently lowers identically to \
+                     `:all` (wait-for-all). First-completion / cancel-the-rest \
+                     semantics are tracked as a Plan 21 follow-up.",
+                    parent_label
+                );
+            }
+            let mut pending: Vec<PendingTask<'_>> = Vec::with_capacity(children.len());
             for child in children {
-                last_val = compile_hir_stmt(
-                    context, builder, module, function, child, variables, array_ptrs, module_env,
-                )?;
+                let task_body: &HirStmt = match child {
+                    HirStmt::Expr(HirExpr::Task { body, .. }) => body.as_ref(),
+                    other => other,
+                };
+                pending.push(emit_task_spawn_only(
+                    context, builder, module, function, task_body, variables, module_env,
+                )?);
+            }
+            let mut last_val: BasicValueEnum = context.i64_type().const_int(0, false).into();
+            for p in &pending {
+                last_val = emit_task_join_only(context, builder, module, p)?;
             }
             Ok(last_val)
         }
@@ -1290,16 +1330,78 @@ fn compile_hir_expr<'a>(
             Ok(context.i64_type().const_int(0, false).into())
         }
 
-        // Plan 8: Channel send — compile value expr, return unit (0)
-        HirExpr::ChanSend { value, .. } => {
-            let _val = compile_hir_expr(
+        // Plan 21 — concurrency runtime: channel send compiles to a call
+        // into the runtime helper `__mumei_chan_send(chan_id: i64, value:
+        // i64) -> void`. The runtime is responsible for the
+        // `pthread_mutex_lock` / `pthread_cond_signal` / unlock sequence —
+        // see `runtime/mumei_runtime.c`. The channel is referred to by an
+        // i64 handle; the front-end is responsible for binding `let ch =
+        // chan_new()` to a unique id (current grammar's `chan` literal
+        // lowers to a fresh i64, so this just threads the handle through).
+        HirExpr::ChanSend { channel, value } => {
+            let chan_val = compile_hir_expr(
+                context, builder, module, function, channel, variables, array_ptrs, module_env,
+            )?;
+            let val = compile_hir_expr(
                 context, builder, module, function, value, variables, array_ptrs, module_env,
             )?;
+            let chan_i64 = if chan_val.is_int_value() {
+                chan_val.into_int_value()
+            } else {
+                context.i64_type().const_int(0, false)
+            };
+            let val_i64 = if val.is_int_value() {
+                val.into_int_value()
+            } else {
+                context.i64_type().const_int(0, false)
+            };
+            let send_fn = module.get_function("__mumei_chan_send").unwrap_or_else(|| {
+                let i64_type = context.i64_type();
+                let fn_type = context
+                    .void_type()
+                    .fn_type(&[i64_type.into(), i64_type.into()], false);
+                module.add_function(
+                    "__mumei_chan_send",
+                    fn_type,
+                    Some(inkwell::module::Linkage::External),
+                )
+            });
+            llvm!(builder.build_call(
+                send_fn,
+                &[chan_i64.into(), val_i64.into()],
+                "chan_send_call"
+            ));
             Ok(context.i64_type().const_int(0, false).into())
         }
 
-        // Plan 8: Channel recv — return a placeholder value
-        HirExpr::ChanRecv { .. } => Ok(context.i64_type().const_int(0, false).into()),
+        // Plan 21 — concurrency runtime: channel receive calls
+        // `__mumei_chan_recv(chan_id: i64) -> i64`, which performs a
+        // `pthread_cond_wait` loop until a value is available. See
+        // `runtime/mumei_runtime.c`.
+        HirExpr::ChanRecv { channel } => {
+            let chan_val = compile_hir_expr(
+                context, builder, module, function, channel, variables, array_ptrs, module_env,
+            )?;
+            let chan_i64 = if chan_val.is_int_value() {
+                chan_val.into_int_value()
+            } else {
+                context.i64_type().const_int(0, false)
+            };
+            let recv_fn = module.get_function("__mumei_chan_recv").unwrap_or_else(|| {
+                let i64_type = context.i64_type();
+                let fn_type = i64_type.fn_type(&[i64_type.into()], false);
+                module.add_function(
+                    "__mumei_chan_recv",
+                    fn_type,
+                    Some(inkwell::module::Linkage::External),
+                )
+            });
+            let call = llvm!(builder.build_call(recv_fn, &[chan_i64.into()], "chan_recv_call"));
+            Ok(call
+                .try_as_basic_value()
+                .left()
+                .unwrap_or(context.i64_type().const_int(0, false).into()))
+        }
 
         // Plan 14: Enum variant construction — build tagged union struct
         HirExpr::VariantInit {
@@ -1592,4 +1694,352 @@ fn find_field_index(
         }
     }
     None
+}
+
+/// Plan 21 — concurrency runtime: count `__mumei_task_*` wrapper functions
+/// already declared on `module` so each new wrapper picks a unique numeric
+/// suffix. The IR-level layout is:
+///   `__mumei_task_<atom>_<N>` for the task body
+///   `__mumei_task_args_<atom>_<N>` (LLVM struct) for the captured i64 vars
+fn next_task_counter(module: &Module<'_>, atom_name: &str) -> u32 {
+    let prefix = format!("__mumei_task_{}_", atom_name);
+    let mut max_seen: i32 = -1;
+    let mut f = module.get_first_function();
+    while let Some(func) = f {
+        if let Ok(name) = func.get_name().to_str() {
+            if let Some(rest) = name.strip_prefix(&prefix) {
+                if let Ok(n) = rest.parse::<i32>() {
+                    if n > max_seen {
+                        max_seen = n;
+                    }
+                }
+            }
+        }
+        f = func.get_next_function();
+    }
+    (max_seen + 1) as u32
+}
+
+/// Plan 21 — concurrency runtime: declare `pthread_create` /
+/// `pthread_join` once per module and return their `FunctionValue`s.
+/// Both have the standard glibc signatures (using `i8*` / `void*` for
+/// opaque thread / arg / retval slots so we don't need `pthread_t`'s
+/// platform-specific layout in IR).
+fn declare_pthread_externs<'a>(
+    context: &'a Context,
+    module: &Module<'a>,
+) -> (FunctionValue<'a>, FunctionValue<'a>) {
+    let i32_type = context.i32_type();
+    let ptr_type = context.ptr_type(AddressSpace::default());
+
+    let create_fn = module.get_function("pthread_create").unwrap_or_else(|| {
+        // int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
+        //                    void *(*start_routine)(void *), void *arg);
+        let fn_type = i32_type.fn_type(
+            &[
+                ptr_type.into(),
+                ptr_type.into(),
+                ptr_type.into(),
+                ptr_type.into(),
+            ],
+            false,
+        );
+        module.add_function(
+            "pthread_create",
+            fn_type,
+            Some(inkwell::module::Linkage::External),
+        )
+    });
+    let join_fn = module.get_function("pthread_join").unwrap_or_else(|| {
+        // int pthread_join(pthread_t thread, void **retval);
+        // pthread_t is `unsigned long` on glibc — model as i64.
+        let fn_type = i32_type.fn_type(&[context.i64_type().into(), ptr_type.into()], false);
+        module.add_function(
+            "pthread_join",
+            fn_type,
+            Some(inkwell::module::Linkage::External),
+        )
+    });
+    (create_fn, join_fn)
+}
+
+/// Plan 21 — concurrency runtime: handle for a `task` that has been
+/// spawned but not yet joined. `emit_task_spawn_only` returns one of
+/// these; `emit_task_join_only` consumes it. Splitting spawn from join
+/// is what makes `task_group:all` actually concurrent — see the
+/// `HirExpr::TaskGroup` arm in `compile_hir_expr` for the full
+/// spawn-all-then-join-all sequence.
+struct PendingTask<'a> {
+    args_struct_type: inkwell::types::StructType<'a>,
+    args_ptr: inkwell::values::PointerValue<'a>,
+    thread_ptr: inkwell::values::PointerValue<'a>,
+    /// Field index of the trailing `i64 result` slot inside `args_struct_type`.
+    result_idx: u32,
+}
+
+/// Plan 21 — concurrency runtime: emit the `__mumei_task_<atom>_<N>`
+/// wrapper function for `body` and the parent-side `pthread_create`
+/// call, returning a `PendingTask` handle that
+/// `emit_task_join_only` can later turn into the joined i64 result.
+///
+/// The wrapper has signature `i8* (i8*)`. Its `arg` is a
+/// stack-allocated args struct populated by the parent before
+/// `pthread_create`; the struct layout is
+/// `{ <captured i64s…>, i64 result }`.
+///
+/// Captures are the intersection of the body's free variables and the
+/// parent's currently-live i64 variables. Free variables that exist in
+/// the parent's `variables` map but are *not* i64 (f64 / struct /
+/// pointer / Str / array fat-pointers) are silently skipped today —
+/// LLVM-IR-level closure conversion for those types is out-of-scope
+/// for Plan 21 and tracked as a follow-up. We emit a `eprintln!`
+/// diagnostic naming each dropped capture so users notice immediately
+/// rather than only when their task body silently reads a zero. A
+/// proper user-facing diagnostic (via `MumeiError`) is the right
+/// long-term home for this warning, but at the time of writing the
+/// codegen pass has no way to thread non-fatal diagnostics back to the
+/// driver, so a stderr line is the best we can do without a larger
+/// refactor.
+///
+/// Allocations (args struct, `pthread_t` slot) live in the parent's
+/// *entry* block so subsequent basic blocks dominate them — this also
+/// means a `task` inside an `if`/`while` doesn't hide the alloca from
+/// later joins.
+fn emit_task_spawn_only<'a>(
+    context: &'a Context,
+    builder: &Builder<'a>,
+    module: &Module<'a>,
+    parent_function: &FunctionValue<'a>,
+    body: &HirStmt,
+    variables: &HashMap<String, BasicValueEnum<'a>>,
+    module_env: &ModuleEnv,
+) -> MumeiResult<PendingTask<'a>> {
+    let i64_type = context.i64_type();
+    let ptr_type = context.ptr_type(AddressSpace::default());
+
+    // 1. Determine captures: i64 free vars from `body` that are bound in `variables`.
+    let free_vars = collect_free_variables_stmt(body);
+    let mut captures: Vec<(String, BasicValueEnum<'a>)> = Vec::new();
+    let mut dropped: Vec<String> = Vec::new();
+    for name in &free_vars {
+        if let Some(v) = variables.get(name.as_str()) {
+            if v.is_int_value() && v.into_int_value().get_type() == i64_type {
+                captures.push((name.clone(), *v));
+            } else {
+                dropped.push(name.clone());
+            }
+        }
+    }
+    captures.sort_by(|a, b| a.0.cmp(&b.0));
+    if !dropped.is_empty() {
+        dropped.sort();
+        let parent_label = parent_function.get_name().to_str().unwrap_or("anon");
+        eprintln!(
+            "[mumei codegen] warning: in atom '{}', task body references non-i64 \
+             free variable(s) {:?} which were silently dropped from the pthread \
+             closure. The wrapper sees them as zero. (Plan 21 only marshals i64 \
+             captures; floats/structs/pointers/Str/arrays are tracked as a \
+             follow-up.)",
+            parent_label, dropped
+        );
+    }
+
+    // 2. Build args struct type: { i64 capture_0, i64 capture_1, …, i64 result }.
+    let args_struct_type = context.struct_type(
+        &captures
+            .iter()
+            .map(|_| i64_type.into())
+            .chain(std::iter::once(i64_type.into()))
+            .collect::<Vec<inkwell::types::BasicTypeEnum>>(),
+        false,
+    );
+
+    let parent_name = parent_function
+        .get_name()
+        .to_str()
+        .unwrap_or("anon")
+        .to_string();
+    let counter = next_task_counter(module, &parent_name);
+    let wrapper_name = format!("__mumei_task_{}_{}", parent_name, counter);
+
+    // 3. Generate wrapper function: i8* (i8*).
+    let wrapper_fn_type = ptr_type.fn_type(&[ptr_type.into()], false);
+    let wrapper_fn = module.add_function(&wrapper_name, wrapper_fn_type, None);
+    let wrapper_entry = context.append_basic_block(wrapper_fn, "entry");
+
+    // Save parent insertion point so we can restore once wrapper is emitted.
+    let parent_insert_block = builder.get_insert_block();
+
+    builder.position_at_end(wrapper_entry);
+    let arg_ptr = wrapper_fn.get_nth_param(0).unwrap().into_pointer_value();
+
+    // Build inner variables map by loading each capture from args struct.
+    let mut inner_vars: HashMap<String, BasicValueEnum> = HashMap::new();
+    for (i, (name, _val)) in captures.iter().enumerate() {
+        let field_ptr = llvm!(builder.build_struct_gep(
+            args_struct_type,
+            arg_ptr,
+            i as u32,
+            &format!("task_capture_{}_ptr", name),
+        ));
+        let loaded =
+            llvm!(builder.build_load(i64_type, field_ptr, &format!("task_capture_{}", name),));
+        inner_vars.insert(name.clone(), loaded);
+    }
+
+    // Compile the task body inside the wrapper. Note: `array_ptrs` is empty —
+    // arrays in task bodies are not yet captured (follow-up work).
+    let empty_array_ptrs: HashMap<String, (BasicValueEnum<'_>, BasicValueEnum<'_>)> =
+        HashMap::new();
+    let body_result = compile_hir_stmt(
+        context,
+        builder,
+        module,
+        &wrapper_fn,
+        body,
+        &mut inner_vars,
+        &empty_array_ptrs,
+        module_env,
+    )?;
+
+    // Coerce body result to i64 (most task bodies already produce i64;
+    // f64/struct/pointer results are not yet plumbed through join).
+    let body_i64 = if body_result.is_int_value() {
+        body_result.into_int_value()
+    } else {
+        i64_type.const_int(0, false)
+    };
+
+    // Store result into the trailing slot of the args struct.
+    let result_idx = captures.len() as u32;
+    let result_ptr =
+        llvm!(builder.build_struct_gep(args_struct_type, arg_ptr, result_idx, "task_result_ptr",));
+    llvm!(builder.build_store(result_ptr, body_i64));
+
+    let null_ret = ptr_type.const_null();
+    llvm!(builder.build_return(Some(&null_ret)));
+
+    // 4. Restore builder to parent's insertion point.
+    if let Some(block) = parent_insert_block {
+        builder.position_at_end(block);
+    }
+
+    // 5. Allocate args struct + thread handle in the parent's *entry* block
+    //    so they dominate any later use, then store captures and call
+    //    `pthread_create`. Joining happens in `emit_task_join_only`.
+    let parent_entry = parent_function
+        .get_first_basic_block()
+        .ok_or_else(|| MumeiError::codegen(String::from("parent function has no entry block")))?;
+    let (args_ptr, thread_ptr) = {
+        let saved = builder.get_insert_block();
+        if let Some(first_inst) = parent_entry.get_first_instruction() {
+            builder.position_before(&first_inst);
+        } else {
+            builder.position_at_end(parent_entry);
+        }
+        let alloca = llvm!(builder.build_alloca(args_struct_type, "task_args"));
+        let thread_alloca = llvm!(builder.build_alloca(i64_type, "task_thread"));
+        if let Some(block) = saved {
+            builder.position_at_end(block);
+        }
+        (alloca, thread_alloca)
+    };
+
+    // Store captures.
+    for (i, (name, val)) in captures.iter().enumerate() {
+        let field_ptr = llvm!(builder.build_struct_gep(
+            args_struct_type,
+            args_ptr,
+            i as u32,
+            &format!("task_arg_{}_ptr", name),
+        ));
+        llvm!(builder.build_store(field_ptr, val.into_int_value()));
+    }
+    // Initialize result slot to 0 so an early failure returns a defined value.
+    let result_ptr_parent = llvm!(builder.build_struct_gep(
+        args_struct_type,
+        args_ptr,
+        result_idx,
+        "task_result_init_ptr",
+    ));
+    llvm!(builder.build_store(result_ptr_parent, i64_type.const_int(0, false)));
+
+    let (create_fn, _join_fn) = declare_pthread_externs(context, module);
+    let null_attr = ptr_type.const_null();
+    let wrapper_ptr = wrapper_fn.as_global_value().as_pointer_value();
+    llvm!(builder.build_call(
+        create_fn,
+        &[
+            thread_ptr.into(),
+            null_attr.into(),
+            wrapper_ptr.into(),
+            args_ptr.into(),
+        ],
+        "pthread_create_call",
+    ));
+
+    Ok(PendingTask {
+        args_struct_type,
+        args_ptr,
+        thread_ptr,
+        result_idx,
+    })
+}
+
+/// Plan 21 — concurrency runtime: emit `pthread_join` for `pending`
+/// and load the i64 result back from the args struct's tail slot.
+///
+/// We deliberately read the result from the args struct rather than
+/// from `pthread_join`'s `retval` `void**` — passing an i64 through a
+/// `void**` requires casting that breaks under `-O0` on some targets,
+/// and the args struct slot is a clean way to keep the IR portable.
+fn emit_task_join_only<'a>(
+    context: &'a Context,
+    builder: &Builder<'a>,
+    module: &Module<'a>,
+    pending: &PendingTask<'a>,
+) -> MumeiResult<BasicValueEnum<'a>> {
+    let i64_type = context.i64_type();
+    let ptr_type = context.ptr_type(AddressSpace::default());
+    let (_create_fn, join_fn) = declare_pthread_externs(context, module);
+    let thread_loaded = llvm!(builder.build_load(i64_type, pending.thread_ptr, "task_thread_val"));
+    llvm!(builder.build_call(
+        join_fn,
+        &[thread_loaded.into(), ptr_type.const_null().into()],
+        "pthread_join_call",
+    ));
+    let final_result_ptr = llvm!(builder.build_struct_gep(
+        pending.args_struct_type,
+        pending.args_ptr,
+        pending.result_idx,
+        "task_result_load_ptr",
+    ));
+    let result = llvm!(builder.build_load(i64_type, final_result_ptr, "task_result"));
+    Ok(result)
+}
+
+/// Plan 21 — concurrency runtime: spawn + immediately join a single
+/// `task { … }` body. Used by the `HirExpr::Task` arm. `task_group`
+/// callers spawn each child via `emit_task_spawn_only` first and then
+/// join them via `emit_task_join_only`, so children actually execute
+/// in parallel.
+fn compile_task_spawn<'a>(
+    context: &'a Context,
+    builder: &Builder<'a>,
+    module: &Module<'a>,
+    parent_function: &FunctionValue<'a>,
+    body: &HirStmt,
+    variables: &HashMap<String, BasicValueEnum<'a>>,
+    module_env: &ModuleEnv,
+) -> MumeiResult<BasicValueEnum<'a>> {
+    let pending = emit_task_spawn_only(
+        context,
+        builder,
+        module,
+        parent_function,
+        body,
+        variables,
+        module_env,
+    )?;
+    emit_task_join_only(context, builder, module, &pending)
 }
