@@ -266,6 +266,34 @@ fn diagnose(uri: &str, source: &str) -> Vec<serde_json::Value> {
             };
             // Feature 3f: Build relatedInformation from MumeiError's #[related] field
             let related_info = build_related_information(uri, &e);
+            // Plan 10 (Task 5C): Surface Z3 counter-example in the diagnostic.
+            //   - Append "Counter-example: a = 1, b = 2" to the message.
+            //   - Stash the structured CE under `data.counterexample` so the
+            //     editor extension can render inline ghost-text decorations.
+            let counterexample = match &e {
+                verification::MumeiError::VerificationError { counterexample, .. } => {
+                    counterexample.clone()
+                }
+                _ => None,
+            };
+            let mut message = format!("{}", detail);
+            if let Some(ce) = &counterexample {
+                if let Some(obj) = ce.as_object() {
+                    let ce_parts: Vec<String> = obj
+                        .iter()
+                        .map(|(k, v)| {
+                            let value_str = v
+                                .as_str()
+                                .map(|s| s.to_string())
+                                .unwrap_or_else(|| v.to_string());
+                            format!("{} = {}", k, value_str)
+                        })
+                        .collect();
+                    if !ce_parts.is_empty() {
+                        message.push_str(&format!("\n\nCounter-example: {}", ce_parts.join(", ")));
+                    }
+                }
+            }
             let mut diag = serde_json::json!({
                 "range": {
                     "start": { "line": line, "character": col },
@@ -273,10 +301,13 @@ fn diagnose(uri: &str, source: &str) -> Vec<serde_json::Value> {
                 },
                 "severity": 1,
                 "source": "mumei-z3",
-                "message": format!("{}", detail)
+                "message": message
             });
             if !related_info.is_empty() {
                 diag["relatedInformation"] = serde_json::json!(related_info);
+            }
+            if let Some(ce) = counterexample {
+                diag["data"] = serde_json::json!({ "counterexample": ce });
             }
             diagnostics.push(diag);
         }

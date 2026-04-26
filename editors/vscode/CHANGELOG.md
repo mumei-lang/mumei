@@ -2,6 +2,19 @@
 
 All notable changes to the "Mumei Language" extension will be documented in this file.
 
+## [0.2.0] — 2026-04-26
+
+### Added
+
+- Counter-example inline visualization: Z3 counter-example values produced by
+  the Mumei verifier (e.g. `len = 0`, `divisor = 0`) are now displayed as
+  italic ghost-text decorations next to verification errors, both via the
+  diagnostic message and via structured `data.counterexample` payloads from
+  the LSP.
+- Automatic decoration refresh on `onDidChangeDiagnostics`,
+  `onDidChangeActiveTextEditor`, and `onDidChangeVisibleTextEditors`, so
+  counter-example annotations stay in sync as the user edits.
+
 ## [0.1.0] — 2026-04-19
 
 Initial release prepared for the Visual Studio Code Marketplace as part of

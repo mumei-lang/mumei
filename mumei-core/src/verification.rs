@@ -50,6 +50,9 @@ pub struct ErrorDetail {
     pub span: Span,
     /// 修正提案（例: "型を i64 に変更してください"）
     pub suggestion: Option<String>,
+    /// Z3 から抽出した反例（counter-example）。
+    /// エディタや LSP がインライン装飾で表示するために利用する。
+    pub counterexample: Option<serde_json::Value>,
 }
 
 impl ErrorDetail {
@@ -60,6 +63,7 @@ impl ErrorDetail {
             message: msg.into(),
             span: Span::default(),
             suggestion: None,
+            counterexample: None,
         }
     }
 
@@ -70,6 +74,7 @@ impl ErrorDetail {
             message: msg.into(),
             span,
             suggestion: None,
+            counterexample: None,
         }
     }
 }
@@ -149,6 +154,9 @@ pub enum MumeiError {
         original_span: Span,
         #[related]
         related: Vec<RelatedDiagnostic>,
+        /// Z3 から抽出した反例（counter-example）。
+        /// エディタや LSP がインライン装飾用に取り出して表示する。
+        counterexample: Option<serde_json::Value>,
     },
     #[error("Codegen Error: {msg}")]
     #[diagnostic(code(mumei::codegen))]
@@ -192,6 +200,7 @@ impl MumeiError {
             help: None,
             original_span: Span::default(),
             related: Vec::new(),
+            counterexample: None,
         }
     }
     /// Span 付きで VerificationError を生成
@@ -210,6 +219,7 @@ impl MumeiError {
             help: None,
             original_span: span,
             related: Vec::new(),
+            counterexample: None,
         }
     }
     /// ソースコード付きで VerificationError を生成（リッチ出力対応）
@@ -235,6 +245,7 @@ impl MumeiError {
             help,
             original_span: span.clone(),
             related: Vec::new(),
+            counterexample: None,
         }
     }
     /// Span なしで CodegenError を生成
@@ -328,15 +339,22 @@ impl MumeiError {
         }
     }
 
-    /// ErrorDetail を取得する（Span 情報を保持）
+    /// ErrorDetail を取得する（Span 情報と counter-example を保持）
     pub fn to_detail(&self) -> ErrorDetail {
         match self {
             MumeiError::VerificationError {
-                msg, original_span, ..
-            } => ErrorDetail::with_span(
-                format!("Verification Error: {}", msg),
-                original_span.clone(),
-            ),
+                msg,
+                original_span,
+                counterexample,
+                ..
+            } => {
+                let mut detail = ErrorDetail::with_span(
+                    format!("Verification Error: {}", msg),
+                    original_span.clone(),
+                );
+                detail.counterexample = counterexample.clone();
+                detail
+            }
             MumeiError::CodegenError {
                 msg, original_span, ..
             } => ErrorDetail::with_span(format!("Codegen Error: {}", msg), original_span.clone()),
@@ -344,6 +362,14 @@ impl MumeiError {
                 msg, original_span, ..
             } => ErrorDetail::with_span(format!("Type Error: {}", msg), original_span.clone()),
         }
+    }
+
+    /// Z3 反例（counter-example）をエラーに附与する。VerificationError 以外の variant では no-op。
+    pub fn with_counterexample(mut self, ce: Option<serde_json::Value>) -> Self {
+        if let MumeiError::VerificationError { counterexample, .. } = &mut self {
+            *counterexample = ce;
+        }
+        self
     }
 
     /// ソースコードを設定してリッチ出力を有効にする
@@ -377,6 +403,7 @@ impl MumeiError {
                 help,
                 original_span,
                 related,
+                counterexample,
                 ..
             } => {
                 // Propagate source to related diagnostics that share the same file.
@@ -405,6 +432,7 @@ impl MumeiError {
                     help,
                     original_span,
                     related: updated_related,
+                    counterexample,
                 }
             }
             MumeiError::CodegenError {
@@ -484,6 +512,7 @@ impl MumeiError {
                 span,
                 original_span,
                 related,
+                counterexample,
                 ..
             } => MumeiError::VerificationError {
                 msg,
@@ -492,6 +521,7 @@ impl MumeiError {
                 help,
                 original_span,
                 related,
+                counterexample,
             },
             MumeiError::CodegenError {
                 msg,
@@ -2715,22 +2745,26 @@ pub fn verify_impl(
                                 None,
                             );
                             if ce_parts.is_empty() {
-                                "  (no concrete values available)".to_string()
+                                ("  (no concrete values available)".to_string(), ce_value)
                             } else {
-                                format!("  Counter-example: {}", ce_parts.join(", "))
+                                (
+                                    format!("  Counter-example: {}", ce_parts.join(", ")),
+                                    ce_value,
+                                )
                             }
                         } else {
-                            "  (could not retrieve model)".to_string()
+                            ("  (could not retrieve model)".to_string(), None)
                         };
                         solver.pop(1);
+                        let (ce_text, ce_data) = counterexample;
                         return Err(MumeiError::verification_at(
                             format!(
                                 "impl {} for {}: law '{}' (defined in trait at {}) is not satisfied\n  Law: {}\n  Expanded: {}\n{}",
                                 impl_def.trait_name, impl_def.target_type,
-                                law_name, trait_def.span, law_expr, substituted, counterexample
+                                law_name, trait_def.span, law_expr, substituted, ce_text
                             ),
                             impl_def.span.clone()
-                        ));
+                        ).with_counterexample(ce_data));
                     }
                     solver.pop(1);
                 }
@@ -6457,7 +6491,9 @@ fn verify_inner(
                 let mut err = MumeiError::verification_at(
                     "Postcondition (ensures) is not satisfied.",
                     atom.span.clone(),
-                ).with_help("ensures の条件を確認してください。body の返り値が事後条件を満たすか検討してください");
+                )
+                .with_help("ensures の条件を確認してください。body の返り値が事後条件を満たすか検討してください")
+                .with_counterexample(ce_value.clone());
                 for mapping in &constraint_mappings {
                     if mapping.span.line > 0 {
                         let related_src_span = span_to_source_span("", &mapping.span);
@@ -7146,10 +7182,34 @@ fn expr_to_z3<'a>(
                                     solver.push();
                                     solver.assert(&req_bool.not());
                                     if solver.check() == SatResult::Sat {
+                                        // Extract counterexample: concrete argument values
+                                        // that violate the callee's precondition.
+                                        let ce_value = if let Some(model) = solver.get_model() {
+                                            let mut ce_json = serde_json::Map::new();
+                                            for (i, param) in callee.params.iter().enumerate() {
+                                                if let Some(arg_val) = arg_vals.get(i) {
+                                                    if let Some(val) = model.eval(arg_val, true) {
+                                                        let val_str = format!("{}", val);
+                                                        ce_json.insert(
+                                                            param.name.clone(),
+                                                            json!(val_str),
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                            if ce_json.is_empty() {
+                                                None
+                                            } else {
+                                                Some(serde_json::Value::Object(ce_json))
+                                            }
+                                        } else {
+                                            None
+                                        };
                                         solver.pop(1);
                                         return Err(MumeiError::verification(
                                             format!("Call to '{}': precondition (requires) not satisfied at call site", name)
-                                        ).with_help("呼び出し元で事前条件を満たしていません。引数の制約を確認してください"));
+                                        ).with_help("呼び出し元で事前条件を満たしていません。引数の制約を確認してください")
+                                        .with_counterexample(ce_value));
                                     }
                                     solver.pop(1);
                                 }
@@ -7569,12 +7629,29 @@ fn expr_to_z3<'a>(
                                     .as_ref()
                                     .map(|fb| format!(" [semantic_feedback: {}]", fb))
                                     .unwrap_or_default();
+                                let ce_value = if let Some(model) = solver.get_model() {
+                                    let dividend_val = model
+                                        .eval(&li, true)
+                                        .map(|v| format!("{}", v))
+                                        .unwrap_or_else(|| "?".to_string());
+                                    let divisor_val = model
+                                        .eval(&ri, true)
+                                        .map(|v| format!("{}", v))
+                                        .unwrap_or_else(|| "0".to_string());
+                                    Some(serde_json::json!({
+                                        "dividend": dividend_val,
+                                        "divisor": divisor_val,
+                                    }))
+                                } else {
+                                    None
+                                };
                                 solver.pop(1);
                                 return Err(MumeiError::verification(format!(
                                     "Potential division by zero.{}{}",
                                     ce_hint, feedback_hint
                                 ))
-                                .with_help("Add a condition divisor != 0 to requires"));
+                                .with_help("Add a condition divisor != 0 to requires")
+                                .with_counterexample(ce_value));
                             }
                             solver.pop(1);
                         }
@@ -7731,12 +7808,15 @@ fn expr_to_z3<'a>(
                             "unknown value".to_string()
                         };
                         solver.pop(1);
+                        let ce_value = serde_json::json!({
+                            "target": counterexample,
+                        });
                         return Err(MumeiError::verification(
                             format!(
                                 "Match is not exhaustive: the following value is not covered by any arm:\n  Counter-example: {}",
                                 counterexample
                             )
-                        ));
+                        ).with_counterexample(Some(ce_value)));
                     }
                     solver.pop(1);
                     return Err(MumeiError::verification(
