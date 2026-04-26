@@ -413,7 +413,7 @@ source.mm → parse → resolve → monomorphize → verify (Z3) → codegen (LL
 |---|---|
 | `acquire r { body }` | `call i32 @pthread_mutex_lock(@__mumei_resource_r)` → body → `call i32 @pthread_mutex_unlock(@__mumei_resource_r)` |
 | `task { body }` | Captures (i64 free vars) marshalled into a stack-allocated args struct; body emitted as a separate `__mumei_task_<atom>_<N>(i8*)→i8*` wrapper; parent emits `call i32 @pthread_create(&t, NULL, wrapper, &args)` then `call i32 @pthread_join(t, NULL)`; result read back from the args struct's tail slot. See [`compile_task_spawn`](../mumei-emit-llvm/src/codegen.rs). |
-| `task_group:all { task { … }; … }` | One `pthread_create` + `pthread_join` pair per child (sequential join in declaration order). `task_group:any` is parsed but currently uses the same `all`-style join — atomic completion-flag lowering is a follow-up. |
+| `task_group:all { task { … }; … }` | All children are `pthread_create`'d first, then `pthread_join`'d in declaration order — children execute concurrently and `recv`/`send` rendezvous patterns inside the group don't deadlock. `task_group:any` is parsed but currently uses the same `:all`-style spawn-all-then-join-all — atomic completion-flag (cancel-the-rest) semantics are a follow-up. |
 | `send(ch, v)` | `call void @__mumei_chan_send(i64 chan_id, i64 v)` into the runtime ([`runtime/mumei_runtime.c`](../runtime/mumei_runtime.c)) which performs the `pthread_mutex_lock` / `pthread_cond_broadcast` / unlock sequence. |
 | `recv(ch)` | `call i64 @__mumei_chan_recv(i64 chan_id)` — the runtime performs a `pthread_cond_wait` loop until a value is ready. |
 | `async { body }` | Synchronous compilation (future: `@llvm.coro.*` intrinsics) |

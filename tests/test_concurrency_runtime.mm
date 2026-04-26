@@ -52,3 +52,26 @@ body: {
     send(ch, 42);
     recv(ch)
 }
+
+// --- Concurrent rendezvous inside `task_group:all` ---
+//
+// This atom is the runtime correctness test for `task_group:all`:
+// child A blocks in `recv(ch)` until child B calls `send(ch, …)`.
+// Under a sequential `spawn-join-spawn-join` lowering this would
+// deadlock — the parent would join A before B is ever spawned —
+// so reaching the join+return is itself the proof that the IR
+// pipeline emits all `pthread_create`s before any `pthread_join`.
+//
+// The verifier only sees the post-join scalar result (`a`), so the
+// `ensures` asserts the value of the receiving task's body. Real
+// ordering is exercised by linking the emitted `.ll` against
+// `runtime/mumei_runtime.c` and observing a normal exit.
+atom chan_rendezvous_in_group(ch: i64)
+requires: ch >= 0;
+ensures: result == 42;
+body: {
+    task_group:all {
+        task { recv(ch) };
+        task { send(ch, 42); 42 }
+    }
+}

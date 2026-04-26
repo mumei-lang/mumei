@@ -36,7 +36,7 @@
 
 #### LLVM IR codegen — concurrency runtime
 
-- **`task` / `task_group:all`** (`mumei-emit-llvm/src/codegen.rs::compile_task_spawn`):
+- **`task` / `task_group:all`** (`mumei-emit-llvm/src/codegen.rs`):
   each `task { body }` now emits a separate
   `__mumei_task_<atom>_<N>(i8*) → i8*` wrapper function. The parent
   marshals the body's i64 free variables into a stack-allocated args
@@ -44,10 +44,24 @@
   `pthread_join(thread, NULL)` calls. The wrapper loads captures from
   the args struct, runs the body, and stores the result back into the
   trailing slot of the struct, which the parent reads after join.
-  `pthread_create` and `pthread_join` are declared as external symbols
-  resolved at link time. `task_group:any` is parsed but currently uses
-  the same `:all`-style join — atomic completion-flag lowering is a
-  follow-up.
+  `task_group:all` lowers as **spawn-all-then-join-all**:
+  `emit_task_spawn_only` is called for every child first, then
+  `emit_task_join_only` joins each `PendingTask` in declaration order.
+  This is what makes the children actually concurrent — the
+  alternative spawn-join-spawn-join layout would deadlock simple
+  `recv` / `send` rendezvous patterns inside the group. A regression
+  test `chan_rendezvous_in_group` exercises exactly this case.
+  `task_group:any` is parsed but currently uses the same
+  spawn-all-then-join-all — atomic completion-flag (cancel-the-rest)
+  semantics are a follow-up.
+- **Diagnostic for dropped task captures**: when a `task` body
+  references a parent-scope free variable that the IR closure
+  conversion can't yet marshal (anything that isn't `i64` — `f64`,
+  `Str`, struct, pointer, array fat-pointer), the codegen emits an
+  `eprintln!` warning naming the dropped variable and the enclosing
+  atom so users notice immediately rather than silently observing a
+  zero in the wrapper. Threading this through `MumeiError` for a
+  proper user-facing diagnostic is a follow-up.
 - **`send` / `recv`**: lowered to direct calls to the runtime helpers
   `__mumei_chan_send(i64, i64)` and `__mumei_chan_recv(i64) → i64`.
 - **Runtime library** (`runtime/mumei_runtime.c`): provides
