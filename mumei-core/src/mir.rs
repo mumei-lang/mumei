@@ -326,6 +326,68 @@ impl LowerCtx {
             Place::Local(Local(0))
         }
     }
+
+    /// Look up the recorded type of a named variable, if any.
+    fn lookup_var_ty(&self, name: &str) -> Option<String> {
+        let local = self.var_map.get(name)?;
+        self.locals
+            .iter()
+            .find(|d| d.local == *local)
+            .and_then(|d| d.ty.clone())
+    }
+
+    /// Best-effort type inference for a HIR expression. Used to populate
+    /// `LocalDecl::ty` when the surface syntax does not annotate `let` /
+    /// induction-variable types. Only the common cases that influence
+    /// `Movability` (i.e. the Copy primitives) are recognised; anything
+    /// unknown returns `None` and the local stays conservatively Move.
+    fn infer_hir_ty(&self, expr: &HirExpr) -> Option<String> {
+        match expr {
+            HirExpr::Number(_) => Some("i64".to_string()),
+            HirExpr::Float(_) => Some("f64".to_string()),
+            HirExpr::StringLit(_) => Some("Str".to_string()),
+            HirExpr::Variable(name) => {
+                if name == "true" || name == "false" {
+                    Some("bool".to_string())
+                } else {
+                    self.lookup_var_ty(name)
+                }
+            }
+            HirExpr::BinaryOp(lhs, op, rhs) => match op {
+                crate::parser::Op::Eq
+                | crate::parser::Op::Neq
+                | crate::parser::Op::Lt
+                | crate::parser::Op::Le
+                | crate::parser::Op::Gt
+                | crate::parser::Op::Ge
+                | crate::parser::Op::And
+                | crate::parser::Op::Or
+                | crate::parser::Op::Implies => Some("bool".to_string()),
+                _ => self.infer_hir_ty(lhs).or_else(|| self.infer_hir_ty(rhs)),
+            },
+            HirExpr::ArrayAccess(name, _) => {
+                // Arrays are i64 in the current surface syntax.
+                self.lookup_var_ty(name).or_else(|| Some("i64".to_string()))
+            }
+            HirExpr::IfThenElse {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                fn tail_expr(stmt: &HirStmt) -> Option<&HirExpr> {
+                    match stmt {
+                        HirStmt::Expr(e) => Some(e),
+                        HirStmt::Block { tail_expr, .. } => tail_expr.as_deref(),
+                        _ => None,
+                    }
+                }
+                tail_expr(then_branch)
+                    .and_then(|e| self.infer_hir_ty(e))
+                    .or_else(|| tail_expr(else_branch).and_then(|e| self.infer_hir_ty(e)))
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Lower a HirAtom to MirBody.
@@ -359,8 +421,14 @@ pub fn lower_hir_to_mir(hir_atom: &HirAtom) -> MirBody {
 fn lower_stmt(ctx: &mut LowerCtx, stmt: &HirStmt) -> Option<Operand> {
     match stmt {
         HirStmt::Let { var, ty, value } => {
+            // Infer a concrete type from the initializer when the surface
+            // syntax did not annotate one. This is critical for move
+            // analysis: numeric literals make the binding `Copy`, which
+            // prevents UseAfterMove false-positives on common idioms such
+            // as `let i = 0; while i < n { arr[i] = …; i = i + 1 }`.
+            let inferred_ty = ty.clone().or_else(|| ctx.infer_hir_ty(value));
             let val_op = lower_expr(ctx, value);
-            let local = ctx.alloc_local(Some(var.clone()), ty.clone());
+            let local = ctx.alloc_local(Some(var.clone()), inferred_ty);
             ctx.emit(MirStatement::StorageLive(local.clone()));
             ctx.emit(MirStatement::Assign(
                 Place::Local(local),

@@ -22,10 +22,11 @@ body: {
 
 // --- Test 2: ループ内 store（ゼロ埋め） ---
 // len_arr >= n を forall で確保してから、各反復で arr[i] に 0 を書き込む。
-// NOTE: while 内の `i = i + 1` は現行 MIR の move 解析制限で false-positive
-//       を起こす (insertion_sort と同じ原因) ため `trusted` を付ける。
-//       store 追跡自体は通過することを確認する。
-trusted atom test_array_store_loop(n: i64)
+// NOTE: 旧来は while 内の `i = i + 1` が MIR move 解析の
+//       false-positive (insertion_sort と同じ原因) を引き起こしていたが、
+//       `let i = 0` から `i64`/`Copy` を推論する mir.rs の修正により
+//       `trusted` 不要で要素数保存契約が証明できるようになった。
+atom test_array_store_loop(n: i64)
 requires: n >= 0 && forall(i, 0, n, arr[i] >= 0);
 ensures: result == n;
 body: {

@@ -606,7 +606,7 @@ fn collect_pattern_bindings(pattern: &crate::parser::Pattern, bound: &mut HashSe
 
 /// Collect free variables from a HirStmt (recursive traversal).
 /// Returns all variable names referenced, excluding those bound by let statements.
-fn collect_free_variables_stmt(stmt: &HirStmt) -> HashSet<String> {
+pub fn collect_free_variables_stmt(stmt: &HirStmt) -> HashSet<String> {
     let mut vars = HashSet::new();
     match stmt {
         HirStmt::Let { value, .. } => {
@@ -675,7 +675,7 @@ fn collect_free_variables_stmt(stmt: &HirStmt) -> HashSet<String> {
 }
 
 /// Collect free variables from a HirExpr (recursive traversal).
-fn collect_free_variables_expr(expr: &HirExpr) -> HashSet<String> {
+pub fn collect_free_variables_expr(expr: &HirExpr) -> HashSet<String> {
     let mut vars = HashSet::new();
     match expr {
         HirExpr::Variable(name) => {
