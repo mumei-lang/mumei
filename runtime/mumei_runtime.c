@@ -27,7 +27,9 @@
  */
 
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 
 #define MUMEI_MAX_CHANNELS 256
@@ -37,25 +39,44 @@ typedef struct {
     pthread_cond_t cv;
     int64_t value;
     int ready;
-    int initialized;
+    /*
+     * `initialized` is read once without the `g_init_mu` lock (the outer
+     * check of the double-checked locking pattern in `mumei_chan_get`).
+     * Under the C11 memory model that unsynchronized read would be a
+     * data race on a plain `int`, so we make the field `_Atomic` and
+     * pair acquire-loads with release-stores. On x86-64 this compiles
+     * to plain mov instructions; on weaker architectures (ARM, POWER)
+     * it inserts the required barriers.
+     */
+    _Atomic int initialized;
 } mumei_chan_t;
 
 static mumei_chan_t g_channels[MUMEI_MAX_CHANNELS];
 static pthread_mutex_t g_init_mu = PTHREAD_MUTEX_INITIALIZER;
 
 static mumei_chan_t *mumei_chan_get(int64_t chan_id) {
+    /*
+     * Fail-fast on out-of-range handles. The previous behaviour silently
+     * clamped to channel 0, which would quietly alias logically distinct
+     * channels once `chan_new()` returns fresh ids — a very hard-to-debug
+     * source of spurious rendezvous. Aborting here surfaces the bug at
+     * the point of first misuse.
+     */
     if (chan_id < 0 || chan_id >= MUMEI_MAX_CHANNELS) {
-        chan_id = 0;
+        fprintf(stderr,
+                "[mumei runtime] fatal: chan_id %lld out of range [0, %d)\n",
+                (long long)chan_id, MUMEI_MAX_CHANNELS);
+        abort();
     }
     mumei_chan_t *ch = &g_channels[chan_id];
-    if (!ch->initialized) {
+    if (!atomic_load_explicit(&ch->initialized, memory_order_acquire)) {
         pthread_mutex_lock(&g_init_mu);
-        if (!ch->initialized) {
+        if (!atomic_load_explicit(&ch->initialized, memory_order_relaxed)) {
             pthread_mutex_init(&ch->mu, NULL);
             pthread_cond_init(&ch->cv, NULL);
             ch->value = 0;
             ch->ready = 0;
-            ch->initialized = 1;
+            atomic_store_explicit(&ch->initialized, 1, memory_order_release);
         }
         pthread_mutex_unlock(&g_init_mu);
     }

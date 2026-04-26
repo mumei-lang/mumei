@@ -7,7 +7,7 @@ use inkwell::AddressSpace;
 use inkwell::FloatPredicate;
 use inkwell::IntPredicate;
 use mumei_core::hir::{collect_free_variables_stmt, HirAtom, HirExpr, HirStmt};
-use mumei_core::parser::{Op, Pattern};
+use mumei_core::parser::{JoinSemantics, Op, Pattern};
 use mumei_core::verification::{ModuleEnv, MumeiError, MumeiResult};
 use std::collections::HashMap;
 use std::path::Path;
@@ -1123,7 +1123,10 @@ fn compile_hir_expr<'a>(
         HirExpr::Task { body, .. } => compile_task_spawn(
             context, builder, module, function, body, variables, module_env,
         ),
-        HirExpr::TaskGroup { children, .. } => {
+        HirExpr::TaskGroup {
+            children,
+            join_semantics,
+        } => {
             // Plan 21 — concurrency runtime: `task_group:all` spawns every
             // child on its own pthread *first*, then joins them in
             // declaration order. Splitting spawn from join is what makes
@@ -1140,6 +1143,16 @@ fn compile_hir_expr<'a>(
             // that here so `emit_task_spawn_only` operates on the
             // *task body*, not the surrounding `Task` expression —
             // otherwise we'd emit two nested pthread spawns per child.
+            if matches!(join_semantics, JoinSemantics::Any) {
+                let parent_label = function.get_name().to_str().unwrap_or("anon");
+                eprintln!(
+                    "[mumei codegen] warning: in atom '{}', `task_group:any` is \
+                     not yet implemented and currently lowers identically to \
+                     `:all` (wait-for-all). First-completion / cancel-the-rest \
+                     semantics are tracked as a Plan 21 follow-up.",
+                    parent_label
+                );
+            }
             let mut pending: Vec<PendingTask<'_>> = Vec::with_capacity(children.len());
             for child in children {
                 let task_body: &HirStmt = match child {

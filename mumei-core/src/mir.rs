@@ -365,9 +365,13 @@ impl LowerCtx {
                 | crate::parser::Op::Implies => Some("bool".to_string()),
                 _ => self.infer_hir_ty(lhs).or_else(|| self.infer_hir_ty(rhs)),
             },
-            HirExpr::ArrayAccess(name, _) => {
-                // Arrays are i64 in the current surface syntax.
-                self.lookup_var_ty(name).or_else(|| Some("i64".to_string()))
+            HirExpr::ArrayAccess(_name, _) => {
+                // Array element access always yields i64 in the current
+                // surface syntax. Returning the *array* variable's type
+                // here (e.g. `"[i64]"`) would classify the local as Move
+                // and cause false-positive UseAfterMove on idioms like
+                // `let key = arr[i]`.
+                Some("i64".to_string())
             }
             HirExpr::IfThenElse {
                 then_branch,
