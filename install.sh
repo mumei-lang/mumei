@@ -108,7 +108,14 @@ detect_platform() {
     fi
 
     case "$os" in
-        Linux)  os="unknown-linux-gnu" ;;
+        Linux)
+            # Plan 7: Prefer musl (statically linked) binary on Linux x86_64
+            if [ "$arch" = "x86_64" ] || [ "$arch" = "amd64" ]; then
+                os="unknown-linux-musl"
+            else
+                os="unknown-linux-gnu"
+            fi
+            ;;
         Darwin) os="apple-darwin" ;;
         *)      err "Unsupported OS: $os" ;;
     esac
