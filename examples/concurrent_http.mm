@@ -5,6 +5,10 @@
 // 複数の URL に同時にリクエストを送信し、結果を集約する。
 //
 // Plan 17: URL パラメータを Str 型に移行
+// Plan 21: task / task_group は LLVM IR レベルで pthread_create /
+//          pthread_join に直接 lower される（mumei-emit-llvm/src/
+//          codegen.rs::compile_task_spawn を参照）。HTTP 呼び出し
+//          自体は依然 stub だが、並行構造は実際に走る。
 //
 // Usage:
 //   mumei check examples/concurrent_http.mm

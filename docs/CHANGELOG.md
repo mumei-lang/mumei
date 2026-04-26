@@ -2,6 +2,90 @@
 
 ---
 
+### Plan 21: `trusted` reduction + real concurrency runtime
+
+#### Verification
+
+- **MIR move analysis** (`mumei-core/src/mir.rs`,
+  `mumei-core/src/mir_analysis.rs`): nested `while` loops over `i64` (Copy)
+  induction variables no longer trigger spurious `UseAfterMove` on
+  `i = i + 1`. Numeric-literal type information is now propagated through
+  HIR → MIR lowering so `lookup_movability` correctly classifies the local
+  as `Copy` at the back-edge merge.
+- **Z3 forall in `ensures`** (`mumei-core/src/verification.rs`): the
+  `expr_to_z3` handler for `Expr::Call("forall", …)` now extracts
+  `select(arr, idx)` patterns from the body and attaches them to the
+  generated `forall_const`, mirroring the existing `requires`-side
+  pattern extraction. Combined with `set_bool("mbqi", true)` on the
+  solver `Params` for atoms that contain array-quantified constraints,
+  this enables E-matching to fire on post-store array states so that
+  `ensures: forall(i, 0, n, arr[i] >= 0)` is provable when the same
+  forall is present in `requires` and the body's stores preserve it.
+- `trusted` removed from `tests/test_array_store.mm::test_array_store_loop`,
+  `tests/test_verified_sort.mm::verify_noop_sort` and
+  `verify_insertion_sort_skeleton`, and from `std/list.mm::insertion_sort` /
+  `verified_insertion_sort` / `verified_merge_sort` (the move-analysis
+  reason; the full sortedness-preservation Z3 proof remains a separate
+  task tracked in `docs/CROSS_PROJECT_ROADMAP.md`).
+- New regression tests:
+  - `tests/test_array_forall_ensures.mm` — covers pattern-based
+    E-matching for `forall` in `ensures` over arrays modified by
+    stores.
+  - `tests/test_nested_while_no_trusted.mm` — covers the
+    nested-while + Copy-typed induction-variable case.
+
+#### LLVM IR codegen — concurrency runtime
+
+- **`task` / `task_group:all`** (`mumei-emit-llvm/src/codegen.rs`):
+  each `task { body }` now emits a separate
+  `__mumei_task_<atom>_<N>(i8*) → i8*` wrapper function. The parent
+  marshals the body's i64 free variables into a stack-allocated args
+  struct, then emits `pthread_create(&thread, NULL, wrapper, &args)` and
+  `pthread_join(thread, NULL)` calls. The wrapper loads captures from
+  the args struct, runs the body, and stores the result back into the
+  trailing slot of the struct, which the parent reads after join.
+  `task_group:all` lowers as **spawn-all-then-join-all**:
+  `emit_task_spawn_only` is called for every child first, then
+  `emit_task_join_only` joins each `PendingTask` in declaration order.
+  This is what makes the children actually concurrent — the
+  alternative spawn-join-spawn-join layout would deadlock simple
+  `recv` / `send` rendezvous patterns inside the group. A regression
+  test `chan_rendezvous_in_group` exercises exactly this case.
+  `task_group:any` is parsed but currently uses the same
+  spawn-all-then-join-all — atomic completion-flag (cancel-the-rest)
+  semantics are a follow-up.
+- **Diagnostic for dropped task captures**: when a `task` body
+  references a parent-scope free variable that the IR closure
+  conversion can't yet marshal (anything that isn't `i64` — `f64`,
+  `Str`, struct, pointer, array fat-pointer), the codegen emits an
+  `eprintln!` warning naming the dropped variable and the enclosing
+  atom so users notice immediately rather than silently observing a
+  zero in the wrapper. Threading this through `MumeiError` for a
+  proper user-facing diagnostic is a follow-up.
+- **`send` / `recv`**: lowered to direct calls to the runtime helpers
+  `__mumei_chan_send(i64, i64)` and `__mumei_chan_recv(i64) → i64`.
+- **Runtime library** (`runtime/mumei_runtime.c`): provides
+  `__mumei_chan_send` / `__mumei_chan_recv` / `__mumei_chan_init`,
+  backed by a fixed table of `pthread_mutex_t` + `pthread_cond_t`
+  channel slots. The send/recv pair implements single-slot rendezvous
+  semantics — `send` waits if a value is already pending; `recv` waits
+  until one arrives.
+- New integration test `tests/test_concurrency_runtime.mm` exercises
+  `task`, `task_group:all`, and `send` / `recv` codegen end-to-end.
+  `examples/concurrent_http.mm` is annotated to clarify that the
+  concurrency structure now compiles to real `pthread_*` calls.
+
+#### Documentation
+
+- `docs/ARCHITECTURE.md` — LLVM IR Codegen table updated with `task`,
+  `task_group:all`, `send`, `recv` rows.
+- `docs/CONCURRENCY.md` — Implementation Status table updated:
+  Runtime scheduler and Channel types are now implemented; LLVM
+  codegen rows split into `task` / `chan`; `task_group:any` flagged
+  as not yet implemented.
+
+---
+
 ### `Stmt::ArrayStore`: first-class `arr[i] = v` across parser → verifier → codegen
 
 #### Language / AST
