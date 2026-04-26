@@ -2,6 +2,61 @@
 
 ---
 
+### Plan 22: `mumei doc` enhancement + counter-example visualizer
+
+#### `mumei doc` enhancement
+
+- **Contract metadata in generated docs** (`src/main.rs`, `ItemDoc`): the
+  doc generator now records `requires` / `ensures` / `body` / `effects`
+  for every atom and renders them inline in the HTML and Markdown
+  outputs. Trivial `requires: true` / `ensures: true` clauses are
+  filtered out so the page stays focused on actual obligations.
+- **Doc-comment extraction prefers `///`** (`extract_comment_before`):
+  when a `///` doc-comment block immediately precedes an atom or type
+  it is used verbatim; otherwise the existing `//` heuristic still
+  applies, preserving backward compatibility with current `.mm`
+  sources.
+- **Syntax highlighting for contracts and bodies**
+  (`highlight_mumei_code`): a small token-level highlighter wraps
+  keywords, types, operators, numeric/string literals, and line
+  comments in CSS classes (`kw`, `ty`, `op`, `num`, `str`, `cm`) so
+  the generated HTML pages are readable without an external
+  highlighter.
+- **`--format json` mode** (`cmd_doc`): the doc subcommand now also
+  accepts `json`, which streams the full structured documentation
+  (atoms with all contract metadata, types, structs, enums, traits)
+  to stdout and writes `<out>/docs.json` for static hosting and
+  tooling integrations.
+- **Client-side search** (`generate_html_docs`): the index page gains
+  a search input that filters the module list incrementally.
+
+#### Counter-example visualizer in editor
+
+- **`MumeiError::VerificationError` carries a Z3 counter-example**
+  (`mumei-core/src/verification.rs`): a new
+  `counterexample: Option<serde_json::Value>` field is preserved
+  through `with_source` / `with_help`, surfaced via `to_detail`,
+  and populated by a `with_counterexample` builder. All five
+  primary verification failure sites — postcondition violated,
+  precondition violated at call site, trait law violated, match
+  exhaustiveness, and division by zero — now thread their Z3 model
+  values into the error.
+- **LSP diagnostics expose the counter-example** (`src/lsp.rs`): the
+  diagnostic message gains a `Counter-example: a = 1, b = 2` line
+  and the structured value is also attached as `data.counterexample`
+  on the LSP `Diagnostic`, so editors can render it without parsing
+  the message string.
+- **VS Code extension renders inline ghost-text decorations**
+  (`editors/vscode/src/extension.ts`, `editors/vscode/CHANGELOG.md`,
+  `editors/vscode/package.json` → `0.2.0`): a
+  `TextEditorDecorationType` is registered for counter-example
+  values and updated in response to `onDidChangeDiagnostics`,
+  active-editor changes, and visible-editor changes, so the
+  violating concrete inputs appear next to the failing line as
+  italic ghost text.
+
+---
+
 ### Plan 21: `trusted` reduction + real concurrency runtime
 
 #### Verification
