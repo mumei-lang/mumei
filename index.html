@@ -54,7 +54,7 @@
   <pre><code id="cmd-curl">curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash</code><button class="copy-btn" onclick="navigator.clipboard.writeText(document.getElementById('cmd-curl').textContent)">Copy</button></pre>
   <p class="or">or</p>
   <pre><code id="cmd-brew">brew install mumei-lang/mumei/mumei</code><button class="copy-btn" onclick="navigator.clipboard.writeText(document.getElementById('cmd-brew').textContent)">Copy</button></pre>
-  <p style="color:#8b949e; font-size:0.875rem; margin-top:0.5rem;">No Rust toolchain required. Detects OS/arch automatically.</p>
+  <p style="color:#8b949e; font-size:0.875rem; margin-top:0.5rem;">No Rust toolchain required. Detects OS/arch automatically. By default the latest tagged release is installed; pin a specific version with <code>--version v0.5.6</code>.</p>
 
   <h2>Quick Start</h2>
   <div class="steps">
@@ -73,13 +73,15 @@
   <h2>Links</h2>
   <ul style="list-style:none; padding:0;">
     <li><a href="https://github.com/mumei-lang/mumei">GitHub Repository</a></li>
-    <li><a href="https://github.com/mumei-lang/mumei/releases">Releases & Pre-built Binaries</a></li>
+    <li><a href="https://github.com/mumei-lang/mumei/releases">Releases &amp; Pre-built Binaries</a></li>
     <li><a href="https://github.com/mumei-lang/mumei/blob/develop/docs/LANGUAGE.md">Language Reference</a></li>
     <li><a href="https://github.com/mumei-lang/mumei/blob/develop/docs/STDLIB.md">Standard Library</a></li>
+    <li><a href="https://github.com/mumei-lang/mumei/blob/develop/docs/CHANGELOG.md">Changelog</a></li>
+    <li><a href="https://github.com/mumei-lang/mumei-agent">mumei-agent (AI + Z3 self-healing loop)</a></li>
   </ul>
 
   <div class="footer">
-    <p>MIT License &middot; <a href="https://github.com/mumei-lang/mumei">mumei-lang/mumei</a></p>
+    <p>Apache-2.0 License &middot; <a href="https://github.com/mumei-lang/mumei">mumei-lang/mumei</a></p>
   </div>
 </body>
 </html>
