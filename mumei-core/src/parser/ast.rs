@@ -222,6 +222,15 @@ pub enum Stmt {
         value: Box<Expr>,
         span: Span,
     },
+    /// Array element store: `name[idx] = value`.
+    /// Semantics: Z3 `Array::store(arr, idx, value)` — produces a new logical
+    /// array where position `idx` now holds `value`.
+    ArrayStore {
+        array: String,
+        index: Box<Expr>,
+        value: Box<Expr>,
+        span: Span,
+    },
     Block(Vec<Stmt>, Span),
     While {
         cond: Box<Expr>,
@@ -264,6 +273,7 @@ impl Stmt {
         match self {
             Stmt::Let { span, .. }
             | Stmt::Assign { span, .. }
+            | Stmt::ArrayStore { span, .. }
             | Stmt::While { span, .. }
             | Stmt::Acquire { span, .. }
             | Stmt::Task { span, .. }

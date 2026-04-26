@@ -109,6 +109,14 @@ fn rename_calls_in_hir_stmt(stmt: &mut HirStmt, from: &str, to: &str) {
         HirStmt::Assign { ref mut value, .. } => {
             rename_calls_in_hir_expr(value, from, to);
         }
+        HirStmt::ArrayStore {
+            ref mut index,
+            ref mut value,
+            ..
+        } => {
+            rename_calls_in_hir_expr(index, from, to);
+            rename_calls_in_hir_expr(value, from, to);
+        }
         HirStmt::While {
             ref mut cond,
             ref mut invariant,

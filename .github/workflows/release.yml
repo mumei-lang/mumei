@@ -146,7 +146,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: C:\LLVM17
-          key: llvm-17.0.6-win64-msvc-release-v2
+          key: llvm-17.0.6-win64-msvc-release-v3
       - name: Build LLVM 17 from source (Windows)
         if: runner.os == 'Windows' && steps.cache-llvm-win.outputs.cache-hit != 'true'
         shell: pwsh
@@ -190,7 +190,7 @@ jobs:
             "-DCMAKE_BUILD_TYPE=Release" `
             "-DCMAKE_INSTALL_PREFIX=$installDir" `
             "-DLLVM_ENABLE_PROJECTS=clang" `
-            "-DLLVM_TARGETS_TO_BUILD=X86" `
+            "-DLLVM_TARGETS_TO_BUILD=X86;ARM;AArch64;AMDGPU;BPF;Hexagon;Lanai;LoongArch;Mips;MSP430;NVPTX;PowerPC;RISCV;Sparc;SystemZ;WebAssembly;XCore" `
             "-DLLVM_ENABLE_ZLIB=OFF" `
             "-DLLVM_ENABLE_ZSTD=OFF" `
             "-DLLVM_ENABLE_TERMINFO=OFF" `
