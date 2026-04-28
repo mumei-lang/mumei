@@ -701,10 +701,45 @@ SI-5 Autonomous Proliferation が 9 フェーズ全て ✅ Implemented / Complet
 
 ---
 
+## mumei-lean: External Lean 4 Proof Backend — ⏸️ Deferred (External Project)
+
+**Repository**: [`mumei-lang/mumei-lean`](https://github.com/mumei-lang/mumei-lean)
+
+mumei の Z3 検証で `unknown` となる複雑な性質に対し、Lean 4 による対話型証明を**外部プロジェクト**として提供する。mumei 本体には変更を加えず、既存の Proof Certificate Chain (P5-A) と `MUMEI_PROOF_BUNDLE` (SI-5 Phase 3-C) を介してのみ連携する。
+
+- **入力**: `.proof-cert.json` / `std-proof-bundle.json` 内で `z3_check_result: "unknown"` となっている `AtomCertificate`
+- **出力**: mumei 互換の `.lean-cert.json`(`ProofCertificate` スキーマ準拠)。成功した atom は `z3_check_result: "lean_verified"` / `status: "verified"` を持つ
+- **連携**: resolver の 3-tier 探索 (tier 1: ローカル `.proof-cert.json` / `proof_certificate.json`、tier 3: `MUMEI_PROOF_BUNDLE`) に統合
+
+**思想的位置づけ**: mumei の「完全自動検証」思想は維持。Lean は Z3 の能力を超える領域(暗号プリミティブの正当性、量化子重視の不変条件 等)のみを対象とし、mumei ユーザーには透過的に動作する。`mumei-core/src/resolver.rs::verify_import_certificate` は現状 `"unsat"` 以外を `"unproven"` 扱いするため、`"lean_verified"` 値の導入は**前方互換**(将来 mumei 側で `"lean_verified"` を `"proven"` として認識する 1 行の拡張を予定)。
+
+**連携アーキテクチャの全体像**:
+
+```mermaid
+graph TD
+    M["mumei verify --proof-cert"] -->|".proof-cert.json"| ML["mumei-lean"]
+    M2["mumei build --emit verified-json"] -->|".verified.json"| ML
+    ML -->|"Lean 4 theorem + tactic"| LP["Lean Proof Check"]
+    LP -->|".lean-cert.json"| MR["mumei resolver\n(verify_import_certificate)"]
+    MR -->|"mark_verified()"| MV["mumei verification pipeline"]
+    AG["mumei-agent\n(proliferate / forge)"] -->|"Z3 unknown atoms"| ML
+```
+
+| 項目 | 状態 | 備考 |
+|------|------|------|
+| Lean 4 プロジェクト初期構成 | ✅ Implemented (mumei-lean PR #1) | `lakefile.lean` (mathlib4 依存), `lean-toolchain` (`leanprover/lean4:v4.15.0`), `MumeiLean/{Basic,CertParser,TheoremGen,Verify,CertWriter}.lean` |
+| Python ブリッジ | ✅ Implemented (mumei-lean PR #1) | `scripts/{expr_translator,ingest_cert,export_cert,bridge}.py` — mumei 契約式 → Lean `Prop` トランスレータ + cert ↔ `generated/*.lean` ↔ `.lean-cert.json` パイプライン |
+| pytest スイート + GitHub Actions CI | ✅ Implemented (mumei-lean PR #1) | 24 ケース。`lake build` ジョブは mathlib4 ブートストラップ中の暫定 `continue-on-error: true` |
+| 契約式トランスレータ拡張 (mathlib4 active 利用) | ⏸️ Deferred | 量化子・有限体・群論ライブラリを使った暗号プリミティブの証明。ブリッジ v1 は算術比較 + 論理結合 + 整数リテラルのみ |
+| mumei 側 `"lean_verified"` 認識 | ⏸️ Deferred | `verify_import_certificate` で `"lean_verified"` を `"proven"` 同等に扱う拡張。互換性のため明示的なオプトイン (e.g. `--allow-lean-verified`) を予定 |
+
+---
+
 ## Related Documents
 
 - [`docs/ROADMAP.md`](ROADMAP.md) — mumei compiler strategic roadmap (P1-P3, Plans 1-24)
 - [`docs/SESSION_PLANS.md`](SESSION_PLANS.md) — Detailed session plans for compiler phases
 - [mumei-agent `docs/ROADMAP.md`](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md) — Agent-specific roadmap
+- [mumei-lean `docs/ARCHITECTURE.md`](https://github.com/mumei-lang/mumei-lean/blob/develop/docs/ARCHITECTURE.md) — External Lean 4 proof backend architecture & schema contract
 - [`instruction.md`](../instruction.md) — Development guidelines and priorities
 - [`docs/ZERO_HUMAN_CHALLENGE.md`](ZERO_HUMAN_CHALLENGE.md) — Zero-Human Challenge results
