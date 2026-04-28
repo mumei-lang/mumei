@@ -1630,7 +1630,7 @@ def generate_doc(source_code: str, format: str = "json") -> str:
                         files[str(f.relative_to(out_dir).as_posix())] = (
                             f.read_text(encoding="utf-8")
                         )
-                    except OSError:
+                    except (OSError, UnicodeDecodeError):
                         continue
         return json.dumps(
             {
