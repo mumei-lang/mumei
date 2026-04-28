@@ -1282,7 +1282,7 @@ def _parse_atoms(text: str) -> list[str]:
     """Return atom names defined or trusted in *text* (best effort)."""
     names: list[str] = []
     for line in text.splitlines():
-        m = re.match(r"^\s*(?:trusted\s+)?atom\s+([A-Za-z_][A-Za-z0-9_]*)", line)
+        m = re.match(r"^\s*(?:trusted\s+|async\s+)?atom\s+([A-Za-z_][A-Za-z0-9_]*)", line)
         if m:
             names.append(m.group(1))
     return names
