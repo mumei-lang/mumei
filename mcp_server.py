@@ -1411,7 +1411,7 @@ def measure_std_health() -> str:
         success = result.returncode == 0
         if success:
             verified_files += 1
-            verified_atoms += max(file_total - file_trusted, 0)
+            verified_atoms += file_total
             status = "verified"
         else:
             failed_files += 1
@@ -1476,11 +1476,21 @@ def get_proof_certificate(module_path: str) -> str:
 
     certs_dir = root_dir / "std" / "certs"
     candidate = certs_dir / f"{rel}.proof.json"
+    key_with_prefix = f"std/{rel}"
     if candidate.exists():
         try:
-            return candidate.read_text(encoding="utf-8")
-        except OSError as exc:
+            cert = json.loads(candidate.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
             return json.dumps({"error": f"failed to read certificate: {exc}"})
+        return json.dumps(
+            {
+                "module": key_with_prefix,
+                "source": "std/certs",
+                "certificate": cert,
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
 
     bundle = root_dir / "std-proof-bundle.json"
     if bundle.exists():
@@ -1491,7 +1501,6 @@ def get_proof_certificate(module_path: str) -> str:
                 {"error": f"failed to read std-proof-bundle.json: {exc}"}
             )
         modules = data.get("modules") or {}
-        key_with_prefix = f"std/{rel}"
         cert = modules.get(key_with_prefix) or modules.get(rel)
         if cert is not None:
             return json.dumps(

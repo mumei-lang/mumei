@@ -153,8 +153,10 @@ class TestGetProofCertificate:
             payload = _payload(
                 mcp_server.get_proof_certificate("std/__p10_test_mod")
             )
-            assert payload["status"] == "verified"
-            assert payload["atoms"] == ["foo"]
+            assert payload["source"] == "std/certs"
+            assert payload["module"] == "std/__p10_test_mod"
+            assert payload["certificate"]["status"] == "verified"
+            assert payload["certificate"]["atoms"] == ["foo"]
         finally:
             cert_path.unlink(missing_ok=True)
 
