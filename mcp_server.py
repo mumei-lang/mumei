@@ -1352,6 +1352,7 @@ def measure_std_health() -> str:
     total_files = 0
     verified_files = 0
     failed_files = 0
+    verify_unavailable_files = 0
     total_atoms = 0
     verified_atoms = 0
     trusted_atoms = 0
@@ -1384,7 +1385,6 @@ def measure_std_health() -> str:
 
         total_files += 1
         total_atoms += file_total
-        trusted_atoms += file_trusted
         todo_count += file_todo
 
         try:
@@ -1396,6 +1396,7 @@ def measure_std_health() -> str:
                 timeout=120,
             )
         except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+            verify_unavailable_files += 1
             details.append(
                 {
                     "file": rel,
@@ -1412,6 +1413,7 @@ def measure_std_health() -> str:
         if success:
             verified_files += 1
             verified_atoms += file_total
+            trusted_atoms += file_trusted
             status = "verified"
         else:
             failed_files += 1
@@ -1434,6 +1436,7 @@ def measure_std_health() -> str:
         "total_files": total_files,
         "verified_files": verified_files,
         "failed_files": failed_files,
+        "verify_unavailable_files": verify_unavailable_files,
         "total_atoms": total_atoms,
         "verified_atoms": verified_atoms,
         "trusted_atoms": trusted_atoms,
