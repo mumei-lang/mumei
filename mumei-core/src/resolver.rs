@@ -57,6 +57,10 @@ struct ResolverContext {
     loaded: HashMap<PathBuf, Vec<Item>>,
     /// P5-C: When true, missing/invalid certificates cause hard errors instead of warnings
     strict_imports: bool,
+    /// PR 2: When true, certificates carrying `z3_check_result == "lean_verified"`
+    /// (emitted by mumei-lean) are accepted as `"proven"`. Default `false`
+    /// preserves the strict Z3-only contract.
+    allow_lean_verified: bool,
 }
 impl ResolverContext {
     fn new() -> Self {
@@ -64,6 +68,7 @@ impl ResolverContext {
             loading: HashSet::new(),
             loaded: HashMap::new(),
             strict_imports: false,
+            allow_lean_verified: false,
         }
     }
 }
@@ -86,10 +91,25 @@ pub fn resolve_imports_with_options(
     module_env: &mut ModuleEnv,
     strict_imports: bool,
 ) -> MumeiResult<()> {
+    resolve_imports_with_full_options(items, base_dir, module_env, strict_imports, false)
+}
+
+/// PR 2: `resolve_imports` with both `strict_imports` and `allow_lean_verified`
+/// opt-ins. `allow_lean_verified == true` widens the resolver so it accepts
+/// mumei-lean-emitted certificates (`z3_check_result == "lean_verified"`) as
+/// `"proven"`. Off by default.
+pub fn resolve_imports_with_full_options(
+    items: &[Item],
+    base_dir: &Path,
+    module_env: &mut ModuleEnv,
+    strict_imports: bool,
+    allow_lean_verified: bool,
+) -> MumeiResult<()> {
     let cache_path = base_dir.join(".mumei_cache");
     let mut cache = load_cache(&cache_path);
     let mut ctx = ResolverContext::new();
     ctx.strict_imports = strict_imports;
+    ctx.allow_lean_verified = allow_lean_verified;
     resolve_imports_recursive(items, base_dir, &mut ctx, &mut cache, module_env)?;
     save_cache(&cache_path, &cache);
     Ok(())
@@ -211,6 +231,7 @@ fn verify_import_certificate(
     module_dir: &Path,
     source_file: &Path,
     items: &[Item],
+    allow_lean_verified: bool,
 ) -> Option<HashMap<String, String>> {
     let mut qualified_methods: Vec<parser::Atom> = Vec::new();
     let atom_refs = collect_atom_refs_with_methods(items, &mut qualified_methods);
@@ -228,7 +249,8 @@ fn verify_import_certificate(
                 let source_matches = source_file.ends_with(cert_file_path)
                     || cert_file_path.ends_with(source_file.file_name().unwrap_or_default());
                 if source_matches || cert.file.is_empty() {
-                    let results = proof_cert::verify_certificate(&cert, &atom_refs);
+                    let results =
+                        proof_cert::verify_certificate(&cert, &atom_refs, allow_lean_verified);
                     return Some(results.into_iter().collect());
                 }
                 // Certificate is for a different file — fall through to the
@@ -257,7 +279,8 @@ fn verify_import_certificate(
                 Ok(bundle) => {
                     if let Some(cert) = proof_cert::lookup_bundle_certificate(&bundle, source_file)
                     {
-                        let results = proof_cert::verify_certificate(cert, &atom_refs);
+                        let results =
+                            proof_cert::verify_certificate(cert, &atom_refs, allow_lean_verified);
                         return Some(results.into_iter().collect());
                     }
                 }
@@ -416,8 +439,12 @@ fn resolve_imports_recursive(
             register_imported_items(&imported_items, alias_prefix, module_env);
 
             // P5-C: Check for proof certificate before marking atoms as verified
-            let cert_results =
-                verify_import_certificate(import_base_dir, &resolved_path, &imported_items);
+            let cert_results = verify_import_certificate(
+                import_base_dir,
+                &resolved_path,
+                &imported_items,
+                ctx.allow_lean_verified,
+            );
 
             // P5-C: In strict mode, missing certificates are hard errors
             if ctx.strict_imports && cert_results.is_none() {
@@ -790,6 +817,35 @@ pub fn resolve_manifest_dependencies_with_options(
     module_env: &mut ModuleEnv,
     strict_imports: bool,
 ) -> MumeiResult<()> {
+    resolve_manifest_dependencies_with_full_options(
+        manifest,
+        project_dir,
+        module_env,
+        strict_imports,
+        false,
+    )
+}
+
+/// PR 2: `resolve_manifest_dependencies` with both `strict_imports` and
+/// `allow_lean_verified` opt-ins. See [`resolve_imports_with_full_options`].
+// TODO(follow-up): `strict_imports` is not propagated into the
+// `ResolverContext` used for sub-imports inside each dependency below
+// (path / git / registry). Each branch creates a fresh `ResolverContext`
+// and only sets `ctx.allow_lean_verified = allow_lean_verified;`, leaving
+// `ctx.strict_imports` at its default `false`. As a result, transitive
+// imports within a dependency are never subject to strict checking — only
+// the direct dependency atoms are (via `mark_dependency_atoms_with_cert`).
+// This mirrors pre-PR-2 behaviour, but should be revisited: either fully
+// propagate `strict_imports` here too, or document the asymmetry. Doing it
+// in this PR would change strict-mode semantics for existing users, so it
+// is intentionally deferred to a dedicated follow-up.
+pub fn resolve_manifest_dependencies_with_full_options(
+    manifest: &crate::manifest::Manifest,
+    project_dir: &Path,
+    module_env: &mut ModuleEnv,
+    strict_imports: bool,
+    allow_lean_verified: bool,
+) -> MumeiResult<()> {
     for (dep_name, dep) in &manifest.dependencies {
         // パス依存
         if let Some(dep_path) = dep.as_path() {
@@ -814,11 +870,13 @@ pub fn resolve_manifest_dependencies_with_options(
                 let cache_path = dep_base_dir.join(".mumei_cache");
                 let mut cache = load_cache(&cache_path);
                 let mut ctx = ResolverContext::new();
+                ctx.allow_lean_verified = allow_lean_verified;
                 resolve_imports_recursive(&items, dep_base_dir, &mut ctx, &mut cache, module_env)?;
                 save_cache(&cache_path, &cache);
                 register_imported_items(&items, Some(dep_name), module_env);
                 // P5-C: Check for proof certificate before marking atoms as verified
-                let cert_results = verify_import_certificate(&abs_path, entry_path, &items);
+                let cert_results =
+                    verify_import_certificate(&abs_path, entry_path, &items, allow_lean_verified);
                 mark_dependency_atoms_with_cert(
                     &items,
                     dep_name,
@@ -920,13 +978,15 @@ pub fn resolve_manifest_dependencies_with_options(
                 let cache_path = dep_base_dir.join(".mumei_cache");
                 let mut cache = load_cache(&cache_path);
                 let mut ctx = ResolverContext::new();
+                ctx.allow_lean_verified = allow_lean_verified;
                 resolve_imports_recursive(&items, dep_base_dir, &mut ctx, &mut cache, module_env)?;
                 save_cache(&cache_path, &cache);
                 register_imported_items(&items, Some(dep_name), module_env);
                 // P5-C: Check for proof certificate before marking atoms as verified
                 // Use clone_dir (package root) instead of dep_base_dir (entry file parent)
                 // because cmd_publish saves certificates to the package root.
-                let cert_results = verify_import_certificate(&clone_dir, entry_path, &items);
+                let cert_results =
+                    verify_import_certificate(&clone_dir, entry_path, &items, allow_lean_verified);
                 mark_dependency_atoms_with_cert(
                     &items,
                     dep_name,
@@ -965,6 +1025,7 @@ pub fn resolve_manifest_dependencies_with_options(
                     let cache_path = dep_base_dir.join(".mumei_cache");
                     let mut cache = load_cache(&cache_path);
                     let mut ctx = ResolverContext::new();
+                    ctx.allow_lean_verified = allow_lean_verified;
                     resolve_imports_recursive(
                         &items,
                         dep_base_dir,
@@ -977,7 +1038,12 @@ pub fn resolve_manifest_dependencies_with_options(
                     // P5-C: Check for proof certificate before marking atoms as verified
                     // Use pkg_dir (package root) instead of dep_base_dir (entry file parent)
                     // because cmd_publish saves certificates to the package root.
-                    let cert_results = verify_import_certificate(&pkg_dir, entry_path, &items);
+                    let cert_results = verify_import_certificate(
+                        &pkg_dir,
+                        entry_path,
+                        &items,
+                        allow_lean_verified,
+                    );
                     mark_dependency_atoms_with_cert(
                         &items,
                         dep_name,
@@ -1985,7 +2051,7 @@ impl Stack {
         );
 
         // Now verify_certificate should report "proven" for "Stack::push"
-        let results = proof_cert::verify_certificate(&cert, &atom_refs);
+        let results = proof_cert::verify_certificate(&cert, &atom_refs, false);
         let result_map: std::collections::HashMap<String, String> = results.into_iter().collect();
         assert_eq!(
             result_map.get("Stack::push").map(|s| s.as_str()),
@@ -2104,7 +2170,7 @@ atom add(x: i64, y: i64) -> i64
         fs::write(&logical_source, source).unwrap();
 
         std::env::set_var("MUMEI_PROOF_BUNDLE", &bundle_path);
-        let result = verify_import_certificate(&std_root, &logical_source, &items);
+        let result = verify_import_certificate(&std_root, &logical_source, &items, false);
         std::env::remove_var("MUMEI_PROOF_BUNDLE");
 
         let result = result.expect("bundle fallback should produce cert results");
@@ -2139,7 +2205,7 @@ atom sub(x: i64, y: i64) -> i64
         fs::write(&source_file, source).unwrap();
 
         std::env::set_var("MUMEI_PROOF_BUNDLE", &bogus);
-        let result = verify_import_certificate(&module_dir, &source_file, &items);
+        let result = verify_import_certificate(&module_dir, &source_file, &items, false);
         std::env::remove_var("MUMEI_PROOF_BUNDLE");
 
         assert!(
@@ -2195,7 +2261,7 @@ atom mul(x: i64, y: i64) -> i64
         proof_cert::save_certificate(&local_cert, &local_cert_path).unwrap();
 
         std::env::set_var("MUMEI_PROOF_BUNDLE", &bundle_path);
-        let result = verify_import_certificate(&std_root, &logical_source, &items);
+        let result = verify_import_certificate(&std_root, &logical_source, &items, false);
         std::env::remove_var("MUMEI_PROOF_BUNDLE");
 
         let result = result.expect("local cert should produce results");
@@ -2206,6 +2272,86 @@ atom mul(x: i64, y: i64) -> i64
             "local cert must take precedence over the bundle",
         );
 
+        let _ = fs::remove_file(&bundle_path);
+        let _ = fs::remove_dir_all(std_root.parent().unwrap());
+    }
+
+    /// PR 2: Bundle fallback honours `allow_lean_verified` opt-in.
+    /// A `lean_verified` atom in the bundle is `"unproven"` by default but
+    /// `"proven"` when the resolver is opted in.
+    #[test]
+    fn test_verify_import_certificate_lean_verified_bundle() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+        let source = r#"
+atom hard_lemma(x: i64) -> i64
+    requires: true;
+    ensures: true;
+    body: { x };
+"#;
+        let items = parser::parse_module(source);
+        let atom_refs: Vec<&parser::Atom> = items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Atom(a) => Some(a),
+                _ => None,
+            })
+            .collect();
+
+        // Build a bundle with a lean_verified atom (mumei-lean-style cert).
+        let mut results = HashMap::new();
+        results.insert(
+            "hard_lemma".to_string(),
+            ("lean_verified".to_string(), "verified".to_string()),
+        );
+        let module_env = ModuleEnv::new();
+        let cert = proof_cert::generate_certificate(
+            "std/lean_pilot.mm",
+            &atom_refs,
+            &results,
+            &module_env,
+            None,
+            None,
+        );
+        let mut modules = HashMap::new();
+        modules.insert("std/lean_pilot".to_string(), cert);
+        let bundle = proof_cert::ProofBundle {
+            bundle_version: "1.0".to_string(),
+            generated_at: "2026-04-29T00:00:00Z".to_string(),
+            mumei_version: "test".to_string(),
+            modules,
+            summary: proof_cert::BundleSummary::default(),
+        };
+        let bundle_path = write_bundle_to_tempfile(&bundle, "mumei_test_bundle_lean.json");
+
+        // Stage a logical std/ source file so module_key_from_source resolves.
+        let std_root = std::env::temp_dir().join("mumei_test_lean/std");
+        let _ = fs::remove_dir_all(std_root.parent().unwrap());
+        fs::create_dir_all(&std_root).unwrap();
+        let logical_source = std_root.join("lean_pilot.mm");
+        fs::write(&logical_source, source).unwrap();
+
+        std::env::set_var("MUMEI_PROOF_BUNDLE", &bundle_path);
+
+        // Default (allow_lean_verified=false): hard_lemma is NOT proven.
+        let default_result = verify_import_certificate(&std_root, &logical_source, &items, false)
+            .expect("bundle fallback should produce cert results");
+        assert_eq!(
+            default_result.get("hard_lemma").map(|s| s.as_str()),
+            Some("unproven"),
+            "lean_verified must be 'unproven' without --allow-lean-verified",
+        );
+
+        // Opt-in (allow_lean_verified=true): hard_lemma IS proven.
+        let opt_in_result = verify_import_certificate(&std_root, &logical_source, &items, true)
+            .expect("bundle fallback should produce cert results");
+        assert_eq!(
+            opt_in_result.get("hard_lemma").map(|s| s.as_str()),
+            Some("proven"),
+            "lean_verified must be 'proven' with --allow-lean-verified",
+        );
+
+        std::env::remove_var("MUMEI_PROOF_BUNDLE");
         let _ = fs::remove_file(&bundle_path);
         let _ = fs::remove_dir_all(std_root.parent().unwrap());
     }

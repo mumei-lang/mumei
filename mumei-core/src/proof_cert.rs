@@ -203,11 +203,22 @@ fn compute_certificate_hash(cert: &ProofCertificate) -> String {
 /// Verify a proof certificate against the current source file.
 /// Returns a list of (atom_name, status) where status is:
 /// - "proven" if content_hash matches and z3_check_result was "unsat"
+///   (or `"lean_verified"` when `allow_lean_verified` is enabled — see below).
 /// - "changed" if content_hash differs (re-verification needed)
 /// - "unproven" if z3_check_result was not "unsat"
+///
+/// `allow_lean_verified` controls how `z3_check_result == "lean_verified"`
+/// values are treated. mumei-lean (the external Lean 4 proof backend) emits
+/// `"lean_verified"` for atoms it has discharged itself (Z3 returned
+/// `unknown`, but a Lean tactic proof completed). For backwards
+/// compatibility the default is `false`, which treats `"lean_verified"` as
+/// `"unproven"`. Callers that have explicitly opted in to the cross-project
+/// Proof Certificate Chain (e.g. via the `--allow-lean-verified` CLI flag)
+/// should pass `true` to recognise those atoms as `"proven"`.
 pub fn verify_certificate(
     cert: &ProofCertificate,
     atoms: &[&crate::parser::Atom],
+    allow_lean_verified: bool,
 ) -> Vec<(String, String)> {
     let current_hashes: HashMap<String, String> = atoms
         .iter()
@@ -225,7 +236,9 @@ pub fn verify_certificate(
             let status = if let Some(current_hash) = current_hashes.get(&ac.name) {
                 if current_hash != &ac.content_hash {
                     "changed".to_string()
-                } else if ac.z3_check_result == "unsat" {
+                } else if ac.z3_check_result == "unsat"
+                    || (allow_lean_verified && ac.z3_check_result == "lean_verified")
+                {
                     "proven".to_string()
                 } else {
                     "unproven".to_string()
@@ -495,16 +508,69 @@ mod tests {
         let cert = generate_certificate("test.mm", &atoms, &results, &module_env, None, None);
 
         // Verify with same source → "proven"
-        let status = verify_certificate(&cert, &atoms);
+        let status = verify_certificate(&cert, &atoms, false);
         assert_eq!(status.len(), 1);
         assert_eq!(status[0], ("add".to_string(), "proven".to_string()));
 
         // Modify the atom body and verify again → "changed"
         let modified_atom = make_test_atom("add", "x > 0", "result > 0", "x + 2");
         let modified_atoms: Vec<&parser::Atom> = vec![&modified_atom];
-        let status2 = verify_certificate(&cert, &modified_atoms);
+        let status2 = verify_certificate(&cert, &modified_atoms, false);
         assert_eq!(status2.len(), 1);
         assert_eq!(status2[0], ("add".to_string(), "changed".to_string()));
+    }
+
+    /// PR 2: `lean_verified` is rejected by default and accepted with the
+    /// `allow_lean_verified` opt-in flag, mirroring the cross-project Proof
+    /// Certificate Chain (mumei-lean → mumei resolver) handshake.
+    #[test]
+    fn test_verify_certificate_lean_verified_opt_in() {
+        let atom = make_test_atom("hard_lemma", "true", "true", "42");
+        let atoms: Vec<&parser::Atom> = vec![&atom];
+        let mut results = HashMap::new();
+        // mumei-lean signals successful Lean discharge with this string.
+        results.insert(
+            "hard_lemma".to_string(),
+            ("lean_verified".to_string(), "verified".to_string()),
+        );
+        let module_env = ModuleEnv::new();
+        let cert = generate_certificate("test.mm", &atoms, &results, &module_env, None, None);
+
+        // Default (backwards-compatible): lean_verified is NOT proven.
+        let status_default = verify_certificate(&cert, &atoms, false);
+        assert_eq!(
+            status_default[0],
+            ("hard_lemma".to_string(), "unproven".to_string())
+        );
+
+        // Opt-in: lean_verified IS proven.
+        let status_opt_in = verify_certificate(&cert, &atoms, true);
+        assert_eq!(
+            status_opt_in[0],
+            ("hard_lemma".to_string(), "proven".to_string())
+        );
+    }
+
+    /// PR 2: `allow_lean_verified` does not weaken the `"changed"` detector.
+    /// A modified body must still be flagged as needing re-verification, even
+    /// when the cert claims `lean_verified`.
+    #[test]
+    fn test_verify_certificate_lean_verified_changed_detection() {
+        let atom = make_test_atom("hard_lemma", "true", "true", "42");
+        let atoms: Vec<&parser::Atom> = vec![&atom];
+        let mut results = HashMap::new();
+        results.insert(
+            "hard_lemma".to_string(),
+            ("lean_verified".to_string(), "verified".to_string()),
+        );
+        let module_env = ModuleEnv::new();
+        let cert = generate_certificate("test.mm", &atoms, &results, &module_env, None, None);
+
+        let modified = make_test_atom("hard_lemma", "true", "true", "43");
+        let modified_refs: Vec<&parser::Atom> = vec![&modified];
+
+        let status = verify_certificate(&cert, &modified_refs, true);
+        assert_eq!(status[0], ("hard_lemma".to_string(), "changed".to_string()));
     }
 
     /// P5-A: certificate_hash is deterministic
