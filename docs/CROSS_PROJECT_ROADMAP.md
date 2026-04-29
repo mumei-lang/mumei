@@ -732,6 +732,7 @@ graph TD
 | pytest スイート + GitHub Actions CI | ✅ Implemented (mumei-lean PR #1) | 24 ケース。`lake build` ジョブは mathlib4 ブートストラップ中の暫定 `continue-on-error: true` |
 | 契約式トランスレータ拡張 (mathlib4 active 利用) | ⏸️ Deferred | 量化子・有限体・群論ライブラリを使った暗号プリミティブの証明。ブリッジ v1 は算術比較 + 論理結合 + 整数リテラルのみ |
 | mumei 側 `"lean_verified"` 認識 | ✅ Implemented (PR 2) | `verify_certificate(.., allow_lean_verified)` と `--allow-lean-verified` CLI フラグ (`build` / `verify` / `verify-cert`) を追加。デフォルトでは `"unsat"` のみ受付、フラグ付けで `"lean_verified"` も `"proven"` として認識 |
+| E2E 証明チェーン統合テスト | ✅ Implemented (PR 5) | `scripts/test_e2e_proof_chain.py` + `tests/fixtures/mock_lean_cert.json` + `.github/workflows/e2e-proof-chain.yml` で `mumei verify --proof-cert` → mumei-lean モック cert → `mumei verify-cert --allow-lean-verified` の E2E を CI で自動実行。`--mock-lean` フラグで mumei-lean 不在時もテスト可能、`lake build` 安定後にフラグ除去予定 |
 | P8-B Counter-example Visualizer | ✅ Implemented (Plan 22) | LSP `relatedInformation` を活用した Z3 反例のインライン表示。mumei doc 拡張と同期して PR #167 でマージ |
 
 ---
