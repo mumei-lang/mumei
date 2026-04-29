@@ -94,6 +94,12 @@ enum Command {
         /// P5-C: Strict import mode — missing/invalid certificates cause hard errors
         #[arg(long)]
         strict_imports: bool,
+        /// PR 2: Accept mumei-lean-emitted certificates
+        /// (`z3_check_result == "lean_verified"`) as proven during import
+        /// resolution. Off by default for backwards compatibility — the resolver
+        /// only trusts Z3-discharged (`unsat`) atoms unless this flag is set.
+        #[arg(long)]
+        allow_lean_verified: bool,
     },
     /// Z3 formal verification only (no codegen)
     Verify {
@@ -114,6 +120,11 @@ enum Command {
         /// P5-C: Strict import mode — missing/invalid certificates cause hard errors
         #[arg(long)]
         strict_imports: bool,
+        /// PR 2: Accept mumei-lean-emitted certificates
+        /// (`z3_check_result == "lean_verified"`) as proven during import
+        /// resolution. Off by default for backwards compatibility.
+        #[arg(long)]
+        allow_lean_verified: bool,
     },
     /// Parse + resolve + monomorphize only (no Z3, fast syntax check)
     Check {
@@ -189,6 +200,11 @@ enum Command {
         cert: String,
         /// Source .mm file to verify against
         input: String,
+        /// PR 2: Accept mumei-lean-emitted certificates
+        /// (`z3_check_result == "lean_verified"`) as proven. Off by default —
+        /// only Z3-discharged (`unsat`) atoms are accepted.
+        #[arg(long)]
+        allow_lean_verified: bool,
     },
     /// P7-B: Build and run a mumei program as a native binary
     Run {
@@ -217,6 +233,7 @@ fn main() {
             output,
             emit,
             strict_imports,
+            allow_lean_verified,
         }) => {
             let emit_target = match emit.as_str() {
                 "llvm-ir" => emitter::EmitTarget::LlvmIr,
@@ -235,7 +252,13 @@ fn main() {
                     std::process::exit(1);
                 }
             };
-            cmd_build(&input, &output, &emit_target, strict_imports);
+            cmd_build(
+                &input,
+                &output,
+                &emit_target,
+                strict_imports,
+                allow_lean_verified,
+            );
         }
         Some(Command::Verify {
             input,
@@ -244,6 +267,7 @@ fn main() {
             report_dir,
             json,
             strict_imports,
+            allow_lean_verified,
         }) => {
             cmd_verify(
                 &input,
@@ -252,6 +276,7 @@ fn main() {
                 report_dir.as_deref(),
                 json,
                 strict_imports,
+                allow_lean_verified,
             );
         }
         Some(Command::Check { input }) => {
@@ -298,8 +323,12 @@ fn main() {
         Some(Command::InferContracts { input }) => {
             cmd_infer_contracts(&input);
         }
-        Some(Command::VerifyCert { cert, input }) => {
-            cmd_verify_cert(&cert, &input);
+        Some(Command::VerifyCert {
+            cert,
+            input,
+            allow_lean_verified,
+        }) => {
+            cmd_verify_cert(&cert, &input, allow_lean_verified);
         }
         Some(Command::Run { input, args }) => {
             cmd_run(&input, &args);
@@ -307,7 +336,13 @@ fn main() {
         None => {
             // 後方互換: `mumei input.mm -o dist/katana` → build として実行
             if let Some(ref input) = cli.input {
-                cmd_build(input, &cli.output, &emitter::EmitTarget::LlvmIr, false);
+                cmd_build(
+                    input,
+                    &cli.output,
+                    &emitter::EmitTarget::LlvmIr,
+                    false,
+                    false,
+                );
             } else {
                 eprintln!("Usage: mumei <COMMAND> or mumei <input.mm>");
                 eprintln!("  build   Verify + compile (default)");
@@ -360,13 +395,25 @@ fn check_z3_available() {
 /// parse → resolve → monomorphize → ModuleEnv に全定義を登録
 /// ソースコード文字列も返す（miette リッチ出力のため）
 fn load_and_prepare(input: &str) -> (Vec<Item>, verification::ModuleEnv, Vec<ImportDecl>, String) {
-    load_and_prepare_with_options(input, false)
+    load_and_prepare_with_full_options(input, false, false)
 }
 
 /// P5-C: load_and_prepare with strict_imports option.
+#[allow(dead_code)]
 fn load_and_prepare_with_options(
     input: &str,
     strict_imports: bool,
+) -> (Vec<Item>, verification::ModuleEnv, Vec<ImportDecl>, String) {
+    load_and_prepare_with_full_options(input, strict_imports, false)
+}
+
+/// PR 2: load_and_prepare with both strict_imports and allow_lean_verified.
+/// `allow_lean_verified == true` widens the resolver so it accepts
+/// mumei-lean-emitted `lean_verified` certificates as `"proven"`.
+fn load_and_prepare_with_full_options(
+    input: &str,
+    strict_imports: bool,
+    allow_lean_verified: bool,
 ) -> (Vec<Item>, verification::ModuleEnv, Vec<ImportDecl>, String) {
     let source = load_source(input);
     let items = parser::parse_module(&source);
@@ -386,15 +433,20 @@ fn load_and_prepare_with_options(
 
     // mumei.toml の [dependencies] から依存パッケージを解決
     if let Some((proj_dir, m)) = manifest::find_and_load() {
-        if strict_imports {
-            if let Err(e) = resolver::resolve_manifest_dependencies_with_options(
+        if strict_imports || allow_lean_verified {
+            if let Err(e) = resolver::resolve_manifest_dependencies_with_full_options(
                 &m,
                 &proj_dir,
                 &mut module_env,
                 strict_imports,
+                allow_lean_verified,
             ) {
-                eprintln!("  ❌ Dependency resolution failed (strict mode): {}", e);
-                std::process::exit(1);
+                if strict_imports {
+                    eprintln!("  ❌ Dependency resolution failed (strict mode): {}", e);
+                    std::process::exit(1);
+                } else {
+                    eprintln!("  ⚠️  Dependency resolution warning: {}", e);
+                }
             }
         } else if let Err(e) =
             resolver::resolve_manifest_dependencies(&m, &proj_dir, &mut module_env)
@@ -403,15 +455,21 @@ fn load_and_prepare_with_options(
         }
     }
 
-    if strict_imports {
-        if let Err(e) = resolver::resolve_imports_with_options(
+    if strict_imports || allow_lean_verified {
+        if let Err(e) = resolver::resolve_imports_with_full_options(
             &items,
             base_dir,
             &mut module_env,
             strict_imports,
+            allow_lean_verified,
         ) {
-            eprintln!("  ❌ Import resolution failed (strict mode): {}", e);
-            std::process::exit(1);
+            if strict_imports {
+                eprintln!("  ❌ Import resolution failed (strict mode): {}", e);
+                std::process::exit(1);
+            } else {
+                eprintln!("  ❌ Import Resolution Failed: {}", e);
+                std::process::exit(1);
+            }
         }
     } else if let Err(e) = resolver::resolve_imports(&items, base_dir, &mut module_env) {
         eprintln!("  ❌ Import Resolution Failed: {}", e);
@@ -625,13 +683,14 @@ fn cmd_verify(
     report_dir: Option<&str>,
     json_output: bool,
     strict_imports: bool,
+    allow_lean_verified: bool,
 ) {
     check_z3_available();
     if !json_output {
         println!("🗡️  Mumei verify: verifying '{}'...", input);
     }
     let (items, mut module_env, _imports, source) =
-        load_and_prepare_with_options(input, strict_imports);
+        load_and_prepare_with_full_options(input, strict_imports, allow_lean_verified);
 
     let output_dir = match report_dir {
         Some(dir) => Path::new(dir),
@@ -1544,11 +1603,14 @@ fn cmd_inspect_file(input: &str, ai: bool, format: &str) {
 // mumei verify-cert — Verify proof certificate against current source (Plan 11B)
 // =============================================================================
 
-fn cmd_verify_cert(cert_path: &str, input: &str) {
+fn cmd_verify_cert(cert_path: &str, input: &str, allow_lean_verified: bool) {
     println!(
         "🔍 Mumei verify-cert: checking '{}' against '{}'...",
         cert_path, input
     );
+    if allow_lean_verified {
+        println!("  ℹ️  --allow-lean-verified: lean_verified atoms will be accepted as proven");
+    }
 
     let cert = match proof_cert::load_certificate(Path::new(cert_path)) {
         Ok(c) => c,
@@ -1558,7 +1620,8 @@ fn cmd_verify_cert(cert_path: &str, input: &str) {
         }
     };
 
-    let (items, _module_env, _imports, _source) = load_and_prepare(input);
+    let (items, _module_env, _imports, _source) =
+        load_and_prepare_with_full_options(input, false, allow_lean_verified);
 
     let mut atom_refs: Vec<&parser::Atom> = items
         .iter()
@@ -1585,7 +1648,7 @@ fn cmd_verify_cert(cert_path: &str, input: &str) {
         atom_refs.push(qm);
     }
 
-    let results = proof_cert::verify_certificate(&cert, &atom_refs);
+    let results = proof_cert::verify_certificate(&cert, &atom_refs, allow_lean_verified);
 
     let mut proven = 0;
     let mut changed = 0;
@@ -1721,7 +1784,13 @@ fn dispatch_emit(
 // mumei build — full pipeline (verify + codegen)
 // =============================================================================
 
-fn cmd_build(input: &str, output: &str, emit_target: &emitter::EmitTarget, strict_imports: bool) {
+fn cmd_build(
+    input: &str,
+    output: &str,
+    emit_target: &emitter::EmitTarget,
+    strict_imports: bool,
+    allow_lean_verified: bool,
+) {
     check_z3_available();
     println!("🗡️  Mumei: Forging the blade (Type System 2.0 + Generics enabled)...");
 
@@ -1741,7 +1810,7 @@ fn cmd_build(input: &str, output: &str, emit_target: &emitter::EmitTarget, stric
     };
 
     let (items, mut module_env, _imports, source) =
-        load_and_prepare_with_options(input, strict_imports);
+        load_and_prepare_with_full_options(input, strict_imports, allow_lean_verified);
 
     let output_path = Path::new(output);
     let output_dir = output_path.parent().unwrap_or(Path::new("."));
