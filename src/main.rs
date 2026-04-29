@@ -1041,6 +1041,23 @@ fn cmd_verify(
                 }
             }
         }
+
+        // Task 1-B: When `--proof-cert` is active, surface atoms whose Z3
+        // check returned `unknown` so the user knows which lemmas might
+        // benefit from being discharged externally (e.g. via mumei-lean).
+        if !json_output {
+            let unknown_count = cert
+                .atoms
+                .iter()
+                .filter(|a| a.z3_check_result == "unknown")
+                .count();
+            if unknown_count > 0 {
+                println!(
+                    "ℹ️  {} atom(s) returned 'unknown' from Z3. Consider running mumei-lean to discharge them.",
+                    unknown_count
+                );
+            }
+        }
     }
 
     // Proposal B: --json outputs report.json content to stdout
