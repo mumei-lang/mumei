@@ -146,15 +146,26 @@ def step_3_run_lean_bridge(
             raise SystemExit(
                 f"--mock-lean: fixture {MOCK_LEAN_CERT_FIXTURE} not found"
             )
-        # Take the atoms from the real proof cert but swap their
-        # z3_check_result/status to mumei-lean's success values, then
-        # surface the schema-pinned envelope from the fixture.
-        cert = json.loads(proof_cert.read_text())
-        for atom in cert.get("atoms", []):
+        # Load the schema-pinned envelope from the fixture (it carries
+        # the mumei-lean-style `z3_version` field — "mumei-lean (Lean
+        # ... + mathlib4)" — that distinguishes a lean-emitted cert
+        # from a Z3-emitted one), then graft the atoms from the real
+        # step-1 proof cert with their `z3_check_result`/`status`
+        # rewritten to mumei-lean's success values. This way the
+        # fixture is actually consumed: its envelope shape is what
+        # `mumei verify-cert` deserialises.
+        envelope = json.loads(MOCK_LEAN_CERT_FIXTURE.read_text())
+        real_cert = json.loads(proof_cert.read_text())
+        rewritten_atoms = []
+        for atom in real_cert.get("atoms", []):
+            atom = dict(atom)
             atom["z3_check_result"] = "lean_verified"
             atom["status"] = "verified"
-        cert["all_verified"] = True
-        out_path.write_text(json.dumps(cert, indent=2))
+            rewritten_atoms.append(atom)
+        envelope["atoms"] = rewritten_atoms
+        envelope["file"] = real_cert.get("file", envelope.get("file", ""))
+        envelope["all_verified"] = True
+        out_path.write_text(json.dumps(envelope, indent=2))
         return out_path
 
     bridge = REPO_ROOT.parent / "mumei-lean" / "scripts" / "bridge.py"
