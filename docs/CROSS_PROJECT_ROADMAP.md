@@ -732,6 +732,9 @@ graph TD
 | pytest スイート + GitHub Actions CI | ✅ Implemented (mumei-lean PR #1) | 24 ケース。`lake build` ジョブは mathlib4 ブートストラップ中の暫定 `continue-on-error: true` |
 | 契約式トランスレータ拡張 (mathlib4 active 利用) | ⏸️ Deferred | 量化子・有限体・群論ライブラリを使った暗号プリミティブの証明。ブリッジ v1 は算術比較 + 論理結合 + 整数リテラルのみ |
 | mumei 側 `"lean_verified"` 認識 | ✅ Implemented (PR 2) | `verify_certificate(.., allow_lean_verified)` と `--allow-lean-verified` CLI フラグ (`build` / `verify` / `verify-cert`) を追加。デフォルトでは `"unsat"` のみ受付、フラグ付けで `"lean_verified"` も `"proven"` として認識 |
+| `strict_imports` の sub-import への伝播 | ✅ Implemented (Task 1-B) | `resolve_manifest_dependencies_with_full_options` の path / git / registry 各分岐で `ResolverContext` に `strict_imports` をセット。トランジティブな import まで `--strict-imports` の検証セマンティクスが届く。`tests::test_strict_imports_propagated_to_sub_imports` で回帰防止 |
+| `lean_verified` 受理の監査ログ | ✅ Implemented (Task 1-B) | `--allow-lean-verified` で `"lean_verified"` atom を `"proven"` 扱いした際、`resolver::verify_import_certificate` から `🔗 Lean-verified atom '<name>' accepted as proven (--allow-lean-verified)` の eprintln を発行。下流が Proof Certificate Chain を再現する際の監査用 |
+| `unknown` atom サマリ | ✅ Implemented (Task 1-B) | `mumei verify --proof-cert` 完了時、生成した cert で `z3_check_result == "unknown"` の atom を集計し、`ℹ️  N atom(s) returned 'unknown' from Z3. Consider running mumei-lean to discharge them.` を表示。`N == 0` の場合と `--json` 出力時は抑制 |
 | P8-B Counter-example Visualizer | ✅ Implemented (Plan 22) | LSP `relatedInformation` を活用した Z3 反例のインライン表示。mumei doc 拡張と同期して PR #167 でマージ |
 
 ---

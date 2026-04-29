@@ -1041,6 +1041,24 @@ fn cmd_verify(
                 }
             }
         }
+
+        // Task 1-B: surface atoms that Z3 returned `unknown` for, so users
+        // know they may benefit from running mumei-lean to discharge them
+        // via Lean tactics. We only print this when --proof-cert is active
+        // and at least one atom is in the unknown state.
+        if !json_output {
+            let unknown_count = cert
+                .atoms
+                .iter()
+                .filter(|ac| ac.z3_check_result == "unknown")
+                .count();
+            if unknown_count > 0 {
+                println!(
+                    "ℹ️  {} atom(s) returned 'unknown' from Z3. Consider running mumei-lean to discharge them.",
+                    unknown_count
+                );
+            }
+        }
     }
 
     // Proposal B: --json outputs report.json content to stdout

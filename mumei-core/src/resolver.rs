@@ -215,6 +215,36 @@ fn collect_atom_refs_with_methods<'a>(
     atom_refs
 }
 
+/// Task 1-B: emit an audit log line for each atom that the resolver accepted
+/// as `"proven"` solely because the certificate was emitted by mumei-lean
+/// (i.e. `z3_check_result == "lean_verified"`) and `--allow-lean-verified`
+/// was passed. Visibility into which atoms are trusted via the cross-project
+/// Proof Certificate Chain is important for downstream auditors who want to
+/// reproduce the proof path. No-op when `allow_lean_verified` is false or
+/// when no atom was accepted via the lean_verified branch.
+fn log_lean_verified_acceptances(
+    cert: &proof_cert::ProofCertificate,
+    results: &[(String, String)],
+    allow_lean_verified: bool,
+) {
+    if !allow_lean_verified {
+        return;
+    }
+    let proven: HashSet<&str> = results
+        .iter()
+        .filter(|(_, status)| status == "proven")
+        .map(|(name, _)| name.as_str())
+        .collect();
+    for ac in &cert.atoms {
+        if ac.z3_check_result == "lean_verified" && proven.contains(ac.name.as_str()) {
+            eprintln!(
+                "  🔗 Lean-verified atom '{}' accepted as proven (--allow-lean-verified)",
+                ac.name
+            );
+        }
+    }
+}
+
 /// P5-C: Attempt to verify a proof certificate for an imported module directory.
 /// Returns a map of atom_name -> status ("proven", "changed", "unproven", "missing").
 /// Returns None if no certificate exists.
@@ -251,6 +281,7 @@ fn verify_import_certificate(
                 if source_matches || cert.file.is_empty() {
                     let results =
                         proof_cert::verify_certificate(&cert, &atom_refs, allow_lean_verified);
+                    log_lean_verified_acceptances(&cert, &results, allow_lean_verified);
                     return Some(results.into_iter().collect());
                 }
                 // Certificate is for a different file — fall through to the
@@ -281,6 +312,7 @@ fn verify_import_certificate(
                     {
                         let results =
                             proof_cert::verify_certificate(cert, &atom_refs, allow_lean_verified);
+                        log_lean_verified_acceptances(cert, &results, allow_lean_verified);
                         return Some(results.into_iter().collect());
                     }
                 }
@@ -828,17 +860,12 @@ pub fn resolve_manifest_dependencies_with_options(
 
 /// PR 2: `resolve_manifest_dependencies` with both `strict_imports` and
 /// `allow_lean_verified` opt-ins. See [`resolve_imports_with_full_options`].
-// TODO(follow-up): `strict_imports` is not propagated into the
-// `ResolverContext` used for sub-imports inside each dependency below
-// (path / git / registry). Each branch creates a fresh `ResolverContext`
-// and only sets `ctx.allow_lean_verified = allow_lean_verified;`, leaving
-// `ctx.strict_imports` at its default `false`. As a result, transitive
-// imports within a dependency are never subject to strict checking — only
-// the direct dependency atoms are (via `mark_dependency_atoms_with_cert`).
-// This mirrors pre-PR-2 behaviour, but should be revisited: either fully
-// propagate `strict_imports` here too, or document the asymmetry. Doing it
-// in this PR would change strict-mode semantics for existing users, so it
-// is intentionally deferred to a dedicated follow-up.
+//
+// Task 1-B: `strict_imports` is now propagated into the `ResolverContext`
+// used for sub-imports inside each dependency (path / git / registry), so
+// transitive imports within a dependency are subject to the same strict
+// checking as direct imports. This closes the asymmetry noted in the
+// previous TODO and gives `--strict-imports` end-to-end semantics.
 pub fn resolve_manifest_dependencies_with_full_options(
     manifest: &crate::manifest::Manifest,
     project_dir: &Path,
@@ -871,6 +898,7 @@ pub fn resolve_manifest_dependencies_with_full_options(
                 let mut cache = load_cache(&cache_path);
                 let mut ctx = ResolverContext::new();
                 ctx.allow_lean_verified = allow_lean_verified;
+                ctx.strict_imports = strict_imports;
                 resolve_imports_recursive(&items, dep_base_dir, &mut ctx, &mut cache, module_env)?;
                 save_cache(&cache_path, &cache);
                 register_imported_items(&items, Some(dep_name), module_env);
@@ -979,6 +1007,7 @@ pub fn resolve_manifest_dependencies_with_full_options(
                 let mut cache = load_cache(&cache_path);
                 let mut ctx = ResolverContext::new();
                 ctx.allow_lean_verified = allow_lean_verified;
+                ctx.strict_imports = strict_imports;
                 resolve_imports_recursive(&items, dep_base_dir, &mut ctx, &mut cache, module_env)?;
                 save_cache(&cache_path, &cache);
                 register_imported_items(&items, Some(dep_name), module_env);
@@ -1026,6 +1055,7 @@ pub fn resolve_manifest_dependencies_with_full_options(
                     let mut cache = load_cache(&cache_path);
                     let mut ctx = ResolverContext::new();
                     ctx.allow_lean_verified = allow_lean_verified;
+                    ctx.strict_imports = strict_imports;
                     resolve_imports_recursive(
                         &items,
                         dep_base_dir,
@@ -2354,5 +2384,129 @@ atom hard_lemma(x: i64) -> i64
         std::env::remove_var("MUMEI_PROOF_BUNDLE");
         let _ = fs::remove_file(&bundle_path);
         let _ = fs::remove_dir_all(std_root.parent().unwrap());
+    }
+
+    /// Task 1-B: `strict_imports` must be propagated into the
+    /// `ResolverContext` used for sub-imports inside each dependency. Before
+    /// the fix, `resolve_manifest_dependencies_with_full_options` only set
+    /// `ctx.allow_lean_verified` and left `ctx.strict_imports` at its
+    /// default `false`, so transitive imports inside a path/git/registry dep
+    /// were never subject to strict checking.
+    ///
+    /// This test sets up a path-based dependency whose `src/main.mm`
+    /// contains an `import` statement pointing at a peer module without any
+    /// proof certificate. With `strict_imports=true`, the propagation fix
+    /// should cause `resolve_manifest_dependencies_with_full_options` to
+    /// return `Err` from the sub-import's strict check. Without the fix,
+    /// the sub-import would silently succeed.
+    #[test]
+    fn test_strict_imports_propagated_to_sub_imports() {
+        use crate::manifest;
+        use crate::verification::ModuleEnv;
+
+        let test_id = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+        );
+        let root = std::env::temp_dir().join(format!("mumei_test_strict_propagate_{}", test_id));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+
+        // Sub-module without any proof certificate. The direct dependency
+        // imports from this path.
+        let sub_dir = root.join("sub");
+        fs::create_dir_all(&sub_dir).unwrap();
+        let sub_source_path = sub_dir.join("sub.mm");
+        fs::write(
+            &sub_source_path,
+            r#"atom sub_helper(x: i64) -> i64
+requires: true;
+ensures: true;
+body: { x };
+"#,
+        )
+        .unwrap();
+
+        // Direct dependency: a path dep whose `src/main.mm` has an
+        // `import` statement pointing at the sub-module above. We escape
+        // backslashes for Windows.
+        let dep_dir = root.join("dep");
+        fs::create_dir_all(dep_dir.join("src")).unwrap();
+        let import_path_str = sub_source_path.to_string_lossy().replace('\\', "\\\\");
+        fs::write(
+            dep_dir.join("src/main.mm"),
+            format!(
+                r#"import "{}";
+
+atom dep_helper(x: i64) -> i64
+requires: true;
+ensures: true;
+body: {{ x }};
+"#,
+                import_path_str
+            ),
+        )
+        .unwrap();
+
+        // Build a Manifest by parsing a tiny TOML so we don't need a public
+        // constructor for the (Deserialize-only) struct.
+        let manifest_toml = format!(
+            r#"
+[package]
+name = "test_strict_propagate"
+version = "0.0.0"
+
+[dependencies]
+dep = {{ path = "{}" }}
+"#,
+            dep_dir.to_string_lossy().replace('\\', "\\\\"),
+        );
+        let manifest: manifest::Manifest =
+            toml::from_str(&manifest_toml).expect("manifest must parse");
+
+        // Strict mode must surface the sub-import's missing cert as a hard
+        // error. This only succeeds when `strict_imports` is propagated
+        // into the ResolverContext used inside the path-dep branch.
+        let mut module_env_strict = ModuleEnv::new();
+        let strict = resolve_manifest_dependencies_with_full_options(
+            &manifest,
+            &root,
+            &mut module_env_strict,
+            true,
+            false,
+        );
+        assert!(
+            strict.is_err(),
+            "strict_imports=true must reject sub-imports without a cert, got Ok",
+        );
+        let msg = strict.unwrap_err().to_string();
+        assert!(
+            msg.contains("Strict imports") || msg.contains("strict_imports"),
+            "error message must reference strict_imports, got: {msg}",
+        );
+
+        // Sanity check: with `strict_imports=false` the same setup must
+        // succeed (legacy behaviour), confirming the failure above is
+        // attributable to the strict_imports flag and not some unrelated
+        // wiring.
+        let mut module_env_lax = ModuleEnv::new();
+        let lax = resolve_manifest_dependencies_with_full_options(
+            &manifest,
+            &root,
+            &mut module_env_lax,
+            false,
+            false,
+        );
+        assert!(
+            lax.is_ok(),
+            "non-strict mode must continue to accept sub-imports without certs, got: {:?}",
+            lax.err(),
+        );
+
+        let _ = fs::remove_dir_all(&root);
     }
 }
