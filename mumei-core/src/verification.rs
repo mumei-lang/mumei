@@ -5925,6 +5925,12 @@ fn verify_inner(
         // common `arr[i]`, `data[k]` shapes used in the std lib.
         q.condition.contains('[')
     });
+    // TODO(timeout-multiplier): When an atom carries BOTH string constraints
+    // and `forall + arr[i]` quantifiers, the string-constraint branch (2x)
+    // currently wins over the array-forall branch (3x), giving a *shorter*
+    // effective timeout than the forall-only case. No real atom hits this
+    // today, but if one does, switch to `max(string_mult, array_mult)` (or
+    // a multiplicative composition) — see PR #174 review thread.
     let effective_timeout = if has_string_constraints_cell_pre.get() {
         timeout_ms * 2
     } else if has_array_forall {
