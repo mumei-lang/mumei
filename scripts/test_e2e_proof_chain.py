@@ -240,37 +240,60 @@ def main() -> int:
                     f"{atom['name']} = {atom['z3_check_result']}"
                 )
 
-        # Step 4a: verify WITHOUT --allow-lean-verified. Expect "unproven"
-        # in the output.
+        # Step 4a: verify WITHOUT --allow-lean-verified. Each lean_verified
+        # atom must appear as `{name}: unproven` in the per-atom output.
+        # Note: substring checks like `"unproven" in out` are unreliable
+        # because cmd_verify_cert always prints the summary line
+        # `Results: X proven, Y changed, Z unproven, W missing` which
+        # contains both words regardless of classification — see
+        # `src/main.rs` cmd_verify_cert.
         source = workdir / "pilot.mm"
         rc_default, out_default, err_default = step_4_verify_with_flag(
             lean_cert, source, mumei, allow_lean_verified=False
         )
-        if "unproven" not in out_default and "unproven" not in err_default:
-            sys.stderr.write(out_default)
-            sys.stderr.write(err_default)
+        atom_names = [a["name"] for a in lc.get("atoms", [])]
+        if not atom_names:
             raise SystemExit(
-                "step 4 (default): expected 'unproven' in output without "
-                "--allow-lean-verified, got nothing matching."
+                "step 4: no atoms in lean cert — cannot assert per-atom status."
             )
+        for atom_name in atom_names:
+            unproven_marker = f"{atom_name}: unproven"
+            proven_marker = f"{atom_name}: proven"
+            combined = out_default + err_default
+            if unproven_marker not in combined:
+                sys.stderr.write(out_default)
+                sys.stderr.write(err_default)
+                raise SystemExit(
+                    f"step 4 (default): expected '{unproven_marker}' in "
+                    "output without --allow-lean-verified, not found."
+                )
+            if proven_marker in combined:
+                sys.stderr.write(out_default)
+                sys.stderr.write(err_default)
+                raise SystemExit(
+                    f"step 4 (default): atom {atom_name} unexpectedly "
+                    "reported 'proven' without --allow-lean-verified."
+                )
         print("[e2e] step 4a OK: lean_verified is 'unproven' by default")
 
-        # Step 4b: verify WITH --allow-lean-verified. Expect "proven".
+        # Step 4b: verify WITH --allow-lean-verified. Each lean_verified
+        # atom must now appear as `{name}: proven` and must NOT still
+        # report 'unproven'.
         rc_optin, out_optin, err_optin = step_4_verify_with_flag(
             lean_cert, source, mumei, allow_lean_verified=True
         )
-        if "proven" not in out_optin and "proven" not in err_optin:
-            sys.stderr.write(out_optin)
-            sys.stderr.write(err_optin)
-            raise SystemExit(
-                "step 4 (opt-in): expected 'proven' in output with "
-                "--allow-lean-verified, got nothing matching."
-            )
-        # Be paranoid: opt-in must NOT report 'unproven' for the
-        # lean_verified atoms.
-        for atom_name in (a["name"] for a in lc.get("atoms", [])):
+        for atom_name in atom_names:
+            proven_marker = f"{atom_name}: proven"
             unproven_marker = f"{atom_name}: unproven"
-            if unproven_marker in out_optin or unproven_marker in err_optin:
+            combined = out_optin + err_optin
+            if proven_marker not in combined:
+                sys.stderr.write(out_optin)
+                sys.stderr.write(err_optin)
+                raise SystemExit(
+                    f"step 4 (opt-in): expected '{proven_marker}' in output "
+                    "with --allow-lean-verified, not found."
+                )
+            if unproven_marker in combined:
                 raise SystemExit(
                     f"step 4 (opt-in): atom {atom_name} still reported "
                     "'unproven' under --allow-lean-verified."
