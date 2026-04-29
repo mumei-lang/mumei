@@ -1,0 +1,73 @@
+name: E2E Proof Chain (mumei → mumei-lean → mumei)
+
+# PR 5: regression gate for the cross-project Proof Certificate Chain.
+#
+# Verifies that:
+#   1. `mumei verify --proof-cert` produces a well-formed certificate.
+#   2. A mumei-lean-style certificate (z3_check_result = "lean_verified")
+#      is rejected by `mumei verify-cert` by default (backwards-compat).
+#   3. The same certificate is accepted as "proven" under
+#      `mumei verify-cert --allow-lean-verified`.
+#
+# CI runs the script with `--mock-lean`, substituting the schema-pinned
+# mock cert under tests/fixtures/. When `lake build` in mumei-lean
+# stabilises, drop the `--mock-lean` flag and add a step that builds
+# mumei-lean first.
+
+on:
+  pull_request:
+    paths:
+      - 'mumei-core/**'
+      - 'src/**'
+      - 'scripts/test_e2e_proof_chain.py'
+      - 'tests/fixtures/mock_lean_cert.json'
+      - '.github/workflows/e2e-proof-chain.yml'
+      - 'Cargo.toml'
+  push:
+    branches:
+      - develop
+  workflow_dispatch:
+
+jobs:
+  e2e-proof-chain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libz3-dev z3 libzstd-dev
+          # signed-by pattern matches verify-std.yml / release.yml.
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
+          codename=$(lsb_release -cs)
+          echo "deb http://apt.llvm.org/${codename}/ llvm-toolchain-${codename}-17 main" \
+            | sudo tee /etc/apt/sources.list.d/llvm-17.list > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y llvm-17-dev libclang-17-dev libpolly-17-dev
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-e2e-proof-chain-${{ hashFiles('Cargo.toml', '**/Cargo.toml') }}
+          restore-keys: |
+            cargo-e2e-proof-chain-
+
+      - name: Build mumei (release)
+        env:
+          LLVM_SYS_170_PREFIX: /usr/lib/llvm-17
+          LIBCLANG_PATH: /usr/lib/llvm-17/lib
+        run: cargo build --release
+
+      - name: Run E2E proof chain test (mock-lean)
+        env:
+          LLVM_SYS_170_PREFIX: /usr/lib/llvm-17
+          LIBCLANG_PATH: /usr/lib/llvm-17/lib
+        run: python scripts/test_e2e_proof_chain.py --mock-lean

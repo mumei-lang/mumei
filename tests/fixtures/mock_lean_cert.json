@@ -1,0 +1,22 @@
+{
+  "version": "1.0",
+  "timestamp": "2026-04-29T00:00:00Z",
+  "mumei_version": "0.2.0",
+  "z3_version": "mumei-lean (Lean 4.15.0 + mathlib4)",
+  "file": "tests/fixtures/pilot.mm",
+  "atoms": [
+    {
+      "name": "pilot_lemma",
+      "z3_check_result": "lean_verified",
+      "content_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "status": "verified",
+      "proof_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "dependencies": [],
+      "effects": [],
+      "requires": "n >= 0",
+      "ensures": "result == 0"
+    }
+  ],
+  "certificate_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+  "all_verified": true
+}
