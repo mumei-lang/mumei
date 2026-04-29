@@ -206,6 +206,14 @@ enum Command {
         #[arg(long)]
         allow_lean_verified: bool,
     },
+    // TODO(follow-up): `Run` and `Publish` do not yet accept
+    // `--allow-lean-verified`. They currently call `load_and_prepare` which
+    // hard-codes `allow_lean_verified=false`, so projects depending on
+    // mumei-lean-verified atoms will see those atoms as `"unproven"` during
+    // import resolution under `mumei run` / `mumei publish`. Add the flag to
+    // both subcommands and thread it through to
+    // `load_and_prepare_with_full_options` once the cross-project Proof
+    // Certificate Chain E2E test (PR 5) lands.
     /// P7-B: Build and run a mumei program as a native binary
     Run {
         /// Input .mm file

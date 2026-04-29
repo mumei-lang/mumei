@@ -828,6 +828,17 @@ pub fn resolve_manifest_dependencies_with_options(
 
 /// PR 2: `resolve_manifest_dependencies` with both `strict_imports` and
 /// `allow_lean_verified` opt-ins. See [`resolve_imports_with_full_options`].
+// TODO(follow-up): `strict_imports` is not propagated into the
+// `ResolverContext` used for sub-imports inside each dependency below
+// (path / git / registry). Each branch creates a fresh `ResolverContext`
+// and only sets `ctx.allow_lean_verified = allow_lean_verified;`, leaving
+// `ctx.strict_imports` at its default `false`. As a result, transitive
+// imports within a dependency are never subject to strict checking — only
+// the direct dependency atoms are (via `mark_dependency_atoms_with_cert`).
+// This mirrors pre-PR-2 behaviour, but should be revisited: either fully
+// propagate `strict_imports` here too, or document the asymmetry. Doing it
+// in this PR would change strict-mode semantics for existing users, so it
+// is intentionally deferred to a dedicated follow-up.
 pub fn resolve_manifest_dependencies_with_full_options(
     manifest: &crate::manifest::Manifest,
     project_dir: &Path,
