@@ -99,7 +99,8 @@ pub type BoxedEmitter = Box<dyn Emitter + Send + Sync>;
 ///
 /// - Linux:   `libmumei_emit_<name>.so`
 /// - macOS:   `libmumei_emit_<name>.dylib`
-/// - Windows: `libmumei_emit_<name>.dll`
+/// - Windows: `mumei_emit_<name>.dll` (no `lib` prefix — matches Rust
+///   `cdylib` output convention on Windows)
 ///
 /// # Plugin contract
 ///
@@ -123,17 +124,18 @@ pub type BoxedEmitter = Box<dyn Emitter + Send + Sync>;
 /// (e.g. `src/main.rs`'s `--emit` dispatch) can integrate the
 /// resolution path without waiting on the loader implementation.
 pub fn load_external_emitter(name: &str) -> MumeiResult<BoxedEmitter> {
-    let lib_filename = format!(
-        "libmumei_emit_{}{}",
-        name,
-        if cfg!(target_os = "windows") {
-            ".dll"
-        } else if cfg!(target_os = "macos") {
-            ".dylib"
-        } else {
-            ".so"
-        }
-    );
+    // Rust's `cdylib` output on Windows produces `<crate>.dll` *without*
+    // a `lib` prefix, while Linux/macOS keep the `lib` prefix. Match that
+    // convention so plugin authors can drop their compiled artefact in
+    // place without renaming.
+    let (prefix, ext) = if cfg!(target_os = "windows") {
+        ("", ".dll")
+    } else if cfg!(target_os = "macos") {
+        ("lib", ".dylib")
+    } else {
+        ("lib", ".so")
+    };
+    let lib_filename = format!("{}mumei_emit_{}{}", prefix, name, ext);
     let lib_path = crate::manifest::mumei_home()
         .join("emitters")
         .join(name)
