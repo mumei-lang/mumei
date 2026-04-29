@@ -5272,6 +5272,32 @@ impl VerificationMetrics {
     }
 }
 
+/// PR 1: Centralised Z3 solver tuning for atoms whose contracts mix
+/// `forall(i, …, arr[i] …)` quantifiers with `Array::store` updates.
+///
+/// We enable model-based quantifier instantiation (`smt.mbqi`) on the
+/// solver so that `forall(i, …, arr[i] …)` pattern triggers fire under
+/// post-store array states. `mbqi` is a module-level (`smt.*`) param so
+/// it must be set on the solver via `Params`, not on `Config` (which
+/// only accepts global Z3 parameters).
+///
+/// We deliberately do NOT also tune `qi.eager_threshold` here:
+/// empirically, the z3-rs binding (0.12) silently drops the surrounding
+/// solver assertions when an unrecognized solver param is set, which
+/// would erase the requires-side forall and make every quantified
+/// ensures fail. `mbqi` alone is enough to recover post-store ensures
+/// verification on top of the pattern extraction performed by
+/// `expr_to_z3` / `stmt_to_z3`.
+///
+/// Centralising this in a helper keeps the verifier's main z3 setup
+/// focused on the verification body and gives future tuning passes a
+/// single place to extend (e.g. per-atom `forall+store` heuristics).
+fn configure_array_quantifier_params(ctx: &Context, solver: &Solver) {
+    let mut params = z3::Params::new(ctx);
+    params.set_bool("mbqi", true);
+    solver.set_params(&params);
+}
+
 fn verify_inner(
     hir_atom: &HirAtom,
     output_dir: &Path,
@@ -5912,22 +5938,7 @@ fn verify_inner(
     let ctx = Context::new(&cfg);
     let solver = Solver::new(&ctx);
     if has_array_forall {
-        // Enable model-based quantifier instantiation so that
-        // `forall(i, …, arr[i] …)` pattern triggers fire under post-store
-        // array states. `mbqi` is a module-level (`smt.*`) param so it
-        // must be set on the solver via `Params`, not on `Config` (which
-        // only accepts global Z3 parameters).
-        //
-        // We deliberately do NOT also tune `qi.eager_threshold` here:
-        // empirically, the z3-rs binding (0.12) silently drops the
-        // surrounding solver assertions when an unrecognized solver
-        // param is set, which would erase the requires-side forall and
-        // make every quantified ensures fail. `mbqi` alone is enough to
-        // recover post-store ensures verification on top of the pattern
-        // extraction below.
-        let mut params = z3::Params::new(&ctx);
-        params.set_bool("mbqi", true);
-        solver.set_params(&params);
+        configure_array_quantifier_params(&ctx, &solver);
     }
 
     let int_sort = z3::Sort::int(&ctx);
