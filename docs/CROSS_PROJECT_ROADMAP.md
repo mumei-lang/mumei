@@ -162,11 +162,17 @@ mumei のコード生成バックエンドをプラグイン化し、LLVM IR 以
 - ✅ `VerifiedJsonEmitter` を第3のエミッターとして追加 (`--emit verified-json`)
 - ✅ `ProofBookEmitter` を第4のエミッターとして追加 (`--emit proof-book`) — 検証済み Atom から人間可読な Markdown 証明書ドキュメントを生成
 
-### Phase 3 (Future — ecosystem growth)
+### Phase 3 (🏃 In Progress — foundation)
 
-- 動的プラグインローディングまたはレジストリベースのエミッター検出
-- `mumei add --emitter wasm` スタイルの CLI で外部エミッターをインストール
-- Wasm ターゲット（現在保留中）を外部プラグインとして core に触れずに追加可能
+- 🏃 動的プラグインローディングのファウンデーション (Task 1-C):
+  - `mumei-core/src/emitter.rs` に `EmitTarget::External(String)` バリアントを追加し、CLI 不明文字列を外部プラグイン名として保持できるようにした。
+  - `ArtifactKind::Metadata` バリアントを追加し、`Source` / `Header` / `Binary` のいずれにも当てはまらないプラグイン由来サイドカー (Wasm component manifest, lean cert blob 等) のための分類軸を用意。
+  - `pub type BoxedEmitter = Box<dyn Emitter + Send + Sync>` 型エイリアスと `pub fn load_external_emitter(name: &str) -> MumeiResult<BoxedEmitter>` スタブを公開。スタブは `~/.mumei/emitters/<name>/libmumei_emit_<name>.{so,dylib,dll}` を `crate::manifest::mumei_home()` 経由で解決し、ファイルが無ければ "not found" エラー、有れば "Phase 3 plugin loader is not yet implemented" エラーを構造化メッセージで返す。`extern "C" fn mumei_create_emitter() -> *mut dyn Emitter` の C-ABI コントラクトを docstring に明記。
+  - `src/main.rs` の `--emit` 文字列マッチを拡張し、未知ターゲット文字列はまず `load_external_emitter(other)` にフォールバックし、成功時は `EmitTarget::External(other.to_string())` を返す。`dispatch_emit` にも `External(name)` 分岐を追加（実 dlopen は Phase 3 ローダー landing 時に挿入予定）。
+  - 単体テスト: `test_artifact_kind_metadata_distinct`、`test_emit_target_external_carries_name`、`test_load_external_emitter_missing_plugin_errors`。
+- ⏸ 動的ローダー本体 (`libloading` 経由の dlopen + ABI バージョニング + panic-safety wrapper) は別 PR で導入予定。
+- ⏸ `mumei add --emitter wasm` スタイルの CLI で外部エミッターをインストール
+- ⏸ Wasm ターゲット（現在保留中）を外部プラグインとして core に触れずに追加可能
 
 ### Design Decisions
 
@@ -689,7 +695,7 @@ SI-5 Autonomous Proliferation が 9 フェーズ全て ✅ Implemented / Complet
 | visualizer ヘルパ分離 (std_graph_lib.py) | mumei | ✅ Implemented (PR #154) | FastMCP lazy-import dance を排除、`mcp_server.py` / `visualizer/generate_graph.py` の両経路が直接 import |
 | VS Code Extension Marketplace 公開 | mumei | ✅ Published | `.github/workflows/publish-vscode.yml` 経由で [`mumei-lang.mumei`](https://marketplace.visualstudio.com/items?itemName=mumei-lang.mumei) を公開。`vscode-v*` タグ push で再発行可能 |
 | STDLIB_METRICS.md 時系列推移の表示 | mumei | ✅ Implemented | `scripts/generate_stdlib_metrics.py` が `git log` から過去 `docs(std): auto-update STDLIB_METRICS.md` コミットを遡って Summary 行を抽出し、`## History` テーブル (最大 20 行, 同日コミットは最新のみ) を出力。`--no-history` / `--stdout` では省略可能 |
-| trusted atom の削減 (Z3 Array store 追跡) | mumei | 🏃 In Progress | `std/list.mm::insertion_sort`, `tests/test_array_store.mm::test_array_store_loop`, `tests/test_verified_sort.mm::verify_noop_sort` / `verify_insertion_sort_skeleton` から `trusted` を除去 (PR #165 系列)。MIR move 解析の数値リテラル型推論 + `if/else` path 条件伝播 + ensures 内 `forall` の `arr[idx]` E-matching pattern 強化 + `smt.mbqi` の自動チューニング (PR 1 で `configure_array_quantifier_params` ヘルパに集約) で `forall + store` パターンを閉じる。`std/container/bounded_array.mm` と `std/container/verified_vector.mm` は既に全 atom が trusted-free。残る `std/list.mm::verified_insertion_sort` / `verified_merge_sort` は二重 while 内側ループの MIR move 解析 false-positive のため `trusted` を維持（Z3 検証は通る）。識別子に `trusted` を残す理由は move 解析の改善後に外せる旨をコメントで明記済み |
+| trusted atom の削減 (Z3 Array store 追跡) | mumei | ✅ Complete (sort 系) | Task 1-A で `std/list.mm::verified_insertion_sort` / `verified_merge_sort` から `trusted` を除去。`mumei-core/src/mir.rs::infer_hir_ty()` に `Expr::ArrayAccess => i64` のケースを追加して `let key = arr[i]` の Copy 推論を成立させ、二重 while 内側ループの MIR move 解析 false-positive を解消（`tests/test_nested_while_no_trusted.mm::nested_while_with_array_read_init` と `tests/test_verified_sort.mm::verify_insertion_sort_full` で回帰テスト）。`verified_insertion_sort` は OOB 推論用に `forall(i, 0, n, arr[i] >= 0)` を `requires` に追加（`verify_insertion_sort_skeleton` と同じイディオム）。配列の polymorphic 化 (`[T]`) が入ったタイミングで `infer_hir_ty()` の i64 ハードコードを generalise する `// TODO` を `mir.rs` に明記。残る `std/list.mm::fold_left` / `fold_min_index` / `fold_max_index` の `trusted` は `atom_ref` 契約展開・early-return ownership 解析の制限に起因し、本タスクの範囲外（既存の `// TODO` 通り将来課題）。 |
 
 ### Deferred
 
@@ -731,7 +737,7 @@ graph TD
 | Python ブリッジ | ✅ Implemented (mumei-lean PR #1) | `scripts/{expr_translator,ingest_cert,export_cert,bridge}.py` — mumei 契約式 → Lean `Prop` トランスレータ + cert ↔ `generated/*.lean` ↔ `.lean-cert.json` パイプライン |
 | pytest スイート + GitHub Actions CI | ✅ Implemented (mumei-lean PR #1) | 24 ケース。`lake build` ジョブは mathlib4 ブートストラップ中の暫定 `continue-on-error: true` |
 | 契約式トランスレータ拡張 (mathlib4 active 利用) | ⏸️ Deferred | 量化子・有限体・群論ライブラリを使った暗号プリミティブの証明。ブリッジ v1 は算術比較 + 論理結合 + 整数リテラルのみ |
-| mumei 側 `"lean_verified"` 認識 | ✅ Implemented (PR 2) | `verify_certificate(.., allow_lean_verified)` と `--allow-lean-verified` CLI フラグ (`build` / `verify` / `verify-cert`) を追加。デフォルトでは `"unsat"` のみ受付、フラグ付けで `"lean_verified"` も `"proven"` として認識 |
+| mumei 側 `"lean_verified"` 認識 | ✅ Implemented (PR 2 + Task 1-B) | `verify_certificate(.., allow_lean_verified)` と `--allow-lean-verified` CLI フラグ (`build` / `verify` / `verify-cert`) を追加。デフォルトでは `"unsat"` のみ受付、フラグ付けで `"lean_verified"` も `"proven"` として認識。Task 1-B で resolver の (a) `strict_imports` をマニフェスト dep 配下のサブ import (`path` / `git` / `registry` 全分岐) の `ResolverContext` にも伝播 (`test_strict_imports_propagated_to_sub_imports` で回帰)、(b) `allow_lean_verified` で `"lean_verified"` atom を `"proven"` として受理した際に `🔗 Lean-verified atom '{}' accepted as proven (--allow-lean-verified)` の audit ログを `eprintln!` に追加、(c) `mumei verify --proof-cert` 完了時に `z3_check_result == "unknown"` の atom 数を `ℹ️  N atom(s) returned 'unknown' from Z3. Consider running mumei-lean to discharge them.` として要約出力。 |
 | P8-B Counter-example Visualizer | ✅ Implemented (Plan 22) | LSP `relatedInformation` を活用した Z3 反例のインライン表示。mumei doc 拡張と同期して PR #167 でマージ |
 
 ---

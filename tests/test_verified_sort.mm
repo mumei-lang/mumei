@@ -65,3 +65,41 @@ body: {
         n
     }
 };
+
+// --- Test 3: 挿入ソート全体（trusted-free 版回帰）---
+// Task 1-A: `std/list.mm::verified_insertion_sort` から `trusted` を外した
+// 後の回帰として、std と同じ body / ensures を `tests/` 側にもミラー
+// しておく。`mir.rs::infer_hir_ty()` の `Expr::ArrayAccess => i64` 推論が
+// 退行すると、`let key = arr[i]` が Move 扱いになり inner-while の
+// `i = i + 1` が UseAfterMove false-positive を出すため、その早期検出
+// テストとして機能する。
+atom verify_insertion_sort_full(n: i64)
+requires: n >= 0 && forall(i, 0, n, arr[i] >= 0);
+ensures: result == n;
+body: {
+    if n <= 1 { n }
+    else {
+        let i = 1;
+        while i < n
+        invariant: i >= 1 && i <= n
+        decreases: n - i
+        {
+            let key = arr[i];
+            let j = i;
+            while j > 0
+            invariant: j >= 0 && j <= i
+            decreases: j
+            {
+                if arr[j - 1] > key {
+                    arr[j] = arr[j - 1];
+                    j = j - 1
+                } else {
+                    j = 0
+                }
+            };
+            arr[j] = key;
+            i = i + 1
+        };
+        n
+    }
+};
