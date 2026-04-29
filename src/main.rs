@@ -253,11 +253,24 @@ fn main() {
                 "rust-wrapper" => emitter::EmitTarget::RustWrapper,
                 "python-wrapper" => emitter::EmitTarget::PythonWrapper,
                 other => {
-                    eprintln!(
-                        "\u{274c} Error: Unknown emit target '{}'. Valid values: llvm-ir, c-header, verified-json, proof-book, proof-cert, binary, rust-wrapper, python-wrapper",
-                        other
-                    );
-                    std::process::exit(1);
+                    // Task 1-C: fall through to the Phase 3 external
+                    // emitter resolver so unknown CLI strings can map
+                    // to plugins under `~/.mumei/emitters/<name>/`.
+                    // We probe for the plugin eagerly here so users
+                    // get the same diagnostic whether the failure is
+                    // "no such target" or "plugin loader not yet
+                    // implemented".
+                    match emitter::load_external_emitter(other) {
+                        Ok(_emitter) => emitter::EmitTarget::External(other.to_string()),
+                        Err(err) => {
+                            eprintln!(
+                                "\u{274c} Error: Unknown emit target '{}'. Valid built-in values: llvm-ir, c-header, verified-json, proof-book, proof-cert, binary, rust-wrapper, python-wrapper.",
+                                other
+                            );
+                            eprintln!("  External plugin lookup failed: {}", err);
+                            std::process::exit(1);
+                        }
+                    }
                 }
             };
             cmd_build(
@@ -1802,6 +1815,17 @@ fn dispatch_emit(
             module_env,
             extern_blocks,
         ),
+        emitter::EmitTarget::External(name) => {
+            // Task 1-C / Phase 3: resolve the external plugin freshly per
+            // dispatch. The resolver is currently a foundation stub —
+            // it returns Err if the plugin file is missing, *or* if the
+            // file is present but the dynamic loader has not yet been
+            // wired up. Either way we surface the diagnostic via the
+            // standard MumeiResult propagation so users see the same
+            // error path as built-in targets.
+            let boxed = emitter::load_external_emitter(name)?;
+            boxed.emit(hir_atom, output_path, module_env, extern_blocks)
+        }
     }
 }
 
@@ -2099,6 +2123,10 @@ fn cmd_build(
                                     emitter::EmitTarget::LlvmIr => {
                                         artifact.kind != emitter::ArtifactKind::Source
                                     }
+                                    // Phase 3 plugins are responsible for their
+                                    // own ArtifactKind selection; we trust them
+                                    // and write everything they emit.
+                                    emitter::EmitTarget::External(_) => true,
                                     _ => true,
                                 };
                                 if should_write {
@@ -2112,15 +2140,18 @@ fn cmd_build(
                                     }
                                 }
                             }
-                            let target_desc = match emit_target {
-                                emitter::EmitTarget::LlvmIr => "LLVM IR",
-                                emitter::EmitTarget::CHeader => "C header",
-                                emitter::EmitTarget::VerifiedJson => "Verified JSON",
-                                emitter::EmitTarget::ProofBook => "Proof-Book",
-                                emitter::EmitTarget::ProofCert => "Proof-Cert",
-                                emitter::EmitTarget::Binary => "Binary",
-                                emitter::EmitTarget::RustWrapper => "Rust wrapper",
-                                emitter::EmitTarget::PythonWrapper => "Python wrapper",
+                            let target_desc: std::borrow::Cow<'static, str> = match emit_target {
+                                emitter::EmitTarget::LlvmIr => "LLVM IR".into(),
+                                emitter::EmitTarget::CHeader => "C header".into(),
+                                emitter::EmitTarget::VerifiedJson => "Verified JSON".into(),
+                                emitter::EmitTarget::ProofBook => "Proof-Book".into(),
+                                emitter::EmitTarget::ProofCert => "Proof-Cert".into(),
+                                emitter::EmitTarget::Binary => "Binary".into(),
+                                emitter::EmitTarget::RustWrapper => "Rust wrapper".into(),
+                                emitter::EmitTarget::PythonWrapper => "Python wrapper".into(),
+                                emitter::EmitTarget::External(name) => {
+                                    format!("external plugin '{}'", name).into()
+                                }
                             };
                             println!(
                                 "  ⚙️  [3/3] Tempering: Done. Compiled '{}' to {}.",
@@ -2255,6 +2286,7 @@ fn cmd_build(
                                 emitter::EmitTarget::LlvmIr => {
                                     artifact.kind != emitter::ArtifactKind::Source
                                 }
+                                emitter::EmitTarget::External(_) => true,
                                 _ => true,
                             };
                             if should_write {
@@ -2268,15 +2300,18 @@ fn cmd_build(
                                 }
                             }
                         }
-                        let target_desc = match emit_target {
-                            emitter::EmitTarget::LlvmIr => "LLVM IR",
-                            emitter::EmitTarget::CHeader => "C header",
-                            emitter::EmitTarget::VerifiedJson => "Verified JSON",
-                            emitter::EmitTarget::ProofBook => "Proof-Book",
-                            emitter::EmitTarget::ProofCert => "Proof-Cert",
-                            emitter::EmitTarget::Binary => "Binary",
-                            emitter::EmitTarget::RustWrapper => "Rust wrapper",
-                            emitter::EmitTarget::PythonWrapper => "Python wrapper",
+                        let target_desc: std::borrow::Cow<'static, str> = match emit_target {
+                            emitter::EmitTarget::LlvmIr => "LLVM IR".into(),
+                            emitter::EmitTarget::CHeader => "C header".into(),
+                            emitter::EmitTarget::VerifiedJson => "Verified JSON".into(),
+                            emitter::EmitTarget::ProofBook => "Proof-Book".into(),
+                            emitter::EmitTarget::ProofCert => "Proof-Cert".into(),
+                            emitter::EmitTarget::Binary => "Binary".into(),
+                            emitter::EmitTarget::RustWrapper => "Rust wrapper".into(),
+                            emitter::EmitTarget::PythonWrapper => "Python wrapper".into(),
+                            emitter::EmitTarget::External(name) => {
+                                format!("external plugin '{}'", name).into()
+                            }
                         };
                         println!(
                             "  ⚙️  [3/3] Tempering: Done. Compiled '{}' to {}.",
