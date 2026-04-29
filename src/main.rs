@@ -253,11 +253,21 @@ fn main() {
                 "rust-wrapper" => emitter::EmitTarget::RustWrapper,
                 "python-wrapper" => emitter::EmitTarget::PythonWrapper,
                 other => {
-                    eprintln!(
-                        "\u{274c} Error: Unknown emit target '{}'. Valid values: llvm-ir, c-header, verified-json, proof-book, proof-cert, binary, rust-wrapper, python-wrapper",
-                        other
-                    );
-                    std::process::exit(1);
+                    // Phase 3 (foundation): give external emitter plugins a
+                    // chance to handle the unknown name before we error
+                    // out. `load_external_emitter` only inspects the
+                    // filesystem; we surface its error via the existing
+                    // CLI exit path so the user sees the search list.
+                    match emitter::load_external_emitter(other) {
+                        Ok(_) => emitter::EmitTarget::External(other.to_string()),
+                        Err(e) => {
+                            eprintln!(
+                                "\u{274c} Error: Unknown emit target '{}'. Valid values: llvm-ir, c-header, verified-json, proof-book, proof-cert, binary, rust-wrapper, python-wrapper.\n   {}",
+                                other, e
+                            );
+                            std::process::exit(1);
+                        }
+                    }
                 }
             };
             cmd_build(
@@ -1803,6 +1813,12 @@ fn dispatch_emit(
             module_env,
             extern_blocks,
         ),
+        emitter::EmitTarget::External(name) => emitter::load_external_emitter(name)?.emit(
+            hir_atom,
+            output_path,
+            module_env,
+            extern_blocks,
+        ),
     }
 }
 
@@ -2113,7 +2129,7 @@ fn cmd_build(
                                     }
                                 }
                             }
-                            let target_desc = match emit_target {
+                            let target_desc: &str = match emit_target {
                                 emitter::EmitTarget::LlvmIr => "LLVM IR",
                                 emitter::EmitTarget::CHeader => "C header",
                                 emitter::EmitTarget::VerifiedJson => "Verified JSON",
@@ -2122,6 +2138,7 @@ fn cmd_build(
                                 emitter::EmitTarget::Binary => "Binary",
                                 emitter::EmitTarget::RustWrapper => "Rust wrapper",
                                 emitter::EmitTarget::PythonWrapper => "Python wrapper",
+                                emitter::EmitTarget::External(name) => name.as_str(),
                             };
                             println!(
                                 "  ⚙️  [3/3] Tempering: Done. Compiled '{}' to {}.",
@@ -2269,7 +2286,7 @@ fn cmd_build(
                                 }
                             }
                         }
-                        let target_desc = match emit_target {
+                        let target_desc: &str = match emit_target {
                             emitter::EmitTarget::LlvmIr => "LLVM IR",
                             emitter::EmitTarget::CHeader => "C header",
                             emitter::EmitTarget::VerifiedJson => "Verified JSON",
@@ -2278,6 +2295,7 @@ fn cmd_build(
                             emitter::EmitTarget::Binary => "Binary",
                             emitter::EmitTarget::RustWrapper => "Rust wrapper",
                             emitter::EmitTarget::PythonWrapper => "Python wrapper",
+                            emitter::EmitTarget::External(name) => name.as_str(),
                         };
                         println!(
                             "  ⚙️  [3/3] Tempering: Done. Compiled '{}' to {}.",

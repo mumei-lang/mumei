@@ -162,11 +162,17 @@ mumei のコード生成バックエンドをプラグイン化し、LLVM IR 以
 - ✅ `VerifiedJsonEmitter` を第3のエミッターとして追加 (`--emit verified-json`)
 - ✅ `ProofBookEmitter` を第4のエミッターとして追加 (`--emit proof-book`) — 検証済み Atom から人間可読な Markdown 証明書ドキュメントを生成
 
-### Phase 3 (Future — ecosystem growth)
+### Phase 3 — 🏃 In Progress (foundation)
 
-- 動的プラグインローディングまたはレジストリベースのエミッター検出
-- `mumei add --emitter wasm` スタイルの CLI で外部エミッターをインストール
-- Wasm ターゲット（現在保留中）を外部プラグインとして core に触れずに追加可能
+- 🏃 動的プラグインローディングの土台 (Task 1-C):
+  - `EmitTarget::External(String)` を追加し、未知の `--emit <name>` を組み込みターゲットの一覧で弾く前に `load_external_emitter` 経由で解決を試みる
+  - `ArtifactKind::Metadata` を追加し、ソース／ヘッダ以外のサイドカー (`verified.json`, proof bundle 等) を正しく分類できるようにする
+  - `BoxedEmitter = Box<dyn Emitter + Send + Sync>` 型エイリアスを追加し、外部エミッターを統一的に dispatch できるよう準備
+  - `load_external_emitter(name)` スタブを追加。`~/.mumei/emitters/{name}/libmumei_emit_{name}.{so,dylib}` / `mumei_emit_{name}.dll` を探索し、未実装である旨と検索パスを含むエラーメッセージを返す。期待する C-ABI シンボル `extern "C" fn mumei_create_emitter() -> *mut dyn Emitter` を docstring に明記
+  - `dispatch_emit` で `EmitTarget::External(name)` を `load_external_emitter` 経由でルーティング（現状は常にエラー、`libloading` 統合は次フェーズ）
+- ⏸️ `libloading` クレートの導入と `dlopen` 実装（次フェーズ）
+- ⏸️ `mumei add --emitter wasm` スタイルの CLI で外部エミッターをインストール
+- ⏸️ Wasm ターゲット（現在保留中）を外部プラグインとして core に触れずに追加可能
 
 ### Design Decisions
 
