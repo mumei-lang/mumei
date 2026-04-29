@@ -415,11 +415,18 @@ body: {
 //   要求する用途には、下記の `verified_insertion_sort_identity`
 //   (sorted-in → sorted-out の証明可能な identity 版) を使用すること。
 //
-//   `trusted` は二重 while 内側ループでの `i = i + 1` の MIR move 解析
-//   false-positive（`insertion_sort` / `test_array_store_loop` と同根）を
-//   回避する目的で残している。move 解析が改善されたら `trusted` を外せる。
-trusted atom verified_insertion_sort(n: i64)
-requires: n >= 0;
+//   旧来は二重 while 内側ループの `let key = arr[i]` で move 解析が
+//   false-positive を出していたため `trusted` を付けていたが、
+//   `mir.rs::infer_hir_ty()` が `Expr::ArrayAccess` から `i64` を推論し
+//   `Movability::Copy` を立てるようになったため `trusted` 不要で
+//   要素数保存契約 (`result == n`) が証明できる。
+//
+//   `forall(i, 0, n, arr[i] >= 0)` を requires に追加することで
+//   `arr[i]` / `arr[j]` の OOB 推論に必要な `len_arr >= n + 1` を
+//   Z3 に提示している（`tests/test_verified_sort.mm` の
+//   `verify_insertion_sort_skeleton` と同じイディオム）。
+atom verified_insertion_sort(n: i64)
+requires: n >= 0 && forall(i, 0, n, arr[i] >= 0);
 ensures: result == n;
 body: {
     if n <= 1 { n }
@@ -465,9 +472,13 @@ body: n;
 //
 // 検証する性質（方針 A）: 要素数保存 (result == n) のみ。
 // 「出力が昇順」の保証はソート本体が省略されているため成立せず、
-// 偽の `trusted` 保証を避けて ensures から外した。`trusted` は再帰
-// async atom 解析の制限を回避するために残している。
-trusted atom verified_merge_sort(n: i64)
+// 偽の `trusted` 保証を避けて ensures から外した。
+// 旧来は再帰呼び出し結果の `let left = …` / `let right = …` で
+// move 解析が false-positive を出していたため `trusted` を付けていたが、
+// `mir.rs::infer_hir_ty()` が呼び出し戻り値型から `i64` を推論し
+// `Movability::Copy` を立てるようになったため `trusted` 不要で
+// 要素数保存契約 (`result == n`) が証明できる。
+atom verified_merge_sort(n: i64)
 requires: n >= 0;
 ensures: result == n;
 body: {

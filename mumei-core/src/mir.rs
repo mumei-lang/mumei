@@ -371,6 +371,12 @@ impl LowerCtx {
                 // here (e.g. `"[i64]"`) would classify the local as Move
                 // and cause false-positive UseAfterMove on idioms like
                 // `let key = arr[i]`.
+                //
+                // mumei arrays are currently `[i64]` only, so hard-coding
+                // the element type here is sound. When polymorphic arrays
+                // (`[T]`) are introduced this branch must instead resolve
+                // the array variable's element type from the local's
+                // `[T]` annotation.
                 Some("i64".to_string())
             }
             HirExpr::IfThenElse {
