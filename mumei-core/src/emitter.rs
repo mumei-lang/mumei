@@ -14,6 +14,7 @@
 use crate::hir::HirAtom;
 use crate::parser::ExternBlock;
 use crate::verification::{ModuleEnv, MumeiError, MumeiResult};
+use std::ffi::c_void;
 use std::path::Path;
 
 // =============================================================================
@@ -92,6 +93,51 @@ pub const EMITTER_ABI_VERSION: u32 = 1;
 /// future build pipeline.
 pub type BoxedEmitter = Box<dyn Emitter + Send + Sync>;
 
+#[repr(C)]
+struct RawEmitterTraitObject {
+    data: *mut c_void,
+    vtable: *mut c_void,
+}
+
+const _: () = {
+    assert!(std::mem::size_of::<BoxedEmitter>() == std::mem::size_of::<RawEmitterTraitObject>());
+    assert!(std::mem::align_of::<BoxedEmitter>() == std::mem::align_of::<RawEmitterTraitObject>());
+};
+
+/// C-compatible handle returned by `mumei_create_emitter`.
+///
+/// Rust trait objects are fat pointers, so plugins return their data
+/// pointer and vtable pointer explicitly instead of returning
+/// `*mut dyn Emitter` across the `extern "C"` boundary.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct EmitterPluginHandle {
+    pub data: *mut c_void,
+    pub vtable: *mut c_void,
+}
+
+impl EmitterPluginHandle {
+    pub fn from_boxed(emitter: BoxedEmitter) -> Self {
+        let raw: RawEmitterTraitObject = unsafe { std::mem::transmute(emitter) };
+        Self {
+            data: raw.data,
+            vtable: raw.vtable,
+        }
+    }
+
+    fn is_null(&self) -> bool {
+        self.data.is_null() || self.vtable.is_null()
+    }
+
+    unsafe fn into_boxed(self) -> BoxedEmitter {
+        let raw = RawEmitterTraitObject {
+            data: self.data,
+            vtable: self.vtable,
+        };
+        unsafe { std::mem::transmute(raw) }
+    }
+}
+
 struct PanicSafeEmitter {
     inner: BoxedEmitter,
     _lib: libloading::Library,
@@ -143,8 +189,7 @@ impl Emitter for PanicSafeEmitter {
 /// /// Returns a heap-allocated emitter owned by the caller. The host frees the box via
 /// /// `drop` when the build finishes.
 /// #[no_mangle]
-/// pub extern "C" fn mumei_create_emitter(
-/// ) -> *mut (dyn mumei_core::emitter::Emitter + Send + Sync);
+/// pub extern "C" fn mumei_create_emitter() -> mumei_core::emitter::EmitterPluginHandle;
 /// ```
 pub fn load_external_emitter(name: &str) -> MumeiResult<BoxedEmitter> {
     // Rust's `cdylib` output on Windows produces `<crate>.dll` *without*
@@ -198,23 +243,22 @@ pub fn load_external_emitter(name: &str) -> MumeiResult<BoxedEmitter> {
             )));
         }
 
-        let raw = {
-            let create: libloading::Symbol<
-                unsafe extern "C" fn() -> *mut (dyn Emitter + Send + Sync),
-            > = lib.get(b"mumei_create_emitter").map_err(|e| {
-                MumeiError::verification(format!(
-                    "External emitter '{name}' does not export mumei_create_emitter: {e}"
-                ))
-            })?;
+        let handle = {
+            let create: libloading::Symbol<unsafe extern "C" fn() -> EmitterPluginHandle> =
+                lib.get(b"mumei_create_emitter").map_err(|e| {
+                    MumeiError::verification(format!(
+                        "External emitter '{name}' does not export mumei_create_emitter: {e}"
+                    ))
+                })?;
             create()
         };
-        if raw.is_null() {
+        if handle.is_null() {
             return Err(MumeiError::verification(format!(
-                "External emitter '{name}' returned null from mumei_create_emitter"
+                "External emitter '{name}' returned a null handle from mumei_create_emitter"
             )));
         }
 
-        let emitter = Box::from_raw(raw);
+        let emitter = handle.into_boxed();
         let wrapped = PanicSafeEmitter {
             inner: emitter,
             _lib: lib,
@@ -639,6 +683,20 @@ mod tests {
     #[test]
     fn test_emitter_abi_version_constant() {
         assert_eq!(EMITTER_ABI_VERSION, 1);
+    }
+
+    #[test]
+    fn test_emitter_plugin_handle_round_trips_boxed_emitter() {
+        let handle = EmitterPluginHandle::from_boxed(Box::new(CHeaderEmitter));
+        assert!(!handle.is_null());
+        let boxed = unsafe { handle.into_boxed() };
+        let hir = make_hir_atom("handle_round_trip", vec![], "true", "true", None);
+        let module_env = ModuleEnv::new();
+        let artifacts = boxed
+            .emit(&hir, Path::new("/tmp/handle_round_trip"), &module_env, &[])
+            .expect("round-tripped emitter should remain callable");
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].kind, ArtifactKind::Header);
     }
 
     struct PanickingEmitter;

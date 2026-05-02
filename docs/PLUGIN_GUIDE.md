@@ -28,14 +28,14 @@ mumei-core = { path = "../mumei/mumei-core" }
 Every plugin must export:
 
 - `mumei_emitter_abi_version() -> u32`
-- `mumei_create_emitter() -> *mut (dyn Emitter + Send + Sync)`
+- `mumei_create_emitter() -> EmitterPluginHandle`
 
 The ABI version must match `mumei_core::emitter::EMITTER_ABI_VERSION`.
 
 ## No-op sample plugin
 
 ```rust
-use mumei_core::emitter::{Artifact, Emitter, EMITTER_ABI_VERSION};
+use mumei_core::emitter::{Artifact, BoxedEmitter, Emitter, EmitterPluginHandle, EMITTER_ABI_VERSION};
 use mumei_core::hir::HirAtom;
 use mumei_core::parser::ExternBlock;
 use mumei_core::verification::{ModuleEnv, MumeiResult};
@@ -61,10 +61,13 @@ pub extern "C" fn mumei_emitter_abi_version() -> u32 {
 }
 
 #[no_mangle]
-pub extern "C" fn mumei_create_emitter() -> *mut (dyn Emitter + Send + Sync) {
-    Box::into_raw(Box::new(NoopEmitter))
+pub extern "C" fn mumei_create_emitter() -> EmitterPluginHandle {
+    let emitter: BoxedEmitter = Box::new(NoopEmitter);
+    EmitterPluginHandle::from_boxed(emitter)
 }
 ```
+
+`EmitterPluginHandle` is a `#[repr(C)]` two-pointer handle carrying the trait object's data and vtable pointers explicitly. Do not export `*mut dyn Emitter` directly across the C ABI boundary.
 
 ## Build and install
 

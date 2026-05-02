@@ -168,8 +168,8 @@ mumei のコード生成バックエンドをプラグイン化し、LLVM IR 以
   - `mumei-core/src/emitter.rs` に `EmitTarget::External(String)` バリアントを追加し、CLI 不明文字列を外部プラグイン名として保持できるようにした。
   - `ArtifactKind::Metadata` バリアントを追加し、`Source` / `Header` / `Binary` のいずれにも当てはまらないプラグイン由来サイドカー (Wasm component manifest, lean cert blob 等) のための分類軸を用意。
   - `pub type BoxedEmitter = Box<dyn Emitter + Send + Sync>` 型エイリアスと `pub fn load_external_emitter(name: &str) -> MumeiResult<BoxedEmitter>` を公開。`~/.mumei/emitters/<name>/libmumei_emit_<name>.{so,dylib,dll}` を `crate::manifest::mumei_home()` 経由で解決し、`libloading` で実 dlopen を行う。
-  - プラグインは `mumei_emitter_abi_version() -> u32` と `mumei_create_emitter() -> *mut (dyn Emitter + Send + Sync)` を export する。ホスト側は `EMITTER_ABI_VERSION` を検証し、`PanicSafeEmitter` で `emit()` 中の panic を `MumeiError` に変換する。
-  - `src/main.rs` の `--emit` 文字列マッチを拡張し、未知ターゲット文字列はまず `load_external_emitter(other)` にフォールバックし、成功時は `EmitTarget::External(other.to_string())` を返す。`dispatch_emit` にも `External(name)` 分岐を追加。
+  - プラグインは `mumei_emitter_abi_version() -> u32` と `mumei_create_emitter() -> EmitterPluginHandle` を export する。ホスト側は `EMITTER_ABI_VERSION` を検証し、C-compatible な2ポインタ handle から trait object を復元して、`PanicSafeEmitter` で `emit()` 中の panic を `MumeiError` に変換する。
+  - `src/main.rs` の `--emit` 文字列マッチを拡張し、未知ターゲット文字列は `EmitTarget::External(other.to_string())` として保持する。`cmd_build` は外部 emitter を build ごとに1回だけロードし、`dispatch_emit` の `External(name)` 分岐へ再利用して渡す。
   - 単体テスト: `test_artifact_kind_metadata_distinct`、`test_emit_target_external_carries_name`、`test_load_external_emitter_missing_plugin_errors`、`test_emitter_abi_version_constant`、`test_panic_safe_emitter_catches_panic`。
 - ✅ 動的ローダー本体 (`libloading` 経由の dlopen + ABI バージョニング + panic-safety wrapper) を実装。
 - ⏸ `mumei add --emitter wasm` スタイルの CLI で外部エミッターをインストール
