@@ -32,7 +32,7 @@ If Z3 is missing, commands exit immediately with "Z3 solver not found" — no pa
 | `mumei verify-cert <cert.json> <file.mm>` | Verify cert against current source |
 | `mumei build <file.mm>` | Build (verify + compile to LLVM IR) |
 | `mumei build --emit proof-cert <file.mm>` | Note: `--emit proof-cert` dispatches to `ProofCert` emit target but returns empty artifacts. Use `verify --proof-cert` instead for cert generation. |
-| `mumei build --emit <unknown_name> <file.mm>` | Unknown emit targets fall through to `emitter::load_external_emitter`, which probes `~/.mumei/emitters/<name>/libmumei_emit_<name>.{so,dylib,dll}` (no `lib` prefix on Windows — matches Rust `cdylib` convention). When absent, exits 1 with stderr beginning `❌ Error: Unknown emit target …` and an external plugin lookup failure. |
+| `mumei build --emit <unknown_name> <file.mm>` | Unknown emit targets fall through to `emitter::load_external_emitter`, which checks `~/.mumei/emitters/<name>/libmumei_emit_<name>.{so,dylib,dll}` (no `lib` prefix on Windows — matches Rust `cdylib` convention). When absent, exits 1 with stderr beginning `❌ Error: Unknown emit target …` and an external plugin lookup failure. |
 | `mumei publish` | Publish current project to local registry (requires `mumei.toml`) |
 | `mumei add <pkg>` | Add dependency from registry (requires `mumei.toml`) |
 | `mumei verify --strict-imports <file.mm>` | Strict import mode |
@@ -45,9 +45,9 @@ If Z3 is missing, commands exit immediately with "Z3 solver not found" — no pa
 - `examples/import_test/main.mm` — Imports `lib/math_utils.mm`, good for import/dependency testing.
 - `examples/import_test/lib/math_utils.mm` — 2 simple atoms (`safe_add`, `safe_double`), all verify successfully. Good for generating clean certificates.
 - `tests/test_cross_atom_chain.mm` — Effect system + chained atom composition.
-- `tests/test_nested_while_no_trusted.mm` — Regression for `Expr::ArrayAccess => i64` MIR inference (`let key = arr[i]` inside nested `while`). A regression in `mir.rs::infer_hir_ty()` would fire `UseAfterMove` here.
+- `tests/test_nested_while_no_trusted.mm` — Regression for `Expr::ArrayAccess => i64` MIR inference (`let key = arr[i]` inside nested `while`).
 - `tests/test_verified_sort.mm` — Mirrors `std/list.mm::verified_insertion_sort` without `trusted`; same regression target as above plus the `forall(i, 0, n, arr[i] >= 0)` Z3-bounds idiom.
-- `tests/test_polymorphic_array.mm` — Polymorphic `[T]` array verification fixture. Use this after parser/MIR/Z3 array changes. It should verify 5 atoms: legacy untyped/i64 array access, `[f64]` reads, `[f64]` stores of an integer literal, `[bool]` reads/equality, and `[i64]` element inference.
+- `tests/test_polymorphic_array.mm` — Polymorphic `[T]` array verification fixture. Use this after parser/MIR/Z3 array changes and external emitter plugin-loader changes. It should verify 5 atoms: legacy untyped/i64 array access, `[f64]` reads, `[f64]` stores of an integer literal, `[bool]` reads/equality, and `[i64]` element inference.
 - `tests/test_verified_ffi.mm` — Existing scalar `f64` FFI regression fixture. Useful when changes touch f64/Real/Float verification semantics.
 
 ## Testing Flows
@@ -72,6 +72,41 @@ Expected assertions:
 - Output does not include `skipped`, `failed`, a Z3 sort/store mismatch, or `Array store value must be real`.
 
 The `test_f64_array_store_int_literal` atom is the adversarial case for storing an integer literal such as `42` into a `[f64]` array. If Int-to-Real coercion before Z3 `array.store` is broken, this case may fail with a sort mismatch.
+
+### External Emitter Plugin Loader
+
+Use this flow when changes touch `mumei-core/src/emitter.rs`, external `--emit <name>` dispatch, plugin ABI (`EmitterPluginHandle`), or plugin library lifetime/reload behavior.
+
+1. Build a temporary Rust `cdylib` plugin whose crate name is `mumei_emit_counting`, with:
+   - `mumei_emitter_abi_version() -> EMITTER_ABI_VERSION`
+   - `mumei_create_emitter() -> EmitterPluginHandle`
+   - a factory side effect that appends one line to `/home/ubuntu/mumei-plugin-test/factory.log`
+   - an `emit()` implementation that returns one `ArtifactKind::Metadata` marker named `format!("{}.counting.marker", output_path.display())` containing `counting:<atom_name>`
+2. Install the compiled Linux artifact at the exact loader path:
+   ```bash
+   mkdir -p /home/ubuntu/.mumei/emitters/counting
+   cp /home/ubuntu/mumei-plugin-test/plugin/target/release/libmumei_emit_counting.so \
+     /home/ubuntu/.mumei/emitters/counting/libmumei_emit_counting.so
+   ```
+3. Run the five-atom fixture:
+   ```bash
+   LLVM_SYS_170_PREFIX=/usr/lib/llvm-17 /home/ubuntu/repos/mumei/target/debug/mumei \
+     build /home/ubuntu/repos/mumei/tests/test_polymorphic_array.mm \
+     --emit counting \
+     -o /home/ubuntu/mumei-plugin-test/out/result
+   ```
+4. Expected assertions:
+   - command exits 0
+   - output includes `Blade forged successfully with 5 atoms`
+   - output includes `Compiled '<atom>' to external plugin 'counting'.` for all five atoms in `tests/test_polymorphic_array.mm`
+   - marker files exist at `/home/ubuntu/mumei-plugin-test/out/result_<atom>.counting.marker`
+   - every marker contains exact text `counting:<atom>`
+   - `wc -l /home/ubuntu/mumei-plugin-test/factory.log` is exactly `1`
+   - combined output does not contain `Unknown emit target`, `plugin loader is not yet implemented`, `ABI version mismatch`, or `does not export mumei_create_emitter`
+
+The factory count is the adversarial assertion: a broken eager CLI probe plus per-atom reload may produce 6 calls for this fixture; per-atom reload alone may produce 5; the fixed behavior should produce exactly 1.
+
+For the negative control, run the same `build` with `--emit definitely_missing_phase3_plugin`. It should exit non-zero and stderr should include the plugin name plus the `.mumei/emitters` expected install path.
 
 ### Scalar `f64` Regression Verification
 
