@@ -49,6 +49,15 @@ The repository is a Cargo workspace with 3 library crates + 1 CLI binary:
 
 ---
 
+
+## Type System Notes
+
+Type annotations include primitive scalar types (`i64`, `f64`, `bool`, `Str`), refined types registered in `ModuleEnv`, generic type references such as `Stack<i64>`, higher-order `atom_ref(...) -> ...` types, and polymorphic array types written as `[T]`. Array annotations preserve their element type through parsing and MIR inference: `[i64]` accesses produce `i64`, `[f64]` accesses produce `f64`, and `[bool]` accesses produce `bool`. Untyped legacy array accesses such as `arr[i]` still default to `i64` for backward compatibility with existing `std/list.mm` contracts and `forall(i, 0, n, arr[i] >= 0)` patterns.
+
+During Z3 verification, array indices use `Int` sort and the array element sort is selected from the declared element type: `Int` for `[i64]`, `Real` for `[f64]`, and `Bool` for `[bool]`.
+
+---
+
 ## ModuleEnv
 
 Zero global state. All definitions in one struct:

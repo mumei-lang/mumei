@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs;
 use std::path::Path;
-use z3::ast::{Array, Ast, Bool, Dynamic, Float, Int, String as Z3String};
+use z3::ast::{Array, Ast, Bool, Dynamic, Float, Int, Real, String as Z3String};
 use z3::{Config, Context, SatResult, Solver};
 
 /// Word-boundary-aware replacement of the placeholder `v` in constraint strings.
@@ -1592,10 +1592,9 @@ pub fn build_contradiction_feedback(
 /// Default constraint budget per atom (max number of solver.assert() calls).
 pub const DEFAULT_CONSTRAINT_BUDGET: usize = 1000;
 
-/// 検証時に共有するコンテキスト（ctx, arr, module_env を束ねて引数を削減）
+/// 検証時に共有するコンテキスト（ctx, module_env を束ねて引数を削減）
 struct VCtx<'a> {
     ctx: &'a Context,
-    arr: &'a Array<'a>,
     module_env: &'a ModuleEnv,
     /// Phase B call_with_contract: 現在検証中の atom への参照。
     /// CallRef の動的ケース（パラメトリック関数型）で、呼び出し先の関数パラメータに
@@ -1629,6 +1628,111 @@ struct VCtx<'a> {
     /// implied by being in the `else` of `if n <= 1`) participate in the
     /// satisfiability query without leaking into sibling branches.
     path_cond_stack: std::cell::RefCell<Vec<Bool<'a>>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArrayElementSort {
+    Int,
+    Real,
+    Bool,
+}
+
+fn array_element_type_from_annotation(type_name: Option<&str>, module_env: &ModuleEnv) -> String {
+    let Some(ty) = type_name else {
+        return "i64".to_string();
+    };
+    if ty.starts_with('[') && ty.ends_with(']') {
+        module_env.resolve_base_type(ty[1..ty.len() - 1].trim())
+    } else {
+        "i64".to_string()
+    }
+}
+
+fn array_element_type_name(name: &str, vc: &VCtx<'_>) -> String {
+    vc.current_atom
+        .and_then(|atom| atom.params.iter().find(|param| param.name == name))
+        .and_then(|param| param.type_name.as_deref())
+        .map(|ty| array_element_type_from_annotation(Some(ty), vc.module_env))
+        .unwrap_or_else(|| "i64".to_string())
+}
+
+fn array_element_sort_from_type(type_name: &str) -> ArrayElementSort {
+    match type_name {
+        "f64" => ArrayElementSort::Real,
+        "bool" => ArrayElementSort::Bool,
+        _ => ArrayElementSort::Int,
+    }
+}
+
+fn array_element_sort(name: &str, vc: &VCtx<'_>) -> ArrayElementSort {
+    array_element_sort_from_type(&array_element_type_name(name, vc))
+}
+
+fn real_from_f64<'a>(ctx: &'a Context, value: f64) -> Real<'a> {
+    let formatted = value.to_string();
+    if let Some((num, frac)) = formatted.split_once('.') {
+        let mut denominator = String::from("1");
+        denominator.extend(std::iter::repeat_n('0', frac.len()));
+        let numerator = format!("{}{}", num, frac);
+        Real::from_real_str(ctx, &numerator, &denominator)
+            .unwrap_or_else(|| Real::from_real(ctx, 0, 1))
+    } else {
+        Real::from_real_str(ctx, &formatted, "1").unwrap_or_else(|| Real::from_real(ctx, 0, 1))
+    }
+}
+
+fn z3_array_for_sort<'a>(ctx: &'a Context, name: &str, sort: ArrayElementSort) -> Array<'a> {
+    let int_sort = z3::Sort::int(ctx);
+    match sort {
+        ArrayElementSort::Int => Array::new_const(ctx, name, &int_sort, &int_sort),
+        ArrayElementSort::Real => {
+            let real_sort = z3::Sort::real(ctx);
+            Array::new_const(ctx, name, &int_sort, &real_sort)
+        }
+        ArrayElementSort::Bool => {
+            let bool_sort = z3::Sort::bool(ctx);
+            Array::new_const(ctx, name, &int_sort, &bool_sort)
+        }
+    }
+}
+
+fn z3_array_for_name<'a>(vc: &VCtx<'a>, name: &str) -> Array<'a> {
+    z3_array_for_sort(vc.ctx, name, array_element_sort(name, vc))
+}
+
+fn z3_dynamic_array<'a>(vc: &VCtx<'a>, name: &str, env: &Env<'a>) -> Array<'a> {
+    let arr_key = format!("__z3_arr_{}", name);
+    env.get(&arr_key)
+        .and_then(|d| d.as_array())
+        .unwrap_or_else(|| z3_array_for_name(vc, name))
+}
+
+fn param_z3_value<'a>(
+    ctx: &'a Context,
+    name: &str,
+    type_name: Option<&str>,
+    module_env: &ModuleEnv,
+) -> Dynamic<'a> {
+    let base = type_name
+        .map(|t| module_env.resolve_base_type(t))
+        .unwrap_or_else(|| "i64".to_string());
+    if type_name.is_some_and(|ty| ty.starts_with('[') && ty.ends_with(']')) {
+        z3_array_for_sort(
+            ctx,
+            name,
+            array_element_sort_from_type(&array_element_type_from_annotation(
+                type_name, module_env,
+            )),
+        )
+        .into()
+    } else {
+        match base.as_str() {
+            "f64" => Real::new_const(ctx, name).into(),
+            "Str" => Z3String::new_const(ctx, name).into(),
+            "bool" => Bool::new_const(ctx, name).into(),
+            _ => Int::new_const(ctx, name).into(),
+        }
+    }
 }
 
 impl<'a> VCtx<'a> {
@@ -2627,11 +2731,8 @@ pub fn verify_impl(
         let substituted = substitute_method_calls(law_expr, &method_body_map, &method_param_names);
 
         // シンボリック変数で law を検証
-        let int_sort = z3::Sort::int(&ctx);
-        let arr = Array::new_const(&ctx, "arr", &int_sort, &int_sort);
         let vc = VCtx {
             ctx: &ctx,
-            arr: &arr,
             module_env,
             current_atom: None,
             linearity_ctx: None,
@@ -4026,11 +4127,8 @@ fn verify_atom_invariant(
     let ctx = Context::new(&cfg);
     let solver = Solver::new(&ctx);
 
-    let int_sort = z3::Sort::int(&ctx);
-    let arr = Array::new_const(&ctx, "arr", &int_sort, &int_sort);
     let vc = VCtx {
         ctx: &ctx,
-        arr: &arr,
         module_env,
         current_atom: Some(atom),
         linearity_ctx: None,
@@ -4045,17 +4143,12 @@ fn verify_atom_invariant(
 
     // パラメータをシンボリック変数として登録
     for param in &atom.params {
-        let base = param
-            .type_name
-            .as_deref()
-            .map(|t| module_env.resolve_base_type(t))
-            .unwrap_or_else(|| "i64".to_string());
-        let var: Dynamic = match base.as_str() {
-            "f64" => Float::new_const(&ctx, param.name.as_str(), 11, 53).into(),
-            // Plan 9: Str parameters as Z3 String Sort
-            "Str" => Z3String::new_const(&ctx, param.name.as_str()).into(),
-            _ => Int::new_const(&ctx, param.name.as_str()).into(),
-        };
+        let var = param_z3_value(
+            &ctx,
+            param.name.as_str(),
+            param.type_name.as_deref(),
+            module_env,
+        );
         env.insert(param.name.clone(), var);
 
         // 精緻型制約も適用
@@ -5947,8 +6040,6 @@ fn verify_inner(
         configure_array_quantifier_params(&ctx, &solver);
     }
 
-    let int_sort = z3::Sort::int(&ctx);
-    let arr = Array::new_const(&ctx, "arr", &int_sort, &int_sort);
     // linearity_ctx is wrapped in RefCell so expr_to_z3/stmt_to_z3 can mutate it
     // without requiring signature changes to every recursive call site.
     let linearity_ctx_cell = std::cell::RefCell::new(LinearityCtx::new());
@@ -5962,7 +6053,6 @@ fn verify_inner(
     let has_string_constraints_cell = std::cell::Cell::new(has_string_constraints_cell_pre.get());
     let vc = VCtx {
         ctx: &ctx,
-        arr: &arr,
         module_env,
         current_atom: Some(atom),
         linearity_ctx: Some(&linearity_ctx_cell),
@@ -5981,16 +6071,12 @@ fn verify_inner(
     // (concatenation, equality) to silently produce incorrect verification results.
     // This matches the treatment in verify_atom_invariant (line 3206-3218).
     for param in &atom.params {
-        let base = param
-            .type_name
-            .as_deref()
-            .map(|t| module_env.resolve_base_type(t))
-            .unwrap_or_else(|| "i64".to_string());
-        let var: Dynamic = match base.as_str() {
-            "f64" => Float::new_const(&ctx, param.name.as_str(), 11, 53).into(),
-            "Str" => Z3String::new_const(&ctx, param.name.as_str()).into(),
-            _ => Int::new_const(&ctx, param.name.as_str()).into(),
-        };
+        let var = param_z3_value(
+            &ctx,
+            param.name.as_str(),
+            param.type_name.as_deref(),
+            module_env,
+        );
         env.insert(param.name.clone(), var);
     }
 
@@ -6057,21 +6143,12 @@ fn verify_inner(
 
         let quantifier_expr = match q.q_type {
             QuantifierType::ForAll => {
-                // Build Z3 patterns for E-matching instantiation. Only attach
-                // a pattern if at least one `arr[idx_expr]` successfully
-                // lowered to an int; `Z3_mk_pattern` requires a non-empty
-                // term slice and would otherwise be invalid.
-                //
-                // We currently always pattern on `vc.arr` (the single array
-                // VCtx binds today) regardless of the source array name.
-                // Extending to per-name `select` would require threading the
-                // array handle through VCtx — tracked by the `len_<name>`
-                // rename below, which is the portion that affects soundness.
                 let mut pattern_asts: Vec<Dynamic> = Vec::new();
-                for (_arr_name, idx_expr) in &arr_accesses {
+                for (arr_name, idx_expr) in &arr_accesses {
                     if let Ok(idx_z3) = expr_to_z3(&vc, idx_expr, &mut env, None) {
                         if let Some(idx_int) = idx_z3.as_int() {
-                            pattern_asts.push(arr.select(&idx_int));
+                            pattern_asts
+                                .push(z3_dynamic_array(&vc, arr_name, &env).select(&idx_int));
                         }
                     }
                 }
@@ -6126,7 +6203,7 @@ fn verify_inner(
                             &ctx,
                             &[&idx_int.ge(&Int::from_i64(&ctx, 0)), &idx_int.lt(&len_var)],
                         ));
-                        let pattern_ast = arr.select(&idx_int);
+                        let pattern_ast = z3_dynamic_array(&vc, arr_name, &env).select(&idx_int);
                         let pattern_refs: Vec<&dyn z3::ast::Ast> =
                             vec![&pattern_ast as &dyn z3::ast::Ast];
                         let pattern = z3::Pattern::new(&ctx, &pattern_refs);
@@ -6884,10 +6961,9 @@ fn expr_to_z3<'a>(
     }
 
     let ctx = vc.ctx;
-    let arr = vc.arr;
     match expr {
         Expr::Number(n) => Ok(Int::from_i64(ctx, *n).into()),
-        Expr::Float(f) => Ok(Float::from_f64(ctx, *f).into()),
+        Expr::Float(f) => Ok(real_from_f64(ctx, *f).into()),
         // Plan 9: String literal to Z3 String Sort
         Expr::StringLit(s) => Ok(Z3String::from_str(ctx, s).unwrap().into()),
         Expr::Variable(name) => {
@@ -7000,12 +7076,8 @@ fn expr_to_z3<'a>(
                         for (arr_name, idx_expr) in &arr_accesses {
                             if let Ok(idx_z3) = expr_to_z3(vc, idx_expr, env, None) {
                                 if let Some(idx_int) = idx_z3.as_int() {
-                                    let arr_key = format!("__z3_arr_{}", arr_name);
-                                    let current_arr: Array<'_> = env
-                                        .get(&arr_key)
-                                        .and_then(|d| d.as_array())
-                                        .unwrap_or_else(|| vc.arr.clone());
-                                    pattern_asts.push(current_arr.select(&idx_int));
+                                    pattern_asts
+                                        .push(z3_dynamic_array(vc, arr_name, env).select(&idx_int));
                                 }
                             }
                         }
@@ -7503,19 +7575,7 @@ fn expr_to_z3<'a>(
                 }
                 solver.pop(1);
             }
-            // `__z3_arr_<name>` holds the latest logical array for the *specific*
-            // array `name` after any `Stmt::ArrayStore` updates performed earlier
-            // in the body; fall back to `vc.arr` (the default symbolic handle) when
-            // no store has occurred yet. Keying per-name is required for soundness
-            // when multiple arrays (e.g. `arr` and `aux`) appear in the same body —
-            // a shared `__z3_arr` key would let a store to `brr` pollute reads
-            // from `arr`.
-            let arr_key = format!("__z3_arr_{}", name);
-            let current_arr: Array<'_> = env
-                .get(&arr_key)
-                .and_then(|d| d.as_array())
-                .unwrap_or_else(|| arr.clone());
-            Ok(current_arr.select(&idx))
+            Ok(z3_dynamic_array(vc, name, env).select(&idx))
         }
         Expr::BinaryOp(left, op, right) => {
             let l = expr_to_z3(vc, left, env, solver_opt)?;
@@ -7537,10 +7597,29 @@ fn expr_to_z3<'a>(
                 };
             }
 
-            // 浮動小数点か整数かで Z3 の AST メソッドを使い分ける
-            if l.as_float().is_some() || r.as_float().is_some() {
-                // 浮動小数点の場合、比較演算のみサポート（z3 0.12 の Float 算術は丸めモード API が複雑なため）
-                // 算術演算はシンボリック結果として返す
+            if l.as_real().is_some() || r.as_real().is_some() {
+                let lr = l
+                    .as_real()
+                    .or_else(|| l.as_int().map(|i| i.to_real()))
+                    .unwrap_or_else(|| Real::from_real(ctx, 0, 1));
+                let rr = r
+                    .as_real()
+                    .or_else(|| r.as_int().map(|i| i.to_real()))
+                    .unwrap_or_else(|| Real::from_real(ctx, 0, 1));
+                match op {
+                    Op::Gt => Ok(lr.gt(&rr).into()),
+                    Op::Lt => Ok(lr.lt(&rr).into()),
+                    Op::Ge => Ok(lr.ge(&rr).into()),
+                    Op::Le => Ok(lr.le(&rr).into()),
+                    Op::Eq => Ok(lr._eq(&rr).into()),
+                    Op::Neq => Ok(lr._eq(&rr).not().into()),
+                    Op::Add => Ok(Real::add(ctx, &[&lr, &rr]).into()),
+                    Op::Sub => Ok(Real::sub(ctx, &[&lr, &rr]).into()),
+                    Op::Mul => Ok(Real::mul(ctx, &[&lr, &rr]).into()),
+                    Op::Div => Ok(lr.div(&rr).into()),
+                    _ => Err("Invalid real op".into()),
+                }
+            } else if l.as_float().is_some() || r.as_float().is_some() {
                 let lf = l.as_float().unwrap_or(Float::from_f64(ctx, 0.0));
                 let rf = r.as_float().unwrap_or(Float::from_f64(ctx, 0.0));
                 match op {
@@ -7551,39 +7630,10 @@ fn expr_to_z3<'a>(
                     Op::Eq => Ok(lf._eq(&rf).into()),
                     Op::Neq => Ok(lf._eq(&rf).not().into()),
                     Op::Add | Op::Sub | Op::Mul | Op::Div => {
-                        // シンボリック Float + 符号伝播制約
-                        // (z3 crate 0.12 は内部フィールドが非公開のため z3-sys 直接呼び出し不可)
                         static FLOAT_COUNTER: std::sync::atomic::AtomicUsize =
                             std::sync::atomic::AtomicUsize::new(0);
                         let id = FLOAT_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                        let result = Float::new_const(ctx, format!("float_arith_{}", id), 11, 53);
-                        let zero = Float::from_f64(ctx, 0.0);
-                        if let Some(solver) = solver_opt {
-                            match op {
-                                Op::Mul => {
-                                    let both_pos = Bool::and(ctx, &[&lf.gt(&zero), &rf.gt(&zero)]);
-                                    solver.assert(&both_pos.implies(&result.gt(&zero)));
-                                    let both_neg = Bool::and(ctx, &[&lf.lt(&zero), &rf.lt(&zero)]);
-                                    solver.assert(&both_neg.implies(&result.gt(&zero)));
-                                }
-                                Op::Add => {
-                                    let both_pos = Bool::and(ctx, &[&lf.gt(&zero), &rf.ge(&zero)]);
-                                    solver.assert(&both_pos.implies(&result.gt(&zero)));
-                                    let both_pos2 = Bool::and(ctx, &[&lf.ge(&zero), &rf.gt(&zero)]);
-                                    solver.assert(&both_pos2.implies(&result.gt(&zero)));
-                                }
-                                Op::Sub => {
-                                    let a_gt_b = Bool::and(ctx, &[&lf.gt(&rf), &rf.ge(&zero)]);
-                                    solver.assert(&a_gt_b.implies(&result.ge(&zero)));
-                                }
-                                Op::Div => {
-                                    let both_pos = Bool::and(ctx, &[&lf.gt(&zero), &rf.gt(&zero)]);
-                                    solver.assert(&both_pos.implies(&result.gt(&zero)));
-                                }
-                                _ => {}
-                            }
-                        }
-                        Ok(result.into())
+                        Ok(Float::new_const(ctx, format!("float_arith_{}", id), 11, 53).into())
                     }
                     _ => Err("Invalid float op".into()),
                 }
@@ -7604,6 +7654,16 @@ fn expr_to_z3<'a>(
                         let lb = l.as_bool().ok_or("Expected bool for =>")?;
                         let rb = r.as_bool().ok_or("Expected bool for =>")?;
                         return Ok(lb.implies(&rb).into());
+                    }
+                    Op::Eq | Op::Neq if l.as_bool().is_some() || r.as_bool().is_some() => {
+                        let lb = l.as_bool().ok_or("Expected bool for ==")?;
+                        let rb = r.as_bool().ok_or("Expected bool for ==")?;
+                        let eq = lb._eq(&rb);
+                        return Ok(if matches!(op, Op::Neq) {
+                            eq.not().into()
+                        } else {
+                            eq.into()
+                        });
                     }
                     _ => {}
                 }
@@ -8619,9 +8679,7 @@ fn stmt_to_z3<'a>(
             let idx = expr_to_z3(vc, index, env, solver_opt)?
                 .as_int()
                 .ok_or(MumeiError::type_error("Array index must be integer"))?;
-            let val = expr_to_z3(vc, value, env, solver_opt)?
-                .as_int()
-                .ok_or(MumeiError::type_error("Array store value must be integer"))?;
+            let val = expr_to_z3(vc, value, env, solver_opt)?;
 
             // OOB check mirrors `Expr::ArrayAccess`: store at an index that may
             // fall outside `[0, len_<name>)` is flagged as a verification
@@ -8654,22 +8712,12 @@ fn stmt_to_z3<'a>(
                 solver.pop(1);
             }
 
-            // Update the logical Z3 array bound to *this* array name.
-            // `__z3_arr_<name>` isolates stores per-array so that a store to
-            // `brr` cannot pollute reads from `arr`. expr_to_z3's
-            // `Expr::ArrayAccess` branch mirrors this key (falling back to
-            // `vc.arr` when unset). This matches Z3's theory-of-arrays
-            // semantics locally for each named array:
-            //   select(store(a, i, v), j) = if i == j then v else select(a, j)
             let arr_key = format!("__z3_arr_{}", array);
-            let current_arr: Array<'_> = env
-                .get(&arr_key)
-                .and_then(|d| d.as_array())
-                .unwrap_or_else(|| vc.arr.clone());
+            let current_arr = z3_dynamic_array(vc, array, env);
             let new_arr = current_arr.store(&idx, &val);
             env.insert(arr_key, new_arr.into());
 
-            Ok(val.into())
+            Ok(val)
         }
         Stmt::Block(stmts, _) => {
             let mut last: Dynamic = Int::from_i64(ctx, 0).into();
@@ -9674,15 +9722,12 @@ mod tests {
     fn test_constraint_budget_exceeded() {
         // Simulate constraint budget exceeded by setting a very low budget
         let ctx = z3::Context::new(&z3::Config::new());
-        let int_sort = z3::Sort::int(&ctx);
-        let arr = z3::ast::Array::new_const(&ctx, "arr", &int_sort, &int_sort);
         let count_cell = std::cell::Cell::new(0usize);
         let has_string_cell = std::cell::Cell::new(false);
         let module_env = ModuleEnv::new();
 
         let vc = VCtx {
             ctx: &ctx,
-            arr: &arr,
             module_env: &module_env,
             current_atom: None,
             linearity_ctx: None,
@@ -9712,13 +9757,10 @@ mod tests {
     fn test_constraint_budget_no_limit() {
         // When constraint_count is None, no budget checking occurs
         let ctx = z3::Context::new(&z3::Config::new());
-        let int_sort = z3::Sort::int(&ctx);
-        let arr = z3::ast::Array::new_const(&ctx, "arr", &int_sort, &int_sort);
         let module_env = ModuleEnv::new();
 
         let vc = VCtx {
             ctx: &ctx,
-            arr: &arr,
             module_env: &module_env,
             current_atom: None,
             linearity_ctx: None,
@@ -10320,12 +10362,9 @@ mod tests {
         let cfg = Config::new();
         let ctx = Context::new(&cfg);
         let solver = Solver::new(&ctx);
-        let int_sort = z3::Sort::int(&ctx);
-        let arr = Array::new_const(&ctx, "arr", &int_sort, &int_sort);
         let module_env = ModuleEnv::new();
         let vc = VCtx {
             ctx: &ctx,
-            arr: &arr,
             module_env: &module_env,
             current_atom: None,
             linearity_ctx: None,
@@ -10388,12 +10427,9 @@ mod tests {
         let cfg = Config::new();
         let ctx = Context::new(&cfg);
         let solver = Solver::new(&ctx);
-        let int_sort = z3::Sort::int(&ctx);
-        let arr = Array::new_const(&ctx, "arr", &int_sort, &int_sort);
         let module_env = ModuleEnv::new();
         let vc = VCtx {
             ctx: &ctx,
-            arr: &arr,
             module_env: &module_env,
             current_atom: None,
             linearity_ctx: None,
@@ -10459,12 +10495,9 @@ mod tests {
         let cfg = Config::new();
         let ctx = Context::new(&cfg);
         let solver = Solver::new(&ctx);
-        let int_sort = z3::Sort::int(&ctx);
-        let arr = Array::new_const(&ctx, "arr", &int_sort, &int_sort);
         let module_env = ModuleEnv::new();
         let vc = VCtx {
             ctx: &ctx,
-            arr: &arr,
             module_env: &module_env,
             current_atom: None,
             linearity_ctx: None,
@@ -10537,12 +10570,9 @@ mod tests {
         let cfg = Config::new();
         let ctx = Context::new(&cfg);
         let solver = Solver::new(&ctx);
-        let int_sort = z3::Sort::int(&ctx);
-        let arr = Array::new_const(&ctx, "arr", &int_sort, &int_sort);
         let module_env = ModuleEnv::new();
         let vc = VCtx {
             ctx: &ctx,
-            arr: &arr,
             module_env: &module_env,
             current_atom: None,
             linearity_ctx: None,
@@ -10597,12 +10627,9 @@ mod tests {
         let cfg = Config::new();
         let ctx = Context::new(&cfg);
         let solver = Solver::new(&ctx);
-        let int_sort = z3::Sort::int(&ctx);
-        let arr = Array::new_const(&ctx, "arr", &int_sort, &int_sort);
         let module_env = ModuleEnv::new();
         let vc = VCtx {
             ctx: &ctx,
-            arr: &arr,
             module_env: &module_env,
             current_atom: None,
             linearity_ctx: None,
@@ -11014,8 +11041,6 @@ mod tests {
         let cfg = Config::new();
         let ctx = Context::new(&cfg);
         let solver = Solver::new(&ctx);
-        let int_sort = z3::Sort::int(&ctx);
-        let arr = Array::new_const(&ctx, "arr", &int_sort, &int_sort);
         let module_env = ModuleEnv::new();
         let linearity_ctx_cell = std::cell::RefCell::new(LinearityCtx::new());
         let effect_ctx_cell =
@@ -11024,7 +11049,6 @@ mod tests {
         let has_string_constraints_cell = std::cell::Cell::new(false);
         let vc = VCtx {
             ctx: &ctx,
-            arr: &arr,
             module_env: &module_env,
             current_atom: None,
             linearity_ctx: Some(&linearity_ctx_cell),
