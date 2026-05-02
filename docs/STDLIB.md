@@ -185,6 +185,12 @@ import "std/result" as result;
 
 ---
 
+<!-- TODO(stdlib-docs-sync): `list_map` (L221) と `verified_insertion_sort` (L242) の
+     Description 列に残る `trusted` 表記は、過去 PR で実コード側から `trusted` が
+     除去された際に追従漏れしたもの。本ファイル全体を `std/*.mm` の実 atom 定義
+     ベースで再同期する follow-up が必要。理想的には `scripts/generate_stdlib_metrics.py`
+     と同様に STDLIB.md も自動生成 or lint で stale 検出できるようにする。 -->
+
 ## std/list.mm
 
 ```mumei
