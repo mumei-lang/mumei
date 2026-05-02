@@ -1668,6 +1668,17 @@ fn array_element_sort(name: &str, vc: &VCtx<'_>) -> ArrayElementSort {
     array_element_sort_from_type(&array_element_type_name(name, vc))
 }
 
+/// Convert an `f64` literal to a Z3 `Real` (exact rational) value.
+///
+/// TODO(f64-real-sort): `f64` is currently verified under Z3 `Real` sort, not
+/// IEEE 754 `Float` sort. The literal `0.1` is interpreted here as the rational
+/// `1/10` — not as the binary64 approximation `0x3FB999999999999A`. Properties
+/// depending on IEEE 754 semantics (rounding, subnormals, NaN/Infinity, the
+/// fact that `0.1 + 0.2 != 0.3` in IEEE 754) are *not* modeled. When IEEE 754-
+/// faithful verification is required, swap this for `Float::from_f64(ctx, value)`
+/// and re-introduce the `Float` arithmetic branch in `expr_to_z3` (see also the
+/// `param_z3_value` `f64` branch and `Expr::Float` lowering). See
+/// `docs/ARCHITECTURE.md` § "`f64` Verification Sort: Real (not IEEE 754 Float)".
 fn real_from_f64<'a>(ctx: &'a Context, value: f64) -> Real<'a> {
     let formatted = value.to_string();
     if let Some((num, frac)) = formatted.split_once('.') {
@@ -1745,6 +1756,9 @@ fn param_z3_value<'a>(
         .into()
     } else {
         match base.as_str() {
+            // TODO(f64-real-sort): `f64` params are encoded as Z3 `Real` (exact
+            // rationals), not IEEE 754. See `real_from_f64` and
+            // `docs/ARCHITECTURE.md` § "`f64` Verification Sort".
             "f64" => Real::new_const(ctx, name).into(),
             "Str" => Z3String::new_const(ctx, name).into(),
             "bool" => Bool::new_const(ctx, name).into(),

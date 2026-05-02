@@ -56,6 +56,16 @@ Type annotations include primitive scalar types (`i64`, `f64`, `bool`, `Str`), r
 
 During Z3 verification, array indices use `Int` sort and the array element sort is selected from the declared element type: `Int` for `[i64]`, `Real` for `[f64]`, and `Bool` for `[bool]`.
 
+### `f64` Verification Sort: Real (not IEEE 754 Float)
+
+`f64` parameters and `f64` literals are encoded as Z3 `Real` sort (exact mathematical reals over ℚ), not Z3 `Float` sort (IEEE 754 binary64). This is a deliberate trade-off:
+
+- **Pro**: `Real` is decidable in linear arithmetic, fast to solve, and supports the full set of arithmetic operators (`+`, `-`, `*`, `/`, comparisons) needed by current `f64` verification fixtures (e.g., `tests/test_verified_ffi.mm`).
+- **Con**: Properties that depend on IEEE 754 semantics — rounding, subnormals, `NaN`/`Infinity`, the fact that `0.1 + 0.2 != 0.3` — are **not** modeled. Atoms that rely on IEEE 754 corner cases for correctness (e.g., bit-level reinterpretation, deterministic rounding) would verify successfully under `Real` but may misbehave at runtime.
+- **Migration path**: When IEEE 754-faithful verification is required, individual atoms can be re-encoded with Z3 `Float` sort by reintroducing the `Float::new_const` / `Float::from_f64` paths in `param_z3_value` and `Expr::Float` lowering (`mumei-core/src/verification.rs`). Until then, `f64` should be treated as "real-arithmetic-faithful" rather than "IEEE 754-faithful".
+
+`f64` literals are converted to `Real` via `real_from_f64` (`mumei-core/src/verification.rs`), which interprets the Rust `to_string()` output as an exact decimal fraction (e.g., `0.1` → `1/10`). This intentionally diverges from IEEE 754: the literal `0.1` is treated as the rational ⅒, not as the IEEE 754 binary approximation `0x3FB999999999999A`.
+
 ---
 
 ## ModuleEnv
