@@ -14,7 +14,7 @@
 use crate::hir::HirAtom;
 use crate::parser::ExternBlock;
 use crate::verification::{ModuleEnv, MumeiError, MumeiResult};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 // =============================================================================
 // Artifact abstraction (Roadmap #5 Phase 1)
@@ -27,12 +27,11 @@ pub enum ArtifactKind {
     Binary,
     Source,
     Header,
-    /// Phase 3: non-source / non-header metadata emitted alongside the
-    /// primary build output. Examples include `verified.json` reports,
-    /// proof-cert bundles, dependency manifests, and similar JSON / YAML
-    /// sidecar files. External emitter plugins that produce structured
-    /// metadata (rather than compilable code) should classify their
-    /// artifacts under this variant.
+    /// Phase 3: non-source, non-header sidecar artefacts emitted by
+    /// plugin emitters (e.g. proof bundles, `.proof-cert.json`-like
+    /// metadata blobs, Wasm component manifests). The exact MIME of
+    /// the payload is emitter-defined; the build pipeline should treat
+    /// these as opaque bytes when copying them to disk.
     Metadata,
 }
 
@@ -73,90 +72,99 @@ pub enum EmitTarget {
     RustWrapper,
     /// FFI glue code for Python (NOT a transpiler — generates ctypes-based wrappers)
     PythonWrapper,
-    /// Phase 3 (foundation): an external emitter plugin loaded at runtime
-    /// from `~/.mumei/emitters/{name}/libmumei_emit_{name}.so` (or the
-    /// platform-specific `.dll` / `.dylib`). The wrapped string is the
-    /// emitter name as supplied to `--emit`, used for diagnostics and the
-    /// dynamic-library lookup. See [`load_external_emitter`].
+    /// Phase 3: an emitter loaded from an external dynamic library at
+    /// `~/.mumei/emitters/<name>/libmumei_emit_<name>.{so,dll,dylib}`.
+    /// Resolution is delegated to [`load_external_emitter`]. Used when
+    /// the `--emit` CLI flag does not match any built-in target.
     External(String),
 }
 
-/// Phase 3 (foundation): trait-object handle for emitter plugins. External
-/// emitters produced by [`load_external_emitter`] are returned in this
-/// box so callers can store and dispatch them uniformly with the
-/// statically-linked emitters.
+// =============================================================================
+// Phase 3: external emitter plugin loader (foundation)
+// =============================================================================
+
+/// Trait-object wrapper for an emitter loaded out-of-process. Plugins
+/// must be `Send + Sync` so they can be shared across threads in the
+/// future build pipeline.
 pub type BoxedEmitter = Box<dyn Emitter + Send + Sync>;
 
-/// Phase 3 (foundation, stub): resolve an external emitter plugin by name.
+/// Phase 3 stub: locate and (eventually) load an external emitter
+/// plugin by name.
 ///
-/// Looks for a dynamic library at:
+/// # Resolution
 ///
-/// - `~/.mumei/emitters/{name}/libmumei_emit_{name}.so` (Linux),
-/// - `~/.mumei/emitters/{name}/libmumei_emit_{name}.dylib` (macOS), or
-/// - `~/.mumei/emitters/{name}/mumei_emit_{name}.dll` (Windows).
+/// Looks for the platform-specific dynamic library under the user's
+/// `~/.mumei/emitters/<name>/` directory (the same root where
+/// `crate::manifest::mumei_home()` resolves):
 ///
-/// External emitters MUST expose the C-ABI symbol
+/// - Linux:   `libmumei_emit_<name>.so`
+/// - macOS:   `libmumei_emit_<name>.dylib`
+/// - Windows: `mumei_emit_<name>.dll` (no `lib` prefix — matches Rust
+///   `cdylib` output convention on Windows)
 ///
-/// ```text
+/// # Plugin contract
+///
+/// Loaded libraries must export a single C-ABI factory symbol:
+///
+/// ```ignore
+/// /// Phase 3 plugin entry-point. Returns a heap-allocated emitter
+/// /// owned by the caller. The host frees the box via `drop` when the
+/// /// build finishes; plugins must not retain mutable global state.
 /// #[no_mangle]
-/// extern "C" fn mumei_create_emitter() -> *mut dyn Emitter
+/// pub extern "C" fn mumei_create_emitter() -> *mut dyn mumei_core::emitter::Emitter;
 /// ```
 ///
-/// returning a heap-allocated `Emitter` whose vtable lives in the plugin's
-/// own crate. Callers are responsible for keeping the returned
-/// [`BoxedEmitter`] alive only while the host process is alive (the
-/// plugin's `.so` is dlopen-ed once and never closed in this stub).
+/// # Status
 ///
-/// **This is a stub** that performs only the path resolution and existence
-/// check; it does NOT yet `dlopen` the library. Returning `Err(...)` here
-/// is the contract that lets the CLI fall through to its existing
-/// "Unknown emit target" error path with a helpful diagnostic. A follow-up
-/// PR will fill in `libloading::Library::new()` + the `extern "C"` symbol
-/// lookup once the C-ABI is stabilized.
+/// This is a **foundation stub** — it deliberately does not yet call
+/// `libloading::Library::new`, because Phase 3's full plugin host
+/// requires ABI versioning, panic-safety wrappers, and a well-defined
+/// `Send + Sync` contract that have not landed yet. The function
+/// returns a structured error in two regimes so that downstream code
+/// (e.g. `src/main.rs`'s `--emit` dispatch) can integrate the
+/// resolution path without waiting on the loader implementation.
 pub fn load_external_emitter(name: &str) -> MumeiResult<BoxedEmitter> {
-    let mumei_home = crate::manifest::mumei_home();
-    let emitter_dir = mumei_home.join("emitters").join(name);
-    let candidates = external_emitter_library_candidates(&emitter_dir, name);
-    let found = candidates.iter().find(|p| p.exists());
+    // Rust's `cdylib` output on Windows produces `<crate>.dll` *without*
+    // a `lib` prefix, while Linux/macOS keep the `lib` prefix. Match that
+    // convention so plugin authors can drop their compiled artefact in
+    // place without renaming.
+    let (prefix, ext) = if cfg!(target_os = "windows") {
+        ("", ".dll")
+    } else if cfg!(target_os = "macos") {
+        ("lib", ".dylib")
+    } else {
+        ("lib", ".so")
+    };
+    let lib_filename = format!("{}mumei_emit_{}{}", prefix, name, ext);
+    let lib_path = crate::manifest::mumei_home()
+        .join("emitters")
+        .join(name)
+        .join(&lib_filename);
 
-    match found {
-        Some(path) => Err(MumeiError::codegen(format!(
-            "External emitter '{}' was found at '{}', but dynamic loading \
-             of emitter plugins is not yet implemented (Phase 3 foundation \
-             stub). Implementations will need to dlopen this library and \
-             call its `mumei_create_emitter()` entry point. Tracked in \
-             docs/CROSS_PROJECT_ROADMAP.md.",
-            name,
-            path.display()
-        ))),
-        None => {
-            let searched = candidates
-                .iter()
-                .map(|p| p.display().to_string())
-                .collect::<Vec<_>>()
-                .join("\n    ");
-            Err(MumeiError::codegen(format!(
-                "External emitter '{}' not found. Searched:\n    {}\n\
-                 Install a plugin at one of these paths or pick a built-in \
-                 --emit target (llvm-ir, c-header, verified-json, proof-book, \
-                 proof-cert, binary, rust-wrapper, python-wrapper).",
-                name, searched,
-            )))
-        }
+    if !lib_path.exists() {
+        return Err(MumeiError::verification(format!(
+            "External emitter '{name}' not found.\n  \
+             Expected plugin at: {path}\n  \
+             To install: place the compiled `{lib_filename}` (exporting `extern \"C\" fn mumei_create_emitter() -> *mut dyn mumei_core::emitter::Emitter`) at that location.",
+            name = name,
+            path = lib_path.display(),
+            lib_filename = lib_filename,
+        )));
     }
+
+    // Phase 3 foundation: the file is present but actual `dlopen` is
+    // intentionally deferred. See the docstring above.
+    Err(MumeiError::verification(format!(
+        "External emitter '{name}' was found at {path}, but the Phase 3 plugin loader is not yet implemented in this build of mumei. \
+         Re-run with a built-in `--emit` target (`llvm-ir`, `c-header`, `verified-json`, `proof-book`, `proof-cert`, `binary`, `rust-wrapper`, `python-wrapper`) until Phase 3 ships the dynamic loader.",
+        name = name,
+        path = lib_path.display(),
+    )))
 }
 
-/// Phase 3 (foundation): build the candidate list of dynamic-library paths
-/// that [`load_external_emitter`] inspects for plugin `name`. Exposed at
-/// crate level so tests and downstream tooling can verify the resolution
-/// rules without touching the filesystem.
-pub fn external_emitter_library_candidates(emitter_dir: &Path, name: &str) -> Vec<PathBuf> {
-    vec![
-        emitter_dir.join(format!("libmumei_emit_{}.so", name)),
-        emitter_dir.join(format!("libmumei_emit_{}.dylib", name)),
-        emitter_dir.join(format!("mumei_emit_{}.dll", name)),
-    ]
-}
+// =============================================================================
+// Built-in emitters
+// =============================================================================
 
 pub struct CHeaderEmitter;
 
@@ -500,97 +508,70 @@ mod tests {
         assert!(content.contains("#endif /* SAFE_DIV_H */"));
     }
 
-    // ---- Phase 3 (foundation) emitter plugin tests ----
+    // ============================================================
+    // Phase 3: ArtifactKind / EmitTarget / load_external_emitter
+    // ============================================================
 
-    /// `EmitTarget::External` carries the supplied plugin name verbatim so
-    /// it can be threaded through dispatch and printed in CLI status.
-    #[test]
-    fn test_emit_target_external_round_trips_name() {
-        let target = EmitTarget::External("wasm".to_string());
-        match &target {
-            EmitTarget::External(name) => assert_eq!(name, "wasm"),
-            _ => panic!("expected External variant, got {:?}", target),
-        }
-        // A second instance with a different name must not compare equal
-        // structurally (we don't impl `Eq` on EmitTarget but we do exercise
-        // the `Debug` formatter to lock down at least minimal stability).
-        let other = EmitTarget::External("cuda".to_string());
-        let dbg_a = format!("{:?}", target);
-        let dbg_b = format!("{:?}", other);
-        assert!(dbg_a.contains("wasm"));
-        assert!(dbg_b.contains("cuda"));
-        assert_ne!(dbg_a, dbg_b);
-    }
-
-    /// `ArtifactKind::Metadata` is a distinct variant so emitters that
-    /// produce non-source / non-header sidecar files (verified.json,
-    /// proof bundles, dependency reports, …) can declare their kind
-    /// honestly.
+    /// Phase 3: `ArtifactKind::Metadata` is a distinct variant so the
+    /// build pipeline can route plugin metadata blobs differently from
+    /// `Source` / `Header` / `Binary`.
     #[test]
     fn test_artifact_kind_metadata_distinct() {
-        assert_ne!(ArtifactKind::Metadata, ArtifactKind::Source);
-        assert_ne!(ArtifactKind::Metadata, ArtifactKind::Header);
-        assert_ne!(ArtifactKind::Metadata, ArtifactKind::Binary);
-        // Round-trip through Debug so any future rename of the variant
-        // forces this test to be updated.
-        assert_eq!(format!("{:?}", ArtifactKind::Metadata), "Metadata");
+        let m = ArtifactKind::Metadata;
+        assert_ne!(m, ArtifactKind::Source);
+        assert_ne!(m, ArtifactKind::Header);
+        assert_ne!(m, ArtifactKind::Binary);
+        // round-trip an Artifact{kind: Metadata}
+        let art = Artifact {
+            name: std::path::PathBuf::from("/tmp/plugin.meta.json"),
+            data: br#"{"kind":"metadata"}"#.to_vec(),
+            kind: ArtifactKind::Metadata,
+        };
+        assert_eq!(art.kind, ArtifactKind::Metadata);
     }
 
-    /// `external_emitter_library_candidates` returns the three
-    /// platform-specific filename patterns documented on
-    /// [`load_external_emitter`].
+    /// Phase 3: `EmitTarget::External(name)` carries the requested
+    /// plugin name so that `dispatch_emit` can resolve the dynamic
+    /// library path at build time.
     #[test]
-    fn test_external_emitter_library_candidates_shape() {
-        let dir = std::path::PathBuf::from("/tmp/mumei_emitters/wasm");
-        let candidates = external_emitter_library_candidates(&dir, "wasm");
-        assert_eq!(candidates.len(), 3);
-        assert_eq!(
-            candidates[0],
-            std::path::PathBuf::from("/tmp/mumei_emitters/wasm/libmumei_emit_wasm.so")
-        );
-        assert_eq!(
-            candidates[1],
-            std::path::PathBuf::from("/tmp/mumei_emitters/wasm/libmumei_emit_wasm.dylib")
-        );
-        assert_eq!(
-            candidates[2],
-            std::path::PathBuf::from("/tmp/mumei_emitters/wasm/mumei_emit_wasm.dll")
-        );
+    fn test_emit_target_external_carries_name() {
+        let t = EmitTarget::External("wasm".to_string());
+        match &t {
+            EmitTarget::External(name) => assert_eq!(name, "wasm"),
+            other => panic!("expected External, got {:?}", other),
+        }
+        // Default is still LlvmIr so existing CLI defaults are unchanged.
+        assert!(matches!(EmitTarget::default(), EmitTarget::LlvmIr));
     }
 
-    /// When no plugin file exists at the expected paths,
-    /// `load_external_emitter` returns an `Err` whose message lists the
-    /// candidate paths it searched. This is the path that the CLI
-    /// fallback in `src/main.rs` relies on to print a helpful diagnostic.
+    /// Phase 3: `load_external_emitter` returns a structured "not
+    /// found" error when the plugin file does not exist on disk. The
+    /// error message must include both the plugin name and the
+    /// expected install path so users can self-serve.
     #[test]
-    fn test_load_external_emitter_missing_returns_err_with_paths() {
-        // Use a name that is overwhelmingly unlikely to exist on disk, even
-        // accidentally. The default mumei_home() is honoured so this also
-        // validates the `~/.mumei/emitters/{name}` resolution rule.
-        let unique = format!(
-            "task_1c_phase3_missing_{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0),
-        );
-        let result = load_external_emitter(&unique);
-        let err = match result {
-            Ok(_) => panic!("missing plugin must error, but load_external_emitter returned Ok"),
+    fn test_load_external_emitter_missing_plugin_errors() {
+        // Use a name that is exceedingly unlikely to be installed on
+        // any contributor machine or CI runner.
+        let res = load_external_emitter("definitely_not_installed_phase3_plugin");
+        let err = match res {
+            Ok(_) => panic!("missing plugin must be an Err"),
             Err(e) => e,
         };
         let msg = format!("{}", err);
         assert!(
-            msg.contains(&unique),
-            "error must mention the requested name '{unique}', got: {msg}"
+            msg.contains("definitely_not_installed_phase3_plugin"),
+            "error must mention plugin name; got: {msg}"
         );
         assert!(
-            msg.contains("not found"),
-            "error must say 'not found' when no library is present, got: {msg}"
+            msg.contains("not found") || msg.contains("Expected plugin at"),
+            "error must explain *why* the lookup failed; got: {msg}"
         );
+        // Plugins live under ~/.mumei/emitters/<name>/. Check that the
+        // hint references that directory so users know where to drop
+        // their .so / .dylib / .dll.
         assert!(
-            msg.contains(&format!("libmumei_emit_{unique}.so")),
-            "error must list the .so candidate path, got: {msg}"
+            msg.contains(".mumei") && msg.contains("emitters"),
+            "error must point to the ~/.mumei/emitters install path; got: {msg}"
         );
     }
 }

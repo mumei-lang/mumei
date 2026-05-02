@@ -66,11 +66,13 @@ body: {
     }
 };
 
-// --- Test 3: trusted-free 挿入ソート（std/list.mm::verified_insertion_sort と同型）---
-// `mir.rs::infer_hir_ty()` の `Expr::ArrayAccess → i64` 推論が
-// `let key = arr[i]` を `Movability::Copy` 扱いにしているため、
-// 二重 while 内側ループでの move 解析 false-positive が発生せず、
-// `trusted` なしで要素数保存契約が証明可能であることを確認する。
+// --- Test 3: 挿入ソート全体（trusted-free 版回帰）---
+// Task 1-A: `std/list.mm::verified_insertion_sort` から `trusted` を外した
+// 後の回帰として、std と同じ body / ensures を `tests/` 側にもミラー
+// しておく。`mir.rs::infer_hir_ty()` の `Expr::ArrayAccess => i64` 推論が
+// 退行すると、`let key = arr[i]` が Move 扱いになり inner-while の
+// `i = i + 1` が UseAfterMove false-positive を出すため、その早期検出
+// テストとして機能する。
 atom verify_insertion_sort_full(n: i64)
 requires: n >= 0 && forall(i, 0, n, arr[i] >= 0);
 ensures: result == n;

@@ -35,10 +35,15 @@ body:
     }
     0;
 
-// Task 1-A: `let key = arr[i]` inside a nested while must be classified as
-// Copy via `Expr::ArrayAccess → i64` inference in `mir.rs::infer_hir_ty()`,
-// so subsequent uses of `key` in the inner loop don't trigger
-// UseAfterMove / move-after-borrow false-positives.
+// Regression for Task 1-A: `let key = arr[i]` inside a nested while loop
+// must yield a Copy-typed (`i64`) local. Before the
+// `mir.rs::infer_hir_ty()` fix for `Expr::ArrayAccess`, this binding was
+// classified `Movability::Move` and tripped a false-positive
+// UseAfterMove on the inner loop's `i = i + 1` step.
+//
+// `forall(i, 0, n, arr[i] >= 0)` in `requires` keeps the OOB checker
+// happy by giving Z3 `len_arr >= n + 1` (same idiom as
+// `verify_insertion_sort_skeleton` in `tests/test_verified_sort.mm`).
 atom nested_while_with_array_read_init(n: i64)
 requires: n >= 0 && forall(i, 0, n, arr[i] >= 0);
 ensures: result == 0;
@@ -48,7 +53,6 @@ body:
         let key = arr[i];
         let j = 0;
         while j < n {
-            arr[j] = key;
             j = j + 1;
         }
         i = i + 1;

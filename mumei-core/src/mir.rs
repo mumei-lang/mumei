@@ -372,10 +372,11 @@ impl LowerCtx {
                 // and cause false-positive UseAfterMove on idioms like
                 // `let key = arr[i]`.
                 //
-                // TODO: generalize to the array's element type when
-                // polymorphic arrays (e.g. `[T]`) are introduced. mumei
-                // arrays are currently `[i64]` only, so hard-coding `i64`
-                // is sound for now.
+                // mumei arrays are currently `[i64]` only, so hard-coding
+                // the element type here is sound. When polymorphic arrays
+                // (`[T]`) are introduced this branch must instead resolve
+                // the array variable's element type from the local's
+                // `[T]` annotation.
                 Some("i64".to_string())
             }
             HirExpr::IfThenElse {

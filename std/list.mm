@@ -415,11 +415,16 @@ body: {
 //   要求する用途には、下記の `verified_insertion_sort_identity`
 //   (sorted-in → sorted-out の証明可能な identity 版) を使用すること。
 //
-//   旧来は二重 while 内側ループで `let key = arr[i]` の MIR move 解析
-//   false-positive のため `trusted` を付けていたが、`mir.rs::infer_hir_ty()`
-//   が `Expr::ArrayAccess` から `i64` を推論して `Movability::Copy` を立て
-//   るようになったため、`trusted` 不要で要素数保存契約 (`result == n`) が
-//   証明できる。
+//   旧来は二重 while 内側ループの `let key = arr[i]` で move 解析が
+//   false-positive を出していたため `trusted` を付けていたが、
+//   `mir.rs::infer_hir_ty()` が `Expr::ArrayAccess` から `i64` を推論し
+//   `Movability::Copy` を立てるようになったため `trusted` 不要で
+//   要素数保存契約 (`result == n`) が証明できる。
+//
+//   `forall(i, 0, n, arr[i] >= 0)` を requires に追加することで
+//   `arr[i]` / `arr[j]` の OOB 推論に必要な `len_arr >= n + 1` を
+//   Z3 に提示している（`tests/test_verified_sort.mm` の
+//   `verify_insertion_sort_skeleton` と同じイディオム）。
 atom verified_insertion_sort(n: i64)
 requires: n >= 0 && forall(i, 0, n, arr[i] >= 0);
 ensures: result == n;
@@ -468,10 +473,14 @@ body: n;
 // 検証する性質（方針 A）: 要素数保存 (result == n) のみ。
 // 「出力が昇順」の保証はソート本体が省略されているため成立せず、
 // 偽の `trusted` 保証を避けて ensures から外した。
-// 旧来は再帰呼び出しに伴う MIR move 解析 false-positive を避けるため
-// `trusted` を付けていたが、`mir.rs::infer_hir_ty()` の数値リテラル/
-// 配列要素アクセス推論強化により、`trusted` 不要で要素数保存契約
-// (`result == n`) が証明できる。
+// `let left = …` / `let right = …` は再帰呼び出しの戻り値を一度だけ
+// (`left + right` で) 使うのみで、現在の `mir.rs::infer_hir_ty()` は
+// `HirExpr::Call` の戻り値型を推論しない (`_ => None`) ため `Move`
+// のままだが、二重消費が無いので UseAfterMove は発火せず `trusted`
+// 無しで要素数保存契約 (`result == n`) が証明できる。
+// （将来 `infer_hir_ty()` に Call ケースが追加されれば `Copy` 化され
+//   さらに堅牢になるが、現時点ではあくまで「単一消費」に依存した
+//   trusted-free 化である。）
 atom verified_merge_sort(n: i64)
 requires: n >= 0;
 ensures: result == n;
