@@ -125,6 +125,33 @@ pub fn parse_type_ref(input: &str) -> TypeRef {
 
 pub fn parse_type_ref_from_ctx(ctx: &mut super::ParseContext) -> TypeRef {
     let mut type_str = String::new();
+    if ctx.peek() == &Token::LBracket {
+        type_str.push('[');
+        ctx.advance();
+        let mut depth = 1;
+        while depth > 0 && ctx.peek() != &Token::Eof {
+            match ctx.peek().clone() {
+                Token::LBracket => {
+                    depth += 1;
+                    type_str.push('[');
+                    ctx.advance();
+                }
+                Token::RBracket => {
+                    depth -= 1;
+                    type_str.push(']');
+                    ctx.advance();
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                ref tok => {
+                    type_str.push_str(&format!("{}", tok));
+                    ctx.advance();
+                }
+            }
+        }
+        return parse_type_ref(&type_str);
+    }
     match ctx.peek().clone() {
         Token::Ident(s) => {
             type_str.push_str(&s);
@@ -1330,10 +1357,14 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
         })
         .collect();
 
-    // Plan 18: Parse optional return type annotation (e.g., `-> Str`)
+    // Plan 18: Parse optional return type annotation (e.g., `-> Str`, `-> [i64]`)
     let return_type = if ctx.peek() == &Token::Arrow {
         ctx.advance();
-        Some(ctx.expect_ident())
+        if ctx.peek() == &Token::LBracket {
+            Some(parse_type_ref_from_ctx(ctx).display_name())
+        } else {
+            Some(ctx.expect_ident())
+        }
     } else {
         None
     };
