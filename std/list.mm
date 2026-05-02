@@ -250,10 +250,9 @@ body: {
 // 空配列の場合は -1 を返す。
 // ensures: result >= -1 && result < n
 //
-// NOTE: 早期 return の制御フロー解析で min_idx の所有権追跡が失敗するため
-//       trusted 契約として宣言する。
-//       TODO: early-return ownership analysis が改善されたら `trusted` を外す。
-trusted atom fold_min_index(n: i64)
+// early-return 分岐 (`n == 0` -> -1 / else -> valid index) も
+// Z3 path 条件と MIR move 解析で `trusted` 不要に検証できる。
+atom fold_min_index(n: i64)
 requires: n >= 0;
 ensures: result >= 0 - 1 && result < n;
 body: {
@@ -276,10 +275,9 @@ body: {
 // 空配列の場合は -1 を返す。
 // ensures: result >= -1 && result < n
 //
-// NOTE: 早期 return の制御フロー解析で max_idx の所有権追跡が失敗するため
-//       trusted 契約として宣言する。
-//       TODO: early-return ownership analysis が改善されたら `trusted` を外す。
-trusted atom fold_max_index(n: i64)
+// early-return 分岐 (`n == 0` -> -1 / else -> valid index) も
+// Z3 path 条件と MIR move 解析で `trusted` 不要に検証できる。
+atom fold_max_index(n: i64)
 requires: n >= 0;
 ensures: result >= 0 - 1 && result < n;
 body: {
