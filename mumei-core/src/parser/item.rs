@@ -587,6 +587,9 @@ fn collect_balanced_parens(ctx: &mut ParseContext) -> String {
             }
             Token::LBracket => {
                 bracket_depth += 1;
+                if !text.is_empty() && !text.ends_with('(') && !text.ends_with('[') {
+                    text.push(' ');
+                }
                 text.push('[');
                 ctx.advance();
             }
@@ -1357,14 +1360,11 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
         })
         .collect();
 
-    // Plan 18: Parse optional return type annotation (e.g., `-> Str`, `-> [i64]`)
+    // Plan 18: Parse optional return type annotation
+    // (e.g., `-> Str`, `-> [i64]`, `-> Stack<i64>`)
     let return_type = if ctx.peek() == &Token::Arrow {
         ctx.advance();
-        if ctx.peek() == &Token::LBracket {
-            Some(parse_type_ref_from_ctx(ctx).display_name())
-        } else {
-            Some(ctx.expect_ident())
-        }
+        Some(parse_type_ref_from_ctx(ctx).display_name())
     } else {
         None
     };
