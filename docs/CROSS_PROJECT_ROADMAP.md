@@ -162,15 +162,16 @@ mumei のコード生成バックエンドをプラグイン化し、LLVM IR 以
 - ✅ `VerifiedJsonEmitter` を第3のエミッターとして追加 (`--emit verified-json`)
 - ✅ `ProofBookEmitter` を第4のエミッターとして追加 (`--emit proof-book`) — 検証済み Atom から人間可読な Markdown 証明書ドキュメントを生成
 
-### Phase 3 (🏃 In Progress — foundation)
+### Phase 3 (✅ Implemented)
 
-- 🏃 動的プラグインローディングのファウンデーション (Task 1-C):
+- ✅ 動的プラグインローディングのファウンデーション (Task 1-C):
   - `mumei-core/src/emitter.rs` に `EmitTarget::External(String)` バリアントを追加し、CLI 不明文字列を外部プラグイン名として保持できるようにした。
   - `ArtifactKind::Metadata` バリアントを追加し、`Source` / `Header` / `Binary` のいずれにも当てはまらないプラグイン由来サイドカー (Wasm component manifest, lean cert blob 等) のための分類軸を用意。
-  - `pub type BoxedEmitter = Box<dyn Emitter + Send + Sync>` 型エイリアスと `pub fn load_external_emitter(name: &str) -> MumeiResult<BoxedEmitter>` スタブを公開。スタブは `~/.mumei/emitters/<name>/libmumei_emit_<name>.{so,dylib,dll}` を `crate::manifest::mumei_home()` 経由で解決し、ファイルが無ければ "not found" エラー、有れば "Phase 3 plugin loader is not yet implemented" エラーを構造化メッセージで返す。`extern "C" fn mumei_create_emitter() -> *mut dyn Emitter` の C-ABI コントラクトを docstring に明記。
-  - `src/main.rs` の `--emit` 文字列マッチを拡張し、未知ターゲット文字列はまず `load_external_emitter(other)` にフォールバックし、成功時は `EmitTarget::External(other.to_string())` を返す。`dispatch_emit` にも `External(name)` 分岐を追加（実 dlopen は Phase 3 ローダー landing 時に挿入予定）。
-  - 単体テスト: `test_artifact_kind_metadata_distinct`、`test_emit_target_external_carries_name`、`test_load_external_emitter_missing_plugin_errors`。
-- ⏸ 動的ローダー本体 (`libloading` 経由の dlopen + ABI バージョニング + panic-safety wrapper) は別 PR で導入予定。
+  - `pub type BoxedEmitter = Box<dyn Emitter + Send + Sync>` 型エイリアスと `pub fn load_external_emitter(name: &str) -> MumeiResult<BoxedEmitter>` を公開。`~/.mumei/emitters/<name>/libmumei_emit_<name>.{so,dylib,dll}` を `crate::manifest::mumei_home()` 経由で解決し、`libloading` で実 dlopen を行う。
+  - プラグインは `mumei_emitter_abi_version() -> u32` と `mumei_create_emitter() -> *mut (dyn Emitter + Send + Sync)` を export する。ホスト側は `EMITTER_ABI_VERSION` を検証し、`PanicSafeEmitter` で `emit()` 中の panic を `MumeiError` に変換する。
+  - `src/main.rs` の `--emit` 文字列マッチを拡張し、未知ターゲット文字列はまず `load_external_emitter(other)` にフォールバックし、成功時は `EmitTarget::External(other.to_string())` を返す。`dispatch_emit` にも `External(name)` 分岐を追加。
+  - 単体テスト: `test_artifact_kind_metadata_distinct`、`test_emit_target_external_carries_name`、`test_load_external_emitter_missing_plugin_errors`、`test_emitter_abi_version_constant`、`test_panic_safe_emitter_catches_panic`。
+- ✅ 動的ローダー本体 (`libloading` 経由の dlopen + ABI バージョニング + panic-safety wrapper) を実装。
 - ⏸ `mumei add --emitter wasm` スタイルの CLI で外部エミッターをインストール
 - ⏸ Wasm ターゲット（現在保留中）を外部プラグインとして core に触れずに追加可能
 
