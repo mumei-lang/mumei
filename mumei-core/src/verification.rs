@@ -1707,6 +1707,24 @@ fn z3_dynamic_array<'a>(vc: &VCtx<'a>, name: &str, env: &Env<'a>) -> Array<'a> {
         .unwrap_or_else(|| z3_array_for_name(vc, name))
 }
 
+fn coerce_array_store_value<'a>(vc: &VCtx<'a>, array: &str, value: Dynamic<'a>) -> DynResult<'a> {
+    match array_element_sort(array, vc) {
+        ArrayElementSort::Int => value
+            .as_int()
+            .map(Into::into)
+            .ok_or_else(|| MumeiError::type_error("Array store value must be integer")),
+        ArrayElementSort::Real => value
+            .as_real()
+            .or_else(|| value.as_int().map(|i| i.to_real()))
+            .map(Into::into)
+            .ok_or_else(|| MumeiError::type_error("Array store value must be real")),
+        ArrayElementSort::Bool => value
+            .as_bool()
+            .map(Into::into)
+            .ok_or_else(|| MumeiError::type_error("Array store value must be boolean")),
+    }
+}
+
 fn param_z3_value<'a>(
     ctx: &'a Context,
     name: &str,
@@ -8680,6 +8698,7 @@ fn stmt_to_z3<'a>(
                 .as_int()
                 .ok_or(MumeiError::type_error("Array index must be integer"))?;
             let val = expr_to_z3(vc, value, env, solver_opt)?;
+            let stored_val = coerce_array_store_value(vc, array, val)?;
 
             // OOB check mirrors `Expr::ArrayAccess`: store at an index that may
             // fall outside `[0, len_<name>)` is flagged as a verification
@@ -8714,10 +8733,10 @@ fn stmt_to_z3<'a>(
 
             let arr_key = format!("__z3_arr_{}", array);
             let current_arr = z3_dynamic_array(vc, array, env);
-            let new_arr = current_arr.store(&idx, &val);
+            let new_arr = current_arr.store(&idx, &stored_val);
             env.insert(arr_key, new_arr.into());
 
-            Ok(val)
+            Ok(stored_val)
         }
         Stmt::Block(stmts, _) => {
             let mut last: Dynamic = Int::from_i64(ctx, 0).into();
@@ -9301,7 +9320,70 @@ fn save_visualizer_report(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hir::lower_atom_to_hir_with_env;
     use crate::parser::{Atom, ImplDef, Param, Span, TraitDef, TraitMethod, TrustLevel};
+    use std::path::Path;
+
+    fn test_atom(
+        name: &str,
+        params: Vec<Param>,
+        requires: &str,
+        ensures: &str,
+        body_expr: &str,
+        return_type: Option<&str>,
+    ) -> Atom {
+        Atom {
+            name: name.to_string(),
+            type_params: vec![],
+            where_bounds: vec![],
+            params,
+            requires: requires.to_string(),
+            forall_constraints: vec![],
+            ensures: ensures.to_string(),
+            body_expr: body_expr.to_string(),
+            consumed_params: vec![],
+            resources: vec![],
+            is_async: false,
+            trust_level: TrustLevel::Verified,
+            max_unroll: None,
+            invariant: None,
+            effects: vec![],
+            return_type: return_type.map(str::to_string),
+            span: Span::default(),
+            effect_pre: HashMap::new(),
+            effect_post: HashMap::new(),
+        }
+    }
+
+    fn test_param(name: &str, type_name: Option<&str>) -> Param {
+        Param {
+            name: name.to_string(),
+            type_name: type_name.map(str::to_string),
+            type_ref: type_name.map(crate::parser::parse_type_ref),
+            is_ref: false,
+            is_ref_mut: false,
+            fn_contract_requires: None,
+            fn_contract_ensures: None,
+        }
+    }
+
+    #[test]
+    fn test_array_store_promotes_int_literal_for_real_arrays() {
+        let atom = test_atom(
+            "store_real_array",
+            vec![test_param("arr", Some("[f64]"))],
+            "len(arr) >= 1",
+            "result == 42.0",
+            "{ arr[0] = 42; arr[0] }",
+            Some("f64"),
+        );
+        let mut module_env = ModuleEnv::new();
+        register_builtin_traits(&mut module_env);
+        module_env.register_atom(&atom);
+        let hir = lower_atom_to_hir_with_env(&atom, Some(&module_env));
+
+        verify(&hir, Path::new("."), &module_env).unwrap();
+    }
 
     // ---- constraint_to_natural_language tests ----
 

@@ -20,6 +20,14 @@ requires: n >= 1 && forall(i, 0, n, arr[i] >= 0.0);
 ensures: result == arr[0] && result >= 0.0;
 body: arr[0];
 
+atom test_f64_array_store_int_literal(arr: [f64]) -> f64
+requires: len(arr) >= 1;
+ensures: result == 42.0;
+body: {
+    arr[0] = 42;
+    arr[0]
+};
+
 atom test_bool_array(arr: [bool], n: i64) -> bool
 requires: n >= 1 && forall(i, 0, n, arr[i] == true);
 ensures: result == true;
