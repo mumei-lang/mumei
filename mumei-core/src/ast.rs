@@ -38,7 +38,9 @@ impl TypeRef {
 
     /// 表示用の正規化名を返す（例: "Stack<i64>", "atom_ref(i64) -> i64"）
     pub fn display_name(&self) -> String {
-        let base = if self.is_fn_type() {
+        let base = if self.name == "[]" && self.type_args.len() == 1 {
+            format!("[{}]", self.type_args[0].display_name())
+        } else if self.is_fn_type() {
             // 関数型: atom_ref(param_types...) -> return_type
             let param_types: Vec<String> = self.type_args[..self.type_args.len() - 1]
                 .iter()
@@ -60,6 +62,24 @@ impl TypeRef {
             }
         } else {
             base
+        }
+    }
+
+    /// 配列型 `[` T `]` を作成する。
+    pub fn array(element_type: TypeRef) -> Self {
+        TypeRef {
+            name: "[]".to_string(),
+            type_args: vec![element_type],
+            effect_set: None,
+        }
+    }
+
+    /// 配列型なら要素型を返す。
+    pub fn array_element_type(&self) -> Option<&TypeRef> {
+        if self.name == "[]" && self.type_args.len() == 1 {
+            self.type_args.first()
+        } else {
+            None
         }
     }
 

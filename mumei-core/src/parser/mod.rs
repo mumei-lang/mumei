@@ -168,6 +168,15 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_type_ref_array() {
+        let tr = parse_type_ref("[f64]");
+        assert_eq!(tr.name, "[]");
+        assert_eq!(tr.type_args.len(), 1);
+        assert_eq!(tr.type_args[0].name, "f64");
+        assert_eq!(tr.display_name(), "[f64]");
+    }
+
+    #[test]
     fn test_parse_type_ref_nested() {
         let tr = parse_type_ref("Map<String, List<i64>>");
         assert_eq!(tr.name, "Map");
