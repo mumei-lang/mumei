@@ -135,6 +135,14 @@ mumeiの思想の究極的な体現:
   - Sandboxed pipeline composing all three capabilities
   - Three unsafe examples that Z3 rejects at compile time (passwd read, path traversal, plain HTTP)
 
+### P3-D: Phase 1 Demo: Ownership Transfer Protocol ✅ Demo Ready
+
+**Repository**: `mumei-lang/mumei`
+
+- ✅ `std/ownership.mm` — Stateful `Ownership` effect with `Idle`, `PendingTransfer`, and `Transferred` states
+- ✅ Verified atoms for proposal, acceptance, cancellation, full transfer, and propose-then-cancel composition
+- ✅ E2E tests covering valid transfer flows and hostile takeover rejection via temporal effect verification
+
 ---
 
 ## Emitter Plugin Architecture (コード生成プラグイン構造)

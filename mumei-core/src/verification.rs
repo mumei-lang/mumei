@@ -5730,7 +5730,7 @@ fn verify_inner(
                     crate::mir_analysis::TemporalViolationKind::InvalidPreState => {
                         // Hard error: operation performed in wrong state
                         return Err(MumeiError::verification(format!(
-                            "Temporal effect violation: '{}' operation '{}' requires state '{}' \
+                            "Temporal effect violation (InvalidPreState): '{}' operation '{}' requires state '{}' \
                              but current state is '{}' (block {})",
                             v.effect, v.operation, v.expected_state, v.actual_state, v.block_id
                         )));
