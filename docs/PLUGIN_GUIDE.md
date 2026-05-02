@@ -103,4 +103,4 @@ For `--emit <name>`, Mumei searches:
 
 ## Runtime safety
 
-The host keeps the dynamic library loaded while the emitter object is alive. `emit()` calls are wrapped in a panic catcher, so plugin panics become `MumeiError` diagnostics instead of unwinding through Mumei.
+The host loads an external emitter once per `mumei build` invocation and reuses that object for every atom emitted in the build. It keeps the dynamic library loaded while the emitter object is alive. `emit()` calls are wrapped in a panic catcher, so plugin panics become `MumeiError` diagnostics instead of unwinding through Mumei.

@@ -252,25 +252,7 @@ fn main() {
                 "binary" => emitter::EmitTarget::Binary,
                 "rust-wrapper" => emitter::EmitTarget::RustWrapper,
                 "python-wrapper" => emitter::EmitTarget::PythonWrapper,
-                other => {
-                    // Task 1-C: fall through to the Phase 3 external
-                    // emitter resolver so unknown CLI strings can map
-                    // to plugins under `~/.mumei/emitters/<name>/`.
-                    // We probe for the plugin eagerly here so users
-                    // get the same diagnostic whether the failure is
-                    // "no such target" or "dynamic plugin failed to load".
-                    match emitter::load_external_emitter(other) {
-                        Ok(_emitter) => emitter::EmitTarget::External(other.to_string()),
-                        Err(err) => {
-                            eprintln!(
-                                "\u{274c} Error: Unknown emit target '{}'. Valid built-in values: llvm-ir, c-header, verified-json, proof-book, proof-cert, binary, rust-wrapper, python-wrapper.",
-                                other
-                            );
-                            eprintln!("  External plugin lookup failed: {}", err);
-                            std::process::exit(1);
-                        }
-                    }
-                }
+                other => emitter::EmitTarget::External(other.to_string()),
             };
             cmd_build(
                 &input,
@@ -1768,6 +1750,7 @@ fn cmd_verify_cert(cert_path: &str, input: &str, allow_lean_verified: bool) {
 
 fn dispatch_emit(
     target: &emitter::EmitTarget,
+    external_emitter: Option<&(dyn Emitter + Send + Sync)>,
     hir_atom: &hir::HirAtom,
     output_path: &std::path::Path,
     module_env: &verification::ModuleEnv,
@@ -1815,8 +1798,12 @@ fn dispatch_emit(
             extern_blocks,
         ),
         emitter::EmitTarget::External(name) => {
-            let boxed = emitter::load_external_emitter(name)?;
-            boxed.emit(hir_atom, output_path, module_env, extern_blocks)
+            let external_emitter = external_emitter.ok_or_else(|| {
+                verification::MumeiError::verification(format!(
+                    "External emitter '{name}' was not loaded"
+                ))
+            })?;
+            external_emitter.emit(hir_atom, output_path, module_env, extern_blocks)
         }
     }
 }
@@ -1832,6 +1819,21 @@ fn cmd_build(
     strict_imports: bool,
     allow_lean_verified: bool,
 ) {
+    let external_emitter = match emit_target {
+        emitter::EmitTarget::External(name) => match emitter::load_external_emitter(name) {
+            Ok(emitter) => Some(emitter),
+            Err(err) => {
+                eprintln!(
+                    "\u{274c} Error: Unknown emit target '{}'. Valid built-in values: llvm-ir, c-header, verified-json, proof-book, proof-cert, binary, rust-wrapper, python-wrapper.",
+                    name
+                );
+                eprintln!("  External plugin lookup failed: {}", err);
+                std::process::exit(1);
+            }
+        },
+        _ => None,
+    };
+
     check_z3_available();
     println!("🗡️  Mumei: Forging the blade (Type System 2.0 + Generics enabled)...");
 
@@ -2104,6 +2106,7 @@ fn cmd_build(
                     let extern_blocks = collect_extern_blocks(&items);
                     match dispatch_emit(
                         emit_target,
+                        external_emitter.as_deref(),
                         &hir_atom,
                         &atom_output_path,
                         &module_env,
@@ -2267,6 +2270,7 @@ fn cmd_build(
                 let extern_blocks = collect_extern_blocks(&items);
                 match dispatch_emit(
                     emit_target,
+                    external_emitter.as_deref(),
                     &hir_atom,
                     &atom_output_path,
                     &module_env,
