@@ -544,7 +544,7 @@ mumei-agent の forge モード（P9）により、vStd の各タスクを自律
 3. mumei-lean → 正しい実装の到達不可能性を数学的に証明
 4. BEFORE (LLM alone: バグ見逃し) vs AFTER (LLM + mumei: バグ検出)
 
-### Phase 2: RTGS Settlement — 📋 Planned
+### Phase 2: RTGS Settlement — 🚧 In Progress
 
 基幹システム寄りのデモ。mumei の全機能を同時に活用:
 - Resource Hierarchy（デッドロック防止）
@@ -552,6 +552,9 @@ mumei-agent の forge モード（P9）により、vStd の各タスクを自律
 - Loop invariant + decreases（停止性証明）
 - forall 量化子（残高不変量）
 - safe_queue（キュー操作）
+
+実装:
+- 🚧 mumei: `std/settlement.mm` — RTGS 決済プロトコル。Temporal Effect (`Pending → Validated → Settled`)、Resource Hierarchy (`ledger → queue`)、Loop invariant + decreases（キュー処理停止性）、forall 量化子（全残高の非負性）を統合。
 
 Z3 → Lean エスカレーション: Z3 が個別トランザクションの安全性を証明、Lean がグローバル残高保存の帰納的証明を担当。
 
