@@ -101,7 +101,7 @@ mumei build src/main.mm -o dist/output
 
 | Command | Description |
 |---------|-------------|
-| `mumei build <file> -o <out>` | Verify + codegen (`--emit llvm-ir` (default) / `c-header` / `verified-json` / `proof-book` / `rust` / `python`) |
+| `mumei build <file> -o <out>` | Verify + codegen (`--emit llvm-ir` (default) / `c-header` / `verified-json` / `proof-book` / `rust` / `python` / external plugin name) |
 | `mumei verify <file>` | Z3 verification only |
 | `mumei check <file>` | Parse + resolve (fast, no Z3) |
 | `mumei init <name>` | Generate project template |
@@ -131,7 +131,7 @@ mumei build src/main.mm -o dist/output
 | **Safety** | `trusted` / `unverified` atoms, taint analysis, BMC + inductive invariant, [`call_with_contract`](docs/LANGUAGE.md#higher-order-functions-phase-a) for higher-order function verification |
 | **FFI** | `extern "Rust"` / `extern "C"` blocks, handle-based memory management (`json_free`, `http_free`), Str type interop |
 | **Std Library** | Option, Result, List, BoundedArray, Vector, HashMap, JSON, HTTP, sort algorithms, effect definitions |
-| **Output** | LLVM IR (native binary), C header (`.h`) via `--emit c-header`, verified JSON metadata via `--emit verified-json`, Markdown proof certificates via `--emit proof-book`, Rust / Python FFI bindings via `--emit rust` / `--emit python`. Cargo workspace with emitter plugin architecture (`mumei-core`, `mumei-emit-llvm`, `mumei-emit-json`, `mumei-emit-proofbook`, `mumei-emit-rust`, `mumei-emit-python`) — see [Roadmap](docs/CROSS_PROJECT_ROADMAP.md) |
+| **Output** | LLVM IR (native binary), C header (`.h`) via `--emit c-header`, verified JSON metadata via `--emit verified-json`, Markdown proof certificates via `--emit proof-book`, Rust / Python FFI bindings via `--emit rust` / `--emit python`, and runtime-loaded emitter plugins from `~/.mumei/emitters/<name>/`. Cargo workspace with emitter plugin architecture (`mumei-core`, `mumei-emit-llvm`, `mumei-emit-json`, `mumei-emit-proofbook`, `mumei-emit-rust`, `mumei-emit-python`) — see [Plugin Guide](docs/PLUGIN_GUIDE.md) and [Roadmap](docs/CROSS_PROJECT_ROADMAP.md) |
 | **Tooling** | LSP server, VS Code extension (counter-example ghost-text decorations — v0.2.0+), `mumei.toml` manifest, dependency manager, MCP server, contract-aware `mumei doc` (HTML / Markdown / JSON with client-side search), semantic feedback (bilingual EN/JP) |
 
 <details>

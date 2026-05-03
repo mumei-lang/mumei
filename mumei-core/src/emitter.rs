@@ -13,7 +13,8 @@
 
 use crate::hir::HirAtom;
 use crate::parser::ExternBlock;
-use crate::verification::{ModuleEnv, MumeiResult};
+use crate::verification::{ModuleEnv, MumeiError, MumeiResult};
+use std::ffi::c_void;
 use std::path::Path;
 
 // =============================================================================
@@ -21,14 +22,18 @@ use std::path::Path;
 // =============================================================================
 
 /// Classification of emitted artifacts.
-// TODO: Consider adding a `Metadata` variant when more non-source emitters are added
-// (e.g., Phase 3 Wasm). Currently `VerifiedJsonEmitter` uses `Source` as the closest match.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ArtifactKind {
     /// Reserved for future native binary output
     Binary,
     Source,
     Header,
+    /// Phase 3: non-source, non-header sidecar artefacts emitted by
+    /// plugin emitters (e.g. proof bundles, `.proof-cert.json`-like
+    /// metadata blobs, Wasm component manifests). The exact MIME of
+    /// the payload is emitter-defined; the build pipeline should treat
+    /// these as opaque bytes when copying them to disk.
+    Metadata,
 }
 
 /// A single output artifact produced by an emitter.
@@ -68,7 +73,203 @@ pub enum EmitTarget {
     RustWrapper,
     /// FFI glue code for Python (NOT a transpiler — generates ctypes-based wrappers)
     PythonWrapper,
+    /// Phase 3: an emitter loaded from an external dynamic library at
+    /// `~/.mumei/emitters/<name>/libmumei_emit_<name>.{so,dll,dylib}`.
+    /// Resolution is delegated to [`load_external_emitter`]. Used when
+    /// the `--emit` CLI flag does not match any built-in target.
+    External(String),
 }
+
+// =============================================================================
+// Phase 3: external emitter plugin loader
+// =============================================================================
+
+/// Current emitter plugin ABI version. Bump when the Emitter trait
+/// signature or HirAtom/ModuleEnv layout changes in a breaking way.
+pub const EMITTER_ABI_VERSION: u32 = 1;
+
+/// Trait-object wrapper for an emitter loaded out-of-process. Plugins
+/// must be `Send + Sync` so they can be shared across threads in the
+/// future build pipeline.
+pub type BoxedEmitter = Box<dyn Emitter + Send + Sync>;
+
+#[repr(C)]
+struct RawEmitterTraitObject {
+    data: *mut c_void,
+    vtable: *mut c_void,
+}
+
+const _: () = {
+    assert!(std::mem::size_of::<BoxedEmitter>() == std::mem::size_of::<RawEmitterTraitObject>());
+    assert!(std::mem::align_of::<BoxedEmitter>() == std::mem::align_of::<RawEmitterTraitObject>());
+};
+
+/// C-compatible handle returned by `mumei_create_emitter`.
+///
+/// Rust trait objects are fat pointers, so plugins return their data
+/// pointer and vtable pointer explicitly instead of returning
+/// `*mut dyn Emitter` across the `extern "C"` boundary.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct EmitterPluginHandle {
+    pub data: *mut c_void,
+    pub vtable: *mut c_void,
+}
+
+impl EmitterPluginHandle {
+    pub fn from_boxed(emitter: BoxedEmitter) -> Self {
+        let raw: RawEmitterTraitObject = unsafe { std::mem::transmute(emitter) };
+        Self {
+            data: raw.data,
+            vtable: raw.vtable,
+        }
+    }
+
+    fn is_null(&self) -> bool {
+        self.data.is_null() || self.vtable.is_null()
+    }
+
+    unsafe fn into_boxed(self) -> BoxedEmitter {
+        let raw = RawEmitterTraitObject {
+            data: self.data,
+            vtable: self.vtable,
+        };
+        unsafe { std::mem::transmute(raw) }
+    }
+}
+
+struct PanicSafeEmitter {
+    inner: BoxedEmitter,
+    _lib: libloading::Library,
+}
+
+impl Emitter for PanicSafeEmitter {
+    fn emit(
+        &self,
+        hir_atom: &HirAtom,
+        output_path: &Path,
+        module_env: &ModuleEnv,
+        extern_blocks: &[ExternBlock],
+    ) -> MumeiResult<Vec<Artifact>> {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.inner
+                .emit(hir_atom, output_path, module_env, extern_blocks)
+        }))
+        .unwrap_or_else(|_| {
+            Err(MumeiError::verification(
+                "External emitter panicked during emit".to_string(),
+            ))
+        })
+    }
+}
+
+/// Locate and load an external emitter plugin by name.
+///
+/// # Resolution
+///
+/// Looks for the platform-specific dynamic library under the user's
+/// `~/.mumei/emitters/<name>/` directory (the same root where
+/// `crate::manifest::mumei_home()` resolves):
+///
+/// - Linux:   `libmumei_emit_<name>.so`
+/// - macOS:   `libmumei_emit_<name>.dylib`
+/// - Windows: `mumei_emit_<name>.dll` (no `lib` prefix — matches Rust
+///   `cdylib` output convention on Windows)
+///
+/// # Plugin contract
+///
+/// Loaded libraries must export an ABI-version function and a C-ABI factory symbol:
+///
+/// ```ignore
+/// #[no_mangle]
+/// pub extern "C" fn mumei_emitter_abi_version() -> u32 {
+///     mumei_core::emitter::EMITTER_ABI_VERSION
+/// }
+///
+/// /// Returns a heap-allocated emitter owned by the caller. The host frees the box via
+/// /// `drop` when the build finishes.
+/// #[no_mangle]
+/// pub extern "C" fn mumei_create_emitter() -> mumei_core::emitter::EmitterPluginHandle;
+/// ```
+pub fn load_external_emitter(name: &str) -> MumeiResult<BoxedEmitter> {
+    // Rust's `cdylib` output on Windows produces `<crate>.dll` *without*
+    // a `lib` prefix, while Linux/macOS keep the `lib` prefix. Match that
+    // convention so plugin authors can drop their compiled artefact in
+    // place without renaming.
+    let (prefix, ext) = if cfg!(target_os = "windows") {
+        ("", ".dll")
+    } else if cfg!(target_os = "macos") {
+        ("lib", ".dylib")
+    } else {
+        ("lib", ".so")
+    };
+    let lib_filename = format!("{}mumei_emit_{}{}", prefix, name, ext);
+    let lib_path = crate::manifest::mumei_home()
+        .join("emitters")
+        .join(name)
+        .join(&lib_filename);
+
+    if !lib_path.exists() {
+        return Err(MumeiError::verification(format!(
+            "External emitter '{name}' not found.\n  \
+             Expected plugin at: {path}\n  \
+             To install: place the compiled `{lib_filename}` (exporting `mumei_emitter_abi_version` and `mumei_create_emitter`) at that location.",
+            name = name,
+            path = lib_path.display(),
+            lib_filename = lib_filename,
+        )));
+    }
+
+    unsafe {
+        let lib = libloading::Library::new(&lib_path).map_err(|e| {
+            MumeiError::verification(format!(
+                "Failed to load external emitter '{name}' from {}: {e}",
+                lib_path.display()
+            ))
+        })?;
+
+        let version = {
+            let abi_version: libloading::Symbol<unsafe extern "C" fn() -> u32> =
+                lib.get(b"mumei_emitter_abi_version").map_err(|e| {
+                    MumeiError::verification(format!(
+                        "External emitter '{name}' does not export mumei_emitter_abi_version: {e}"
+                    ))
+                })?;
+            abi_version()
+        };
+        if version != EMITTER_ABI_VERSION {
+            return Err(MumeiError::verification(format!(
+                "External emitter '{name}' ABI version mismatch: expected {EMITTER_ABI_VERSION}, got {version}"
+            )));
+        }
+
+        let handle = {
+            let create: libloading::Symbol<unsafe extern "C" fn() -> EmitterPluginHandle> =
+                lib.get(b"mumei_create_emitter").map_err(|e| {
+                    MumeiError::verification(format!(
+                        "External emitter '{name}' does not export mumei_create_emitter: {e}"
+                    ))
+                })?;
+            create()
+        };
+        if handle.is_null() {
+            return Err(MumeiError::verification(format!(
+                "External emitter '{name}' returned a null handle from mumei_create_emitter"
+            )));
+        }
+
+        let emitter = handle.into_boxed();
+        let wrapped = PanicSafeEmitter {
+            inner: emitter,
+            _lib: lib,
+        };
+        Ok(Box::new(wrapped))
+    }
+}
+
+// =============================================================================
+// Built-in emitters
+// =============================================================================
 
 pub struct CHeaderEmitter;
 
@@ -410,5 +611,126 @@ mod tests {
         assert!(content.contains("#include <stdint.h>"));
         assert!(content.contains("extern int64_t safe_div(int64_t dividend, int64_t divisor);"));
         assert!(content.contains("#endif /* SAFE_DIV_H */"));
+    }
+
+    // ============================================================
+    // Phase 3: ArtifactKind / EmitTarget / load_external_emitter
+    // ============================================================
+
+    /// Phase 3: `ArtifactKind::Metadata` is a distinct variant so the
+    /// build pipeline can route plugin metadata blobs differently from
+    /// `Source` / `Header` / `Binary`.
+    #[test]
+    fn test_artifact_kind_metadata_distinct() {
+        let m = ArtifactKind::Metadata;
+        assert_ne!(m, ArtifactKind::Source);
+        assert_ne!(m, ArtifactKind::Header);
+        assert_ne!(m, ArtifactKind::Binary);
+        // round-trip an Artifact{kind: Metadata}
+        let art = Artifact {
+            name: std::path::PathBuf::from("/tmp/plugin.meta.json"),
+            data: br#"{"kind":"metadata"}"#.to_vec(),
+            kind: ArtifactKind::Metadata,
+        };
+        assert_eq!(art.kind, ArtifactKind::Metadata);
+    }
+
+    /// Phase 3: `EmitTarget::External(name)` carries the requested
+    /// plugin name so that `dispatch_emit` can resolve the dynamic
+    /// library path at build time.
+    #[test]
+    fn test_emit_target_external_carries_name() {
+        let t = EmitTarget::External("wasm".to_string());
+        match &t {
+            EmitTarget::External(name) => assert_eq!(name, "wasm"),
+            other => panic!("expected External, got {:?}", other),
+        }
+        // Default is still LlvmIr so existing CLI defaults are unchanged.
+        assert!(matches!(EmitTarget::default(), EmitTarget::LlvmIr));
+    }
+
+    /// Phase 3: `load_external_emitter` returns a structured "not
+    /// found" error when the plugin file does not exist on disk. The
+    /// error message must include both the plugin name and the
+    /// expected install path so users can self-serve.
+    #[test]
+    fn test_load_external_emitter_missing_plugin_errors() {
+        // Use a name that is exceedingly unlikely to be installed on
+        // any contributor machine or CI runner.
+        let res = load_external_emitter("definitely_not_installed_phase3_plugin");
+        let err = match res {
+            Ok(_) => panic!("missing plugin must be an Err"),
+            Err(e) => e,
+        };
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("definitely_not_installed_phase3_plugin"),
+            "error must mention plugin name; got: {msg}"
+        );
+        assert!(
+            msg.contains("not found") || msg.contains("Expected plugin at"),
+            "error must explain *why* the lookup failed; got: {msg}"
+        );
+        // Plugins live under ~/.mumei/emitters/<name>/. Check that the
+        // hint references that directory so users know where to drop
+        // their .so / .dylib / .dll.
+        assert!(
+            msg.contains(".mumei") && msg.contains("emitters"),
+            "error must point to the ~/.mumei/emitters install path; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_emitter_abi_version_constant() {
+        assert_eq!(EMITTER_ABI_VERSION, 1);
+    }
+
+    #[test]
+    fn test_emitter_plugin_handle_round_trips_boxed_emitter() {
+        let handle = EmitterPluginHandle::from_boxed(Box::new(CHeaderEmitter));
+        assert!(!handle.is_null());
+        let boxed = unsafe { handle.into_boxed() };
+        let hir = make_hir_atom("handle_round_trip", vec![], "true", "true", None);
+        let module_env = ModuleEnv::new();
+        let artifacts = boxed
+            .emit(&hir, Path::new("/tmp/handle_round_trip"), &module_env, &[])
+            .expect("round-tripped emitter should remain callable");
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].kind, ArtifactKind::Header);
+    }
+
+    struct PanickingEmitter;
+
+    impl Emitter for PanickingEmitter {
+        fn emit(
+            &self,
+            _hir_atom: &HirAtom,
+            _output_path: &Path,
+            _module_env: &ModuleEnv,
+            _extern_blocks: &[ExternBlock],
+        ) -> MumeiResult<Vec<Artifact>> {
+            panic!("plugin emit failure");
+        }
+    }
+
+    #[test]
+    fn test_panic_safe_emitter_catches_panic() {
+        let wrapped = PanicSafeEmitter {
+            inner: Box::new(PanickingEmitter),
+            #[cfg(unix)]
+            _lib: libloading::os::unix::Library::this().into(),
+            #[cfg(windows)]
+            _lib: libloading::os::windows::Library::this().unwrap().into(),
+        };
+        let hir = make_hir_atom("panic_plugin", vec![], "true", "true", None);
+        let module_env = ModuleEnv::new();
+        let err = wrapped
+            .emit(&hir, Path::new("/tmp/panic_plugin"), &module_env, &[])
+            .unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("External emitter panicked during emit"),
+            "panic must be converted to a verification error; got: {msg}"
+        );
     }
 }

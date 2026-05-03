@@ -1245,5 +1245,402 @@ def analyze_std_gaps() -> str:
     return json.dumps(result, indent=2, ensure_ascii=False)
 
 
+# ---------------------------------------------------------------------------
+# P10: cross-repo MCP tools
+# ---------------------------------------------------------------------------
+#
+# These tools mirror utilities that previously only existed in
+# mumei-agent (``agent/std_health.py``) or required a local mumei
+# checkout, so external MCP clients (Claude Code / Devin / Codex) can
+# now query proof health, retrieve proof certificates, and generate
+# documentation through the same FastMCP transport as the rest of the
+# Mumei-Forge tools.
+
+
+def _resolve_mumei_invocation() -> list[str]:
+    """Pick how to invoke ``mumei``.
+
+    Honors ``MUMEI_BIN`` (which may include arguments such as
+    ``cargo run --manifest-path … --``), then falls back to a plain
+    ``mumei`` on ``$PATH``, then to ``cargo run --`` from the repo
+    root.
+    """
+    import os
+    import shlex
+
+    env = os.environ.get("MUMEI_BIN", "").strip()
+    if env:
+        parts = shlex.split(env)
+        if parts and (shutil.which(parts[0]) or Path(parts[0]).exists()):
+            return parts
+    if shutil.which("mumei"):
+        return ["mumei"]
+    return ["cargo", "run", "--quiet", "--"]
+
+
+def _parse_atoms(text: str) -> list[str]:
+    """Return atom names defined or trusted in *text* (best effort)."""
+    names: list[str] = []
+    for line in text.splitlines():
+        m = re.match(r"^\s*(?:trusted\s+|async\s+)?atom\s+([A-Za-z_][A-Za-z0-9_]*)", line)
+        if m:
+            names.append(m.group(1))
+    return names
+
+
+def _parse_trusted_atoms(text: str) -> list[str]:
+    names: list[str] = []
+    for line in text.splitlines():
+        m = re.match(r"^\s*trusted\s+atom\s+([A-Za-z_][A-Za-z0-9_]*)", line)
+        if m:
+            names.append(m.group(1))
+    return names
+
+
+_TODO_RE = re.compile(
+    r"//.*?\b(TODO|FIXME|XXX|HACK)\b",
+    re.IGNORECASE,
+)
+
+
+def _count_todos(text: str) -> int:
+    return sum(1 for line in text.splitlines() if _TODO_RE.search(line))
+
+
+def _compute_health_score(
+    total_atoms: int,
+    verified_atoms: int,
+    trusted_atoms: int,
+    todo_count: int,
+) -> float:
+    """Mirror of ``agent.std_health.compute_health_score``.
+
+    score = (verified - trusted) / total - 0.01 * todo_count, clamped
+    to ``[0.0, 1.0]``.
+    """
+    if total_atoms <= 0:
+        return 0.0
+    base = (verified_atoms - trusted_atoms) / total_atoms
+    penalty = 0.01 * todo_count
+    score = base - penalty
+    if score < 0.0:
+        return 0.0
+    if score > 1.0:
+        return 1.0
+    return round(score, 4)
+
+
+@mcp.tool()
+def measure_std_health() -> str:
+    """Measure proof-health metrics for the std/ library.
+
+    Mirrors :func:`agent.std_health.measure_health` so external MCP
+    clients can monitor std/ health without installing mumei-agent.
+
+    Returns JSON with ``total_files``, ``verified_files``,
+    ``failed_files``, ``total_atoms``, ``verified_atoms``,
+    ``trusted_atoms``, ``health_score``, ``todo_count``, and
+    per-file ``details``.
+    """
+    root_dir = Path(__file__).parent.absolute()
+    std_dir = root_dir / "std"
+    if not std_dir.exists():
+        return json.dumps({"error": "std/ directory not found"})
+
+    cmd_prefix = _resolve_mumei_invocation()
+
+    total_files = 0
+    verified_files = 0
+    failed_files = 0
+    verify_unavailable_files = 0
+    total_atoms = 0
+    verified_atoms = 0
+    trusted_atoms = 0
+    todo_count = 0
+    details: list[dict] = []
+
+    for mm_file in sorted(std_dir.rglob("*.mm")):
+        # Skip files under std/certs/ (proof outputs, not source).
+        try:
+            rel_to_std = mm_file.relative_to(std_dir)
+        except ValueError:
+            continue
+        if rel_to_std.parts and rel_to_std.parts[0] == "certs":
+            continue
+
+        rel = mm_file.relative_to(root_dir).as_posix()
+        try:
+            text = mm_file.read_text(encoding="utf-8")
+        except OSError as exc:
+            details.append(
+                {"file": rel, "status": "io_error", "error": str(exc)}
+            )
+            continue
+
+        atoms = _parse_atoms(text)
+        trusted = _parse_trusted_atoms(text)
+        file_total = len(atoms)
+        file_trusted = len(trusted)
+        file_todo = _count_todos(text)
+
+        total_files += 1
+        total_atoms += file_total
+        todo_count += file_todo
+
+        try:
+            result = subprocess.run(
+                [*cmd_prefix, "verify", "--json", str(mm_file)],
+                cwd=root_dir,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+            verify_unavailable_files += 1
+            details.append(
+                {
+                    "file": rel,
+                    "status": "verify_unavailable",
+                    "error": str(exc),
+                    "atoms": file_total,
+                    "trusted_atoms": file_trusted,
+                    "todo": file_todo,
+                }
+            )
+            continue
+
+        success = result.returncode == 0
+        if success:
+            verified_files += 1
+            verified_atoms += file_total
+            trusted_atoms += file_trusted
+            status = "verified"
+        else:
+            failed_files += 1
+            status = "failed"
+
+        details.append(
+            {
+                "file": rel,
+                "status": status,
+                "atoms": file_total,
+                "trusted_atoms": file_trusted,
+                "todo": file_todo,
+            }
+        )
+
+    health_score = _compute_health_score(
+        total_atoms, verified_atoms, trusted_atoms, todo_count
+    )
+    payload = {
+        "total_files": total_files,
+        "verified_files": verified_files,
+        "failed_files": failed_files,
+        "verify_unavailable_files": verify_unavailable_files,
+        "total_atoms": total_atoms,
+        "verified_atoms": verified_atoms,
+        "trusted_atoms": trusted_atoms,
+        "todo_count": todo_count,
+        "health_score": health_score,
+        "details": details,
+    }
+    return json.dumps(payload, indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+def get_proof_certificate(module_path: str) -> str:
+    """Return the proof certificate JSON for *module_path*.
+
+    *module_path* is a repo-relative module path such as ``std/core.mm``
+    or ``std/core``.  The tool first looks under ``std/certs/`` for a
+    matching ``<module>.proof.json``, then falls back to the bundled
+    ``std-proof-bundle.json`` if present.
+
+    Returns a JSON object with either the certificate payload or an
+    ``error`` field describing why no certificate is available.
+    """
+    root_dir = Path(__file__).parent.absolute()
+    if not module_path or not isinstance(module_path, str):
+        return json.dumps({"error": "module_path is required"})
+
+    # Normalise the module path: strip leading "std/", trailing ".mm",
+    # collapse backslashes.  We do not allow absolute paths or "..".
+    cleaned = module_path.replace("\\", "/").strip()
+    if cleaned.startswith("./"):
+        cleaned = cleaned[2:]
+    if ".." in Path(cleaned).parts or Path(cleaned).is_absolute():
+        return json.dumps({"error": "module_path must be repo-relative"})
+
+    # Drop the leading 'std/' prefix when present so we can compose
+    # paths under ``std/certs/`` cleanly.
+    rel = cleaned[4:] if cleaned.startswith("std/") else cleaned
+    if rel.endswith(".mm"):
+        rel = rel[: -len(".mm")]
+
+    certs_dir = root_dir / "std" / "certs"
+    candidate = certs_dir / f"{rel}.proof.json"
+    key_with_prefix = f"std/{rel}"
+    if candidate.exists():
+        try:
+            cert = json.loads(candidate.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            return json.dumps({"error": f"failed to read certificate: {exc}"})
+        return json.dumps(
+            {
+                "module": key_with_prefix,
+                "source": "std/certs",
+                "certificate": cert,
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+
+    bundle = root_dir / "std-proof-bundle.json"
+    if bundle.exists():
+        try:
+            data = json.loads(bundle.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            return json.dumps(
+                {"error": f"failed to read std-proof-bundle.json: {exc}"}
+            )
+        modules = data.get("modules") or {}
+        cert = modules.get(key_with_prefix) or modules.get(rel)
+        if cert is not None:
+            return json.dumps(
+                {
+                    "module": key_with_prefix,
+                    "source": "std-proof-bundle.json",
+                    "certificate": cert,
+                    "bundle_version": data.get("bundle_version"),
+                    "mumei_version": data.get("mumei_version"),
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+
+    return json.dumps(
+        {
+            "error": "no proof certificate found",
+            "module": cleaned,
+            "looked_at": [str(candidate.relative_to(root_dir)), "std-proof-bundle.json"],
+        }
+    )
+
+
+@mcp.tool()
+def generate_doc(source_code: str, format: str = "json") -> str:
+    """Run ``mumei doc`` on *source_code* and return structured docs.
+
+    The mumei compiler's ``doc`` subcommand supports
+    ``--format json|markdown|html`` and writes its output under an
+    ``--output`` directory.  We point the output at a NamedTemporaryFile
+    directory so the call does not pollute the repo.
+
+    Args:
+        source_code: ``.mm`` source code to document.
+        format: One of ``json`` (default), ``markdown``, ``html``.  For
+            ``json`` we return the parsed object directly so MCP
+            clients don't have to re-parse the inner payload.
+    """
+    if not isinstance(source_code, str) or not source_code.strip():
+        return json.dumps({"error": "source_code must be non-empty"})
+    fmt = (format or "json").strip().lower()
+    if fmt not in ("json", "markdown", "html"):
+        return json.dumps({"error": f"unsupported format: {format!r}"})
+
+    root_dir = Path(__file__).parent.absolute()
+    cmd_prefix = _resolve_mumei_invocation()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        source_path = tmp_path / "input.mm"
+        source_path.write_text(source_code, encoding="utf-8")
+
+        try:
+            result = subprocess.run(
+                [
+                    *cmd_prefix,
+                    "doc",
+                    str(source_path),
+                    "--output",
+                    str(tmp_path / "out"),
+                    "--format",
+                    fmt,
+                ],
+                cwd=root_dir,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+            return json.dumps(
+                {"error": f"mumei doc unavailable: {exc}"}
+            )
+
+        if result.returncode != 0:
+            return json.dumps(
+                {
+                    "error": "mumei doc failed",
+                    "stderr": result.stderr,
+                    "stdout": result.stdout,
+                }
+            )
+
+        if fmt == "json":
+            text = result.stdout.strip()
+            if text:
+                try:
+                    parsed = json.loads(text)
+                    return json.dumps(
+                        {"format": "json", "doc": parsed},
+                        indent=2,
+                        ensure_ascii=False,
+                    )
+                except json.JSONDecodeError:
+                    pass
+
+            # Some doc backends write to <out>/doc.json instead of
+            # stdout.  Walk the output dir and surface whatever we find.
+            out_dir = tmp_path / "out"
+            collected: dict[str, object] = {}
+            if out_dir.exists():
+                for f in sorted(out_dir.rglob("*.json")):
+                    try:
+                        collected[
+                            str(f.relative_to(out_dir).as_posix())
+                        ] = json.loads(f.read_text(encoding="utf-8"))
+                    except (OSError, json.JSONDecodeError):
+                        continue
+            if collected:
+                return json.dumps(
+                    {"format": "json", "doc": collected},
+                    indent=2,
+                    ensure_ascii=False,
+                )
+            return json.dumps(
+                {"error": "mumei doc produced no JSON output", "stdout": text}
+            )
+
+        # markdown / html: return raw text (and any rendered files).
+        out_dir = tmp_path / "out"
+        files: dict[str, str] = {}
+        if out_dir.exists():
+            for f in sorted(out_dir.rglob("*")):
+                if f.is_file():
+                    try:
+                        files[str(f.relative_to(out_dir).as_posix())] = (
+                            f.read_text(encoding="utf-8")
+                        )
+                    except (OSError, UnicodeDecodeError):
+                        continue
+        return json.dumps(
+            {
+                "format": fmt,
+                "stdout": result.stdout,
+                "files": files,
+            },
+            ensure_ascii=False,
+        )
+
+
 if __name__ == "__main__":
     mcp.run()

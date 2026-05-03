@@ -3163,6 +3163,85 @@ mod tests {
         contracts
     }
 
+    fn make_ownership_effect_sm() -> EffectStateMachine {
+        use crate::parser::{EffectDef, EffectTransition};
+        let def = EffectDef {
+            name: "Ownership".to_string(),
+            params: vec![],
+            constraint: None,
+            includes: vec![],
+            refinement: None,
+            parent: vec![],
+            span: Span::default(),
+            states: vec![
+                "Idle".to_string(),
+                "PendingTransfer".to_string(),
+                "Transferred".to_string(),
+            ],
+            transitions: vec![
+                EffectTransition {
+                    operation: "propose".to_string(),
+                    from_state: "Idle".to_string(),
+                    to_state: "PendingTransfer".to_string(),
+                },
+                EffectTransition {
+                    operation: "accept".to_string(),
+                    from_state: "PendingTransfer".to_string(),
+                    to_state: "Transferred".to_string(),
+                },
+                EffectTransition {
+                    operation: "cancel".to_string(),
+                    from_state: "PendingTransfer".to_string(),
+                    to_state: "Idle".to_string(),
+                },
+            ],
+            initial_state: Some("Idle".to_string()),
+        };
+        EffectStateMachine::from_effect_def(&def).unwrap()
+    }
+
+    fn make_ownership_callee_contracts() -> HashMap<String, AtomEffectContract> {
+        let mut contracts = HashMap::new();
+
+        let mut propose_pre = HashMap::new();
+        propose_pre.insert("Ownership".to_string(), "Idle".to_string());
+        let mut propose_post = HashMap::new();
+        propose_post.insert("Ownership".to_string(), "PendingTransfer".to_string());
+        contracts.insert(
+            "propose_transfer".to_string(),
+            AtomEffectContract {
+                effect_pre: propose_pre,
+                effect_post: propose_post,
+            },
+        );
+
+        let mut accept_pre = HashMap::new();
+        accept_pre.insert("Ownership".to_string(), "PendingTransfer".to_string());
+        let mut accept_post = HashMap::new();
+        accept_post.insert("Ownership".to_string(), "Transferred".to_string());
+        contracts.insert(
+            "accept_transfer".to_string(),
+            AtomEffectContract {
+                effect_pre: accept_pre,
+                effect_post: accept_post,
+            },
+        );
+
+        let mut cancel_pre = HashMap::new();
+        cancel_pre.insert("Ownership".to_string(), "PendingTransfer".to_string());
+        let mut cancel_post = HashMap::new();
+        cancel_post.insert("Ownership".to_string(), "Idle".to_string());
+        contracts.insert(
+            "cancel_transfer".to_string(),
+            AtomEffectContract {
+                effect_pre: cancel_pre,
+                effect_post: cancel_post,
+            },
+        );
+
+        contracts
+    }
+
     #[test]
     fn test_cross_atom_composition_valid() {
         // full_pipeline: open_file → write_and_close (correct order)
@@ -3435,5 +3514,89 @@ mod tests {
             "perform File.write after open_file should succeed (effect_post = Open), got: {:?}",
             result.violations
         );
+    }
+
+    #[test]
+    fn test_ownership_protocol_cross_atom_success_and_failure() {
+        let sm = make_ownership_effect_sm();
+        let contracts = make_ownership_callee_contracts();
+
+        let valid = MirBody {
+            name: "full_transfer".to_string(),
+            locals: vec![LocalDecl {
+                local: Local(0),
+                name: Some("_ret".to_string()),
+                ty: None,
+                movability: Movability::Move,
+            }],
+            blocks: vec![BasicBlock {
+                id: 0,
+                statements: vec![
+                    MirStatement::Assign(
+                        Place::Local(Local(0)),
+                        Rvalue::Call {
+                            func: "propose_transfer".to_string(),
+                            args: vec![Operand::Constant(MirConstant::Int(1))],
+                        },
+                    ),
+                    MirStatement::Assign(
+                        Place::Local(Local(0)),
+                        Rvalue::Call {
+                            func: "accept_transfer".to_string(),
+                            args: vec![Operand::Constant(MirConstant::Int(1))],
+                        },
+                    ),
+                ],
+                terminator: Terminator::Return(Operand::Constant(MirConstant::Int(0))),
+            }],
+            entry_block: 0,
+        };
+        let mut machines = HashMap::new();
+        machines.insert("Ownership".to_string(), sm.clone());
+        let result = analyze_temporal_effects_with_contracts(&valid, &machines, Some(&contracts));
+        assert!(
+            result.violations.is_empty(),
+            "propose_transfer → accept_transfer should pass, got: {:?}",
+            result.violations
+        );
+        if let Some(exit_map) = result.exit_states.get(&0) {
+            assert_eq!(exit_map.get("Ownership").unwrap(), "Transferred");
+        }
+
+        let invalid = MirBody {
+            name: "hostile_takeover".to_string(),
+            locals: vec![LocalDecl {
+                local: Local(0),
+                name: Some("_ret".to_string()),
+                ty: None,
+                movability: Movability::Move,
+            }],
+            blocks: vec![BasicBlock {
+                id: 0,
+                statements: vec![MirStatement::Assign(
+                    Place::Local(Local(0)),
+                    Rvalue::Call {
+                        func: "accept_transfer".to_string(),
+                        args: vec![Operand::Constant(MirConstant::Int(1))],
+                    },
+                )],
+                terminator: Terminator::Return(Operand::Constant(MirConstant::Int(0))),
+            }],
+            entry_block: 0,
+        };
+        let mut machines = HashMap::new();
+        machines.insert("Ownership".to_string(), sm);
+        let result = analyze_temporal_effects_with_contracts(&invalid, &machines, Some(&contracts));
+        assert!(
+            !result.violations.is_empty(),
+            "accept_transfer from Idle should produce InvalidPreState"
+        );
+        assert_eq!(
+            result.violations[0].kind,
+            TemporalViolationKind::InvalidPreState
+        );
+        assert!(result.violations[0].operation.contains("accept_transfer"));
+        assert_eq!(result.violations[0].actual_state, "Idle");
+        assert_eq!(result.violations[0].expected_state, "PendingTransfer");
     }
 }

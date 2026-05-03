@@ -365,14 +365,16 @@ impl LowerCtx {
                 | crate::parser::Op::Implies => Some("bool".to_string()),
                 _ => self.infer_hir_ty(lhs).or_else(|| self.infer_hir_ty(rhs)),
             },
-            HirExpr::ArrayAccess(_name, _) => {
-                // Array element access always yields i64 in the current
-                // surface syntax. Returning the *array* variable's type
-                // here (e.g. `"[i64]"`) would classify the local as Move
-                // and cause false-positive UseAfterMove on idioms like
-                // `let key = arr[i]`.
-                Some("i64".to_string())
-            }
+            HirExpr::ArrayAccess(name, _) => self
+                .lookup_var_ty(name)
+                .and_then(|ty| {
+                    if ty.starts_with('[') && ty.ends_with(']') {
+                        Some(ty[1..ty.len() - 1].to_string())
+                    } else {
+                        None
+                    }
+                })
+                .or_else(|| Some("i64".to_string())),
             HirExpr::IfThenElse {
                 then_branch,
                 else_branch,
@@ -903,6 +905,52 @@ mod tests {
             fn_contract_requires: None,
             fn_contract_ensures: None,
         }
+    }
+
+    fn infer_body_expr_type(atom: &Atom) -> Option<String> {
+        let hir = lower_atom_to_hir(atom);
+        let mut ctx = LowerCtx::new();
+        for param in &hir.atom.params {
+            ctx.alloc_local(Some(param.name.clone()), param.type_name.clone());
+        }
+        match &hir.body {
+            crate::hir::HirStmt::Expr(expr) => ctx.infer_hir_ty(expr),
+            crate::hir::HirStmt::Block {
+                tail_expr: Some(expr),
+                ..
+            } => ctx.infer_hir_ty(expr),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn test_infer_hir_ty_array_access_typed() {
+        let atom = make_atom(
+            "array_access_typed",
+            vec![make_param("arr", "[i64]"), make_param("i", "i64")],
+            "arr[i]",
+        );
+        assert_eq!(infer_body_expr_type(&atom), Some("i64".to_string()));
+    }
+
+    #[test]
+    fn test_infer_hir_ty_array_access_f64() {
+        let atom = make_atom(
+            "array_access_f64",
+            vec![make_param("arr", "[f64]"), make_param("i", "i64")],
+            "arr[i]",
+        );
+        assert_eq!(infer_body_expr_type(&atom), Some("f64".to_string()));
+    }
+
+    #[test]
+    fn test_infer_hir_ty_array_access_untyped_fallback() {
+        let atom = make_atom(
+            "array_access_untyped",
+            vec![make_param("i", "i64")],
+            "arr[i]",
+        );
+        assert_eq!(infer_body_expr_type(&atom), Some("i64".to_string()));
     }
 
     #[test]

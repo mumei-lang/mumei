@@ -49,6 +49,11 @@ fn parse_type_params_from_str(input: &str) -> (Vec<String>, usize) {
 pub fn parse_type_ref(input: &str) -> TypeRef {
     let input = input.trim();
 
+    if input.starts_with('[') && input.ends_with(']') {
+        let inner = &input[1..input.len() - 1];
+        return TypeRef::array(parse_type_ref(inner));
+    }
+
     if let Some(after_paren) = input.strip_prefix("atom_ref(") {
         let mut depth = 1;
         let mut close_pos = 0;
@@ -120,6 +125,33 @@ pub fn parse_type_ref(input: &str) -> TypeRef {
 
 pub fn parse_type_ref_from_ctx(ctx: &mut super::ParseContext) -> TypeRef {
     let mut type_str = String::new();
+    if ctx.peek() == &Token::LBracket {
+        type_str.push('[');
+        ctx.advance();
+        let mut depth = 1;
+        while depth > 0 && ctx.peek() != &Token::Eof {
+            match ctx.peek().clone() {
+                Token::LBracket => {
+                    depth += 1;
+                    type_str.push('[');
+                    ctx.advance();
+                }
+                Token::RBracket => {
+                    depth -= 1;
+                    type_str.push(']');
+                    ctx.advance();
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                ref tok => {
+                    type_str.push_str(&format!("{}", tok));
+                    ctx.advance();
+                }
+            }
+        }
+        return parse_type_ref(&type_str);
+    }
     match ctx.peek().clone() {
         Token::Ident(s) => {
             type_str.push_str(&s);
@@ -235,11 +267,11 @@ fn split_variants(input: &str) -> Vec<String> {
     let mut current = String::new();
     for c in input.chars() {
         match c {
-            '(' => {
+            '(' | '[' => {
                 depth += 1;
                 current.push(c);
             }
-            ')' => {
+            ')' | ']' => {
                 depth -= 1;
                 current.push(c);
             }
@@ -268,11 +300,11 @@ fn split_params(input: &str) -> Vec<String> {
     let mut current = String::new();
     for c in input.chars() {
         match c {
-            '(' => {
+            '(' | '[' => {
                 depth += 1;
                 current.push(c);
             }
-            ')' => {
+            ')' | ']' => {
                 depth -= 1;
                 current.push(c);
             }
@@ -534,29 +566,44 @@ fn collect_balanced_parens(ctx: &mut ParseContext) -> String {
     }
     ctx.advance();
     let mut text = String::new();
-    let mut depth = 1;
+    let mut paren_depth = 1;
+    let mut bracket_depth = 0;
     loop {
         match ctx.peek() {
             Token::Eof => break,
             Token::LParen => {
-                depth += 1;
+                paren_depth += 1;
                 text.push('(');
                 ctx.advance();
             }
             Token::RParen => {
-                depth -= 1;
-                if depth == 0 {
+                paren_depth -= 1;
+                if paren_depth == 0 {
                     ctx.advance();
                     break;
                 }
                 text.push(')');
                 ctx.advance();
             }
+            Token::LBracket => {
+                bracket_depth += 1;
+                if !text.is_empty() && !text.ends_with('(') && !text.ends_with('[') {
+                    text.push(' ');
+                }
+                text.push('[');
+                ctx.advance();
+            }
+            Token::RBracket => {
+                bracket_depth -= 1;
+                text.push(']');
+                ctx.advance();
+            }
             _ => {
                 let tok = ctx.advance();
                 if !text.is_empty()
                     && !text.ends_with('(')
-                    && !matches!(tok.token, Token::Comma | Token::RParen)
+                    && !text.ends_with('[')
+                    && !matches!(tok.token, Token::Comma | Token::RParen | Token::RBracket)
                 {
                     text.push(' ');
                 }
@@ -568,6 +615,7 @@ fn collect_balanced_parens(ctx: &mut ParseContext) -> String {
                     }
                     other => text.push_str(&format!("{}", other)),
                 }
+                let _ = bracket_depth;
             }
         }
     }
@@ -1312,10 +1360,11 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
         })
         .collect();
 
-    // Plan 18: Parse optional return type annotation (e.g., `-> Str`)
+    // Plan 18: Parse optional return type annotation
+    // (e.g., `-> Str`, `-> [i64]`, `-> Stack<i64>`)
     let return_type = if ctx.peek() == &Token::Arrow {
         ctx.advance();
-        Some(ctx.expect_ident())
+        Some(parse_type_ref_from_ctx(ctx).display_name())
     } else {
         None
     };

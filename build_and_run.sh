@@ -190,6 +190,16 @@ else
     EXAMPLES_FAILED=$((EXAMPLES_FAILED + 1))
 fi
 
+# 6l. Fold min/max early-return pattern without trusted
+echo -n "  test_fold_no_trusted.mm ... "
+if $MUMEI verify tests/test_fold_no_trusted.mm 2>/dev/null; then
+    echo "✅"
+    EXAMPLES_PASSED=$((EXAMPLES_PASSED + 1))
+else
+    echo "❌"
+    EXAMPLES_FAILED=$((EXAMPLES_FAILED + 1))
+fi
+
 echo ""
 echo "  Examples: $EXAMPLES_PASSED passed, $EXAMPLES_FAILED failed"
 
