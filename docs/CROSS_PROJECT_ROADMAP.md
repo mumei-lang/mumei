@@ -544,7 +544,7 @@ mumei-agent の forge モード（P9）により、vStd の各タスクを自律
 3. mumei-lean → 正しい実装の到達不可能性を数学的に証明
 4. BEFORE (LLM alone: バグ見逃し) vs AFTER (LLM + mumei: バグ検出)
 
-### Phase 2: RTGS Settlement — 🚧 In Progress
+### Phase 2: RTGS Settlement — ✅ Complete
 
 基幹システム寄りのデモ。mumei の全機能を同時に活用:
 - Resource Hierarchy（デッドロック防止）
@@ -554,14 +554,17 @@ mumei-agent の forge モード（P9）により、vStd の各タスクを自律
 - safe_queue（キュー操作）
 
 実装:
-- 🚧 mumei: `std/settlement.mm` — RTGS 決済プロトコル。Temporal Effect (`Pending → Validated → Settled`)、Resource Hierarchy (`ledger → queue`)、Loop invariant + decreases（キュー処理停止性）、forall 量化子（全残高の非負性）を統合。
+- ✅ mumei: `std/settlement.mm` — RTGS 決済プロトコル。Temporal Effect (`Pending → Validated → Settled`)、Resource Hierarchy (`ledger → queue`)、Loop invariant + decreases（キュー処理停止性）、forall 量化子（全残高の非負性）を統合。
 
 Z3 → Lean エスカレーション: Z3 が個別トランザクションの安全性を証明、Lean がグローバル残高保存の帰納的証明を担当。
 
-### Phase 3: RegTech Compliance — 📋 Planned
+### Phase 3: RegTech Compliance — 🚧 In Progress
 
 規制遵守の論理的コンプライアンス保証。forall 量化子 + match 網羅性で Z3 が処理。
 注: Z3 だけで完結する可能性が高いため、2層検証デモとして設計。
+
+実装:
+- ✅ mumei: `std/compliance.mm` — KYC/AML コンプライアンスプロトコル。`CustomerType` / `RiskLevel` enum、全顧客タイプの match 網羅性、forall 量化子による全取引の限度額遵守、`RiskScore` / `TransactionAmount` 精緻型、guards による承認レベル分類を統合。Lean 不要の Z3-only デモとして構成。
 
 ### ディレクトリ構成設計
 
