@@ -155,16 +155,10 @@ atom list_reverse(list: i64)
 // リスト（配列）の要素を左から右に畳み込む。
 // f は atom_ref で渡された二項関数 (acc, elem) -> acc'。
 // 契約は call 時に自動展開される。
-// Phase B: call_with_contract により f の契約を Z3 で展開。trusted 不要。
-// WARNING: body 内の arr[i] は配列パラメータが必要だが、この atom には
-// 配列パラメータがないため codegen 時にエラーになる。
-// mumei build std/list.mm を単独実行しないこと。
-//
-// NOTE: atom_ref + arr[i] パターンは現行の Z3 OOB 推論では検証不能のため
-//       trusted 契約として宣言する。
-//       TODO: atom_ref の契約展開と配列パラメータ推論が実装されたら `trusted` を外す。
-trusted atom fold_left(n: i64, init: i64, f: atom_ref(i64, i64) -> i64)
-requires: n >= 0 && init >= 0;
+// Phase B: call_with_contract により f の契約を Z3 で展開する。
+// body 内の arr[i] 境界は len(arr) >= n で明示する。
+atom fold_left(n: i64, init: i64, f: atom_ref(i64, i64) -> i64)
+requires: n >= 0 && init >= 0 && len(arr) >= n;
 ensures: result >= 0;
 contract(f): ensures: result >= 0;
 body: {
