@@ -5,8 +5,11 @@
 // 取引限度額の遵守を Z3 でコンパイル時に保証する。
 //
 // 検証される性質:
-//   - match 網羅性: 全顧客タイプ（Individual, Corporate, Government, PEP）が
-//     リスク分類で漏れなくカバーされている
+//   - match カバレッジ: requires で値域 0..=3 に絞った i64 ターゲットに対し、
+//     全顧客タイプ（Individual=0, Corporate=1, Government=2, PEP=3）に対応する
+//     アームを明示し、ワイルドカード `_` で総体性を補完する。
+//     真の enum バリアント網羅性チェック（PEP 漏れの検出）は
+//     `tests/test_compliance_negative.mm` で `CustomerType` を直接受け取る形で実証する。
 //   - forall 量化子: 全取引が規制限度額を遵守している
 //   - 精緻型: リスクスコアと取引額の値域制約
 //
@@ -36,7 +39,8 @@ enum RiskLevel {
 }
 
 // --- 基本 atom: 顧客タイプからリスクレベルへの分類 ---
-// match 網羅性により、全顧客タイプが必ずリスクレベルにマッピングされる
+// 全顧客タイプ (tag 0..3) を明示的にアームで網羅し、`_` で i64 全域に対する
+// 総体性を確保する。enum シグネチャによる網羅性チェックは負テスト側で実証。
 atom classify_risk(customer_type: i64)
     requires: customer_type >= 0 && customer_type <= 3;
     ensures: result >= 0 && result <= 3;
@@ -96,7 +100,9 @@ atom verify_all_risk_scores_within_threshold(n: i64, threshold: RiskScore)
 
 // --- 合成 atom: KYC 完全性チェック ---
 // 顧客タイプの分類 + 取引チェックを合成
-// match 網羅性 + forall 量化子の両方を活用
+// match カバレッジ + forall 量化子の両方を活用。
+// なお `arr[]` / `n_history` / `limit` は requires で呼び出し側に
+// 履歴配列の事前条件を課すためのもので、本体ではカレント取引のみを評価する。
 atom full_kyc_check(customer_type: i64, amount: TransactionAmount, n_history: i64, limit: i64)
     requires: customer_type >= 0 && customer_type <= 3 && amount >= 0 && n_history >= 0 && limit > 0 && forall(i, 0, n_history, arr[i] >= 0 && arr[i] <= limit);
     ensures: result >= 0 && result <= 1;
