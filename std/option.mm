@@ -73,17 +73,6 @@ atom is_none(opt: i64)
         }
     }
 
-// Some の値を取り出す。None の場合はデフォルト値を返す。
-atom unwrap_or(opt: i64, default_val: i64)
-    requires: opt >= 0 && opt <= 1;
-    ensures: true;
-    body: {
-        match opt {
-            0 => default_val,
-            _ => default_val
-        }
-    }
-
 // =============================================================
 // 高階関数相当の操作（Map / AndThen）
 // =============================================================
