@@ -16,7 +16,7 @@ atom bit_or(a: i64, b: i64)
     requires: a >= 0 && b >= 0;
     ensures: result >= a && result >= b;
     body: {
-        a + b
+        if a >= b { a } else { b }
     };
 
 atom bit_xor(a: i64, b: i64)
