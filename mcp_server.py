@@ -891,6 +891,47 @@ _STD_GAP_RULES: list[dict] = [
         "difficulty": "medium",
         "trigger": {"missing": "std/hash.mm"},
     },
+    {
+        "target": "std/math/factorial.mm",
+        "reason": "階乗計算。requires: n >= 0, ensures: result >= 1。"
+        "Z3 整数理論で検証可能。",
+        "depends_on": ["std/core.mm"],
+        "difficulty": "medium",
+        "trigger": {
+            "missing": "std/math/factorial.mm",
+            "requires_present": ["std/core.mm"],
+        },
+    },
+    {
+        "target": "std/container/sorted_map.mm",
+        "reason": "ソート済みキーバリューマップ。"
+        "挿入後のソート不変量を Z3 で検証。",
+        "depends_on": ["std/container/bounded_array.mm"],
+        "difficulty": "high",
+        "trigger": {
+            "missing": "std/container/sorted_map.mm",
+            "requires_present": ["std/container/bounded_array.mm"],
+        },
+    },
+    {
+        "target": "std/string/validator.mm",
+        "reason": "文字列バリデーション（is_numeric, is_alphanumeric 等）。"
+        "RegTech デモの拡張に有用。",
+        "depends_on": ["std/core.mm"],
+        "difficulty": "low",
+        "trigger": {"missing": "std/string/validator.mm"},
+    },
+    {
+        "target": "std/math/fibonacci.mm",
+        "reason": "フィボナッチ数列。"
+        "loop invariant + decreases で停止性証明。",
+        "depends_on": ["std/core.mm"],
+        "difficulty": "medium",
+        "trigger": {
+            "missing": "std/math/fibonacci.mm",
+            "requires_present": ["std/core.mm"],
+        },
+    },
 ]
 
 
