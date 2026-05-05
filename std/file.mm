@@ -51,7 +51,7 @@ trusted atom read_file(path: i64)
 // FFI-backed: contract is enforced by the Rust runtime.
 trusted atom write_file(path: i64, content: i64)
     effects: [FileWrite]
-    requires: path > 0 && content > 0;
+    requires: path > 0 && content >= 0;
     ensures: result >= 0 && result <= 1;
     body: {
         perform FileWrite.write(path);
