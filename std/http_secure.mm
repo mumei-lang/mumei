@@ -93,7 +93,7 @@ trusted atom secure_delete(url: Str)
 // レスポンスの HTTP ステータスコードを取得
 trusted atom status(handle: i64)
     requires: handle > 0;
-    ensures: result >= 100 && result <= 599;
+    ensures: result >= 0 && result <= 599;
     body: {
         http_status(handle)
     }

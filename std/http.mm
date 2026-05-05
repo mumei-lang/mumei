@@ -99,7 +99,7 @@ trusted atom delete(url: Str)
 // FFI-backed: 契約は Rust ランタイムで担保される。
 trusted atom status(handle: i64)
     requires: handle > 0;
-    ensures: result >= 100 && result <= 599;
+    ensures: result >= 0 && result <= 599;
     body: {
         http_status(handle)
     }
@@ -162,9 +162,10 @@ trusted atom is_ok(handle: i64)
     }
 
 // レスポンスがエラーかどうかを判定（0=false, 1=true）
+// ハンドル 0（ネットワークエラー）も true を返す
 // FFI-backed: 契約は Rust ランタイムで担保される。
 trusted atom is_error(handle: i64)
-    requires: handle > 0;
+    requires: handle >= 0;
     ensures: result >= 0 && result <= 1;
     body: {
         http_is_error(handle)
