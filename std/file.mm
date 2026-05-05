@@ -34,7 +34,7 @@ extern "Rust" {
 // FFI-backed: contract is enforced by the Rust runtime.
 trusted atom read_file(path: i64)
     effects: [FileRead]
-    requires: true;
+    requires: path > 0;
     ensures: result >= 0;
     body: {
         perform FileRead.read(path);
@@ -51,7 +51,7 @@ trusted atom read_file(path: i64)
 // FFI-backed: contract is enforced by the Rust runtime.
 trusted atom write_file(path: i64, content: i64)
     effects: [FileWrite]
-    requires: true;
+    requires: path > 0 && content >= 0;
     ensures: result >= 0 && result <= 1;
     body: {
         perform FileWrite.write(path);
@@ -67,7 +67,7 @@ trusted atom write_file(path: i64, content: i64)
 // FFI-backed: contract is enforced by the Rust runtime.
 trusted atom exists(path: i64)
     effects: [FileRead]
-    requires: true;
+    requires: path > 0;
     ensures: result >= 0 && result <= 1;
     body: {
         perform FileRead.read(path);
@@ -79,7 +79,7 @@ trusted atom exists(path: i64)
 // FFI-backed: contract is enforced by the Rust runtime.
 trusted atom remove(path: i64)
     effects: [FileWrite]
-    requires: true;
+    requires: path > 0;
     ensures: result >= 0 && result <= 1;
     body: {
         perform FileWrite.write(path);
