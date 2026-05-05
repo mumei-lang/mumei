@@ -124,6 +124,8 @@ Expected final summary: `Verification passed: 3 item(s) verified`.
 1. `mumei verify --proof-cert <file.mm>` generates `<stem>.proof.json`.
 2. `mumei verify-cert <cert.json> <file.mm>` checks cert against source.
 3. Modify source, re-run verify-cert to see "changed" status.
+4. To assert contract changes, parse the generated certificate's per-atom `requires` / `ensures` fields and compare exact strings.
+5. Do not use proof-certificate atom `status` as the source of truth for stdlib trusted atom counts. `cmd_verify` may record successfully checked trusted atoms as `status == "verified"`; for stdlib metrics, count source-level `trusted atom` declarations, matching `scripts/generate_stdlib_metrics.py`.
 
 ### Publish + Add (P5-B)
 1. Create project dir with `mumei.toml` (needs `[package]` with name/version and `[build]` with entry).
