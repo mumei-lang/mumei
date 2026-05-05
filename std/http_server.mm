@@ -62,7 +62,7 @@ trusted atom bind_server(addr: Str)
 trusted atom listen_server(server_handle: i64)
     effects: [HttpServer]
     requires: server_handle > 0;
-    ensures: result >= 0;
+    ensures: result >= 0 && result <= 1;
     body: {
         perform HttpServer.listen(server_handle);
         http_server_listen(server_handle)
@@ -85,8 +85,8 @@ trusted atom accept_request(server_handle: i64)
 // FFI-backed + stateful effect: contract enforced by Rust runtime.
 trusted atom send_response(req_handle: i64, status: i64, body: Str)
     effects: [HttpServer]
-    requires: req_handle > 0 && status >= 100 && status < 600;
-    ensures: result >= 0;
+    requires: req_handle > 0 && status >= 100 && status <= 599;
+    ensures: result >= 0 && result <= 1;
     body: {
         perform HttpServer.respond(req_handle);
         http_server_respond(req_handle, status, body)

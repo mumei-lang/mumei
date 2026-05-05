@@ -191,6 +191,18 @@ import "std/result" as result;
      ベースで再同期する follow-up が必要。理想的には `scripts/generate_stdlib_metrics.py`
      と同様に STDLIB.md も自動生成 or lint で stale 検出できるようにする。 -->
 
+<!-- TODO(stdlib-docs-sync, PR #197 follow-up): std/json.mm / std/http.mm / std/http_secure.mm の
+     handle 系 atom の precondition は `.mm` 実装側で `handle >= 0` から `handle > 0` に
+     tightened されたが、本ファイルの該当行（json: L361, L367-370, L376-379, L385-387, L394,
+     L403-404 / http: L430-433, L440-441, L447 / http_secure: L564-567）はまだ `handle >= 0`
+     表記のまま。`http::status` / `http_secure::status` の ensures も `result >= 0` のまま
+     で、実装側の `result >= 0 && result <= 599` と乖離している（`http::is_error` のみ
+     ネットワークエラー検知のため意図的に `handle >= 0` を維持）。
+     さらに `examples/http_demo.mm` 等が `http::get` の戻り値（ensures `result >= 0`）を
+     gate なしで `http::status` 等に渡しており、tightened precondition により Z3 verify が
+     落ちる可能性がある。STDLIB.md 同期と examples の handle-0 ガード追加は別 PR で
+     まとめて扱うこと。 -->
+
 ## std/list.mm
 
 ```mumei
