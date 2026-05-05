@@ -98,8 +98,8 @@ trusted atom delete(url: Str)
 // レスポンスの HTTP ステータスコードを取得（200, 404, 500 等）
 // FFI-backed: 契約は Rust ランタイムで担保される。
 trusted atom status(handle: i64)
-    requires: handle >= 0;
-    ensures: result >= 0;
+    requires: handle > 0;
+    ensures: result >= 100 && result <= 599;
     body: {
         http_status(handle)
     }
@@ -108,7 +108,7 @@ trusted atom status(handle: i64)
 // Plan 11: 戻り値を Str に変更
 // FFI-backed: 契約は Rust ランタイムで担保される。
 trusted atom body(handle: i64)
-    requires: handle >= 0;
+    requires: handle > 0;
     ensures: true;
     body: {
         http_body(handle)
@@ -118,7 +118,7 @@ trusted atom body(handle: i64)
 // Content-Type が application/json の場合に使用
 // FFI-backed: 契約は Rust ランタイムで担保される。
 trusted atom body_json(handle: i64)
-    requires: handle >= 0;
+    requires: handle > 0;
     ensures: result >= 0;
     body: {
         http_body_json(handle)
@@ -132,7 +132,7 @@ trusted atom body_json(handle: i64)
 // Plan 11: name を Str 型に変更、戻り値も Str
 // FFI-backed: 契約は Rust ランタイムで担保される。
 trusted atom header_get(handle: i64, name: Str)
-    requires: handle >= 0;
+    requires: handle > 0;
     ensures: true;
     body: {
         http_header_get(handle, name)
@@ -142,7 +142,7 @@ trusted atom header_get(handle: i64, name: Str)
 // Plan 11: name, value を Str 型に変更
 // FFI-backed: 契約は Rust ランタイムで担保される。
 trusted atom header_set(handle: i64, name: Str, value: Str)
-    requires: handle >= 0;
+    requires: handle > 0;
     ensures: result >= 0;
     body: {
         http_header_set(handle, name, value)
@@ -155,17 +155,16 @@ trusted atom header_set(handle: i64, name: Str, value: Str)
 // レスポンスが成功（2xx）かどうかを判定（0=false, 1=true）
 // FFI-backed: 契約は Rust ランタイムで担保される。
 trusted atom is_ok(handle: i64)
-    requires: handle >= 0;
+    requires: handle > 0;
     ensures: result >= 0 && result <= 1;
     body: {
         http_is_ok(handle)
     }
 
 // レスポンスがエラーかどうかを判定（0=false, 1=true）
-// ハンドル 0（ネットワークエラー）も true を返す
 // FFI-backed: 契約は Rust ランタイムで担保される。
 trusted atom is_error(handle: i64)
-    requires: handle >= 0;
+    requires: handle > 0;
     ensures: result >= 0 && result <= 1;
     body: {
         http_is_error(handle)
@@ -178,7 +177,7 @@ trusted atom is_error(handle: i64)
 // HTTP レスポンスハンドルを解放する（1=成功, 0=無効なハンドル）
 // FFI-backed: 契約は Rust ランタイムで担保される。
 trusted atom free(handle: i64)
-    requires: handle >= 0;
+    requires: handle > 0;
     ensures: result >= 0 && result <= 1;
     body: {
         http_free(handle)

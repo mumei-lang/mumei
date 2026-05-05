@@ -92,15 +92,15 @@ trusted atom secure_delete(url: Str)
 
 // レスポンスの HTTP ステータスコードを取得
 trusted atom status(handle: i64)
-    requires: handle >= 0;
-    ensures: result >= 0;
+    requires: handle > 0;
+    ensures: result >= 100 && result <= 599;
     body: {
         http_status(handle)
     }
 
 // レスポンスボディを Str として取得
 trusted atom body(handle: i64)
-    requires: handle >= 0;
+    requires: handle > 0;
     ensures: true;
     body: {
         http_body(handle)
@@ -108,7 +108,7 @@ trusted atom body(handle: i64)
 
 // レスポンスが成功（2xx）かどうかを判定（0=false, 1=true）
 trusted atom is_ok(handle: i64)
-    requires: handle >= 0;
+    requires: handle > 0;
     ensures: result >= 0 && result <= 1;
     body: {
         http_is_ok(handle)
@@ -120,7 +120,7 @@ trusted atom is_ok(handle: i64)
 
 // HTTP レスポンスハンドルを解放する（1=成功, 0=無効なハンドル）
 trusted atom free(handle: i64)
-    requires: handle >= 0;
+    requires: handle > 0;
     ensures: result >= 0 && result <= 1;
     body: {
         http_free(handle)
