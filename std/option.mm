@@ -29,6 +29,38 @@ atom is_some(opt: i64)
         }
     }
 
+// None タグ（0）を構築する。
+atom option_none()
+    requires: true;
+    ensures: result == 0;
+    body: {
+        0
+    };
+
+// Some タグ（1）を構築する。
+atom option_some(x: i64)
+    requires: true;
+    ensures: result == 1;
+    body: {
+        1
+    };
+
+// タグ値を Some 判定として返す。
+atom option_is_some(tag: i64)
+    requires: tag == 0 || tag == 1;
+    ensures: result == tag && (result == 0 || result == 1);
+    body: {
+        tag
+    };
+
+// Some の場合は値を返し、None の場合はデフォルト値を返す。
+atom option_unwrap_or(tag: i64, value: i64, default_v: i64)
+    requires: tag == 0 || tag == 1;
+    ensures: (tag == 1 && result == value) || (tag == 0 && result == default_v);
+    body: {
+        if tag == 1 { value } else { default_v }
+    };
+
 // Option が None かどうかを判定する（tag == 0 なら true）
 atom is_none(opt: i64)
     requires: opt >= 0 && opt <= 1;
