@@ -13,7 +13,8 @@ compute:
 * ``todos``         — count of ``TODO`` / ``FIXME`` / ``XXX`` / ``HACK``
   markers in the file
 * ``health_score``  — ``(proven + TRUSTED_CREDIT × trusted) / atoms``
-  where ``proven = atoms − trusted`` and ``TRUSTED_CREDIT = 0.8``.
+  where ``proven = atoms − trusted`` and ``TRUSTED_CREDIT`` defaults to 0.8
+  unless overridden by ``MUMEI_TRUSTED_CREDIT``.
   A TODO penalty of 1% per TODO (capped at 20%) is then subtracted
   and FAIL verification halves the final score. Files without atoms
   score 1.0.
@@ -24,6 +25,7 @@ whenever ``std/**`` changes.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -75,9 +77,9 @@ def _run_verify(mumei_bin: Path | None, mm_path: Path) -> str:
 #: explicit, reviewed contracts — typically wrapping FFI-backed runtime
 #: calls or quantified predicates that Z3 cannot yet discharge. They are
 #: not the same as an unproven atom; the author has vouched for the
-#: contract in code review. We therefore award partial credit (0.8)
+#: contract in code review. We therefore award configurable partial credit
 #: instead of treating them as proof holes.
-TRUSTED_CREDIT = 0.8
+TRUSTED_CREDIT = float(os.environ.get("MUMEI_TRUSTED_CREDIT", "0.8"))
 
 
 def _compute_health(atoms: int, trusted: int, todos: int, verified: str) -> float:

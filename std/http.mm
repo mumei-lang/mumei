@@ -46,6 +46,8 @@ extern "Rust" {
 // Plan 11: url を Str 型に変更
 // ネットワークエラー時はハンドル 0 を返す。
 // FFI-backed: 契約は Rust ランタイムで担保される。
+// TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
+// Z3 verifies contract consistency; body execution delegated to FFI backend.
 trusted atom get(url: Str)
     effects: [HttpGet(url)]
     requires: true;
@@ -58,6 +60,8 @@ trusted atom get(url: Str)
 // POST リクエストを送信し、レスポンスハンドルを返す。
 // Plan 11: url, body を Str 型に変更
 // FFI-backed: 契約は Rust ランタイムで担保される。
+// TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
+// Z3 verifies contract consistency; body execution delegated to FFI backend.
 trusted atom post(url: Str, body: Str)
     effects: [HttpPost(url)]
     requires: true;
@@ -70,6 +74,8 @@ trusted atom post(url: Str, body: Str)
 // PUT リクエストを送信し、レスポンスハンドルを返す。
 // Plan 11: url, body を Str 型に変更
 // FFI-backed: 契約は Rust ランタイムで担保される。
+// TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
+// Z3 verifies contract consistency; body execution delegated to FFI backend.
 trusted atom put(url: Str, body: Str)
     effects: [HttpPut(url)]
     requires: true;
@@ -82,6 +88,8 @@ trusted atom put(url: Str, body: Str)
 // DELETE リクエストを送信し、レスポンスハンドルを返す。
 // Plan 11: url を Str 型に変更
 // FFI-backed: 契約は Rust ランタイムで担保される。
+// TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
+// Z3 verifies contract consistency; body execution delegated to FFI backend.
 trusted atom delete(url: Str)
     effects: [HttpDelete(url)]
     requires: true;
@@ -97,6 +105,8 @@ trusted atom delete(url: Str)
 
 // レスポンスの HTTP ステータスコードを取得（200, 404, 500 等）
 // FFI-backed: 契約は Rust ランタイムで担保される。
+// TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
+// Z3 verifies contract consistency; body execution delegated to FFI backend.
 trusted atom status(handle: i64)
     requires: handle > 0;
     ensures: result >= 0 && result <= 599;
@@ -107,6 +117,8 @@ trusted atom status(handle: i64)
 // レスポンスボディを Str として取得
 // Plan 11: 戻り値を Str に変更
 // FFI-backed: 契約は Rust ランタイムで担保される。
+// TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
+// Z3 verifies contract consistency; body execution delegated to FFI backend.
 trusted atom body(handle: i64)
     requires: handle > 0;
     ensures: true;
@@ -117,6 +129,8 @@ trusted atom body(handle: i64)
 // レスポンスボディを JSON ハンドルとしてパースして取得
 // Content-Type が application/json の場合に使用
 // FFI-backed: 契約は Rust ランタイムで担保される。
+// TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
+// Z3 verifies contract consistency; body execution delegated to FFI backend.
 trusted atom body_json(handle: i64)
     requires: handle > 0;
     ensures: result >= 0;
@@ -131,6 +145,8 @@ trusted atom body_json(handle: i64)
 // レスポンスヘッダーの値を取得
 // Plan 11: name を Str 型に変更、戻り値も Str
 // FFI-backed: 契約は Rust ランタイムで担保される。
+// TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
+// Z3 verifies contract consistency; body execution delegated to FFI backend.
 trusted atom header_get(handle: i64, name: Str)
     requires: handle > 0;
     ensures: true;
@@ -141,6 +157,8 @@ trusted atom header_get(handle: i64, name: Str)
 // リクエストヘッダーを設定（新しいハンドルを返す）
 // Plan 11: name, value を Str 型に変更
 // FFI-backed: 契約は Rust ランタイムで担保される。
+// TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
+// Z3 verifies contract consistency; body execution delegated to FFI backend.
 trusted atom header_set(handle: i64, name: Str, value: Str)
     requires: handle > 0;
     ensures: result >= 0;
@@ -154,6 +172,8 @@ trusted atom header_set(handle: i64, name: Str, value: Str)
 
 // レスポンスが成功（2xx）かどうかを判定（0=false, 1=true）
 // FFI-backed: 契約は Rust ランタイムで担保される。
+// TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
+// Z3 verifies contract consistency; body execution delegated to FFI backend.
 trusted atom is_ok(handle: i64)
     requires: handle > 0;
     ensures: result >= 0 && result <= 1;
@@ -164,6 +184,8 @@ trusted atom is_ok(handle: i64)
 // レスポンスがエラーかどうかを判定（0=false, 1=true）
 // ハンドル 0（ネットワークエラー）も true を返す
 // FFI-backed: 契約は Rust ランタイムで担保される。
+// TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
+// Z3 verifies contract consistency; body execution delegated to FFI backend.
 trusted atom is_error(handle: i64)
     requires: handle >= 0;
     ensures: result >= 0 && result <= 1;
@@ -177,6 +199,8 @@ trusted atom is_error(handle: i64)
 
 // HTTP レスポンスハンドルを解放する（1=成功, 0=無効なハンドル）
 // FFI-backed: 契約は Rust ランタイムで担保される。
+// TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
+// Z3 verifies contract consistency; body execution delegated to FFI backend.
 trusted atom free(handle: i64)
     requires: handle > 0;
     ensures: result >= 0 && result <= 1;

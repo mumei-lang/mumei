@@ -45,6 +45,8 @@ extern "Rust" {
 
 // Bind a server to the given address. Returns a server handle (>0) or 0 on error.
 // FFI-backed + stateful effect: contract enforced by Rust runtime.
+// TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
+// Z3 verifies contract consistency; body execution delegated to FFI backend.
 trusted atom bind_server(addr: Str)
     effects: [HttpServer]
     requires: true;
@@ -59,6 +61,8 @@ trusted atom bind_server(addr: Str)
 // state transition that enables accept_request to be called.
 // Returns 1 if server handle is valid, 0 otherwise.
 // FFI-backed + stateful effect: contract enforced by Rust runtime.
+// TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
+// Z3 verifies contract consistency; body execution delegated to FFI backend.
 trusted atom listen_server(server_handle: i64)
     effects: [HttpServer]
     requires: server_handle > 0;
@@ -71,6 +75,8 @@ trusted atom listen_server(server_handle: i64)
 // Accept an incoming request. Blocks until a connection arrives.
 // Returns a request handle (>0) or 0 on error.
 // FFI-backed + stateful effect: contract enforced by Rust runtime.
+// TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
+// Z3 verifies contract consistency; body execution delegated to FFI backend.
 trusted atom accept_request(server_handle: i64)
     effects: [HttpServer]
     requires: server_handle > 0;
@@ -83,6 +89,8 @@ trusted atom accept_request(server_handle: i64)
 // Send an HTTP response with the given status code and body.
 // Returns 1 on success, 0 on failure.
 // FFI-backed + stateful effect: contract enforced by Rust runtime.
+// TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
+// Z3 verifies contract consistency; body execution delegated to FFI backend.
 trusted atom send_response(req_handle: i64, status: i64, body: Str)
     effects: [HttpServer]
     requires: req_handle > 0 && status >= 100 && status <= 599;
