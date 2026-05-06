@@ -247,9 +247,9 @@ def _render_markdown(rows: list[dict], history: list[dict] | None = None) -> str
         )
     lines.append("")
     lines.append(
-        "> Health = `(proven + 0.8 × trusted) / atoms` − TODO penalty "
+        f"> Health = `(proven + {TRUSTED_CREDIT:g} × trusted) / atoms` − TODO penalty "
         "(1% per TODO, capped 20%). Failing verification halves the score. "
-        "Trusted atoms receive 0.8 credit because they are explicit, reviewed "
+        f"Trusted atoms receive {TRUSTED_CREDIT:g} credit because they are explicit, reviewed "
         "contracts (typically FFI-backed or quantified predicates beyond Z3's "
         "current reach), not unproven proof holes.",
     )
