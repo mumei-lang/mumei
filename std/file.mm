@@ -32,9 +32,11 @@ extern "Rust" {
 // Path must start with /tmp/ or /home/ for security.
 // Returns 0 on failure, >0 handle on success.
 // FFI-backed: contract is enforced by the Rust runtime.
+// TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
+// Z3 verifies contract consistency; body execution delegated to FFI backend.
 trusted atom read_file(path: i64)
     effects: [FileRead]
-    requires: true;
+    requires: path > 0;
     ensures: result >= 0;
     body: {
         perform FileRead.read(path);
@@ -49,9 +51,11 @@ trusted atom read_file(path: i64)
 // Path must start with /tmp/ for security.
 // Returns 1 on success, 0 on failure.
 // FFI-backed: contract is enforced by the Rust runtime.
+// TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
+// Z3 verifies contract consistency; body execution delegated to FFI backend.
 trusted atom write_file(path: i64, content: i64)
     effects: [FileWrite]
-    requires: true;
+    requires: path > 0 && content >= 0;
     ensures: result >= 0 && result <= 1;
     body: {
         perform FileWrite.write(path);
@@ -65,9 +69,11 @@ trusted atom write_file(path: i64, content: i64)
 // Check if a file exists at the given path.
 // Returns 1 if exists, 0 if not.
 // FFI-backed: contract is enforced by the Rust runtime.
+// TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
+// Z3 verifies contract consistency; body execution delegated to FFI backend.
 trusted atom exists(path: i64)
     effects: [FileRead]
-    requires: true;
+    requires: path > 0;
     ensures: result >= 0 && result <= 1;
     body: {
         perform FileRead.read(path);
@@ -77,9 +83,11 @@ trusted atom exists(path: i64)
 // Delete a file at the given path.
 // Returns 1 on success, 0 on failure.
 // FFI-backed: contract is enforced by the Rust runtime.
+// TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
+// Z3 verifies contract consistency; body execution delegated to FFI backend.
 trusted atom remove(path: i64)
     effects: [FileWrite]
-    requires: true;
+    requires: path > 0;
     ensures: result >= 0 && result <= 1;
     body: {
         perform FileWrite.write(path);
