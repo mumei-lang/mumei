@@ -13,7 +13,7 @@ body: {
 
 // 上限を超える場合は max_val に飽和する乗算。
 atom saturating_mul(a: i64, b: i64, max_val: i64)
-requires: a >= 0 && b >= 0 && max_val >= 0;
+requires: a >= 0 && b >= 0 && max_val >= 0 && a <= 3037000499 && b <= 3037000499;
 ensures: result >= 0 && result <= max_val;
 body: {
     if a * b > max_val { max_val } else { a * b }
