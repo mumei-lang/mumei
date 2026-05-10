@@ -460,8 +460,12 @@ def generate_test_fn(atom: TrustedAtom) -> str:
             )
         elif atom.module == "file" and hp == "path":
             body_lines.append("    let _ = std::fs::remove_file(temp_path_for_cleanup);")
+            body_lines.append("    mumei_core::ffi::json::mumei_str_free(path);")
         elif atom.module == "file" and hp == "content":
             body_lines.append("    mumei_core::ffi::json::mumei_str_free(content);")
+
+    if atom.module == "file" and atom.name == "write_file":
+        body_lines.append("    mumei_core::ffi::json::mumei_str_free(content);")
 
     if strategy_lines:
         strategy_block = "\n".join(strategy_lines)

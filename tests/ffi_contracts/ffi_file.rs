@@ -20,6 +20,7 @@ proptest! {
     let result = mumei_core::ffi::file::file_read(path);
     prop_assert!(result >= 0, "ensures: result >= 0, got {}", result);
     let _ = std::fs::remove_file(temp_path_for_cleanup);
+    mumei_core::ffi::json::mumei_str_free(path);
     }
 }
 
@@ -36,6 +37,8 @@ proptest! {
     prop_assert!(result >= 0, "ensures: result >= 0, got {}", result);
     prop_assert!(result <= 1, "ensures: result <= 1, got {}", result);
     let _ = std::fs::remove_file(temp_path_for_cleanup);
+    mumei_core::ffi::json::mumei_str_free(path);
+    mumei_core::ffi::json::mumei_str_free(content);
     }
 }
 
@@ -51,6 +54,7 @@ proptest! {
     prop_assert!(result >= 0, "ensures: result >= 0, got {}", result);
     prop_assert!(result <= 1, "ensures: result <= 1, got {}", result);
     let _ = std::fs::remove_file(temp_path_for_cleanup);
+    mumei_core::ffi::json::mumei_str_free(path);
     }
 }
 
@@ -66,5 +70,6 @@ proptest! {
     prop_assert!(result >= 0, "ensures: result >= 0, got {}", result);
     prop_assert!(result <= 1, "ensures: result <= 1, got {}", result);
     let _ = std::fs::remove_file(temp_path_for_cleanup);
+    mumei_core::ffi::json::mumei_str_free(path);
     }
 }
