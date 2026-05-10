@@ -1,5 +1,5 @@
 [workspace]
-members = ["mumei-core", "mumei-emit-llvm", "mumei-emit-json", "mumei-emit-proofbook", "mumei-emit-rust", "mumei-emit-python"]
+members = ["mumei-core", "mumei-emit-llvm", "mumei-emit-json", "mumei-emit-proofbook", "mumei-emit-rust", "mumei-emit-python", "mumei-ffi-tests"]
 
 [package]
 name = "mumei"

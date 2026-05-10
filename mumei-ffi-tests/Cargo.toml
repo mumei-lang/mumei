@@ -1,0 +1,11 @@
+[package]
+name = "mumei-ffi-tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+mumei-core = { path = "../mumei-core" }
+
+[dev-dependencies]
+proptest = "1.6"

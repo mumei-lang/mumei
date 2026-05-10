@@ -89,7 +89,7 @@ Trusted status therefore means:
 
 ## Reduction roadmap
 
-1. **FFI contract test harness**: generate runtime property tests from `requires`/`ensures` clauses and execute them against the Rust backend.
+1. **FFI contract test harness** — ✅ Implemented: `scripts/ffi_contract_test_gen.py` scans `std/json.mm`, `std/http.mm`, `std/http_secure.mm`, `std/http_server.mm`, and `std/file.mm`, regenerates `tests/ffi_contracts/*.rs`, and `cargo test -p mumei-ffi-tests` executes 48 runtime property tests against the Rust backend.
 2. **FFI verification framework**: model handle tables, error paths, and resource lifetimes in a backend-specific proof layer.
 3. **Lean contract witnesses**: export FFI contract obligations into Lean for high-value atoms whose semantics can be modeled independently.
 4. **Typed resource handles**: replace raw `i64` handles with refined handle types so more validity constraints become statically checkable.
