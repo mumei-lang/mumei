@@ -1,0 +1,13 @@
+title: Mumei Language
+description: Mathematical proof-driven programming language
+url: "https://mumei-lang.github.io/mumei"
+baseurl: ""
+markdown: kramdown
+kramdown:
+  input: GFM
+exclude:
+  - target
+  - .git
+  - .github
+  - .agents
+  - .claude
