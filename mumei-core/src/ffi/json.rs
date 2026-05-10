@@ -307,6 +307,14 @@ pub fn mumei_str_alloc_internal(s: &str) -> i64 {
     }
 }
 
+pub fn mumei_str_clone(handle: i64) -> Option<String> {
+    let store = STRING_STORE.lock().unwrap();
+    store
+        .get(&handle)
+        .and_then(|cs| cs.to_str().ok())
+        .map(ToOwned::to_owned)
+}
+
 /// FFI entry point: Allocate a string in STRING_STORE.
 #[no_mangle]
 pub extern "C" fn mumei_str_alloc(s: *const c_char) -> i64 {
