@@ -4,6 +4,8 @@
 
 Mumei formally verifies every function with Z3 before compiling to LLVM IR.
 
+[Technical Paper](paper/) — proof-driven programming architecture, autonomous verification loop, and case studies.
+
 > parse → resolve → monomorphize → lower_to_hir → **verify (Z3)** → emit (LLVM IR / C Header / Verified JSON)
 
 ```mumei
