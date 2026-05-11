@@ -29,20 +29,44 @@ atom round_trip_conversion(x: i64, scale: i64, min_val: i64, max_val: i64)
         (x * scale) / scale
     };
 
-// 2口座間の資金移動で合計残高が保存されることを表す。
-atom sum_invariant(from_balance: i64, to_balance: i64, amount: i64)
-    requires: amount >= 0 && from_balance >= amount && to_balance >= 0;
-    ensures: result == from_balance + to_balance;
+// before/after 配列が各インデックスで等しいとき、合計値も保存される。
+atom sum_invariant(before_values: [i64], after_values: [i64], n: i64)
+    requires: n >= 0 && len(before_values) >= n && len(after_values) >= n
+           && forall(i, 0, n, before_values[i] >= 0 && after_values[i] >= 0 && before_values[i] == after_values[i]);
+    ensures: result == 0;
+    max_unroll: 5;
     body: {
-        let new_from = from_balance - amount;
-        let new_to = to_balance + amount;
-        new_from + new_to
+        let before_sum = 0;
+        let after_sum = 0;
+        let i = 0;
+        while i < n
+        invariant: i >= 0 && i <= n && before_sum >= 0 && after_sum >= 0 && before_sum == after_sum
+        decreases: n - i
+        {
+            before_sum = before_sum + before_values[i];
+            after_sum = after_sum + after_values[i];
+            i = i + 1;
+        };
+        after_sum - before_sum
     };
 
-// 条件を満たす件数から1件を安全に消費する単純な count 保存パターン。
-atom count_invariant(count_before: i64, removed: i64, added: i64)
-    requires: count_before >= 0 && removed >= 0 && added >= 0 && removed <= count_before && removed == added;
-    ensures: result == count_before && result >= 0;
+// before/after 配列が各インデックスで等しいとき、target 件数も保存される。
+atom count_invariant(before_values: [i64], after_values: [i64], n: i64, target: i64)
+    requires: n >= 0 && len(before_values) >= n && len(after_values) >= n
+           && forall(i, 0, n, before_values[i] == after_values[i]);
+    ensures: result == 0;
+    max_unroll: 5;
     body: {
-        count_before - removed + added
+        let before_count = 0;
+        let after_count = 0;
+        let i = 0;
+        while i < n
+        invariant: i >= 0 && i <= n && before_count >= 0 && before_count <= i && after_count >= 0 && after_count <= i && before_count == after_count
+        decreases: n - i
+        {
+            if before_values[i] == target { before_count = before_count + 1 } else { before_count = before_count };
+            if after_values[i] == target { after_count = after_count + 1 } else { after_count = after_count };
+            i = i + 1;
+        };
+        after_count - before_count
     };
