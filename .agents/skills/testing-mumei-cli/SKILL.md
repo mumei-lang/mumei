@@ -33,20 +33,22 @@ If Z3 is missing, commands exit immediately with "Z3 solver not found" — no pa
 |---|---|
 | `mumei verify <file.mm>` | Verify atoms with Z3 |
 | `mumei verify --report-dir <dir> <file.mm>` | Verify and write `<dir>/report.json` for diagnostics/self-healing flows |
+| `mumei verify --cross-spec-verify --report-dir <dir> <file.mm>` | Verify atoms and write `<dir>/cross_spec.json` for cross-specification consistency |
 | `mumei verify --proof-cert <file.mm>` | Verify + generate `.proof.json` certificate |
 | `mumei verify-cert <cert.json> <file.mm>` | Verify cert against current source |
 | `mumei build <file.mm>` | Build (verify + compile to LLVM IR) |
 | `mumei build --emit proof-cert <file.mm>` | Note: `--emit proof-cert` dispatches to `ProofCert` emit target but returns empty artifacts. Use `verify --proof-cert` instead for cert generation. |
-| `mumei build --emit <unknown_name> <file.mm>` | Unknown emit targets fall through to `emitter::load_external_emitter`, which checks `~/.mumei/emitters/<name>/libmumei_emit_<name>.{so,dylib,dll}` (no `lib` prefix on Windows — matches Rust `cdylib` convention). When absent, exits 1 with stderr beginning `❌ Error: Unknown emit target …` and an external plugin lookup failure. |
+| `mumei build --emit <unknown_name>` | Unknown emit targets fall through to `emitter::load_external_emitter`, which checks `~/.mumei/emitters/<name>/libmumei_emit_<name>.{so,dylib,dll}` (no `lib` prefix on Windows — matches Rust `cdylib` convention). When absent, exits 1 with stderr beginning `❌ Error: Unknown emit target …` and an external plugin lookup failure. |
 | `mumei publish` | Publish current project to local registry (requires `mumei.toml`) |
 | `mumei add <pkg>` | Add dependency from registry (requires `mumei.toml`) |
 | `mumei verify --strict-imports <file.mm>` | Strict import mode |
 | `mumei build --strict-imports <file.mm>` | Strict import mode for build |
-| `mumei verify --allow-lean-verified <file.mm>` | Accept mumei-lean-emitted certs (`z3_check_result == "lean_verified"`) as proven. When this flag triggers acceptance, the resolver audit-logs `🔗 Lean-verified atom '<name>' accepted as proven (--allow-lean-verified)` to stderr — useful as a grep target for tests. |
+| `mumei verify --allow-lean-verified <file.mm>` | Accept mumei-lean-emitted certificates (`z3_check_result == "lean_verified"`) as proven during import resolution. When this flag triggers acceptance, the resolver audit-logs `🔗 Lean-verified atom '<name>' accepted as proven (--allow-lean-verified)` to stderr — useful as a grep target for tests. |
 
 ## Test Files
 
 - `sword_test.mm` — 8 atoms covering loops, floats, stack ops. Note: `scale` atom may fail verification (float multiplication precision), so `all_verified` can be `false`.
+- `tests/test_cross_spec.mm` — Cross-specification fixture where `transfer` calls `validate_balance`; good for `--cross-spec-verify` report testing.
 - `examples/import_test/main.mm` — Imports `lib/math_utils.mm`, good for import/dependency testing.
 - `examples/import_test/lib/math_utils.mm` — 2 simple atoms (`safe_add`, `safe_double`), all verify successfully. Good for generating clean certificates.
 - `tests/test_contradiction.mm` — Existing contradiction fixture where `type Pos = i64 where v > 0` conflicts with `requires: n < 0`; useful for unsat-core and `report.json` diagnostics testing.
@@ -57,6 +59,51 @@ If Z3 is missing, commands exit immediately with "Z3 solver not found" — no pa
 - `tests/test_verified_ffi.mm` — Existing scalar `f64` FFI regression fixture. Useful when changes touch f64/Real/Float verification semantics.
 
 ## Testing Flows
+
+### Cross-specification Verification Report
+
+Use this flow when changes touch `mumei-core/src/cross_spec/`, `VerificationConfig`, module-level verification reporting, or CLI/manifest wiring for `cross_spec_verify`.
+
+```bash
+cd /home/ubuntu/repos/mumei
+rm -rf /home/ubuntu/mumei-cross-spec-report
+LLVM_SYS_170_PREFIX=/usr/lib/llvm-17 LIBCLANG_PATH=/usr/lib/x86_64-linux-gnu \
+  ./target/debug/mumei verify \
+  --cross-spec-verify \
+  --report-dir /home/ubuntu/mumei-cross-spec-report \
+  tests/test_cross_spec.mm
+```
+
+Expected assertions:
+- Command exits zero.
+- Output includes `Cross-spec report written to: /home/ubuntu/mumei-cross-spec-report/cross_spec.json`.
+- `/home/ubuntu/mumei-cross-spec-report/cross_spec.json` exists and is valid JSON.
+- `summary.total_atoms == 6`, `summary.consistent_calls == 1`, `summary.inconsistent_calls == 0`, `summary.circular_dependency_count == 0`, and `summary.global_invariant_count == 2`.
+- `contract_consistency` has exactly one edge: `transfer -> validate_balance` with `is_consistent == true`.
+- `global_invariants` contains `result >= 0`.
+
+A quick JSON assertion helper:
+
+```bash
+python - <<'PY'
+import json
+from pathlib import Path
+p = Path('/home/ubuntu/mumei-cross-spec-report/cross_spec.json')
+assert p.exists(), p
+report = json.loads(p.read_text())
+assert report['summary']['total_atoms'] == 6, report['summary']
+assert report['summary']['consistent_calls'] == 1, report['summary']
+assert report['summary']['inconsistent_calls'] == 0, report['summary']
+assert report['summary']['circular_dependency_count'] == 0, report['summary']
+assert report['summary']['global_invariant_count'] == 2, report['summary']
+contracts = report['contract_consistency']
+assert len(contracts) == 1, contracts
+assert contracts[0]['caller_atom'] == 'transfer', contracts[0]
+assert contracts[0]['callee_atom'] == 'validate_balance', contracts[0]
+assert contracts[0]['is_consistent'] is True, contracts[0]
+assert any(inv['invariant'] == 'result >= 0' for inv in report['global_invariants'])
+PY
+```
 
 ### Contradiction Report / Unsat Core Diagnostics
 
