@@ -1589,6 +1589,52 @@ pub fn build_contradiction_feedback(
     })
 }
 
+const MINIMAL_UNSAT_CORE_PROBE_TIMEOUT_MS: u32 = 1000;
+const MAX_MINIMAL_UNSAT_CORE_PROBES: usize = 512;
+
+struct MinimalUnsatCoreProbe<'ctx> {
+    solver: Solver<'ctx>,
+    context: &'ctx Context,
+    probes_used: usize,
+}
+
+impl<'ctx> MinimalUnsatCoreProbe<'ctx> {
+    fn new(source_solver: &Solver<'ctx>, context: &'ctx Context) -> Self {
+        let solver = Solver::new(context);
+        let mut params = z3::Params::new(context);
+        params.set_u32("timeout", MINIMAL_UNSAT_CORE_PROBE_TIMEOUT_MS);
+        solver.set_params(&params);
+
+        for assertion in source_solver.get_assertions() {
+            solver.assert(&assertion);
+        }
+
+        Self {
+            solver,
+            context,
+            probes_used: 0,
+        }
+    }
+
+    fn has_budget(&self) -> bool {
+        self.probes_used < MAX_MINIMAL_UNSAT_CORE_PROBES
+    }
+
+    fn is_unsat_with_labels(&mut self, labels: &[String]) -> bool {
+        if labels.is_empty() || !self.has_budget() {
+            return false;
+        }
+
+        self.probes_used += 1;
+        let assumptions: Vec<Bool> = labels
+            .iter()
+            .map(|label| Bool::new_const(self.context, normalize_tracking_label(label)))
+            .collect();
+
+        self.solver.check_assumptions(&assumptions) == SatResult::Unsat
+    }
+}
+
 /// Extract a deletion-minimal unsat core from tracked Z3 constraint labels.
 ///
 /// Given a set of constraints that are unsatisfiable together, find a subset
@@ -1615,14 +1661,15 @@ pub fn extract_minimal_unsat_core<'ctx>(
         return all_labels.to_vec();
     }
 
+    let mut probe = MinimalUnsatCoreProbe::new(solver, context);
     let mut minimal = all_labels.to_vec();
     let mut chunk_size = minimal.len() / 2;
 
-    while chunk_size > 0 && minimal.len() > 1 {
+    while chunk_size > 0 && minimal.len() > 1 && probe.has_budget() {
         let mut removed_chunk = false;
         let mut start = 0;
 
-        while start < minimal.len() {
+        while start < minimal.len() && probe.has_budget() {
             let end = (start + chunk_size).min(minimal.len());
             let test_set: Vec<String> = minimal
                 .iter()
@@ -1631,7 +1678,7 @@ pub fn extract_minimal_unsat_core<'ctx>(
                 .map(|(_, label)| label.clone())
                 .collect();
 
-            if !test_set.is_empty() && is_unsat_with_labels(solver, &test_set, context) {
+            if !test_set.is_empty() && probe.is_unsat_with_labels(&test_set) {
                 minimal = test_set;
                 chunk_size = (minimal.len() / 2).max(1);
                 removed_chunk = true;
@@ -1646,7 +1693,7 @@ pub fn extract_minimal_unsat_core<'ctx>(
         }
     }
 
-    extract_minimal_unsat_core_linear(solver, &minimal, context)
+    extract_minimal_unsat_core_linear_with_probe(&mut probe, &minimal)
 }
 
 /// Extract a deletion-minimal unsat core using a linear greedy pass.
@@ -1659,10 +1706,18 @@ pub fn extract_minimal_unsat_core_linear<'ctx>(
         return vec![];
     }
 
+    let mut probe = MinimalUnsatCoreProbe::new(solver, context);
+    extract_minimal_unsat_core_linear_with_probe(&mut probe, all_labels)
+}
+
+fn extract_minimal_unsat_core_linear_with_probe<'ctx>(
+    probe: &mut MinimalUnsatCoreProbe<'ctx>,
+    all_labels: &[String],
+) -> Vec<String> {
     let mut minimal = all_labels.to_vec();
     let mut i = 0;
 
-    while i < minimal.len() && minimal.len() > 1 {
+    while i < minimal.len() && minimal.len() > 1 && probe.has_budget() {
         let test_set: Vec<String> = minimal
             .iter()
             .enumerate()
@@ -1670,7 +1725,7 @@ pub fn extract_minimal_unsat_core_linear<'ctx>(
             .map(|(_, label)| label.clone())
             .collect();
 
-        if is_unsat_with_labels(solver, &test_set, context) {
+        if probe.is_unsat_with_labels(&test_set) {
             minimal = test_set;
         } else {
             i += 1;
@@ -1686,25 +1741,6 @@ fn normalize_tracking_label(label: &str) -> String {
         .and_then(|without_prefix| without_prefix.strip_suffix('|'))
         .unwrap_or(label)
         .to_string()
-}
-
-/// Check if activating a set of tracked labels makes the solver assertions unsatisfiable.
-fn is_unsat_with_labels<'ctx>(
-    solver: &Solver<'ctx>,
-    labels: &[String],
-    context: &'ctx Context,
-) -> bool {
-    let probe = Solver::new(context);
-    for assertion in solver.get_assertions() {
-        probe.assert(&assertion);
-    }
-
-    let assumptions: Vec<Bool> = labels
-        .iter()
-        .map(|label| Bool::new_const(context, normalize_tracking_label(label)))
-        .collect();
-
-    probe.check_assumptions(&assumptions) == SatResult::Unsat
 }
 
 /// Build contradiction feedback with minimal unsat core information.
