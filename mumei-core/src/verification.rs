@@ -1,3 +1,4 @@
+use crate::cross_spec::{CrossSpecResult, CrossSpecVerifier};
 use crate::hir::HirAtom;
 use crate::parser::{
     parse_body_expr, parse_expression, Atom, Effect, EffectDef, EnumDef, Expr, ImplDef, Item,
@@ -594,6 +595,29 @@ impl From<&str> for MumeiError {
 }
 
 pub type MumeiResult<T> = Result<T, MumeiError>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerificationConfig {
+    pub timeout_ms: u64,
+    pub global_max_unroll: usize,
+    pub enable_cross_spec_verification: bool,
+}
+
+impl Default for VerificationConfig {
+    fn default() -> Self {
+        Self {
+            timeout_ms: 10000,
+            global_max_unroll: 3,
+            enable_cross_spec_verification: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ModuleVerificationReport {
+    pub cross_spec: Option<CrossSpecResult>,
+}
+
 type Env<'a> = HashMap<String, Dynamic<'a>>;
 type DynResult<'a> = MumeiResult<Dynamic<'a>>;
 
@@ -5553,6 +5577,28 @@ pub fn verify_with_config(
     _global_max_unroll: usize,
 ) -> MumeiResult<()> {
     verify_inner(hir_atom, output_dir, module_env, timeout_ms)
+}
+
+pub fn verify_with_verification_config(
+    hir_atom: &HirAtom,
+    output_dir: &Path,
+    module_env: &ModuleEnv,
+    config: &VerificationConfig,
+) -> MumeiResult<()> {
+    verify_inner(hir_atom, output_dir, module_env, config.timeout_ms)
+}
+
+pub fn verify_module(
+    module_env: &ModuleEnv,
+    config: &VerificationConfig,
+) -> MumeiResult<ModuleVerificationReport> {
+    let cross_spec = if config.enable_cross_spec_verification {
+        Some(CrossSpecVerifier::new(module_env).verify_all())
+    } else {
+        None
+    };
+
+    Ok(ModuleVerificationReport { cross_spec })
 }
 
 pub fn verify(hir_atom: &HirAtom, output_dir: &Path, module_env: &ModuleEnv) -> MumeiResult<()> {
