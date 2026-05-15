@@ -720,6 +720,11 @@ fn cmd_verify(options: VerifyOptions<'_>) {
     if report_dir.is_some() {
         let _ = std::fs::create_dir_all(output_dir);
     }
+    let verification_config = verification::VerificationConfig {
+        timeout_ms: 10000,
+        global_max_unroll: 3,
+        enable_cross_spec_verification,
+    };
     let input_path = Path::new(input);
     let base_dir = input_path.parent().unwrap_or(Path::new("."));
     let mut verified = 0;
@@ -834,7 +839,12 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                         }
                     }
 
-                    match verification::verify(&hir_atom, output_dir, &module_env) {
+                    match verification::verify_with_verification_config(
+                        &hir_atom,
+                        output_dir,
+                        &module_env,
+                        &verification_config,
+                    ) {
                         Ok(_) => {
                             if !json_output {
                                 println!("  ⚖️  '{}': verified ✅", atom.name);
@@ -945,7 +955,12 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                             }
                         }
 
-                        match verification::verify(&hir_atom, output_dir, &module_env) {
+                        match verification::verify_with_verification_config(
+                            &hir_atom,
+                            output_dir,
+                            &module_env,
+                            &verification_config,
+                        ) {
                             Ok(_) => {
                                 if !json_output {
                                     println!("  ⚖️  '{}': verified ✅", qualified_name);
@@ -1144,8 +1159,15 @@ fn save_cross_spec_report(
     output_dir: &Path,
     print_path: bool,
 ) -> Result<cross_spec::CrossSpecResult, String> {
-    let cross_spec_verifier = cross_spec::CrossSpecVerifier::new(module_env);
-    let cross_spec_result = cross_spec_verifier.verify_all();
+    let config = verification::VerificationConfig {
+        enable_cross_spec_verification: true,
+        ..verification::VerificationConfig::default()
+    };
+    let module_report = verification::verify_module(module_env, &config)
+        .map_err(|err| format!("cross-spec verification failed: {err}"))?;
+    let cross_spec_result = module_report
+        .cross_spec
+        .ok_or_else(|| "cross-spec verification was not enabled".to_string())?;
     std::fs::create_dir_all(output_dir)
         .map_err(|err| format!("failed to create report directory: {err}"))?;
     let cross_spec_path = output_dir.join("cross_spec.json");
@@ -1958,6 +1980,11 @@ fn cmd_build(
     let mut verification_cache_new = verification_cache.clone();
 
     let skip_verify = !build_cfg.verify;
+    let verification_config = verification::VerificationConfig {
+        timeout_ms: proof_cfg.timeout_ms,
+        global_max_unroll: build_cfg.max_unroll,
+        enable_cross_spec_verification: proof_cfg.cross_spec_verify,
+    };
 
     let mut atom_count = 0;
 
@@ -2114,12 +2141,11 @@ fn cmd_build(
                             println!("  ⚖️  [2/3] Verification: Skipped (unchanged, cached) ⏩");
                             module_env.mark_verified(&qualified_name);
                         } else {
-                            match verification::verify_with_config(
+                            match verification::verify_with_verification_config(
                                 &hir_atom,
                                 output_dir,
                                 &module_env,
-                                proof_cfg.timeout_ms,
-                                build_cfg.max_unroll,
+                                &verification_config,
                             ) {
                                 Ok(_) => {
                                     println!(
@@ -2278,12 +2304,11 @@ fn cmd_build(
                         println!("  ⚖️  [2/3] Verification: Skipped (unchanged, cached) ⏩");
                         module_env.mark_verified(&atom.name);
                     } else {
-                        match verification::verify_with_config(
+                        match verification::verify_with_verification_config(
                             &hir_atom,
                             output_dir,
                             &module_env,
-                            proof_cfg.timeout_ms,
-                            build_cfg.max_unroll,
+                            &verification_config,
                         ) {
                             Ok(_) => {
                                 println!(
