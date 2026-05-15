@@ -11,8 +11,8 @@ use mumei_core::hir::lower_atom_to_hir;
 use mumei_core::hir::lower_atom_to_hir_with_env;
 use mumei_core::parser::{ImportDecl, Item};
 use mumei_core::{
-    ast, emitter, hir, inspect, manifest, mir, mir_analysis, parser, proof_cert, registry,
-    resolver, verification,
+    ast, cross_spec, emitter, hir, inspect, manifest, mir, mir_analysis, parser, proof_cert,
+    registry, resolver, verification,
 };
 use std::fs;
 use std::path::Path;
@@ -125,6 +125,9 @@ enum Command {
         /// resolution. Off by default for backwards compatibility.
         #[arg(long)]
         allow_lean_verified: bool,
+        /// Enable cross-specification consistency verification across atoms
+        #[arg(long)]
+        cross_spec_verify: bool,
     },
     /// Parse + resolve + monomorphize only (no Z3, fast syntax check)
     Check {
@@ -270,16 +273,18 @@ fn main() {
             json,
             strict_imports,
             allow_lean_verified,
+            cross_spec_verify,
         }) => {
-            cmd_verify(
-                &input,
-                proof_cert,
-                output.as_deref(),
-                report_dir.as_deref(),
-                json,
+            cmd_verify(VerifyOptions {
+                input: &input,
+                generate_proof_cert: proof_cert,
+                cert_output: output.as_deref(),
+                report_dir: report_dir.as_deref(),
+                json_output: json,
                 strict_imports,
                 allow_lean_verified,
-            );
+                enable_cross_spec_verification: cross_spec_verify,
+            });
         }
         Some(Command::Check { input }) => {
             cmd_check(&input);
@@ -678,15 +683,28 @@ fn cmd_check(input: &str) {
 // mumei verify — Z3 verification only (no codegen)
 // =============================================================================
 
-fn cmd_verify(
-    input: &str,
+struct VerifyOptions<'a> {
+    input: &'a str,
     generate_proof_cert: bool,
-    cert_output: Option<&str>,
-    report_dir: Option<&str>,
+    cert_output: Option<&'a str>,
+    report_dir: Option<&'a str>,
     json_output: bool,
     strict_imports: bool,
     allow_lean_verified: bool,
-) {
+    enable_cross_spec_verification: bool,
+}
+
+fn cmd_verify(options: VerifyOptions<'_>) {
+    let VerifyOptions {
+        input,
+        generate_proof_cert,
+        cert_output,
+        report_dir,
+        json_output,
+        strict_imports,
+        allow_lean_verified,
+        enable_cross_spec_verification,
+    } = options;
     check_z3_available();
     if !json_output {
         println!("🗡️  Mumei verify: verifying '{}'...", input);
@@ -983,6 +1001,31 @@ fn cmd_verify(
     // and be re-verified automatically.
     resolver::save_verification_cache(base_dir, &verification_cache);
 
+    if enable_cross_spec_verification {
+        match save_cross_spec_report(&module_env, output_dir, !json_output) {
+            Ok(cross_spec_result) => {
+                if cross_spec_result.summary.inconsistent_calls > 0 && !json_output {
+                    eprintln!(
+                        "Warning: {} inconsistent contract calls detected",
+                        cross_spec_result.summary.inconsistent_calls
+                    );
+                }
+                if cross_spec_result.summary.circular_dependency_count > 0 && !json_output {
+                    eprintln!(
+                        "Warning: {} circular dependencies detected",
+                        cross_spec_result.summary.circular_dependency_count
+                    );
+                }
+            }
+            Err(e) => {
+                if !json_output {
+                    eprintln!("  ⚠️  Failed to write cross-spec report: {}", e);
+                }
+                failed += 1;
+            }
+        }
+    }
+
     // Plan 11B: Generate proof certificate if requested
     if generate_proof_cert {
         let mut atom_refs: Vec<&parser::Atom> = items
@@ -1094,6 +1137,29 @@ fn cmd_verify(
             println!("✅ Verification passed: {} item(s) verified", verified);
         }
     }
+}
+
+fn save_cross_spec_report(
+    module_env: &verification::ModuleEnv,
+    output_dir: &Path,
+    print_path: bool,
+) -> Result<cross_spec::CrossSpecResult, String> {
+    let cross_spec_verifier = cross_spec::CrossSpecVerifier::new(module_env);
+    let cross_spec_result = cross_spec_verifier.verify_all();
+    std::fs::create_dir_all(output_dir)
+        .map_err(|err| format!("failed to create report directory: {err}"))?;
+    let cross_spec_path = output_dir.join("cross_spec.json");
+    let payload = serde_json::to_string_pretty(&cross_spec_result)
+        .map_err(|err| format!("failed to serialize cross-spec report: {err}"))?;
+    std::fs::write(&cross_spec_path, payload)
+        .map_err(|err| format!("failed to write {}: {err}", cross_spec_path.display()))?;
+    if print_path {
+        println!(
+            "  🔗 Cross-spec report written to: {}",
+            cross_spec_path.display()
+        );
+    }
+    Ok(cross_spec_result)
 }
 
 // =============================================================================
@@ -2451,6 +2517,29 @@ fn cmd_build(
     // Feature 2: Save enhanced verification cache
     if proof_cfg.cache {
         resolver::save_verification_cache(build_base_dir, &verification_cache_new);
+    }
+
+    if proof_cfg.cross_spec_verify {
+        match save_cross_spec_report(&module_env, output_dir, true) {
+            Ok(cross_spec_result) => {
+                if cross_spec_result.summary.inconsistent_calls > 0 {
+                    eprintln!(
+                        "Warning: {} inconsistent contract calls detected",
+                        cross_spec_result.summary.inconsistent_calls
+                    );
+                }
+                if cross_spec_result.summary.circular_dependency_count > 0 {
+                    eprintln!(
+                        "Warning: {} circular dependencies detected",
+                        cross_spec_result.summary.circular_dependency_count
+                    );
+                }
+            }
+            Err(e) => {
+                eprintln!("  ⚠️  Failed to write cross-spec report: {}", e);
+                std::process::exit(1);
+            }
+        }
     }
 }
 

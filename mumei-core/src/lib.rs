@@ -3,6 +3,7 @@
 #![allow(clippy::new_without_default)]
 
 pub mod ast;
+pub mod cross_spec;
 pub mod emitter;
 // NOTE: ffi module contains HTTP/JSON/server FFI backends not yet wired into the public API
 #[allow(dead_code)]
