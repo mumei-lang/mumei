@@ -1589,6 +1589,165 @@ pub fn build_contradiction_feedback(
     })
 }
 
+/// Extract a deletion-minimal unsat core from tracked Z3 constraint labels.
+///
+/// Given a set of constraints that are unsatisfiable together, find a subset
+/// where removing any single remaining label makes that subset satisfiable.
+/// This helps users understand which specific constraints are conflicting and
+/// may need to be relaxed.
+///
+/// # Arguments
+/// * `solver` - Z3 solver instance containing tracked assertions
+/// * `all_labels` - Constraint labels to test
+/// * `context` - Z3 context for creating label assumptions
+///
+/// # Returns
+/// * `Vec<String>` - Minimal set of labels that cause unsatisfiability
+pub fn extract_minimal_unsat_core<'ctx>(
+    solver: &Solver<'ctx>,
+    all_labels: &[String],
+    context: &'ctx Context,
+) -> Vec<String> {
+    if all_labels.is_empty() {
+        return vec![];
+    }
+    if all_labels.len() == 1 {
+        return all_labels.to_vec();
+    }
+
+    let mut minimal = all_labels.to_vec();
+    let mut chunk_size = minimal.len() / 2;
+
+    while chunk_size > 0 && minimal.len() > 1 {
+        let mut removed_chunk = false;
+        let mut start = 0;
+
+        while start < minimal.len() {
+            let end = (start + chunk_size).min(minimal.len());
+            let test_set: Vec<String> = minimal
+                .iter()
+                .enumerate()
+                .filter(|(idx, _)| *idx < start || *idx >= end)
+                .map(|(_, label)| label.clone())
+                .collect();
+
+            if !test_set.is_empty() && is_unsat_with_labels(solver, &test_set, context) {
+                minimal = test_set;
+                chunk_size = (minimal.len() / 2).max(1);
+                removed_chunk = true;
+                break;
+            }
+
+            start += chunk_size;
+        }
+
+        if !removed_chunk {
+            chunk_size /= 2;
+        }
+    }
+
+    extract_minimal_unsat_core_linear(solver, &minimal, context)
+}
+
+/// Extract a deletion-minimal unsat core using a linear greedy pass.
+pub fn extract_minimal_unsat_core_linear<'ctx>(
+    solver: &Solver<'ctx>,
+    all_labels: &[String],
+    context: &'ctx Context,
+) -> Vec<String> {
+    if all_labels.is_empty() {
+        return vec![];
+    }
+
+    let mut minimal = all_labels.to_vec();
+    let mut i = 0;
+
+    while i < minimal.len() && minimal.len() > 1 {
+        let test_set: Vec<String> = minimal
+            .iter()
+            .enumerate()
+            .filter(|(idx, _)| *idx != i)
+            .map(|(_, label)| label.clone())
+            .collect();
+
+        if is_unsat_with_labels(solver, &test_set, context) {
+            minimal = test_set;
+        } else {
+            i += 1;
+        }
+    }
+
+    minimal
+}
+
+fn normalize_tracking_label(label: &str) -> String {
+    label
+        .strip_prefix('|')
+        .and_then(|without_prefix| without_prefix.strip_suffix('|'))
+        .unwrap_or(label)
+        .to_string()
+}
+
+/// Check if activating a set of tracked labels makes the solver assertions unsatisfiable.
+fn is_unsat_with_labels<'ctx>(
+    solver: &Solver<'ctx>,
+    labels: &[String],
+    context: &'ctx Context,
+) -> bool {
+    let probe = Solver::new(context);
+    for assertion in solver.get_assertions() {
+        probe.assert(&assertion);
+    }
+
+    let assumptions: Vec<Bool> = labels
+        .iter()
+        .map(|label| Bool::new_const(context, normalize_tracking_label(label)))
+        .collect();
+
+    probe.check_assumptions(&assumptions) == SatResult::Unsat
+}
+
+/// Build contradiction feedback with minimal unsat core information.
+pub fn build_contradiction_feedback_with_minimal_core(
+    atom_name: &str,
+    conflicting_constraints: &[String],
+    raw_unsat_core: &[String],
+    structured_labels: &[StructuredLabel],
+    minimal_core: &[String],
+) -> serde_json::Value {
+    let mut feedback = build_contradiction_feedback(
+        atom_name,
+        conflicting_constraints,
+        raw_unsat_core,
+        structured_labels,
+    );
+
+    feedback["minimal_unsat_core"] = json!(minimal_core);
+    feedback["minimal_core_size"] = json!(minimal_core.len());
+    feedback["total_core_size"] = json!(raw_unsat_core.len());
+    feedback["reduction_ratio"] = json!(if raw_unsat_core.is_empty() {
+        0.0
+    } else {
+        minimal_core.len() as f64 / raw_unsat_core.len() as f64
+    });
+
+    if minimal_core.is_empty() {
+        feedback["suggestion"] = json!(suggestion_for_failure_type(FAILURE_INVARIANT_VIOLATED));
+    } else if minimal_core.len() == 1 {
+        feedback["suggestion"] = json!(format!(
+            "Single constraint causing contradiction: '{}'. Consider relaxing or removing it.",
+            minimal_core[0]
+        ));
+    } else {
+        feedback["suggestion"] = json!(format!(
+            "Minimal conflicting constraints: [{}]. Consider relaxing one of these.",
+            minimal_core.join(", ")
+        ));
+    }
+
+    feedback
+}
+
 /// Default constraint budget per atom (max number of solver.assert() calls).
 pub const DEFAULT_CONSTRAINT_BUDGET: usize = 1000;
 
@@ -6699,7 +6858,11 @@ fn verify_inner(
     let z3_check_start = std::time::Instant::now();
     if solver.check() == SatResult::Unsat {
         let unsat_core = solver.get_unsat_core();
-        let core_labels: Vec<String> = unsat_core.iter().map(|b| format!("{}", b)).collect();
+        let core_labels: Vec<String> = unsat_core
+            .iter()
+            .map(|b| normalize_tracking_label(&b.decl().name()))
+            .collect();
+        let minimal_core = extract_minimal_unsat_core(&solver, &core_labels, &ctx);
 
         let structured_labels: Vec<StructuredLabel> = core_labels
             .iter()
@@ -6711,11 +6874,12 @@ fn verify_inner(
             .map(|sl| sl.description.clone())
             .collect();
 
-        let contradiction_fb = build_contradiction_feedback(
+        let contradiction_fb = build_contradiction_feedback_with_minimal_core(
             &atom.name,
             &conflicting_constraints,
             &core_labels,
             &structured_labels,
+            &minimal_core,
         );
 
         save_visualizer_report(
@@ -9808,6 +9972,124 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("could not be determined"));
+    }
+
+    #[test]
+    fn test_extract_minimal_unsat_core_simple() {
+        let cfg = Config::new();
+        let ctx = Context::new(&cfg);
+        let solver = Solver::new(&ctx);
+        let a = Bool::new_const(&ctx, "A");
+        let b = Bool::new_const(&ctx, "B");
+        let track_a = Bool::new_const(&ctx, "track_a");
+        let track_not_a = Bool::new_const(&ctx, "track_not_a");
+        let track_b = Bool::new_const(&ctx, "track_b");
+
+        solver.assert_and_track(&a, &track_a);
+        solver.assert_and_track(&a.not(), &track_not_a);
+        solver.assert_and_track(&b, &track_b);
+
+        assert_eq!(solver.check(), SatResult::Unsat);
+
+        let labels = vec![
+            "track_a".to_string(),
+            "track_not_a".to_string(),
+            "track_b".to_string(),
+        ];
+        let minimal = extract_minimal_unsat_core(&solver, &labels, &ctx);
+
+        assert_eq!(minimal.len(), 2);
+        assert!(minimal.contains(&"track_a".to_string()));
+        assert!(minimal.contains(&"track_not_a".to_string()));
+        assert!(!minimal.contains(&"track_b".to_string()));
+    }
+
+    #[test]
+    fn test_extract_minimal_unsat_core_empty() {
+        let cfg = Config::new();
+        let ctx = Context::new(&cfg);
+        let solver = Solver::new(&ctx);
+
+        let minimal = extract_minimal_unsat_core(&solver, &[], &ctx);
+        assert!(minimal.is_empty());
+    }
+
+    #[test]
+    fn test_extract_minimal_unsat_core_single() {
+        let cfg = Config::new();
+        let ctx = Context::new(&cfg);
+        let solver = Solver::new(&ctx);
+
+        let labels = vec!["track_a".to_string()];
+        let minimal = extract_minimal_unsat_core(&solver, &labels, &ctx);
+
+        assert_eq!(minimal, labels);
+    }
+
+    #[test]
+    fn test_extract_minimal_unsat_core_linear_matches_simple_case() {
+        let cfg = Config::new();
+        let ctx = Context::new(&cfg);
+        let solver = Solver::new(&ctx);
+        let a = Bool::new_const(&ctx, "A");
+        let b = Bool::new_const(&ctx, "B");
+        let track_a = Bool::new_const(&ctx, "track_a");
+        let track_not_a = Bool::new_const(&ctx, "track_not_a");
+        let track_b = Bool::new_const(&ctx, "track_b");
+
+        solver.assert_and_track(&a, &track_a);
+        solver.assert_and_track(&a.not(), &track_not_a);
+        solver.assert_and_track(&b, &track_b);
+
+        let labels = vec![
+            "track_a".to_string(),
+            "track_not_a".to_string(),
+            "track_b".to_string(),
+        ];
+        let minimal = extract_minimal_unsat_core_linear(&solver, &labels, &ctx);
+
+        assert_eq!(minimal.len(), 2);
+        assert!(minimal.contains(&"track_a".to_string()));
+        assert!(minimal.contains(&"track_not_a".to_string()));
+        assert!(!minimal.contains(&"track_b".to_string()));
+    }
+
+    #[test]
+    fn test_build_contradiction_feedback_with_minimal_core() {
+        let constraints = vec![
+            "Precondition (requires)".to_string(),
+            "Refined type constraint: n (Nat)".to_string(),
+        ];
+        let raw = vec![
+            "track_requires".to_string(),
+            "track_refined_type_n::Nat".to_string(),
+            "track_quantifier_0".to_string(),
+        ];
+        let minimal = vec![
+            "track_requires".to_string(),
+            "track_refined_type_n::Nat".to_string(),
+        ];
+        let structured: Vec<StructuredLabel> = raw
+            .iter()
+            .filter_map(|label| parse_tracking_label(label))
+            .collect();
+
+        let feedback = build_contradiction_feedback_with_minimal_core(
+            "test_atom",
+            &constraints,
+            &raw,
+            &structured,
+            &minimal,
+        );
+
+        assert_eq!(feedback["minimal_unsat_core"], json!(minimal));
+        assert_eq!(feedback["minimal_core_size"], 2);
+        assert_eq!(feedback["total_core_size"], 3);
+        assert_eq!(feedback["reduction_ratio"], json!(2.0 / 3.0));
+        assert!(feedback["suggestion"]
+            .as_str()
+            .unwrap()
+            .contains("Minimal conflicting constraints"));
     }
 
     // =========================================================================
