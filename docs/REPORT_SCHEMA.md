@@ -43,6 +43,7 @@ The existing `conflicting_constraints` (array of description strings) and `raw_u
 ## semantic_feedback.minimal_unsat_core
 
 When `failure_type` is `"invariant_violated"` and Z3 reports a contradiction, the `semantic_feedback` object includes a `minimal_unsat_core` array containing a deletion-minimal subset of tracked constraints that is still contradictory.
+This diagnostic helps identify which constraints should be relaxed when revising a specification.
 
 | Field | Type | Description |
 |---|---|---|

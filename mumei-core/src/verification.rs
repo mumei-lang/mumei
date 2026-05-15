@@ -1565,6 +1565,7 @@ pub fn build_contradiction_feedback(
     conflicting_constraints: &[String],
     raw_labels: &[String],
     structured_labels: &[StructuredLabel],
+    minimal_core: Option<&[String]>,
 ) -> serde_json::Value {
     let explanation = if conflicting_constraints.is_empty() {
         "The constraints are mutually contradictory, but the specific conflicting set could not be determined. \
@@ -1578,7 +1579,7 @@ pub fn build_contradiction_feedback(
         )
     };
 
-    json!({
+    let mut feedback = json!({
         "failure_type": FAILURE_INVARIANT_VIOLATED,
         "atom": atom_name,
         "conflicting_constraints": conflicting_constraints,
@@ -1586,7 +1587,34 @@ pub fn build_contradiction_feedback(
         "structured_unsat_core": structured_labels,
         "explanation": explanation,
         "suggestion": suggestion_for_failure_type(FAILURE_INVARIANT_VIOLATED)
-    })
+    });
+
+    if let Some(minimal_core) = minimal_core {
+        feedback["minimal_unsat_core"] = json!(minimal_core);
+        feedback["minimal_core_size"] = json!(minimal_core.len());
+        feedback["total_core_size"] = json!(raw_labels.len());
+        feedback["reduction_ratio"] = json!(if raw_labels.is_empty() {
+            0.0
+        } else {
+            minimal_core.len() as f64 / raw_labels.len() as f64
+        });
+
+        if minimal_core.is_empty() {
+            feedback["suggestion"] = json!(suggestion_for_failure_type(FAILURE_INVARIANT_VIOLATED));
+        } else if minimal_core.len() == 1 {
+            feedback["suggestion"] = json!(format!(
+                "Single constraint causing contradiction: '{}'. Consider relaxing or removing it.",
+                minimal_core[0]
+            ));
+        } else {
+            feedback["suggestion"] = json!(format!(
+                "Minimal conflicting constraints: [{}]. Consider relaxing one of these.",
+                minimal_core.join(", ")
+            ));
+        }
+    }
+
+    feedback
 }
 
 const MINIMAL_UNSAT_CORE_PROBE_TIMEOUT_MS: u32 = 1000;
@@ -1751,37 +1779,13 @@ pub fn build_contradiction_feedback_with_minimal_core(
     structured_labels: &[StructuredLabel],
     minimal_core: &[String],
 ) -> serde_json::Value {
-    let mut feedback = build_contradiction_feedback(
+    build_contradiction_feedback(
         atom_name,
         conflicting_constraints,
         raw_unsat_core,
         structured_labels,
-    );
-
-    feedback["minimal_unsat_core"] = json!(minimal_core);
-    feedback["minimal_core_size"] = json!(minimal_core.len());
-    feedback["total_core_size"] = json!(raw_unsat_core.len());
-    feedback["reduction_ratio"] = json!(if raw_unsat_core.is_empty() {
-        0.0
-    } else {
-        minimal_core.len() as f64 / raw_unsat_core.len() as f64
-    });
-
-    if minimal_core.is_empty() {
-        feedback["suggestion"] = json!(suggestion_for_failure_type(FAILURE_INVARIANT_VIOLATED));
-    } else if minimal_core.len() == 1 {
-        feedback["suggestion"] = json!(format!(
-            "Single constraint causing contradiction: '{}'. Consider relaxing or removing it.",
-            minimal_core[0]
-        ));
-    } else {
-        feedback["suggestion"] = json!(format!(
-            "Minimal conflicting constraints: [{}]. Consider relaxing one of these.",
-            minimal_core.join(", ")
-        ));
-    }
-
-    feedback
+        Some(minimal_core),
+    )
 }
 
 /// Default constraint budget per atom (max number of solver.assert() calls).
@@ -6910,12 +6914,12 @@ fn verify_inner(
             .map(|sl| sl.description.clone())
             .collect();
 
-        let contradiction_fb = build_contradiction_feedback_with_minimal_core(
+        let contradiction_fb = build_contradiction_feedback(
             &atom.name,
             &conflicting_constraints,
             &core_labels,
             &structured_labels,
-            &minimal_core,
+            Some(&minimal_core),
         );
 
         save_visualizer_report(
@@ -9967,7 +9971,8 @@ mod tests {
             .iter()
             .filter_map(|label| parse_tracking_label(label))
             .collect();
-        let feedback = build_contradiction_feedback("test_atom", &constraints, &raw, &structured);
+        let feedback =
+            build_contradiction_feedback("test_atom", &constraints, &raw, &structured, None);
         assert_eq!(feedback["failure_type"], FAILURE_INVARIANT_VIOLATED);
         assert_eq!(feedback["atom"], "test_atom");
         assert!(feedback["conflicting_constraints"].is_array());
@@ -9994,7 +9999,7 @@ mod tests {
 
     #[test]
     fn test_build_contradiction_feedback_empty() {
-        let feedback = build_contradiction_feedback("test_atom", &[], &[], &[]);
+        let feedback = build_contradiction_feedback("test_atom", &[], &[], &[], None);
         assert_eq!(feedback["atom"], "test_atom");
         assert!(feedback["conflicting_constraints"]
             .as_array()
@@ -10126,6 +10131,40 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("Minimal conflicting constraints"));
+    }
+
+    #[test]
+    fn test_build_contradiction_feedback_accepts_optional_minimal_core() {
+        let raw = vec![
+            "track_requires".to_string(),
+            "track_refined_type_n::Nat".to_string(),
+            "track_quantifier_0".to_string(),
+        ];
+        let minimal = vec![
+            "track_requires".to_string(),
+            "track_refined_type_n::Nat".to_string(),
+        ];
+        let structured: Vec<StructuredLabel> = raw
+            .iter()
+            .filter_map(|label| parse_tracking_label(label))
+            .collect();
+        let constraints: Vec<String> = structured
+            .iter()
+            .map(|label| label.description.clone())
+            .collect();
+
+        let feedback = build_contradiction_feedback(
+            "test_atom",
+            &constraints,
+            &raw,
+            &structured,
+            Some(&minimal),
+        );
+
+        assert_eq!(feedback["minimal_unsat_core"], json!(minimal));
+        assert_eq!(feedback["minimal_core_size"], 2);
+        assert_eq!(feedback["total_core_size"], 3);
+        assert_eq!(feedback["reduction_ratio"], json!(2.0 / 3.0));
     }
 
     // =========================================================================
