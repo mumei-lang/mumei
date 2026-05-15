@@ -87,12 +87,16 @@ pub struct ProofConfig {
     /// Z3 ソルバのタイムアウト（ミリ秒、デフォルト: 10000）
     #[serde(default = "default_timeout")]
     pub timeout_ms: u64,
+    /// 複数仕様間の契約整合性検証を実行するか（デフォルト: false）
+    #[serde(default)]
+    pub cross_spec_verify: bool,
 }
 impl Default for ProofConfig {
     fn default() -> Self {
         Self {
             cache: true,
             timeout_ms: 10000,
+            cross_spec_verify: false,
         }
     }
 }
