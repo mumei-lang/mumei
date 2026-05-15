@@ -40,6 +40,31 @@ When `failure_type` is `"invariant_violated"`, the `semantic_feedback` object in
 
 The existing `conflicting_constraints` (array of description strings) and `raw_unsat_core` (array of raw Z3 label strings) fields are preserved for backward compatibility.
 
+## semantic_feedback.minimal_unsat_core
+
+When `failure_type` is `"invariant_violated"` and Z3 reports a contradiction, the `semantic_feedback` object includes a `minimal_unsat_core` array containing a deletion-minimal subset of tracked constraints that is still contradictory.
+
+| Field | Type | Description |
+|---|---|---|
+| `minimal_unsat_core` | `array[string]` | Minimal set of constraint labels causing contradiction |
+| `minimal_core_size` | `number` | Size of minimal core |
+| `total_core_size` | `number` | Size of full unsat core |
+| `reduction_ratio` | `number` | Ratio of minimal to full core (0.0 to 1.0) |
+| `suggestion` | `string` | Human-readable suggestion for fixing the contradiction |
+
+Example:
+
+```json
+{
+  "failure_type": "invariant_violated",
+  "minimal_unsat_core": ["track_refined_type_n::Pos", "track_requires"],
+  "minimal_core_size": 2,
+  "total_core_size": 5,
+  "reduction_ratio": 0.4,
+  "suggestion": "Minimal conflicting constraints: [track_refined_type_n::Pos, track_requires]. Consider relaxing one of these."
+}
+```
+
 ## semantic_feedback Object
 
 | Field | Type | Description |
