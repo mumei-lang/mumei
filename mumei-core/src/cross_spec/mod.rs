@@ -95,20 +95,14 @@ impl<'env> CrossSpecVerifier<'env> {
         let mut violations = Vec::new();
         let mut warnings = Vec::new();
 
-        let caller_bounds = self.extract_numeric_bounds(&caller.ensures);
-        let caller_bounds = match caller_bounds {
-            Some(bounds) => bounds,
-            None => self
-                .extract_numeric_bounds(&caller.requires)
-                .unwrap_or_default(),
-        };
+        let caller_bounds = self.extract_numeric_bounds_from_contract(caller);
         if !caller_bounds.is_empty() {
             if let Some(callee_requires) = self.extract_numeric_bounds(&callee.requires) {
                 for (param, caller_bound) in &caller_bounds {
                     if let Some(callee_bound) = callee_requires.get(param) {
                         if caller_bound < callee_bound {
                             violations.push(format!(
-                                "Caller ensures {param} >= {caller_bound} but callee requires {param} >= {callee_bound}"
+                                "Caller contract provides {param} >= {caller_bound} but callee requires {param} >= {callee_bound}"
                             ));
                         }
                     }
@@ -150,6 +144,16 @@ impl<'env> CrossSpecVerifier<'env> {
         } else {
             Some(bounds)
         }
+    }
+
+    fn extract_numeric_bounds_from_contract(&self, atom: &Atom) -> HashMap<String, i64> {
+        let mut bounds = self
+            .extract_numeric_bounds(&atom.requires)
+            .unwrap_or_default();
+        if let Some(ensures_bounds) = self.extract_numeric_bounds(&atom.ensures) {
+            merge_bounds(&mut bounds, ensures_bounds);
+        }
+        bounds
     }
 
     /// Check if caller's effects cover callee's effects.
@@ -401,6 +405,15 @@ fn parse_ge_constraint(constraint: &str) -> Option<(String, i64)> {
     }
     let bound = bound.trim().parse::<i64>().ok()?;
     Some((var.to_string(), bound))
+}
+
+fn merge_bounds(target: &mut HashMap<String, i64>, source: HashMap<String, i64>) {
+    for (var, bound) in source {
+        target
+            .entry(var)
+            .and_modify(|existing| *existing = (*existing).max(bound))
+            .or_insert(bound);
+    }
 }
 
 fn is_simple_identifier(value: &str) -> bool {

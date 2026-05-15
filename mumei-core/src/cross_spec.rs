@@ -1,6 +1,6 @@
 //! Cross-specification consistency verification.
 
-#[path = "cross_spec/verifier.rs"]
+#[path = "cross_spec/mod.rs"]
 mod verifier;
 
 pub use verifier::{
