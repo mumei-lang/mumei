@@ -639,7 +639,7 @@ Enables mumei's verified code to actually run — both interactively in the REPL
 - WebAssembly compilation target for browser/edge execution
 - Will be implemented after P7-A/B stabilize
 
-**P8: Developer Experience** — Deferred
+**Future: Developer Experience** — Deferred
 - Enhanced error messages, IDE integration improvements, debugging tools
 - Will be implemented after runtime completion is stable
 
@@ -653,6 +653,182 @@ Enables mumei's verified code to actually run — both interactively in the REPL
 - `src/main.rs` — `cmd_run()`, REPL JIT enhancements, `Run` command variant
 - `examples/run_demo.mm` — Simple binary execution demo
 - `examples/run_with_calls.mm` — Multi-atom binary execution demo
+
+---
+
+### P8: 形式検証の理論的限界への対処
+
+Z3 ベースの自動検証は Mumei の主要な強みだが、SMT ソルバのモデルは「仕様が正しい」ことや「反例が意味論的に正当である」ことまでは保証しない。
+P8 では、形式仕様そのものの健全性を検査し、Z3 で扱える決定可能断片を明文化し、必要な場合だけ Lean 4 へエスカレーションする運用境界を定義する。
+
+**P8-A: Spurious Counterexample Detection（偽反例検出）** — Planned
+
+Lean 4 の `bv_decide` / BVDecide が反例を再構成して検証するアプローチを参照し、Z3 の `sat` モデルをそのまま信じず、Mumei の意味論で再評価するメタ検証層を追加する。
+
+**Implementation Plan**:
+
+```
+1. 反例モデルの正当性チェック
+   - Z3 から得たモデルを HIR/MIR 式へ再代入
+   - requires / ensures / effect_pre / effect_post を Mumei 側で再評価
+   - 再評価不能な項は "unvalidated_counterexample" として分類
+
+2. Uninterpreted symbol detection
+   - 未解釈関数・未展開 atom・trusted atom 由来のシンボルを抽出
+   - 反例が未解釈シンボルの任意解釈だけに依存していないか検査
+   - 証明失敗レポートに symbol provenance を付与
+
+3. Unused hypothesis checking
+   - unsat core / dependency trace から未使用 requires・invariant・effect 制約を検出
+   - 未使用仮説が仕様の過剰拘束または死んだ仕様でないか警告
+   - 反例の最小制約集合を proof certificate に保存
+```
+
+**Files to modify/create**:
+- `mumei-core/src/verification.rs` — Z3 モデル取得、反例再代入、未解釈シンボル検出
+- `mumei-core/src/proof_cert.rs` — 反例メタ検証結果、unused hypothesis、symbol provenance の証明書フィールド
+- `src/main.rs` — CLI 診断出力に `validated_counterexample` / `spurious_candidate` を表示
+- `tests/` — 偽反例・未解釈シンボル・未使用仮説の回帰テスト
+
+**Success Metrics**:
+- Z3 `sat` のうち Mumei 再評価に成功した反例率: ≥ 95%
+- 未解釈シンボル依存の反例を `spurious_candidate` として分類できる率: ≥ 90%
+- unused hypothesis 警告の false positive: < 5%
+
+**P8-B: Specification Validation Framework（仕様検証フレームワーク）** — Planned
+
+コードを証明する前に、仕様自体が矛盾・過剰拘束・自然言語プロンプトからの逸脱を含まないかを検証する。
+特に AI 生成仕様では「実装は証明されるが、仕様が意図と違う」リスクを明示的に扱う。
+
+**Implementation Plan**:
+
+```
+1. Contradiction detection for specs
+   - requires の充足可能性を Z3 で事前チェック
+   - ensures 同士、refinement type、effect state 制約の矛盾を検出
+   - 矛盾仕様を proof attempt 前に SpecContradiction として停止
+
+2. QuickCheck-style property-based testing
+   - refinement type から入力ジェネレータを合成
+   - ランダム・境界値・縮小 (shrinking) による仕様妥当性チェック
+   - Z3 で unknown となる仕様にも実行的な sanity check を提供
+
+3. Semantic traceability verification
+   - 自然言語プロンプト、生成仕様、実装 atom の三者を trace_id で接続
+   - prompt の must/never/only 条件が requires / ensures / effects に反映されたか検査
+   - mumei-agent から受け取る forge task metadata と proof certificate を連携
+```
+
+**Files to modify/create**:
+- `mumei-core/src/verification.rs` — 仕様充足可能性チェックと `SpecContradiction` 診断
+- `mumei-core/src/parser/ast.rs` — optional `trace_id` / spec metadata の保持
+- `mumei-core/src/proof_cert.rs` — spec validation 結果と traceability hash の記録
+- `mcp_server.py` — AI 生成仕様の traceability metadata 入出力
+- `docs/SPEC_GUIDE.md` — 仕様検証と property-based validation の利用ガイド
+
+**Success Metrics**:
+- 矛盾する requires を proof 前に検出する率: 100%
+- property-based validation で発見された仕様欠陥の縮小反例出力率: ≥ 90%
+- natural language prompt と formal spec の traceability coverage: ≥ 95%
+
+**P8-C: Lean Escalation Criteria（Lean 4 エスカレーション基準）** — Planned
+
+Z3 が `unknown` または不安定な結果を返す場合に、どの義務を Lean 4 へ送るべきかを決定論的に分類する。
+既存の `lean_verified` 証明証明書ハンドシェイクと `mumei-lean` bridge を拡張し、エスカレーションの成功率を計測可能にする。
+
+**Escalation Criteria**:
+
+```
+Escalate to Lean 4 when:
+1. Z3 result == unknown / timeout / resource limit
+2. 非線形算術、帰納的データ型、再帰的不変条件を含む
+3. quantifier alternation または trigger-sensitive な forall/exists を含む
+4. Z3 反例が P8-A で spurious_candidate と分類された
+5. trusted atom を減らすために人間レビュー済み補題へ昇格する
+
+Do not escalate when:
+1. requires が unsat で仕様矛盾が原因
+2. 決定可能断片内で Z3 が明確な sat 反例を返し、P8-A 再評価も成功
+3. Lean 側 translator が未対応の構文で partial translation になる
+```
+
+**Implementation Plan**:
+
+```
+1. Z3 result classifier
+   - timeout / unknown / sat / unsat / skipped を原因別に分類
+   - proof obligation に logic fragment tag を付与
+
+2. mumei-lean bridge integration
+   - escalation candidate を proof certificate bundle として出力
+   - mumei-lean/scripts/bridge.py が candidate reason を読み取り Lean proof を生成
+   - Lean 結果を `z3_check_result = "lean_verified"` として戻す
+
+3. Metrics and feedback loop
+   - escalation_attempts / lean_successes / partial_translation / manual_required を記録
+   - atom・logic fragment・failure reason ごとの成功率を集計
+   - 低成功率カテゴリを P8-D の仕様ガイドへフィードバック
+```
+
+**Files to modify/create**:
+- `mumei-core/src/proof_cert.rs` — escalation reason、logic fragment tag、Lean result metadata
+- `mumei-core/src/resolver.rs` — `--allow-lean-verified` 経路での acceptance metrics
+- `src/main.rs` — `mumei verify --escalate-lean` / `--emit escalation-bundle` CLI
+- `mumei-lean/scripts/bridge.py` — escalation candidate bundle の取り込み
+- `mumei-lean/scripts/ingest_cert.py` — candidate reason を Lean theorem metadata へ変換
+
+**Success Metrics**:
+- Z3 `unknown` obligation の Lean escalation 成功率: ≥ 70%
+- partial translation 率: < 20%
+- `lean_verified` certificate の再検証成功率: 100%
+
+**P8-D: Decidable Fragment Documentation（決定可能断片ドキュメント）** — Planned
+
+Z3 が安定して証明できる仕様の範囲を明文化し、Mumei の仕様を書く人間・AI agent の双方が「証明しやすい仕様」を選べるようにする。
+これは P8-A〜C の検出・エスカレーション結果を、仕様設計のガイドラインへ還元するフェーズである。
+
+**Documented Fragment**:
+
+```
+1. Linear arithmetic
+   - i64 / Nat refinement は加減算・比較・定数倍を推奨
+   - 変数同士の乗算、除算、mod、指数は Lean escalation candidate
+
+2. Array and sequence access patterns
+   - 0 <= i < len(a) の明示的境界条件を必須化
+   - 単一 index の read/write と length-preserving update を推奨
+   - nested mutable aliasing や quantified permutation は Lean 側へ送る
+
+3. Quantifier restrictions
+   - forall は bounded range または finite collection に限定
+   - exists は witness を構成できる形を推奨
+   - quantifier alternation (`forall exists`, `exists forall`) は原則 escalation
+
+4. Effects and temporal state
+   - state machine は finite state + explicit transition に制限
+   - path / URL / regex 制約は Z3 String Sort の既存近似範囲を明記
+```
+
+**Implementation Plan**:
+
+```
+1. docs/SPEC_GUIDE.md に決定可能断片を追加
+2. mumei verify の警告として "outside_decidable_fragment" を出す
+3. mumei-agent の prompt に spec-writing guideline を注入
+4. P8-C metrics から証明失敗しやすい fragment を定期更新
+```
+
+**Files to modify/create**:
+- `docs/SPEC_GUIDE.md` — 決定可能断片、アンチパターン、推奨仕様テンプレート
+- `docs/LANGUAGE.md` — refinement / quantifier / array access の言語仕様へのリンク
+- `mumei-core/src/verification.rs` — logic fragment detector と warning diagnostic
+- `mcp_server.py` — agent-facing spec guideline summary の提供
+- `mumei-agent/agent/prompts/` — 仕様生成プロンプトへの guideline 反映
+
+**Success Metrics**:
+- 新規仕様の `outside_decidable_fragment` 警告率: 四半期ごとに 20% 減少
+- Z3 `unknown` 率: < 5%
+- AI 生成仕様の first-pass verification 成功率: ≥ 85%
 
 ---
 
