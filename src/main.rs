@@ -88,7 +88,7 @@ enum Command {
         /// Output base name
         #[arg(short, long, default_value = "katana")]
         output: String,
-        /// Emit target: llvm-ir (default), c-header, verified-json, proof-book, proof-cert
+        /// Emit target: llvm-ir (default), c-header, verified-json, proof-book, proof-cert, escalation-bundle
         #[arg(long, default_value = "llvm-ir")]
         emit: String,
         /// P5-C: Strict import mode — missing/invalid certificates cause hard errors
@@ -108,6 +108,12 @@ enum Command {
         /// Generate Z3 proof certificate (.proof.json)
         #[arg(long)]
         proof_cert: bool,
+        /// Emit Lean escalation candidate bundle alongside verification results
+        #[arg(long)]
+        escalate_lean: bool,
+        /// Emit target for verify-only output: escalation-bundle
+        #[arg(long)]
+        emit: Option<String>,
         /// Output path for proof certificate (default: <input>.proof.json)
         #[arg(long)]
         output: Option<String>,
@@ -252,6 +258,7 @@ fn main() {
                 "verified-json" => emitter::EmitTarget::VerifiedJson,
                 "proof-book" => emitter::EmitTarget::ProofBook,
                 "proof-cert" => emitter::EmitTarget::ProofCert,
+                "escalation-bundle" => emitter::EmitTarget::EscalationBundle,
                 "binary" => emitter::EmitTarget::Binary,
                 "rust-wrapper" => emitter::EmitTarget::RustWrapper,
                 "python-wrapper" => emitter::EmitTarget::PythonWrapper,
@@ -268,6 +275,8 @@ fn main() {
         Some(Command::Verify {
             input,
             proof_cert,
+            escalate_lean,
+            emit,
             output,
             report_dir,
             json,
@@ -275,9 +284,21 @@ fn main() {
             allow_lean_verified,
             cross_spec_verify,
         }) => {
+            let emit_escalation_bundle = match emit.as_deref() {
+                Some("escalation-bundle") => true,
+                Some(other) => {
+                    eprintln!(
+                        "Unsupported verify --emit target '{}'. Supported value: escalation-bundle",
+                        other
+                    );
+                    std::process::exit(1);
+                }
+                None => false,
+            };
             cmd_verify(VerifyOptions {
                 input: &input,
                 generate_proof_cert: proof_cert,
+                emit_escalation_bundle: escalate_lean || emit_escalation_bundle,
                 cert_output: output.as_deref(),
                 report_dir: report_dir.as_deref(),
                 json_output: json,
@@ -686,6 +707,7 @@ fn cmd_check(input: &str) {
 struct VerifyOptions<'a> {
     input: &'a str,
     generate_proof_cert: bool,
+    emit_escalation_bundle: bool,
     cert_output: Option<&'a str>,
     report_dir: Option<&'a str>,
     json_output: bool,
@@ -698,6 +720,7 @@ fn cmd_verify(options: VerifyOptions<'_>) {
     let VerifyOptions {
         input,
         generate_proof_cert,
+        emit_escalation_bundle,
         cert_output,
         report_dir,
         json_output,
@@ -741,6 +764,7 @@ fn cmd_verify(options: VerifyOptions<'_>) {
     let mut verified = 0;
     let mut failed = 0;
     let mut skipped = 0;
+    let mut escalated = 0;
 
     // Plan 11B: Track per-atom verification results for proof certificates
     let mut cert_results: std::collections::HashMap<String, (String, String)> =
@@ -885,19 +909,42 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                             verified += 1;
                         }
                         Err(e) => {
+                            let error_text = format!("{e}");
                             if !json_output {
                                 let resolved = resolve_source_for_span(&source, &atom.span);
                                 let e = e.with_source(&resolved, &atom.span);
                                 eprintln!("{:?}", miette::Report::new(e));
                             }
-                            // Plan 11B: Record "sat" (counter-example found) for proof certificate
-                            cert_results.insert(
-                                atom.name.clone(),
-                                ("sat".to_string(), "failed".to_string()),
+                            let z3_result = verification::z3_result_from_error_message(&error_text)
+                                .unwrap_or("sat")
+                                .to_string();
+                            let classification = verification::classify_atom_for_lean_escalation(
+                                atom,
+                                &module_env,
+                                &z3_result,
+                                "failed",
                             );
+                            let status = if emit_escalation_bundle && classification.should_escalate
+                            {
+                                if !json_output {
+                                    println!(
+                                        "  [lean] '{}': marked for escalation ({})",
+                                        atom.name,
+                                        classification
+                                            .escalation_reason
+                                            .as_deref()
+                                            .unwrap_or("lean_escalation")
+                                    );
+                                }
+                                escalated += 1;
+                                "escalation_candidate"
+                            } else {
+                                failed += 1;
+                                "failed"
+                            };
+                            cert_results.insert(atom.name.clone(), (z3_result, status.to_string()));
                             // 検証失敗した atom はキャッシュから除外
                             verification_cache.remove(&atom.name);
-                            failed += 1;
                         }
                     }
                 }
@@ -1000,17 +1047,46 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                                 verified += 1;
                             }
                             Err(e) => {
+                                let error_text = format!("{e}");
                                 if !json_output {
                                     let resolved = resolve_source_for_span(&source, &method.span);
                                     let e = e.with_source(&resolved, &method.span);
                                     eprintln!("{:?}", miette::Report::new(e));
                                 }
+                                let z3_result =
+                                    verification::z3_result_from_error_message(&error_text)
+                                        .unwrap_or("sat")
+                                        .to_string();
+                                let classification =
+                                    verification::classify_atom_for_lean_escalation(
+                                        &qualified_method,
+                                        &module_env,
+                                        &z3_result,
+                                        "failed",
+                                    );
+                                let status =
+                                    if emit_escalation_bundle && classification.should_escalate {
+                                        if !json_output {
+                                            println!(
+                                                "  [lean] '{}': marked for escalation ({})",
+                                                qualified_name,
+                                                classification
+                                                    .escalation_reason
+                                                    .as_deref()
+                                                    .unwrap_or("lean_escalation")
+                                            );
+                                        }
+                                        escalated += 1;
+                                        "escalation_candidate"
+                                    } else {
+                                        failed += 1;
+                                        "failed"
+                                    };
                                 cert_results.insert(
                                     qualified_name.clone(),
-                                    ("sat".to_string(), "failed".to_string()),
+                                    (z3_result, status.to_string()),
                                 );
                                 verification_cache.remove(&qualified_name);
-                                failed += 1;
                             }
                         }
                     }
@@ -1053,7 +1129,7 @@ fn cmd_verify(options: VerifyOptions<'_>) {
     }
 
     // Plan 11B: Generate proof certificate if requested
-    if generate_proof_cert {
+    if generate_proof_cert || emit_escalation_bundle {
         let mut atom_refs: Vec<&parser::Atom> = items
             .iter()
             .filter_map(|item| {
@@ -1092,15 +1168,38 @@ fn cmd_verify(options: VerifyOptions<'_>) {
             let stem = Path::new(input).file_stem().unwrap_or_default();
             Path::new(".").join(format!("{}.proof.json", stem.to_string_lossy()))
         };
-        match proof_cert::save_certificate(&cert, &cert_path) {
-            Ok(()) => {
-                if !json_output {
-                    println!("  📜 Proof certificate written to: {}", cert_path.display());
+        if generate_proof_cert {
+            match proof_cert::save_certificate(&cert, &cert_path) {
+                Ok(()) => {
+                    if !json_output {
+                        println!("  📜 Proof certificate written to: {}", cert_path.display());
+                    }
+                }
+                Err(e) => {
+                    if !json_output {
+                        eprintln!("  ⚠️  Failed to write proof certificate: {}", e);
+                    }
                 }
             }
-            Err(e) => {
-                if !json_output {
-                    eprintln!("  ⚠️  Failed to write proof certificate: {}", e);
+        }
+
+        if emit_escalation_bundle {
+            let bundle = proof_cert::generate_escalation_bundle(&cert);
+            let bundle_path = cert_path.with_extension("escalation-bundle.json");
+            match proof_cert::save_escalation_bundle(&bundle, &bundle_path) {
+                Ok(()) => {
+                    if !json_output {
+                        println!(
+                            "  Lean escalation bundle written to: {} ({} candidate(s))",
+                            bundle_path.display(),
+                            bundle.summary.candidate_count
+                        );
+                    }
+                }
+                Err(e) => {
+                    if !json_output {
+                        eprintln!("  ⚠️  Failed to write escalation bundle: {}", e);
+                    }
                 }
             }
         }
@@ -1138,8 +1237,8 @@ fn cmd_verify(options: VerifyOptions<'_>) {
             // No report.json produced — emit minimal JSON status
             let status = if failed > 0 { "failed" } else { "passed" };
             println!(
-                "{{\"status\":\"{}\",\"verified\":{},\"failed\":{},\"skipped\":{}}}",
-                status, verified, failed, skipped
+                "{{\"status\":\"{}\",\"verified\":{},\"failed\":{},\"skipped\":{},\"escalation_candidates\":{}}}",
+                status, verified, failed, skipped, escalated
             );
         }
         if failed > 0 {
@@ -1149,18 +1248,21 @@ fn cmd_verify(options: VerifyOptions<'_>) {
         println!();
         if failed > 0 {
             eprintln!(
-                "❌ Verification: {} passed, {} failed, {} skipped (cached)",
-                verified, failed, skipped
+                "❌ Verification: {} passed, {} failed, {} skipped (cached), {} Lean escalation candidate(s)",
+                verified, failed, skipped, escalated
             );
             std::process::exit(1);
         }
         if skipped > 0 {
             println!(
-                "✅ Verification passed: {} verified, {} skipped (unchanged) ⚡",
-                verified, skipped
+                "✅ Verification passed: {} verified, {} skipped (unchanged), {} Lean escalation candidate(s) ⚡",
+                verified, skipped, escalated
             );
         } else {
-            println!("✅ Verification passed: {} item(s) verified", verified);
+            println!(
+                "✅ Verification passed: {} item(s) verified, {} Lean escalation candidate(s)",
+                verified, escalated
+            );
         }
     }
 }
@@ -1875,9 +1977,8 @@ fn dispatch_emit(
             module_env,
             extern_blocks,
         ),
-        emitter::EmitTarget::ProofCert => {
-            // P5-A: ProofCert emit is handled at a higher level (cmd_build);
-            // at per-atom dispatch we return an empty artifact list.
+        emitter::EmitTarget::ProofCert | emitter::EmitTarget::EscalationBundle => {
+            // Certificate-like emits are handled at the cmd_build level.
             Ok(vec![])
         }
         emitter::EmitTarget::Binary => {
@@ -1924,7 +2025,7 @@ fn cmd_build(
             Ok(emitter) => Some(emitter),
             Err(err) => {
                 eprintln!(
-                    "\u{274c} Error: Unknown emit target '{}'. Valid built-in values: llvm-ir, c-header, verified-json, proof-book, proof-cert, binary, rust-wrapper, python-wrapper.",
+                    "\u{274c} Error: Unknown emit target '{}'. Valid built-in values: llvm-ir, c-header, verified-json, proof-book, proof-cert, escalation-bundle, binary, rust-wrapper, python-wrapper.",
                     name
                 );
                 eprintln!("  External plugin lookup failed: {}", err);
@@ -2245,6 +2346,9 @@ fn cmd_build(
                                 emitter::EmitTarget::VerifiedJson => "Verified JSON".into(),
                                 emitter::EmitTarget::ProofBook => "Proof-Book".into(),
                                 emitter::EmitTarget::ProofCert => "Proof-Cert".into(),
+                                emitter::EmitTarget::EscalationBundle => {
+                                    "Lean escalation bundle".into()
+                                }
                                 emitter::EmitTarget::Binary => "Binary".into(),
                                 emitter::EmitTarget::RustWrapper => "Rust wrapper".into(),
                                 emitter::EmitTarget::PythonWrapper => "Python wrapper".into(),
@@ -2405,6 +2509,9 @@ fn cmd_build(
                             emitter::EmitTarget::VerifiedJson => "Verified JSON".into(),
                             emitter::EmitTarget::ProofBook => "Proof-Book".into(),
                             emitter::EmitTarget::ProofCert => "Proof-Cert".into(),
+                            emitter::EmitTarget::EscalationBundle => {
+                                "Lean escalation bundle".into()
+                            }
                             emitter::EmitTarget::Binary => "Binary".into(),
                             emitter::EmitTarget::RustWrapper => "Rust wrapper".into(),
                             emitter::EmitTarget::PythonWrapper => "Python wrapper".into(),
@@ -2478,8 +2585,12 @@ fn cmd_build(
         let _ = fs::remove_file(&ll_path);
     }
 
-    // P5-A: Generate proof certificate when --emit proof-cert is requested
-    if matches!(emit_target, emitter::EmitTarget::ProofCert) && atom_count > 0 {
+    // P5-A: Generate proof certificate or Lean escalation bundle when requested
+    if matches!(
+        emit_target,
+        emitter::EmitTarget::ProofCert | emitter::EmitTarget::EscalationBundle
+    ) && atom_count > 0
+    {
         let mut cert_atoms: Vec<&parser::Atom> = items
             .iter()
             .filter_map(|item| {
@@ -2535,12 +2646,29 @@ fn cmd_build(
         );
 
         let cert_path = output_dir.join(format!("{}.proof-cert.json", file_stem));
-        match proof_cert::save_certificate(&cert, &cert_path) {
-            Ok(()) => {
-                println!("  📜 Proof certificate written to: {}", cert_path.display());
+        if matches!(emit_target, emitter::EmitTarget::ProofCert) {
+            match proof_cert::save_certificate(&cert, &cert_path) {
+                Ok(()) => {
+                    println!("  📜 Proof certificate written to: {}", cert_path.display());
+                }
+                Err(e) => {
+                    eprintln!("  ⚠️  Failed to write proof certificate: {}", e);
+                }
             }
-            Err(e) => {
-                eprintln!("  ⚠️  Failed to write proof certificate: {}", e);
+        } else {
+            let bundle = proof_cert::generate_escalation_bundle(&cert);
+            let bundle_path = output_dir.join(format!("{}.escalation-bundle.json", file_stem));
+            match proof_cert::save_escalation_bundle(&bundle, &bundle_path) {
+                Ok(()) => {
+                    println!(
+                        "  Lean escalation bundle written to: {} ({} candidate(s))",
+                        bundle_path.display(),
+                        bundle.summary.candidate_count
+                    );
+                }
+                Err(e) => {
+                    eprintln!("  ⚠️  Failed to write escalation bundle: {}", e);
+                }
             }
         }
     }
