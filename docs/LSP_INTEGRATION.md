@@ -84,12 +84,12 @@ The diagnostic `data` field includes:
 
 ## VS Code Extension Hooks
 
-A VS Code extension can support the new LSP surface by registering:
+The bundled VS Code extension registers:
 
-- `mumei.showIntentDrift`: open an intent drift detail view/dashboard for the provided atom.
-- `mumei.showSpecCodeMapping`: open a side panel focused on the selected `requires` or `ensures` clause.
+- `mumei.showIntentDrift`: opens an intent drift detail dashboard for the provided atom.
+- `mumei.showSpecCodeMapping`: opens a side panel focused on the selected `requires` or `ensures` clause.
 
-The extension should request CodeLens for `.mm` files and refresh lenses after document edits so scores update with the current source text.
+The LSP client requests CodeLens for `.mm` files and refreshes lenses after document edits so scores update with the current source text.
 
 ## Usage
 

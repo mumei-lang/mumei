@@ -43,6 +43,16 @@
         "path": "./syntaxes/mumei.tmLanguage.json"
       }
     ],
+    "commands": [
+      {
+        "command": "mumei.showIntentDrift",
+        "title": "Mumei: Show Intent Drift"
+      },
+      {
+        "command": "mumei.showSpecCodeMapping",
+        "title": "Mumei: Show Spec-Code Mapping"
+      }
+    ],
     "configuration": {
       "title": "Mumei",
       "properties": {
