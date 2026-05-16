@@ -2,6 +2,14 @@
 
 ---
 
+### PR #221: Lean translator contract metadata
+
+- **Typed translator metadata in proof certificates**: `AtomCertificate` now records `TranslatorIRMetadata` so Lean escalation bundles carry obligation sort, binders, theorem goal, provenance span, and lowering rules alongside the source contract.
+- **Binder and bridge validation**: certificates include `binder_mapping` and `bridge_lemma_hash`, allowing mumei and mumei-lean to confirm that generated Lean binders and semantic bridge lemmas still match the compiler-side translator contract.
+- **Manual lemma escalation reasons**: obligations that require hand-written Lean support carry `manual_lemma_reason`, keeping partial translations auditable instead of silently treating them as proof success.
+
+---
+
 ### Plan 22: `mumei doc` enhancement + counter-example visualizer
 
 #### `mumei doc` enhancement
