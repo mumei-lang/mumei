@@ -40,6 +40,32 @@ When `failure_type` is `"invariant_violated"`, the `semantic_feedback` object in
 
 The existing `conflicting_constraints` (array of description strings) and `raw_unsat_core` (array of raw Z3 label strings) fields are preserved for backward compatibility.
 
+## semantic_feedback.minimal_unsat_core
+
+When `failure_type` is `"invariant_violated"` and Z3 reports a contradiction, the `semantic_feedback` object includes a `minimal_unsat_core` array containing a deletion-minimal subset of tracked constraints that is still contradictory.
+This diagnostic helps identify which constraints should be relaxed when revising a specification.
+
+| Field | Type | Description |
+|---|---|---|
+| `minimal_unsat_core` | `array[string]` | Minimal set of constraint labels causing contradiction |
+| `minimal_core_size` | `number` | Size of minimal core |
+| `total_core_size` | `number` | Size of full unsat core |
+| `reduction_ratio` | `number` | Ratio of minimal to full core (0.0 to 1.0) |
+| `suggestion` | `string` | Human-readable suggestion for fixing the contradiction |
+
+Example:
+
+```json
+{
+  "failure_type": "invariant_violated",
+  "minimal_unsat_core": ["track_refined_type_n::Pos", "track_requires"],
+  "minimal_core_size": 2,
+  "total_core_size": 5,
+  "reduction_ratio": 0.4,
+  "suggestion": "Minimal conflicting constraints: [track_refined_type_n::Pos, track_requires]. Consider relaxing one of these."
+}
+```
+
 ## semantic_feedback Object
 
 | Field | Type | Description |
@@ -68,3 +94,69 @@ The existing `conflicting_constraints` (array of description strings) and `raw_u
 | `caller_effects` | `array` | Caller's declared effects |
 | `callee_effects` | `array` | Callee's required effects |
 | `missing_effects` | `array` | Effects missing from caller |
+
+## cross_spec.json Schema
+
+When cross-specification verification is enabled with `mumei verify --cross-spec-verify`, Mumei writes `cross_spec.json` in the report directory.
+
+| Field | Type | Description |
+|---|---|---|
+| `contract_consistency` | `array` | Contract consistency check results between caller/callee atom pairs |
+| `contract_consistency[].caller_atom` | `string` | Name of the caller atom |
+| `contract_consistency[].callee_atom` | `string` | Name of the callee atom |
+| `contract_consistency[].is_consistent` | `boolean` | Whether the caller/callee contract pair is consistent |
+| `contract_consistency[].violations` | `array[string]` | Contract violations |
+| `contract_consistency[].warnings` | `array[string]` | Non-fatal consistency warnings |
+| `global_invariants` | `array` | Invariants inferred from repeated atom postconditions |
+| `global_invariants[].invariant` | `string` | Invariant expression |
+| `global_invariants[].source_atoms` | `array[string]` | Atoms contributing the invariant |
+| `global_invariants[].confidence` | `number` | Ratio of contributing atoms to total atoms |
+| `circular_dependencies` | `array[array[string]]` | Detected atom dependency cycles |
+| `dependency_graph` | `array` | Dependency graph nodes |
+| `dependency_graph[].atom_name` | `string` | Atom name |
+| `dependency_graph[].dependencies` | `array[string]` | Atoms this atom depends on |
+| `dependency_graph[].dependents` | `array[string]` | Atoms that depend on this atom |
+| `summary` | `object` | Cross-specification summary |
+| `summary.total_atoms` | `number` | Total number of atoms |
+| `summary.consistent_calls` | `number` | Number of consistent contract calls |
+| `summary.inconsistent_calls` | `number` | Number of inconsistent contract calls |
+| `summary.circular_dependency_count` | `number` | Number of detected circular dependencies |
+| `summary.global_invariant_count` | `number` | Number of inferred global invariants |
+
+Example:
+
+```json
+{
+  "contract_consistency": [
+    {
+      "caller_atom": "transfer",
+      "callee_atom": "validate_balance",
+      "is_consistent": true,
+      "violations": [],
+      "warnings": []
+    }
+  ],
+  "global_invariants": [
+    {
+      "invariant": "balance >= 0",
+      "source_atoms": ["transfer", "withdraw"],
+      "confidence": 0.5
+    }
+  ],
+  "circular_dependencies": [],
+  "dependency_graph": [
+    {
+      "atom_name": "transfer",
+      "dependencies": ["validate_balance"],
+      "dependents": []
+    }
+  ],
+  "summary": {
+    "total_atoms": 2,
+    "consistent_calls": 1,
+    "inconsistent_calls": 0,
+    "circular_dependency_count": 0,
+    "global_invariant_count": 1
+  }
+}
+```

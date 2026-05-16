@@ -6,7 +6,7 @@
 //! - `[package]`: プロジェクトメタデータ（name, version, authors, description）
 //! - `[dependencies]`: パッケージ依存（path / git / version）
 //! - `[build]`: ビルド設定（verify, max_unroll）
-//! - `[proof]`: 検証設定（cache, timeout_ms）
+//! - `[proof]`: 検証設定（cache, timeout_ms, cross_spec_verify）
 //! - `[effects]`: エフェクト境界設定（allowed, denied）
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -87,12 +87,16 @@ pub struct ProofConfig {
     /// Z3 ソルバのタイムアウト（ミリ秒、デフォルト: 10000）
     #[serde(default = "default_timeout")]
     pub timeout_ms: u64,
+    /// 複数仕様間の契約整合性検証を実行するか（デフォルト: true）
+    #[serde(default = "default_true")]
+    pub cross_spec_verify: bool,
 }
 impl Default for ProofConfig {
     fn default() -> Self {
         Self {
             cache: true,
             timeout_ms: 10000,
+            cross_spec_verify: true,
         }
     }
 }
@@ -205,3 +209,50 @@ impl std::fmt::Display for ManifestError {
     }
 }
 impl std::error::Error for ManifestError {}
+
+#[cfg(test)]
+mod tests {
+    use super::{Manifest, ProofConfig};
+
+    #[test]
+    fn proof_config_default_enables_cross_spec_verify() {
+        assert!(ProofConfig::default().cross_spec_verify);
+    }
+
+    #[test]
+    fn missing_cross_spec_verify_field_defaults_to_enabled() {
+        let manifest: Manifest = toml::from_str(
+            r#"
+[package]
+name = "demo"
+version = "0.1.0"
+
+[proof]
+cache = true
+timeout_ms = 10000
+"#,
+        )
+        .expect("manifest parses");
+
+        assert!(manifest.proof.cross_spec_verify);
+    }
+
+    #[test]
+    fn explicit_false_disables_cross_spec_verify() {
+        let manifest: Manifest = toml::from_str(
+            r#"
+[package]
+name = "demo"
+version = "0.1.0"
+
+[proof]
+cache = true
+timeout_ms = 10000
+cross_spec_verify = false
+"#,
+        )
+        .expect("manifest parses");
+
+        assert!(!manifest.proof.cross_spec_verify);
+    }
+}

@@ -11,8 +11,8 @@ use mumei_core::hir::lower_atom_to_hir;
 use mumei_core::hir::lower_atom_to_hir_with_env;
 use mumei_core::parser::{ImportDecl, Item};
 use mumei_core::{
-    ast, emitter, hir, inspect, manifest, mir, mir_analysis, parser, proof_cert, registry,
-    resolver, verification,
+    ast, cross_spec, emitter, hir, inspect, manifest, mir, mir_analysis, parser, proof_cert,
+    registry, resolver, verification,
 };
 use std::fs;
 use std::path::Path;
@@ -29,6 +29,19 @@ fn resolve_source_for_span(main_source: &str, span: &parser::Span) -> String {
         main_source.to_string()
     } else {
         std::fs::read_to_string(&span.file).unwrap_or_else(|_| main_source.to_string())
+    }
+}
+
+fn emit_decidable_fragment_warning(
+    atom: &parser::Atom,
+    module_env: &verification::ModuleEnv,
+    suppress_output: bool,
+) {
+    if suppress_output {
+        return;
+    }
+    if let Some(warning) = verification::outside_decidable_fragment_warning(atom, module_env) {
+        eprintln!("  ⚠️  {warning}");
     }
 }
 
@@ -88,7 +101,7 @@ enum Command {
         /// Output base name
         #[arg(short, long, default_value = "katana")]
         output: String,
-        /// Emit target: llvm-ir (default), c-header, verified-json, proof-book, proof-cert
+        /// Emit target: llvm-ir (default), c-header, verified-json, proof-book, proof-cert, escalation-bundle
         #[arg(long, default_value = "llvm-ir")]
         emit: String,
         /// P5-C: Strict import mode — missing/invalid certificates cause hard errors
@@ -108,6 +121,12 @@ enum Command {
         /// Generate Z3 proof certificate (.proof.json)
         #[arg(long)]
         proof_cert: bool,
+        /// Emit Lean escalation candidate bundle alongside verification results
+        #[arg(long)]
+        escalate_lean: bool,
+        /// Emit target for verify-only output: escalation-bundle
+        #[arg(long)]
+        emit: Option<String>,
         /// Output path for proof certificate (default: <input>.proof.json)
         #[arg(long)]
         output: Option<String>,
@@ -125,6 +144,9 @@ enum Command {
         /// resolution. Off by default for backwards compatibility.
         #[arg(long)]
         allow_lean_verified: bool,
+        /// Enable cross-specification consistency verification across atoms
+        #[arg(long)]
+        cross_spec_verify: bool,
     },
     /// Parse + resolve + monomorphize only (no Z3, fast syntax check)
     Check {
@@ -249,6 +271,7 @@ fn main() {
                 "verified-json" => emitter::EmitTarget::VerifiedJson,
                 "proof-book" => emitter::EmitTarget::ProofBook,
                 "proof-cert" => emitter::EmitTarget::ProofCert,
+                "escalation-bundle" => emitter::EmitTarget::EscalationBundle,
                 "binary" => emitter::EmitTarget::Binary,
                 "rust-wrapper" => emitter::EmitTarget::RustWrapper,
                 "python-wrapper" => emitter::EmitTarget::PythonWrapper,
@@ -265,21 +288,37 @@ fn main() {
         Some(Command::Verify {
             input,
             proof_cert,
+            escalate_lean,
+            emit,
             output,
             report_dir,
             json,
             strict_imports,
             allow_lean_verified,
+            cross_spec_verify,
         }) => {
-            cmd_verify(
-                &input,
-                proof_cert,
-                output.as_deref(),
-                report_dir.as_deref(),
-                json,
+            let emit_escalation_bundle = match emit.as_deref() {
+                Some("escalation-bundle") => true,
+                Some(other) => {
+                    eprintln!(
+                        "Unsupported verify --emit target '{}'. Supported value: escalation-bundle",
+                        other
+                    );
+                    std::process::exit(1);
+                }
+                None => false,
+            };
+            cmd_verify(VerifyOptions {
+                input: &input,
+                generate_proof_cert: proof_cert,
+                emit_escalation_bundle: escalate_lean || emit_escalation_bundle,
+                cert_output: output.as_deref(),
+                report_dir: report_dir.as_deref(),
+                json_output: json,
                 strict_imports,
                 allow_lean_verified,
-            );
+                enable_cross_spec_verification: cross_spec_verify,
+            });
         }
         Some(Command::Check { input }) => {
             cmd_check(&input);
@@ -678,16 +717,42 @@ fn cmd_check(input: &str) {
 // mumei verify — Z3 verification only (no codegen)
 // =============================================================================
 
-fn cmd_verify(
-    input: &str,
+struct VerifyOptions<'a> {
+    input: &'a str,
     generate_proof_cert: bool,
-    cert_output: Option<&str>,
-    report_dir: Option<&str>,
+    emit_escalation_bundle: bool,
+    cert_output: Option<&'a str>,
+    report_dir: Option<&'a str>,
     json_output: bool,
     strict_imports: bool,
     allow_lean_verified: bool,
-) {
+    enable_cross_spec_verification: bool,
+}
+
+fn cmd_verify(options: VerifyOptions<'_>) {
+    let VerifyOptions {
+        input,
+        generate_proof_cert,
+        emit_escalation_bundle,
+        cert_output,
+        report_dir,
+        json_output,
+        strict_imports,
+        allow_lean_verified,
+        enable_cross_spec_verification,
+    } = options;
     check_z3_available();
+    let manifest_config = manifest::find_and_load();
+    let (build_cfg, proof_cfg) = if let Some((_, ref m)) = manifest_config {
+        (m.build.clone(), m.proof.clone())
+    } else {
+        (
+            manifest::BuildConfig::default(),
+            manifest::ProofConfig::default(),
+        )
+    };
+    let enable_cross_spec_verification =
+        enable_cross_spec_verification || proof_cfg.cross_spec_verify;
     if !json_output {
         println!("🗡️  Mumei verify: verifying '{}'...", input);
     }
@@ -702,11 +767,17 @@ fn cmd_verify(
     if report_dir.is_some() {
         let _ = std::fs::create_dir_all(output_dir);
     }
+    let verification_config = verification::VerificationConfig {
+        timeout_ms: proof_cfg.timeout_ms,
+        global_max_unroll: build_cfg.max_unroll,
+        enable_cross_spec_verification,
+    };
     let input_path = Path::new(input);
     let base_dir = input_path.parent().unwrap_or(Path::new("."));
     let mut verified = 0;
     let mut failed = 0;
     let mut skipped = 0;
+    let mut escalated = 0;
 
     // Plan 11B: Track per-atom verification results for proof certificates
     let mut cert_results: std::collections::HashMap<String, (String, String)> =
@@ -801,6 +872,7 @@ fn cmd_verify(
                         .filter(|tn| module_env.get_type(tn).is_some())
                         .collect();
 
+                    emit_decidable_fragment_warning(atom, &module_env, json_output);
                     let hir_atom = lower_atom_to_hir_with_env(atom, Some(&module_env));
 
                     // MIR pipeline: lower to MIR and run analyses
@@ -816,7 +888,12 @@ fn cmd_verify(
                         }
                     }
 
-                    match verification::verify(&hir_atom, output_dir, &module_env) {
+                    match verification::verify_with_verification_config(
+                        &hir_atom,
+                        output_dir,
+                        &module_env,
+                        &verification_config,
+                    ) {
                         Ok(_) => {
                             if !json_output {
                                 println!("  ⚖️  '{}': verified ✅", atom.name);
@@ -846,19 +923,42 @@ fn cmd_verify(
                             verified += 1;
                         }
                         Err(e) => {
+                            let error_text = format!("{e}");
                             if !json_output {
                                 let resolved = resolve_source_for_span(&source, &atom.span);
                                 let e = e.with_source(&resolved, &atom.span);
                                 eprintln!("{:?}", miette::Report::new(e));
                             }
-                            // Plan 11B: Record "sat" (counter-example found) for proof certificate
-                            cert_results.insert(
-                                atom.name.clone(),
-                                ("sat".to_string(), "failed".to_string()),
+                            let z3_result = verification::z3_result_from_error_message(&error_text)
+                                .unwrap_or("sat")
+                                .to_string();
+                            let classification = verification::classify_atom_for_lean_escalation(
+                                atom,
+                                &module_env,
+                                &z3_result,
+                                "failed",
                             );
+                            let status = if emit_escalation_bundle && classification.should_escalate
+                            {
+                                if !json_output {
+                                    println!(
+                                        "  [lean] '{}': marked for escalation ({})",
+                                        atom.name,
+                                        classification
+                                            .escalation_reason
+                                            .as_deref()
+                                            .unwrap_or("lean_escalation")
+                                    );
+                                }
+                                escalated += 1;
+                                "escalation_candidate"
+                            } else {
+                                failed += 1;
+                                "failed"
+                            };
+                            cert_results.insert(atom.name.clone(), (z3_result, status.to_string()));
                             // 検証失敗した atom はキャッシュから除外
                             verification_cache.remove(&atom.name);
-                            failed += 1;
                         }
                     }
                 }
@@ -912,6 +1012,11 @@ fn cmd_verify(
                             .filter(|tn| module_env.get_type(tn).is_some())
                             .collect();
 
+                        emit_decidable_fragment_warning(
+                            &qualified_method,
+                            &module_env,
+                            json_output,
+                        );
                         let hir_atom =
                             lower_atom_to_hir_with_env(&qualified_method, Some(&module_env));
 
@@ -927,7 +1032,12 @@ fn cmd_verify(
                             }
                         }
 
-                        match verification::verify(&hir_atom, output_dir, &module_env) {
+                        match verification::verify_with_verification_config(
+                            &hir_atom,
+                            output_dir,
+                            &module_env,
+                            &verification_config,
+                        ) {
                             Ok(_) => {
                                 if !json_output {
                                     println!("  ⚖️  '{}': verified ✅", qualified_name);
@@ -956,17 +1066,46 @@ fn cmd_verify(
                                 verified += 1;
                             }
                             Err(e) => {
+                                let error_text = format!("{e}");
                                 if !json_output {
                                     let resolved = resolve_source_for_span(&source, &method.span);
                                     let e = e.with_source(&resolved, &method.span);
                                     eprintln!("{:?}", miette::Report::new(e));
                                 }
+                                let z3_result =
+                                    verification::z3_result_from_error_message(&error_text)
+                                        .unwrap_or("sat")
+                                        .to_string();
+                                let classification =
+                                    verification::classify_atom_for_lean_escalation(
+                                        &qualified_method,
+                                        &module_env,
+                                        &z3_result,
+                                        "failed",
+                                    );
+                                let status =
+                                    if emit_escalation_bundle && classification.should_escalate {
+                                        if !json_output {
+                                            println!(
+                                                "  [lean] '{}': marked for escalation ({})",
+                                                qualified_name,
+                                                classification
+                                                    .escalation_reason
+                                                    .as_deref()
+                                                    .unwrap_or("lean_escalation")
+                                            );
+                                        }
+                                        escalated += 1;
+                                        "escalation_candidate"
+                                    } else {
+                                        failed += 1;
+                                        "failed"
+                                    };
                                 cert_results.insert(
                                     qualified_name.clone(),
-                                    ("sat".to_string(), "failed".to_string()),
+                                    (z3_result, status.to_string()),
                                 );
                                 verification_cache.remove(&qualified_name);
-                                failed += 1;
                             }
                         }
                     }
@@ -983,8 +1122,33 @@ fn cmd_verify(
     // and be re-verified automatically.
     resolver::save_verification_cache(base_dir, &verification_cache);
 
+    if enable_cross_spec_verification {
+        match save_cross_spec_report(&module_env, output_dir, !json_output) {
+            Ok(cross_spec_result) => {
+                if cross_spec_result.summary.inconsistent_calls > 0 && !json_output {
+                    eprintln!(
+                        "Warning: {} inconsistent contract calls detected",
+                        cross_spec_result.summary.inconsistent_calls
+                    );
+                }
+                if cross_spec_result.summary.circular_dependency_count > 0 && !json_output {
+                    eprintln!(
+                        "Warning: {} circular dependencies detected",
+                        cross_spec_result.summary.circular_dependency_count
+                    );
+                }
+            }
+            Err(e) => {
+                if !json_output {
+                    eprintln!("  ⚠️  Failed to write cross-spec report: {}", e);
+                }
+                failed += 1;
+            }
+        }
+    }
+
     // Plan 11B: Generate proof certificate if requested
-    if generate_proof_cert {
+    if generate_proof_cert || emit_escalation_bundle {
         let mut atom_refs: Vec<&parser::Atom> = items
             .iter()
             .filter_map(|item| {
@@ -1023,15 +1187,38 @@ fn cmd_verify(
             let stem = Path::new(input).file_stem().unwrap_or_default();
             Path::new(".").join(format!("{}.proof.json", stem.to_string_lossy()))
         };
-        match proof_cert::save_certificate(&cert, &cert_path) {
-            Ok(()) => {
-                if !json_output {
-                    println!("  📜 Proof certificate written to: {}", cert_path.display());
+        if generate_proof_cert {
+            match proof_cert::save_certificate(&cert, &cert_path) {
+                Ok(()) => {
+                    if !json_output {
+                        println!("  📜 Proof certificate written to: {}", cert_path.display());
+                    }
+                }
+                Err(e) => {
+                    if !json_output {
+                        eprintln!("  ⚠️  Failed to write proof certificate: {}", e);
+                    }
                 }
             }
-            Err(e) => {
-                if !json_output {
-                    eprintln!("  ⚠️  Failed to write proof certificate: {}", e);
+        }
+
+        if emit_escalation_bundle {
+            let bundle = proof_cert::generate_escalation_bundle(&cert);
+            let bundle_path = cert_path.with_extension("escalation-bundle.json");
+            match proof_cert::save_escalation_bundle(&bundle, &bundle_path) {
+                Ok(()) => {
+                    if !json_output {
+                        println!(
+                            "  Lean escalation bundle written to: {} ({} candidate(s))",
+                            bundle_path.display(),
+                            bundle.summary.candidate_count
+                        );
+                    }
+                }
+                Err(e) => {
+                    if !json_output {
+                        eprintln!("  ⚠️  Failed to write escalation bundle: {}", e);
+                    }
                 }
             }
         }
@@ -1069,8 +1256,8 @@ fn cmd_verify(
             // No report.json produced — emit minimal JSON status
             let status = if failed > 0 { "failed" } else { "passed" };
             println!(
-                "{{\"status\":\"{}\",\"verified\":{},\"failed\":{},\"skipped\":{}}}",
-                status, verified, failed, skipped
+                "{{\"status\":\"{}\",\"verified\":{},\"failed\":{},\"skipped\":{},\"escalation_candidates\":{}}}",
+                status, verified, failed, skipped, escalated
             );
         }
         if failed > 0 {
@@ -1080,20 +1267,53 @@ fn cmd_verify(
         println!();
         if failed > 0 {
             eprintln!(
-                "❌ Verification: {} passed, {} failed, {} skipped (cached)",
-                verified, failed, skipped
+                "❌ Verification: {} passed, {} failed, {} skipped (cached), {} Lean escalation candidate(s)",
+                verified, failed, skipped, escalated
             );
             std::process::exit(1);
         }
         if skipped > 0 {
             println!(
-                "✅ Verification passed: {} verified, {} skipped (unchanged) ⚡",
-                verified, skipped
+                "✅ Verification passed: {} verified, {} skipped (unchanged), {} Lean escalation candidate(s) ⚡",
+                verified, skipped, escalated
             );
         } else {
-            println!("✅ Verification passed: {} item(s) verified", verified);
+            println!(
+                "✅ Verification passed: {} item(s) verified, {} Lean escalation candidate(s)",
+                verified, escalated
+            );
         }
     }
+}
+
+fn save_cross_spec_report(
+    module_env: &verification::ModuleEnv,
+    output_dir: &Path,
+    print_path: bool,
+) -> Result<cross_spec::CrossSpecResult, String> {
+    let config = verification::VerificationConfig {
+        enable_cross_spec_verification: true,
+        ..verification::VerificationConfig::default()
+    };
+    let module_report = verification::verify_module(module_env, &config)
+        .map_err(|err| format!("cross-spec verification failed: {err}"))?;
+    let cross_spec_result = module_report
+        .cross_spec
+        .ok_or_else(|| "cross-spec verification was not enabled".to_string())?;
+    std::fs::create_dir_all(output_dir)
+        .map_err(|err| format!("failed to create report directory: {err}"))?;
+    let cross_spec_path = output_dir.join("cross_spec.json");
+    let payload = serde_json::to_string_pretty(&cross_spec_result)
+        .map_err(|err| format!("failed to serialize cross-spec report: {err}"))?;
+    std::fs::write(&cross_spec_path, payload)
+        .map_err(|err| format!("failed to write {}: {err}", cross_spec_path.display()))?;
+    if print_path {
+        println!(
+            "  🔗 Cross-spec report written to: {}",
+            cross_spec_path.display()
+        );
+    }
+    Ok(cross_spec_result)
 }
 
 // =============================================================================
@@ -1132,6 +1352,7 @@ max_unroll = 3
 [proof]
 cache = true
 timeout_ms = 10000
+cross_spec_verify = true
 [effects]
 # allowed = ["Log", "FileRead"]
 # denied = ["Network"]
@@ -1775,9 +1996,8 @@ fn dispatch_emit(
             module_env,
             extern_blocks,
         ),
-        emitter::EmitTarget::ProofCert => {
-            // P5-A: ProofCert emit is handled at a higher level (cmd_build);
-            // at per-atom dispatch we return an empty artifact list.
+        emitter::EmitTarget::ProofCert | emitter::EmitTarget::EscalationBundle => {
+            // Certificate-like emits are handled at the cmd_build level.
             Ok(vec![])
         }
         emitter::EmitTarget::Binary => {
@@ -1824,7 +2044,7 @@ fn cmd_build(
             Ok(emitter) => Some(emitter),
             Err(err) => {
                 eprintln!(
-                    "\u{274c} Error: Unknown emit target '{}'. Valid built-in values: llvm-ir, c-header, verified-json, proof-book, proof-cert, binary, rust-wrapper, python-wrapper.",
+                    "\u{274c} Error: Unknown emit target '{}'. Valid built-in values: llvm-ir, c-header, verified-json, proof-book, proof-cert, escalation-bundle, binary, rust-wrapper, python-wrapper.",
                     name
                 );
                 eprintln!("  External plugin lookup failed: {}", err);
@@ -1892,6 +2112,13 @@ fn cmd_build(
     let mut verification_cache_new = verification_cache.clone();
 
     let skip_verify = !build_cfg.verify;
+    let verification_config = verification::VerificationConfig {
+        timeout_ms: proof_cfg.timeout_ms,
+        global_max_unroll: build_cfg.max_unroll,
+        enable_cross_spec_verification: proof_cfg.cross_spec_verify,
+    };
+    let mut escalation_cert_results: std::collections::HashMap<String, (String, String)> =
+        std::collections::HashMap::new();
 
     let mut atom_count = 0;
 
@@ -2017,6 +2244,7 @@ fn cmd_build(
                     let mut qualified_method = method.clone();
                     qualified_method.name = qualified_name.clone();
 
+                    emit_decidable_fragment_warning(&qualified_method, &module_env, false);
                     let hir_atom = lower_atom_to_hir_with_env(&qualified_method, Some(&module_env));
 
                     let mir_body = mir::lower_hir_to_mir(&hir_atom);
@@ -2048,12 +2276,11 @@ fn cmd_build(
                             println!("  ⚖️  [2/3] Verification: Skipped (unchanged, cached) ⏩");
                             module_env.mark_verified(&qualified_name);
                         } else {
-                            match verification::verify_with_config(
+                            match verification::verify_with_verification_config(
                                 &hir_atom,
                                 output_dir,
                                 &module_env,
-                                proof_cfg.timeout_ms,
-                                build_cfg.max_unroll,
+                                &verification_config,
                             ) {
                                 Ok(_) => {
                                     println!(
@@ -2091,10 +2318,38 @@ fn cmd_build(
                                     );
                                 }
                                 Err(e) => {
+                                    let error_text = format!("{e}");
+                                    let z3_result =
+                                        verification::z3_result_from_error_message(&error_text)
+                                            .unwrap_or("sat")
+                                            .to_string();
+                                    let classification =
+                                        verification::classify_atom_for_lean_escalation(
+                                            &qualified_method,
+                                            &module_env,
+                                            &z3_result,
+                                            "failed",
+                                        );
                                     let resolved = resolve_source_for_span(&source, &method.span);
                                     let e = e.with_source(&resolved, &method.span);
                                     eprintln!("{:?}", miette::Report::new(e));
                                     verification_cache_new.remove(&qualified_name);
+                                    if matches!(emit_target, emitter::EmitTarget::EscalationBundle)
+                                        && classification.should_escalate
+                                    {
+                                        println!(
+                                            "  ⚖️  [2/3] Verification: Deferred to Lean ({})",
+                                            classification
+                                                .escalation_reason
+                                                .as_deref()
+                                                .unwrap_or("lean_escalation")
+                                        );
+                                        escalation_cert_results.insert(
+                                            qualified_name.clone(),
+                                            (z3_result, "escalation_candidate".to_string()),
+                                        );
+                                        continue;
+                                    }
                                     std::process::exit(1);
                                 }
                             }
@@ -2141,6 +2396,9 @@ fn cmd_build(
                                 emitter::EmitTarget::VerifiedJson => "Verified JSON".into(),
                                 emitter::EmitTarget::ProofBook => "Proof-Book".into(),
                                 emitter::EmitTarget::ProofCert => "Proof-Cert".into(),
+                                emitter::EmitTarget::EscalationBundle => {
+                                    "Lean escalation bundle".into()
+                                }
                                 emitter::EmitTarget::Binary => "Binary".into(),
                                 emitter::EmitTarget::RustWrapper => "Rust wrapper".into(),
                                 emitter::EmitTarget::PythonWrapper => "Python wrapper".into(),
@@ -2177,6 +2435,8 @@ fn cmd_build(
                     atom.name, async_marker, res_marker
                 );
 
+                emit_decidable_fragment_warning(atom, &module_env, false);
+
                 // HIR lowering: body_expr を1回だけパースして全ステージで再利用する
                 let hir_atom = lower_atom_to_hir_with_env(atom, Some(&module_env));
 
@@ -2212,12 +2472,11 @@ fn cmd_build(
                         println!("  ⚖️  [2/3] Verification: Skipped (unchanged, cached) ⏩");
                         module_env.mark_verified(&atom.name);
                     } else {
-                        match verification::verify_with_config(
+                        match verification::verify_with_verification_config(
                             &hir_atom,
                             output_dir,
                             &module_env,
-                            proof_cfg.timeout_ms,
-                            build_cfg.max_unroll,
+                            &verification_config,
                         ) {
                             Ok(_) => {
                                 println!(
@@ -2254,10 +2513,38 @@ fn cmd_build(
                                 );
                             }
                             Err(e) => {
+                                let error_text = format!("{e}");
+                                let z3_result =
+                                    verification::z3_result_from_error_message(&error_text)
+                                        .unwrap_or("sat")
+                                        .to_string();
+                                let classification =
+                                    verification::classify_atom_for_lean_escalation(
+                                        atom,
+                                        &module_env,
+                                        &z3_result,
+                                        "failed",
+                                    );
                                 let resolved = resolve_source_for_span(&source, &atom.span);
                                 let e = e.with_source(&resolved, &atom.span);
                                 eprintln!("{:?}", miette::Report::new(e));
                                 verification_cache_new.remove(&atom.name);
+                                if matches!(emit_target, emitter::EmitTarget::EscalationBundle)
+                                    && classification.should_escalate
+                                {
+                                    println!(
+                                        "  ⚖️  [2/3] Verification: Deferred to Lean ({})",
+                                        classification
+                                            .escalation_reason
+                                            .as_deref()
+                                            .unwrap_or("lean_escalation")
+                                    );
+                                    escalation_cert_results.insert(
+                                        atom.name.clone(),
+                                        (z3_result, "escalation_candidate".to_string()),
+                                    );
+                                    continue;
+                                }
                                 std::process::exit(1);
                             }
                         }
@@ -2302,6 +2589,9 @@ fn cmd_build(
                             emitter::EmitTarget::VerifiedJson => "Verified JSON".into(),
                             emitter::EmitTarget::ProofBook => "Proof-Book".into(),
                             emitter::EmitTarget::ProofCert => "Proof-Cert".into(),
+                            emitter::EmitTarget::EscalationBundle => {
+                                "Lean escalation bundle".into()
+                            }
                             emitter::EmitTarget::Binary => "Binary".into(),
                             emitter::EmitTarget::RustWrapper => "Rust wrapper".into(),
                             emitter::EmitTarget::PythonWrapper => "Python wrapper".into(),
@@ -2375,8 +2665,12 @@ fn cmd_build(
         let _ = fs::remove_file(&ll_path);
     }
 
-    // P5-A: Generate proof certificate when --emit proof-cert is requested
-    if matches!(emit_target, emitter::EmitTarget::ProofCert) && atom_count > 0 {
+    // P5-A: Generate proof certificate or Lean escalation bundle when requested
+    if matches!(
+        emit_target,
+        emitter::EmitTarget::ProofCert | emitter::EmitTarget::EscalationBundle
+    ) && atom_count > 0
+    {
         let mut cert_atoms: Vec<&parser::Atom> = items
             .iter()
             .filter_map(|item| {
@@ -2401,15 +2695,13 @@ fn cmd_build(
             cert_atoms.push(qm);
         }
 
-        // Collect verification results (all atoms that passed verification)
-        let mut cert_results: std::collections::HashMap<String, (String, String)> =
-            std::collections::HashMap::new();
+        // Collect verification results, preserving Lean escalation candidates.
+        let mut cert_results = escalation_cert_results;
         for atom_ref in &cert_atoms {
             if module_env.is_verified(&atom_ref.name) {
-                cert_results.insert(
-                    atom_ref.name.clone(),
-                    ("unsat".to_string(), "verified".to_string()),
-                );
+                cert_results
+                    .entry(atom_ref.name.clone())
+                    .or_insert_with(|| ("unsat".to_string(), "verified".to_string()));
             }
         }
 
@@ -2432,12 +2724,29 @@ fn cmd_build(
         );
 
         let cert_path = output_dir.join(format!("{}.proof-cert.json", file_stem));
-        match proof_cert::save_certificate(&cert, &cert_path) {
-            Ok(()) => {
-                println!("  📜 Proof certificate written to: {}", cert_path.display());
+        if matches!(emit_target, emitter::EmitTarget::ProofCert) {
+            match proof_cert::save_certificate(&cert, &cert_path) {
+                Ok(()) => {
+                    println!("  📜 Proof certificate written to: {}", cert_path.display());
+                }
+                Err(e) => {
+                    eprintln!("  ⚠️  Failed to write proof certificate: {}", e);
+                }
             }
-            Err(e) => {
-                eprintln!("  ⚠️  Failed to write proof certificate: {}", e);
+        } else {
+            let bundle = proof_cert::generate_escalation_bundle(&cert);
+            let bundle_path = output_dir.join(format!("{}.escalation-bundle.json", file_stem));
+            match proof_cert::save_escalation_bundle(&bundle, &bundle_path) {
+                Ok(()) => {
+                    println!(
+                        "  Lean escalation bundle written to: {} ({} candidate(s))",
+                        bundle_path.display(),
+                        bundle.summary.candidate_count
+                    );
+                }
+                Err(e) => {
+                    eprintln!("  ⚠️  Failed to write escalation bundle: {}", e);
+                }
             }
         }
     }
@@ -2451,6 +2760,29 @@ fn cmd_build(
     // Feature 2: Save enhanced verification cache
     if proof_cfg.cache {
         resolver::save_verification_cache(build_base_dir, &verification_cache_new);
+    }
+
+    if proof_cfg.cross_spec_verify {
+        match save_cross_spec_report(&module_env, output_dir, true) {
+            Ok(cross_spec_result) => {
+                if cross_spec_result.summary.inconsistent_calls > 0 {
+                    eprintln!(
+                        "Warning: {} inconsistent contract calls detected",
+                        cross_spec_result.summary.inconsistent_calls
+                    );
+                }
+                if cross_spec_result.summary.circular_dependency_count > 0 {
+                    eprintln!(
+                        "Warning: {} circular dependencies detected",
+                        cross_spec_result.summary.circular_dependency_count
+                    );
+                }
+            }
+            Err(e) => {
+                eprintln!("  ⚠️  Failed to write cross-spec report: {}", e);
+                std::process::exit(1);
+            }
+        }
     }
 }
 

@@ -639,7 +639,7 @@ Enables mumei's verified code to actually run — both interactively in the REPL
 - WebAssembly compilation target for browser/edge execution
 - Will be implemented after P7-A/B stabilize
 
-**P8: Developer Experience** — Deferred
+**Future: Developer Experience** — Deferred
 - Enhanced error messages, IDE integration improvements, debugging tools
 - Will be implemented after runtime completion is stable
 
@@ -653,6 +653,468 @@ Enables mumei's verified code to actually run — both interactively in the REPL
 - `src/main.rs` — `cmd_run()`, REPL JIT enhancements, `Run` command variant
 - `examples/run_demo.mm` — Simple binary execution demo
 - `examples/run_with_calls.mm` — Multi-atom binary execution demo
+
+---
+
+### P8: 形式検証の理論的限界への対処
+
+Z3 ベースの自動検証は Mumei の主要な強みだが、SMT ソルバのモデルは「仕様が正しい」ことや「反例が意味論的に正当である」ことまでは保証しない。
+P8 では、形式仕様そのものの健全性を検査し、Z3 で扱える決定可能断片を明文化し、必要な場合だけ Lean 4 へエスカレーションする運用境界を定義する。
+
+**P8-A: Spurious Counterexample Detection（偽反例検出）** — Planned
+
+Lean 4 の `bv_decide` / BVDecide が反例を再構成して検証するアプローチを参照し、Z3 の `sat` モデルをそのまま信じず、Mumei の意味論で再評価するメタ検証層を追加する。
+
+**Implementation Plan**:
+
+```
+1. 反例モデルの正当性チェック
+   - Z3 から得たモデルを HIR/MIR 式へ再代入
+   - requires / ensures / effect_pre / effect_post を Mumei 側で再評価
+   - 再評価不能な項は "unvalidated_counterexample" として分類
+
+2. Uninterpreted symbol detection
+   - 未解釈関数・未展開 atom・trusted atom 由来のシンボルを抽出
+   - 反例が未解釈シンボルの任意解釈だけに依存していないか検査
+   - 証明失敗レポートに symbol provenance を付与
+
+3. Unused hypothesis checking
+   - unsat core / dependency trace から未使用 requires・invariant・effect 制約を検出
+   - 未使用仮説が仕様の過剰拘束または死んだ仕様でないか警告
+   - 反例の最小制約集合を proof certificate に保存
+```
+
+**Files to modify/create**:
+- `mumei-core/src/verification.rs` — Z3 モデル取得、反例再代入、未解釈シンボル検出
+- `mumei-core/src/proof_cert.rs` — 反例メタ検証結果、unused hypothesis、symbol provenance の証明書フィールド
+- `src/main.rs` — CLI 診断出力に `validated_counterexample` / `spurious_candidate` を表示
+- `tests/` — 偽反例・未解釈シンボル・未使用仮説の回帰テスト
+
+**Success Metrics**:
+- Z3 `sat` のうち Mumei 再評価に成功した反例率: ≥ 95%
+- 未解釈シンボル依存の反例を `spurious_candidate` として分類できる率: ≥ 90%
+- unused hypothesis 警告の false positive: < 5%
+
+**P8-B: Specification Validation Framework（仕様検証フレームワーク）** — Planned
+
+コードを証明する前に、仕様自体が矛盾・過剰拘束・自然言語プロンプトからの逸脱を含まないかを検証する。
+特に AI 生成仕様では「実装は証明されるが、仕様が意図と違う」リスクを明示的に扱う。
+
+**Implementation Plan**:
+
+```
+1. Contradiction detection for specs
+   - requires の充足可能性を Z3 で事前チェック
+   - ensures 同士、refinement type、effect state 制約の矛盾を検出
+   - 矛盾仕様を proof attempt 前に SpecContradiction として停止
+
+2. QuickCheck-style property-based testing
+   - refinement type から入力ジェネレータを合成
+   - ランダム・境界値・縮小 (shrinking) による仕様妥当性チェック
+   - Z3 で unknown となる仕様にも実行的な sanity check を提供
+
+3. Semantic traceability verification
+   - 自然言語プロンプト、生成仕様、実装 atom の三者を trace_id で接続
+   - prompt の must/never/only 条件が requires / ensures / effects に反映されたか検査
+   - mumei-agent から受け取る forge task metadata と proof certificate を連携
+```
+
+**Files to modify/create**:
+- `mumei-core/src/verification.rs` — 仕様充足可能性チェックと `SpecContradiction` 診断
+- `mumei-core/src/parser/ast.rs` — optional `trace_id` / spec metadata の保持
+- `mumei-core/src/proof_cert.rs` — spec validation 結果と traceability hash の記録
+- `mcp_server.py` — AI 生成仕様の traceability metadata 入出力
+- `docs/SPEC_GUIDE.md` — 仕様検証と property-based validation の利用ガイド
+
+**Success Metrics**:
+- 矛盾する requires を proof 前に検出する率: 100%
+- property-based validation で発見された仕様欠陥の縮小反例出力率: ≥ 90%
+- natural language prompt と formal spec の traceability coverage: ≥ 95%
+
+**P8-C: Lean Escalation Criteria（Lean 4 エスカレーション基準）** — Planned
+
+Z3 が `unknown` または不安定な結果を返す場合に、どの義務を Lean 4 へ送るべきかを決定論的に分類する。
+既存の `lean_verified` 証明証明書ハンドシェイクと `mumei-lean` bridge を拡張し、エスカレーションの成功率を計測可能にする。
+
+**Escalation Criteria**:
+
+```
+Escalate to Lean 4 when:
+1. Z3 result == unknown / timeout / resource limit
+2. 非線形算術、帰納的データ型、再帰的不変条件を含む
+3. quantifier alternation または trigger-sensitive な forall/exists を含む
+4. Z3 反例が P8-A で spurious_candidate と分類された
+5. trusted atom を減らすために人間レビュー済み補題へ昇格する
+
+Do not escalate when:
+1. requires が unsat で仕様矛盾が原因
+2. 決定可能断片内で Z3 が明確な sat 反例を返し、P8-A 再評価も成功
+3. Lean 側 translator が未対応の構文で partial translation になる
+```
+
+**Implementation Plan**:
+
+```
+1. Z3 result classifier
+   - timeout / unknown / sat / unsat / skipped を原因別に分類
+   - proof obligation に logic fragment tag を付与
+
+2. mumei-lean bridge integration
+   - escalation candidate を proof certificate bundle として出力
+   - mumei-lean/scripts/bridge.py が candidate reason を読み取り Lean proof を生成
+   - Lean 結果を `z3_check_result = "lean_verified"` として戻す
+
+3. Metrics and feedback loop
+   - escalation_attempts / lean_successes / partial_translation / manual_required を記録
+   - atom・logic fragment・failure reason ごとの成功率を集計
+   - 低成功率カテゴリを P8-D の仕様ガイドへフィードバック
+```
+
+**Files to modify/create**:
+- `mumei-core/src/proof_cert.rs` — escalation reason、logic fragment tag、Lean result metadata
+- `mumei-core/src/resolver.rs` — `--allow-lean-verified` 経路での acceptance metrics
+- `src/main.rs` — `mumei verify --escalate-lean` / `--emit escalation-bundle` CLI
+- `mumei-lean/scripts/bridge.py` — escalation candidate bundle の取り込み
+- `mumei-lean/scripts/ingest_cert.py` — candidate reason を Lean theorem metadata へ変換
+
+**Success Metrics**:
+- Z3 `unknown` obligation の Lean escalation 成功率: ≥ 70%
+- partial translation 率: < 20%
+- `lean_verified` certificate の再検証成功率: 100%
+
+**P8-D: Decidable Fragment Documentation（決定可能断片ドキュメント）** — Planned
+
+Z3 が安定して証明できる仕様の範囲を明文化し、Mumei の仕様を書く人間・AI agent の双方が「証明しやすい仕様」を選べるようにする。
+これは P8-A〜C の検出・エスカレーション結果を、仕様設計のガイドラインへ還元するフェーズである。
+
+**Documented Fragment**:
+
+```
+1. Linear arithmetic
+   - i64 / Nat refinement は加減算・比較・定数倍を推奨
+   - 変数同士の乗算、除算、mod、指数は Lean escalation candidate
+
+2. Array and sequence access patterns
+   - 0 <= i < len(a) の明示的境界条件を必須化
+   - 単一 index の read/write と length-preserving update を推奨
+   - nested mutable aliasing や quantified permutation は Lean 側へ送る
+
+3. Quantifier restrictions
+   - forall は bounded range または finite collection に限定
+   - exists は witness を構成できる形を推奨
+   - quantifier alternation (`forall exists`, `exists forall`) は原則 escalation
+
+4. Effects and temporal state
+   - state machine は finite state + explicit transition に制限
+   - path / URL / regex 制約は Z3 String Sort の既存近似範囲を明記
+```
+
+**Implementation Plan**:
+
+```
+1. docs/SPEC_GUIDE.md に決定可能断片を追加
+2. mumei verify の警告として "outside_decidable_fragment" を出す
+3. mumei-agent の prompt に spec-writing guideline を注入
+4. P8-C metrics から証明失敗しやすい fragment を定期更新
+```
+
+**Files to modify/create**:
+- `docs/SPEC_GUIDE.md` — 決定可能断片、アンチパターン、推奨仕様テンプレート
+- `docs/LANGUAGE.md` — refinement / quantifier / array access の言語仕様へのリンク
+- `mumei-core/src/verification.rs` — logic fragment detector と warning diagnostic
+- `mcp_server.py` — agent-facing spec guideline summary の提供
+- `mumei-agent/agent/prompts/` — 仕様生成プロンプトへの guideline 反映
+
+**Success Metrics**:
+- 新規仕様の `outside_decidable_fragment` 警告率: 四半期ごとに 20% 減少
+- Z3 `unknown` 率: < 5%
+- AI 生成仕様の first-pass verification 成功率: ≥ 85%
+
+**P8-E: Lean Escalation Formal Translator Specification（Lean 4 エスカレーション形式変換仕様）** — Planned
+
+P8-C のエスカレーション判定を実運用するには、Mumei の型システム・refinement type・loop invariant を Lean 4 の依存型理論へ写像する変換規則を、実装依存のスクリプトではなく形式仕様として固定する必要がある。
+このフェーズでは `mumei-lean` bridge の translator contract を定義し、Z3 で `unknown` になった義務が Lean kernel で何として解釈されるかを追跡可能にする。
+
+**Translator Specification**:
+
+```
+1. Type system mapping
+   - Mumei の i64 / bool / string / array / struct / enum を Lean 4 の Int / Bool / String / List / structure / inductive へ写像
+   - ownership / borrow / capability は値の性質ではなく証明コンテキスト上の仮説として表現
+   - trusted atom は Lean theorem ではなく opaque axiom または explicit assumption として provenance を保持
+
+2. Refinement type lowering
+   - `{v: T | P(v)}` を Lean の subtype または predicate argument として表現
+   - requires / ensures / effect_pre / effect_post を theorem statement の前提・結論へ分離
+   - counterexample reconstruction で使う witness 名と Lean binder 名を proof certificate に保存
+
+3. Loop invariant and recursion encoding
+   - `while` / `for` の invariant を well-founded recursion または induction hypothesis に変換
+   - variant / decreases clause がないループは partial translation として止める
+   - MIR の basic block transition を Lean 側の state transition lemma へ対応づける
+```
+
+**Compiler Technology Plan**:
+
+```
+1. Typed intermediate translator IR
+   - HIR/MIR から Lean 直書き文字列へ変換せず、型付き TranslatorIR を経由する
+   - sort / binder / theorem goal / provenance span を保持し、未対応構文を構造的に報告
+   - generated Lean の各 declaration に source atom と proof hash を埋め込む
+
+2. Semantic gap bridge
+   - integer overflow、array bounds、string/regex、effect state の意味論差を lowering rule として明文化
+   - Z3 の近似モデルと Lean の total function semantics が異なる箇所に bridge lemma を要求
+   - partial translation を silent success にせず `manual_lemma_required` として分類
+
+3. Kernel-checked escalation handshake
+   - `escalation_bundle.json` → Lean source → `.olean` / result certificate の一方向パイプラインを固定
+   - Lean 成功結果には theorem name、translator version、bridge lemma set hash を含める
+   - translator version mismatch 時は証明キャッシュを無効化する
+```
+
+**Files to modify/create**:
+- `mumei-core/src/proof_cert.rs` — translator version、binder mapping、bridge lemma hash、manual lemma reason の証明書フィールド
+- `mumei-core/src/verification.rs` — HIR/MIR obligation から escalation bundle への型付き出力
+- `mumei-lean/scripts/expr_translator.py` — Mumei 型・refinement・loop invariant から Lean expression への仕様準拠 translator
+- `mumei-lean/scripts/ingest_cert.py` — TranslatorIR metadata を Lean declaration / theorem statement へ反映
+- `mumei-lean/MumeiLean/Basic.lean` — 基本型、subtype、配列境界、effect state の bridge lemma
+- `docs/PROOF_CERTIFICATE.md` — Lean escalation translator contract と certificate schema
+
+**Success Metrics**:
+- Z3 `unknown` obligation の translator 完全変換率: ≥ 80%
+- Lean escalation 成功率（partial translation を除く）: ≥ 75%
+- translator version mismatch による stale certificate acceptance: 0 件
+- manual lemma required の reason attribution coverage: 100%
+
+**P8-F: MCP Server Z3 Process State Management（MCP サーバー Z3 プロセス状態管理）** — Planned
+
+`mcp_server.py` が複数の AI agent・IDE・CI から並列に検証要求を受けると、Z3 process、verification cache、proof certificate の状態が衝突し、同じ atom の異なる義務が混線するリスクがある。
+このフェーズでは MCP サーバーを単なる CLI wrapper ではなく、Z3 process lifecycle と cache isolation を管理する検証オーケストレータとして強化する。
+
+**Implementation Plan**:
+
+```
+1. Z3 process lifecycle management
+   - request ごとに solver context / timeout / memory limit / cancellation token を割り当てる
+   - 長時間実行・hung process を watchdog で終了し、proof certificate に timeout reason を記録
+   - warm pool を使う場合でも context reset と assertion leak detection を必須化
+
+2. Cache conflict handling
+   - cache key を source hash + dependency hash + translator version + solver config + target fragment で構成
+   - 同一 key の並列書き込みは atomic write + file lock + generation id で直列化
+   - stale / partial / failed cache entry を区別し、unknown を成功キャッシュとして扱わない
+
+3. Parallel verification safety
+   - verification task id を全ログ・証明書・MCP response に伝搬
+   - 複数 task が同じ artifact path を更新する場合は per-module workspace へ分離
+   - cancellation / retry / escalation が他 task の Z3 context や cache entry を破壊しないことをテストする
+```
+
+**Files to modify/create**:
+- `mcp_server.py` — task registry、Z3 worker lifecycle、cancellation、cache lock orchestration
+- `mumei-core/src/verification.rs` — solver config fingerprint、task id、timeout/cancel reason の結果伝搬
+- `mumei-core/src/proof_cert.rs` — cache key、generation id、solver process metadata、parallel safety diagnostics
+- `src/main.rs` — `mumei verify --task-id` / `--solver-timeout` / `--cache-scope` CLI オプション
+- `tests/` — 並列 MCP 検証、cache collision、hung Z3 process、cancellation の回帰テスト
+- `docs/TOOLCHAIN.md` — MCP 経由の並列検証と cache isolation の運用ガイド
+
+**Success Metrics**:
+- 100 並列 verification request で cache corruption: 0 件
+- hung Z3 process の watchdog recovery 成功率: 100%
+- 同一 atom の競合検証で task id / certificate provenance の取り違え: 0 件
+- cache hit correctness（hash mismatch acceptance）: 100% rejected
+
+**P8-G: Retry Budget Theoretical Foundation（リトライ予算の理論的基盤）** — Planned
+
+Self-healing loop と Lean escalation は成功率を上げる一方で、無制限に retry・prompt 修正・solver 再実行を許すと探索空間と token cost が爆発する。
+このフェーズでは retry budget を経験則ではなく、探索木・検証義務分類・期待改善率に基づく制御問題として定式化する。
+
+**Theoretical Boundary**:
+
+```
+1. Search space model
+   - 各 repair attempt を branching factor b、depth d、solver outcome distribution を持つ探索木としてモデル化
+   - retry は仕様変更・実装修正・補題追加・Lean escalation の action class に分類
+   - 同一 counterexample signature への再試行は情報利得がない限り depth を増やさない
+
+2. Formal stop conditions
+   - max_attempts、max_tokens、max_solver_time、max_semantic_delta を proof task ごとに明示
+   - 仕様を弱める repair は monotonicity check に通らない限り budget 消費後に human review へ送る
+   - unknown → retry の回数は logic fragment と P8-E translator coverage に応じて上限を変える
+
+3. Cost-success trade-off analysis
+   - attempt n の expected marginal success rate が token/solver cost threshold を下回る場合に停止
+   - high-assurance target では token cost より false proof / spec drift risk を優先
+   - library proliferation では proof health gain per token を最適化指標にする
+```
+
+**Implementation Plan**:
+
+```
+1. Retry budget policy schema
+   - forge task / MCP request / CLI verification に共通の BudgetPolicy を定義
+   - action class ごとの token・solver・Lean escalation・semantic delta 上限を設定可能にする
+   - policy fingerprint を proof certificate と agent log に保存
+
+2. Budget-aware self-healing loop
+   - Z3 counterexample signature、unsat core、Lean error class を retry state に記録
+   - 同じ失敗原因への prompt 再投入を抑制し、別 action class への切り替えを明示
+   - budget exhaustion 時は `manual_review_required` と structured summary を返す
+
+3. Metrics feedback
+   - attempts_to_success、tokens_to_success、solver_seconds_to_success、spec_drift_score を集計
+   - fragment / task type / repair strategy ごとに Pareto frontier を可視化
+   - 四半期ごとに default budget を実測データから再調整する
+```
+
+**Files to modify/create**:
+- `mcp_server.py` — MCP request の BudgetPolicy 入力、retry state、budget exhaustion response
+- `mumei-core/src/proof_cert.rs` — retry policy fingerprint、attempt summary、cost/success metrics の証明書フィールド
+- `mumei-core/src/verification.rs` — solver retry reason、counterexample signature、semantic delta guard の結果出力
+- `mumei-agent/agent/strategies/` — self-healing loop の budget-aware strategy selection
+- `mumei-agent/agent/prompts/` — retry 境界と spec weakening 禁止条件の prompt 注入
+- `docs/CROSS_PROJECT_ROADMAP.md` — mumei / mumei-agent / mumei-lean をまたぐ retry budget 運用計画
+- `docs/PROOF_CERTIFICATE.md` — retry metrics と budget policy schema
+
+**Success Metrics**:
+- retry budget exhaustion 時の structured failure summary 出力率: 100%
+- token cost あたり first-pass + retry success rate の四半期改善: ≥ 15%
+- 同一 counterexample signature への無情報 retry 削減率: ≥ 80%
+- spec weakening による false success regression: 0 件
+
+---
+
+### P9: NLAE Integration - Provable AI Runtime
+
+Anthropic の Natural Language Autoencoders (NLAE) 理論を mumei エコシステムに統合し、LLM の推論（内部状態）と形式検証（数学的真理）をシームレスに結合する証明可能な AI 実行基盤を構築する。
+
+#### 設計思想
+
+Mumei DSL を、AI にとっての究極の NLA（Natural Language Activation：高密度論理言語）として位置づける。自然言語の仕様が持つ「曖昧さ（ノイズ）」を排し、AI の設計意図を 100% の忠実度（Fidelity）で数学的証明空間へ射影（コンパイル）する。
+
+#### コンポーネントマッピング
+
+| リポジトリ | NLAE 役割 | 具体的抽象化レイヤー |
+| --- | --- | --- |
+| `mumei-agent` | **Module A (AV)** | 内部推論（潜在空間） → `mumei` 構文（離散表現）への写像 |
+| `mumei` | **Module B (AR)** | `mumei` 構文 → Z3 意味論（論理状態）への再構築 |
+| `mumei-lean` | **Fidelity Checker** | 再構築の忠実度検証（誤差がゼロであることを数学的に担保） |
+| `mumei-demo` | **Evaluation Loop** | 誤差（反例）に基づく自己修復ループの実行環境 |
+
+**P9-A: Latent-space Debugging（潜在空間デバッグ）** — Planned
+
+既存の `LatentEncoder` / `LatentDecoder` を拡張し、より高度な潜在空間デバッグを実現する。
+
+**Implementation Plan**:
+- `LatentEncoder` の特徴抽出機能を拡張（現在は構文・意味論・効果・依存関係・契約・スコープ・検証特徴） [6-cite-7](#6-cite-7)
+- `LatentDecoder` の編集戦略を拡張（現在は effect 追加・削除・型洗練・requires 強化・ensures 弱化） [6-cite-8](#6-cite-8)
+- `LatentDebugStrategy` のバグ方向計算を高度化 [6-cite-9](#6-cite-9)
+- フォールバック動作とユニットテスト
+
+**Success Metrics**:
+- 潜在空間デバッグの成功率: ≥ 30%（rule-based + LLM の前段）
+
+**P9-B: Dense Property Generation（高密度プロパティ生成）** — Planned
+
+既存の `DensePropertyGenerator` を拡張し、より高密度な契約生成を実現する。
+
+**Implementation Plan**:
+- `DensePropertyGenerator` の LLM プロンプトを最適化 [6-cite-10](#6-cite-10)
+- Z3 検証効率を考慮した契約圧縮アルゴリズム
+- 生成された契約の検証時間メトリクス
+
+**Success Metrics**:
+- 生成された契約の Z3 検証時間が既存契約より 20% 短縮
+
+**P9-C: Latent Protocol for Agent Communication（エージェント間通信プロトコル）** — Planned
+
+既存の `LatentProtocol` を拡張し、エージェント間の効率的な通信を実現する。
+
+**Implementation Plan**:
+- `LatentProtocol` のハッシュベースエンコーディングを拡張 [6-cite-11](#6-cite-11)
+- MCP サーバーへの `send_latent_message` 統合
+- プロトコルのセキュリティとプライバシー保証
+
+**Success Metrics**:
+- エージェント間通信のデータ転送量が 50% 削減
+
+**P9-D: Reconstruction Loss Formalization（復元誤差の定式化）** — Planned
+
+プログラム状態の写像と復元誤差を数学的に定義する。
+
+**Implementation Plan**:
+- 意図される正当な仕様空間 $S$ と実装空間 $V$ の定義
+- 復元誤差 $L_{\text{recon}} = \{ x \in S \mid V(x) \neq \text{True} \}$ の実装
+- Z3 反例を復元誤差として解釈するモジュール
+- 誤差がゼロ（$L_{\text{recon}} = \emptyset$）の状態を検証するメカニズム
+
+**Success Metrics**:
+- 復元誤差の検出精度: ≥ 95%
+
+**P9-E: Structured Feedback JSON Schema（構造化フィードバック JSON 規格）** — Planned
+
+AI が解釈しやすい構造化 JSON（Loss Vector）の規格を定義・実装する。
+
+**Implementation Plan**:
+- 以下の JSON スキーマの定義と実装:
+
+```json
+{
+  "status": "verification_failed",
+  "error_type": "postcondition_violation",
+  "location": { "file": "vault.mu", "line": 12 },
+  "reconstruction_loss": {
+    "violated_property": "ensures from_after == from - amount",
+    "counter_example": { "from": 100, "to": 0, "amount": -50, "from_after": 150 }
+  },
+  "feedback_instruction": "The system allowed a negative amount deposit..."
+}
+```
+
+- `mumei-core` の `verification.rs` からの出力拡張
+- `mumei-agent` での解釈ロジック実装
+
+**Success Metrics**:
+- AI によるフィードバック解釈成功率: ≥ 90%
+
+**P9-F: Self-Correction Protocol（自己修復ループ）** — Planned
+
+誤差（反例）を最小化する自律サイクルを実装する。
+
+**Implementation Plan**:
+- 生成 → 検証 → 反例出力 → 修正 → 証明のループ実装
+- `mumei-demo` での評価環境構築
+- ループの収束条件と停止条件の定義
+- トークンコストと成功率のトレードオフ最適化
+
+**Success Metrics**:
+- 自己修復ループの収束率: ≥ 70%（10 回以内）
+
+**P9-G: Ecosystem Integration（エコシステム統合）** — Planned
+
+4 つのリポジトリを NLAE コンポーネントとして統合する。
+
+**Implementation Plan**:
+- `mumei-core`: Z3 変換時の Loss Vector 出力モジュール
+- `mumei-agent`: MCP 経由の JSON エラー入力と NLAE Backpropagation プロンプト
+- `mumei-lean`: 完全証明のための Lean 4 トランスパイル
+- `mumei-demo`: 自己修復ループの実行環境
+
+**Success Metrics**:
+- エンドツーエンドの NLAE 統合デモの成功
+
+#### Configuration
+
+- すべての機能はデフォルト無効（既存の NLAE 機能と同様）
+- `ENABLE_LATENT_DEBUG`, `ENABLE_DENSE_PROPERTIES`, `ENABLE_LATENT_PROTOCOL`
+- `ENABLE_RECONSTRUCTION_LOSS`, `ENABLE_STRUCTURED_FEEDBACK`, `ENABLE_SELF_CORRECTION`
+
+#### References
+
+- Anthropic NLAE research: https://www.anthropic.com/research/natural-language-autoencoders
+- Reference implementation: https://github.com/kitft/natural_language_autoencoders
+- Existing NLAE integration: `mumei-agent/docs/NLAE_INTEGRATION.md`
 
 ---
 

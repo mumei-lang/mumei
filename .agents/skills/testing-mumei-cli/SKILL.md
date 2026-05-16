@@ -4,6 +4,10 @@ description: Test Mumei CLI verification, build, proof certificate, and polymorp
 ---
 # Testing Mumei CLI
 
+## Devin Secrets Needed
+
+None for local CLI verification/build/report testing.
+
 ## Prerequisites
 
 ### Build
@@ -28,22 +32,29 @@ If Z3 is missing, commands exit immediately with "Z3 solver not found" — no pa
 | Command | Purpose |
 |---|---|
 | `mumei verify <file.mm>` | Verify atoms with Z3 |
-| `mumei verify --proof-cert <file.mm>` | Verify + generate `.proof.json` certificate |
+| `mumei verify --report-dir <dir> <file.mm>` | Verify and write `<dir>/report.json` for diagnostics/self-healing flows |
+| `mumei verify --cross-spec-verify --report-dir <dir> <file.mm>` | Verify atoms and write `<dir>/cross_spec.json` for cross-specification consistency |
+| `mumei verify --proof-cert <file.mm>` | Verify + generate `.proof.json` certificate. When run from repo root, the current CLI may write `./<stem>.proof.json` rather than beside the source file; trust the printed path. |
+| `mumei verify --emit escalation-bundle --output <base> <file.mm>` | Verify + generate `<base>.escalation-bundle.json` for Lean escalation candidates |
 | `mumei verify-cert <cert.json> <file.mm>` | Verify cert against current source |
 | `mumei build <file.mm>` | Build (verify + compile to LLVM IR) |
 | `mumei build --emit proof-cert <file.mm>` | Note: `--emit proof-cert` dispatches to `ProofCert` emit target but returns empty artifacts. Use `verify --proof-cert` instead for cert generation. |
-| `mumei build --emit <unknown_name> <file.mm>` | Unknown emit targets fall through to `emitter::load_external_emitter`, which checks `~/.mumei/emitters/<name>/libmumei_emit_<name>.{so,dylib,dll}` (no `lib` prefix on Windows — matches Rust `cdylib` convention). When absent, exits 1 with stderr beginning `❌ Error: Unknown emit target …` and an external plugin lookup failure. |
+| `mumei build --emit escalation-bundle --output <base> <file.mm>` | Build + generate `<base>.escalation-bundle.json`; escalatable verification failures should be deferred into the bundle rather than exiting before serialization |
+| `mumei build --emit <unknown_name>` | Unknown emit targets fall through to `emitter::load_external_emitter`, which checks `~/.mumei/emitters/<name>/libmumei_emit_<name>.{so,dylib,dll}` (no `lib` prefix on Windows — matches Rust `cdylib` convention). When absent, exits 1 with stderr beginning `❌ Error: Unknown emit target …` and an external plugin lookup failure. |
 | `mumei publish` | Publish current project to local registry (requires `mumei.toml`) |
 | `mumei add <pkg>` | Add dependency from registry (requires `mumei.toml`) |
 | `mumei verify --strict-imports <file.mm>` | Strict import mode |
 | `mumei build --strict-imports <file.mm>` | Strict import mode for build |
-| `mumei verify --allow-lean-verified <file.mm>` | Accept mumei-lean-emitted certs (`z3_check_result == "lean_verified"`) as proven. When this flag triggers acceptance, the resolver audit-logs `🔗 Lean-verified atom '<name>' accepted as proven (--allow-lean-verified)` to stderr — useful as a grep target for tests. |
+| `mumei verify --allow-lean-verified <file.mm>` | Accept mumei-lean-emitted certificates (`z3_check_result == "lean_verified"`) as proven during import resolution. When this flag triggers acceptance, the resolver audit-logs `🔗 Lean-verified atom '<name>' accepted as proven (--allow-lean-verified)` to stderr — useful as a grep target for tests. |
+| `mumei verify-cert --allow-lean-verified <cert.json> <file.mm>` | Accept `z3_check_result == "lean_verified"` atoms as proven during certificate verification; without the flag, those atoms should be reported as unproven |
 
 ## Test Files
 
 - `sword_test.mm` — 8 atoms covering loops, floats, stack ops. Note: `scale` atom may fail verification (float multiplication precision), so `all_verified` can be `false`.
+- `tests/test_cross_spec.mm` — Cross-specification fixture where `transfer` calls `validate_balance`; good for `--cross-spec-verify` report testing.
 - `examples/import_test/main.mm` — Imports `lib/math_utils.mm`, good for import/dependency testing.
-- `examples/import_test/lib/math_utils.mm` — 2 simple atoms (`safe_add`, `safe_double`), all verify successfully. Good for generating clean certificates.
+- `examples/import_test/lib/math_utils.mm` — 2 simple atoms (`safe_add`, `safe_double`), all verify successfully. Good for generating clean certificates and zero-candidate escalation bundles.
+- `tests/test_contradiction.mm` — Existing contradiction fixture where `type Pos = i64 where v > 0` conflicts with `requires: n < 0`; useful for unsat-core and `report.json` diagnostics testing. For escalation-bundle testing, this should remain non-escalatable and should not emit candidates.
 - `tests/test_cross_atom_chain.mm` — Effect system + chained atom composition.
 - `tests/test_nested_while_no_trusted.mm` — Regression for `Expr::ArrayAccess => i64` MIR inference (`let key = arr[i]` inside nested `while`).
 - `tests/test_verified_sort.mm` — Mirrors `std/list.mm::verified_insertion_sort` without `trusted`; same regression target as above plus the `forall(i, 0, n, arr[i] >= 0)` Z3-bounds idiom.
@@ -51,6 +62,90 @@ If Z3 is missing, commands exit immediately with "Z3 solver not found" — no pa
 - `tests/test_verified_ffi.mm` — Existing scalar `f64` FFI regression fixture. Useful when changes touch f64/Real/Float verification semantics.
 
 ## Testing Flows
+
+### Cross-specification Verification Report
+
+Use this flow when changes touch `mumei-core/src/cross_spec/`, `VerificationConfig`, module-level verification reporting, or CLI/manifest wiring for `cross_spec_verify`.
+
+```bash
+cd /home/ubuntu/repos/mumei
+rm -rf /home/ubuntu/mumei-cross-spec-report
+LLVM_SYS_170_PREFIX=/usr/lib/llvm-17 LIBCLANG_PATH=/usr/lib/x86_64-linux-gnu \
+  ./target/debug/mumei verify \
+  --cross-spec-verify \
+  --report-dir /home/ubuntu/mumei-cross-spec-report \
+  tests/test_cross_spec.mm
+```
+
+Expected assertions:
+- Command exits zero.
+- Output includes `Cross-spec report written to: /home/ubuntu/mumei-cross-spec-report/cross_spec.json`.
+- `/home/ubuntu/mumei-cross-spec-report/cross_spec.json` exists and is valid JSON.
+- `summary.total_atoms == 6`, `summary.consistent_calls == 1`, `summary.inconsistent_calls == 0`, `summary.circular_dependency_count == 0`, and `summary.global_invariant_count == 2`.
+- `contract_consistency` has exactly one edge: `transfer -> validate_balance` with `is_consistent == true`.
+- `global_invariants` contains `result >= 0`.
+
+A quick JSON assertion helper:
+```bash
+python - <<'PY'
+import json
+from pathlib import Path
+p = Path('/home/ubuntu/mumei-cross-spec-report/cross_spec.json')
+assert p.exists(), p
+report = json.loads(p.read_text())
+assert report['summary']['total_atoms'] == 6, report['summary']
+assert report['summary']['consistent_calls'] == 1, report['summary']
+assert report['summary']['inconsistent_calls'] == 0, report['summary']
+assert report['summary']['circular_dependency_count'] == 0, report['summary']
+assert report['summary']['global_invariant_count'] == 2, report['summary']
+contracts = report['contract_consistency']
+assert len(contracts) == 1, contracts
+assert contracts[0]['caller_atom'] == 'transfer', contracts[0]
+assert contracts[0]['callee_atom'] == 'validate_balance', contracts[0]
+assert contracts[0]['is_consistent'] is True, contracts[0]
+assert any(inv['invariant'] == 'result >= 0' for inv in report['global_invariants'])
+PY
+```
+
+### Contradiction Report / Unsat Core Diagnostics
+
+Use this flow when changes touch contradiction handling, Z3 unsat-core tracking labels, semantic feedback, `report.json`, or self-healing diagnostics.
+
+```bash
+cd /home/ubuntu/repos/mumei
+rm -rf /home/ubuntu/mumei-contradiction-report
+LLVM_SYS_170_PREFIX=/usr/lib/llvm-17 LIBCLANG_PATH=/usr/lib/x86_64-linux-gnu \
+  ./target/debug/mumei verify \
+  --report-dir /home/ubuntu/mumei-contradiction-report \
+  tests/test_contradiction.mm
+```
+
+Expected assertions:
+- Command exits non-zero because `tests/test_contradiction.mm` is intentionally contradictory.
+- Output includes `Contradiction found`.
+- `/home/ubuntu/mumei-contradiction-report/report.json` exists.
+- Report top-level `failure_type` is `invariant_violated`.
+- `semantic_feedback.raw_unsat_core` includes `track_refined_type_n::Pos` and `track_requires`.
+- If testing minimal-core support, `semantic_feedback.minimal_unsat_core` should include exactly `track_refined_type_n::Pos` and `track_requires`, with `minimal_core_size == 2`, `total_core_size == 2`, and `reduction_ratio == 1.0`.
+- If testing suggestion text, check `semantic_feedback.suggestion`; the top-level `suggestion` may still be the broader contextual invariant suggestion.
+
+A quick JSON assertion helper:
+```bash
+python - <<'PY'
+import json
+from pathlib import Path
+report = json.loads(Path('/home/ubuntu/mumei-contradiction-report/report.json').read_text())
+sf = report['semantic_feedback']
+expected = {'track_refined_type_n::Pos', 'track_requires'}
+assert report['failure_type'] == 'invariant_violated'
+assert set(sf['raw_unsat_core']) == expected
+if 'minimal_unsat_core' in sf:
+    assert set(sf['minimal_unsat_core']) == expected
+    assert sf['minimal_core_size'] == 2
+    assert sf['total_core_size'] == 2
+    assert sf['reduction_ratio'] == 1.0
+PY
+```
 
 ### Polymorphic `[T]` Array Verification
 
@@ -77,95 +172,98 @@ The `test_f64_array_store_int_literal` atom is the adversarial case for storing 
 
 Use this flow when changes touch `mumei-core/src/emitter.rs`, external `--emit <name>` dispatch, plugin ABI (`EmitterPluginHandle`), or plugin library lifetime/reload behavior.
 
-1. Build a temporary Rust `cdylib` plugin whose crate name is `mumei_emit_counting`, with:
-   - `mumei_emitter_abi_version() -> EMITTER_ABI_VERSION`
-   - `mumei_create_emitter() -> EmitterPluginHandle`
-   - a factory side effect that appends one line to `/home/ubuntu/mumei-plugin-test/factory.log`
-   - an `emit()` implementation that returns one `ArtifactKind::Metadata` marker named `format!("{}.counting.marker", output_path.display())` containing `counting:<atom_name>`
-2. Install the compiled Linux artifact at the exact loader path:
-   ```bash
-   mkdir -p /home/ubuntu/.mumei/emitters/counting
-   cp /home/ubuntu/mumei-plugin-test/plugin/target/release/libmumei_emit_counting.so \
-     /home/ubuntu/.mumei/emitters/counting/libmumei_emit_counting.so
-   ```
-3. Run the five-atom fixture:
-   ```bash
-   LLVM_SYS_170_PREFIX=/usr/lib/llvm-17 /home/ubuntu/repos/mumei/target/debug/mumei \
-     build /home/ubuntu/repos/mumei/tests/test_polymorphic_array.mm \
-     --emit counting \
-     -o /home/ubuntu/mumei-plugin-test/out/result
-   ```
-4. Expected assertions:
-   - command exits 0
-   - output includes `Blade forged successfully with 5 atoms`
-   - output includes `Compiled '<atom>' to external plugin 'counting'.` for all five atoms in `tests/test_polymorphic_array.mm`
-   - marker files exist at `/home/ubuntu/mumei-plugin-test/out/result_<atom>.counting.marker`
-   - every marker contains exact text `counting:<atom>`
-   - `wc -l /home/ubuntu/mumei-plugin-test/factory.log` is exactly `1`
-   - combined output does not contain `Unknown emit target`, `plugin loader is not yet implemented`, `ABI version mismatch`, or `does not export mumei_create_emitter`
+```bash
+cd /home/ubuntu/repos/mumei
+LLVM_SYS_170_PREFIX=/usr/lib/llvm-17 LIBCLANG_PATH=/usr/lib/x86_64-linux-gnu \
+  ./target/debug/mumei build --emit missing-plugin examples/import_test/lib/math_utils.mm
+```
 
-The factory count is the adversarial assertion: a broken eager CLI probe plus per-atom reload may produce 6 calls for this fixture; per-atom reload alone may produce 5; the fixed behavior should produce exactly 1.
+Expected assertions:
+- Command exits non-zero.
+- Stderr begins with `❌ Error: Unknown emit target 'missing-plugin'`.
+- Stderr includes the checked plugin path under `~/.mumei/emitters/missing-plugin/`.
+- Stderr does not panic or print `segmentation fault`.
 
-For the negative control, run the same `build` with `--emit definitely_missing_phase3_plugin`. It should exit non-zero and stderr should include the plugin name plus the `.mumei/emitters` expected install path.
+### Lean Escalation Bundle CLI and Bridge Dry-Run
 
-### Scalar `f64` Regression Verification
-
-Use this flow when changes touch f64 verification semantics, especially Float-vs-Real handling.
+Use this flow when changes touch `mumei-core/src/verification.rs`, `mumei-core/src/proof_cert.rs`, `src/main.rs` escalation CLI wiring, or the mumei-lean bridge schema.
 
 ```bash
 cd /home/ubuntu/repos/mumei
-rm -rf tests/.mumei tests/.mumei_build_cache tests/.mumei_cache .mumei .mumei_build_cache .mumei_cache
-./target/debug/mumei verify tests/test_verified_ffi.mm
+rm -rf /home/ubuntu/mumei-escalation-e2e
+mkdir -p /home/ubuntu/mumei-escalation-e2e
+LLVM_SYS_170_PREFIX=/usr/lib/llvm-17 LIBCLANG_PATH=/usr/lib/x86_64-linux-gnu \
+  ./target/debug/mumei verify \
+  --emit escalation-bundle \
+  --output /home/ubuntu/mumei-escalation-e2e/verify-bundle \
+  examples/import_test/lib/math_utils.mm
+LLVM_SYS_170_PREFIX=/usr/lib/llvm-17 LIBCLANG_PATH=/usr/lib/x86_64-linux-gnu \
+  ./target/debug/mumei build \
+  --emit escalation-bundle \
+  --output /home/ubuntu/mumei-escalation-e2e/build-bundle \
+  examples/import_test/lib/math_utils.mm
 ```
 
-Expected final summary: `Verification passed: 3 item(s) verified`.
+Expected assertions:
+- Verify writes `/home/ubuntu/mumei-escalation-e2e/verify-bundle.escalation-bundle.json`.
+- Build writes `/home/ubuntu/mumei-escalation-e2e/build-bundle.escalation-bundle.json`.
+- Zero-candidate fixtures should have `summary.candidate_count == 0`, `summary.by_reason == {}`, and `candidates == []`.
+- For `tests/test_contradiction.mm`, `build --emit escalation-bundle` should exit non-zero and should not write an escalation candidate bundle, because spec contradictions / `requires_unsat` are explicitly non-escalatable.
 
-### Certificate Generation + Verification (P5-A)
-1. `mumei verify --proof-cert <file.mm>` generates `<stem>.proof.json`.
-2. `mumei verify-cert <cert.json> <file.mm>` checks cert against source.
-3. Modify source, re-run verify-cert to see "changed" status.
-4. To assert contract changes, parse the generated certificate's per-atom `requires` / `ensures` fields and compare exact strings.
-5. Do not use proof-certificate atom `status` as the source of truth for stdlib trusted atom counts. `cmd_verify` may record successfully checked trusted atoms as `status == "verified"`; for stdlib metrics, count source-level `trusted atom` declarations, matching `scripts/generate_stdlib_metrics.py`.
+For cross-repo bridge compatibility, create a synthetic escalation bundle with a candidate containing `z3_check_result`, `z3_result_class`, `status`, `escalation_reason`, `logic_fragment_tags`, `requires`, `ensures`, hashes, dependency/effect fields, and optional `lean_metadata`, then run from `/home/ubuntu/repos/mumei-lean`:
 
-### Publish + Add (P5-B)
-1. Create project dir with `mumei.toml` (needs `[package]` with name/version and `[build]` with entry).
-2. `mumei publish` from project dir.
-3. Check `~/.mumei/registry.json` for `cert_path`/`cert_hash`.
-4. Create consumer project, `mumei add <pkg-name>` to resolve from registry.
-
-### Project Setup for Publish Testing
-```toml
-# mumei.toml
-[package]
-name = "test-pkg"
-version = "0.1.0"
-description = "Test"
-
-[build]
-entry = "main.mm"
-```
-
-## Known Quirks
-
-- **`--strict-imports` on direct file imports**: For `import "./path.mm"`, the resolver uses legacy behavior (trust atoms) when no cert exists, even with `--strict-imports`. Strict enforcement only applies at manifest dependency level.
-- **`verify-cert` exit codes**: "changed" atoms produce exit 0 (soft warning). Only "unproven"/"missing" atoms cause exit 1.
-- **Verification caching — TWO locations**: To force a clean re-verify you need to clear both `.mumei/cache/verification_cache.json` (enhanced cache) and `<input-dir>/.mumei_cache` (legacy resolver cache). After only clearing one, verify can report `0 verified, N skipped (unchanged) ⚡`. Quick reset:
-  ```bash
-  rm -rf .mumei .mumei_build_cache <input-dir>/.mumei_cache
-  ```
-- **`-o` is a base name, not a full path**: `mumei build … -o /tmp/foo` writes to `/tmp/foo_<atom_name>.<ext>` for each atom (e.g. `/tmp/foo_main_fn.verified.json` for `--emit verified-json`). Do not assert on the literal `-o` path.
-- **`--emit proof-cert`**: The `build --emit proof-cert` flag is parsed but returns empty artifacts. Use `verify --proof-cert` for actual cert generation.
-- **`cmd_verify --proof-cert` Z3-unknown summary line might be unreachable**: the `ℹ  N atom(s) returned 'unknown' from Z3.` line in `src/main.rs::cmd_verify` only fires when `cert.atoms[i].z3_check_result == "unknown"`. Most current `.mm` sources record only `"unsat"` or `"sat"`. To exercise it adversarially, temporarily patch one `cert_results.insert(...)` call to record `"unknown"` (for example gated on a test env var), rebuild, run `mumei verify <file.mm> --proof-cert`, observe the line, then revert. The negative control (`--json`) must suppress the line.
-
-## Running Tests
 ```bash
-# Full workspace tests
-LLVM_SYS_170_PREFIX=/usr/lib/llvm-17 cargo test --workspace
-
-# Lint
-LLVM_SYS_170_PREFIX=/usr/lib/llvm-17 cargo clippy --all-targets -- -D warnings
-cargo fmt --check
+python scripts/bridge.py \
+  --escalation-bundle /home/ubuntu/mumei-escalation-e2e/synthetic-escalation-bundle.json \
+  --out-dir /home/ubuntu/mumei-escalation-e2e/generated \
+  --summary-json /home/ubuntu/mumei-escalation-e2e/summary.json \
+  --module-prefix Generated \
+  --no-build
 ```
 
-## Devin Secrets Needed
-None required — all testing is local.
+Expected assertions:
+- Command exits zero and generated Lean files exist under the output directory.
+- `summary.json` includes `total_candidates`, `metrics.escalation_attempts`, `metrics.by_failure_reason.<reason>.attempts`, and `metrics.by_logic_fragment.<tag>.attempts`.
+- `--no-build` is a dry-run mode and intentionally does not write `--lean-cert-out`; only expect Lean source and summary JSON from this step.
+
+### Lean-Verified Certificate Opt-In
+
+Use this flow when changes touch `verify-cert`, proof certificate verification, or `--allow-lean-verified` trust policy.
+
+```bash
+cd /home/ubuntu/repos/mumei
+rm -f math_utils.proof.json cross_spec.json /home/ubuntu/mumei-escalation-e2e/lean-verified-cert.json
+LLVM_SYS_170_PREFIX=/usr/lib/llvm-17 LIBCLANG_PATH=/usr/lib/x86_64-linux-gnu \
+  ./target/debug/mumei verify --proof-cert examples/import_test/lib/math_utils.mm
+```
+
+Transform the generated certificate at the path printed by the CLI (currently `./math_utils.proof.json` when run from the repo root) so each atom has `z3_check_result = "lean_verified"` and matching `lean_metadata.status = "lean_verified"`.
+
+Expected assertions:
+- `./target/debug/mumei verify-cert <lean-verified-cert> examples/import_test/lib/math_utils.mm` exits non-zero and reports the Lean-verified atoms as `unproven`.
+- `./target/debug/mumei verify-cert --allow-lean-verified <lean-verified-cert> examples/import_test/lib/math_utils.mm` exits zero and reports those atoms as `proven`.
+- Remove generated `math_utils.proof.json` and `cross_spec.json` afterward so the repo stays clean.
+
+### Proof Certificate Generation and Verification
+
+Use this flow when changes touch proof certificate generation, certificate verification, hashing, import caching, or resolver trust policy.
+
+```bash
+cd /home/ubuntu/repos/mumei
+rm -f examples/import_test/lib/math_utils.proof.json
+LLVM_SYS_170_PREFIX=/usr/lib/llvm-17 LIBCLANG_PATH=/usr/lib/x86_64-linux-gnu \
+  ./target/debug/mumei verify --proof-cert examples/import_test/lib/math_utils.mm
+LLVM_SYS_170_PREFIX=/usr/lib/llvm-17 LIBCLANG_PATH=/usr/lib/x86_64-linux-gnu \
+  ./target/debug/mumei verify-cert examples/import_test/lib/math_utils.proof.json examples/import_test/lib/math_utils.mm
+```
+
+Expected assertions:
+- `math_utils.proof.json` is created at the path printed by the CLI.
+- Verify output includes 2 verified atoms or 2 skipped atoms if the verification cache is warm.
+- `verify-cert` exits zero and prints a valid/verified certificate message.
+
+## Notes
+
+- Prefer using absolute `LLVM_SYS_170_PREFIX=/usr/lib/llvm-17 LIBCLANG_PATH=/usr/lib/x86_64-linux-gnu` env vars for all cargo/CLI commands in this repo.
+- No browser recording is useful for shell-only CLI flows; collect command output and generated JSON instead.
+- Mumei verification commands may emit `cross_spec.json` in the current working directory; delete temporary copies before final `git status`.

@@ -67,6 +67,8 @@ pub enum EmitTarget {
     ProofBook,
     /// P5-A: Generate .proof-cert.json alongside build output
     ProofCert,
+    /// Emit Lean escalation candidate bundle alongside build output
+    EscalationBundle,
     /// P7-B: Compile to standalone native binary via clang
     Binary,
     /// FFI glue code for Rust (NOT a transpiler — generates extern "C" bindings + safe wrappers)

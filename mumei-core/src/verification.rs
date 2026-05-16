@@ -1,3 +1,5 @@
+use crate::ast::TypeRef;
+use crate::cross_spec::{CrossSpecResult, CrossSpecVerifier};
 use crate::hir::HirAtom;
 use crate::parser::{
     parse_body_expr, parse_expression, Atom, Effect, EffectDef, EnumDef, Expr, ImplDef, Item,
@@ -594,6 +596,789 @@ impl From<&str> for MumeiError {
 }
 
 pub type MumeiResult<T> = Result<T, MumeiError>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerificationConfig {
+    pub timeout_ms: u64,
+    pub global_max_unroll: usize,
+    pub enable_cross_spec_verification: bool,
+}
+
+impl Default for VerificationConfig {
+    fn default() -> Self {
+        Self {
+            timeout_ms: 10000,
+            global_max_unroll: 3,
+            enable_cross_spec_verification: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ModuleVerificationReport {
+    pub cross_spec: Option<CrossSpecResult>,
+}
+
+pub const LEAN_TRANSLATOR_VERSION: &str = "mumei-lean-translator-ir-v1";
+pub const LEAN_BRIDGE_LEMMA_HASH: &str =
+    "d8d270d6429a3e31c608dc109876df4ec99ee1243796430775a5b0ef18b5ac24";
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+pub struct TranslatorIRProvenanceSpan {
+    #[serde(default)]
+    pub file: String,
+    #[serde(default)]
+    pub line: usize,
+    #[serde(default)]
+    pub col: usize,
+    #[serde(default)]
+    pub len: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+pub struct TranslatorIRBinder {
+    #[serde(default)]
+    pub mumei_name: String,
+    #[serde(default)]
+    pub lean_name: String,
+    #[serde(default)]
+    pub mumei_type: String,
+    #[serde(default)]
+    pub lean_type: String,
+    #[serde(default)]
+    pub role: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refinement: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+pub struct TranslatorIRMetadata {
+    #[serde(default)]
+    pub sort: String,
+    #[serde(default)]
+    pub binders: Vec<TranslatorIRBinder>,
+    #[serde(default)]
+    pub theorem_goal: String,
+    #[serde(default)]
+    pub provenance_span: TranslatorIRProvenanceSpan,
+    #[serde(default)]
+    pub lowering_rules: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manual_lemma_reason: Option<String>,
+}
+
+pub fn build_translator_binder_mapping(atom: &Atom) -> HashMap<String, String> {
+    build_translator_ir_metadata(atom, &ModuleEnv::default())
+        .binders
+        .into_iter()
+        .map(|binder| (binder.mumei_name, binder.lean_name))
+        .collect()
+}
+
+pub fn build_translator_ir_metadata(atom: &Atom, module_env: &ModuleEnv) -> TranslatorIRMetadata {
+    let body_stmt = parse_body_expr(&atom.body_expr);
+    let tags = detect_logic_fragment_tags(atom, module_env);
+    let sort = if atom.invariant.is_some() || stmt_has_while(&body_stmt) {
+        "loop_invariant"
+    } else if atom.params.iter().any(|param| {
+        param
+            .type_name
+            .as_ref()
+            .is_some_and(|type_name| module_env.types.contains_key(type_name))
+    }) {
+        "refinement_predicate"
+    } else if tags.iter().any(|tag| tag == "inductive_data_type") {
+        "inductive_obligation"
+    } else {
+        "contract_obligation"
+    };
+
+    let mut binders: Vec<TranslatorIRBinder> = atom
+        .params
+        .iter()
+        .map(|param| {
+            let mumei_type = param
+                .type_ref
+                .as_ref()
+                .map(TypeRef::display_name)
+                .or_else(|| param.type_name.clone())
+                .unwrap_or_else(|| "i64".to_string());
+            let refinement = param
+                .type_name
+                .as_ref()
+                .and_then(|type_name| module_env.types.get(type_name))
+                .map(|refined| refined.predicate_raw.clone());
+            TranslatorIRBinder {
+                mumei_name: param.name.clone(),
+                lean_name: lean_binder_name(&param.name),
+                lean_type: mumei_type_to_lean_type(&mumei_type),
+                mumei_type,
+                role: "param".to_string(),
+                refinement,
+            }
+        })
+        .collect();
+
+    let result_type = atom.return_type.as_deref().unwrap_or("i64").to_string();
+    binders.push(TranslatorIRBinder {
+        mumei_name: "result".to_string(),
+        lean_name: "result".to_string(),
+        lean_type: mumei_type_to_lean_type(&result_type),
+        mumei_type: result_type,
+        role: "result".to_string(),
+        refinement: None,
+    });
+
+    let mut lowering_rules = vec![
+        "type_system_mapping".to_string(),
+        "contract_lowering".to_string(),
+    ];
+    if sort == "loop_invariant" {
+        lowering_rules.push("loop_invariant_recursion".to_string());
+    }
+    if !atom.effects.is_empty() {
+        lowering_rules.push("effect_state_bridge".to_string());
+    }
+    if tags.iter().any(|tag| tag.contains("array")) {
+        lowering_rules.push("array_bounds_bridge".to_string());
+    }
+    if tags.iter().any(|tag| tag.contains("string")) {
+        lowering_rules.push("string_regex_bridge".to_string());
+    }
+    if tags.iter().any(|tag| tag.contains("nonlinear")) {
+        lowering_rules.push("integer_overflow_bridge".to_string());
+    }
+
+    TranslatorIRMetadata {
+        sort: sort.to_string(),
+        binders,
+        theorem_goal: format!("({}) -> ({})", atom.requires, atom.ensures),
+        provenance_span: TranslatorIRProvenanceSpan {
+            file: atom.span.file.clone(),
+            line: atom.span.line,
+            col: atom.span.col,
+            len: atom.span.len,
+        },
+        lowering_rules,
+        manual_lemma_reason: None,
+    }
+}
+
+fn lean_binder_name(name: &str) -> String {
+    let mut result = String::new();
+    for (idx, ch) in name.chars().enumerate() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            if idx == 0 && ch.is_ascii_digit() {
+                result.push('_');
+            }
+            result.push(ch);
+        } else {
+            result.push('_');
+        }
+    }
+    if result.is_empty() || is_lean_reserved_word(&result) {
+        format!("{}_binder", result)
+    } else {
+        result
+    }
+}
+
+fn is_lean_reserved_word(name: &str) -> bool {
+    matches!(
+        name,
+        "by" | "def" | "end" | "fun" | "have" | "if" | "let" | "match" | "namespace" | "theorem"
+    )
+}
+
+fn mumei_type_to_lean_type(type_name: &str) -> String {
+    let normalized = type_name.trim();
+    if normalized.starts_with('[') && normalized.ends_with(']') {
+        let inner = &normalized[1..normalized.len() - 1];
+        format!("List {}", mumei_type_to_lean_type(inner))
+    } else if normalized.starts_with("[]<") && normalized.ends_with('>') {
+        let inner = &normalized[3..normalized.len() - 1];
+        format!("List {}", mumei_type_to_lean_type(inner))
+    } else {
+        match normalized {
+            "i64" | "int" | "Int" => "Int".to_string(),
+            "bool" | "Bool" => "Bool".to_string(),
+            "string" | "Str" | "String" => "String".to_string(),
+            "unit" | "Unit" => "Unit".to_string(),
+            other => other.to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeanEscalationClassification {
+    pub z3_result_class: String,
+    pub should_escalate: bool,
+    pub escalation_reason: Option<String>,
+    pub logic_fragment_tags: Vec<String>,
+}
+
+pub fn classify_z3_result(result: &str) -> &'static str {
+    let normalized = result.to_ascii_lowercase();
+    if normalized.contains("timeout") {
+        "timeout"
+    } else if normalized.contains("resource") || normalized.contains("budget") {
+        "resource_limit"
+    } else if normalized.contains("unknown") {
+        "unknown"
+    } else if normalized == "unsat" || normalized.contains("proven") {
+        "unsat"
+    } else if normalized.contains("skipped") {
+        "skipped"
+    } else if normalized.contains("sat") || normalized.contains("counter") {
+        "sat"
+    } else {
+        "skipped"
+    }
+}
+
+pub fn z3_result_from_error_message(message: &str) -> Option<&'static str> {
+    let normalized = message.to_ascii_lowercase();
+    if normalized.contains("z3 returned unknown") || normalized.contains("solver returned unknown")
+    {
+        Some("unknown")
+    } else if normalized.contains("timeout") {
+        Some("timeout")
+    } else if normalized.contains("resource limit")
+        || normalized.contains("constraint budget exceeded")
+    {
+        Some("resource_limit")
+    } else if normalized.contains("spurious_candidate") {
+        Some("spurious_candidate")
+    } else {
+        None
+    }
+}
+
+pub fn classify_atom_for_lean_escalation(
+    atom: &Atom,
+    module_env: &ModuleEnv,
+    z3_result: &str,
+    status: &str,
+) -> LeanEscalationClassification {
+    let z3_result_class = classify_z3_result(z3_result).to_string();
+    let logic_fragment_tags = detect_logic_fragment_tags(atom, module_env);
+    let normalized_result = z3_result.to_ascii_lowercase();
+    let normalized_status = status.to_ascii_lowercase();
+
+    let mut reason = None;
+    if normalized_result.contains("partial_translation")
+        || normalized_status.contains("partial_translation")
+        || normalized_result.contains("requires_unsat")
+        || normalized_status.contains("requires_unsat")
+        || normalized_status.contains("spec_contradiction")
+    {
+        reason = None;
+    } else if normalized_result.contains("spurious_candidate")
+        || normalized_status.contains("spurious_candidate")
+    {
+        reason = Some("spurious_counterexample".to_string());
+    } else if matches!(
+        z3_result_class.as_str(),
+        "unknown" | "timeout" | "resource_limit"
+    ) {
+        reason = Some(if logic_fragment_tags.is_empty() {
+            format!("z3_{}", z3_result_class)
+        } else {
+            format!("z3_{}_complex_fragment", z3_result_class)
+        });
+    } else if atom.trust_level == TrustLevel::Trusted {
+        reason = Some("trusted_atom_human_review".to_string());
+    }
+
+    LeanEscalationClassification {
+        z3_result_class,
+        should_escalate: reason.is_some(),
+        escalation_reason: reason,
+        logic_fragment_tags,
+    }
+}
+
+pub fn detect_logic_fragment_tags(atom: &Atom, module_env: &ModuleEnv) -> Vec<String> {
+    let mut tags = Vec::new();
+
+    for param in &atom.params {
+        if param
+            .type_name
+            .as_ref()
+            .is_some_and(|type_name| module_env.enums.contains_key(type_name))
+        {
+            push_unique_tag(&mut tags, "inductive_data_type");
+        }
+    }
+
+    let requires_expr = parse_expression(&atom.requires);
+    let ensures_expr = parse_expression(&atom.ensures);
+    let body_stmt = parse_body_expr(&atom.body_expr);
+    let contract_text = atom_contract_text(atom);
+
+    if expr_has_nonlinear_arithmetic(&requires_expr)
+        || expr_has_nonlinear_arithmetic(&ensures_expr)
+        || stmt_has_nonlinear_arithmetic(&body_stmt)
+        || text_has_nonlinear_arithmetic_marker(&contract_text)
+    {
+        push_unique_tag(&mut tags, "nonlinear_arithmetic");
+    }
+    if expr_has_inductive_shape(&requires_expr)
+        || expr_has_inductive_shape(&ensures_expr)
+        || stmt_has_inductive_shape(&body_stmt)
+    {
+        push_unique_tag(&mut tags, "inductive_data_type");
+    }
+
+    if let Some(invariant) = &atom.invariant {
+        push_unique_tag(&mut tags, "recursive_invariant");
+        let invariant_expr = parse_expression(invariant);
+        if expr_has_nonlinear_arithmetic(&invariant_expr)
+            || text_has_nonlinear_arithmetic_marker(invariant)
+        {
+            push_unique_tag(&mut tags, "nonlinear_arithmetic");
+        }
+    }
+
+    if stmt_has_while(&body_stmt) {
+        push_unique_tag(&mut tags, "recursive_invariant");
+    }
+    if atom_has_unbounded_array_access(atom, &requires_expr, &ensures_expr, &body_stmt) {
+        push_unique_tag(&mut tags, "array_without_bounds");
+    }
+
+    let has_forall = atom
+        .forall_constraints
+        .iter()
+        .any(|q| q.q_type == QuantifierType::ForAll)
+        || atom.requires.contains("forall(")
+        || atom.ensures.contains("forall(");
+    let has_exists = atom
+        .forall_constraints
+        .iter()
+        .any(|q| q.q_type == QuantifierType::Exists)
+        || atom.requires.contains("exists(")
+        || atom.ensures.contains("exists(");
+    if has_forall && has_exists {
+        push_unique_tag(&mut tags, "quantifier_alternation");
+    }
+    if atom.forall_constraints.iter().any(|q| {
+        q.condition.contains('[')
+            || q.condition.contains("forall(")
+            || q.condition.contains("exists(")
+    }) || atom.requires.contains("forall(")
+        || atom.ensures.contains("forall(")
+    {
+        push_unique_tag(&mut tags, "trigger_sensitive_quantifier");
+    }
+    if atom_uses_complex_temporal_effect(atom, module_env) {
+        push_unique_tag(&mut tags, "complex_temporal_effect");
+    }
+
+    tags
+}
+
+pub fn outside_decidable_fragment_warning(atom: &Atom, module_env: &ModuleEnv) -> Option<String> {
+    let tags = detect_logic_fragment_tags(atom, module_env);
+    if tags.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "outside_decidable_fragment: atom '{}' uses {}; prefer the Z3-stable fragment in docs/SPEC_GUIDE.md or escalate to Lean",
+            atom.name,
+            tags.join(", ")
+        ))
+    }
+}
+
+fn push_unique_tag(tags: &mut Vec<String>, tag: &str) {
+    if !tags.iter().any(|existing| existing == tag) {
+        tags.push(tag.to_string());
+    }
+}
+
+fn atom_contract_text(atom: &Atom) -> String {
+    let mut parts = vec![
+        atom.requires.as_str(),
+        atom.ensures.as_str(),
+        atom.body_expr.as_str(),
+    ];
+    if let Some(invariant) = &atom.invariant {
+        parts.push(invariant.as_str());
+    }
+    for q in &atom.forall_constraints {
+        parts.push(q.start.as_str());
+        parts.push(q.end.as_str());
+        parts.push(q.condition.as_str());
+    }
+    parts.join(" ")
+}
+
+fn text_has_nonlinear_arithmetic_marker(text: &str) -> bool {
+    text.contains('%')
+        || text.contains("**")
+        || text.contains("pow(")
+        || text.contains("mod(")
+        || text.contains("exp(")
+}
+
+fn atom_has_unbounded_array_access(
+    atom: &Atom,
+    requires_expr: &Expr,
+    ensures_expr: &Expr,
+    body_stmt: &Stmt,
+) -> bool {
+    let mut indexes = Vec::new();
+    collect_array_index_names_from_expr(requires_expr, &mut indexes);
+    collect_array_index_names_from_expr(ensures_expr, &mut indexes);
+    collect_array_index_names_from_stmt(body_stmt, &mut indexes);
+
+    for q in &atom.forall_constraints {
+        let condition_expr = parse_expression(&q.condition);
+        collect_array_index_names_from_expr(&condition_expr, &mut indexes);
+        let normalized_start = normalize_logical_text(&q.start);
+        if normalized_start == "0" {
+            indexes.retain(|idx| idx != &q.var);
+        }
+    }
+
+    let contract_text = normalize_logical_text(&atom_contract_text(atom));
+    indexes
+        .iter()
+        .any(|index| !index_has_explicit_bounds(index, &contract_text))
+}
+
+fn collect_array_index_names_from_stmt(stmt: &Stmt, indexes: &mut Vec<String>) {
+    match stmt {
+        Stmt::Let { value, .. } | Stmt::Assign { value, .. } => {
+            collect_array_index_names_from_expr(value, indexes);
+        }
+        Stmt::Expr(value, _) => collect_array_index_names_from_expr(value, indexes),
+        Stmt::ArrayStore { index, value, .. } => {
+            collect_array_index_name(index, indexes);
+            collect_array_index_names_from_expr(value, indexes);
+        }
+        Stmt::Block(stmts, _) => {
+            for stmt in stmts {
+                collect_array_index_names_from_stmt(stmt, indexes);
+            }
+        }
+        Stmt::While {
+            cond,
+            invariant,
+            body,
+            ..
+        } => {
+            collect_array_index_names_from_expr(cond, indexes);
+            collect_array_index_names_from_expr(invariant, indexes);
+            collect_array_index_names_from_stmt(body, indexes);
+        }
+        Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => {
+            collect_array_index_names_from_stmt(body, indexes);
+        }
+        Stmt::TaskGroup { children, .. } => {
+            for child in children {
+                collect_array_index_names_from_stmt(child, indexes);
+            }
+        }
+        Stmt::Cancel { .. } => {}
+    }
+}
+
+fn collect_array_index_names_from_expr(expr: &Expr, indexes: &mut Vec<String>) {
+    match expr {
+        Expr::ArrayAccess(_, index) => {
+            collect_array_index_name(index, indexes);
+            collect_array_index_names_from_expr(index, indexes);
+        }
+        Expr::BinaryOp(left, _, right) => {
+            collect_array_index_names_from_expr(left, indexes);
+            collect_array_index_names_from_expr(right, indexes);
+        }
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            collect_array_index_names_from_expr(cond, indexes);
+            collect_array_index_names_from_stmt(then_branch, indexes);
+            collect_array_index_names_from_stmt(else_branch, indexes);
+        }
+        Expr::Call(_, args) => {
+            for arg in args {
+                collect_array_index_names_from_expr(arg, indexes);
+            }
+        }
+        Expr::StructInit { fields, .. } => {
+            for (_, field_expr) in fields {
+                collect_array_index_names_from_expr(field_expr, indexes);
+            }
+        }
+        Expr::FieldAccess(base, _) => collect_array_index_names_from_expr(base, indexes),
+        Expr::Match { target, arms } => {
+            collect_array_index_names_from_expr(target, indexes);
+            for arm in arms {
+                collect_array_index_names_from_stmt(&arm.body, indexes);
+            }
+        }
+        Expr::Async { body } | Expr::Lambda { body, .. } => {
+            collect_array_index_names_from_stmt(body, indexes);
+        }
+        Expr::Await { expr } => collect_array_index_names_from_expr(expr, indexes),
+        Expr::CallRef { callee, args } => {
+            collect_array_index_names_from_expr(callee, indexes);
+            for arg in args {
+                collect_array_index_names_from_expr(arg, indexes);
+            }
+        }
+        Expr::Perform { args, .. } => {
+            for arg in args {
+                collect_array_index_names_from_expr(arg, indexes);
+            }
+        }
+        Expr::ChanSend { channel, value } => {
+            collect_array_index_names_from_expr(channel, indexes);
+            collect_array_index_names_from_expr(value, indexes);
+        }
+        Expr::ChanRecv { channel } => collect_array_index_names_from_expr(channel, indexes),
+        Expr::Number(_)
+        | Expr::Float(_)
+        | Expr::StringLit(_)
+        | Expr::Variable(_)
+        | Expr::AtomRef { .. } => {}
+    }
+}
+
+fn collect_array_index_name(index: &Expr, indexes: &mut Vec<String>) {
+    match index {
+        Expr::Variable(name) if !indexes.iter().any(|existing| existing == name) => {
+            indexes.push(name.clone());
+        }
+        Expr::BinaryOp(left, _, right) => {
+            collect_array_index_name(left, indexes);
+            collect_array_index_name(right, indexes);
+        }
+        _ => {}
+    }
+}
+
+fn normalize_logical_text(text: &str) -> String {
+    text.chars().filter(|ch| !ch.is_whitespace()).collect()
+}
+
+fn index_has_explicit_bounds(index: &str, normalized_text: &str) -> bool {
+    let has_lower_bound = normalized_text.contains(&format!("{index}>=0"))
+        || normalized_text.contains(&format!("0<={index}"));
+    let has_upper_bound = normalized_text.contains(&format!("{index}<"))
+        || normalized_text.contains(&format!(">{index}"));
+    has_lower_bound && has_upper_bound
+}
+
+fn atom_uses_complex_temporal_effect(atom: &Atom, module_env: &ModuleEnv) -> bool {
+    atom.effects.iter().any(|effect| {
+        module_env
+            .effect_defs
+            .get(&effect.name)
+            .or_else(|| module_env.effects.get(&effect.name))
+            .is_some_and(|def| def.states.len() > 4 || def.transitions.len() > 8)
+    })
+}
+
+fn expr_has_nonlinear_arithmetic(expr: &Expr) -> bool {
+    match expr {
+        Expr::BinaryOp(left, Op::Mul, right) => {
+            (!expr_is_numeric_literal(left) && !expr_is_numeric_literal(right))
+                || expr_has_nonlinear_arithmetic(left)
+                || expr_has_nonlinear_arithmetic(right)
+        }
+        Expr::BinaryOp(left, Op::Div, right) => {
+            !expr_is_numeric_literal(right)
+                || expr_has_nonlinear_arithmetic(left)
+                || expr_has_nonlinear_arithmetic(right)
+        }
+        Expr::BinaryOp(left, _, right) => {
+            expr_has_nonlinear_arithmetic(left) || expr_has_nonlinear_arithmetic(right)
+        }
+        Expr::ArrayAccess(_, idx) => expr_has_nonlinear_arithmetic(idx),
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            expr_has_nonlinear_arithmetic(cond)
+                || stmt_has_nonlinear_arithmetic(then_branch)
+                || stmt_has_nonlinear_arithmetic(else_branch)
+        }
+        Expr::Call(_, args) => args.iter().any(expr_has_nonlinear_arithmetic),
+        Expr::StructInit { fields, .. } => fields
+            .iter()
+            .any(|(_, field_expr)| expr_has_nonlinear_arithmetic(field_expr)),
+        Expr::FieldAccess(base, _) => expr_has_nonlinear_arithmetic(base),
+        Expr::Match { target, arms } => {
+            expr_has_nonlinear_arithmetic(target)
+                || arms
+                    .iter()
+                    .any(|arm| stmt_has_nonlinear_arithmetic(&arm.body))
+        }
+        Expr::Async { body } | Expr::Lambda { body, .. } => stmt_has_nonlinear_arithmetic(body),
+        Expr::Await { expr } => expr_has_nonlinear_arithmetic(expr),
+        Expr::CallRef { callee, args } => {
+            expr_has_nonlinear_arithmetic(callee) || args.iter().any(expr_has_nonlinear_arithmetic)
+        }
+        Expr::Perform { args, .. } => args.iter().any(expr_has_nonlinear_arithmetic),
+        Expr::ChanSend { channel, value } => {
+            expr_has_nonlinear_arithmetic(channel) || expr_has_nonlinear_arithmetic(value)
+        }
+        Expr::ChanRecv { channel } => expr_has_nonlinear_arithmetic(channel),
+        Expr::Number(_)
+        | Expr::Float(_)
+        | Expr::StringLit(_)
+        | Expr::Variable(_)
+        | Expr::AtomRef { .. } => false,
+    }
+}
+
+fn stmt_has_nonlinear_arithmetic(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Let { value, .. } | Stmt::Assign { value, .. } => {
+            expr_has_nonlinear_arithmetic(value)
+        }
+        Stmt::Expr(value, _) => expr_has_nonlinear_arithmetic(value),
+        Stmt::ArrayStore { index, value, .. } => {
+            expr_has_nonlinear_arithmetic(index) || expr_has_nonlinear_arithmetic(value)
+        }
+        Stmt::Block(stmts, _) => stmts.iter().any(stmt_has_nonlinear_arithmetic),
+        Stmt::While {
+            cond,
+            invariant,
+            body,
+            ..
+        } => {
+            expr_has_nonlinear_arithmetic(cond)
+                || expr_has_nonlinear_arithmetic(invariant)
+                || stmt_has_nonlinear_arithmetic(body)
+        }
+        Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => stmt_has_nonlinear_arithmetic(body),
+        Stmt::TaskGroup { children, .. } => children.iter().any(stmt_has_nonlinear_arithmetic),
+        Stmt::Cancel { .. } => false,
+    }
+}
+
+fn expr_has_inductive_shape(expr: &Expr) -> bool {
+    match expr {
+        Expr::Match { .. } => true,
+        Expr::BinaryOp(left, _, right) => {
+            expr_has_inductive_shape(left) || expr_has_inductive_shape(right)
+        }
+        Expr::ArrayAccess(_, idx) => expr_has_inductive_shape(idx),
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            expr_has_inductive_shape(cond)
+                || stmt_has_inductive_shape(then_branch)
+                || stmt_has_inductive_shape(else_branch)
+        }
+        Expr::Call(_, args) => args.iter().any(expr_has_inductive_shape),
+        Expr::StructInit { fields, .. } => fields
+            .iter()
+            .any(|(_, field_expr)| expr_has_inductive_shape(field_expr)),
+        Expr::FieldAccess(base, _) => expr_has_inductive_shape(base),
+        Expr::Async { body } | Expr::Lambda { body, .. } => stmt_has_inductive_shape(body),
+        Expr::Await { expr } => expr_has_inductive_shape(expr),
+        Expr::CallRef { callee, args } => {
+            expr_has_inductive_shape(callee) || args.iter().any(expr_has_inductive_shape)
+        }
+        Expr::Perform { args, .. } => args.iter().any(expr_has_inductive_shape),
+        Expr::ChanSend { channel, value } => {
+            expr_has_inductive_shape(channel) || expr_has_inductive_shape(value)
+        }
+        Expr::ChanRecv { channel } => expr_has_inductive_shape(channel),
+        Expr::Number(_)
+        | Expr::Float(_)
+        | Expr::StringLit(_)
+        | Expr::Variable(_)
+        | Expr::AtomRef { .. } => false,
+    }
+}
+
+fn stmt_has_inductive_shape(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Let { value, .. } | Stmt::Assign { value, .. } => expr_has_inductive_shape(value),
+        Stmt::Expr(value, _) => expr_has_inductive_shape(value),
+        Stmt::ArrayStore { index, value, .. } => {
+            expr_has_inductive_shape(index) || expr_has_inductive_shape(value)
+        }
+        Stmt::Block(stmts, _) => stmts.iter().any(stmt_has_inductive_shape),
+        Stmt::While {
+            cond,
+            invariant,
+            body,
+            ..
+        } => {
+            expr_has_inductive_shape(cond)
+                || expr_has_inductive_shape(invariant)
+                || stmt_has_inductive_shape(body)
+        }
+        Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => stmt_has_inductive_shape(body),
+        Stmt::TaskGroup { children, .. } => children.iter().any(stmt_has_inductive_shape),
+        Stmt::Cancel { .. } => false,
+    }
+}
+
+fn stmt_has_while(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::While { .. } => true,
+        Stmt::Block(stmts, _) => stmts.iter().any(stmt_has_while),
+        Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => stmt_has_while(body),
+        Stmt::TaskGroup { children, .. } => children.iter().any(stmt_has_while),
+        Stmt::Let { value, .. } | Stmt::Assign { value, .. } => expr_contains_while(value),
+        Stmt::Expr(value, _) => expr_contains_while(value),
+        Stmt::ArrayStore { index, value, .. } => {
+            expr_contains_while(index) || expr_contains_while(value)
+        }
+        Stmt::Cancel { .. } => false,
+    }
+}
+
+fn expr_contains_while(expr: &Expr) -> bool {
+    match expr {
+        Expr::IfThenElse {
+            then_branch,
+            else_branch,
+            ..
+        } => stmt_has_while(then_branch) || stmt_has_while(else_branch),
+        Expr::Match { arms, .. } => arms.iter().any(|arm| stmt_has_while(&arm.body)),
+        Expr::Async { body } | Expr::Lambda { body, .. } => stmt_has_while(body),
+        Expr::BinaryOp(left, _, right) => expr_contains_while(left) || expr_contains_while(right),
+        Expr::ArrayAccess(_, idx) => expr_contains_while(idx),
+        Expr::Call(_, args) => args.iter().any(expr_contains_while),
+        Expr::StructInit { fields, .. } => fields
+            .iter()
+            .any(|(_, field_expr)| expr_contains_while(field_expr)),
+        Expr::FieldAccess(base, _) => expr_contains_while(base),
+        Expr::Await { expr } => expr_contains_while(expr),
+        Expr::CallRef { callee, args } => {
+            expr_contains_while(callee) || args.iter().any(expr_contains_while)
+        }
+        Expr::Perform { args, .. } => args.iter().any(expr_contains_while),
+        Expr::ChanSend { channel, value } => {
+            expr_contains_while(channel) || expr_contains_while(value)
+        }
+        Expr::ChanRecv { channel } => expr_contains_while(channel),
+        Expr::Number(_)
+        | Expr::Float(_)
+        | Expr::StringLit(_)
+        | Expr::Variable(_)
+        | Expr::AtomRef { .. } => false,
+    }
+}
+
+fn expr_is_numeric_literal(expr: &Expr) -> bool {
+    matches!(expr, Expr::Number(_) | Expr::Float(_))
+}
+
 type Env<'a> = HashMap<String, Dynamic<'a>>;
 type DynResult<'a> = MumeiResult<Dynamic<'a>>;
 
@@ -1565,6 +2350,7 @@ pub fn build_contradiction_feedback(
     conflicting_constraints: &[String],
     raw_labels: &[String],
     structured_labels: &[StructuredLabel],
+    minimal_core: Option<&[String]>,
 ) -> serde_json::Value {
     let explanation = if conflicting_constraints.is_empty() {
         "The constraints are mutually contradictory, but the specific conflicting set could not be determined. \
@@ -1578,7 +2364,7 @@ pub fn build_contradiction_feedback(
         )
     };
 
-    json!({
+    let mut feedback = json!({
         "failure_type": FAILURE_INVARIANT_VIOLATED,
         "atom": atom_name,
         "conflicting_constraints": conflicting_constraints,
@@ -1586,7 +2372,205 @@ pub fn build_contradiction_feedback(
         "structured_unsat_core": structured_labels,
         "explanation": explanation,
         "suggestion": suggestion_for_failure_type(FAILURE_INVARIANT_VIOLATED)
-    })
+    });
+
+    if let Some(minimal_core) = minimal_core {
+        feedback["minimal_unsat_core"] = json!(minimal_core);
+        feedback["minimal_core_size"] = json!(minimal_core.len());
+        feedback["total_core_size"] = json!(raw_labels.len());
+        feedback["reduction_ratio"] = json!(if raw_labels.is_empty() {
+            0.0
+        } else {
+            minimal_core.len() as f64 / raw_labels.len() as f64
+        });
+
+        if minimal_core.is_empty() {
+            feedback["suggestion"] = json!(suggestion_for_failure_type(FAILURE_INVARIANT_VIOLATED));
+        } else if minimal_core.len() == 1 {
+            feedback["suggestion"] = json!(format!(
+                "Single constraint causing contradiction: '{}'. Consider relaxing or removing it.",
+                minimal_core[0]
+            ));
+        } else {
+            feedback["suggestion"] = json!(format!(
+                "Minimal conflicting constraints: [{}]. Consider relaxing one of these.",
+                minimal_core.join(", ")
+            ));
+        }
+    }
+
+    feedback
+}
+
+const MINIMAL_UNSAT_CORE_PROBE_TIMEOUT_MS: u32 = 1000;
+const MAX_MINIMAL_UNSAT_CORE_PROBES: usize = 512;
+
+struct MinimalUnsatCoreProbe<'ctx> {
+    solver: Solver<'ctx>,
+    context: &'ctx Context,
+    probes_used: usize,
+}
+
+impl<'ctx> MinimalUnsatCoreProbe<'ctx> {
+    fn new(source_solver: &Solver<'ctx>, context: &'ctx Context) -> Self {
+        let solver = Solver::new(context);
+        let mut params = z3::Params::new(context);
+        params.set_u32("timeout", MINIMAL_UNSAT_CORE_PROBE_TIMEOUT_MS);
+        solver.set_params(&params);
+
+        for assertion in source_solver.get_assertions() {
+            solver.assert(&assertion);
+        }
+
+        Self {
+            solver,
+            context,
+            probes_used: 0,
+        }
+    }
+
+    fn has_budget(&self) -> bool {
+        self.probes_used < MAX_MINIMAL_UNSAT_CORE_PROBES
+    }
+
+    fn is_unsat_with_labels(&mut self, labels: &[String]) -> bool {
+        if labels.is_empty() || !self.has_budget() {
+            return false;
+        }
+
+        self.probes_used += 1;
+        let assumptions: Vec<Bool> = labels
+            .iter()
+            .map(|label| Bool::new_const(self.context, normalize_tracking_label(label)))
+            .collect();
+
+        self.solver.check_assumptions(&assumptions) == SatResult::Unsat
+    }
+}
+
+/// Extract a deletion-minimal unsat core from tracked Z3 constraint labels.
+///
+/// Given a set of constraints that are unsatisfiable together, find a subset
+/// where removing any single remaining label makes that subset satisfiable.
+/// This helps users understand which specific constraints are conflicting and
+/// may need to be relaxed.
+///
+/// # Arguments
+/// * `solver` - Z3 solver instance containing tracked assertions
+/// * `all_labels` - Constraint labels to test
+/// * `context` - Z3 context for creating label assumptions
+///
+/// # Returns
+/// * `Vec<String>` - Minimal set of labels that cause unsatisfiability
+pub fn extract_minimal_unsat_core<'ctx>(
+    solver: &Solver<'ctx>,
+    all_labels: &[String],
+    context: &'ctx Context,
+) -> Vec<String> {
+    if all_labels.is_empty() {
+        return vec![];
+    }
+    if all_labels.len() == 1 {
+        return all_labels.to_vec();
+    }
+
+    let mut probe = MinimalUnsatCoreProbe::new(solver, context);
+    let mut minimal = all_labels.to_vec();
+    let mut chunk_size = minimal.len() / 2;
+
+    while chunk_size > 0 && minimal.len() > 1 && probe.has_budget() {
+        let mut removed_chunk = false;
+        let mut start = 0;
+
+        while start < minimal.len() && probe.has_budget() {
+            let end = (start + chunk_size).min(minimal.len());
+            let test_set: Vec<String> = minimal
+                .iter()
+                .enumerate()
+                .filter(|(idx, _)| *idx < start || *idx >= end)
+                .map(|(_, label)| label.clone())
+                .collect();
+
+            if !test_set.is_empty() && probe.is_unsat_with_labels(&test_set) {
+                minimal = test_set;
+                chunk_size = (minimal.len() / 2).max(1);
+                removed_chunk = true;
+                break;
+            }
+
+            start += chunk_size;
+        }
+
+        if !removed_chunk {
+            chunk_size /= 2;
+        }
+    }
+
+    extract_minimal_unsat_core_linear_with_probe(&mut probe, &minimal)
+}
+
+/// Extract a deletion-minimal unsat core using a linear greedy pass.
+pub fn extract_minimal_unsat_core_linear<'ctx>(
+    solver: &Solver<'ctx>,
+    all_labels: &[String],
+    context: &'ctx Context,
+) -> Vec<String> {
+    if all_labels.is_empty() {
+        return vec![];
+    }
+
+    let mut probe = MinimalUnsatCoreProbe::new(solver, context);
+    extract_minimal_unsat_core_linear_with_probe(&mut probe, all_labels)
+}
+
+fn extract_minimal_unsat_core_linear_with_probe<'ctx>(
+    probe: &mut MinimalUnsatCoreProbe<'ctx>,
+    all_labels: &[String],
+) -> Vec<String> {
+    let mut minimal = all_labels.to_vec();
+    let mut i = 0;
+
+    while i < minimal.len() && minimal.len() > 1 && probe.has_budget() {
+        let test_set: Vec<String> = minimal
+            .iter()
+            .enumerate()
+            .filter(|(idx, _)| *idx != i)
+            .map(|(_, label)| label.clone())
+            .collect();
+
+        if probe.is_unsat_with_labels(&test_set) {
+            minimal = test_set;
+        } else {
+            i += 1;
+        }
+    }
+
+    minimal
+}
+
+fn normalize_tracking_label(label: &str) -> String {
+    label
+        .strip_prefix('|')
+        .and_then(|without_prefix| without_prefix.strip_suffix('|'))
+        .unwrap_or(label)
+        .to_string()
+}
+
+/// Build contradiction feedback with minimal unsat core information.
+pub fn build_contradiction_feedback_with_minimal_core(
+    atom_name: &str,
+    conflicting_constraints: &[String],
+    raw_unsat_core: &[String],
+    structured_labels: &[StructuredLabel],
+    minimal_core: &[String],
+) -> serde_json::Value {
+    build_contradiction_feedback(
+        atom_name,
+        conflicting_constraints,
+        raw_unsat_core,
+        structured_labels,
+        Some(minimal_core),
+    )
 }
 
 /// Default constraint budget per atom (max number of solver.assert() calls).
@@ -5356,6 +6340,28 @@ pub fn verify_with_config(
     verify_inner(hir_atom, output_dir, module_env, timeout_ms)
 }
 
+pub fn verify_with_verification_config(
+    hir_atom: &HirAtom,
+    output_dir: &Path,
+    module_env: &ModuleEnv,
+    config: &VerificationConfig,
+) -> MumeiResult<()> {
+    verify_inner(hir_atom, output_dir, module_env, config.timeout_ms)
+}
+
+pub fn verify_module(
+    module_env: &ModuleEnv,
+    config: &VerificationConfig,
+) -> MumeiResult<ModuleVerificationReport> {
+    let cross_spec = if config.enable_cross_spec_verification {
+        Some(CrossSpecVerifier::new(module_env).verify_all())
+    } else {
+        None
+    };
+
+    Ok(ModuleVerificationReport { cross_spec })
+}
+
 pub fn verify(hir_atom: &HirAtom, output_dir: &Path, module_env: &ModuleEnv) -> MumeiResult<()> {
     verify_inner(hir_atom, output_dir, module_env, 10000)
 }
@@ -6554,7 +7560,8 @@ fn verify_inner(
         if let Some(ens_bool) = ens_z3.as_bool() {
             solver.push();
             solver.assert(&ens_bool.not());
-            if solver.check() == SatResult::Sat {
+            let ensures_check = solver.check();
+            if ensures_check == SatResult::Sat {
                 // Extract counterexample from Z3 model
                 let (ce_a, ce_b, ce_value) = if let Some(model) = solver.get_model() {
                     let mut ce_json = serde_json::Map::new();
@@ -6641,6 +7648,19 @@ fn verify_inner(
                 }
                 return Err(err);
             }
+            if ensures_check == SatResult::Unknown {
+                solver.pop(1);
+                metrics.record_phase(
+                    "Phase 5: ensures verification (unknown)",
+                    phase_start.elapsed(),
+                );
+                metrics.total_constraints = constraint_count_cell.get();
+                metrics.print_summary();
+                return Err(MumeiError::verification_at(
+                    "Z3 returned unknown while checking the postcondition.",
+                    atom.span.clone(),
+                ));
+            }
             solver.pop(1);
         }
         env.remove("result");
@@ -6697,9 +7717,14 @@ fn verify_inner(
     metrics.record_phase("Phase 5: ensures verification", phase_start.elapsed());
 
     let z3_check_start = std::time::Instant::now();
-    if solver.check() == SatResult::Unsat {
+    let final_check = solver.check();
+    if final_check == SatResult::Unsat {
         let unsat_core = solver.get_unsat_core();
-        let core_labels: Vec<String> = unsat_core.iter().map(|b| format!("{}", b)).collect();
+        let core_labels: Vec<String> = unsat_core
+            .iter()
+            .map(|b| normalize_tracking_label(&b.decl().name()))
+            .collect();
+        let minimal_core = extract_minimal_unsat_core(&solver, &core_labels, &ctx);
 
         let structured_labels: Vec<StructuredLabel> = core_labels
             .iter()
@@ -6716,6 +7741,7 @@ fn verify_inner(
             &conflicting_constraints,
             &core_labels,
             &structured_labels,
+            Some(&minimal_core),
         );
 
         save_visualizer_report(
@@ -6750,6 +7776,19 @@ fn verify_inner(
         metrics.print_summary();
         return Err(MumeiError::verification_at(
             constraint_summary,
+            atom.span.clone(),
+        ));
+    }
+    if final_check == SatResult::Unknown {
+        metrics.z3_check_time = z3_check_start.elapsed();
+        metrics.total_constraints = constraint_count_cell.get();
+        metrics.record_phase(
+            "Phase 6: final Z3 check (unknown)",
+            z3_check_start.elapsed(),
+        );
+        metrics.print_summary();
+        return Err(MumeiError::verification_at(
+            "Z3 returned unknown during the final consistency check.",
             atom.span.clone(),
         ));
     }
@@ -9335,7 +10374,10 @@ fn save_visualizer_report(
 mod tests {
     use super::*;
     use crate::hir::lower_atom_to_hir_with_env;
-    use crate::parser::{Atom, ImplDef, Param, Span, TraitDef, TraitMethod, TrustLevel};
+    use crate::parser::{
+        Atom, Effect, EffectDef, EffectTransition, ImplDef, Param, Span, TraitDef, TraitMethod,
+        TrustLevel,
+    };
     use std::path::Path;
 
     fn test_atom(
@@ -9379,6 +10421,78 @@ mod tests {
             fn_contract_requires: None,
             fn_contract_ensures: None,
         }
+    }
+
+    #[test]
+    fn test_decidable_fragment_warning_detects_unbounded_array_access() {
+        let atom = test_atom(
+            "read_unbounded",
+            vec![
+                test_param("arr", Some("[i64]")),
+                test_param("i", Some("i64")),
+            ],
+            "i >= 0",
+            "result == arr[i]",
+            "arr[i]",
+            Some("i64"),
+        );
+        let module_env = ModuleEnv::new();
+
+        let tags = detect_logic_fragment_tags(&atom, &module_env);
+        assert!(tags.iter().any(|tag| tag == "array_without_bounds"));
+        assert!(outside_decidable_fragment_warning(&atom, &module_env)
+            .is_some_and(|warning| warning.contains("outside_decidable_fragment")));
+    }
+
+    #[test]
+    fn test_decidable_fragment_warning_accepts_explicit_array_bounds() {
+        let atom = test_atom(
+            "read_bounded",
+            vec![
+                test_param("arr", Some("[i64]")),
+                test_param("i", Some("i64")),
+            ],
+            "i >= 0 && i < len(arr)",
+            "result == arr[i]",
+            "arr[i]",
+            Some("i64"),
+        );
+        let module_env = ModuleEnv::new();
+
+        let tags = detect_logic_fragment_tags(&atom, &module_env);
+        assert!(!tags.iter().any(|tag| tag == "array_without_bounds"));
+    }
+
+    #[test]
+    fn test_decidable_fragment_warning_detects_complex_temporal_effect() {
+        let mut atom = test_atom("temporal", vec![], "true", "result == 0", "0", Some("i64"));
+        atom.effects.push(Effect::simple("Protocol"));
+
+        let mut module_env = ModuleEnv::new();
+        module_env.register_effect(&EffectDef {
+            name: "Protocol".to_string(),
+            params: vec![],
+            constraint: None,
+            includes: vec![],
+            refinement: None,
+            parent: vec![],
+            span: Span::default(),
+            states: vec!["S0", "S1", "S2", "S3", "S4"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            transitions: (0..9)
+                .map(|idx| EffectTransition {
+                    operation: format!("op{idx}"),
+                    from_state: "S0".to_string(),
+                    to_state: "S1".to_string(),
+                })
+                .collect(),
+            initial_state: Some("S0".to_string()),
+        });
+
+        let tags = detect_logic_fragment_tags(&atom, &module_env);
+        assert!(tags.iter().any(|tag| tag == "complex_temporal_effect"));
     }
 
     #[test]
@@ -9767,7 +10881,8 @@ mod tests {
             .iter()
             .filter_map(|label| parse_tracking_label(label))
             .collect();
-        let feedback = build_contradiction_feedback("test_atom", &constraints, &raw, &structured);
+        let feedback =
+            build_contradiction_feedback("test_atom", &constraints, &raw, &structured, None);
         assert_eq!(feedback["failure_type"], FAILURE_INVARIANT_VIOLATED);
         assert_eq!(feedback["atom"], "test_atom");
         assert!(feedback["conflicting_constraints"].is_array());
@@ -9794,7 +10909,7 @@ mod tests {
 
     #[test]
     fn test_build_contradiction_feedback_empty() {
-        let feedback = build_contradiction_feedback("test_atom", &[], &[], &[]);
+        let feedback = build_contradiction_feedback("test_atom", &[], &[], &[], None);
         assert_eq!(feedback["atom"], "test_atom");
         assert!(feedback["conflicting_constraints"]
             .as_array()
@@ -9808,6 +10923,158 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("could not be determined"));
+    }
+
+    #[test]
+    fn test_extract_minimal_unsat_core_simple() {
+        let cfg = Config::new();
+        let ctx = Context::new(&cfg);
+        let solver = Solver::new(&ctx);
+        let a = Bool::new_const(&ctx, "A");
+        let b = Bool::new_const(&ctx, "B");
+        let track_a = Bool::new_const(&ctx, "track_a");
+        let track_not_a = Bool::new_const(&ctx, "track_not_a");
+        let track_b = Bool::new_const(&ctx, "track_b");
+
+        solver.assert_and_track(&a, &track_a);
+        solver.assert_and_track(&a.not(), &track_not_a);
+        solver.assert_and_track(&b, &track_b);
+
+        assert_eq!(solver.check(), SatResult::Unsat);
+
+        let labels = vec![
+            "track_a".to_string(),
+            "track_not_a".to_string(),
+            "track_b".to_string(),
+        ];
+        let minimal = extract_minimal_unsat_core(&solver, &labels, &ctx);
+
+        assert_eq!(minimal.len(), 2);
+        assert!(minimal.contains(&"track_a".to_string()));
+        assert!(minimal.contains(&"track_not_a".to_string()));
+        assert!(!minimal.contains(&"track_b".to_string()));
+    }
+
+    #[test]
+    fn test_extract_minimal_unsat_core_empty() {
+        let cfg = Config::new();
+        let ctx = Context::new(&cfg);
+        let solver = Solver::new(&ctx);
+
+        let minimal = extract_minimal_unsat_core(&solver, &[], &ctx);
+        assert!(minimal.is_empty());
+    }
+
+    #[test]
+    fn test_extract_minimal_unsat_core_single() {
+        let cfg = Config::new();
+        let ctx = Context::new(&cfg);
+        let solver = Solver::new(&ctx);
+
+        let labels = vec!["track_a".to_string()];
+        let minimal = extract_minimal_unsat_core(&solver, &labels, &ctx);
+
+        assert_eq!(minimal, labels);
+    }
+
+    #[test]
+    fn test_extract_minimal_unsat_core_linear_matches_simple_case() {
+        let cfg = Config::new();
+        let ctx = Context::new(&cfg);
+        let solver = Solver::new(&ctx);
+        let a = Bool::new_const(&ctx, "A");
+        let b = Bool::new_const(&ctx, "B");
+        let track_a = Bool::new_const(&ctx, "track_a");
+        let track_not_a = Bool::new_const(&ctx, "track_not_a");
+        let track_b = Bool::new_const(&ctx, "track_b");
+
+        solver.assert_and_track(&a, &track_a);
+        solver.assert_and_track(&a.not(), &track_not_a);
+        solver.assert_and_track(&b, &track_b);
+
+        let labels = vec![
+            "track_a".to_string(),
+            "track_not_a".to_string(),
+            "track_b".to_string(),
+        ];
+        let minimal = extract_minimal_unsat_core_linear(&solver, &labels, &ctx);
+
+        assert_eq!(minimal.len(), 2);
+        assert!(minimal.contains(&"track_a".to_string()));
+        assert!(minimal.contains(&"track_not_a".to_string()));
+        assert!(!minimal.contains(&"track_b".to_string()));
+    }
+
+    #[test]
+    fn test_build_contradiction_feedback_with_minimal_core() {
+        let constraints = vec![
+            "Precondition (requires)".to_string(),
+            "Refined type constraint: n (Nat)".to_string(),
+        ];
+        let raw = vec![
+            "track_requires".to_string(),
+            "track_refined_type_n::Nat".to_string(),
+            "track_quantifier_0".to_string(),
+        ];
+        let minimal = vec![
+            "track_requires".to_string(),
+            "track_refined_type_n::Nat".to_string(),
+        ];
+        let structured: Vec<StructuredLabel> = raw
+            .iter()
+            .filter_map(|label| parse_tracking_label(label))
+            .collect();
+
+        let feedback = build_contradiction_feedback_with_minimal_core(
+            "test_atom",
+            &constraints,
+            &raw,
+            &structured,
+            &minimal,
+        );
+
+        assert_eq!(feedback["minimal_unsat_core"], json!(minimal));
+        assert_eq!(feedback["minimal_core_size"], 2);
+        assert_eq!(feedback["total_core_size"], 3);
+        assert_eq!(feedback["reduction_ratio"], json!(2.0 / 3.0));
+        assert!(feedback["suggestion"]
+            .as_str()
+            .unwrap()
+            .contains("Minimal conflicting constraints"));
+    }
+
+    #[test]
+    fn test_build_contradiction_feedback_accepts_optional_minimal_core() {
+        let raw = vec![
+            "track_requires".to_string(),
+            "track_refined_type_n::Nat".to_string(),
+            "track_quantifier_0".to_string(),
+        ];
+        let minimal = vec![
+            "track_requires".to_string(),
+            "track_refined_type_n::Nat".to_string(),
+        ];
+        let structured: Vec<StructuredLabel> = raw
+            .iter()
+            .filter_map(|label| parse_tracking_label(label))
+            .collect();
+        let constraints: Vec<String> = structured
+            .iter()
+            .map(|label| label.description.clone())
+            .collect();
+
+        let feedback = build_contradiction_feedback(
+            "test_atom",
+            &constraints,
+            &raw,
+            &structured,
+            Some(&minimal),
+        );
+
+        assert_eq!(feedback["minimal_unsat_core"], json!(minimal));
+        assert_eq!(feedback["minimal_core_size"], 2);
+        assert_eq!(feedback["total_core_size"], 3);
+        assert_eq!(feedback["reduction_ratio"], json!(2.0 / 3.0));
     }
 
     // =========================================================================

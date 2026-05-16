@@ -1,7 +1,7 @@
 # 🔬 Mumei Language Reference
 ## Type System
 ### Refinement Types
-Types with embedded logical predicates verified by Z3.
+Types with embedded logical predicates verified by Z3. For Z3-stable refinement patterns, see [Linear arithmetic](SPEC_GUIDE.md#linear-arithmetic).
 ```mumei
 type Nat = i64 where v >= 0;
 type Pos = f64 where v > 0.0;
@@ -173,6 +173,8 @@ body: {
 ```
 ---
 ## Quantifiers in Contracts
+Use bounded ranges or finite collections when possible; see [Quantifiers](SPEC_GUIDE.md#quantifiers) for proof-friendly restrictions.
+
 ```mumei
 // Real insertion-sort body with `arr[i] = val` store syntax.
 // `trusted` for MIR move-analysis false-positive on inner-loop `i = i + 1`.
@@ -195,6 +197,8 @@ ensures: result >= 0 - 1 && result < n;
 body: { ... };
 ```
 ### Array Element Assignment (`arr[i] = v`)
+Explicit bounds such as `0 <= idx && idx < len` keep array obligations in the decidable fragment; see [Array and sequence access](SPEC_GUIDE.md#array-and-sequence-access).
+
 `arr[idx] = expr` は `Stmt::ArrayStore` としてパースされ、Z3 では
 `Array::store(arr, idx, expr)` でモデル化される。後続の `arr[j]` 読み取りは
 環境内の最新配列から `select` されるため、
@@ -313,6 +317,8 @@ atom process_json(input: Str)
 
 ---
 ## Stateful Effects (Temporal Ordering)
+
+Keep state machines finite with explicit transitions; see [Effects and temporal state](SPEC_GUIDE.md#effects-and-temporal-state).
 
 Effects can define states and transitions verified at compile time:
 

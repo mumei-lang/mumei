@@ -43,7 +43,21 @@ A proof certificate (`.proof-cert.json`) is a JSON file containing cryptographic
   "dependencies": ["helper", "validate"],
   "effects": ["Log"],
   "requires": "x >= 0",
-  "ensures": "result >= x"
+  "ensures": "result >= x",
+  "translator_version": "mumei-lean-translator-ir-v1",
+  "binder_mapping": { "x": "x", "result": "result" },
+  "bridge_lemma_hash": "d8d270d6429a3e31c608dc109876df4ec99ee1243796430775a5b0ef18b5ac24",
+  "manual_lemma_reason": null,
+  "translator_ir": {
+    "sort": "contract_obligation",
+    "binders": [
+      { "mumei_name": "x", "lean_name": "x", "mumei_type": "i64", "lean_type": "Int", "role": "param" },
+      { "mumei_name": "result", "lean_name": "result", "mumei_type": "i64", "lean_type": "Int", "role": "result" }
+    ],
+    "theorem_goal": "(x >= 0) -> (result >= x)",
+    "provenance_span": { "file": "src/math.mm", "line": 1, "col": 1, "len": 3 },
+    "lowering_rules": ["type_system_mapping", "contract_lowering"]
+  }
 }
 ```
 
@@ -57,6 +71,56 @@ A proof certificate (`.proof-cert.json`) is a JSON file containing cryptographic
 | `effects` | `Vec<String>` | Declared effect names |
 | `requires` | `String` | Precondition contract text |
 | `ensures` | `String` | Postcondition contract text |
+| `z3_result_class` | `String` | Normalized solver class used for Lean routing (`unknown`, `timeout`, `resource_limit`, `unsat`, etc.) |
+| `escalation_reason` | `Option<String>` | Reason an obligation is routed to Lean |
+| `logic_fragment_tags` | `Vec<String>` | Detected fragments such as arrays, quantifiers, strings, non-linear arithmetic, or temporal effects |
+| `translator_version` | `String` | Lean translator contract version. Version mismatch invalidates Lean proof cache acceptance. |
+| `binder_mapping` | `HashMap<String, String>` | Mumei witness/result names mapped to generated Lean binder names |
+| `bridge_lemma_hash` | `String` | SHA-256-compatible identifier of the bridge lemma set used during lowering |
+| `manual_lemma_reason` | `Option<String>` | Reason partial translation must be completed by a manual lemma |
+| `translator_ir` | `TranslatorIRMetadata` | Typed intermediate metadata: obligation sort, binders, theorem goal, provenance span, and lowering rules |
+| `lean_metadata` | `Option<LeanResultMetadata>` | Lean result metadata emitted by mumei-lean (`status`, theorem name, translator version, bridge lemma hash, proof path, diagnostics) |
+
+## Lean Escalation Translator Contract
+
+Mumei emits a typed escalation bundle for Z3 obligations that are outside the decidable fragment (`unknown`, `timeout`, or `resource_limit`) and for trusted atoms that require higher-assurance review. The bridge is intentionally one-way:
+
+```
+escalation_bundle.json -> generated Lean source -> .olean/result certificate -> upgraded proof certificate
+```
+
+The Mumei compiler never accepts an upgraded `lean_verified` atom unless the atom source hash still matches and the translator contract metadata is current. A mismatched `translator_version` or `bridge_lemma_hash` is reported as stale and requires re-translation/rebuild.
+
+### Type system mapping
+
+| Mumei | Lean 4 lowering |
+|---|---|
+| `i64` | `Int` plus bridge lemmas for bounded `[-2^63, 2^63)` semantics when overflow-sensitive |
+| `bool` | `Bool` |
+| `string` / `Str` | `String` plus string/regex bridge lemmas for operations outside Lean's kernel primitives |
+| `array` / `[T]` | `List T` plus array-bounds lemmas for total `get!`/index semantics |
+| `struct` | Lean `structure` with field-level types and refinements |
+| `enum` | Lean `inductive` with constructor-specific fields |
+
+### Refinement type lowering
+
+A Mumei refinement `{v: T | P(v)}` lowers either to a Lean subtype `{v : T // P v}` when the witness is first-class, or to an explicit predicate argument when the witness is only needed in a theorem statement. `translator_ir.binders[*].refinement` records the raw predicate that produced the lowered proof obligation.
+
+### Loop invariant and recursion encoding
+
+`while` / `for` obligations lower to `translator_ir.sort = "loop_invariant"`. The Lean side must encode these obligations using an induction hypothesis or well-founded recursion proof. If the translator cannot identify a measure or invariant shape, it must mark the atom as `manual_lemma_required` with a non-empty `manual_lemma_reason`.
+
+### Semantic gap bridge
+
+The bridge lemma set covers:
+
+- base type coercions and subtype projection
+- integer overflow and bounded `i64` arithmetic
+- array bounds and total list indexing semantics
+- string/regex semantics
+- effect-state transition semantics
+
+Unsupported or partially translated syntax must not be treated as success. It is classified as `manual_lemma_required`, and every such atom must carry `manual_lemma_reason`.
 
 ## Proof Hash Algorithm
 

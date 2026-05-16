@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::resolver;
-use crate::verification::ModuleEnv;
+use crate::verification::{self, ModuleEnv, TranslatorIRMetadata};
 
 /// Top-level proof certificate for a Mumei source file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,6 +69,98 @@ pub struct AtomCertificate {
     /// Postcondition contract text (P5-A)
     #[serde(default)]
     pub ensures: String,
+    /// Deterministic Z3 outcome class used by Lean escalation routing.
+    #[serde(default)]
+    pub z3_result_class: String,
+    /// Reason this atom should be escalated to Lean, when applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub escalation_reason: Option<String>,
+    /// Logical fragments detected in this proof obligation.
+    #[serde(default)]
+    pub logic_fragment_tags: Vec<String>,
+    /// Translator version required for Lean escalation cache validity.
+    #[serde(default)]
+    pub translator_version: String,
+    /// Mumei witness name to generated Lean binder name mapping.
+    #[serde(default)]
+    pub binder_mapping: HashMap<String, String>,
+    /// Hash of the bridge lemma set used by this translation contract.
+    #[serde(default)]
+    pub bridge_lemma_hash: String,
+    /// Structured reason when this atom requires manual Lean lemma work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manual_lemma_reason: Option<String>,
+    /// Typed intermediate representation metadata for Lean lowering.
+    #[serde(default)]
+    pub translator_ir: TranslatorIRMetadata,
+    /// Lean-side result metadata populated by mumei-lean.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lean_metadata: Option<LeanResultMetadata>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LeanResultMetadata {
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub theorem_name: String,
+    #[serde(default)]
+    pub translator_version: String,
+    #[serde(default)]
+    pub bridge_lemma_hash: String,
+    #[serde(default)]
+    pub proof_path: String,
+    #[serde(default)]
+    pub diagnostics: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EscalationCandidate {
+    pub name: String,
+    pub z3_check_result: String,
+    pub z3_result_class: String,
+    pub status: String,
+    pub content_hash: String,
+    pub proof_hash: String,
+    pub dependencies: Vec<String>,
+    pub effects: Vec<String>,
+    pub requires: String,
+    pub ensures: String,
+    pub escalation_reason: String,
+    pub logic_fragment_tags: Vec<String>,
+    #[serde(default)]
+    pub translator_version: String,
+    #[serde(default)]
+    pub binder_mapping: HashMap<String, String>,
+    #[serde(default)]
+    pub bridge_lemma_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manual_lemma_reason: Option<String>,
+    #[serde(default)]
+    pub translator_ir: TranslatorIRMetadata,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lean_metadata: Option<LeanResultMetadata>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct EscalationBundleSummary {
+    pub total_atoms: usize,
+    pub candidate_count: usize,
+    pub by_reason: HashMap<String, usize>,
+    pub by_logic_fragment: HashMap<String, usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EscalationBundle {
+    pub version: String,
+    pub timestamp: String,
+    pub file: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package_version: Option<String>,
+    pub summary: EscalationBundleSummary,
+    pub candidates: Vec<EscalationCandidate>,
 }
 
 /// Compute SHA-256 hash of an atom's logical content.
@@ -149,6 +241,18 @@ pub fn generate_certificate(
 
             // P5-A: Declared effect names
             let effects: Vec<String> = atom.effects.iter().map(|e| e.name.clone()).collect();
+            let classification = verification::classify_atom_for_lean_escalation(
+                atom, module_env, &z3_result, &status,
+            );
+            let mut translator_ir = verification::build_translator_ir_metadata(atom, module_env);
+            let manual_lemma_reason =
+                manual_lemma_reason_for_atom(atom, &classification.logic_fragment_tags);
+            translator_ir.manual_lemma_reason = manual_lemma_reason.clone();
+            let binder_mapping = translator_ir
+                .binders
+                .iter()
+                .map(|binder| (binder.mumei_name.clone(), binder.lean_name.clone()))
+                .collect();
 
             AtomCertificate {
                 name: atom.name.clone(),
@@ -160,6 +264,15 @@ pub fn generate_certificate(
                 effects,
                 requires: atom.requires.clone(),
                 ensures: atom.ensures.clone(),
+                z3_result_class: classification.z3_result_class,
+                escalation_reason: classification.escalation_reason,
+                logic_fragment_tags: classification.logic_fragment_tags,
+                translator_version: verification::LEAN_TRANSLATOR_VERSION.to_string(),
+                binder_mapping,
+                bridge_lemma_hash: verification::LEAN_BRIDGE_LEMMA_HASH.to_string(),
+                manual_lemma_reason,
+                translator_ir,
+                lean_metadata: None,
             }
         })
         .collect();
@@ -186,6 +299,61 @@ pub fn generate_certificate(
     cert.certificate_hash = compute_certificate_hash(&cert);
 
     cert
+}
+
+pub fn generate_escalation_bundle(cert: &ProofCertificate) -> EscalationBundle {
+    let candidates: Vec<EscalationCandidate> = cert
+        .atoms
+        .iter()
+        .filter_map(|atom| {
+            let escalation_reason = atom.escalation_reason.clone()?;
+            Some(EscalationCandidate {
+                name: atom.name.clone(),
+                z3_check_result: atom.z3_check_result.clone(),
+                z3_result_class: atom.z3_result_class.clone(),
+                status: atom.status.clone(),
+                content_hash: atom.content_hash.clone(),
+                proof_hash: atom.proof_hash.clone(),
+                dependencies: atom.dependencies.clone(),
+                effects: atom.effects.clone(),
+                requires: atom.requires.clone(),
+                ensures: atom.ensures.clone(),
+                escalation_reason,
+                logic_fragment_tags: atom.logic_fragment_tags.clone(),
+                translator_version: atom.translator_version.clone(),
+                binder_mapping: atom.binder_mapping.clone(),
+                bridge_lemma_hash: atom.bridge_lemma_hash.clone(),
+                manual_lemma_reason: atom.manual_lemma_reason.clone(),
+                translator_ir: atom.translator_ir.clone(),
+                lean_metadata: atom.lean_metadata.clone(),
+            })
+        })
+        .collect();
+
+    let mut summary = EscalationBundleSummary {
+        total_atoms: cert.atoms.len(),
+        candidate_count: candidates.len(),
+        ..EscalationBundleSummary::default()
+    };
+    for candidate in &candidates {
+        *summary
+            .by_reason
+            .entry(candidate.escalation_reason.clone())
+            .or_insert(0) += 1;
+        for tag in &candidate.logic_fragment_tags {
+            *summary.by_logic_fragment.entry(tag.clone()).or_insert(0) += 1;
+        }
+    }
+
+    EscalationBundle {
+        version: "1.0".to_string(),
+        timestamp: cert.timestamp.clone(),
+        file: cert.file.clone(),
+        package_name: cert.package_name.clone(),
+        package_version: cert.package_version.clone(),
+        summary,
+        candidates,
+    }
 }
 
 /// Compute SHA-256 hash of the serialized certificate.
@@ -236,10 +404,14 @@ pub fn verify_certificate(
             let status = if let Some(current_hash) = current_hashes.get(&ac.name) {
                 if current_hash != &ac.content_hash {
                     "changed".to_string()
-                } else if ac.z3_check_result == "unsat"
-                    || (allow_lean_verified && ac.z3_check_result == "lean_verified")
-                {
+                } else if ac.z3_check_result == "unsat" {
                     "proven".to_string()
+                } else if allow_lean_verified && ac.z3_check_result == "lean_verified" {
+                    if lean_certificate_metadata_is_current(ac) {
+                        "proven".to_string()
+                    } else {
+                        "stale_translator".to_string()
+                    }
                 } else {
                     "unproven".to_string()
                 }
@@ -249,6 +421,38 @@ pub fn verify_certificate(
             (ac.name.clone(), status)
         })
         .collect()
+}
+
+fn manual_lemma_reason_for_atom(
+    atom: &crate::parser::Atom,
+    logic_fragment_tags: &[String],
+) -> Option<String> {
+    if atom.body_expr.contains("match ")
+        || logic_fragment_tags
+            .iter()
+            .any(|tag| tag == "inductive_data_type")
+    {
+        Some("inductive_or_pattern_translation_requires_manual_lemma".to_string())
+    } else if atom.requires.contains("regex") || atom.ensures.contains("regex") {
+        Some("regex_semantics_require_manual_lemma".to_string())
+    } else {
+        None
+    }
+}
+
+fn lean_certificate_metadata_is_current(atom: &AtomCertificate) -> bool {
+    if atom.translator_version != verification::LEAN_TRANSLATOR_VERSION
+        || atom.bridge_lemma_hash != verification::LEAN_BRIDGE_LEMMA_HASH
+    {
+        return false;
+    }
+    let Some(metadata) = atom.lean_metadata.as_ref() else {
+        return false;
+    };
+    metadata.status == "lean_verified"
+        && !metadata.theorem_name.is_empty()
+        && metadata.translator_version == verification::LEAN_TRANSLATOR_VERSION
+        && metadata.bridge_lemma_hash == verification::LEAN_BRIDGE_LEMMA_HASH
 }
 
 /// Compute SHA-256 hash of arbitrary data (utility for other crates).
@@ -270,6 +474,12 @@ pub fn load_certificate(path: &Path) -> Result<ProofCertificate, String> {
 pub fn save_certificate(cert: &ProofCertificate, path: &Path) -> Result<(), String> {
     let json = serde_json::to_string_pretty(cert)
         .map_err(|e| format!("Failed to serialize certificate: {}", e))?;
+    std::fs::write(path, json).map_err(|e| format!("Failed to write {}: {}", path.display(), e))
+}
+
+pub fn save_escalation_bundle(bundle: &EscalationBundle, path: &Path) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(bundle)
+        .map_err(|e| format!("Failed to serialize escalation bundle: {}", e))?;
     std::fs::write(path, json).map_err(|e| format!("Failed to write {}: {}", path.display(), e))
 }
 
@@ -534,7 +744,7 @@ mod tests {
             ("lean_verified".to_string(), "verified".to_string()),
         );
         let module_env = ModuleEnv::new();
-        let cert = generate_certificate("test.mm", &atoms, &results, &module_env, None, None);
+        let mut cert = generate_certificate("test.mm", &atoms, &results, &module_env, None, None);
 
         // Default (backwards-compatible): lean_verified is NOT proven.
         let status_default = verify_certificate(&cert, &atoms, false);
@@ -543,7 +753,23 @@ mod tests {
             ("hard_lemma".to_string(), "unproven".to_string())
         );
 
-        // Opt-in: lean_verified IS proven.
+        // Opt-in still rejects lean_verified without Lean result metadata.
+        let status_missing_metadata = verify_certificate(&cert, &atoms, true);
+        assert_eq!(
+            status_missing_metadata[0],
+            ("hard_lemma".to_string(), "stale_translator".to_string())
+        );
+
+        cert.atoms[0].lean_metadata = Some(LeanResultMetadata {
+            status: "lean_verified".to_string(),
+            theorem_name: "hard_lemma_correct".to_string(),
+            translator_version: verification::LEAN_TRANSLATOR_VERSION.to_string(),
+            bridge_lemma_hash: verification::LEAN_BRIDGE_LEMMA_HASH.to_string(),
+            proof_path: "Generated/Test.lean".to_string(),
+            diagnostics: vec![],
+        });
+
+        // Opt-in: lean_verified is proven only with current Lean metadata.
         let status_opt_in = verify_certificate(&cert, &atoms, true);
         assert_eq!(
             status_opt_in[0],

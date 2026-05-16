@@ -10,6 +10,7 @@ Mumei is a mathematical proof-driven language that uses Z3 to formally verify fu
 - **Code Completion** — Context-aware completions via LSP
 - **Go to Definition** — Jump to atom, struct, trait, and type definitions
 - **Real-time Diagnostics** — Verification errors and warnings displayed inline as you type
+- **Intent CodeLens** — Inline intent drift scores and spec-code mapping panels for `requires`/`ensures`
 
 ## Requirements
 
