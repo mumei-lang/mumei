@@ -63,7 +63,7 @@ curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash
 # Homebrew
 brew install mumei-lang/mumei/mumei
 
-# Specific version (latest is v0.5.6)
+# Specific version (latest is v0.5.9)
 curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash -s -- --version v0.5.9
 ```
 
@@ -124,7 +124,7 @@ mumei build src/main.mm -o dist/output
 | Category | Highlights |
 |----------|-----------|
 | **Types** | Refinement types (`i64 where v >= 0`), Structs, Enums (ADT), Generics, explicit return types (`-> Str`) |
-| **Verification** | Pre/postconditions, [loop invariants + termination proof](docs/LANGUAGE.md#termination-checking), `forall`/`exists` quantifiers, [temporal effect Z3 probes](docs/ARCHITECTURE.md#stateful-effects-temporal-effect-verification) |
+| **Verification** | Pre/postconditions, [loop invariants + termination proof](docs/LANGUAGE.md#termination-checking), `forall`/`exists` quantifiers, [temporal effect Z3 probes](docs/ARCHITECTURE.md#stateful-effects-temporal-effect-verification), Lean translator contract metadata in proof certificates (`translator_version`, `binder_mapping`, `bridge_lemma_hash`) |
 | **Traits** | [Algebraic laws verified by Z3](docs/LANGUAGE.md#trait-definitions-with-laws) (`law reflexive: leq(x, x) == true`) |
 | **Ownership** | [`ref` / `ref mut` / `consume`](docs/LANGUAGE.md#ownership-and-borrowing) with Z3 aliasing prevention, MIR-based move analysis |
 | **Concurrency** | `async`/`await`, `task_group:all`/`task_group:any`, [deadlock-free proof via resource hierarchy](docs/LANGUAGE.md#asyncawait-and-resource-hierarchy) |
@@ -133,7 +133,7 @@ mumei build src/main.mm -o dist/output
 | **Safety** | `trusted` / `unverified` atoms, taint analysis, BMC + inductive invariant, [`call_with_contract`](docs/LANGUAGE.md#higher-order-functions-phase-a) for higher-order function verification |
 | **FFI** | `extern "Rust"` / `extern "C"` blocks, handle-based memory management (`json_free`, `http_free`), Str type interop |
 | **Std Library** | Option, Result, List, BoundedArray, Vector, HashMap, JSON, HTTP, sort algorithms, effect definitions |
-| **Output** | LLVM IR (native binary), C header (`.h`) via `--emit c-header`, verified JSON metadata via `--emit verified-json`, Markdown proof certificates via `--emit proof-book`, Rust / Python FFI bindings via `--emit rust` / `--emit python`, and runtime-loaded emitter plugins from `~/.mumei/emitters/<name>/`. Cargo workspace with emitter plugin architecture (`mumei-core`, `mumei-emit-llvm`, `mumei-emit-json`, `mumei-emit-proofbook`, `mumei-emit-rust`, `mumei-emit-python`) — see [Plugin Guide](docs/PLUGIN_GUIDE.md) and [Roadmap](docs/CROSS_PROJECT_ROADMAP.md) |
+| **Output** | LLVM IR (native binary), C header (`.h`) via `--emit c-header`, verified JSON metadata via `--emit verified-json`, Markdown proof certificates via `--emit proof-book`, Lean escalation bundles via `--proof-cert`, Rust / Python FFI bindings via `--emit rust` / `--emit python`, and runtime-loaded emitter plugins from `~/.mumei/emitters/<name>/`. Cargo workspace with emitter plugin architecture (`mumei-core`, `mumei-emit-llvm`, `mumei-emit-json`, `mumei-emit-proofbook`, `mumei-emit-rust`, `mumei-emit-python`) — see [Plugin Guide](docs/PLUGIN_GUIDE.md) and [Roadmap](docs/CROSS_PROJECT_ROADMAP.md) |
 | **Tooling** | LSP server, VS Code extension (counter-example ghost-text decorations — v0.2.0+), `mumei.toml` manifest, dependency manager, MCP server, contract-aware `mumei doc` (HTML / Markdown / JSON with client-side search), semantic feedback (bilingual EN/JP) |
 
 <details>
