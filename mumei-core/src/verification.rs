@@ -722,31 +722,38 @@ pub fn detect_logic_fragment_tags(atom: &Atom, module_env: &ModuleEnv) -> Vec<St
 
     let requires_expr = parse_expression(&atom.requires);
     let ensures_expr = parse_expression(&atom.ensures);
-    if expr_has_nonlinear_arithmetic(&requires_expr) || expr_has_nonlinear_arithmetic(&ensures_expr)
+    let body_stmt = parse_body_expr(&atom.body_expr);
+    let contract_text = atom_contract_text(atom);
+
+    if expr_has_nonlinear_arithmetic(&requires_expr)
+        || expr_has_nonlinear_arithmetic(&ensures_expr)
+        || stmt_has_nonlinear_arithmetic(&body_stmt)
+        || text_has_nonlinear_arithmetic_marker(&contract_text)
     {
         push_unique_tag(&mut tags, "nonlinear_arithmetic");
     }
-    if expr_has_inductive_shape(&requires_expr) || expr_has_inductive_shape(&ensures_expr) {
+    if expr_has_inductive_shape(&requires_expr)
+        || expr_has_inductive_shape(&ensures_expr)
+        || stmt_has_inductive_shape(&body_stmt)
+    {
         push_unique_tag(&mut tags, "inductive_data_type");
     }
 
     if let Some(invariant) = &atom.invariant {
         push_unique_tag(&mut tags, "recursive_invariant");
         let invariant_expr = parse_expression(invariant);
-        if expr_has_nonlinear_arithmetic(&invariant_expr) {
+        if expr_has_nonlinear_arithmetic(&invariant_expr)
+            || text_has_nonlinear_arithmetic_marker(invariant)
+        {
             push_unique_tag(&mut tags, "nonlinear_arithmetic");
         }
     }
 
-    let body_stmt = parse_body_expr(&atom.body_expr);
-    if stmt_has_nonlinear_arithmetic(&body_stmt) {
-        push_unique_tag(&mut tags, "nonlinear_arithmetic");
-    }
-    if stmt_has_inductive_shape(&body_stmt) {
-        push_unique_tag(&mut tags, "inductive_data_type");
-    }
     if stmt_has_while(&body_stmt) {
         push_unique_tag(&mut tags, "recursive_invariant");
+    }
+    if atom_has_unbounded_array_access(atom, &requires_expr, &ensures_expr, &body_stmt) {
+        push_unique_tag(&mut tags, "array_without_bounds");
     }
 
     let has_forall = atom
@@ -773,14 +780,217 @@ pub fn detect_logic_fragment_tags(atom: &Atom, module_env: &ModuleEnv) -> Vec<St
     {
         push_unique_tag(&mut tags, "trigger_sensitive_quantifier");
     }
+    if atom_uses_complex_temporal_effect(atom, module_env) {
+        push_unique_tag(&mut tags, "complex_temporal_effect");
+    }
 
     tags
+}
+
+pub fn outside_decidable_fragment_warning(atom: &Atom, module_env: &ModuleEnv) -> Option<String> {
+    let tags = detect_logic_fragment_tags(atom, module_env);
+    if tags.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "outside_decidable_fragment: atom '{}' uses {}; prefer the Z3-stable fragment in docs/SPEC_GUIDE.md or escalate to Lean",
+            atom.name,
+            tags.join(", ")
+        ))
+    }
 }
 
 fn push_unique_tag(tags: &mut Vec<String>, tag: &str) {
     if !tags.iter().any(|existing| existing == tag) {
         tags.push(tag.to_string());
     }
+}
+
+fn atom_contract_text(atom: &Atom) -> String {
+    let mut parts = vec![
+        atom.requires.as_str(),
+        atom.ensures.as_str(),
+        atom.body_expr.as_str(),
+    ];
+    if let Some(invariant) = &atom.invariant {
+        parts.push(invariant.as_str());
+    }
+    for q in &atom.forall_constraints {
+        parts.push(q.start.as_str());
+        parts.push(q.end.as_str());
+        parts.push(q.condition.as_str());
+    }
+    parts.join(" ")
+}
+
+fn text_has_nonlinear_arithmetic_marker(text: &str) -> bool {
+    text.contains('%')
+        || text.contains("**")
+        || text.contains("pow(")
+        || text.contains("mod(")
+        || text.contains("exp(")
+}
+
+fn atom_has_unbounded_array_access(
+    atom: &Atom,
+    requires_expr: &Expr,
+    ensures_expr: &Expr,
+    body_stmt: &Stmt,
+) -> bool {
+    let mut indexes = Vec::new();
+    collect_array_index_names_from_expr(requires_expr, &mut indexes);
+    collect_array_index_names_from_expr(ensures_expr, &mut indexes);
+    collect_array_index_names_from_stmt(body_stmt, &mut indexes);
+
+    for q in &atom.forall_constraints {
+        let condition_expr = parse_expression(&q.condition);
+        collect_array_index_names_from_expr(&condition_expr, &mut indexes);
+        let normalized_start = normalize_logical_text(&q.start);
+        if normalized_start == "0" {
+            indexes.retain(|idx| idx != &q.var);
+        }
+    }
+
+    let contract_text = normalize_logical_text(&atom_contract_text(atom));
+    indexes
+        .iter()
+        .any(|index| !index_has_explicit_bounds(index, &contract_text))
+}
+
+fn collect_array_index_names_from_stmt(stmt: &Stmt, indexes: &mut Vec<String>) {
+    match stmt {
+        Stmt::Let { value, .. } | Stmt::Assign { value, .. } => {
+            collect_array_index_names_from_expr(value, indexes);
+        }
+        Stmt::Expr(value, _) => collect_array_index_names_from_expr(value, indexes),
+        Stmt::ArrayStore { index, value, .. } => {
+            collect_array_index_name(index, indexes);
+            collect_array_index_names_from_expr(value, indexes);
+        }
+        Stmt::Block(stmts, _) => {
+            for stmt in stmts {
+                collect_array_index_names_from_stmt(stmt, indexes);
+            }
+        }
+        Stmt::While {
+            cond,
+            invariant,
+            body,
+            ..
+        } => {
+            collect_array_index_names_from_expr(cond, indexes);
+            collect_array_index_names_from_expr(invariant, indexes);
+            collect_array_index_names_from_stmt(body, indexes);
+        }
+        Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => {
+            collect_array_index_names_from_stmt(body, indexes);
+        }
+        Stmt::TaskGroup { children, .. } => {
+            for child in children {
+                collect_array_index_names_from_stmt(child, indexes);
+            }
+        }
+        Stmt::Cancel { .. } => {}
+    }
+}
+
+fn collect_array_index_names_from_expr(expr: &Expr, indexes: &mut Vec<String>) {
+    match expr {
+        Expr::ArrayAccess(_, index) => {
+            collect_array_index_name(index, indexes);
+            collect_array_index_names_from_expr(index, indexes);
+        }
+        Expr::BinaryOp(left, _, right) => {
+            collect_array_index_names_from_expr(left, indexes);
+            collect_array_index_names_from_expr(right, indexes);
+        }
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            collect_array_index_names_from_expr(cond, indexes);
+            collect_array_index_names_from_stmt(then_branch, indexes);
+            collect_array_index_names_from_stmt(else_branch, indexes);
+        }
+        Expr::Call(_, args) => {
+            for arg in args {
+                collect_array_index_names_from_expr(arg, indexes);
+            }
+        }
+        Expr::StructInit { fields, .. } => {
+            for (_, field_expr) in fields {
+                collect_array_index_names_from_expr(field_expr, indexes);
+            }
+        }
+        Expr::FieldAccess(base, _) => collect_array_index_names_from_expr(base, indexes),
+        Expr::Match { target, arms } => {
+            collect_array_index_names_from_expr(target, indexes);
+            for arm in arms {
+                collect_array_index_names_from_stmt(&arm.body, indexes);
+            }
+        }
+        Expr::Async { body } | Expr::Lambda { body, .. } => {
+            collect_array_index_names_from_stmt(body, indexes);
+        }
+        Expr::Await { expr } => collect_array_index_names_from_expr(expr, indexes),
+        Expr::CallRef { callee, args } => {
+            collect_array_index_names_from_expr(callee, indexes);
+            for arg in args {
+                collect_array_index_names_from_expr(arg, indexes);
+            }
+        }
+        Expr::Perform { args, .. } => {
+            for arg in args {
+                collect_array_index_names_from_expr(arg, indexes);
+            }
+        }
+        Expr::ChanSend { channel, value } => {
+            collect_array_index_names_from_expr(channel, indexes);
+            collect_array_index_names_from_expr(value, indexes);
+        }
+        Expr::ChanRecv { channel } => collect_array_index_names_from_expr(channel, indexes),
+        Expr::Number(_)
+        | Expr::Float(_)
+        | Expr::StringLit(_)
+        | Expr::Variable(_)
+        | Expr::AtomRef { .. } => {}
+    }
+}
+
+fn collect_array_index_name(index: &Expr, indexes: &mut Vec<String>) {
+    match index {
+        Expr::Variable(name) if !indexes.iter().any(|existing| existing == name) => {
+            indexes.push(name.clone());
+        }
+        Expr::BinaryOp(left, _, right) => {
+            collect_array_index_name(left, indexes);
+            collect_array_index_name(right, indexes);
+        }
+        _ => {}
+    }
+}
+
+fn normalize_logical_text(text: &str) -> String {
+    text.chars().filter(|ch| !ch.is_whitespace()).collect()
+}
+
+fn index_has_explicit_bounds(index: &str, normalized_text: &str) -> bool {
+    let has_lower_bound = normalized_text.contains(&format!("{index}>=0"))
+        || normalized_text.contains(&format!("0<={index}"));
+    let has_upper_bound = normalized_text.contains(&format!("{index}<"))
+        || normalized_text.contains(&format!(">{index}"));
+    has_lower_bound && has_upper_bound
+}
+
+fn atom_uses_complex_temporal_effect(atom: &Atom, module_env: &ModuleEnv) -> bool {
+    atom.effects.iter().any(|effect| {
+        module_env
+            .effect_defs
+            .get(&effect.name)
+            .or_else(|| module_env.effects.get(&effect.name))
+            .is_some_and(|def| def.states.len() > 4 || def.transitions.len() > 8)
+    })
 }
 
 fn expr_has_nonlinear_arithmetic(expr: &Expr) -> bool {
@@ -9973,7 +10183,10 @@ fn save_visualizer_report(
 mod tests {
     use super::*;
     use crate::hir::lower_atom_to_hir_with_env;
-    use crate::parser::{Atom, ImplDef, Param, Span, TraitDef, TraitMethod, TrustLevel};
+    use crate::parser::{
+        Atom, Effect, EffectDef, EffectTransition, ImplDef, Param, Span, TraitDef, TraitMethod,
+        TrustLevel,
+    };
     use std::path::Path;
 
     fn test_atom(
@@ -10017,6 +10230,78 @@ mod tests {
             fn_contract_requires: None,
             fn_contract_ensures: None,
         }
+    }
+
+    #[test]
+    fn test_decidable_fragment_warning_detects_unbounded_array_access() {
+        let atom = test_atom(
+            "read_unbounded",
+            vec![
+                test_param("arr", Some("[i64]")),
+                test_param("i", Some("i64")),
+            ],
+            "i >= 0",
+            "result == arr[i]",
+            "arr[i]",
+            Some("i64"),
+        );
+        let module_env = ModuleEnv::new();
+
+        let tags = detect_logic_fragment_tags(&atom, &module_env);
+        assert!(tags.iter().any(|tag| tag == "array_without_bounds"));
+        assert!(outside_decidable_fragment_warning(&atom, &module_env)
+            .is_some_and(|warning| warning.contains("outside_decidable_fragment")));
+    }
+
+    #[test]
+    fn test_decidable_fragment_warning_accepts_explicit_array_bounds() {
+        let atom = test_atom(
+            "read_bounded",
+            vec![
+                test_param("arr", Some("[i64]")),
+                test_param("i", Some("i64")),
+            ],
+            "i >= 0 && i < len(arr)",
+            "result == arr[i]",
+            "arr[i]",
+            Some("i64"),
+        );
+        let module_env = ModuleEnv::new();
+
+        let tags = detect_logic_fragment_tags(&atom, &module_env);
+        assert!(!tags.iter().any(|tag| tag == "array_without_bounds"));
+    }
+
+    #[test]
+    fn test_decidable_fragment_warning_detects_complex_temporal_effect() {
+        let mut atom = test_atom("temporal", vec![], "true", "result == 0", "0", Some("i64"));
+        atom.effects.push(Effect::simple("Protocol"));
+
+        let mut module_env = ModuleEnv::new();
+        module_env.register_effect(&EffectDef {
+            name: "Protocol".to_string(),
+            params: vec![],
+            constraint: None,
+            includes: vec![],
+            refinement: None,
+            parent: vec![],
+            span: Span::default(),
+            states: vec!["S0", "S1", "S2", "S3", "S4"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            transitions: (0..9)
+                .map(|idx| EffectTransition {
+                    operation: format!("op{idx}"),
+                    from_state: "S0".to_string(),
+                    to_state: "S1".to_string(),
+                })
+                .collect(),
+            initial_state: Some("S0".to_string()),
+        });
+
+        let tags = detect_logic_fragment_tags(&atom, &module_env);
+        assert!(tags.iter().any(|tag| tag == "complex_temporal_effect"));
     }
 
     #[test]

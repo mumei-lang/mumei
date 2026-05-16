@@ -32,6 +32,19 @@ fn resolve_source_for_span(main_source: &str, span: &parser::Span) -> String {
     }
 }
 
+fn emit_decidable_fragment_warning(
+    atom: &parser::Atom,
+    module_env: &verification::ModuleEnv,
+    suppress_output: bool,
+) {
+    if suppress_output {
+        return;
+    }
+    if let Some(warning) = verification::outside_decidable_fragment_warning(atom, module_env) {
+        eprintln!("  ⚠️  {warning}");
+    }
+}
+
 /// Collect all ExternBlock items from a list of Items.
 fn collect_extern_blocks(items: &[Item]) -> Vec<parser::ExternBlock> {
     items
@@ -859,6 +872,7 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                         .filter(|tn| module_env.get_type(tn).is_some())
                         .collect();
 
+                    emit_decidable_fragment_warning(atom, &module_env, json_output);
                     let hir_atom = lower_atom_to_hir_with_env(atom, Some(&module_env));
 
                     // MIR pipeline: lower to MIR and run analyses
@@ -998,6 +1012,11 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                             .filter(|tn| module_env.get_type(tn).is_some())
                             .collect();
 
+                        emit_decidable_fragment_warning(
+                            &qualified_method,
+                            &module_env,
+                            json_output,
+                        );
                         let hir_atom =
                             lower_atom_to_hir_with_env(&qualified_method, Some(&module_env));
 
@@ -2225,6 +2244,7 @@ fn cmd_build(
                     let mut qualified_method = method.clone();
                     qualified_method.name = qualified_name.clone();
 
+                    emit_decidable_fragment_warning(&qualified_method, &module_env, false);
                     let hir_atom = lower_atom_to_hir_with_env(&qualified_method, Some(&module_env));
 
                     let mir_body = mir::lower_hir_to_mir(&hir_atom);
@@ -2414,6 +2434,8 @@ fn cmd_build(
                     "  ✨ [1/3] Polishing Syntax: Atom '{}'{}{} identified.",
                     atom.name, async_marker, res_marker
                 );
+
+                emit_decidable_fragment_warning(atom, &module_env, false);
 
                 // HIR lowering: body_expr を1回だけパースして全ステージで再利用する
                 let hir_atom = lower_atom_to_hir_with_env(atom, Some(&module_env));
