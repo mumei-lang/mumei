@@ -2098,6 +2098,8 @@ fn cmd_build(
         global_max_unroll: build_cfg.max_unroll,
         enable_cross_spec_verification: proof_cfg.cross_spec_verify,
     };
+    let mut escalation_cert_results: std::collections::HashMap<String, (String, String)> =
+        std::collections::HashMap::new();
 
     let mut atom_count = 0;
 
@@ -2296,10 +2298,38 @@ fn cmd_build(
                                     );
                                 }
                                 Err(e) => {
+                                    let error_text = format!("{e}");
+                                    let z3_result =
+                                        verification::z3_result_from_error_message(&error_text)
+                                            .unwrap_or("sat")
+                                            .to_string();
+                                    let classification =
+                                        verification::classify_atom_for_lean_escalation(
+                                            &qualified_method,
+                                            &module_env,
+                                            &z3_result,
+                                            "failed",
+                                        );
                                     let resolved = resolve_source_for_span(&source, &method.span);
                                     let e = e.with_source(&resolved, &method.span);
                                     eprintln!("{:?}", miette::Report::new(e));
                                     verification_cache_new.remove(&qualified_name);
+                                    if matches!(emit_target, emitter::EmitTarget::EscalationBundle)
+                                        && classification.should_escalate
+                                    {
+                                        println!(
+                                            "  ⚖️  [2/3] Verification: Deferred to Lean ({})",
+                                            classification
+                                                .escalation_reason
+                                                .as_deref()
+                                                .unwrap_or("lean_escalation")
+                                        );
+                                        escalation_cert_results.insert(
+                                            qualified_name.clone(),
+                                            (z3_result, "escalation_candidate".to_string()),
+                                        );
+                                        continue;
+                                    }
                                     std::process::exit(1);
                                 }
                             }
@@ -2461,10 +2491,38 @@ fn cmd_build(
                                 );
                             }
                             Err(e) => {
+                                let error_text = format!("{e}");
+                                let z3_result =
+                                    verification::z3_result_from_error_message(&error_text)
+                                        .unwrap_or("sat")
+                                        .to_string();
+                                let classification =
+                                    verification::classify_atom_for_lean_escalation(
+                                        atom,
+                                        &module_env,
+                                        &z3_result,
+                                        "failed",
+                                    );
                                 let resolved = resolve_source_for_span(&source, &atom.span);
                                 let e = e.with_source(&resolved, &atom.span);
                                 eprintln!("{:?}", miette::Report::new(e));
                                 verification_cache_new.remove(&atom.name);
+                                if matches!(emit_target, emitter::EmitTarget::EscalationBundle)
+                                    && classification.should_escalate
+                                {
+                                    println!(
+                                        "  ⚖️  [2/3] Verification: Deferred to Lean ({})",
+                                        classification
+                                            .escalation_reason
+                                            .as_deref()
+                                            .unwrap_or("lean_escalation")
+                                    );
+                                    escalation_cert_results.insert(
+                                        atom.name.clone(),
+                                        (z3_result, "escalation_candidate".to_string()),
+                                    );
+                                    continue;
+                                }
                                 std::process::exit(1);
                             }
                         }
@@ -2615,15 +2673,13 @@ fn cmd_build(
             cert_atoms.push(qm);
         }
 
-        // Collect verification results (all atoms that passed verification)
-        let mut cert_results: std::collections::HashMap<String, (String, String)> =
-            std::collections::HashMap::new();
+        // Collect verification results, preserving Lean escalation candidates.
+        let mut cert_results = escalation_cert_results;
         for atom_ref in &cert_atoms {
             if module_env.is_verified(&atom_ref.name) {
-                cert_results.insert(
-                    atom_ref.name.clone(),
-                    ("unsat".to_string(), "verified".to_string()),
-                );
+                cert_results
+                    .entry(atom_ref.name.clone())
+                    .or_insert_with(|| ("unsat".to_string(), "verified".to_string()));
             }
         }
 
