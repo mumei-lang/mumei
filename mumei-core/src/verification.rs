@@ -1,3 +1,4 @@
+use crate::ast::TypeRef;
 use crate::cross_spec::{CrossSpecResult, CrossSpecVerifier};
 use crate::hir::HirAtom;
 use crate::parser::{
@@ -616,6 +617,196 @@ impl Default for VerificationConfig {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ModuleVerificationReport {
     pub cross_spec: Option<CrossSpecResult>,
+}
+
+pub const LEAN_TRANSLATOR_VERSION: &str = "mumei-lean-translator-ir-v1";
+pub const LEAN_BRIDGE_LEMMA_HASH: &str =
+    "d8d270d6429a3e31c608dc109876df4ec99ee1243796430775a5b0ef18b5ac24";
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+pub struct TranslatorIRProvenanceSpan {
+    #[serde(default)]
+    pub file: String,
+    #[serde(default)]
+    pub line: usize,
+    #[serde(default)]
+    pub col: usize,
+    #[serde(default)]
+    pub len: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+pub struct TranslatorIRBinder {
+    #[serde(default)]
+    pub mumei_name: String,
+    #[serde(default)]
+    pub lean_name: String,
+    #[serde(default)]
+    pub mumei_type: String,
+    #[serde(default)]
+    pub lean_type: String,
+    #[serde(default)]
+    pub role: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refinement: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+pub struct TranslatorIRMetadata {
+    #[serde(default)]
+    pub sort: String,
+    #[serde(default)]
+    pub binders: Vec<TranslatorIRBinder>,
+    #[serde(default)]
+    pub theorem_goal: String,
+    #[serde(default)]
+    pub provenance_span: TranslatorIRProvenanceSpan,
+    #[serde(default)]
+    pub lowering_rules: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manual_lemma_reason: Option<String>,
+}
+
+pub fn build_translator_binder_mapping(atom: &Atom) -> HashMap<String, String> {
+    build_translator_ir_metadata(atom, &ModuleEnv::default())
+        .binders
+        .into_iter()
+        .map(|binder| (binder.mumei_name, binder.lean_name))
+        .collect()
+}
+
+pub fn build_translator_ir_metadata(atom: &Atom, module_env: &ModuleEnv) -> TranslatorIRMetadata {
+    let body_stmt = parse_body_expr(&atom.body_expr);
+    let tags = detect_logic_fragment_tags(atom, module_env);
+    let sort = if atom.invariant.is_some() || stmt_has_while(&body_stmt) {
+        "loop_invariant"
+    } else if atom.params.iter().any(|param| {
+        param
+            .type_name
+            .as_ref()
+            .is_some_and(|type_name| module_env.types.contains_key(type_name))
+    }) {
+        "refinement_predicate"
+    } else if tags.iter().any(|tag| tag == "inductive_data_type") {
+        "inductive_obligation"
+    } else {
+        "contract_obligation"
+    };
+
+    let mut binders: Vec<TranslatorIRBinder> = atom
+        .params
+        .iter()
+        .map(|param| {
+            let mumei_type = param
+                .type_ref
+                .as_ref()
+                .map(TypeRef::display_name)
+                .or_else(|| param.type_name.clone())
+                .unwrap_or_else(|| "i64".to_string());
+            let refinement = param
+                .type_name
+                .as_ref()
+                .and_then(|type_name| module_env.types.get(type_name))
+                .map(|refined| refined.predicate_raw.clone());
+            TranslatorIRBinder {
+                mumei_name: param.name.clone(),
+                lean_name: lean_binder_name(&param.name),
+                lean_type: mumei_type_to_lean_type(&mumei_type),
+                mumei_type,
+                role: "param".to_string(),
+                refinement,
+            }
+        })
+        .collect();
+
+    let result_type = atom.return_type.as_deref().unwrap_or("i64").to_string();
+    binders.push(TranslatorIRBinder {
+        mumei_name: "result".to_string(),
+        lean_name: "result".to_string(),
+        lean_type: mumei_type_to_lean_type(&result_type),
+        mumei_type: result_type,
+        role: "result".to_string(),
+        refinement: None,
+    });
+
+    let mut lowering_rules = vec![
+        "type_system_mapping".to_string(),
+        "contract_lowering".to_string(),
+    ];
+    if sort == "loop_invariant" {
+        lowering_rules.push("loop_invariant_recursion".to_string());
+    }
+    if !atom.effects.is_empty() {
+        lowering_rules.push("effect_state_bridge".to_string());
+    }
+    if tags.iter().any(|tag| tag.contains("array")) {
+        lowering_rules.push("array_bounds_bridge".to_string());
+    }
+    if tags.iter().any(|tag| tag.contains("string")) {
+        lowering_rules.push("string_regex_bridge".to_string());
+    }
+    if tags.iter().any(|tag| tag.contains("nonlinear")) {
+        lowering_rules.push("integer_overflow_bridge".to_string());
+    }
+
+    TranslatorIRMetadata {
+        sort: sort.to_string(),
+        binders,
+        theorem_goal: format!("({}) -> ({})", atom.requires, atom.ensures),
+        provenance_span: TranslatorIRProvenanceSpan {
+            file: atom.span.file.clone(),
+            line: atom.span.line,
+            col: atom.span.col,
+            len: atom.span.len,
+        },
+        lowering_rules,
+        manual_lemma_reason: None,
+    }
+}
+
+fn lean_binder_name(name: &str) -> String {
+    let mut result = String::new();
+    for (idx, ch) in name.chars().enumerate() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            if idx == 0 && ch.is_ascii_digit() {
+                result.push('_');
+            }
+            result.push(ch);
+        } else {
+            result.push('_');
+        }
+    }
+    if result.is_empty() || is_lean_reserved_word(&result) {
+        format!("{}_binder", result)
+    } else {
+        result
+    }
+}
+
+fn is_lean_reserved_word(name: &str) -> bool {
+    matches!(
+        name,
+        "by" | "def" | "end" | "fun" | "have" | "if" | "let" | "match" | "namespace" | "theorem"
+    )
+}
+
+fn mumei_type_to_lean_type(type_name: &str) -> String {
+    let normalized = type_name.trim();
+    if normalized.starts_with('[') && normalized.ends_with(']') {
+        let inner = &normalized[1..normalized.len() - 1];
+        format!("List {}", mumei_type_to_lean_type(inner))
+    } else if normalized.starts_with("[]<") && normalized.ends_with('>') {
+        let inner = &normalized[3..normalized.len() - 1];
+        format!("List {}", mumei_type_to_lean_type(inner))
+    } else {
+        match normalized {
+            "i64" | "int" | "Int" => "Int".to_string(),
+            "bool" | "Bool" => "Bool".to_string(),
+            "string" | "Str" | "String" => "String".to_string(),
+            "unit" | "Unit" => "Unit".to_string(),
+            other => other.to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
