@@ -2413,14 +2413,14 @@ atom hard_lemma(x: i64) -> i64
             })
             .collect();
 
-        // Build a bundle with a lean_verified atom (mumei-lean-style cert).
+        // Build a bundle with a lean_verified atom and Lean result metadata.
         let mut results = HashMap::new();
         results.insert(
             "hard_lemma".to_string(),
             ("lean_verified".to_string(), "verified".to_string()),
         );
         let module_env = ModuleEnv::new();
-        let cert = proof_cert::generate_certificate(
+        let mut cert = proof_cert::generate_certificate(
             "std/lean_pilot.mm",
             &atom_refs,
             &results,
@@ -2428,6 +2428,14 @@ atom hard_lemma(x: i64) -> i64
             None,
             None,
         );
+        cert.atoms[0].lean_metadata = Some(proof_cert::LeanResultMetadata {
+            status: "lean_verified".to_string(),
+            theorem_name: "hard_lemma_correct".to_string(),
+            translator_version: crate::verification::LEAN_TRANSLATOR_VERSION.to_string(),
+            bridge_lemma_hash: crate::verification::LEAN_BRIDGE_LEMMA_HASH.to_string(),
+            proof_path: "Generated/StdLeanPilot.lean".to_string(),
+            diagnostics: vec![],
+        });
         let mut modules = HashMap::new();
         modules.insert("std/lean_pilot".to_string(), cert);
         let bundle = proof_cert::ProofBundle {

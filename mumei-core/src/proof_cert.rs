@@ -441,13 +441,18 @@ fn manual_lemma_reason_for_atom(
 }
 
 fn lean_certificate_metadata_is_current(atom: &AtomCertificate) -> bool {
-    let atom_metadata_matches = atom.translator_version == verification::LEAN_TRANSLATOR_VERSION
-        && atom.bridge_lemma_hash == verification::LEAN_BRIDGE_LEMMA_HASH;
-    let lean_metadata_matches = atom.lean_metadata.as_ref().is_none_or(|metadata| {
-        metadata.translator_version == verification::LEAN_TRANSLATOR_VERSION
-            && metadata.bridge_lemma_hash == verification::LEAN_BRIDGE_LEMMA_HASH
-    });
-    atom_metadata_matches && lean_metadata_matches
+    if atom.translator_version != verification::LEAN_TRANSLATOR_VERSION
+        || atom.bridge_lemma_hash != verification::LEAN_BRIDGE_LEMMA_HASH
+    {
+        return false;
+    }
+    let Some(metadata) = atom.lean_metadata.as_ref() else {
+        return false;
+    };
+    metadata.status == "lean_verified"
+        && !metadata.theorem_name.is_empty()
+        && metadata.translator_version == verification::LEAN_TRANSLATOR_VERSION
+        && metadata.bridge_lemma_hash == verification::LEAN_BRIDGE_LEMMA_HASH
 }
 
 /// Compute SHA-256 hash of arbitrary data (utility for other crates).
@@ -739,7 +744,7 @@ mod tests {
             ("lean_verified".to_string(), "verified".to_string()),
         );
         let module_env = ModuleEnv::new();
-        let cert = generate_certificate("test.mm", &atoms, &results, &module_env, None, None);
+        let mut cert = generate_certificate("test.mm", &atoms, &results, &module_env, None, None);
 
         // Default (backwards-compatible): lean_verified is NOT proven.
         let status_default = verify_certificate(&cert, &atoms, false);
@@ -748,7 +753,23 @@ mod tests {
             ("hard_lemma".to_string(), "unproven".to_string())
         );
 
-        // Opt-in: lean_verified IS proven.
+        // Opt-in still rejects lean_verified without Lean result metadata.
+        let status_missing_metadata = verify_certificate(&cert, &atoms, true);
+        assert_eq!(
+            status_missing_metadata[0],
+            ("hard_lemma".to_string(), "stale_translator".to_string())
+        );
+
+        cert.atoms[0].lean_metadata = Some(LeanResultMetadata {
+            status: "lean_verified".to_string(),
+            theorem_name: "hard_lemma_correct".to_string(),
+            translator_version: verification::LEAN_TRANSLATOR_VERSION.to_string(),
+            bridge_lemma_hash: verification::LEAN_BRIDGE_LEMMA_HASH.to_string(),
+            proof_path: "Generated/Test.lean".to_string(),
+            diagnostics: vec![],
+        });
+
+        // Opt-in: lean_verified is proven only with current Lean metadata.
         let status_opt_in = verify_certificate(&cert, &atoms, true);
         assert_eq!(
             status_opt_in[0],
