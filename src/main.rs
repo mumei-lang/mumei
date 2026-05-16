@@ -706,6 +706,17 @@ fn cmd_verify(options: VerifyOptions<'_>) {
         enable_cross_spec_verification,
     } = options;
     check_z3_available();
+    let manifest_config = manifest::find_and_load();
+    let (build_cfg, proof_cfg) = if let Some((_, ref m)) = manifest_config {
+        (m.build.clone(), m.proof.clone())
+    } else {
+        (
+            manifest::BuildConfig::default(),
+            manifest::ProofConfig::default(),
+        )
+    };
+    let enable_cross_spec_verification =
+        enable_cross_spec_verification || proof_cfg.cross_spec_verify;
     if !json_output {
         println!("🗡️  Mumei verify: verifying '{}'...", input);
     }
@@ -721,8 +732,8 @@ fn cmd_verify(options: VerifyOptions<'_>) {
         let _ = std::fs::create_dir_all(output_dir);
     }
     let verification_config = verification::VerificationConfig {
-        timeout_ms: 10000,
-        global_max_unroll: 3,
+        timeout_ms: proof_cfg.timeout_ms,
+        global_max_unroll: build_cfg.max_unroll,
         enable_cross_spec_verification,
     };
     let input_path = Path::new(input);
@@ -1220,6 +1231,7 @@ max_unroll = 3
 [proof]
 cache = true
 timeout_ms = 10000
+cross_spec_verify = true
 [effects]
 # allowed = ["Log", "FileRead"]
 # denied = ["Network"]

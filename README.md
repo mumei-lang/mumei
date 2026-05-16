@@ -337,6 +337,7 @@ The two approaches are **complementary**: the MCP Server enables any agent to ac
 | [Standard Library](docs/STDLIB.md) | Option, Result, List, BoundedArray, sort |
 | [Examples & Tests](docs/EXAMPLES.md) | Verification suite, pattern matching, negative tests |
 | [Architecture](docs/ARCHITECTURE.md) | Compiler internals |
+| [Cross-Spec Verification](docs/CROSS_SPEC_GUIDE.md) | System-wide contract consistency, invariants, and dependency cycles |
 | [Toolchain](docs/TOOLCHAIN.md) | CLI commands, package management |
 | [Roadmap](docs/ROADMAP.md) | Strategic roadmap |
 | [Capability Security](docs/CAPABILITY_SECURITY.md) | Effect-based capability security evaluation |

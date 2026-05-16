@@ -2,7 +2,7 @@ use serde_json::Value;
 use std::process::Command;
 
 #[test]
-fn cross_spec_verify_writes_report() {
+fn cross_spec_verify_writes_report_by_default() {
     let bin = env!("CARGO_BIN_EXE_mumei");
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let report_dir = std::env::temp_dir().join(format!("mumei_cross_spec_{}", std::process::id()));
@@ -12,13 +12,12 @@ fn cross_spec_verify_writes_report() {
 
     let output = Command::new(bin)
         .arg("verify")
-        .arg("--cross-spec-verify")
         .arg("--report-dir")
         .arg(&report_dir)
         .arg("tests/test_cross_spec.mm")
         .current_dir(manifest_dir)
         .output()
-        .unwrap_or_else(|err| panic!("failed to run mumei verify --cross-spec-verify: {err}"));
+        .unwrap_or_else(|err| panic!("failed to run mumei verify: {err}"));
 
     assert!(
         output.status.success(),
