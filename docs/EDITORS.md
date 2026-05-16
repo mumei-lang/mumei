@@ -6,6 +6,7 @@ The Mumei language server (`mumei lsp`) communicates via JSON-RPC over stdio and
 - **Hover** — atom requires/ensures/effects display
 - **Completion** — keywords, atom names, effect names, trait names, resource names, type/struct/enum names
 - **Go to Definition** — jump to atom, type, struct, enum, effect, trait, and resource definitions
+- **CodeLens** — inline intent drift scores and `requires`/`ensures` spec-code mappings
 
 ## Neovim
 
@@ -164,3 +165,4 @@ After configuring your editor, open a `.mm` file and verify:
 2. **Completion**: Type `ato` and trigger completion — you should see `atom` and `atom_ref` in the completion list.
 3. **Hover**: Hover over an `atom` definition to see its `requires` and `ensures` contracts.
 4. **Go to Definition**: Place the cursor on an atom name and use your editor's "Go to Definition" command to jump to its definition.
+5. **CodeLens**: Confirm atom definitions show `Intent Drift` and `requires:`/`ensures:` lines show `Spec-Code Mapping` entries. See [LSP Integration](LSP_INTEGRATION.md) for command details.
