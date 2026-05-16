@@ -618,6 +618,366 @@ pub struct ModuleVerificationReport {
     pub cross_spec: Option<CrossSpecResult>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeanEscalationClassification {
+    pub z3_result_class: String,
+    pub should_escalate: bool,
+    pub escalation_reason: Option<String>,
+    pub logic_fragment_tags: Vec<String>,
+}
+
+pub fn classify_z3_result(result: &str) -> &'static str {
+    let normalized = result.to_ascii_lowercase();
+    if normalized.contains("timeout") {
+        "timeout"
+    } else if normalized.contains("resource") || normalized.contains("budget") {
+        "resource_limit"
+    } else if normalized.contains("unknown") {
+        "unknown"
+    } else if normalized == "unsat" || normalized.contains("proven") {
+        "unsat"
+    } else if normalized.contains("skipped") {
+        "skipped"
+    } else if normalized.contains("sat") || normalized.contains("counter") {
+        "sat"
+    } else {
+        "skipped"
+    }
+}
+
+pub fn z3_result_from_error_message(message: &str) -> Option<&'static str> {
+    let normalized = message.to_ascii_lowercase();
+    if normalized.contains("z3 returned unknown") || normalized.contains("solver returned unknown")
+    {
+        Some("unknown")
+    } else if normalized.contains("timeout") {
+        Some("timeout")
+    } else if normalized.contains("resource limit")
+        || normalized.contains("constraint budget exceeded")
+    {
+        Some("resource_limit")
+    } else if normalized.contains("spurious_candidate") {
+        Some("spurious_candidate")
+    } else {
+        None
+    }
+}
+
+pub fn classify_atom_for_lean_escalation(
+    atom: &Atom,
+    module_env: &ModuleEnv,
+    z3_result: &str,
+    status: &str,
+) -> LeanEscalationClassification {
+    let z3_result_class = classify_z3_result(z3_result).to_string();
+    let logic_fragment_tags = detect_logic_fragment_tags(atom, module_env);
+    let normalized_result = z3_result.to_ascii_lowercase();
+    let normalized_status = status.to_ascii_lowercase();
+
+    let mut reason = None;
+    if normalized_result.contains("partial_translation")
+        || normalized_status.contains("partial_translation")
+        || normalized_result.contains("requires_unsat")
+        || normalized_status.contains("requires_unsat")
+        || normalized_status.contains("spec_contradiction")
+    {
+        reason = None;
+    } else if normalized_result.contains("spurious_candidate")
+        || normalized_status.contains("spurious_candidate")
+    {
+        reason = Some("spurious_counterexample".to_string());
+    } else if matches!(
+        z3_result_class.as_str(),
+        "unknown" | "timeout" | "resource_limit"
+    ) {
+        reason = Some(if logic_fragment_tags.is_empty() {
+            format!("z3_{}", z3_result_class)
+        } else {
+            format!("z3_{}_complex_fragment", z3_result_class)
+        });
+    } else if atom.trust_level == TrustLevel::Trusted {
+        reason = Some("trusted_atom_human_review".to_string());
+    }
+
+    LeanEscalationClassification {
+        z3_result_class,
+        should_escalate: reason.is_some(),
+        escalation_reason: reason,
+        logic_fragment_tags,
+    }
+}
+
+pub fn detect_logic_fragment_tags(atom: &Atom, module_env: &ModuleEnv) -> Vec<String> {
+    let mut tags = Vec::new();
+
+    for param in &atom.params {
+        if param
+            .type_name
+            .as_ref()
+            .is_some_and(|type_name| module_env.enums.contains_key(type_name))
+        {
+            push_unique_tag(&mut tags, "inductive_data_type");
+        }
+    }
+
+    let requires_expr = parse_expression(&atom.requires);
+    let ensures_expr = parse_expression(&atom.ensures);
+    if expr_has_nonlinear_arithmetic(&requires_expr) || expr_has_nonlinear_arithmetic(&ensures_expr)
+    {
+        push_unique_tag(&mut tags, "nonlinear_arithmetic");
+    }
+    if expr_has_inductive_shape(&requires_expr) || expr_has_inductive_shape(&ensures_expr) {
+        push_unique_tag(&mut tags, "inductive_data_type");
+    }
+
+    if let Some(invariant) = &atom.invariant {
+        push_unique_tag(&mut tags, "recursive_invariant");
+        let invariant_expr = parse_expression(invariant);
+        if expr_has_nonlinear_arithmetic(&invariant_expr) {
+            push_unique_tag(&mut tags, "nonlinear_arithmetic");
+        }
+    }
+
+    let body_stmt = parse_body_expr(&atom.body_expr);
+    if stmt_has_nonlinear_arithmetic(&body_stmt) {
+        push_unique_tag(&mut tags, "nonlinear_arithmetic");
+    }
+    if stmt_has_inductive_shape(&body_stmt) {
+        push_unique_tag(&mut tags, "inductive_data_type");
+    }
+    if stmt_has_while(&body_stmt) {
+        push_unique_tag(&mut tags, "recursive_invariant");
+    }
+
+    let has_forall = atom
+        .forall_constraints
+        .iter()
+        .any(|q| q.q_type == QuantifierType::ForAll)
+        || atom.requires.contains("forall(")
+        || atom.ensures.contains("forall(");
+    let has_exists = atom
+        .forall_constraints
+        .iter()
+        .any(|q| q.q_type == QuantifierType::Exists)
+        || atom.requires.contains("exists(")
+        || atom.ensures.contains("exists(");
+    if has_forall && has_exists {
+        push_unique_tag(&mut tags, "quantifier_alternation");
+    }
+    if atom.forall_constraints.iter().any(|q| {
+        q.condition.contains('[')
+            || q.condition.contains("forall(")
+            || q.condition.contains("exists(")
+    }) || atom.requires.contains("forall(")
+        || atom.ensures.contains("forall(")
+    {
+        push_unique_tag(&mut tags, "trigger_sensitive_quantifier");
+    }
+
+    tags
+}
+
+fn push_unique_tag(tags: &mut Vec<String>, tag: &str) {
+    if !tags.iter().any(|existing| existing == tag) {
+        tags.push(tag.to_string());
+    }
+}
+
+fn expr_has_nonlinear_arithmetic(expr: &Expr) -> bool {
+    match expr {
+        Expr::BinaryOp(left, Op::Mul, right) => {
+            (!expr_is_numeric_literal(left) && !expr_is_numeric_literal(right))
+                || expr_has_nonlinear_arithmetic(left)
+                || expr_has_nonlinear_arithmetic(right)
+        }
+        Expr::BinaryOp(left, Op::Div, right) => {
+            !expr_is_numeric_literal(right)
+                || expr_has_nonlinear_arithmetic(left)
+                || expr_has_nonlinear_arithmetic(right)
+        }
+        Expr::BinaryOp(left, _, right) => {
+            expr_has_nonlinear_arithmetic(left) || expr_has_nonlinear_arithmetic(right)
+        }
+        Expr::ArrayAccess(_, idx) => expr_has_nonlinear_arithmetic(idx),
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            expr_has_nonlinear_arithmetic(cond)
+                || stmt_has_nonlinear_arithmetic(then_branch)
+                || stmt_has_nonlinear_arithmetic(else_branch)
+        }
+        Expr::Call(_, args) => args.iter().any(expr_has_nonlinear_arithmetic),
+        Expr::StructInit { fields, .. } => fields
+            .iter()
+            .any(|(_, field_expr)| expr_has_nonlinear_arithmetic(field_expr)),
+        Expr::FieldAccess(base, _) => expr_has_nonlinear_arithmetic(base),
+        Expr::Match { target, arms } => {
+            expr_has_nonlinear_arithmetic(target)
+                || arms
+                    .iter()
+                    .any(|arm| stmt_has_nonlinear_arithmetic(&arm.body))
+        }
+        Expr::Async { body } | Expr::Lambda { body, .. } => stmt_has_nonlinear_arithmetic(body),
+        Expr::Await { expr } => expr_has_nonlinear_arithmetic(expr),
+        Expr::CallRef { callee, args } => {
+            expr_has_nonlinear_arithmetic(callee) || args.iter().any(expr_has_nonlinear_arithmetic)
+        }
+        Expr::Perform { args, .. } => args.iter().any(expr_has_nonlinear_arithmetic),
+        Expr::ChanSend { channel, value } => {
+            expr_has_nonlinear_arithmetic(channel) || expr_has_nonlinear_arithmetic(value)
+        }
+        Expr::ChanRecv { channel } => expr_has_nonlinear_arithmetic(channel),
+        Expr::Number(_)
+        | Expr::Float(_)
+        | Expr::StringLit(_)
+        | Expr::Variable(_)
+        | Expr::AtomRef { .. } => false,
+    }
+}
+
+fn stmt_has_nonlinear_arithmetic(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Let { value, .. } | Stmt::Assign { value, .. } => {
+            expr_has_nonlinear_arithmetic(value)
+        }
+        Stmt::Expr(value, _) => expr_has_nonlinear_arithmetic(value),
+        Stmt::ArrayStore { index, value, .. } => {
+            expr_has_nonlinear_arithmetic(index) || expr_has_nonlinear_arithmetic(value)
+        }
+        Stmt::Block(stmts, _) => stmts.iter().any(stmt_has_nonlinear_arithmetic),
+        Stmt::While {
+            cond,
+            invariant,
+            body,
+            ..
+        } => {
+            expr_has_nonlinear_arithmetic(cond)
+                || expr_has_nonlinear_arithmetic(invariant)
+                || stmt_has_nonlinear_arithmetic(body)
+        }
+        Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => stmt_has_nonlinear_arithmetic(body),
+        Stmt::TaskGroup { children, .. } => children.iter().any(stmt_has_nonlinear_arithmetic),
+        Stmt::Cancel { .. } => false,
+    }
+}
+
+fn expr_has_inductive_shape(expr: &Expr) -> bool {
+    match expr {
+        Expr::Match { .. } => true,
+        Expr::BinaryOp(left, _, right) => {
+            expr_has_inductive_shape(left) || expr_has_inductive_shape(right)
+        }
+        Expr::ArrayAccess(_, idx) => expr_has_inductive_shape(idx),
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            expr_has_inductive_shape(cond)
+                || stmt_has_inductive_shape(then_branch)
+                || stmt_has_inductive_shape(else_branch)
+        }
+        Expr::Call(_, args) => args.iter().any(expr_has_inductive_shape),
+        Expr::StructInit { fields, .. } => fields
+            .iter()
+            .any(|(_, field_expr)| expr_has_inductive_shape(field_expr)),
+        Expr::FieldAccess(base, _) => expr_has_inductive_shape(base),
+        Expr::Async { body } | Expr::Lambda { body, .. } => stmt_has_inductive_shape(body),
+        Expr::Await { expr } => expr_has_inductive_shape(expr),
+        Expr::CallRef { callee, args } => {
+            expr_has_inductive_shape(callee) || args.iter().any(expr_has_inductive_shape)
+        }
+        Expr::Perform { args, .. } => args.iter().any(expr_has_inductive_shape),
+        Expr::ChanSend { channel, value } => {
+            expr_has_inductive_shape(channel) || expr_has_inductive_shape(value)
+        }
+        Expr::ChanRecv { channel } => expr_has_inductive_shape(channel),
+        Expr::Number(_)
+        | Expr::Float(_)
+        | Expr::StringLit(_)
+        | Expr::Variable(_)
+        | Expr::AtomRef { .. } => false,
+    }
+}
+
+fn stmt_has_inductive_shape(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Let { value, .. } | Stmt::Assign { value, .. } => expr_has_inductive_shape(value),
+        Stmt::Expr(value, _) => expr_has_inductive_shape(value),
+        Stmt::ArrayStore { index, value, .. } => {
+            expr_has_inductive_shape(index) || expr_has_inductive_shape(value)
+        }
+        Stmt::Block(stmts, _) => stmts.iter().any(stmt_has_inductive_shape),
+        Stmt::While {
+            cond,
+            invariant,
+            body,
+            ..
+        } => {
+            expr_has_inductive_shape(cond)
+                || expr_has_inductive_shape(invariant)
+                || stmt_has_inductive_shape(body)
+        }
+        Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => stmt_has_inductive_shape(body),
+        Stmt::TaskGroup { children, .. } => children.iter().any(stmt_has_inductive_shape),
+        Stmt::Cancel { .. } => false,
+    }
+}
+
+fn stmt_has_while(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::While { .. } => true,
+        Stmt::Block(stmts, _) => stmts.iter().any(stmt_has_while),
+        Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => stmt_has_while(body),
+        Stmt::TaskGroup { children, .. } => children.iter().any(stmt_has_while),
+        Stmt::Let { value, .. } | Stmt::Assign { value, .. } => expr_contains_while(value),
+        Stmt::Expr(value, _) => expr_contains_while(value),
+        Stmt::ArrayStore { index, value, .. } => {
+            expr_contains_while(index) || expr_contains_while(value)
+        }
+        Stmt::Cancel { .. } => false,
+    }
+}
+
+fn expr_contains_while(expr: &Expr) -> bool {
+    match expr {
+        Expr::IfThenElse {
+            then_branch,
+            else_branch,
+            ..
+        } => stmt_has_while(then_branch) || stmt_has_while(else_branch),
+        Expr::Match { arms, .. } => arms.iter().any(|arm| stmt_has_while(&arm.body)),
+        Expr::Async { body } | Expr::Lambda { body, .. } => stmt_has_while(body),
+        Expr::BinaryOp(left, _, right) => expr_contains_while(left) || expr_contains_while(right),
+        Expr::ArrayAccess(_, idx) => expr_contains_while(idx),
+        Expr::Call(_, args) => args.iter().any(expr_contains_while),
+        Expr::StructInit { fields, .. } => fields
+            .iter()
+            .any(|(_, field_expr)| expr_contains_while(field_expr)),
+        Expr::FieldAccess(base, _) => expr_contains_while(base),
+        Expr::Await { expr } => expr_contains_while(expr),
+        Expr::CallRef { callee, args } => {
+            expr_contains_while(callee) || args.iter().any(expr_contains_while)
+        }
+        Expr::Perform { args, .. } => args.iter().any(expr_contains_while),
+        Expr::ChanSend { channel, value } => {
+            expr_contains_while(channel) || expr_contains_while(value)
+        }
+        Expr::ChanRecv { channel } => expr_contains_while(channel),
+        Expr::Number(_)
+        | Expr::Float(_)
+        | Expr::StringLit(_)
+        | Expr::Variable(_)
+        | Expr::AtomRef { .. } => false,
+    }
+}
+
+fn expr_is_numeric_literal(expr: &Expr) -> bool {
+    matches!(expr, Expr::Number(_) | Expr::Float(_))
+}
+
 type Env<'a> = HashMap<String, Dynamic<'a>>;
 type DynResult<'a> = MumeiResult<Dynamic<'a>>;
 
@@ -6799,7 +7159,8 @@ fn verify_inner(
         if let Some(ens_bool) = ens_z3.as_bool() {
             solver.push();
             solver.assert(&ens_bool.not());
-            if solver.check() == SatResult::Sat {
+            let ensures_check = solver.check();
+            if ensures_check == SatResult::Sat {
                 // Extract counterexample from Z3 model
                 let (ce_a, ce_b, ce_value) = if let Some(model) = solver.get_model() {
                     let mut ce_json = serde_json::Map::new();
@@ -6886,6 +7247,19 @@ fn verify_inner(
                 }
                 return Err(err);
             }
+            if ensures_check == SatResult::Unknown {
+                solver.pop(1);
+                metrics.record_phase(
+                    "Phase 5: ensures verification (unknown)",
+                    phase_start.elapsed(),
+                );
+                metrics.total_constraints = constraint_count_cell.get();
+                metrics.print_summary();
+                return Err(MumeiError::verification_at(
+                    "Z3 returned unknown while checking the postcondition.",
+                    atom.span.clone(),
+                ));
+            }
             solver.pop(1);
         }
         env.remove("result");
@@ -6942,7 +7316,8 @@ fn verify_inner(
     metrics.record_phase("Phase 5: ensures verification", phase_start.elapsed());
 
     let z3_check_start = std::time::Instant::now();
-    if solver.check() == SatResult::Unsat {
+    let final_check = solver.check();
+    if final_check == SatResult::Unsat {
         let unsat_core = solver.get_unsat_core();
         let core_labels: Vec<String> = unsat_core
             .iter()
@@ -7000,6 +7375,19 @@ fn verify_inner(
         metrics.print_summary();
         return Err(MumeiError::verification_at(
             constraint_summary,
+            atom.span.clone(),
+        ));
+    }
+    if final_check == SatResult::Unknown {
+        metrics.z3_check_time = z3_check_start.elapsed();
+        metrics.total_constraints = constraint_count_cell.get();
+        metrics.record_phase(
+            "Phase 6: final Z3 check (unknown)",
+            z3_check_start.elapsed(),
+        );
+        metrics.print_summary();
+        return Err(MumeiError::verification_at(
+            "Z3 returned unknown during the final consistency check.",
             atom.span.clone(),
         ));
     }

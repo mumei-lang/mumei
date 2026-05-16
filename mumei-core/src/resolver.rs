@@ -62,6 +62,55 @@ struct ResolverContext {
     /// preserves the strict Z3-only contract.
     allow_lean_verified: bool,
 }
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LeanEscalationMetrics {
+    pub escalation_attempts: usize,
+    pub lean_successes: usize,
+    pub partial_translation: usize,
+    pub manual_required: usize,
+    #[serde(default)]
+    pub by_atom: HashMap<String, String>,
+    #[serde(default)]
+    pub by_logic_fragment: HashMap<String, usize>,
+    #[serde(default)]
+    pub by_failure_reason: HashMap<String, usize>,
+}
+
+impl LeanEscalationMetrics {
+    fn record_candidate(&mut self, atom: &proof_cert::AtomCertificate) {
+        if let Some(reason) = &atom.escalation_reason {
+            self.escalation_attempts += 1;
+            self.by_atom.insert(atom.name.clone(), reason.clone());
+            *self.by_failure_reason.entry(reason.clone()).or_insert(0) += 1;
+            for tag in &atom.logic_fragment_tags {
+                *self.by_logic_fragment.entry(tag.clone()).or_insert(0) += 1;
+            }
+        }
+    }
+
+    fn merge(&mut self, other: Self) {
+        self.escalation_attempts += other.escalation_attempts;
+        self.lean_successes += other.lean_successes;
+        self.partial_translation += other.partial_translation;
+        self.manual_required += other.manual_required;
+        self.by_atom.extend(other.by_atom);
+        for (tag, count) in other.by_logic_fragment {
+            *self.by_logic_fragment.entry(tag).or_insert(0) += count;
+        }
+        for (reason, count) in other.by_failure_reason {
+            *self.by_failure_reason.entry(reason).or_insert(0) += count;
+        }
+    }
+
+    fn has_activity(&self) -> bool {
+        self.escalation_attempts > 0
+            || self.lean_successes > 0
+            || self.partial_translation > 0
+            || self.manual_required > 0
+    }
+}
+
 impl ResolverContext {
     fn new() -> Self {
         Self {
@@ -226,24 +275,46 @@ fn log_lean_verified_acceptance(
     cert: &proof_cert::ProofCertificate,
     results: &[(String, String)],
     allow_lean_verified: bool,
-) {
+) -> LeanEscalationMetrics {
+    let mut metrics = LeanEscalationMetrics::default();
     if !allow_lean_verified {
-        return;
+        return metrics;
     }
     let proven: HashMap<&str, &str> = results
         .iter()
         .map(|(name, status)| (name.as_str(), status.as_str()))
         .collect();
     for atom in &cert.atoms {
+        metrics.record_candidate(atom);
+        let lean_status = atom
+            .lean_metadata
+            .as_ref()
+            .map(|metadata| metadata.status.as_str())
+            .unwrap_or(atom.z3_check_result.as_str());
         if atom.z3_check_result == "lean_verified"
             && proven.get(atom.name.as_str()).copied() == Some("proven")
         {
+            metrics.lean_successes += 1;
             eprintln!(
-                "  🔗 Lean-verified atom '{}' accepted as proven (--allow-lean-verified)",
+                "  Lean-verified atom '{}' accepted as proven (--allow-lean-verified)",
                 atom.name,
             );
+        } else if lean_status == "partial_translation" {
+            metrics.partial_translation += 1;
+        } else if atom.escalation_reason.is_some() {
+            metrics.manual_required += 1;
         }
     }
+    if metrics.has_activity() {
+        eprintln!(
+            "  Lean escalation metrics: attempts={}, successes={}, partial_translation={}, manual_required={}",
+            metrics.escalation_attempts,
+            metrics.lean_successes,
+            metrics.partial_translation,
+            metrics.manual_required,
+        );
+    }
+    metrics
 }
 
 /// P5-C: Attempt to verify a proof certificate for an imported module directory.
@@ -282,7 +353,12 @@ fn verify_import_certificate(
                 if source_matches || cert.file.is_empty() {
                     let results =
                         proof_cert::verify_certificate(&cert, &atom_refs, allow_lean_verified);
-                    log_lean_verified_acceptance(&cert, &results, allow_lean_verified);
+                    let mut metrics = LeanEscalationMetrics::default();
+                    metrics.merge(log_lean_verified_acceptance(
+                        &cert,
+                        &results,
+                        allow_lean_verified,
+                    ));
                     return Some(results.into_iter().collect());
                 }
                 // Certificate is for a different file — fall through to the
@@ -313,7 +389,12 @@ fn verify_import_certificate(
                     {
                         let results =
                             proof_cert::verify_certificate(cert, &atom_refs, allow_lean_verified);
-                        log_lean_verified_acceptance(cert, &results, allow_lean_verified);
+                        let mut metrics = LeanEscalationMetrics::default();
+                        metrics.merge(log_lean_verified_acceptance(
+                            cert,
+                            &results,
+                            allow_lean_verified,
+                        ));
                         return Some(results.into_iter().collect());
                     }
                 }

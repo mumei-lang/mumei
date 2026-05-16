@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::resolver;
-use crate::verification::ModuleEnv;
+use crate::verification::{self, ModuleEnv};
 
 /// Top-level proof certificate for a Mumei source file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,6 +69,69 @@ pub struct AtomCertificate {
     /// Postcondition contract text (P5-A)
     #[serde(default)]
     pub ensures: String,
+    /// Deterministic Z3 outcome class used by Lean escalation routing.
+    #[serde(default)]
+    pub z3_result_class: String,
+    /// Reason this atom should be escalated to Lean, when applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub escalation_reason: Option<String>,
+    /// Logical fragments detected in this proof obligation.
+    #[serde(default)]
+    pub logic_fragment_tags: Vec<String>,
+    /// Lean-side result metadata populated by mumei-lean.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lean_metadata: Option<LeanResultMetadata>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LeanResultMetadata {
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub theorem_name: String,
+    #[serde(default)]
+    pub proof_path: String,
+    #[serde(default)]
+    pub diagnostics: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EscalationCandidate {
+    pub name: String,
+    pub z3_check_result: String,
+    pub z3_result_class: String,
+    pub status: String,
+    pub content_hash: String,
+    pub proof_hash: String,
+    pub dependencies: Vec<String>,
+    pub effects: Vec<String>,
+    pub requires: String,
+    pub ensures: String,
+    pub escalation_reason: String,
+    pub logic_fragment_tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lean_metadata: Option<LeanResultMetadata>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct EscalationBundleSummary {
+    pub total_atoms: usize,
+    pub candidate_count: usize,
+    pub by_reason: HashMap<String, usize>,
+    pub by_logic_fragment: HashMap<String, usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EscalationBundle {
+    pub version: String,
+    pub timestamp: String,
+    pub file: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package_version: Option<String>,
+    pub summary: EscalationBundleSummary,
+    pub candidates: Vec<EscalationCandidate>,
 }
 
 /// Compute SHA-256 hash of an atom's logical content.
@@ -149,6 +212,9 @@ pub fn generate_certificate(
 
             // P5-A: Declared effect names
             let effects: Vec<String> = atom.effects.iter().map(|e| e.name.clone()).collect();
+            let classification = verification::classify_atom_for_lean_escalation(
+                atom, module_env, &z3_result, &status,
+            );
 
             AtomCertificate {
                 name: atom.name.clone(),
@@ -160,6 +226,10 @@ pub fn generate_certificate(
                 effects,
                 requires: atom.requires.clone(),
                 ensures: atom.ensures.clone(),
+                z3_result_class: classification.z3_result_class,
+                escalation_reason: classification.escalation_reason,
+                logic_fragment_tags: classification.logic_fragment_tags,
+                lean_metadata: None,
             }
         })
         .collect();
@@ -186,6 +256,56 @@ pub fn generate_certificate(
     cert.certificate_hash = compute_certificate_hash(&cert);
 
     cert
+}
+
+pub fn generate_escalation_bundle(cert: &ProofCertificate) -> EscalationBundle {
+    let candidates: Vec<EscalationCandidate> = cert
+        .atoms
+        .iter()
+        .filter_map(|atom| {
+            let escalation_reason = atom.escalation_reason.clone()?;
+            Some(EscalationCandidate {
+                name: atom.name.clone(),
+                z3_check_result: atom.z3_check_result.clone(),
+                z3_result_class: atom.z3_result_class.clone(),
+                status: atom.status.clone(),
+                content_hash: atom.content_hash.clone(),
+                proof_hash: atom.proof_hash.clone(),
+                dependencies: atom.dependencies.clone(),
+                effects: atom.effects.clone(),
+                requires: atom.requires.clone(),
+                ensures: atom.ensures.clone(),
+                escalation_reason,
+                logic_fragment_tags: atom.logic_fragment_tags.clone(),
+                lean_metadata: atom.lean_metadata.clone(),
+            })
+        })
+        .collect();
+
+    let mut summary = EscalationBundleSummary {
+        total_atoms: cert.atoms.len(),
+        candidate_count: candidates.len(),
+        ..EscalationBundleSummary::default()
+    };
+    for candidate in &candidates {
+        *summary
+            .by_reason
+            .entry(candidate.escalation_reason.clone())
+            .or_insert(0) += 1;
+        for tag in &candidate.logic_fragment_tags {
+            *summary.by_logic_fragment.entry(tag.clone()).or_insert(0) += 1;
+        }
+    }
+
+    EscalationBundle {
+        version: "1.0".to_string(),
+        timestamp: cert.timestamp.clone(),
+        file: cert.file.clone(),
+        package_name: cert.package_name.clone(),
+        package_version: cert.package_version.clone(),
+        summary,
+        candidates,
+    }
 }
 
 /// Compute SHA-256 hash of the serialized certificate.
@@ -270,6 +390,12 @@ pub fn load_certificate(path: &Path) -> Result<ProofCertificate, String> {
 pub fn save_certificate(cert: &ProofCertificate, path: &Path) -> Result<(), String> {
     let json = serde_json::to_string_pretty(cert)
         .map_err(|e| format!("Failed to serialize certificate: {}", e))?;
+    std::fs::write(path, json).map_err(|e| format!("Failed to write {}: {}", path.display(), e))
+}
+
+pub fn save_escalation_bundle(bundle: &EscalationBundle, path: &Path) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(bundle)
+        .map_err(|e| format!("Failed to serialize escalation bundle: {}", e))?;
     std::fs::write(path, json).map_err(|e| format!("Failed to write {}: {}", path.display(), e))
 }
 
