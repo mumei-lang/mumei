@@ -9,6 +9,7 @@
 //! - `textDocument/hover` — atom の requires/ensures 表示
 //! - `textDocument/completion` — キーワード・atom・effect・type 名補完
 //! - `textDocument/definition` — 定義ジャンプ
+//! - `textDocument/codeLens` — intent drift と spec-code mapping のインライン表示
 //! - `textDocument/publishDiagnostics` — Z3 検証エラーのリアルタイム表示
 //! - `shutdown` / `exit`
 use mumei_core::parser;
@@ -57,7 +58,10 @@ pub fn run() {
                         "completionProvider": {
                             "triggerCharacters": [".", ":"]
                         },
-                        "definitionProvider": true
+                        "definitionProvider": true,
+                        "codeLensProvider": {
+                            "resolveProvider": true
+                        }
                     },
                     "serverInfo": {
                         "name": "mumei-lsp",
@@ -202,6 +206,34 @@ pub fn run() {
                     send_response(&mut writer, id, result);
                 }
             }
+            "textDocument/codeLens" => {
+                let result = if let Some(params) = json.get("params") {
+                    let uri = params
+                        .get("textDocument")
+                        .and_then(|td| td.get("uri"))
+                        .and_then(|u| u.as_str())
+                        .unwrap_or("");
+                    if let Some(text) = documents.get(uri) {
+                        build_code_lenses(text, uri)
+                    } else {
+                        serde_json::json!([])
+                    }
+                } else {
+                    serde_json::json!([])
+                };
+                if let Some(id) = id {
+                    send_response(&mut writer, id, result);
+                }
+            }
+            "codeLens/resolve" => {
+                let result = json
+                    .get("params")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({}));
+                if let Some(id) = id {
+                    send_response(&mut writer, id, result);
+                }
+            }
             "shutdown" => {
                 eprintln!("mumei-lsp: shutdown requested");
                 if let Some(id) = id {
@@ -318,6 +350,8 @@ fn diagnose(uri: &str, source: &str) -> Vec<serde_json::Value> {
             diagnostics.push(diag);
         }
     }
+
+    append_intent_drift_diagnostics(source, &items, &mut diagnostics);
 
     diagnostics
 }
@@ -549,6 +583,246 @@ fn build_hover(source: &str, line: usize) -> Option<String> {
     }
 
     None
+}
+
+// =============================================================================
+// CodeLens (textDocument/codeLens)
+// =============================================================================
+
+fn build_code_lenses(source: &str, uri: &str) -> serde_json::Value {
+    let items = parser::parse_module(source);
+    let mut lenses: Vec<serde_json::Value> = Vec::new();
+
+    for item in &items {
+        match item {
+            parser::Item::Atom(atom) => push_atom_code_lenses(source, uri, atom, &mut lenses),
+            parser::Item::ImplBlock(impl_block) => {
+                for method in &impl_block.methods {
+                    push_atom_code_lenses(source, uri, method, &mut lenses);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    serde_json::json!(lenses)
+}
+
+fn push_atom_code_lenses(
+    source: &str,
+    uri: &str,
+    atom: &parser::Atom,
+    lenses: &mut Vec<serde_json::Value>,
+) {
+    let drift = calculate_intent_drift(atom);
+    lenses.push(serde_json::json!({
+        "range": atom_name_range(source, atom),
+        "command": {
+            "title": format!("Intent Drift: {:.2}", drift),
+            "command": "mumei.showIntentDrift",
+            "arguments": [uri, atom.name.clone(), drift]
+        },
+        "data": {
+            "kind": "intentDrift",
+            "atom": atom.name,
+            "score": drift
+        }
+    }));
+
+    for clause in ["requires", "ensures"] {
+        if let Some(range) = contract_clause_range(source, atom, clause) {
+            lenses.push(serde_json::json!({
+                "range": range,
+                "command": {
+                    "title": format!("Spec-Code Mapping: {} → {}", clause, atom.name),
+                    "command": "mumei.showSpecCodeMapping",
+                    "arguments": [uri, atom.name.clone(), clause]
+                },
+                "data": {
+                    "kind": "specCodeMapping",
+                    "atom": atom.name,
+                    "clause": clause
+                }
+            }));
+        }
+    }
+}
+
+fn calculate_intent_drift(atom: &parser::Atom) -> f64 {
+    let contract_complexity = constraint_complexity(&atom.requires)
+        + constraint_complexity(&atom.ensures)
+        + atom.forall_constraints.len() * 3;
+    let implementation_complexity = expression_complexity(&atom.body_expr)
+        + atom.effects.len() * 2
+        + atom.resources.len()
+        + atom.effect_pre.len()
+        + atom.effect_post.len();
+    let interface_complexity = atom.params.len() + atom.type_params.len() + atom.where_bounds.len();
+    let total = contract_complexity + implementation_complexity + interface_complexity;
+
+    (total as f64 / 32.0).min(1.0)
+}
+
+fn constraint_complexity(expr: &str) -> usize {
+    let trimmed = expr.trim();
+    if trimmed.is_empty() || trimmed == "true" {
+        return 0;
+    }
+
+    let logical_ops = ["&&", "||", "=>", "forall", "exists"]
+        .iter()
+        .map(|op| trimmed.matches(op).count())
+        .sum::<usize>();
+    let comparisons = ["==", "!=", ">=", "<=", ">", "<"]
+        .iter()
+        .map(|op| trimmed.matches(op).count())
+        .sum::<usize>();
+    let arithmetic = ['+', '-', '*', '/', '%']
+        .iter()
+        .map(|op| trimmed.matches(*op).count())
+        .sum::<usize>();
+    let grouping = trimmed.matches('(').count() + trimmed.matches('[').count();
+
+    1 + logical_ops * 2 + comparisons + arithmetic + grouping
+}
+
+fn expression_complexity(expr: &str) -> usize {
+    let trimmed = expr.trim();
+    if trimmed.is_empty() {
+        return 0;
+    }
+
+    let control_flow = ["if", "match", "while", "call", "perform", "acquire"]
+        .iter()
+        .map(|keyword| trimmed.matches(keyword).count())
+        .sum::<usize>();
+    let operators = ["&&", "||", "==", "!=", ">=", "<=", "+", "-", "*", "/", "%"]
+        .iter()
+        .map(|op| trimmed.matches(op).count())
+        .sum::<usize>();
+
+    1 + control_flow * 2 + operators
+}
+
+fn atom_name_range(source: &str, atom: &parser::Atom) -> serde_json::Value {
+    let start_line = atom.span.line.saturating_sub(1);
+    let lines: Vec<&str> = source.lines().collect();
+    for (line_idx, line) in lines.iter().enumerate().skip(start_line) {
+        if let Some(name_col) = line.find(&atom.name) {
+            if line[..name_col].contains("atom") {
+                return lsp_range(line_idx, name_col, line_idx, name_col + atom.name.len());
+            }
+        }
+        if line_idx > start_line && is_item_start(line) {
+            break;
+        }
+    }
+
+    let start_col = atom.span.col.saturating_sub(1);
+    lsp_range(
+        start_line,
+        start_col,
+        start_line,
+        start_col + atom.name.len(),
+    )
+}
+
+fn contract_clause_range(
+    source: &str,
+    atom: &parser::Atom,
+    clause: &str,
+) -> Option<serde_json::Value> {
+    let start_line = atom.span.line.saturating_sub(1);
+    let lines: Vec<&str> = source.lines().collect();
+    let needle = format!("{}:", clause);
+
+    for (line_idx, line) in lines.iter().enumerate().skip(start_line) {
+        if let Some(start_col) = line.find(&needle) {
+            return Some(lsp_range(
+                line_idx,
+                start_col,
+                line_idx,
+                start_col + needle.len(),
+            ));
+        }
+        if line_idx > start_line && is_item_start(line) {
+            break;
+        }
+    }
+
+    None
+}
+
+fn lsp_range(
+    start_line: usize,
+    start_character: usize,
+    end_line: usize,
+    end_character: usize,
+) -> serde_json::Value {
+    serde_json::json!({
+        "start": { "line": start_line, "character": start_character },
+        "end": { "line": end_line, "character": end_character }
+    })
+}
+
+fn is_item_start(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    trimmed.starts_with("atom ")
+        || trimmed.starts_with("async atom ")
+        || trimmed.starts_with("trusted atom ")
+        || trimmed.starts_with("unverified atom ")
+        || trimmed.starts_with("struct ")
+        || trimmed.starts_with("enum ")
+        || trimmed.starts_with("trait ")
+        || trimmed.starts_with("impl ")
+        || trimmed.starts_with("effect ")
+        || trimmed.starts_with("resource ")
+        || trimmed.starts_with("extern ")
+        || trimmed.starts_with("import ")
+}
+
+fn append_intent_drift_diagnostics(
+    source: &str,
+    items: &[parser::Item],
+    diagnostics: &mut Vec<serde_json::Value>,
+) {
+    for item in items {
+        match item {
+            parser::Item::Atom(atom) => push_intent_drift_diagnostic(source, atom, diagnostics),
+            parser::Item::ImplBlock(impl_block) => {
+                for method in &impl_block.methods {
+                    push_intent_drift_diagnostic(source, method, diagnostics);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn push_intent_drift_diagnostic(
+    source: &str,
+    atom: &parser::Atom,
+    diagnostics: &mut Vec<serde_json::Value>,
+) {
+    let drift = calculate_intent_drift(atom);
+    if drift < 0.75 {
+        return;
+    }
+
+    diagnostics.push(serde_json::json!({
+        "range": atom_name_range(source, atom),
+        "severity": 2,
+        "source": "mumei-intent",
+        "message": format!(
+            "High intent drift score ({:.2}) for atom '{}'. Review spec-code mapping.",
+            drift,
+            atom.name
+        ),
+        "data": {
+            "intentDrift": drift,
+            "atom": atom.name
+        }
+    }));
 }
 
 // =============================================================================
@@ -846,6 +1120,45 @@ fn send_message(writer: &mut impl Write, message: &serde_json::Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_build_code_lenses_for_atom_and_contract_clauses() {
+        let source = r#"
+atom inc(n: i64)
+    requires: n >= 0;
+    ensures: result == n + 1;
+    body: n + 1;
+"#;
+
+        let result = build_code_lenses(source, "file:///test.mm");
+        let lenses = result.as_array().expect("should be array");
+        let titles: Vec<&str> = lenses
+            .iter()
+            .filter_map(|lens| {
+                lens.pointer("/command/title")
+                    .and_then(|title| title.as_str())
+            })
+            .collect();
+
+        assert_eq!(lenses.len(), 3);
+        assert!(titles
+            .iter()
+            .any(|title| title.starts_with("Intent Drift:")));
+        assert!(titles.contains(&"Spec-Code Mapping: requires → inc"));
+        assert!(titles.contains(&"Spec-Code Mapping: ensures → inc"));
+    }
+
+    #[test]
+    fn test_calculate_intent_drift_increases_with_complexity() {
+        let simple = parser::parse_atom(
+            "atom simple(n: i64) requires: true; ensures: result == n; body: n;",
+        );
+        let complex = parser::parse_atom(
+            "atom complex(a: i64, b: i64) requires: a >= 0 && b >= 0 && a != b; ensures: result >= a && result >= b && result == a + b; effects: [IO]; body: if a > b { a + b } else { b + a };",
+        );
+
+        assert!(calculate_intent_drift(&complex) > calculate_intent_drift(&simple));
+    }
 
     #[test]
     fn test_completion_includes_keywords() {
