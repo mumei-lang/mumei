@@ -985,6 +985,139 @@ Self-healing loop と Lean escalation は成功率を上げる一方で、無制
 
 ---
 
+### P9: NLAE Integration - Provable AI Runtime
+
+Anthropic の Natural Language Autoencoders (NLAE) 理論を mumei エコシステムに統合し、LLM の推論（内部状態）と形式検証（数学的真理）をシームレスに結合する証明可能な AI 実行基盤を構築する。
+
+#### 設計思想
+
+Mumei DSL を、AI にとっての究極の NLA（Natural Language Activation：高密度論理言語）として位置づける。自然言語の仕様が持つ「曖昧さ（ノイズ）」を排し、AI の設計意図を 100% の忠実度（Fidelity）で数学的証明空間へ射影（コンパイル）する。
+
+#### コンポーネントマッピング
+
+| リポジトリ | NLAE 役割 | 具体的抽象化レイヤー |
+| --- | --- | --- |
+| `mumei-agent` | **Module A (AV)** | 内部推論（潜在空間） → `mumei` 構文（離散表現）への写像 |
+| `mumei` | **Module B (AR)** | `mumei` 構文 → Z3 意味論（論理状態）への再構築 |
+| `mumei-lean` | **Fidelity Checker** | 再構築の忠実度検証（誤差がゼロであることを数学的に担保） |
+| `mumei-demo` | **Evaluation Loop** | 誤差（反例）に基づく自己修復ループの実行環境 |
+
+**P9-A: Latent-space Debugging（潜在空間デバッグ）** — Planned
+
+既存の `LatentEncoder` / `LatentDecoder` を拡張し、より高度な潜在空間デバッグを実現する。
+
+**Implementation Plan**:
+- `LatentEncoder` の特徴抽出機能を拡張（現在は構文・意味論・効果・依存関係・契約・スコープ・検証特徴） [6-cite-7](#6-cite-7)
+- `LatentDecoder` の編集戦略を拡張（現在は effect 追加・削除・型洗練・requires 強化・ensures 弱化） [6-cite-8](#6-cite-8)
+- `LatentDebugStrategy` のバグ方向計算を高度化 [6-cite-9](#6-cite-9)
+- フォールバック動作とユニットテスト
+
+**Success Metrics**:
+- 潜在空間デバッグの成功率: ≥ 30%（rule-based + LLM の前段）
+
+**P9-B: Dense Property Generation（高密度プロパティ生成）** — Planned
+
+既存の `DensePropertyGenerator` を拡張し、より高密度な契約生成を実現する。
+
+**Implementation Plan**:
+- `DensePropertyGenerator` の LLM プロンプトを最適化 [6-cite-10](#6-cite-10)
+- Z3 検証効率を考慮した契約圧縮アルゴリズム
+- 生成された契約の検証時間メトリクス
+
+**Success Metrics**:
+- 生成された契約の Z3 検証時間が既存契約より 20% 短縮
+
+**P9-C: Latent Protocol for Agent Communication（エージェント間通信プロトコル）** — Planned
+
+既存の `LatentProtocol` を拡張し、エージェント間の効率的な通信を実現する。
+
+**Implementation Plan**:
+- `LatentProtocol` のハッシュベースエンコーディングを拡張 [6-cite-11](#6-cite-11)
+- MCP サーバーへの `send_latent_message` 統合
+- プロトコルのセキュリティとプライバシー保証
+
+**Success Metrics**:
+- エージェント間通信のデータ転送量が 50% 削減
+
+**P9-D: Reconstruction Loss Formalization（復元誤差の定式化）** — Planned
+
+プログラム状態の写像と復元誤差を数学的に定義する。
+
+**Implementation Plan**:
+- 意図される正当な仕様空間 $S$ と実装空間 $V$ の定義
+- 復元誤差 $L_{\text{recon}} = \{ x \in S \mid V(x) \neq \text{True} \}$ の実装
+- Z3 反例を復元誤差として解釈するモジュール
+- 誤差がゼロ（$L_{\text{recon}} = \emptyset$）の状態を検証するメカニズム
+
+**Success Metrics**:
+- 復元誤差の検出精度: ≥ 95%
+
+**P9-E: Structured Feedback JSON Schema（構造化フィードバック JSON 規格）** — Planned
+
+AI が解釈しやすい構造化 JSON（Loss Vector）の規格を定義・実装する。
+
+**Implementation Plan**:
+- 以下の JSON スキーマの定義と実装:
+
+```json
+{
+  "status": "verification_failed",
+  "error_type": "postcondition_violation",
+  "location": { "file": "vault.mu", "line": 12 },
+  "reconstruction_loss": {
+    "violated_property": "ensures from_after == from - amount",
+    "counter_example": { "from": 100, "to": 0, "amount": -50, "from_after": 150 }
+  },
+  "feedback_instruction": "The system allowed a negative amount deposit..."
+}
+```
+
+- `mumei-core` の `verification.rs` からの出力拡張
+- `mumei-agent` での解釈ロジック実装
+
+**Success Metrics**:
+- AI によるフィードバック解釈成功率: ≥ 90%
+
+**P9-F: Self-Correction Protocol（自己修復ループ）** — Planned
+
+誤差（反例）を最小化する自律サイクルを実装する。
+
+**Implementation Plan**:
+- 生成 → 検証 → 反例出力 → 修正 → 証明のループ実装
+- `mumei-demo` での評価環境構築
+- ループの収束条件と停止条件の定義
+- トークンコストと成功率のトレードオフ最適化
+
+**Success Metrics**:
+- 自己修復ループの収束率: ≥ 70%（10 回以内）
+
+**P9-G: Ecosystem Integration（エコシステム統合）** — Planned
+
+4 つのリポジトリを NLAE コンポーネントとして統合する。
+
+**Implementation Plan**:
+- `mumei-core`: Z3 変換時の Loss Vector 出力モジュール
+- `mumei-agent`: MCP 経由の JSON エラー入力と NLAE Backpropagation プロンプト
+- `mumei-lean`: 完全証明のための Lean 4 トランスパイル
+- `mumei-demo`: 自己修復ループの実行環境
+
+**Success Metrics**:
+- エンドツーエンドの NLAE 統合デモの成功
+
+#### Configuration
+
+- すべての機能はデフォルト無効（既存の NLAE 機能と同様）
+- `ENABLE_LATENT_DEBUG`, `ENABLE_DENSE_PROPERTIES`, `ENABLE_LATENT_PROTOCOL`
+- `ENABLE_RECONSTRUCTION_LOSS`, `ENABLE_STRUCTURED_FEEDBACK`, `ENABLE_SELF_CORRECTION`
+
+#### References
+
+- Anthropic NLAE research: https://www.anthropic.com/research/natural-language-autoencoders
+- Reference implementation: https://github.com/kitft/natural_language_autoencoders
+- Existing NLAE integration: `mumei-agent/docs/NLAE_INTEGRATION.md`
+
+---
+
 ## Related Documents
 
 - [`docs/FFI.md`](FFI.md) — FFI extern block design (Phase A foundation)
