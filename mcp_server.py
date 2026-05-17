@@ -1,10 +1,17 @@
+from __future__ import annotations
+
 import hashlib
+import json
 import os
 import re
 import shutil
 import subprocess
-import json
 import tempfile
+import threading
+import time
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from mcp.server.fastmcp import FastMCP
 
@@ -32,6 +39,210 @@ _session_effects: dict = {
     "denied": [],
     "source": "default",  # "default" | "mumei.toml" | "session_override"
 }
+
+
+@dataclass
+class Z3WorkerContext:
+    worker_id: str
+    solver_config_fingerprint: str
+    process: subprocess.Popen | None = None
+    start_time: float = field(default_factory=time.time)
+
+
+@dataclass
+class VerificationTask:
+    task_id: str
+    source_hash: str
+    cache_key: str
+    status: str = "pending"
+    result: dict | None = None
+    cancel_reason: str | None = None
+    worker_id: str | None = None
+    created_at: float = field(default_factory=time.time)
+    completed_at: float | None = None
+
+
+class VerificationTaskRegistry:
+    def __init__(self):
+        self._tasks: dict[str, VerificationTask] = {}
+        self._cache: dict[str, dict] = {}
+        self._lock = threading.RLock()
+
+    def register_task(self, source_hash: str, cache_key: str) -> str:
+        task_id = f"verify-{uuid.uuid4().hex}"
+        task = VerificationTask(task_id=task_id, source_hash=source_hash, cache_key=cache_key)
+        with self._lock:
+            self._tasks[task_id] = task
+        return task_id
+
+    def get_task(self, task_id: str) -> VerificationTask | None:
+        with self._lock:
+            return self._tasks.get(task_id)
+
+    def complete_task(self, task_id: str, result: dict, cache_result: bool = True):
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if task is None:
+                return
+            task.status = "completed"
+            task.result = result
+            task.completed_at = time.time()
+            task.cancel_reason = None
+            task.worker_id = None
+            if cache_result:
+                self._cache[task.cache_key] = result
+
+    def cancel_task(self, task_id: str, reason: str):
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if task is None:
+                return
+            task.status = "cancelled"
+            task.cancel_reason = reason
+            task.completed_at = time.time()
+            task.worker_id = None
+
+    def mark_running(self, task_id: str, worker_id: str):
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if task is None:
+                return
+            task.status = "running"
+            task.worker_id = worker_id
+
+    def get_cached_result(self, cache_key: str) -> dict | None:
+        with self._lock:
+            return self._cache.get(cache_key)
+
+
+class Z3WorkerPool:
+    def __init__(self, max_workers: int = 4, timeout_ms: int = 30000, memory_limit_mb: int = 1024):
+        self.max_workers = max(1, max_workers)
+        self.timeout_ms = timeout_ms
+        self.memory_limit_mb = memory_limit_mb
+        self._workers = [
+            Z3WorkerContext(
+                worker_id=f"z3-worker-{index}",
+                solver_config_fingerprint=_compute_mcp_solver_config_fingerprint(
+                    timeout_ms,
+                    memory_limit_mb,
+                ),
+            )
+            for index in range(self.max_workers)
+        ]
+        self._available = list(self._workers)
+        self._busy: dict[str, Z3WorkerContext] = {}
+        self._task_workers: dict[str, str] = {}
+        self._condition = threading.Condition()
+
+    def acquire_worker(self) -> Z3WorkerContext:
+        with self._condition:
+            while not self._available:
+                self._condition.wait()
+            worker = self._available.pop(0)
+            worker.start_time = time.time()
+            self._busy[worker.worker_id] = worker
+            return worker
+
+    def release_worker(self, worker_id: str):
+        with self._condition:
+            worker = self._busy.pop(worker_id, None)
+            if worker is None:
+                return
+            if worker.process is not None and worker.process.poll() is None:
+                worker.process.terminate()
+            worker.process = None
+            self._task_workers = {
+                task_id: mapped_worker_id
+                for task_id, mapped_worker_id in self._task_workers.items()
+                if mapped_worker_id != worker_id
+            }
+            self._available.append(worker)
+            self._condition.notify()
+
+    def cancel_task(self, task_id: str):
+        with self._condition:
+            worker_id = self._task_workers.get(task_id)
+            if worker_id is None:
+                return False
+            worker = self._busy.get(worker_id)
+            if worker is None or worker.process is None:
+                return False
+            if worker.process.poll() is None:
+                worker.process.terminate()
+            return True
+
+    def bind_task(self, task_id: str, worker_id: str):
+        with self._condition:
+            self._task_workers[task_id] = worker_id
+
+    def shutdown(self):
+        with self._condition:
+            for worker in self._workers:
+                if worker.process is not None and worker.process.poll() is None:
+                    worker.process.terminate()
+                worker.process = None
+            self._available = list(self._workers)
+            self._busy.clear()
+            self._task_workers.clear()
+            self._condition.notify_all()
+
+
+def _compute_mcp_solver_config_fingerprint(timeout_ms: int, memory_limit_mb: int, mbqi: bool = True) -> str:
+    payload = json.dumps(
+        {
+            "engine": "mumei-z3",
+            "timeout_ms": timeout_ms,
+            "memory_limit_mb": memory_limit_mb,
+            "smt.mbqi": mbqi,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _limit_worker_memory(memory_limit_mb: int):
+    if os.name != "posix":
+        return None
+
+    def _set_limit():
+        try:
+            import resource
+
+            limit_bytes = memory_limit_mb * 1024 * 1024
+            resource.setrlimit(resource.RLIMIT_AS, (limit_bytes, limit_bytes))
+        except (ImportError, OSError, ValueError):
+            pass
+
+    return _set_limit
+
+
+def _resume_task_validation_error(
+    task_id: str | None,
+    resumed_task: VerificationTask | None,
+    source_hash: str,
+    cache_key: str,
+) -> dict | None:
+    if task_id is None:
+        return None
+    if resumed_task is None:
+        return {"status": "error", "task_id": task_id, "error": "task_id not found"}
+    if resumed_task.source_hash != source_hash or resumed_task.cache_key != cache_key:
+        return {
+            "status": "error",
+            "task_id": task_id,
+            "error": "task_id does not match source_hash or solver configuration",
+            "expected_source_hash": resumed_task.source_hash,
+            "requested_source_hash": source_hash,
+            "expected_cache_key": resumed_task.cache_key,
+            "requested_cache_key": cache_key,
+        }
+    return None
+
+
+_task_registry = VerificationTaskRegistry()
+_z3_worker_pool = Z3WorkerPool()
 
 def _format_semantic_feedback(report_json: str) -> str:
     """Parse report.json and format semantic_feedback into a readable section.
@@ -500,6 +711,165 @@ def validate_logic(
                 )
 
         return "\n".join(response_parts)
+
+
+@mcp.tool()
+def verify_with_orchestration(
+    source_code: str,
+    timeout_ms: int = 30000,
+    enable_cache: bool = True,
+    task_id: str | None = None,
+) -> str:
+    """
+    Run verification through an orchestration-aware Z3 worker pool.
+    This tool leaves validate_logic/forge_blade unchanged and adds task IDs,
+    cache isolation, bounded parallelism, timeout cancellation, and process metadata.
+    """
+    root_dir = Path(__file__).parent.absolute()
+    timeout_ms = max(1, timeout_ms)
+    source_hash = hashlib.sha256(source_code.encode("utf-8")).hexdigest()
+    solver_fingerprint = _compute_mcp_solver_config_fingerprint(
+        timeout_ms,
+        _z3_worker_pool.memory_limit_mb,
+    )
+    cache_key = hashlib.sha256(
+        f"{source_hash}:{solver_fingerprint}".encode("utf-8")
+    ).hexdigest()
+
+    resumed_task = _task_registry.get_task(task_id) if task_id else None
+    resume_error = _resume_task_validation_error(task_id, resumed_task, source_hash, cache_key)
+    if resume_error is not None:
+        return json.dumps(resume_error, ensure_ascii=False, indent=2)
+
+    if resumed_task is not None:
+        if resumed_task.status == "completed" and resumed_task.result is not None:
+            response = dict(resumed_task.result)
+            response["resumed"] = True
+            return json.dumps(response, ensure_ascii=False, indent=2)
+        if resumed_task.status == "cancelled":
+            return json.dumps(
+                {
+                    "status": "cancelled",
+                    "task_id": resumed_task.task_id,
+                    "cache_key": resumed_task.cache_key,
+                    "cancel_reason": resumed_task.cancel_reason,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+
+    if enable_cache:
+        cached_result = _task_registry.get_cached_result(cache_key)
+        if cached_result is not None:
+            response = dict(cached_result)
+            response["cache_hit"] = True
+            response["cache_key"] = cache_key
+            return json.dumps(response, ensure_ascii=False, indent=2)
+
+    if resumed_task is not None:
+        active_task_id = resumed_task.task_id
+    else:
+        active_task_id = _task_registry.register_task(source_hash, cache_key)
+
+    worker = _z3_worker_pool.acquire_worker()
+    worker.solver_config_fingerprint = solver_fingerprint
+    _z3_worker_pool.bind_task(active_task_id, worker.worker_id)
+    _task_registry.mark_running(active_task_id, worker.worker_id)
+    generation_id = f"generation-{uuid.uuid4().hex}"
+    process_start_time = datetime.now(timezone.utc).isoformat()
+
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            source_path = tmp_path / "input.mm"
+            source_path.write_text(source_code, encoding="utf-8")
+            env = os.environ.copy()
+            env.update(
+                {
+                    "MUMEI_TASK_ID": active_task_id,
+                    "MUMEI_GENERATION_ID": generation_id,
+                    "MUMEI_SOLVER_CONFIG_FINGERPRINT": solver_fingerprint,
+                    "MUMEI_SOLVER_CACHE_KEY": cache_key,
+                    "MUMEI_VERIFICATION_TIMEOUT_MS": str(timeout_ms),
+                    "MUMEI_SOLVER_PROCESS_START_TIME": process_start_time,
+                }
+            )
+            process = subprocess.Popen(
+                [
+                    "cargo",
+                    "run",
+                    "--",
+                    "verify",
+                    "--report-dir",
+                    str(tmp_path),
+                    str(source_path),
+                ],
+                cwd=root_dir,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+                preexec_fn=_limit_worker_memory(_z3_worker_pool.memory_limit_mb),
+            )
+            worker.process = process
+            try:
+                stdout, stderr = process.communicate(timeout=timeout_ms / 1000)
+            except subprocess.TimeoutExpired:
+                _z3_worker_pool.cancel_task(active_task_id)
+                try:
+                    stdout, stderr = process.communicate(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    stdout, stderr = process.communicate()
+                reason = f"timeout after {timeout_ms}ms"
+                _task_registry.cancel_task(active_task_id, reason)
+                result_payload = {
+                    "status": "cancelled",
+                    "task_id": active_task_id,
+                    "generation_id": generation_id,
+                    "worker_id": worker.worker_id,
+                    "source_hash": source_hash,
+                    "cache_key": cache_key,
+                    "solver_config_fingerprint": solver_fingerprint,
+                    "timeout_ms": timeout_ms,
+                    "cancel_reason": reason,
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "process_start_time": process_start_time,
+                    "process_end_time": datetime.now(timezone.utc).isoformat(),
+                }
+                return json.dumps(result_payload, ensure_ascii=False, indent=2)
+
+            report_file = tmp_path / "report.json"
+            report_data = None
+            if report_file.exists():
+                report_text = report_file.read_text(encoding="utf-8")
+                try:
+                    report_data = json.loads(report_text)
+                except json.JSONDecodeError:
+                    report_data = {"raw_report": report_text}
+
+            result_payload = {
+                "status": "passed" if process.returncode == 0 else "failed",
+                "task_id": active_task_id,
+                "generation_id": generation_id,
+                "worker_id": worker.worker_id,
+                "source_hash": source_hash,
+                "cache_key": cache_key,
+                "solver_config_fingerprint": solver_fingerprint,
+                "timeout_ms": timeout_ms,
+                "returncode": process.returncode,
+                "cache_hit": False,
+                "report": report_data,
+                "stdout": stdout,
+                "stderr": stderr,
+                "process_start_time": process_start_time,
+                "process_end_time": datetime.now(timezone.utc).isoformat(),
+            }
+            _task_registry.complete_task(active_task_id, result_payload, cache_result=enable_cache)
+            return json.dumps(result_payload, ensure_ascii=False, indent=2)
+    finally:
+        _z3_worker_pool.release_worker(worker.worker_id)
 
 
 @mcp.tool()

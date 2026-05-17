@@ -1,4 +1,4 @@
-use super::executor::{verify, VerificationMetrics};
+use super::executor::{compute_solver_config_fingerprint, verify, VerificationMetrics};
 use super::fragment::*;
 use super::module_env::*;
 use super::nlae_reporter::*;
@@ -780,6 +780,10 @@ fn test_verification_metrics_basic() {
     assert!(metrics.phase_times.is_empty());
     assert_eq!(metrics.total_constraints, 0);
     assert_eq!(metrics.z3_check_time, std::time::Duration::ZERO);
+    assert!(metrics.solver_config_fingerprint.is_empty());
+    assert_eq!(metrics.task_id, None);
+    assert_eq!(metrics.timeout_ms, 0);
+    assert_eq!(metrics.cancel_reason, None);
 
     // Record some phases
     metrics.record_phase("Phase 1", std::time::Duration::from_millis(10));
@@ -796,6 +800,35 @@ fn test_verification_metrics_basic() {
     assert_eq!(metrics.phase_times[1].0, "Phase 2");
     assert_eq!(metrics.total_constraints, 42);
     assert_eq!(metrics.z3_check_time, std::time::Duration::from_millis(5));
+}
+
+#[test]
+fn test_solver_config_fingerprint_changes_with_config() {
+    let base = compute_solver_config_fingerprint(30000, true, false, false, true);
+    assert_eq!(
+        base,
+        compute_solver_config_fingerprint(30000, true, false, false, true)
+    );
+    assert_ne!(
+        base,
+        compute_solver_config_fingerprint(10000, true, false, false, true)
+    );
+    assert_ne!(
+        base,
+        compute_solver_config_fingerprint(30000, false, false, false, true)
+    );
+    assert_ne!(
+        base,
+        compute_solver_config_fingerprint(30000, true, true, false, true)
+    );
+    assert_ne!(
+        base,
+        compute_solver_config_fingerprint(30000, true, false, true, true)
+    );
+    assert_ne!(
+        base,
+        compute_solver_config_fingerprint(30000, true, false, false, false)
+    );
 }
 
 #[test]

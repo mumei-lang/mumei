@@ -108,6 +108,28 @@ pub struct AtomCertificate {
     /// P8-A: Unused hypothesis report.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unused_hypotheses: Option<UnusedHypothesisMetadata>,
+    #[serde(default)]
+    pub solver_process_metadata: Option<SolverProcessMetadata>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SolverProcessMetadata {
+    #[serde(default)]
+    pub task_id: Option<String>,
+    #[serde(default)]
+    pub cache_key: String,
+    #[serde(default)]
+    pub generation_id: String,
+    #[serde(default)]
+    pub solver_config_fingerprint: String,
+    #[serde(default)]
+    pub timeout_ms: u64,
+    #[serde(default)]
+    pub cancel_reason: Option<String>,
+    #[serde(default)]
+    pub process_start_time: String,
+    #[serde(default)]
+    pub process_end_time: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -300,6 +322,7 @@ pub fn generate_certificate(
                 verification::detect_uninterpreted_symbols(atom, &HashMap::new(), module_env);
             let spec_validation_result =
                 verification::check_spec_satisfiability(atom, module_env).ok();
+            let solver_process_metadata = solver_process_metadata_from_env(&content_hash);
 
             AtomCertificate {
                 name: atom.name.clone(),
@@ -324,6 +347,7 @@ pub fn generate_certificate(
                 counterexample_validation,
                 symbol_provenance,
                 unused_hypotheses: None,
+                solver_process_metadata,
             }
         })
         .collect();
@@ -511,6 +535,48 @@ pub fn compute_sha256(data: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data.as_bytes());
     format!("{:x}", hasher.finalize())
+}
+
+fn env_nonempty(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|value| !value.is_empty())
+}
+
+fn solver_process_metadata_from_env(content_hash: &str) -> Option<SolverProcessMetadata> {
+    let task_id = env_nonempty("MUMEI_TASK_ID");
+    let generation_id = env_nonempty("MUMEI_GENERATION_ID").unwrap_or_default();
+    let timeout_ms = env_nonempty("MUMEI_VERIFICATION_TIMEOUT_MS")
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or_default();
+    let explicit_fingerprint = env_nonempty("MUMEI_SOLVER_CONFIG_FINGERPRINT");
+    let solver_config_fingerprint = explicit_fingerprint.clone().unwrap_or_else(|| {
+        verification::compute_solver_config_fingerprint(timeout_ms, true, false, false, true)
+    });
+    let explicit_cache_key = env_nonempty("MUMEI_SOLVER_CACHE_KEY");
+    let cache_key = explicit_cache_key.clone().unwrap_or_else(|| {
+        compute_sha256(&format!("{}:{}", content_hash, solver_config_fingerprint))
+    });
+    let cancel_reason = env_nonempty("MUMEI_CANCEL_REASON");
+    let process_start_time = env_nonempty("MUMEI_SOLVER_PROCESS_START_TIME").unwrap_or_default();
+    let has_metadata = task_id.is_some()
+        || !generation_id.is_empty()
+        || timeout_ms > 0
+        || explicit_fingerprint.is_some()
+        || explicit_cache_key.is_some()
+        || cancel_reason.is_some()
+        || !process_start_time.is_empty();
+    if !has_metadata {
+        return None;
+    }
+    Some(SolverProcessMetadata {
+        task_id,
+        cache_key,
+        generation_id,
+        solver_config_fingerprint,
+        timeout_ms,
+        cancel_reason,
+        process_start_time,
+        process_end_time: chrono_like_now(),
+    })
 }
 
 /// Load a proof certificate from a JSON file.
@@ -745,6 +811,7 @@ mod tests {
         assert_eq!(cert.atoms[0].requires, "x > 0");
         assert_eq!(cert.atoms[0].ensures, "result > 0");
         assert!(!cert.atoms[0].proof_hash.is_empty());
+        assert!(cert.atoms[0].solver_process_metadata.is_none());
         assert!(cert.all_verified);
         assert_eq!(cert.package_name, Some("my_pkg".to_string()));
         assert_eq!(cert.package_version, Some("1.0.0".to_string()));

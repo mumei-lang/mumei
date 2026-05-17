@@ -151,3 +151,49 @@ class TestListStdCatalog:
             assert "atoms" in module
             assert "structs" in module
             assert "effects" in module
+
+
+class TestOrchestrationResumeValidation:
+    """Tests for orchestration task resume safeguards."""
+
+    def test_missing_resume_task_returns_error(self) -> None:
+        """Unknown task IDs are rejected instead of starting unrelated work."""
+        from mcp_server import _resume_task_validation_error
+
+        error = _resume_task_validation_error("missing-task", None, "source-a", "cache-a")
+
+        assert error is not None
+        assert error["status"] == "error"
+        assert error["task_id"] == "missing-task"
+        assert error["error"] == "task_id not found"
+
+    def test_mismatched_resume_task_returns_error(self) -> None:
+        """Task IDs cannot be resumed with a different source or solver config."""
+        from mcp_server import VerificationTask, _resume_task_validation_error
+
+        task = VerificationTask(
+            task_id="task-1",
+            source_hash="source-a",
+            cache_key="cache-a",
+        )
+        error = _resume_task_validation_error("task-1", task, "source-b", "cache-b")
+
+        assert error is not None
+        assert error["status"] == "error"
+        assert error["task_id"] == "task-1"
+        assert error["expected_source_hash"] == "source-a"
+        assert error["requested_source_hash"] == "source-b"
+        assert error["expected_cache_key"] == "cache-a"
+        assert error["requested_cache_key"] == "cache-b"
+
+    def test_matching_resume_task_has_no_error(self) -> None:
+        """Matching source and solver cache keys are safe to resume."""
+        from mcp_server import VerificationTask, _resume_task_validation_error
+
+        task = VerificationTask(
+            task_id="task-1",
+            source_hash="source-a",
+            cache_key="cache-a",
+        )
+
+        assert _resume_task_validation_error("task-1", task, "source-a", "cache-a") is None
