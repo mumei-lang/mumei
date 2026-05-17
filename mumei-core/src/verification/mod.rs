@@ -19,6 +19,7 @@ pub mod executor;
 pub mod fragment;
 pub mod module_env;
 pub mod nlae_reporter;
+pub mod spurious_detection;
 pub(crate) mod support;
 pub mod translator;
 pub mod types;
@@ -30,6 +31,7 @@ pub use executor::*;
 pub use fragment::*;
 pub use module_env::*;
 pub use nlae_reporter::*;
+pub use spurious_detection::*;
 pub use support::{
     infer_contracts_json, infer_effects_json, verify_impl, AllowedEffect, SecurityPolicy,
 };

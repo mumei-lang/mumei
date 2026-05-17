@@ -16,7 +16,7 @@ pub fn verify_with_config(
     timeout_ms: u64,
     _global_max_unroll: usize,
 ) -> MumeiResult<()> {
-    verify_inner(hir_atom, output_dir, module_env, timeout_ms)
+    verify_inner(hir_atom, output_dir, module_env, timeout_ms, true)
 }
 
 pub fn verify_with_verification_config(
@@ -25,7 +25,13 @@ pub fn verify_with_verification_config(
     module_env: &ModuleEnv,
     config: &VerificationConfig,
 ) -> MumeiResult<()> {
-    verify_inner(hir_atom, output_dir, module_env, config.timeout_ms)
+    verify_inner(
+        hir_atom,
+        output_dir,
+        module_env,
+        config.timeout_ms,
+        config.enable_spurious_detection,
+    )
 }
 
 pub fn verify_module(
@@ -50,7 +56,7 @@ pub fn verify_module(
 }
 
 pub fn verify(hir_atom: &HirAtom, output_dir: &Path, module_env: &ModuleEnv) -> MumeiResult<()> {
-    verify_inner(hir_atom, output_dir, module_env, 10000)
+    verify_inner(hir_atom, output_dir, module_env, 10000, true)
 }
 
 /// Compile-time metrics for a single atom verification.
@@ -121,6 +127,7 @@ pub(crate) fn verify_inner(
     output_dir: &Path,
     module_env: &ModuleEnv,
     timeout_ms: u64,
+    enable_spurious_detection: bool,
 ) -> MumeiResult<()> {
     let atom = &hir_atom.atom;
     let mut metrics = VerificationMetrics::new(&atom.name);
@@ -1275,6 +1282,38 @@ pub(crate) fn verify_inner(
                     } else {
                         Some(serde_json::Value::Object(ce_json))
                     };
+                    if enable_spurious_detection {
+                        let mut model_map = HashMap::new();
+                        for (name, var_z3) in &env {
+                            if let Some(val) = model.eval(var_z3, true) {
+                                if let Some(int_value) = z3_dynamic_to_i64(&val) {
+                                    model_map.insert(name.clone(), int_value);
+                                }
+                            }
+                        }
+                        let validation = validate_counterexample(atom, &model_map, module_env);
+                        if validation.validation_status == "spurious_candidate" {
+                            solver.pop(1);
+                            let symbols = validation
+                                .symbol_provenance
+                                .iter()
+                                .map(|symbol| format!("{} ({})", symbol.symbol_name, symbol.source))
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            return Err(MumeiError::verification_at(
+                                format!(
+                                    "Spurious counterexample detected for atom '{}'",
+                                    atom.name
+                                ),
+                                atom.span.clone(),
+                            )
+                            .with_help(format!(
+                                "Counterexample depends on uninterpreted symbols: {}. Consider escalating to Lean or expanding the symbol.",
+                                symbols
+                            ))
+                            .with_counterexample(ce_val.clone()));
+                        }
+                    }
                     (a_str, b_str, ce_val)
                 } else {
                     ("N/A".to_string(), "N/A".to_string(), None)
@@ -1501,6 +1540,13 @@ pub(crate) fn verify_inner(
         None,
     );
     Ok(())
+}
+
+fn z3_dynamic_to_i64(value: &Dynamic) -> Option<i64> {
+    value
+        .as_int()
+        .and_then(|int_value| int_value.as_i64())
+        .or_else(|| format!("{}", value).parse::<i64>().ok())
 }
 
 #[allow(clippy::too_many_arguments)]

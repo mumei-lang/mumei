@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::resolver;
-use crate::verification::{self, ModuleEnv, TranslatorIRMetadata};
+use crate::verification::{self, ModuleEnv, SymbolProvenance, TranslatorIRMetadata};
 
 /// Top-level proof certificate for a Mumei source file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,6 +96,35 @@ pub struct AtomCertificate {
     /// Lean-side result metadata populated by mumei-lean.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lean_metadata: Option<LeanResultMetadata>,
+    /// P8-A: Counterexample validation status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub counterexample_validation: Option<CounterexampleValidationMetadata>,
+    /// P8-A: Symbol provenance for uninterpreted symbols.
+    #[serde(default)]
+    pub symbol_provenance: Vec<SymbolProvenance>,
+    /// P8-A: Unused hypothesis report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unused_hypotheses: Option<UnusedHypothesisMetadata>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CounterexampleValidationMetadata {
+    #[serde(default)]
+    pub validation_status: String,
+    #[serde(default)]
+    pub validated_at: String,
+    #[serde(default)]
+    pub failed_constraints: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct UnusedHypothesisMetadata {
+    #[serde(default)]
+    pub unused_requires: Vec<String>,
+    #[serde(default)]
+    pub unused_invariants: Vec<String>,
+    #[serde(default)]
+    pub minimal_constraint_set: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -253,6 +282,19 @@ pub fn generate_certificate(
                 .iter()
                 .map(|binder| (binder.mumei_name.clone(), binder.lean_name.clone()))
                 .collect();
+            let counterexample_validation = if z3_result == "sat" {
+                let validation =
+                    verification::validate_counterexample(atom, &HashMap::new(), module_env);
+                Some(CounterexampleValidationMetadata {
+                    validation_status: validation.validation_status,
+                    validated_at: now.clone(),
+                    failed_constraints: validation.failed_constraints,
+                })
+            } else {
+                None
+            };
+            let symbol_provenance =
+                verification::detect_uninterpreted_symbols(atom, &HashMap::new(), module_env);
 
             AtomCertificate {
                 name: atom.name.clone(),
@@ -273,6 +315,9 @@ pub fn generate_certificate(
                 manual_lemma_reason,
                 translator_ir,
                 lean_metadata: None,
+                counterexample_validation,
+                symbol_provenance,
+                unused_hypotheses: None,
             }
         })
         .collect();
