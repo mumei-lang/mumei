@@ -138,6 +138,16 @@ pub(crate) fn verify_inner(
         return Ok(());
     }
 
+    // Phase 0a: 仕様健全性チェック（proof attempt 前の requires/ensures/refinement SAT）
+    let phase_start = std::time::Instant::now();
+    let _spec_validation_result = check_spec_satisfiability(atom, module_env).map_err(|err| {
+        MumeiError::verification_at(err.to_string(), err.span.clone()).with_help(format!(
+            "SpecValidation failed before proof attempt (kind: {}, constraints: {:?})",
+            err.kind, err.constraints
+        ))
+    })?;
+    metrics.record_phase("Phase 0a: spec validation", phase_start.elapsed());
+
     // Phase 0: 信頼レベルチェック（Trust Boundary）
     match &atom.trust_level {
         TrustLevel::Trusted => {

@@ -54,6 +54,9 @@ pub struct AtomCertificate {
     pub content_hash: String,
     /// Verification status: "verified", "failed", "skipped", "trusted"
     pub status: String,
+    /// Pre-proof specification validation and traceability result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spec_validation_result: Option<verification::SpecValidationResult>,
     /// Dependency-aware proof hash including transitive callee signatures (P5-A)
     #[serde(default)]
     pub proof_hash: String,
@@ -295,12 +298,15 @@ pub fn generate_certificate(
             };
             let symbol_provenance =
                 verification::detect_uninterpreted_symbols(atom, &HashMap::new(), module_env);
+            let spec_validation_result =
+                verification::check_spec_satisfiability(atom, module_env).ok();
 
             AtomCertificate {
                 name: atom.name.clone(),
                 z3_check_result: z3_result,
                 content_hash,
                 status,
+                spec_validation_result,
                 proof_hash,
                 dependencies,
                 effects,
@@ -693,6 +699,8 @@ mod tests {
             type_params: vec![],
             where_bounds: vec![],
             params: vec![],
+            trace_id: None,
+            spec_metadata: std::collections::HashMap::new(),
             requires: requires.to_string(),
             forall_constraints: vec![],
             ensures: ensures.to_string(),
