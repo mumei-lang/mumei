@@ -421,6 +421,14 @@ fn verify_import_certificate(
                 let source_matches = source_file.ends_with(cert_file_path)
                     || cert_file_path.ends_with(source_file.file_name().unwrap_or_default());
                 if source_matches || cert.file.is_empty() {
+                    if let Err(err) = proof_cert::validate_translator_version(&cert) {
+                        eprintln!(
+                            "  ⚠️  Local certificate {} has invalid Lean translator metadata: {}",
+                            cert_path.display(),
+                            err,
+                        );
+                        return None;
+                    }
                     let results =
                         proof_cert::verify_certificate(&cert, &atom_refs, allow_lean_verified);
                     let mut metrics = LeanEscalationMetrics::default();
@@ -457,6 +465,14 @@ fn verify_import_certificate(
                 Ok(bundle) => {
                     if let Some(cert) = proof_cert::lookup_bundle_certificate(&bundle, source_file)
                     {
+                        if let Err(err) = proof_cert::validate_translator_version(cert) {
+                            eprintln!(
+                                "  ⚠️  MUMEI_PROOF_BUNDLE certificate for {} has invalid Lean translator metadata: {}",
+                                source_file.display(),
+                                err,
+                            );
+                            return None;
+                        }
                         let results =
                             proof_cert::verify_certificate(cert, &atom_refs, allow_lean_verified);
                         let mut metrics = LeanEscalationMetrics::default();
@@ -2461,6 +2477,56 @@ atom mul(x: i64, y: i64) -> i64
 
         let _ = fs::remove_file(&bundle_path);
         let _ = fs::remove_dir_all(std_root.parent().unwrap());
+    }
+
+    #[test]
+    fn test_verify_import_certificate_rejects_stale_lean_translator_local_cert() {
+        let source = r#"
+atom hard_lemma(x: i64) -> i64
+    requires: true;
+    ensures: true;
+    body: { x };
+"#;
+        let items = parser::parse_module(source);
+        let atom_refs: Vec<&parser::Atom> = items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Atom(a) => Some(a),
+                _ => None,
+            })
+            .collect();
+
+        let module_dir = std::env::temp_dir().join("mumei_test_stale_lean_local");
+        let _ = fs::remove_dir_all(&module_dir);
+        fs::create_dir_all(&module_dir).unwrap();
+        let source_file = module_dir.join("hard_lemma.mm");
+        fs::write(&source_file, source).unwrap();
+
+        let mut results = HashMap::new();
+        results.insert(
+            "hard_lemma".to_string(),
+            ("lean_verified".to_string(), "verified".to_string()),
+        );
+        let module_env = ModuleEnv::new();
+        let mut cert = proof_cert::generate_certificate(
+            source_file.to_str().unwrap(),
+            &atom_refs,
+            &results,
+            &module_env,
+            None,
+            None,
+        );
+        cert.atoms[0].translator_version = "stale-translator".to_string();
+        proof_cert::save_certificate(&cert, &module_dir.join(".proof-cert.json"))
+            .expect("write stale cert");
+
+        let result = verify_import_certificate(&module_dir, &source_file, &items, true);
+        assert!(
+            result.is_none(),
+            "stale translator metadata must reject the cert"
+        );
+
+        let _ = fs::remove_dir_all(&module_dir);
     }
 
     /// PR 2: Bundle fallback honours `allow_lean_verified` opt-in.
