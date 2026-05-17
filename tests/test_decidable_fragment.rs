@@ -15,6 +15,8 @@ fn base_atom(name: &str) -> Atom {
         type_params: Vec::new(),
         where_bounds: Vec::new(),
         params: Vec::new(),
+        trace_id: None,
+        spec_metadata: std::collections::HashMap::new(),
         requires: "true".to_string(),
         forall_constraints: Vec::new(),
         ensures: "result >= 0".to_string(),

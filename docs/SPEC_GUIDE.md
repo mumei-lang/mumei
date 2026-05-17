@@ -215,6 +215,43 @@ P8-C success targets:
 - `lean_verified` certificate re-verification success rate: 100%.
 - low-success category detection rate: 100%.
 
+## Specification Validation
+
+Before a proof obligation is submitted to Z3, Mumei runs `check_spec_satisfiability()` on each atom. This validation rejects specifications whose preconditions or refinements are already impossible, so proof attempts do not proceed from contradictory assumptions.
+
+The validator checks:
+
+- `requires` satisfiability with the atom parameters and refinement constraints asserted in Z3.
+- refinement type satisfiability for all available refined types.
+- each top-level `ensures` conjunct against `requires`.
+- pairwise `ensures` relationships with `requires ∧ ensures_i ∧ ¬ensures_j`.
+
+A contradiction is reported as `SpecContradiction` with a kind such as `requires_unsat`, `refinement_unsat`, or `ensures_unsat`. Treat these errors as specification bugs: relax the over-constrained clause, split the atom into clearer cases, or revise the natural-language requirement before attempting proof repair.
+
+### Traceability metadata
+
+Atoms carry optional traceability fields:
+
+- `trace_id`: stable ID for the originating prompt, ticket, regulation clause, or forge task.
+- `spec_metadata`: key/value links such as `source`, `requirement_id`, `prompt_hash`, or `reviewer`.
+
+Proof certificates include `spec_validation_result`, which records the validation status, traceability hash, and traceability coverage. The hash is SHA-256 over `trace_id`, sorted `spec_metadata`, `requires`, and `ensures`, binding the formal contract to its natural-language source.
+
+For MCP workflows, pass traceability through `validate_logic` or `forge_blade`:
+
+```json
+{
+  "source_code": "atom increment(n: i64) -> i64 requires: n >= 0; ensures: result > n; body: n + 1;",
+  "trace_id": "REQ-42",
+  "spec_metadata": {
+    "source": "forge_task",
+    "requirement_id": "REQ-42"
+  }
+}
+```
+
+A complete traceability record should include a non-empty `trace_id`, at least one metadata key, a meaningful `requires`, and a meaningful `ensures`; this yields 100% coverage and satisfies the ≥95% coverage target.
+
 ## Lean escalation policy
 
 Escalate to Lean when the intended property is inherently nonlinear, inductive, trigger-sensitive, or recursive. A warning does not mean the specification is wrong; it means the spec is outside the Z3-stable fragment and should be reviewed before relying on first-pass SMT automation.

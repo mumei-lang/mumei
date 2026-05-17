@@ -680,6 +680,8 @@ fn load_and_prepare_with_full_options(
                         type_params: vec![],
                         where_bounds: vec![],
                         params,
+                        trace_id: None,
+                        spec_metadata: std::collections::HashMap::new(),
                         requires: ext_fn
                             .requires
                             .clone()
@@ -3823,6 +3825,8 @@ fn cmd_repl() {
                                     type_params: vec![],
                                     where_bounds: vec![],
                                     params,
+                                    trace_id: None,
+                                    spec_metadata: std::collections::HashMap::new(),
                                     requires: ext_fn
                                         .requires
                                         .clone()
@@ -5153,6 +5157,8 @@ atom main() -> i64
                             type_params: vec![],
                             where_bounds: vec![],
                             params,
+                            trace_id: None,
+                            spec_metadata: std::collections::HashMap::new(),
                             requires: "true".to_string(),
                             forall_constraints: vec![],
                             ensures: "true".to_string(),

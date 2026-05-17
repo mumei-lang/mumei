@@ -379,6 +379,8 @@ pub struct Atom {
     /// 単相化時のトレイト境界バリデーションで使用
     pub where_bounds: Vec<TypeParamBound>,
     pub params: Vec<Param>,
+    pub trace_id: Option<String>,
+    pub spec_metadata: HashMap<String, String>,
     pub requires: String,
     pub forall_constraints: Vec<Quantifier>,
     pub ensures: String,

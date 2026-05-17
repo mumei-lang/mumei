@@ -426,6 +426,8 @@ mod tests {
                 type_params: vec![],
                 where_bounds: vec![],
                 params,
+                trace_id: None,
+                spec_metadata: std::collections::HashMap::new(),
                 requires: requires.to_string(),
                 forall_constraints: vec![],
                 ensures: ensures.to_string(),

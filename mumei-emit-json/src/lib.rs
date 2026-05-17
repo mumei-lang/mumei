@@ -125,6 +125,8 @@ mod tests {
                         fn_contract_ensures: None,
                     },
                 ],
+                trace_id: None,
+                spec_metadata: std::collections::HashMap::new(),
                 requires: "b != 0".to_string(),
                 forall_constraints: vec![],
                 ensures: "result == a / b".to_string(),

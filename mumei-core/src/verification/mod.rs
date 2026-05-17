@@ -19,6 +19,7 @@ pub mod executor;
 pub mod fragment;
 pub mod module_env;
 pub mod nlae_reporter;
+pub mod spec_validation;
 pub mod spurious_detection;
 pub(crate) mod support;
 pub mod translator;
@@ -31,8 +32,37 @@ pub use executor::*;
 pub use fragment::*;
 pub use module_env::*;
 pub use nlae_reporter::*;
+pub use spec_validation::*;
 pub use spurious_detection::*;
 pub use support::{
     infer_contracts_json, infer_effects_json, verify_impl, AllowedEffect, SecurityPolicy,
 };
 pub use types::*;
+
+#[derive(thiserror::Error, Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[error("Spec contradiction in atom '{atom_name}': {message}")]
+pub struct SpecContradiction {
+    pub atom_name: String,
+    pub kind: String,
+    pub message: String,
+    pub constraints: Vec<String>,
+    pub span: Span,
+}
+
+impl SpecContradiction {
+    pub fn new(
+        atom_name: impl Into<String>,
+        kind: impl Into<String>,
+        message: impl Into<String>,
+        constraints: Vec<String>,
+        span: Span,
+    ) -> Self {
+        Self {
+            atom_name: atom_name.into(),
+            kind: kind.into(),
+            message: message.into(),
+            constraints,
+            span,
+        }
+    }
+}

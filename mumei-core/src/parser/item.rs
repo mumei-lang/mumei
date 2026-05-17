@@ -1535,6 +1535,8 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
         type_params,
         where_bounds,
         params,
+        trace_id: None,
+        spec_metadata: std::collections::HashMap::new(),
         requires: requires_cleaned,
         forall_constraints,
         ensures,

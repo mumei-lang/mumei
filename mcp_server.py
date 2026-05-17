@@ -1,3 +1,5 @@
+import hashlib
+import os
 import re
 import shutil
 import subprocess
@@ -221,6 +223,62 @@ def _build_machine_readable(report: dict, feedback: dict) -> "dict | None":
     return result
 
 
+def _normalize_spec_metadata(spec_metadata: dict = None) -> dict:
+    if spec_metadata is None:
+        return {}
+    if isinstance(spec_metadata, str):
+        try:
+            parsed = json.loads(spec_metadata)
+        except json.JSONDecodeError:
+            return {"value": spec_metadata}
+        if isinstance(parsed, dict):
+            spec_metadata = parsed
+        else:
+            return {"value": str(parsed)}
+    if not isinstance(spec_metadata, dict):
+        return {"value": str(spec_metadata)}
+    return {str(key): str(value) for key, value in spec_metadata.items()}
+
+
+def _traceability_payload(source_code: str, trace_id: str = "", spec_metadata: dict = None) -> dict:
+    normalized_metadata = _normalize_spec_metadata(spec_metadata)
+    requires = re.findall(r"\brequires\s*:\s*([^;]*);", source_code, re.S)
+    ensures = re.findall(r"\bensures\s*:\s*([^;]*);", source_code, re.S)
+    hasher = hashlib.sha256()
+    hasher.update((trace_id or "").encode("utf-8"))
+    for key, value in sorted(normalized_metadata.items()):
+        hasher.update(key.encode("utf-8"))
+        hasher.update(b"=")
+        hasher.update(value.encode("utf-8"))
+        hasher.update(b";")
+    hasher.update(" && ".join(item.strip() for item in requires).encode("utf-8"))
+    hasher.update(" && ".join(item.strip() for item in ensures).encode("utf-8"))
+    covered = sum([
+        bool((trace_id or "").strip()),
+        bool(normalized_metadata),
+        any(item.strip() and item.strip() != "true" for item in requires),
+        any(item.strip() and item.strip() != "true" for item in ensures),
+    ])
+    return {
+        "trace_id": trace_id or None,
+        "spec_metadata": normalized_metadata,
+        "traceability_hash": hasher.hexdigest(),
+        "traceability_coverage": covered / 4.0,
+    }
+
+
+def _traceability_env(trace_payload: dict) -> dict:
+    env = os.environ.copy()
+    if trace_payload["trace_id"]:
+        env["MUMEI_TRACE_ID"] = trace_payload["trace_id"]
+    env["MUMEI_SPEC_METADATA"] = json.dumps(trace_payload["spec_metadata"], sort_keys=True)
+    return env
+
+
+def _format_traceability_feedback(trace_payload: dict) -> str:
+    return "### Traceability\n```json\n" + json.dumps(trace_payload, indent=2, sort_keys=True) + "\n```"
+
+
 def _format_effect_feedback(report_json: str) -> str:
     """Format effect-specific violation feedback from report.json.
     Returns empty string if no effect violation is present.
@@ -267,12 +325,19 @@ def _format_effect_feedback(report_json: str) -> str:
 
 
 @mcp.tool()
-def forge_blade(source_code: str, output_name: str = "katana") -> str:
+def forge_blade(
+    source_code: str,
+    output_name: str = "katana",
+    trace_id: str = "",
+    spec_metadata: dict = None,
+) -> str:
     """
     Verify Mumei code and generate LLVM IR output.
     The build command writes report.json to the -o directory, so reports are isolated per request.
+    Optional trace_id/spec_metadata are forwarded into proof certificates.
     """
     root_dir = Path(__file__).parent.absolute()
+    trace_payload = _traceability_payload(source_code, trace_id, spec_metadata)
 
     # 1. Create fully isolated temp directory per request
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -287,10 +352,11 @@ def forge_blade(source_code: str, output_name: str = "katana") -> str:
             ["cargo", "run", "--", "build", str(source_path), "-o", str(output_base)],
             cwd=root_dir,
             capture_output=True,
-            text=True
+            text=True,
+            env=_traceability_env(trace_payload),
         )
 
-        response_parts = []
+        response_parts = [_format_traceability_feedback(trace_payload)]
 
         # Inject effect boundary context if restricted
         effects_ctx = json.loads(get_allowed_effects(str(root_dir)))
@@ -340,7 +406,11 @@ def forge_blade(source_code: str, output_name: str = "katana") -> str:
             return "\n".join(response_parts)
 
 @mcp.tool()
-def validate_logic(source_code: str) -> str:
+def validate_logic(
+    source_code: str,
+    trace_id: str = "",
+    spec_metadata: dict = None,
+) -> str:
     """
     Run formal verification (Z3) only on Mumei code.
     No code generation — returns verification results and counter-examples.
@@ -348,8 +418,10 @@ def validate_logic(source_code: str) -> str:
 
     Uses --report-dir to write report.json directly into a per-request temp
     directory, making concurrent calls safe.
+    Optional trace_id/spec_metadata are forwarded into proof certificates.
     """
     root_dir = Path(__file__).parent.absolute()
+    trace_payload = _traceability_payload(source_code, trace_id, spec_metadata)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_path = Path(tmpdir)
@@ -364,10 +436,11 @@ def validate_logic(source_code: str) -> str:
              str(source_path)],
             cwd=root_dir,
             capture_output=True,
-            text=True
+            text=True,
+            env=_traceability_env(trace_payload),
         )
 
-        response_parts = []
+        response_parts = [_format_traceability_feedback(trace_payload)]
 
         # Inject effect boundary context if restricted
         effects_ctx = json.loads(get_allowed_effects(str(root_dir)))

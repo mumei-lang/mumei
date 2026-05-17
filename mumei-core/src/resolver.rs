@@ -847,6 +847,8 @@ fn register_imported_items(items: &[Item], alias: Option<&str>, module_env: &mut
                         type_params: vec![],
                         where_bounds: vec![],
                         params,
+                        trace_id: None,
+                        spec_metadata: std::collections::HashMap::new(),
                         requires: ext_fn
                             .requires
                             .clone()
