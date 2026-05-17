@@ -150,6 +150,19 @@ fn orchestration_cancel_reason_from_env() -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+fn orchestration_timeout_ms_from_env() -> Option<u64> {
+    std::env::var("MUMEI_VERIFICATION_TIMEOUT_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+}
+
+fn orchestration_solver_config_fingerprint_from_env() -> Option<String> {
+    std::env::var("MUMEI_SOLVER_CONFIG_FINGERPRINT")
+        .ok()
+        .filter(|value| !value.is_empty())
+}
+
 pub fn compute_solver_config_fingerprint(
     timeout_ms: u64,
     mbqi_enabled: bool,
@@ -205,6 +218,7 @@ pub(crate) fn verify_inner(
     task_id: Option<String>,
     _generation_id: Option<String>,
 ) -> MumeiResult<()> {
+    let timeout_ms = orchestration_timeout_ms_from_env().unwrap_or(timeout_ms);
     let atom = &hir_atom.atom;
     let mut metrics = VerificationMetrics::new(&atom.name);
     metrics.task_id = task_id;
@@ -852,13 +866,16 @@ pub(crate) fn verify_inner(
     };
 
     metrics.timeout_ms = effective_timeout;
-    metrics.solver_config_fingerprint = compute_solver_config_fingerprint(
-        effective_timeout,
-        !has_array_forall,
-        has_string_constraints_cell_pre.get(),
-        has_array_forall,
-        enable_spurious_detection,
-    );
+    metrics.solver_config_fingerprint = orchestration_solver_config_fingerprint_from_env()
+        .unwrap_or_else(|| {
+            compute_solver_config_fingerprint(
+                effective_timeout,
+                !has_array_forall,
+                has_string_constraints_cell_pre.get(),
+                has_array_forall,
+                enable_spurious_detection,
+            )
+        });
 
     let mut cfg = Config::new();
     cfg.set_timeout_msec(effective_timeout);

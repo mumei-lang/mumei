@@ -844,6 +844,21 @@ mod tests {
     use crate::parser;
     use crate::verification::ModuleEnv;
 
+    fn solver_env_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    struct SolverEnvCleanup(&'static [&'static str]);
+
+    impl Drop for SolverEnvCleanup {
+        fn drop(&mut self) {
+            for name in self.0 {
+                std::env::remove_var(name);
+            }
+        }
+    }
+
     fn make_test_atom(name: &str, requires: &str, ensures: &str, body: &str) -> parser::Atom {
         parser::Atom {
             name: name.to_string(),
@@ -906,6 +921,52 @@ mod tests {
         let parsed: ProofCertificate = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.atoms[0].requires, "x > 0");
         assert_eq!(parsed.atoms[0].ensures, "result > 0");
+    }
+
+    #[test]
+    fn test_generate_certificate_records_solver_process_metadata() {
+        let _guard = solver_env_lock().lock().unwrap();
+        let env_names = &[
+            "MUMEI_TASK_ID",
+            "MUMEI_GENERATION_ID",
+            "MUMEI_VERIFICATION_TIMEOUT_MS",
+            "MUMEI_SOLVER_CONFIG_FINGERPRINT",
+            "MUMEI_SOLVER_CACHE_KEY",
+            "MUMEI_CANCEL_REASON",
+            "MUMEI_SOLVER_PROCESS_START_TIME",
+        ];
+        let _cleanup = SolverEnvCleanup(env_names);
+        for name in &env_names {
+            std::env::remove_var(name);
+        }
+        std::env::set_var("MUMEI_TASK_ID", "task-1");
+        std::env::set_var("MUMEI_GENERATION_ID", "generation-1");
+        std::env::set_var("MUMEI_VERIFICATION_TIMEOUT_MS", "1234");
+        std::env::set_var("MUMEI_SOLVER_CONFIG_FINGERPRINT", "fingerprint-1");
+        std::env::set_var("MUMEI_SOLVER_CACHE_KEY", "cache-1");
+        std::env::set_var("MUMEI_CANCEL_REASON", "timeout");
+        std::env::set_var("MUMEI_SOLVER_PROCESS_START_TIME", "2026-05-17T00:00:00Z");
+
+        let atom = make_test_atom("orchestrated", "true", "true", "0");
+        let atoms: Vec<&parser::Atom> = vec![&atom];
+        let mut results = HashMap::new();
+        results.insert(
+            "orchestrated".to_string(),
+            ("unsat".to_string(), "verified".to_string()),
+        );
+        let module_env = ModuleEnv::new();
+
+        let cert = generate_certificate("test.mm", &atoms, &results, &module_env, None, None);
+        let metadata = cert.atoms[0].solver_process_metadata.as_ref().unwrap();
+
+        assert_eq!(metadata.task_id.as_deref(), Some("task-1"));
+        assert_eq!(metadata.generation_id, "generation-1");
+        assert_eq!(metadata.timeout_ms, 1234);
+        assert_eq!(metadata.solver_config_fingerprint, "fingerprint-1");
+        assert_eq!(metadata.cache_key, "cache-1");
+        assert_eq!(metadata.cancel_reason.as_deref(), Some("timeout"));
+        assert_eq!(metadata.process_start_time, "2026-05-17T00:00:00Z");
+        assert!(!metadata.process_end_time.is_empty());
     }
 
     #[test]

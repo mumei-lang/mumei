@@ -189,13 +189,38 @@ class Z3WorkerPool:
             self._condition.notify_all()
 
 
-def _compute_mcp_solver_config_fingerprint(timeout_ms: int, memory_limit_mb: int, mbqi: bool = True) -> str:
+def _detect_mcp_solver_features(source_code: str) -> dict[str, bool]:
+    return {
+        "has_string_constraints": bool(
+            re.search(r"\b(Str|string|String)\b|starts_with|ends_with|contains", source_code)
+        ),
+        "has_array_forall": bool(
+            re.search(
+                r"forall\s*\([^\n;)]*\[[^\n;)]*\)|forall\s*\([^)]*\)[^\n;]*\[",
+                source_code,
+                re.DOTALL,
+            )
+        ),
+    }
+
+
+def _compute_mcp_solver_config_fingerprint(
+    timeout_ms: int,
+    memory_limit_mb: int,
+    mbqi: bool = True,
+    has_string_constraints: bool = False,
+    has_array_forall: bool = False,
+    enable_spurious_detection: bool = True,
+) -> str:
     payload = json.dumps(
         {
             "engine": "mumei-z3",
             "timeout_ms": timeout_ms,
             "memory_limit_mb": memory_limit_mb,
             "smt.mbqi": mbqi,
+            "string_constraints": has_string_constraints,
+            "array_forall": has_array_forall,
+            "spurious_detection": enable_spurious_detection,
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -733,9 +758,13 @@ def verify_with_orchestration(
     root_dir = Path(__file__).parent.absolute()
     timeout_ms = max(1, timeout_ms)
     source_hash = hashlib.sha256(source_code.encode("utf-8")).hexdigest()
+    solver_features = _detect_mcp_solver_features(source_code)
     solver_fingerprint = _compute_mcp_solver_config_fingerprint(
         timeout_ms,
         _z3_worker_pool.memory_limit_mb,
+        mbqi=not solver_features["has_array_forall"],
+        has_string_constraints=solver_features["has_string_constraints"],
+        has_array_forall=solver_features["has_array_forall"],
     )
     cache_key = hashlib.sha256(
         f"{source_hash}:{solver_fingerprint}".encode("utf-8")
@@ -805,6 +834,9 @@ def verify_with_orchestration(
                     "run",
                     "--",
                     "verify",
+                    "--proof-cert",
+                    "--output",
+                    str(tmp_path / "input.proof.json"),
                     "--report-dir",
                     str(tmp_path),
                     str(source_path),
@@ -854,6 +886,15 @@ def verify_with_orchestration(
                 except json.JSONDecodeError:
                     report_data = {"raw_report": report_text}
 
+            certificate_file = tmp_path / "input.proof.json"
+            certificate_data = None
+            if certificate_file.exists():
+                certificate_text = certificate_file.read_text(encoding="utf-8")
+                try:
+                    certificate_data = json.loads(certificate_text)
+                except json.JSONDecodeError:
+                    certificate_data = {"raw_certificate": certificate_text}
+
             result_payload = {
                 "status": "passed" if process.returncode == 0 else "failed",
                 "task_id": active_task_id,
@@ -866,6 +907,7 @@ def verify_with_orchestration(
                 "returncode": process.returncode,
                 "cache_hit": False,
                 "report": report_data,
+                "proof_certificate": certificate_data,
                 "stdout": stdout,
                 "stderr": stderr,
                 "process_start_time": process_start_time,
