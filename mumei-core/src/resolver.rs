@@ -303,6 +303,13 @@ fn check_cert_for_atom(cert_results: &HashMap<String, String>, atom_name: &str) 
         .is_some_and(|status| status == "proven")
 }
 
+fn unproven_cert_results(atom_refs: &[&parser::Atom]) -> HashMap<String, String> {
+    atom_refs
+        .iter()
+        .map(|atom| (atom.name.clone(), "unproven".to_string()))
+        .collect()
+}
+
 /// Collect atom references (including ImplBlock methods with qualified names)
 /// from a parsed module. Shared between local certificate verification and
 /// SI-5 Phase 3-C bundle-fallback verification so both paths recognise
@@ -427,7 +434,7 @@ fn verify_import_certificate(
                             cert_path.display(),
                             err,
                         );
-                        return None;
+                        return Some(unproven_cert_results(&atom_refs));
                     }
                     let results =
                         proof_cert::verify_certificate(&cert, &atom_refs, allow_lean_verified);
@@ -471,7 +478,7 @@ fn verify_import_certificate(
                                 source_file.display(),
                                 err,
                             );
-                            return None;
+                            return Some(unproven_cert_results(&atom_refs));
                         }
                         let results =
                             proof_cert::verify_certificate(cert, &atom_refs, allow_lean_verified);
@@ -2520,9 +2527,11 @@ atom hard_lemma(x: i64) -> i64
         proof_cert::save_certificate(&cert, &module_dir.join(".proof-cert.json"))
             .expect("write stale cert");
 
-        let result = verify_import_certificate(&module_dir, &source_file, &items, true);
-        assert!(
-            result.is_none(),
+        let result = verify_import_certificate(&module_dir, &source_file, &items, true)
+            .expect("invalid cert should produce unproven results");
+        assert_eq!(
+            result.get("hard_lemma").map(|s| s.as_str()),
+            Some("unproven"),
             "stale translator metadata must reject the cert"
         );
 
