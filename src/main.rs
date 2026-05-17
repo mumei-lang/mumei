@@ -175,9 +175,12 @@ enum Command {
         /// Emit Lean escalation candidate bundle alongside verification results
         #[arg(long)]
         escalate_lean: bool,
-        /// Emit target for verify-only output: escalation-bundle or decidable-metrics
+        /// Emit target for verify-only output: escalation-bundle, escalation-metrics, or decidable-metrics
         #[arg(long)]
         emit: Option<String>,
+        /// Disable verify-only output targets: escalation-metrics
+        #[arg(long = "no-emit")]
+        no_emit: Vec<String>,
         /// Output path for proof certificate (default: <input>.proof.json)
         #[arg(long)]
         output: Option<String>,
@@ -345,6 +348,7 @@ fn main() {
             proof_cert,
             escalate_lean,
             emit,
+            no_emit,
             output,
             report_dir,
             json,
@@ -353,12 +357,29 @@ fn main() {
             cross_spec_verify,
             disable_spurious_detection,
         }) => {
+            let no_emit_escalation_metrics =
+                no_emit.iter().any(|target| target == "escalation-metrics");
+            if let Some(other) = no_emit
+                .iter()
+                .find(|target| target.as_str() != "escalation-metrics")
+            {
+                eprintln!(
+                    "Unsupported verify --no-emit target '{}'. Supported values: escalation-metrics",
+                    other
+                );
+                std::process::exit(1);
+            }
             let emit_escalation_bundle = matches!(emit.as_deref(), Some("escalation-bundle"));
+            let emit_escalation_metrics = matches!(emit.as_deref(), Some("escalation-metrics"))
+                && !no_emit_escalation_metrics;
             let emit_decidable_metrics = matches!(emit.as_deref(), Some("decidable-metrics"));
             if let Some(other) = emit.as_deref() {
-                if !emit_escalation_bundle && !emit_decidable_metrics {
+                if !emit_escalation_bundle
+                    && !matches!(other, "escalation-metrics")
+                    && !emit_decidable_metrics
+                {
                     eprintln!(
-                        "Unsupported verify --emit target '{}'. Supported values: escalation-bundle, decidable-metrics",
+                        "Unsupported verify --emit target '{}'. Supported values: escalation-bundle, escalation-metrics, decidable-metrics",
                         other
                     );
                     std::process::exit(1);
@@ -368,6 +389,7 @@ fn main() {
                 input: &input,
                 generate_proof_cert: proof_cert,
                 emit_escalation_bundle: escalate_lean || emit_escalation_bundle,
+                emit_escalation_metrics,
                 emit_decidable_metrics,
                 cert_output: output.as_deref(),
                 report_dir: report_dir.as_deref(),
@@ -779,6 +801,7 @@ struct VerifyOptions<'a> {
     input: &'a str,
     generate_proof_cert: bool,
     emit_escalation_bundle: bool,
+    emit_escalation_metrics: bool,
     emit_decidable_metrics: bool,
     cert_output: Option<&'a str>,
     report_dir: Option<&'a str>,
@@ -794,6 +817,7 @@ fn cmd_verify(options: VerifyOptions<'_>) {
         input,
         generate_proof_cert,
         emit_escalation_bundle,
+        emit_escalation_metrics,
         emit_decidable_metrics,
         cert_output,
         report_dir,
@@ -1015,8 +1039,9 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                                 &z3_result,
                                 "failed",
                             );
-                            let status = if emit_escalation_bundle && classification.should_escalate
-                            {
+                            let emit_lean_artifacts =
+                                emit_escalation_bundle || emit_escalation_metrics;
+                            let status = if emit_lean_artifacts && classification.should_escalate {
                                 if !json_output {
                                     println!(
                                         "  [lean] '{}': marked for escalation ({})",
@@ -1173,8 +1198,10 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                                         &z3_result,
                                         "failed",
                                     );
+                                let emit_lean_artifacts =
+                                    emit_escalation_bundle || emit_escalation_metrics;
                                 let status =
-                                    if emit_escalation_bundle && classification.should_escalate {
+                                    if emit_lean_artifacts && classification.should_escalate {
                                         if !json_output {
                                             println!(
                                                 "  [lean] '{}': marked for escalation ({})",
@@ -1252,7 +1279,7 @@ fn cmd_verify(options: VerifyOptions<'_>) {
     }
 
     // Plan 11B: Generate proof certificate if requested
-    if generate_proof_cert || emit_escalation_bundle {
+    if generate_proof_cert || emit_escalation_bundle || emit_escalation_metrics {
         let mut atom_refs: Vec<&parser::Atom> = items
             .iter()
             .filter_map(|item| {
@@ -1306,22 +1333,50 @@ fn cmd_verify(options: VerifyOptions<'_>) {
             }
         }
 
-        if emit_escalation_bundle {
+        if emit_escalation_bundle || emit_escalation_metrics {
             let bundle = proof_cert::generate_escalation_bundle(&cert);
-            let bundle_path = cert_path.with_extension("escalation-bundle.json");
-            match proof_cert::save_escalation_bundle(&bundle, &bundle_path) {
-                Ok(()) => {
-                    if !json_output {
-                        println!(
-                            "  Lean escalation bundle written to: {} ({} candidate(s))",
-                            bundle_path.display(),
-                            bundle.summary.candidate_count
-                        );
+            if emit_escalation_bundle {
+                let bundle_path = cert_path.with_extension("escalation-bundle.json");
+                match proof_cert::save_escalation_bundle(&bundle, &bundle_path) {
+                    Ok(()) => {
+                        if !json_output {
+                            println!(
+                                "  Lean escalation bundle written to: {} ({} candidate(s))",
+                                bundle_path.display(),
+                                bundle.summary.candidate_count
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        if !json_output {
+                            eprintln!("  ⚠️  Failed to write escalation bundle: {}", e);
+                        }
                     }
                 }
-                Err(e) => {
-                    if !json_output {
-                        eprintln!("  ⚠️  Failed to write escalation bundle: {}", e);
+            }
+            if emit_escalation_metrics {
+                let mut metrics = resolver::LeanEscalationMetrics::default();
+                for candidate in &bundle.candidates {
+                    metrics.record_candidate(candidate);
+                }
+                let metrics_path = cert_path.with_extension("escalation-metrics.json");
+                let metrics_json = metrics.to_summary_json();
+                match serde_json::to_string_pretty(&metrics_json)
+                    .map_err(|e| e.to_string())
+                    .and_then(|json| std::fs::write(&metrics_path, json).map_err(|e| e.to_string()))
+                {
+                    Ok(()) => {
+                        if !json_output {
+                            println!(
+                                "  📊 Escalation metrics written to: {}",
+                                metrics_path.display()
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        if !json_output {
+                            eprintln!("  ⚠️  Failed to write escalation metrics: {}", e);
+                        }
                     }
                 }
             }
