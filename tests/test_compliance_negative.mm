@@ -19,3 +19,16 @@ atom buggy_classify_risk(customer_type: CustomerType)
             Government => 0
         }
     }
+
+// 負テスト: PEP カテゴリが match から漏れているケース
+atom test_missing_pep_arm(customer_type: CustomerType)
+    requires: true;
+    ensures: result >= 0 && result <= 3;
+    body: {
+        match customer_type {
+            Individual => 0,
+            Corporate => 1,
+            Government => 0
+            // PEP が意図的に省略されている
+        }
+    }
