@@ -1173,6 +1173,27 @@ mod tests {
         let _ = std::fs::remove_file(&tmp);
     }
 
+    #[test]
+    fn test_load_certificate_rejects_stale_bridge_hash() {
+        let atom = make_test_atom("bar", "true", "result == 1", "1");
+        let atoms: Vec<&parser::Atom> = vec![&atom];
+        let mut results = HashMap::new();
+        results.insert(
+            "bar".to_string(),
+            ("unsat".to_string(), "verified".to_string()),
+        );
+        let module_env = ModuleEnv::new();
+        let mut cert = generate_certificate("test.mm", &atoms, &results, &module_env, None, None);
+        cert.atoms[0].bridge_lemma_hash = "old-bridge-hash".to_string();
+
+        let tmp = std::env::temp_dir().join("mumei_stale_bridge_cert.json");
+        save_certificate(&cert, &tmp).unwrap();
+        let err = load_certificate(&tmp).expect_err("load_certificate must reject stale metadata");
+        assert!(err.contains("old-bridge-hash"));
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
     /// P5-A: save and load certificate roundtrip
     #[test]
     fn test_save_load_certificate_roundtrip() {
