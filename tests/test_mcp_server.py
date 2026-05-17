@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -151,6 +152,110 @@ class TestListStdCatalog:
             assert "atoms" in module
             assert "structs" in module
             assert "effects" in module
+
+
+class _FakeRunningProcess:
+    def __init__(self) -> None:
+        self.terminated = False
+
+    def poll(self) -> int | None:
+        return 0 if self.terminated else None
+
+    def terminate(self) -> None:
+        self.terminated = True
+
+
+class _FakeCompletedProcess:
+    returncode = 0
+
+    def communicate(self, timeout: float | None = None) -> tuple[str, str]:
+        return "", ""
+
+    def poll(self) -> int:
+        return self.returncode
+
+
+class TestOrchestrationWorkerPool:
+    def test_cancel_task_terminates_bound_process(self) -> None:
+        from mcp_server import Z3WorkerPool
+
+        pool = Z3WorkerPool(max_workers=1, timeout_ms=100, memory_limit_mb=64)
+        worker = pool.acquire_worker()
+        process = _FakeRunningProcess()
+        worker.process = process
+        pool.bind_task("task-1", worker.worker_id)
+
+        assert pool.cancel_task("task-1") is True
+        assert process.terminated is True
+
+        pool.release_worker(worker.worker_id)
+
+
+class TestOrchestrationCacheIsolation:
+    def test_fingerprint_changes_with_solver_features(self) -> None:
+        from mcp_server import _compute_mcp_solver_config_fingerprint
+
+        base = _compute_mcp_solver_config_fingerprint(30000, 1024)
+
+        assert base != _compute_mcp_solver_config_fingerprint(10000, 1024)
+        assert base != _compute_mcp_solver_config_fingerprint(30000, 2048)
+        assert base != _compute_mcp_solver_config_fingerprint(
+            30000,
+            1024,
+            has_string_constraints=True,
+        )
+        assert base != _compute_mcp_solver_config_fingerprint(
+            30000,
+            1024,
+            has_array_forall=True,
+        )
+
+    def test_detects_source_features_for_cache_keys(self) -> None:
+        from mcp_server import _detect_mcp_solver_features
+
+        source = "atom f(s: Str, arr: [i64]) forall(i, 0, n, arr[i] > 0);"
+
+        assert _detect_mcp_solver_features(source) == {
+            "has_string_constraints": True,
+            "has_array_forall": True,
+        }
+
+
+class TestVerifyWithOrchestration:
+    def test_invocation_writes_certificate_and_env_metadata(self) -> None:
+        from mcp_server import verify_with_orchestration, _z3_worker_pool
+
+        popen_calls = []
+
+        def fake_popen(args: list[str], **kwargs) -> _FakeCompletedProcess:
+            popen_calls.append((args, kwargs))
+            output_path = Path(args[args.index("--output") + 1])
+            output_path.write_text(json.dumps({"atoms": []}), encoding="utf-8")
+            report_dir = Path(args[args.index("--report-dir") + 1])
+            (report_dir / "report.json").write_text(
+                json.dumps({"status": "ok"}),
+                encoding="utf-8",
+            )
+            return _FakeCompletedProcess()
+
+        with patch("mcp_server.subprocess.Popen", side_effect=fake_popen):
+            raw = verify_with_orchestration(
+                "atom f() ensures: result == 0; body: 0;",
+                timeout_ms=1234,
+                enable_cache=False,
+            )
+
+        _z3_worker_pool.shutdown()
+        payload = json.loads(raw)
+        args, kwargs = popen_calls[0]
+        env = kwargs["env"]
+
+        assert payload["status"] == "passed"
+        assert payload["proof_certificate"] == {"atoms": []}
+        assert "--proof-cert" in args
+        assert env["MUMEI_TASK_ID"] == payload["task_id"]
+        assert env["MUMEI_SOLVER_CACHE_KEY"] == payload["cache_key"]
+        assert env["MUMEI_VERIFICATION_TIMEOUT_MS"] == "1234"
 
 
 class TestOrchestrationResumeValidation:
