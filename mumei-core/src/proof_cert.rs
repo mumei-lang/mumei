@@ -649,13 +649,18 @@ fn solver_process_metadata_from_env(content_hash: &str) -> Option<SolverProcessM
     })
 }
 
-/// Load a proof certificate from a JSON file.
-pub fn load_certificate(path: &Path) -> Result<ProofCertificate, String> {
+pub(crate) fn load_certificate_unvalidated(path: &Path) -> Result<ProofCertificate, String> {
     let contents = std::fs::read_to_string(path)
         .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
-    let cert: ProofCertificate = serde_json::from_str(&contents)
-        .map_err(|e| format!("Failed to parse {}: {}", path.display(), e))?;
-    validate_certificate_translator_versions(&cert)?;
+    serde_json::from_str(&contents)
+        .map_err(|e| format!("Failed to parse {}: {}", path.display(), e))
+}
+
+/// Load a proof certificate from a JSON file.
+pub fn load_certificate(path: &Path) -> Result<ProofCertificate, String> {
+    let cert = load_certificate_unvalidated(path)?;
+    validate_certificate_translator_versions(&cert)
+        .map_err(|e| format!("Failed to validate {}: {}", path.display(), e))?;
     Ok(cert)
 }
 

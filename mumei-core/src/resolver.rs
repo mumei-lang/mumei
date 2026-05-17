@@ -421,7 +421,7 @@ fn verify_import_certificate(
         module_dir.join("proof_certificate.json"),
     ];
     if let Some(cert_path) = cert_candidates.iter().find(|p| p.exists()) {
-        match proof_cert::load_certificate(cert_path) {
+        match proof_cert::load_certificate_unvalidated(cert_path) {
             Ok(cert) => {
                 // Check if the certificate matches this source file.
                 let cert_file_path = Path::new(&cert.file);
@@ -450,14 +450,6 @@ fn verify_import_certificate(
                 // bundle fallback rather than silently returning None.
             }
             Err(err) => {
-                if err.contains("Lean translator metadata validation failed") {
-                    eprintln!(
-                        "  ⚠️  Local certificate {} has invalid Lean translator metadata: {}",
-                        cert_path.display(),
-                        err,
-                    );
-                    return Some(unproven_cert_results(&atom_refs));
-                }
                 // Local cert exists but is corrupted/unparseable — do NOT
                 // fall through to the bundle, because that would silently
                 // paper over the problem (especially dangerous under
@@ -2397,6 +2389,64 @@ atom add(x: i64, y: i64) -> i64
 
         let _ = fs::remove_file(&bundle_path);
         let _ = fs::remove_dir_all(&module_dir);
+        let _ = fs::remove_dir_all(std_root.parent().unwrap());
+    }
+
+    #[test]
+    fn test_verify_import_certificate_ignores_unmatched_stale_local_cert_for_bundle_fallback() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+        let source = r#"
+atom add(x: i64, y: i64) -> i64
+    requires: true;
+    ensures: true;
+    body: { x + y };
+"#;
+        let items = parser::parse_module(source);
+        let atom_refs: Vec<&parser::Atom> = items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Atom(a) => Some(a),
+                _ => None,
+            })
+            .collect();
+
+        let std_root = std::env::temp_dir().join("mumei_test_ws3_unmatched_stale/std");
+        let _ = fs::remove_dir_all(std_root.parent().unwrap());
+        fs::create_dir_all(&std_root).unwrap();
+        let logical_source = std_root.join("dummy_math.mm");
+        fs::write(&logical_source, source).unwrap();
+
+        let bundle = make_bundle_with_module("std/dummy_math", "std/dummy_math.mm", &atom_refs);
+        let bundle_path =
+            write_bundle_to_tempfile(&bundle, "mumei_test_bundle_unmatched_stale.json");
+
+        let mut local_results = HashMap::new();
+        local_results.insert(
+            "add".to_string(),
+            ("unsat".to_string(), "verified".to_string()),
+        );
+        let module_env = ModuleEnv::new();
+        let mut stale_local_cert = proof_cert::generate_certificate(
+            "std/other_module.mm",
+            &atom_refs,
+            &local_results,
+            &module_env,
+            None,
+            None,
+        );
+        stale_local_cert.atoms[0].translator_version = "stale-translator".to_string();
+        proof_cert::save_certificate(&stale_local_cert, &std_root.join(".proof-cert.json"))
+            .unwrap();
+
+        std::env::set_var("MUMEI_PROOF_BUNDLE", &bundle_path);
+        let result = verify_import_certificate(&std_root, &logical_source, &items, false);
+        std::env::remove_var("MUMEI_PROOF_BUNDLE");
+
+        let result = result.expect("unmatched local cert should fall through to bundle fallback");
+        assert_eq!(result.get("add").map(|s| s.as_str()), Some("proven"));
+
+        let _ = fs::remove_file(&bundle_path);
         let _ = fs::remove_dir_all(std_root.parent().unwrap());
     }
 
