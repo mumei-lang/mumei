@@ -13,6 +13,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Dict, Optional
 from mcp.server.fastmcp import FastMCP
 
 # ws5 / SI-5 Phase 1-C: std/ graph helpers live in std_graph_lib so that
@@ -434,7 +435,7 @@ def _build_machine_readable(report: dict, feedback: dict) -> "dict | None":
     return result
 
 
-def _normalize_spec_metadata(spec_metadata: dict = None) -> dict:
+def _normalize_spec_metadata(spec_metadata: Optional[Dict[str, str]] = None) -> dict:
     if spec_metadata is None:
         return {}
     if isinstance(spec_metadata, str):
@@ -451,7 +452,11 @@ def _normalize_spec_metadata(spec_metadata: dict = None) -> dict:
     return {str(key): str(value) for key, value in spec_metadata.items()}
 
 
-def _traceability_payload(source_code: str, trace_id: str = "", spec_metadata: dict = None) -> dict:
+def _traceability_payload(
+    source_code: str,
+    trace_id: Optional[str] = None,
+    spec_metadata: Optional[Dict[str, str]] = None,
+) -> dict:
     normalized_metadata = _normalize_spec_metadata(spec_metadata)
     requires = re.findall(r"\brequires\s*:\s*([^;]*);", source_code, re.S)
     ensures = re.findall(r"\bensures\s*:\s*([^;]*);", source_code, re.S)
@@ -539,8 +544,8 @@ def _format_effect_feedback(report_json: str) -> str:
 def forge_blade(
     source_code: str,
     output_name: str = "katana",
-    trace_id: str = "",
-    spec_metadata: dict = None,
+    trace_id: Optional[str] = None,
+    spec_metadata: Optional[Dict[str, str]] = None,
 ) -> str:
     """
     Verify Mumei code and generate LLVM IR output.
@@ -619,8 +624,8 @@ def forge_blade(
 @mcp.tool()
 def validate_logic(
     source_code: str,
-    trace_id: str = "",
-    spec_metadata: dict = None,
+    trace_id: Optional[str] = None,
+    spec_metadata: Optional[Dict[str, str]] = None,
 ) -> str:
     """
     Run formal verification (Z3) only on Mumei code.

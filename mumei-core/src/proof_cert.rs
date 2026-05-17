@@ -320,8 +320,11 @@ pub fn generate_certificate(
             };
             let symbol_provenance =
                 verification::detect_uninterpreted_symbols(atom, &HashMap::new(), module_env);
-            let spec_validation_result =
-                verification::check_spec_satisfiability(atom, module_env).ok();
+            let spec_validation_result = Some(
+                verification::check_spec_satisfiability(atom, module_env).unwrap_or_else(|err| {
+                    verification::SpecValidationResult::from_contradiction(atom, &err)
+                }),
+            );
             let solver_process_metadata = solver_process_metadata_from_env(&content_hash);
 
             AtomCertificate {
@@ -898,6 +901,29 @@ mod tests {
         let parsed: ProofCertificate = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.atoms[0].requires, "x > 0");
         assert_eq!(parsed.atoms[0].ensures, "result > 0");
+    }
+
+    #[test]
+    fn test_generate_certificate_records_traceability_validation() {
+        let mut atom = make_test_atom("traced", "true", "true", "0");
+        atom.trace_id = Some("REQ-1".to_string());
+        atom.spec_metadata
+            .insert("source".to_string(), "unit-test".to_string());
+        let atoms: Vec<&parser::Atom> = vec![&atom];
+        let mut results = HashMap::new();
+        results.insert(
+            "traced".to_string(),
+            ("unsat".to_string(), "verified".to_string()),
+        );
+        let module_env = ModuleEnv::new();
+
+        let cert = generate_certificate("test.mm", &atoms, &results, &module_env, None, None);
+        let validation = cert.atoms[0].spec_validation_result.as_ref().unwrap();
+
+        assert!(validation.is_satisfiable);
+        assert!(validation.contradiction_details.is_none());
+        assert_eq!(validation.trace_id.as_deref(), Some("REQ-1"));
+        assert_eq!(validation.traceability_hash.len(), 64);
     }
 
     /// P5-A: verify_certificate detects "changed" when source is modified

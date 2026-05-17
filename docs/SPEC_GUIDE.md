@@ -235,7 +235,7 @@ Atoms carry optional traceability fields:
 - `trace_id`: stable ID for the originating prompt, ticket, regulation clause, or forge task.
 - `spec_metadata`: key/value links such as `source`, `requirement_id`, `prompt_hash`, or `reviewer`.
 
-Proof certificates include `spec_validation_result`, which records the validation status, traceability hash, and traceability coverage. The hash is SHA-256 over `trace_id`, sorted `spec_metadata`, `requires`, and `ensures`, binding the formal contract to its natural-language source.
+Proof certificates include `spec_validation_result`, which records `is_satisfiable`, `contradiction_details`, validation status, traceability hash, and traceability coverage. The hash is SHA-256 over `trace_id`, sorted `spec_metadata`, `requires`, and `ensures`, binding the formal contract to its natural-language source.
 
 For MCP workflows, pass traceability through `validate_logic` or `forge_blade`:
 
