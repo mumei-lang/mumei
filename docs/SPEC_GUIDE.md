@@ -168,7 +168,7 @@ Keep transition names aligned with `perform` operations so MIR temporal analysis
 
 ## Metrics and review cadence
 
-Use `mumei --emit decidable-metrics <file.mm>` to collect decidable-fragment warning metrics as JSON. The report includes `total_atoms_checked`, `atoms_with_warnings`, and per-tag `warning_counts`, which should be aggregated with P8-C metrics for generated specifications.
+Use `mumei verify --emit decidable-metrics --output decidable_metrics.json <file.mm>` to collect decidable-fragment warning metrics as JSON. The report includes `total_atoms_checked`, `atoms_with_warnings`, and per-tag `warning_counts`, which should be aggregated with P8-C metrics for generated specifications.
 
 Track the following quarterly:
 
