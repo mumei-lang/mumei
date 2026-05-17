@@ -45,6 +45,57 @@ fn emit_decidable_fragment_warning(
     }
 }
 
+fn emit_spurious_counterexample_diagnostic(
+    validation: &verification::CounterexampleValidationResult,
+    atom_name: &str,
+    suppress_output: bool,
+) {
+    if suppress_output {
+        return;
+    }
+    match validation.validation_status.as_str() {
+        "validated" => eprintln!("  ✓ Counterexample validated for atom '{}'", atom_name),
+        "spurious_candidate" => {
+            eprintln!(
+                "  ⚠️  Spurious counterexample candidate for atom '{}'",
+                atom_name
+            );
+            let symbols = validation
+                .symbol_provenance
+                .iter()
+                .map(|symbol| format!("{} ({})", symbol.symbol_name, symbol.source))
+                .collect::<Vec<_>>()
+                .join(", ");
+            eprintln!("    Depends on uninterpreted symbols: {symbols}");
+        }
+        "unvalidated" => eprintln!("  ? Counterexample unvalidated for atom '{}'", atom_name),
+        _ => {}
+    }
+}
+
+fn counterexample_model_from_error(
+    error: &verification::MumeiError,
+) -> std::collections::HashMap<String, i64> {
+    let mut model = std::collections::HashMap::new();
+    if let verification::MumeiError::VerificationError {
+        counterexample: Some(serde_json::Value::Object(values)),
+        ..
+    } = error
+    {
+        for (name, value) in values {
+            let parsed = match value {
+                serde_json::Value::Number(number) => number.as_i64(),
+                serde_json::Value::String(text) => text.parse::<i64>().ok(),
+                _ => None,
+            };
+            if let Some(value) = parsed {
+                model.insert(name.clone(), value);
+            }
+        }
+    }
+    model
+}
+
 /// Collect all ExternBlock items from a list of Items.
 fn collect_extern_blocks(items: &[Item]) -> Vec<parser::ExternBlock> {
     items
@@ -147,6 +198,9 @@ enum Command {
         /// Enable cross-specification consistency verification across atoms
         #[arg(long)]
         cross_spec_verify: bool,
+        /// Disable P8-A spurious counterexample detection
+        #[arg(long)]
+        disable_spurious_detection: bool,
     },
     /// Parse + resolve + monomorphize only (no Z3, fast syntax check)
     Check {
@@ -297,6 +351,7 @@ fn main() {
             strict_imports,
             allow_lean_verified,
             cross_spec_verify,
+            disable_spurious_detection,
         }) => {
             let emit_escalation_bundle = matches!(emit.as_deref(), Some("escalation-bundle"));
             let emit_decidable_metrics = matches!(emit.as_deref(), Some("decidable-metrics"));
@@ -320,6 +375,7 @@ fn main() {
                 strict_imports,
                 allow_lean_verified,
                 enable_cross_spec_verification: cross_spec_verify,
+                enable_spurious_detection: !disable_spurious_detection,
             });
         }
         Some(Command::Check { input }) => {
@@ -730,6 +786,7 @@ struct VerifyOptions<'a> {
     strict_imports: bool,
     allow_lean_verified: bool,
     enable_cross_spec_verification: bool,
+    enable_spurious_detection: bool,
 }
 
 fn cmd_verify(options: VerifyOptions<'_>) {
@@ -744,6 +801,7 @@ fn cmd_verify(options: VerifyOptions<'_>) {
         strict_imports,
         allow_lean_verified,
         enable_cross_spec_verification,
+        enable_spurious_detection,
     } = options;
     check_z3_available();
     let manifest_config = manifest::find_and_load();
@@ -776,6 +834,7 @@ fn cmd_verify(options: VerifyOptions<'_>) {
         global_max_unroll: build_cfg.max_unroll,
         enable_cross_spec_verification,
         collect_decidable_fragment_metrics: emit_decidable_metrics,
+        enable_spurious_detection,
     };
     let input_path = Path::new(input);
     let base_dir = input_path.parent().unwrap_or(Path::new("."));
@@ -929,6 +988,7 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                         }
                         Err(e) => {
                             let error_text = format!("{e}");
+                            let counterexample_model = counterexample_model_from_error(&e);
                             if !json_output {
                                 let resolved = resolve_source_for_span(&source, &atom.span);
                                 let e = e.with_source(&resolved, &atom.span);
@@ -937,6 +997,18 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                             let z3_result = verification::z3_result_from_error_message(&error_text)
                                 .unwrap_or("sat")
                                 .to_string();
+                            if enable_spurious_detection && z3_result == "sat" {
+                                let validation = verification::validate_counterexample(
+                                    atom,
+                                    &counterexample_model,
+                                    &module_env,
+                                );
+                                emit_spurious_counterexample_diagnostic(
+                                    &validation,
+                                    &atom.name,
+                                    json_output,
+                                );
+                            }
                             let classification = verification::classify_atom_for_lean_escalation(
                                 atom,
                                 &module_env,
@@ -1072,6 +1144,7 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                             }
                             Err(e) => {
                                 let error_text = format!("{e}");
+                                let counterexample_model = counterexample_model_from_error(&e);
                                 if !json_output {
                                     let resolved = resolve_source_for_span(&source, &method.span);
                                     let e = e.with_source(&resolved, &method.span);
@@ -1081,6 +1154,18 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                                     verification::z3_result_from_error_message(&error_text)
                                         .unwrap_or("sat")
                                         .to_string();
+                                if enable_spurious_detection && z3_result == "sat" {
+                                    let validation = verification::validate_counterexample(
+                                        &qualified_method,
+                                        &counterexample_model,
+                                        &module_env,
+                                    );
+                                    emit_spurious_counterexample_diagnostic(
+                                        &validation,
+                                        &qualified_name,
+                                        json_output,
+                                    );
+                                }
                                 let classification =
                                     verification::classify_atom_for_lean_escalation(
                                         &qualified_method,
@@ -2171,6 +2256,7 @@ fn cmd_build(
             emit_target,
             emitter::EmitTarget::DecidableMetrics
         ),
+        enable_spurious_detection: true,
     };
     let mut escalation_cert_results: std::collections::HashMap<String, (String, String)> =
         std::collections::HashMap::new();

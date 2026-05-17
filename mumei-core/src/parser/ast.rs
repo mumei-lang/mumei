@@ -6,12 +6,13 @@
 // This file contains all the core data structures used by the parser.
 
 use crate::ast::TypeRef;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 // --- 0. Source position information (Span) ---
 
 /// Source position information. Attached to all AST nodes for diagnostic accuracy.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub struct Span {
     pub file: String,
     pub line: usize,

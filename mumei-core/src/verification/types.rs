@@ -589,6 +589,7 @@ pub struct VerificationConfig {
     pub global_max_unroll: usize,
     pub enable_cross_spec_verification: bool,
     pub collect_decidable_fragment_metrics: bool,
+    pub enable_spurious_detection: bool,
 }
 
 impl Default for VerificationConfig {
@@ -598,6 +599,7 @@ impl Default for VerificationConfig {
             global_max_unroll: 3,
             enable_cross_spec_verification: false,
             collect_decidable_fragment_metrics: false,
+            enable_spurious_detection: true,
         }
     }
 }
