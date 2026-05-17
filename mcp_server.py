@@ -195,7 +195,11 @@ def _detect_mcp_solver_features(source_code: str) -> dict[str, bool]:
             re.search(r"\b(Str|string|String)\b|starts_with|ends_with|contains", source_code)
         ),
         "has_array_forall": bool(
-            re.search(r"forall\s*\([^)]*\)[^\n;]*\[", source_code, re.DOTALL)
+            re.search(
+                r"forall\s*\([^\n;)]*\[[^\n;)]*\)|forall\s*\([^)]*\)[^\n;]*\[",
+                source_code,
+                re.DOTALL,
+            )
         ),
     }
 

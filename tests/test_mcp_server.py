@@ -245,7 +245,6 @@ class TestVerifyWithOrchestration:
                 enable_cache=False,
             )
 
-        _z3_worker_pool.shutdown()
         payload = json.loads(raw)
         args, kwargs = popen_calls[0]
         env = kwargs["env"]
