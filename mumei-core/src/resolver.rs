@@ -75,6 +75,8 @@ pub struct LeanEscalationMetrics {
     pub by_logic_fragment: HashMap<String, usize>,
     #[serde(default)]
     pub by_failure_reason: HashMap<String, usize>,
+    #[serde(default)]
+    pub successes_by_failure_reason: HashMap<String, usize>,
 }
 
 impl LeanEscalationMetrics {
@@ -89,7 +91,13 @@ impl LeanEscalationMetrics {
             .as_ref()
             .map(|metadata| metadata.status.as_str())
         {
-            Some("lean_verified") => self.lean_successes += 1,
+            Some("lean_verified") => {
+                self.lean_successes += 1;
+                *self
+                    .successes_by_failure_reason
+                    .entry(candidate.escalation_reason.clone())
+                    .or_insert(0) += 1;
+            }
             Some("partial_translation") => self.partial_translation += 1,
             _ if candidate.manual_lemma_reason.is_some() => self.manual_required += 1,
             _ => {}
@@ -117,7 +125,11 @@ impl LeanEscalationMetrics {
     pub fn identify_low_success_categories(&self) -> Vec<String> {
         let mut low_success = Vec::new();
         for (reason, attempts) in &self.by_failure_reason {
-            let successes = self.lean_successes;
+            let successes = self
+                .successes_by_failure_reason
+                .get(reason)
+                .copied()
+                .unwrap_or(0);
             if *attempts > 0 && successes as f64 / (*attempts as f64) < 0.5 {
                 low_success.push(reason.clone());
             }
@@ -138,6 +150,7 @@ impl LeanEscalationMetrics {
                 0.0
             },
             "by_failure_reason": self.by_failure_reason,
+            "successes_by_failure_reason": self.successes_by_failure_reason,
             "by_logic_fragment": self.by_logic_fragment,
             "low_success_categories": self.identify_low_success_categories(),
         })
@@ -154,6 +167,9 @@ impl LeanEscalationMetrics {
         }
         for (reason, count) in other.by_failure_reason {
             *self.by_failure_reason.entry(reason).or_insert(0) += count;
+        }
+        for (reason, count) in other.successes_by_failure_reason {
+            *self.successes_by_failure_reason.entry(reason).or_insert(0) += count;
         }
     }
 

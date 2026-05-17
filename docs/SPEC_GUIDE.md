@@ -196,6 +196,7 @@ Collect escalation metrics with `mumei verify --emit escalation-metrics <file.mm
 - `partial_translation`: candidates where the Lean translator only produced a partial proof artifact.
 - `manual_required`: candidates requiring a manual lemma or human review.
 - `by_failure_reason`: escalation counts grouped by reason, such as Z3 unknown, timeout, resource limit, spurious counterexample, or trusted atom review.
+- `successes_by_failure_reason`: `lean_verified` counts grouped by failure reason.
 - `by_logic_fragment`: escalation counts grouped by fragment tag.
 - `low_success_categories`: failure reasons whose success rate is below 50%.
 

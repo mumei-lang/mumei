@@ -63,6 +63,12 @@ fn test_escalation_metrics_collection() {
 
     assert_eq!(metrics.escalation_attempts, 3);
     assert_eq!(metrics.lean_successes, 1);
+    assert_eq!(
+        metrics
+            .successes_by_failure_reason
+            .get("z3_unknown_complex_fragment"),
+        Some(&1)
+    );
     assert_eq!(metrics.partial_translation, 1);
     assert_eq!(metrics.manual_required, 1);
     assert_eq!(
@@ -81,16 +87,29 @@ fn test_escalation_metrics_collection() {
 
 #[test]
 fn test_low_success_category_identification() {
-    let mut metrics = LeanEscalationMetrics {
-        lean_successes: 1,
-        ..LeanEscalationMetrics::default()
-    };
-    metrics
-        .by_failure_reason
-        .insert("z3_unknown_complex_fragment".to_string(), 3);
-    metrics
-        .by_failure_reason
-        .insert("trusted_atom_human_review".to_string(), 2);
+    let mut metrics = LeanEscalationMetrics::default();
+    for index in 0..3 {
+        metrics.record_candidate(&candidate(
+            &format!("unknown_{index}"),
+            "z3_unknown_complex_fragment",
+            &["nonlinear_arithmetic"],
+            if index == 0 {
+                Some("lean_verified")
+            } else {
+                Some("partial_translation")
+            },
+            None,
+        ));
+    }
+    for index in 0..2 {
+        metrics.record_candidate(&candidate(
+            &format!("trusted_{index}"),
+            "trusted_atom_human_review",
+            &["trusted_atom"],
+            Some("lean_verified"),
+            None,
+        ));
+    }
 
     assert_eq!(
         metrics.identify_low_success_categories(),
@@ -117,6 +136,10 @@ fn test_metrics_json_output() {
     assert_eq!(json["manual_required"], 0);
     assert_eq!(json["success_rate"], 1.0);
     assert_eq!(json["by_failure_reason"]["z3_unknown_complex_fragment"], 1);
+    assert_eq!(
+        json["successes_by_failure_reason"]["z3_unknown_complex_fragment"],
+        1
+    );
     assert_eq!(json["by_logic_fragment"]["nonlinear_arithmetic"], 1);
     assert_eq!(json["low_success_categories"].as_array().unwrap().len(), 0);
 }
