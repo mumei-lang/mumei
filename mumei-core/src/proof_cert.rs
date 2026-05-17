@@ -530,6 +530,66 @@ fn lean_certificate_metadata_is_current(atom: &AtomCertificate) -> bool {
         && metadata.bridge_lemma_hash == verification::LEAN_BRIDGE_LEMMA_HASH
 }
 
+fn atom_carries_lean_translator_metadata(atom: &AtomCertificate) -> bool {
+    atom.z3_check_result == "lean_verified"
+        || atom.lean_metadata.is_some()
+        || !atom.translator_version.is_empty()
+        || !atom.bridge_lemma_hash.is_empty()
+}
+
+/// Validate that Lean translator metadata matches the currently trusted bridge.
+pub fn validate_translator_version(cert: &ProofCertificate) -> Result<(), String> {
+    let mut issues = Vec::new();
+    for atom in &cert.atoms {
+        if atom_carries_lean_translator_metadata(atom) {
+            if atom.translator_version != verification::LEAN_TRANSLATOR_VERSION {
+                issues.push(format!(
+                    "atom '{}': translator_version '{}' does not match expected '{}'",
+                    atom.name,
+                    atom.translator_version,
+                    verification::LEAN_TRANSLATOR_VERSION
+                ));
+            }
+            if atom.bridge_lemma_hash != verification::LEAN_BRIDGE_LEMMA_HASH {
+                issues.push(format!(
+                    "atom '{}': bridge_lemma_hash '{}' does not match expected '{}'",
+                    atom.name,
+                    atom.bridge_lemma_hash,
+                    verification::LEAN_BRIDGE_LEMMA_HASH
+                ));
+            }
+        }
+
+        if let Some(metadata) = atom.lean_metadata.as_ref() {
+            if metadata.translator_version != verification::LEAN_TRANSLATOR_VERSION {
+                issues.push(format!(
+                    "atom '{}': lean_metadata.translator_version '{}' does not match expected '{}'",
+                    atom.name,
+                    metadata.translator_version,
+                    verification::LEAN_TRANSLATOR_VERSION
+                ));
+            }
+            if metadata.bridge_lemma_hash != verification::LEAN_BRIDGE_LEMMA_HASH {
+                issues.push(format!(
+                    "atom '{}': lean_metadata.bridge_lemma_hash '{}' does not match expected '{}'",
+                    atom.name,
+                    metadata.bridge_lemma_hash,
+                    verification::LEAN_BRIDGE_LEMMA_HASH
+                ));
+            }
+        }
+    }
+
+    if issues.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Lean translator metadata validation failed: {}",
+            issues.join("; ")
+        ))
+    }
+}
+
 /// Compute SHA-256 hash of arbitrary data (utility for other crates).
 pub fn compute_sha256(data: &str) -> String {
     let mut hasher = Sha256::new();
@@ -895,6 +955,84 @@ mod tests {
             status_opt_in[0],
             ("hard_lemma".to_string(), "proven".to_string())
         );
+    }
+
+    #[test]
+    fn test_validate_translator_version_detects_atom_version_mismatch() {
+        let atom = make_test_atom("hard_lemma", "true", "true", "42");
+        let atoms: Vec<&parser::Atom> = vec![&atom];
+        let mut results = HashMap::new();
+        results.insert(
+            "hard_lemma".to_string(),
+            ("lean_verified".to_string(), "verified".to_string()),
+        );
+        let module_env = ModuleEnv::new();
+        let mut cert = generate_certificate("test.mm", &atoms, &results, &module_env, None, None);
+        cert.atoms[0].translator_version = "old-translator".to_string();
+
+        let err = validate_translator_version(&cert).expect_err("stale translator must fail");
+        assert!(err.contains("translator_version"));
+        assert!(err.contains("old-translator"));
+    }
+
+    #[test]
+    fn test_validate_translator_version_detects_bridge_hash_mismatch() {
+        let atom = make_test_atom("hard_lemma", "true", "true", "42");
+        let atoms: Vec<&parser::Atom> = vec![&atom];
+        let mut results = HashMap::new();
+        results.insert(
+            "hard_lemma".to_string(),
+            ("lean_verified".to_string(), "verified".to_string()),
+        );
+        let module_env = ModuleEnv::new();
+        let mut cert = generate_certificate("test.mm", &atoms, &results, &module_env, None, None);
+        cert.atoms[0].bridge_lemma_hash = "old-bridge-hash".to_string();
+
+        let err = validate_translator_version(&cert).expect_err("stale bridge hash must fail");
+        assert!(err.contains("bridge_lemma_hash"));
+        assert!(err.contains("old-bridge-hash"));
+    }
+
+    #[test]
+    fn test_validate_translator_version_detects_lean_metadata_mismatch() {
+        let atom = make_test_atom("hard_lemma", "true", "true", "42");
+        let atoms: Vec<&parser::Atom> = vec![&atom];
+        let mut results = HashMap::new();
+        results.insert(
+            "hard_lemma".to_string(),
+            ("lean_verified".to_string(), "verified".to_string()),
+        );
+        let module_env = ModuleEnv::new();
+        let mut cert = generate_certificate("test.mm", &atoms, &results, &module_env, None, None);
+        cert.atoms[0].lean_metadata = Some(LeanResultMetadata {
+            status: "lean_verified".to_string(),
+            theorem_name: "hard_lemma_correct".to_string(),
+            translator_version: "old-translator".to_string(),
+            bridge_lemma_hash: verification::LEAN_BRIDGE_LEMMA_HASH.to_string(),
+            proof_path: "Generated/Test.lean".to_string(),
+            diagnostics: vec![],
+        });
+
+        let err = validate_translator_version(&cert).expect_err("stale Lean metadata must fail");
+        assert!(err.contains("lean_metadata.translator_version"));
+        assert!(err.contains("old-translator"));
+    }
+
+    #[test]
+    fn test_validate_translator_version_allows_legacy_z3_only_certificate() {
+        let atom = make_test_atom("add", "true", "true", "1");
+        let atoms: Vec<&parser::Atom> = vec![&atom];
+        let mut results = HashMap::new();
+        results.insert(
+            "add".to_string(),
+            ("unsat".to_string(), "verified".to_string()),
+        );
+        let module_env = ModuleEnv::new();
+        let mut cert = generate_certificate("test.mm", &atoms, &results, &module_env, None, None);
+        cert.atoms[0].translator_version.clear();
+        cert.atoms[0].bridge_lemma_hash.clear();
+
+        assert!(validate_translator_version(&cert).is_ok());
     }
 
     /// PR 2: `allow_lean_verified` does not weaken the `"changed"` detector.
