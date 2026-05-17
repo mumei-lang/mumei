@@ -122,3 +122,20 @@ fn test_cli_exposes_spurious_detection_flag() {
     assert!(stdout.contains("--enable-spurious-detection"));
     assert!(stdout.contains("--disable-spurious-detection"));
 }
+
+#[test]
+fn test_cli_spurious_detection_flags_conflict() {
+    let bin = env!("CARGO_BIN_EXE_mumei");
+    let output = std::process::Command::new(bin)
+        .arg("verify")
+        .arg("--enable-spurious-detection")
+        .arg("--disable-spurious-detection")
+        .arg("tests/test_contracts.mm")
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("failed to run mumei verify with conflicting flags");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("cannot be used with") || stderr.contains("conflict"));
+}

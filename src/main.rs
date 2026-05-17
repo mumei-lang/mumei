@@ -57,11 +57,7 @@ fn emit_spurious_counterexample_diagnostic(
         "validated" => eprintln!("  ✓ Counterexample validated for atom '{}'", atom_name),
         "spurious_candidate" => {
             eprintln!(
-                "  ⚠️  Spurious counterexample detected for atom '{}'",
-                atom_name
-            );
-            eprintln!(
-                "  ⚠️  Spurious counterexample candidate for atom '{}'",
+                "  ⚠️  Spurious counterexample detected (candidate) for atom '{}'",
                 atom_name
             );
             let symbols = validation
