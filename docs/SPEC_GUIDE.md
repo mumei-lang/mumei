@@ -185,6 +185,35 @@ Use the P8-C feedback loop after each quarterly rollup:
 4. Prefer Lean escalation templates when a warning represents intentional nonlinear, inductive, trigger-sensitive, or temporal reasoning.
 5. Re-run the rollup and confirm progress toward the P8-D targets: 20% quarterly warning-rate reduction, Z3 `unknown` under 5%, and at least 85% first-pass verification success.
 
+## Escalation Metrics and Feedback Loop
+
+Lean escalation metrics track which Z3-stable obligations need Lean, which translated successfully, and which categories need prompt or guideline updates.
+
+Collect escalation metrics with `mumei verify --emit escalation-metrics <file.mm>`. The command writes `<file>.escalation-metrics.json`; pass `--no-emit escalation-metrics` to suppress emission in wrapper flows that request metrics by default. The JSON includes:
+
+- `escalation_attempts`: Lean escalation candidates emitted from verification.
+- `lean_successes`: candidates accepted as `lean_verified`.
+- `partial_translation`: candidates where the Lean translator only produced a partial proof artifact.
+- `manual_required`: candidates requiring a manual lemma or human review.
+- `by_failure_reason`: escalation counts grouped by reason, such as Z3 unknown, timeout, resource limit, spurious counterexample, or trusted atom review.
+- `by_logic_fragment`: escalation counts grouped by fragment tag.
+- `low_success_categories`: failure reasons whose success rate is below 50%.
+
+Use the manual feedback loop when `low_success_categories` is non-empty:
+
+1. Identify fragment tags with the highest warning rate or largest regression.
+2. Add or update atom-generation prompt guidance for those tags.
+3. Add regression examples that reproduce the warning or low-success pattern.
+4. Prefer Lean escalation templates for intentional nonlinear, inductive, trigger-sensitive, or temporal reasoning.
+5. Re-run the rollup and confirm progress toward the P8-D targets.
+
+P8-C success targets:
+
+- Z3 `unknown` obligation Lean escalation success rate: at least 70%.
+- partial translation rate: below 20%.
+- `lean_verified` certificate re-verification success rate: 100%.
+- low-success category detection rate: 100%.
+
 ## Lean escalation policy
 
 Escalate to Lean when the intended property is inherently nonlinear, inductive, trigger-sensitive, or recursive. A warning does not mean the specification is wrong; it means the spec is outside the Z3-stable fragment and should be reviewed before relying on first-pass SMT automation.
