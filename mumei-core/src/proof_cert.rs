@@ -530,55 +530,65 @@ fn lean_certificate_metadata_is_current(atom: &AtomCertificate) -> bool {
         && metadata.bridge_lemma_hash == verification::LEAN_BRIDGE_LEMMA_HASH
 }
 
-fn atom_carries_lean_translator_metadata(atom: &AtomCertificate) -> bool {
-    atom.z3_check_result == "lean_verified"
-        || atom.lean_metadata.is_some()
-        || !atom.translator_version.is_empty()
-        || !atom.bridge_lemma_hash.is_empty()
-}
-
-/// Validate that Lean translator metadata matches the currently trusted bridge.
-pub fn validate_translator_version(cert: &ProofCertificate) -> Result<(), String> {
+/// Validate that an atom certificate matches the expected Lean translator bridge.
+pub fn validate_translator_version(
+    cert: &AtomCertificate,
+    expected_version: &str,
+    expected_hash: &str,
+) -> Result<(), String> {
     let mut issues = Vec::new();
-    for atom in &cert.atoms {
-        if atom_carries_lean_translator_metadata(atom) {
-            if atom.translator_version != verification::LEAN_TRANSLATOR_VERSION {
-                issues.push(format!(
-                    "atom '{}': translator_version '{}' does not match expected '{}'",
-                    atom.name,
-                    atom.translator_version,
-                    verification::LEAN_TRANSLATOR_VERSION
-                ));
-            }
-            if atom.bridge_lemma_hash != verification::LEAN_BRIDGE_LEMMA_HASH {
-                issues.push(format!(
-                    "atom '{}': bridge_lemma_hash '{}' does not match expected '{}'",
-                    atom.name,
-                    atom.bridge_lemma_hash,
-                    verification::LEAN_BRIDGE_LEMMA_HASH
-                ));
-            }
-        }
+    if cert.translator_version != expected_version {
+        issues.push(format!(
+            "translator_version '{}' does not match expected '{}'",
+            cert.translator_version, expected_version
+        ));
+    }
+    if cert.bridge_lemma_hash != expected_hash {
+        issues.push(format!(
+            "bridge_lemma_hash '{}' does not match expected '{}'",
+            cert.bridge_lemma_hash, expected_hash
+        ));
+    }
 
-        if let Some(metadata) = atom.lean_metadata.as_ref() {
-            if metadata.translator_version != verification::LEAN_TRANSLATOR_VERSION {
-                issues.push(format!(
-                    "atom '{}': lean_metadata.translator_version '{}' does not match expected '{}'",
-                    atom.name,
-                    metadata.translator_version,
-                    verification::LEAN_TRANSLATOR_VERSION
-                ));
-            }
-            if metadata.bridge_lemma_hash != verification::LEAN_BRIDGE_LEMMA_HASH {
-                issues.push(format!(
-                    "atom '{}': lean_metadata.bridge_lemma_hash '{}' does not match expected '{}'",
-                    atom.name,
-                    metadata.bridge_lemma_hash,
-                    verification::LEAN_BRIDGE_LEMMA_HASH
-                ));
-            }
+    if let Some(metadata) = cert.lean_metadata.as_ref() {
+        if metadata.translator_version != expected_version {
+            issues.push(format!(
+                "lean_metadata.translator_version '{}' does not match expected '{}'",
+                metadata.translator_version, expected_version
+            ));
+        }
+        if metadata.bridge_lemma_hash != expected_hash {
+            issues.push(format!(
+                "lean_metadata.bridge_lemma_hash '{}' does not match expected '{}'",
+                metadata.bridge_lemma_hash, expected_hash
+            ));
         }
     }
+
+    if issues.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "atom '{}': Lean translator metadata validation failed: {}",
+            cert.name,
+            issues.join("; ")
+        ))
+    }
+}
+
+pub fn validate_certificate_translator_versions(cert: &ProofCertificate) -> Result<(), String> {
+    let issues: Vec<String> = cert
+        .atoms
+        .iter()
+        .filter_map(|atom| {
+            validate_translator_version(
+                atom,
+                verification::LEAN_TRANSLATOR_VERSION,
+                verification::LEAN_BRIDGE_LEMMA_HASH,
+            )
+            .err()
+        })
+        .collect();
 
     if issues.is_empty() {
         Ok(())
@@ -643,8 +653,10 @@ fn solver_process_metadata_from_env(content_hash: &str) -> Option<SolverProcessM
 pub fn load_certificate(path: &Path) -> Result<ProofCertificate, String> {
     let contents = std::fs::read_to_string(path)
         .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
-    serde_json::from_str(&contents)
-        .map_err(|e| format!("Failed to parse {}: {}", path.display(), e))
+    let cert: ProofCertificate = serde_json::from_str(&contents)
+        .map_err(|e| format!("Failed to parse {}: {}", path.display(), e))?;
+    validate_certificate_translator_versions(&cert)?;
+    Ok(cert)
 }
 
 /// Save a proof certificate to a JSON file.
@@ -970,7 +982,12 @@ mod tests {
         let mut cert = generate_certificate("test.mm", &atoms, &results, &module_env, None, None);
         cert.atoms[0].translator_version = "old-translator".to_string();
 
-        let err = validate_translator_version(&cert).expect_err("stale translator must fail");
+        let err = validate_translator_version(
+            &cert.atoms[0],
+            verification::LEAN_TRANSLATOR_VERSION,
+            verification::LEAN_BRIDGE_LEMMA_HASH,
+        )
+        .expect_err("stale translator must fail");
         assert!(err.contains("translator_version"));
         assert!(err.contains("old-translator"));
     }
@@ -988,7 +1005,12 @@ mod tests {
         let mut cert = generate_certificate("test.mm", &atoms, &results, &module_env, None, None);
         cert.atoms[0].bridge_lemma_hash = "old-bridge-hash".to_string();
 
-        let err = validate_translator_version(&cert).expect_err("stale bridge hash must fail");
+        let err = validate_translator_version(
+            &cert.atoms[0],
+            verification::LEAN_TRANSLATOR_VERSION,
+            verification::LEAN_BRIDGE_LEMMA_HASH,
+        )
+        .expect_err("stale bridge hash must fail");
         assert!(err.contains("bridge_lemma_hash"));
         assert!(err.contains("old-bridge-hash"));
     }
@@ -1013,13 +1035,18 @@ mod tests {
             diagnostics: vec![],
         });
 
-        let err = validate_translator_version(&cert).expect_err("stale Lean metadata must fail");
+        let err = validate_translator_version(
+            &cert.atoms[0],
+            verification::LEAN_TRANSLATOR_VERSION,
+            verification::LEAN_BRIDGE_LEMMA_HASH,
+        )
+        .expect_err("stale Lean metadata must fail");
         assert!(err.contains("lean_metadata.translator_version"));
         assert!(err.contains("old-translator"));
     }
 
     #[test]
-    fn test_validate_translator_version_allows_legacy_z3_only_certificate() {
+    fn test_validate_translator_version_detects_missing_metadata() {
         let atom = make_test_atom("add", "true", "true", "1");
         let atoms: Vec<&parser::Atom> = vec![&atom];
         let mut results = HashMap::new();
@@ -1032,7 +1059,14 @@ mod tests {
         cert.atoms[0].translator_version.clear();
         cert.atoms[0].bridge_lemma_hash.clear();
 
-        assert!(validate_translator_version(&cert).is_ok());
+        let err = validate_translator_version(
+            &cert.atoms[0],
+            verification::LEAN_TRANSLATOR_VERSION,
+            verification::LEAN_BRIDGE_LEMMA_HASH,
+        )
+        .expect_err("missing translator metadata must fail");
+        assert!(err.contains("translator_version"));
+        assert!(err.contains("bridge_lemma_hash"));
     }
 
     /// PR 2: `allow_lean_verified` does not weaken the `"changed"` detector.
@@ -1111,6 +1145,27 @@ mod tests {
 
         let cert = generate_certificate("test.mm", &atoms, &results, &module_env, None, None);
         assert!(!cert.all_verified);
+    }
+
+    #[test]
+    fn test_load_certificate_rejects_stale_translator_version() {
+        let atom = make_test_atom("bar", "true", "result == 1", "1");
+        let atoms: Vec<&parser::Atom> = vec![&atom];
+        let mut results = HashMap::new();
+        results.insert(
+            "bar".to_string(),
+            ("unsat".to_string(), "verified".to_string()),
+        );
+        let module_env = ModuleEnv::new();
+        let mut cert = generate_certificate("test.mm", &atoms, &results, &module_env, None, None);
+        cert.atoms[0].translator_version = "old-translator".to_string();
+
+        let tmp = std::env::temp_dir().join("mumei_stale_translator_cert.json");
+        save_certificate(&cert, &tmp).unwrap();
+        let err = load_certificate(&tmp).expect_err("load_certificate must reject stale metadata");
+        assert!(err.contains("old-translator"));
+
+        let _ = std::fs::remove_file(&tmp);
     }
 
     /// P5-A: save and load certificate roundtrip

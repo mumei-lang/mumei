@@ -428,7 +428,7 @@ fn verify_import_certificate(
                 let source_matches = source_file.ends_with(cert_file_path)
                     || cert_file_path.ends_with(source_file.file_name().unwrap_or_default());
                 if source_matches || cert.file.is_empty() {
-                    if let Err(err) = proof_cert::validate_translator_version(&cert) {
+                    if let Err(err) = proof_cert::validate_certificate_translator_versions(&cert) {
                         eprintln!(
                             "  ⚠️  Local certificate {} has invalid Lean translator metadata: {}",
                             cert_path.display(),
@@ -450,6 +450,14 @@ fn verify_import_certificate(
                 // bundle fallback rather than silently returning None.
             }
             Err(err) => {
+                if err.contains("Lean translator metadata validation failed") {
+                    eprintln!(
+                        "  ⚠️  Local certificate {} has invalid Lean translator metadata: {}",
+                        cert_path.display(),
+                        err,
+                    );
+                    return Some(unproven_cert_results(&atom_refs));
+                }
                 // Local cert exists but is corrupted/unparseable — do NOT
                 // fall through to the bundle, because that would silently
                 // paper over the problem (especially dangerous under
@@ -472,7 +480,8 @@ fn verify_import_certificate(
                 Ok(bundle) => {
                     if let Some(cert) = proof_cert::lookup_bundle_certificate(&bundle, source_file)
                     {
-                        if let Err(err) = proof_cert::validate_translator_version(cert) {
+                        if let Err(err) = proof_cert::validate_certificate_translator_versions(cert)
+                        {
                             eprintln!(
                                 "  ⚠️  MUMEI_PROOF_BUNDLE certificate for {} has invalid Lean translator metadata: {}",
                                 source_file.display(),
