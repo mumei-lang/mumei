@@ -11,6 +11,10 @@ use sha2::{Digest, Sha256};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpecValidationResult {
     pub status: String,
+    #[serde(default = "default_is_satisfiable")]
+    pub is_satisfiable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contradiction_details: Option<String>,
     pub trace_id: Option<String>,
     pub spec_metadata: HashMap<String, String>,
     pub traceability_hash: String,
@@ -20,6 +24,35 @@ pub struct SpecValidationResult {
     pub checked_refinements: usize,
     pub ensures_implication_checks: usize,
     pub diagnostics: Vec<String>,
+}
+
+fn default_is_satisfiable() -> bool {
+    true
+}
+
+impl SpecValidationResult {
+    pub fn from_contradiction(atom: &Atom, contradiction: &SpecContradiction) -> Self {
+        let trace_id = effective_trace_id(atom);
+        let spec_metadata = effective_spec_metadata(atom);
+        let contradiction_details = format!(
+            "{}: {} (constraints: {:?})",
+            contradiction.kind, contradiction.message, contradiction.constraints
+        );
+        Self {
+            status: "unsatisfiable".to_string(),
+            is_satisfiable: false,
+            contradiction_details: Some(contradiction_details.clone()),
+            trace_id: trace_id.clone(),
+            spec_metadata: spec_metadata.clone(),
+            traceability_hash: calculate_traceability_hash(atom),
+            traceability_coverage: traceability_coverage(atom, trace_id.as_ref(), &spec_metadata),
+            checked_requires: !contradiction.kind.starts_with("refinement_"),
+            checked_ensures: 0,
+            checked_refinements: 0,
+            ensures_implication_checks: 0,
+            diagnostics: vec![contradiction_details],
+        }
+    }
 }
 
 pub fn calculate_traceability_hash(atom: &Atom) -> String {
@@ -164,6 +197,8 @@ pub fn check_spec_satisfiability(
 
     Ok(SpecValidationResult {
         status: "satisfiable".to_string(),
+        is_satisfiable: true,
+        contradiction_details: None,
         trace_id: trace_id.clone(),
         spec_metadata: spec_metadata.clone(),
         traceability_hash: calculate_traceability_hash(atom),
@@ -478,6 +513,11 @@ atom impossible(x: i64) -> i64
 
         let err = check_spec_satisfiability(&atom, &module_env).unwrap_err();
         assert_eq!(err.kind, "requires_unsat");
+
+        let result = SpecValidationResult::from_contradiction(&atom, &err);
+        assert!(!result.is_satisfiable);
+        assert_eq!(result.status, "unsatisfiable");
+        assert!(result.contradiction_details.is_some());
     }
 
     #[test]
@@ -501,6 +541,8 @@ atom increment(x: i64) -> i64
         std::env::remove_var("MUMEI_TRACE_ID");
         std::env::remove_var("MUMEI_SPEC_METADATA");
 
+        assert!(result.is_satisfiable);
+        assert!(result.contradiction_details.is_none());
         assert_eq!(result.trace_id.as_deref(), Some("REQ-42"));
         assert_eq!(result.traceability_hash.len(), 64);
         assert_eq!(result.traceability_coverage, 1.0);
