@@ -5,6 +5,7 @@ use super::support::*;
 use super::translator::*;
 use super::types::*;
 use super::*;
+use sha2::{Digest, Sha256};
 
 /// mumei.toml の [proof]/[build] 設定を反映した verify
 /// timeout_ms: Z3 ソルバのタイムアウト（ミリ秒）
@@ -16,7 +17,15 @@ pub fn verify_with_config(
     timeout_ms: u64,
     _global_max_unroll: usize,
 ) -> MumeiResult<()> {
-    verify_inner(hir_atom, output_dir, module_env, timeout_ms, true)
+    verify_inner(
+        hir_atom,
+        output_dir,
+        module_env,
+        timeout_ms,
+        true,
+        orchestration_task_id_from_env(),
+        orchestration_generation_id_from_env(),
+    )
 }
 
 pub fn verify_with_verification_config(
@@ -31,6 +40,8 @@ pub fn verify_with_verification_config(
         module_env,
         config.timeout_ms,
         config.enable_spurious_detection,
+        orchestration_task_id_from_env(),
+        orchestration_generation_id_from_env(),
     )
 }
 
@@ -56,7 +67,15 @@ pub fn verify_module(
 }
 
 pub fn verify(hir_atom: &HirAtom, output_dir: &Path, module_env: &ModuleEnv) -> MumeiResult<()> {
-    verify_inner(hir_atom, output_dir, module_env, 10000, true)
+    verify_inner(
+        hir_atom,
+        output_dir,
+        module_env,
+        10000,
+        true,
+        orchestration_task_id_from_env(),
+        orchestration_generation_id_from_env(),
+    )
 }
 
 /// Compile-time metrics for a single atom verification.
@@ -66,6 +85,10 @@ pub struct VerificationMetrics {
     pub phase_times: Vec<(String, std::time::Duration)>,
     pub total_constraints: usize,
     pub z3_check_time: std::time::Duration,
+    pub solver_config_fingerprint: String,
+    pub task_id: Option<String>,
+    pub timeout_ms: u64,
+    pub cancel_reason: Option<String>,
 }
 
 impl VerificationMetrics {
@@ -75,6 +98,10 @@ impl VerificationMetrics {
             phase_times: Vec::new(),
             total_constraints: 0,
             z3_check_time: std::time::Duration::ZERO,
+            solver_config_fingerprint: String::new(),
+            task_id: None,
+            timeout_ms: 0,
+            cancel_reason: orchestration_cancel_reason_from_env(),
         }
     }
 
@@ -93,7 +120,54 @@ impl VerificationMetrics {
             self.total_constraints,
             self.z3_check_time.as_secs_f64() * 1000.0
         );
+        if !self.solver_config_fingerprint.is_empty() {
+            eprintln!(
+                "    task_id: {:?}, timeout_ms: {}, solver_config_fingerprint: {}",
+                self.task_id, self.timeout_ms, self.solver_config_fingerprint
+            );
+        }
+        if let Some(cancel_reason) = &self.cancel_reason {
+            eprintln!("    cancel_reason: {}", cancel_reason);
+        }
     }
+}
+
+fn orchestration_task_id_from_env() -> Option<String> {
+    std::env::var("MUMEI_TASK_ID")
+        .ok()
+        .filter(|value| !value.is_empty())
+}
+
+fn orchestration_generation_id_from_env() -> Option<String> {
+    std::env::var("MUMEI_GENERATION_ID")
+        .ok()
+        .filter(|value| !value.is_empty())
+}
+
+fn orchestration_cancel_reason_from_env() -> Option<String> {
+    std::env::var("MUMEI_CANCEL_REASON")
+        .ok()
+        .filter(|value| !value.is_empty())
+}
+
+pub fn compute_solver_config_fingerprint(
+    timeout_ms: u64,
+    mbqi_enabled: bool,
+    has_string_constraints: bool,
+    has_array_forall: bool,
+    enable_spurious_detection: bool,
+) -> String {
+    let payload = format!(
+        "z3.timeout_ms={};smt.mbqi={};string_constraints={};array_forall={};spurious_detection={}",
+        timeout_ms,
+        mbqi_enabled,
+        has_string_constraints,
+        has_array_forall,
+        enable_spurious_detection
+    );
+    let mut hasher = Sha256::new();
+    hasher.update(payload.as_bytes());
+    format!("{:x}", hasher.finalize())
 }
 
 /// PR 1: Centralised Z3 solver tuning for atoms whose contracts mix
@@ -128,9 +202,12 @@ pub(crate) fn verify_inner(
     module_env: &ModuleEnv,
     timeout_ms: u64,
     enable_spurious_detection: bool,
+    task_id: Option<String>,
+    _generation_id: Option<String>,
 ) -> MumeiResult<()> {
     let atom = &hir_atom.atom;
     let mut metrics = VerificationMetrics::new(&atom.name);
+    metrics.task_id = task_id;
 
     // ジェネリック atom は単相化後に検証される
     // 例: pipe<E: Effect> は検証スキップ、pipe<FileWrite> が検証対象
@@ -773,6 +850,15 @@ pub(crate) fn verify_inner(
     } else {
         timeout_ms
     };
+
+    metrics.timeout_ms = effective_timeout;
+    metrics.solver_config_fingerprint = compute_solver_config_fingerprint(
+        effective_timeout,
+        !has_array_forall,
+        has_string_constraints_cell_pre.get(),
+        has_array_forall,
+        enable_spurious_detection,
+    );
 
     let mut cfg = Config::new();
     cfg.set_timeout_msec(effective_timeout);
@@ -1588,6 +1674,22 @@ pub(crate) fn save_visualizer_report(
     }
     if let Some(sf) = semantic_feedback {
         report["semantic_feedback"] = sf.clone();
+    }
+    if let Some(task_id) = orchestration_task_id_from_env() {
+        report["task_id"] = json!(task_id);
+    }
+    if let Ok(fingerprint) = std::env::var("MUMEI_SOLVER_CONFIG_FINGERPRINT") {
+        if !fingerprint.is_empty() {
+            report["solver_config_fingerprint"] = json!(fingerprint);
+        }
+    }
+    if let Ok(timeout_ms) = std::env::var("MUMEI_VERIFICATION_TIMEOUT_MS") {
+        if let Ok(parsed_timeout_ms) = timeout_ms.parse::<u64>() {
+            report["timeout_ms"] = json!(parsed_timeout_ms);
+        }
+    }
+    if let Some(cancel_reason) = orchestration_cancel_reason_from_env() {
+        report["cancel_reason"] = json!(cancel_reason);
     }
     // Use contextual suggestion when counterexample/unsat_core available, fallback to static
     let structured_unsat_core = semantic_feedback.and_then(|sf| sf.get("structured_unsat_core"));
