@@ -602,6 +602,7 @@ pub struct VerificationConfig {
     pub timeout_ms: u64,
     pub global_max_unroll: usize,
     pub enable_cross_spec_verification: bool,
+    pub collect_decidable_fragment_metrics: bool,
 }
 
 impl Default for VerificationConfig {
@@ -610,13 +611,22 @@ impl Default for VerificationConfig {
             timeout_ms: 10000,
             global_max_unroll: 3,
             enable_cross_spec_verification: false,
+            collect_decidable_fragment_metrics: false,
         }
     }
+}
+
+#[derive(Debug, Clone, serde::Serialize, Default)]
+pub struct DecidableFragmentMetrics {
+    pub total_atoms_checked: usize,
+    pub atoms_with_warnings: usize,
+    pub warning_counts: HashMap<String, usize>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ModuleVerificationReport {
     pub cross_spec: Option<CrossSpecResult>,
+    pub decidable_fragment: Option<DecidableFragmentMetrics>,
 }
 
 pub const LEAN_TRANSLATOR_VERSION: &str = "mumei-lean-translator-ir-v1";
@@ -989,6 +999,24 @@ pub fn outside_decidable_fragment_warning(atom: &Atom, module_env: &ModuleEnv) -
             tags.join(", ")
         ))
     }
+}
+
+pub fn collect_decidable_fragment_metrics(module_env: &ModuleEnv) -> DecidableFragmentMetrics {
+    let mut metrics = DecidableFragmentMetrics::default();
+
+    for atom in module_env.atoms.values() {
+        metrics.total_atoms_checked += 1;
+        let tags = detect_logic_fragment_tags(atom, module_env);
+        if tags.is_empty() {
+            continue;
+        }
+        metrics.atoms_with_warnings += 1;
+        for tag in tags {
+            *metrics.warning_counts.entry(tag).or_insert(0) += 1;
+        }
+    }
+
+    metrics
 }
 
 fn push_unique_tag(tags: &mut Vec<String>, tag: &str) {
@@ -6358,8 +6386,16 @@ pub fn verify_module(
     } else {
         None
     };
+    let decidable_fragment = if config.collect_decidable_fragment_metrics {
+        Some(collect_decidable_fragment_metrics(module_env))
+    } else {
+        None
+    };
 
-    Ok(ModuleVerificationReport { cross_spec })
+    Ok(ModuleVerificationReport {
+        cross_spec,
+        decidable_fragment,
+    })
 }
 
 pub fn verify(hir_atom: &HirAtom, output_dir: &Path, module_env: &ModuleEnv) -> MumeiResult<()> {

@@ -15,7 +15,7 @@ use mumei_core::{
     registry, resolver, verification,
 };
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 // =============================================================================
 // Helpers
@@ -101,7 +101,7 @@ enum Command {
         /// Output base name
         #[arg(short, long, default_value = "katana")]
         output: String,
-        /// Emit target: llvm-ir (default), c-header, verified-json, proof-book, proof-cert, escalation-bundle
+        /// Emit target: llvm-ir (default), c-header, verified-json, decidable-metrics, proof-book, proof-cert, escalation-bundle
         #[arg(long, default_value = "llvm-ir")]
         emit: String,
         /// P5-C: Strict import mode — missing/invalid certificates cause hard errors
@@ -124,7 +124,7 @@ enum Command {
         /// Emit Lean escalation candidate bundle alongside verification results
         #[arg(long)]
         escalate_lean: bool,
-        /// Emit target for verify-only output: escalation-bundle
+        /// Emit target for verify-only output: escalation-bundle or decidable-metrics
         #[arg(long)]
         emit: Option<String>,
         /// Output path for proof certificate (default: <input>.proof.json)
@@ -269,6 +269,7 @@ fn main() {
                 "llvm-ir" => emitter::EmitTarget::LlvmIr,
                 "c-header" => emitter::EmitTarget::CHeader,
                 "verified-json" => emitter::EmitTarget::VerifiedJson,
+                "decidable-metrics" => emitter::EmitTarget::DecidableMetrics,
                 "proof-book" => emitter::EmitTarget::ProofBook,
                 "proof-cert" => emitter::EmitTarget::ProofCert,
                 "escalation-bundle" => emitter::EmitTarget::EscalationBundle,
@@ -297,21 +298,22 @@ fn main() {
             allow_lean_verified,
             cross_spec_verify,
         }) => {
-            let emit_escalation_bundle = match emit.as_deref() {
-                Some("escalation-bundle") => true,
-                Some(other) => {
+            let emit_escalation_bundle = matches!(emit.as_deref(), Some("escalation-bundle"));
+            let emit_decidable_metrics = matches!(emit.as_deref(), Some("decidable-metrics"));
+            if let Some(other) = emit.as_deref() {
+                if !emit_escalation_bundle && !emit_decidable_metrics {
                     eprintln!(
-                        "Unsupported verify --emit target '{}'. Supported value: escalation-bundle",
+                        "Unsupported verify --emit target '{}'. Supported values: escalation-bundle, decidable-metrics",
                         other
                     );
                     std::process::exit(1);
                 }
-                None => false,
-            };
+            }
             cmd_verify(VerifyOptions {
                 input: &input,
                 generate_proof_cert: proof_cert,
                 emit_escalation_bundle: escalate_lean || emit_escalation_bundle,
+                emit_decidable_metrics,
                 cert_output: output.as_deref(),
                 report_dir: report_dir.as_deref(),
                 json_output: json,
@@ -721,6 +723,7 @@ struct VerifyOptions<'a> {
     input: &'a str,
     generate_proof_cert: bool,
     emit_escalation_bundle: bool,
+    emit_decidable_metrics: bool,
     cert_output: Option<&'a str>,
     report_dir: Option<&'a str>,
     json_output: bool,
@@ -734,6 +737,7 @@ fn cmd_verify(options: VerifyOptions<'_>) {
         input,
         generate_proof_cert,
         emit_escalation_bundle,
+        emit_decidable_metrics,
         cert_output,
         report_dir,
         json_output,
@@ -771,6 +775,7 @@ fn cmd_verify(options: VerifyOptions<'_>) {
         timeout_ms: proof_cfg.timeout_ms,
         global_max_unroll: build_cfg.max_unroll,
         enable_cross_spec_verification,
+        collect_decidable_fragment_metrics: emit_decidable_metrics,
     };
     let input_path = Path::new(input);
     let base_dir = input_path.parent().unwrap_or(Path::new("."));
@@ -1122,6 +1127,20 @@ fn cmd_verify(options: VerifyOptions<'_>) {
     // and be re-verified automatically.
     resolver::save_verification_cache(base_dir, &verification_cache);
 
+    if emit_decidable_metrics {
+        let metrics_path = cert_output
+            .filter(|_| !generate_proof_cert)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| output_dir.join("decidable_metrics.json"));
+        match save_decidable_fragment_metrics(&module_env, &metrics_path, !json_output) {
+            Ok(()) => {}
+            Err(err) => {
+                eprintln!("❌ {err}");
+                failed += 1;
+            }
+        }
+    }
+
     if enable_cross_spec_verification {
         match save_cross_spec_report(&module_env, output_dir, !json_output) {
             Ok(cross_spec_result) => {
@@ -1284,6 +1303,37 @@ fn cmd_verify(options: VerifyOptions<'_>) {
             );
         }
     }
+}
+
+fn save_decidable_fragment_metrics(
+    module_env: &verification::ModuleEnv,
+    metrics_path: &Path,
+    print_path: bool,
+) -> Result<(), String> {
+    let config = verification::VerificationConfig {
+        collect_decidable_fragment_metrics: true,
+        ..verification::VerificationConfig::default()
+    };
+    let module_report = verification::verify_module(module_env, &config)
+        .map_err(|err| format!("decidable-fragment metrics failed: {err}"))?;
+    let metrics = module_report
+        .decidable_fragment
+        .ok_or_else(|| "decidable-fragment metrics were not collected".to_string())?;
+    if let Some(parent) = metrics_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|err| format!("failed to create metrics directory: {err}"))?;
+    }
+    let payload = serde_json::to_string_pretty(&metrics)
+        .map_err(|err| format!("failed to serialize decidable-fragment metrics: {err}"))?;
+    std::fs::write(metrics_path, payload)
+        .map_err(|err| format!("failed to write {}: {err}", metrics_path.display()))?;
+    if print_path {
+        println!(
+            "  📊 Decidable-fragment metrics written to: {}",
+            metrics_path.display()
+        );
+    }
+    Ok(())
 }
 
 fn save_cross_spec_report(
@@ -1990,6 +2040,7 @@ fn dispatch_emit(
             module_env,
             extern_blocks,
         ),
+        emitter::EmitTarget::DecidableMetrics => Ok(vec![]),
         emitter::EmitTarget::ProofBook => mumei_emit_proofbook::ProofBookEmitter.emit(
             hir_atom,
             output_path,
@@ -2044,7 +2095,7 @@ fn cmd_build(
             Ok(emitter) => Some(emitter),
             Err(err) => {
                 eprintln!(
-                    "\u{274c} Error: Unknown emit target '{}'. Valid built-in values: llvm-ir, c-header, verified-json, proof-book, proof-cert, escalation-bundle, binary, rust-wrapper, python-wrapper.",
+                    "\u{274c} Error: Unknown emit target '{}'. Valid built-in values: llvm-ir, c-header, verified-json, decidable-metrics, proof-book, proof-cert, escalation-bundle, binary, rust-wrapper, python-wrapper.",
                     name
                 );
                 eprintln!("  External plugin lookup failed: {}", err);
@@ -2116,6 +2167,10 @@ fn cmd_build(
         timeout_ms: proof_cfg.timeout_ms,
         global_max_unroll: build_cfg.max_unroll,
         enable_cross_spec_verification: proof_cfg.cross_spec_verify,
+        collect_decidable_fragment_metrics: matches!(
+            emit_target,
+            emitter::EmitTarget::DecidableMetrics
+        ),
     };
     let mut escalation_cert_results: std::collections::HashMap<String, (String, String)> =
         std::collections::HashMap::new();
@@ -2390,26 +2445,30 @@ fn cmd_build(
                                     }
                                 }
                             }
-                            let target_desc: std::borrow::Cow<'static, str> = match emit_target {
-                                emitter::EmitTarget::LlvmIr => "LLVM IR".into(),
-                                emitter::EmitTarget::CHeader => "C header".into(),
-                                emitter::EmitTarget::VerifiedJson => "Verified JSON".into(),
-                                emitter::EmitTarget::ProofBook => "Proof-Book".into(),
-                                emitter::EmitTarget::ProofCert => "Proof-Cert".into(),
-                                emitter::EmitTarget::EscalationBundle => {
-                                    "Lean escalation bundle".into()
-                                }
-                                emitter::EmitTarget::Binary => "Binary".into(),
-                                emitter::EmitTarget::RustWrapper => "Rust wrapper".into(),
-                                emitter::EmitTarget::PythonWrapper => "Python wrapper".into(),
-                                emitter::EmitTarget::External(name) => {
-                                    format!("external plugin '{}'", name).into()
-                                }
-                            };
-                            println!(
-                                "  ⚙️  [3/3] Tempering: Done. Compiled '{}' to {}.",
-                                qualified_name, target_desc
-                            );
+                            if !matches!(emit_target, emitter::EmitTarget::DecidableMetrics) {
+                                let target_desc: std::borrow::Cow<'static, str> = match emit_target
+                                {
+                                    emitter::EmitTarget::LlvmIr => "LLVM IR".into(),
+                                    emitter::EmitTarget::CHeader => "C header".into(),
+                                    emitter::EmitTarget::VerifiedJson => "Verified JSON".into(),
+                                    emitter::EmitTarget::DecidableMetrics => unreachable!(),
+                                    emitter::EmitTarget::ProofBook => "Proof-Book".into(),
+                                    emitter::EmitTarget::ProofCert => "Proof-Cert".into(),
+                                    emitter::EmitTarget::EscalationBundle => {
+                                        "Lean escalation bundle".into()
+                                    }
+                                    emitter::EmitTarget::Binary => "Binary".into(),
+                                    emitter::EmitTarget::RustWrapper => "Rust wrapper".into(),
+                                    emitter::EmitTarget::PythonWrapper => "Python wrapper".into(),
+                                    emitter::EmitTarget::External(name) => {
+                                        format!("external plugin '{}'", name).into()
+                                    }
+                                };
+                                println!(
+                                    "  ⚙️  [3/3] Tempering: Done. Compiled '{}' to {}.",
+                                    qualified_name, target_desc
+                                );
+                            }
                         }
                         Err(e) => {
                             let resolved = resolve_source_for_span(&source, &method.span);
@@ -2583,26 +2642,29 @@ fn cmd_build(
                                 }
                             }
                         }
-                        let target_desc: std::borrow::Cow<'static, str> = match emit_target {
-                            emitter::EmitTarget::LlvmIr => "LLVM IR".into(),
-                            emitter::EmitTarget::CHeader => "C header".into(),
-                            emitter::EmitTarget::VerifiedJson => "Verified JSON".into(),
-                            emitter::EmitTarget::ProofBook => "Proof-Book".into(),
-                            emitter::EmitTarget::ProofCert => "Proof-Cert".into(),
-                            emitter::EmitTarget::EscalationBundle => {
-                                "Lean escalation bundle".into()
-                            }
-                            emitter::EmitTarget::Binary => "Binary".into(),
-                            emitter::EmitTarget::RustWrapper => "Rust wrapper".into(),
-                            emitter::EmitTarget::PythonWrapper => "Python wrapper".into(),
-                            emitter::EmitTarget::External(name) => {
-                                format!("external plugin '{}'", name).into()
-                            }
-                        };
-                        println!(
-                            "  ⚙️  [3/3] Tempering: Done. Compiled '{}' to {}.",
-                            atom.name, target_desc
-                        );
+                        if !matches!(emit_target, emitter::EmitTarget::DecidableMetrics) {
+                            let target_desc: std::borrow::Cow<'static, str> = match emit_target {
+                                emitter::EmitTarget::LlvmIr => "LLVM IR".into(),
+                                emitter::EmitTarget::CHeader => "C header".into(),
+                                emitter::EmitTarget::VerifiedJson => "Verified JSON".into(),
+                                emitter::EmitTarget::DecidableMetrics => unreachable!(),
+                                emitter::EmitTarget::ProofBook => "Proof-Book".into(),
+                                emitter::EmitTarget::ProofCert => "Proof-Cert".into(),
+                                emitter::EmitTarget::EscalationBundle => {
+                                    "Lean escalation bundle".into()
+                                }
+                                emitter::EmitTarget::Binary => "Binary".into(),
+                                emitter::EmitTarget::RustWrapper => "Rust wrapper".into(),
+                                emitter::EmitTarget::PythonWrapper => "Python wrapper".into(),
+                                emitter::EmitTarget::External(name) => {
+                                    format!("external plugin '{}'", name).into()
+                                }
+                            };
+                            println!(
+                                "  ⚙️  [3/3] Tempering: Done. Compiled '{}' to {}.",
+                                atom.name, target_desc
+                            );
+                        }
                     }
                     Err(e) => {
                         let resolved = resolve_source_for_span(&source, &atom.span);
@@ -2666,6 +2728,17 @@ fn cmd_build(
     }
 
     // P5-A: Generate proof certificate or Lean escalation bundle when requested
+    if matches!(emit_target, emitter::EmitTarget::DecidableMetrics) {
+        let metrics_path = output_dir.join(format!("{}.decidable-metrics.json", file_stem));
+        match save_decidable_fragment_metrics(&module_env, &metrics_path, true) {
+            Ok(()) => {}
+            Err(err) => {
+                eprintln!("❌ {err}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     if matches!(
         emit_target,
         emitter::EmitTarget::ProofCert | emitter::EmitTarget::EscalationBundle
