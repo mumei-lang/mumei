@@ -57,6 +57,10 @@ fn emit_spurious_counterexample_diagnostic(
         "validated" => eprintln!("  ✓ Counterexample validated for atom '{}'", atom_name),
         "spurious_candidate" => {
             eprintln!(
+                "  ⚠️  Spurious counterexample detected for atom '{}'",
+                atom_name
+            );
+            eprintln!(
                 "  ⚠️  Spurious counterexample candidate for atom '{}'",
                 atom_name
             );
@@ -201,6 +205,9 @@ enum Command {
         /// Enable cross-specification consistency verification across atoms
         #[arg(long)]
         cross_spec_verify: bool,
+        /// Enable P8-A spurious counterexample detection
+        #[arg(long, conflicts_with = "disable_spurious_detection")]
+        enable_spurious_detection: bool,
         /// Disable P8-A spurious counterexample detection
         #[arg(long)]
         disable_spurious_detection: bool,
@@ -355,6 +362,7 @@ fn main() {
             strict_imports,
             allow_lean_verified,
             cross_spec_verify,
+            enable_spurious_detection,
             disable_spurious_detection,
         }) => {
             let no_emit_escalation_metrics =
@@ -397,7 +405,7 @@ fn main() {
                 strict_imports,
                 allow_lean_verified,
                 enable_cross_spec_verification: cross_spec_verify,
-                enable_spurious_detection: !disable_spurious_detection,
+                enable_spurious_detection: enable_spurious_detection || !disable_spurious_detection,
             });
         }
         Some(Command::Check { input }) => {

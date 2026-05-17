@@ -106,3 +106,19 @@ fn test_minimal_constraint_set() {
 
     assert_eq!(report.minimal_constraint_set, core);
 }
+
+#[test]
+fn test_cli_exposes_spurious_detection_flag() {
+    let bin = env!("CARGO_BIN_EXE_mumei");
+    let output = std::process::Command::new(bin)
+        .arg("verify")
+        .arg("--help")
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("failed to run mumei verify --help");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("--enable-spurious-detection"));
+    assert!(stdout.contains("--disable-spurious-detection"));
+}
