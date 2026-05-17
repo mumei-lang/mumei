@@ -355,9 +355,14 @@ pub fn generate_certificate(
         })
         .collect();
 
-    let all_verified = atom_certs
-        .iter()
-        .all(|ac| ac.status == "verified" || ac.status == "trusted");
+    let all_verified = atom_certs.iter().all(|ac| {
+        (ac.status == "verified" || ac.status == "trusted")
+            && ac
+                .spec_validation_result
+                .as_ref()
+                .map(|validation| validation.is_satisfiable)
+                .unwrap_or(true)
+    });
 
     // Build certificate without hash first, then compute hash
     let mut cert = ProofCertificate {
@@ -1175,6 +1180,24 @@ mod tests {
         let module_env = ModuleEnv::new();
 
         let cert = generate_certificate("test.mm", &atoms, &results, &module_env, None, None);
+        assert!(!cert.all_verified);
+    }
+
+    #[test]
+    fn test_all_verified_false_when_spec_validation_fails() {
+        let atom = make_test_atom("impossible", "false", "true", "0");
+        let atoms: Vec<&parser::Atom> = vec![&atom];
+        let mut results = HashMap::new();
+        results.insert(
+            "impossible".to_string(),
+            ("unsat".to_string(), "verified".to_string()),
+        );
+        let module_env = ModuleEnv::new();
+
+        let cert = generate_certificate("test.mm", &atoms, &results, &module_env, None, None);
+        let validation = cert.atoms[0].spec_validation_result.as_ref().unwrap();
+
+        assert!(!validation.is_satisfiable);
         assert!(!cert.all_verified);
     }
 
