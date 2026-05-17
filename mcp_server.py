@@ -218,6 +218,29 @@ def _limit_worker_memory(memory_limit_mb: int):
     return _set_limit
 
 
+def _resume_task_validation_error(
+    task_id: str | None,
+    resumed_task: VerificationTask | None,
+    source_hash: str,
+    cache_key: str,
+) -> dict | None:
+    if task_id is None:
+        return None
+    if resumed_task is None:
+        return {"status": "error", "task_id": task_id, "error": "task_id not found"}
+    if resumed_task.source_hash != source_hash or resumed_task.cache_key != cache_key:
+        return {
+            "status": "error",
+            "task_id": task_id,
+            "error": "task_id does not match source_hash or solver configuration",
+            "expected_source_hash": resumed_task.source_hash,
+            "requested_source_hash": source_hash,
+            "expected_cache_key": resumed_task.cache_key,
+            "requested_cache_key": cache_key,
+        }
+    return None
+
+
 _task_registry = VerificationTaskRegistry()
 _z3_worker_pool = Z3WorkerPool()
 
@@ -713,15 +736,11 @@ def verify_with_orchestration(
         f"{source_hash}:{solver_fingerprint}".encode("utf-8")
     ).hexdigest()
 
-    if enable_cache:
-        cached_result = _task_registry.get_cached_result(cache_key)
-        if cached_result is not None:
-            response = dict(cached_result)
-            response["cache_hit"] = True
-            response["cache_key"] = cache_key
-            return json.dumps(response, ensure_ascii=False, indent=2)
-
     resumed_task = _task_registry.get_task(task_id) if task_id else None
+    resume_error = _resume_task_validation_error(task_id, resumed_task, source_hash, cache_key)
+    if resume_error is not None:
+        return json.dumps(resume_error, ensure_ascii=False, indent=2)
+
     if resumed_task is not None:
         if resumed_task.status == "completed" and resumed_task.result is not None:
             response = dict(resumed_task.result)
@@ -738,6 +757,16 @@ def verify_with_orchestration(
                 ensure_ascii=False,
                 indent=2,
             )
+
+    if enable_cache:
+        cached_result = _task_registry.get_cached_result(cache_key)
+        if cached_result is not None:
+            response = dict(cached_result)
+            response["cache_hit"] = True
+            response["cache_key"] = cache_key
+            return json.dumps(response, ensure_ascii=False, indent=2)
+
+    if resumed_task is not None:
         active_task_id = resumed_task.task_id
     else:
         active_task_id = _task_registry.register_task(source_hash, cache_key)
