@@ -64,6 +64,7 @@ pub enum EmitTarget {
     LlvmIr,
     CHeader,
     VerifiedJson,
+    DecidableMetrics,
     ProofBook,
     /// P5-A: Generate .proof-cert.json alongside build output
     ProofCert,

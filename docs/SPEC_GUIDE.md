@@ -166,6 +166,25 @@ effect Session
 
 Keep transition names aligned with `perform` operations so MIR temporal analysis can track them directly.
 
+## Metrics and review cadence
+
+Use `mumei verify --emit decidable-metrics --output decidable_metrics.json <file.mm>` to collect decidable-fragment warning metrics as JSON. The report includes `total_atoms_checked`, `atoms_with_warnings`, and per-tag `warning_counts`, which should be aggregated with P8-C metrics for generated specifications.
+
+Track the following quarterly:
+
+- `outside_decidable_fragment` warning rate: `atoms_with_warnings / total_atoms_checked`
+- Z3 `unknown` rate from verification reports
+- first-pass verification success rate for AI-generated specifications
+- per-fragment warning counts for the seven tags in the anti-pattern table
+
+Use the P8-C feedback loop after each quarterly rollup:
+
+1. Identify fragment tags with the highest warning rate or largest regression.
+2. Add or update atom-generation prompt guidance for those tags.
+3. Add regression examples that reproduce the warning pattern.
+4. Prefer Lean escalation templates when a warning represents intentional nonlinear, inductive, trigger-sensitive, or temporal reasoning.
+5. Re-run the rollup and confirm progress toward the P8-D targets: 20% quarterly warning-rate reduction, Z3 `unknown` under 5%, and at least 85% first-pass verification success.
+
 ## Lean escalation policy
 
 Escalate to Lean when the intended property is inherently nonlinear, inductive, trigger-sensitive, or recursive. A warning does not mean the specification is wrong; it means the spec is outside the Z3-stable fragment and should be reviewed before relying on first-pass SMT automation.
