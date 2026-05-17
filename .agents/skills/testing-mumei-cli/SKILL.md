@@ -32,6 +32,7 @@ If Z3 is missing, commands exit immediately with "Z3 solver not found" — no pa
 | Command | Purpose |
 |---|---|
 | `mumei verify <file.mm>` | Verify atoms with Z3 |
+| `mumei verify --disable-spurious-detection <file.mm>` | Disable P8-A spurious counterexample classification and use the legacy SAT/postcondition failure path |
 | `mumei verify --report-dir <dir> <file.mm>` | Verify and write `<dir>/report.json` for diagnostics/self-healing flows |
 | `mumei verify --cross-spec-verify --report-dir <dir> <file.mm>` | Verify atoms and write `<dir>/cross_spec.json` for cross-specification consistency |
 | `mumei verify --proof-cert <file.mm>` | Verify + generate `.proof.json` certificate. When run from repo root, the current CLI may write `./<stem>.proof.json` rather than beside the source file; trust the printed path. |
@@ -62,6 +63,91 @@ If Z3 is missing, commands exit immediately with "Z3 solver not found" — no pa
 - `tests/test_verified_ffi.mm` — Existing scalar `f64` FFI regression fixture. Useful when changes touch f64/Real/Float verification semantics.
 
 ## Testing Flows
+
+### P8-A Spurious Counterexample Detection
+
+Use this flow when changes touch `mumei-core/src/verification/spurious_detection.rs`, Z3 SAT/counterexample handling in `executor.rs`, `VerificationConfig::enable_spurious_detection`, proof certificate metadata, or the `--disable-spurious-detection` CLI flag.
+
+First run the focused Rust tests:
+```bash
+cd /home/ubuntu/repos/mumei
+LLVM_SYS_170_PREFIX=/usr/lib/llvm-17 LIBCLANG_PATH=/usr/lib/x86_64-linux-gnu cargo test --test test_spurious_detection
+```
+Expected assertions:
+- The four P8-A regression tests pass: validated counterexample, uninterpreted-symbol spurious candidate, unused hypothesis detection, and minimal constraint set.
+
+Create a temporary validated-counterexample fixture outside the repo:
+```bash
+mkdir -p /home/ubuntu/mumei-p8a-fixtures
+cat > /home/ubuntu/mumei-p8a-fixtures/validated_counterexample.mm <<'MM'
+atom bad_increment(x: i64) -> i64 {
+    requires: x >= 0;
+    ensures: result > 10;
+    body: {
+        x + 1
+    }
+}
+MM
+```
+Run:
+```bash
+LLVM_SYS_170_PREFIX=/usr/lib/llvm-17 LIBCLANG_PATH=/usr/lib/x86_64-linux-gnu \
+  ./target/debug/mumei verify /home/ubuntu/mumei-p8a-fixtures/validated_counterexample.mm
+```
+Expected assertions:
+- Command exits non-zero because the postcondition is intentionally false.
+- Output includes `Counterexample validated for atom 'bad_increment'`.
+- Output does not include `Spurious counterexample candidate`.
+
+Create a temporary trusted-atom fixture to exercise trusted/uninterpreted provenance through the CLI:
+```bash
+cat > /home/ubuntu/mumei-p8a-fixtures/spurious_trusted.mm <<'MM'
+extern "Rust" {
+    fn native_external(x: i64) -> i64;
+}
+
+trusted atom external_value(x: i64) -> i64 {
+    requires: true;
+    ensures: result >= 0 && result <= 1;
+    body: {
+        native_external(x)
+    }
+}
+
+atom depends_on_trusted(x: i64) -> i64 {
+    requires: x >= 0;
+    ensures: external_value(x) == 42;
+    body: {
+        x
+    }
+}
+MM
+```
+Run:
+```bash
+LLVM_SYS_170_PREFIX=/usr/lib/llvm-17 LIBCLANG_PATH=/usr/lib/x86_64-linux-gnu \
+  ./target/debug/mumei verify /home/ubuntu/mumei-p8a-fixtures/spurious_trusted.mm
+```
+Expected assertions:
+- Command exits non-zero.
+- Output includes `Spurious counterexample detected for atom 'depends_on_trusted'`.
+- Output includes `Spurious counterexample candidate for atom 'depends_on_trusted'`.
+- Output names `external_value (trusted_atom)` as the dependency/provenance.
+
+Then verify the disable flag preserves the legacy failure path:
+```bash
+LLVM_SYS_170_PREFIX=/usr/lib/llvm-17 LIBCLANG_PATH=/usr/lib/x86_64-linux-gnu \
+  ./target/debug/mumei verify --disable-spurious-detection /home/ubuntu/mumei-p8a-fixtures/spurious_trusted.mm
+```
+Expected assertions:
+- Command exits non-zero.
+- Output includes a normal postcondition/verification failure.
+- Output does not include `Spurious counterexample candidate` or `Spurious counterexample detected`.
+
+For certificate metadata, run the Proof Certificate flow below and additionally assert:
+- Each atom has `symbol_provenance` as an array.
+- `counterexample_validation` and `unused_hypotheses`, when present, are objects or `null`.
+- Clean up generated `cross_spec.json`, proof cert files, and `/home/ubuntu/mumei-p8a-fixtures` after the test.
 
 ### Cross-specification Verification Report
 
