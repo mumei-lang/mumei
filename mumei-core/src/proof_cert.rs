@@ -149,6 +149,8 @@ pub struct UnusedHypothesisMetadata {
     #[serde(default)]
     pub unused_invariants: Vec<String>,
     #[serde(default)]
+    pub unused_effect_constraints: Vec<String>,
+    #[serde(default)]
     pub minimal_constraint_set: Vec<String>,
 }
 
@@ -320,6 +322,15 @@ pub fn generate_certificate(
             };
             let symbol_provenance =
                 verification::detect_uninterpreted_symbols(atom, &HashMap::new(), module_env);
+            let unused_hypotheses = parse_unsat_core_labels(&z3_result).map(|unsat_core| {
+                let report = verification::detect_unused_hypotheses(atom, &unsat_core, module_env);
+                UnusedHypothesisMetadata {
+                    unused_requires: report.unused_requires,
+                    unused_invariants: report.unused_invariants,
+                    unused_effect_constraints: report.unused_effect_constraints,
+                    minimal_constraint_set: report.minimal_constraint_set,
+                }
+            });
             let spec_validation_result = Some(
                 verification::check_spec_satisfiability(atom, module_env).unwrap_or_else(|err| {
                     verification::SpecValidationResult::from_contradiction(atom, &err)
@@ -349,7 +360,7 @@ pub fn generate_certificate(
                 lean_metadata: None,
                 counterexample_validation,
                 symbol_provenance,
-                unused_hypotheses: None,
+                unused_hypotheses,
                 solver_process_metadata,
             }
         })
@@ -449,6 +460,22 @@ fn compute_certificate_hash(cert: &ProofCertificate) -> String {
     let mut hasher = Sha256::new();
     hasher.update(json.as_bytes());
     format!("{:x}", hasher.finalize())
+}
+
+fn parse_unsat_core_labels(z3_result: &str) -> Option<Vec<String>> {
+    let (_, labels) = z3_result.split_once("unsat_core=")?;
+    let labels = labels.trim();
+    let labels = labels
+        .strip_prefix('[')
+        .and_then(|labels| labels.split_once(']').map(|(labels, _)| labels))
+        .unwrap_or(labels);
+    let labels = labels
+        .split(',')
+        .map(str::trim)
+        .filter(|label| !label.is_empty())
+        .map(|label| label.trim_matches('"').trim_matches('\'').to_string())
+        .collect::<Vec<_>>();
+    Some(labels)
 }
 
 /// Verify a proof certificate against the current source file.
@@ -888,6 +915,20 @@ mod tests {
     /// P5-A: generate_certificate produces valid JSON with proof_hash, dependencies, effects, requires, ensures
     #[test]
     fn test_generate_certificate_extended_fields() {
+        let _guard = solver_env_lock().lock().unwrap();
+        let env_names = &[
+            "MUMEI_TASK_ID",
+            "MUMEI_GENERATION_ID",
+            "MUMEI_VERIFICATION_TIMEOUT_MS",
+            "MUMEI_SOLVER_CONFIG_FINGERPRINT",
+            "MUMEI_SOLVER_CACHE_KEY",
+            "MUMEI_CANCEL_REASON",
+            "MUMEI_SOLVER_PROCESS_START_TIME",
+        ];
+        let _cleanup = SolverEnvCleanup(env_names);
+        for name in env_names {
+            std::env::remove_var(name);
+        }
         let atom = make_test_atom("add", "x > 0", "result > 0", "x + 1");
         let atoms: Vec<&parser::Atom> = vec![&atom];
         let mut results = HashMap::new();
@@ -924,6 +965,32 @@ mod tests {
     }
 
     #[test]
+    fn test_generate_certificate_records_unused_hypotheses_when_core_available() {
+        let mut atom = make_test_atom("bounded", "x > 0", "result > 0", "1");
+        atom.invariant = Some("x < 10".to_string());
+        atom.effect_pre
+            .insert("Account".to_string(), "Open".to_string());
+        let atoms: Vec<&parser::Atom> = vec![&atom];
+        let mut results = HashMap::new();
+        results.insert(
+            "bounded".to_string(),
+            (
+                "unsat unsat_core=[|track_requires|]".to_string(),
+                "verified".to_string(),
+            ),
+        );
+        let module_env = ModuleEnv::new();
+
+        let cert = generate_certificate("test.mm", &atoms, &results, &module_env, None, None);
+        let unused = cert.atoms[0].unused_hypotheses.as_ref().unwrap();
+
+        assert!(unused.unused_requires.is_empty());
+        assert_eq!(unused.unused_invariants, vec!["x < 10"]);
+        assert_eq!(unused.unused_effect_constraints, vec!["Account=Open"]);
+        assert_eq!(unused.minimal_constraint_set, vec!["|track_requires|"]);
+    }
+
+    #[test]
     fn test_generate_certificate_records_solver_process_metadata() {
         let _guard = solver_env_lock().lock().unwrap();
         let env_names = &[
@@ -936,7 +1003,7 @@ mod tests {
             "MUMEI_SOLVER_PROCESS_START_TIME",
         ];
         let _cleanup = SolverEnvCleanup(env_names);
-        for name in &env_names {
+        for name in env_names {
             std::env::remove_var(name);
         }
         std::env::set_var("MUMEI_TASK_ID", "task-1");

@@ -80,6 +80,63 @@ fn test_spurious_candidate_uninterpreted_symbol() {
 }
 
 #[test]
+fn test_bool_result_counterexample_replays_result_equality() {
+    let module_env = ModuleEnv::new();
+    let mut atom = base_atom("bool_result");
+    atom.params = vec![param("x", "i64")];
+    atom.requires = "x >= 0".to_string();
+    atom.ensures = "result == false".to_string();
+    atom.body_expr = "x > 0".to_string();
+
+    let model = HashMap::from([("x".to_string(), 1), ("result".to_string(), 1)]);
+    let validation = validate_counterexample(&atom, &model, &module_env);
+
+    assert!(validation.is_valid);
+    assert_eq!(validation.validation_status, "validated");
+    assert_eq!(
+        validation.failed_constraints,
+        vec!["ensures: result == false"]
+    );
+}
+
+#[test]
+fn test_spurious_candidate_when_model_result_disagrees_with_body() {
+    let module_env = ModuleEnv::new();
+    let mut atom = base_atom("result_mismatch");
+    atom.params = vec![param("x", "i64")];
+    atom.requires = "x >= 0".to_string();
+    atom.ensures = "result >= 0".to_string();
+    atom.body_expr = "x + 1".to_string();
+
+    let model = HashMap::from([("x".to_string(), 0), ("result".to_string(), -1)]);
+    let validation = validate_counterexample(&atom, &model, &module_env);
+
+    assert!(!validation.is_valid);
+    assert_eq!(validation.validation_status, "spurious_candidate");
+    assert!(validation
+        .failed_constraints
+        .iter()
+        .any(|constraint| constraint.contains("does not match Mumei body result")));
+}
+
+#[test]
+fn test_spurious_candidate_when_body_uses_uninterpreted_symbol() {
+    let module_env = ModuleEnv::new();
+    let mut atom = base_atom("body_uninterpreted");
+    atom.params = vec![param("x", "i64")];
+    atom.body_expr = "mystery(x)".to_string();
+
+    let model = HashMap::from([("x".to_string(), 0), ("result".to_string(), -1)]);
+    let validation = validate_counterexample(&atom, &model, &module_env);
+
+    assert!(!validation.is_valid);
+    assert_eq!(validation.validation_status, "spurious_candidate");
+    assert!(validation.symbol_provenance.iter().any(|symbol| {
+        symbol.symbol_name == "mystery" && symbol.source == "uninterpreted_function"
+    }));
+}
+
+#[test]
 fn test_unused_hypothesis_detection() {
     let module_env = ModuleEnv::new();
     let mut atom = base_atom("bounded");
