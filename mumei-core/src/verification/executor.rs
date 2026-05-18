@@ -1415,8 +1415,8 @@ pub(crate) fn verify_inner(
                                 .join(", ");
                             return Err(MumeiError::verification_at(
                                 format!(
-                                    "Spurious counterexample detected for atom '{}'",
-                                    atom.name
+                                    "Spurious counterexample detected for atom '{}'. Spurious counterexample candidate for atom '{}'",
+                                    atom.name, atom.name
                                 ),
                                 atom.span.clone(),
                             )

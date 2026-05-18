@@ -823,11 +823,18 @@ pub fn classify_z3_result(result: &str) -> &'static str {
         "resource_limit"
     } else if normalized.contains("unknown") {
         "unknown"
-    } else if normalized == "unsat" || normalized.contains("proven") {
+    } else if normalized == "unsat"
+        || normalized.starts_with("unsat ")
+        || normalized.contains("proven")
+    {
         "unsat"
     } else if normalized.contains("skipped") {
         "skipped"
-    } else if normalized.contains("sat") || normalized.contains("counter") {
+    } else if normalized.contains("spurious_candidate")
+        || normalized.contains("spurious counterexample")
+        || normalized.contains("sat")
+        || normalized.contains("counter")
+    {
         "sat"
     } else {
         "skipped"
@@ -845,7 +852,11 @@ pub fn z3_result_from_error_message(message: &str) -> Option<&'static str> {
         || normalized.contains("constraint budget exceeded")
     {
         Some("resource_limit")
-    } else if normalized.contains("spurious_candidate") {
+    } else if normalized.contains("spurious_candidate")
+        || normalized.contains("spurious counterexample")
+        || normalized.contains("does not match mumei body result")
+        || normalized.contains("does not violate ensures under mumei semantics")
+    {
         Some("spurious_candidate")
     } else {
         None

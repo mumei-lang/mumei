@@ -40,56 +40,120 @@ pub fn validate_counterexample(
 ) -> CounterexampleValidationResult {
     let symbol_provenance = detect_uninterpreted_symbols(atom, model, module_env);
     let mut eval_env = model.clone();
-    let mut failed_constraints = Vec::new();
 
-    let requires_valid = eval_bool_clause(&atom.requires, &mut eval_env, module_env);
-    let body_stmt = parse_body_expr(&atom.body_expr);
-    let body_value = eval_stmt(&body_stmt, &mut eval_env, module_env, 0);
-    if let Ok(EvalValue::Int(result)) = body_value {
-        eval_env.insert("result".to_string(), result);
-    } else if let Some(result) = model.get("result") {
-        eval_env.insert("result".to_string(), *result);
-    }
-    let ensures_valid = eval_bool_clause(&atom.ensures, &mut eval_env, module_env);
-
-    match (requires_valid, ensures_valid) {
-        (Ok(true), Ok(false)) => {
-            failed_constraints.push(format!("ensures: {}", atom.ensures));
-            CounterexampleValidationResult {
-                is_valid: true,
-                validation_status: "validated".to_string(),
-                failed_constraints,
+    match eval_bool_clause(&atom.requires, &mut eval_env, module_env) {
+        Ok(true) => {}
+        Ok(false) => {
+            return CounterexampleValidationResult {
+                is_valid: false,
+                validation_status: "unvalidated".to_string(),
+                failed_constraints: vec![format!("requires not satisfied: {}", atom.requires)],
                 symbol_provenance,
-            }
+            };
         }
-        (Ok(false), _) => CounterexampleValidationResult {
-            is_valid: false,
-            validation_status: "unvalidated".to_string(),
-            failed_constraints: vec![format!("requires not satisfied: {}", atom.requires)],
+        Err(err) => {
+            return invalid_counterexample_result(
+                atom,
+                symbol_provenance,
+                false,
+                format!("requires not replayable: {err}"),
+            );
+        }
+    }
+
+    let body_stmt = parse_body_expr(&atom.body_expr);
+    match eval_stmt(&body_stmt, &mut eval_env, module_env, 0) {
+        Ok(EvalValue::Int(result)) => {
+            if let Some(model_result) = model.get("result") {
+                if *model_result != result {
+                    return invalid_counterexample_result(
+                        atom,
+                        symbol_provenance,
+                        true,
+                        format!(
+                            "Z3 model result {} does not match Mumei body result {}",
+                            model_result, result
+                        ),
+                    );
+                }
+            }
+            eval_env.insert("result".to_string(), result);
+        }
+        Ok(EvalValue::Bool(result)) => {
+            let result = if result { 1 } else { 0 };
+            if let Some(model_result) = model.get("result") {
+                if *model_result != result {
+                    return invalid_counterexample_result(
+                        atom,
+                        symbol_provenance,
+                        true,
+                        format!(
+                            "Z3 model result {} does not match Mumei body result {}",
+                            model_result, result
+                        ),
+                    );
+                }
+            }
+            eval_env.insert("result".to_string(), result);
+        }
+        Ok(EvalValue::String(_)) => {
+            return invalid_counterexample_result(
+                atom,
+                symbol_provenance,
+                false,
+                "string result is not replayable in Z3 integer model".to_string(),
+            );
+        }
+        Err(err) => {
+            return invalid_counterexample_result(
+                atom,
+                symbol_provenance,
+                false,
+                format!("body not replayable: {err}"),
+            );
+        }
+    }
+
+    match eval_bool_clause(&atom.ensures, &mut eval_env, module_env) {
+        Ok(false) => CounterexampleValidationResult {
+            is_valid: true,
+            validation_status: "validated".to_string(),
+            failed_constraints: vec![format!("ensures: {}", atom.ensures)],
             symbol_provenance,
         },
-        (_, Err(_)) | (Err(_), _) => CounterexampleValidationResult {
-            is_valid: false,
-            validation_status: if symbol_provenance.is_empty() {
-                "unvalidated".to_string()
-            } else {
-                "spurious_candidate".to_string()
-            },
-            failed_constraints: collect_unvalidated_constraints(atom),
+        Ok(true) => invalid_counterexample_result(
+            atom,
             symbol_provenance,
-        },
-        (Ok(true), Ok(true)) => CounterexampleValidationResult {
-            is_valid: false,
-            validation_status: if symbol_provenance.is_empty() {
-                "unvalidated".to_string()
-            } else {
-                "spurious_candidate".to_string()
-            },
-            failed_constraints: vec![
-                "Z3 model does not violate ensures under Mumei semantics".to_string()
-            ],
+            true,
+            "Z3 model does not violate ensures under Mumei semantics".to_string(),
+        ),
+        Err(err) => invalid_counterexample_result(
+            atom,
             symbol_provenance,
-        },
+            false,
+            format!("ensures not replayable: {err}"),
+        ),
+    }
+}
+
+fn invalid_counterexample_result(
+    atom: &Atom,
+    symbol_provenance: Vec<SymbolProvenance>,
+    force_spurious_candidate: bool,
+    reason: String,
+) -> CounterexampleValidationResult {
+    let validation_status = if force_spurious_candidate || !symbol_provenance.is_empty() {
+        "spurious_candidate"
+    } else {
+        "unvalidated"
+    };
+    let mut failed_constraints = collect_unvalidated_constraints(atom);
+    failed_constraints.push(reason);
+    CounterexampleValidationResult {
+        is_valid: false,
+        validation_status: validation_status.to_string(),
+        failed_constraints,
+        symbol_provenance,
     }
 }
 
@@ -118,13 +182,17 @@ pub fn detect_unused_hypotheses(
     unsat_core: &[String],
     _module_env: &ModuleEnv,
 ) -> UnusedHypothesisReport {
-    let core: HashSet<&str> = unsat_core.iter().map(String::as_str).collect();
+    let core: HashSet<String> = unsat_core
+        .iter()
+        .map(|label| normalize_core_label(label))
+        .collect();
     let requires_label = format!("requires:{}", atom.name);
     let invariant_label = format!("invariant:{}", atom.name);
 
     let unused_requires = if atom.requires.trim().is_empty()
         || atom.requires.trim() == "true"
         || core_contains_clause(&core, &requires_label, "requires")
+        || core_contains_clause(&core, "track_requires", "track_requires")
     {
         Vec::new()
     } else {
@@ -134,7 +202,8 @@ pub fn detect_unused_hypotheses(
     let unused_invariants = match &atom.invariant {
         Some(invariant)
             if !invariant.trim().is_empty()
-                && !core_contains_clause(&core, &invariant_label, "invariant") =>
+                && !core_contains_clause(&core, &invariant_label, "invariant")
+                && !core_contains_clause(&core, "track_invariant", "track_invariant") =>
         {
             vec![invariant.clone()]
         }
@@ -522,6 +591,14 @@ fn collect_unvalidated_constraints(atom: &Atom) -> Vec<String> {
     constraints
 }
 
-fn core_contains_clause(core: &HashSet<&str>, exact: &str, prefix: &str) -> bool {
+fn normalize_core_label(label: &str) -> String {
+    label
+        .strip_prefix('|')
+        .and_then(|without_prefix| without_prefix.strip_suffix('|'))
+        .unwrap_or(label)
+        .to_string()
+}
+
+fn core_contains_clause(core: &HashSet<String>, exact: &str, prefix: &str) -> bool {
     core.contains(exact) || core.iter().any(|entry| entry.contains(prefix))
 }
