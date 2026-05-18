@@ -369,8 +369,14 @@ fn eval_atom_call(
     }
     let body = parse_body_expr(&callee.body_expr);
     let result = eval_stmt(&body, &mut call_env, module_env, depth)?;
-    if let EvalValue::Int(value) = result {
-        call_env.insert("result".to_string(), value);
+    match &result {
+        EvalValue::Int(value) => {
+            call_env.insert("result".to_string(), *value);
+        }
+        EvalValue::Bool(value) => {
+            call_env.insert("result".to_string(), i64::from(*value));
+        }
+        EvalValue::String(_) => {}
     }
     if !eval_bool_clause(&callee.ensures, &mut call_env, module_env)? {
         return Err(format!("callee '{}' ensures clause is false", name));
@@ -410,15 +416,27 @@ fn eval_binary(left: EvalValue, op: &Op, right: EvalValue) -> Result<EvalValue, 
             _ => Err("unsupported string operation in counterexample replay".to_string()),
         },
         (left, right) => {
+            let left_int = value_as_int(&left);
+            let right_int = value_as_int(&right);
             let left_bool = value_as_bool(&left);
             let right_bool = value_as_bool(&right);
-            match (left_bool, right_bool, op) {
-                (Some(left), Some(right), Op::And) => Ok(EvalValue::Bool(left && right)),
-                (Some(left), Some(right), Op::Or) => Ok(EvalValue::Bool(left || right)),
-                (Some(left), Some(right), Op::Implies) => Ok(EvalValue::Bool(!left || right)),
+            match (left_int, right_int, left_bool, right_bool, op) {
+                (Some(left), Some(right), _, _, Op::Eq) => Ok(EvalValue::Bool(left == right)),
+                (Some(left), Some(right), _, _, Op::Neq) => Ok(EvalValue::Bool(left != right)),
+                (_, _, Some(left), Some(right), Op::And) => Ok(EvalValue::Bool(left && right)),
+                (_, _, Some(left), Some(right), Op::Or) => Ok(EvalValue::Bool(left || right)),
+                (_, _, Some(left), Some(right), Op::Implies) => Ok(EvalValue::Bool(!left || right)),
                 _ => Err("type mismatch during counterexample replay".to_string()),
             }
         }
+    }
+}
+
+fn value_as_int(value: &EvalValue) -> Option<i64> {
+    match value {
+        EvalValue::Int(value) => Some(*value),
+        EvalValue::Bool(value) => Some(i64::from(*value)),
+        EvalValue::String(_) => None,
     }
 }
 

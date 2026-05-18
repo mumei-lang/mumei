@@ -825,6 +825,7 @@ pub fn classify_z3_result(result: &str) -> &'static str {
         "unknown"
     } else if normalized == "unsat"
         || normalized.starts_with("unsat ")
+        || normalized.starts_with("unsat_core=")
         || normalized.contains("proven")
     {
         "unsat"

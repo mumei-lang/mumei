@@ -1413,6 +1413,17 @@ pub(crate) fn verify_inner(
                                 .map(|symbol| format!("{} ({})", symbol.symbol_name, symbol.source))
                                 .collect::<Vec<_>>()
                                 .join(", ");
+                            let help = if symbols.is_empty() {
+                                format!(
+                                    "Counterexample replay mismatch: {}. Consider escalating to Lean or checking the Z3 translation.",
+                                    validation.failed_constraints.join("; ")
+                                )
+                            } else {
+                                format!(
+                                    "Counterexample depends on uninterpreted symbols: {}. Consider escalating to Lean or expanding the symbol.",
+                                    symbols
+                                )
+                            };
                             return Err(MumeiError::verification_at(
                                 format!(
                                     "Spurious counterexample detected for atom '{}'. Spurious counterexample candidate for atom '{}'",
@@ -1420,10 +1431,7 @@ pub(crate) fn verify_inner(
                                 ),
                                 atom.span.clone(),
                             )
-                            .with_help(format!(
-                                "Counterexample depends on uninterpreted symbols: {}. Consider escalating to Lean or expanding the symbol.",
-                                symbols
-                            ))
+                            .with_help(help)
                             .with_counterexample(ce_val.clone()));
                         }
                     }
