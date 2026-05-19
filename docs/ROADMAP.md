@@ -925,7 +925,7 @@ P8-C のエスカレーション判定を実運用するには、Mumei の型シ
 - 同一 atom の競合検証で task id / certificate provenance の取り違え: 0 件
 - cache hit correctness（hash mismatch acceptance）: 100% rejected
 
-**P8-G: Retry Budget Theoretical Foundation（リトライ予算の理論的基盤）** — Planned
+**P8-G: Retry Budget Theoretical Foundation（リトライ予算の理論的基盤）** — Implemented
 
 Self-healing loop と Lean escalation は成功率を上げる一方で、無制限に retry・prompt 修正・solver 再実行を許すと探索空間と token cost が爆発する。
 このフェーズでは retry budget を経験則ではなく、探索木・検証義務分類・期待改善率に基づく制御問題として定式化する。
