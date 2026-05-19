@@ -48,6 +48,18 @@ A proof certificate (`.proof-cert.json`) is a JSON file containing cryptographic
   "binder_mapping": { "x": "x", "result": "result" },
   "bridge_lemma_hash": "d8d270d6429a3e31c608dc109876df4ec99ee1243796430775a5b0ef18b5ac24",
   "manual_lemma_reason": null,
+  "retry_policy_fingerprint": "9bb6d4f2...",
+  "attempt_summary": {
+    "total_attempts": 2,
+    "attempts_by_action_class": { "llm_fix": 1, "lean_escalation": 1 },
+    "final_action_class": "lean_escalation"
+  },
+  "cost_success_metrics": {
+    "attempts_to_success": 2,
+    "tokens_to_success": 6400,
+    "solver_seconds_to_success": 4.25,
+    "spec_drift_score": 0.08
+  },
   "translator_ir": {
     "sort": "contract_obligation",
     "binders": [
@@ -80,6 +92,73 @@ A proof certificate (`.proof-cert.json`) is a JSON file containing cryptographic
 | `manual_lemma_reason` | `Option<String>` | Reason partial translation must be completed by a manual lemma |
 | `translator_ir` | `TranslatorIRMetadata` | Typed intermediate metadata: obligation sort, binders, theorem goal, provenance span, and lowering rules |
 | `lean_metadata` | `Option<LeanResultMetadata>` | Lean result metadata emitted by mumei-lean (`status`, theorem name, translator version, bridge lemma hash, proof path, diagnostics) |
+| `retry_policy_fingerprint` | `Option<String>` | SHA-256 fingerprint of the retry budget policy used by the agent/healing process |
+| `attempt_summary` | `Option<AttemptSummary>` | Total attempts, attempts by action class, and final action class before success or manual review |
+| `cost_success_metrics` | `Option<CostSuccessMetrics>` | Attempts, tokens, solver seconds, and spec drift observed before success |
+
+## Retry Budget Policy Schema (P8-G)
+
+Retry budget metadata makes self-healing and Lean escalation auditable. Policies are intentionally fingerprinted and embedded indirectly so certificates can prove which retry boundary governed an atom without storing full agent logs.
+
+```json
+{
+  "max_attempts": 5,
+  "max_tokens": 10000,
+  "max_solver_time_ms": 30000,
+  "max_semantic_delta": 0.5,
+  "action_class_limits": {
+    "llm_fix": {
+      "max_attempts": 3,
+      "max_tokens": 5000,
+      "max_lean_escalations": 0
+    },
+    "lean_escalation": {
+      "max_attempts": 1,
+      "max_tokens": 5000,
+      "max_lean_escalations": 1
+    }
+  }
+}
+```
+
+### Structs
+
+```rust
+pub struct BudgetPolicy {
+    pub max_attempts: u32,
+    pub max_tokens: u64,
+    pub max_solver_time_ms: u64,
+    pub max_semantic_delta: f64,
+    pub action_class_limits: HashMap<String, ActionClassLimit>,
+}
+
+pub struct ActionClassLimit {
+    pub max_attempts: u32,
+    pub max_tokens: u64,
+    pub max_lean_escalations: u32,
+}
+
+pub struct AttemptSummary {
+    pub total_attempts: u32,
+    pub attempts_by_action_class: HashMap<String, u32>,
+    pub final_action_class: String,
+}
+
+pub struct CostSuccessMetrics {
+    pub attempts_to_success: u32,
+    pub tokens_to_success: u64,
+    pub solver_seconds_to_success: f64,
+    pub spec_drift_score: f64,
+}
+```
+
+### Semantics
+
+- `max_attempts`, `max_tokens`, and `max_solver_time_ms` stop runaway repair searches.
+- `max_semantic_delta` prevents spec weakening from becoming an unreviewed false success.
+- `action_class_limits` bounds strategy-specific retries such as `llm_fix`, `effect_fix`, `precondition_strengthening`, `postcondition_fix`, and `lean_escalation`.
+- Repeating the same counterexample signature without a new action class yields `manual_review_required`.
+- `retry_policy_fingerprint` is computed from canonical JSON serialization with sorted keys.
 
 ## Lean Escalation Translator Contract
 

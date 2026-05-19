@@ -110,6 +110,15 @@ pub struct AtomCertificate {
     pub unused_hypotheses: Option<UnusedHypothesisMetadata>,
     #[serde(default)]
     pub solver_process_metadata: Option<SolverProcessMetadata>,
+    /// P8-G: Fingerprint of the retry budget policy used by the healing/escalation loop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_policy_fingerprint: Option<String>,
+    /// P8-G: Summary of retry attempts leading to this certificate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_summary: Option<AttemptSummary>,
+    /// P8-G: Cost/success metrics for budget feedback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_success_metrics: Option<CostSuccessMetrics>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -130,6 +139,37 @@ pub struct SolverProcessMetadata {
     pub process_start_time: String,
     #[serde(default)]
     pub process_end_time: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BudgetPolicy {
+    pub max_attempts: u32,
+    pub max_tokens: u64,
+    pub max_solver_time_ms: u64,
+    pub max_semantic_delta: f64,
+    pub action_class_limits: HashMap<String, ActionClassLimit>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActionClassLimit {
+    pub max_attempts: u32,
+    pub max_tokens: u64,
+    pub max_lean_escalations: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttemptSummary {
+    pub total_attempts: u32,
+    pub attempts_by_action_class: HashMap<String, u32>,
+    pub final_action_class: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CostSuccessMetrics {
+    pub attempts_to_success: u32,
+    pub tokens_to_success: u64,
+    pub solver_seconds_to_success: f64,
+    pub spec_drift_score: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -362,6 +402,9 @@ pub fn generate_certificate(
                 symbol_provenance,
                 unused_hypotheses,
                 solver_process_metadata,
+                retry_policy_fingerprint: None,
+                attempt_summary: None,
+                cost_success_metrics: None,
             }
         })
         .collect();
@@ -953,6 +996,9 @@ mod tests {
         assert_eq!(cert.atoms[0].ensures, "result > 0");
         assert!(!cert.atoms[0].proof_hash.is_empty());
         assert!(cert.atoms[0].solver_process_metadata.is_none());
+        assert!(cert.atoms[0].retry_policy_fingerprint.is_none());
+        assert!(cert.atoms[0].attempt_summary.is_none());
+        assert!(cert.atoms[0].cost_success_metrics.is_none());
         assert!(cert.all_verified);
         assert_eq!(cert.package_name, Some("my_pkg".to_string()));
         assert_eq!(cert.package_version, Some("1.0.0".to_string()));
@@ -962,6 +1008,90 @@ mod tests {
         let parsed: ProofCertificate = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.atoms[0].requires, "x > 0");
         assert_eq!(parsed.atoms[0].ensures, "result > 0");
+    }
+
+    #[test]
+    fn test_retry_budget_schema_roundtrip() {
+        let mut limits = HashMap::new();
+        limits.insert(
+            "lean_escalation".to_string(),
+            ActionClassLimit {
+                max_attempts: 1,
+                max_tokens: 2_000,
+                max_lean_escalations: 1,
+            },
+        );
+        let policy = BudgetPolicy {
+            max_attempts: 5,
+            max_tokens: 10_000,
+            max_solver_time_ms: 30_000,
+            max_semantic_delta: 0.5,
+            action_class_limits: limits,
+        };
+
+        let json = serde_json::to_string(&policy).unwrap();
+        let parsed: BudgetPolicy = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.max_attempts, 5);
+        assert_eq!(
+            parsed
+                .action_class_limits
+                .get("lean_escalation")
+                .unwrap()
+                .max_lean_escalations,
+            1
+        );
+    }
+
+    #[test]
+    fn test_atom_certificate_retry_metrics_roundtrip() {
+        let atom = make_test_atom("budgeted", "true", "true", "0");
+        let atoms: Vec<&parser::Atom> = vec![&atom];
+        let mut results = HashMap::new();
+        results.insert(
+            "budgeted".to_string(),
+            ("unsat".to_string(), "verified".to_string()),
+        );
+        let module_env = ModuleEnv::new();
+        let mut cert = generate_certificate("test.mm", &atoms, &results, &module_env, None, None);
+        let mut attempts_by_action_class = HashMap::new();
+        attempts_by_action_class.insert("llm_fix".to_string(), 2);
+        cert.atoms[0].retry_policy_fingerprint = Some("sha256:abc".to_string());
+        cert.atoms[0].attempt_summary = Some(AttemptSummary {
+            total_attempts: 2,
+            attempts_by_action_class,
+            final_action_class: "llm_fix".to_string(),
+        });
+        cert.atoms[0].cost_success_metrics = Some(CostSuccessMetrics {
+            attempts_to_success: 2,
+            tokens_to_success: 1_024,
+            solver_seconds_to_success: 1.5,
+            spec_drift_score: 0.1,
+        });
+
+        let json = serde_json::to_string(&cert).unwrap();
+        let parsed: ProofCertificate = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(
+            parsed.atoms[0].retry_policy_fingerprint.as_deref(),
+            Some("sha256:abc")
+        );
+        assert_eq!(
+            parsed.atoms[0]
+                .attempt_summary
+                .as_ref()
+                .unwrap()
+                .final_action_class,
+            "llm_fix"
+        );
+        assert_eq!(
+            parsed.atoms[0]
+                .cost_success_metrics
+                .as_ref()
+                .unwrap()
+                .tokens_to_success,
+            1_024
+        );
     }
 
     #[test]
