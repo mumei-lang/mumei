@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+from concurrent.futures import ThreadPoolExecutor
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -255,6 +257,89 @@ class TestVerifyWithOrchestration:
         assert env["MUMEI_TASK_ID"] == payload["task_id"]
         assert env["MUMEI_SOLVER_CACHE_KEY"] == payload["cache_key"]
         assert env["MUMEI_VERIFICATION_TIMEOUT_MS"] == "1234"
+
+    def test_parallel_requests_keep_task_ids_and_cache_keys_isolated(self) -> None:
+        from mcp_server import verify_with_orchestration, _task_registry
+
+        def fake_popen(args: list[str], **kwargs) -> _FakeCompletedProcess:
+            output_path = Path(args[args.index("--output") + 1])
+            output_path.write_text(json.dumps({"atoms": []}), encoding="utf-8")
+            report_dir = Path(args[args.index("--report-dir") + 1])
+            (report_dir / "report.json").write_text(
+                json.dumps({"status": "ok", "task": kwargs["env"]["MUMEI_TASK_ID"]}),
+                encoding="utf-8",
+            )
+            return _FakeCompletedProcess()
+
+        _task_registry._tasks.clear()
+        _task_registry._cache.clear()
+
+        with patch("mcp_server.subprocess.Popen", side_effect=fake_popen):
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                payloads = list(
+                    executor.map(
+                        lambda index: json.loads(
+                            verify_with_orchestration(
+                                f"atom f{index}() ensures: result == {index}; body: {index};",
+                                timeout_ms=1000,
+                                enable_cache=True,
+                            )
+                        ),
+                        range(100),
+                    )
+                )
+
+        task_ids = {payload["task_id"] for payload in payloads}
+        cache_keys = {payload["cache_key"] for payload in payloads}
+
+        assert len(payloads) == 100
+        assert len(task_ids) == 100
+        assert len(cache_keys) == 100
+        assert all(payload["status"] == "passed" for payload in payloads)
+        assert all(
+            payload["report"]["task"] == payload["task_id"] for payload in payloads
+        )
+
+    def test_timeout_returns_structured_cancellation(self) -> None:
+        from mcp_server import verify_with_orchestration, _task_registry
+
+        class TimeoutProcess(_FakeCompletedProcess):
+            returncode = None
+
+            def __init__(self) -> None:
+                self.terminated = False
+                self.killed = False
+
+            def communicate(self, timeout: float | None = None) -> tuple[str, str]:
+                if not self.terminated:
+                    raise subprocess.TimeoutExpired("mumei", timeout)
+                return "", "terminated"
+
+            def terminate(self) -> None:
+                self.terminated = True
+
+            def kill(self) -> None:
+                self.killed = True
+
+            def poll(self) -> int | None:
+                return None if not self.terminated else -15
+
+        _task_registry._tasks.clear()
+        _task_registry._cache.clear()
+
+        with patch("mcp_server.subprocess.Popen", return_value=TimeoutProcess()):
+            payload = json.loads(
+                verify_with_orchestration(
+                    "atom stuck() ensures: result == 0; body: 0;",
+                    timeout_ms=1,
+                    enable_cache=False,
+                )
+            )
+
+        assert payload["status"] == "cancelled"
+        assert payload["cancel_reason"] == "timeout after 1ms"
+        assert payload["task_id"] in _task_registry._tasks
+        assert _task_registry._tasks[payload["task_id"]].status == "cancelled"
 
 
 class TestOrchestrationResumeValidation:

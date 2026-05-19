@@ -169,6 +169,15 @@ enum Command {
     Verify {
         /// Input .mm file
         input: String,
+        /// Verification task ID for MCP/CI provenance
+        #[arg(long)]
+        task_id: Option<String>,
+        /// Override Z3 solver timeout in milliseconds
+        #[arg(long)]
+        solver_timeout: Option<u64>,
+        /// Verification cache scope: module (input directory) or global (current workspace)
+        #[arg(long, default_value = "module", value_parser = ["module", "global"])]
+        cache_scope: String,
         /// Generate Z3 proof certificate (.proof.json)
         #[arg(long)]
         proof_cert: bool,
@@ -348,6 +357,9 @@ fn main() {
         }
         Some(Command::Verify {
             input,
+            task_id,
+            solver_timeout,
+            cache_scope,
             proof_cert,
             escalate_lean,
             emit,
@@ -391,6 +403,9 @@ fn main() {
             }
             cmd_verify(VerifyOptions {
                 input: &input,
+                task_id: task_id.as_deref(),
+                solver_timeout,
+                cache_scope: &cache_scope,
                 generate_proof_cert: proof_cert,
                 emit_escalation_bundle: escalate_lean || emit_escalation_bundle,
                 emit_escalation_metrics,
@@ -805,6 +820,9 @@ fn cmd_check(input: &str) {
 
 struct VerifyOptions<'a> {
     input: &'a str,
+    task_id: Option<&'a str>,
+    solver_timeout: Option<u64>,
+    cache_scope: &'a str,
     generate_proof_cert: bool,
     emit_escalation_bundle: bool,
     emit_escalation_metrics: bool,
@@ -821,6 +839,9 @@ struct VerifyOptions<'a> {
 fn cmd_verify(options: VerifyOptions<'_>) {
     let VerifyOptions {
         input,
+        task_id,
+        solver_timeout,
+        cache_scope,
         generate_proof_cert,
         emit_escalation_bundle,
         emit_escalation_metrics,
@@ -845,6 +866,7 @@ fn cmd_verify(options: VerifyOptions<'_>) {
     };
     let enable_cross_spec_verification =
         enable_cross_spec_verification || proof_cfg.cross_spec_verify;
+    let effective_timeout_ms = solver_timeout.unwrap_or(proof_cfg.timeout_ms);
     if !json_output {
         println!("🗡️  Mumei verify: verifying '{}'...", input);
     }
@@ -860,7 +882,7 @@ fn cmd_verify(options: VerifyOptions<'_>) {
         let _ = std::fs::create_dir_all(output_dir);
     }
     let verification_config = verification::VerificationConfig {
-        timeout_ms: proof_cfg.timeout_ms,
+        timeout_ms: effective_timeout_ms,
         global_max_unroll: build_cfg.max_unroll,
         enable_cross_spec_verification,
         collect_decidable_fragment_metrics: emit_decidable_metrics,
@@ -868,6 +890,19 @@ fn cmd_verify(options: VerifyOptions<'_>) {
     };
     let input_path = Path::new(input);
     let base_dir = input_path.parent().unwrap_or(Path::new("."));
+    let cache_base_dir = if cache_scope == "global" {
+        Path::new(".")
+    } else {
+        base_dir
+    };
+    if let Some(task_id) = task_id {
+        std::env::set_var("MUMEI_TASK_ID", task_id);
+    }
+    std::env::set_var(
+        "MUMEI_VERIFICATION_TIMEOUT_MS",
+        effective_timeout_ms.to_string(),
+    );
+    std::env::set_var("MUMEI_SOLVER_CACHE_SCOPE", cache_scope);
     let mut verified = 0;
     let mut failed = 0;
     let mut skipped = 0;
@@ -896,8 +931,8 @@ fn cmd_verify(options: VerifyOptions<'_>) {
     }
 
     // Feature 2: Migrate old cache and load enhanced verification cache
-    resolver::migrate_old_cache(base_dir);
-    let mut verification_cache = resolver::load_verification_cache(base_dir);
+    resolver::migrate_old_cache(cache_base_dir);
+    let mut verification_cache = resolver::load_verification_cache(cache_base_dir);
 
     for item in &items {
         match item {
@@ -1243,7 +1278,7 @@ fn cmd_verify(options: VerifyOptions<'_>) {
     // already includes callee signatures (requires/ensures) in the hash.
     // If a callee's contract changes, all callers will have different proof hashes
     // and be re-verified automatically.
-    resolver::save_verification_cache(base_dir, &verification_cache);
+    resolver::save_verification_cache(cache_base_dir, &verification_cache);
 
     if emit_decidable_metrics {
         let metrics_path = cert_output
