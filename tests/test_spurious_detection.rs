@@ -183,6 +183,23 @@ fn test_cli_exposes_spurious_detection_flag() {
 }
 
 #[test]
+fn test_cli_exposes_orchestration_flags() {
+    let bin = env!("CARGO_BIN_EXE_mumei");
+    let output = std::process::Command::new(bin)
+        .arg("verify")
+        .arg("--help")
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("failed to run mumei verify --help");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("--task-id"));
+    assert!(stdout.contains("--solver-timeout"));
+    assert!(stdout.contains("--cache-scope"));
+}
+
+#[test]
 fn test_cli_spurious_detection_flags_conflict() {
     let bin = env!("CARGO_BIN_EXE_mumei");
     let output = std::process::Command::new(bin)

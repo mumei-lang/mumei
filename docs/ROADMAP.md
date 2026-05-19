@@ -887,7 +887,7 @@ P8-C のエスカレーション判定を実運用するには、Mumei の型シ
 - translator version mismatch による stale certificate acceptance: 0 件
 - manual lemma required の reason attribution coverage: 100%
 
-**P8-F: MCP Server Z3 Process State Management（MCP サーバー Z3 プロセス状態管理）** — Planned
+**P8-F: MCP Server Z3 Process State Management（MCP サーバー Z3 プロセス状態管理）** — Implemented
 
 `mcp_server.py` が複数の AI agent・IDE・CI から並列に検証要求を受けると、Z3 process、verification cache、proof certificate の状態が衝突し、同じ atom の異なる義務が混線するリスクがある。
 このフェーズでは MCP サーバーを単なる CLI wrapper ではなく、Z3 process lifecycle と cache isolation を管理する検証オーケストレータとして強化する。
