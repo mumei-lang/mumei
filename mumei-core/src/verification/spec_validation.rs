@@ -1,4 +1,7 @@
 use super::module_env::ModuleEnv;
+use super::property_based::{
+    run_property_based_test, PropertyBasedTestConfig, PropertyBasedTestResult,
+};
 use super::translator::{
     apply_refinement_constraint, expr_to_z3, param_z3_value, VCtx, DEFAULT_CONSTRAINT_BUDGET,
 };
@@ -23,6 +26,8 @@ pub struct SpecValidationResult {
     pub checked_ensures: usize,
     pub checked_refinements: usize,
     pub ensures_implication_checks: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub property_based_test: Option<PropertyBasedTestResult>,
     pub diagnostics: Vec<String>,
 }
 
@@ -50,6 +55,7 @@ impl SpecValidationResult {
             checked_ensures: 0,
             checked_refinements: 0,
             ensures_implication_checks: 0,
+            property_based_test: None,
             diagnostics: vec![contradiction_details],
         }
     }
@@ -78,6 +84,14 @@ pub fn calculate_traceability_hash(atom: &Atom) -> String {
 pub fn check_spec_satisfiability(
     atom: &Atom,
     module_env: &ModuleEnv,
+) -> Result<SpecValidationResult, SpecContradiction> {
+    check_spec_satisfiability_with_property_based(atom, module_env, None)
+}
+
+pub fn check_spec_satisfiability_with_property_based(
+    atom: &Atom,
+    module_env: &ModuleEnv,
+    property_based_config: Option<&PropertyBasedTestConfig>,
 ) -> Result<SpecValidationResult, SpecContradiction> {
     let mut diagnostics = Vec::new();
     let checked_refinements = check_standalone_refinements(atom, module_env)?;
@@ -195,6 +209,17 @@ pub fn check_spec_satisfiability(
     let trace_id = effective_trace_id(atom);
     let spec_metadata = effective_spec_metadata(atom);
 
+    let property_based_test = property_based_config.map(|config| {
+        let result = run_property_based_test(atom, module_env, config);
+        diagnostics.extend(
+            result
+                .diagnostics
+                .iter()
+                .map(|diagnostic| format!("property-based: {diagnostic}")),
+        );
+        result
+    });
+
     Ok(SpecValidationResult {
         status: "satisfiable".to_string(),
         is_satisfiable: true,
@@ -207,6 +232,7 @@ pub fn check_spec_satisfiability(
         checked_ensures: ensure_clauses.len(),
         checked_refinements,
         ensures_implication_checks: implication_checks,
+        property_based_test,
         diagnostics,
     })
 }

@@ -173,6 +173,7 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum Command {
     /// Verify + compile to LLVM IR (default)
     Build {
@@ -245,6 +246,15 @@ enum Command {
         /// Disable P8-A spurious counterexample detection
         #[arg(long)]
         disable_spurious_detection: bool,
+        /// Run property-based validation synthesized from refinement types
+        #[arg(long)]
+        property_based_test: bool,
+        /// Number of generated property-based inputs per atom
+        #[arg(long, default_value_t = 100)]
+        property_based_test_count: usize,
+        /// Seed for deterministic property-based input generation
+        #[arg(long)]
+        property_based_test_seed: Option<u64>,
         /// Harness contract path or identifier to embed in generated proof certificates
         #[arg(long)]
         harness_contract: Option<String>,
@@ -410,6 +420,9 @@ fn main() {
             cross_spec_verify,
             enable_spurious_detection,
             disable_spurious_detection,
+            property_based_test,
+            property_based_test_count,
+            property_based_test_seed,
             harness_contract,
             artifact_paths,
             budget_policy_fingerprint,
@@ -458,6 +471,9 @@ fn main() {
                 allow_lean_verified,
                 enable_cross_spec_verification: cross_spec_verify,
                 enable_spurious_detection: enable_spurious_detection || !disable_spurious_detection,
+                property_based_test,
+                property_based_test_count,
+                property_based_test_seed,
                 harness_contract: resolve_harness_contract(harness_contract),
                 artifact_paths: resolve_artifact_paths(artifact_paths),
                 budget_policy_fingerprint: resolve_budget_policy_fingerprint(
@@ -880,6 +896,9 @@ struct VerifyOptions<'a> {
     allow_lean_verified: bool,
     enable_cross_spec_verification: bool,
     enable_spurious_detection: bool,
+    property_based_test: bool,
+    property_based_test_count: usize,
+    property_based_test_seed: Option<u64>,
     harness_contract: Option<String>,
     artifact_paths: Option<Vec<String>>,
     budget_policy_fingerprint: Option<String>,
@@ -902,6 +921,9 @@ fn cmd_verify(options: VerifyOptions<'_>) {
         allow_lean_verified,
         enable_cross_spec_verification,
         enable_spurious_detection,
+        property_based_test,
+        property_based_test_count,
+        property_based_test_seed,
         harness_contract,
         artifact_paths,
         budget_policy_fingerprint,
@@ -919,8 +941,21 @@ fn cmd_verify(options: VerifyOptions<'_>) {
     let enable_cross_spec_verification =
         enable_cross_spec_verification || proof_cfg.cross_spec_verify;
     let effective_timeout_ms = solver_timeout.unwrap_or(proof_cfg.timeout_ms);
+    let property_based_config =
+        property_based_test.then(|| verification::PropertyBasedTestConfig {
+            test_count: property_based_test_count,
+            seed: property_based_test_seed
+                .unwrap_or(verification::PropertyBasedTestConfig::default().seed),
+            ..verification::PropertyBasedTestConfig::default()
+        });
     if !json_output {
         println!("🗡️  Mumei verify: verifying '{}'...", input);
+        if let Some(config) = &property_based_config {
+            println!(
+                "  🎲 Property-based validation: {} generated input(s), seed {}",
+                config.test_count, config.seed
+            );
+        }
     }
     let (items, mut module_env, _imports, source) =
         load_and_prepare_with_full_options(input, strict_imports, allow_lean_verified);
@@ -939,6 +974,7 @@ fn cmd_verify(options: VerifyOptions<'_>) {
         enable_cross_spec_verification,
         collect_decidable_fragment_metrics: emit_decidable_metrics,
         enable_spurious_detection,
+        property_based_test: property_based_config,
     };
     let input_path = Path::new(input);
     let base_dir = input_path.parent().unwrap_or(Path::new("."));
@@ -2411,6 +2447,7 @@ fn cmd_build(
             emitter::EmitTarget::DecidableMetrics
         ),
         enable_spurious_detection: true,
+        property_based_test: None,
     };
     let mut escalation_cert_results: std::collections::HashMap<String, (String, String)> =
         std::collections::HashMap::new();

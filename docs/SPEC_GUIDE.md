@@ -100,6 +100,41 @@ The verifier emits an `outside_decidable_fragment` warning when it detects patte
 | `recursive_invariant` | While loop or recursive invariant | Keep invariants linear and local, or escalate to Lean |
 | `complex_temporal_effect` | Many states/transitions or implicit history | Reduce to finite explicit transitions |
 
+## Property-based validation
+
+Use property-based validation when a specification is outside Z3's most reliable fragment or you want an executable sanity check before Lean escalation.
+
+```bash
+mumei verify --property-based-test spec.mm
+mumei verify --property-based-test --property-based-test-count 500 spec.mm
+mumei verify --property-based-test --property-based-test-seed 12345 spec.mm
+```
+
+The validator synthesizes generators from refinement types and `requires` bounds:
+
+```mumei
+type Nat = i64 where v >= 0;
+type Bounded = i64 where v >= MIN && v <= MAX;
+```
+
+- `Nat` generates boundary values near `0` plus deterministic random values in a bounded non-negative range.
+- `Bounded` generates values inside the inferred `MIN..MAX` range.
+- Complex predicates are scanned for direct comparisons such as `v >= n`, `v < n`, and `v == n`; unrecognized constraints fall back to a conservative integer range.
+- Array-typed parameters generate small arrays, boundary lengths, and element values composed from the element generator.
+
+On failure, Mumei shrinks the counterexample before reporting it:
+
+- integers shrink toward `0` and inferred bounds using binary-search-like candidates
+- arrays shrink by shortening length first, then shrinking individual elements
+- `--property-based-test-seed` makes a failure reproducible
+
+Best practices:
+
+1. Keep refinement predicates close to simple bounds (`v >= 0`, `v <= max`) so generator synthesis is precise.
+2. Put input-domain assumptions in `requires`; property-based validation discards generated inputs that do not satisfy preconditions.
+3. Use a fixed seed in CI when investigating a failure.
+4. Treat property-based success as a sanity check, not a proof. Z3/Lean verification remains the source of formal assurance.
+
 ## Recommended templates
 
 ### Linear refinement template
