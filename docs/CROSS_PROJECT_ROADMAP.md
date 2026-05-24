@@ -483,6 +483,159 @@ graph TD
 
 ---
 
+## Priority 11: Natural-Language Agent Harnesses 対応ロードマップ
+
+**背景**: "Natural-Language Agent Harnesses" (arXiv:2603.25723) は、エージェント性能をモデル単体ではなく、周辺の harness（実行制御、状態、検証、停止条件、artifact 契約）が強く規定することを示す。Mumei エコシステムでは、既に P6 self-healing、P8-G retry budget、P9 Forge、P10 MCP、P11 natural-language spec extraction、P12 NLAE、mumei-lean fallback、mumei-demo scenario runner が分散実装されている。次の焦点は、これらを「コードに埋もれた制御」ではなく、外部化・計測・ablation 可能な harness 仕様として扱うことである。
+
+### 学ぶべき設計原則
+
+1. **Harness を第一級オブジェクトにする**
+   生成、修復、検証、Lean fallback、PR 作成、demo 実行を controller code の暗黙状態ではなく、読み書き可能な harness policy として表現する。
+2. **自然言語 = 方針、Mumei DSL / JSON schema / Z3 / Lean = 執行**
+   NLAH の編集性は取り入れるが、決定的な検証、証明証明書、adapter、schema validation はコード・DSL・証明器側に残す。
+3. **Artifact contract と file-backed state を必須にする**
+   各段階で読むファイル、生成するファイル、検証証拠、停止条件を明記し、長期実行や子エージェント handoff を context 依存にしない。
+4. **Verifier は evaluator / intent に近づける**
+   Z3/Lean の数学的正しさだけでなく、元の要求仕様との fidelity、semantic drift、manual review 条件も artifact に残す。
+5. **重い探索より acceptance path を短くする**
+   Multi-candidate search は費用対効果が悪化し得るため、まずは単一路線の generate → verify → repair → evidence gate を堅牢化し、分岐は独立性と budget が明確な場合だけ使う。
+6. **Module ablation を前提に設計する**
+   file-backed state、evidence-backed answering、verifier separation、self-evolution、multi-candidate search、context compression、markdown memory を個別に ON/OFF できるようにし、成功率・token・solver time・handoff loss を比較する。
+
+### P11-A: Cross-project harness plan & task ordering — ✅ This roadmap PR
+
+**Repository**: `mumei-lang/mumei`
+
+既存ロードマップへ NLAH 論文からの学習点を統合し、以降の PR 順序を明文化する。
+
+**成果物**:
+- `docs/CROSS_PROJECT_ROADMAP.md` に Priority 11 を追加。
+- mumei-agent / mumei-demo / mumei-lean / mumei 本体の責務境界を整理。
+- 後続 PR の順序を「まず harness 仕様と artifact contract、次に runtime 実装、最後に demo/Lean/MCP 連携」に固定。
+
+### P11-B: Agent Harness Spec（NLAH 風プレイブック）導入
+
+**Repository**: `mumei-lang/mumei-agent`
+
+mumei-agent の Forge / heal / extract-spec / proliferate / Lean fallback を、外部化された harness 仕様として文書化し、実行時ログと対応付ける。
+
+**実装タスク**:
+- `docs/AGENT_HARNESS_SPEC.md` を追加し、role、stage、artifact contract、state semantics、verifier gates、failure taxonomy、budget policy、stopping criteria を定義。
+- `docs/ROADMAP.md` に P13: Harness Externalization を追加。
+- `agent` の既存 CLI は変更せず、まずは仕様と運用契約を固定する。
+- `summary.json` / `forge_log.json` / `lean_fallback` / `budget_metrics` の各フィールドがどの harness stage の証拠かを対応表にする。
+
+**受け入れ条件**:
+- `pytest -q` が通る。
+- `AGENT_HARNESS_SPEC.md` だけで Forge run の入力、出力、検証ゲート、停止条件をレビューできる。
+
+### P11-C: Harness telemetry & ablation metrics
+
+**Repository**: `mumei-lang/mumei-agent`
+
+論文の module ablation を Mumei 向けに実行できるよう、module flags と集計指標を追加する。
+
+**実装タスク**:
+- `agent/harness_metrics.py` を追加し、`module_enabled`, `artifact_contract_passed`, `verification_gate`, `handoff_count`, `retry_class`, `intent_fidelity_status` を集計。
+- P8-G `budget_metrics.py` と統合し、`tokens_to_success`, `solver_seconds_to_success`, `spec_drift_score` と同じ summary に出す。
+- `--harness-profile basic|stateful|verifier|self_evolution|lean_fallback|full` を Forge / proliferate dry-run に追加する。
+- `tests/test_harness_metrics.py` で module ON/OFF と summary JSON を検証する。
+
+**受け入れ条件**:
+- module ごとの成功率・コスト・drift を比較可能。
+- 重い multi-candidate search は default off のまま、明示 profile のみで起動する。
+
+### P11-D: Demo scenario harness contracts
+
+**Repository**: `mumei-lang/mumei-demo`
+
+scenario runner を NLAH 風の artifact contract と evidence gate で説明可能にする。
+
+**実装タスク**:
+- `docs/HARNESS_CONTRACTS.md` を追加し、scenario.json の `l1_z3`, `l2_agent`, `l3_lean` を stage contract として定義。
+- 各 scenario の `result.json`, `report.md`, proof certificate, dashboard summary がどの gate の証拠かを明記。
+- `docs/SCENARIO_SPEC.md` に `artifact_contracts` と `intent_fidelity` の推奨フィールドを追記。
+- `Makefile` の scenario 一覧と README の ten-scenario 記述を整合させる。
+
+**受け入れ条件**:
+- `python3 -m compileall -q scripts dashboard`
+- `bash -n scripts/setup_repos.sh scripts/run_scenario.sh scripts/run_all.sh`
+- 代表 scenario JSON が `python3 -m json.tool` を通る。
+
+### P11-E: Lean bridge harness contract
+
+**Repository**: `mumei-lang/mumei-lean`
+
+mumei-lean を「Z3 unknown を受ける deep-proof verifier module」として、入力・出力・失敗分類を harness contract 化する。
+
+**実装タスク**:
+- `docs/LEAN_HARNESS_CONTRACT.md` を追加し、`.proof-cert.json` / generated Lean / lake build / `.lean-cert.json` の contract を定義。
+- `manual_lemma_required`, `translator_ir`, `bridge_lemma_hash`, `stale_translator`, `lake_missing`, `lean_verified` の failure taxonomy を整理。
+- `docs/BRIDGE_PIPELINE.md` から参照する。
+- CI pending 対策として、live E2E job に timeout と skip diagnostics を追加する別 PR を後続で切る。
+
+**受け入れ条件**:
+- `PYTHONPATH=scripts MUMEI_LEAN_SKIP_LIVE=1 python -m pytest -q`
+- `PATH="$HOME/.elan/bin:$PATH" lake build`（環境が重い場合は結果を PR に明記）
+
+### P11-F: Mumei-side harness certificate fields
+
+**Repository**: `mumei-lang/mumei`
+
+mumei 本体の proof certificate / MCP / doc 生成に、harness が参照できる intent・artifact・budget メタデータを追加する。
+
+**実装タスク**:
+- `ProofCertificate` に optional `harness_contract`, `intent_fidelity`, `artifact_paths`, `budget_policy_fingerprint` を追加する設計を固める。
+- `mumei verify --proof-cert` で既存 schema と後方互換を保ったまま追加 metadata を出す。
+- `mcp_server.py::get_proof_certificate` と `generate_doc` が追加 metadata を返す。
+- `docs/PROOF_CERTIFICATE.md` を更新する。
+
+**受け入れ条件**:
+- `cargo test` または関連 unit tests。
+- `python -m pytest tests/test_mcp_server.py -v`。
+- 既存 certificate consumer が optional field を無視して動作する。
+
+### P11-G: NLAH-style integrated demo
+
+**Repository**: `mumei-lang/mumei-demo`
+
+P11-B〜F の成果を、demo で「自然言語要件 → harness spec → artifact contract → Z3/Lean/agent evidence」として可視化する。
+
+**実装タスク**:
+- 既存 `nl_to_verified` scenario を拡張し、harness policy、state file、verification evidence、intent fidelity を dashboard に表示。
+- `make demo-nl` で harness contract compliance を report に出す。
+- 将来の Phase 4 Merkle Tree / Phase 6 ArkLib-Style Audit はこの contract を標準採用する。
+
+**受け入れ条件**:
+- `make demo-nl` または fixture mode equivalent が PASS。
+- dashboard summary に harness contract compliance が表示される。
+
+### 推奨 PR 順序
+
+```mermaid
+graph TD
+    A["P11-A Cross-project roadmap\nmumei docs"] --> B["P11-B Agent harness spec\nmumei-agent docs"]
+    B --> C["P11-C Harness telemetry\nmumei-agent code"]
+    B --> D["P11-D Demo harness contracts\nmumei-demo docs"]
+    B --> E["P11-E Lean harness contract\nmumei-lean docs"]
+    C --> F["P11-F Certificate metadata\nmumei code"]
+    D --> G["P11-G NLAH-style demo\nmumei-demo"]
+    E --> G
+    F --> G
+```
+
+| 順序 | PR | Repository | 理由 |
+|------|----|------------|------|
+| 1 | P11-A | `mumei` | クロスプロジェクトの順序と責務を固定する |
+| 2 | P11-B | `mumei-agent` | 実行制御の中心である agent harness contract を先に外部化する |
+| 3 | P11-D | `mumei-demo` | 既存 scenario runner を artifact contract として説明可能にする |
+| 4 | P11-E | `mumei-lean` | deep-proof verifier の input/output/failure taxonomy を固定する |
+| 5 | P11-C | `mumei-agent` | harness module の計測・ablation を実装する |
+| 6 | P11-F | `mumei` | certificate / MCP metadata を harness から参照可能にする |
+| 7 | P11-G | `mumei-demo` | 全成果を統合 demo として可視化する |
+
+---
+
 ## 優先度マトリクス（更新版）
 
 | 優先度 | 項目 | リポジトリ | 状態 |
@@ -510,6 +663,7 @@ graph TD
 | 🚧 | Phase 4: Merkle Tree Verification | mumei-demo | Planned |
 | 🚧 | Phase 5: DeFi Invariant | mumei-demo | Planned |
 | 🚧 | Phase 6: ArkLib-Style Audit | mumei-demo | Planned |
+| 🚧 | P11: NLAH-style Harness Externalization | 全リポジトリ | Roadmap / PR sequence started |
 | 🚧 | SI-6: Lean 4 Executable Code Generation | mumei-lean | Planned |
 | ⏸️ | SI-4: no_std Ecosystem | mumei | Deferred |
 
