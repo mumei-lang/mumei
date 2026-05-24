@@ -224,6 +224,14 @@ class TestOrchestrationCacheIsolation:
 
 
 class TestVerifyWithOrchestration:
+    @patch.dict(
+        "os.environ",
+        {
+            "MUMEI_HARNESS_CONTRACT": "contracts/harness.json",
+            "MUMEI_ARTIFACT_PATHS": "reports/a.json,out/b.json",
+            "MUMEI_BUDGET_POLICY_FINGERPRINT": "sha256:budget",
+        },
+    )
     def test_invocation_writes_certificate_and_env_metadata(self) -> None:
         from mcp_server import verify_with_orchestration, _z3_worker_pool
 
@@ -232,7 +240,19 @@ class TestVerifyWithOrchestration:
         def fake_popen(args: list[str], **kwargs) -> _FakeCompletedProcess:
             popen_calls.append((args, kwargs))
             output_path = Path(args[args.index("--output") + 1])
-            output_path.write_text(json.dumps({"atoms": []}), encoding="utf-8")
+            output_path.write_text(
+                json.dumps(
+                    {
+                        "atoms": [],
+                        "harness_contract": kwargs["env"]["MUMEI_HARNESS_CONTRACT"],
+                        "artifact_paths": ["reports/a.json", "out/b.json"],
+                        "budget_policy_fingerprint": kwargs["env"][
+                            "MUMEI_BUDGET_POLICY_FINGERPRINT"
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
             report_dir = Path(args[args.index("--report-dir") + 1])
             (report_dir / "report.json").write_text(
                 json.dumps({"status": "ok"}),
@@ -252,11 +272,25 @@ class TestVerifyWithOrchestration:
         env = kwargs["env"]
 
         assert payload["status"] == "passed"
-        assert payload["proof_certificate"] == {"atoms": []}
+        assert payload["proof_certificate"] == {
+            "atoms": [],
+            "harness_contract": "contracts/harness.json",
+            "artifact_paths": ["reports/a.json", "out/b.json"],
+            "budget_policy_fingerprint": "sha256:budget",
+        }
         assert "--proof-cert" in args
+        assert args[args.index("--harness-contract") + 1] == "contracts/harness.json"
+        assert args[args.index("--artifact-paths") + 1] == "reports/a.json,out/b.json"
+        assert (
+            args[args.index("--budget-policy-fingerprint") + 1]
+            == "sha256:budget"
+        )
         assert env["MUMEI_TASK_ID"] == payload["task_id"]
         assert env["MUMEI_SOLVER_CACHE_KEY"] == payload["cache_key"]
         assert env["MUMEI_VERIFICATION_TIMEOUT_MS"] == "1234"
+        assert env["MUMEI_HARNESS_CONTRACT"] == "contracts/harness.json"
+        assert env["MUMEI_ARTIFACT_PATHS"] == "reports/a.json,out/b.json"
+        assert env["MUMEI_BUDGET_POLICY_FINGERPRINT"] == "sha256:budget"
 
     def test_parallel_requests_keep_task_ids_and_cache_keys_isolated(self) -> None:
         from mcp_server import verify_with_orchestration, _task_registry
@@ -340,6 +374,65 @@ class TestVerifyWithOrchestration:
         assert payload["cancel_reason"] == "timeout after 1ms"
         assert payload["task_id"] in _task_registry._tasks
         assert _task_registry._tasks[payload["task_id"]].status == "cancelled"
+
+
+class TestMcpHarnessMetadata:
+    @patch.dict(
+        "os.environ",
+        {
+            "MUMEI_HARNESS_CONTRACT": "contracts/harness.json",
+            "MUMEI_ARTIFACT_PATHS": "reports/a.json,out/b.json",
+            "MUMEI_BUDGET_POLICY_FINGERPRINT": "sha256:budget",
+        },
+    )
+    def test_get_proof_certificate_attaches_env_metadata(self) -> None:
+        import mcp_server
+
+        root_dir = Path(mcp_server.__file__).parent
+        cert_path = root_dir / "std" / "certs" / "unit_harness.proof.json"
+        cert_path.parent.mkdir(parents=True, exist_ok=True)
+        cert_path.write_text(json.dumps({"atoms": []}), encoding="utf-8")
+        try:
+            payload = json.loads(mcp_server.get_proof_certificate("std/unit_harness.mm"))
+        finally:
+            cert_path.unlink(missing_ok=True)
+
+        assert payload["certificate"]["harness_contract"] == "contracts/harness.json"
+        assert payload["certificate"]["artifact_paths"] == [
+            "reports/a.json",
+            "out/b.json",
+        ]
+        assert payload["certificate"]["budget_policy_fingerprint"] == "sha256:budget"
+
+    @patch.dict(
+        "os.environ",
+        {
+            "MUMEI_HARNESS_CONTRACT": "contracts/harness.json",
+            "MUMEI_ARTIFACT_PATHS": "reports/a.json,out/b.json",
+            "MUMEI_BUDGET_POLICY_FINGERPRINT": "sha256:budget",
+        },
+    )
+    def test_generate_doc_returns_harness_metadata(self) -> None:
+        from mcp_server import generate_doc
+
+        class FakeRunResult:
+            returncode = 0
+            stdout = json.dumps([{"name": "input", "atoms": []}])
+            stderr = ""
+
+        with patch("mcp_server._resolve_mumei_invocation", return_value=["mumei"]):
+            with patch("mcp_server.subprocess.run", return_value=FakeRunResult()):
+                payload = json.loads(
+                    generate_doc(
+                        "atom f() ensures: result == 0; body: 0;",
+                        format="json",
+                    )
+                )
+
+        assert payload["format"] == "json"
+        assert payload["harness_contract"] == "contracts/harness.json"
+        assert payload["artifact_paths"] == ["reports/a.json", "out/b.json"]
+        assert payload["budget_policy_fingerprint"] == "sha256:budget"
 
 
 class TestOrchestrationResumeValidation:

@@ -96,6 +96,35 @@ fn counterexample_model_from_error(
     model
 }
 
+fn parse_artifact_paths(value: &str) -> Option<Vec<String>> {
+    let paths: Vec<String> = value
+        .split(',')
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(str::to_string)
+        .collect();
+    if paths.is_empty() {
+        None
+    } else {
+        Some(paths)
+    }
+}
+
+fn resolve_harness_contract(cli_value: Option<String>) -> Option<String> {
+    cli_value.or_else(proof_cert::harness_contract_from_env)
+}
+
+fn resolve_artifact_paths(cli_value: Option<String>) -> Option<Vec<String>> {
+    cli_value
+        .as_deref()
+        .and_then(parse_artifact_paths)
+        .or_else(proof_cert::artifact_paths_from_env)
+}
+
+fn resolve_budget_policy_fingerprint(cli_value: Option<String>) -> Option<String> {
+    cli_value.or_else(proof_cert::budget_policy_fingerprint_from_env)
+}
+
 /// Collect all ExternBlock items from a list of Items.
 fn collect_extern_blocks(items: &[Item]) -> Vec<parser::ExternBlock> {
     items
@@ -216,6 +245,15 @@ enum Command {
         /// Disable P8-A spurious counterexample detection
         #[arg(long)]
         disable_spurious_detection: bool,
+        /// Harness contract path or identifier to embed in generated proof certificates
+        #[arg(long)]
+        harness_contract: Option<String>,
+        /// Comma-separated artifact paths to embed in generated proof certificates
+        #[arg(long)]
+        artifact_paths: Option<String>,
+        /// Budget policy fingerprint to embed in generated proof certificates
+        #[arg(long)]
+        budget_policy_fingerprint: Option<String>,
     },
     /// Parse + resolve + monomorphize only (no Z3, fast syntax check)
     Check {
@@ -372,6 +410,9 @@ fn main() {
             cross_spec_verify,
             enable_spurious_detection,
             disable_spurious_detection,
+            harness_contract,
+            artifact_paths,
+            budget_policy_fingerprint,
         }) => {
             let no_emit_escalation_metrics =
                 no_emit.iter().any(|target| target == "escalation-metrics");
@@ -417,6 +458,11 @@ fn main() {
                 allow_lean_verified,
                 enable_cross_spec_verification: cross_spec_verify,
                 enable_spurious_detection: enable_spurious_detection || !disable_spurious_detection,
+                harness_contract: resolve_harness_contract(harness_contract),
+                artifact_paths: resolve_artifact_paths(artifact_paths),
+                budget_policy_fingerprint: resolve_budget_policy_fingerprint(
+                    budget_policy_fingerprint,
+                ),
             });
         }
         Some(Command::Check { input }) => {
@@ -834,6 +880,9 @@ struct VerifyOptions<'a> {
     allow_lean_verified: bool,
     enable_cross_spec_verification: bool,
     enable_spurious_detection: bool,
+    harness_contract: Option<String>,
+    artifact_paths: Option<Vec<String>>,
+    budget_policy_fingerprint: Option<String>,
 }
 
 fn cmd_verify(options: VerifyOptions<'_>) {
@@ -853,6 +902,9 @@ fn cmd_verify(options: VerifyOptions<'_>) {
         allow_lean_verified,
         enable_cross_spec_verification,
         enable_spurious_detection,
+        harness_contract,
+        artifact_paths,
+        budget_policy_fingerprint,
     } = options;
     check_z3_available();
     let manifest_config = manifest::find_and_load();
@@ -1352,6 +1404,12 @@ fn cmd_verify(options: VerifyOptions<'_>) {
             &module_env,
             None,
             None,
+            Some(proof_cert::HarnessCertificateMetadata {
+                harness_contract: harness_contract.clone(),
+                intent_fidelity: None,
+                artifact_paths: artifact_paths.clone(),
+                budget_policy_fingerprint: budget_policy_fingerprint.clone(),
+            }),
         );
         let cert_path = if let Some(output) = cert_output {
             std::path::PathBuf::from(output)
@@ -2976,6 +3034,7 @@ fn cmd_build(
             &module_env,
             pkg_name,
             pkg_version,
+            None,
         );
 
         let cert_path = output_dir.join(format!("{}.proof-cert.json", file_stem));
@@ -3621,6 +3680,7 @@ fn cmd_publish(proof_only: bool) {
             &module_env,
             Some(pkg_name),
             Some(pkg_version),
+            None,
         );
         let cert_path = pkg_dir.join("proof_certificate.json");
         match proof_cert::save_certificate(&cert, &cert_path) {
@@ -4334,10 +4394,11 @@ fn cmd_doc(input: &str, output_dir: &str, format: &str) {
             // Emits the full set of contract metadata for every atom so that
             // downstream consumers (LSP, web frontends, code generators) can
             // ingest the docs without re-parsing Mumei source.
+            let harness_metadata = collect_harness_doc_metadata();
             let json_docs: Vec<serde_json::Value> = all_docs
                 .iter()
                 .map(|doc| {
-                    serde_json::json!({
+                    let mut module = serde_json::json!({
                         "name": doc.name,
                         "file_path": doc.file_path,
                         "atoms": doc.atoms.iter().map(|a| serde_json::json!({
@@ -4367,7 +4428,30 @@ fn cmd_doc(input: &str, output_dir: &str, format: &str) {
                             "name": t.name,
                             "comment": t.comment,
                         })).collect::<Vec<_>>(),
-                    })
+                    });
+                    if let serde_json::Value::Object(ref mut fields) = module {
+                        if let Some(ref harness_contract) = harness_metadata.harness_contract {
+                            fields.insert(
+                                "harness_contract".to_string(),
+                                serde_json::Value::String(harness_contract.clone()),
+                            );
+                        }
+                        if let Some(ref artifact_paths) = harness_metadata.artifact_paths {
+                            fields.insert(
+                                "artifact_paths".to_string(),
+                                serde_json::json!(artifact_paths),
+                            );
+                        }
+                        if let Some(ref budget_policy_fingerprint) =
+                            harness_metadata.budget_policy_fingerprint
+                        {
+                            fields.insert(
+                                "budget_policy_fingerprint".to_string(),
+                                serde_json::Value::String(budget_policy_fingerprint.clone()),
+                            );
+                        }
+                    }
+                    module
                 })
                 .collect();
             let payload =
@@ -4415,6 +4499,20 @@ struct ItemDoc {
     body_expr: String,
     /// Declared effect names (e.g. `["FileRead"]`).
     effects: Vec<String>,
+}
+
+struct HarnessDocMetadata {
+    harness_contract: Option<String>,
+    artifact_paths: Option<Vec<String>>,
+    budget_policy_fingerprint: Option<String>,
+}
+
+fn collect_harness_doc_metadata() -> HarnessDocMetadata {
+    HarnessDocMetadata {
+        harness_contract: proof_cert::harness_contract_from_env(),
+        artifact_paths: proof_cert::artifact_paths_from_env(),
+        budget_policy_fingerprint: proof_cert::budget_policy_fingerprint_from_env(),
+    }
 }
 
 struct TypeDoc {
@@ -5078,6 +5176,46 @@ atom json_parse(input: String) -> String
         assert!(!doc.atoms[0].is_async);
         assert_eq!(doc.atoms[1].name, "json_parse");
         assert_eq!(doc.atoms[1].params, vec!["input"]);
+    }
+
+    #[test]
+    fn test_parse_artifact_paths_trims_and_ignores_empty_entries() {
+        assert_eq!(
+            parse_artifact_paths(" reports/a.json, ,out/b.json "),
+            Some(vec!["reports/a.json".to_string(), "out/b.json".to_string()])
+        );
+        assert!(parse_artifact_paths(" , ").is_none());
+    }
+
+    #[test]
+    fn test_verify_cli_accepts_harness_metadata_options() {
+        let cli = Cli::try_parse_from([
+            "mumei",
+            "verify",
+            "--proof-cert",
+            "--harness-contract",
+            "contracts/harness.json",
+            "--artifact-paths",
+            "reports/a.json,out/b.json",
+            "--budget-policy-fingerprint",
+            "sha256:budget",
+            "input.mm",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Some(Command::Verify {
+                harness_contract,
+                artifact_paths,
+                budget_policy_fingerprint,
+                ..
+            }) => {
+                assert_eq!(harness_contract.as_deref(), Some("contracts/harness.json"));
+                assert_eq!(artifact_paths.as_deref(), Some("reports/a.json,out/b.json"));
+                assert_eq!(budget_policy_fingerprint.as_deref(), Some("sha256:budget"));
+            }
+            _ => panic!("expected verify command"),
+        }
     }
 
     // --- P3-A: REPL ヘルパーテスト ---

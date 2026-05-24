@@ -17,7 +17,16 @@ A proof certificate (`.proof-cert.json`) is a JSON file containing cryptographic
   "package_name": "my_math_lib",
   "package_version": "1.0.0",
   "certificate_hash": "sha256:abcdef...",
-  "all_verified": true
+  "all_verified": true,
+  "harness_contract": "contracts/nlah-harness.json",
+  "intent_fidelity": {
+    "natural_language_prompt_hash": "sha256:prompt...",
+    "spec_traceability_score": 0.97,
+    "semantic_drift_detected": false,
+    "manual_review_required": false
+  },
+  "artifact_paths": ["reports/proof.json", "docs_out/docs.json"],
+  "budget_policy_fingerprint": "sha256:budget..."
 }
 ```
 
@@ -31,6 +40,52 @@ A proof certificate (`.proof-cert.json`) is a JSON file containing cryptographic
 | `package_version` | `Option<String>` | Package version from `mumei.toml` (if available) |
 | `certificate_hash` | `String` | SHA-256 hash of the serialized certificate (excluding this field) |
 | `all_verified` | `bool` | `true` if every atom in the certificate passed verification |
+| `harness_contract` | `Option<String>` | Harness contract path or identifier that downstream scenario runners should validate |
+| `intent_fidelity` | `Option<IntentFidelityMetadata>` | Natural-language intent traceability metadata for harness review gates |
+| `artifact_paths` | `Option<Vec<String>>` | Generated artifacts that a harness should collect or compare |
+| `budget_policy_fingerprint` | `Option<String>` | Fingerprint of the harness retry/budget policy used for this certificate |
+
+### IntentFidelityMetadata
+
+```json
+{
+  "natural_language_prompt_hash": "sha256:prompt...",
+  "spec_traceability_score": 0.97,
+  "semantic_drift_detected": false,
+  "manual_review_required": false
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `natural_language_prompt_hash` | `Option<String>` | Hash of the prompt or intent artifact used to derive the specification |
+| `spec_traceability_score` | `f64` | Score from `0.0` to `1.0` indicating how well code/spec artifacts trace to the original intent |
+| `semantic_drift_detected` | `bool` | `true` when the harness detected meaningful drift from the original intent |
+| `manual_review_required` | `bool` | `true` when the harness requires a human to review intent/spec alignment |
+
+All top-level harness metadata fields are optional and use serde defaults, so older certificates that omit them remain loadable by existing consumers.
+
+### Harness metadata inputs
+
+`mumei verify --proof-cert` can set harness metadata from CLI options:
+
+```bash
+mumei verify --proof-cert src/math.mm \
+  --harness-contract contracts/nlah-harness.json \
+  --artifact-paths reports/proof.json,docs_out/docs.json \
+  --budget-policy-fingerprint sha256:budget...
+```
+
+The same values can be supplied via environment variables, which is useful for MCP or CI harnesses:
+
+```bash
+MUMEI_HARNESS_CONTRACT=contracts/nlah-harness.json \
+MUMEI_ARTIFACT_PATHS=reports/proof.json,docs_out/docs.json \
+MUMEI_BUDGET_POLICY_FINGERPRINT=sha256:budget... \
+mumei verify --proof-cert src/math.mm
+```
+
+CLI values take precedence over environment values. `MUMEI_ARTIFACT_PATHS` and `--artifact-paths` are comma-separated; empty entries are ignored.
 
 ### AtomCertificate (per-atom)
 

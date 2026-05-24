@@ -13,7 +13,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 from mcp.server.fastmcp import FastMCP
 
 # ws5 / SI-5 Phase 1-C: std/ graph helpers live in std_graph_lib so that
@@ -40,6 +40,38 @@ _session_effects: dict = {
     "denied": [],
     "source": "default",  # "default" | "mumei.toml" | "session_override"
 }
+
+
+def _env_nonempty(name: str) -> str | None:
+    value = os.environ.get(name)
+    if value is None or value == "":
+        return None
+    return value
+
+
+def _harness_metadata_from_env() -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    harness_contract = _env_nonempty("MUMEI_HARNESS_CONTRACT")
+    if harness_contract is not None:
+        metadata["harness_contract"] = harness_contract
+    artifact_paths = _env_nonempty("MUMEI_ARTIFACT_PATHS")
+    if artifact_paths is not None:
+        parsed_paths = [
+            path.strip() for path in artifact_paths.split(",") if path.strip()
+        ]
+        if parsed_paths:
+            metadata["artifact_paths"] = parsed_paths
+    budget_policy_fingerprint = _env_nonempty("MUMEI_BUDGET_POLICY_FINGERPRINT")
+    if budget_policy_fingerprint is not None:
+        metadata["budget_policy_fingerprint"] = budget_policy_fingerprint
+    return metadata
+
+
+def _attach_harness_metadata(payload: dict[str, Any]) -> dict[str, Any]:
+    metadata = _harness_metadata_from_env()
+    for key, value in metadata.items():
+        payload.setdefault(key, value)
+    return payload
 
 
 @dataclass
@@ -828,6 +860,14 @@ def verify_with_orchestration(
                     "MUMEI_SOLVER_PROCESS_START_TIME": process_start_time,
                 }
             )
+            if _env_nonempty("MUMEI_HARNESS_CONTRACT") is not None:
+                env["MUMEI_HARNESS_CONTRACT"] = os.environ["MUMEI_HARNESS_CONTRACT"]
+            if _env_nonempty("MUMEI_ARTIFACT_PATHS") is not None:
+                env["MUMEI_ARTIFACT_PATHS"] = os.environ["MUMEI_ARTIFACT_PATHS"]
+            if _env_nonempty("MUMEI_BUDGET_POLICY_FINGERPRINT") is not None:
+                env["MUMEI_BUDGET_POLICY_FINGERPRINT"] = os.environ[
+                    "MUMEI_BUDGET_POLICY_FINGERPRINT"
+                ]
             process = subprocess.Popen(
                 [
                     "cargo",
@@ -835,6 +875,30 @@ def verify_with_orchestration(
                     "--",
                     "verify",
                     "--proof-cert",
+                    *(
+                        [
+                            "--harness-contract",
+                            os.environ["MUMEI_HARNESS_CONTRACT"],
+                        ]
+                        if _env_nonempty("MUMEI_HARNESS_CONTRACT") is not None
+                        else []
+                    ),
+                    *(
+                        [
+                            "--artifact-paths",
+                            os.environ["MUMEI_ARTIFACT_PATHS"],
+                        ]
+                        if _env_nonempty("MUMEI_ARTIFACT_PATHS") is not None
+                        else []
+                    ),
+                    *(
+                        [
+                            "--budget-policy-fingerprint",
+                            os.environ["MUMEI_BUDGET_POLICY_FINGERPRINT"],
+                        ]
+                        if _env_nonempty("MUMEI_BUDGET_POLICY_FINGERPRINT") is not None
+                        else []
+                    ),
                     "--output",
                     str(tmp_path / "input.proof.json"),
                     "--report-dir",
@@ -2016,6 +2080,8 @@ def get_proof_certificate(module_path: str) -> str:
             cert = json.loads(candidate.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             return json.dumps({"error": f"failed to read certificate: {exc}"})
+        if isinstance(cert, dict):
+            cert = _attach_harness_metadata(cert)
         return json.dumps(
             {
                 "module": key_with_prefix,
@@ -2037,6 +2103,8 @@ def get_proof_certificate(module_path: str) -> str:
         modules = data.get("modules") or {}
         cert = modules.get(key_with_prefix) or modules.get(rel)
         if cert is not None:
+            if isinstance(cert, dict):
+                cert = _attach_harness_metadata(cert)
             return json.dumps(
                 {
                     "module": key_with_prefix,
@@ -2121,8 +2189,10 @@ def generate_doc(source_code: str, format: str = "json") -> str:
             if text:
                 try:
                     parsed = json.loads(text)
+                    payload = {"format": "json", "doc": parsed}
+                    payload.update(_harness_metadata_from_env())
                     return json.dumps(
-                        {"format": "json", "doc": parsed},
+                        payload,
                         indent=2,
                         ensure_ascii=False,
                     )
@@ -2142,8 +2212,10 @@ def generate_doc(source_code: str, format: str = "json") -> str:
                     except (OSError, json.JSONDecodeError):
                         continue
             if collected:
+                payload = {"format": "json", "doc": collected}
+                payload.update(_harness_metadata_from_env())
                 return json.dumps(
-                    {"format": "json", "doc": collected},
+                    payload,
                     indent=2,
                     ensure_ascii=False,
                 )
@@ -2163,14 +2235,13 @@ def generate_doc(source_code: str, format: str = "json") -> str:
                         )
                     except (OSError, UnicodeDecodeError):
                         continue
-        return json.dumps(
-            {
-                "format": fmt,
-                "stdout": result.stdout,
-                "files": files,
-            },
-            ensure_ascii=False,
-        )
+        payload = {
+            "format": fmt,
+            "stdout": result.stdout,
+            "files": files,
+        }
+        payload.update(_harness_metadata_from_env())
+        return json.dumps(payload, ensure_ascii=False)
 
 
 if __name__ == "__main__":
