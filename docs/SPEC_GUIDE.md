@@ -108,6 +108,7 @@ Use property-based validation when a specification is outside Z3's most reliable
 mumei verify --property-based-test spec.mm
 mumei verify --property-based-test --property-based-test-count 500 spec.mm
 mumei verify --property-based-test --property-based-test-seed 12345 spec.mm
+mumei verify --property-based-test --property-based-test-max-shrink-steps 128 spec.mm
 ```
 
 The validator synthesizes generators from refinement types and `requires` bounds:

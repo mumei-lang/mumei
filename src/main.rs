@@ -255,6 +255,9 @@ enum Command {
         /// Seed for deterministic property-based input generation
         #[arg(long)]
         property_based_test_seed: Option<u64>,
+        /// Maximum property-based shrinking steps per counterexample
+        #[arg(long, default_value_t = 64)]
+        property_based_test_max_shrink_steps: usize,
         /// Harness contract path or identifier to embed in generated proof certificates
         #[arg(long)]
         harness_contract: Option<String>,
@@ -423,6 +426,7 @@ fn main() {
             property_based_test,
             property_based_test_count,
             property_based_test_seed,
+            property_based_test_max_shrink_steps,
             harness_contract,
             artifact_paths,
             budget_policy_fingerprint,
@@ -474,6 +478,7 @@ fn main() {
                 property_based_test,
                 property_based_test_count,
                 property_based_test_seed,
+                property_based_test_max_shrink_steps,
                 harness_contract: resolve_harness_contract(harness_contract),
                 artifact_paths: resolve_artifact_paths(artifact_paths),
                 budget_policy_fingerprint: resolve_budget_policy_fingerprint(
@@ -899,6 +904,7 @@ struct VerifyOptions<'a> {
     property_based_test: bool,
     property_based_test_count: usize,
     property_based_test_seed: Option<u64>,
+    property_based_test_max_shrink_steps: usize,
     harness_contract: Option<String>,
     artifact_paths: Option<Vec<String>>,
     budget_policy_fingerprint: Option<String>,
@@ -924,6 +930,7 @@ fn cmd_verify(options: VerifyOptions<'_>) {
         property_based_test,
         property_based_test_count,
         property_based_test_seed,
+        property_based_test_max_shrink_steps,
         harness_contract,
         artifact_paths,
         budget_policy_fingerprint,
@@ -944,6 +951,7 @@ fn cmd_verify(options: VerifyOptions<'_>) {
     let property_based_config =
         property_based_test.then(|| verification::PropertyBasedTestConfig {
             test_count: property_based_test_count,
+            max_shrink_steps: property_based_test_max_shrink_steps,
             seed: property_based_test_seed
                 .unwrap_or(verification::PropertyBasedTestConfig::default().seed),
             ..verification::PropertyBasedTestConfig::default()

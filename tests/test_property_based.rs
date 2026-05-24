@@ -164,4 +164,5 @@ fn cli_exposes_property_based_validation_flags() {
     assert!(stdout.contains("--property-based-test"));
     assert!(stdout.contains("--property-based-test-count"));
     assert!(stdout.contains("--property-based-test-seed"));
+    assert!(stdout.contains("--property-based-test-max-shrink-steps"));
 }
