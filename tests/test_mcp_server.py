@@ -233,7 +233,7 @@ class TestVerifyWithOrchestration:
         },
     )
     def test_invocation_writes_certificate_and_env_metadata(self) -> None:
-        from mcp_server import verify_with_orchestration, _z3_worker_pool
+        from mcp_server import verify_with_orchestration
 
         popen_calls = []
 
