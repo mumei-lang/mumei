@@ -2251,6 +2251,7 @@ impl Stack {
             &module_env,
             None,
             None,
+            None,
         );
 
         // Verify that the cert contains the qualified method name
@@ -2304,6 +2305,7 @@ impl Stack {
             &module_env,
             Some("mumei-std"),
             Some("0.0.0"),
+            None,
         );
         let mut modules = HashMap::new();
         modules.insert(module_key.to_string(), cert);
@@ -2434,6 +2436,7 @@ atom add(x: i64, y: i64) -> i64
             &module_env,
             None,
             None,
+            None,
         );
         stale_local_cert.atoms[0].translator_version = "stale-translator".to_string();
         proof_cert::save_certificate(&stale_local_cert, &std_root.join(".proof-cert.json"))
@@ -2525,6 +2528,7 @@ atom mul(x: i64, y: i64) -> i64
             &local_env,
             None,
             None,
+            None,
         );
         let local_cert_path = std_root.join(".proof-cert.json");
         proof_cert::save_certificate(&local_cert, &local_cert_path).unwrap();
@@ -2581,6 +2585,7 @@ atom hard_lemma(x: i64) -> i64
             &module_env,
             None,
             None,
+            None,
         );
         cert.atoms[0].translator_version = "stale-translator".to_string();
         proof_cert::save_certificate(&cert, &module_dir.join(".proof-cert.json"))
@@ -2631,6 +2636,7 @@ atom hard_lemma(x: i64) -> i64
             &atom_refs,
             &results,
             &module_env,
+            None,
             None,
             None,
         );
@@ -2745,6 +2751,7 @@ atom hard_lemma(x: i64) -> i64
             &dep_atom_refs,
             &results,
             &module_env,
+            None,
             None,
             None,
         );

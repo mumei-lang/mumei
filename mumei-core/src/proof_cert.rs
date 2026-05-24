@@ -41,6 +41,18 @@ pub struct ProofCertificate {
     /// Summary flag: true if all atoms are verified (P5-A)
     #[serde(default)]
     pub all_verified: bool,
+    /// Harness contract path or identifier for cross-repo verification harnesses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_contract: Option<String>,
+    /// Metadata tracking natural-language intent fidelity for harness consumers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent_fidelity: Option<IntentFidelityMetadata>,
+    /// Artifact paths that a harness should collect or validate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_paths: Option<Vec<String>>,
+    /// Fingerprint of the retry/budget policy used by the harness.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_policy_fingerprint: Option<String>,
 }
 
 /// Per-atom verification certificate.
@@ -119,6 +131,26 @@ pub struct AtomCertificate {
     /// P8-G: Cost/success metrics for budget feedback.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_success_metrics: Option<CostSuccessMetrics>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct IntentFidelityMetadata {
+    #[serde(default)]
+    pub natural_language_prompt_hash: Option<String>,
+    #[serde(default)]
+    pub spec_traceability_score: f64,
+    #[serde(default)]
+    pub semantic_drift_detected: bool,
+    #[serde(default)]
+    pub manual_review_required: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct HarnessCertificateMetadata {
+    pub harness_contract: Option<String>,
+    pub intent_fidelity: Option<IntentFidelityMetadata>,
+    pub artifact_paths: Option<Vec<String>>,
+    pub budget_policy_fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -305,8 +337,10 @@ pub fn generate_certificate(
     module_env: &ModuleEnv,
     package_name: Option<&str>,
     package_version: Option<&str>,
+    harness_metadata: Option<HarnessCertificateMetadata>,
 ) -> ProofCertificate {
     let now = chrono_like_now();
+    let harness_metadata = harness_metadata.unwrap_or_default();
     let atom_certs: Vec<AtomCertificate> = atoms
         .iter()
         .map(|atom| {
@@ -430,6 +464,10 @@ pub fn generate_certificate(
         package_version: package_version.map(|s| s.to_string()),
         certificate_hash: String::new(),
         all_verified,
+        harness_contract: harness_metadata.harness_contract,
+        intent_fidelity: harness_metadata.intent_fidelity,
+        artifact_paths: harness_metadata.artifact_paths,
+        budget_policy_fingerprint: harness_metadata.budget_policy_fingerprint,
     };
 
     // P5-A: Compute certificate_hash as SHA-256 of serialized cert (with empty hash field)
@@ -687,6 +725,30 @@ pub fn compute_sha256(data: &str) -> String {
 
 fn env_nonempty(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
+}
+
+pub fn harness_contract_from_env() -> Option<String> {
+    env_nonempty("MUMEI_HARNESS_CONTRACT")
+}
+
+pub fn artifact_paths_from_env() -> Option<Vec<String>> {
+    env_nonempty("MUMEI_ARTIFACT_PATHS").and_then(|value| {
+        let paths: Vec<String> = value
+            .split(',')
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .map(str::to_string)
+            .collect();
+        if paths.is_empty() {
+            None
+        } else {
+            Some(paths)
+        }
+    })
+}
+
+pub fn budget_policy_fingerprint_from_env() -> Option<String> {
+    env_nonempty("MUMEI_BUDGET_POLICY_FINGERPRINT")
 }
 
 fn solver_process_metadata_from_env(content_hash: &str) -> Option<SolverProcessMetadata> {
@@ -967,6 +1029,9 @@ mod tests {
             "MUMEI_SOLVER_CACHE_KEY",
             "MUMEI_CANCEL_REASON",
             "MUMEI_SOLVER_PROCESS_START_TIME",
+            "MUMEI_HARNESS_CONTRACT",
+            "MUMEI_ARTIFACT_PATHS",
+            "MUMEI_BUDGET_POLICY_FINGERPRINT",
         ];
         let _cleanup = SolverEnvCleanup(env_names);
         for name in env_names {
@@ -988,6 +1053,7 @@ mod tests {
             &module_env,
             Some("my_pkg"),
             Some("1.0.0"),
+            None,
         );
 
         assert_eq!(cert.atoms.len(), 1);
@@ -1008,6 +1074,122 @@ mod tests {
         let parsed: ProofCertificate = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.atoms[0].requires, "x > 0");
         assert_eq!(parsed.atoms[0].ensures, "result > 0");
+    }
+
+    #[test]
+    fn test_generate_certificate_harness_metadata_fields() {
+        let atom = make_test_atom("harnessed", "true", "true", "0");
+        let atoms: Vec<&parser::Atom> = vec![&atom];
+        let mut results = HashMap::new();
+        results.insert(
+            "harnessed".to_string(),
+            ("unsat".to_string(), "verified".to_string()),
+        );
+        let module_env = ModuleEnv::new();
+
+        let cert = generate_certificate(
+            "test.mm",
+            &atoms,
+            &results,
+            &module_env,
+            None,
+            None,
+            Some(HarnessCertificateMetadata {
+                harness_contract: Some("contracts/nlah.json".to_string()),
+                intent_fidelity: Some(IntentFidelityMetadata {
+                    natural_language_prompt_hash: Some("sha256:prompt".to_string()),
+                    spec_traceability_score: 0.97,
+                    semantic_drift_detected: false,
+                    manual_review_required: true,
+                }),
+                artifact_paths: Some(vec![
+                    "reports/proof.json".to_string(),
+                    "out/doc.json".to_string(),
+                ]),
+                budget_policy_fingerprint: Some("sha256:budget".to_string()),
+            }),
+        );
+
+        assert_eq!(
+            cert.harness_contract.as_deref(),
+            Some("contracts/nlah.json")
+        );
+        let intent_fidelity = cert.intent_fidelity.as_ref().unwrap();
+        assert_eq!(
+            intent_fidelity.natural_language_prompt_hash.as_deref(),
+            Some("sha256:prompt")
+        );
+        assert_eq!(intent_fidelity.spec_traceability_score, 0.97);
+        assert!(!intent_fidelity.semantic_drift_detected);
+        assert!(intent_fidelity.manual_review_required);
+        assert_eq!(
+            cert.artifact_paths,
+            Some(vec![
+                "reports/proof.json".to_string(),
+                "out/doc.json".to_string()
+            ])
+        );
+        assert_eq!(
+            cert.budget_policy_fingerprint.as_deref(),
+            Some("sha256:budget")
+        );
+
+        let json = serde_json::to_string(&cert).unwrap();
+        let parsed: ProofCertificate = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.harness_contract, cert.harness_contract);
+        assert_eq!(parsed.artifact_paths, cert.artifact_paths);
+    }
+
+    #[test]
+    fn test_certificate_backward_compatibility_without_harness_fields() {
+        let json = r#"{
+            "version": "1.0",
+            "timestamp": "2026-05-24T00:00:00Z",
+            "mumei_version": "0.2.0",
+            "z3_version": "z3 4.12.2",
+            "file": "legacy.mm",
+            "atoms": [],
+            "certificate_hash": "",
+            "all_verified": true
+        }"#;
+
+        let cert: ProofCertificate = serde_json::from_str(json).unwrap();
+
+        assert!(cert.harness_contract.is_none());
+        assert!(cert.intent_fidelity.is_none());
+        assert!(cert.artifact_paths.is_none());
+        assert!(cert.budget_policy_fingerprint.is_none());
+    }
+
+    #[test]
+    fn test_harness_metadata_env_helpers() {
+        let _guard = solver_env_lock().lock().unwrap();
+        let env_names = &[
+            "MUMEI_HARNESS_CONTRACT",
+            "MUMEI_ARTIFACT_PATHS",
+            "MUMEI_BUDGET_POLICY_FINGERPRINT",
+        ];
+        let _cleanup = SolverEnvCleanup(env_names);
+        for name in env_names {
+            std::env::remove_var(name);
+        }
+
+        std::env::set_var("MUMEI_HARNESS_CONTRACT", "contracts/harness.json");
+        std::env::set_var("MUMEI_ARTIFACT_PATHS", " reports/a.json, ,out/b.json ");
+        std::env::set_var("MUMEI_BUDGET_POLICY_FINGERPRINT", "sha256:budget");
+
+        assert_eq!(
+            harness_contract_from_env().as_deref(),
+            Some("contracts/harness.json")
+        );
+        assert_eq!(
+            artifact_paths_from_env(),
+            Some(vec!["reports/a.json".to_string(), "out/b.json".to_string()])
+        );
+        assert_eq!(
+            budget_policy_fingerprint_from_env().as_deref(),
+            Some("sha256:budget")
+        );
     }
 
     #[test]
@@ -1053,7 +1235,8 @@ mod tests {
             ("unsat".to_string(), "verified".to_string()),
         );
         let module_env = ModuleEnv::new();
-        let mut cert = generate_certificate("test.mm", &atoms, &results, &module_env, None, None);
+        let mut cert =
+            generate_certificate("test.mm", &atoms, &results, &module_env, None, None, None);
         let mut attempts_by_action_class = HashMap::new();
         attempts_by_action_class.insert("llm_fix".to_string(), 2);
         cert.atoms[0].retry_policy_fingerprint = Some("sha256:abc".to_string());
@@ -1111,7 +1294,7 @@ mod tests {
         );
         let module_env = ModuleEnv::new();
 
-        let cert = generate_certificate("test.mm", &atoms, &results, &module_env, None, None);
+        let cert = generate_certificate("test.mm", &atoms, &results, &module_env, None, None, None);
         let unused = cert.atoms[0].unused_hypotheses.as_ref().unwrap();
 
         assert!(unused.unused_requires.is_empty());
@@ -1153,7 +1336,7 @@ mod tests {
         );
         let module_env = ModuleEnv::new();
 
-        let cert = generate_certificate("test.mm", &atoms, &results, &module_env, None, None);
+        let cert = generate_certificate("test.mm", &atoms, &results, &module_env, None, None, None);
         let metadata = cert.atoms[0].solver_process_metadata.as_ref().unwrap();
 
         assert_eq!(metadata.task_id.as_deref(), Some("task-1"));
@@ -1180,7 +1363,7 @@ mod tests {
         );
         let module_env = ModuleEnv::new();
 
-        let cert = generate_certificate("test.mm", &atoms, &results, &module_env, None, None);
+        let cert = generate_certificate("test.mm", &atoms, &results, &module_env, None, None, None);
         let validation = cert.atoms[0].spec_validation_result.as_ref().unwrap();
 
         assert!(validation.is_satisfiable);
@@ -1201,7 +1384,7 @@ mod tests {
         );
         let module_env = ModuleEnv::new();
 
-        let cert = generate_certificate("test.mm", &atoms, &results, &module_env, None, None);
+        let cert = generate_certificate("test.mm", &atoms, &results, &module_env, None, None, None);
 
         // Verify with same source → "proven"
         let status = verify_certificate(&cert, &atoms, false);
@@ -1230,7 +1413,8 @@ mod tests {
             ("lean_verified".to_string(), "verified".to_string()),
         );
         let module_env = ModuleEnv::new();
-        let mut cert = generate_certificate("test.mm", &atoms, &results, &module_env, None, None);
+        let mut cert =
+            generate_certificate("test.mm", &atoms, &results, &module_env, None, None, None);
 
         // Default (backwards-compatible): lean_verified is NOT proven.
         let status_default = verify_certificate(&cert, &atoms, false);
@@ -1273,7 +1457,8 @@ mod tests {
             ("lean_verified".to_string(), "verified".to_string()),
         );
         let module_env = ModuleEnv::new();
-        let mut cert = generate_certificate("test.mm", &atoms, &results, &module_env, None, None);
+        let mut cert =
+            generate_certificate("test.mm", &atoms, &results, &module_env, None, None, None);
         cert.atoms[0].translator_version = "old-translator".to_string();
 
         let err = validate_translator_version(
@@ -1296,7 +1481,8 @@ mod tests {
             ("lean_verified".to_string(), "verified".to_string()),
         );
         let module_env = ModuleEnv::new();
-        let mut cert = generate_certificate("test.mm", &atoms, &results, &module_env, None, None);
+        let mut cert =
+            generate_certificate("test.mm", &atoms, &results, &module_env, None, None, None);
         cert.atoms[0].bridge_lemma_hash = "old-bridge-hash".to_string();
 
         let err = validate_translator_version(
@@ -1319,7 +1505,8 @@ mod tests {
             ("lean_verified".to_string(), "verified".to_string()),
         );
         let module_env = ModuleEnv::new();
-        let mut cert = generate_certificate("test.mm", &atoms, &results, &module_env, None, None);
+        let mut cert =
+            generate_certificate("test.mm", &atoms, &results, &module_env, None, None, None);
         cert.atoms[0].lean_metadata = Some(LeanResultMetadata {
             status: "lean_verified".to_string(),
             theorem_name: "hard_lemma_correct".to_string(),
@@ -1349,7 +1536,8 @@ mod tests {
             ("unsat".to_string(), "verified".to_string()),
         );
         let module_env = ModuleEnv::new();
-        let mut cert = generate_certificate("test.mm", &atoms, &results, &module_env, None, None);
+        let mut cert =
+            generate_certificate("test.mm", &atoms, &results, &module_env, None, None, None);
         cert.atoms[0].translator_version.clear();
         cert.atoms[0].bridge_lemma_hash.clear();
 
@@ -1376,7 +1564,7 @@ mod tests {
             ("lean_verified".to_string(), "verified".to_string()),
         );
         let module_env = ModuleEnv::new();
-        let cert = generate_certificate("test.mm", &atoms, &results, &module_env, None, None);
+        let cert = generate_certificate("test.mm", &atoms, &results, &module_env, None, None, None);
 
         let modified = make_test_atom("hard_lemma", "true", "true", "43");
         let modified_refs: Vec<&parser::Atom> = vec![&modified];
@@ -1397,8 +1585,10 @@ mod tests {
         );
         let module_env = ModuleEnv::new();
 
-        let cert1 = generate_certificate("test.mm", &atoms, &results, &module_env, None, None);
-        let cert2 = generate_certificate("test.mm", &atoms, &results, &module_env, None, None);
+        let cert1 =
+            generate_certificate("test.mm", &atoms, &results, &module_env, None, None, None);
+        let cert2 =
+            generate_certificate("test.mm", &atoms, &results, &module_env, None, None, None);
 
         // certificate_hash should be the same for the same inputs
         // (timestamp differs, so we check the hash is non-empty and format is correct)
@@ -1437,7 +1627,7 @@ mod tests {
         );
         let module_env = ModuleEnv::new();
 
-        let cert = generate_certificate("test.mm", &atoms, &results, &module_env, None, None);
+        let cert = generate_certificate("test.mm", &atoms, &results, &module_env, None, None, None);
         assert!(!cert.all_verified);
     }
 
@@ -1452,7 +1642,7 @@ mod tests {
         );
         let module_env = ModuleEnv::new();
 
-        let cert = generate_certificate("test.mm", &atoms, &results, &module_env, None, None);
+        let cert = generate_certificate("test.mm", &atoms, &results, &module_env, None, None, None);
         let validation = cert.atoms[0].spec_validation_result.as_ref().unwrap();
 
         assert!(!validation.is_satisfiable);
@@ -1469,7 +1659,8 @@ mod tests {
             ("unsat".to_string(), "verified".to_string()),
         );
         let module_env = ModuleEnv::new();
-        let mut cert = generate_certificate("test.mm", &atoms, &results, &module_env, None, None);
+        let mut cert =
+            generate_certificate("test.mm", &atoms, &results, &module_env, None, None, None);
         cert.atoms[0].translator_version = "old-translator".to_string();
 
         let tmp = std::env::temp_dir().join("mumei_stale_translator_cert.json");
@@ -1490,7 +1681,8 @@ mod tests {
             ("unsat".to_string(), "verified".to_string()),
         );
         let module_env = ModuleEnv::new();
-        let mut cert = generate_certificate("test.mm", &atoms, &results, &module_env, None, None);
+        let mut cert =
+            generate_certificate("test.mm", &atoms, &results, &module_env, None, None, None);
         cert.atoms[0].bridge_lemma_hash = "old-bridge-hash".to_string();
 
         let tmp = std::env::temp_dir().join("mumei_stale_bridge_cert.json");
@@ -1520,6 +1712,7 @@ mod tests {
             &module_env,
             Some("pkg"),
             Some("2.0.0"),
+            None,
         );
 
         let tmp = std::env::temp_dir().join("mumei_test_cert.json");
