@@ -360,6 +360,12 @@ enum Command {
     Run {
         /// Input .mm file
         input: String,
+        /// Emit target: binary (default) or llvm-ir
+        #[arg(long, default_value = "binary", value_parser = ["binary", "llvm-ir"])]
+        emit: String,
+        /// Output executable path (default: temporary binary)
+        #[arg(short, long)]
+        output: Option<String>,
         /// Arguments to pass to the compiled program
         #[arg(trailing_var_arg = true)]
         args: Vec<String>,
@@ -537,8 +543,13 @@ fn main() {
         }) => {
             cmd_verify_cert(&cert, &input, allow_lean_verified);
         }
-        Some(Command::Run { input, args }) => {
-            cmd_run(&input, &args);
+        Some(Command::Run {
+            input,
+            emit,
+            output,
+            args,
+        }) => {
+            cmd_run(&input, &emit, output.as_deref(), &args);
         }
         None => {
             // 後方互換: `mumei input.mm -o dist/katana` → build として実行
@@ -2362,6 +2373,62 @@ fn dispatch_emit(
     }
 }
 
+fn sanitized_runtime_symbol(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn write_effect_and_resource_runtime_stubs(
+    module_env: &verification::ModuleEnv,
+    output_path: &Path,
+) -> Result<(), String> {
+    use std::fmt::Write;
+
+    let mut source =
+        String::from("#include <pthread.h>\n#include <stdint.h>\n#include <stddef.h>\n\n");
+    let mut resources: Vec<_> = module_env.resources.keys().cloned().collect();
+    resources.sort();
+    for resource in resources {
+        let symbol = sanitized_runtime_symbol(&resource);
+        writeln!(
+            source,
+            "pthread_mutex_t __mumei_resource_{symbol} = PTHREAD_MUTEX_INITIALIZER;"
+        )
+        .map_err(|err| err.to_string())?;
+    }
+    if !module_env.resources.is_empty() {
+        source.push('\n');
+    }
+
+    let mut effects: Vec<_> = module_env.effect_defs.keys().cloned().collect();
+    effects.sort();
+    for effect in effects {
+        let symbol = sanitized_runtime_symbol(&effect);
+        writeln!(
+            source,
+            "int64_t __effect_{symbol}_stub(int64_t value) {{ (void)value; return 0; }}"
+        )
+        .map_err(|err| err.to_string())?;
+    }
+
+    if source.ends_with("\n\n") {
+        source.push_str("/* No named resources or effect stubs required. */\n");
+    }
+    std::fs::write(output_path, source).map_err(|err| {
+        format!(
+            "failed to write runtime stubs '{}': {err}",
+            output_path.display()
+        )
+    })
+}
+
 // =============================================================================
 // mumei build — full pipeline (verify + codegen)
 // =============================================================================
@@ -3002,14 +3069,21 @@ fn cmd_build(
             "  🔗 Linking {} atom(s) to native binary...",
             hir_atoms.len()
         );
-        if let Err(e) = linker::link_to_binary(std::slice::from_ref(&ll_path), &binary_output, None)
-        {
+        let runtime_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("runtime/mumei_runtime.c");
+        let runtime_stubs_path = output_dir.join(format!("{}_runtime_stubs.c", file_stem));
+        if let Err(e) = write_effect_and_resource_runtime_stubs(&module_env, &runtime_stubs_path) {
+            eprintln!("❌ Runtime stub generation failed: {}", e);
+            std::process::exit(1);
+        }
+        let link_inputs = vec![ll_path.clone(), runtime_stubs_path.clone()];
+        if let Err(e) = linker::link_to_binary(&link_inputs, &binary_output, Some(&runtime_path)) {
             eprintln!("❌ Linking failed: {}", e);
             std::process::exit(1);
         }
         println!("  ✅ Binary written to: {}", binary_output.display());
-        // Clean up intermediate .ll file
+        // Clean up intermediate files
         let _ = fs::remove_file(&ll_path);
+        let _ = fs::remove_file(&runtime_stubs_path);
     }
 
     // P5-A: Generate proof certificate or Lean escalation bundle when requested
@@ -3149,7 +3223,7 @@ fn cmd_build(
 // P7-B: mumei run — build and execute a native binary
 // =============================================================================
 
-fn cmd_run(input: &str, args: &[String]) {
+fn cmd_run(input: &str, emit: &str, output: Option<&str>, args: &[String]) {
     use std::process::Command;
 
     let tmp_dir = std::env::temp_dir().join(format!("mumei_run_{}", std::process::id()));
@@ -3158,11 +3232,24 @@ fn cmd_run(input: &str, args: &[String]) {
         std::process::exit(1);
     }
 
-    let binary_path = tmp_dir.join("mumei_output");
+    let output_path = output.map(PathBuf::from);
+    let binary_path = output_path
+        .clone()
+        .unwrap_or_else(|| tmp_dir.join("mumei_output"));
+    if let Some(parent) = binary_path.parent() {
+        if let Err(e) = fs::create_dir_all(parent) {
+            eprintln!(
+                "❌ Failed to create output directory '{}': {}",
+                parent.display(),
+                e
+            );
+            let _ = fs::remove_dir_all(&tmp_dir);
+            std::process::exit(1);
+        }
+    }
 
-    // Build with Binary emit target (reuse cmd_build pipeline logic)
     check_z3_available();
-    println!("🗡️  Mumei Run: Building and executing...");
+    println!("🗡️  Mumei Run: verify → codegen → link → execute");
 
     let (items, mut module_env, _imports, _source) = load_and_prepare(input);
     let extern_blocks = collect_extern_blocks(&items);
@@ -3261,31 +3348,62 @@ fn cmd_run(input: &str, args: &[String]) {
         }
     }
 
-    // Use the binary compilation pipeline from mumei-emit-llvm
-    let ll_path = tmp_dir.join("merged.ll");
-    if let Err(e) = mumei_emit_llvm::binary::compile_atoms_to_binary_ll(
-        &hir_atoms,
-        &module_env,
-        &extern_blocks,
-        &ll_path,
-    ) {
-        eprintln!("❌ Codegen failed: {}", e);
+    let runtime_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("runtime/mumei_runtime.c");
+    if !runtime_path.exists() {
+        eprintln!("❌ Runtime library not found: {}", runtime_path.display());
+        let _ = fs::remove_dir_all(&tmp_dir);
+        std::process::exit(1);
+    }
+    let runtime_stubs_path = tmp_dir.join("mumei_runtime_stubs.c");
+    if let Err(e) = write_effect_and_resource_runtime_stubs(&module_env, &runtime_stubs_path) {
+        eprintln!("❌ Runtime stub generation failed: {}", e);
         let _ = fs::remove_dir_all(&tmp_dir);
         std::process::exit(1);
     }
 
-    // Link to binary
+    let link_input = if emit == "llvm-ir" {
+        let ll_path = output_path
+            .as_ref()
+            .map(|path| path.with_extension("ll"))
+            .unwrap_or_else(|| tmp_dir.join("merged.ll"));
+        if let Err(e) = mumei_emit_llvm::binary::compile_atoms_to_binary_ll(
+            &hir_atoms,
+            &module_env,
+            &extern_blocks,
+            &ll_path,
+        ) {
+            eprintln!("❌ Codegen failed: {}", e);
+            let _ = fs::remove_dir_all(&tmp_dir);
+            std::process::exit(1);
+        }
+        ll_path
+    } else {
+        let object_path = tmp_dir.join("mumei_output.o");
+        if let Err(e) = mumei_emit_llvm::binary::compile_atoms_to_binary_object(
+            &hir_atoms,
+            &module_env,
+            &extern_blocks,
+            &object_path,
+        ) {
+            eprintln!("❌ Codegen failed: {}", e);
+            let _ = fs::remove_dir_all(&tmp_dir);
+            std::process::exit(1);
+        }
+        object_path
+    };
+
     println!(
         "  🔗 Linking {} atom(s) to native binary...",
         hir_atoms.len()
     );
-    if let Err(e) = linker::link_to_binary(std::slice::from_ref(&ll_path), &binary_path, None) {
+    let link_inputs = vec![link_input.clone(), runtime_stubs_path.clone()];
+    if let Err(e) = linker::link_to_binary(&link_inputs, &binary_path, Some(&runtime_path)) {
         eprintln!("❌ Linking failed: {}", e);
         let _ = fs::remove_dir_all(&tmp_dir);
         std::process::exit(1);
     }
 
-    println!("  🚀 Running...\n");
+    println!("  🚀 Running {}...\n", binary_path.display());
 
     // Execute the binary
     let status = Command::new(&binary_path)
@@ -3297,7 +3415,9 @@ fn cmd_run(input: &str, args: &[String]) {
             std::process::exit(1);
         });
 
-    // Clean up
+    if output_path.is_some() {
+        println!("\n  ✅ Binary written to: {}", binary_path.display());
+    }
     let _ = fs::remove_dir_all(&tmp_dir);
 
     // Exit with the child's exit code

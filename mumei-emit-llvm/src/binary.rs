@@ -5,11 +5,19 @@
 
 use inkwell::context::Context;
 use mumei_core::hir::{HirAtom, HirExpr, HirStmt};
+use mumei_core::parser::Atom;
 use mumei_core::parser::ExternBlock;
 use mumei_core::verification::{ModuleEnv, MumeiError, MumeiResult};
 use std::path::Path;
 
-use crate::codegen::compile_atom_into_module;
+use crate::codegen::{compile_atom_into_module, compile_llvm_ir_to_object};
+
+fn rename_calls_in_atom(atom: &mut Atom, from: &str, to: &str) {
+    let replacement = format!("{to}(");
+    atom.body_expr = atom.body_expr.replace(&format!("{from}("), &replacement);
+    atom.requires = atom.requires.replace(&format!("{from}("), &replacement);
+    atom.ensures = atom.ensures.replace(&format!("{from}("), &replacement);
+}
 
 /// Recursively rename function calls in a HirExpr from `from` to `to`.
 fn rename_calls_in_hir_expr(expr: &mut HirExpr, from: &str, to: &str) {
@@ -198,10 +206,7 @@ pub fn compile_atoms_to_binary_ll(
             // Rename self-recursive calls inside the body so they target
             // __mumei_user_main instead of the C wrapper main.
             rename_calls_in_hir_stmt(&mut renamed.body, "main", "__mumei_user_main");
-            renamed.atom.body_expr = renamed
-                .atom
-                .body_expr
-                .replace("main(", "__mumei_user_main(");
+            rename_calls_in_atom(&mut renamed.atom, "main", "__mumei_user_main");
             compile_atom_into_module(
                 &context,
                 &merged_module,
@@ -214,10 +219,7 @@ pub fn compile_atoms_to_binary_ll(
             // __mumei_user_main instead of the C wrapper main(argc, argv).
             let mut patched = hir_atom.clone();
             rename_calls_in_hir_stmt(&mut patched.body, "main", "__mumei_user_main");
-            patched.atom.body_expr = patched
-                .atom
-                .body_expr
-                .replace("main(", "__mumei_user_main(");
+            rename_calls_in_atom(&mut patched.atom, "main", "__mumei_user_main");
             compile_atom_into_module(
                 &context,
                 &merged_module,
@@ -272,12 +274,26 @@ pub fn compile_atoms_to_binary_ll(
         .build_return(Some(&exit_code))
         .map_err(|e| MumeiError::codegen(format!("Failed to build return: {}", e)))?;
 
-    // Write merged module to .ll file
     merged_module
         .print_to_file(output_ll_path)
         .map_err(|e| MumeiError::codegen(format!("Failed to write LLVM IR: {}", e)))?;
 
     Ok(())
+}
+
+pub fn compile_atoms_to_binary_object(
+    hir_atoms: &[HirAtom],
+    module_env: &ModuleEnv,
+    extern_blocks: &[ExternBlock],
+    output_object_path: &Path,
+) -> MumeiResult<()> {
+    let ll_path = output_object_path.with_extension("ll");
+    compile_atoms_to_binary_ll(hir_atoms, module_env, extern_blocks, &ll_path)?;
+    let object_result = compile_llvm_ir_to_object(&ll_path, output_object_path);
+    if object_result.is_ok() {
+        let _ = std::fs::remove_file(&ll_path);
+    }
+    object_result
 }
 
 #[cfg(test)]

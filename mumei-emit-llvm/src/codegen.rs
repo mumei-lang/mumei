@@ -1,11 +1,15 @@
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Module;
+use inkwell::targets::{
+    CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine,
+};
 use inkwell::types::{BasicMetadataTypeEnum, BasicType};
 use inkwell::values::{AnyValue, BasicMetadataValueEnum, BasicValueEnum, FunctionValue, PhiValue};
 use inkwell::AddressSpace;
 use inkwell::FloatPredicate;
 use inkwell::IntPredicate;
+use inkwell::OptimizationLevel;
 use mumei_core::hir::{collect_free_variables_stmt, HirAtom, HirExpr, HirStmt};
 use mumei_core::parser::{JoinSemantics, Op, Pattern};
 use mumei_core::verification::{ModuleEnv, MumeiError, MumeiResult};
@@ -270,6 +274,63 @@ pub fn compile_to_module(
 
 /// Original compile function — calls compile_atom_into_module then writes .ll file.
 /// Preserves existing behavior including effects comment insertion.
+pub fn compile_atoms_into_module<'ctx>(
+    context: &'ctx Context,
+    module: &Module<'ctx>,
+    hir_atoms: &[HirAtom],
+    module_env: &ModuleEnv,
+    extern_blocks: &[mumei_core::parser::ExternBlock],
+) -> MumeiResult<()> {
+    for hir_atom in hir_atoms {
+        compile_atom_into_module(context, module, hir_atom, module_env, extern_blocks)?;
+    }
+    Ok(())
+}
+
+pub fn compile_llvm_ir_to_object(ir_path: &Path, object_path: &Path) -> MumeiResult<()> {
+    Target::initialize_native(&InitializationConfig::default()).map_err(|e| {
+        MumeiError::codegen(format!("Failed to initialize native LLVM target: {e}"))
+    })?;
+
+    let triple = TargetMachine::get_default_triple();
+    let target = Target::from_triple(&triple)
+        .map_err(|e| MumeiError::codegen(format!("Failed to create LLVM target: {e}")))?;
+    let machine = target
+        .create_target_machine(
+            &triple,
+            "generic",
+            "",
+            OptimizationLevel::Default,
+            RelocMode::Default,
+            CodeModel::Default,
+        )
+        .ok_or_else(|| MumeiError::codegen("Failed to create LLVM target machine".to_string()))?;
+
+    let context = Context::create();
+    let memory_buffer =
+        inkwell::memory_buffer::MemoryBuffer::create_from_file(ir_path).map_err(|e| {
+            MumeiError::codegen(format!(
+                "Failed to read LLVM IR '{}': {e}",
+                ir_path.display()
+            ))
+        })?;
+    let module = context.create_module_from_ir(memory_buffer).map_err(|e| {
+        MumeiError::codegen(format!(
+            "Failed to parse LLVM IR '{}': {e}",
+            ir_path.display()
+        ))
+    })?;
+
+    machine
+        .write_to_file(&module, FileType::Object, object_path)
+        .map_err(|e| {
+            MumeiError::codegen(format!(
+                "Failed to write object '{}': {e}",
+                object_path.display()
+            ))
+        })
+}
+
 pub fn compile(
     hir_atom: &HirAtom,
     output_path: &Path,
@@ -477,7 +538,6 @@ fn compile_hir_stmt<'a>(
             Ok(last_val)
         }
         HirStmt::Acquire { resource, body } => {
-            // --- mutex_lock/unlock の外部関数宣言 ---
             let ptr_type = context.ptr_type(AddressSpace::default());
             let i32_type = context.i32_type();
 
@@ -501,16 +561,31 @@ fn compile_hir_stmt<'a>(
                         Some(inkwell::module::Linkage::External),
                     )
                 });
-
-            let global_name = format!("__mumei_resource_{}", resource);
-            let mutex_global = module.get_global(&global_name).unwrap_or_else(|| {
-                let i8_type = context.i8_type();
-                let global =
-                    module.add_global(i8_type, Some(AddressSpace::default()), &global_name);
-                global.set_linkage(inkwell::module::Linkage::External);
-                global
-            });
-            let mutex_ptr = mutex_global.as_pointer_value();
+            let get_resource_fn = module
+                .get_function("__mumei_get_resource_mutex")
+                .unwrap_or_else(|| {
+                    let fn_type = ptr_type.fn_type(&[ptr_type.into()], false);
+                    module.add_function(
+                        "__mumei_get_resource_mutex",
+                        fn_type,
+                        Some(inkwell::module::Linkage::External),
+                    )
+                });
+            let resource_name = builder
+                .build_global_string_ptr(resource, &format!("resource_name_{}", resource))
+                .map_err(|e| MumeiError::codegen(format!("Failed to build resource name: {e}")))?;
+            let mutex_call = llvm!(builder.build_call(
+                get_resource_fn,
+                &[resource_name.as_pointer_value().into()],
+                &format!("resource_{}", resource)
+            ));
+            let mutex_ptr = mutex_call
+                .try_as_basic_value()
+                .left()
+                .ok_or_else(|| {
+                    MumeiError::codegen("resource mutex helper returned void".to_string())
+                })?
+                .into_pointer_value();
 
             llvm!(builder.build_call(lock_fn, &[mutex_ptr.into()], &format!("lock_{}", resource)));
 
@@ -1305,9 +1380,19 @@ fn compile_hir_expr<'a>(
                 })
                 .collect();
             let fn_type = context.i64_type().fn_type(&param_types, false);
-            let callee_fn = module.get_function(&fn_name).unwrap_or_else(|| {
-                module.add_function(&fn_name, fn_type, Some(inkwell::module::Linkage::External))
-            });
+            let callee_fn = if let Some(function) = module.get_function(&fn_name) {
+                function
+            } else {
+                let function = module.add_function(&fn_name, fn_type, None);
+                let current_block = builder.get_insert_block();
+                let entry = context.append_basic_block(function, "entry");
+                builder.position_at_end(entry);
+                llvm!(builder.build_return(Some(&context.i64_type().const_int(0, false))));
+                if let Some(block) = current_block {
+                    builder.position_at_end(block);
+                }
+                function
+            };
 
             let args_meta: Vec<BasicMetadataValueEnum> =
                 arg_vals.iter().map(|v| (*v).into()).collect();
