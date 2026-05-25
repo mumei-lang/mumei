@@ -293,6 +293,7 @@ pub(crate) fn verify_inner(
                 None,
                 Some(&atom.span),
                 None,
+                None,
             );
             return Ok(());
         }
@@ -317,6 +318,7 @@ pub(crate) fn verify_inner(
                     "",
                     None,
                     Some(&atom.span),
+                    None,
                     None,
                 );
                 return Ok(());
@@ -1385,6 +1387,7 @@ pub(crate) fn verify_inner(
                 semantic_fb.as_ref(),
                 Some(&atom.span),
                 Some(&constraint_mappings),
+                None,
             );
             return Err(e);
         }
@@ -1407,13 +1410,23 @@ pub(crate) fn verify_inner(
             let ensures_check = solver.check();
             if ensures_check == SatResult::Sat {
                 // Extract counterexample from Z3 model
-                let (ce_a, ce_b, ce_value) = if let Some(model) = solver.get_model() {
+                let (ce_a, ce_b, ce_value, data_flow_trace) = if let Some(model) =
+                    solver.get_model()
+                {
                     let mut ce_json = serde_json::Map::new();
+                    let mut model_map = HashMap::new();
                     for param in &atom.params {
                         if let Some(var_z3) = env.get(&param.name) {
                             if let Some(val) = model.eval(var_z3, true) {
                                 let val_str = format!("{}", val);
                                 ce_json.insert(param.name.clone(), json!(val_str));
+                            }
+                        }
+                    }
+                    for (name, var_z3) in &env {
+                        if let Some(val) = model.eval(var_z3, true) {
+                            if let Some(int_value) = z3_dynamic_to_i64(&val) {
+                                model_map.insert(name.clone(), int_value);
                             }
                         }
                     }
@@ -1432,15 +1445,9 @@ pub(crate) fn verify_inner(
                     } else {
                         Some(serde_json::Value::Object(ce_json))
                     };
+                    let data_flow_trace =
+                        build_data_flow_trace(atom, &model_map, module_env, hir_atom);
                     if enable_spurious_detection {
-                        let mut model_map = HashMap::new();
-                        for (name, var_z3) in &env {
-                            if let Some(val) = model.eval(var_z3, true) {
-                                if let Some(int_value) = z3_dynamic_to_i64(&val) {
-                                    model_map.insert(name.clone(), int_value);
-                                }
-                            }
-                        }
                         let validation = validate_counterexample(atom, &model_map, module_env);
                         if validation.validation_status == "spurious_candidate" {
                             solver.pop(1);
@@ -1472,9 +1479,9 @@ pub(crate) fn verify_inner(
                             .with_counterexample(ce_val.clone()));
                         }
                     }
-                    (a_str, b_str, ce_val)
+                    (a_str, b_str, ce_val, data_flow_trace)
                 } else {
-                    ("N/A".to_string(), "N/A".to_string(), None)
+                    ("N/A".to_string(), "N/A".to_string(), None, None)
                 };
                 solver.pop(1);
                 let constraint_mappings = build_constraint_mappings_for_atom(atom, module_env);
@@ -1497,6 +1504,7 @@ pub(crate) fn verify_inner(
                     semantic_fb.as_ref(),
                     Some(&atom.span),
                     Some(&constraint_mappings),
+                    data_flow_trace.as_ref(),
                 );
                 metrics.record_phase(
                     "Phase 5: ensures verification (failed)",
@@ -1594,6 +1602,7 @@ pub(crate) fn verify_inner(
                 Some(&linearity_fb),
                 Some(&atom.span),
                 None,
+                None,
             );
             return Err(MumeiError::verification_at(
                 format!(
@@ -1646,6 +1655,7 @@ pub(crate) fn verify_inner(
             FAILURE_INVARIANT_VIOLATED,
             Some(&contradiction_fb),
             Some(&atom.span),
+            None,
             None,
         );
 
@@ -1710,6 +1720,7 @@ pub(crate) fn verify_inner(
         None,
         Some(&atom.span),
         None,
+        None,
     );
     Ok(())
 }
@@ -1734,6 +1745,7 @@ pub(crate) fn save_visualizer_report(
     semantic_feedback: Option<&serde_json::Value>,
     span: Option<&Span>,
     constraint_mappings: Option<&[ConstraintMapping]>,
+    data_flow_trace: Option<&DataFlowTrace>,
 ) {
     let mut report = json!({
         "status": status,
@@ -1750,6 +1762,9 @@ pub(crate) fn save_visualizer_report(
     }
     if let Some(sf) = semantic_feedback {
         report["semantic_feedback"] = sf.clone();
+    }
+    if let Some(trace) = data_flow_trace {
+        report["data_flow_trace"] = json!(trace);
     }
     if let Some(task_id) = orchestration_task_id_from_env() {
         report["task_id"] = json!(task_id);

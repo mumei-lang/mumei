@@ -350,6 +350,7 @@ pub fn verify_impl(
                                 None,
                                 Some(&impl_def.span),
                                 None,
+                                None,
                             );
                             if ce_parts.is_empty() {
                                 ("  (no concrete values available)".to_string(), ce_value)
@@ -2252,6 +2253,389 @@ pub(crate) fn check_taint_propagation(
                 atom.name, tainted_sources.join(", ")
             );
         }
+    }
+}
+
+// =============================================================================
+// Source-map data flow trace (spurious counterexample debugging)
+// =============================================================================
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct DataFlowTrace {
+    pub initial_state: Vec<VariableState>,
+    pub execution_path: Vec<ExecutionStep>,
+    pub violation: ViolationInfo,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct VariableState {
+    pub name: String,
+    pub value: String,
+    pub line: usize,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ExecutionStep {
+    pub line: usize,
+    pub expression: String,
+    pub mutations: Vec<VariableMutation>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct VariableMutation {
+    pub name: String,
+    pub before: String,
+    pub after: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ViolationInfo {
+    pub line: usize,
+    pub contract_type: String,
+    pub expression: String,
+    pub evaluated_as: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum TraceValue {
+    Int(i64),
+    Bool(bool),
+    String(String),
+}
+
+/// Build an LLM-readable data-flow trace from a concrete Z3 model.
+///
+/// The trace replays the HIR body under Mumei semantics, records source-line
+/// mutations, and localizes the failing postcondition. It is intentionally
+/// conservative: unsupported statement/expression forms return `None` rather
+/// than producing misleading debug stories.
+pub fn build_data_flow_trace(
+    atom: &Atom,
+    model: &HashMap<String, i64>,
+    module_env: &ModuleEnv,
+    hir_atom: &HirAtom,
+) -> Option<DataFlowTrace> {
+    let mut env = model.clone();
+    let initial_state: Vec<VariableState> = atom
+        .params
+        .iter()
+        .filter_map(|param| {
+            let value = model.get(&param.name)?;
+            Some(VariableState {
+                name: param.name.clone(),
+                value: value.to_string(),
+                line: atom.span.line,
+            })
+        })
+        .collect();
+
+    let mut execution_path = Vec::new();
+    let result = trace_stmt(
+        &hir_atom.body_stmt,
+        &mut env,
+        module_env,
+        &mut execution_path,
+        0,
+    )?;
+    match &result {
+        TraceValue::Int(value) => {
+            env.insert("result".to_string(), *value);
+        }
+        TraceValue::Bool(value) => {
+            env.insert("result".to_string(), i64::from(*value));
+        }
+        TraceValue::String(_) => {}
+    }
+
+    let ensures_expr = parse_expression(&atom.ensures);
+    let evaluated = trace_eval_expr(&ensures_expr, &mut env, module_env, 0)?;
+    let is_satisfied = trace_value_as_bool(&evaluated)?;
+    if is_satisfied {
+        return None;
+    }
+
+    Some(DataFlowTrace {
+        initial_state,
+        execution_path,
+        violation: ViolationInfo {
+            line: atom.span.line,
+            contract_type: "ensures".to_string(),
+            expression: atom.ensures.clone(),
+            evaluated_as: format!(
+                "{} ({})",
+                trace_evaluated_expression(&ensures_expr, &env),
+                if is_satisfied { "TRUE" } else { "FALSE" }
+            ),
+        },
+    })
+}
+
+fn trace_stmt(
+    stmt: &Stmt,
+    env: &mut HashMap<String, i64>,
+    module_env: &ModuleEnv,
+    execution_path: &mut Vec<ExecutionStep>,
+    depth: usize,
+) -> Option<TraceValue> {
+    match stmt {
+        Stmt::Let { var, value, span } | Stmt::Assign { var, value, span } => {
+            let before = env
+                .get(var)
+                .map(i64::to_string)
+                .unwrap_or_else(|| "<unbound>".to_string());
+            let eval = trace_eval_expr(value, env, module_env, depth)?;
+            let after = trace_value_as_int(&eval)?;
+            env.insert(var.clone(), after);
+            let after_string = after.to_string();
+            execution_path.push(ExecutionStep {
+                line: span.line,
+                expression: format!("{} = {}", var, expr_to_source_string(value)),
+                mutations: vec![VariableMutation {
+                    name: var.clone(),
+                    before,
+                    after: after_string,
+                }],
+            });
+            Some(TraceValue::Int(after))
+        }
+        Stmt::Block(stmts, _) => {
+            let mut last = TraceValue::Int(0);
+            for stmt in stmts {
+                last = trace_stmt(stmt, env, module_env, execution_path, depth)?;
+            }
+            Some(last)
+        }
+        Stmt::Expr(expr, span) => {
+            let value = trace_eval_expr(expr, env, module_env, depth)?;
+            execution_path.push(ExecutionStep {
+                line: span.line,
+                expression: expr_to_source_string(expr),
+                mutations: Vec::new(),
+            });
+            Some(value)
+        }
+        Stmt::While { .. }
+        | Stmt::Acquire { .. }
+        | Stmt::Task { .. }
+        | Stmt::TaskGroup { .. }
+        | Stmt::Cancel { .. }
+        | Stmt::ArrayStore { .. } => None,
+    }
+}
+
+fn trace_eval_expr(
+    expr: &Expr,
+    env: &mut HashMap<String, i64>,
+    module_env: &ModuleEnv,
+    depth: usize,
+) -> Option<TraceValue> {
+    if depth > 8 {
+        return None;
+    }
+
+    match expr {
+        Expr::Number(value) => Some(TraceValue::Int(*value)),
+        Expr::Float(_) => None,
+        Expr::StringLit(value) => Some(TraceValue::String(value.clone())),
+        Expr::Variable(name) if name == "true" => Some(TraceValue::Bool(true)),
+        Expr::Variable(name) if name == "false" => Some(TraceValue::Bool(false)),
+        Expr::Variable(name) => env.get(name).copied().map(TraceValue::Int),
+        Expr::BinaryOp(left, op, right) => {
+            let left_value = trace_eval_expr(left, env, module_env, depth)?;
+            let right_value = trace_eval_expr(right, env, module_env, depth)?;
+            trace_eval_binary(left_value, op, right_value)
+        }
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            let cond_value = trace_eval_expr(cond, env, module_env, depth)?;
+            if trace_value_as_bool(&cond_value)? {
+                trace_stmt(then_branch, env, module_env, &mut Vec::new(), depth)
+            } else {
+                trace_stmt(else_branch, env, module_env, &mut Vec::new(), depth)
+            }
+        }
+        Expr::Call(name, args) => trace_eval_atom_call(name, args, env, module_env, depth + 1),
+        Expr::ArrayAccess(_, _)
+        | Expr::StructInit { .. }
+        | Expr::FieldAccess(_, _)
+        | Expr::Match { .. }
+        | Expr::Async { .. }
+        | Expr::Await { .. }
+        | Expr::AtomRef { .. }
+        | Expr::CallRef { .. }
+        | Expr::Perform { .. }
+        | Expr::Lambda { .. }
+        | Expr::ChanSend { .. }
+        | Expr::ChanRecv { .. } => None,
+    }
+}
+
+fn trace_eval_atom_call(
+    name: &str,
+    args: &[Expr],
+    env: &mut HashMap<String, i64>,
+    module_env: &ModuleEnv,
+    depth: usize,
+) -> Option<TraceValue> {
+    let callee = module_env.get_atom(name)?;
+    if callee.trust_level == TrustLevel::Trusted || args.len() != callee.params.len() {
+        return None;
+    }
+
+    let mut call_env = HashMap::new();
+    for (param, arg) in callee.params.iter().zip(args) {
+        let value = trace_eval_expr(arg, env, module_env, depth)?;
+        call_env.insert(param.name.clone(), trace_value_as_int(&value)?);
+    }
+
+    if !trace_eval_bool_clause(&callee.requires, &mut call_env, module_env)? {
+        return None;
+    }
+    let body = parse_body_expr(&callee.body_expr);
+    let result = trace_stmt(&body, &mut call_env, module_env, &mut Vec::new(), depth)?;
+    match &result {
+        TraceValue::Int(value) => {
+            call_env.insert("result".to_string(), *value);
+        }
+        TraceValue::Bool(value) => {
+            call_env.insert("result".to_string(), i64::from(*value));
+        }
+        TraceValue::String(_) => {}
+    }
+    if !trace_eval_bool_clause(&callee.ensures, &mut call_env, module_env)? {
+        return None;
+    }
+    Some(result)
+}
+
+fn trace_eval_bool_clause(
+    clause: &str,
+    env: &mut HashMap<String, i64>,
+    module_env: &ModuleEnv,
+) -> Option<bool> {
+    if clause.trim().is_empty() || clause.trim() == "true" {
+        return Some(true);
+    }
+    let expr = parse_expression(clause);
+    let value = trace_eval_expr(&expr, env, module_env, 0)?;
+    trace_value_as_bool(&value)
+}
+
+fn trace_eval_binary(left: TraceValue, op: &Op, right: TraceValue) -> Option<TraceValue> {
+    match (left, right) {
+        (TraceValue::Int(left), TraceValue::Int(right)) => match op {
+            Op::Add => Some(TraceValue::Int(left + right)),
+            Op::Sub => Some(TraceValue::Int(left - right)),
+            Op::Mul => Some(TraceValue::Int(left * right)),
+            Op::Div if right != 0 => Some(TraceValue::Int(left / right)),
+            Op::Div => None,
+            Op::Eq => Some(TraceValue::Bool(left == right)),
+            Op::Neq => Some(TraceValue::Bool(left != right)),
+            Op::Gt => Some(TraceValue::Bool(left > right)),
+            Op::Lt => Some(TraceValue::Bool(left < right)),
+            Op::Ge => Some(TraceValue::Bool(left >= right)),
+            Op::Le => Some(TraceValue::Bool(left <= right)),
+            Op::And => Some(TraceValue::Bool(left != 0 && right != 0)),
+            Op::Or => Some(TraceValue::Bool(left != 0 || right != 0)),
+            Op::Implies => Some(TraceValue::Bool(left == 0 || right != 0)),
+        },
+        (TraceValue::Bool(left), TraceValue::Bool(right)) => match op {
+            Op::Eq => Some(TraceValue::Bool(left == right)),
+            Op::Neq => Some(TraceValue::Bool(left != right)),
+            Op::And => Some(TraceValue::Bool(left && right)),
+            Op::Or => Some(TraceValue::Bool(left || right)),
+            Op::Implies => Some(TraceValue::Bool(!left || right)),
+            _ => None,
+        },
+        (TraceValue::String(left), TraceValue::String(right)) => match op {
+            Op::Eq => Some(TraceValue::Bool(left == right)),
+            Op::Neq => Some(TraceValue::Bool(left != right)),
+            _ => None,
+        },
+        (left, right) => {
+            let left_int = trace_value_as_int(&left);
+            let right_int = trace_value_as_int(&right);
+            let left_bool = trace_value_as_bool(&left);
+            let right_bool = trace_value_as_bool(&right);
+            match (left_int, right_int, left_bool, right_bool, op) {
+                (Some(left), Some(right), _, _, Op::Eq) => Some(TraceValue::Bool(left == right)),
+                (Some(left), Some(right), _, _, Op::Neq) => Some(TraceValue::Bool(left != right)),
+                (_, _, Some(left), Some(right), Op::And) => Some(TraceValue::Bool(left && right)),
+                (_, _, Some(left), Some(right), Op::Or) => Some(TraceValue::Bool(left || right)),
+                (_, _, Some(left), Some(right), Op::Implies) => {
+                    Some(TraceValue::Bool(!left || right))
+                }
+                _ => None,
+            }
+        }
+    }
+}
+
+fn trace_value_as_int(value: &TraceValue) -> Option<i64> {
+    match value {
+        TraceValue::Int(value) => Some(*value),
+        TraceValue::Bool(value) => Some(i64::from(*value)),
+        TraceValue::String(_) => None,
+    }
+}
+
+fn trace_value_as_bool(value: &TraceValue) -> Option<bool> {
+    match value {
+        TraceValue::Bool(value) => Some(*value),
+        TraceValue::Int(value) => Some(*value != 0),
+        TraceValue::String(_) => None,
+    }
+}
+
+fn trace_evaluated_expression(expr: &Expr, env: &HashMap<String, i64>) -> String {
+    match expr {
+        Expr::Number(value) => value.to_string(),
+        Expr::Float(value) => value.to_string(),
+        Expr::StringLit(value) => format!("\"{}\"", value),
+        Expr::Variable(name) if name == "true" || name == "false" => name.clone(),
+        Expr::Variable(name) => env.get(name).map_or_else(|| name.clone(), i64::to_string),
+        Expr::BinaryOp(left, op, right) => format!(
+            "{} {} {}",
+            trace_evaluated_expression(left, env),
+            trace_op_symbol(op),
+            trace_evaluated_expression(right, env)
+        ),
+        Expr::Call(name, args) => {
+            let args = args
+                .iter()
+                .map(|arg| trace_evaluated_expression(arg, env))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{}({})", name, args)
+        }
+        Expr::FieldAccess(base, field) => {
+            format!("{}.{}", trace_evaluated_expression(base, env), field)
+        }
+        Expr::ArrayAccess(name, idx) => {
+            format!("{}[{}]", name, trace_evaluated_expression(idx, env))
+        }
+        _ => expr_to_source_string(expr),
+    }
+}
+
+fn trace_op_symbol(op: &Op) -> &'static str {
+    match op {
+        Op::Add => "+",
+        Op::Sub => "-",
+        Op::Mul => "*",
+        Op::Div => "/",
+        Op::Eq => "==",
+        Op::Neq => "!=",
+        Op::Gt => ">",
+        Op::Lt => "<",
+        Op::Ge => ">=",
+        Op::Le => "<=",
+        Op::And => "&&",
+        Op::Or => "||",
+        Op::Implies => "==>",
     }
 }
 
