@@ -1696,6 +1696,9 @@ mod tests {
         assert!(ir
             .requires_bridge_lemmas
             .contains(&"mumei_array_bounds_bridge".to_string()));
+        assert!(ir
+            .requires_bridge_lemmas
+            .contains(&"mumei_array_get_bridge".to_string()));
     }
 
     /// PR 2: `allow_lean_verified` does not weaken the `"changed"` detector.

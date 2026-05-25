@@ -953,18 +953,22 @@ fn bridge_lemmas_for_rules(lowering_rules: &[String]) -> Vec<String> {
         .any(|rule| rule == "integer_overflow_bridge")
     {
         lemmas.push("mumei_i64_overflow_bridge".to_string());
+        lemmas.push("mumei_i64_add_overflow_bridge".to_string());
+        lemmas.push("mumei_div_by_zero_bridge".to_string());
     }
     if lowering_rules
         .iter()
         .any(|rule| rule == "array_bounds_bridge")
     {
         lemmas.push("mumei_array_bounds_bridge".to_string());
+        lemmas.push("mumei_array_get_bridge".to_string());
     }
     if lowering_rules
         .iter()
         .any(|rule| rule == "string_regex_bridge")
     {
         lemmas.push("mumei_regex_bridge".to_string());
+        lemmas.push("mumei_string_concat_bridge".to_string());
     }
     if lowering_rules
         .iter()
