@@ -17,7 +17,7 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -1544,40 +1544,73 @@ pub fn compute_proof_hash(atom: &crate::parser::Atom, module_env: &ModuleEnv) ->
 pub fn compute_contract_hash(atom: &crate::parser::Atom) -> String {
     let mut hasher = Sha256::new();
 
-    hasher.update(atom.name.as_bytes());
-    hasher.update(b"|");
-    hasher.update(atom.requires.as_bytes());
-    hasher.update(b"|");
-    hasher.update(atom.ensures.as_bytes());
-    hasher.update(b"|");
+    hash_field(&mut hasher, "name", &atom.name);
+    hash_field(&mut hasher, "requires", &atom.requires);
+    for q in &atom.forall_constraints {
+        let quantifier_type = match q.q_type {
+            crate::parser::QuantifierType::ForAll => "forall",
+            crate::parser::QuantifierType::Exists => "exists",
+        };
+        hash_field(&mut hasher, "quantifier.type", quantifier_type);
+        hash_field(&mut hasher, "quantifier.var", &q.var);
+        hash_field(&mut hasher, "quantifier.start", &q.start);
+        hash_field(&mut hasher, "quantifier.end", &q.end);
+        hash_field(&mut hasher, "quantifier.condition", &q.condition);
+    }
+    hash_field(&mut hasher, "ensures", &atom.ensures);
     if let Some(ref inv) = atom.invariant {
-        hasher.update(b"invariant:");
-        hasher.update(inv.as_bytes());
+        hash_field(&mut hasher, "invariant", inv);
     }
     for e in &atom.effects {
-        hasher.update(b"effect:");
-        hasher.update(e.name.as_bytes());
+        hash_field(&mut hasher, "effect.name", &e.name);
+        hash_field(
+            &mut hasher,
+            "effect.negated",
+            if e.negated { "true" } else { "false" },
+        );
         for p in &e.params {
-            hasher.update(b",param:");
-            hasher.update(p.value.as_bytes());
+            hash_field(&mut hasher, "effect.param.value", &p.value);
+            hash_field(
+                &mut hasher,
+                "effect.param.is_constant",
+                if p.is_constant { "true" } else { "false" },
+            );
+            if let Some(ref refinement) = p.refinement {
+                hash_field(&mut hasher, "effect.param.refinement", refinement);
+            }
         }
     }
     for p in &atom.params {
         if let Some(ref req) = p.fn_contract_requires {
-            hasher.update(b"|fn_contract_req:");
-            hasher.update(p.name.as_bytes());
-            hasher.update(b"=");
-            hasher.update(req.as_bytes());
+            hash_field(&mut hasher, "fn_contract.param", &p.name);
+            hash_field(&mut hasher, "fn_contract.requires", req);
         }
         if let Some(ref ens) = p.fn_contract_ensures {
-            hasher.update(b"|fn_contract_ens:");
-            hasher.update(p.name.as_bytes());
-            hasher.update(b"=");
-            hasher.update(ens.as_bytes());
+            hash_field(&mut hasher, "fn_contract.param", &p.name);
+            hash_field(&mut hasher, "fn_contract.ensures", ens);
         }
     }
+    hash_string_map(&mut hasher, "effect_pre", &atom.effect_pre);
+    hash_string_map(&mut hasher, "effect_post", &atom.effect_post);
 
     format!("{:x}", hasher.finalize())
+}
+
+fn hash_field(hasher: &mut Sha256, label: &str, value: &str) {
+    hasher.update(label.as_bytes());
+    hasher.update(b"#");
+    hasher.update(value.len().to_string().as_bytes());
+    hasher.update(b":");
+    hasher.update(value.as_bytes());
+    hasher.update(b";");
+}
+
+fn hash_string_map(hasher: &mut Sha256, label: &str, values: &HashMap<String, String>) {
+    let sorted: BTreeMap<&String, &String> = values.iter().collect();
+    for (key, value) in sorted {
+        hash_field(hasher, label, key);
+        hash_field(hasher, label, value);
+    }
 }
 
 /// Collect callee names from an atom's body expression string.

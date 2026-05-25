@@ -7,8 +7,8 @@ use super::translator::*;
 use super::types::*;
 use crate::hir::lower_atom_to_hir_with_env;
 use crate::parser::{
-    Atom, Effect, EffectDef, EffectTransition, Expr, ImplDef, Op, Param, Span, TraitDef,
-    TraitMethod, TrustLevel,
+    parse_module, Atom, Effect, EffectDef, EffectTransition, Expr, ImplDef, Item, Op, Param,
+    Quantifier, QuantifierType, Span, TraitDef, TraitMethod, TrustLevel,
 };
 use crate::resolver::compute_contract_hash;
 use crate::verification::{generate_contract_manifest, verify_contract_integrity};
@@ -98,6 +98,113 @@ fn test_contract_hash_ignores_body_changes() {
     assert_eq!(
         compute_contract_hash(&atom),
         compute_contract_hash(&changed_body)
+    );
+}
+
+#[test]
+fn test_contract_hash_detects_quantifier_changes() {
+    let mut atom = test_atom(
+        "array_non_negative",
+        vec![test_param("n", Some("i64"))],
+        "n >= 0 && true",
+        "result == n",
+        "n",
+        Some("i64"),
+    );
+    atom.forall_constraints.push(Quantifier {
+        q_type: QuantifierType::ForAll,
+        var: "i".to_string(),
+        start: "0".to_string(),
+        end: "n".to_string(),
+        condition: "arr[i] >= 0".to_string(),
+    });
+
+    let mut mutated = atom.clone();
+    mutated.forall_constraints[0].condition = "arr[i] > 0".to_string();
+
+    assert_ne!(
+        compute_contract_hash(&atom),
+        compute_contract_hash(&mutated)
+    );
+}
+
+#[test]
+fn test_contract_hash_detects_temporal_effect_contract_changes() {
+    let mut atom = test_atom(
+        "process_order",
+        vec![],
+        "true",
+        "result >= 0",
+        "0",
+        Some("i64"),
+    );
+    atom.effects.push(Effect::simple("Order"));
+    atom.effect_pre
+        .insert("Order".to_string(), "Created".to_string());
+    atom.effect_post
+        .insert("Order".to_string(), "Shipped".to_string());
+
+    let mut mutated = atom.clone();
+    mutated
+        .effect_post
+        .insert("Order".to_string(), "Cancelled".to_string());
+
+    assert_ne!(
+        compute_contract_hash(&atom),
+        compute_contract_hash(&mutated)
+    );
+}
+
+#[test]
+fn test_contract_hash_detects_negated_effect_changes() {
+    let mut atom = test_atom("pure_step", vec![], "true", "result == 0", "0", Some("i64"));
+    atom.effects.push(Effect {
+        name: "IO".to_string(),
+        params: vec![],
+        span: Span::default(),
+        negated: true,
+    });
+
+    let mut mutated = atom.clone();
+    mutated.effects[0].negated = false;
+
+    assert_ne!(
+        compute_contract_hash(&atom),
+        compute_contract_hash(&mutated)
+    );
+}
+
+#[test]
+fn test_contract_hash_avoids_field_boundary_collisions() {
+    let left = test_atom("ab", vec![], "c", "d", "0", Some("i64"));
+    let right = test_atom("a", vec![], "bc", "d", "0", Some("i64"));
+
+    assert_ne!(compute_contract_hash(&left), compute_contract_hash(&right));
+}
+
+#[test]
+fn test_contract_hash_covers_parsed_contract_clauses() {
+    let source = r#"
+atom apply(x: i64, f: atom_ref(i64) -> i64)
+    requires: x >= 0;
+    ensures: result >= 0;
+    contract(f): requires: x >= 0, ensures: result >= 0;
+    body: call(f, x);
+"#;
+    let items = parse_module(source);
+    let atom = items
+        .iter()
+        .find_map(|item| match item {
+            Item::Atom(atom) => Some(atom.clone()),
+            _ => None,
+        })
+        .expect("expected atom");
+    let mut mutated = atom.clone();
+    mutated.params[1].fn_contract_ensures = Some("result > 0".to_string());
+
+    assert_ne!(
+        compute_contract_hash(&atom),
+        compute_contract_hash(&mutated)
     );
 }
 
