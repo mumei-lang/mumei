@@ -125,6 +125,18 @@ type Bounded = i64 where v >= MIN && v <= MAX;
 
 On failure, Mumei shrinks the counterexample before reporting it:
 
+## Z3 timeout profiling
+
+When Z3 returns `unknown` or times out during the final consistency check, Mumei writes a deterministic solver resource heatmap to `<output_dir>/<atom_name>_heatmap.json` and includes a short summary in the verification error help text. The Lean bridge can carry this heatmap into escalation metadata so Lean proof work can target the constraints that consumed the most solver resources.
+
+The heatmap includes:
+
+- `total_rlimit`: total Z3 resource-limit units consumed since solver setup
+- `constraints`: tracked constraints with `constraint_id`, `rlimit_consumed`, `time_ms`, and `source_location`
+- `timeout_reason`: the timeout classification, such as `z3_unknown`
+
+Use the top-consuming constraints to prioritize Lean 4 lemmas for nonlinear invariants, simplify or split expensive specifications, and identify recurring constraint patterns that push Z3 outside the reliable fragment.
+
 - integers shrink toward `0` and inferred bounds using binary-search-like candidates
 - arrays shrink by shortening length first, then shrinking individual elements
 - `--property-based-test-seed` makes a failure reproducible

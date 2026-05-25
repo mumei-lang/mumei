@@ -2,6 +2,7 @@ use super::executor::{compute_solver_config_fingerprint, verify, VerificationMet
 use super::fragment::*;
 use super::module_env::*;
 use super::nlae_reporter::*;
+use super::profiler::{self, ConstraintProfile, IncrementalProfiler};
 use super::support::*;
 use super::translator::*;
 use super::types::*;
@@ -831,6 +832,91 @@ fn test_extract_minimal_unsat_core_linear_matches_simple_case() {
 }
 
 #[test]
+fn test_profiler_basic() {
+    let cfg = Config::new();
+    let ctx = Context::new(&cfg);
+    let solver = Solver::new(&ctx);
+
+    let mut profiler = IncrementalProfiler::new(&solver, &ctx);
+
+    let x = Int::new_const(&ctx, "profiler_x");
+    let y = Int::new_const(&ctx, "profiler_y");
+
+    solver.assert(&x._eq(&y));
+    profiler.profile_assertion("constraint_1", Some("test.mm:10".to_string()));
+
+    solver.assert(&x.ge(&Int::from_i64(&ctx, 0)));
+    profiler.profile_assertion("constraint_2", Some("test.mm:11".to_string()));
+
+    let heatmap = profiler.build_heatmap("test_atom", "test_timeout");
+
+    assert_eq!(heatmap.atom_name, "test_atom");
+    assert_eq!(heatmap.timeout_reason, "test_timeout");
+    assert_eq!(heatmap.constraints.len(), 2);
+    assert_eq!(heatmap.constraints[0].constraint_id, "constraint_1");
+    assert_eq!(
+        heatmap.constraints[1].source_location,
+        Some("test.mm:11".to_string())
+    );
+}
+
+#[test]
+fn test_top_consumers_summary_orders_by_rlimit() {
+    let constraints = vec![
+        ConstraintProfile {
+            constraint_id: "low".to_string(),
+            rlimit_consumed: 1,
+            time_ms: 0,
+            source_location: None,
+        },
+        ConstraintProfile {
+            constraint_id: "high".to_string(),
+            rlimit_consumed: 10,
+            time_ms: 0,
+            source_location: None,
+        },
+    ];
+
+    assert_eq!(
+        profiler::top_consumers_summary(&constraints, 1),
+        "high (10 rlimit)"
+    );
+}
+
+#[test]
+fn test_profiler_attributes_check_rlimit_to_recent_constraints() {
+    let cfg = Config::new();
+    let ctx = Context::new(&cfg);
+    let solver = Solver::new(&ctx);
+    let mut profiler = IncrementalProfiler::new(&solver, &ctx);
+
+    let x = Int::new_const(&ctx, "profiler_check_x");
+    let y = Int::new_const(&ctx, "profiler_check_y");
+    solver.assert(&x.gt(&Int::from_i64(&ctx, 0)));
+    profiler.profile_assertion("constraint_1", None);
+    solver.assert(&y._eq(&(x.clone() + 1_i64)));
+    profiler.profile_assertion("constraint_2", None);
+
+    let checkpoint = profiler.begin_check();
+    assert_eq!(solver.check(), SatResult::Sat);
+    profiler.end_check(checkpoint);
+
+    let heatmap = profiler.build_heatmap("test_atom", "test_timeout");
+    assert!(heatmap
+        .constraints
+        .iter()
+        .all(|c| c.constraint_id != "solver_check"));
+    assert!(
+        heatmap
+            .constraints
+            .iter()
+            .map(|constraint| constraint.rlimit_consumed)
+            .sum::<u64>()
+            <= heatmap.total_rlimit
+    );
+}
+
+#[test]
 fn test_build_contradiction_feedback_with_minimal_core() {
     let constraints = vec![
         "Precondition (requires)".to_string(),
@@ -919,6 +1005,7 @@ fn test_constraint_budget_exceeded() {
         constraint_budget: 5, // Very low budget
         has_string_constraints: Some(&has_string_cell),
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
+        profiler: None,
     };
 
     // Each call increments and checks
@@ -952,6 +1039,7 @@ fn test_constraint_budget_no_limit() {
         constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
         has_string_constraints: None,
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
+        profiler: None,
     };
 
     // Should always succeed when no constraint tracking
@@ -1587,6 +1675,7 @@ fn test_subsumption_check_holds_with_requires() {
         constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
         has_string_constraints: None,
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
+        profiler: None,
     };
     let concrete = Atom {
         name: "increment".to_string(),
@@ -1654,6 +1743,7 @@ fn test_subsumption_check_fails_without_requires() {
         constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
         has_string_constraints: None,
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
+        profiler: None,
     };
     let concrete = Atom {
         name: "negate".to_string(),
@@ -1724,6 +1814,7 @@ fn test_subsumption_check_crossed_param_names() {
         constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
         has_string_constraints: None,
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
+        profiler: None,
     };
     let concrete = Atom {
         name: "compute".to_string(),
@@ -1801,6 +1892,7 @@ fn test_subsumption_check_trivial_contract_ensures_skipped() {
         constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
         has_string_constraints: None,
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
+        profiler: None,
     };
     let concrete = Atom {
         name: "something".to_string(),
@@ -1860,6 +1952,7 @@ fn test_subsumption_check_concrete_true_ensures_warns() {
         constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
         has_string_constraints: None,
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
+        profiler: None,
     };
     let concrete = Atom {
         name: "no_guarantee".to_string(),
@@ -2284,6 +2377,7 @@ fn test_expr_to_z3_true_false_are_bool() {
         constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
         has_string_constraints: Some(&has_string_constraints_cell),
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
+        profiler: None,
     };
     let mut env: Env = HashMap::new();
 

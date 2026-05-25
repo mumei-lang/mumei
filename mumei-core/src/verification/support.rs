@@ -247,6 +247,7 @@ pub fn verify_impl(
             constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
             has_string_constraints: None,
             path_cond_stack: std::cell::RefCell::new(Vec::new()),
+            profiler: None,
         };
 
         let mut env: Env = HashMap::new();
@@ -1648,6 +1649,7 @@ pub(crate) fn verify_atom_invariant(
         constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
         has_string_constraints: None,
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
+        profiler: None,
     };
 
     let mut env: Env = HashMap::new();

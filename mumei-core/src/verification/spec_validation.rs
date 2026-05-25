@@ -252,6 +252,7 @@ fn validation_ctx<'a>(
         constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
         has_string_constraints: None,
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
+        profiler: None,
     }
 }
 
