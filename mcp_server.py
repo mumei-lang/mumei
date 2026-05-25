@@ -302,6 +302,26 @@ def _resume_task_validation_error(
 _task_registry = VerificationTaskRegistry()
 _z3_worker_pool = Z3WorkerPool()
 
+
+def _format_data_flow_trace(trace: dict) -> str:
+    parts = ["### Data Flow Trace"]
+    parts.append("**Initial State:**")
+    for var in trace.get("initial_state", []):
+        parts.append(f"- {var['name']} = {var['value']} (line {var['line']})")
+
+    parts.append("\n**Execution Path:**")
+    for step in trace.get("execution_path", []):
+        parts.append(f"- Line {step['line']}: {step['expression']}")
+        for mut in step.get("mutations", []):
+            parts.append(f"  - {mut['name']}: {mut['before']} → {mut['after']}")
+
+    violation = trace.get("violation", {})
+    parts.append(f"\n**Violation at line {violation.get('line')}:**")
+    parts.append(f"- {violation.get('contract_type')}: {violation.get('expression')}")
+    parts.append(f"- Evaluated as: {violation.get('evaluated_as')}")
+
+    return "\n".join(parts)
+
 def _format_semantic_feedback(report_json: str) -> str:
     """Parse report.json and format semantic_feedback into a readable section.
     Returns empty string if no semantic_feedback is present (backward compatible).
@@ -312,7 +332,10 @@ def _format_semantic_feedback(report_json: str) -> str:
         return ""
 
     feedback = report.get("semantic_feedback")
+    trace = report.get("data_flow_trace")
     if not feedback:
+        if isinstance(trace, dict):
+            return _format_data_flow_trace(trace)
         return ""
 
     parts = ["### Semantic Feedback"]
@@ -430,6 +453,9 @@ def _format_semantic_feedback(report_json: str) -> str:
     if span:
         parts.append(f"**Location:** {span.get('file', '?')}:{span.get('line', '?')}:{span.get('col', '?')}")
 
+    if isinstance(trace, dict):
+        parts.append(_format_data_flow_trace(trace))
+
     # Machine-readable section for AI agents
     machine_readable = _build_machine_readable(report, feedback)
     if machine_readable:
@@ -482,6 +508,10 @@ def _build_machine_readable(report: dict, feedback: dict) -> "dict | None":
     data_flow = feedback.get("data_flow", [])
     if data_flow:
         result["data_flow"] = data_flow
+
+    data_flow_trace = report.get("data_flow_trace")
+    if data_flow_trace:
+        result["data_flow_trace"] = data_flow_trace
 
     # Include related_locations in machine-readable output (Feature 3g)
     related_locations = feedback.get("related_locations", [])

@@ -14,6 +14,48 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
+def test_format_data_flow_trace_section() -> None:
+    from mcp_server import _format_semantic_feedback
+
+    report = {
+        "status": "failed",
+        "atom": "withdraw_balance",
+        "semantic_feedback": {
+            "violated_constraints": [],
+        },
+        "data_flow_trace": {
+            "initial_state": [
+                {"name": "balance", "value": "100", "line": 5},
+                {"name": "amount", "value": "150", "line": 5},
+            ],
+            "execution_path": [
+                {
+                    "line": 12,
+                    "expression": "balance = balance - amount",
+                    "mutations": [
+                        {"name": "balance", "before": "100", "after": "-50"},
+                    ],
+                },
+            ],
+            "violation": {
+                "line": 15,
+                "contract_type": "ensures",
+                "expression": "balance >= 0",
+                "evaluated_as": "-50 >= 0 (FALSE)",
+            },
+        },
+    }
+
+    formatted = _format_semantic_feedback(json.dumps(report))
+
+    assert "### Data Flow Trace" in formatted
+    assert "- balance = 100 (line 5)" in formatted
+    assert "- Line 12: balance = balance - amount" in formatted
+    assert "balance: 100 → -50" in formatted
+    assert "**Violation at line 15:**" in formatted
+    assert "Evaluated as: -50 >= 0 (FALSE)" in formatted
+
+
 def _get_catalog() -> dict:
     """Call list_std_catalog() and parse the JSON result."""
     # Import inline to avoid MCP server startup side effects
