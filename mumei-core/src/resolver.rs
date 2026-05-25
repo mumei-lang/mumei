@@ -1539,6 +1539,47 @@ pub fn compute_proof_hash(atom: &crate::parser::Atom, module_env: &ModuleEnv) ->
     format!("{:x}", hasher.finalize())
 }
 
+/// Compute a hash for the contract (specification) portion only.
+/// This is used to detect unauthorized specification mutations by the agent.
+pub fn compute_contract_hash(atom: &crate::parser::Atom) -> String {
+    let mut hasher = Sha256::new();
+
+    hasher.update(atom.name.as_bytes());
+    hasher.update(b"|");
+    hasher.update(atom.requires.as_bytes());
+    hasher.update(b"|");
+    hasher.update(atom.ensures.as_bytes());
+    hasher.update(b"|");
+    if let Some(ref inv) = atom.invariant {
+        hasher.update(b"invariant:");
+        hasher.update(inv.as_bytes());
+    }
+    for e in &atom.effects {
+        hasher.update(b"effect:");
+        hasher.update(e.name.as_bytes());
+        for p in &e.params {
+            hasher.update(b",param:");
+            hasher.update(p.value.as_bytes());
+        }
+    }
+    for p in &atom.params {
+        if let Some(ref req) = p.fn_contract_requires {
+            hasher.update(b"|fn_contract_req:");
+            hasher.update(p.name.as_bytes());
+            hasher.update(b"=");
+            hasher.update(req.as_bytes());
+        }
+        if let Some(ref ens) = p.fn_contract_ensures {
+            hasher.update(b"|fn_contract_ens:");
+            hasher.update(p.name.as_bytes());
+            hasher.update(b"=");
+            hasher.update(ens.as_bytes());
+        }
+    }
+
+    format!("{:x}", hasher.finalize())
+}
+
 /// Collect callee names from an atom's body expression string.
 /// This is a simple text-based extraction of function call names.
 pub fn collect_callees_from_body(body_expr: &str) -> HashSet<String> {

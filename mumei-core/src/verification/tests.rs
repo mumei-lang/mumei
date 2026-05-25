@@ -10,6 +10,8 @@ use crate::parser::{
     Atom, Effect, EffectDef, EffectTransition, Expr, ImplDef, Op, Param, Span, TraitDef,
     TraitMethod, TrustLevel,
 };
+use crate::resolver::compute_contract_hash;
+use crate::verification::{generate_contract_manifest, verify_contract_integrity};
 use serde_json::json;
 use std::collections::HashMap;
 use std::path::Path;
@@ -59,6 +61,85 @@ fn test_param(name: &str, type_name: Option<&str>) -> Param {
         fn_contract_requires: None,
         fn_contract_ensures: None,
     }
+}
+
+#[test]
+fn test_contract_hash_computation_is_deterministic() {
+    let mut atom = test_atom(
+        "bounded_add",
+        vec![test_param("a", Some("i64")), test_param("b", Some("i64"))],
+        "a >= 0 && b >= 0",
+        "result == a + b",
+        "a + b",
+        Some("i64"),
+    );
+    atom.effects.push(Effect::simple("Pure"));
+
+    let hash1 = compute_contract_hash(&atom);
+    let hash2 = compute_contract_hash(&atom);
+
+    assert_eq!(hash1, hash2);
+    assert_eq!(hash1.len(), 64);
+}
+
+#[test]
+fn test_contract_hash_ignores_body_changes() {
+    let atom = test_atom(
+        "bounded_add",
+        vec![test_param("a", Some("i64")), test_param("b", Some("i64"))],
+        "a >= 0 && b >= 0",
+        "result == a + b",
+        "a + b",
+        Some("i64"),
+    );
+    let mut changed_body = atom.clone();
+    changed_body.body_expr = "b + a".to_string();
+
+    assert_eq!(
+        compute_contract_hash(&atom),
+        compute_contract_hash(&changed_body)
+    );
+}
+
+#[test]
+fn test_contract_mutation_detection() {
+    let atom = test_atom(
+        "bounded_add",
+        vec![test_param("a", Some("i64")), test_param("b", Some("i64"))],
+        "a >= 0 && b >= 0",
+        "result == a + b",
+        "a + b",
+        Some("i64"),
+    );
+    let mut module_env = ModuleEnv::new();
+    module_env.register_atom(&atom);
+    let manifest = generate_contract_manifest(&module_env);
+
+    let mut mutated = atom.clone();
+    mutated.ensures = "result >= a".to_string();
+    let err = verify_contract_integrity(&mutated, &manifest).unwrap_err();
+
+    assert!(matches!(err, MumeiError::ContractMutation { .. }));
+}
+
+#[test]
+fn test_contract_integrity_verification_allows_implementation_changes() {
+    let atom = test_atom(
+        "bounded_add",
+        vec![test_param("a", Some("i64")), test_param("b", Some("i64"))],
+        "a >= 0 && b >= 0",
+        "result == a + b",
+        "a + b",
+        Some("i64"),
+    );
+    let mut module_env = ModuleEnv::new();
+    module_env.register_atom(&atom);
+    let manifest = generate_contract_manifest(&module_env);
+
+    let mut changed_body = atom.clone();
+    changed_body.body_expr = "(a + b)".to_string();
+
+    assert!(verify_contract_integrity(&changed_body, &manifest).is_ok());
 }
 
 #[test]

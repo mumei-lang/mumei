@@ -146,6 +146,20 @@ pub enum MumeiError {
         /// エディタや LSP がインライン装飾用に取り出して表示する。
         counterexample: Option<serde_json::Value>,
     },
+    #[error("Contract Mutation: atom '{atom_name}' contract hash changed from {expected_hash} to {actual_hash}")]
+    #[diagnostic(code(mumei::contract_mutation))]
+    ContractMutation {
+        atom_name: String,
+        expected_hash: String,
+        actual_hash: String,
+        #[source_code]
+        src: miette::NamedSource<String>,
+        #[label("contract mutated here")]
+        span: SourceSpan,
+        #[help]
+        help: Option<String>,
+        original_span: Span,
+    },
     #[error("Codegen Error: {msg}")]
     #[diagnostic(code(mumei::codegen))]
     CodegenError {
@@ -189,6 +203,32 @@ impl MumeiError {
             original_span: Span::default(),
             related: Vec::new(),
             counterexample: None,
+        }
+    }
+    pub fn contract_mutation(
+        atom_name: impl Into<String>,
+        expected_hash: impl Into<String>,
+        actual_hash: impl Into<String>,
+        span: Span,
+    ) -> Self {
+        MumeiError::ContractMutation {
+            atom_name: atom_name.into(),
+            expected_hash: expected_hash.into(),
+            actual_hash: actual_hash.into(),
+            src: miette::NamedSource::new(
+                if span.file.is_empty() {
+                    "<unknown>"
+                } else {
+                    &span.file
+                },
+                String::new(),
+            ),
+            span: SourceSpan::from((0, 0)),
+            help: Some(
+                "Specification changes are not allowed in contract isolation mode; modify only the implementation body."
+                    .to_string(),
+            ),
+            original_span: span,
         }
     }
     /// Span 付きで VerificationError を生成
@@ -343,6 +383,19 @@ impl MumeiError {
                 detail.counterexample = counterexample.clone();
                 detail
             }
+            MumeiError::ContractMutation {
+                atom_name,
+                expected_hash,
+                actual_hash,
+                original_span,
+                ..
+            } => ErrorDetail::with_span(
+                format!(
+                    "Contract Mutation: atom '{}' contract hash changed from {} to {}",
+                    atom_name, expected_hash, actual_hash
+                ),
+                original_span.clone(),
+            ),
             MumeiError::CodegenError {
                 msg, original_span, ..
             } => ErrorDetail::with_span(format!("Codegen Error: {}", msg), original_span.clone()),
@@ -368,6 +421,7 @@ impl MumeiError {
         // otherwise fall back to the provided span (e.g., atom definition)
         let effective_span = match &self {
             MumeiError::VerificationError { original_span, .. }
+            | MumeiError::ContractMutation { original_span, .. }
             | MumeiError::CodegenError { original_span, .. }
             | MumeiError::TypeError { original_span, .. }
                 if original_span.line > 0 =>
@@ -423,6 +477,22 @@ impl MumeiError {
                     counterexample,
                 }
             }
+            MumeiError::ContractMutation {
+                atom_name,
+                expected_hash,
+                actual_hash,
+                help,
+                original_span,
+                ..
+            } => MumeiError::ContractMutation {
+                atom_name,
+                expected_hash,
+                actual_hash,
+                src: named_src,
+                span: source_span,
+                help,
+                original_span,
+            },
             MumeiError::CodegenError {
                 msg,
                 help,
@@ -511,6 +581,23 @@ impl MumeiError {
                 related,
                 counterexample,
             },
+            MumeiError::ContractMutation {
+                atom_name,
+                expected_hash,
+                actual_hash,
+                src,
+                span,
+                original_span,
+                ..
+            } => MumeiError::ContractMutation {
+                atom_name,
+                expected_hash,
+                actual_hash,
+                src,
+                span,
+                help,
+                original_span,
+            },
             MumeiError::CodegenError {
                 msg,
                 src,
@@ -562,6 +649,7 @@ impl MumeiError {
         };
         match &mut self {
             MumeiError::VerificationError { related, .. } => related.push(diag),
+            MumeiError::ContractMutation { .. } => {}
             MumeiError::CodegenError { related, .. } => related.push(diag),
             MumeiError::TypeError { related, .. } => related.push(diag),
         }

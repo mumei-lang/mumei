@@ -478,6 +478,7 @@ fn build_related_information(
         verification::MumeiError::VerificationError { related, .. }
         | verification::MumeiError::CodegenError { related, .. }
         | verification::MumeiError::TypeError { related, .. } => related,
+        verification::MumeiError::ContractMutation { .. } => return Vec::new(),
     };
     related_spans
         .iter()

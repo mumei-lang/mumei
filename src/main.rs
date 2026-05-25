@@ -267,6 +267,9 @@ enum Command {
         /// Budget policy fingerprint to embed in generated proof certificates
         #[arg(long)]
         budget_policy_fingerprint: Option<String>,
+        /// Emit a contract manifest containing per-atom specification hashes
+        #[arg(long)]
+        emit_contract_manifest: bool,
     },
     /// Parse + resolve + monomorphize only (no Z3, fast syntax check)
     Check {
@@ -436,6 +439,7 @@ fn main() {
             harness_contract,
             artifact_paths,
             budget_policy_fingerprint,
+            emit_contract_manifest,
         }) => {
             let no_emit_escalation_metrics =
                 no_emit.iter().any(|target| target == "escalation-metrics");
@@ -490,6 +494,7 @@ fn main() {
                 budget_policy_fingerprint: resolve_budget_policy_fingerprint(
                     budget_policy_fingerprint,
                 ),
+                emit_contract_manifest,
             });
         }
         Some(Command::Check { input }) => {
@@ -919,6 +924,7 @@ struct VerifyOptions<'a> {
     harness_contract: Option<String>,
     artifact_paths: Option<Vec<String>>,
     budget_policy_fingerprint: Option<String>,
+    emit_contract_manifest: bool,
 }
 
 fn cmd_verify(options: VerifyOptions<'_>) {
@@ -945,6 +951,7 @@ fn cmd_verify(options: VerifyOptions<'_>) {
         harness_contract,
         artifact_paths,
         budget_policy_fingerprint,
+        emit_contract_manifest,
     } = options;
     check_z3_available();
     let manifest_config = manifest::find_and_load();
@@ -1018,6 +1025,37 @@ fn cmd_verify(options: VerifyOptions<'_>) {
     // Plan 11B: Track per-atom verification results for proof certificates
     let mut cert_results: std::collections::HashMap<String, (String, String)> =
         std::collections::HashMap::new();
+
+    if emit_contract_manifest {
+        let manifest = verification::generate_contract_manifest(&module_env);
+        let manifest_path = if let (Some(output), false) = (
+            cert_output,
+            generate_proof_cert || emit_escalation_bundle || emit_escalation_metrics,
+        ) {
+            PathBuf::from(output)
+        } else {
+            output_dir.join("contract-manifest.json")
+        };
+        match serde_json::to_string_pretty(&manifest)
+            .map_err(|e| e.to_string())
+            .and_then(|json| std::fs::write(&manifest_path, json).map_err(|e| e.to_string()))
+        {
+            Ok(()) => {
+                if !json_output {
+                    println!(
+                        "  📜 Contract manifest written to: {}",
+                        manifest_path.display()
+                    );
+                }
+            }
+            Err(e) => {
+                if !json_output {
+                    eprintln!("  ⚠️  Failed to write contract manifest: {}", e);
+                }
+                failed += 1;
+            }
+        }
+    }
 
     // Feature 2: Register dependencies for all atoms before verification
     for item in &items {
