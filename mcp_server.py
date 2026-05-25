@@ -806,6 +806,217 @@ def validate_logic(
 
 
 @mcp.tool()
+def analyze_contract_conflicts(source_code: str) -> str:
+    """Analyze contract conflicts in Mumei source code."""
+    root_dir = Path(__file__).parent.absolute()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        source_path = tmp_path / "input.mm"
+        source_path.write_text(source_code, encoding="utf-8")
+
+        result = subprocess.run(
+            [
+                "cargo",
+                "run",
+                "--",
+                "verify",
+                "--cross-spec-verify",
+                "--report-dir",
+                str(tmp_path),
+                str(source_path),
+            ],
+            cwd=root_dir,
+            capture_output=True,
+            text=True,
+            env=os.environ.copy(),
+        )
+
+        cross_spec_path = tmp_path / "cross_spec.json"
+        if not cross_spec_path.exists():
+            return json.dumps(
+                {
+                    "conflicts": [],
+                    "circular_dependencies": [],
+                    "dependency_graph": [],
+                    "success": result.returncode == 0,
+                    "error": result.stderr.strip() or result.stdout.strip(),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+
+        try:
+            cross_spec = json.loads(cross_spec_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            return json.dumps(
+                {
+                    "conflicts": [],
+                    "circular_dependencies": [],
+                    "dependency_graph": [],
+                    "success": False,
+                    "error": f"invalid cross_spec.json: {exc}",
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        contracts = _extract_source_atom_contracts(source_code)
+        conflicts = []
+        for item in cross_spec.get("contract_consistency", []):
+            if item.get("is_consistent", True):
+                continue
+            caller_atom = str(item.get("caller_atom", ""))
+            callee_atom = str(item.get("callee_atom", ""))
+            conflicts.append(
+                {
+                    "caller_atom": caller_atom,
+                    "callee_atom": callee_atom,
+                    "caller_requires": contracts.get(caller_atom, {}).get("requires", "true"),
+                    "caller_ensures": contracts.get(caller_atom, {}).get("ensures", "true"),
+                    "callee_requires": contracts.get(callee_atom, {}).get("requires", "true"),
+                    "callee_ensures": contracts.get(callee_atom, {}).get("ensures", "true"),
+                    "violations": item.get("violations", []),
+                    "warnings": item.get("warnings", []),
+                }
+            )
+
+        return json.dumps(
+            {
+                "conflicts": conflicts,
+                "circular_dependencies": cross_spec.get("circular_dependencies", []),
+                "dependency_graph": cross_spec.get("dependency_graph", []),
+                "summary": cross_spec.get("summary", {}),
+                "success": result.returncode == 0,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+
+
+@mcp.tool()
+def propose_interface_refactoring(
+    source_code: str,
+    retry_history: dict | None = None,
+) -> str:
+    """Propose interface-level refactoring to resolve architectural issues."""
+    try:
+        analysis = json.loads(analyze_contract_conflicts(source_code))
+    except json.JSONDecodeError as exc:
+        return json.dumps(
+            {
+                "proposals": [],
+                "analysis_summary": {},
+                "conflict_count": 0,
+                "error": f"invalid analysis payload: {exc}",
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    proposals = []
+
+    for conflict in analysis.get("conflicts", []):
+        violations = " ".join(str(item) for item in conflict.get("violations", [])).lower()
+        if "requires" in violations or "caller contract provides" in violations:
+            callee_atom = conflict.get("callee_atom", "")
+            caller_atom = conflict.get("caller_atom", "")
+            proposals.append(
+                _proposal_dict(
+                    f"relax_{callee_atom}",
+                    (
+                        f"Relax {callee_atom} requires to match {caller_atom} guarantees"
+                    ),
+                    "relax_requires",
+                    [callee_atom],
+                    {
+                        "atom": callee_atom,
+                        "requires": conflict.get("caller_ensures", "true"),
+                    },
+                    "Resolves caller/callee contract mismatch by raising interface abstraction.",
+                )
+            )
+
+    for index, cycle in enumerate(analysis.get("circular_dependencies", []), start=1):
+        proposals.append(
+            _proposal_dict(
+                f"split_cycle_{index}",
+                f"Split atoms in cycle {cycle} to break circular dependency",
+                "split_atom",
+                cycle,
+                {"action": "extract_interface"},
+                "Breaks circular dependency by introducing an abstraction layer.",
+            )
+        )
+
+    if retry_history and not proposals:
+        attempts = retry_history.get("attempts", [])
+        graph = analysis.get("dependency_graph", [])
+        if isinstance(attempts, list) and len(attempts) >= 5 and graph:
+            central_node = max(
+                graph,
+                key=lambda node: len(node.get("dependents", [])),
+            )
+            atom = central_node.get("atom_name", "")
+            proposals.append(
+                _proposal_dict(
+                    f"abstract_{atom}",
+                    f"Extract interface boundary around {atom}",
+                    "split_atom",
+                    [atom],
+                    {"action": "extract_interface"},
+                    "Budget exhaustion without a local fix suggests raising interface abstraction.",
+                )
+            )
+
+    return json.dumps(
+        {
+            "proposals": proposals,
+            "analysis_summary": analysis.get("summary", {}),
+            "conflict_count": len(analysis.get("conflicts", [])),
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
+def _extract_source_atom_contracts(source_code: str) -> dict[str, dict[str, str]]:
+    contracts: dict[str, dict[str, str]] = {}
+    matches = list(re.finditer(r"\batom\s+([A-Za-z_][A-Za-z0-9_:]*)", source_code))
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(source_code)
+        atom_body = source_code[match.start():end]
+        contracts[match.group(1)] = {
+            "requires": _extract_contract_clause(atom_body, "requires") or "true",
+            "ensures": _extract_contract_clause(atom_body, "ensures") or "true",
+        }
+    return contracts
+
+
+def _extract_contract_clause(atom_body: str, clause: str) -> str | None:
+    match = re.search(rf"{clause}\s*:?\s*(.*?);", atom_body, flags=re.DOTALL)
+    if match is None:
+        return None
+    return " ".join(match.group(1).split())
+
+
+def _proposal_dict(
+    proposal_id: str,
+    description: str,
+    refactoring_type: str,
+    target_atoms: list,
+    changes: dict,
+    rationale: str,
+) -> dict:
+    return {
+        "proposal_id": proposal_id,
+        "description": description,
+        "refactoring_type": refactoring_type,
+        "target_atoms": target_atoms,
+        "changes": changes,
+        "rationale": rationale,
+    }
+
+
+@mcp.tool()
 def verify_with_orchestration(
     source_code: str,
     timeout_ms: int = 30000,
