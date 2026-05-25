@@ -1,5 +1,6 @@
 use super::module_env::*;
 use super::nlae_reporter::*;
+use super::profiler::IncrementalProfiler;
 use super::support::*;
 use super::types::*;
 use super::*;
@@ -43,6 +44,7 @@ pub(crate) struct VCtx<'a> {
     /// implied by being in the `else` of `if n <= 1`) participate in the
     /// satisfiability query without leaking into sibling branches.
     pub(crate) path_cond_stack: std::cell::RefCell<Vec<Bool<'a>>>,
+    pub(crate) profiler: Option<&'a std::cell::RefCell<IncrementalProfiler<'a>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -240,6 +242,29 @@ pub(crate) fn check_constraint_budget(vc: &VCtx, atom_name: &str) -> MumeiResult
     Ok(())
 }
 
+pub(crate) fn profile_solver_assertion(
+    vc: &VCtx<'_>,
+    constraint_id: &str,
+    source_location: Option<String>,
+) {
+    if let Some(profiler) = vc.profiler {
+        profiler
+            .borrow_mut()
+            .profile_assertion(constraint_id, source_location);
+    }
+}
+
+pub(crate) fn profiler_checkpoint(vc: &VCtx<'_>) -> Option<usize> {
+    vc.profiler
+        .map(|profiler| profiler.borrow_mut().begin_check())
+}
+
+pub(crate) fn profile_solver_check(vc: &VCtx<'_>, start_index: Option<usize>) {
+    if let (Some(profiler), Some(start_index)) = (vc.profiler, start_index) {
+        profiler.borrow_mut().end_check(start_index);
+    }
+}
+
 pub(crate) fn apply_refinement_constraint<'a>(
     vc: &VCtx<'a>,
     solver: &Solver<'a>,
@@ -255,6 +280,7 @@ pub(crate) fn apply_refinement_constraint<'a>(
             let v = Int::new_const(ctx, var_name);
             let track_u64 = Bool::new_const(ctx, format!("track_u64_nonneg_{}", var_name).as_str());
             solver.assert_and_track(&v.ge(&Int::from_i64(ctx, 0)), &track_u64);
+            profile_solver_assertion(vc, &format!("u64_nonneg_{}", var_name), None);
             v.into()
         }
         // Plan 9-7: Str base type uses Z3 String Sort for refinement constraints
@@ -284,6 +310,11 @@ pub(crate) fn apply_refinement_constraint<'a>(
     let track_label = format!("track_refined_type_{}::{}", var_name, refined.name);
     let track_bool = Bool::new_const(ctx, track_label.as_str());
     solver.assert_and_track(&predicate_z3, &track_bool);
+    profile_solver_assertion(
+        vc,
+        &format!("refined_type_{}::{}", var_name, refined.name),
+        Some(refined.span.to_string()),
+    );
     Ok(())
 }
 
@@ -1625,6 +1656,7 @@ pub(crate) fn expr_to_z3<'a>(
                                 );
                                 let track_bool = Bool::new_const(ctx, track_label.as_str());
                                 solver.assert_and_track(&constraint_bool, &track_bool);
+                                profile_solver_assertion(vc, &track_label, None);
                             }
 
                             // Store the Z3 String variable in env for downstream use
@@ -1980,6 +2012,14 @@ pub(crate) fn expr_to_z3<'a>(
                                 if let Some(ens_bool) = ens_z3.as_bool() {
                                     if let Some(solver) = solver_opt {
                                         solver.assert(&ens_bool);
+                                        profile_solver_assertion(
+                                            vc,
+                                            &format!(
+                                                "call_with_contract_{}_ensures",
+                                                callee_var_name
+                                            ),
+                                            None,
+                                        );
                                     }
                                 }
                             }
@@ -2142,11 +2182,13 @@ pub(crate) fn stmt_to_z3<'a>(
         Stmt::Let { var, value, .. } => {
             let val = expr_to_z3(vc, value, env, solver_opt)?;
             env.insert(var.clone(), val.clone());
+            profile_solver_assertion(vc, &format!("let_{}", var), None);
             Ok(val)
         }
         Stmt::Assign { var, value, .. } => {
             let val = expr_to_z3(vc, value, env, solver_opt)?;
             env.insert(var.clone(), val.clone());
+            profile_solver_assertion(vc, &format!("assign_{}", var), None);
             Ok(val)
         }
         Stmt::ArrayStore {
@@ -2196,6 +2238,7 @@ pub(crate) fn stmt_to_z3<'a>(
             let current_arr = z3_dynamic_array(vc, array, env);
             let new_arr = current_arr.store(&idx, &stored_val);
             env.insert(arr_key, new_arr.into());
+            profile_solver_assertion(vc, &format!("array_store_{}", array), None);
 
             Ok(stored_val)
         }

@@ -935,6 +935,7 @@ pub(crate) fn verify_inner(
     // Sort-aware timeout: flag for Z3 String Sort constraints.
     // Set to true when Z3 String constraints are added during expr_to_z3.
     let has_string_constraints_cell = std::cell::Cell::new(has_string_constraints_cell_pre.get());
+    let profiler_cell = std::cell::RefCell::new(IncrementalProfiler::new(&solver, &ctx));
     let vc = VCtx {
         ctx: &ctx,
         module_env,
@@ -945,6 +946,7 @@ pub(crate) fn verify_inner(
         constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
         has_string_constraints: Some(&has_string_constraints_cell),
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
+        profiler: Some(&profiler_cell),
     };
 
     let mut env: Env = HashMap::new();
@@ -1052,6 +1054,11 @@ pub(crate) fn verify_inner(
         let track_label = format!("track_quantifier_{}", q_index);
         let track_bool = Bool::new_const(&ctx, track_label.as_str());
         solver.assert_and_track(&quantifier_expr, &track_bool);
+        profile_solver_assertion(
+            &vc,
+            &track_label,
+            Some(format!("forall_{}:{}", q_index, atom.span)),
+        );
 
         // Assert a length bound for each array referenced in the forall
         // condition so that ArrayAccess's OOB check does not fail on
@@ -1101,6 +1108,11 @@ pub(crate) fn verify_inner(
                         );
                         let track_bool = Bool::new_const(&ctx, track_label.as_str());
                         solver.assert_and_track(&len_forall, &track_bool);
+                        profile_solver_assertion(
+                            &vc,
+                            &track_label,
+                            Some(format!("forall_{}:{}", q_index, atom.span)),
+                        );
                     }
                 }
             }
@@ -1146,6 +1158,11 @@ pub(crate) fn verify_inner(
                                 format!("track_struct_field_{}::{}", param.name, field.name);
                             let track_bool = Bool::new_const(&ctx, track_label.as_str());
                             solver.assert_and_track(&constraint_bool, &track_bool);
+                            profile_solver_assertion(
+                                &vc,
+                                &track_label,
+                                Some(atom.span.to_string()),
+                            );
                         }
                     }
                 }
@@ -1255,6 +1272,7 @@ pub(crate) fn verify_inner(
         if let Some(req_bool) = req_z3.as_bool() {
             let track_requires = Bool::new_const(&ctx, "track_requires");
             solver.assert_and_track(&req_bool, &track_requires);
+            profile_solver_assertion(&vc, "requires", Some(atom.span.to_string()));
         }
     }
 
@@ -1617,7 +1635,9 @@ pub(crate) fn verify_inner(
     metrics.record_phase("Phase 5: ensures verification", phase_start.elapsed());
 
     let z3_check_start = std::time::Instant::now();
+    let profiler_final_check_start = profiler_checkpoint(&vc);
     let final_check = solver.check();
+    profile_solver_check(&vc, profiler_final_check_start);
     if final_check == SatResult::Unsat {
         let unsat_core = solver.get_unsat_core();
         let core_labels: Vec<String> = unsat_core
@@ -1681,9 +1701,23 @@ pub(crate) fn verify_inner(
         ));
     }
     if final_check == SatResult::Unknown {
+        let heatmap = profiler_cell
+            .borrow()
+            .build_heatmap(&atom.name, "z3_unknown");
+        let heatmap_path = output_dir.join(format!("{}_heatmap.json", atom.name));
+        if let Ok(heatmap_json) = serde_json::to_string_pretty(&heatmap) {
+            let _ = std::fs::create_dir_all(output_dir);
+            let _ = std::fs::write(&heatmap_path, heatmap_json);
+        }
         let property_based_help = property_based_config
             .map(|config| run_property_based_test(atom, module_env, config))
             .and_then(property_based_help);
+        let heatmap_hint = format!(
+            "Z3 resource heatmap: {} constraints consumed {} rlimit units. Top consumers: {}",
+            heatmap.constraints.len(),
+            heatmap.total_rlimit,
+            profiler::top_consumers_summary(&heatmap.constraints, 3)
+        );
         metrics.z3_check_time = z3_check_start.elapsed();
         metrics.total_constraints = constraint_count_cell.get();
         metrics.record_phase(
@@ -1698,6 +1732,7 @@ pub(crate) fn verify_inner(
         if let Some(help) = property_based_help {
             err = err.with_help(help);
         }
+        err = err.with_help(heatmap_hint);
         return Err(err);
     }
 
