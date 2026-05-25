@@ -288,6 +288,49 @@ For MCP workflows, pass traceability through `validate_logic` or `forge_blade`:
 
 A complete traceability record should include a non-empty `trace_id`, at least one metadata key, a meaningful `requires`, and a meaningful `ensures`; this yields 100% coverage and satisfies the ≥95% coverage target.
 
+## Contract Isolation Sandbox
+
+Mumei enforces strict separation between specifications (contracts) and implementations to prevent specification gaming by AI agents.
+
+### Contract Hash Verification
+
+The compiler computes SHA-256 hashes for contract portions (`requires`, `ensures`, `invariant`, `effects`) and stores them in a manifest file. When `mumei-agent` modifies code, the compiler verifies that contract hashes remain unchanged.
+
+```bash
+# Generate contract manifest
+mumei verify --emit-contract-manifest file.mm
+
+# Verify contract integrity (automatic in agent workflow)
+```
+
+### Intent Drift Detection
+
+The `IntentTracker` in `mumei-agent` monitors specification changes and warns when intent drift exceeds the configured threshold. This provides a soft guardrail alongside the hard hash-based enforcement.
+
+## Translation Validation Layer
+
+Mumei includes a translation validation layer to ensure semantic consistency between Mumei source code, Z3 SMT-LIB, and Lean 4 representations.
+
+### Semantic Gap Notes
+
+The translator automatically generates semantic gap notes highlighting differences between representation layers:
+
+- Integer overflow semantics (2's complement wrap vs unbounded)
+- Array bounds checking (implicit vs explicit)
+- String/regex semantics (approximate vs exact)
+- Effect state transitions (state machine vs linear logic)
+
+### Bridge Lemmas
+
+Bridge lemmas in Lean 4 formalize the semantic mappings:
+
+- `mumei_i64_overflow_bridge` — Integer overflow behavior
+- `mumei_array_bounds_bridge` — Array bounds checking
+- `mumei_regex_bridge` — String/regex semantics
+- `mumei_effect_transition_bridge` — Effect state preservation
+
+See `mumei-lean/docs/LEAN_TRANSLATOR_SPEC.md` for the complete formal specification.
+
 ## Lean escalation policy
 
 Escalate to Lean when the intended property is inherently nonlinear, inductive, trigger-sensitive, or recursive. A warning does not mean the specification is wrong; it means the spec is outside the Z3-stable fragment and should be reviewed before relying on first-pass SMT automation.
