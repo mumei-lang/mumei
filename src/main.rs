@@ -270,6 +270,9 @@ enum Command {
         /// Emit a contract manifest containing per-atom specification hashes
         #[arg(long)]
         emit_contract_manifest: bool,
+        /// Enable spec vacuity checking via mutation testing
+        #[arg(long)]
+        enable_vacuity_check: bool,
         /// Detect loops that may need stronger invariants
         #[arg(long)]
         detect_loops: bool,
@@ -446,6 +449,7 @@ fn main() {
             artifact_paths,
             budget_policy_fingerprint,
             emit_contract_manifest,
+            enable_vacuity_check,
             detect_loops,
             suggest_cegis,
         }) => {
@@ -503,6 +507,7 @@ fn main() {
                     budget_policy_fingerprint,
                 ),
                 emit_contract_manifest,
+                enable_vacuity_check,
                 detect_loops,
                 suggest_cegis,
             });
@@ -935,6 +940,7 @@ struct VerifyOptions<'a> {
     artifact_paths: Option<Vec<String>>,
     budget_policy_fingerprint: Option<String>,
     emit_contract_manifest: bool,
+    enable_vacuity_check: bool,
     detect_loops: bool,
     suggest_cegis: bool,
 }
@@ -964,6 +970,7 @@ fn cmd_verify(options: VerifyOptions<'_>) {
         artifact_paths,
         budget_policy_fingerprint,
         emit_contract_manifest,
+        enable_vacuity_check,
         detect_loops,
         suggest_cegis,
     } = options;
@@ -1014,6 +1021,7 @@ fn cmd_verify(options: VerifyOptions<'_>) {
         enable_cross_spec_verification,
         collect_decidable_fragment_metrics: emit_decidable_metrics,
         enable_spurious_detection,
+        enable_vacuity_check,
         detect_loops,
         suggest_cegis,
         property_based_test: property_based_config,
@@ -2646,6 +2654,8 @@ fn cmd_build(
             emitter::EmitTarget::DecidableMetrics
         ),
         enable_spurious_detection: true,
+        enable_vacuity_check: std::env::var("MUMEI_ENABLE_VACUITY_CHECK").unwrap_or_default()
+            == "1",
         detect_loops: false,
         suggest_cegis: false,
         property_based_test: None,

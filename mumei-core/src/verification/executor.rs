@@ -24,6 +24,7 @@ pub fn verify_with_config(
         VerifyInnerOptions {
             timeout_ms,
             enable_spurious_detection: true,
+            enable_vacuity_check: false,
             property_based_config: None,
             task_id: orchestration_task_id_from_env(),
             generation_id: orchestration_generation_id_from_env(),
@@ -44,6 +45,7 @@ pub fn verify_with_verification_config(
         VerifyInnerOptions {
             timeout_ms: config.timeout_ms,
             enable_spurious_detection: config.enable_spurious_detection,
+            enable_vacuity_check: config.enable_vacuity_check,
             property_based_config: config.property_based_test.as_ref(),
             task_id: orchestration_task_id_from_env(),
             generation_id: orchestration_generation_id_from_env(),
@@ -80,6 +82,7 @@ pub fn verify(hir_atom: &HirAtom, output_dir: &Path, module_env: &ModuleEnv) -> 
         VerifyInnerOptions {
             timeout_ms: 10000,
             enable_spurious_detection: true,
+            enable_vacuity_check: false,
             property_based_config: None,
             task_id: orchestration_task_id_from_env(),
             generation_id: orchestration_generation_id_from_env(),
@@ -90,6 +93,7 @@ pub fn verify(hir_atom: &HirAtom, output_dir: &Path, module_env: &ModuleEnv) -> 
 pub(crate) struct VerifyInnerOptions<'a> {
     timeout_ms: u64,
     enable_spurious_detection: bool,
+    enable_vacuity_check: bool,
     property_based_config: Option<&'a PropertyBasedTestConfig>,
     task_id: Option<String>,
     generation_id: Option<String>,
@@ -249,6 +253,7 @@ pub(crate) fn verify_inner(
     let VerifyInnerOptions {
         timeout_ms,
         enable_spurious_detection,
+        enable_vacuity_check,
         property_based_config,
         task_id,
         generation_id: _generation_id,
@@ -494,7 +499,29 @@ pub(crate) fn verify_inner(
     }
     metrics.record_phase("Phase 1h: MIR move analysis", phase_start.elapsed());
 
-    // Phase 1i: Temporal effect verification (stateful effects)
+    // Phase 1i: Vacuity checking via mutation testing
+    let phase_start = std::time::Instant::now();
+    if enable_vacuity_check && mir_body.check_analysis_budget().is_ok() {
+        match crate::verification::vacuity::check_spec_vacuity_for_hir(
+            atom, hir_atom, &mir_body, module_env, 10, timeout_ms,
+        ) {
+            Ok(result) => {
+                eprintln!(
+                    "  ✓ Vacuity check passed for '{}': {} mutations tested, none passed verification",
+                    atom.name, result.total_mutations_tested
+                );
+            }
+            Err(vacuity_err) => {
+                return Err(MumeiError::verification_at(
+                    vacuity_err.reason,
+                    atom.span.clone(),
+                ));
+            }
+        }
+    }
+    metrics.record_phase("Phase 1i: vacuity checking", phase_start.elapsed());
+
+    // Phase 1j: Temporal effect verification (stateful effects)
     // Build state machines from effect_defs and run forward dataflow analysis
     // on the MIR to verify that perform operations occur in valid states.
     let phase_start = std::time::Instant::now();

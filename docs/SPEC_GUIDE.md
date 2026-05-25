@@ -300,6 +300,19 @@ For MCP workflows, pass traceability through `validate_logic` or `forge_blade`:
 
 A complete traceability record should include a non-empty `trace_id`, at least one metadata key, a meaningful `requires`, and a meaningful `ensures`; this yields 100% coverage and satisfies the ≥95% coverage target.
 
+### Spec Vacuity Checking
+
+Mumei can detect specifications that are too weak using mutation testing. When enabled, the verifier mutates the MIR for an atom (for example flipping arithmetic/comparison operators, offsetting array indices, or replacing integer constants) and re-runs the postcondition proof against the original contract. If any mutated implementation still verifies, the specification is reported as vacuous and compilation is rejected.
+
+Vacuity checking is opt-in because it performs additional verification attempts:
+
+```bash
+MUMEI_ENABLE_VACUITY_CHECK=1 mumei verify spec.mm
+mumei verify --enable-vacuity-check spec.mm
+```
+
+Use this check in AI-generated-code workflows to catch semantic evasion such as replacing meaningful `requires` or `ensures` clauses with `true`.
+
 ## Contract Isolation Sandbox
 
 Mumei enforces strict separation between specifications (contracts) and implementations to prevent specification gaming by AI agents.
