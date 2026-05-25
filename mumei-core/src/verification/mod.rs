@@ -6,7 +6,9 @@ use crate::parser::{
     JoinSemantics, MatchArm, Op, Pattern, QuantifierType, RefinedType, ResourceDef, ResourceMode,
     Span, Stmt, StructDef, TraitDef, TraitMethod, TrustLevel,
 };
+use crate::resolver::compute_contract_hash;
 use miette::SourceSpan;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -41,6 +43,52 @@ pub use support::{
     DataFlowTrace, ExecutionStep, SecurityPolicy, VariableMutation, VariableState, ViolationInfo,
 };
 pub use types::*;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContractManifest {
+    pub version: String,
+    pub contract_hashes: HashMap<String, String>,
+    pub timestamp: u64,
+}
+
+pub fn generate_contract_manifest(module_env: &ModuleEnv) -> ContractManifest {
+    let mut contract_hashes = HashMap::new();
+
+    for (atom_name, atom) in &module_env.atoms {
+        contract_hashes.insert(atom_name.clone(), compute_contract_hash(atom));
+    }
+
+    ContractManifest {
+        version: "1.0".to_string(),
+        contract_hashes,
+        timestamp: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+    }
+}
+
+pub fn verify_contract_integrity(atom: &Atom, manifest: &ContractManifest) -> MumeiResult<()> {
+    let expected_hash = manifest.contract_hashes.get(&atom.name).ok_or_else(|| {
+        MumeiError::verification_at(
+            format!("Atom '{}' not found in contract manifest", atom.name),
+            atom.span.clone(),
+        )
+    })?;
+
+    let actual_hash = compute_contract_hash(atom);
+
+    if expected_hash != &actual_hash {
+        return Err(MumeiError::contract_mutation(
+            atom.name.clone(),
+            expected_hash.clone(),
+            actual_hash,
+            atom.span.clone(),
+        ));
+    }
+
+    Ok(())
+}
 
 #[derive(thiserror::Error, Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[error("Spec contradiction in atom '{atom_name}': {message}")]
