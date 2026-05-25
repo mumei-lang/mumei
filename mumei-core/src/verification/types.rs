@@ -753,6 +753,12 @@ pub struct TranslatorIRMetadata {
     pub lowering_rules: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manual_lemma_reason: Option<String>,
+    #[serde(default)]
+    pub semantic_gap_notes: Vec<String>,
+    #[serde(default)]
+    pub proof_trace_hints: Vec<String>,
+    #[serde(default)]
+    pub requires_bridge_lemmas: Vec<String>,
 }
 
 pub fn build_translator_binder_mapping(atom: &Atom) -> HashMap<String, String> {
@@ -836,6 +842,18 @@ pub fn build_translator_ir_metadata(atom: &Atom, module_env: &ModuleEnv) -> Tran
     if tags.iter().any(|tag| tag.contains("nonlinear")) {
         lowering_rules.push("integer_overflow_bridge".to_string());
     }
+    if tags
+        .iter()
+        .any(|tag| tag.contains("quantifier") || tag.contains("refinement"))
+    {
+        lowering_rules.push("refinement_predicate_lowering".to_string());
+    }
+
+    lowering_rules.sort();
+    lowering_rules.dedup();
+    let semantic_gap_notes = semantic_gap_notes_for_rules(&lowering_rules);
+    let proof_trace_hints = proof_trace_hints_for_rules(&lowering_rules);
+    let requires_bridge_lemmas = bridge_lemmas_for_rules(&lowering_rules);
 
     TranslatorIRMetadata {
         sort: sort.to_string(),
@@ -849,7 +867,112 @@ pub fn build_translator_ir_metadata(atom: &Atom, module_env: &ModuleEnv) -> Tran
         },
         lowering_rules,
         manual_lemma_reason: None,
+        semantic_gap_notes,
+        proof_trace_hints,
+        requires_bridge_lemmas,
     }
+}
+
+fn semantic_gap_notes_for_rules(lowering_rules: &[String]) -> Vec<String> {
+    let mut notes = Vec::new();
+    if lowering_rules
+        .iter()
+        .any(|rule| rule == "integer_overflow_bridge")
+    {
+        notes.push(
+            "integer_overflow_bridge: Mumei uses 2's complement wrap semantics, Lean 4 Int is unbounded. Bridge lemma required for overflow behavior."
+                .to_string(),
+        );
+    }
+    if lowering_rules
+        .iter()
+        .any(|rule| rule == "array_bounds_bridge")
+    {
+        notes.push(
+            "array_bounds_bridge: Mumei requires explicit bounds checking, Lean 4 guarded List access requires bounds evidence."
+                .to_string(),
+        );
+    }
+    if lowering_rules
+        .iter()
+        .any(|rule| rule == "string_regex_bridge")
+    {
+        notes.push(
+            "string_regex_bridge: String operations and regex semantics differ between Z3 and Lean 4. Manual lemma may be required."
+                .to_string(),
+        );
+    }
+    if lowering_rules
+        .iter()
+        .any(|rule| rule == "refinement_predicate_lowering")
+    {
+        notes.push(
+            "refinement_predicate_lowering: Quantifiers and refinement predicates are lowered to Lean dependent types."
+                .to_string(),
+        );
+    }
+    notes
+}
+
+fn proof_trace_hints_for_rules(lowering_rules: &[String]) -> Vec<String> {
+    let mut hints = Vec::new();
+    if lowering_rules
+        .iter()
+        .any(|rule| rule == "integer_overflow_bridge")
+    {
+        hints.push(
+            "assert mumei_i64_in_range hypotheses before applying arithmetic lemmas".to_string(),
+        );
+    }
+    if lowering_rules
+        .iter()
+        .any(|rule| rule == "array_bounds_bridge")
+    {
+        hints.push("preserve i < arr.length evidence before guarded List access".to_string());
+    }
+    if lowering_rules
+        .iter()
+        .any(|rule| rule == "string_regex_bridge")
+    {
+        hints
+            .push("route regex/string obligations through explicit bridge assumptions".to_string());
+    }
+    if lowering_rules
+        .iter()
+        .any(|rule| rule == "refinement_predicate_lowering")
+    {
+        hints.push("carry subtype predicate witnesses through quantifier lowering".to_string());
+    }
+    hints
+}
+
+fn bridge_lemmas_for_rules(lowering_rules: &[String]) -> Vec<String> {
+    let mut lemmas = Vec::new();
+    if lowering_rules
+        .iter()
+        .any(|rule| rule == "integer_overflow_bridge")
+    {
+        lemmas.push("mumei_i64_overflow_bridge".to_string());
+    }
+    if lowering_rules
+        .iter()
+        .any(|rule| rule == "array_bounds_bridge")
+    {
+        lemmas.push("mumei_array_bounds_bridge".to_string());
+    }
+    if lowering_rules
+        .iter()
+        .any(|rule| rule == "string_regex_bridge")
+    {
+        lemmas.push("mumei_regex_bridge".to_string());
+    }
+    if lowering_rules
+        .iter()
+        .any(|rule| rule == "refinement_predicate_lowering")
+    {
+        lemmas.push("mumei_subtype_predicate_bridge".to_string());
+    }
+    lemmas
 }
 
 pub(crate) fn lean_binder_name(name: &str) -> String {

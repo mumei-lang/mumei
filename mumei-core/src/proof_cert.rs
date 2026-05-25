@@ -692,6 +692,83 @@ pub fn validate_translator_version(
     }
 }
 
+/// Validate that an atom certificate matches the expected Lean translator bridge
+/// and carries semantic-gap lowering metadata required by its logic fragment.
+pub fn validate_translator_version_with_semantics(
+    cert: &AtomCertificate,
+    expected_version: &str,
+    expected_hash: &str,
+    required_lowering_rules: &[String],
+) -> Result<(), String> {
+    let mut issues = Vec::new();
+    if let Err(err) = validate_translator_version(cert, expected_version, expected_hash) {
+        issues.push(err);
+    }
+
+    let missing_rules: Vec<&String> = required_lowering_rules
+        .iter()
+        .filter(|rule| !cert.translator_ir.lowering_rules.contains(*rule))
+        .collect();
+    if !missing_rules.is_empty() {
+        issues.push(format!(
+            "missing required lowering rules: {}",
+            missing_rules
+                .iter()
+                .map(|rule| rule.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+
+    if issues.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "atom '{}': Lean translator metadata validation failed: {}",
+            cert.name,
+            issues.join("; ")
+        ))
+    }
+}
+
+/// Get required TranslatorIR lowering rules from logic-fragment tags.
+pub fn get_required_lowering_rules(logic_fragment_tags: &[String]) -> Vec<String> {
+    let mut rules = vec![
+        "type_system_mapping".to_string(),
+        "contract_lowering".to_string(),
+    ];
+
+    for tag in logic_fragment_tags {
+        match tag.as_str() {
+            "array_operations" | "array_without_bounds" => {
+                rules.push("array_bounds_bridge".to_string());
+            }
+            "string_operations" => {
+                rules.push("string_regex_bridge".to_string());
+            }
+            "integer_arithmetic" | "nonlinear_arithmetic" => {
+                rules.push("integer_overflow_bridge".to_string());
+            }
+            "quantifiers" | "quantifier_alternation" | "trigger_sensitive_quantifier" => {
+                rules.push("refinement_predicate_lowering".to_string());
+            }
+            "finite_field" => {
+                rules.push("finite_field_lowering".to_string());
+                rules.push("mathlib4_bridge".to_string());
+            }
+            "group_theory" => {
+                rules.push("group_theory_lowering".to_string());
+                rules.push("mathlib4_bridge".to_string());
+            }
+            _ => {}
+        }
+    }
+
+    rules.sort();
+    rules.dedup();
+    rules
+}
+
 pub fn validate_certificate_translator_versions(cert: &ProofCertificate) -> Result<(), String> {
     let issues: Vec<String> = cert
         .atoms
@@ -1549,6 +1626,76 @@ mod tests {
         .expect_err("missing translator metadata must fail");
         assert!(err.contains("translator_version"));
         assert!(err.contains("bridge_lemma_hash"));
+    }
+
+    #[test]
+    fn test_required_lowering_rules_extraction() {
+        let tags = vec![
+            "array_operations".to_string(),
+            "integer_arithmetic".to_string(),
+        ];
+        let rules = get_required_lowering_rules(&tags);
+
+        assert!(rules.contains(&"type_system_mapping".to_string()));
+        assert!(rules.contains(&"contract_lowering".to_string()));
+        assert!(rules.contains(&"array_bounds_bridge".to_string()));
+        assert!(rules.contains(&"integer_overflow_bridge".to_string()));
+    }
+
+    #[test]
+    fn test_translator_version_validation_with_semantics() {
+        let atom = make_test_atom("semantic_gap", "true", "true", "1");
+        let atoms: Vec<&parser::Atom> = vec![&atom];
+        let mut results = HashMap::new();
+        results.insert(
+            "semantic_gap".to_string(),
+            ("lean_verified".to_string(), "verified".to_string()),
+        );
+        let module_env = ModuleEnv::new();
+        let mut cert =
+            generate_certificate("test.mm", &atoms, &results, &module_env, None, None, None);
+        cert.atoms[0].translator_ir.lowering_rules = vec!["type_system_mapping".to_string()];
+
+        let required_rules = vec![
+            "type_system_mapping".to_string(),
+            "array_bounds_bridge".to_string(),
+        ];
+        let result = validate_translator_version_with_semantics(
+            &cert.atoms[0],
+            verification::LEAN_TRANSLATOR_VERSION,
+            verification::LEAN_BRIDGE_LEMMA_HASH,
+            &required_rules,
+        );
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .contains("missing required lowering rules"));
+    }
+
+    #[test]
+    fn test_translator_ir_metadata_includes_semantic_gap_fields() {
+        let atom = make_test_atom("array_guard", "forall(i, 0, n, arr[i] >= 0)", "true", "1");
+        let module_env = ModuleEnv::new();
+        let ir = verification::build_translator_ir_metadata(&atom, &module_env);
+
+        assert!(ir
+            .lowering_rules
+            .contains(&"array_bounds_bridge".to_string()));
+        assert!(ir
+            .lowering_rules
+            .contains(&"refinement_predicate_lowering".to_string()));
+        assert!(ir
+            .semantic_gap_notes
+            .iter()
+            .any(|note| note.starts_with("array_bounds_bridge:")));
+        assert!(ir
+            .proof_trace_hints
+            .iter()
+            .any(|hint| hint.starts_with("preserve i < arr.length")));
+        assert!(ir
+            .requires_bridge_lemmas
+            .contains(&"mumei_array_bounds_bridge".to_string()));
     }
 
     /// PR 2: `allow_lean_verified` does not weaken the `"changed"` detector.
