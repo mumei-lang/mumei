@@ -66,7 +66,7 @@ impl<'a> IncrementalProfiler<'a> {
     }
 
     pub fn begin_check(&mut self) -> usize {
-        self.constraints.len()
+        0
     }
 
     pub fn end_check(&mut self, start_index: usize) {
