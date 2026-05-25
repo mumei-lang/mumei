@@ -97,13 +97,15 @@ mumei setup && source ~/.mumei/env
 mumei init my_app
 cd my_app
 mumei build src/main.mm -o dist/output
+mumei run src/main.mm
 ```
 
 ### CLI
 
 | Command | Description |
 |---------|-------------|
-| `mumei build <file> -o <out>` | Verify + codegen (`--emit llvm-ir` (default) / `c-header` / `verified-json` / `proof-book` / `rust` / `python` / external plugin name) |
+| `mumei build <file> -o <out>` | Verify + codegen (`--emit llvm-ir` (default) / `c-header` / `verified-json` / `proof-book` / `binary` / `rust` / `python` / external plugin name) |
+| `mumei run <file>` | Verify → codegen → link → execute `atom main()` as a native binary (`--emit binary` default, `--emit llvm-ir` keeps IR before linking) |
 | `mumei verify <file>` | Z3 verification only |
 | `mumei check <file>` | Parse + resolve (fast, no Z3) |
 | `mumei init <name>` | Generate project template |

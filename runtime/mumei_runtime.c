@@ -30,6 +30,7 @@
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 #include <stdlib.h>
 
 #define MUMEI_MAX_CHANNELS 256
@@ -123,4 +124,60 @@ int64_t __mumei_chan_recv(int64_t chan_id) {
  */
 void __mumei_chan_init(void) {
     (void)mumei_chan_get(0);
+}
+
+
+#define MUMEI_MAX_NAMED_RESOURCES 128
+#define MUMEI_MAX_NAMED_RESOURCE_NAME 128
+
+typedef struct {
+    pthread_mutex_t mu;
+    char name[MUMEI_MAX_NAMED_RESOURCE_NAME];
+    _Atomic int initialized;
+} mumei_named_resource_t;
+
+static mumei_named_resource_t g_named_resources[MUMEI_MAX_NAMED_RESOURCES];
+static pthread_mutex_t g_named_resource_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static pthread_mutex_t *mumei_named_resource_get(const char *name) {
+    if (name == NULL || name[0] == '\0') {
+        fprintf(stderr, "[mumei runtime] fatal: empty resource name\n");
+        abort();
+    }
+
+    pthread_mutex_lock(&g_named_resource_mu);
+    int free_slot = -1;
+    for (int i = 0; i < MUMEI_MAX_NAMED_RESOURCES; i++) {
+        if (atomic_load_explicit(&g_named_resources[i].initialized, memory_order_acquire)) {
+            if (strncmp(g_named_resources[i].name, name, MUMEI_MAX_NAMED_RESOURCE_NAME) == 0) {
+                pthread_mutex_unlock(&g_named_resource_mu);
+                return &g_named_resources[i].mu;
+            }
+        } else if (free_slot < 0) {
+            free_slot = i;
+        }
+    }
+
+    if (free_slot < 0) {
+        pthread_mutex_unlock(&g_named_resource_mu);
+        fprintf(stderr, "[mumei runtime] fatal: too many named resources\n");
+        abort();
+    }
+
+    mumei_named_resource_t *slot = &g_named_resources[free_slot];
+    pthread_mutex_init(&slot->mu, NULL);
+    snprintf(slot->name, MUMEI_MAX_NAMED_RESOURCE_NAME, "%s", name);
+    atomic_store_explicit(&slot->initialized, 1, memory_order_release);
+    pthread_mutex_unlock(&g_named_resource_mu);
+    return &slot->mu;
+}
+
+pthread_mutex_t *__mumei_get_resource_mutex(const char *name) {
+    return mumei_named_resource_get(name);
+}
+
+int64_t __mumei_effect_stub(const char *effect, const char *operation) {
+    (void)effect;
+    (void)operation;
+    return 0;
 }

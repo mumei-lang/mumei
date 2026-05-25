@@ -9,7 +9,7 @@ use mumei_core::parser::ExternBlock;
 use mumei_core::verification::{ModuleEnv, MumeiError, MumeiResult};
 use std::path::Path;
 
-use crate::codegen::compile_atom_into_module;
+use crate::codegen::{compile_atom_into_module, compile_llvm_ir_to_object};
 
 /// Recursively rename function calls in a HirExpr from `from` to `to`.
 fn rename_calls_in_hir_expr(expr: &mut HirExpr, from: &str, to: &str) {
@@ -272,12 +272,26 @@ pub fn compile_atoms_to_binary_ll(
         .build_return(Some(&exit_code))
         .map_err(|e| MumeiError::codegen(format!("Failed to build return: {}", e)))?;
 
-    // Write merged module to .ll file
     merged_module
         .print_to_file(output_ll_path)
         .map_err(|e| MumeiError::codegen(format!("Failed to write LLVM IR: {}", e)))?;
 
     Ok(())
+}
+
+pub fn compile_atoms_to_binary_object(
+    hir_atoms: &[HirAtom],
+    module_env: &ModuleEnv,
+    extern_blocks: &[ExternBlock],
+    output_object_path: &Path,
+) -> MumeiResult<()> {
+    let ll_path = output_object_path.with_extension("ll");
+    compile_atoms_to_binary_ll(hir_atoms, module_env, extern_blocks, &ll_path)?;
+    let object_result = compile_llvm_ir_to_object(&ll_path, output_object_path);
+    if object_result.is_ok() {
+        let _ = std::fs::remove_file(&ll_path);
+    }
+    object_result
 }
 
 #[cfg(test)]
