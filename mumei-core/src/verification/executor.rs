@@ -617,7 +617,7 @@ pub(crate) fn verify_inner(
                             if expected_int >= 0 && actual_int >= 0 {
                                 // Check constraint budget: each Z3 probe costs ~4
                                 // assertions (variable, branch-a, branch-b, equality).
-                                // Phase 1i runs before the main solver is created, so
+                                // This phase runs before the main solver is created, so
                                 // we use mir_body complexity as a proxy budget check.
                                 let budget_ok = mir_body.complexity() < DEFAULT_CONSTRAINT_BUDGET;
 
@@ -776,7 +776,7 @@ pub(crate) fn verify_inner(
             }
         }
     }
-    metrics.record_phase("Phase 1i: temporal effects", phase_start.elapsed());
+    metrics.record_phase("Phase 1j: temporal effects", phase_start.elapsed());
 
     // ✅ Phase 4c complete (Plan 19): MIR lowering now covers all expression forms
     // (Match, Lambda, Async, Await, Task, TaskGroup, ChanSend, ChanRecv, etc.).

@@ -1176,7 +1176,13 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                     }
                 } else {
                     // Feature 2: Use compute_proof_hash with dependency-aware hashing
-                    let proof_hash = resolver::compute_proof_hash(atom, &module_env);
+                    let proof_flags = if verification_config.enable_vacuity_check {
+                        &["enable_vacuity_check"][..]
+                    } else {
+                        &[][..]
+                    };
+                    let proof_hash =
+                        resolver::compute_proof_hash_with_flags(atom, &module_env, proof_flags);
 
                     if let Some(cached_entry) = verification_cache.get(&atom.name) {
                         if cached_entry.proof_hash == proof_hash {
@@ -1328,8 +1334,16 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                         let mut qualified_method = method.clone();
                         qualified_method.name = qualified_name.clone();
 
-                        let proof_hash =
-                            resolver::compute_proof_hash(&qualified_method, &module_env);
+                        let proof_flags = if verification_config.enable_vacuity_check {
+                            &["enable_vacuity_check"][..]
+                        } else {
+                            &[][..]
+                        };
+                        let proof_hash = resolver::compute_proof_hash_with_flags(
+                            &qualified_method,
+                            &module_env,
+                            proof_flags,
+                        );
 
                         if let Some(cached_entry) = verification_cache.get(&qualified_name) {
                             if cached_entry.proof_hash == proof_hash {
@@ -2808,8 +2822,16 @@ fn cmd_build(
                     } else if module_env.is_verified(&qualified_name) {
                         println!("  ⚖️  [2/3] Verification: Skipped (imported, contract-trusted).");
                     } else {
-                        let proof_hash =
-                            resolver::compute_proof_hash(&qualified_method, &module_env);
+                        let proof_flags = if verification_config.enable_vacuity_check {
+                            &["enable_vacuity_check"][..]
+                        } else {
+                            &[][..]
+                        };
+                        let proof_hash = resolver::compute_proof_hash_with_flags(
+                            &qualified_method,
+                            &module_env,
+                            proof_flags,
+                        );
 
                         let cache_hit = verification_cache
                             .get(&qualified_name)
@@ -3009,7 +3031,13 @@ fn cmd_build(
                     println!("  ⚖️  [2/3] Verification: Skipped (imported, contract-trusted).");
                 } else {
                     // Feature 2: Use compute_proof_hash with dependency-aware hashing
-                    let proof_hash = resolver::compute_proof_hash(atom, &module_env);
+                    let proof_flags = if verification_config.enable_vacuity_check {
+                        &["enable_vacuity_check"][..]
+                    } else {
+                        &[][..]
+                    };
+                    let proof_hash =
+                        resolver::compute_proof_hash_with_flags(atom, &module_env, proof_flags);
 
                     let cache_hit = verification_cache
                         .get(&atom.name)

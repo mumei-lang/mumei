@@ -1,6 +1,4 @@
-use crate::mir::{
-    BasicBlockId, MirBody, MirConstant, MirStatement, Operand, Place, Rvalue, Terminator,
-};
+use crate::mir::{MirBody, MirConstant, MirStatement, Operand, Place, Rvalue, Terminator};
 use crate::parser::Op;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -14,7 +12,7 @@ pub enum MutationOperator {
     ConstantOne,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct MutationResult {
     pub operator: MutationOperator,
     pub location: String,
@@ -284,6 +282,3 @@ pub fn generate_mutations(body: &MirBody, max_mutations: usize) -> Vec<MutationO
     mutations.truncate(max_mutations);
     mutations
 }
-
-#[allow(dead_code)]
-fn _basic_block_id(_: BasicBlockId) {}

@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use z3::{Config, Context, SatResult, Solver};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct VacuityCheckResult {
     pub is_vacuous: bool,
     pub mutation_results: Vec<MutationResult>,
@@ -71,7 +71,6 @@ pub fn check_spec_vacuity_for_hir(
     let mut vacuous_mutations = Vec::new();
 
     for mutation in &mutations {
-        let mutated_body = apply_mutation(mir_body, mutation);
         let mut mutated_stmt = hir_atom.body_stmt.clone();
         let stmt_changed = mutate_stmt(&mut mutated_stmt, mutation);
         let mut mutated_hir_body = hir_atom.body.clone();
@@ -89,7 +88,7 @@ pub fn check_spec_vacuity_for_hir(
         mutation_results.push(MutationResult {
             operator: mutation.clone(),
             location: format!("mir_body_{}", atom.name),
-            mutated_body,
+            mutated_body: apply_mutation(mir_body, mutation),
             verification_passed,
         });
     }

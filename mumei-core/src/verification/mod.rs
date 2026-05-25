@@ -50,7 +50,9 @@ pub use support::{
     DataFlowTrace, ExecutionStep, SecurityPolicy, VariableMutation, VariableState, ViolationInfo,
 };
 pub use types::*;
-pub use vacuity::{check_spec_vacuity, VacuityCheckResult, VacuityError};
+pub use vacuity::{
+    check_spec_vacuity, check_spec_vacuity_for_hir, VacuityCheckResult, VacuityError,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContractManifest {
