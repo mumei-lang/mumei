@@ -846,7 +846,20 @@ def analyze_contract_conflicts(source_code: str) -> str:
                 indent=2,
             )
 
-        cross_spec = json.loads(cross_spec_path.read_text(encoding="utf-8"))
+        try:
+            cross_spec = json.loads(cross_spec_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            return json.dumps(
+                {
+                    "conflicts": [],
+                    "circular_dependencies": [],
+                    "dependency_graph": [],
+                    "success": False,
+                    "error": f"invalid cross_spec.json: {exc}",
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
         contracts = _extract_source_atom_contracts(source_code)
         conflicts = []
         for item in cross_spec.get("contract_consistency", []):
@@ -886,7 +899,19 @@ def propose_interface_refactoring(
     retry_history: dict | None = None,
 ) -> str:
     """Propose interface-level refactoring to resolve architectural issues."""
-    analysis = json.loads(analyze_contract_conflicts(source_code))
+    try:
+        analysis = json.loads(analyze_contract_conflicts(source_code))
+    except json.JSONDecodeError as exc:
+        return json.dumps(
+            {
+                "proposals": [],
+                "analysis_summary": {},
+                "conflict_count": 0,
+                "error": f"invalid analysis payload: {exc}",
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
     proposals = []
 
     for conflict in analysis.get("conflicts", []):

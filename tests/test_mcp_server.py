@@ -345,6 +345,29 @@ body: x;
             "requires": "x >= 0",
         }
 
+    def test_analyze_contract_conflicts_handles_invalid_cross_spec(self) -> None:
+        from mcp_server import analyze_contract_conflicts
+
+        def fake_run(args: list[str], **_kwargs) -> subprocess.CompletedProcess:
+            report_dir = Path(args[args.index("--report-dir") + 1])
+            (report_dir / "cross_spec.json").write_text("not json", encoding="utf-8")
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+        with patch("mcp_server.subprocess.run", side_effect=fake_run):
+            payload = json.loads(analyze_contract_conflicts("atom caller() body: 0;"))
+
+        assert payload["success"] is False
+        assert "invalid cross_spec.json" in payload["error"]
+
+    def test_propose_interface_refactoring_handles_invalid_analysis(self) -> None:
+        from mcp_server import propose_interface_refactoring
+
+        with patch("mcp_server.analyze_contract_conflicts", return_value="not json"):
+            payload = json.loads(propose_interface_refactoring("atom caller() body: 0;"))
+
+        assert payload["proposals"] == []
+        assert "invalid analysis payload" in payload["error"]
+
 
 class TestVerifyWithOrchestration:
     @patch.dict(
