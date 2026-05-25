@@ -270,6 +270,12 @@ enum Command {
         /// Emit a contract manifest containing per-atom specification hashes
         #[arg(long)]
         emit_contract_manifest: bool,
+        /// Detect loops that may need stronger invariants
+        #[arg(long)]
+        detect_loops: bool,
+        /// Include CEGIS loop-invariant suggestions in JSON/report output
+        #[arg(long, requires = "detect_loops")]
+        suggest_cegis: bool,
     },
     /// Parse + resolve + monomorphize only (no Z3, fast syntax check)
     Check {
@@ -440,6 +446,8 @@ fn main() {
             artifact_paths,
             budget_policy_fingerprint,
             emit_contract_manifest,
+            detect_loops,
+            suggest_cegis,
         }) => {
             let no_emit_escalation_metrics =
                 no_emit.iter().any(|target| target == "escalation-metrics");
@@ -495,6 +503,8 @@ fn main() {
                     budget_policy_fingerprint,
                 ),
                 emit_contract_manifest,
+                detect_loops,
+                suggest_cegis,
             });
         }
         Some(Command::Check { input }) => {
@@ -925,6 +935,8 @@ struct VerifyOptions<'a> {
     artifact_paths: Option<Vec<String>>,
     budget_policy_fingerprint: Option<String>,
     emit_contract_manifest: bool,
+    detect_loops: bool,
+    suggest_cegis: bool,
 }
 
 fn cmd_verify(options: VerifyOptions<'_>) {
@@ -952,6 +964,8 @@ fn cmd_verify(options: VerifyOptions<'_>) {
         artifact_paths,
         budget_policy_fingerprint,
         emit_contract_manifest,
+        detect_loops,
+        suggest_cegis,
     } = options;
     check_z3_available();
     let manifest_config = manifest::find_and_load();
@@ -1000,6 +1014,8 @@ fn cmd_verify(options: VerifyOptions<'_>) {
         enable_cross_spec_verification,
         collect_decidable_fragment_metrics: emit_decidable_metrics,
         enable_spurious_detection,
+        detect_loops,
+        suggest_cegis,
         property_based_test: property_based_config,
     };
     let input_path = Path::new(input);
@@ -1021,6 +1037,7 @@ fn cmd_verify(options: VerifyOptions<'_>) {
     let mut failed = 0;
     let mut skipped = 0;
     let mut escalated = 0;
+    let mut loop_suggestions: Vec<serde_json::Value> = Vec::new();
 
     // Plan 11B: Track per-atom verification results for proof certificates
     let mut cert_results: std::collections::HashMap<String, (String, String)> =
@@ -1061,12 +1078,48 @@ fn cmd_verify(options: VerifyOptions<'_>) {
     for item in &items {
         match item {
             Item::Atom(atom) => {
+                if verification_config.detect_loops {
+                    let loops = verification::detect_loops_needing_invariants(atom);
+                    if !loops.is_empty() {
+                        if !json_output {
+                            println!(
+                                "  🔁 '{}': {} loop(s) may need invariant strengthening",
+                                atom.name,
+                                loops.len()
+                            );
+                        }
+                        if verification_config.suggest_cegis {
+                            loop_suggestions.push(serde_json::json!({
+                                "atom": atom.name,
+                                "loops": loops,
+                            }));
+                        }
+                    }
+                }
                 let callees = resolver::collect_callees_from_body(&atom.body_expr);
                 module_env.register_dependencies(&atom.name, callees);
             }
             Item::ImplBlock(impl_block) => {
                 for method in &impl_block.methods {
                     let qualified_name = format!("{}::{}", impl_block.struct_name, method.name);
+                    if verification_config.detect_loops {
+                        let loops = verification::detect_loops_needing_invariants(method);
+                        if !loops.is_empty() {
+                            if !json_output {
+                                println!(
+                                    "  🔁 '{}': {} loop(s) may need invariant strengthening",
+                                    qualified_name,
+                                    loops.len()
+                                );
+                            }
+                            if verification_config.suggest_cegis {
+                                loop_suggestions.push(serde_json::json!({
+                                    "atom": qualified_name,
+                                    "loops": loops,
+                                }));
+                            }
+                        }
+                    }
                     let callees = resolver::collect_callees_from_body(&method.body_expr);
                     module_env.register_dependencies(&qualified_name, callees);
                 }
@@ -1597,7 +1650,27 @@ fn cmd_verify(options: VerifyOptions<'_>) {
         let report_path = output_dir.join("report.json");
         if report_path.exists() {
             match std::fs::read_to_string(&report_path) {
-                Ok(content) => println!("{}", content),
+                Ok(content) => {
+                    if loop_suggestions.is_empty() {
+                        println!("{}", content);
+                    } else {
+                        match serde_json::from_str::<serde_json::Value>(&content) {
+                            Ok(mut payload) => {
+                                if let Some(object) = payload.as_object_mut() {
+                                    object.insert(
+                                        "cegis_suggestions".to_string(),
+                                        serde_json::Value::Array(loop_suggestions.clone()),
+                                    );
+                                }
+                                match serde_json::to_string_pretty(&payload) {
+                                    Ok(json) => println!("{json}"),
+                                    Err(_) => println!("{}", content),
+                                }
+                            }
+                            Err(_) => println!("{}", content),
+                        }
+                    }
+                }
                 Err(e) => {
                     eprintln!("Failed to read report.json: {}", e);
                     std::process::exit(1);
@@ -1606,10 +1679,23 @@ fn cmd_verify(options: VerifyOptions<'_>) {
         } else {
             // No report.json produced — emit minimal JSON status
             let status = if failed > 0 { "failed" } else { "passed" };
-            println!(
-                "{{\"status\":\"{}\",\"verified\":{},\"failed\":{},\"skipped\":{},\"escalation_candidates\":{}}}",
-                status, verified, failed, skipped, escalated
-            );
+            let mut payload = serde_json::json!({
+                "status": status,
+                "verified": verified,
+                "failed": failed,
+                "skipped": skipped,
+                "escalation_candidates": escalated,
+            });
+            if !loop_suggestions.is_empty() {
+                payload["cegis_suggestions"] = serde_json::Value::Array(loop_suggestions.clone());
+            }
+            match serde_json::to_string_pretty(&payload) {
+                Ok(json) => println!("{json}"),
+                Err(_) => println!(
+                    "{{\"status\":\"{}\",\"verified\":{},\"failed\":{},\"skipped\":{},\"escalation_candidates\":{}}}",
+                    status, verified, failed, skipped, escalated
+                ),
+            }
         }
         if failed > 0 {
             std::process::exit(1);
@@ -2560,6 +2646,8 @@ fn cmd_build(
             emitter::EmitTarget::DecidableMetrics
         ),
         enable_spurious_detection: true,
+        detect_loops: false,
+        suggest_cegis: false,
         property_based_test: None,
     };
     let mut escalation_cert_results: std::collections::HashMap<String, (String, String)> =
