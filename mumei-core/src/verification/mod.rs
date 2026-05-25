@@ -21,6 +21,7 @@ pub mod executor;
 pub mod fragment;
 pub mod loop_detector;
 pub mod module_env;
+pub mod mutation;
 pub mod nlae_reporter;
 pub mod profiler;
 pub mod property_based;
@@ -29,6 +30,7 @@ pub mod spurious_detection;
 pub(crate) mod support;
 pub mod translator;
 pub mod types;
+pub mod vacuity;
 
 #[cfg(test)]
 mod tests;
@@ -37,6 +39,7 @@ pub use executor::*;
 pub use fragment::*;
 pub use loop_detector::*;
 pub use module_env::*;
+pub use mutation::{apply_mutation, generate_mutations, MutationOperator, MutationResult};
 pub use nlae_reporter::*;
 pub use profiler::{ConstraintProfile, IncrementalProfiler, SolverHeatmap};
 pub use property_based::*;
@@ -47,6 +50,9 @@ pub use support::{
     DataFlowTrace, ExecutionStep, SecurityPolicy, VariableMutation, VariableState, ViolationInfo,
 };
 pub use types::*;
+pub use vacuity::{
+    check_spec_vacuity, check_spec_vacuity_for_hir, VacuityCheckResult, VacuityError,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContractManifest {

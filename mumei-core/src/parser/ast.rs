@@ -43,7 +43,7 @@ impl std::fmt::Display for Span {
 
 // --- 1. Expression AST ---
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Op {
     Add,
     Sub,

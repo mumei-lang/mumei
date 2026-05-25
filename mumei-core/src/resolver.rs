@@ -1418,6 +1418,14 @@ pub struct VerificationCacheEntry {
 /// Compute a proof hash that includes transitive dependency signatures and type predicates.
 /// This extends compute_atom_hash with callee signatures and type predicate content.
 pub fn compute_proof_hash(atom: &crate::parser::Atom, module_env: &ModuleEnv) -> String {
+    compute_proof_hash_with_flags(atom, module_env, &[])
+}
+
+pub fn compute_proof_hash_with_flags(
+    atom: &crate::parser::Atom,
+    module_env: &ModuleEnv,
+    flags: &[&str],
+) -> String {
     let mut hasher = Sha256::new();
 
     // 1. Include everything from the basic atom hash
@@ -1484,6 +1492,10 @@ pub fn compute_proof_hash(atom: &crate::parser::Atom, module_env: &ModuleEnv) ->
     if let Some(max) = atom.max_unroll {
         hasher.update(b"|max_unroll:");
         hasher.update(max.to_string().as_bytes());
+    }
+    for flag in flags {
+        hasher.update(b"|verify_flag:");
+        hasher.update(flag.as_bytes());
     }
 
     // 2. Include type predicate content for each param's refined type
@@ -1945,6 +1957,30 @@ atom add(x: i64, y: i64) -> i64
                 assert_eq!(hash1, hash2, "same atom should produce same proof hash");
             }
         }
+    }
+
+    #[test]
+    fn test_proof_hash_includes_verification_flags() {
+        let source = r#"
+atom add(x: i64, y: i64) -> i64
+  requires: true;
+  ensures: result == x + y;
+  body: x + y;
+"#;
+        let module = parser::parse_module(source);
+        let mut module_env = ModuleEnv::new();
+        for item in &module {
+            if let parser::Item::Atom(atom) = item {
+                module_env.register_atom(atom);
+            }
+        }
+        let atom = module_env.get_atom("add").unwrap();
+
+        let default_hash = compute_proof_hash(atom, &module_env);
+        let vacuity_hash =
+            compute_proof_hash_with_flags(atom, &module_env, &["enable_vacuity_check"]);
+
+        assert_ne!(default_hash, vacuity_hash);
     }
 
     /// Test compute_proof_hash changes when callee signature changes
