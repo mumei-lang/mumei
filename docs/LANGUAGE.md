@@ -173,7 +173,7 @@ body: {
 ```
 ---
 ## Quantifiers in Contracts
-Use bounded ranges or finite collections when possible; see [Quantifiers](SPEC_GUIDE.md#quantifiers) for proof-friendly restrictions.
+Use bounded ranges or finite collections when possible. For Z3-stable quantifier restrictions, see [Quantifiers](SPEC_GUIDE.md#quantifiers).
 
 ```mumei
 // Real insertion-sort body with `arr[i] = val` store syntax.
@@ -197,7 +197,7 @@ ensures: result >= 0 - 1 && result < n;
 body: { ... };
 ```
 ### Array Element Assignment (`arr[i] = v`)
-Explicit bounds such as `0 <= idx && idx < len` keep array obligations in the decidable fragment; see [Array and sequence access](SPEC_GUIDE.md#array-and-sequence-access).
+Explicit bounds such as `0 <= idx && idx < len` keep array obligations in the decidable fragment. For Z3-stable array access patterns, see [Array and sequence access](SPEC_GUIDE.md#array-and-sequence-access).
 
 `arr[idx] = expr` は `Stmt::ArrayStore` としてパースされ、Z3 では
 `Array::store(arr, idx, expr)` でモデル化される。後続の `arr[j]` 読み取りは
