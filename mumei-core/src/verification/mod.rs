@@ -19,6 +19,7 @@ pub mod executor;
 pub mod fragment;
 pub mod module_env;
 pub mod nlae_reporter;
+pub mod property_based;
 pub mod spec_validation;
 pub mod spurious_detection;
 pub(crate) mod support;
@@ -32,6 +33,7 @@ pub use executor::*;
 pub use fragment::*;
 pub use module_env::*;
 pub use nlae_reporter::*;
+pub use property_based::*;
 pub use spec_validation::*;
 pub use spurious_detection::*;
 pub use support::{

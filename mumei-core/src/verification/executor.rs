@@ -21,10 +21,13 @@ pub fn verify_with_config(
         hir_atom,
         output_dir,
         module_env,
-        timeout_ms,
-        true,
-        orchestration_task_id_from_env(),
-        orchestration_generation_id_from_env(),
+        VerifyInnerOptions {
+            timeout_ms,
+            enable_spurious_detection: true,
+            property_based_config: None,
+            task_id: orchestration_task_id_from_env(),
+            generation_id: orchestration_generation_id_from_env(),
+        },
     )
 }
 
@@ -38,10 +41,13 @@ pub fn verify_with_verification_config(
         hir_atom,
         output_dir,
         module_env,
-        config.timeout_ms,
-        config.enable_spurious_detection,
-        orchestration_task_id_from_env(),
-        orchestration_generation_id_from_env(),
+        VerifyInnerOptions {
+            timeout_ms: config.timeout_ms,
+            enable_spurious_detection: config.enable_spurious_detection,
+            property_based_config: config.property_based_test.as_ref(),
+            task_id: orchestration_task_id_from_env(),
+            generation_id: orchestration_generation_id_from_env(),
+        },
     )
 }
 
@@ -71,11 +77,36 @@ pub fn verify(hir_atom: &HirAtom, output_dir: &Path, module_env: &ModuleEnv) -> 
         hir_atom,
         output_dir,
         module_env,
-        10000,
-        true,
-        orchestration_task_id_from_env(),
-        orchestration_generation_id_from_env(),
+        VerifyInnerOptions {
+            timeout_ms: 10000,
+            enable_spurious_detection: true,
+            property_based_config: None,
+            task_id: orchestration_task_id_from_env(),
+            generation_id: orchestration_generation_id_from_env(),
+        },
     )
+}
+
+pub(crate) struct VerifyInnerOptions<'a> {
+    timeout_ms: u64,
+    enable_spurious_detection: bool,
+    property_based_config: Option<&'a PropertyBasedTestConfig>,
+    task_id: Option<String>,
+    generation_id: Option<String>,
+}
+
+fn property_based_help(result: PropertyBasedTestResult) -> Option<String> {
+    match result.status.as_str() {
+        "failed" => Some(format!(
+            "Z3 returned unknown; property-based validation found a counterexample after {} input(s): {:?}",
+            result.tests_run, result.shrunk_counterexample
+        )),
+        "passed" => Some(format!(
+            "Z3 returned unknown; property-based validation passed {} generated input(s) as an executable sanity check.",
+            result.tests_run
+        )),
+        _ => None,
+    }
 }
 
 /// Compile-time metrics for a single atom verification.
@@ -213,11 +244,15 @@ pub(crate) fn verify_inner(
     hir_atom: &HirAtom,
     output_dir: &Path,
     module_env: &ModuleEnv,
-    timeout_ms: u64,
-    enable_spurious_detection: bool,
-    task_id: Option<String>,
-    _generation_id: Option<String>,
+    options: VerifyInnerOptions<'_>,
 ) -> MumeiResult<()> {
+    let VerifyInnerOptions {
+        timeout_ms,
+        enable_spurious_detection,
+        property_based_config,
+        task_id,
+        generation_id: _generation_id,
+    } = options;
     let timeout_ms = orchestration_timeout_ms_from_env().unwrap_or(timeout_ms);
     let atom = &hir_atom.atom;
     let mut metrics = VerificationMetrics::new(&atom.name);
@@ -231,12 +266,14 @@ pub(crate) fn verify_inner(
 
     // Phase 0a: 仕様健全性チェック（proof attempt 前の requires/ensures/refinement SAT）
     let phase_start = std::time::Instant::now();
-    let _spec_validation_result = check_spec_satisfiability(atom, module_env).map_err(|err| {
-        MumeiError::verification_at(err.to_string(), err.span.clone()).with_help(format!(
-            "SpecValidation failed before proof attempt (kind: {}, constraints: {:?})",
-            err.kind, err.constraints
-        ))
-    })?;
+    let _spec_validation_result =
+        check_spec_satisfiability_with_property_based(atom, module_env, property_based_config)
+            .map_err(|err| {
+                MumeiError::verification_at(err.to_string(), err.span.clone()).with_help(format!(
+                    "SpecValidation failed before proof attempt (kind: {}, constraints: {:?})",
+                    err.kind, err.constraints
+                ))
+            })?;
     metrics.record_phase("Phase 0a: spec validation", phase_start.elapsed());
 
     // Phase 0: 信頼レベルチェック（Trust Boundary）
@@ -1497,16 +1534,23 @@ pub(crate) fn verify_inner(
             }
             if ensures_check == SatResult::Unknown {
                 solver.pop(1);
+                let property_based_help = property_based_config
+                    .map(|config| run_property_based_test(atom, module_env, config))
+                    .and_then(property_based_help);
                 metrics.record_phase(
                     "Phase 5: ensures verification (unknown)",
                     phase_start.elapsed(),
                 );
                 metrics.total_constraints = constraint_count_cell.get();
                 metrics.print_summary();
-                return Err(MumeiError::verification_at(
+                let mut err = MumeiError::verification_at(
                     "Z3 returned unknown while checking the postcondition.",
                     atom.span.clone(),
-                ));
+                );
+                if let Some(help) = property_based_help {
+                    err = err.with_help(help);
+                }
+                return Err(err);
             }
             solver.pop(1);
         }
@@ -1627,6 +1671,9 @@ pub(crate) fn verify_inner(
         ));
     }
     if final_check == SatResult::Unknown {
+        let property_based_help = property_based_config
+            .map(|config| run_property_based_test(atom, module_env, config))
+            .and_then(property_based_help);
         metrics.z3_check_time = z3_check_start.elapsed();
         metrics.total_constraints = constraint_count_cell.get();
         metrics.record_phase(
@@ -1634,10 +1681,14 @@ pub(crate) fn verify_inner(
             z3_check_start.elapsed(),
         );
         metrics.print_summary();
-        return Err(MumeiError::verification_at(
+        let mut err = MumeiError::verification_at(
             "Z3 returned unknown during the final consistency check.",
             atom.span.clone(),
-        ));
+        );
+        if let Some(help) = property_based_help {
+            err = err.with_help(help);
+        }
+        return Err(err);
     }
 
     metrics.z3_check_time = z3_check_start.elapsed();
