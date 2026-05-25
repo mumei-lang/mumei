@@ -19,6 +19,7 @@ use z3::{Config, Context, SatResult, Solver};
 
 pub mod executor;
 pub mod fragment;
+pub mod loop_detector;
 pub mod module_env;
 pub mod nlae_reporter;
 pub mod property_based;
@@ -33,6 +34,7 @@ mod tests;
 
 pub use executor::*;
 pub use fragment::*;
+pub use loop_detector::*;
 pub use module_env::*;
 pub use nlae_reporter::*;
 pub use property_based::*;

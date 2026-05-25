@@ -678,6 +678,8 @@ pub struct VerificationConfig {
     pub enable_cross_spec_verification: bool,
     pub collect_decidable_fragment_metrics: bool,
     pub enable_spurious_detection: bool,
+    pub detect_loops: bool,
+    pub suggest_cegis: bool,
     pub property_based_test: Option<PropertyBasedTestConfig>,
 }
 
@@ -689,6 +691,8 @@ impl Default for VerificationConfig {
             enable_cross_spec_verification: false,
             collect_decidable_fragment_metrics: false,
             enable_spurious_detection: true,
+            detect_loops: false,
+            suggest_cegis: false,
             property_based_test: None,
         }
     }
