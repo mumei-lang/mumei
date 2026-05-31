@@ -22,27 +22,67 @@
 // --- extern 宣言: Rust FFI バックエンド ---
 // Plan 10: Str 型に移行 — 文字列パラメータを i64 ハンドルから Str に変更
 extern "Rust" {
-    fn json_parse(input: Str) -> i64;
-    fn json_stringify(handle: i64) -> Str;
-    fn json_get(handle: i64, key: Str) -> i64;
-    fn json_get_int(handle: i64, key: Str) -> i64;
-    fn json_get_str(handle: i64, key: Str) -> Str;
-    fn json_get_bool(handle: i64, key: Str) -> i64;
-    fn json_array_len(handle: i64) -> i64;
-    fn json_array_get(handle: i64, index: i64) -> i64;
-    fn json_is_null(handle: i64) -> i64;
-    fn json_is_object(handle: i64) -> i64;
-    fn json_is_array(handle: i64) -> i64;
-    fn json_object_new() -> i64;
-    fn json_object_set(handle: i64, key: Str, value: i64) -> i64;
-    fn json_array_new() -> i64;
-    fn json_array_push(handle: i64, value: i64) -> i64;
-    fn json_from_int(value: i64) -> i64;
-    fn json_from_str(value: Str) -> i64;
-    fn json_from_bool(value: i64) -> i64;
+    fn json_parse(input: Str) -> i64
+        requires: true;
+        ensures: result >= 0;
+    fn json_stringify(handle: i64) -> Str
+        requires: handle > 0;
+        ensures: true;
+    fn json_get(handle: i64, key: Str) -> i64
+        requires: handle > 0 && not_contains(key, "\0");
+        ensures: result >= 0;
+    fn json_get_int(handle: i64, key: Str) -> i64
+        requires: handle > 0 && not_contains(key, "\0");
+        ensures: true;
+    fn json_get_str(handle: i64, key: Str) -> Str
+        requires: handle > 0 && not_contains(key, "\0");
+        ensures: true;
+    fn json_get_bool(handle: i64, key: Str) -> i64
+        requires: handle > 0 && not_contains(key, "\0");
+        ensures: result >= 0 && result <= 1;
+    fn json_array_len(handle: i64) -> i64
+        requires: handle > 0;
+        ensures: result >= 0;
+    fn json_array_get(handle: i64, index: i64) -> i64
+        requires: handle > 0 && index >= 0;
+        ensures: result >= 0;
+    fn json_is_null(handle: i64) -> i64
+        requires: handle > 0;
+        ensures: result >= 0 && result <= 1;
+    fn json_is_object(handle: i64) -> i64
+        requires: handle > 0;
+        ensures: result >= 0 && result <= 1;
+    fn json_is_array(handle: i64) -> i64
+        requires: handle > 0;
+        ensures: result >= 0 && result <= 1;
+    fn json_object_new() -> i64
+        requires: true;
+        ensures: result >= 0;
+    fn json_object_set(handle: i64, key: Str, value: i64) -> i64
+        requires: handle > 0 && value >= 0 && not_contains(key, "\0");
+        ensures: result >= 0;
+    fn json_array_new() -> i64
+        requires: true;
+        ensures: result >= 0;
+    fn json_array_push(handle: i64, value: i64) -> i64
+        requires: handle > 0 && value >= 0;
+        ensures: result >= 0;
+    fn json_from_int(value: i64) -> i64
+        requires: true;
+        ensures: result >= 0;
+    fn json_from_str(value: Str) -> i64
+        requires: true;
+        ensures: result >= 0;
+    fn json_from_bool(value: i64) -> i64
+        requires: value >= 0 && value <= 1;
+        ensures: result >= 0;
     // Plan 16: Memory management
-    fn json_free(handle: i64) -> i64;
-    fn string_free(handle: i64) -> i64;
+    fn json_free(handle: i64) -> i64
+        requires: handle > 0;
+        ensures: result >= 0 && result <= 1;
+    fn string_free(handle: i64) -> i64
+        requires: handle > 0;
+        ensures: result >= 0 && result <= 1;
 }
 
 // =============================================================
@@ -54,7 +94,7 @@ extern "Rust" {
 // 解析失敗時はハンドル 0 (null) を返す。
 // TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
 // Z3 verifies contract consistency; body execution delegated to FFI backend.
-trusted atom parse(input: Str)
+atom parse(input: Str)
     requires: true;
     ensures: result >= 0;
     body: {
@@ -65,7 +105,7 @@ trusted atom parse(input: Str)
 // Plan 10: 戻り値は Str
 // TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
 // Z3 verifies contract consistency; body execution delegated to FFI backend.
-trusted atom stringify(handle: i64)
+atom stringify(handle: i64)
     requires: handle > 0;
     ensures: true;
     body: {
@@ -80,8 +120,8 @@ trusted atom stringify(handle: i64)
 // Plan 10: key を Str 型に変更
 // TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
 // Z3 verifies contract consistency; body execution delegated to FFI backend.
-trusted atom get(handle: i64, key: Str)
-    requires: handle > 0;
+atom get(handle: i64, key: Str)
+    requires: handle > 0 && not_contains(key, "\0");
     ensures: result >= 0;
     body: {
         json_get(handle, key)
@@ -91,8 +131,8 @@ trusted atom get(handle: i64, key: Str)
 // Plan 10: key を Str 型に変更
 // TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
 // Z3 verifies contract consistency; body execution delegated to FFI backend.
-trusted atom get_int(handle: i64, key: Str)
-    requires: handle > 0;
+atom get_int(handle: i64, key: Str)
+    requires: handle > 0 && not_contains(key, "\0");
     ensures: true;
     body: {
         json_get_int(handle, key)
@@ -102,8 +142,8 @@ trusted atom get_int(handle: i64, key: Str)
 // Plan 10: key を Str 型に変更、戻り値も Str
 // TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
 // Z3 verifies contract consistency; body execution delegated to FFI backend.
-trusted atom get_str(handle: i64, key: Str)
-    requires: handle > 0;
+atom get_str(handle: i64, key: Str)
+    requires: handle > 0 && not_contains(key, "\0");
     ensures: true;
     body: {
         json_get_str(handle, key)
@@ -113,8 +153,8 @@ trusted atom get_str(handle: i64, key: Str)
 // Plan 10: key を Str 型に変更
 // TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
 // Z3 verifies contract consistency; body execution delegated to FFI backend.
-trusted atom get_bool(handle: i64, key: Str)
-    requires: handle > 0;
+atom get_bool(handle: i64, key: Str)
+    requires: handle > 0 && not_contains(key, "\0");
     ensures: result >= 0 && result <= 1;
     body: {
         json_get_bool(handle, key)
@@ -127,7 +167,7 @@ trusted atom get_bool(handle: i64, key: Str)
 // 配列の長さを取得
 // TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
 // Z3 verifies contract consistency; body execution delegated to FFI backend.
-trusted atom array_len(handle: i64)
+atom array_len(handle: i64)
     requires: handle > 0;
     ensures: result >= 0;
     body: {
@@ -137,7 +177,7 @@ trusted atom array_len(handle: i64)
 // 配列からインデックスで値を取得（ハンドルを返す）
 // TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
 // Z3 verifies contract consistency; body execution delegated to FFI backend.
-trusted atom array_get(handle: i64, index: i64)
+atom array_get(handle: i64, index: i64)
     requires: handle > 0 && index >= 0;
     ensures: result >= 0;
     body: {
@@ -151,7 +191,7 @@ trusted atom array_get(handle: i64, index: i64)
 // JSON 値が null かどうかを判定（0=false, 1=true）
 // TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
 // Z3 verifies contract consistency; body execution delegated to FFI backend.
-trusted atom is_null(handle: i64)
+atom is_null(handle: i64)
     requires: handle > 0;
     ensures: result >= 0 && result <= 1;
     body: {
@@ -161,7 +201,7 @@ trusted atom is_null(handle: i64)
 // JSON 値がオブジェクトかどうかを判定（0=false, 1=true）
 // TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
 // Z3 verifies contract consistency; body execution delegated to FFI backend.
-trusted atom is_object(handle: i64)
+atom is_object(handle: i64)
     requires: handle > 0;
     ensures: result >= 0 && result <= 1;
     body: {
@@ -171,7 +211,7 @@ trusted atom is_object(handle: i64)
 // JSON 値が配列かどうかを判定（0=false, 1=true）
 // TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
 // Z3 verifies contract consistency; body execution delegated to FFI backend.
-trusted atom is_array(handle: i64)
+atom is_array(handle: i64)
     requires: handle > 0;
     ensures: result >= 0 && result <= 1;
     body: {
@@ -185,7 +225,7 @@ trusted atom is_array(handle: i64)
 // 空のオブジェクトを生成
 // TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
 // Z3 verifies contract consistency; body execution delegated to FFI backend.
-trusted atom object_new()
+atom object_new()
     requires: true;
     ensures: result >= 0;
     body: {
@@ -196,8 +236,8 @@ trusted atom object_new()
 // Plan 10: key を Str 型に変更
 // TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
 // Z3 verifies contract consistency; body execution delegated to FFI backend.
-trusted atom object_set(handle: i64, key: Str, value: i64)
-    requires: handle > 0;
+atom object_set(handle: i64, key: Str, value: i64)
+    requires: handle > 0 && value >= 0 && not_contains(key, "\0");
     ensures: result >= 0;
     body: {
         json_object_set(handle, key, value)
@@ -206,7 +246,7 @@ trusted atom object_set(handle: i64, key: Str, value: i64)
 // 空の配列を生成
 // TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
 // Z3 verifies contract consistency; body execution delegated to FFI backend.
-trusted atom array_new()
+atom array_new()
     requires: true;
     ensures: result >= 0;
     body: {
@@ -216,8 +256,8 @@ trusted atom array_new()
 // 配列に値を追加
 // TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
 // Z3 verifies contract consistency; body execution delegated to FFI backend.
-trusted atom array_push(handle: i64, value: i64)
-    requires: handle > 0;
+atom array_push(handle: i64, value: i64)
+    requires: handle > 0 && value >= 0;
     ensures: result >= 0;
     body: {
         json_array_push(handle, value)
@@ -226,7 +266,7 @@ trusted atom array_push(handle: i64, value: i64)
 // 整数値から JSON 値を生成
 // TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
 // Z3 verifies contract consistency; body execution delegated to FFI backend.
-trusted atom from_int(value: i64)
+atom from_int(value: i64)
     requires: true;
     ensures: result >= 0;
     body: {
@@ -237,7 +277,7 @@ trusted atom from_int(value: i64)
 // Plan 10: value を Str 型に変更
 // TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
 // Z3 verifies contract consistency; body execution delegated to FFI backend.
-trusted atom from_str(value: Str)
+atom from_str(value: Str)
     requires: true;
     ensures: result >= 0;
     body: {
@@ -247,7 +287,7 @@ trusted atom from_str(value: Str)
 // ブール値から JSON 値を生成（0=false, 1=true）
 // TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
 // Z3 verifies contract consistency; body execution delegated to FFI backend.
-trusted atom from_bool(value: i64)
+atom from_bool(value: i64)
     requires: value >= 0 && value <= 1;
     ensures: result >= 0;
     body: {
@@ -261,7 +301,7 @@ trusted atom from_bool(value: i64)
 // JSON ハンドルを解放する（1=成功, 0=無効なハンドル）
 // TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
 // Z3 verifies contract consistency; body execution delegated to FFI backend.
-trusted atom free(handle: i64)
+atom free(handle: i64)
     requires: handle > 0;
     ensures: result >= 0 && result <= 1;
     body: {
@@ -271,7 +311,7 @@ trusted atom free(handle: i64)
 // 文字列ハンドルを解放する（1=成功, 0=無効なハンドル）
 // TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
 // Z3 verifies contract consistency; body execution delegated to FFI backend.
-trusted atom str_free(handle: i64)
+atom str_free(handle: i64)
     requires: handle > 0;
     ensures: result >= 0 && result <= 1;
     body: {

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Generate Rust proptest property tests from trusted atom contracts.
+"""Generate Rust proptest property tests from FFI atom contracts.
 
-Scans std/*.mm for `trusted atom` declarations, extracts requires/ensures
-contracts, and emits proptest-based Rust integration tests that exercise the
-real FFI backend implementations.
+Scans std/*.mm for FFI-backed `atom` / `trusted atom` declarations, extracts
+requires/ensures contracts, and emits proptest-based Rust integration tests
+that exercise the real FFI backend implementations.
 
 Usage:
     python scripts/ffi_contract_test_gen.py
@@ -28,10 +28,61 @@ STD_DIR = REPO_ROOT / "std"
 # Parsing helpers
 # ---------------------------------------------------------------------------
 
-TRUSTED_ATOM_RE = re.compile(
-    r"^\s*trusted\s+atom\s+(\w+)\s*\(([^)]*)\)",
+FFI_ATOM_RE = re.compile(
+    r"^\s*(?:trusted\s+)?atom\s+(\w+)\s*\(([^)]*)\)",
     re.MULTILINE,
 )
+
+FFI_ATOM_NAMES = {
+    "file": {"read_file", "write_file", "exists", "remove"},
+    "http": {
+        "get",
+        "post",
+        "put",
+        "delete",
+        "status",
+        "body",
+        "body_json",
+        "header_get",
+        "header_set",
+        "is_ok",
+        "is_error",
+        "free",
+    },
+    "http_secure": {
+        "secure_get",
+        "secure_post",
+        "secure_put",
+        "secure_delete",
+        "status",
+        "body",
+        "is_ok",
+        "free",
+    },
+    "http_server": {"bind_server", "listen_server", "accept_request", "send_response"},
+    "json": {
+        "parse",
+        "stringify",
+        "get",
+        "get_int",
+        "get_str",
+        "get_bool",
+        "array_len",
+        "array_get",
+        "is_null",
+        "is_object",
+        "is_array",
+        "object_new",
+        "object_set",
+        "array_new",
+        "array_push",
+        "from_int",
+        "from_str",
+        "from_bool",
+        "free",
+        "str_free",
+    },
+}
 
 @dataclass
 class Param:
@@ -122,13 +173,15 @@ def _atom_ffi_fn(module: str, atom_name: str) -> str:
 
 
 def parse_mm_file(path: Path) -> list[TrustedAtom]:
-    """Extract all trusted atom declarations from a .mm file."""
+    """Extract FFI-backed atom declarations from a .mm file."""
     text = path.read_text(encoding="utf-8")
     module = path.stem  # e.g. "json", "http"
     atoms: list[TrustedAtom] = []
 
-    for m in TRUSTED_ATOM_RE.finditer(text):
+    for m in FFI_ATOM_RE.finditer(text):
         name = m.group(1)
+        if name not in FFI_ATOM_NAMES.get(module, set()):
+            continue
         params = _parse_params(m.group(2))
         atom_start = m.start()
         requires = _extract_clause(text, atom_start, "requires")
@@ -226,8 +279,9 @@ def _translate_ensures_to_assertions(atom: TrustedAtom) -> list[str]:
         ]
 
     assertions: list[str] = []
-    # Split on && for conjuncts
-    parts = [p.strip() for p in ens.split("&&")]
+    # Split on top-level && for conjuncts. Avoid splitting conjunctions nested
+    # inside parentheses, e.g. `result == 0 || (result >= 100 && result <= 599)`.
+    parts = _split_top_level_and(ens)
     for part in parts:
         part = part.strip()
         if not part or part == "true":
@@ -256,6 +310,11 @@ def _translate_ensures_to_assertions(atom: TrustedAtom) -> list[str]:
         # result == expr  (rare but handle)
         m = re.match(r"result\s*==\s*(.+)", part)
         if m:
+            if "result >= 100" in part and "result <= 599" in part:
+                assertions.append(
+                    '    prop_assert!(result == 0 || (result >= 100 && result <= 599), "ensures: result == 0 || (100 <= result <= 599), got {}", result);'
+                )
+                continue
             assertions.append(
                 f"    // ensures: result == {m.group(1)} — skipped (depends on input semantics)"
             )
@@ -265,6 +324,32 @@ def _translate_ensures_to_assertions(atom: TrustedAtom) -> list[str]:
     return assertions if assertions else [
         "    // ensures: complex — manual review needed"
     ]
+
+
+def _split_top_level_and(expr: str) -> list[str]:
+    parts: list[str] = []
+    depth = 0
+    current: list[str] = []
+    i = 0
+    while i < len(expr):
+        ch = expr[i]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth = max(0, depth - 1)
+        if depth == 0 and expr.startswith("&&", i):
+            part = "".join(current).strip()
+            if part:
+                parts.append(part)
+            current = []
+            i += 2
+            continue
+        current.append(ch)
+        i += 1
+    part = "".join(current).strip()
+    if part:
+        parts.append(part)
+    return parts
 
 
 def _handle_params(atom: TrustedAtom) -> list[str]:

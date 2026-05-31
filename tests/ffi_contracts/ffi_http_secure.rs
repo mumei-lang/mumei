@@ -65,8 +65,7 @@ proptest! {
     let handle = mumei_ffi_tests::http_response_handle();
     prop_assume!(handle > 0);
     let result = mumei_core::ffi::http::http_status(handle);
-    prop_assert!(result >= 0, "ensures: result >= 0, got {}", result);
-    prop_assert!(result <= 599, "ensures: result <= 599, got {}", result);
+    prop_assert!(result == 0 || (result >= 100 && result <= 599), "ensures: result == 0 || (100 <= result <= 599), got {}", result);
     mumei_core::ffi::http::http_free(handle);
     }
 }

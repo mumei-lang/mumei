@@ -29,14 +29,30 @@ effect HttpServer
 
 // --- extern declarations: Rust FFI backend ---
 extern "Rust" {
-    fn http_server_bind(addr: Str) -> i64;
-    fn http_server_listen(server_handle: i64) -> i64;
-    fn http_server_accept(server_handle: i64) -> i64;
-    fn http_request_path(req_handle: i64) -> Str;
-    fn http_request_method(req_handle: i64) -> Str;
-    fn http_server_respond(req_handle: i64, status: i64, body: Str) -> i64;
-    fn http_server_free(server_handle: i64) -> i64;
-    fn http_request_free(req_handle: i64) -> i64;
+    fn http_server_bind(addr: Str) -> i64
+        requires: contains(addr, ":") && not_contains(addr, "\n") && not_contains(addr, "\r");
+        ensures: result >= 0;
+    fn http_server_listen(server_handle: i64) -> i64
+        requires: server_handle > 0;
+        ensures: result >= 0 && result <= 1;
+    fn http_server_accept(server_handle: i64) -> i64
+        requires: server_handle > 0;
+        ensures: result >= 0;
+    fn http_request_path(req_handle: i64) -> Str
+        requires: req_handle > 0;
+        ensures: true;
+    fn http_request_method(req_handle: i64) -> Str
+        requires: req_handle > 0;
+        ensures: true;
+    fn http_server_respond(req_handle: i64, status: i64, body: Str) -> i64
+        requires: req_handle > 0 && status >= 100 && status <= 599;
+        ensures: result >= 0 && result <= 1;
+    fn http_server_free(server_handle: i64) -> i64
+        requires: server_handle > 0;
+        ensures: result >= 0 && result <= 1;
+    fn http_request_free(req_handle: i64) -> i64
+        requires: req_handle > 0;
+        ensures: result >= 0 && result <= 1;
 }
 
 // =============================================================
@@ -49,7 +65,7 @@ extern "Rust" {
 // Z3 verifies contract consistency; body execution delegated to FFI backend.
 trusted atom bind_server(addr: Str)
     effects: [HttpServer]
-    requires: true;
+    requires: contains(addr, ":") && not_contains(addr, "\n") && not_contains(addr, "\r");
     ensures: result >= 0;
     body: {
         perform HttpServer.bind(addr);

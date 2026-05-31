@@ -23,19 +23,43 @@
 // --- extern 宣言: Rust FFI バックエンド ---
 // Plan 11: Str 型に移行 — URL/ボディ/ヘッダーパラメータを i64 から Str に変更
 extern "Rust" {
-    fn http_get(url: Str) -> i64;
-    fn http_post(url: Str, body: Str) -> i64;
-    fn http_put(url: Str, body: Str) -> i64;
-    fn http_delete(url: Str) -> i64;
-    fn http_status(handle: i64) -> i64;
-    fn http_body(handle: i64) -> Str;
-    fn http_body_json(handle: i64) -> i64;
-    fn http_header_get(handle: i64, name: Str) -> Str;
-    fn http_header_set(handle: i64, name: Str, value: Str) -> i64;
-    fn http_is_ok(handle: i64) -> i64;
-    fn http_is_error(handle: i64) -> i64;
+    fn http_get(url: Str) -> i64
+        requires: starts_with(url, "https://");
+        ensures: result >= 0;
+    fn http_post(url: Str, body: Str) -> i64
+        requires: starts_with(url, "https://");
+        ensures: result >= 0;
+    fn http_put(url: Str, body: Str) -> i64
+        requires: starts_with(url, "https://");
+        ensures: result >= 0;
+    fn http_delete(url: Str) -> i64
+        requires: starts_with(url, "https://");
+        ensures: result >= 0;
+    fn http_status(handle: i64) -> i64
+        requires: handle > 0;
+        ensures: result == 0 || (result >= 100 && result <= 599);
+    fn http_body(handle: i64) -> Str
+        requires: handle > 0;
+        ensures: true;
+    fn http_body_json(handle: i64) -> i64
+        requires: handle > 0;
+        ensures: result >= 0;
+    fn http_header_get(handle: i64, name: Str) -> Str
+        requires: handle > 0 && not_contains(name, "\n") && not_contains(name, "\r");
+        ensures: true;
+    fn http_header_set(handle: i64, name: Str, value: Str) -> i64
+        requires: handle > 0 && not_contains(name, "\n") && not_contains(name, "\r") && not_contains(value, "\n") && not_contains(value, "\r");
+        ensures: result >= 0;
+    fn http_is_ok(handle: i64) -> i64
+        requires: handle > 0;
+        ensures: result >= 0 && result <= 1;
+    fn http_is_error(handle: i64) -> i64
+        requires: handle >= 0;
+        ensures: result >= 0 && result <= 1;
     // Plan 16: Memory management
-    fn http_free(handle: i64) -> i64;
+    fn http_free(handle: i64) -> i64
+        requires: handle > 0;
+        ensures: result >= 0 && result <= 1;
 }
 
 // =============================================================
@@ -48,9 +72,9 @@ extern "Rust" {
 // FFI-backed: 契約は Rust ランタイムで担保される。
 // TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
 // Z3 verifies contract consistency; body execution delegated to FFI backend.
-trusted atom get(url: Str)
+atom get(url: Str)
     effects: [HttpGet(url)]
-    requires: true;
+    requires: starts_with(url, "https://");
     ensures: result >= 0;
     body: {
         perform HttpGet.request(url);
@@ -62,9 +86,9 @@ trusted atom get(url: Str)
 // FFI-backed: 契約は Rust ランタイムで担保される。
 // TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
 // Z3 verifies contract consistency; body execution delegated to FFI backend.
-trusted atom post(url: Str, body: Str)
+atom post(url: Str, body: Str)
     effects: [HttpPost(url)]
-    requires: true;
+    requires: starts_with(url, "https://");
     ensures: result >= 0;
     body: {
         perform HttpPost.request(url);
@@ -76,9 +100,9 @@ trusted atom post(url: Str, body: Str)
 // FFI-backed: 契約は Rust ランタイムで担保される。
 // TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
 // Z3 verifies contract consistency; body execution delegated to FFI backend.
-trusted atom put(url: Str, body: Str)
+atom put(url: Str, body: Str)
     effects: [HttpPut(url)]
-    requires: true;
+    requires: starts_with(url, "https://");
     ensures: result >= 0;
     body: {
         perform HttpPut.request(url);
@@ -90,9 +114,9 @@ trusted atom put(url: Str, body: Str)
 // FFI-backed: 契約は Rust ランタイムで担保される。
 // TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
 // Z3 verifies contract consistency; body execution delegated to FFI backend.
-trusted atom delete(url: Str)
+atom delete(url: Str)
     effects: [HttpDelete(url)]
-    requires: true;
+    requires: starts_with(url, "https://");
     ensures: result >= 0;
     body: {
         perform HttpDelete.request(url);
@@ -107,9 +131,9 @@ trusted atom delete(url: Str)
 // FFI-backed: 契約は Rust ランタイムで担保される。
 // TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
 // Z3 verifies contract consistency; body execution delegated to FFI backend.
-trusted atom status(handle: i64)
+atom status(handle: i64)
     requires: handle > 0;
-    ensures: result >= 0 && result <= 599;
+    ensures: result == 0 || (result >= 100 && result <= 599);
     body: {
         http_status(handle)
     }
@@ -119,7 +143,7 @@ trusted atom status(handle: i64)
 // FFI-backed: 契約は Rust ランタイムで担保される。
 // TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
 // Z3 verifies contract consistency; body execution delegated to FFI backend.
-trusted atom body(handle: i64)
+atom body(handle: i64)
     requires: handle > 0;
     ensures: true;
     body: {
@@ -131,7 +155,7 @@ trusted atom body(handle: i64)
 // FFI-backed: 契約は Rust ランタイムで担保される。
 // TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
 // Z3 verifies contract consistency; body execution delegated to FFI backend.
-trusted atom body_json(handle: i64)
+atom body_json(handle: i64)
     requires: handle > 0;
     ensures: result >= 0;
     body: {
@@ -147,8 +171,8 @@ trusted atom body_json(handle: i64)
 // FFI-backed: 契約は Rust ランタイムで担保される。
 // TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
 // Z3 verifies contract consistency; body execution delegated to FFI backend.
-trusted atom header_get(handle: i64, name: Str)
-    requires: handle > 0;
+atom header_get(handle: i64, name: Str)
+    requires: handle > 0 && not_contains(name, "\n") && not_contains(name, "\r");
     ensures: true;
     body: {
         http_header_get(handle, name)
@@ -159,8 +183,8 @@ trusted atom header_get(handle: i64, name: Str)
 // FFI-backed: 契約は Rust ランタイムで担保される。
 // TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
 // Z3 verifies contract consistency; body execution delegated to FFI backend.
-trusted atom header_set(handle: i64, name: Str, value: Str)
-    requires: handle > 0;
+atom header_set(handle: i64, name: Str, value: Str)
+    requires: handle > 0 && not_contains(name, "\n") && not_contains(name, "\r") && not_contains(value, "\n") && not_contains(value, "\r");
     ensures: result >= 0;
     body: {
         http_header_set(handle, name, value)
@@ -174,7 +198,7 @@ trusted atom header_set(handle: i64, name: Str, value: Str)
 // FFI-backed: 契約は Rust ランタイムで担保される。
 // TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
 // Z3 verifies contract consistency; body execution delegated to FFI backend.
-trusted atom is_ok(handle: i64)
+atom is_ok(handle: i64)
     requires: handle > 0;
     ensures: result >= 0 && result <= 1;
     body: {
@@ -186,7 +210,7 @@ trusted atom is_ok(handle: i64)
 // FFI-backed: 契約は Rust ランタイムで担保される。
 // TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
 // Z3 verifies contract consistency; body execution delegated to FFI backend.
-trusted atom is_error(handle: i64)
+atom is_error(handle: i64)
     requires: handle >= 0;
     ensures: result >= 0 && result <= 1;
     body: {
@@ -201,7 +225,7 @@ trusted atom is_error(handle: i64)
 // FFI-backed: 契約は Rust ランタイムで担保される。
 // TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
 // Z3 verifies contract consistency; body execution delegated to FFI backend.
-trusted atom free(handle: i64)
+atom free(handle: i64)
     requires: handle > 0;
     ensures: result >= 0 && result <= 1;
     body: {

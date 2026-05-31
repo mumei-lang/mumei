@@ -340,6 +340,43 @@ fn test_array_store_promotes_int_literal_for_real_arrays() {
     verify(&hir, Path::new("."), &module_env).unwrap();
 }
 
+#[test]
+fn test_array_store_updates_subsequent_selects_for_ffi_buffers() {
+    let atom = test_atom(
+        "ffi_buffer_store_roundtrip",
+        vec![test_param("buf", Some("[i64]"))],
+        "len(buf) >= 1",
+        "result == 7",
+        "{ buf[0] = 7; buf[0] }",
+        Some("i64"),
+    );
+    let mut module_env = ModuleEnv::new();
+    register_builtin_traits(&mut module_env);
+    module_env.register_atom(&atom);
+    let hir = lower_atom_to_hir_with_env(&atom, Some(&module_env));
+
+    verify(&hir, Path::new("."), &module_env).unwrap();
+}
+
+#[test]
+fn test_array_store_rejects_out_of_bounds_ffi_buffers() {
+    let atom = test_atom(
+        "ffi_buffer_store_oob",
+        vec![test_param("buf", Some("[i64]"))],
+        "len(buf) >= 1",
+        "result == 7",
+        "{ buf[1] = 7; 7 }",
+        Some("i64"),
+    );
+    let mut module_env = ModuleEnv::new();
+    register_builtin_traits(&mut module_env);
+    module_env.register_atom(&atom);
+    let hir = lower_atom_to_hir_with_env(&atom, Some(&module_env));
+
+    let err = verify(&hir, Path::new("."), &module_env).unwrap_err();
+    assert!(err.to_string().contains("Potential Out-of-Bounds store"));
+}
+
 // ---- constraint_to_natural_language tests ----
 
 #[test]
