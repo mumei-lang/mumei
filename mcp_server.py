@@ -54,6 +54,28 @@ def _harness_metadata_from_env() -> dict[str, Any]:
     harness_contract = _env_nonempty("MUMEI_HARNESS_CONTRACT")
     if harness_contract is not None:
         metadata["harness_contract"] = harness_contract
+    intent_prompt_hash = _env_nonempty("MUMEI_INTENT_PROMPT_HASH")
+    spec_traceability_score = _env_nonempty("MUMEI_SPEC_TRACEABILITY_SCORE")
+    semantic_drift_detected = _env_nonempty("MUMEI_SEMANTIC_DRIFT_DETECTED")
+    manual_review_required = _env_nonempty("MUMEI_MANUAL_REVIEW_REQUIRED")
+    intent_fidelity: dict[str, Any] = {}
+    if intent_prompt_hash is not None:
+        intent_fidelity["natural_language_prompt_hash"] = intent_prompt_hash
+    if spec_traceability_score is not None:
+        try:
+            intent_fidelity["spec_traceability_score"] = float(spec_traceability_score)
+        except ValueError:
+            pass
+    if semantic_drift_detected is not None:
+        intent_fidelity["semantic_drift_detected"] = (
+            semantic_drift_detected.lower() == "true"
+        )
+    if manual_review_required is not None:
+        intent_fidelity["manual_review_required"] = (
+            manual_review_required.lower() == "true"
+        )
+    if intent_fidelity:
+        metadata["intent_fidelity"] = intent_fidelity
     artifact_paths = _env_nonempty("MUMEI_ARTIFACT_PATHS")
     if artifact_paths is not None:
         parsed_paths = [
@@ -1103,6 +1125,14 @@ def verify_with_orchestration(
             )
             if _env_nonempty("MUMEI_HARNESS_CONTRACT") is not None:
                 env["MUMEI_HARNESS_CONTRACT"] = os.environ["MUMEI_HARNESS_CONTRACT"]
+            for intent_env_name in (
+                "MUMEI_INTENT_PROMPT_HASH",
+                "MUMEI_SPEC_TRACEABILITY_SCORE",
+                "MUMEI_SEMANTIC_DRIFT_DETECTED",
+                "MUMEI_MANUAL_REVIEW_REQUIRED",
+            ):
+                if _env_nonempty(intent_env_name) is not None:
+                    env[intent_env_name] = os.environ[intent_env_name]
             if _env_nonempty("MUMEI_ARTIFACT_PATHS") is not None:
                 env["MUMEI_ARTIFACT_PATHS"] = os.environ["MUMEI_ARTIFACT_PATHS"]
             if _env_nonempty("MUMEI_BUDGET_POLICY_FINGERPRINT") is not None:
@@ -1122,6 +1152,14 @@ def verify_with_orchestration(
                             os.environ["MUMEI_HARNESS_CONTRACT"],
                         ]
                         if _env_nonempty("MUMEI_HARNESS_CONTRACT") is not None
+                        else []
+                    ),
+                    *(
+                        [
+                            "--intent-fidelity",
+                            json.dumps(_harness_metadata_from_env()["intent_fidelity"]),
+                        ]
+                        if "intent_fidelity" in _harness_metadata_from_env()
                         else []
                     ),
                     *(
