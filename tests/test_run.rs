@@ -87,3 +87,41 @@ body: { 0 };
 
     std::fs::remove_dir_all(fixture.parent().unwrap()).expect("remove run fixture dir");
 }
+
+#[test]
+fn run_command_links_rust_ffi_runtime() {
+    let bin = env!("CARGO_BIN_EXE_mumei");
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let fixture = write_fixture(
+        "rust_ffi",
+        r#"
+extern "Rust" {
+    fn json_from_bool(value: i64) -> i64
+        requires: value >= 0 && value <= 1;
+        ensures: result >= 0;
+}
+
+atom main()
+requires: true;
+ensures: result >= 0;
+body: { json_from_bool(0) };
+"#,
+    );
+
+    let output = Command::new(bin)
+        .arg("run")
+        .arg(&fixture)
+        .current_dir(manifest_dir)
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run mumei run with Rust FFI: {err}"));
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "json_from_bool should execute via the linked Rust FFI runtime and return handle 1\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    std::fs::remove_dir_all(fixture.parent().unwrap()).expect("remove run fixture dir");
+}

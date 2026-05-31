@@ -2600,6 +2600,140 @@ fn write_effect_and_resource_runtime_stubs(
     })
 }
 
+fn uses_rust_ffi(extern_blocks: &[parser::ExternBlock]) -> bool {
+    extern_blocks
+        .iter()
+        .any(|block| block.language == "Rust" && !block.functions.is_empty())
+}
+
+fn generate_rust_ffi_staticlib(crate_dir: &Path, output_dir: &Path) -> Result<PathBuf, String> {
+    let ffi_lib_dir = output_dir.join("mumei_ffi_staticlib");
+    if ffi_lib_dir.exists() {
+        std::fs::remove_dir_all(&ffi_lib_dir).map_err(|err| {
+            format!(
+                "failed to remove stale FFI build dir '{}': {err}",
+                ffi_lib_dir.display()
+            )
+        })?;
+    }
+    std::fs::create_dir_all(ffi_lib_dir.join("src")).map_err(|err| {
+        format!(
+            "failed to create FFI build dir '{}': {err}",
+            ffi_lib_dir.display()
+        )
+    })?;
+
+    let core_dir = crate_dir.join("mumei-core");
+    let cargo_toml = "[package]\nname = \"mumei-ffi-staticlib\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\nname = \"mumei_ffi_staticlib\"\ncrate-type = [\"staticlib\"]\n\n[dependencies]\nlazy_static = \"1.4\"\nserde_json = \"1.0\"\nreqwest = { version = \"0.12\", default-features = false, features = [\"blocking\", \"json\", \"rustls-tls\"] }\n";
+    std::fs::write(ffi_lib_dir.join("Cargo.toml"), cargo_toml).map_err(|err| {
+        format!(
+            "failed to write FFI Cargo.toml in '{}': {err}",
+            ffi_lib_dir.display()
+        )
+    })?;
+    std::fs::write(
+        ffi_lib_dir.join("src/lib.rs"),
+        format!(
+            "mod json {{ include!({:?}); }}\nmod http {{ include!({:?}); }}\nmod http_server {{ include!({:?}); }}\nmod file {{ include!({:?}); }}\n",
+            core_dir.join("src/ffi/json.rs"),
+            core_dir.join("src/ffi/http.rs"),
+            core_dir.join("src/ffi/http_server.rs"),
+            core_dir.join("src/ffi/file.rs"),
+        ),
+    )
+    .map_err(|err| {
+        format!(
+            "failed to write FFI lib.rs in '{}': {err}",
+            ffi_lib_dir.display()
+        )
+    })?;
+
+    let mut cmd = std::process::Command::new("cargo");
+    cmd.arg("build")
+        .arg("--release")
+        .arg("--manifest-path")
+        .arg(ffi_lib_dir.join("Cargo.toml"));
+    for var in ["LLVM_SYS_170_PREFIX", "LIBCLANG_PATH"] {
+        if let Ok(value) = std::env::var(var) {
+            cmd.env(var, value);
+        }
+    }
+    let output = cmd
+        .output()
+        .map_err(|err| format!("failed to execute cargo for Rust FFI staticlib: {err}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "Rust FFI staticlib build failed (exit {}):\n{}{}",
+            output.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    let lib_name = if cfg!(windows) {
+        "mumei_ffi_staticlib.lib"
+    } else {
+        "libmumei_ffi_staticlib.a"
+    };
+    let lib_path = ffi_lib_dir.join("target/release").join(lib_name);
+    if lib_path.exists() {
+        Ok(lib_path)
+    } else {
+        Err(format!(
+            "Rust FFI staticlib build finished but '{}' was not produced",
+            lib_path.display()
+        ))
+    }
+}
+
+fn collect_binary_hir_atoms(
+    items: &[Item],
+    module_env: &verification::ModuleEnv,
+) -> Vec<hir::HirAtom> {
+    let mut hir_atoms = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for item in items {
+        match item {
+            Item::Atom(atom) => {
+                if seen.insert(atom.name.clone()) {
+                    hir_atoms.push(lower_atom_to_hir_with_env(atom, Some(module_env)));
+                }
+            }
+            Item::ImplBlock(impl_block) => {
+                for method in &impl_block.methods {
+                    let mut qualified = method.clone();
+                    qualified.name = format!("{}::{}", impl_block.struct_name, method.name);
+                    if seen.insert(qualified.name.clone()) {
+                        hir_atoms.push(lower_atom_to_hir_with_env(&qualified, Some(module_env)));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut imported_names: Vec<_> = module_env.atoms.keys().cloned().collect();
+    imported_names.sort();
+    for name in imported_names {
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        let Some(atom) = module_env.atoms.get(&name) else {
+            continue;
+        };
+        if atom.body_expr.trim().is_empty() {
+            continue;
+        }
+        if atom.trust_level == parser::TrustLevel::Trusted {
+            continue;
+        }
+        hir_atoms.push(lower_atom_to_hir_with_env(atom, Some(module_env)));
+    }
+
+    hir_atoms
+}
+
 // =============================================================================
 // mumei build — full pipeline (verify + codegen)
 // =============================================================================
@@ -3221,33 +3355,15 @@ fn cmd_build(
     // P7-B: When --emit binary is requested, merge all atoms into a single
     // LLVM module with a C-compatible main wrapper and link to a native binary.
     if matches!(emit_target, emitter::EmitTarget::Binary) && atom_count > 0 {
-        // Collect all verified HirAtoms
-        let mut hir_atoms = Vec::new();
         let extern_blocks = collect_extern_blocks(&items);
-        for item in &items {
-            match item {
-                Item::Atom(atom) => {
-                    let hir_atom = lower_atom_to_hir_with_env(atom, Some(&module_env));
-                    hir_atoms.push(hir_atom);
-                }
-                Item::ImplBlock(impl_block) => {
-                    for method in &impl_block.methods {
-                        let mut qualified = method.clone();
-                        qualified.name = format!("{}::{}", impl_block.struct_name, method.name);
-                        let hir_atom = lower_atom_to_hir_with_env(&qualified, Some(&module_env));
-                        hir_atoms.push(hir_atom);
-                    }
-                }
-                _ => {}
-            }
-        }
+        let hir_atoms = collect_binary_hir_atoms(&items, &module_env);
 
-        let ll_path = output_dir.join(format!("{}_merged.ll", file_stem));
-        if let Err(e) = mumei_emit_llvm::binary::compile_atoms_to_binary_ll(
+        let object_path = output_dir.join(format!("{}_merged.o", file_stem));
+        if let Err(e) = mumei_emit_llvm::binary::compile_atoms_to_binary_object(
             &hir_atoms,
             &module_env,
             &extern_blocks,
-            &ll_path,
+            &object_path,
         ) {
             eprintln!("❌ Binary codegen failed: {}", e);
             std::process::exit(1);
@@ -3264,14 +3380,28 @@ fn cmd_build(
             eprintln!("❌ Runtime stub generation failed: {}", e);
             std::process::exit(1);
         }
-        let link_inputs = vec![ll_path.clone(), runtime_stubs_path.clone()];
+        let mut link_inputs = vec![object_path.clone(), runtime_stubs_path.clone()];
+        let rust_ffi_lib = if uses_rust_ffi(&extern_blocks) {
+            match generate_rust_ffi_staticlib(Path::new(env!("CARGO_MANIFEST_DIR")), output_dir) {
+                Ok(path) => Some(path),
+                Err(e) => {
+                    eprintln!("❌ Rust FFI runtime build failed: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        } else {
+            None
+        };
+        if let Some(path) = &rust_ffi_lib {
+            link_inputs.push(path.clone());
+        }
         if let Err(e) = linker::link_to_binary(&link_inputs, &binary_output, Some(&runtime_path)) {
             eprintln!("❌ Linking failed: {}", e);
             std::process::exit(1);
         }
         println!("  ✅ Binary written to: {}", binary_output.display());
         // Clean up intermediate files
-        let _ = fs::remove_file(&ll_path);
+        let _ = fs::remove_file(&object_path);
         let _ = fs::remove_file(&runtime_stubs_path);
     }
 
@@ -3501,7 +3631,6 @@ fn cmd_run(input: &str, emit: &str, output: Option<&str>, args: &[String]) {
     }
 
     // Verify and collect all atoms
-    let mut hir_atoms = Vec::new();
     for item in &items {
         match item {
             Item::Atom(atom) => {
@@ -3517,7 +3646,6 @@ fn cmd_run(input: &str, emit: &str, output: Option<&str>, args: &[String]) {
                         std::process::exit(1);
                     }
                 }
-                hir_atoms.push(hir_atom);
             }
             Item::ImplBlock(impl_block) => {
                 for method in &impl_block.methods {
@@ -3535,12 +3663,12 @@ fn cmd_run(input: &str, emit: &str, output: Option<&str>, args: &[String]) {
                             std::process::exit(1);
                         }
                     }
-                    hir_atoms.push(hir_atom);
                 }
             }
             _ => {}
         }
     }
+    let hir_atoms = collect_binary_hir_atoms(&items, &module_env);
 
     let runtime_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("runtime/mumei_runtime.c");
     if !runtime_path.exists() {
@@ -3570,7 +3698,14 @@ fn cmd_run(input: &str, emit: &str, output: Option<&str>, args: &[String]) {
             let _ = fs::remove_dir_all(&tmp_dir);
             std::process::exit(1);
         }
-        ll_path
+        let object_path = tmp_dir.join("mumei_output.o");
+        if let Err(e) = mumei_emit_llvm::codegen::compile_llvm_ir_to_object(&ll_path, &object_path)
+        {
+            eprintln!("❌ Codegen failed: {}", e);
+            let _ = fs::remove_dir_all(&tmp_dir);
+            std::process::exit(1);
+        }
+        object_path
     } else {
         let object_path = tmp_dir.join("mumei_output.o");
         if let Err(e) = mumei_emit_llvm::binary::compile_atoms_to_binary_object(
@@ -3590,7 +3725,22 @@ fn cmd_run(input: &str, emit: &str, output: Option<&str>, args: &[String]) {
         "  🔗 Linking {} atom(s) to native binary...",
         hir_atoms.len()
     );
-    let link_inputs = vec![link_input.clone(), runtime_stubs_path.clone()];
+    let mut link_inputs = vec![link_input.clone(), runtime_stubs_path.clone()];
+    let rust_ffi_lib = if uses_rust_ffi(&extern_blocks) {
+        match generate_rust_ffi_staticlib(Path::new(env!("CARGO_MANIFEST_DIR")), &tmp_dir) {
+            Ok(path) => Some(path),
+            Err(e) => {
+                eprintln!("❌ Rust FFI runtime build failed: {}", e);
+                let _ = fs::remove_dir_all(&tmp_dir);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        None
+    };
+    if let Some(path) = &rust_ffi_lib {
+        link_inputs.push(path.clone());
+    }
     if let Err(e) = linker::link_to_binary(&link_inputs, &binary_path, Some(&runtime_path)) {
         eprintln!("❌ Linking failed: {}", e);
         let _ = fs::remove_dir_all(&tmp_dir);
