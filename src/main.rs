@@ -121,6 +121,24 @@ fn resolve_artifact_paths(cli_value: Option<String>) -> Option<Vec<String>> {
         .or_else(proof_cert::artifact_paths_from_env)
 }
 
+fn parse_intent_fidelity_json(value: &str) -> Result<proof_cert::IntentFidelity, String> {
+    serde_json::from_str(value).map_err(|err| format!("invalid --intent-fidelity JSON: {err}"))
+}
+
+fn resolve_intent_fidelity(cli_value: Option<String>) -> Option<proof_cert::IntentFidelity> {
+    if let Some(value) = cli_value {
+        match parse_intent_fidelity_json(&value) {
+            Ok(intent_fidelity) => Some(intent_fidelity),
+            Err(message) => {
+                eprintln!("  ❌ {message}");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        proof_cert::intent_fidelity_from_env()
+    }
+}
+
 fn resolve_budget_policy_fingerprint(cli_value: Option<String>) -> Option<String> {
     cli_value.or_else(proof_cert::budget_policy_fingerprint_from_env)
 }
@@ -261,6 +279,9 @@ enum Command {
         /// Harness contract path or identifier to embed in generated proof certificates
         #[arg(long)]
         harness_contract: Option<String>,
+        /// Intent fidelity metadata JSON to embed in generated proof certificates
+        #[arg(long)]
+        intent_fidelity: Option<String>,
         /// Comma-separated artifact paths to embed in generated proof certificates
         #[arg(long)]
         artifact_paths: Option<String>,
@@ -446,6 +467,7 @@ fn main() {
             property_based_test_seed,
             property_based_test_max_shrink_steps,
             harness_contract,
+            intent_fidelity,
             artifact_paths,
             budget_policy_fingerprint,
             emit_contract_manifest,
@@ -502,6 +524,7 @@ fn main() {
                 property_based_test_seed,
                 property_based_test_max_shrink_steps,
                 harness_contract: resolve_harness_contract(harness_contract),
+                intent_fidelity: resolve_intent_fidelity(intent_fidelity),
                 artifact_paths: resolve_artifact_paths(artifact_paths),
                 budget_policy_fingerprint: resolve_budget_policy_fingerprint(
                     budget_policy_fingerprint,
@@ -937,6 +960,7 @@ struct VerifyOptions<'a> {
     property_based_test_seed: Option<u64>,
     property_based_test_max_shrink_steps: usize,
     harness_contract: Option<String>,
+    intent_fidelity: Option<proof_cert::IntentFidelity>,
     artifact_paths: Option<Vec<String>>,
     budget_policy_fingerprint: Option<String>,
     emit_contract_manifest: bool,
@@ -967,6 +991,7 @@ fn cmd_verify(options: VerifyOptions<'_>) {
         property_based_test_seed,
         property_based_test_max_shrink_steps,
         harness_contract,
+        intent_fidelity,
         artifact_paths,
         budget_policy_fingerprint,
         emit_contract_manifest,
@@ -1574,7 +1599,7 @@ fn cmd_verify(options: VerifyOptions<'_>) {
             None,
             Some(proof_cert::HarnessCertificateMetadata {
                 harness_contract: harness_contract.clone(),
-                intent_fidelity: None,
+                intent_fidelity: intent_fidelity.clone(),
                 artifact_paths: artifact_paths.clone(),
                 budget_policy_fingerprint: budget_policy_fingerprint.clone(),
             }),
@@ -3317,7 +3342,12 @@ fn cmd_build(
             &module_env,
             pkg_name,
             pkg_version,
-            None,
+            Some(proof_cert::HarnessCertificateMetadata {
+                harness_contract: proof_cert::harness_contract_from_env(),
+                intent_fidelity: proof_cert::intent_fidelity_from_env(),
+                artifact_paths: proof_cert::artifact_paths_from_env(),
+                budget_policy_fingerprint: proof_cert::budget_policy_fingerprint_from_env(),
+            }),
         );
 
         let cert_path = output_dir.join(format!("{}.proof-cert.json", file_stem));
@@ -4009,7 +4039,12 @@ fn cmd_publish(proof_only: bool) {
             &module_env,
             Some(pkg_name),
             Some(pkg_version),
-            None,
+            Some(proof_cert::HarnessCertificateMetadata {
+                harness_contract: proof_cert::harness_contract_from_env(),
+                intent_fidelity: proof_cert::intent_fidelity_from_env(),
+                artifact_paths: proof_cert::artifact_paths_from_env(),
+                budget_policy_fingerprint: proof_cert::budget_policy_fingerprint_from_env(),
+            }),
         );
         let cert_path = pkg_dir.join("proof_certificate.json");
         match proof_cert::save_certificate(&cert, &cert_path) {
@@ -4765,6 +4800,12 @@ fn cmd_doc(input: &str, output_dir: &str, format: &str) {
                                 serde_json::Value::String(harness_contract.clone()),
                             );
                         }
+                        if let Some(ref intent_fidelity) = harness_metadata.intent_fidelity {
+                            fields.insert(
+                                "intent_fidelity".to_string(),
+                                serde_json::json!(intent_fidelity),
+                            );
+                        }
                         if let Some(ref artifact_paths) = harness_metadata.artifact_paths {
                             fields.insert(
                                 "artifact_paths".to_string(),
@@ -4832,6 +4873,7 @@ struct ItemDoc {
 
 struct HarnessDocMetadata {
     harness_contract: Option<String>,
+    intent_fidelity: Option<proof_cert::IntentFidelity>,
     artifact_paths: Option<Vec<String>>,
     budget_policy_fingerprint: Option<String>,
 }
@@ -4839,6 +4881,7 @@ struct HarnessDocMetadata {
 fn collect_harness_doc_metadata() -> HarnessDocMetadata {
     HarnessDocMetadata {
         harness_contract: proof_cert::harness_contract_from_env(),
+        intent_fidelity: proof_cert::intent_fidelity_from_env(),
         artifact_paths: proof_cert::artifact_paths_from_env(),
         budget_policy_fingerprint: proof_cert::budget_policy_fingerprint_from_env(),
     }
@@ -5517,6 +5560,23 @@ atom json_parse(input: String) -> String
     }
 
     #[test]
+    fn test_parse_intent_fidelity_json() {
+        let metadata = parse_intent_fidelity_json(
+            r#"{"natural_language_prompt_hash":"sha256:prompt","spec_traceability_score":0.97,"semantic_drift_detected":false,"manual_review_required":true}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            metadata.natural_language_prompt_hash.as_deref(),
+            Some("sha256:prompt")
+        );
+        assert_eq!(metadata.spec_traceability_score, 0.97);
+        assert!(!metadata.semantic_drift_detected);
+        assert!(metadata.manual_review_required);
+        assert!(parse_intent_fidelity_json("not json").is_err());
+    }
+
+    #[test]
     fn test_verify_cli_accepts_harness_metadata_options() {
         let cli = Cli::try_parse_from([
             "mumei",
@@ -5524,6 +5584,8 @@ atom json_parse(input: String) -> String
             "--proof-cert",
             "--harness-contract",
             "contracts/harness.json",
+            "--intent-fidelity",
+            r#"{"natural_language_prompt_hash":"sha256:prompt"}"#,
             "--artifact-paths",
             "reports/a.json,out/b.json",
             "--budget-policy-fingerprint",
@@ -5535,11 +5597,16 @@ atom json_parse(input: String) -> String
         match cli.command {
             Some(Command::Verify {
                 harness_contract,
+                intent_fidelity,
                 artifact_paths,
                 budget_policy_fingerprint,
                 ..
             }) => {
                 assert_eq!(harness_contract.as_deref(), Some("contracts/harness.json"));
+                assert_eq!(
+                    intent_fidelity.as_deref(),
+                    Some(r#"{"natural_language_prompt_hash":"sha256:prompt"}"#)
+                );
                 assert_eq!(artifact_paths.as_deref(), Some("reports/a.json,out/b.json"));
                 assert_eq!(budget_policy_fingerprint.as_deref(), Some("sha256:budget"));
             }

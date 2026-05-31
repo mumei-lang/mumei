@@ -46,7 +46,7 @@ pub struct ProofCertificate {
     pub harness_contract: Option<String>,
     /// Metadata tracking natural-language intent fidelity for harness consumers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub intent_fidelity: Option<IntentFidelityMetadata>,
+    pub intent_fidelity: Option<IntentFidelity>,
     /// Artifact paths that a harness should collect or validate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact_paths: Option<Vec<String>>,
@@ -134,7 +134,7 @@ pub struct AtomCertificate {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct IntentFidelityMetadata {
+pub struct IntentFidelity {
     #[serde(default)]
     pub natural_language_prompt_hash: Option<String>,
     #[serde(default)]
@@ -148,10 +148,12 @@ pub struct IntentFidelityMetadata {
 #[derive(Debug, Clone, Default)]
 pub struct HarnessCertificateMetadata {
     pub harness_contract: Option<String>,
-    pub intent_fidelity: Option<IntentFidelityMetadata>,
+    pub intent_fidelity: Option<IntentFidelity>,
     pub artifact_paths: Option<Vec<String>>,
     pub budget_policy_fingerprint: Option<String>,
 }
+
+pub type IntentFidelityMetadata = IntentFidelity;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SolverProcessMetadata {
@@ -824,6 +826,39 @@ pub fn artifact_paths_from_env() -> Option<Vec<String>> {
     })
 }
 
+pub fn intent_fidelity_from_env() -> Option<IntentFidelity> {
+    let natural_language_prompt_hash = env_nonempty("MUMEI_INTENT_PROMPT_HASH");
+    let raw_spec_traceability_score = env_nonempty("MUMEI_SPEC_TRACEABILITY_SCORE");
+    let spec_traceability_score = raw_spec_traceability_score
+        .as_deref()
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or_default();
+    let raw_semantic_drift_detected = env_nonempty("MUMEI_SEMANTIC_DRIFT_DETECTED");
+    let semantic_drift_detected = raw_semantic_drift_detected
+        .as_deref()
+        .and_then(|value| value.parse::<bool>().ok())
+        .unwrap_or_default();
+    let raw_manual_review_required = env_nonempty("MUMEI_MANUAL_REVIEW_REQUIRED");
+    let manual_review_required = raw_manual_review_required
+        .as_deref()
+        .and_then(|value| value.parse::<bool>().ok())
+        .unwrap_or_default();
+    let has_metadata = natural_language_prompt_hash.is_some()
+        || raw_spec_traceability_score.is_some()
+        || raw_semantic_drift_detected.is_some()
+        || raw_manual_review_required.is_some();
+    if has_metadata {
+        Some(IntentFidelity {
+            natural_language_prompt_hash,
+            spec_traceability_score,
+            semantic_drift_detected,
+            manual_review_required,
+        })
+    } else {
+        None
+    }
+}
+
 pub fn budget_policy_fingerprint_from_env() -> Option<String> {
     env_nonempty("MUMEI_BUDGET_POLICY_FINGERPRINT")
 }
@@ -1107,6 +1142,10 @@ mod tests {
             "MUMEI_CANCEL_REASON",
             "MUMEI_SOLVER_PROCESS_START_TIME",
             "MUMEI_HARNESS_CONTRACT",
+            "MUMEI_INTENT_PROMPT_HASH",
+            "MUMEI_SPEC_TRACEABILITY_SCORE",
+            "MUMEI_SEMANTIC_DRIFT_DETECTED",
+            "MUMEI_MANUAL_REVIEW_REQUIRED",
             "MUMEI_ARTIFACT_PATHS",
             "MUMEI_BUDGET_POLICY_FINGERPRINT",
         ];
@@ -1243,6 +1282,10 @@ mod tests {
         let _guard = solver_env_lock().lock().unwrap();
         let env_names = &[
             "MUMEI_HARNESS_CONTRACT",
+            "MUMEI_INTENT_PROMPT_HASH",
+            "MUMEI_SPEC_TRACEABILITY_SCORE",
+            "MUMEI_SEMANTIC_DRIFT_DETECTED",
+            "MUMEI_MANUAL_REVIEW_REQUIRED",
             "MUMEI_ARTIFACT_PATHS",
             "MUMEI_BUDGET_POLICY_FINGERPRINT",
         ];
@@ -1252,6 +1295,10 @@ mod tests {
         }
 
         std::env::set_var("MUMEI_HARNESS_CONTRACT", "contracts/harness.json");
+        std::env::set_var("MUMEI_INTENT_PROMPT_HASH", "sha256:prompt");
+        std::env::set_var("MUMEI_SPEC_TRACEABILITY_SCORE", "0.97");
+        std::env::set_var("MUMEI_SEMANTIC_DRIFT_DETECTED", "false");
+        std::env::set_var("MUMEI_MANUAL_REVIEW_REQUIRED", "true");
         std::env::set_var("MUMEI_ARTIFACT_PATHS", " reports/a.json, ,out/b.json ");
         std::env::set_var("MUMEI_BUDGET_POLICY_FINGERPRINT", "sha256:budget");
 
@@ -1263,6 +1310,14 @@ mod tests {
             artifact_paths_from_env(),
             Some(vec!["reports/a.json".to_string(), "out/b.json".to_string()])
         );
+        let intent_fidelity = intent_fidelity_from_env().unwrap();
+        assert_eq!(
+            intent_fidelity.natural_language_prompt_hash.as_deref(),
+            Some("sha256:prompt")
+        );
+        assert_eq!(intent_fidelity.spec_traceability_score, 0.97);
+        assert!(!intent_fidelity.semantic_drift_detected);
+        assert!(intent_fidelity.manual_review_required);
         assert_eq!(
             budget_policy_fingerprint_from_env().as_deref(),
             Some("sha256:budget")

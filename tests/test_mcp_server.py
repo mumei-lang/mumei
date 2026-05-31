@@ -374,6 +374,10 @@ class TestVerifyWithOrchestration:
         "os.environ",
         {
             "MUMEI_HARNESS_CONTRACT": "contracts/harness.json",
+            "MUMEI_INTENT_PROMPT_HASH": "sha256:prompt",
+            "MUMEI_SPEC_TRACEABILITY_SCORE": "0.97",
+            "MUMEI_SEMANTIC_DRIFT_DETECTED": "false",
+            "MUMEI_MANUAL_REVIEW_REQUIRED": "true",
             "MUMEI_ARTIFACT_PATHS": "reports/a.json,out/b.json",
             "MUMEI_BUDGET_POLICY_FINGERPRINT": "sha256:budget",
         },
@@ -391,6 +395,9 @@ class TestVerifyWithOrchestration:
                     {
                         "atoms": [],
                         "harness_contract": kwargs["env"]["MUMEI_HARNESS_CONTRACT"],
+                        "intent_fidelity": json.loads(
+                            args[args.index("--intent-fidelity") + 1]
+                        ),
                         "artifact_paths": ["reports/a.json", "out/b.json"],
                         "budget_policy_fingerprint": kwargs["env"][
                             "MUMEI_BUDGET_POLICY_FINGERPRINT"
@@ -421,11 +428,23 @@ class TestVerifyWithOrchestration:
         assert payload["proof_certificate"] == {
             "atoms": [],
             "harness_contract": "contracts/harness.json",
+            "intent_fidelity": {
+                "natural_language_prompt_hash": "sha256:prompt",
+                "spec_traceability_score": 0.97,
+                "semantic_drift_detected": False,
+                "manual_review_required": True,
+            },
             "artifact_paths": ["reports/a.json", "out/b.json"],
             "budget_policy_fingerprint": "sha256:budget",
         }
         assert "--proof-cert" in args
         assert args[args.index("--harness-contract") + 1] == "contracts/harness.json"
+        assert json.loads(args[args.index("--intent-fidelity") + 1]) == {
+            "natural_language_prompt_hash": "sha256:prompt",
+            "spec_traceability_score": 0.97,
+            "semantic_drift_detected": False,
+            "manual_review_required": True,
+        }
         assert args[args.index("--artifact-paths") + 1] == "reports/a.json,out/b.json"
         assert (
             args[args.index("--budget-policy-fingerprint") + 1]
@@ -435,6 +454,10 @@ class TestVerifyWithOrchestration:
         assert env["MUMEI_SOLVER_CACHE_KEY"] == payload["cache_key"]
         assert env["MUMEI_VERIFICATION_TIMEOUT_MS"] == "1234"
         assert env["MUMEI_HARNESS_CONTRACT"] == "contracts/harness.json"
+        assert env["MUMEI_INTENT_PROMPT_HASH"] == "sha256:prompt"
+        assert env["MUMEI_SPEC_TRACEABILITY_SCORE"] == "0.97"
+        assert env["MUMEI_SEMANTIC_DRIFT_DETECTED"] == "false"
+        assert env["MUMEI_MANUAL_REVIEW_REQUIRED"] == "true"
         assert env["MUMEI_ARTIFACT_PATHS"] == "reports/a.json,out/b.json"
         assert env["MUMEI_BUDGET_POLICY_FINGERPRINT"] == "sha256:budget"
 
@@ -527,6 +550,10 @@ class TestMcpHarnessMetadata:
         "os.environ",
         {
             "MUMEI_HARNESS_CONTRACT": "contracts/harness.json",
+            "MUMEI_INTENT_PROMPT_HASH": "sha256:prompt",
+            "MUMEI_SPEC_TRACEABILITY_SCORE": "0.97",
+            "MUMEI_SEMANTIC_DRIFT_DETECTED": "false",
+            "MUMEI_MANUAL_REVIEW_REQUIRED": "true",
             "MUMEI_ARTIFACT_PATHS": "reports/a.json,out/b.json",
             "MUMEI_BUDGET_POLICY_FINGERPRINT": "sha256:budget",
         },
@@ -544,6 +571,12 @@ class TestMcpHarnessMetadata:
             cert_path.unlink(missing_ok=True)
 
         assert payload["certificate"]["harness_contract"] == "contracts/harness.json"
+        assert payload["certificate"]["intent_fidelity"] == {
+            "natural_language_prompt_hash": "sha256:prompt",
+            "spec_traceability_score": 0.97,
+            "semantic_drift_detected": False,
+            "manual_review_required": True,
+        }
         assert payload["certificate"]["artifact_paths"] == [
             "reports/a.json",
             "out/b.json",
@@ -554,6 +587,10 @@ class TestMcpHarnessMetadata:
         "os.environ",
         {
             "MUMEI_HARNESS_CONTRACT": "contracts/harness.json",
+            "MUMEI_INTENT_PROMPT_HASH": "sha256:prompt",
+            "MUMEI_SPEC_TRACEABILITY_SCORE": "0.97",
+            "MUMEI_SEMANTIC_DRIFT_DETECTED": "false",
+            "MUMEI_MANUAL_REVIEW_REQUIRED": "true",
             "MUMEI_ARTIFACT_PATHS": "reports/a.json,out/b.json",
             "MUMEI_BUDGET_POLICY_FINGERPRINT": "sha256:budget",
         },
@@ -577,6 +614,12 @@ class TestMcpHarnessMetadata:
 
         assert payload["format"] == "json"
         assert payload["harness_contract"] == "contracts/harness.json"
+        assert payload["intent_fidelity"] == {
+            "natural_language_prompt_hash": "sha256:prompt",
+            "spec_traceability_score": 0.97,
+            "semantic_drift_detected": False,
+            "manual_review_required": True,
+        }
         assert payload["artifact_paths"] == ["reports/a.json", "out/b.json"]
         assert payload["budget_policy_fingerprint"] == "sha256:budget"
 

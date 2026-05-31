@@ -72,6 +72,7 @@ All top-level harness metadata fields are optional and use serde defaults, so ol
 ```bash
 mumei verify --proof-cert src/math.mm \
   --harness-contract contracts/nlah-harness.json \
+  --intent-fidelity '{"natural_language_prompt_hash":"sha256:prompt...","spec_traceability_score":0.97,"semantic_drift_detected":false,"manual_review_required":false}' \
   --artifact-paths reports/proof.json,docs_out/docs.json \
   --budget-policy-fingerprint sha256:budget...
 ```
@@ -80,12 +81,18 @@ The same values can be supplied via environment variables, which is useful for M
 
 ```bash
 MUMEI_HARNESS_CONTRACT=contracts/nlah-harness.json \
+MUMEI_INTENT_PROMPT_HASH=sha256:prompt... \
+MUMEI_SPEC_TRACEABILITY_SCORE=0.97 \
+MUMEI_SEMANTIC_DRIFT_DETECTED=false \
+MUMEI_MANUAL_REVIEW_REQUIRED=false \
 MUMEI_ARTIFACT_PATHS=reports/proof.json,docs_out/docs.json \
 MUMEI_BUDGET_POLICY_FINGERPRINT=sha256:budget... \
 mumei verify --proof-cert src/math.mm
 ```
 
-CLI values take precedence over environment values. `MUMEI_ARTIFACT_PATHS` and `--artifact-paths` are comma-separated; empty entries are ignored.
+CLI values take precedence over environment values. `--intent-fidelity` accepts the `IntentFidelity` JSON object. The environment form builds the same object from `MUMEI_INTENT_PROMPT_HASH`, `MUMEI_SPEC_TRACEABILITY_SCORE`, `MUMEI_SEMANTIC_DRIFT_DETECTED`, and `MUMEI_MANUAL_REVIEW_REQUIRED`. `MUMEI_ARTIFACT_PATHS` and `--artifact-paths` are comma-separated; empty entries are ignored.
+
+`mcp_server.py::get_proof_certificate` preserves existing certificate payloads and fills only missing harness metadata from the same environment variables. `generate_doc` includes the same metadata in its returned payload (and in `mumei doc --format json` module entries when environment values are present), so harness consumers can correlate proof, docs, artifacts, and budget policy without requiring schema changes from older consumers.
 
 ### AtomCertificate (per-atom)
 
