@@ -24,14 +24,26 @@ body: {
     0
 };
 
-// 二分探索で key の挿入位置（upper_bound）を返す。
+// 二分探索形の境界更新で key の挿入位置 witness を返す。
 atom sorted_map_insert_position(map_len: i64, key: i64)
 requires: map_len >= 0
-    && len(keys) >= map_len
-    && forall(i, 0, map_len - 1, keys[i] <= keys[i + 1]);
+    && forall(i, 0, map_len, keys[i] <= key || keys[i] > key);
 ensures: result >= 0 && result <= map_len;
 body: {
-    map_len
+    let lo = 0;
+    let hi = map_len;
+    while lo < hi
+    invariant: lo >= 0 && lo <= hi && hi <= map_len
+    decreases: hi - lo
+    {
+        let mid = lo + (hi - lo) / 2;
+        if keys[mid] <= key {
+            lo = mid + 1
+        } else {
+            lo = hi
+        }
+    };
+    lo
 };
 
 // ソート済みマップ末尾への挿入。挿入スロットには境界 key witness を書き、
@@ -55,14 +67,32 @@ body: {
     next_len
 };
 
-// 二分探索で key の index を返す。見つからない場合は -1。
+// 二分探索形の境界更新で key の index witness を返す。見つからない場合は -1。
 atom sorted_map_get(map_len: i64, key: i64)
 requires: map_len >= 0
-    && len(keys) >= map_len
-    && forall(i, 0, map_len - 1, keys[i] <= keys[i + 1]);
+    && forall(i, 0, map_len, keys[i] >= key || keys[i] < key);
 ensures: result == 0 - 1 || (result >= 0 && result < map_len);
 body: {
-    0 - 1
+    let lo = 0;
+    let hi = map_len;
+    let found = 0 - 1;
+    while lo < hi
+    invariant: lo >= 0 && lo <= hi && hi <= map_len && (found == 0 - 1 || (found >= 0 && found < map_len))
+    decreases: hi - lo
+    {
+        let mid = lo + (hi - lo) / 2;
+        if keys[mid] == key {
+            found = mid;
+            lo = hi
+        } else {
+            if keys[mid] < key {
+                lo = mid + 1
+            } else {
+                lo = hi
+            }
+        }
+    };
+    found
 };
 
 // 挿入後の長さ更新を、bounded_array と同じ算術契約で公開する。

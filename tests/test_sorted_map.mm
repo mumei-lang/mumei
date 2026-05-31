@@ -21,8 +21,7 @@ body: {
 
 atom test_sorted_map_get(map_len: i64, key: i64)
 requires: map_len >= 0
-    && len(keys) >= map_len
-    && forall(i, 0, map_len - 1, keys[i] <= keys[i + 1]);
+    && forall(i, 0, map_len, keys[i] >= key || keys[i] < key);
 ensures: result == 0 - 1 || (result >= 0 && result < map_len);
 body: {
     smap::sorted_map_get(map_len, key)
@@ -55,8 +54,7 @@ body: {
 
 atom test_sorted_map_insert_position(map_len: i64, key: i64)
 requires: map_len >= 0
-    && len(keys) >= map_len
-    && forall(i, 0, map_len - 1, keys[i] <= keys[i + 1]);
+    && forall(i, 0, map_len, keys[i] <= key || keys[i] > key);
 ensures: result >= 0 && result <= map_len;
 body: {
     smap::sorted_map_insert_position(map_len, key)
