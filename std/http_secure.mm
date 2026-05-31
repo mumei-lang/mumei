@@ -21,14 +21,30 @@
 
 // --- extern 宣言: Rust FFI バックエンド（std/http.mm と共有）---
 extern "Rust" {
-    fn http_get(url: Str) -> i64;
-    fn http_post(url: Str, body: Str) -> i64;
-    fn http_put(url: Str, body: Str) -> i64;
-    fn http_delete(url: Str) -> i64;
-    fn http_status(handle: i64) -> i64;
-    fn http_body(handle: i64) -> Str;
-    fn http_is_ok(handle: i64) -> i64;
-    fn http_free(handle: i64) -> i64;
+    fn http_get(url: Str) -> i64
+        requires: starts_with(url, "https://");
+        ensures: result >= 0;
+    fn http_post(url: Str, body: Str) -> i64
+        requires: starts_with(url, "https://");
+        ensures: result >= 0;
+    fn http_put(url: Str, body: Str) -> i64
+        requires: starts_with(url, "https://");
+        ensures: result >= 0;
+    fn http_delete(url: Str) -> i64
+        requires: starts_with(url, "https://");
+        ensures: result >= 0;
+    fn http_status(handle: i64) -> i64
+        requires: handle > 0;
+        ensures: result == 0 || (result >= 100 && result <= 599);
+    fn http_body(handle: i64) -> Str
+        requires: handle > 0;
+        ensures: true;
+    fn http_is_ok(handle: i64) -> i64
+        requires: handle > 0;
+        ensures: result >= 0 && result <= 1;
+    fn http_free(handle: i64) -> i64
+        requires: handle > 0;
+        ensures: result >= 0 && result <= 1;
 }
 
 // --- Parameterized Effects: HTTPS URL 制約 ---
@@ -49,7 +65,7 @@ effect SecureHttpDelete(url: Str) where starts_with(url, "https://");
 // HTTPS GET リクエストを送信し、レスポンスハンドルを返す。
 // TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
 // Z3 verifies contract consistency; body execution delegated to FFI backend.
-trusted atom secure_get(url: Str)
+atom secure_get(url: Str)
     effects: [SecureHttpGet(url)]
     requires: starts_with(url, "https://");
     ensures: result >= 0;
@@ -61,7 +77,7 @@ trusted atom secure_get(url: Str)
 // HTTPS POST リクエストを送信し、レスポンスハンドルを返す。
 // TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
 // Z3 verifies contract consistency; body execution delegated to FFI backend.
-trusted atom secure_post(url: Str, body: Str)
+atom secure_post(url: Str, body: Str)
     effects: [SecureHttpPost(url)]
     requires: starts_with(url, "https://");
     ensures: result >= 0;
@@ -73,7 +89,7 @@ trusted atom secure_post(url: Str, body: Str)
 // HTTPS PUT リクエストを送信し、レスポンスハンドルを返す。
 // TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
 // Z3 verifies contract consistency; body execution delegated to FFI backend.
-trusted atom secure_put(url: Str, body: Str)
+atom secure_put(url: Str, body: Str)
     effects: [SecureHttpPut(url)]
     requires: starts_with(url, "https://");
     ensures: result >= 0;
@@ -85,7 +101,7 @@ trusted atom secure_put(url: Str, body: Str)
 // HTTPS DELETE リクエストを送信し、レスポンスハンドルを返す。
 // TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
 // Z3 verifies contract consistency; body execution delegated to FFI backend.
-trusted atom secure_delete(url: Str)
+atom secure_delete(url: Str)
     effects: [SecureHttpDelete(url)]
     requires: starts_with(url, "https://");
     ensures: result >= 0;
@@ -101,9 +117,9 @@ trusted atom secure_delete(url: Str)
 // レスポンスの HTTP ステータスコードを取得
 // TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
 // Z3 verifies contract consistency; body execution delegated to FFI backend.
-trusted atom status(handle: i64)
+atom status(handle: i64)
     requires: handle > 0;
-    ensures: result >= 0 && result <= 599;
+    ensures: result == 0 || (result >= 100 && result <= 599);
     body: {
         http_status(handle)
     }
@@ -111,7 +127,7 @@ trusted atom status(handle: i64)
 // レスポンスボディを Str として取得
 // TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
 // Z3 verifies contract consistency; body execution delegated to FFI backend.
-trusted atom body(handle: i64)
+atom body(handle: i64)
     requires: handle > 0;
     ensures: true;
     body: {
@@ -121,7 +137,7 @@ trusted atom body(handle: i64)
 // レスポンスが成功（2xx）かどうかを判定（0=false, 1=true）
 // TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
 // Z3 verifies contract consistency; body execution delegated to FFI backend.
-trusted atom is_ok(handle: i64)
+atom is_ok(handle: i64)
     requires: handle > 0;
     ensures: result >= 0 && result <= 1;
     body: {
@@ -135,7 +151,7 @@ trusted atom is_ok(handle: i64)
 // HTTP レスポンスハンドルを解放する（1=成功, 0=無効なハンドル）
 // TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
 // Z3 verifies contract consistency; body execution delegated to FFI backend.
-trusted atom free(handle: i64)
+atom free(handle: i64)
     requires: handle > 0;
     ensures: result >= 0 && result <= 1;
     body: {

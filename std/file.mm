@@ -18,10 +18,18 @@
 
 // --- extern declarations: Rust FFI backend ---
 extern "Rust" {
-    fn file_read(path: i64) -> i64;
-    fn file_write(path: i64, content: i64) -> i64;
-    fn file_exists(path: i64) -> i64;
-    fn file_delete(path: i64) -> i64;
+    fn file_read(path: i64) -> i64
+        requires: path > 0;
+        ensures: result >= 0;
+    fn file_write(path: i64, content: i64) -> i64
+        requires: path > 0 && content >= 0;
+        ensures: result >= 0 && result <= 1;
+    fn file_exists(path: i64) -> i64
+        requires: path > 0;
+        ensures: result >= 0 && result <= 1;
+    fn file_delete(path: i64) -> i64
+        requires: path > 0;
+        ensures: result >= 0 && result <= 1;
 }
 
 // =============================================================
@@ -34,7 +42,7 @@ extern "Rust" {
 // FFI-backed: contract is enforced by the Rust runtime.
 // TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
 // Z3 verifies contract consistency; body execution delegated to FFI backend.
-trusted atom read_file(path: i64)
+atom read_file(path: i64)
     effects: [FileRead]
     requires: path > 0;
     ensures: result >= 0;
@@ -53,7 +61,7 @@ trusted atom read_file(path: i64)
 // FFI-backed: contract is enforced by the Rust runtime.
 // TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
 // Z3 verifies contract consistency; body execution delegated to FFI backend.
-trusted atom write_file(path: i64, content: i64)
+atom write_file(path: i64, content: i64)
     effects: [FileWrite]
     requires: path > 0 && content >= 0;
     ensures: result >= 0 && result <= 1;
@@ -71,7 +79,7 @@ trusted atom write_file(path: i64, content: i64)
 // FFI-backed: contract is enforced by the Rust runtime.
 // TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
 // Z3 verifies contract consistency; body execution delegated to FFI backend.
-trusted atom exists(path: i64)
+atom exists(path: i64)
     effects: [FileRead]
     requires: path > 0;
     ensures: result >= 0 && result <= 1;
@@ -85,7 +93,7 @@ trusted atom exists(path: i64)
 // FFI-backed: contract is enforced by the Rust runtime.
 // TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
 // Z3 verifies contract consistency; body execution delegated to FFI backend.
-trusted atom remove(path: i64)
+atom remove(path: i64)
     effects: [FileWrite]
     requires: path > 0;
     ensures: result >= 0 && result <= 1;

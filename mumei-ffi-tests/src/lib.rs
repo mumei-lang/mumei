@@ -39,6 +39,10 @@ pub fn temp_path_handle(name: &str) -> (i64, PathBuf) {
 }
 
 pub fn local_http_url() -> CString {
+    https_error_url()
+}
+
+pub fn insecure_local_http_url() -> CString {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind test HTTP listener");
     let addr = listener.local_addr().expect("local HTTP listener addr");
     thread::spawn(move || {
@@ -65,7 +69,7 @@ pub fn https_error_url() -> CString {
 }
 
 pub fn http_response_handle() -> i64 {
-    let url = local_http_url();
+    let url = insecure_local_http_url();
     mumei_core::ffi::http::http_get(url.as_ptr())
 }
 
