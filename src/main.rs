@@ -121,15 +121,22 @@ fn resolve_artifact_paths(cli_value: Option<String>) -> Option<Vec<String>> {
         .or_else(proof_cert::artifact_paths_from_env)
 }
 
-fn parse_intent_fidelity_json(value: &str) -> Option<proof_cert::IntentFidelity> {
-    serde_json::from_str(value).ok()
+fn parse_intent_fidelity_json(value: &str) -> Result<proof_cert::IntentFidelity, String> {
+    serde_json::from_str(value).map_err(|err| format!("invalid --intent-fidelity JSON: {err}"))
 }
 
 fn resolve_intent_fidelity(cli_value: Option<String>) -> Option<proof_cert::IntentFidelity> {
-    cli_value
-        .as_deref()
-        .and_then(parse_intent_fidelity_json)
-        .or_else(proof_cert::intent_fidelity_from_env)
+    if let Some(value) = cli_value {
+        match parse_intent_fidelity_json(&value) {
+            Ok(intent_fidelity) => Some(intent_fidelity),
+            Err(message) => {
+                eprintln!("  ❌ {message}");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        proof_cert::intent_fidelity_from_env()
+    }
 }
 
 fn resolve_budget_policy_fingerprint(cli_value: Option<String>) -> Option<String> {
@@ -5566,7 +5573,7 @@ atom json_parse(input: String) -> String
         assert_eq!(metadata.spec_traceability_score, 0.97);
         assert!(!metadata.semantic_drift_detected);
         assert!(metadata.manual_review_required);
-        assert!(parse_intent_fidelity_json("not json").is_none());
+        assert!(parse_intent_fidelity_json("not json").is_err());
     }
 
     #[test]

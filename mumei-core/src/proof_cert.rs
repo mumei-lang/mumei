@@ -828,19 +828,25 @@ pub fn artifact_paths_from_env() -> Option<Vec<String>> {
 
 pub fn intent_fidelity_from_env() -> Option<IntentFidelity> {
     let natural_language_prompt_hash = env_nonempty("MUMEI_INTENT_PROMPT_HASH");
-    let spec_traceability_score = env_nonempty("MUMEI_SPEC_TRACEABILITY_SCORE")
+    let raw_spec_traceability_score = env_nonempty("MUMEI_SPEC_TRACEABILITY_SCORE");
+    let spec_traceability_score = raw_spec_traceability_score
+        .as_deref()
         .and_then(|value| value.parse::<f64>().ok())
         .unwrap_or_default();
-    let semantic_drift_detected = env_nonempty("MUMEI_SEMANTIC_DRIFT_DETECTED")
+    let raw_semantic_drift_detected = env_nonempty("MUMEI_SEMANTIC_DRIFT_DETECTED");
+    let semantic_drift_detected = raw_semantic_drift_detected
+        .as_deref()
         .and_then(|value| value.parse::<bool>().ok())
         .unwrap_or_default();
-    let manual_review_required = env_nonempty("MUMEI_MANUAL_REVIEW_REQUIRED")
+    let raw_manual_review_required = env_nonempty("MUMEI_MANUAL_REVIEW_REQUIRED");
+    let manual_review_required = raw_manual_review_required
+        .as_deref()
         .and_then(|value| value.parse::<bool>().ok())
         .unwrap_or_default();
     let has_metadata = natural_language_prompt_hash.is_some()
-        || spec_traceability_score != 0.0
-        || semantic_drift_detected
-        || manual_review_required;
+        || raw_spec_traceability_score.is_some()
+        || raw_semantic_drift_detected.is_some()
+        || raw_manual_review_required.is_some();
     if has_metadata {
         Some(IntentFidelity {
             natural_language_prompt_hash,

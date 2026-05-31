@@ -89,6 +89,23 @@ def _harness_metadata_from_env() -> dict[str, Any]:
     return metadata
 
 
+def _harness_env_vars_from_env() -> dict[str, str]:
+    env_vars: dict[str, str] = {}
+    for name in (
+        "MUMEI_HARNESS_CONTRACT",
+        "MUMEI_INTENT_PROMPT_HASH",
+        "MUMEI_SPEC_TRACEABILITY_SCORE",
+        "MUMEI_SEMANTIC_DRIFT_DETECTED",
+        "MUMEI_MANUAL_REVIEW_REQUIRED",
+        "MUMEI_ARTIFACT_PATHS",
+        "MUMEI_BUDGET_POLICY_FINGERPRINT",
+    ):
+        value = _env_nonempty(name)
+        if value is not None:
+            env_vars[name] = value
+    return env_vars
+
+
 def _attach_harness_metadata(payload: dict[str, Any]) -> dict[str, Any]:
     metadata = _harness_metadata_from_env()
     for key, value in metadata.items():
@@ -1123,22 +1140,9 @@ def verify_with_orchestration(
                     "MUMEI_SOLVER_PROCESS_START_TIME": process_start_time,
                 }
             )
-            if _env_nonempty("MUMEI_HARNESS_CONTRACT") is not None:
-                env["MUMEI_HARNESS_CONTRACT"] = os.environ["MUMEI_HARNESS_CONTRACT"]
-            for intent_env_name in (
-                "MUMEI_INTENT_PROMPT_HASH",
-                "MUMEI_SPEC_TRACEABILITY_SCORE",
-                "MUMEI_SEMANTIC_DRIFT_DETECTED",
-                "MUMEI_MANUAL_REVIEW_REQUIRED",
-            ):
-                if _env_nonempty(intent_env_name) is not None:
-                    env[intent_env_name] = os.environ[intent_env_name]
-            if _env_nonempty("MUMEI_ARTIFACT_PATHS") is not None:
-                env["MUMEI_ARTIFACT_PATHS"] = os.environ["MUMEI_ARTIFACT_PATHS"]
-            if _env_nonempty("MUMEI_BUDGET_POLICY_FINGERPRINT") is not None:
-                env["MUMEI_BUDGET_POLICY_FINGERPRINT"] = os.environ[
-                    "MUMEI_BUDGET_POLICY_FINGERPRINT"
-                ]
+            harness_env_vars = _harness_env_vars_from_env()
+            harness_metadata = _harness_metadata_from_env()
+            env.update(harness_env_vars)
             process = subprocess.Popen(
                 [
                     "cargo",
@@ -1157,9 +1161,9 @@ def verify_with_orchestration(
                     *(
                         [
                             "--intent-fidelity",
-                            json.dumps(_harness_metadata_from_env()["intent_fidelity"]),
+                            json.dumps(harness_metadata["intent_fidelity"]),
                         ]
-                        if "intent_fidelity" in _harness_metadata_from_env()
+                        if "intent_fidelity" in harness_metadata
                         else []
                     ),
                     *(
