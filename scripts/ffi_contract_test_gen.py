@@ -23,6 +23,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 STD_DIR = REPO_ROOT / "std"
+CRYPTO_STD_DIR = STD_DIR / "crypto"
 
 # ---------------------------------------------------------------------------
 # Parsing helpers
@@ -34,6 +35,9 @@ FFI_ATOM_RE = re.compile(
 )
 
 FFI_ATOM_NAMES = {
+    "hash": {"sha256", "hash_eq"},
+    "hmac": {"hmac_sha256"},
+    "signature": {"verify_signature"},
     "file": {"read_file", "write_file", "exists", "remove"},
     "http": {
         "get",
@@ -141,6 +145,9 @@ def _extract_clause(text: str, start: int, clause_name: str) -> str:
 def _atom_ffi_fn(module: str, atom_name: str) -> str:
     """Map a module+atom name to the extern "C" FFI function name."""
     prefix_map = {
+        "hash": "crypto_",
+        "hmac": "crypto_",
+        "signature": "crypto_",
         "json": "json_",
         "http": "http_",
         "http_secure": "http_",
@@ -151,6 +158,9 @@ def _atom_ffi_fn(module: str, atom_name: str) -> str:
 
     # Special cases where the atom name doesn't directly map
     special_map = {
+        ("hash", "hash_eq"): "crypto_hash_eq",
+        ("hmac", "hmac_sha256"): "crypto_hmac_sha256",
+        ("signature", "verify_signature"): "crypto_verify_signature",
         ("json", "str_free"): "string_free",
         ("file", "read_file"): "file_read",
         ("file", "write_file"): "file_write",
@@ -175,7 +185,7 @@ def _atom_ffi_fn(module: str, atom_name: str) -> str:
 def parse_mm_file(path: Path) -> list[TrustedAtom]:
     """Extract FFI-backed atom declarations from a .mm file."""
     text = path.read_text(encoding="utf-8")
-    module = path.stem  # e.g. "json", "http"
+    module = path.stem  # e.g. "json", "http", "hash"
     atoms: list[TrustedAtom] = []
 
     for m in FFI_ATOM_RE.finditer(text):
@@ -222,6 +232,8 @@ def _translate_requires_to_strategy(atom: TrustedAtom) -> list[str]:
         if p.name == "addr" and atom.module == "http_server":
             continue
         if p.name == "content" and atom.module == "file":
+            continue
+        if atom.module in {"hash", "hmac", "signature"}:
             continue
         if _is_str_param(p):
             # Check for starts_with constraint
@@ -357,6 +369,12 @@ def _handle_params(atom: TrustedAtom) -> list[str]:
     req = atom.requires
     handles = []
     for p in atom.params:
+        if atom.module in {"hash", "hmac", "signature"} and (
+            re.search(rf"\b{re.escape(p.name)}\s*>\s*0", req)
+            or re.search(rf"\b{re.escape(p.name)}\s*>=\s*1\b", req)
+        ):
+            handles.append(p.name)
+            continue
         if (
             not _is_str_param(p)
             and (p.name == "handle" or p.name.endswith("_handle") or p.name == "path")
@@ -379,6 +397,19 @@ def _generate_handle_setup(atom: TrustedAtom) -> list[str]:
     module = atom.module
 
     for hp in handle_params:
+        if module in {"hash", "hmac", "signature"}:
+            value = {
+                "input": "abc",
+                "left": "digest",
+                "right": "digest",
+                "key": "key",
+                "message": "message",
+                "public_key": "public-key",
+                "signature": "3d461619e939ce5274da929c96d321ba4a7615206637cc31db6b74fa64e97fc9",
+            }.get(hp, "contract")
+            lines.append(f'    let {hp} = mumei_ffi_tests::string_handle("{value}");')
+            lines.append(f"    prop_assume!({hp} > 0);")
+            continue
         if module == "json":
             if hp == "handle":
                 if atom.name == "str_free":
@@ -447,6 +478,9 @@ def _generate_call(atom: TrustedAtom) -> str:
             args.append(p.name)
 
     ffi_mod = {
+        "hash": "crypto",
+        "hmac": "crypto",
+        "signature": "crypto",
         "json": "json",
         "http": "http",
         "http_secure": "http",
@@ -514,40 +548,46 @@ def generate_test_fn(atom: TrustedAtom) -> str:
 
     # Handle cleanup for json handles created during setup
     handle_params = _handle_params(atom)
-    for hp in handle_params:
-        if atom.module == "json" or (
-            atom.module in ("http", "http_secure") and hp == "handle"
-        ):
-            if atom.module == "json" and atom.name in {"free", "str_free"}:
-                continue
-            if atom.module in {"http", "http_secure"}:
-                if atom.name == "free":
+    if atom.module in {"hash", "hmac", "signature"}:
+        for hp in handle_params:
+            body_lines.append(f"    mumei_core::ffi::json::mumei_str_free({hp});")
+        if atom.name in {"sha256", "hmac_sha256"}:
+            body_lines.append("    mumei_core::ffi::json::mumei_str_free(result);")
+    else:
+        for hp in handle_params:
+            if atom.module == "json" or (
+                atom.module in ("http", "http_secure") and hp == "handle"
+            ):
+                if atom.module == "json" and atom.name in {"free", "str_free"}:
                     continue
-                body_lines.append(f"    mumei_core::ffi::http::http_free({hp});")
-            else:
-                body_lines.append(f"    mumei_core::ffi::json::json_free({hp});")
-        elif atom.module == "http_server" and hp == "server_handle":
-            if atom.name == "accept_request":
+                if atom.module in {"http", "http_secure"}:
+                    if atom.name == "free":
+                        continue
+                    body_lines.append(f"    mumei_core::ffi::http::http_free({hp});")
+                else:
+                    body_lines.append(f"    mumei_core::ffi::json::json_free({hp});")
+            elif atom.module == "http_server" and hp == "server_handle":
+                if atom.name == "accept_request":
+                    body_lines.append(
+                        "    if result > 0 { mumei_core::ffi::http_server::http_request_free(result); }"
+                    )
+                    body_lines.append("    let _ = client_for_accept_cleanup.join();")
                 body_lines.append(
-                    "    if result > 0 { mumei_core::ffi::http_server::http_request_free(result); }"
+                    f"    mumei_core::ffi::http_server::http_server_free({hp});"
                 )
-                body_lines.append("    let _ = client_for_accept_cleanup.join();")
-            body_lines.append(
-                f"    mumei_core::ffi::http_server::http_server_free({hp});"
-            )
-        elif atom.module == "http_server" and hp == "req_handle":
-            body_lines.append(
-                "    mumei_core::ffi::http_server::http_request_free(req_handle);"
-            )
-            body_lines.append("    let _ = client_for_request_cleanup.join();")
-            body_lines.append(
-                "    mumei_core::ffi::http_server::http_server_free(server_handle_for_cleanup);"
-            )
-        elif atom.module == "file" and hp == "path":
-            body_lines.append("    let _ = std::fs::remove_file(temp_path_for_cleanup);")
-            body_lines.append("    mumei_core::ffi::json::mumei_str_free(path);")
-        elif atom.module == "file" and hp == "content":
-            body_lines.append("    mumei_core::ffi::json::mumei_str_free(content);")
+            elif atom.module == "http_server" and hp == "req_handle":
+                body_lines.append(
+                    "    mumei_core::ffi::http_server::http_request_free(req_handle);"
+                )
+                body_lines.append("    let _ = client_for_request_cleanup.join();")
+                body_lines.append(
+                    "    mumei_core::ffi::http_server::http_server_free(server_handle_for_cleanup);"
+                )
+            elif atom.module == "file" and hp == "path":
+                body_lines.append("    let _ = std::fs::remove_file(temp_path_for_cleanup);")
+                body_lines.append("    mumei_core::ffi::json::mumei_str_free(path);")
+            elif atom.module == "file" and hp == "content":
+                body_lines.append("    mumei_core::ffi::json::mumei_str_free(content);")
 
     if atom.module == "file" and atom.name == "write_file":
         body_lines.append("    mumei_core::ffi::json::mumei_str_free(content);")
@@ -670,8 +710,8 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    mm_files = sorted(STD_DIR.glob("*.mm"))
-    target_modules = {"json", "http", "http_secure", "http_server", "file"}
+    mm_files = sorted(STD_DIR.glob("*.mm")) + sorted(CRYPTO_STD_DIR.glob("*.mm"))
+    target_modules = {"json", "http", "http_secure", "http_server", "file", "hash", "hmac", "signature"}
 
     all_atoms: list[TrustedAtom] = []
     by_module: dict[str, list[TrustedAtom]] = {}
