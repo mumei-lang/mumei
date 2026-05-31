@@ -200,6 +200,26 @@ else
     EXAMPLES_FAILED=$((EXAMPLES_FAILED + 1))
 fi
 
+# 6m. SortedMap std module and integration fixture
+echo -n "  test_sorted_map.mm ... "
+if $MUMEI verify tests/test_sorted_map.mm 2>/dev/null; then
+    echo "✅"
+    EXAMPLES_PASSED=$((EXAMPLES_PASSED + 1))
+else
+    echo "❌"
+    EXAMPLES_FAILED=$((EXAMPLES_FAILED + 1))
+fi
+
+# 6n. Negative test: sorted map invariant violation (should FAIL)
+echo -n "  negative/sorted_map_invariant_violation.mm (expect fail) ... "
+if $MUMEI verify tests/negative/sorted_map_invariant_violation.mm 2>/dev/null; then
+    echo "❌ (unexpected pass)"
+    EXAMPLES_FAILED=$((EXAMPLES_FAILED + 1))
+else
+    echo "✅ (expected fail)"
+    EXAMPLES_PASSED=$((EXAMPLES_PASSED + 1))
+fi
+
 echo ""
 echo "  Examples: $EXAMPLES_PASSED passed, $EXAMPLES_FAILED failed"
 
@@ -217,7 +237,7 @@ echo "  ✅ Struct 'Point'      : Field constraints (x >= 0.0, y >= 0.0)"
 echo "  ✅ Generic 'Pair<T,U>' : Polymorphic struct (monomorphization)"
 echo "  ✅ Generic 'Option<T>' : Polymorphic enum (monomorphization)"
 echo "  ✅ Trait 'Comparable'  : Law 'reflexive' verified by Z3"
-echo "  ✅ Std Library         : std/option, std/stack, std/result, std/list, std/container/bounded_array"
+echo "  ✅ Std Library         : std/option, std/stack, std/result, std/list, std/container/bounded_array, std/container/sorted_map"
 echo "  ✅ Built-in Traits     : Eq, Ord, Numeric for i64/u64/f64"
 echo "  ✅ forall in ensures   : Quantifier support in postconditions (Z3 ∀/∃)"
 echo "  ✅ Sort Algorithms     : insertion_sort, merge_sort, binary_search (verified)"
