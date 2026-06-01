@@ -2,6 +2,21 @@
 
 All notable changes to the "Mumei Language" extension will be documented in this file.
 
+## [0.3.0] — 2026-05-31
+
+### Changed
+
+- Prepared the Marketplace package metadata and maintainer documentation for
+  the `mumei-lang.mumei` 0.3.0 release.
+- Expanded the README with installation, local VSIX testing, LSP verification,
+  and known-issues guidance for users and maintainers.
+
+### Verified
+
+- `vsce package` produces a distributable `.vsix` from `editors/vscode/`.
+- Extension asset validation covers Marketplace metadata, TextMate grammar, and
+  `language-configuration.json`.
+
 ## [0.2.0] — 2026-04-26
 
 ### Added
