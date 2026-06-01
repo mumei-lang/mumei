@@ -4158,13 +4158,493 @@ fn cmd_list() {
 // mumei repl — Interactive REPL (Read-Eval-Print Loop)
 // =============================================================================
 
+const REPL_EVAL_ATOM: &str = "__repl_eval";
+
+struct ReplContext<'ctx> {
+    module_env: verification::ModuleEnv,
+    jit_engine: Option<mumei_emit_llvm::jit::JitEngine<'ctx>>,
+    extern_blocks: Vec<parser::ExternBlock>,
+}
+
+enum ReplAction {
+    Continue,
+    Quit,
+}
+
+fn repl_register_extern_fn(module_env: &mut verification::ModuleEnv, ext_fn: &parser::ExternFn) {
+    let params: Vec<parser::Param> = ext_fn
+        .param_types
+        .iter()
+        .enumerate()
+        .map(|(i, ty)| parser::Param {
+            name: ext_fn
+                .param_names
+                .get(i)
+                .cloned()
+                .unwrap_or_else(|| format!("arg{}", i)),
+            type_name: Some(ty.clone()),
+            type_ref: Some(parser::parse_type_ref(ty)),
+            is_ref: false,
+            is_ref_mut: false,
+            fn_contract_requires: None,
+            fn_contract_ensures: None,
+        })
+        .collect();
+    let atom = parser::Atom {
+        name: ext_fn.name.clone(),
+        type_params: vec![],
+        where_bounds: vec![],
+        params,
+        trace_id: None,
+        spec_metadata: std::collections::HashMap::new(),
+        requires: ext_fn
+            .requires
+            .clone()
+            .unwrap_or_else(|| "true".to_string()),
+        forall_constraints: vec![],
+        ensures: ext_fn.ensures.clone().unwrap_or_else(|| "true".to_string()),
+        body_expr: String::new(),
+        consumed_params: vec![],
+        resources: vec![],
+        is_async: false,
+        trust_level: parser::TrustLevel::Trusted,
+        max_unroll: None,
+        invariant: None,
+        effects: vec![],
+        return_type: Some(ext_fn.return_type.clone()),
+        span: ext_fn.span.clone(),
+        effect_pre: std::collections::HashMap::new(),
+        effect_post: std::collections::HashMap::new(),
+    };
+    module_env.register_atom(&atom);
+}
+
+fn repl_register_item(
+    ctx: &mut ReplContext<'_>,
+    item: &parser::Item,
+    compile_atoms: bool,
+) -> usize {
+    match item {
+        parser::Item::Atom(atom) => {
+            ctx.module_env.register_atom(atom);
+            if compile_atoms {
+                repl_verify_and_compile_atom(ctx, atom);
+            }
+            1
+        }
+        parser::Item::TypeDef(t) => {
+            ctx.module_env.register_type(t);
+            1
+        }
+        parser::Item::StructDef(s) => {
+            ctx.module_env.register_struct(s);
+            1
+        }
+        parser::Item::EnumDef(e) => {
+            ctx.module_env.register_enum(e);
+            1
+        }
+        parser::Item::TraitDef(t) => {
+            ctx.module_env.register_trait(t);
+            1
+        }
+        parser::Item::ImplDef(i) => {
+            ctx.module_env.register_impl(i);
+            1
+        }
+        parser::Item::ResourceDef(r) => {
+            ctx.module_env.register_resource(r);
+            1
+        }
+        parser::Item::EffectDef(e) => {
+            ctx.module_env.register_effect(e);
+            1
+        }
+        parser::Item::ExternBlock(eb) => {
+            ctx.extern_blocks.push(eb.clone());
+            for ext_fn in &eb.functions {
+                repl_register_extern_fn(&mut ctx.module_env, ext_fn);
+            }
+            eb.functions.len()
+        }
+        parser::Item::ImplBlock(ib) => {
+            for method in &ib.methods {
+                let mut qualified = method.clone();
+                qualified.name = format!("{}::{}", ib.struct_name, method.name);
+                ctx.module_env.register_atom(&qualified);
+                if compile_atoms {
+                    repl_verify_and_compile_atom(ctx, &qualified);
+                }
+            }
+            ib.methods.len()
+        }
+        parser::Item::Import(_) => 0,
+    }
+}
+
+fn repl_verify_and_compile_atom(ctx: &mut ReplContext<'_>, atom: &parser::Atom) -> bool {
+    let hir_atom = lower_atom_to_hir_with_env(atom, Some(&ctx.module_env));
+    match verification::verify(&hir_atom, Path::new("."), &ctx.module_env) {
+        Ok(()) => {
+            if let Some(engine) = ctx.jit_engine.as_ref() {
+                if let Err(err) =
+                    engine.compile_atom(&hir_atom, &ctx.module_env, &ctx.extern_blocks)
+                {
+                    eprintln!("  ⚠️  JIT compile warning for '{}': {}", atom.name, err);
+                }
+            }
+            println!("  ✅ Verified: {}", atom.name);
+            true
+        }
+        Err(err) => {
+            eprintln!("  ❌ Verification failed for '{}': {}", atom.name, err);
+            if let verification::MumeiError::VerificationError {
+                counterexample: Some(counterexample),
+                ..
+            } = &err
+            {
+                eprintln!("  counterexample: {}", counterexample);
+            }
+            println!("  ℹ️  Atom '{}' registered but not JIT-compiled", atom.name);
+            false
+        }
+    }
+}
+
+fn repl_wrap_expr(expr: &str) -> String {
+    format!(
+        "atom {REPL_EVAL_ATOM}()\n  requires: true;\n  ensures: true;\n  body: {{\n    {expr}\n  }}"
+    )
+}
+
+fn repl_compile_eval_atom(ctx: &mut ReplContext<'_>, atom: &parser::Atom) -> Option<&'static str> {
+    let engine = match ctx.jit_engine.as_ref() {
+        Some(engine) => engine,
+        None => {
+            eprintln!("  ❌ JIT engine not available");
+            return None;
+        }
+    };
+
+    engine.remove_function(REPL_EVAL_ATOM);
+    let hir_atom = lower_atom_to_hir_with_env(atom, Some(&ctx.module_env));
+    if let Err(err) = engine.compile_atom(&hir_atom, &ctx.module_env, &ctx.extern_blocks) {
+        engine.remove_function(REPL_EVAL_ATOM);
+        eprintln!("  ❌ JIT compile error: {}", err);
+        return None;
+    }
+
+    Some(
+        if atom
+            .return_type
+            .as_deref()
+            .is_some_and(|return_type| ctx.module_env.resolve_base_type(return_type) == "f64")
+        {
+            "f64"
+        } else {
+            "i64"
+        },
+    )
+}
+
+fn repl_execute_eval_atom(ctx: &mut ReplContext<'_>, return_type: &str) {
+    let Some(engine) = ctx.jit_engine.as_ref() else {
+        eprintln!("  ❌ JIT engine not available");
+        return;
+    };
+    let result = if return_type == "f64" {
+        engine
+            .execute_f64(REPL_EVAL_ATOM)
+            .map(|value| value.to_string())
+    } else {
+        engine
+            .execute_i64(REPL_EVAL_ATOM)
+            .map(|value| value.to_string())
+    };
+    match result {
+        Ok(value) => println!("  = {}", value),
+        Err(err) => eprintln!("  ❌ Execution error: {}", err),
+    }
+    engine.remove_function(REPL_EVAL_ATOM);
+}
+
+fn repl_eval_expr(ctx: &mut ReplContext<'_>, expr: &str, verify_first: bool) {
+    let wrapped = repl_wrap_expr(expr);
+    let items = parser::parse_module(&wrapped);
+    let Some(parser::Item::Atom(atom)) = items.first() else {
+        eprintln!("  ❌ Syntax error: could not parse expression");
+        return;
+    };
+
+    if verify_first {
+        let hir_atom = lower_atom_to_hir_with_env(atom, Some(&ctx.module_env));
+        match verification::verify(&hir_atom, Path::new("."), &ctx.module_env) {
+            Ok(()) => {}
+            Err(err) => {
+                eprintln!("  ❌ Verification failed: {}", err);
+                if let verification::MumeiError::VerificationError {
+                    counterexample: Some(counterexample),
+                    ..
+                } = &err
+                {
+                    eprintln!("  counterexample: {}", counterexample);
+                }
+                return;
+            }
+        }
+    }
+
+    if let Some(return_type) = repl_compile_eval_atom(ctx, atom) {
+        repl_execute_eval_atom(ctx, return_type);
+    }
+}
+
+fn repl_type_expr(ctx: &ReplContext<'_>, expr: &str) {
+    match parser::parse_expression(expr) {
+        parser::Expr::Float(_) => println!("  : f64"),
+        parser::Expr::StringLit(_) => println!("  : Str"),
+        parser::Expr::Number(_) => println!("  : i64"),
+        parser::Expr::Variable(name) if name == "true" || name == "false" => println!("  : bool"),
+        parser::Expr::BinaryOp(_, op, _) => match op {
+            parser::Op::Eq
+            | parser::Op::Neq
+            | parser::Op::Gt
+            | parser::Op::Lt
+            | parser::Op::Ge
+            | parser::Op::Le
+            | parser::Op::And
+            | parser::Op::Or
+            | parser::Op::Implies => println!("  : bool"),
+            _ => println!("  : i64"),
+        },
+        parser::Expr::Call(name, _) => {
+            let fqn_name = name.replace('.', "::");
+            match ctx
+                .module_env
+                .get_atom(&name)
+                .or_else(|| ctx.module_env.get_atom(&fqn_name))
+                .and_then(|atom| atom.return_type.as_deref())
+            {
+                Some(return_type) => println!("  : {}", return_type),
+                None => println!("  : i64"),
+            }
+        }
+        _ => println!("  : unknown"),
+    }
+}
+
+fn repl_load_file(ctx: &mut ReplContext<'_>, file: &str) {
+    println!("  Loading '{}'...", file);
+    let source = match fs::read_to_string(file) {
+        Ok(source) => source,
+        Err(err) => {
+            eprintln!("  ❌ Failed to read '{}': {}", file, err);
+            return;
+        }
+    };
+    let items = parser::parse_module(&source);
+    if items.is_empty() {
+        eprintln!("  ❌ Syntax error: no items parsed from '{}'", file);
+        return;
+    }
+    let mut count = 0;
+    for item in &items {
+        count += repl_register_item(ctx, item, true);
+    }
+    println!("  ✅ Loaded {} definition(s) from '{}'", count, file);
+}
+
+fn repl_verify_named_atom(ctx: &mut ReplContext<'_>, atom_name: &str) {
+    match ctx.module_env.get_atom(atom_name).cloned() {
+        Some(atom) => {
+            repl_verify_and_compile_atom(ctx, &atom);
+        }
+        None => eprintln!("  ❌ Unknown atom '{}'", atom_name),
+    }
+}
+
+fn repl_print_env(ctx: &ReplContext<'_>) {
+    println!(
+        "  --- Registered Atoms ({}) ---",
+        ctx.module_env.atoms.len()
+    );
+    let mut names: Vec<&String> = ctx.module_env.atoms.keys().collect();
+    names.sort();
+    for name in names {
+        if let Some(atom) = ctx.module_env.atoms.get(name) {
+            let params_str: Vec<String> = atom
+                .params
+                .iter()
+                .map(|p| format!("{}: {}", p.name, p.type_name.as_deref().unwrap_or("?")))
+                .collect();
+            println!(
+                "    {} atom {}({}) [{:?}]",
+                if atom.is_async { "async" } else { "" },
+                name,
+                params_str.join(", "),
+                atom.trust_level
+            );
+        }
+    }
+    println!(
+        "  --- Registered Types ({}) ---",
+        ctx.module_env.types.len()
+    );
+    for name in ctx.module_env.types.keys() {
+        println!("    type {}", name);
+    }
+    println!(
+        "  --- Registered Structs ({}) ---",
+        ctx.module_env.structs.len()
+    );
+    for name in ctx.module_env.structs.keys() {
+        println!("    struct {}", name);
+    }
+    println!(
+        "  --- Registered Enums ({}) ---",
+        ctx.module_env.enums.len()
+    );
+    for name in ctx.module_env.enums.keys() {
+        println!("    enum {}", name);
+    }
+}
+
+fn repl_help() {
+    println!("  :help          — Show this help");
+    println!("  :quit/:exit    — Exit the REPL");
+    println!("  :load <file>   — Load atoms and extern declarations from a .mm file");
+    println!("  :type <expr>   — Infer a simple expression type");
+    println!("  :verify <atom> — Verify and JIT-compile a registered atom");
+    println!("  :eval <expr>   — JIT compile and execute an expression without verification");
+    println!("  :check <expr>  — Parse and type-check an expression");
+    println!("  :env           — Show registered atoms and types");
+}
+
+fn repl_brace_balance(input: &str) -> i32 {
+    let mut balance = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+    for ch in input.chars() {
+        if in_string {
+            if ch == '"' && !escaped {
+                in_string = false;
+            }
+            escaped = ch == '\\' && !escaped;
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '{' => balance += 1,
+            '}' => balance -= 1,
+            _ => {}
+        }
+    }
+    balance
+}
+
+fn repl_input_incomplete(input: &str) -> bool {
+    let trimmed = input.trim_start();
+    let looks_like_atom = trimmed.starts_with("atom ")
+        || trimmed.starts_with("trusted atom ")
+        || trimmed.starts_with("unverified atom ")
+        || trimmed.starts_with("async atom ");
+    if looks_like_atom {
+        return !input.contains("body:") || repl_brace_balance(input) > 0;
+    }
+    trimmed.starts_with("extern ") && (!input.contains('}') || repl_brace_balance(input) > 0)
+}
+
+fn repl_handle_line(ctx: &mut ReplContext<'_>, input: &str) -> ReplAction {
+    match input {
+        ":quit" | ":q" | ":exit" => {
+            println!("Goodbye! 🗡️");
+            ReplAction::Quit
+        }
+        ":help" | ":h" => {
+            repl_help();
+            ReplAction::Continue
+        }
+        ":env" => {
+            repl_print_env(ctx);
+            ReplAction::Continue
+        }
+        _ if input.starts_with(":load ") => {
+            repl_load_file(ctx, input.strip_prefix(":load ").unwrap().trim());
+            ReplAction::Continue
+        }
+        _ if input.starts_with(":type ") => {
+            repl_type_expr(ctx, input.strip_prefix(":type ").unwrap().trim());
+            ReplAction::Continue
+        }
+        _ if input.starts_with(":verify ") => {
+            let target = input.strip_prefix(":verify ").unwrap().trim();
+            if ctx.module_env.get_atom(target).is_some() {
+                repl_verify_named_atom(ctx, target);
+            } else {
+                repl_eval_expr(ctx, target, true);
+            }
+            ReplAction::Continue
+        }
+        _ if input.starts_with(":check ") => {
+            let expr = input.strip_prefix(":check ").unwrap().trim();
+            let wrapped = repl_wrap_expr(expr);
+            if parser::parse_module(&wrapped).is_empty() {
+                eprintln!("  ❌ Syntax error: could not parse expression");
+            } else {
+                println!("  ✅ Parsed expression");
+            }
+            ReplAction::Continue
+        }
+        _ if input.starts_with(":eval ") => {
+            repl_eval_expr(ctx, input.strip_prefix(":eval ").unwrap().trim(), false);
+            ReplAction::Continue
+        }
+        _ => {
+            let items = parser::parse_module(input);
+            if items.is_empty() {
+                repl_eval_expr(ctx, input, true);
+            } else {
+                for item in &items {
+                    match item {
+                        parser::Item::Atom(atom) => {
+                            repl_register_item(ctx, item, false);
+                            repl_verify_and_compile_atom(ctx, atom);
+                        }
+                        parser::Item::TypeDef(t) => {
+                            repl_register_item(ctx, item, false);
+                            println!("  ✅ Registered type '{}'", t.name);
+                        }
+                        parser::Item::StructDef(s) => {
+                            repl_register_item(ctx, item, false);
+                            println!("  ✅ Registered struct '{}'", s.name);
+                        }
+                        parser::Item::EnumDef(e) => {
+                            repl_register_item(ctx, item, false);
+                            println!("  ✅ Registered enum '{}'", e.name);
+                        }
+                        parser::Item::ExternBlock(eb) => {
+                            repl_register_item(ctx, item, false);
+                            println!("  ✅ Registered {} extern function(s)", eb.functions.len());
+                        }
+                        _ => {
+                            repl_register_item(ctx, item, false);
+                            println!("  ✅ Processed");
+                        }
+                    }
+                }
+            }
+            ReplAction::Continue
+        }
+    }
+}
+
 fn cmd_repl() {
     println!(
         "🗡️  Mumei REPL v{} (JIT enabled)",
         env!("CARGO_PKG_VERSION")
     );
     println!("  Type expressions or atom definitions to evaluate.");
-    println!("  Commands: :help, :check <expr>, :verify <expr>, :eval <expr>, :load <file>, :quit");
+    println!("  Commands: :help, :type <expr>, :verify <atom>, :load <file>, :quit");
     println!();
 
     let mut module_env = verification::ModuleEnv::new();
@@ -4187,13 +4667,22 @@ fn cmd_repl() {
             None
         }
     };
-    let mut extern_blocks_repl: Vec<parser::ExternBlock> = Vec::new();
+    let mut ctx = ReplContext {
+        module_env,
+        jit_engine,
+        extern_blocks: Vec::new(),
+    };
 
     let stdin = std::io::stdin();
     let mut line_buf = String::new();
+    let mut pending_input = String::new();
 
     loop {
-        eprint!("mumei> ");
+        if pending_input.is_empty() {
+            eprint!("mumei> ");
+        } else {
+            eprint!("....> ");
+        }
         line_buf.clear();
         match stdin.read_line(&mut line_buf) {
             Ok(0) => break, // EOF
@@ -4204,404 +4693,25 @@ fn cmd_repl() {
             }
         }
 
-        let input = line_buf.trim();
+        let input = line_buf.trim_end();
         if input.is_empty() {
             continue;
         }
 
-        match input {
-            ":quit" | ":q" | ":exit" => {
-                println!("Goodbye! 🗡️");
-                break;
-            }
-            ":help" | ":h" => {
-                println!("  :check <expr>  — Parse and type-check an expression");
-                println!("  :verify <expr> — Formally verify an expression with Z3");
-                println!("  :eval <expr>   — JIT compile and execute (skip verification)");
-                println!("  :load <file>   — Load and register a .mm file");
-                println!("  :env           — Show registered atoms and types");
-                println!("  :quit          — Exit the REPL");
-            }
-            _ if input.starts_with(":load ") => {
-                let file = input.strip_prefix(":load ").unwrap().trim();
-                println!("  Loading '{}'...", file);
-                let source = match fs::read_to_string(file) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        eprintln!("  ❌ Failed to read '{}': {}", file, e);
-                        continue;
-                    }
-                };
-                let items = parser::parse_module(&source);
-                let mut count = 0;
-                for item in &items {
-                    match item {
-                        parser::Item::Atom(atom) => {
-                            module_env.register_atom(atom);
-                            // P7-A: Compile loaded atoms into JIT module
-                            if let Some(ref engine) = jit_engine {
-                                let hir_atom = lower_atom_to_hir_with_env(atom, Some(&module_env));
-                                if let Err(e) =
-                                    engine.compile_atom(&hir_atom, &module_env, &extern_blocks_repl)
-                                {
-                                    eprintln!(
-                                        "  ⚠️  JIT compile warning for '{}': {}",
-                                        atom.name, e
-                                    );
-                                }
-                            }
-                            count += 1;
-                        }
-                        parser::Item::TypeDef(t) => module_env.register_type(t),
-                        parser::Item::StructDef(s) => module_env.register_struct(s),
-                        parser::Item::EnumDef(e) => module_env.register_enum(e),
-                        parser::Item::TraitDef(t) => module_env.register_trait(t),
-                        parser::Item::ImplDef(i) => module_env.register_impl(i),
-                        parser::Item::ResourceDef(r) => module_env.register_resource(r),
-                        parser::Item::ExternBlock(eb) => {
-                            extern_blocks_repl.push(eb.clone());
-                            for ext_fn in &eb.functions {
-                                let params: Vec<parser::Param> = ext_fn
-                                    .param_types
-                                    .iter()
-                                    .enumerate()
-                                    .map(|(i, ty)| parser::Param {
-                                        name: ext_fn
-                                            .param_names
-                                            .get(i)
-                                            .cloned()
-                                            .unwrap_or_else(|| format!("arg{}", i)),
-                                        type_name: Some(ty.clone()),
-                                        type_ref: Some(parser::parse_type_ref(ty)),
-                                        is_ref: false,
-                                        is_ref_mut: false,
-                                        fn_contract_requires: None,
-                                        fn_contract_ensures: None,
-                                    })
-                                    .collect();
-                                let atom = parser::Atom {
-                                    name: ext_fn.name.clone(),
-                                    type_params: vec![],
-                                    where_bounds: vec![],
-                                    params,
-                                    trace_id: None,
-                                    spec_metadata: std::collections::HashMap::new(),
-                                    requires: ext_fn
-                                        .requires
-                                        .clone()
-                                        .unwrap_or_else(|| "true".to_string()),
-                                    forall_constraints: vec![],
-                                    ensures: ext_fn
-                                        .ensures
-                                        .clone()
-                                        .unwrap_or_else(|| "true".to_string()),
-                                    body_expr: String::new(),
-                                    consumed_params: vec![],
-                                    resources: vec![],
-                                    is_async: false,
-                                    trust_level: parser::TrustLevel::Trusted,
-                                    max_unroll: None,
-                                    invariant: None,
-                                    effects: vec![],
-                                    return_type: Some(ext_fn.return_type.clone()),
-                                    span: ext_fn.span.clone(),
-                                    effect_pre: std::collections::HashMap::new(),
-                                    effect_post: std::collections::HashMap::new(),
-                                };
-                                module_env.register_atom(&atom);
-                                count += 1;
-                            }
-                        }
-                        parser::Item::Import(_) => {}
-                        parser::Item::EffectDef(e) => module_env.register_effect(e),
-                        parser::Item::ImplBlock(ib) => {
-                            for method in &ib.methods {
-                                let mut qualified = method.clone();
-                                qualified.name = format!("{}::{}", ib.struct_name, method.name);
-                                module_env.register_atom(&qualified);
-                                count += 1;
-                            }
-                        }
-                    }
-                }
-                println!("  ✅ Loaded {} definition(s) from '{}'", count, file);
-            }
-            ":env" => {
-                println!("  --- Registered Atoms ({}) ---", module_env.atoms.len());
-                let mut names: Vec<&String> = module_env.atoms.keys().collect();
-                names.sort();
-                for name in names {
-                    if let Some(atom) = module_env.atoms.get(name) {
-                        let params_str: Vec<String> = atom
-                            .params
-                            .iter()
-                            .map(|p| {
-                                format!("{}: {}", p.name, p.type_name.as_deref().unwrap_or("?"))
-                            })
-                            .collect();
-                        println!(
-                            "    {} atom {}({}) [{:?}]",
-                            if atom.is_async { "async" } else { "" },
-                            name,
-                            params_str.join(", "),
-                            atom.trust_level
-                        );
-                    }
-                }
-                println!("  --- Registered Types ({}) ---", module_env.types.len());
-                for name in module_env.types.keys() {
-                    println!("    type {}", name);
-                }
-                println!(
-                    "  --- Registered Structs ({}) ---",
-                    module_env.structs.len()
-                );
-                for name in module_env.structs.keys() {
-                    println!("    struct {}", name);
-                }
-                println!("  --- Registered Enums ({}) ---", module_env.enums.len());
-                for name in module_env.enums.keys() {
-                    println!("    enum {}", name);
-                }
-            }
-            // P7-A: :eval command — skip verification, directly JIT compile and execute
-            _ if input.starts_with(":eval ") => {
-                let expr_str = input.strip_prefix(":eval ").unwrap().trim();
-                if jit_engine.is_none() {
-                    eprintln!("  ❌ JIT engine not available");
-                    continue;
-                }
-                let engine = jit_engine.as_ref().unwrap();
+        if pending_input.is_empty() {
+            pending_input.push_str(input);
+        } else {
+            pending_input.push('\n');
+            pending_input.push_str(input);
+        }
 
-                let wrapped = format!(
-                    "atom __repl_eval()\n  requires: true;\n  ensures: true;\n  body: {{\n    {}\n  }}",
-                    expr_str
-                );
-                let eval_items = parser::parse_module(&wrapped);
-                if eval_items.is_empty() {
-                    eprintln!("  ❌ Parse error");
-                    continue;
-                }
-                for eval_item in &eval_items {
-                    if let parser::Item::Atom(atom) = eval_item {
-                        let hir_atom = lower_atom_to_hir_with_env(atom, Some(&module_env));
-                        // Precautionary cleanup of any stale __repl_eval from previous failures
-                        engine.remove_function("__repl_eval");
-                        match engine.compile_atom(&hir_atom, &module_env, &extern_blocks_repl) {
-                            Ok(()) => {
-                                // Determine return type to pick execute_i64 vs execute_f64
-                                let is_f64 =
-                                    atom.return_type.as_deref().is_some_and(|rt| rt == "f64");
-                                if is_f64 {
-                                    match engine.execute_f64("__repl_eval") {
-                                        Ok(v) => println!("  = {}", v),
-                                        Err(e) => eprintln!("  ❌ Execution error: {}", e),
-                                    }
-                                } else {
-                                    match engine.execute_i64("__repl_eval") {
-                                        Ok(v) => println!("  = {}", v),
-                                        Err(e) => eprintln!("  ❌ Execution error: {}", e),
-                                    }
-                                }
-                                engine.remove_function("__repl_eval");
-                            }
-                            Err(e) => {
-                                engine.remove_function("__repl_eval");
-                                eprintln!("  ❌ JIT compile error: {}", e);
-                            }
-                        }
-                    }
-                }
-            }
-            _ if input.starts_with(":check ") || input.starts_with(":verify ") => {
-                let is_verify = input.starts_with(":verify ");
-                let expr_str = if is_verify {
-                    input.strip_prefix(":verify ").unwrap()
-                } else {
-                    input.strip_prefix(":check ").unwrap()
-                };
+        if repl_input_incomplete(&pending_input) {
+            continue;
+        }
 
-                // 式をパースして簡易検証
-                let wrapped = format!(
-                    "atom __repl_eval()\n  requires: true;\n  ensures: true;\n  body: {{\n    {}\n  }}",
-                    expr_str
-                );
-                let items = parser::parse_module(&wrapped);
-                if items.is_empty() {
-                    eprintln!("  ❌ Parse error");
-                    continue;
-                }
-                for item in &items {
-                    if let parser::Item::Atom(atom) = item {
-                        println!("  ✅ Parsed: atom {}()", atom.name);
-                        if is_verify {
-                            let hir_atom = lower_atom_to_hir_with_env(atom, Some(&module_env));
-                            match verification::verify(&hir_atom, Path::new("."), &module_env) {
-                                Ok(()) => {
-                                    println!("  ✅ Verification passed");
-                                    // P7-A: If verification passes, also JIT execute and show result
-                                    if let Some(ref engine) = jit_engine {
-                                        // Precautionary cleanup of any stale __repl_eval
-                                        engine.remove_function("__repl_eval");
-                                        match engine.compile_atom(
-                                            &hir_atom,
-                                            &module_env,
-                                            &extern_blocks_repl,
-                                        ) {
-                                            Ok(()) => {
-                                                let is_f64 = atom
-                                                    .return_type
-                                                    .as_deref()
-                                                    .is_some_and(|rt| rt == "f64");
-                                                if is_f64 {
-                                                    match engine.execute_f64("__repl_eval") {
-                                                        Ok(v) => println!("  = {}", v),
-                                                        Err(e) => {
-                                                            eprintln!("  ❌ Execution error: {}", e)
-                                                        }
-                                                    }
-                                                } else {
-                                                    match engine.execute_i64("__repl_eval") {
-                                                        Ok(v) => println!("  = {}", v),
-                                                        Err(e) => {
-                                                            eprintln!("  ❌ Execution error: {}", e)
-                                                        }
-                                                    }
-                                                }
-                                                engine.remove_function("__repl_eval");
-                                            }
-                                            Err(e) => {
-                                                engine.remove_function("__repl_eval");
-                                                eprintln!("  ⚠️  JIT compile warning: {}", e)
-                                            }
-                                        }
-                                    }
-                                }
-                                Err(e) => eprintln!("  ❌ Verification failed: {}", e),
-                            }
-                        }
-                    }
-                }
-            }
-            _ => {
-                // Try parsing as atom definition or other declaration
-                let items = parser::parse_module(input);
-                if items.is_empty() {
-                    // P7-A: Try parsing as expression for JIT evaluation
-                    // Wrap as __repl_eval atom and attempt verify + execute
-                    let wrapped = format!(
-                        "atom __repl_eval()\n  requires: true;\n  ensures: true;\n  body: {{\n    {}\n  }}",
-                        input
-                    );
-                    let eval_items = parser::parse_module(&wrapped);
-                    if eval_items.is_empty() {
-                        eprintln!("  ❌ Could not parse input. Try :help for commands.");
-                        continue;
-                    }
-                    for eval_item in &eval_items {
-                        if let parser::Item::Atom(atom) = eval_item {
-                            let hir_atom = lower_atom_to_hir_with_env(atom, Some(&module_env));
-                            // Verify first
-                            match verification::verify(&hir_atom, Path::new("."), &module_env) {
-                                Ok(()) => {
-                                    // JIT execute
-                                    if let Some(ref engine) = jit_engine {
-                                        // Precautionary cleanup of any stale __repl_eval
-                                        engine.remove_function("__repl_eval");
-                                        match engine.compile_atom(
-                                            &hir_atom,
-                                            &module_env,
-                                            &extern_blocks_repl,
-                                        ) {
-                                            Ok(()) => {
-                                                let is_f64 = atom
-                                                    .return_type
-                                                    .as_deref()
-                                                    .is_some_and(|rt| rt == "f64");
-                                                if is_f64 {
-                                                    match engine.execute_f64("__repl_eval") {
-                                                        Ok(v) => println!("  = {}", v),
-                                                        Err(e) => {
-                                                            eprintln!("  ❌ Execution error: {}", e)
-                                                        }
-                                                    }
-                                                } else {
-                                                    match engine.execute_i64("__repl_eval") {
-                                                        Ok(v) => println!("  = {}", v),
-                                                        Err(e) => {
-                                                            eprintln!("  ❌ Execution error: {}", e)
-                                                        }
-                                                    }
-                                                }
-                                                engine.remove_function("__repl_eval");
-                                            }
-                                            Err(e) => {
-                                                engine.remove_function("__repl_eval");
-                                                eprintln!("  ⚠️  JIT compile warning: {}", e)
-                                            }
-                                        }
-                                    } else {
-                                        println!("  ✅ Verification passed (JIT unavailable)");
-                                    }
-                                }
-                                Err(e) => eprintln!("  ❌ Verification failed: {}", e),
-                            }
-                        }
-                    }
-                    continue;
-                }
-                for item in &items {
-                    match item {
-                        parser::Item::Atom(atom) => {
-                            module_env.register_atom(atom);
-                            // P7-A: Verify and compile atom into JIT module
-                            let hir_atom = lower_atom_to_hir_with_env(atom, Some(&module_env));
-                            match verification::verify(&hir_atom, Path::new("."), &module_env) {
-                                Ok(()) => {
-                                    if let Some(ref engine) = jit_engine {
-                                        if let Err(e) = engine.compile_atom(
-                                            &hir_atom,
-                                            &module_env,
-                                            &extern_blocks_repl,
-                                        ) {
-                                            eprintln!(
-                                                "  ⚠️  JIT compile warning for '{}': {}",
-                                                atom.name, e
-                                            );
-                                        }
-                                    }
-                                    println!("  ✅ Verified: {}", atom.name);
-                                }
-                                Err(e) => {
-                                    eprintln!(
-                                        "  ❌ Verification failed for '{}': {}",
-                                        atom.name, e
-                                    );
-                                    println!(
-                                        "  ℹ️  Atom '{}' registered but not JIT-compiled",
-                                        atom.name
-                                    );
-                                }
-                            }
-                        }
-                        parser::Item::TypeDef(t) => {
-                            module_env.register_type(t);
-                            println!("  ✅ Registered type '{}'", t.name);
-                        }
-                        parser::Item::StructDef(s) => {
-                            module_env.register_struct(s);
-                            println!("  ✅ Registered struct '{}'", s.name);
-                        }
-                        parser::Item::EnumDef(e) => {
-                            module_env.register_enum(e);
-                            println!("  ✅ Registered enum '{}'", e.name);
-                        }
-                        _ => {
-                            println!("  ✅ Processed");
-                        }
-                    }
-                }
-            }
+        let input = std::mem::take(&mut pending_input);
+        if matches!(repl_handle_line(&mut ctx, input.trim()), ReplAction::Quit) {
+            break;
         }
     }
 }
