@@ -214,7 +214,17 @@ pub fn compile_atom_into_module<'ctx>(
     // Plan 18: Use resolved return type instead of hardcoded i64
     let ret_type = resolve_return_type(context, atom, module_env);
     let fn_type = ret_type.fn_type(&param_types, false);
-    let function = module.add_function(&atom.name, fn_type, None);
+    let function = if let Some(existing) = module.get_function(&atom.name) {
+        if existing.get_first_basic_block().is_some() {
+            return Err(MumeiError::codegen(format!(
+                "Duplicate function definition: {}",
+                atom.name
+            )));
+        }
+        existing
+    } else {
+        module.add_function(&atom.name, fn_type, None)
+    };
 
     let entry_block = context.append_basic_block(function, "entry");
     builder.position_at_end(entry_block);
@@ -705,6 +715,7 @@ fn compile_hir_expr<'a>(
                     .get_atom(name)
                     .or_else(|| module_env.get_atom(&fqn_name));
                 if let Some(callee) = resolved_callee {
+                    let callee_symbol = callee.name.as_str();
                     let callee_param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = callee
                         .params
                         .iter()
@@ -717,9 +728,9 @@ fn compile_hir_expr<'a>(
                     let callee_ret_type = resolve_return_type(context, callee, module_env);
                     let callee_fn = {
                         let fn_type = callee_ret_type.fn_type(&callee_param_types, false);
-                        module.get_function(name).unwrap_or_else(|| {
+                        module.get_function(callee_symbol).unwrap_or_else(|| {
                             module.add_function(
-                                name,
+                                callee_symbol,
                                 fn_type,
                                 Some(inkwell::module::Linkage::External),
                             )
@@ -735,8 +746,11 @@ fn compile_hir_expr<'a>(
                         arg_vals.push(val.into());
                     }
 
-                    let call_result =
-                        llvm!(builder.build_call(callee_fn, &arg_vals, &format!("call_{}", name)));
+                    let call_name = format!(
+                        "call_{}",
+                        callee_symbol.replace("::", "_").replace('.', "_")
+                    );
+                    let call_result = llvm!(builder.build_call(callee_fn, &arg_vals, &call_name));
                     let result = call_result.as_any_value_enum();
                     if result.is_float_value() {
                         Ok(result.into_float_value().into())

@@ -125,3 +125,88 @@ body: { json_from_bool(0) };
 
     std::fs::remove_dir_all(fixture.parent().unwrap()).expect("remove run fixture dir");
 }
+
+#[test]
+fn run_command_links_imported_std_rust_ffi_runtime() {
+    let bin = env!("CARGO_BIN_EXE_mumei");
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let fixture = write_fixture(
+        "std_rust_ffi",
+        r#"
+import "std/json" as json;
+
+atom main()
+requires: true;
+ensures: result >= 0;
+body: { json.from_bool(1) + json::from_bool(1) };
+"#,
+    );
+
+    let output = Command::new(bin)
+        .arg("run")
+        .arg(&fixture)
+        .current_dir(manifest_dir)
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run mumei run with imported Rust FFI: {err}"));
+
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "imported std/json FFI should link through both dot and :: qualified calls\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    std::fs::remove_dir_all(fixture.parent().unwrap()).expect("remove run fixture dir");
+}
+
+#[test]
+fn build_binary_links_imported_std_rust_ffi_runtime() {
+    let bin = env!("CARGO_BIN_EXE_mumei");
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let fixture = write_fixture(
+        "build_std_rust_ffi",
+        r#"
+import "std/json" as json;
+
+atom main()
+requires: true;
+ensures: result >= 0;
+body: { json::from_bool(1) };
+"#,
+    );
+    let out_path = fixture.parent().unwrap().join("std_json_app");
+
+    let output = Command::new(bin)
+        .arg("build")
+        .arg(&fixture)
+        .arg("--emit")
+        .arg("binary")
+        .arg("-o")
+        .arg(&out_path)
+        .current_dir(manifest_dir)
+        .output()
+        .unwrap_or_else(|err| panic!("failed to build mumei binary with imported Rust FFI: {err}"));
+
+    assert!(
+        output.status.success(),
+        "mumei build --emit binary should link imported std/json FFI\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(out_path.exists(), "binary output should exist");
+
+    let binary_output = Command::new(&out_path)
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run built imported Rust FFI binary: {err}"));
+
+    assert_eq!(
+        binary_output.status.code(),
+        Some(1),
+        "persisted binary should execute imported std/json Rust FFI\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&binary_output.stdout),
+        String::from_utf8_lossy(&binary_output.stderr)
+    );
+
+    std::fs::remove_dir_all(fixture.parent().unwrap()).expect("remove run fixture dir");
+}

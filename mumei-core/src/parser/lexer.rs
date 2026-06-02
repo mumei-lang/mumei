@@ -94,7 +94,14 @@ impl<'a> Lexer<'a> {
             '+' => Token::Plus,
             '*' => Token::Star,
             ',' => Token::Comma,
-            ':' => Token::Colon,
+            ':' => {
+                if self.peek() == Some(':') {
+                    self.advance();
+                    Token::ColonColon
+                } else {
+                    Token::Colon
+                }
+            }
             ';' => Token::Semicolon,
             '(' => Token::LParen,
             ')' => Token::RParen,

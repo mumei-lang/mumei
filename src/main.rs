@@ -143,18 +143,9 @@ fn resolve_budget_policy_fingerprint(cli_value: Option<String>) -> Option<String
     cli_value.or_else(proof_cert::budget_policy_fingerprint_from_env)
 }
 
-/// Collect all ExternBlock items from a list of Items.
-fn collect_extern_blocks(items: &[Item]) -> Vec<parser::ExternBlock> {
-    items
-        .iter()
-        .filter_map(|item| {
-            if let Item::ExternBlock(eb) = item {
-                Some(eb.clone())
-            } else {
-                None
-            }
-        })
-        .collect()
+/// Collect extern declarations needed by binary codegen, including imported modules.
+fn collect_extern_blocks(module_env: &verification::ModuleEnv) -> Vec<parser::ExternBlock> {
+    module_env.extern_blocks.clone()
 }
 
 // =============================================================================
@@ -790,6 +781,7 @@ fn load_and_prepare_with_full_options(
                 );
             }
             Item::ExternBlock(extern_block) => {
+                module_env.register_extern_block(extern_block);
                 for ext_fn in &extern_block.functions {
                     // ExternFn → trusted Atom に変換して ModuleEnv に登録
                     let params: Vec<parser::Param> = ext_fn
@@ -2686,18 +2678,130 @@ fn generate_rust_ffi_staticlib(crate_dir: &Path, output_dir: &Path) -> Result<Pa
     }
 }
 
+fn collect_hir_calls_from_atom(hir_atom: &hir::HirAtom, calls: &mut Vec<String>) {
+    collect_hir_calls_from_stmt(&hir_atom.body, calls);
+}
+
+fn collect_hir_calls_from_stmt(stmt: &hir::HirStmt, calls: &mut Vec<String>) {
+    match stmt {
+        hir::HirStmt::Let { value, .. } => collect_hir_calls_from_expr(value, calls),
+        hir::HirStmt::Assign { value, .. } => collect_hir_calls_from_expr(value, calls),
+        hir::HirStmt::ArrayStore { index, value, .. } => {
+            collect_hir_calls_from_expr(index, calls);
+            collect_hir_calls_from_expr(value, calls);
+        }
+        hir::HirStmt::While {
+            cond,
+            invariant,
+            decreases,
+            body,
+        } => {
+            collect_hir_calls_from_expr(cond, calls);
+            collect_hir_calls_from_expr(invariant, calls);
+            if let Some(decreases) = decreases {
+                collect_hir_calls_from_expr(decreases, calls);
+            }
+            collect_hir_calls_from_stmt(body, calls);
+        }
+        hir::HirStmt::Block { stmts, tail_expr } => {
+            for stmt in stmts {
+                collect_hir_calls_from_stmt(stmt, calls);
+            }
+            if let Some(tail_expr) = tail_expr {
+                collect_hir_calls_from_expr(tail_expr, calls);
+            }
+        }
+        hir::HirStmt::Acquire { body, .. } => collect_hir_calls_from_stmt(body, calls),
+        hir::HirStmt::Expr(expr) => collect_hir_calls_from_expr(expr, calls),
+    }
+}
+
+fn collect_hir_calls_from_expr(expr: &hir::HirExpr, calls: &mut Vec<String>) {
+    match expr {
+        hir::HirExpr::Call { name, args, .. } => {
+            calls.push(name.replace('.', "::"));
+            for arg in args {
+                collect_hir_calls_from_expr(arg, calls);
+            }
+        }
+        hir::HirExpr::BinaryOp(lhs, _, rhs) => {
+            collect_hir_calls_from_expr(lhs, calls);
+            collect_hir_calls_from_expr(rhs, calls);
+        }
+        hir::HirExpr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            collect_hir_calls_from_expr(cond, calls);
+            collect_hir_calls_from_stmt(then_branch, calls);
+            collect_hir_calls_from_stmt(else_branch, calls);
+        }
+        hir::HirExpr::StructInit { fields, .. } => {
+            for (_, value) in fields {
+                collect_hir_calls_from_expr(value, calls);
+            }
+        }
+        hir::HirExpr::FieldAccess(inner, _) => collect_hir_calls_from_expr(inner, calls),
+        hir::HirExpr::ArrayAccess(_, index) => collect_hir_calls_from_expr(index, calls),
+        hir::HirExpr::Match { target, arms } => {
+            collect_hir_calls_from_expr(target, calls);
+            for arm in arms {
+                collect_hir_calls_from_stmt(&arm.body, calls);
+                if let Some(guard) = &arm.guard {
+                    collect_hir_calls_from_expr(guard, calls);
+                }
+            }
+        }
+        hir::HirExpr::CallRef { callee, args } => {
+            collect_hir_calls_from_expr(callee, calls);
+            for arg in args {
+                collect_hir_calls_from_expr(arg, calls);
+            }
+        }
+        hir::HirExpr::Async { body } | hir::HirExpr::Task { body, .. } => {
+            collect_hir_calls_from_stmt(body, calls);
+        }
+        hir::HirExpr::Await { expr } => collect_hir_calls_from_expr(expr, calls),
+        hir::HirExpr::Perform { args, .. } | hir::HirExpr::VariantInit { fields: args, .. } => {
+            for arg in args {
+                collect_hir_calls_from_expr(arg, calls);
+            }
+        }
+        hir::HirExpr::TaskGroup { children, .. } => {
+            for child in children {
+                collect_hir_calls_from_stmt(child, calls);
+            }
+        }
+        hir::HirExpr::Lambda { body, .. } => collect_hir_calls_from_stmt(body, calls),
+        hir::HirExpr::ChanSend { channel, value } => {
+            collect_hir_calls_from_expr(channel, calls);
+            collect_hir_calls_from_expr(value, calls);
+        }
+        hir::HirExpr::ChanRecv { channel } => collect_hir_calls_from_expr(channel, calls),
+        hir::HirExpr::Number(_)
+        | hir::HirExpr::Float(_)
+        | hir::HirExpr::StringLit(_)
+        | hir::HirExpr::Variable(_)
+        | hir::HirExpr::AtomRef { .. } => {}
+    }
+}
+
 fn collect_binary_hir_atoms(
     items: &[Item],
     module_env: &verification::ModuleEnv,
 ) -> Vec<hir::HirAtom> {
     let mut hir_atoms = Vec::new();
     let mut seen = std::collections::HashSet::new();
+    let mut pending_calls = Vec::new();
 
     for item in items {
         match item {
             Item::Atom(atom) => {
                 if seen.insert(atom.name.clone()) {
-                    hir_atoms.push(lower_atom_to_hir_with_env(atom, Some(module_env)));
+                    let hir_atom = lower_atom_to_hir_with_env(atom, Some(module_env));
+                    collect_hir_calls_from_atom(&hir_atom, &mut pending_calls);
+                    hir_atoms.push(hir_atom);
                 }
             }
             Item::ImplBlock(impl_block) => {
@@ -2705,7 +2809,9 @@ fn collect_binary_hir_atoms(
                     let mut qualified = method.clone();
                     qualified.name = format!("{}::{}", impl_block.struct_name, method.name);
                     if seen.insert(qualified.name.clone()) {
-                        hir_atoms.push(lower_atom_to_hir_with_env(&qualified, Some(module_env)));
+                        let hir_atom = lower_atom_to_hir_with_env(&qualified, Some(module_env));
+                        collect_hir_calls_from_atom(&hir_atom, &mut pending_calls);
+                        hir_atoms.push(hir_atom);
                     }
                 }
             }
@@ -2713,22 +2819,28 @@ fn collect_binary_hir_atoms(
         }
     }
 
-    let mut imported_names: Vec<_> = module_env.atoms.keys().cloned().collect();
-    imported_names.sort();
-    for name in imported_names {
-        if !seen.insert(name.clone()) {
+    let mut queued = std::collections::HashSet::new();
+    while let Some(name) = pending_calls.pop() {
+        if !queued.insert(name.clone()) {
             continue;
         }
         let Some(atom) = module_env.atoms.get(&name) else {
             continue;
         };
+        if seen.contains(&atom.name) {
+            continue;
+        }
         if atom.body_expr.trim().is_empty() {
             continue;
         }
         if atom.trust_level == parser::TrustLevel::Trusted {
             continue;
         }
-        hir_atoms.push(lower_atom_to_hir_with_env(atom, Some(module_env)));
+        if seen.insert(atom.name.clone()) {
+            let hir_atom = lower_atom_to_hir_with_env(atom, Some(module_env));
+            collect_hir_calls_from_atom(&hir_atom, &mut pending_calls);
+            hir_atoms.push(hir_atom);
+        }
     }
 
     hir_atoms
@@ -3082,7 +3194,7 @@ fn cmd_build(
 
                     let safe_name = qualified_name.replace("::", "__");
                     let atom_output_path = output_dir.join(format!("{}_{}", file_stem, safe_name));
-                    let extern_blocks = collect_extern_blocks(&items);
+                    let extern_blocks = collect_extern_blocks(&module_env);
                     match dispatch_emit(
                         emit_target,
                         external_emitter.as_deref(),
@@ -3288,7 +3400,7 @@ fn cmd_build(
                 // --- 3. Codegen / Emit ---
                 // 各 Atom ごとにターゲット形式のファイルを生成
                 let atom_output_path = output_dir.join(format!("{}_{}", file_stem, atom.name));
-                let extern_blocks = collect_extern_blocks(&items);
+                let extern_blocks = collect_extern_blocks(&module_env);
                 match dispatch_emit(
                     emit_target,
                     external_emitter.as_deref(),
@@ -3355,7 +3467,7 @@ fn cmd_build(
     // P7-B: When --emit binary is requested, merge all atoms into a single
     // LLVM module with a C-compatible main wrapper and link to a native binary.
     if matches!(emit_target, emitter::EmitTarget::Binary) && atom_count > 0 {
-        let extern_blocks = collect_extern_blocks(&items);
+        let extern_blocks = collect_extern_blocks(&module_env);
         let hir_atoms = collect_binary_hir_atoms(&items, &module_env);
 
         let object_path = output_dir.join(format!("{}_merged.o", file_stem));
@@ -3576,7 +3688,7 @@ fn cmd_run(input: &str, emit: &str, output: Option<&str>, args: &[String]) {
     println!("🗡️  Mumei Run: verify → codegen → link → execute");
 
     let (items, mut module_env, _imports, _source) = load_and_prepare(input);
-    let extern_blocks = collect_extern_blocks(&items);
+    let extern_blocks = collect_extern_blocks(&module_env);
 
     // Check that a main atom exists and takes no parameters
     let main_atom = items
