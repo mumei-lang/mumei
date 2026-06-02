@@ -10,9 +10,9 @@ extern "Rust" {
         ensures: result >= 0 && result <= 1;
 }
 
-// 署名検証結果を 0/1 で返す。
-// TRUSTED(FFI): Rust backend verifies a deterministic SHA-256 based fixture
-// signature format used by the current stdlib tests.
+// Ed25519 署名検証結果を 0/1 で返す。
+// TRUSTED(FFI): Rust ed25519-dalek backend verifies 32-byte public keys and
+// 64-byte signatures encoded as lowercase/uppercase hex strings.
 atom verify_signature(public_key: i64, message: i64, signature: i64)
     requires: public_key > 0 && message > 0 && signature > 0;
     ensures: result >= 0 && result <= 1;

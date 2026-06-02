@@ -403,9 +403,12 @@ def _generate_handle_setup(atom: TrustedAtom) -> list[str]:
                 "left": "digest",
                 "right": "digest",
                 "key": "key",
-                "message": "message",
-                "public_key": "public-key",
-                "signature": "3d461619e939ce5274da929c96d321ba4a7615206637cc31db6b74fa64e97fc9",
+                "message": "" if atom.module == "signature" else "message",
+                "public_key": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+                "signature": (
+                    "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e06522490155"
+                    "5fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b"
+                ),
             }.get(hp, "contract")
             lines.append(f'    let {hp} = mumei_ffi_tests::string_handle("{value}");')
             lines.append(f"    prop_assume!({hp} > 0);")

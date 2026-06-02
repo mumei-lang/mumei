@@ -24,11 +24,10 @@ those handles as `i64`, clone the associated string bytes, and return either:
 - a `0`/`1` verification result.
 
 SHA-256 and HMAC-SHA256 are implemented with the existing Rust `sha2` crate.
-Signature verification currently uses the repository test fixture contract:
+Signature verification uses the Rust `ed25519-dalek` backend:
 
 ```text
-signature == sha256(public_key || ":" || message)
+public_key = 32-byte Ed25519 verifying key encoded as 64 hex chars
+signature = 64-byte Ed25519 signature encoded as 128 hex chars
+message = raw UTF-8 bytes stored in the Mumei Str handle
 ```
-
-This gives deterministic FFI behavior for contract testing while keeping the
-Mumei-side API ready for a future OpenSSL/Ed25519 backend.

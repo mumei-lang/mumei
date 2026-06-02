@@ -14,11 +14,11 @@ proptest! {
         fn contract_signature_verify_signature(
             _case in 0u8..=0u8,
         ) {
-    let public_key = mumei_ffi_tests::string_handle("public-key");
+    let public_key = mumei_ffi_tests::string_handle("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a");
     prop_assume!(public_key > 0);
-    let message = mumei_ffi_tests::string_handle("message");
+    let message = mumei_ffi_tests::string_handle("");
     prop_assume!(message > 0);
-    let signature = mumei_ffi_tests::string_handle("3d461619e939ce5274da929c96d321ba4a7615206637cc31db6b74fa64e97fc9");
+    let signature = mumei_ffi_tests::string_handle("e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b");
     prop_assume!(signature > 0);
     let result = mumei_core::ffi::crypto::crypto_verify_signature(public_key, message, signature);
     prop_assert!(result >= 0, "ensures: result >= 0, got {}", result);
