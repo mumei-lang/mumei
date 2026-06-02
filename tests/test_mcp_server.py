@@ -56,6 +56,59 @@ def test_format_data_flow_trace_section() -> None:
     assert "Evaluated as: -50 >= 0 (FALSE)" in formatted
 
 
+def test_structured_feedback_from_report_helper() -> None:
+    from mcp_server import _structured_feedback_from_report
+
+    report = {
+        "status": "failed",
+        "failure_type": "postcondition_violated",
+        "span": {"file": "input.mm", "line": 4},
+        "suggestion": "When x = 0, result > 10 fails",
+        "semantic_feedback": {
+            "reconstruction_loss": {
+                "violated_property": "result > 10",
+                "counter_example": {"x": "0"},
+                "loss_vector": [0.0],
+            }
+        },
+    }
+
+    payload = _structured_feedback_from_report(json.dumps(report))
+
+    assert payload["status"] == "verification_failed"
+    assert payload["error_type"] == "postcondition_violated"
+    assert payload["location"] == {"file": "input.mm", "line": 4}
+    assert payload["reconstruction_loss"]["violated_property"] == "result > 10"
+    assert "When x = 0" in payload["feedback_instruction"]
+
+
+def test_get_structured_feedback_returns_cli_payload() -> None:
+    from mcp_server import get_structured_feedback
+
+    def fake_run(args: list[str], **kwargs) -> subprocess.CompletedProcess:
+        output_path = Path(args[args.index("--output") + 1])
+        output_path.write_text(
+            json.dumps(
+                {
+                    "status": "verification_failed",
+                    "error_type": "postcondition_violated",
+                    "location": {"file": "input.mm", "line": 2},
+                    "reconstruction_loss": None,
+                    "feedback_instruction": "Fix the body to satisfy `ensures`.",
+                }
+            ),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(args, 1, "", "verification failed")
+
+    with patch("mcp_server.subprocess.run", side_effect=fake_run):
+        payload = json.loads(get_structured_feedback("atom bad() -> i64 { body: { 0 } }"))
+
+    assert payload["status"] == "verification_failed"
+    assert payload["error_type"] == "postcondition_violated"
+    assert "ensures" in payload["feedback_instruction"]
+
+
 def _get_catalog() -> dict:
     """Call list_std_catalog() and parse the JSON result."""
     # Import inline to avoid MCP server startup side effects
