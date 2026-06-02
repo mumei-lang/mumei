@@ -52,6 +52,21 @@ fn repl_evaluates_expression_immediately() {
 }
 
 #[test]
+fn repl_evaluates_float_expression_immediately() {
+    let (success, stdout, stderr) = run_repl_session(":type 1.5\n1.5\n:quit\n");
+
+    assert!(
+        success,
+        "repl should exit successfully\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(stdout.contains(": f64"));
+    assert!(
+        stdout.contains("= 1.5"),
+        "float literal should not be executed as i64\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+}
+
+#[test]
 fn repl_compiles_atom_definition_and_calls_it() {
     let input = r#"
 atom inc(x: i64) -> i64
