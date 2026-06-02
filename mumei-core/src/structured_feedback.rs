@@ -180,13 +180,62 @@ impl StructuredFeedback {
                 },
                 "reconstruction_loss": {
                     "type": ["object", "null"],
-                    "required": ["violated_property", "counter_example", "loss_vector"],
+                    "required": [
+                        "schema_version",
+                        "formalization",
+                        "violated_property",
+                        "counter_example",
+                        "loss_vector",
+                        "loss_components"
+                    ],
                     "properties": {
+                        "schema_version": {"type": "string"},
+                        "formalization": {
+                            "type": "object",
+                            "required": [
+                                "specification_space",
+                                "implementation_space",
+                                "metric",
+                                "zero_loss_condition"
+                            ],
+                            "properties": {
+                                "specification_space": {
+                                    "type": "object",
+                                    "required": ["symbol", "definition"],
+                                    "properties": {
+                                        "symbol": {"type": "string"},
+                                        "definition": {"type": "string"}
+                                    }
+                                },
+                                "implementation_space": {
+                                    "type": "object",
+                                    "required": ["symbol", "definition"],
+                                    "properties": {
+                                        "symbol": {"type": "string"},
+                                        "definition": {"type": "string"}
+                                    }
+                                },
+                                "metric": {"type": "string"},
+                                "zero_loss_condition": {"type": "string"}
+                            }
+                        },
                         "violated_property": {"type": "string"},
                         "counter_example": {"type": "object"},
                         "loss_vector": {
                             "type": "array",
                             "items": {"type": "number"}
+                        },
+                        "loss_components": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "required": ["variable", "observed", "magnitude"],
+                                "properties": {
+                                    "variable": {"type": "string"},
+                                    "observed": {},
+                                    "magnitude": {"type": "number"}
+                                }
+                            }
                         }
                     }
                 },
