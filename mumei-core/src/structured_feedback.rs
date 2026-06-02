@@ -13,14 +13,6 @@ pub struct Location {
     pub line: usize,
 }
 
-/// P9-E Loss Vector structured feedback emitted by verification.
-///
-/// JSON schema:
-/// - `status`: `"verification_failed"` or `"verification_passed"`
-/// - `error_type`: nullable verifier failure type
-/// - `location`: nullable `{ "file": string, "line": number }`
-/// - `reconstruction_loss`: nullable [`ReconstructionLoss`]
-/// - `feedback_instruction`: actionable repair instruction for AI agents
 impl Location {
     pub fn from_span(span: &Span) -> Option<Self> {
         if span.file.is_empty() && span.line == 0 {
@@ -45,6 +37,14 @@ impl Location {
     }
 }
 
+/// P9-E Loss Vector structured feedback emitted by verification.
+///
+/// JSON schema:
+/// - `status`: `"verification_failed"` or `"verification_passed"`
+/// - `error_type`: nullable verifier failure type
+/// - `location`: nullable `{ "file": string, "line": number }`
+/// - `reconstruction_loss`: nullable [`ReconstructionLoss`]
+/// - `feedback_instruction`: actionable repair instruction for AI agents
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StructuredFeedback {
     pub status: String,
@@ -116,6 +116,14 @@ impl StructuredFeedback {
                     .get("semantic_feedback")
                     .and_then(|feedback| feedback.get("failure_type"))
                     .and_then(Value::as_str)
+            })
+            .or_else(|| {
+                let violation_type = report.get("violation_type").and_then(Value::as_str)?;
+                if violation_type.starts_with("effect_") {
+                    Some("effect_not_allowed")
+                } else {
+                    Some(violation_type)
+                }
             })
             .map(str::to_string);
         let reconstruction_loss = report

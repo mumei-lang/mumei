@@ -80,6 +80,24 @@ fn structured_feedback_from_report_extracts_loss_and_instruction() {
 }
 
 #[test]
+fn structured_feedback_maps_effect_reports_to_effect_not_allowed() {
+    let report = serde_json::json!({
+        "status": "failed",
+        "violation_type": "effect_mismatch",
+        "effect_violation": {
+            "required_effect": "FileWrite",
+            "declared_effects": ["Log"]
+        }
+    });
+
+    let feedback = StructuredFeedback::from_report(&report);
+
+    assert_eq!(feedback.status, STATUS_VERIFICATION_FAILED);
+    assert_eq!(feedback.error_type.as_deref(), Some("effect_not_allowed"));
+    assert!(feedback.feedback_instruction.contains("FileWrite"));
+}
+
+#[test]
 fn violation_types_generate_actionable_instructions() {
     let cases = [
         ("division_by_zero", "divisor"),

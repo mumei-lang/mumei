@@ -590,6 +590,13 @@ def _structured_feedback_from_report(report_json: str) -> dict:
     if isinstance(semantic_feedback, dict):
         reconstruction_loss = semantic_feedback.get("reconstruction_loss")
         failure_type = failure_type or semantic_feedback.get("failure_type")
+    violation_type = report.get("violation_type")
+    if not failure_type and isinstance(violation_type, str):
+        failure_type = (
+            "effect_not_allowed"
+            if violation_type.startswith("effect_")
+            else violation_type
+        )
 
     passed = report.get("status") in {"success", "passed", "verified", "trusted", "unverified"}
     suggestion = report.get("suggestion") or "Review the verifier report and repair the atom."
@@ -774,12 +781,6 @@ def forge_blade(
                 + json.dumps(structured_feedback, indent=2)
                 + "\n```"
             )
-            structured_feedback = _structured_feedback_from_report(report_data)
-            response_parts.append(
-                "### Structured Feedback\n```json\n"
-                + json.dumps(structured_feedback, indent=2)
-                + "\n```"
-            )
         else:
             response_parts.append(
                 '### Semantic Feedback\n'
@@ -866,6 +867,12 @@ def validate_logic(
             ef_section = _format_effect_feedback(report_data)
             if ef_section:
                 response_parts.append(ef_section)
+            structured_feedback = _structured_feedback_from_report(report_data)
+            response_parts.append(
+                "### Structured Feedback\n```json\n"
+                + json.dumps(structured_feedback, indent=2)
+                + "\n```"
+            )
         else:
             # No report file — still include semantic feedback status
             response_parts.append(
