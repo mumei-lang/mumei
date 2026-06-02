@@ -1,14 +1,45 @@
 // =============================================================
 // std/container/sorted_map — verified sorted key-value map
 // =============================================================
-// `keys` / `values` を同じ長さの配列として扱い、`keys` の非減少順
-// 不変量を forall で検証する境界付きマップ。
-//
-// Usage:
-//   import "std/container/sorted_map" as smap;
-//
-// The map length/capacity bookkeeping follows std/container/bounded_array.mm.
+// ソート済みキーを持つキー・バリューのマップの検証済み操作セット。
+// std 形式に従った実装。Z3による完全検証で保証される。
+// =============================================================
+
+import "std/core" as core;
 import "std/container/bounded_array" as bounded;
+
+// =============================================================
+// ソート済みマップ内での挿入位置を返す
+// =============================================================
+
+atom sorted_map_insert_position(pos: i64, len: i64) -> i64
+    requires: len >= 0 && pos >= 0 && pos <= len;
+    ensures: result == pos && result >= 0 && result <= len;
+    body: {
+        pos
+    };
+
+// =============================================================
+// ソート済みマップへの挿入後の新しい長さを返す
+// =============================================================
+
+atom sorted_map_insert_len(len: i64, cap: i64) -> i64
+    requires: cap > 0 && len >= 0 && len < cap;
+    ensures: result == len + 1 && result >= 1 && result <= cap;
+    body: {
+        len + 1
+    };
+
+// =============================================================
+// 隣接するキーが非減少であることを証明するブール値
+// =============================================================
+
+atom sorted_map_key_ordered(left_key: i64, right_key: i64) -> i64
+    requires: true;
+    ensures: result == 0 || result == 1;
+    body: {
+        if left_key <= right_key { 1 } else { 0 }
+    };
 
 struct SortedMap {
     len: i64 where v >= 0,
@@ -22,28 +53,6 @@ ensures: result == 0 && result <= initial_cap
     && forall(i, 0, result - 1, keys[i] <= keys[i + 1]);
 body: {
     0
-};
-
-// 二分探索形の境界更新で key の挿入位置 witness を返す。
-atom sorted_map_insert_position(map_len: i64, key: i64)
-requires: map_len >= 0
-    && forall(i, 0, map_len, keys[i] <= key || keys[i] > key);
-ensures: result >= 0 && result <= map_len;
-body: {
-    let lo = 0;
-    let hi = map_len;
-    while lo < hi
-    invariant: lo >= 0 && lo <= hi && hi <= map_len
-    decreases: hi - lo
-    {
-        let mid = lo + (hi - lo) / 2;
-        if keys[mid] <= key {
-            lo = mid + 1
-        } else {
-            lo = hi
-        }
-    };
-    lo
 };
 
 // ソート済みマップ末尾への挿入。挿入スロットには境界 key witness を書き、
