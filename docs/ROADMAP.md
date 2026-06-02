@@ -10,6 +10,18 @@
 | 🥈 P2 | Runtime Portability | Run-anywhere distribution foundation | ✅ Implemented |
 | 🥉 P3 | CLI Developer Experience | World-class CLI developer experience | ✅ Implemented |
 
+### vStd Autonomous Expansion Checkpoint
+
+The 2026-Q2 forge pass added or refreshed high-priority standard-library modules from `mumei-agent/forge_tasks`:
+
+- `std/concurrency/aviation.mm` — runway allocation effect/resource ordering (`allocate_runway`)
+- `std/container/sorted_map.mm` — insertion position, length, and key-ordering witnesses plus sorted-map helpers
+- `std/math/factorial.mm` — bounded factorial step and safe-range predicate
+- `std/math/fibonacci.mm` — accumulator-step and loop-decrease witnesses
+- `std/string/validator.mm` — ASCII numeric and alphanumeric predicates
+
+All listed modules were checked with `mumei verify --proof-cert`; proof certificates were emitted without Lean escalation candidates.
+
 ---
 
 ## 🥇 Priority 1: Network-First Standard Library
