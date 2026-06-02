@@ -33,6 +33,9 @@ pub struct ProofCertificate {
     /// Reconstruction loss metadata for SAT counterexamples.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reconstruction_loss: Option<Vec<ReconstructionLoss>>,
+    /// P9-F: Aggregate self-correction convergence metrics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub self_correction_summary: Option<SelfCorrectionSummary>,
     /// Package name from mumei.toml [package].name (P5-A)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub package_name: Option<String>,
@@ -121,6 +124,9 @@ pub struct AtomCertificate {
     /// P9: Reconstruction loss inferred from a Z3 SAT counterexample.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reconstruction_loss: Option<ReconstructionLoss>,
+    /// P9-F: Self-correction loop metadata for this atom.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub self_correction_metadata: Option<SelfCorrectionMetadata>,
     /// P8-A: Symbol provenance for uninterpreted symbols.
     #[serde(default)]
     pub symbol_provenance: Vec<SymbolProvenance>,
@@ -138,6 +144,57 @@ pub struct AtomCertificate {
     /// P8-G: Cost/success metrics for budget feedback.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_success_metrics: Option<CostSuccessMetrics>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct SelfCorrectionMetadata {
+    #[serde(default)]
+    pub repair_attempts: u32,
+    #[serde(default)]
+    pub converged: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_error: Option<String>,
+    #[serde(default)]
+    pub consecutive_successes: u32,
+    #[serde(default)]
+    pub token_cost: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct SelfCorrectionSummary {
+    #[serde(default)]
+    pub total_atoms: u32,
+    #[serde(default)]
+    pub converged_atoms: u32,
+    #[serde(default)]
+    pub convergence_rate: f64,
+    #[serde(default)]
+    pub average_repair_attempts: f64,
+    #[serde(default)]
+    pub total_token_cost: u64,
+}
+
+impl SelfCorrectionSummary {
+    pub fn from_atom_metadata(atoms: &[AtomCertificate]) -> Option<Self> {
+        let metadata: Vec<&SelfCorrectionMetadata> = atoms
+            .iter()
+            .filter_map(|atom| atom.self_correction_metadata.as_ref())
+            .collect();
+        if metadata.is_empty() {
+            return None;
+        }
+        let total_atoms = metadata.len() as u32;
+        let converged_atoms = metadata.iter().filter(|item| item.converged).count() as u32;
+        let total_repair_attempts: u32 = metadata.iter().map(|item| item.repair_attempts).sum();
+        let total_token_cost: u64 = metadata.iter().map(|item| item.token_cost).sum();
+        Some(Self {
+            total_atoms,
+            converged_atoms,
+            convergence_rate: converged_atoms as f64 / total_atoms as f64,
+            average_repair_attempts: total_repair_attempts as f64 / total_atoms as f64,
+            total_token_cost,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -331,6 +388,21 @@ pub fn get_z3_version() -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
+fn self_correction_metadata_from_env(atom_name: &str) -> Option<SelfCorrectionMetadata> {
+    let raw = std::env::var("MUMEI_SELF_CORRECTION_METADATA").ok()?;
+    if raw.trim().is_empty() {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    if value.get("repair_attempts").is_some() {
+        return serde_json::from_value(value).ok();
+    }
+    value
+        .get(atom_name)
+        .cloned()
+        .and_then(|item| serde_json::from_value(item).ok())
+}
+
 /// Generate a proof certificate from verification results.
 ///
 /// `verification_results` maps atom_name → (z3_check_result, status).
@@ -446,6 +518,7 @@ pub fn generate_certificate_with_reconstruction_losses(
             let reconstruction_loss = reconstruction_losses
                 .and_then(|losses| losses.get(&atom.name))
                 .cloned();
+            let self_correction_metadata = self_correction_metadata_from_env(&atom.name);
 
             AtomCertificate {
                 name: atom.name.clone(),
@@ -469,6 +542,7 @@ pub fn generate_certificate_with_reconstruction_losses(
                 lean_metadata: None,
                 counterexample_validation,
                 reconstruction_loss,
+                self_correction_metadata,
                 symbol_provenance,
                 unused_hypotheses,
                 solver_process_metadata,
@@ -487,6 +561,7 @@ pub fn generate_certificate_with_reconstruction_losses(
                 .map(|validation| validation.is_satisfiable)
                 .unwrap_or(true)
     });
+    let self_correction_summary = SelfCorrectionSummary::from_atom_metadata(&atom_certs);
 
     // Build certificate without hash first, then compute hash
     let reconstruction_loss = reconstruction_losses.and_then(|losses| {
@@ -510,6 +585,7 @@ pub fn generate_certificate_with_reconstruction_losses(
         file: file.to_string(),
         atoms: atom_certs,
         reconstruction_loss,
+        self_correction_summary,
         package_name: package_name.map(|s| s.to_string()),
         package_version: package_version.map(|s| s.to_string()),
         certificate_hash: String::new(),
