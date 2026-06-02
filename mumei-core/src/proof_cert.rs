@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::Path;
 
+use crate::reconstruction_loss::ReconstructionLoss;
 use crate::resolver;
 use crate::verification::{self, ModuleEnv, SymbolProvenance, TranslatorIRMetadata};
 
@@ -29,6 +30,9 @@ pub struct ProofCertificate {
     pub file: String,
     /// Per-atom verification certificates
     pub atoms: Vec<AtomCertificate>,
+    /// Reconstruction loss metadata for SAT counterexamples.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reconstruction_loss: Option<Vec<ReconstructionLoss>>,
     /// Package name from mumei.toml [package].name (P5-A)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub package_name: Option<String>,
@@ -114,6 +118,9 @@ pub struct AtomCertificate {
     /// P8-A: Counterexample validation status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub counterexample_validation: Option<CounterexampleValidationMetadata>,
+    /// P9: Reconstruction loss inferred from a Z3 SAT counterexample.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reconstruction_loss: Option<ReconstructionLoss>,
     /// P8-A: Symbol provenance for uninterpreted symbols.
     #[serde(default)]
     pub symbol_provenance: Vec<SymbolProvenance>,
@@ -341,6 +348,29 @@ pub fn generate_certificate(
     package_version: Option<&str>,
     harness_metadata: Option<HarnessCertificateMetadata>,
 ) -> ProofCertificate {
+    generate_certificate_with_reconstruction_losses(
+        file,
+        atoms,
+        verification_results,
+        module_env,
+        package_name,
+        package_version,
+        harness_metadata,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn generate_certificate_with_reconstruction_losses(
+    file: &str,
+    atoms: &[&crate::parser::Atom],
+    verification_results: &HashMap<String, (String, String)>,
+    module_env: &ModuleEnv,
+    package_name: Option<&str>,
+    package_version: Option<&str>,
+    harness_metadata: Option<HarnessCertificateMetadata>,
+    reconstruction_losses: Option<&HashMap<String, ReconstructionLoss>>,
+) -> ProofCertificate {
     let now = chrono_like_now();
     let harness_metadata = harness_metadata.unwrap_or_default();
     let atom_certs: Vec<AtomCertificate> = atoms
@@ -413,6 +443,9 @@ pub fn generate_certificate(
                 }),
             );
             let solver_process_metadata = solver_process_metadata_from_env(&content_hash);
+            let reconstruction_loss = reconstruction_losses
+                .and_then(|losses| losses.get(&atom.name))
+                .cloned();
 
             AtomCertificate {
                 name: atom.name.clone(),
@@ -435,6 +468,7 @@ pub fn generate_certificate(
                 translator_ir,
                 lean_metadata: None,
                 counterexample_validation,
+                reconstruction_loss,
                 symbol_provenance,
                 unused_hypotheses,
                 solver_process_metadata,
@@ -455,6 +489,19 @@ pub fn generate_certificate(
     });
 
     // Build certificate without hash first, then compute hash
+    let reconstruction_loss = reconstruction_losses.and_then(|losses| {
+        let mut entries: Vec<ReconstructionLoss> = atoms
+            .iter()
+            .filter_map(|atom| losses.get(&atom.name).cloned())
+            .collect();
+        if entries.is_empty() {
+            None
+        } else {
+            entries.sort_by(|left, right| left.violated_property.cmp(&right.violated_property));
+            Some(entries)
+        }
+    });
+
     let mut cert = ProofCertificate {
         version: "1.0".to_string(),
         timestamp: now,
@@ -462,6 +509,7 @@ pub fn generate_certificate(
         z3_version: get_z3_version(),
         file: file.to_string(),
         atoms: atom_certs,
+        reconstruction_loss,
         package_name: package_name.map(|s| s.to_string()),
         package_version: package_version.map(|s| s.to_string()),
         certificate_hash: String::new(),

@@ -5,6 +5,7 @@ use super::support::*;
 use super::translator::*;
 use super::types::*;
 use super::*;
+use crate::reconstruction_loss::ReconstructionLoss;
 use sha2::{Digest, Sha256};
 
 /// mumei.toml の [proof]/[build] 設定を反映した verify
@@ -1455,7 +1456,9 @@ pub(crate) fn verify_inner(
             let ensures_check = solver.check();
             if ensures_check == SatResult::Sat {
                 // Extract counterexample from Z3 model
-                let (ce_a, ce_b, ce_value, data_flow_trace) = if let Some(model) =
+                let (ce_a, ce_b, ce_value, data_flow_trace, reconstruction_loss) = if let Some(
+                    model,
+                ) =
                     solver.get_model()
                 {
                     let mut ce_json = serde_json::Map::new();
@@ -1468,7 +1471,9 @@ pub(crate) fn verify_inner(
                             }
                         }
                     }
+                    let mut reconstruction_variables = HashMap::new();
                     for (name, var_z3) in &env {
+                        reconstruction_variables.insert(name.clone(), var_z3.clone());
                         if let Some(val) = model.eval(var_z3, true) {
                             if let Some(int_value) = z3_dynamic_to_i64(&val) {
                                 model_map.insert(name.clone(), int_value);
@@ -1492,6 +1497,11 @@ pub(crate) fn verify_inner(
                     };
                     let data_flow_trace =
                         build_data_flow_trace(atom, &model_map, module_env, hir_atom);
+                    let reconstruction_loss = Some(ReconstructionLoss::from_z3_model(
+                        atom.ensures.clone(),
+                        &model,
+                        &reconstruction_variables,
+                    ));
                     if enable_spurious_detection {
                         let validation = validate_counterexample(atom, &model_map, module_env);
                         if validation.validation_status == "spurious_candidate" {
@@ -1524,19 +1534,22 @@ pub(crate) fn verify_inner(
                             .with_counterexample(ce_val.clone()));
                         }
                     }
-                    (a_str, b_str, ce_val, data_flow_trace)
+                    (a_str, b_str, ce_val, data_flow_trace, reconstruction_loss)
                 } else {
-                    ("N/A".to_string(), "N/A".to_string(), None, None)
+                    ("N/A".to_string(), "N/A".to_string(), None, None, None)
                 };
                 solver.pop(1);
                 let constraint_mappings = build_constraint_mappings_for_atom(atom, module_env);
-                let semantic_fb = build_semantic_feedback(
+                let mut semantic_fb = build_semantic_feedback(
                     &constraint_mappings,
                     ce_value.as_ref(),
                     atom,
                     FAILURE_POSTCONDITION_VIOLATED,
                     None,
                 );
+                if let (Some(feedback), Some(loss)) = (&mut semantic_fb, reconstruction_loss) {
+                    feedback["reconstruction_loss"] = json!(loss);
+                }
                 save_visualizer_report(
                     output_dir,
                     "failed",
