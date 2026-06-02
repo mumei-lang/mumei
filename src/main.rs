@@ -4311,9 +4311,57 @@ fn repl_verify_and_compile_atom(ctx: &mut ReplContext<'_>, atom: &parser::Atom) 
     }
 }
 
-fn repl_wrap_expr(expr: &str) -> String {
+fn repl_infer_expr_type_name(ctx: &ReplContext<'_>, expr: &parser::Expr) -> Option<String> {
+    match expr {
+        parser::Expr::Float(_) => Some("f64".to_string()),
+        parser::Expr::StringLit(_) => Some("Str".to_string()),
+        parser::Expr::Number(_) => Some("i64".to_string()),
+        parser::Expr::Variable(name) if name == "true" || name == "false" => {
+            Some("bool".to_string())
+        }
+        parser::Expr::BinaryOp(left, op, right) => match op {
+            parser::Op::Eq
+            | parser::Op::Neq
+            | parser::Op::Gt
+            | parser::Op::Lt
+            | parser::Op::Ge
+            | parser::Op::Le
+            | parser::Op::And
+            | parser::Op::Or
+            | parser::Op::Implies => Some("bool".to_string()),
+            parser::Op::Add | parser::Op::Sub | parser::Op::Mul | parser::Op::Div => {
+                if repl_infer_expr_type_name(ctx, left)
+                    .is_some_and(|ty| ctx.module_env.resolve_base_type(&ty) == "f64")
+                    || repl_infer_expr_type_name(ctx, right)
+                        .is_some_and(|ty| ctx.module_env.resolve_base_type(&ty) == "f64")
+                {
+                    Some("f64".to_string())
+                } else {
+                    Some("i64".to_string())
+                }
+            }
+        },
+        parser::Expr::Call(name, _) if name == "sqrt" => Some("f64".to_string()),
+        parser::Expr::Call(name, _) => {
+            let fqn_name = name.replace('.', "::");
+            match ctx
+                .module_env
+                .get_atom(name)
+                .or_else(|| ctx.module_env.get_atom(&fqn_name))
+                .and_then(|atom| atom.return_type.as_deref())
+            {
+                Some(return_type) => Some(return_type.to_string()),
+                None => Some("i64".to_string()),
+            }
+        }
+        _ => None,
+    }
+}
+
+fn repl_wrap_expr(atom_name: &str, expr: &str, return_type: Option<&str>) -> String {
+    let return_annotation = return_type.map_or(String::new(), |ty| format!(" -> {ty}"));
     format!(
-        "atom {REPL_EVAL_ATOM}()\n  requires: true;\n  ensures: true;\n  body: {{\n    {expr}\n  }}"
+        "atom {atom_name}(){return_annotation}\n  requires: true;\n  ensures: true;\n  body: {{\n    {expr}\n  }}"
     )
 }
 
@@ -4369,7 +4417,12 @@ fn repl_execute_eval_atom(ctx: &mut ReplContext<'_>, return_type: &str) {
 }
 
 fn repl_eval_expr(ctx: &mut ReplContext<'_>, expr: &str, verify_first: bool) {
-    let wrapped = repl_wrap_expr(expr);
+    let parsed_expr = parser::parse_expression(expr);
+    let expr_type = repl_infer_expr_type_name(ctx, &parsed_expr);
+    let eval_return_type = expr_type
+        .as_deref()
+        .filter(|ty| ctx.module_env.resolve_base_type(ty) == "f64");
+    let wrapped = repl_wrap_expr(REPL_EVAL_ATOM, expr, eval_return_type);
     let items = parser::parse_module(&wrapped);
     let Some(parser::Item::Atom(atom)) = items.first() else {
         eprintln!("  ❌ Syntax error: could not parse expression");
@@ -4400,36 +4453,10 @@ fn repl_eval_expr(ctx: &mut ReplContext<'_>, expr: &str, verify_first: bool) {
 }
 
 fn repl_type_expr(ctx: &ReplContext<'_>, expr: &str) {
-    match parser::parse_expression(expr) {
-        parser::Expr::Float(_) => println!("  : f64"),
-        parser::Expr::StringLit(_) => println!("  : Str"),
-        parser::Expr::Number(_) => println!("  : i64"),
-        parser::Expr::Variable(name) if name == "true" || name == "false" => println!("  : bool"),
-        parser::Expr::BinaryOp(_, op, _) => match op {
-            parser::Op::Eq
-            | parser::Op::Neq
-            | parser::Op::Gt
-            | parser::Op::Lt
-            | parser::Op::Ge
-            | parser::Op::Le
-            | parser::Op::And
-            | parser::Op::Or
-            | parser::Op::Implies => println!("  : bool"),
-            _ => println!("  : i64"),
-        },
-        parser::Expr::Call(name, _) => {
-            let fqn_name = name.replace('.', "::");
-            match ctx
-                .module_env
-                .get_atom(&name)
-                .or_else(|| ctx.module_env.get_atom(&fqn_name))
-                .and_then(|atom| atom.return_type.as_deref())
-            {
-                Some(return_type) => println!("  : {}", return_type),
-                None => println!("  : i64"),
-            }
-        }
-        _ => println!("  : unknown"),
+    let parsed = parser::parse_expression(expr);
+    match repl_infer_expr_type_name(ctx, &parsed) {
+        Some(return_type) => println!("  : {}", return_type),
+        None => println!("  : unknown"),
     }
 }
 
@@ -4587,7 +4614,7 @@ fn repl_handle_line(ctx: &mut ReplContext<'_>, input: &str) -> ReplAction {
         }
         _ if input.starts_with(":check ") => {
             let expr = input.strip_prefix(":check ").unwrap().trim();
-            let wrapped = repl_wrap_expr(expr);
+            let wrapped = repl_wrap_expr(REPL_EVAL_ATOM, expr, None);
             if parser::parse_module(&wrapped).is_empty() {
                 eprintln!("  ❌ Syntax error: could not parse expression");
             } else {
@@ -5731,10 +5758,7 @@ atom json_parse(input: String) -> String
     fn test_repl_atom_wrapping() {
         // REPL は入力式を atom でラップして検証する
         let expr = "1 + 2";
-        let wrapped = format!(
-            "atom __repl_eval()\n  requires: true;\n  ensures: true;\n  body: {{\n    {}\n  }}",
-            expr
-        );
+        let wrapped = repl_wrap_expr(REPL_EVAL_ATOM, expr, None);
         assert!(wrapped.contains("__repl_eval"));
         assert!(wrapped.contains("1 + 2"));
         assert!(wrapped.contains("requires: true"));
@@ -5753,6 +5777,18 @@ atom json_parse(input: String) -> String
             .collect();
         assert_eq!(atoms.len(), 1);
         assert_eq!(atoms[0].name, "__repl_eval");
+    }
+
+    #[test]
+    fn test_repl_float_atom_wrapping_annotates_return_type() {
+        let wrapped = repl_wrap_expr(REPL_EVAL_ATOM, "1.5", Some("f64"));
+        let items = parser::parse_module(&wrapped);
+        let Some(parser::Item::Atom(atom)) = items.first() else {
+            panic!("expected wrapped expression atom");
+        };
+
+        assert_eq!(atom.name, "__repl_eval");
+        assert_eq!(atom.return_type.as_deref(), Some("f64"));
     }
 
     /// P3-A: REPL :load コマンドのパースロジックテスト
