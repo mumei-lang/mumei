@@ -12,7 +12,7 @@ use mumei_core::hir::lower_atom_to_hir_with_env;
 use mumei_core::parser::{ImportDecl, Item};
 use mumei_core::{
     ast, cross_spec, emitter, hir, inspect, manifest, mir, mir_analysis, parser, proof_cert,
-    registry, resolver, verification,
+    reconstruction_loss::ReconstructionLoss, registry, resolver, verification,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -94,6 +94,21 @@ fn counterexample_model_from_error(
         }
     }
     model
+}
+
+fn reconstruction_loss_from_error(
+    error: &verification::MumeiError,
+    violated_property: &str,
+) -> Option<ReconstructionLoss> {
+    if let verification::MumeiError::VerificationError {
+        counterexample: Some(counterexample),
+        ..
+    } = error
+    {
+        ReconstructionLoss::from_counterexample_value(violated_property.to_string(), counterexample)
+    } else {
+        None
+    }
 }
 
 fn parse_artifact_paths(value: &str) -> Option<Vec<String>> {
@@ -223,7 +238,7 @@ enum Command {
         /// Emit Lean escalation candidate bundle alongside verification results
         #[arg(long)]
         escalate_lean: bool,
-        /// Emit target for verify-only output: escalation-bundle, escalation-metrics, or decidable-metrics
+        /// Emit target for verify-only output: escalation-bundle, escalation-metrics, decidable-metrics, or reconstruction-loss
         #[arg(long)]
         emit: Option<String>,
         /// Disable verify-only output targets: escalation-metrics
@@ -482,13 +497,15 @@ fn main() {
             let emit_escalation_metrics = matches!(emit.as_deref(), Some("escalation-metrics"))
                 && !no_emit_escalation_metrics;
             let emit_decidable_metrics = matches!(emit.as_deref(), Some("decidable-metrics"));
+            let emit_reconstruction_loss = matches!(emit.as_deref(), Some("reconstruction-loss"));
             if let Some(other) = emit.as_deref() {
                 if !emit_escalation_bundle
                     && !matches!(other, "escalation-metrics")
                     && !emit_decidable_metrics
+                    && !emit_reconstruction_loss
                 {
                     eprintln!(
-                        "Unsupported verify --emit target '{}'. Supported values: escalation-bundle, escalation-metrics, decidable-metrics",
+                        "Unsupported verify --emit target '{}'. Supported values: escalation-bundle, escalation-metrics, decidable-metrics, reconstruction-loss",
                         other
                     );
                     std::process::exit(1);
@@ -503,6 +520,7 @@ fn main() {
                 emit_escalation_bundle: escalate_lean || emit_escalation_bundle,
                 emit_escalation_metrics,
                 emit_decidable_metrics,
+                emit_reconstruction_loss,
                 cert_output: output.as_deref(),
                 report_dir: report_dir.as_deref(),
                 json_output: json,
@@ -940,6 +958,7 @@ struct VerifyOptions<'a> {
     emit_escalation_bundle: bool,
     emit_escalation_metrics: bool,
     emit_decidable_metrics: bool,
+    emit_reconstruction_loss: bool,
     cert_output: Option<&'a str>,
     report_dir: Option<&'a str>,
     json_output: bool,
@@ -971,6 +990,7 @@ fn cmd_verify(options: VerifyOptions<'_>) {
         emit_escalation_bundle,
         emit_escalation_metrics,
         emit_decidable_metrics,
+        emit_reconstruction_loss,
         cert_output,
         report_dir,
         json_output,
@@ -1063,6 +1083,8 @@ fn cmd_verify(options: VerifyOptions<'_>) {
     let mut skipped = 0;
     let mut escalated = 0;
     let mut loop_suggestions: Vec<serde_json::Value> = Vec::new();
+    let mut reconstruction_losses: std::collections::HashMap<String, ReconstructionLoss> =
+        std::collections::HashMap::new();
 
     // Plan 11B: Track per-atom verification results for proof certificates
     let mut cert_results: std::collections::HashMap<String, (String, String)> =
@@ -1283,6 +1305,8 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                         Err(e) => {
                             let error_text = format!("{e}");
                             let counterexample_model = counterexample_model_from_error(&e);
+                            let reconstruction_loss =
+                                reconstruction_loss_from_error(&e, &atom.ensures);
                             if !json_output {
                                 let resolved = resolve_source_for_span(&source, &atom.span);
                                 let e = e.with_source(&resolved, &atom.span);
@@ -1302,6 +1326,17 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                                     &atom.name,
                                     json_output,
                                 );
+                            }
+                            if z3_result == "sat" {
+                                if let Some(loss) = reconstruction_loss {
+                                    if !json_output {
+                                        println!(
+                                            "  🧭 Reconstruction loss for '{}': {:?}",
+                                            atom.name, loss.loss_vector
+                                        );
+                                    }
+                                    reconstruction_losses.insert(atom.name.clone(), loss);
+                                }
                             }
                             let classification = verification::classify_atom_for_lean_escalation(
                                 atom,
@@ -1448,6 +1483,8 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                             Err(e) => {
                                 let error_text = format!("{e}");
                                 let counterexample_model = counterexample_model_from_error(&e);
+                                let reconstruction_loss =
+                                    reconstruction_loss_from_error(&e, &qualified_method.ensures);
                                 if !json_output {
                                     let resolved = resolve_source_for_span(&source, &method.span);
                                     let e = e.with_source(&resolved, &method.span);
@@ -1468,6 +1505,17 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                                         &qualified_name,
                                         json_output,
                                     );
+                                }
+                                if z3_result == "sat" {
+                                    if let Some(loss) = reconstruction_loss {
+                                        if !json_output {
+                                            println!(
+                                                "  🧭 Reconstruction loss for '{}': {:?}",
+                                                qualified_name, loss.loss_vector
+                                            );
+                                        }
+                                        reconstruction_losses.insert(qualified_name.clone(), loss);
+                                    }
                                 }
                                 let classification =
                                     verification::classify_atom_for_lean_escalation(
@@ -1531,6 +1579,20 @@ fn cmd_verify(options: VerifyOptions<'_>) {
         }
     }
 
+    if emit_reconstruction_loss {
+        let loss_path = cert_output
+            .filter(|_| !generate_proof_cert && !emit_escalation_bundle && !emit_escalation_metrics)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| output_dir.join("reconstruction_loss.json"));
+        match save_reconstruction_losses(&reconstruction_losses, &loss_path, !json_output) {
+            Ok(()) => {}
+            Err(err) => {
+                eprintln!("❌ {err}");
+                failed += 1;
+            }
+        }
+    }
+
     if enable_cross_spec_verification {
         match save_cross_spec_report(&module_env, output_dir, !json_output) {
             Ok(cross_spec_result) => {
@@ -1582,7 +1644,7 @@ fn cmd_verify(options: VerifyOptions<'_>) {
         for qm in &qualified_methods {
             atom_refs.push(qm);
         }
-        let cert = proof_cert::generate_certificate(
+        let cert = proof_cert::generate_certificate_with_reconstruction_losses(
             input,
             &atom_refs,
             &cert_results,
@@ -1595,6 +1657,7 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                 artifact_paths: artifact_paths.clone(),
                 budget_policy_fingerprint: budget_policy_fingerprint.clone(),
             }),
+            Some(&reconstruction_losses),
         );
         let cert_path = if let Some(output) = cert_output {
             std::path::PathBuf::from(output)
@@ -1788,6 +1851,50 @@ fn save_decidable_fragment_metrics(
         println!(
             "  📊 Decidable-fragment metrics written to: {}",
             metrics_path.display()
+        );
+    }
+    Ok(())
+}
+
+fn save_reconstruction_losses(
+    losses: &std::collections::HashMap<String, ReconstructionLoss>,
+    output_path: &Path,
+    print_path: bool,
+) -> Result<(), String> {
+    let mut atoms: Vec<&String> = losses.keys().collect();
+    atoms.sort();
+    let entries: Vec<serde_json::Value> = atoms
+        .into_iter()
+        .filter_map(|atom| {
+            losses.get(atom).map(|loss| {
+                serde_json::json!({
+                    "atom": atom,
+                    "violated_property": loss.violated_property,
+                    "counter_example": loss.counter_example,
+                    "loss_vector": loss.loss_vector,
+                    "is_zero_loss": loss.is_zero_loss(),
+                })
+            })
+        })
+        .collect();
+    let payload = serde_json::json!({
+        "version": "1.0",
+        "reconstruction_loss_count": entries.len(),
+        "reconstruction_losses": entries,
+    });
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|err| format!("failed to create reconstruction-loss directory: {err}"))?;
+    }
+    let json = serde_json::to_string_pretty(&payload)
+        .map_err(|err| format!("failed to serialize reconstruction loss: {err}"))?;
+    std::fs::write(output_path, json)
+        .map_err(|err| format!("failed to write {}: {err}", output_path.display()))?;
+    if print_path {
+        println!(
+            "  🧭 Reconstruction loss written to: {} ({} atom(s))",
+            output_path.display(),
+            entries.len()
         );
     }
     Ok(())
