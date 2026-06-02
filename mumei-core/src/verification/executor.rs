@@ -7,6 +7,7 @@ use super::types::*;
 use super::*;
 use crate::reconstruction_loss::ReconstructionLoss;
 use crate::structured_feedback::StructuredFeedback;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 /// mumei.toml の [proof]/[build] 設定を反映した verify
@@ -99,6 +100,80 @@ pub(crate) struct VerifyInnerOptions<'a> {
     property_based_config: Option<&'a PropertyBasedTestConfig>,
     task_id: Option<String>,
     generation_id: Option<String>,
+}
+
+pub const DEFAULT_SELF_CORRECTION_REQUIRED_SUCCESSES: usize = 3;
+pub const DEFAULT_SELF_CORRECTION_MAX_REPAIRS: usize = 10;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConvergenceIteration {
+    pub verification_result: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reconstruction_loss: Option<ReconstructionLoss>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConvergenceDecision {
+    pub converged: bool,
+    pub should_stop: bool,
+    pub consecutive_successes: usize,
+    pub repair_attempts: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<String>,
+}
+
+pub fn check_convergence(
+    history: &[ConvergenceIteration],
+    required_successes: usize,
+    max_repairs: usize,
+    token_cost: u64,
+    max_token_cost: Option<u64>,
+) -> ConvergenceDecision {
+    let required_successes = required_successes.max(1);
+    let mut consecutive_successes = 0usize;
+    for item in history.iter().rev() {
+        let proof_success = matches!(item.verification_result.as_str(), "unsat" | "lean_verified");
+        let zero_loss = item
+            .reconstruction_loss
+            .as_ref()
+            .is_none_or(ReconstructionLoss::is_zero_loss);
+        if proof_success && zero_loss {
+            consecutive_successes += 1;
+        } else {
+            break;
+        }
+    }
+
+    let repair_attempts = history
+        .iter()
+        .filter(|item| {
+            !matches!(item.verification_result.as_str(), "unsat" | "lean_verified")
+                || item
+                    .reconstruction_loss
+                    .as_ref()
+                    .is_some_and(|loss| !loss.is_zero_loss())
+        })
+        .count();
+    let converged = consecutive_successes >= required_successes;
+    let token_exceeded = max_token_cost.is_some_and(|limit| token_cost > limit);
+    let max_repairs_exhausted = repair_attempts >= max_repairs;
+    let stop_reason = if converged {
+        Some("converged".to_string())
+    } else if max_repairs_exhausted {
+        Some("max_repairs_exhausted".to_string())
+    } else if token_exceeded {
+        Some("token_cost_exceeded".to_string())
+    } else {
+        None
+    };
+
+    ConvergenceDecision {
+        converged,
+        should_stop: stop_reason.is_some(),
+        consecutive_successes,
+        repair_attempts,
+        stop_reason,
+    }
 }
 
 fn property_based_help(result: PropertyBasedTestResult) -> Option<String> {
@@ -1895,4 +1970,83 @@ pub(crate) fn save_visualizer_report(
     report["structured_feedback"] = json!(StructuredFeedback::from_report(&report));
     let _ = fs::create_dir_all(output_dir);
     let _ = fs::write(output_dir.join("report.json"), report.to_string());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::Value;
+    use std::collections::HashMap;
+
+    #[test]
+    fn check_convergence_requires_three_zero_loss_successes() {
+        let history = vec![
+            ConvergenceIteration {
+                verification_result: "sat".to_string(),
+                reconstruction_loss: Some(ReconstructionLoss::from_counter_example(
+                    "result > 0",
+                    HashMap::from([("x".to_string(), Value::from(1))]),
+                )),
+            },
+            ConvergenceIteration {
+                verification_result: "unsat".to_string(),
+                reconstruction_loss: None,
+            },
+            ConvergenceIteration {
+                verification_result: "lean_verified".to_string(),
+                reconstruction_loss: Some(ReconstructionLoss::from_counter_example(
+                    "result > 0",
+                    HashMap::new(),
+                )),
+            },
+            ConvergenceIteration {
+                verification_result: "unsat".to_string(),
+                reconstruction_loss: None,
+            },
+        ];
+
+        let decision = check_convergence(
+            &history,
+            DEFAULT_SELF_CORRECTION_REQUIRED_SUCCESSES,
+            DEFAULT_SELF_CORRECTION_MAX_REPAIRS,
+            100,
+            Some(1000),
+        );
+
+        assert!(decision.converged);
+        assert!(decision.should_stop);
+        assert_eq!(decision.consecutive_successes, 3);
+        assert_eq!(decision.repair_attempts, 1);
+        assert_eq!(decision.stop_reason.as_deref(), Some("converged"));
+    }
+
+    #[test]
+    fn check_convergence_stops_on_max_repairs_or_token_cost() {
+        let failures = vec![
+            ConvergenceIteration {
+                verification_result: "sat".to_string(),
+                reconstruction_loss: None,
+            },
+            ConvergenceIteration {
+                verification_result: "unknown".to_string(),
+                reconstruction_loss: None,
+            },
+        ];
+
+        let repair_decision = check_convergence(&failures, 3, 2, 10, Some(100));
+        assert!(!repair_decision.converged);
+        assert!(repair_decision.should_stop);
+        assert_eq!(
+            repair_decision.stop_reason.as_deref(),
+            Some("max_repairs_exhausted")
+        );
+
+        let token_decision = check_convergence(&failures[..1], 3, 10, 101, Some(100));
+        assert!(!token_decision.converged);
+        assert!(token_decision.should_stop);
+        assert_eq!(
+            token_decision.stop_reason.as_deref(),
+            Some("token_cost_exceeded")
+        );
+    }
 }
