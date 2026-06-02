@@ -561,6 +561,56 @@ def _build_machine_readable(report: dict, feedback: dict) -> "dict | None":
     return result
 
 
+def _structured_feedback_from_report(report_json: str) -> dict:
+    try:
+        report = json.loads(report_json)
+    except (json.JSONDecodeError, TypeError):
+        return {
+            "status": "verification_failed",
+            "error_type": None,
+            "location": None,
+            "reconstruction_loss": None,
+            "feedback_instruction": "Verification failed. Review the verifier report and repair the atom.",
+        }
+
+    structured_feedback = report.get("structured_feedback")
+    if isinstance(structured_feedback, dict):
+        return structured_feedback
+
+    failure_type = report.get("failure_type")
+    span = report.get("span") if isinstance(report.get("span"), dict) else {}
+    location = None
+    if span:
+        location = {
+            "file": span.get("file", ""),
+            "line": span.get("line", 0),
+        }
+    semantic_feedback = report.get("semantic_feedback")
+    reconstruction_loss = None
+    if isinstance(semantic_feedback, dict):
+        reconstruction_loss = semantic_feedback.get("reconstruction_loss")
+        failure_type = failure_type or semantic_feedback.get("failure_type")
+    violation_type = report.get("violation_type")
+    if not failure_type and isinstance(violation_type, str):
+        failure_type = (
+            "effect_not_allowed"
+            if violation_type.startswith("effect_")
+            else violation_type
+        )
+
+    passed = report.get("status") in {"success", "passed", "verified", "trusted", "unverified"}
+    suggestion = report.get("suggestion") or "Review the verifier report and repair the atom."
+    return {
+        "status": "verification_passed" if passed else "verification_failed",
+        "error_type": None if passed else failure_type,
+        "location": location,
+        "reconstruction_loss": reconstruction_loss,
+        "feedback_instruction": (
+            "Verification passed; no fix is required." if passed else suggestion
+        ),
+    }
+
+
 def _normalize_spec_metadata(spec_metadata: Optional[Dict[str, str]] = None) -> dict:
     if spec_metadata is None:
         return {}
@@ -725,6 +775,12 @@ def forge_blade(
             ef_section = _format_effect_feedback(report_data)
             if ef_section:
                 response_parts.append(ef_section)
+            structured_feedback = _structured_feedback_from_report(report_data)
+            response_parts.append(
+                "### Structured Feedback\n```json\n"
+                + json.dumps(structured_feedback, indent=2)
+                + "\n```"
+            )
         else:
             response_parts.append(
                 '### Semantic Feedback\n'
@@ -811,6 +867,12 @@ def validate_logic(
             ef_section = _format_effect_feedback(report_data)
             if ef_section:
                 response_parts.append(ef_section)
+            structured_feedback = _structured_feedback_from_report(report_data)
+            response_parts.append(
+                "### Structured Feedback\n```json\n"
+                + json.dumps(structured_feedback, indent=2)
+                + "\n```"
+            )
         else:
             # No report file — still include semantic feedback status
             response_parts.append(
@@ -842,6 +904,61 @@ def validate_logic(
                 )
 
         return "\n".join(response_parts)
+
+
+@mcp.tool()
+def get_structured_feedback(source_code: str) -> str:
+    """Return the P9-E structured feedback JSON for Mumei source code."""
+    root_dir = Path(__file__).parent.absolute()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        source_path = tmp_path / "input.mm"
+        output_path = tmp_path / "structured_feedback.json"
+        source_path.write_text(source_code, encoding="utf-8")
+
+        result = subprocess.run(
+            [
+                "cargo",
+                "run",
+                "--",
+                "verify",
+                "--emit",
+                "structured-feedback",
+                "--output",
+                str(output_path),
+                "--report-dir",
+                str(tmp_path),
+                str(source_path),
+            ],
+            cwd=root_dir,
+            capture_output=True,
+            text=True,
+        )
+
+        if output_path.exists():
+            return output_path.read_text(encoding="utf-8")
+
+        report_path = tmp_path / "report.json"
+        if report_path.exists():
+            return json.dumps(
+                _structured_feedback_from_report(report_path.read_text(encoding="utf-8")),
+                indent=2,
+            )
+
+        return json.dumps(
+            {
+                "status": "verification_failed",
+                "error_type": None,
+                "location": None,
+                "reconstruction_loss": None,
+                "feedback_instruction": (
+                    "Structured feedback was not emitted. "
+                    f"Verifier exited with code {result.returncode}: {result.stderr.strip()}"
+                ),
+            },
+            indent=2,
+        )
 
 
 @mcp.tool()

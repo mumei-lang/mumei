@@ -56,6 +56,123 @@ def test_format_data_flow_trace_section() -> None:
     assert "Evaluated as: -50 >= 0 (FALSE)" in formatted
 
 
+def test_structured_feedback_from_report_helper() -> None:
+    from mcp_server import _structured_feedback_from_report
+
+    report = {
+        "status": "failed",
+        "failure_type": "postcondition_violated",
+        "span": {"file": "input.mm", "line": 4},
+        "suggestion": "When x = 0, result > 10 fails",
+        "semantic_feedback": {
+            "reconstruction_loss": {
+                "violated_property": "result > 10",
+                "counter_example": {"x": "0"},
+                "loss_vector": [0.0],
+            }
+        },
+    }
+
+    payload = _structured_feedback_from_report(json.dumps(report))
+
+    assert payload["status"] == "verification_failed"
+    assert payload["error_type"] == "postcondition_violated"
+    assert payload["location"] == {"file": "input.mm", "line": 4}
+    assert payload["reconstruction_loss"]["violated_property"] == "result > 10"
+    assert "When x = 0" in payload["feedback_instruction"]
+
+
+def test_get_structured_feedback_returns_cli_payload() -> None:
+    from mcp_server import get_structured_feedback
+
+    def fake_run(args: list[str], **kwargs) -> subprocess.CompletedProcess:
+        output_path = Path(args[args.index("--output") + 1])
+        output_path.write_text(
+            json.dumps(
+                {
+                    "status": "verification_failed",
+                    "error_type": "postcondition_violated",
+                    "location": {"file": "input.mm", "line": 2},
+                    "reconstruction_loss": None,
+                    "feedback_instruction": "Fix the body to satisfy `ensures`.",
+                }
+            ),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(args, 1, "", "verification failed")
+
+    with patch("mcp_server.subprocess.run", side_effect=fake_run):
+        payload = json.loads(get_structured_feedback("atom bad() -> i64 { body: { 0 } }"))
+
+    assert payload["status"] == "verification_failed"
+    assert payload["error_type"] == "postcondition_violated"
+    assert "ensures" in payload["feedback_instruction"]
+
+
+def test_validate_logic_includes_structured_feedback_once() -> None:
+    from mcp_server import validate_logic
+
+    def fake_run(args: list[str], **kwargs) -> subprocess.CompletedProcess:
+        report_dir = Path(args[args.index("--report-dir") + 1])
+        report_dir.mkdir(parents=True, exist_ok=True)
+        (report_dir / "report.json").write_text(
+            json.dumps(
+                {
+                    "status": "failed",
+                    "failure_type": "postcondition_violated",
+                    "structured_feedback": {
+                        "status": "verification_failed",
+                        "error_type": "postcondition_violated",
+                        "location": {"file": "input.mm", "line": 2},
+                        "reconstruction_loss": None,
+                        "feedback_instruction": "Fix `ensures`.",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(args, 1, "", "verification failed")
+
+    with patch("mcp_server.get_allowed_effects", return_value='{"unrestricted": true}'):
+        with patch("mcp_server.subprocess.run", side_effect=fake_run):
+            raw = validate_logic("atom bad() -> i64 { body: { 0 } }")
+
+    assert raw.count("### Structured Feedback") == 1
+    assert '"error_type": "postcondition_violated"' in raw
+
+
+def test_forge_blade_includes_structured_feedback_once() -> None:
+    from mcp_server import forge_blade
+
+    def fake_run(args: list[str], **kwargs) -> subprocess.CompletedProcess:
+        output_base = Path(args[args.index("-o") + 1])
+        report_dir = output_base.parent
+        report_dir.mkdir(parents=True, exist_ok=True)
+        (report_dir / "report.json").write_text(
+            json.dumps(
+                {
+                    "status": "success",
+                    "structured_feedback": {
+                        "status": "verification_passed",
+                        "error_type": None,
+                        "location": None,
+                        "reconstruction_loss": None,
+                        "feedback_instruction": "Verification passed; no fix is required.",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    with patch("mcp_server.get_allowed_effects", return_value='{"unrestricted": true}'):
+        with patch("mcp_server.subprocess.run", side_effect=fake_run):
+            raw = forge_blade("atom ok() -> i64 { body: { 0 } }")
+
+    assert raw.count("### Structured Feedback") == 1
+    assert '"status": "verification_passed"' in raw
+
+
 def _get_catalog() -> dict:
     """Call list_std_catalog() and parse the JSON result."""
     # Import inline to avoid MCP server startup side effects

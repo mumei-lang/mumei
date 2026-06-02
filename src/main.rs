@@ -12,7 +12,10 @@ use mumei_core::hir::lower_atom_to_hir_with_env;
 use mumei_core::parser::{ImportDecl, Item};
 use mumei_core::{
     ast, cross_spec, emitter, hir, inspect, manifest, mir, mir_analysis, parser, proof_cert,
-    reconstruction_loss::ReconstructionLoss, registry, resolver, verification,
+    reconstruction_loss::ReconstructionLoss,
+    registry, resolver,
+    structured_feedback::{Location, StructuredFeedback},
+    verification,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -30,6 +33,79 @@ fn resolve_source_for_span(main_source: &str, span: &parser::Span) -> String {
     } else {
         std::fs::read_to_string(&span.file).unwrap_or_else(|_| main_source.to_string())
     }
+}
+
+fn structured_feedback_for_passed_atom(atom: &parser::Atom) -> StructuredFeedback {
+    StructuredFeedback {
+        location: Location::from_span(&atom.span),
+        ..StructuredFeedback::verification_passed()
+    }
+}
+
+fn structured_feedback_from_report_file(
+    output_dir: &Path,
+    atom: &parser::Atom,
+    error_text: Option<&str>,
+) -> StructuredFeedback {
+    let report_path = output_dir.join("report.json");
+    if let Ok(report_json) = std::fs::read_to_string(&report_path) {
+        if let Ok(report) = serde_json::from_str::<serde_json::Value>(&report_json) {
+            if report
+                .get("atom")
+                .and_then(serde_json::Value::as_str)
+                .map(|name| name == atom.name)
+                .unwrap_or(true)
+            {
+                return StructuredFeedback::from_report(&report);
+            }
+        }
+    }
+
+    let error_type = error_text.and_then(infer_failure_type_from_error_text);
+    StructuredFeedback::verification_failed(
+        error_type.map(str::to_string),
+        Location::from_span(&atom.span),
+        None,
+        None,
+    )
+}
+
+fn infer_failure_type_from_error_text(error_text: &str) -> Option<&'static str> {
+    let lower = error_text.to_lowercase();
+    if lower.contains("postcondition") || lower.contains("ensures") {
+        Some(verification::FAILURE_POSTCONDITION_VIOLATED)
+    } else if lower.contains("precondition") || lower.contains("requires") {
+        Some(verification::FAILURE_PRECONDITION_VIOLATED)
+    } else if lower.contains("linearity") || lower.contains("moved") {
+        Some(verification::FAILURE_LINEARITY_VIOLATED)
+    } else if lower.contains("contradiction") || lower.contains("invariant") {
+        Some(verification::FAILURE_INVARIANT_VIOLATED)
+    } else if lower.contains("effect") {
+        Some(verification::FAILURE_EFFECT_NOT_ALLOWED)
+    } else {
+        None
+    }
+}
+
+fn structured_feedback_payload(
+    structured_feedbacks: &[StructuredFeedback],
+    verified: usize,
+    failed: usize,
+    skipped: usize,
+    escalated: usize,
+) -> serde_json::Value {
+    if structured_feedbacks.len() == 1 {
+        return serde_json::json!(structured_feedbacks[0]);
+    }
+    serde_json::json!({
+        "structured_feedback": structured_feedbacks,
+        "summary": {
+            "verified": verified,
+            "failed": failed,
+            "skipped": skipped,
+            "escalation_candidates": escalated,
+        }
+    })
 }
 
 fn emit_decidable_fragment_warning(
@@ -238,7 +314,7 @@ enum Command {
         /// Emit Lean escalation candidate bundle alongside verification results
         #[arg(long)]
         escalate_lean: bool,
-        /// Emit target for verify-only output: escalation-bundle, escalation-metrics, decidable-metrics, or reconstruction-loss
+        /// Emit target for verify-only output: escalation-bundle, escalation-metrics, decidable-metrics, reconstruction-loss, or structured-feedback
         #[arg(long)]
         emit: Option<String>,
         /// Disable verify-only output targets: escalation-metrics
@@ -498,14 +574,16 @@ fn main() {
                 && !no_emit_escalation_metrics;
             let emit_decidable_metrics = matches!(emit.as_deref(), Some("decidable-metrics"));
             let emit_reconstruction_loss = matches!(emit.as_deref(), Some("reconstruction-loss"));
+            let emit_structured_feedback = matches!(emit.as_deref(), Some("structured-feedback"));
             if let Some(other) = emit.as_deref() {
                 if !emit_escalation_bundle
                     && !matches!(other, "escalation-metrics")
                     && !emit_decidable_metrics
                     && !emit_reconstruction_loss
+                    && !emit_structured_feedback
                 {
                     eprintln!(
-                        "Unsupported verify --emit target '{}'. Supported values: escalation-bundle, escalation-metrics, decidable-metrics, reconstruction-loss",
+                        "Unsupported verify --emit target '{}'. Supported values: escalation-bundle, escalation-metrics, decidable-metrics, reconstruction-loss, structured-feedback",
                         other
                     );
                     std::process::exit(1);
@@ -521,6 +599,7 @@ fn main() {
                 emit_escalation_metrics,
                 emit_decidable_metrics,
                 emit_reconstruction_loss,
+                emit_structured_feedback,
                 cert_output: output.as_deref(),
                 report_dir: report_dir.as_deref(),
                 json_output: json,
@@ -959,6 +1038,7 @@ struct VerifyOptions<'a> {
     emit_escalation_metrics: bool,
     emit_decidable_metrics: bool,
     emit_reconstruction_loss: bool,
+    emit_structured_feedback: bool,
     cert_output: Option<&'a str>,
     report_dir: Option<&'a str>,
     json_output: bool,
@@ -991,6 +1071,7 @@ fn cmd_verify(options: VerifyOptions<'_>) {
         emit_escalation_metrics,
         emit_decidable_metrics,
         emit_reconstruction_loss,
+        emit_structured_feedback,
         cert_output,
         report_dir,
         json_output,
@@ -1011,6 +1092,8 @@ fn cmd_verify(options: VerifyOptions<'_>) {
         detect_loops,
         suggest_cegis,
     } = options;
+    let structured_feedback_stdout = emit_structured_feedback && cert_output.is_none();
+    let quiet_output = json_output || structured_feedback_stdout;
     check_z3_available();
     let manifest_config = manifest::find_and_load();
     let (build_cfg, proof_cfg) = if let Some((_, ref m)) = manifest_config {
@@ -1032,7 +1115,7 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                 .unwrap_or(verification::PropertyBasedTestConfig::default().seed),
             ..verification::PropertyBasedTestConfig::default()
         });
-    if !json_output {
+    if !quiet_output {
         println!("🗡️  Mumei verify: verifying '{}'...", input);
         if let Some(config) = &property_based_config {
             println!(
@@ -1085,6 +1168,7 @@ fn cmd_verify(options: VerifyOptions<'_>) {
     let mut loop_suggestions: Vec<serde_json::Value> = Vec::new();
     let mut reconstruction_losses: std::collections::HashMap<String, ReconstructionLoss> =
         std::collections::HashMap::new();
+    let mut structured_feedbacks: Vec<StructuredFeedback> = Vec::new();
 
     // Plan 11B: Track per-atom verification results for proof certificates
     let mut cert_results: std::collections::HashMap<String, (String, String)> =
@@ -1105,7 +1189,7 @@ fn cmd_verify(options: VerifyOptions<'_>) {
             .and_then(|json| std::fs::write(&manifest_path, json).map_err(|e| e.to_string()))
         {
             Ok(()) => {
-                if !json_output {
+                if !quiet_output {
                     println!(
                         "  📜 Contract manifest written to: {}",
                         manifest_path.display()
@@ -1113,7 +1197,7 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                 }
             }
             Err(e) => {
-                if !json_output {
+                if !quiet_output {
                     eprintln!("  ⚠️  Failed to write contract manifest: {}", e);
                 }
                 failed += 1;
@@ -1128,7 +1212,7 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                 if verification_config.detect_loops {
                     let loops = verification::detect_loops_needing_invariants(atom);
                     if !loops.is_empty() {
-                        if !json_output {
+                        if !quiet_output {
                             println!(
                                 "  🔁 '{}': {} loop(s) may need invariant strengthening",
                                 atom.name,
@@ -1152,7 +1236,7 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                     if verification_config.detect_loops {
                         let loops = verification::detect_loops_needing_invariants(method);
                         if !loops.is_empty() {
-                            if !json_output {
+                            if !quiet_output {
                                 println!(
                                     "  🔁 '{}': {} loop(s) may need invariant strengthening",
                                     qualified_name,
@@ -1182,7 +1266,7 @@ fn cmd_verify(options: VerifyOptions<'_>) {
     for item in &items {
         match item {
             Item::ImplDef(impl_def) => {
-                if !json_output {
+                if !quiet_output {
                     println!(
                         "  🔧 Verifying impl {} for {}...",
                         impl_def.trait_name, impl_def.target_type
@@ -1190,13 +1274,13 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                 }
                 match verification::verify_impl(impl_def, &module_env, output_dir) {
                     Ok(_) => {
-                        if !json_output {
+                        if !quiet_output {
                             println!("    ✅ Laws verified");
                         }
                         verified += 1;
                     }
                     Err(e) => {
-                        if !json_output {
+                        if !quiet_output {
                             let resolved = resolve_source_for_span(&source, &impl_def.span);
                             let e = e.with_source(&resolved, &impl_def.span);
                             eprintln!("{:?}", miette::Report::new(e));
@@ -1207,11 +1291,14 @@ fn cmd_verify(options: VerifyOptions<'_>) {
             }
             Item::Atom(atom) => {
                 if module_env.is_verified(&atom.name) {
-                    if !json_output {
+                    if !quiet_output {
                         println!(
                             "  ⚖️  '{}': skipped (imported, contract-trusted)",
                             atom.name
                         );
+                    }
+                    if emit_structured_feedback {
+                        structured_feedbacks.push(structured_feedback_for_passed_atom(atom));
                     }
                 } else {
                     // Feature 2: Use compute_proof_hash with dependency-aware hashing
@@ -1225,7 +1312,7 @@ fn cmd_verify(options: VerifyOptions<'_>) {
 
                     if let Some(cached_entry) = verification_cache.get(&atom.name) {
                         if cached_entry.proof_hash == proof_hash {
-                            if !json_output {
+                            if !quiet_output {
                                 println!("  ⚖️  '{}': skipped (unchanged, cached) ⏩", atom.name);
                             }
                             module_env.mark_verified(&atom.name);
@@ -1234,6 +1321,10 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                                 atom.name.clone(),
                                 ("unsat".to_string(), "verified".to_string()),
                             );
+                            if emit_structured_feedback {
+                                structured_feedbacks
+                                    .push(structured_feedback_for_passed_atom(atom));
+                            }
                             skipped += 1;
                             continue;
                         }
@@ -1275,7 +1366,7 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                         &verification_config,
                     ) {
                         Ok(_) => {
-                            if !json_output {
+                            if !quiet_output {
                                 println!("  ⚖️  '{}': verified ✅", atom.name);
                             }
                             module_env.mark_verified(&atom.name);
@@ -1284,6 +1375,10 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                                 atom.name.clone(),
                                 ("unsat".to_string(), "verified".to_string()),
                             );
+                            if emit_structured_feedback {
+                                structured_feedbacks
+                                    .push(structured_feedback_for_passed_atom(atom));
+                            }
                             verification_cache.insert(
                                 atom.name.clone(),
                                 resolver::VerificationCacheEntry {
@@ -1307,7 +1402,7 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                             let counterexample_model = counterexample_model_from_error(&e);
                             let reconstruction_loss =
                                 reconstruction_loss_from_error(&e, &atom.ensures);
-                            if !json_output {
+                            if !quiet_output {
                                 let resolved = resolve_source_for_span(&source, &atom.span);
                                 let e = e.with_source(&resolved, &atom.span);
                                 eprintln!("{:?}", miette::Report::new(e));
@@ -1329,7 +1424,7 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                             }
                             if z3_result == "sat" {
                                 if let Some(loss) = reconstruction_loss {
-                                    if !json_output {
+                                    if !quiet_output {
                                         println!(
                                             "  🧭 Reconstruction loss for '{}': {:?}",
                                             atom.name, loss.loss_vector
@@ -1347,7 +1442,7 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                             let emit_lean_artifacts =
                                 emit_escalation_bundle || emit_escalation_metrics;
                             let status = if emit_lean_artifacts && classification.should_escalate {
-                                if !json_output {
+                                if !quiet_output {
                                     println!(
                                         "  [lean] '{}': marked for escalation ({})",
                                         atom.name,
@@ -1364,6 +1459,13 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                                 "failed"
                             };
                             cert_results.insert(atom.name.clone(), (z3_result, status.to_string()));
+                            if emit_structured_feedback {
+                                structured_feedbacks.push(structured_feedback_from_report_file(
+                                    output_dir,
+                                    atom,
+                                    Some(&error_text),
+                                ));
+                            }
                             // 検証失敗した atom はキャッシュから除外
                             verification_cache.remove(&atom.name);
                         }
@@ -1374,11 +1476,17 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                 for method in &impl_block.methods {
                     let qualified_name = format!("{}::{}", impl_block.struct_name, method.name);
                     if module_env.is_verified(&qualified_name) {
-                        if !json_output {
+                        if !quiet_output {
                             println!(
                                 "  ⚖️  '{}': skipped (imported, contract-trusted)",
                                 qualified_name
                             );
+                        }
+                        if emit_structured_feedback {
+                            let mut qualified_method = method.clone();
+                            qualified_method.name = qualified_name.clone();
+                            structured_feedbacks
+                                .push(structured_feedback_for_passed_atom(&qualified_method));
                         }
                     } else {
                         // Clone method with qualified name for consistent naming
@@ -1399,7 +1507,7 @@ fn cmd_verify(options: VerifyOptions<'_>) {
 
                         if let Some(cached_entry) = verification_cache.get(&qualified_name) {
                             if cached_entry.proof_hash == proof_hash {
-                                if !json_output {
+                                if !quiet_output {
                                     println!(
                                         "  ⚖️  '{}': skipped (unchanged, cached) ⏩",
                                         qualified_name
@@ -1410,6 +1518,11 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                                     qualified_name.clone(),
                                     ("unsat".to_string(), "verified".to_string()),
                                 );
+                                if emit_structured_feedback {
+                                    structured_feedbacks.push(structured_feedback_for_passed_atom(
+                                        &qualified_method,
+                                    ));
+                                }
                                 skipped += 1;
                                 continue;
                             }
@@ -1454,7 +1567,7 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                             &verification_config,
                         ) {
                             Ok(_) => {
-                                if !json_output {
+                                if !quiet_output {
                                     println!("  ⚖️  '{}': verified ✅", qualified_name);
                                 }
                                 module_env.mark_verified(&qualified_name);
@@ -1462,6 +1575,11 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                                     qualified_name.clone(),
                                     ("unsat".to_string(), "verified".to_string()),
                                 );
+                                if emit_structured_feedback {
+                                    structured_feedbacks.push(structured_feedback_for_passed_atom(
+                                        &qualified_method,
+                                    ));
+                                }
                                 verification_cache.insert(
                                     qualified_name.clone(),
                                     resolver::VerificationCacheEntry {
@@ -1485,7 +1603,7 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                                 let counterexample_model = counterexample_model_from_error(&e);
                                 let reconstruction_loss =
                                     reconstruction_loss_from_error(&e, &qualified_method.ensures);
-                                if !json_output {
+                                if !quiet_output {
                                     let resolved = resolve_source_for_span(&source, &method.span);
                                     let e = e.with_source(&resolved, &method.span);
                                     eprintln!("{:?}", miette::Report::new(e));
@@ -1508,7 +1626,7 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                                 }
                                 if z3_result == "sat" {
                                     if let Some(loss) = reconstruction_loss {
-                                        if !json_output {
+                                        if !quiet_output {
                                             println!(
                                                 "  🧭 Reconstruction loss for '{}': {:?}",
                                                 qualified_name, loss.loss_vector
@@ -1528,7 +1646,7 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                                     emit_escalation_bundle || emit_escalation_metrics;
                                 let status =
                                     if emit_lean_artifacts && classification.should_escalate {
-                                        if !json_output {
+                                        if !quiet_output {
                                             println!(
                                                 "  [lean] '{}': marked for escalation ({})",
                                                 qualified_name,
@@ -1548,6 +1666,15 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                                     qualified_name.clone(),
                                     (z3_result, status.to_string()),
                                 );
+                                if emit_structured_feedback {
+                                    structured_feedbacks.push(
+                                        structured_feedback_from_report_file(
+                                            output_dir,
+                                            &qualified_method,
+                                            Some(&error_text),
+                                        ),
+                                    );
+                                }
                                 verification_cache.remove(&qualified_name);
                             }
                         }
@@ -1570,7 +1697,7 @@ fn cmd_verify(options: VerifyOptions<'_>) {
             .filter(|_| !generate_proof_cert)
             .map(PathBuf::from)
             .unwrap_or_else(|| output_dir.join("decidable_metrics.json"));
-        match save_decidable_fragment_metrics(&module_env, &metrics_path, !json_output) {
+        match save_decidable_fragment_metrics(&module_env, &metrics_path, !quiet_output) {
             Ok(()) => {}
             Err(err) => {
                 eprintln!("❌ {err}");
@@ -1584,7 +1711,7 @@ fn cmd_verify(options: VerifyOptions<'_>) {
             .filter(|_| !generate_proof_cert && !emit_escalation_bundle && !emit_escalation_metrics)
             .map(PathBuf::from)
             .unwrap_or_else(|| output_dir.join("reconstruction_loss.json"));
-        match save_reconstruction_losses(&reconstruction_losses, &loss_path, !json_output) {
+        match save_reconstruction_losses(&reconstruction_losses, &loss_path, !quiet_output) {
             Ok(()) => {}
             Err(err) => {
                 eprintln!("❌ {err}");
@@ -1594,15 +1721,15 @@ fn cmd_verify(options: VerifyOptions<'_>) {
     }
 
     if enable_cross_spec_verification {
-        match save_cross_spec_report(&module_env, output_dir, !json_output) {
+        match save_cross_spec_report(&module_env, output_dir, !quiet_output) {
             Ok(cross_spec_result) => {
-                if cross_spec_result.summary.inconsistent_calls > 0 && !json_output {
+                if cross_spec_result.summary.inconsistent_calls > 0 && !quiet_output {
                     eprintln!(
                         "Warning: {} inconsistent contract calls detected",
                         cross_spec_result.summary.inconsistent_calls
                     );
                 }
-                if cross_spec_result.summary.circular_dependency_count > 0 && !json_output {
+                if cross_spec_result.summary.circular_dependency_count > 0 && !quiet_output {
                     eprintln!(
                         "Warning: {} circular dependencies detected",
                         cross_spec_result.summary.circular_dependency_count
@@ -1610,7 +1737,7 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                 }
             }
             Err(e) => {
-                if !json_output {
+                if !quiet_output {
                     eprintln!("  ⚠️  Failed to write cross-spec report: {}", e);
                 }
                 failed += 1;
@@ -1668,12 +1795,12 @@ fn cmd_verify(options: VerifyOptions<'_>) {
         if generate_proof_cert {
             match proof_cert::save_certificate(&cert, &cert_path) {
                 Ok(()) => {
-                    if !json_output {
+                    if !quiet_output {
                         println!("  📜 Proof certificate written to: {}", cert_path.display());
                     }
                 }
                 Err(e) => {
-                    if !json_output {
+                    if !quiet_output {
                         eprintln!("  ⚠️  Failed to write proof certificate: {}", e);
                     }
                 }
@@ -1686,7 +1813,7 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                 let bundle_path = cert_path.with_extension("escalation-bundle.json");
                 match proof_cert::save_escalation_bundle(&bundle, &bundle_path) {
                     Ok(()) => {
-                        if !json_output {
+                        if !quiet_output {
                             println!(
                                 "  Lean escalation bundle written to: {} ({} candidate(s))",
                                 bundle_path.display(),
@@ -1695,7 +1822,7 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                         }
                     }
                     Err(e) => {
-                        if !json_output {
+                        if !quiet_output {
                             eprintln!("  ⚠️  Failed to write escalation bundle: {}", e);
                         }
                     }
@@ -1713,7 +1840,7 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                     .and_then(|json| std::fs::write(&metrics_path, json).map_err(|e| e.to_string()))
                 {
                     Ok(()) => {
-                        if !json_output {
+                        if !quiet_output {
                             println!(
                                 "  📊 Escalation metrics written to: {}",
                                 metrics_path.display()
@@ -1721,7 +1848,7 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                         }
                     }
                     Err(e) => {
-                        if !json_output {
+                        if !quiet_output {
                             eprintln!("  ⚠️  Failed to write escalation metrics: {}", e);
                         }
                     }
@@ -1732,7 +1859,7 @@ fn cmd_verify(options: VerifyOptions<'_>) {
         // Task 1-B: When `--proof-cert` is active, surface atoms whose Z3
         // check returned `unknown` so the user knows which lemmas might
         // benefit from being discharged externally (e.g. via mumei-lean).
-        if !json_output {
+        if !quiet_output {
             let unknown_count = cert
                 .atoms
                 .iter()
@@ -1743,6 +1870,34 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                     "ℹ️  {} atom(s) returned 'unknown' from Z3. Consider running mumei-lean to discharge them.",
                     unknown_count
                 );
+            }
+        }
+    }
+
+    if emit_structured_feedback {
+        let payload = structured_feedback_payload(
+            &structured_feedbacks,
+            verified,
+            failed,
+            skipped,
+            escalated,
+        );
+        match serde_json::to_string_pretty(&payload) {
+            Ok(serialized) => {
+                if let Some(output) = cert_output {
+                    if let Err(err) = std::fs::write(output, &serialized) {
+                        eprintln!("❌ Failed to write structured feedback: {err}");
+                        failed += 1;
+                    } else if !quiet_output {
+                        println!("  🧾 Structured feedback written to: {output}");
+                    }
+                } else {
+                    println!("{serialized}");
+                }
+            }
+            Err(err) => {
+                eprintln!("❌ Failed to serialize structured feedback: {err}");
+                failed += 1;
             }
         }
     }
@@ -1799,6 +1954,10 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                 ),
             }
         }
+        if failed > 0 {
+            std::process::exit(1);
+        }
+    } else if structured_feedback_stdout {
         if failed > 0 {
             std::process::exit(1);
         }

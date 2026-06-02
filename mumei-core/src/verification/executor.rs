@@ -6,6 +6,7 @@ use super::translator::*;
 use super::types::*;
 use super::*;
 use crate::reconstruction_loss::ReconstructionLoss;
+use crate::structured_feedback::StructuredFeedback;
 use sha2::{Digest, Sha256};
 
 /// mumei.toml の [proof]/[build] 設定を反映した verify
@@ -1891,6 +1892,7 @@ pub(crate) fn save_visualizer_report(
             report["type_definition_locations"] = json!(type_locations);
         }
     }
+    report["structured_feedback"] = json!(StructuredFeedback::from_report(&report));
     let _ = fs::create_dir_all(output_dir);
     let _ = fs::write(output_dir.join("report.json"), report.to_string());
 }

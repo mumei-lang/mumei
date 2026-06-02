@@ -984,9 +984,10 @@ pub(crate) fn save_effect_violation_report(
     source_operation: &str,
     suggested_fixes: &[String],
 ) {
-    let report = json!({
+    let mut report = json!({
         "status": "failed",
         "atom": atom_name,
+        "failure_type": FAILURE_EFFECT_NOT_ALLOWED,
         "violation_type": "effect_mismatch",
         "effect_violation": {
             "declared_effects": declared_effects,
@@ -1013,6 +1014,9 @@ pub(crate) fn save_effect_violation_report(
         "reason": format!("Effect violation: atom '{}' declares effects {:?} but uses '{}' which requires [{}]",
             atom_name, declared_effects, source_operation, required_effect)
     });
+    report["structured_feedback"] = json!(
+        crate::structured_feedback::StructuredFeedback::from_report(&report)
+    );
     let _ = fs::create_dir_all(output_dir);
     let _ = fs::write(
         output_dir.join("report.json"),
@@ -1029,9 +1033,10 @@ pub(crate) fn save_effect_propagation_report(
     callee_effects: &[String],
     missing_effects: &[String],
 ) {
-    let report = json!({
+    let mut report = json!({
         "status": "failed",
         "atom": caller_name,
+        "failure_type": FAILURE_EFFECT_NOT_ALLOWED,
         "violation_type": "effect_propagation",
         "effect_violation": {
             "caller": caller_name,
@@ -1059,6 +1064,9 @@ pub(crate) fn save_effect_propagation_report(
         "reason": format!("Effect propagation violation: '{}' calls '{}' which requires {:?}, but '{}' only declares {:?}",
             caller_name, callee_name, callee_effects, caller_name, caller_effects)
     });
+    report["structured_feedback"] = json!(
+        crate::structured_feedback::StructuredFeedback::from_report(&report)
+    );
     let _ = fs::create_dir_all(output_dir);
     let _ = fs::write(
         output_dir.join("report.json"),
@@ -1076,9 +1084,10 @@ pub(crate) fn save_effect_polymorphism_report(
     declared_effects: &[String],
     missing_effects: &[String],
 ) {
-    let report = json!({
+    let mut report = json!({
         "status": "failed",
         "atom": atom_name,
+        "failure_type": FAILURE_EFFECT_NOT_ALLOWED,
         "violation_type": "effect_polymorphism",
         "effect_violation": {
             "atom": atom_name,
@@ -1129,6 +1138,9 @@ pub(crate) fn save_effect_polymorphism_report(
             atom_name, param_name, param_effect_set, atom_name, declared_effects, missing_effects
         )
     });
+    report["structured_feedback"] = json!(
+        crate::structured_feedback::StructuredFeedback::from_report(&report)
+    );
     let _ = fs::create_dir_all(output_dir);
     let _ = fs::write(
         output_dir.join("report.json"),
