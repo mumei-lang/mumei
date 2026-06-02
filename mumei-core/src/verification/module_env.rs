@@ -1,4 +1,5 @@
 use super::*;
+use crate::parser::ExternBlock;
 
 /// - release_borrow: 借用を解放。
 ///
@@ -148,6 +149,8 @@ pub struct ModuleEnv {
     pub structs: HashMap<String, StructDef>,
     /// Atom 定義（FQN キー）。契約による検証で requires/ensures のみ参照する。
     pub atoms: HashMap<String, Atom>,
+    /// Extern block declarations needed by native binary codegen/linking.
+    pub extern_blocks: Vec<ExternBlock>,
     /// Enum 定義（FQN キー）
     pub enums: HashMap<String, EnumDef>,
     /// トレイト定義
@@ -207,6 +210,10 @@ impl ModuleEnv {
 
     pub fn register_atom(&mut self, atom: &Atom) {
         self.atoms.insert(atom.name.clone(), atom.clone());
+    }
+
+    pub fn register_extern_block(&mut self, extern_block: &ExternBlock) {
+        self.extern_blocks.push(extern_block.clone());
     }
 
     pub fn register_enum(&mut self, enum_def: &EnumDef) {

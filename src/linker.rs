@@ -121,6 +121,8 @@ pub fn link_to_binary(
     {
         cmd.arg("-lm");
         cmd.arg("-lpthread");
+        cmd.arg("-ldl");
+        cmd.arg("-lz3");
     }
 
     let output = cmd

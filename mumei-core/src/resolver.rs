@@ -845,6 +845,7 @@ fn register_imported_items(items: &[Item], alias: Option<&str>, module_env: &mut
                 }
             }
             Item::ExternBlock(extern_block) => {
+                module_env.register_extern_block(extern_block);
                 // ExternBlock 内の関数を trusted atom として ModuleEnv に登録
                 for ext_fn in &extern_block.functions {
                     let params: Vec<crate::parser::Param> = ext_fn
