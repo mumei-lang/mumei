@@ -1291,6 +1291,7 @@ fn compile_hir_expr<'a>(
                 }
                 let check_block = context.append_basic_block(*function, "task_group_any_check");
                 let wait_block = context.append_basic_block(*function, "task_group_any_wait");
+                let yield_block = context.append_basic_block(*function, "task_group_any_yield");
                 let done_block = context.append_basic_block(*function, "task_group_any_done");
                 llvm!(builder.build_unconditional_branch(check_block));
 
@@ -1315,6 +1316,30 @@ fn compile_hir_expr<'a>(
                 llvm!(builder.build_conditional_branch(is_done, done_block, wait_block));
 
                 builder.position_at_end(wait_block);
+                let should_cancel_fn =
+                    declare_task_group_should_cancel_current_extern(context, module);
+                let cancel_flag = llvm!(builder.build_call(
+                    should_cancel_fn,
+                    &[],
+                    "task_group_any_parent_cancel_check",
+                ))
+                .try_as_basic_value()
+                .left()
+                .ok_or_else(|| MumeiError::codegen("cancel check returned void".to_string()))?
+                .into_int_value();
+                let is_parent_cancelled = llvm!(builder.build_int_compare(
+                    IntPredicate::NE,
+                    cancel_flag,
+                    i64_type.const_int(0, false),
+                    "task_group_any_parent_cancelled",
+                ));
+                llvm!(builder.build_conditional_branch(
+                    is_parent_cancelled,
+                    done_block,
+                    yield_block
+                ));
+
+                builder.position_at_end(yield_block);
                 llvm!(builder.build_call(yield_fn, &[], "sched_yield_call"));
                 llvm!(builder.build_unconditional_branch(check_block));
 

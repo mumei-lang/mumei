@@ -59,6 +59,7 @@ static pthread_mutex_t g_init_mu = PTHREAD_MUTEX_INITIALIZER;
 typedef struct {
     _Atomic int completed;
     _Atomic int cancelled;
+    _Atomic int64_t parent_id;
 } mumei_task_group_t;
 
 static mumei_task_group_t g_task_groups[MUMEI_MAX_TASK_GROUPS];
@@ -85,6 +86,7 @@ void __mumei_task_group_reset(int64_t group_id) {
     mumei_task_group_t *group = mumei_task_group_get(group_id);
     atomic_store_explicit(&group->completed, 0, memory_order_release);
     atomic_store_explicit(&group->cancelled, 0, memory_order_release);
+    atomic_store_explicit(&group->parent_id, g_current_task_group_id, memory_order_release);
 }
 
 int64_t __mumei_task_group_any_flag(int64_t group_id) {
@@ -107,8 +109,15 @@ void __mumei_task_group_leave(void) {
 }
 
 int64_t __mumei_task_group_should_cancel(int64_t group_id) {
-    mumei_task_group_t *group = mumei_task_group_get(group_id);
-    return atomic_load_explicit(&group->cancelled, memory_order_acquire) != 0 ? 1 : 0;
+    int64_t current = group_id;
+    for (int depth = 0; depth < MUMEI_MAX_TASK_GROUPS && current >= 0; depth++) {
+        mumei_task_group_t *group = mumei_task_group_get(current);
+        if (atomic_load_explicit(&group->cancelled, memory_order_acquire) != 0) {
+            return 1;
+        }
+        current = atomic_load_explicit(&group->parent_id, memory_order_acquire);
+    }
+    return 0;
 }
 
 int64_t __mumei_task_group_should_cancel_current(void) {
