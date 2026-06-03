@@ -587,6 +587,28 @@ fn test_security_policy_check_param_constraint() {
         .is_err());
 }
 
+#[test]
+fn test_substitute_method_calls_uses_dynamic_nested_passes() {
+    let mut method_bodies = HashMap::new();
+    method_bodies.insert("wrap".to_string(), "inner(x)".to_string());
+    method_bodies.insert("inner".to_string(), "x + 1".to_string());
+
+    let mut method_params = HashMap::new();
+    method_params.insert("wrap".to_string(), vec!["x".to_string()]);
+    method_params.insert("inner".to_string(), vec!["x".to_string()]);
+
+    let expanded = substitute_method_calls("wrap(a) == inner(b)", &method_bodies, &method_params);
+    assert!(expanded.contains("((a) + 1)"));
+    assert!(expanded.contains("((b) + 1)"));
+}
+
+#[test]
+fn test_contains_method_call_rejects_partial_names() {
+    assert!(contains_method_call("add(a, b)", "add"));
+    assert!(!contains_method_call("safe_add(a, b)", "add"));
+    assert!(!contains_method_call("adder(a, b)", "add"));
+}
+
 // ---- evaluate_string_constraint tests ----
 
 #[test]

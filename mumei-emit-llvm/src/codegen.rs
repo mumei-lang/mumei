@@ -34,10 +34,7 @@ fn array_struct_type(context: &Context) -> inkwell::types::StructType<'_> {
 /// Layout: { i64 tag, i64 payload_0, i64 payload_1, ... }
 /// The number of payload slots is the maximum field count across all variants.
 ///
-/// NOTE: All payload slots are currently hardcoded to i64. Variants with f64 or Str
-/// fields will be stored in i64 slots, which causes a type mismatch in LLVM IR.
-/// TODO: Resolve actual field types from EnumDef variant fields and use the
-/// appropriate LLVM type (f64_type, ptr_type, etc.) for each payload slot.
+/// Payload slots are resolved from `EnumDef` variant field types.
 fn enum_llvm_type<'a>(
     context: &'a Context,
     enum_def: &mumei_core::parser::EnumDef,

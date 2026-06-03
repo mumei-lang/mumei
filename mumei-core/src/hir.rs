@@ -186,10 +186,6 @@ pub enum HirExpr {
 #[derive(Debug, Clone)]
 pub enum HirStmt {
     /// 変数束縛: let var = expr
-    /// TODO: ty will be populated by type inference in future phases
-    // NOTE: Let variant is always constructed by lower_stmt. The dead_code warning is
-    // triggered by the `ty` field which is always None in Phase 1 (type inference not yet implemented).
-    #[allow(dead_code)]
     Let {
         var: String,
         ty: Option<String>,
@@ -490,6 +486,77 @@ pub fn lower_expr_with_env(
     result
 }
 
+fn infer_hir_expr_type(
+    expr: &HirExpr,
+    module_env: Option<&crate::verification::ModuleEnv>,
+) -> Option<String> {
+    match expr {
+        HirExpr::Number(_) => Some("i64".to_string()),
+        HirExpr::Float(_) => Some("f64".to_string()),
+        HirExpr::StringLit(_) => Some("Str".to_string()),
+        HirExpr::BinaryOp(left, op, right) => {
+            let left_ty = infer_hir_expr_type(left, module_env);
+            let right_ty = infer_hir_expr_type(right, module_env);
+            match op {
+                Op::Eq
+                | Op::Neq
+                | Op::Gt
+                | Op::Lt
+                | Op::Ge
+                | Op::Le
+                | Op::And
+                | Op::Or
+                | Op::Implies => Some("bool".to_string()),
+                Op::Add
+                    if left_ty.as_deref() == Some("Str") && right_ty.as_deref() == Some("Str") =>
+                {
+                    Some("Str".to_string())
+                }
+                Op::Add | Op::Sub | Op::Mul | Op::Div => {
+                    if left_ty.as_deref() == Some("f64") || right_ty.as_deref() == Some("f64") {
+                        Some("f64".to_string())
+                    } else {
+                        Some("i64".to_string())
+                    }
+                }
+            }
+        }
+        HirExpr::IfThenElse {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            let then_ty = infer_hir_stmt_type(then_branch, module_env);
+            let else_ty = infer_hir_stmt_type(else_branch, module_env);
+            if then_ty == else_ty {
+                then_ty
+            } else {
+                None
+            }
+        }
+        HirExpr::Call { name, .. } => module_env
+            .and_then(|env| env.get_atom(name))
+            .and_then(|atom| atom.return_type.clone()),
+        HirExpr::VariantInit { enum_name, .. } => Some(enum_name.clone()),
+        _ => None,
+    }
+}
+
+fn infer_hir_stmt_type(
+    stmt: &HirStmt,
+    module_env: Option<&crate::verification::ModuleEnv>,
+) -> Option<String> {
+    match stmt {
+        HirStmt::Let { ty, .. } => ty.clone(),
+        HirStmt::Assign { .. } | HirStmt::ArrayStore { .. } | HirStmt::Acquire { .. } => None,
+        HirStmt::While { .. } => Some("bool".to_string()),
+        HirStmt::Block { tail_expr, .. } => tail_expr
+            .as_ref()
+            .and_then(|expr| infer_hir_expr_type(expr, module_env)),
+        HirStmt::Expr(expr) => infer_hir_expr_type(expr, module_env),
+    }
+}
+
 /// AST の Stmt を HirStmt に変換する
 pub fn lower_stmt(stmt: &Stmt) -> HirStmt {
     lower_stmt_with_env(stmt, None)
@@ -501,11 +568,15 @@ pub fn lower_stmt_with_env(
     module_env: Option<&crate::verification::ModuleEnv>,
 ) -> HirStmt {
     match stmt {
-        Stmt::Let { var, value, .. } => HirStmt::Let {
-            var: var.clone(),
-            ty: None, // TODO: type inference
-            value: Box::new(lower_expr_with_env(value, module_env)),
-        },
+        Stmt::Let { var, value, .. } => {
+            let lowered_value = lower_expr_with_env(value, module_env);
+            let ty = infer_hir_expr_type(&lowered_value, module_env);
+            HirStmt::Let {
+                var: var.clone(),
+                ty,
+                value: Box::new(lowered_value),
+            }
+        }
         Stmt::Assign { var, value, .. } => HirStmt::Assign {
             var: var.clone(),
             value: Box::new(lower_expr_with_env(value, module_env)),

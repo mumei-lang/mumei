@@ -26,9 +26,15 @@ pub(crate) fn substitute_method_calls(
     method_params: &HashMap<String, Vec<String>>,
 ) -> String {
     let mut result = law_expr.to_string();
+    let max_passes = law_expr
+        .chars()
+        .filter(|c| *c == '(')
+        .count()
+        .saturating_add(method_bodies.len())
+        .max(1);
 
-    // 各メソッドについて繰り返し展開（ネスト対応のため複数パス）
-    for _pass in 0..5 {
+    // 各メソッドについて繰り返し展開（ネスト対応のため必要なパス数を式から算出）
+    for _pass in 0..max_passes {
         let mut new_result = String::new();
         let mut i = 0;
         let chars: Vec<char> = result.chars().collect();
@@ -104,6 +110,26 @@ pub(crate) fn substitute_method_calls(
     }
 
     result
+}
+
+pub(crate) fn contains_method_call(source: &str, method_name: &str) -> bool {
+    let chars: Vec<char> = source.chars().collect();
+    let method_chars: Vec<char> = method_name.chars().collect();
+    if method_chars.is_empty() {
+        return false;
+    }
+
+    let mut i = 0;
+    while i + method_chars.len() < chars.len() {
+        if chars[i..i + method_chars.len()] == method_chars[..]
+            && chars[i + method_chars.len()] == '('
+            && (i == 0 || !chars[i - 1].is_alphanumeric() && chars[i - 1] != '_')
+        {
+            return true;
+        }
+        i += 1;
+    }
+    false
 }
 
 /// 単語境界を考慮した文字列置換。
@@ -273,16 +299,10 @@ pub fn verify_impl(
                 if let Some(law_bool) = law_z3.as_bool() {
                     solver.push();
 
-                    // P2-B: trait method の param_constraints を solver に assert する。
-                    // law 検証時にメソッドのパラメータ制約（例: div の第2引数 != 0）を
-                    // 前提条件として注入し、制約下での law 成立を検証する。
-                    // NOTE: push/pop スコープ内で assert することで、制約が
-                    // 他の law 検証に漏れないようにする。
-                    // TODO: 将来的には、law_expr に実際に含まれるメソッドの
-                    // 制約のみを注入するようフィルタリングすべき。
+                    // P2-B: law 式に含まれる trait method の param_constraints のみを
+                    // push/pop スコープ内で前提として注入する。
                     for method in &trait_def.methods {
-                        // Only inject constraints for methods that appear in this law
-                        if !law_expr.contains(&method.name) {
+                        if !contains_method_call(law_expr, &method.name) {
                             continue;
                         }
                         let param_names: Vec<String> = (0..method.param_types.len())
@@ -461,8 +481,7 @@ impl SecurityPolicy {
 
     /// Check if an effect with a specific string parameter satisfies the policy.
     /// Uses constant folding for string literals: directly evaluates starts_with/contains.
-    /// For symbolic (non-literal) parameters, returns Ok (deferred to Z3).
-    // TODO: Migrate to Z3 String Sort when available for full symbolic string verification.
+    /// For symbolic (non-literal) parameters, returns Ok; verification uses Z3 String Sort.
     pub fn check_param_constraint(
         &self,
         effect_name: &str,
@@ -1408,6 +1427,7 @@ pub(crate) fn verify_bmc_resource_safety(
     atom: &Atom,
     body_stmt: &Stmt,
     module_env: &ModuleEnv,
+    global_max_unroll: usize,
 ) -> MumeiResult<()> {
     // body 内に acquire が含まれない場合はスキップ
     let acquired_resources = collect_acquire_resources_stmt(body_stmt);
@@ -1447,8 +1467,13 @@ pub(crate) fn verify_bmc_resource_safety(
         return Ok(()); // ループ外の acquire は通常の検証で十分
     }
 
-    // 展開回数: atom 単位のオーバーライド > グローバルデフォルト
-    let unroll_depth = atom.max_unroll.unwrap_or(BMC_DEFAULT_UNROLL_DEPTH);
+    // 展開回数: atom 単位のオーバーライド > 設定ファイルのグローバル値 > デフォルト
+    let configured_unroll_depth = if global_max_unroll == 0 {
+        BMC_DEFAULT_UNROLL_DEPTH
+    } else {
+        global_max_unroll
+    };
+    let unroll_depth = atom.max_unroll.unwrap_or(configured_unroll_depth);
 
     // BMC: ループを展開して各ステップでリソース階層をチェック
     let mut resource_ctx = ResourceCtx::new();

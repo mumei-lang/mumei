@@ -31,10 +31,6 @@ pub(crate) struct VCtx<'a> {
     /// Flag set to true when Z3 String Sort constraints are added.
     /// When true, the Sort-aware timeout mechanism doubles timeout_ms
     /// to accommodate the higher complexity of string theory solving.
-    /// Currently infrastructure-only: will be activated when Z3 String Sort
-    /// is integrated for effect parameter constraints.
-    /// Z3 String Sort 統合時にここを有効化する
-    #[allow(dead_code)]
     pub(crate) has_string_constraints: Option<&'a std::cell::Cell<bool>>,
     /// Stack of path conditions accumulated while descending into nested
     /// `if … else …` branches. These are *not* asserted on the persistent
@@ -90,7 +86,7 @@ pub(crate) fn array_element_sort(name: &str, vc: &VCtx<'_>) -> ArrayElementSort 
 
 /// Convert an `f64` literal to a Z3 `Real` (exact rational) value.
 ///
-/// TODO(f64-real-sort): `f64` is currently verified under Z3 `Real` sort, not
+/// `f64` is currently verified under Z3 `Real` sort, not
 /// IEEE 754 `Float` sort. The literal `0.1` is interpreted here as the rational
 /// `1/10` — not as the binary64 approximation `0x3FB999999999999A`. Properties
 /// depending on IEEE 754 semantics (rounding, subnormals, NaN/Infinity, the
@@ -109,6 +105,12 @@ pub(crate) fn real_from_f64<'a>(ctx: &'a Context, value: f64) -> Real<'a> {
             .unwrap_or_else(|| Real::from_real(ctx, 0, 1))
     } else {
         Real::from_real_str(ctx, &formatted, "1").unwrap_or_else(|| Real::from_real(ctx, 0, 1))
+    }
+}
+
+fn mark_string_constraints(vc: &VCtx<'_>) {
+    if let Some(cell) = vc.has_string_constraints {
+        cell.set(true);
     }
 }
 
@@ -184,8 +186,8 @@ pub(crate) fn param_z3_value<'a>(
         .into()
     } else {
         match base.as_str() {
-            // TODO(f64-real-sort): `f64` params are encoded as Z3 `Real` (exact
-            // rationals), not IEEE 754. See `real_from_f64` and
+            // `f64` params are encoded as Z3 `Real` (exact rationals), not IEEE 754.
+            // See `real_from_f64` and
             // `docs/ARCHITECTURE.md` § "`f64` Verification Sort".
             "f64" => Real::new_const(ctx, name).into(),
             "Str" => Z3String::new_const(ctx, name).into(),
@@ -677,6 +679,7 @@ pub(crate) fn expr_to_z3<'a>(
                     if let (Some(str_z3), Some(pat_z3)) =
                         (str_val.as_string(), pattern_val.as_string())
                     {
+                        mark_string_constraints(vc);
                         let result: Bool = match name.as_str() {
                             "starts_with" => pat_z3.prefix(&str_z3),
                             "ends_with" => pat_z3.suffix(&str_z3),
@@ -1093,6 +1096,7 @@ pub(crate) fn expr_to_z3<'a>(
 
             // Plan 9-8: String concatenation — if both operands are Z3 String Sort
             if l.get_sort() == z3::Sort::string(ctx) && r.get_sort() == z3::Sort::string(ctx) {
+                mark_string_constraints(vc);
                 let ls = l.as_string().ok_or("Expected string for Str op")?;
                 let rs = r.as_string().ok_or("Expected string for Str op")?;
                 return match op {
