@@ -484,6 +484,7 @@ fn compile_hir_stmt<'a>(
             body,
         } => {
             let header_block = context.append_basic_block(*function, "loop.header");
+            let cond_block = context.append_basic_block(*function, "loop.cond");
             let body_block = context.append_basic_block(*function, "loop.body");
             let after_block = context.append_basic_block(*function, "loop.after");
 
@@ -500,7 +501,22 @@ fn compile_hir_stmt<'a>(
                 phi_nodes.push((name.clone(), phi));
                 variables.insert(name.clone(), phi.as_basic_value());
             }
+            let should_cancel_fn = declare_task_group_should_cancel_current_extern(context, module);
+            let cancel_flag =
+                llvm!(builder.build_call(should_cancel_fn, &[], "task_group_cancel_check",))
+                    .try_as_basic_value()
+                    .left()
+                    .ok_or_else(|| MumeiError::codegen("cancel check returned void".to_string()))?
+                    .into_int_value();
+            let is_cancelled = llvm!(builder.build_int_compare(
+                IntPredicate::NE,
+                cancel_flag,
+                context.i64_type().const_int(0, false),
+                "loop_cancelled",
+            ));
+            llvm!(builder.build_conditional_branch(is_cancelled, after_block, cond_block));
 
+            builder.position_at_end(cond_block);
             let cond_val = compile_hir_expr(
                 context, builder, module, function, cond, variables, array_ptrs, module_env,
             )?
@@ -1216,32 +1232,44 @@ fn compile_hir_expr<'a>(
             children,
             join_semantics,
         } => {
-            // Plan 21 — concurrency runtime: `task_group:all` spawns every
-            // child on its own pthread *first*, then joins them in
-            // declaration order. Splitting spawn from join is what makes
-            // the children actually concurrent — the previous
-            // spawn-join-spawn-join layout was sequential and
-            // deadlocked simple `recv`/`send` rendezvous patterns
-            // because the second task wasn't created until the first
-            // had already returned. `JoinSemantics::Any` (atomic
-            // completion flag, cancel-the-rest semantics) is still a
-            // follow-up; today it lowers identically to `:all`.
-            //
             // Each child is constructed in `hir::lower_stmt` as
             // `HirStmt::Expr(HirExpr::Task { body, … })`. We unwrap
             // that here so `emit_task_spawn_only` operates on the
-            // *task body*, not the surrounding `Task` expression —
-            // otherwise we'd emit two nested pthread spawns per child.
-            if matches!(join_semantics, JoinSemantics::Any) {
-                let parent_label = function.get_name().to_str().unwrap_or("anon");
-                eprintln!(
-                    "[mumei codegen] warning: in atom '{}', `task_group:any` is \
-                     not yet implemented and currently lowers identically to \
-                     `:all` (wait-for-all). First-completion / cancel-the-rest \
-                     semantics are tracked as a Plan 21 follow-up.",
-                    parent_label
-                );
-            }
+            // *task body*, not the surrounding `Task` expression.
+            let any_ctx = if matches!(join_semantics, JoinSemantics::Any) && !children.is_empty() {
+                let i64_type = context.i64_type();
+                let group_id = static_next_task_group_id()
+                    .ok_or_else(|| MumeiError::codegen("task_group id overflow".to_string()))?;
+                let parent_entry = function.get_first_basic_block().ok_or_else(|| {
+                    MumeiError::codegen(String::from("parent function has no entry block"))
+                })?;
+                let saved = builder.get_insert_block();
+                let group_result_ptr =
+                    if let Some(first_inst) = parent_entry.get_first_instruction() {
+                        builder.position_before(&first_inst);
+                        llvm!(builder.build_alloca(i64_type, "task_group_any_result"))
+                    } else {
+                        builder.position_at_end(parent_entry);
+                        llvm!(builder.build_alloca(i64_type, "task_group_any_result"))
+                    };
+                if let Some(block) = saved {
+                    builder.position_at_end(block);
+                }
+                llvm!(builder.build_store(group_result_ptr, i64_type.const_int(0, false)));
+                let (_complete_fn, _flag_fn, reset_fn, _cancel_fn, _yield_fn, _, _, _) =
+                    declare_task_group_any_externs(context, module);
+                llvm!(builder.build_call(
+                    reset_fn,
+                    &[i64_type.const_int(group_id, false).into()],
+                    "task_group_reset_call",
+                ));
+                Some(TaskGroupAnyContext {
+                    group_id,
+                    result_ptr: group_result_ptr,
+                })
+            } else {
+                None
+            };
             let mut pending: Vec<PendingTask<'_>> = Vec::with_capacity(children.len());
             for child in children {
                 let task_body: &HirStmt = match child {
@@ -1249,14 +1277,94 @@ fn compile_hir_expr<'a>(
                     other => other,
                 };
                 pending.push(emit_task_spawn_only(
-                    context, builder, module, function, task_body, variables, module_env,
+                    context, builder, module, function, task_body, variables, module_env, any_ctx,
                 )?);
             }
-            let mut last_val: BasicValueEnum = context.i64_type().const_int(0, false).into();
-            for p in &pending {
-                last_val = emit_task_join_only(context, builder, module, p)?;
+            if let Some(any_ctx) = any_ctx {
+                let i64_type = context.i64_type();
+                let (_complete_fn, flag_fn, _reset_fn, _cancel_fn, yield_fn, group_cancel_fn, _, _) =
+                    declare_task_group_any_externs(context, module);
+                if builder.get_insert_block().is_none() {
+                    return Err(MumeiError::codegen(String::from(
+                        "task_group:any has no insertion block",
+                    )));
+                }
+                let check_block = context.append_basic_block(*function, "task_group_any_check");
+                let wait_block = context.append_basic_block(*function, "task_group_any_wait");
+                let yield_block = context.append_basic_block(*function, "task_group_any_yield");
+                let done_block = context.append_basic_block(*function, "task_group_any_done");
+                llvm!(builder.build_unconditional_branch(check_block));
+
+                builder.position_at_end(check_block);
+                let flag = llvm!(builder.build_call(
+                    flag_fn,
+                    &[i64_type.const_int(any_ctx.group_id, false).into()],
+                    "task_group_any_flag_call",
+                ))
+                .try_as_basic_value()
+                .left()
+                .ok_or_else(|| {
+                    MumeiError::codegen("task_group:any flag returned void".to_string())
+                })?
+                .into_int_value();
+                let is_done = llvm!(builder.build_int_compare(
+                    IntPredicate::NE,
+                    flag,
+                    i64_type.const_int(0, false),
+                    "task_group_any_is_done",
+                ));
+                llvm!(builder.build_conditional_branch(is_done, done_block, wait_block));
+
+                builder.position_at_end(wait_block);
+                let should_cancel_fn =
+                    declare_task_group_should_cancel_current_extern(context, module);
+                let cancel_flag = llvm!(builder.build_call(
+                    should_cancel_fn,
+                    &[],
+                    "task_group_any_parent_cancel_check",
+                ))
+                .try_as_basic_value()
+                .left()
+                .ok_or_else(|| MumeiError::codegen("cancel check returned void".to_string()))?
+                .into_int_value();
+                let is_parent_cancelled = llvm!(builder.build_int_compare(
+                    IntPredicate::NE,
+                    cancel_flag,
+                    i64_type.const_int(0, false),
+                    "task_group_any_parent_cancelled",
+                ));
+                llvm!(builder.build_conditional_branch(
+                    is_parent_cancelled,
+                    done_block,
+                    yield_block
+                ));
+
+                builder.position_at_end(yield_block);
+                llvm!(builder.build_call(yield_fn, &[], "sched_yield_call"));
+                llvm!(builder.build_unconditional_branch(check_block));
+
+                builder.position_at_end(done_block);
+                llvm!(builder.build_call(
+                    group_cancel_fn,
+                    &[i64_type.const_int(any_ctx.group_id, false).into()],
+                    "task_group_cancel_call",
+                ));
+                for p in &pending {
+                    let _ = emit_task_join_only(context, builder, module, p)?;
+                }
+                let result = llvm!(builder.build_load(
+                    i64_type,
+                    any_ctx.result_ptr,
+                    "task_group_any_result"
+                ));
+                Ok(result)
+            } else {
+                let mut last_val: BasicValueEnum = context.i64_type().const_int(0, false).into();
+                for p in &pending {
+                    last_val = emit_task_join_only(context, builder, module, p)?;
+                }
+                Ok(last_val)
             }
-            Ok(last_val)
         }
 
         HirExpr::AtomRef { name } => {
@@ -1819,6 +1927,16 @@ fn next_task_counter(module: &Module<'_>, atom_name: &str) -> u32 {
     (max_seen + 1) as u32
 }
 
+fn static_next_task_group_id() -> Option<u64> {
+    static TASK_GROUP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let next = TASK_GROUP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    if next == u64::MAX {
+        None
+    } else {
+        Some(next)
+    }
+}
+
 /// Plan 21 — concurrency runtime: declare `pthread_create` /
 /// `pthread_join` once per module and return their `FunctionValue`s.
 /// Both have the standard glibc signatures (using `i8*` / `void*` for
@@ -1862,6 +1980,133 @@ fn declare_pthread_externs<'a>(
     (create_fn, join_fn)
 }
 
+fn declare_task_group_any_externs<'a>(
+    context: &'a Context,
+    module: &Module<'a>,
+) -> (
+    FunctionValue<'a>,
+    FunctionValue<'a>,
+    FunctionValue<'a>,
+    FunctionValue<'a>,
+    FunctionValue<'a>,
+    FunctionValue<'a>,
+    FunctionValue<'a>,
+    FunctionValue<'a>,
+) {
+    let i64_type = context.i64_type();
+    let i32_type = context.i32_type();
+    let ptr_type = context.ptr_type(AddressSpace::default());
+    let void_type = context.void_type();
+
+    let complete_fn = module
+        .get_function("__mumei_task_group_complete")
+        .unwrap_or_else(|| {
+            let fn_type =
+                i64_type.fn_type(&[i64_type.into(), i64_type.into(), ptr_type.into()], false);
+            module.add_function(
+                "__mumei_task_group_complete",
+                fn_type,
+                Some(inkwell::module::Linkage::External),
+            )
+        });
+    let flag_fn = module
+        .get_function("__mumei_task_group_any_flag")
+        .unwrap_or_else(|| {
+            let fn_type = i64_type.fn_type(&[i64_type.into()], false);
+            module.add_function(
+                "__mumei_task_group_any_flag",
+                fn_type,
+                Some(inkwell::module::Linkage::External),
+            )
+        });
+    let reset_fn = module
+        .get_function("__mumei_task_group_reset")
+        .unwrap_or_else(|| {
+            let fn_type = void_type.fn_type(&[i64_type.into()], false);
+            module.add_function(
+                "__mumei_task_group_reset",
+                fn_type,
+                Some(inkwell::module::Linkage::External),
+            )
+        });
+    let cancel_fn = module
+        .get_function("__mumei_task_cancel")
+        .unwrap_or_else(|| {
+            let fn_type = void_type.fn_type(&[i64_type.into()], false);
+            module.add_function(
+                "__mumei_task_cancel",
+                fn_type,
+                Some(inkwell::module::Linkage::External),
+            )
+        });
+    let yield_fn = module.get_function("sched_yield").unwrap_or_else(|| {
+        let fn_type = i32_type.fn_type(&[], false);
+        module.add_function(
+            "sched_yield",
+            fn_type,
+            Some(inkwell::module::Linkage::External),
+        )
+    });
+    let group_cancel_fn = module
+        .get_function("__mumei_task_group_cancel")
+        .unwrap_or_else(|| {
+            let fn_type = void_type.fn_type(&[i64_type.into()], false);
+            module.add_function(
+                "__mumei_task_group_cancel",
+                fn_type,
+                Some(inkwell::module::Linkage::External),
+            )
+        });
+    let group_enter_fn = module
+        .get_function("__mumei_task_group_enter")
+        .unwrap_or_else(|| {
+            let fn_type = void_type.fn_type(&[i64_type.into()], false);
+            module.add_function(
+                "__mumei_task_group_enter",
+                fn_type,
+                Some(inkwell::module::Linkage::External),
+            )
+        });
+    let group_leave_fn = module
+        .get_function("__mumei_task_group_leave")
+        .unwrap_or_else(|| {
+            let fn_type = void_type.fn_type(&[], false);
+            module.add_function(
+                "__mumei_task_group_leave",
+                fn_type,
+                Some(inkwell::module::Linkage::External),
+            )
+        });
+
+    (
+        complete_fn,
+        flag_fn,
+        reset_fn,
+        cancel_fn,
+        yield_fn,
+        group_cancel_fn,
+        group_enter_fn,
+        group_leave_fn,
+    )
+}
+
+fn declare_task_group_should_cancel_current_extern<'a>(
+    context: &'a Context,
+    module: &Module<'a>,
+) -> FunctionValue<'a> {
+    let i64_type = context.i64_type();
+    module
+        .get_function("__mumei_task_group_should_cancel_current")
+        .unwrap_or_else(|| {
+            let fn_type = i64_type.fn_type(&[], false);
+            module.add_function(
+                "__mumei_task_group_should_cancel_current",
+                fn_type,
+                Some(inkwell::module::Linkage::External),
+            )
+        })
+}
+
 /// Plan 21 — concurrency runtime: handle for a `task` that has been
 /// spawned but not yet joined. `emit_task_spawn_only` returns one of
 /// these; `emit_task_join_only` consumes it. Splitting spawn from join
@@ -1876,6 +2121,12 @@ struct PendingTask<'a> {
     result_idx: u32,
 }
 
+#[derive(Clone, Copy)]
+struct TaskGroupAnyContext<'a> {
+    group_id: u64,
+    result_ptr: inkwell::values::PointerValue<'a>,
+}
+
 /// Plan 21 — concurrency runtime: emit the `__mumei_task_<atom>_<N>`
 /// wrapper function for `body` and the parent-side `pthread_create`
 /// call, returning a `PendingTask` handle that
@@ -1884,7 +2135,7 @@ struct PendingTask<'a> {
 /// The wrapper has signature `i8* (i8*)`. Its `arg` is a
 /// stack-allocated args struct populated by the parent before
 /// `pthread_create`; the struct layout is
-/// `{ <captured i64s…>, i64 result }`.
+/// `{ <captured i64s…>, [i64 group_id, i64* group_result], i64 result }`.
 ///
 /// Captures are the intersection of the body's free variables and the
 /// parent's currently-live i64 variables. Free variables that exist in
@@ -1904,6 +2155,7 @@ struct PendingTask<'a> {
 /// *entry* block so subsequent basic blocks dominate them — this also
 /// means a `task` inside an `if`/`while` doesn't hide the alloca from
 /// later joins.
+#[allow(clippy::too_many_arguments)]
 fn emit_task_spawn_only<'a>(
     context: &'a Context,
     builder: &Builder<'a>,
@@ -1912,6 +2164,7 @@ fn emit_task_spawn_only<'a>(
     body: &HirStmt,
     variables: &HashMap<String, BasicValueEnum<'a>>,
     module_env: &ModuleEnv,
+    task_group_any: Option<TaskGroupAnyContext<'a>>,
 ) -> MumeiResult<PendingTask<'a>> {
     let i64_type = context.i64_type();
     let ptr_type = context.ptr_type(AddressSpace::default());
@@ -1943,15 +2196,23 @@ fn emit_task_spawn_only<'a>(
         );
     }
 
-    // 2. Build args struct type: { i64 capture_0, i64 capture_1, …, i64 result }.
-    let args_struct_type = context.struct_type(
-        &captures
-            .iter()
-            .map(|_| i64_type.into())
-            .chain(std::iter::once(i64_type.into()))
-            .collect::<Vec<inkwell::types::BasicTypeEnum>>(),
-        false,
-    );
+    // 2. Build args struct type: { i64 capture_0, …, [i64 group, i64* group_result], i64 result }.
+    let mut field_types = captures
+        .iter()
+        .map(|_| i64_type.into())
+        .collect::<Vec<inkwell::types::BasicTypeEnum>>();
+    let group_fields = if task_group_any.is_some() {
+        let group_id_idx = field_types.len() as u32;
+        field_types.push(i64_type.into());
+        let group_result_idx = field_types.len() as u32;
+        field_types.push(ptr_type.into());
+        Some((group_id_idx, group_result_idx))
+    } else {
+        None
+    };
+    let result_idx = field_types.len() as u32;
+    field_types.push(i64_type.into());
+    let args_struct_type = context.struct_type(&field_types, false);
 
     let parent_name = parent_function
         .get_name()
@@ -1986,6 +2247,32 @@ fn emit_task_spawn_only<'a>(
         inner_vars.insert(name.clone(), loaded);
     }
 
+    let task_group_runtime = if let Some((group_id_idx, group_result_idx)) = group_fields {
+        let group_id_ptr = llvm!(builder.build_struct_gep(
+            args_struct_type,
+            arg_ptr,
+            group_id_idx,
+            "task_group_id_ptr",
+        ));
+        let group_id =
+            llvm!(builder.build_load(i64_type, group_id_ptr, "task_group_id")).into_int_value();
+        let group_result_ptr_ptr = llvm!(builder.build_struct_gep(
+            args_struct_type,
+            arg_ptr,
+            group_result_idx,
+            "task_group_result_ptr_ptr",
+        ));
+        let group_result_ptr =
+            llvm!(builder.build_load(ptr_type, group_result_ptr_ptr, "task_group_result_ptr"))
+                .into_pointer_value();
+        let (_complete_fn, _flag_fn, _reset_fn, _cancel_fn, _yield_fn, _, enter_fn, _leave_fn) =
+            declare_task_group_any_externs(context, module);
+        llvm!(builder.build_call(enter_fn, &[group_id.into()], "task_group_enter_call",));
+        Some((group_id, group_result_ptr))
+    } else {
+        None
+    };
+
     // Compile the task body inside the wrapper. Note: `array_ptrs` is empty —
     // arrays in task bodies are not yet captured (follow-up work).
     let empty_array_ptrs: HashMap<String, (BasicValueEnum<'_>, BasicValueEnum<'_>)> =
@@ -2010,10 +2297,20 @@ fn emit_task_spawn_only<'a>(
     };
 
     // Store result into the trailing slot of the args struct.
-    let result_idx = captures.len() as u32;
     let result_ptr =
         llvm!(builder.build_struct_gep(args_struct_type, arg_ptr, result_idx, "task_result_ptr",));
     llvm!(builder.build_store(result_ptr, body_i64));
+
+    if let Some((group_id, group_result_ptr)) = task_group_runtime {
+        let (complete_fn, _flag_fn, _reset_fn, _cancel_fn, _yield_fn, _, _, leave_fn) =
+            declare_task_group_any_externs(context, module);
+        llvm!(builder.build_call(
+            complete_fn,
+            &[group_id.into(), body_i64.into(), group_result_ptr.into()],
+            "task_group_complete_call",
+        ));
+        llvm!(builder.build_call(leave_fn, &[], "task_group_leave_call"));
+    }
 
     let null_ret = ptr_type.const_null();
     llvm!(builder.build_return(Some(&null_ret)));
@@ -2053,6 +2350,23 @@ fn emit_task_spawn_only<'a>(
             &format!("task_arg_{}_ptr", name),
         ));
         llvm!(builder.build_store(field_ptr, val.into_int_value()));
+    }
+    if let (Some(any_ctx), Some((group_id_idx, group_result_idx))) = (task_group_any, group_fields)
+    {
+        let group_id_ptr = llvm!(builder.build_struct_gep(
+            args_struct_type,
+            args_ptr,
+            group_id_idx,
+            "task_arg_group_id_ptr",
+        ));
+        llvm!(builder.build_store(group_id_ptr, i64_type.const_int(any_ctx.group_id, false)));
+        let group_result_ptr_ptr = llvm!(builder.build_struct_gep(
+            args_struct_type,
+            args_ptr,
+            group_result_idx,
+            "task_arg_group_result_ptr_ptr",
+        ));
+        llvm!(builder.build_store(group_result_ptr_ptr, any_ctx.result_ptr));
     }
     // Initialize result slot to 0 so an early failure returns a defined value.
     let result_ptr_parent = llvm!(builder.build_struct_gep(
@@ -2139,6 +2453,7 @@ fn compile_task_spawn<'a>(
         body,
         variables,
         module_env,
+        None,
     )?;
     emit_task_join_only(context, builder, module, &pending)
 }
