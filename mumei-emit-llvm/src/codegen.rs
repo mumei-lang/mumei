@@ -484,6 +484,7 @@ fn compile_hir_stmt<'a>(
             body,
         } => {
             let header_block = context.append_basic_block(*function, "loop.header");
+            let cond_block = context.append_basic_block(*function, "loop.cond");
             let body_block = context.append_basic_block(*function, "loop.body");
             let after_block = context.append_basic_block(*function, "loop.after");
 
@@ -500,7 +501,22 @@ fn compile_hir_stmt<'a>(
                 phi_nodes.push((name.clone(), phi));
                 variables.insert(name.clone(), phi.as_basic_value());
             }
+            let should_cancel_fn = declare_task_group_should_cancel_current_extern(context, module);
+            let cancel_flag =
+                llvm!(builder.build_call(should_cancel_fn, &[], "task_group_cancel_check",))
+                    .try_as_basic_value()
+                    .left()
+                    .ok_or_else(|| MumeiError::codegen("cancel check returned void".to_string()))?
+                    .into_int_value();
+            let is_cancelled = llvm!(builder.build_int_compare(
+                IntPredicate::NE,
+                cancel_flag,
+                context.i64_type().const_int(0, false),
+                "loop_cancelled",
+            ));
+            llvm!(builder.build_conditional_branch(is_cancelled, after_block, cond_block));
 
+            builder.position_at_end(cond_block);
             let cond_val = compile_hir_expr(
                 context, builder, module, function, cond, variables, array_ptrs, module_env,
             )?
@@ -1240,7 +1256,7 @@ fn compile_hir_expr<'a>(
                     builder.position_at_end(block);
                 }
                 llvm!(builder.build_store(group_result_ptr, i64_type.const_int(0, false)));
-                let (_complete_fn, _flag_fn, reset_fn, _cancel_fn, _yield_fn) =
+                let (_complete_fn, _flag_fn, reset_fn, _cancel_fn, _yield_fn, _, _, _) =
                     declare_task_group_any_externs(context, module);
                 llvm!(builder.build_call(
                     reset_fn,
@@ -1266,7 +1282,7 @@ fn compile_hir_expr<'a>(
             }
             if let Some(any_ctx) = any_ctx {
                 let i64_type = context.i64_type();
-                let (_complete_fn, flag_fn, _reset_fn, cancel_fn, yield_fn) =
+                let (_complete_fn, flag_fn, _reset_fn, _cancel_fn, yield_fn, group_cancel_fn, _, _) =
                     declare_task_group_any_externs(context, module);
                 if builder.get_insert_block().is_none() {
                     return Err(MumeiError::codegen(String::from(
@@ -1303,15 +1319,11 @@ fn compile_hir_expr<'a>(
                 llvm!(builder.build_unconditional_branch(check_block));
 
                 builder.position_at_end(done_block);
-                for p in &pending {
-                    let thread_loaded =
-                        llvm!(builder.build_load(i64_type, p.thread_ptr, "task_cancel_thread"));
-                    llvm!(builder.build_call(
-                        cancel_fn,
-                        &[thread_loaded.into()],
-                        "task_cancel_call",
-                    ));
-                }
+                llvm!(builder.build_call(
+                    group_cancel_fn,
+                    &[i64_type.const_int(any_ctx.group_id, false).into()],
+                    "task_group_cancel_call",
+                ));
                 for p in &pending {
                     let _ = emit_task_join_only(context, builder, module, p)?;
                 }
@@ -1952,6 +1964,9 @@ fn declare_task_group_any_externs<'a>(
     FunctionValue<'a>,
     FunctionValue<'a>,
     FunctionValue<'a>,
+    FunctionValue<'a>,
+    FunctionValue<'a>,
+    FunctionValue<'a>,
 ) {
     let i64_type = context.i64_type();
     let i32_type = context.i32_type();
@@ -2007,8 +2022,64 @@ fn declare_task_group_any_externs<'a>(
             Some(inkwell::module::Linkage::External),
         )
     });
+    let group_cancel_fn = module
+        .get_function("__mumei_task_group_cancel")
+        .unwrap_or_else(|| {
+            let fn_type = void_type.fn_type(&[i64_type.into()], false);
+            module.add_function(
+                "__mumei_task_group_cancel",
+                fn_type,
+                Some(inkwell::module::Linkage::External),
+            )
+        });
+    let group_enter_fn = module
+        .get_function("__mumei_task_group_enter")
+        .unwrap_or_else(|| {
+            let fn_type = void_type.fn_type(&[i64_type.into()], false);
+            module.add_function(
+                "__mumei_task_group_enter",
+                fn_type,
+                Some(inkwell::module::Linkage::External),
+            )
+        });
+    let group_leave_fn = module
+        .get_function("__mumei_task_group_leave")
+        .unwrap_or_else(|| {
+            let fn_type = void_type.fn_type(&[], false);
+            module.add_function(
+                "__mumei_task_group_leave",
+                fn_type,
+                Some(inkwell::module::Linkage::External),
+            )
+        });
 
-    (complete_fn, flag_fn, reset_fn, cancel_fn, yield_fn)
+    (
+        complete_fn,
+        flag_fn,
+        reset_fn,
+        cancel_fn,
+        yield_fn,
+        group_cancel_fn,
+        group_enter_fn,
+        group_leave_fn,
+    )
+}
+
+fn declare_task_group_should_cancel_current_extern<'a>(
+    context: &'a Context,
+    module: &Module<'a>,
+) -> FunctionValue<'a> {
+    let i64_type = context.i64_type();
+    module
+        .get_function("__mumei_task_group_should_cancel_current")
+        .unwrap_or_else(|| {
+            let fn_type = i64_type.fn_type(&[], false);
+            module.add_function(
+                "__mumei_task_group_should_cancel_current",
+                fn_type,
+                Some(inkwell::module::Linkage::External),
+            )
+        })
 }
 
 /// Plan 21 — concurrency runtime: handle for a `task` that has been
@@ -2151,6 +2222,32 @@ fn emit_task_spawn_only<'a>(
         inner_vars.insert(name.clone(), loaded);
     }
 
+    let task_group_runtime = if let Some((group_id_idx, group_result_idx)) = group_fields {
+        let group_id_ptr = llvm!(builder.build_struct_gep(
+            args_struct_type,
+            arg_ptr,
+            group_id_idx,
+            "task_group_id_ptr",
+        ));
+        let group_id =
+            llvm!(builder.build_load(i64_type, group_id_ptr, "task_group_id")).into_int_value();
+        let group_result_ptr_ptr = llvm!(builder.build_struct_gep(
+            args_struct_type,
+            arg_ptr,
+            group_result_idx,
+            "task_group_result_ptr_ptr",
+        ));
+        let group_result_ptr =
+            llvm!(builder.build_load(ptr_type, group_result_ptr_ptr, "task_group_result_ptr"))
+                .into_pointer_value();
+        let (_complete_fn, _flag_fn, _reset_fn, _cancel_fn, _yield_fn, _, enter_fn, _leave_fn) =
+            declare_task_group_any_externs(context, module);
+        llvm!(builder.build_call(enter_fn, &[group_id.into()], "task_group_enter_call",));
+        Some((group_id, group_result_ptr))
+    } else {
+        None
+    };
+
     // Compile the task body inside the wrapper. Note: `array_ptrs` is empty —
     // arrays in task bodies are not yet captured (follow-up work).
     let empty_array_ptrs: HashMap<String, (BasicValueEnum<'_>, BasicValueEnum<'_>)> =
@@ -2179,31 +2276,15 @@ fn emit_task_spawn_only<'a>(
         llvm!(builder.build_struct_gep(args_struct_type, arg_ptr, result_idx, "task_result_ptr",));
     llvm!(builder.build_store(result_ptr, body_i64));
 
-    if let Some((group_id_idx, group_result_idx)) = group_fields {
-        let group_id_ptr = llvm!(builder.build_struct_gep(
-            args_struct_type,
-            arg_ptr,
-            group_id_idx,
-            "task_group_id_ptr",
-        ));
-        let group_id =
-            llvm!(builder.build_load(i64_type, group_id_ptr, "task_group_id")).into_int_value();
-        let group_result_ptr_ptr = llvm!(builder.build_struct_gep(
-            args_struct_type,
-            arg_ptr,
-            group_result_idx,
-            "task_group_result_ptr_ptr",
-        ));
-        let group_result_ptr =
-            llvm!(builder.build_load(ptr_type, group_result_ptr_ptr, "task_group_result_ptr"))
-                .into_pointer_value();
-        let (complete_fn, _flag_fn, _reset_fn, _cancel_fn, _yield_fn) =
+    if let Some((group_id, group_result_ptr)) = task_group_runtime {
+        let (complete_fn, _flag_fn, _reset_fn, _cancel_fn, _yield_fn, _, _, leave_fn) =
             declare_task_group_any_externs(context, module);
         llvm!(builder.build_call(
             complete_fn,
             &[group_id.into(), body_i64.into(), group_result_ptr.into()],
             "task_group_complete_call",
         ));
+        llvm!(builder.build_call(leave_fn, &[], "task_group_leave_call"));
     }
 
     let null_ret = ptr_type.const_null();

@@ -2414,14 +2414,22 @@ pub(crate) fn stmt_to_z3<'a>(
                 }
             }
             let parent_done = Bool::new_const(ctx, "__task_group_parent_done");
-            if let Some(solver) = solver_opt {
-                match join_semantics {
-                    JoinSemantics::All => {
+            match join_semantics {
+                JoinSemantics::All => {
+                    if let Some(solver) = solver_opt {
                         for done_var in &child_done_vars {
                             solver.assert(&parent_done.implies(done_var));
                         }
                     }
-                    JoinSemantics::Any => {
+                    if let Some(last) = child_results.last() {
+                        Ok(last.clone())
+                    } else {
+                        Ok(Int::from_i64(ctx, 0).into())
+                    }
+                }
+                JoinSemantics::Any => {
+                    let any_result = Int::new_const(ctx, "__task_group_any_result");
+                    if let Some(solver) = solver_opt {
                         if child_done_vars.is_empty() {
                             solver.assert(&parent_done.not());
                         } else {
@@ -2430,6 +2438,11 @@ pub(crate) fn stmt_to_z3<'a>(
                                 .enumerate()
                                 .map(|(winner_idx, done_var)| {
                                     let mut clauses: Vec<Bool<'_>> = vec![done_var.clone()];
+                                    if let Some(child_result) = child_results[winner_idx].as_int() {
+                                        clauses.push(any_result._eq(&child_result));
+                                    } else {
+                                        clauses.push(any_result._eq(&Int::from_i64(ctx, 0)));
+                                    }
                                     for (child_idx, cancelled_var) in
                                         child_cancelled_vars.iter().enumerate()
                                     {
@@ -2442,15 +2455,11 @@ pub(crate) fn stmt_to_z3<'a>(
                                 .collect::<Vec<_>>();
                             let any_winner =
                                 Bool::or(ctx, &winner_cases.iter().collect::<Vec<_>>());
-                            solver.assert(&parent_done.implies(&any_winner));
+                            solver.assert(&any_winner);
                         }
                     }
+                    Ok(any_result.into())
                 }
-            }
-            if let Some(last) = child_results.last() {
-                Ok(last.clone())
-            } else {
-                Ok(Int::from_i64(ctx, 0).into())
             }
         }
         Stmt::Expr(e, _) => expr_to_z3(vc, e, env, solver_opt),

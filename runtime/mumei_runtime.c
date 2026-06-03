@@ -58,9 +58,11 @@ static pthread_mutex_t g_init_mu = PTHREAD_MUTEX_INITIALIZER;
 
 typedef struct {
     _Atomic int completed;
+    _Atomic int cancelled;
 } mumei_task_group_t;
 
 static mumei_task_group_t g_task_groups[MUMEI_MAX_TASK_GROUPS];
+static _Thread_local int64_t g_current_task_group_id = -1;
 
 static mumei_task_group_t *mumei_task_group_get(int64_t group_id) {
     if (group_id < 0 || group_id >= MUMEI_MAX_TASK_GROUPS) {
@@ -82,6 +84,7 @@ void __mumei_task_cancel(int64_t task_id) {
 void __mumei_task_group_reset(int64_t group_id) {
     mumei_task_group_t *group = mumei_task_group_get(group_id);
     atomic_store_explicit(&group->completed, 0, memory_order_release);
+    atomic_store_explicit(&group->cancelled, 0, memory_order_release);
 }
 
 int64_t __mumei_task_group_any_flag(int64_t group_id) {
@@ -92,6 +95,41 @@ int64_t __mumei_task_group_any_flag(int64_t group_id) {
 void __mumei_task_group_set_completed(int64_t group_id) {
     mumei_task_group_t *group = mumei_task_group_get(group_id);
     atomic_store_explicit(&group->completed, 2, memory_order_release);
+}
+
+void __mumei_task_group_enter(int64_t group_id) {
+    (void)mumei_task_group_get(group_id);
+    g_current_task_group_id = group_id;
+}
+
+void __mumei_task_group_leave(void) {
+    g_current_task_group_id = -1;
+}
+
+int64_t __mumei_task_group_should_cancel(int64_t group_id) {
+    mumei_task_group_t *group = mumei_task_group_get(group_id);
+    return atomic_load_explicit(&group->cancelled, memory_order_acquire) != 0 ? 1 : 0;
+}
+
+int64_t __mumei_task_group_should_cancel_current(void) {
+    if (g_current_task_group_id < 0) {
+        return 0;
+    }
+    return __mumei_task_group_should_cancel(g_current_task_group_id);
+}
+
+void __mumei_task_group_cancel(int64_t group_id) {
+    mumei_task_group_t *group = mumei_task_group_get(group_id);
+    atomic_store_explicit(&group->cancelled, 1, memory_order_release);
+    for (int64_t i = 0; i < MUMEI_MAX_CHANNELS; i++) {
+        mumei_chan_t *ch = &g_channels[i];
+        if (!atomic_load_explicit(&ch->initialized, memory_order_acquire)) {
+            continue;
+        }
+        pthread_mutex_lock(&ch->mu);
+        pthread_cond_broadcast(&ch->cv);
+        pthread_mutex_unlock(&ch->mu);
+    }
 }
 
 int64_t __mumei_task_group_complete(int64_t group_id, int64_t result, int64_t *result_ptr) {
@@ -143,6 +181,7 @@ static mumei_chan_t *mumei_chan_get(int64_t chan_id) {
 
 void __mumei_chan_send(int64_t chan_id, int64_t value) {
     mumei_chan_t *ch = mumei_chan_get(chan_id);
+    int cancelled = 0;
     pthread_mutex_lock(&ch->mu);
     pthread_cleanup_push(mumei_unlock_mutex_cleanup, &ch->mu);
     /*
@@ -152,25 +191,44 @@ void __mumei_chan_send(int64_t chan_id, int64_t value) {
      * channel) and avoids unbounded buffering inside the runtime.
      */
     while (ch->ready) {
+        if (__mumei_task_group_should_cancel_current()) {
+            cancelled = 1;
+            break;
+        }
         pthread_cond_wait(&ch->cv, &ch->mu);
     }
-    ch->value = value;
-    ch->ready = 1;
-    pthread_cond_broadcast(&ch->cv);
+    if (!cancelled && __mumei_task_group_should_cancel_current()) {
+        cancelled = 1;
+    }
+    if (!cancelled) {
+        ch->value = value;
+        ch->ready = 1;
+        pthread_cond_broadcast(&ch->cv);
+    }
     pthread_cleanup_pop(1);
 }
 
 int64_t __mumei_chan_recv(int64_t chan_id) {
     mumei_chan_t *ch = mumei_chan_get(chan_id);
     int64_t v = 0;
+    int cancelled = 0;
     pthread_mutex_lock(&ch->mu);
     pthread_cleanup_push(mumei_unlock_mutex_cleanup, &ch->mu);
     while (!ch->ready) {
+        if (__mumei_task_group_should_cancel_current()) {
+            cancelled = 1;
+            break;
+        }
         pthread_cond_wait(&ch->cv, &ch->mu);
     }
-    v = ch->value;
-    ch->ready = 0;
-    pthread_cond_broadcast(&ch->cv);
+    if (!cancelled && __mumei_task_group_should_cancel_current()) {
+        cancelled = 1;
+    }
+    if (!cancelled) {
+        v = ch->value;
+        ch->ready = 0;
+        pthread_cond_broadcast(&ch->cv);
+    }
     pthread_cleanup_pop(1);
     return v;
 }
