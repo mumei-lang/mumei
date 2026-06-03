@@ -41,6 +41,46 @@ Expected assertions:
 - stdout includes `Linking` and `Running`.
 - stderr does not include `Codegen failed`, `Linking failed`, or `undefined reference`.
 
+## Task Group Cancellation Flow
+
+Use this when changes touch `task_group:any`, task cancellation, loop checkpoints, channel wakeups, or runtime task-group state. A nested group fixture is more adversarial than a flat blocked sibling: if cancellation only checks the innermost group, the command times out instead of returning the winning outer child value.
+
+```bash
+cd /home/ubuntu/repos/mumei
+fixture_dir="/home/ubuntu/mumei-task-group-any-artifacts"
+mkdir -p "$fixture_dir"
+fixture="$fixture_dir/nested_any_cancel.mm"
+cat > "$fixture" <<'MM'
+trusted atom main()
+requires: true;
+ensures: true;
+body: {
+    task_group:any {
+        task { 7 };
+        task {
+            task_group:any {
+                task { recv(0) }
+            }
+        }
+    }
+};
+MM
+LLVM_SYS_170_PREFIX=/usr/lib/llvm-17 LIBCLANG_PATH=/usr/lib/x86_64-linux-gnu \
+  timeout 5s target/debug/mumei run "$fixture" \
+  > "$fixture_dir/nested_any_cancel.out" 2> "$fixture_dir/nested_any_cancel.err"
+status=$?
+printf 'status=%s\nfixture=%s\n' "$status" "$fixture"
+cat "$fixture_dir/nested_any_cancel.out"
+cat "$fixture_dir/nested_any_cancel.err"
+```
+
+Expected assertions:
+- Command status is exactly `7`, proving the first completed outer child wins.
+- Command status is not `124`; `124` means GNU `timeout` killed a hung nested cancellation flow.
+- stdout includes `Mumei Run: verify → codegen → link → execute`.
+- stdout includes `Linking 1 atom(s) to native binary` and `Running`.
+- stderr does not include `Codegen failed`, `Linking failed`, or `undefined reference`.
+
 ## Persistent Binary Flow
 
 Use this when validating `--emit binary -o` behavior. `mumei run --emit binary -o <path>` writes the requested binary, then executes it and exits with the child binary's status. Do not expect status `0` unless the Mumei `main` returns `0`.
