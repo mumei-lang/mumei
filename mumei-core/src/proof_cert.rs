@@ -342,6 +342,8 @@ pub struct EscalationBundleSummary {
     pub candidate_count: usize,
     pub by_reason: HashMap<String, usize>,
     pub by_logic_fragment: HashMap<String, usize>,
+    #[serde(default)]
+    pub by_z3_result_class: HashMap<String, usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -640,6 +642,10 @@ pub fn generate_escalation_bundle(cert: &ProofCertificate) -> EscalationBundle {
         *summary
             .by_reason
             .entry(candidate.escalation_reason.clone())
+            .or_insert(0) += 1;
+        *summary
+            .by_z3_result_class
+            .entry(candidate.z3_result_class.clone())
             .or_insert(0) += 1;
         for tag in &candidate.logic_fragment_tags {
             *summary.by_logic_fragment.entry(tag.clone()).or_insert(0) += 1;
