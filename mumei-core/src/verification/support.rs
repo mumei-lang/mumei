@@ -26,9 +26,15 @@ pub(crate) fn substitute_method_calls(
     method_params: &HashMap<String, Vec<String>>,
 ) -> String {
     let mut result = law_expr.to_string();
+    let max_passes = law_expr
+        .chars()
+        .filter(|c| *c == '(')
+        .count()
+        .saturating_add(method_bodies.len())
+        .max(1);
 
-    // 各メソッドについて繰り返し展開（ネスト対応のため複数パス）
-    for _pass in 0..5 {
+    // 各メソッドについて繰り返し展開（ネスト対応のため必要なパス数を式から算出）
+    for _pass in 0..max_passes {
         let mut new_result = String::new();
         let mut i = 0;
         let chars: Vec<char> = result.chars().collect();
@@ -43,7 +49,7 @@ pub(crate) fn substitute_method_calls(
                     && chars[i..i + mn_chars.len()] == mn_chars[..]
                     && chars[i + mn_chars.len()] == '('
                     // メソッド名の直前が英数字でないことを確認（部分一致を防ぐ）
-                    && (i == 0 || !chars[i - 1].is_alphanumeric())
+                    && (i == 0 || !is_identifier_char(chars[i - 1]))
                 {
                     // 引数リストを抽出
                     let args_start = i + mn_chars.len() + 1;
@@ -72,12 +78,9 @@ pub(crate) fn substitute_method_calls(
                     if let Some(param_names) = method_params.get(method_name) {
                         for (j, param_name) in param_names.iter().enumerate() {
                             if let Some(arg) = args.get(j) {
+                                let replacement = parenthesized_arg(arg);
                                 // 単語境界を考慮した置換（部分一致を防ぐ）
-                                expanded = replace_word(
-                                    &expanded,
-                                    param_name,
-                                    &format!("({})", arg.trim()),
-                                );
+                                expanded = replace_word(&expanded, param_name, &replacement);
                             }
                         }
                     }
@@ -106,6 +109,63 @@ pub(crate) fn substitute_method_calls(
     result
 }
 
+pub(crate) fn contains_method_call(source: &str, method_name: &str) -> bool {
+    let chars: Vec<char> = source.chars().collect();
+    let method_chars: Vec<char> = method_name.chars().collect();
+    if method_chars.is_empty() {
+        return false;
+    }
+
+    let mut i = 0;
+    while i + method_chars.len() < chars.len() {
+        if chars[i..i + method_chars.len()] == method_chars[..]
+            && chars[i + method_chars.len()] == '('
+            && (i == 0 || !is_identifier_char(chars[i - 1]))
+        {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+fn is_identifier_char(ch: char) -> bool {
+    ch.is_alphanumeric() || ch == '_'
+}
+
+fn parenthesized_arg(arg: &str) -> String {
+    let trimmed = arg.trim();
+    if has_single_outer_parens(trimmed) {
+        trimmed.to_string()
+    } else {
+        format!("({trimmed})")
+    }
+}
+
+fn has_single_outer_parens(expr: &str) -> bool {
+    let chars: Vec<char> = expr.chars().collect();
+    if chars.len() < 2 || chars.first() != Some(&'(') || chars.last() != Some(&')') {
+        return false;
+    }
+
+    let mut depth = 0isize;
+    for (idx, ch) in chars.iter().enumerate() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            _ => {}
+        }
+        if depth == 0 && idx + 1 < chars.len() {
+            return false;
+        }
+        if depth < 0 {
+            return false;
+        }
+    }
+
+    depth == 0
+}
+
 /// 単語境界を考慮した文字列置換。
 /// "a" を置換する際に "a" 単体のみマッチし、"add" 内の "a" にはマッチしない。
 pub(crate) fn replace_word(source: &str, word: &str, replacement: &str) -> String {
@@ -117,10 +177,9 @@ pub(crate) fn replace_word(source: &str, word: &str, replacement: &str) -> Strin
     while i < chars.len() {
         if i + word_chars.len() <= chars.len()
             && chars[i..i + word_chars.len()] == word_chars[..]
-            && (i == 0 || !chars[i - 1].is_alphanumeric() && chars[i - 1] != '_')
+            && (i == 0 || !is_identifier_char(chars[i - 1]))
             && (i + word_chars.len() >= chars.len()
-                || !chars[i + word_chars.len()].is_alphanumeric()
-                    && chars[i + word_chars.len()] != '_')
+                || !is_identifier_char(chars[i + word_chars.len()]))
         {
             result.push_str(replacement);
             i += word_chars.len();
@@ -273,16 +332,10 @@ pub fn verify_impl(
                 if let Some(law_bool) = law_z3.as_bool() {
                     solver.push();
 
-                    // P2-B: trait method の param_constraints を solver に assert する。
-                    // law 検証時にメソッドのパラメータ制約（例: div の第2引数 != 0）を
-                    // 前提条件として注入し、制約下での law 成立を検証する。
-                    // NOTE: push/pop スコープ内で assert することで、制約が
-                    // 他の law 検証に漏れないようにする。
-                    // TODO: 将来的には、law_expr に実際に含まれるメソッドの
-                    // 制約のみを注入するようフィルタリングすべき。
+                    // P2-B: law 式に含まれる trait method の param_constraints のみを
+                    // push/pop スコープ内で前提として注入する。
                     for method in &trait_def.methods {
-                        // Only inject constraints for methods that appear in this law
-                        if !law_expr.contains(&method.name) {
+                        if !contains_method_call(law_expr, &method.name) {
                             continue;
                         }
                         let param_names: Vec<String> = (0..method.param_types.len())
@@ -461,8 +514,7 @@ impl SecurityPolicy {
 
     /// Check if an effect with a specific string parameter satisfies the policy.
     /// Uses constant folding for string literals: directly evaluates starts_with/contains.
-    /// For symbolic (non-literal) parameters, returns Ok (deferred to Z3).
-    // TODO: Migrate to Z3 String Sort when available for full symbolic string verification.
+    /// For symbolic (non-literal) parameters, returns Ok; verification uses Z3 String Sort.
     pub fn check_param_constraint(
         &self,
         effect_name: &str,
@@ -1408,6 +1460,7 @@ pub(crate) fn verify_bmc_resource_safety(
     atom: &Atom,
     body_stmt: &Stmt,
     module_env: &ModuleEnv,
+    global_max_unroll: usize,
 ) -> MumeiResult<()> {
     // body 内に acquire が含まれない場合はスキップ
     let acquired_resources = collect_acquire_resources_stmt(body_stmt);
@@ -1447,8 +1500,13 @@ pub(crate) fn verify_bmc_resource_safety(
         return Ok(()); // ループ外の acquire は通常の検証で十分
     }
 
-    // 展開回数: atom 単位のオーバーライド > グローバルデフォルト
-    let unroll_depth = atom.max_unroll.unwrap_or(BMC_DEFAULT_UNROLL_DEPTH);
+    // 展開回数: atom 単位のオーバーライド > 設定ファイルのグローバル値 > デフォルト
+    let configured_unroll_depth = if global_max_unroll == 0 {
+        BMC_DEFAULT_UNROLL_DEPTH
+    } else {
+        global_max_unroll
+    };
+    let unroll_depth = atom.max_unroll.unwrap_or(configured_unroll_depth);
 
     // BMC: ループを展開して各ステップでリソース階層をチェック
     let mut resource_ctx = ResourceCtx::new();

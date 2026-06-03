@@ -18,7 +18,7 @@ pub fn verify_with_config(
     output_dir: &Path,
     module_env: &ModuleEnv,
     timeout_ms: u64,
-    _global_max_unroll: usize,
+    global_max_unroll: usize,
 ) -> MumeiResult<()> {
     verify_inner(
         hir_atom,
@@ -26,6 +26,7 @@ pub fn verify_with_config(
         module_env,
         VerifyInnerOptions {
             timeout_ms,
+            global_max_unroll,
             enable_spurious_detection: true,
             enable_vacuity_check: false,
             property_based_config: None,
@@ -47,6 +48,7 @@ pub fn verify_with_verification_config(
         module_env,
         VerifyInnerOptions {
             timeout_ms: config.timeout_ms,
+            global_max_unroll: config.global_max_unroll,
             enable_spurious_detection: config.enable_spurious_detection,
             enable_vacuity_check: config.enable_vacuity_check,
             property_based_config: config.property_based_test.as_ref(),
@@ -84,6 +86,7 @@ pub fn verify(hir_atom: &HirAtom, output_dir: &Path, module_env: &ModuleEnv) -> 
         module_env,
         VerifyInnerOptions {
             timeout_ms: 10000,
+            global_max_unroll: BMC_DEFAULT_UNROLL_DEPTH,
             enable_spurious_detection: true,
             enable_vacuity_check: false,
             property_based_config: None,
@@ -95,6 +98,7 @@ pub fn verify(hir_atom: &HirAtom, output_dir: &Path, module_env: &ModuleEnv) -> 
 
 pub(crate) struct VerifyInnerOptions<'a> {
     timeout_ms: u64,
+    global_max_unroll: usize,
     enable_spurious_detection: bool,
     enable_vacuity_check: bool,
     property_based_config: Option<&'a PropertyBasedTestConfig>,
@@ -329,6 +333,7 @@ pub(crate) fn verify_inner(
 ) -> MumeiResult<()> {
     let VerifyInnerOptions {
         timeout_ms,
+        global_max_unroll,
         enable_spurious_detection,
         enable_vacuity_check,
         property_based_config,
@@ -502,7 +507,7 @@ pub(crate) fn verify_inner(
 
     // Phase 1b: 有界モデル検査（ループ内 acquire パターン）
     let phase_start = std::time::Instant::now();
-    verify_bmc_resource_safety(atom, &hir_atom.body_stmt, module_env)?;
+    verify_bmc_resource_safety(atom, &hir_atom.body_stmt, module_env, global_max_unroll)?;
     metrics.record_phase("Phase 1b: BMC resource safety", phase_start.elapsed());
 
     // Phase 1c: 再帰的 async 呼び出しの深度検証
@@ -984,6 +989,16 @@ pub(crate) fn verify_inner(
     {
         has_string_constraints_cell_pre.set(true);
     }
+    fn text_has_string_constraint(expr: &str) -> bool {
+        ["starts_with(", "ends_with(", "contains(", "not_contains("]
+            .iter()
+            .any(|needle| expr.contains(needle))
+    }
+    if !has_string_constraints_cell_pre.get()
+        && (text_has_string_constraint(&atom.requires) || text_has_string_constraint(&atom.ensures))
+    {
+        has_string_constraints_cell_pre.set(true);
+    }
     // Detect array-heavy forall constraints (forall over `arr[...]` accesses).
     // These benefit from a longer timeout and model-based quantifier
     // instantiation, mirroring the way String-Sort constraints already
@@ -994,19 +1009,13 @@ pub(crate) fn verify_inner(
         // common `arr[i]`, `data[k]` shapes used in the std lib.
         q.condition.contains('[')
     });
-    // TODO(timeout-multiplier): When an atom carries BOTH string constraints
-    // and `forall + arr[i]` quantifiers, the string-constraint branch (2x)
-    // currently wins over the array-forall branch (3x), giving a *shorter*
-    // effective timeout than the forall-only case. No real atom hits this
-    // today, but if one does, switch to `max(string_mult, array_mult)` (or
-    // a multiplicative composition) — see PR #174 review thread.
-    let effective_timeout = if has_string_constraints_cell_pre.get() {
-        timeout_ms * 2
-    } else if has_array_forall {
-        timeout_ms * 3
-    } else {
-        timeout_ms
+    let timeout_multiplier = match (has_string_constraints_cell_pre.get(), has_array_forall) {
+        (true, true) => 3,
+        (true, false) => 2,
+        (false, true) => 3,
+        (false, false) => 1,
     };
+    let effective_timeout = timeout_ms * timeout_multiplier;
 
     metrics.timeout_ms = effective_timeout;
     metrics.solver_config_fingerprint = orchestration_solver_config_fingerprint_from_env()

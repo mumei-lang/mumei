@@ -423,6 +423,9 @@ enum Command {
         /// Publish only the proof cache (no source code)
         #[arg(long)]
         proof_only: bool,
+        /// Accept mumei-lean-emitted certificates (`lean_verified`) as proven.
+        #[arg(long)]
+        allow_lean_verified: bool,
     },
     /// List available packages in the local registry
     List,
@@ -463,14 +466,6 @@ enum Command {
         #[arg(long)]
         allow_lean_verified: bool,
     },
-    // TODO(follow-up): `Run` and `Publish` do not yet accept
-    // `--allow-lean-verified`. They currently call `load_and_prepare` which
-    // hard-codes `allow_lean_verified=false`, so projects depending on
-    // mumei-lean-verified atoms will see those atoms as `"unproven"` during
-    // import resolution under `mumei run` / `mumei publish`. Add the flag to
-    // both subcommands and thread it through to
-    // `load_and_prepare_with_full_options` once the cross-project Proof
-    // Certificate Chain E2E test (PR 5) lands.
     /// P7-B: Build and run a mumei program as a native binary
     Run {
         /// Input .mm file
@@ -481,6 +476,9 @@ enum Command {
         /// Output executable path (default: temporary binary)
         #[arg(short, long)]
         output: Option<String>,
+        /// Accept mumei-lean-emitted certificates (`lean_verified`) as proven.
+        #[arg(long)]
+        allow_lean_verified: bool,
         /// Arguments to pass to the compiled program
         #[arg(trailing_var_arg = true)]
         args: Vec<String>,
@@ -642,8 +640,11 @@ fn main() {
         Some(Command::Add { dep, version }) => {
             cmd_add(&dep, version.as_deref());
         }
-        Some(Command::Publish { proof_only }) => {
-            cmd_publish(proof_only);
+        Some(Command::Publish {
+            proof_only,
+            allow_lean_verified,
+        }) => {
+            cmd_publish(proof_only, allow_lean_verified);
         }
         Some(Command::List) => {
             cmd_list();
@@ -678,9 +679,10 @@ fn main() {
             input,
             emit,
             output,
+            allow_lean_verified,
             args,
         }) => {
-            cmd_run(&input, &emit, output.as_deref(), &args);
+            cmd_run(&input, &emit, output.as_deref(), allow_lean_verified, &args);
         }
         None => {
             // 後方互換: `mumei input.mm -o dist/katana` → build として実行
@@ -3925,7 +3927,13 @@ fn cmd_build(
 // P7-B: mumei run — build and execute a native binary
 // =============================================================================
 
-fn cmd_run(input: &str, emit: &str, output: Option<&str>, args: &[String]) {
+fn cmd_run(
+    input: &str,
+    emit: &str,
+    output: Option<&str>,
+    allow_lean_verified: bool,
+    args: &[String],
+) {
     use std::process::Command;
 
     let tmp_dir = std::env::temp_dir().join(format!("mumei_run_{}", std::process::id()));
@@ -3953,7 +3961,8 @@ fn cmd_run(input: &str, emit: &str, output: Option<&str>, args: &[String]) {
     check_z3_available();
     println!("🗡️  Mumei Run: verify → codegen → link → execute");
 
-    let (items, mut module_env, _imports, _source) = load_and_prepare(input);
+    let (items, mut module_env, _imports, _source) =
+        load_and_prepare_with_full_options(input, false, allow_lean_verified);
     let extern_blocks = collect_extern_blocks(&module_env);
 
     // Check that a main atom exists and takes no parameters
@@ -4367,7 +4376,7 @@ fn cmd_add(dep: &str, version: Option<&str>) {
 // mumei publish — publish to local registry
 // =============================================================================
 
-fn cmd_publish(proof_only: bool) {
+fn cmd_publish(proof_only: bool, allow_lean_verified: bool) {
     println!("📦 Mumei publish: publishing to local registry...");
 
     // 1. mumei.toml を読み込み
@@ -4401,7 +4410,8 @@ fn cmd_publish(proof_only: bool) {
 
     // 3. 全 atom を Z3 で検証（未検証パッケージの公開を禁止）
     println!("  🔍 Verifying all atoms before publish...");
-    let (items, mut module_env, _imports, source) = load_and_prepare(entry);
+    let (items, mut module_env, _imports, source) =
+        load_and_prepare_with_full_options(entry, false, allow_lean_verified);
 
     let output_dir = Path::new(".");
     let mut atom_count = 0;

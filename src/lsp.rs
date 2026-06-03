@@ -359,12 +359,10 @@ fn diagnose(uri: &str, source: &str) -> Vec<serde_json::Value> {
 /// エラーメッセージから関連する atom の Span 情報を検索し、行・列を返す。
 /// マッチしない場合は (0, 0) にフォールバックする。
 fn find_error_position(items: &[parser::Item], error_msg: &str) -> (usize, usize) {
-    // エラーメッセージに atom 名が含まれている場合、その atom の Span を使用
-    // TODO: contains() による部分文字列マッチは短い atom 名で誤マッチする可能性がある。
-    //       将来的には ErrorDetail.span を直接使用するか、ワード境界チェックを追加すべき。
+    // エラーメッセージに atom 名が独立した識別子として含まれている場合、その atom の Span を使用
     for item in items {
         if let parser::Item::Atom(atom) = item {
-            if error_msg.contains(&atom.name) && atom.span.line > 0 {
+            if error_mentions_atom(error_msg, &atom.name) && atom.span.line > 0 {
                 // LSP は 0-indexed なので 1-indexed の Span から変換
                 return (
                     atom.span.line.saturating_sub(1),
@@ -374,6 +372,30 @@ fn find_error_position(items: &[parser::Item], error_msg: &str) -> (usize, usize
         }
     }
     (0, 0)
+}
+
+fn error_mentions_atom(error_msg: &str, atom_name: &str) -> bool {
+    let msg: Vec<char> = error_msg.chars().collect();
+    let atom: Vec<char> = atom_name.chars().collect();
+    if atom.is_empty() {
+        return false;
+    }
+
+    let mut i = 0;
+    while i + atom.len() <= msg.len() {
+        if msg[i..i + atom.len()] == atom[..]
+            && (i == 0 || !is_ident_char(msg[i - 1]))
+            && (i + atom.len() == msg.len() || !is_ident_char(msg[i + atom.len()]))
+        {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+fn is_ident_char(ch: char) -> bool {
+    ch.is_alphanumeric() || ch == '_'
 }
 
 fn uri_to_path(uri: &str) -> Option<std::path::PathBuf> {
@@ -1205,6 +1227,19 @@ atom inc(n: i64)
             .find(|i| i.get("label").and_then(|l| l.as_str()) == Some("inc"))
             .unwrap();
         assert_eq!(inc_item.get("kind").and_then(|k| k.as_u64()), Some(3));
+    }
+
+    #[test]
+    fn test_error_mentions_atom_uses_identifier_boundaries() {
+        assert!(error_mentions_atom("Verification failed for 'add'", "add"));
+        assert!(!error_mentions_atom(
+            "Verification failed for 'safe_add'",
+            "add"
+        ));
+        assert!(!error_mentions_atom(
+            "Verification failed for 'adder'",
+            "add"
+        ));
     }
 
     #[test]
