@@ -34,6 +34,7 @@
 #include <stdlib.h>
 
 #define MUMEI_MAX_CHANNELS 256
+#define MUMEI_MAX_TASK_GROUPS 1024
 
 typedef struct {
     pthread_mutex_t mu;
@@ -54,6 +55,62 @@ typedef struct {
 
 static mumei_chan_t g_channels[MUMEI_MAX_CHANNELS];
 static pthread_mutex_t g_init_mu = PTHREAD_MUTEX_INITIALIZER;
+
+typedef struct {
+    _Atomic int completed;
+} mumei_task_group_t;
+
+static mumei_task_group_t g_task_groups[MUMEI_MAX_TASK_GROUPS];
+
+static mumei_task_group_t *mumei_task_group_get(int64_t group_id) {
+    if (group_id < 0 || group_id >= MUMEI_MAX_TASK_GROUPS) {
+        fprintf(stderr,
+                "[mumei runtime] fatal: task_group id %lld out of range [0, %d)\n",
+                (long long)group_id, MUMEI_MAX_TASK_GROUPS);
+        abort();
+    }
+    return &g_task_groups[group_id];
+}
+
+void __mumei_task_cancel(int64_t task_id) {
+    if (task_id == 0) {
+        return;
+    }
+    (void)pthread_cancel((pthread_t)(uintptr_t)task_id);
+}
+
+void __mumei_task_group_reset(int64_t group_id) {
+    mumei_task_group_t *group = mumei_task_group_get(group_id);
+    atomic_store_explicit(&group->completed, 0, memory_order_release);
+}
+
+int64_t __mumei_task_group_any_flag(int64_t group_id) {
+    mumei_task_group_t *group = mumei_task_group_get(group_id);
+    return atomic_load_explicit(&group->completed, memory_order_acquire) == 2 ? 1 : 0;
+}
+
+void __mumei_task_group_set_completed(int64_t group_id) {
+    mumei_task_group_t *group = mumei_task_group_get(group_id);
+    atomic_store_explicit(&group->completed, 2, memory_order_release);
+}
+
+int64_t __mumei_task_group_complete(int64_t group_id, int64_t result, int64_t *result_ptr) {
+    mumei_task_group_t *group = mumei_task_group_get(group_id);
+    int expected = 0;
+    if (atomic_compare_exchange_strong_explicit(
+            &group->completed, &expected, 1, memory_order_acq_rel, memory_order_acquire)) {
+        if (result_ptr != NULL) {
+            *result_ptr = result;
+        }
+        atomic_store_explicit(&group->completed, 2, memory_order_release);
+        return 1;
+    }
+    return 0;
+}
+
+static void mumei_unlock_mutex_cleanup(void *arg) {
+    pthread_mutex_unlock((pthread_mutex_t *)arg);
+}
 
 static mumei_chan_t *mumei_chan_get(int64_t chan_id) {
     /*
@@ -87,6 +144,7 @@ static mumei_chan_t *mumei_chan_get(int64_t chan_id) {
 void __mumei_chan_send(int64_t chan_id, int64_t value) {
     mumei_chan_t *ch = mumei_chan_get(chan_id);
     pthread_mutex_lock(&ch->mu);
+    pthread_cleanup_push(mumei_unlock_mutex_cleanup, &ch->mu);
     /*
      * Single-slot rendezvous semantics: if a value is already pending,
      * wait for the receiver to drain it. This matches the behaviour
@@ -99,19 +157,21 @@ void __mumei_chan_send(int64_t chan_id, int64_t value) {
     ch->value = value;
     ch->ready = 1;
     pthread_cond_broadcast(&ch->cv);
-    pthread_mutex_unlock(&ch->mu);
+    pthread_cleanup_pop(1);
 }
 
 int64_t __mumei_chan_recv(int64_t chan_id) {
     mumei_chan_t *ch = mumei_chan_get(chan_id);
+    int64_t v = 0;
     pthread_mutex_lock(&ch->mu);
+    pthread_cleanup_push(mumei_unlock_mutex_cleanup, &ch->mu);
     while (!ch->ready) {
         pthread_cond_wait(&ch->cv, &ch->mu);
     }
-    int64_t v = ch->value;
+    v = ch->value;
     ch->ready = 0;
     pthread_cond_broadcast(&ch->cv);
-    pthread_mutex_unlock(&ch->mu);
+    pthread_cleanup_pop(1);
     return v;
 }
 

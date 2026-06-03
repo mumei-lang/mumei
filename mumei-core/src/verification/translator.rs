@@ -2381,15 +2381,37 @@ pub(crate) fn stmt_to_z3<'a>(
         } => {
             let mut child_results = Vec::new();
             let mut child_done_vars = Vec::new();
+            let mut child_cancelled_vars = Vec::new();
             for (i, child) in children.iter().enumerate() {
                 let child_id = format!("__task_group_child_{}", i);
                 let child_alive = Bool::new_const(ctx, format!("{}_alive", child_id).as_str());
-                env.insert(format!("{}_alive", child_id), child_alive.into());
+                env.insert(format!("{}_alive", child_id), child_alive.clone().into());
                 let result = stmt_to_z3(vc, child, env, solver_opt)?;
                 child_results.push(result);
                 let done_var = Bool::new_const(ctx, format!("{}_done", child_id).as_str());
                 child_done_vars.push(done_var.clone());
                 env.insert(format!("{}_done", child_id), done_var.into());
+                let cancelled_var =
+                    Bool::new_const(ctx, format!("{}_cancelled", child_id).as_str());
+                child_cancelled_vars.push(cancelled_var.clone());
+                env.insert(
+                    format!("{}_cancelled", child_id),
+                    cancelled_var.clone().into(),
+                );
+                if let Some(solver) = solver_opt {
+                    solver.assert(&cancelled_var.implies(&child_alive.not()));
+                    for resource in collect_acquire_resources_stmt(child) {
+                        let released_var = Bool::new_const(
+                            ctx,
+                            format!("{}_resource_{}_released", child_id, resource).as_str(),
+                        );
+                        env.insert(
+                            format!("{}_resource_{}_released", child_id, resource),
+                            released_var.clone().into(),
+                        );
+                        solver.assert(&cancelled_var.implies(&released_var));
+                    }
+                }
             }
             let parent_done = Bool::new_const(ctx, "__task_group_parent_done");
             if let Some(solver) = solver_opt {
@@ -2400,10 +2422,27 @@ pub(crate) fn stmt_to_z3<'a>(
                         }
                     }
                     JoinSemantics::Any => {
-                        if !child_done_vars.is_empty() {
-                            let any_done =
-                                Bool::or(ctx, &child_done_vars.iter().collect::<Vec<_>>());
-                            solver.assert(&parent_done.implies(&any_done));
+                        if child_done_vars.is_empty() {
+                            solver.assert(&parent_done.not());
+                        } else {
+                            let winner_cases = child_done_vars
+                                .iter()
+                                .enumerate()
+                                .map(|(winner_idx, done_var)| {
+                                    let mut clauses: Vec<Bool<'_>> = vec![done_var.clone()];
+                                    for (child_idx, cancelled_var) in
+                                        child_cancelled_vars.iter().enumerate()
+                                    {
+                                        if child_idx != winner_idx {
+                                            clauses.push(cancelled_var.clone());
+                                        }
+                                    }
+                                    Bool::and(ctx, &clauses.iter().collect::<Vec<_>>())
+                                })
+                                .collect::<Vec<_>>();
+                            let any_winner =
+                                Bool::or(ctx, &winner_cases.iter().collect::<Vec<_>>());
+                            solver.assert(&parent_done.implies(&any_winner));
                         }
                     }
                 }

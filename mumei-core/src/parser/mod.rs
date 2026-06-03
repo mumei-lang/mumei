@@ -509,6 +509,34 @@ atom concurrent(x: i64)
     }
 
     #[test]
+    fn test_parse_task_group_any_join_semantics() {
+        let body = parse_body_expr(
+            r#"{
+                task_group:any {
+                    task { 1 };
+                    task { 2 }
+                }
+            }"#,
+        );
+
+        let Stmt::Block(stmts, _) = body else {
+            panic!("expected block body");
+        };
+        let Stmt::TaskGroup {
+            join_semantics,
+            children,
+            ..
+        } = &stmts[0]
+        else {
+            panic!("expected task_group statement");
+        };
+        assert_eq!(*join_semantics, JoinSemantics::Any);
+        assert!(join_semantics.completes_after_first_child());
+        assert!(join_semantics.cancels_remaining_children());
+        assert_eq!(children.len(), 2);
+    }
+
+    #[test]
     fn test_parse_effect_def() {
         let source = "effect FileWrite;";
         let items = parse_module(source);

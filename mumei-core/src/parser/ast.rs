@@ -298,6 +298,16 @@ pub enum JoinSemantics {
     Any,
 }
 
+impl JoinSemantics {
+    pub fn completes_after_first_child(&self) -> bool {
+        matches!(self, JoinSemantics::Any)
+    }
+
+    pub fn cancels_remaining_children(&self) -> bool {
+        matches!(self, JoinSemantics::Any)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Pattern {
     Wildcard,
