@@ -110,6 +110,21 @@ impl LeanEscalationMetrics {
         }
     }
 
+    pub fn record_lean_verified_acceptance(&mut self, atom: &proof_cert::AtomCertificate) {
+        let reason = atom
+            .escalation_reason
+            .as_deref()
+            .unwrap_or("lean_verified_import_acceptance");
+        if !self.by_atom.contains_key(&atom.name) {
+            self.record_escalation(&atom.name, reason, &atom.logic_fragment_tags);
+        }
+        self.lean_successes += 1;
+        *self
+            .successes_by_failure_reason
+            .entry(reason.to_string())
+            .or_insert(0) += 1;
+    }
+
     fn record_escalation(&mut self, name: &str, reason: &str, logic_fragment_tags: &[String]) {
         self.escalation_attempts += 1;
         self.by_atom.insert(name.to_string(), reason.to_string());
@@ -371,7 +386,7 @@ fn log_lean_verified_acceptance(
         if atom.z3_check_result == "lean_verified"
             && proven.get(atom.name.as_str()).copied() == Some("proven")
         {
-            metrics.lean_successes += 1;
+            metrics.record_lean_verified_acceptance(atom);
             eprintln!(
                 "  Lean-verified atom '{}' accepted as proven (--allow-lean-verified)",
                 atom.name,

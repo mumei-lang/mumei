@@ -1,6 +1,6 @@
 use std::{collections::HashMap, process::Command};
 
-use mumei_core::proof_cert::{EscalationCandidate, LeanResultMetadata};
+use mumei_core::proof_cert::{AtomCertificate, EscalationCandidate, LeanResultMetadata};
 use mumei_core::resolver::LeanEscalationMetrics;
 use mumei_core::verification::TranslatorIRMetadata;
 
@@ -33,6 +33,42 @@ fn candidate(
             status: status.to_string(),
             ..LeanResultMetadata::default()
         }),
+    }
+}
+
+fn lean_verified_atom(name: &str, reason: Option<&str>, tags: &[&str]) -> AtomCertificate {
+    AtomCertificate {
+        name: name.to_string(),
+        z3_check_result: "lean_verified".to_string(),
+        content_hash: format!("{name}-content"),
+        status: "verified".to_string(),
+        spec_validation_result: None,
+        proof_hash: format!("{name}-proof"),
+        dependencies: Vec::new(),
+        effects: Vec::new(),
+        requires: "true".to_string(),
+        ensures: "result >= 0".to_string(),
+        z3_result_class: "unknown".to_string(),
+        escalation_reason: reason.map(str::to_string),
+        logic_fragment_tags: tags.iter().map(|tag| tag.to_string()).collect(),
+        translator_version: "mumei-lean-translator-ir-v1".to_string(),
+        binder_mapping: HashMap::new(),
+        bridge_lemma_hash: "bridge".to_string(),
+        manual_lemma_reason: None,
+        translator_ir: TranslatorIRMetadata::default(),
+        lean_metadata: Some(LeanResultMetadata {
+            status: "lean_verified".to_string(),
+            ..LeanResultMetadata::default()
+        }),
+        counterexample_validation: None,
+        reconstruction_loss: None,
+        self_correction_metadata: None,
+        symbol_provenance: Vec::new(),
+        unused_hypotheses: None,
+        solver_process_metadata: None,
+        retry_policy_fingerprint: None,
+        attempt_summary: None,
+        cost_success_metrics: None,
     }
 }
 
@@ -142,6 +178,52 @@ fn test_metrics_json_output() {
     );
     assert_eq!(json["by_logic_fragment"]["nonlinear_arithmetic"], 1);
     assert_eq!(json["low_success_categories"].as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn test_lean_verified_acceptance_tracks_success_by_reason() {
+    let mut metrics = LeanEscalationMetrics::default();
+    let atom = lean_verified_atom(
+        "accepted",
+        Some("z3_unknown_complex_fragment"),
+        &["nonlinear_arithmetic"],
+    );
+
+    metrics.record_atom_certificate(&atom);
+    metrics.record_lean_verified_acceptance(&atom);
+
+    assert_eq!(metrics.escalation_attempts, 1);
+    assert_eq!(metrics.lean_successes, 1);
+    assert_eq!(
+        metrics
+            .successes_by_failure_reason
+            .get("z3_unknown_complex_fragment"),
+        Some(&1)
+    );
+    assert_eq!(metrics.to_summary_json()["success_rate"], 1.0);
+}
+
+#[test]
+fn test_lean_verified_acceptance_without_escalation_reason_has_fallback_bucket() {
+    let mut metrics = LeanEscalationMetrics::default();
+    let atom = lean_verified_atom("accepted_import", None, &["quantifier_alternation"]);
+
+    metrics.record_lean_verified_acceptance(&atom);
+
+    assert_eq!(metrics.escalation_attempts, 1);
+    assert_eq!(metrics.lean_successes, 1);
+    assert_eq!(
+        metrics
+            .by_failure_reason
+            .get("lean_verified_import_acceptance"),
+        Some(&1)
+    );
+    assert_eq!(
+        metrics
+            .successes_by_failure_reason
+            .get("lean_verified_import_acceptance"),
+        Some(&1)
+    );
 }
 
 #[test]
