@@ -2299,13 +2299,36 @@ fn emit_task_spawn_only<'a>(
     llvm!(builder.build_store(result_ptr, body_i64));
 
     if let Some((group_id, group_result_ptr)) = task_group_runtime {
-        let (complete_fn, _flag_fn, _reset_fn, _cancel_fn, _yield_fn, _, _, leave_fn) =
+        let (complete_fn, _flag_fn, _reset_fn, _cancel_fn, _yield_fn, group_cancel_fn, _, leave_fn) =
             declare_task_group_any_externs(context, module);
-        llvm!(builder.build_call(
+        let completed = llvm!(builder.build_call(
             complete_fn,
             &[group_id.into(), body_i64.into(), group_result_ptr.into()],
             "task_group_complete_call",
+        ))
+        .try_as_basic_value()
+        .left()
+        .ok_or_else(|| MumeiError::codegen("task_group complete returned void".to_string()))?
+        .into_int_value();
+        let won_group = llvm!(builder.build_int_compare(
+            IntPredicate::NE,
+            completed,
+            i64_type.const_int(0, false),
+            "task_group_complete_won",
         ));
+        let cancel_block = context.append_basic_block(wrapper_fn, "task_group_complete_cancel");
+        let leave_block = context.append_basic_block(wrapper_fn, "task_group_complete_leave");
+        llvm!(builder.build_conditional_branch(won_group, cancel_block, leave_block));
+
+        builder.position_at_end(cancel_block);
+        llvm!(builder.build_call(
+            group_cancel_fn,
+            &[group_id.into()],
+            "task_group_winner_cancel_call",
+        ));
+        llvm!(builder.build_unconditional_branch(leave_block));
+
+        builder.position_at_end(leave_block);
         llvm!(builder.build_call(leave_fn, &[], "task_group_leave_call"));
     }
 

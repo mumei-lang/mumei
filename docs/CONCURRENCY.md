@@ -155,9 +155,9 @@ Verifies that consumed variables before `await` are not accessed after `await`.
 | Parser tests | ✅ Implemented (6 tests: task, task_group, :all, :any, unknown panic) |
 | Unique ID (Task) | ✅ Implemented (TASK_COUNTER prevents env key collision) |
 | Runtime scheduler | ✅ Implemented (Plan 21: pthread-backed; one OS thread per `task`; channel rendezvous via single-slot mutex/condvar in `mumei_runtime.c`) |
-| Task cancellation | ❌ Not implemented |
+| Task cancellation | ✅ Implemented (`task_group:any` winners atomically cancel remaining children; blocked channels are woken via runtime broadcasts) |
 | Channel types | ✅ Implemented (Plan 21: i64 handles + runtime mutex/condvar; full polymorphic `chan<T>` payload-marshalling is a follow-up) |
-| `task_group:any` (atomic completion flag) | ❌ Not implemented (currently lowers identically to `:all`) |
+| `task_group:any` (atomic completion flag) | ✅ Implemented (first child to complete wins via `__mumei_task_group_complete`; remaining children are cancelled, woken, and joined for cleanup) |
 
 ## Safety Guarantees
 
@@ -167,7 +167,7 @@ Verifies that consumed variables before `await` are not accessed after `await`.
 | Resource hold across await | Detect await inside acquire block | ✅ Implemented |
 | Async recursion depth | BMC unroll limit check | ✅ Implemented |
 | Parent task termination constraint | Z3 verification of TaskGroup join semantics | ✅ Implemented |
-| Task cancellation safety | Remaining task cleanup on Any completion | ❌ Future |
+| Task cancellation safety | Atomic `task_group:any` completion, cooperative cancellation checks, channel wakeup broadcasts, and final `pthread_join` cleanup | ✅ Implemented |
 
 ## Future Extensions
 
@@ -192,7 +192,7 @@ task_group:all {
 
 1. **Runtime scheduler**: Preemptive task scheduling
 2. **Channel types**: Type-safe channels for inter-task communication (`chan<T>`)
-3. **Task cancellation**: Safe cancellation of remaining tasks on `Any` completion
+3. **Task cancellation refinements**: timeout/deadline policies and richer cancellation diagnostics
 4. **Timeouts**: Timeout specification for task groups
 5. **LLVM codegen**: LLVM coroutine transformation for task scheduling code
 6. **TaskGroup unique ID**: Prevent Z3 variable name collision across multiple TaskGroups (TASK_GROUP_COUNTER)
