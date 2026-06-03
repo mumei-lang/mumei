@@ -49,7 +49,7 @@ pub(crate) fn substitute_method_calls(
                     && chars[i..i + mn_chars.len()] == mn_chars[..]
                     && chars[i + mn_chars.len()] == '('
                     // メソッド名の直前が英数字でないことを確認（部分一致を防ぐ）
-                    && (i == 0 || !chars[i - 1].is_alphanumeric())
+                    && (i == 0 || !is_identifier_char(chars[i - 1]))
                 {
                     // 引数リストを抽出
                     let args_start = i + mn_chars.len() + 1;
@@ -78,12 +78,9 @@ pub(crate) fn substitute_method_calls(
                     if let Some(param_names) = method_params.get(method_name) {
                         for (j, param_name) in param_names.iter().enumerate() {
                             if let Some(arg) = args.get(j) {
+                                let replacement = parenthesized_arg(arg);
                                 // 単語境界を考慮した置換（部分一致を防ぐ）
-                                expanded = replace_word(
-                                    &expanded,
-                                    param_name,
-                                    &format!("({})", arg.trim()),
-                                );
+                                expanded = replace_word(&expanded, param_name, &replacement);
                             }
                         }
                     }
@@ -123,13 +120,50 @@ pub(crate) fn contains_method_call(source: &str, method_name: &str) -> bool {
     while i + method_chars.len() < chars.len() {
         if chars[i..i + method_chars.len()] == method_chars[..]
             && chars[i + method_chars.len()] == '('
-            && (i == 0 || !chars[i - 1].is_alphanumeric() && chars[i - 1] != '_')
+            && (i == 0 || !is_identifier_char(chars[i - 1]))
         {
             return true;
         }
         i += 1;
     }
     false
+}
+
+fn is_identifier_char(ch: char) -> bool {
+    ch.is_alphanumeric() || ch == '_'
+}
+
+fn parenthesized_arg(arg: &str) -> String {
+    let trimmed = arg.trim();
+    if has_single_outer_parens(trimmed) {
+        trimmed.to_string()
+    } else {
+        format!("({trimmed})")
+    }
+}
+
+fn has_single_outer_parens(expr: &str) -> bool {
+    let chars: Vec<char> = expr.chars().collect();
+    if chars.len() < 2 || chars.first() != Some(&'(') || chars.last() != Some(&')') {
+        return false;
+    }
+
+    let mut depth = 0isize;
+    for (idx, ch) in chars.iter().enumerate() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            _ => {}
+        }
+        if depth == 0 && idx + 1 < chars.len() {
+            return false;
+        }
+        if depth < 0 {
+            return false;
+        }
+    }
+
+    depth == 0
 }
 
 /// 単語境界を考慮した文字列置換。
@@ -143,10 +177,9 @@ pub(crate) fn replace_word(source: &str, word: &str, replacement: &str) -> Strin
     while i < chars.len() {
         if i + word_chars.len() <= chars.len()
             && chars[i..i + word_chars.len()] == word_chars[..]
-            && (i == 0 || !chars[i - 1].is_alphanumeric() && chars[i - 1] != '_')
+            && (i == 0 || !is_identifier_char(chars[i - 1]))
             && (i + word_chars.len() >= chars.len()
-                || !chars[i + word_chars.len()].is_alphanumeric()
-                    && chars[i + word_chars.len()] != '_')
+                || !is_identifier_char(chars[i + word_chars.len()]))
         {
             result.push_str(replacement);
             i += word_chars.len();
