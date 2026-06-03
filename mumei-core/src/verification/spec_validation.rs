@@ -40,12 +40,8 @@ impl SpecValidationResult {
         let trace_id = effective_trace_id(atom);
         let spec_metadata = effective_spec_metadata(atom);
         let contradiction_details = format!(
-            "{}: {} (constraints: {:?})\n{}\nSuggested fix: {}",
-            contradiction.kind,
-            contradiction.message,
-            contradiction.constraints,
-            contradiction.natural_language_explanation,
-            contradiction.suggested_fix
+            "{}: {} (constraints: {:?})",
+            contradiction.kind, contradiction.message, contradiction.constraints
         );
         Self {
             status: "unsatisfiable".to_string(),
@@ -63,7 +59,7 @@ impl SpecValidationResult {
             diagnostics: vec![
                 contradiction_details,
                 contradiction.natural_language_explanation.clone(),
-                contradiction.suggested_fix.clone(),
+                format!("Suggested fix: {}", contradiction.suggested_fix),
             ],
         }
     }
