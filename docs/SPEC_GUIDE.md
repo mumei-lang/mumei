@@ -274,7 +274,26 @@ The validator checks:
 - each top-level `ensures` conjunct against `requires`.
 - pairwise `ensures` relationships with `requires ∧ ensures_i ∧ ¬ensures_j`.
 
-A contradiction is reported as `SpecContradiction` with a kind such as `requires_unsat`, `refinement_unsat`, or `ensures_unsat`. Treat these errors as specification bugs: relax the over-constrained clause, split the atom into clearer cases, or revise the natural-language requirement before attempting proof repair.
+A contradiction is reported as `SpecContradiction` with a kind such as `requires_unsat`, `refinement_unsat`, or `ensures_unsat`. Reports include `natural_language_explanation` and `suggested_fix` fields so humans and agents can see which clause is impossible and how to revise it. Treat these errors as specification bugs: relax the over-constrained clause, split the atom into clearer cases, or revise the natural-language requirement before attempting proof repair.
+
+### Cross-specification consistency
+
+`mumei verify` runs cross-spec checks by default and writes `cross_spec.json` under the report directory. Use `--cross-spec-files` to merge additional `.mm` files into the same `ModuleEnv` before checking caller/callee contract consistency, global invariants, and dependency cycles:
+
+```bash
+mumei verify --report-dir reports/cross-spec \
+  --cross-spec-files specs/account.mm,specs/ledger.mm \
+  specs/transfer.mm
+```
+
+The report includes:
+
+- `contract_consistency[]`: caller/callee pairs, `caller_file`, `callee_file`, and violations such as a caller only guaranteeing `x >= 0` while a callee requires `x >= 5`.
+- `global_invariants[]`: repeated postcondition invariants and the `source_files` that contributed them.
+- `global_invariant_conflicts[]`: directly contradictory postcondition bounds across atoms or files, with a natural-language `message` and `suggested_fix`.
+- `dependency_graph[]` and `circular_dependencies[]`: cross-file atom call relationships.
+
+When reading a conflict, first compare the reported files, then decide whether the bounds should be unified, made conditional with stronger `requires`, or split into domain-specific atoms.
 
 ### Traceability metadata
 

@@ -106,6 +106,8 @@ pub struct SpecContradiction {
     pub atom_name: String,
     pub kind: String,
     pub message: String,
+    pub natural_language_explanation: String,
+    pub suggested_fix: String,
     pub constraints: Vec<String>,
     pub span: Span,
 }
@@ -118,12 +120,65 @@ impl SpecContradiction {
         constraints: Vec<String>,
         span: Span,
     ) -> Self {
+        let atom_name = atom_name.into();
+        let kind = kind.into();
+        let message = message.into();
+        let natural_language_explanation =
+            natural_language_explanation(&atom_name, &kind, &message, &constraints);
+        let suggested_fix = suggested_fix_for_contradiction(&kind, &constraints);
         Self {
-            atom_name: atom_name.into(),
-            kind: kind.into(),
-            message: message.into(),
+            atom_name,
+            kind,
+            message,
+            natural_language_explanation,
+            suggested_fix,
             constraints,
             span,
         }
+    }
+}
+
+fn natural_language_explanation(
+    atom_name: &str,
+    kind: &str,
+    message: &str,
+    constraints: &[String],
+) -> String {
+    let constraint_text = if constraints.is_empty() {
+        "no concrete constraint text was captured".to_string()
+    } else {
+        constraints.join(" AND ")
+    };
+    match kind {
+        "requires_unsat" => format!(
+            "The preconditions for atom '{atom_name}' cannot all be true at the same time: {constraint_text}. {message}."
+        ),
+        "ensures_unsat" => format!(
+            "The postconditions for atom '{atom_name}' contradict the preconditions or each other: {constraint_text}. {message}."
+        ),
+        kind if kind.starts_with("refinement_") => format!(
+            "A refinement type used by atom '{atom_name}' has incompatible bounds: {constraint_text}. {message}."
+        ),
+        _ => format!(
+            "The specification for atom '{atom_name}' is internally inconsistent ({kind}): {constraint_text}. {message}."
+        ),
+    }
+}
+
+fn suggested_fix_for_contradiction(kind: &str, constraints: &[String]) -> String {
+    let joined = constraints.join(" AND ");
+    match kind {
+        "requires_unsat" => format!(
+            "Relax or remove one of the preconditions so the input domain is non-empty. Review: {joined}"
+        ),
+        "ensures_unsat" => format!(
+            "Align the postconditions with the preconditions, or split mutually exclusive outcomes into separate guarded atoms. Review: {joined}"
+        ),
+        kind if kind.starts_with("refinement_") => format!(
+            "Adjust the refinement predicate or parameter constraints so at least one value inhabits the type. Review: {joined}"
+        ),
+        _ => format!(
+            "Inspect the listed constraints and make one of them conditional, weaker, or domain-specific. Review: {joined}"
+        ),
     }
 }

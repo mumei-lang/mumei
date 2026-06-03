@@ -340,6 +340,9 @@ enum Command {
         /// Enable cross-specification consistency verification across atoms
         #[arg(long)]
         cross_spec_verify: bool,
+        /// Additional .mm files to include in cross-specification verification
+        #[arg(long, value_delimiter = ',')]
+        cross_spec_files: Vec<String>,
         /// Enable P8-A spurious counterexample detection
         #[arg(long, conflicts_with = "disable_spurious_detection")]
         enable_spurious_detection: bool,
@@ -540,6 +543,7 @@ fn main() {
             strict_imports,
             allow_lean_verified,
             cross_spec_verify,
+            cross_spec_files,
             enable_spurious_detection,
             disable_spurious_detection,
             property_based_test,
@@ -603,7 +607,8 @@ fn main() {
                 json_output: json,
                 strict_imports,
                 allow_lean_verified,
-                enable_cross_spec_verification: cross_spec_verify,
+                enable_cross_spec_verification: cross_spec_verify || !cross_spec_files.is_empty(),
+                cross_spec_files: &cross_spec_files,
                 enable_spurious_detection: enable_spurious_detection || !disable_spurious_detection,
                 property_based_test,
                 property_based_test_count,
@@ -840,7 +845,7 @@ fn load_and_prepare_with_full_options(
 
     let mut mono = ast::Monomorphizer::new();
     mono.collect(&items);
-    let items = if mono.has_generics() {
+    let mut items = if mono.has_generics() {
         let mono_items = mono.monomorphize(&items, Some(&module_env));
         eprintln!(
             "  🔬 Monomorphization: {} generic instance(s) expanded.",
@@ -850,6 +855,7 @@ fn load_and_prepare_with_full_options(
     } else {
         items
     };
+    annotate_source_file(&mut items, input);
 
     let mut imports: Vec<ImportDecl> = Vec::new();
     for item in &items {
@@ -940,6 +946,101 @@ fn load_and_prepare_with_full_options(
     }
 
     (items, module_env, imports, source)
+}
+
+fn annotate_source_file(items: &mut [Item], input: &str) {
+    for item in items {
+        match item {
+            Item::Atom(atom) => annotate_atom_source_file(atom, input),
+            Item::TypeDef(refined_type) => refined_type.span.file = input.to_string(),
+            Item::StructDef(struct_def) => {
+                struct_def.span.file = input.to_string();
+                for method in &mut struct_def.methods {
+                    annotate_atom_source_file(method, input);
+                }
+            }
+            Item::EnumDef(enum_def) => enum_def.span.file = input.to_string(),
+            Item::Import(decl) => decl.span.file = input.to_string(),
+            Item::TraitDef(trait_def) => trait_def.span.file = input.to_string(),
+            Item::ImplDef(impl_def) => impl_def.span.file = input.to_string(),
+            Item::ResourceDef(resource_def) => resource_def.span.file = input.to_string(),
+            Item::ExternBlock(extern_block) => {
+                extern_block.span.file = input.to_string();
+                for function in &mut extern_block.functions {
+                    function.span.file = input.to_string();
+                }
+            }
+            Item::EffectDef(effect_def) => effect_def.span.file = input.to_string(),
+            Item::ImplBlock(impl_block) => {
+                impl_block.span.file = input.to_string();
+                for method in &mut impl_block.methods {
+                    annotate_atom_source_file(method, input);
+                }
+            }
+        }
+    }
+}
+
+fn annotate_atom_source_file(atom: &mut parser::Atom, input: &str) {
+    atom.span.file = input.to_string();
+    atom.spec_metadata
+        .insert("source_file".to_string(), input.to_string());
+}
+
+fn load_cross_spec_files(
+    cross_spec_files: &[String],
+    strict_imports: bool,
+    allow_lean_verified: bool,
+    items: &mut Vec<Item>,
+    module_env: &mut verification::ModuleEnv,
+    imports: &mut Vec<ImportDecl>,
+    verbose: bool,
+) {
+    for file in cross_spec_files {
+        if verbose {
+            println!("  🔗 Loading cross-spec file '{}'...", file);
+        }
+        let (mut extra_items, extra_env, mut extra_imports, _source) =
+            load_and_prepare_with_full_options(file, strict_imports, allow_lean_verified);
+        items.append(&mut extra_items);
+        imports.append(&mut extra_imports);
+        merge_module_env(module_env, extra_env);
+    }
+}
+
+fn merge_module_env(target: &mut verification::ModuleEnv, source: verification::ModuleEnv) {
+    target.types.extend(source.types);
+    target.structs.extend(source.structs);
+    target.atoms.extend(source.atoms);
+    target.extern_blocks.extend(source.extern_blocks);
+    target.enums.extend(source.enums);
+    target.traits.extend(source.traits);
+    target.impls.extend(source.impls);
+    target.verified_cache.extend(source.verified_cache);
+    target.resources.extend(source.resources);
+    target.effects.extend(source.effects);
+    target.effect_defs.extend(source.effect_defs);
+    target.path_id_map.extend(source.path_id_map);
+    target.next_path_id = target.next_path_id.max(source.next_path_id);
+    target.prefix_ranges.extend(source.prefix_ranges);
+    target.dependency_graph.extend(source.dependency_graph);
+    for (atom, dependents) in source.reverse_deps {
+        target
+            .reverse_deps
+            .entry(atom)
+            .or_default()
+            .extend(dependents);
+    }
+    if target.security_policy.is_none() {
+        target.security_policy = source.security_policy;
+    }
+    for (method, entries) in source.method_trait_index {
+        target
+            .method_trait_index
+            .entry(method)
+            .or_default()
+            .extend(entries);
+    }
 }
 
 // =============================================================================
@@ -1047,6 +1148,7 @@ struct VerifyOptions<'a> {
     strict_imports: bool,
     allow_lean_verified: bool,
     enable_cross_spec_verification: bool,
+    cross_spec_files: &'a [String],
     enable_spurious_detection: bool,
     property_based_test: bool,
     property_based_test_count: usize,
@@ -1080,6 +1182,7 @@ fn cmd_verify(options: VerifyOptions<'_>) {
         strict_imports,
         allow_lean_verified,
         enable_cross_spec_verification,
+        cross_spec_files,
         enable_spurious_detection,
         property_based_test,
         property_based_test_count,
@@ -1106,8 +1209,9 @@ fn cmd_verify(options: VerifyOptions<'_>) {
             manifest::ProofConfig::default(),
         )
     };
-    let enable_cross_spec_verification =
-        enable_cross_spec_verification || proof_cfg.cross_spec_verify;
+    let enable_cross_spec_verification = enable_cross_spec_verification
+        || proof_cfg.cross_spec_verify
+        || !cross_spec_files.is_empty();
     let effective_timeout_ms = solver_timeout.unwrap_or(proof_cfg.timeout_ms);
     let property_based_config =
         property_based_test.then(|| verification::PropertyBasedTestConfig {
@@ -1126,8 +1230,17 @@ fn cmd_verify(options: VerifyOptions<'_>) {
             );
         }
     }
-    let (items, mut module_env, _imports, source) =
+    let (mut items, mut module_env, mut imports, source) =
         load_and_prepare_with_full_options(input, strict_imports, allow_lean_verified);
+    load_cross_spec_files(
+        cross_spec_files,
+        strict_imports,
+        allow_lean_verified,
+        &mut items,
+        &mut module_env,
+        &mut imports,
+        !quiet_output,
+    );
 
     let output_dir = match report_dir {
         Some(dir) => Path::new(dir),
@@ -1735,6 +1848,12 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                     eprintln!(
                         "Warning: {} circular dependencies detected",
                         cross_spec_result.summary.circular_dependency_count
+                    );
+                }
+                if cross_spec_result.summary.global_invariant_conflict_count > 0 && !quiet_output {
+                    eprintln!(
+                        "Warning: {} global invariant conflicts detected",
+                        cross_spec_result.summary.global_invariant_conflict_count
                     );
                 }
             }
@@ -3912,6 +4031,12 @@ fn cmd_build(
                     eprintln!(
                         "Warning: {} circular dependencies detected",
                         cross_spec_result.summary.circular_dependency_count
+                    );
+                }
+                if cross_spec_result.summary.global_invariant_conflict_count > 0 {
+                    eprintln!(
+                        "Warning: {} global invariant conflicts detected",
+                        cross_spec_result.summary.global_invariant_conflict_count
                     );
                 }
             }
