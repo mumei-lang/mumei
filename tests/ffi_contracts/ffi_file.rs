@@ -73,3 +73,21 @@ proptest! {
     mumei_core::ffi::json::mumei_str_free(path);
     }
 }
+#[test]
+fn edge_file_missing_path_and_empty_content() {
+    let (path, temp_path) = mumei_ffi_tests::temp_path_handle("edge_missing");
+    assert!(path > 0);
+    let missing = mumei_core::ffi::file::file_exists(path);
+    assert!((0..=1).contains(&missing));
+
+    let empty = mumei_ffi_tests::string_handle("");
+    assert!(empty > 0);
+    let written = mumei_core::ffi::file::file_write(path, empty);
+    assert!((0..=1).contains(&written));
+    let removed = mumei_core::ffi::file::file_delete(path);
+    assert!((0..=1).contains(&removed));
+
+    let _ = std::fs::remove_file(temp_path);
+    mumei_core::ffi::json::mumei_str_free(path);
+    mumei_core::ffi::json::mumei_str_free(empty);
+}
