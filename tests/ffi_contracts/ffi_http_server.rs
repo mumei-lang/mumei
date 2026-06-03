@@ -68,3 +68,18 @@ proptest! {
     mumei_core::ffi::http_server::http_server_free(server_handle_for_cleanup);
     }
 }
+#[test]
+fn edge_http_server_status_boundaries() {
+    for status in [100_i64, 599_i64] {
+        let (server_handle, req_handle, client) = mumei_ffi_tests::server_request_handle();
+        assert!(server_handle > 0);
+        assert!(req_handle > 0);
+        let body = mumei_ffi_tests::c_string("");
+        let result =
+            mumei_core::ffi::http_server::http_server_respond(req_handle, status, body.as_ptr());
+        assert!((0..=1).contains(&result));
+        mumei_core::ffi::http_server::http_request_free(req_handle);
+        let _ = client.join();
+        mumei_core::ffi::http_server::http_server_free(server_handle);
+    }
+}

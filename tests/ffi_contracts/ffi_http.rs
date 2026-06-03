@@ -166,3 +166,15 @@ proptest! {
     prop_assert!(result <= 1, "ensures: result <= 1, got {}", result);
     }
 }
+#[test]
+fn edge_http_status_and_header_paths() {
+    let handle = mumei_ffi_tests::http_response_handle();
+    assert!(handle > 0);
+    let status = mumei_core::ffi::http::http_status(handle);
+    assert!(status == 0 || (100..=599).contains(&status));
+
+    let header = mumei_ffi_tests::c_string("X-Mumei-Contract");
+    let value = mumei_core::ffi::http::http_header_get(handle, header.as_ptr());
+    assert!(mumei_ffi_tests::contract_result_observed(&value));
+    mumei_core::ffi::http::http_free(handle);
+}

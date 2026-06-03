@@ -269,3 +269,22 @@ proptest! {
     prop_assert!(result <= 1, "ensures: result <= 1, got {}", result);
     }
 }
+#[test]
+fn edge_json_invalid_input_and_bool_bounds() {
+    let invalid = mumei_ffi_tests::c_string("{not-json");
+    let invalid_result = mumei_core::ffi::json::json_parse(invalid.as_ptr());
+    assert!(invalid_result >= 0);
+
+    let array = mumei_ffi_tests::json_array_handle();
+    assert!(array > 0);
+    let negative_index = mumei_core::ffi::json::json_array_get(array, -1);
+    assert!(negative_index >= 0);
+    mumei_core::ffi::json::json_free(array);
+
+    let false_handle = mumei_core::ffi::json::json_from_bool(0);
+    let true_handle = mumei_core::ffi::json::json_from_bool(1);
+    assert!(false_handle > 0);
+    assert!(true_handle > 0);
+    mumei_core::ffi::json::json_free(false_handle);
+    mumei_core::ffi::json::json_free(true_handle);
+}

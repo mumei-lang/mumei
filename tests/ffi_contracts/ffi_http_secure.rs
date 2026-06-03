@@ -109,3 +109,14 @@ proptest! {
     prop_assert!(result <= 1, "ensures: result <= 1, got {}", result);
     }
 }
+#[test]
+fn edge_http_secure_error_url_is_bounded() {
+    let url = mumei_ffi_tests::https_error_url();
+    let handle = mumei_core::ffi::http::http_get(url.as_ptr());
+    assert!(handle >= 0);
+    if handle > 0 {
+        let status = mumei_core::ffi::http::http_status(handle);
+        assert!(status == 0 || (100..=599).contains(&status));
+        mumei_core::ffi::http::http_free(handle);
+    }
+}

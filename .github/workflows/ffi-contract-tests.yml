@@ -51,7 +51,10 @@ jobs:
             cargo-ffi-contract-tests-
 
       - name: Generate FFI contract tests
-        run: python3 scripts/ffi_contract_test_gen.py --report
+        run: python3 scripts/ffi_contract_test_gen.py --report | tee ffi-contract-report.txt
+
+      - name: Enforce FFI contract coverage target
+        run: 'grep -q "Coverage status:             PASS" ffi-contract-report.txt'
 
       - name: Verify generated tests are checked in
         run: git diff --exit-code -- tests/ffi_contracts

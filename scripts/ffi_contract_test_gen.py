@@ -3,7 +3,8 @@
 
 Scans std/*.mm for FFI-backed `atom` / `trusted atom` declarations, extracts
 requires/ensures contracts, and emits proptest-based Rust integration tests
-that exercise the real FFI backend implementations.
+plus deterministic edge-case tests that exercise the real FFI backend
+implementations.
 
 Usage:
     python scripts/ffi_contract_test_gen.py
@@ -30,9 +31,10 @@ CRYPTO_STD_DIR = STD_DIR / "crypto"
 # ---------------------------------------------------------------------------
 
 FFI_ATOM_RE = re.compile(
-    r"^\s*(?:trusted\s+)?atom\s+(\w+)\s*\(([^)]*)\)",
+    r"^\s*(trusted\s+)?atom\s+(\w+)\s*\(([^)]*)\)",
     re.MULTILINE,
 )
+CONTRACT_COVERAGE_TARGET = 0.80
 
 FFI_ATOM_NAMES = {
     "hash": {"sha256", "hash_eq"},
@@ -102,6 +104,7 @@ class TrustedAtom:
     ensures: str
     module: str  # e.g. "json", "http"
     ffi_fn: str  # e.g. "json_parse"
+    trusted: bool
 
 
 def _parse_params(raw: str) -> list[Param]:
@@ -189,10 +192,11 @@ def parse_mm_file(path: Path) -> list[TrustedAtom]:
     atoms: list[TrustedAtom] = []
 
     for m in FFI_ATOM_RE.finditer(text):
-        name = m.group(1)
+        trusted = m.group(1) is not None
+        name = m.group(2)
         if name not in FFI_ATOM_NAMES.get(module, set()):
             continue
-        params = _parse_params(m.group(2))
+        params = _parse_params(m.group(3))
         atom_start = m.start()
         requires = _extract_clause(text, atom_start, "requires")
         ensures = _extract_clause(text, atom_start, "ensures")
@@ -205,6 +209,7 @@ def parse_mm_file(path: Path) -> list[TrustedAtom]:
                 ensures=ensures,
                 module=module,
                 ffi_fn=ffi_fn,
+                trusted=trusted,
             )
         )
     return atoms
@@ -613,6 +618,111 @@ def generate_test_fn(atom: TrustedAtom) -> str:
     )
 
 
+def _generate_edge_case_tests(module: str, atoms: list[TrustedAtom]) -> str:
+    """Generate deterministic boundary/error-path smoke tests for a module."""
+    atom_names = {atom.name for atom in atoms}
+    tests: list[str] = []
+
+    if module == "json" and {"parse", "array_get", "from_bool"}.issubset(atom_names):
+        tests.append(textwrap.dedent("""\
+        #[test]
+        fn edge_json_invalid_input_and_bool_bounds() {
+            let invalid = mumei_ffi_tests::c_string("{not-json");
+            let invalid_result = mumei_core::ffi::json::json_parse(invalid.as_ptr());
+            assert!(invalid_result >= 0);
+
+            let array = mumei_ffi_tests::json_array_handle();
+            assert!(array > 0);
+            let negative_index = mumei_core::ffi::json::json_array_get(array, -1);
+            assert!(negative_index >= 0);
+            mumei_core::ffi::json::json_free(array);
+
+            let false_handle = mumei_core::ffi::json::json_from_bool(0);
+            let true_handle = mumei_core::ffi::json::json_from_bool(1);
+            assert!(false_handle > 0);
+            assert!(true_handle > 0);
+            mumei_core::ffi::json::json_free(false_handle);
+            mumei_core::ffi::json::json_free(true_handle);
+        }
+        """))
+
+    if module == "file" and {"exists", "write_file", "remove"}.issubset(atom_names):
+        tests.append(textwrap.dedent("""\
+        #[test]
+        fn edge_file_missing_path_and_empty_content() {
+            let (path, temp_path) = mumei_ffi_tests::temp_path_handle("edge_missing");
+            assert!(path > 0);
+            let missing = mumei_core::ffi::file::file_exists(path);
+            assert!((0..=1).contains(&missing));
+
+            let empty = mumei_ffi_tests::string_handle("");
+            assert!(empty > 0);
+            let written = mumei_core::ffi::file::file_write(path, empty);
+            assert!((0..=1).contains(&written));
+            let removed = mumei_core::ffi::file::file_delete(path);
+            assert!((0..=1).contains(&removed));
+
+            let _ = std::fs::remove_file(temp_path);
+            mumei_core::ffi::json::mumei_str_free(path);
+            mumei_core::ffi::json::mumei_str_free(empty);
+        }
+        """))
+
+    if module == "http" and {"get", "status", "header_get", "free"}.issubset(atom_names):
+        tests.append(textwrap.dedent("""\
+        #[test]
+        fn edge_http_status_and_header_paths() {
+            let handle = mumei_ffi_tests::http_response_handle();
+            assert!(handle > 0);
+            let status = mumei_core::ffi::http::http_status(handle);
+            assert!(status == 0 || (100..=599).contains(&status));
+
+            let header = mumei_ffi_tests::c_string("X-Mumei-Contract");
+            let value = mumei_core::ffi::http::http_header_get(handle, header.as_ptr());
+            assert!(mumei_ffi_tests::contract_result_observed(&value));
+            mumei_core::ffi::http::http_free(handle);
+        }
+        """))
+
+    if module == "http_secure" and {"secure_get", "status", "free"}.issubset(atom_names):
+        tests.append(textwrap.dedent("""\
+        #[test]
+        fn edge_http_secure_error_url_is_bounded() {
+            let url = mumei_ffi_tests::https_error_url();
+            let handle = mumei_core::ffi::http::http_get(url.as_ptr());
+            assert!(handle >= 0);
+            if handle > 0 {
+                let status = mumei_core::ffi::http::http_status(handle);
+                assert!(status == 0 || (100..=599).contains(&status));
+                mumei_core::ffi::http::http_free(handle);
+            }
+        }
+        """))
+
+    if module == "http_server" and {"bind_server", "send_response"}.issubset(atom_names):
+        tests.append(textwrap.dedent("""\
+        #[test]
+        fn edge_http_server_status_boundaries() {
+            for status in [100_i64, 599_i64] {
+                let (server_handle, req_handle, client) = mumei_ffi_tests::server_request_handle();
+                assert!(server_handle > 0);
+                assert!(req_handle > 0);
+                let body = mumei_ffi_tests::c_string("");
+                let result =
+                    mumei_core::ffi::http_server::http_server_respond(req_handle, status, body.as_ptr());
+                assert!((0..=1).contains(&result));
+                mumei_core::ffi::http_server::http_request_free(req_handle);
+                let _ = client.join();
+                mumei_core::ffi::http_server::http_server_free(server_handle);
+            }
+        }
+        """))
+
+    if not tests:
+        return ""
+    return "\n".join(test.rstrip() for test in tests) + "\n"
+
+
 def _should_skip_atom(atom: TrustedAtom) -> tuple[bool, str]:
     """Return (skip, reason) if the atom should be skipped for test generation."""
     return False, ""
@@ -652,36 +762,49 @@ def generate_module_file(module: str, atoms: list[TrustedAtom]) -> str:
             + "\n\n"
         )
 
-    return header + skip_block + "\n".join(test_fns)
+    return header + skip_block + "\n".join(test_fns) + _generate_edge_case_tests(module, atoms)
 
 
 def generate_report(all_atoms: list[TrustedAtom]) -> str:
     """Generate a summary report of test generation."""
     total = len(all_atoms)
+    trusted = sum(1 for a in all_atoms if a.trusted)
+    verified_wrappers = total - trusted
     skipped = sum(1 for a in all_atoms if _should_skip_atom(a)[0])
     generated = total - skipped
+    coverage = generated / total if total else 0.0
+    coverage_status = "PASS" if coverage >= CONTRACT_COVERAGE_TARGET else "FAIL"
 
     lines = [
         f"FFI Contract Test Generation Report",
         f"====================================",
-        f"Total trusted atoms scanned: {total}",
+        f"Total FFI atoms scanned:     {total}",
+        f"Trusted FFI atoms scanned:   {trusted}",
+        f"Verified FFI wrappers:       {verified_wrappers}",
         f"Tests generated:             {generated}",
         f"Atoms skipped:               {skipped}",
+        f"Contract coverage:           {coverage:.1%}",
+        f"Coverage target:             {CONTRACT_COVERAGE_TARGET:.0%}",
+        f"Coverage status:             {coverage_status}",
         f"",
         f"Breakdown by module:",
     ]
-    by_module: dict[str, tuple[int, int]] = {}
+    by_module: dict[str, tuple[int, int, int]] = {}
     for a in all_atoms:
         skip, _ = _should_skip_atom(a)
         key = a.module
-        gen, sk = by_module.get(key, (0, 0))
+        gen, sk, tr = by_module.get(key, (0, 0, 0))
+        if a.trusted:
+            tr += 1
         if skip:
-            by_module[key] = (gen, sk + 1)
+            by_module[key] = (gen, sk + 1, tr)
         else:
-            by_module[key] = (gen + 1, sk)
+            by_module[key] = (gen + 1, sk, tr)
     for mod_name in sorted(by_module):
-        gen, sk = by_module[mod_name]
-        lines.append(f"  {mod_name:20s}: {gen} generated, {sk} skipped")
+        gen, sk, tr = by_module[mod_name]
+        lines.append(
+            f"  {mod_name:20s}: {gen} generated, {sk} skipped, {tr} trusted"
+        )
 
     return "\n".join(lines)
 
