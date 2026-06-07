@@ -5706,13 +5706,21 @@ fn cmd_infer_effects(input: &str) {
         for file in &files {
             let file_str = file.to_string_lossy().to_string();
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let (items, module_env, _imports, _source) = load_and_prepare(&file_str);
-                verification::infer_effects_json(&items, &module_env)
+                try_load_and_prepare(&file_str).map(|(items, module_env, _imports, _source)| {
+                    verification::infer_effects_json(&items, &module_env)
+                })
             })) {
-                Ok(result) => {
+                Ok(Ok(result)) => {
                     entries.push(serde_json::json!({
                         "file": file_str,
                         "result": result,
+                    }));
+                }
+                Ok(Err(error)) => {
+                    entries.push(serde_json::json!({
+                        "file": file_str,
+                        "result": null,
+                        "error": error,
                     }));
                 }
                 Err(_) => {
@@ -5746,13 +5754,21 @@ fn cmd_infer_contracts(input: &str) {
         for file in &files {
             let file_str = file.to_string_lossy().to_string();
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let (items, module_env, _imports, _source) = load_and_prepare(&file_str);
-                verification::infer_contracts_json(&items, &module_env)
+                try_load_and_prepare(&file_str).map(|(items, module_env, _imports, _source)| {
+                    verification::infer_contracts_json(&items, &module_env)
+                })
             })) {
-                Ok(result) => {
+                Ok(Ok(result)) => {
                     entries.push(serde_json::json!({
                         "file": file_str,
                         "result": result,
+                    }));
+                }
+                Ok(Err(error)) => {
+                    entries.push(serde_json::json!({
+                        "file": file_str,
+                        "result": null,
+                        "error": error,
                     }));
                 }
                 Err(_) => {
