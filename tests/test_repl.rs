@@ -107,8 +107,11 @@ fn repl_loads_json_ffi_and_executes_symbol() {
 
 #[test]
 fn repl_loads_mm_files_from_directory() {
-    let fixture_dir =
-        std::env::temp_dir().join(format!("mumei-repl-load-dir-{}", std::process::id()));
+    let fixture_dir = std::env::temp_dir().join(format!(
+        "mumei-repl-load-dir-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
     let nested_dir = fixture_dir.join("nested");
     let _ = fs::remove_dir_all(&fixture_dir);
     fs::create_dir_all(&nested_dir).expect("create fixture directories");

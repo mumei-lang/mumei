@@ -5158,6 +5158,11 @@ fn repl_load_file(ctx: &mut ReplContext<'_>, file: &str) {
         let mut files = collect_mm_files(path);
         files.sort();
 
+        if files.is_empty() {
+            eprintln!("  ⚠️  No .mm files found in '{}'", file);
+            return;
+        }
+
         let mut total_count = 0;
         let mut loaded_files = 0;
         for mm_file in &files {
