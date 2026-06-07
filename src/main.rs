@@ -599,8 +599,6 @@ fn main() {
                 resolve_budget_policy_fingerprint(budget_policy_fingerprint);
             let enable_cross_spec = cross_spec_verify || !cross_spec_files.is_empty();
             let enable_spurious = enable_spurious_detection || !disable_spurious_detection;
-            let emit_escalation_bundle = escalate_lean || emit_escalation_bundle;
-
             let input_path = Path::new(&input);
             if input_path.is_dir() {
                 let mut files = collect_mm_files(input_path);
@@ -626,6 +624,7 @@ fn main() {
                                 solver_timeout,
                                 cache_scope: &cache_scope,
                                 generate_proof_cert: proof_cert,
+                                escalate_lean,
                                 emit_escalation_bundle,
                                 emit_escalation_metrics,
                                 emit_decidable_metrics,
@@ -679,6 +678,7 @@ fn main() {
                     solver_timeout,
                     cache_scope: &cache_scope,
                     generate_proof_cert: proof_cert,
+                    escalate_lean,
                     emit_escalation_bundle,
                     emit_escalation_metrics,
                     emit_decidable_metrics,
@@ -1455,6 +1455,7 @@ struct VerifyOptions<'a> {
     solver_timeout: Option<u64>,
     cache_scope: &'a str,
     generate_proof_cert: bool,
+    escalate_lean: bool,
     emit_escalation_bundle: bool,
     emit_escalation_metrics: bool,
     emit_decidable_metrics: bool,
@@ -1482,6 +1483,14 @@ struct VerifyOptions<'a> {
     suggest_cegis: bool,
 }
 
+fn verify_escalation_bundle_path(input: &str, output: Option<&str>) -> PathBuf {
+    if let Some(output) = output {
+        PathBuf::from(output).with_extension("escalation-bundle.json")
+    } else {
+        PathBuf::from(format!("{input}.escalation-bundle.json"))
+    }
+}
+
 fn cmd_verify(options: VerifyOptions<'_>) -> bool {
     let VerifyOptions {
         input,
@@ -1489,6 +1498,7 @@ fn cmd_verify(options: VerifyOptions<'_>) -> bool {
         solver_timeout,
         cache_scope,
         generate_proof_cert,
+        escalate_lean,
         emit_escalation_bundle,
         emit_escalation_metrics,
         emit_decidable_metrics,
@@ -1617,7 +1627,10 @@ fn cmd_verify(options: VerifyOptions<'_>) -> bool {
         let manifest = verification::generate_contract_manifest(&module_env);
         let manifest_path = if let (Some(output), false) = (
             cert_output,
-            generate_proof_cert || emit_escalation_bundle || emit_escalation_metrics,
+            generate_proof_cert
+                || escalate_lean
+                || emit_escalation_bundle
+                || emit_escalation_metrics,
         ) {
             PathBuf::from(output)
         } else {
@@ -1879,7 +1892,7 @@ fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                                 "failed",
                             );
                             let emit_lean_artifacts =
-                                emit_escalation_bundle || emit_escalation_metrics;
+                                escalate_lean || emit_escalation_bundle || emit_escalation_metrics;
                             let status = if emit_lean_artifacts && classification.should_escalate {
                                 if !quiet_output {
                                     println!(
@@ -2081,8 +2094,9 @@ fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                                         &z3_result,
                                         "failed",
                                     );
-                                let emit_lean_artifacts =
-                                    emit_escalation_bundle || emit_escalation_metrics;
+                                let emit_lean_artifacts = escalate_lean
+                                    || emit_escalation_bundle
+                                    || emit_escalation_metrics;
                                 let status =
                                     if emit_lean_artifacts && classification.should_escalate {
                                         if !quiet_output {
@@ -2191,7 +2205,7 @@ fn cmd_verify(options: VerifyOptions<'_>) -> bool {
     }
 
     // Plan 11B: Generate proof certificate if requested
-    if generate_proof_cert || emit_escalation_bundle || emit_escalation_metrics {
+    if generate_proof_cert || escalate_lean || emit_escalation_bundle || emit_escalation_metrics {
         let mut atom_refs: Vec<&parser::Atom> = items
             .iter()
             .filter_map(|item| {
@@ -2252,17 +2266,16 @@ fn cmd_verify(options: VerifyOptions<'_>) -> bool {
             }
         }
 
-        if emit_escalation_bundle || emit_escalation_metrics {
+        if escalate_lean || emit_escalation_bundle || emit_escalation_metrics {
             let bundle = proof_cert::generate_escalation_bundle(&cert);
             if emit_escalation_bundle {
-                let bundle_path = cert_path.with_extension("escalation-bundle.json");
+                let bundle_path = verify_escalation_bundle_path(input, cert_output);
                 match proof_cert::save_escalation_bundle(&bundle, &bundle_path) {
                     Ok(()) => {
                         if !quiet_output {
                             println!(
-                                "  Lean escalation bundle written to: {} ({} candidate(s))",
-                                bundle_path.display(),
-                                bundle.summary.candidate_count
+                                "  Lean escalation bundle written to: {}",
+                                bundle_path.display()
                             );
                         }
                     }
@@ -2298,6 +2311,12 @@ fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                         }
                     }
                 }
+            }
+            if !quiet_output {
+                println!(
+                    "  Lean escalation bundle candidate_count: {}",
+                    bundle.summary.candidate_count
+                );
             }
         }
 
