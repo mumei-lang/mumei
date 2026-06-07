@@ -340,6 +340,7 @@ The two approaches are **complementary**: the MCP Server enables any agent to ac
 | [Examples & Tests](docs/EXAMPLES.md) | Verification suite, pattern matching, negative tests |
 | [Architecture](docs/ARCHITECTURE.md) | Compiler internals |
 | [Cross-Spec Verification](docs/CROSS_SPEC_GUIDE.md) | System-wide contract consistency, invariants, and dependency cycles |
+| [Verification Workflow Guide](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/VERIFICATION_WORKFLOW_GUIDE.md) | 自然言語仕様・既存コードの検証手順、仕様↔コード整合性検証、人間向け操作ガイド |
 | [Toolchain](docs/TOOLCHAIN.md) | CLI commands, package management |
 | [LSP Integration](docs/LSP_INTEGRATION.md) | Editor CodeLens, intent drift, and spec-code mapping |
 | [Roadmap](docs/ROADMAP.md) | Strategic roadmap |
