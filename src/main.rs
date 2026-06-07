@@ -617,38 +617,47 @@ fn main() {
                 let mut total_fail = 0usize;
                 for file in &files {
                     let file_str = file.to_string_lossy().to_string();
-                    let has_failure = cmd_verify(VerifyOptions {
-                        input: &file_str,
-                        task_id: task_id.as_deref(),
-                        solver_timeout,
-                        cache_scope: &cache_scope,
-                        generate_proof_cert: proof_cert,
-                        emit_escalation_bundle,
-                        emit_escalation_metrics,
-                        emit_decidable_metrics,
-                        emit_reconstruction_loss,
-                        emit_structured_feedback,
-                        cert_output: output.as_deref(),
-                        report_dir: report_dir.as_deref(),
-                        json_output: json,
-                        strict_imports,
-                        allow_lean_verified,
-                        enable_cross_spec_verification: enable_cross_spec,
-                        cross_spec_files: &cross_spec_files,
-                        enable_spurious_detection: enable_spurious,
-                        property_based_test,
-                        property_based_test_count,
-                        property_based_test_seed,
-                        property_based_test_max_shrink_steps,
-                        harness_contract: harness_contract.clone(),
-                        intent_fidelity: intent_fidelity.clone(),
-                        artifact_paths: artifact_paths.clone(),
-                        budget_policy_fingerprint: budget_policy_fingerprint.clone(),
-                        emit_contract_manifest,
-                        enable_vacuity_check,
-                        detect_loops,
-                        suggest_cegis,
-                    });
+                    let has_failure =
+                        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            cmd_verify(VerifyOptions {
+                                input: &file_str,
+                                task_id: task_id.as_deref(),
+                                solver_timeout,
+                                cache_scope: &cache_scope,
+                                generate_proof_cert: proof_cert,
+                                emit_escalation_bundle,
+                                emit_escalation_metrics,
+                                emit_decidable_metrics,
+                                emit_reconstruction_loss,
+                                emit_structured_feedback,
+                                cert_output: output.as_deref(),
+                                report_dir: report_dir.as_deref(),
+                                json_output: json,
+                                strict_imports,
+                                allow_lean_verified,
+                                enable_cross_spec_verification: enable_cross_spec,
+                                cross_spec_files: &cross_spec_files,
+                                enable_spurious_detection: enable_spurious,
+                                property_based_test,
+                                property_based_test_count,
+                                property_based_test_seed,
+                                property_based_test_max_shrink_steps,
+                                harness_contract: harness_contract.clone(),
+                                intent_fidelity: intent_fidelity.clone(),
+                                artifact_paths: artifact_paths.clone(),
+                                budget_policy_fingerprint: budget_policy_fingerprint.clone(),
+                                emit_contract_manifest,
+                                enable_vacuity_check,
+                                detect_loops,
+                                suggest_cegis,
+                            })
+                        })) {
+                            Ok(has_failure) => has_failure,
+                            Err(_) => {
+                                eprintln!("  ❌ '{}': parse error (panic)", file_str);
+                                true
+                            }
+                        };
                     if has_failure {
                         total_fail += 1;
                     } else {
@@ -1027,6 +1036,14 @@ fn load_and_prepare_with_full_options(
 fn try_load_and_prepare(
     input: &str,
 ) -> Result<(Vec<Item>, verification::ModuleEnv, Vec<ImportDecl>, String), String> {
+    try_load_and_prepare_with_full_options(input, false, false)
+}
+
+fn try_load_and_prepare_with_full_options(
+    input: &str,
+    strict_imports: bool,
+    allow_lean_verified: bool,
+) -> Result<(Vec<Item>, verification::ModuleEnv, Vec<ImportDecl>, String), String> {
     let source =
         fs::read_to_string(input).map_err(|e| format!("Could not read '{}': {}", input, e))?;
     let items = parser::parse_module(&source);
@@ -1042,12 +1059,40 @@ fn try_load_and_prepare(
     }
 
     if let Some((proj_dir, m)) = manifest::find_and_load() {
-        if let Err(e) = resolver::resolve_manifest_dependencies(&m, &proj_dir, &mut module_env) {
+        if strict_imports || allow_lean_verified {
+            if let Err(e) = resolver::resolve_manifest_dependencies_with_full_options(
+                &m,
+                &proj_dir,
+                &mut module_env,
+                strict_imports,
+                allow_lean_verified,
+            ) {
+                if strict_imports {
+                    return Err(format!("Dependency resolution failed (strict mode): {}", e));
+                }
+                eprintln!("  ⚠️  Dependency resolution warning: {}", e);
+            }
+        } else if let Err(e) =
+            resolver::resolve_manifest_dependencies(&m, &proj_dir, &mut module_env)
+        {
             eprintln!("  ⚠️  Dependency resolution warning: {}", e);
         }
     }
 
-    if let Err(e) = resolver::resolve_imports(&items, base_dir, &mut module_env) {
+    if strict_imports || allow_lean_verified {
+        if let Err(e) = resolver::resolve_imports_with_full_options(
+            &items,
+            base_dir,
+            &mut module_env,
+            strict_imports,
+            allow_lean_verified,
+        ) {
+            if strict_imports {
+                return Err(format!("Import resolution failed (strict mode): {}", e));
+            }
+            return Err(format!("Import resolution failed: {}", e));
+        }
+    } else if let Err(e) = resolver::resolve_imports(&items, base_dir, &mut module_env) {
         return Err(format!("Import resolution failed: {}", e));
     }
 
@@ -1479,7 +1524,13 @@ fn cmd_verify(options: VerifyOptions<'_>) -> bool {
         }
     }
     let (mut items, mut module_env, mut imports, source) =
-        load_and_prepare_with_full_options(input, strict_imports, allow_lean_verified);
+        match try_load_and_prepare_with_full_options(input, strict_imports, allow_lean_verified) {
+            Ok(result) => result,
+            Err(e) => {
+                eprintln!("  ❌ {e}");
+                return true;
+            }
+        };
     load_cross_spec_files(
         cross_spec_files,
         strict_imports,
