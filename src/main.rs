@@ -129,13 +129,6 @@ fn emit_decidable_fragment_warning(
     let _ = collect_decidable_fragment_diagnostic(atom, module_env, suppress_output);
 }
 
-fn has_outside_decidable_fragment(
-    atom: &parser::Atom,
-    module_env: &verification::ModuleEnv,
-) -> bool {
-    verification::outside_decidable_fragment_diagnostic(atom, module_env).is_some()
-}
-
 fn enrich_verify_json_payload(
     mut payload: serde_json::Value,
     diagnostics: &[verification::Diagnostic],
@@ -1775,13 +1768,11 @@ fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                 }
             }
             Item::Atom(atom) => {
-                if let Some(diagnostic) =
+                let has_fragment_warning =
                     collect_decidable_fragment_diagnostic(atom, &module_env, json_output)
-                {
-                    diagnostics.push(diagnostic);
-                }
-                let promote_outside_fragment =
-                    emit_lean_artifacts && has_outside_decidable_fragment(atom, &module_env);
+                        .inspect(|d| diagnostics.push(d.clone()))
+                        .is_some();
+                let promote_outside_fragment = emit_lean_artifacts && has_fragment_warning;
                 if module_env.is_verified(&atom.name) {
                     if !quiet_output {
                         println!(
@@ -1997,15 +1988,14 @@ fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                     // throughout HIR lowering, proof hash, and cache lookup
                     let mut qualified_method = method.clone();
                     qualified_method.name = qualified_name.clone();
-                    if let Some(diagnostic) = collect_decidable_fragment_diagnostic(
+                    let has_fragment_warning = collect_decidable_fragment_diagnostic(
                         &qualified_method,
                         &module_env,
                         json_output,
-                    ) {
-                        diagnostics.push(diagnostic);
-                    }
-                    let promote_outside_fragment = emit_lean_artifacts
-                        && has_outside_decidable_fragment(&qualified_method, &module_env);
+                    )
+                    .inspect(|d| diagnostics.push(d.clone()))
+                    .is_some();
+                    let promote_outside_fragment = emit_lean_artifacts && has_fragment_warning;
                     if module_env.is_verified(&qualified_name) {
                         if !quiet_output {
                             println!(

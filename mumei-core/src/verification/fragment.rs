@@ -160,7 +160,6 @@ pub(crate) fn atom_contract_text(atom: &Atom) -> String {
 
 pub(crate) fn text_has_nonlinear_arithmetic_marker(text: &str) -> bool {
     text.contains('%')
-        || text.contains('^')
         || text.contains("**")
         || text.contains("pow(")
         || text.contains("mod(")
@@ -208,7 +207,6 @@ pub(crate) fn text_has_regex_semantics(text: &str) -> bool {
     let normalized = text.to_ascii_lowercase();
     normalized.contains("regex")
         || normalized.contains("regexp")
-        || normalized.contains("matches(")
         || normalized.contains("match_regex(")
         || normalized.contains("re_match(")
 }
