@@ -56,7 +56,11 @@ impl SpecValidationResult {
             checked_refinements: 0,
             ensures_implication_checks: 0,
             property_based_test: None,
-            diagnostics: vec![contradiction_details],
+            diagnostics: vec![
+                contradiction_details,
+                contradiction.natural_language_explanation.clone(),
+                format!("Suggested fix: {}", contradiction.suggested_fix),
+            ],
         }
     }
 }

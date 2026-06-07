@@ -357,8 +357,8 @@ pub(crate) fn verify_inner(
         check_spec_satisfiability_with_property_based(atom, module_env, property_based_config)
             .map_err(|err| {
                 MumeiError::verification_at(err.to_string(), err.span.clone()).with_help(format!(
-                    "SpecValidation failed before proof attempt (kind: {}, constraints: {:?})",
-                    err.kind, err.constraints
+                    "SpecValidation failed before proof attempt (kind: {}, constraints: {:?}). {} Suggested fix: {}",
+                    err.kind, err.constraints, err.natural_language_explanation, err.suggested_fix
                 ))
             })?;
     metrics.record_phase("Phase 0a: spec validation", phase_start.elapsed());

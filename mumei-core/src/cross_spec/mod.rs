@@ -20,7 +20,9 @@ pub struct DependencyNode {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ContractConsistencyResult {
     pub caller_atom: String,
+    pub caller_file: String,
     pub callee_atom: String,
+    pub callee_file: String,
     pub is_consistent: bool,
     pub violations: Vec<String>,
     pub warnings: Vec<String>,
@@ -31,7 +33,21 @@ pub struct ContractConsistencyResult {
 pub struct GlobalInvariant {
     pub invariant: String,
     pub source_atoms: Vec<String>,
+    pub source_files: Vec<String>,
     pub confidence: f64,
+}
+
+/// Contradictory invariants found across atoms or specification files.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GlobalInvariantConflict {
+    pub left_invariant: String,
+    pub right_invariant: String,
+    pub left_source_atoms: Vec<String>,
+    pub right_source_atoms: Vec<String>,
+    pub left_source_files: Vec<String>,
+    pub right_source_files: Vec<String>,
+    pub message: String,
+    pub suggested_fix: String,
 }
 
 /// Cross-specification verification result.
@@ -39,6 +55,7 @@ pub struct GlobalInvariant {
 pub struct CrossSpecResult {
     pub contract_consistency: Vec<ContractConsistencyResult>,
     pub global_invariants: Vec<GlobalInvariant>,
+    pub global_invariant_conflicts: Vec<GlobalInvariantConflict>,
     pub circular_dependencies: Vec<Vec<String>>,
     pub dependency_graph: Vec<DependencyNode>,
     pub summary: CrossSpecSummary,
@@ -52,6 +69,7 @@ pub struct CrossSpecSummary {
     pub inconsistent_calls: usize,
     pub circular_dependency_count: usize,
     pub global_invariant_count: usize,
+    pub global_invariant_conflict_count: usize,
 }
 
 /// Verifier for cross-specification consistency.
@@ -119,7 +137,9 @@ impl<'env> CrossSpecVerifier<'env> {
 
         ContractConsistencyResult {
             caller_atom: caller.name.clone(),
+            caller_file: atom_source_file(caller),
             callee_atom: callee.name.clone(),
+            callee_file: atom_source_file(callee),
             is_consistent: violations.is_empty(),
             violations,
             warnings,
@@ -182,6 +202,7 @@ impl<'env> CrossSpecVerifier<'env> {
 
         let mut ensures_counts: HashMap<String, usize> = HashMap::new();
         let mut source_atoms: HashMap<String, Vec<String>> = HashMap::new();
+        let mut source_files: HashMap<String, Vec<String>> = HashMap::new();
 
         let mut atom_names: Vec<&String> = atoms.keys().collect();
         atom_names.sort();
@@ -202,6 +223,10 @@ impl<'env> CrossSpecVerifier<'env> {
                         .entry(invariant)
                         .or_default()
                         .push(atom_name.clone());
+                    source_files
+                        .entry(normalized.to_string())
+                        .or_default()
+                        .push(atom_source_file(atom));
                 }
             }
         }
@@ -213,6 +238,9 @@ impl<'env> CrossSpecVerifier<'env> {
                     Some(GlobalInvariant {
                         invariant: invariant.clone(),
                         source_atoms: source_atoms.remove(&invariant).unwrap_or_default(),
+                        source_files: unique_sorted(
+                            source_files.remove(&invariant).unwrap_or_default(),
+                        ),
                         confidence: count as f64 / atoms.len() as f64,
                     })
                 } else {
@@ -304,6 +332,78 @@ impl<'env> CrossSpecVerifier<'env> {
         cycles
     }
 
+    /// Detect mutually contradictory invariants inferred from atom postconditions.
+    pub fn detect_global_invariant_conflicts(&self) -> Vec<GlobalInvariantConflict> {
+        let mut bounds = Vec::new();
+        let mut atom_names: Vec<&String> = self.module_env.atoms.keys().collect();
+        atom_names.sort();
+
+        for atom_name in atom_names {
+            let Some(atom) = self.module_env.atoms.get(atom_name) else {
+                continue;
+            };
+            let source_file = atom_source_file(atom);
+            if source_file == "<unknown>" {
+                continue;
+            }
+            for invariant in split_conjuncts(&atom.ensures) {
+                if let Some(bound) = parse_bound_constraint(invariant) {
+                    bounds.push(InvariantBound {
+                        atom_name: atom_name.clone(),
+                        source_file: source_file.clone(),
+                        invariant: invariant.to_string(),
+                        bound,
+                    });
+                }
+            }
+        }
+
+        let mut conflicts = Vec::new();
+        let mut seen = HashSet::new();
+        for left_index in 0..bounds.len() {
+            for right in bounds.iter().skip(left_index + 1) {
+                let left = &bounds[left_index];
+                if left.atom_name == right.atom_name || left.bound.variable != right.bound.variable
+                {
+                    continue;
+                }
+                if !bounds_conflict(&left.bound, &right.bound) {
+                    continue;
+                }
+                let key = canonical_conflict_key(left, right);
+                if !seen.insert(key) {
+                    continue;
+                }
+                let left_files = vec![left.source_file.clone()];
+                let right_files = vec![right.source_file.clone()];
+                conflicts.push(GlobalInvariantConflict {
+                    left_invariant: left.invariant.clone(),
+                    right_invariant: right.invariant.clone(),
+                    left_source_atoms: vec![left.atom_name.clone()],
+                    right_source_atoms: vec![right.atom_name.clone()],
+                    left_source_files: left_files.clone(),
+                    right_source_files: right_files.clone(),
+                    message: format!(
+                        "Global invariant conflict for '{}': '{}' from {} contradicts '{}' from {}",
+                        left.bound.variable,
+                        left.invariant,
+                        left.source_file,
+                        right.invariant,
+                        right.source_file
+                    ),
+                    suggested_fix: format!(
+                        "Align the '{}' bounds across {} and {}, or split the atoms into separate domains with explicit preconditions.",
+                        left.bound.variable,
+                        left.source_file,
+                        right.source_file
+                    ),
+                });
+            }
+        }
+        conflicts.sort_by(|left, right| left.message.cmp(&right.message));
+        conflicts
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn dfs_cycle_detection(
         &self,
@@ -345,6 +445,7 @@ impl<'env> CrossSpecVerifier<'env> {
     pub fn verify_all(&self) -> CrossSpecResult {
         let contract_consistency = self.verify_contract_consistency();
         let global_invariants = self.infer_global_invariants();
+        let global_invariant_conflicts = self.detect_global_invariant_conflicts();
         let dependency_graph = self.build_dependency_graph();
         let circular_dependencies = self.detect_circular_dependencies();
 
@@ -360,11 +461,13 @@ impl<'env> CrossSpecVerifier<'env> {
             inconsistent_calls,
             circular_dependency_count: circular_dependencies.len(),
             global_invariant_count: global_invariants.len(),
+            global_invariant_conflict_count: global_invariant_conflicts.len(),
         };
 
         CrossSpecResult {
             contract_consistency,
             global_invariants,
+            global_invariant_conflicts,
             circular_dependencies,
             dependency_graph,
             summary,
@@ -395,6 +498,138 @@ fn split_conjuncts(constraint: &str) -> impl Iterator<Item = &str> {
         .split("&&")
         .map(str::trim)
         .filter(|part| !part.is_empty())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InvariantBound {
+    atom_name: String,
+    source_file: String,
+    invariant: String,
+    bound: NumericBound,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NumericBound {
+    variable: String,
+    kind: BoundKind,
+    value: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BoundKind {
+    LowerInclusive,
+    LowerExclusive,
+    UpperInclusive,
+    UpperExclusive,
+    Equal,
+}
+
+fn parse_bound_constraint(constraint: &str) -> Option<NumericBound> {
+    for (operator, kind) in [
+        (">=", BoundKind::LowerInclusive),
+        (">", BoundKind::LowerExclusive),
+        ("<=", BoundKind::UpperInclusive),
+        ("<", BoundKind::UpperExclusive),
+        ("==", BoundKind::Equal),
+    ] {
+        let Some((var, bound)) = constraint.split_once(operator) else {
+            continue;
+        };
+        let var = var.trim();
+        if !is_simple_identifier(var) {
+            return None;
+        }
+        let value = bound.trim().parse::<i64>().ok()?;
+        return Some(NumericBound {
+            variable: var.to_string(),
+            kind,
+            value,
+        });
+    }
+    None
+}
+
+fn bounds_conflict(left: &NumericBound, right: &NumericBound) -> bool {
+    if let Some((value, inclusive)) = equality_bound(left) {
+        return !bound_contains(right, value, inclusive);
+    }
+    if let Some((value, inclusive)) = equality_bound(right) {
+        return !bound_contains(left, value, inclusive);
+    }
+    match (lower_bound(left), upper_bound(right)) {
+        (Some(lower), Some(upper)) if lower_conflicts_with_upper(lower, upper) => return true,
+        _ => {}
+    }
+    matches!(
+        (lower_bound(right), upper_bound(left)),
+        (Some(lower), Some(upper)) if lower_conflicts_with_upper(lower, upper)
+    )
+}
+
+fn equality_bound(bound: &NumericBound) -> Option<(i64, bool)> {
+    (bound.kind == BoundKind::Equal).then_some((bound.value, true))
+}
+
+fn lower_bound(bound: &NumericBound) -> Option<(i64, bool)> {
+    match bound.kind {
+        BoundKind::LowerInclusive => Some((bound.value, true)),
+        BoundKind::LowerExclusive => Some((bound.value, false)),
+        BoundKind::Equal => Some((bound.value, true)),
+        BoundKind::UpperInclusive | BoundKind::UpperExclusive => None,
+    }
+}
+
+fn upper_bound(bound: &NumericBound) -> Option<(i64, bool)> {
+    match bound.kind {
+        BoundKind::UpperInclusive => Some((bound.value, true)),
+        BoundKind::UpperExclusive => Some((bound.value, false)),
+        BoundKind::Equal => Some((bound.value, true)),
+        BoundKind::LowerInclusive | BoundKind::LowerExclusive => None,
+    }
+}
+
+fn lower_conflicts_with_upper(lower: (i64, bool), upper: (i64, bool)) -> bool {
+    let (lower_value, lower_inclusive) = lower;
+    let (upper_value, upper_inclusive) = upper;
+    lower_value > upper_value
+        || (lower_value == upper_value && !(lower_inclusive && upper_inclusive))
+}
+
+fn bound_contains(bound: &NumericBound, value: i64, _inclusive: bool) -> bool {
+    match bound.kind {
+        BoundKind::LowerInclusive => value >= bound.value,
+        BoundKind::LowerExclusive => value > bound.value,
+        BoundKind::UpperInclusive => value <= bound.value,
+        BoundKind::UpperExclusive => value < bound.value,
+        BoundKind::Equal => value == bound.value,
+    }
+}
+
+fn atom_source_file(atom: &Atom) -> String {
+    atom.spec_metadata
+        .get("source_file")
+        .filter(|value| !value.is_empty())
+        .cloned()
+        .or_else(|| (!atom.span.file.is_empty()).then(|| atom.span.file.clone()))
+        .unwrap_or_else(|| "<unknown>".to_string())
+}
+
+fn unique_sorted(mut values: Vec<String>) -> Vec<String> {
+    values.sort();
+    values.dedup();
+    values
+}
+
+fn canonical_conflict_key(left: &InvariantBound, right: &InvariantBound) -> String {
+    let mut parts = [
+        format!("{}:{}:{}", left.atom_name, left.source_file, left.invariant),
+        format!(
+            "{}:{}:{}",
+            right.atom_name, right.source_file, right.invariant
+        ),
+    ];
+    parts.sort();
+    parts.join("|")
 }
 
 fn parse_ge_constraint(constraint: &str) -> Option<(String, i64)> {
