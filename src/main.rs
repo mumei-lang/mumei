@@ -297,7 +297,7 @@ enum Command {
     },
     /// Z3 formal verification only (no codegen)
     Verify {
-        /// Input .mm file
+        /// Input .mm file or directory
         input: String,
         /// Verification task ID for MCP/CI provenance
         #[arg(long)]
@@ -388,7 +388,7 @@ enum Command {
     },
     /// Parse + resolve + monomorphize only (no Z3, fast syntax check)
     Check {
-        /// Input .mm file
+        /// Input .mm file or directory
         input: String,
     },
     /// Generate a new Mumei project template
@@ -449,12 +449,12 @@ enum Command {
     },
     /// Infer required effects for all atoms (JSON output, for MCP integration)
     InferEffects {
-        /// Input .mm file
+        /// Input .mm file or directory
         input: String,
     },
     /// Infer contracts (requires/ensures) for all atoms (JSON output, Plan 13)
     InferContracts {
-        /// Input .mm file
+        /// Input .mm file or directory
         input: String,
     },
     /// Verify a proof certificate against current source
@@ -591,40 +591,114 @@ fn main() {
                     std::process::exit(1);
                 }
             }
-            cmd_verify(VerifyOptions {
-                input: &input,
-                task_id: task_id.as_deref(),
-                solver_timeout,
-                cache_scope: &cache_scope,
-                generate_proof_cert: proof_cert,
-                emit_escalation_bundle: escalate_lean || emit_escalation_bundle,
-                emit_escalation_metrics,
-                emit_decidable_metrics,
-                emit_reconstruction_loss,
-                emit_structured_feedback,
-                cert_output: output.as_deref(),
-                report_dir: report_dir.as_deref(),
-                json_output: json,
-                strict_imports,
-                allow_lean_verified,
-                enable_cross_spec_verification: cross_spec_verify || !cross_spec_files.is_empty(),
-                cross_spec_files: &cross_spec_files,
-                enable_spurious_detection: enable_spurious_detection || !disable_spurious_detection,
-                property_based_test,
-                property_based_test_count,
-                property_based_test_seed,
-                property_based_test_max_shrink_steps,
-                harness_contract: resolve_harness_contract(harness_contract),
-                intent_fidelity: resolve_intent_fidelity(intent_fidelity),
-                artifact_paths: resolve_artifact_paths(artifact_paths),
-                budget_policy_fingerprint: resolve_budget_policy_fingerprint(
+            let harness_contract = resolve_harness_contract(harness_contract);
+            let intent_fidelity = resolve_intent_fidelity(intent_fidelity);
+            let artifact_paths = resolve_artifact_paths(artifact_paths);
+            let budget_policy_fingerprint =
+                resolve_budget_policy_fingerprint(budget_policy_fingerprint);
+            let enable_cross_spec = cross_spec_verify || !cross_spec_files.is_empty();
+            let enable_spurious = enable_spurious_detection || !disable_spurious_detection;
+            let emit_escalation_bundle = escalate_lean || emit_escalation_bundle;
+
+            let input_path = Path::new(&input);
+            if input_path.is_dir() {
+                let mut files = collect_mm_files(input_path);
+                files.sort();
+                if files.is_empty() {
+                    eprintln!("❌ No .mm files found in '{}'", input);
+                    std::process::exit(1);
+                }
+                println!(
+                    "🗡️  Mumei verify: verifying {} file(s) in '{}'...",
+                    files.len(),
+                    input
+                );
+                let mut total_ok = 0usize;
+                let mut total_fail = 0usize;
+                for file in &files {
+                    let file_str = file.to_string_lossy().to_string();
+                    let has_failure = cmd_verify(VerifyOptions {
+                        input: &file_str,
+                        task_id: task_id.as_deref(),
+                        solver_timeout,
+                        cache_scope: &cache_scope,
+                        generate_proof_cert: proof_cert,
+                        emit_escalation_bundle,
+                        emit_escalation_metrics,
+                        emit_decidable_metrics,
+                        emit_reconstruction_loss,
+                        emit_structured_feedback,
+                        cert_output: output.as_deref(),
+                        report_dir: report_dir.as_deref(),
+                        json_output: json,
+                        strict_imports,
+                        allow_lean_verified,
+                        enable_cross_spec_verification: enable_cross_spec,
+                        cross_spec_files: &cross_spec_files,
+                        enable_spurious_detection: enable_spurious,
+                        property_based_test,
+                        property_based_test_count,
+                        property_based_test_seed,
+                        property_based_test_max_shrink_steps,
+                        harness_contract: harness_contract.clone(),
+                        intent_fidelity: intent_fidelity.clone(),
+                        artifact_paths: artifact_paths.clone(),
+                        budget_policy_fingerprint: budget_policy_fingerprint.clone(),
+                        emit_contract_manifest,
+                        enable_vacuity_check,
+                        detect_loops,
+                        suggest_cegis,
+                    });
+                    if has_failure {
+                        total_fail += 1;
+                    } else {
+                        total_ok += 1;
+                    }
+                }
+                println!(
+                    "\n🗡️  Directory verify summary: {} passed, {} failed",
+                    total_ok, total_fail
+                );
+                if total_fail > 0 {
+                    std::process::exit(1);
+                }
+            } else {
+                let has_failure = cmd_verify(VerifyOptions {
+                    input: &input,
+                    task_id: task_id.as_deref(),
+                    solver_timeout,
+                    cache_scope: &cache_scope,
+                    generate_proof_cert: proof_cert,
+                    emit_escalation_bundle,
+                    emit_escalation_metrics,
+                    emit_decidable_metrics,
+                    emit_reconstruction_loss,
+                    emit_structured_feedback,
+                    cert_output: output.as_deref(),
+                    report_dir: report_dir.as_deref(),
+                    json_output: json,
+                    strict_imports,
+                    allow_lean_verified,
+                    enable_cross_spec_verification: enable_cross_spec,
+                    cross_spec_files: &cross_spec_files,
+                    enable_spurious_detection: enable_spurious,
+                    property_based_test,
+                    property_based_test_count,
+                    property_based_test_seed,
+                    property_based_test_max_shrink_steps,
+                    harness_contract,
+                    intent_fidelity,
+                    artifact_paths,
                     budget_policy_fingerprint,
-                ),
-                emit_contract_manifest,
-                enable_vacuity_check,
-                detect_loops,
-                suggest_cegis,
-            });
+                    emit_contract_manifest,
+                    enable_vacuity_check,
+                    detect_loops,
+                    suggest_cegis,
+                });
+                if has_failure {
+                    std::process::exit(1);
+                }
+            }
         }
         Some(Command::Check { input }) => {
             cmd_check(&input);
@@ -948,6 +1022,134 @@ fn load_and_prepare_with_full_options(
     (items, module_env, imports, source)
 }
 
+/// Non-exiting variant of `load_and_prepare` — returns `Err` on read/resolve
+/// failures instead of calling `std::process::exit(1)`.
+fn try_load_and_prepare(
+    input: &str,
+) -> Result<(Vec<Item>, verification::ModuleEnv, Vec<ImportDecl>, String), String> {
+    let source =
+        fs::read_to_string(input).map_err(|e| format!("Could not read '{}': {}", input, e))?;
+    let items = parser::parse_module(&source);
+
+    let mut module_env = verification::ModuleEnv::new();
+    verification::register_builtin_traits(&mut module_env);
+    verification::register_builtin_effects(&mut module_env);
+    let input_path = Path::new(input);
+    let base_dir = input_path.parent().unwrap_or(Path::new("."));
+
+    if let Err(e) = resolver::resolve_prelude(base_dir, &mut module_env) {
+        eprintln!("  ⚠️  Prelude load warning: {}", e);
+    }
+
+    if let Some((proj_dir, m)) = manifest::find_and_load() {
+        if let Err(e) = resolver::resolve_manifest_dependencies(&m, &proj_dir, &mut module_env) {
+            eprintln!("  ⚠️  Dependency resolution warning: {}", e);
+        }
+    }
+
+    if let Err(e) = resolver::resolve_imports(&items, base_dir, &mut module_env) {
+        return Err(format!("Import resolution failed: {}", e));
+    }
+
+    for item in &items {
+        match item {
+            Item::TraitDef(trait_def) => module_env.register_trait(trait_def),
+            Item::ImplDef(impl_def) => module_env.register_impl(impl_def),
+            Item::EffectDef(effect_def) => module_env.register_effect(effect_def),
+            _ => {}
+        }
+    }
+
+    let mut mono = ast::Monomorphizer::new();
+    mono.collect(&items);
+    let mut items = if mono.has_generics() {
+        let mono_items = mono.monomorphize(&items, Some(&module_env));
+        eprintln!(
+            "  🔬 Monomorphization: {} generic instance(s) expanded.",
+            mono.instances().len()
+        );
+        mono_items
+    } else {
+        items
+    };
+    annotate_source_file(&mut items, input);
+
+    let mut imports: Vec<ImportDecl> = Vec::new();
+    for item in &items {
+        match item {
+            Item::Import(decl) => imports.push(decl.clone()),
+            Item::TypeDef(refined_type) => module_env.register_type(refined_type),
+            Item::StructDef(struct_def) => module_env.register_struct(struct_def),
+            Item::EnumDef(enum_def) => module_env.register_enum(enum_def),
+            Item::Atom(atom) => module_env.register_atom(atom),
+            Item::TraitDef(_) => {}
+            Item::ImplDef(_) => {}
+            Item::ResourceDef(resource_def) => module_env.register_resource(resource_def),
+            Item::EffectDef(_) => {}
+            Item::ImplBlock(impl_block) => {
+                for method in &impl_block.methods {
+                    let mut qualified = method.clone();
+                    qualified.name = format!("{}::{}", impl_block.struct_name, method.name);
+                    module_env.register_atom(&qualified);
+                }
+            }
+            Item::ExternBlock(extern_block) => {
+                module_env.register_extern_block(extern_block);
+                for ext_fn in &extern_block.functions {
+                    let params: Vec<parser::Param> = ext_fn
+                        .param_types
+                        .iter()
+                        .enumerate()
+                        .map(|(i, ty)| parser::Param {
+                            name: ext_fn
+                                .param_names
+                                .get(i)
+                                .cloned()
+                                .unwrap_or_else(|| format!("arg{}", i)),
+                            type_name: Some(ty.clone()),
+                            type_ref: Some(parser::parse_type_ref(ty)),
+                            is_ref: false,
+                            is_ref_mut: false,
+                            fn_contract_requires: None,
+                            fn_contract_ensures: None,
+                        })
+                        .collect();
+
+                    let atom = parser::Atom {
+                        name: ext_fn.name.clone(),
+                        type_params: vec![],
+                        where_bounds: vec![],
+                        params,
+                        trace_id: None,
+                        spec_metadata: std::collections::HashMap::new(),
+                        requires: ext_fn
+                            .requires
+                            .clone()
+                            .unwrap_or_else(|| "true".to_string()),
+                        forall_constraints: vec![],
+                        ensures: ext_fn.ensures.clone().unwrap_or_else(|| "true".to_string()),
+                        body_expr: String::new(),
+                        consumed_params: vec![],
+                        resources: vec![],
+                        is_async: false,
+                        trust_level: parser::TrustLevel::Trusted,
+                        max_unroll: None,
+                        invariant: None,
+                        effects: vec![],
+                        return_type: Some(ext_fn.return_type.clone()),
+                        span: ext_fn.span.clone(),
+                        effect_pre: std::collections::HashMap::new(),
+                        effect_post: std::collections::HashMap::new(),
+                    };
+                    module_env.register_atom(&atom);
+                }
+            }
+        }
+    }
+
+    Ok((items, module_env, imports, source))
+}
+
 fn annotate_source_file(items: &mut [Item], input: &str) {
     for item in items {
         match item {
@@ -1048,15 +1250,61 @@ fn merge_module_env(target: &mut verification::ModuleEnv, source: verification::
 // =============================================================================
 
 fn cmd_check(input: &str) {
-    println!("🗡️  Mumei check: parsing and resolving '{}'...", input);
-    let (items, _module_env, _imports, _source) = load_and_prepare(input);
+    let input_path = Path::new(input);
+    if input_path.is_dir() {
+        let mut files = collect_mm_files(input_path);
+        files.sort();
+        if files.is_empty() {
+            eprintln!("❌ No .mm files found in '{}'", input);
+            std::process::exit(1);
+        }
+        println!(
+            "🗡️  Mumei check: checking {} file(s) in '{}'...",
+            files.len(),
+            input
+        );
+        let mut total_ok = 0usize;
+        let mut total_fail = 0usize;
+        for file in &files {
+            let file_str = file.to_string_lossy().to_string();
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                try_load_and_prepare(&file_str)
+            })) {
+                Ok(Ok((items, ..))) => {
+                    cmd_check_print_items(&file_str, &items);
+                    total_ok += 1;
+                }
+                Ok(Err(e)) => {
+                    eprintln!("  ❌ '{}': {}", file_str, e);
+                    total_fail += 1;
+                }
+                Err(_) => {
+                    eprintln!("  ❌ '{}': parse error (panic)", file_str);
+                    total_fail += 1;
+                }
+            }
+        }
+        println!(
+            "\n🗡️  Directory check summary: {} passed, {} failed",
+            total_ok, total_fail
+        );
+        if total_fail > 0 {
+            std::process::exit(1);
+        }
+    } else {
+        println!("🗡️  Mumei check: parsing and resolving '{}'...", input);
+        let (items, _module_env, _imports, _source) = load_and_prepare(input);
+        cmd_check_print_items(input, &items);
+    }
+}
 
+fn cmd_check_print_items(_input: &str, items: &[Item]) {
     let mut type_count = 0;
     let mut struct_count = 0;
     let mut enum_count = 0;
     let mut trait_count = 0;
     let mut atom_count = 0;
-    for item in &items {
+    for item in items {
         match item {
             Item::Import(decl) => {
                 let alias_str = decl.alias.as_deref().unwrap_or("(none)");
@@ -1164,7 +1412,7 @@ struct VerifyOptions<'a> {
     suggest_cegis: bool,
 }
 
-fn cmd_verify(options: VerifyOptions<'_>) {
+fn cmd_verify(options: VerifyOptions<'_>) -> bool {
     let VerifyOptions {
         input,
         task_id,
@@ -2051,7 +2299,7 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                 }
                 Err(e) => {
                     eprintln!("Failed to read report.json: {}", e);
-                    std::process::exit(1);
+                    return true;
                 }
             }
         } else {
@@ -2075,13 +2323,9 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                 ),
             }
         }
-        if failed > 0 {
-            std::process::exit(1);
-        }
+        return failed > 0;
     } else if structured_feedback_stdout {
-        if failed > 0 {
-            std::process::exit(1);
-        }
+        return failed > 0;
     } else {
         println!();
         if failed > 0 {
@@ -2089,7 +2333,7 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                 "❌ Verification: {} passed, {} failed, {} skipped (cached), {} Lean escalation candidate(s)",
                 verified, failed, skipped, escalated
             );
-            std::process::exit(1);
+            return true;
         }
         if skipped > 0 {
             println!(
@@ -2103,6 +2347,7 @@ fn cmd_verify(options: VerifyOptions<'_>) {
             );
         }
     }
+    false
 }
 
 fn save_decidable_fragment_metrics(
@@ -5449,18 +5694,82 @@ fn cmd_repl() {
 // =============================================================================
 
 fn cmd_infer_effects(input: &str) {
-    let (items, module_env, _imports, _source) = load_and_prepare(input);
-    let result = verification::infer_effects_json(&items, &module_env);
-    // JSON 出力（MCP が stdout をパースする）
-    println!("{}", serde_json::to_string_pretty(&result).unwrap());
+    let input_path = Path::new(input);
+    if input_path.is_dir() {
+        let mut files = collect_mm_files(input_path);
+        files.sort();
+        if files.is_empty() {
+            eprintln!("❌ No .mm files found in '{}'", input);
+            std::process::exit(1);
+        }
+        let mut entries: Vec<serde_json::Value> = Vec::new();
+        for file in &files {
+            let file_str = file.to_string_lossy().to_string();
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let (items, module_env, _imports, _source) = load_and_prepare(&file_str);
+                verification::infer_effects_json(&items, &module_env)
+            })) {
+                Ok(result) => {
+                    entries.push(serde_json::json!({
+                        "file": file_str,
+                        "result": result,
+                    }));
+                }
+                Err(_) => {
+                    entries.push(serde_json::json!({
+                        "file": file_str,
+                        "result": null,
+                        "error": "parse error",
+                    }));
+                }
+            }
+        }
+        println!("{}", serde_json::to_string_pretty(&entries).unwrap());
+    } else {
+        let (items, module_env, _imports, _source) = load_and_prepare(input);
+        let result = verification::infer_effects_json(&items, &module_env);
+        println!("{}", serde_json::to_string_pretty(&result).unwrap());
+    }
 }
 
 /// Plan 13-3: CLI command for contract inference
 fn cmd_infer_contracts(input: &str) {
-    let (items, module_env, _imports, _source) = load_and_prepare(input);
-    let result = verification::infer_contracts_json(&items, &module_env);
-    // JSON 出力（MCP が stdout をパースする）
-    println!("{}", serde_json::to_string_pretty(&result).unwrap());
+    let input_path = Path::new(input);
+    if input_path.is_dir() {
+        let mut files = collect_mm_files(input_path);
+        files.sort();
+        if files.is_empty() {
+            eprintln!("❌ No .mm files found in '{}'", input);
+            std::process::exit(1);
+        }
+        let mut entries: Vec<serde_json::Value> = Vec::new();
+        for file in &files {
+            let file_str = file.to_string_lossy().to_string();
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let (items, module_env, _imports, _source) = load_and_prepare(&file_str);
+                verification::infer_contracts_json(&items, &module_env)
+            })) {
+                Ok(result) => {
+                    entries.push(serde_json::json!({
+                        "file": file_str,
+                        "result": result,
+                    }));
+                }
+                Err(_) => {
+                    entries.push(serde_json::json!({
+                        "file": file_str,
+                        "result": null,
+                        "error": "parse error",
+                    }));
+                }
+            }
+        }
+        println!("{}", serde_json::to_string_pretty(&entries).unwrap());
+    } else {
+        let (items, module_env, _imports, _source) = load_and_prepare(input);
+        let result = verification::infer_contracts_json(&items, &module_env);
+        println!("{}", serde_json::to_string_pretty(&result).unwrap());
+    }
 }
 
 // =============================================================================
