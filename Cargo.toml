@@ -26,6 +26,7 @@ mumei-emit-proofbook = { path = "mumei-emit-proofbook" }
 mumei-emit-rust = { path = "mumei-emit-rust" }
 mumei-emit-python = { path = "mumei-emit-python" }
 clap = { version = "4.4", features = ["derive"] }
+encoding_rs = "0.8"
 toml = "0.8"
 dirs = "5.0"
 serde = { version = "1.0", features = ["derive"] }
