@@ -34,12 +34,73 @@ from std_graph_lib import (  # noqa: F401 (re-exported for back-compat)
 
 mcp = FastMCP("Mumei-Forge")
 
+SPEC_GUIDELINE_SUMMARY: dict[str, Any] = {
+    "decidable_fragment": {
+        "linear_arithmetic": [
+            "Use i64/Nat addition, subtraction, comparisons, and constant multiplication.",
+            "Avoid variable-variable multiplication, symbolic division/modulo, and exponentiation.",
+        ],
+        "array_access": [
+            "Add explicit bounds for every access: 0 <= i && i < len(a).",
+            "Keep index expressions simple and near their requires/forall bounds.",
+        ],
+        "bounded_quantifiers": [
+            "Use forall only over bounded integer ranges or finite collections.",
+            "Prefer constructible witnesses over exists; avoid forall/exists alternation.",
+        ],
+        "finite_state_machines": [
+            "Model temporal effects with explicit finite states and transitions.",
+            "Avoid implicit history, regex-like traces, and large transition graphs.",
+        ],
+    },
+    "common_failure_patterns": [
+        {
+            "tag": "nonlinear_arithmetic",
+            "patterns": ["x * y", "x / y", "x % y", "pow(x, y)"],
+            "guidance": "Rewrite to linear bounds or mark as a Lean escalation candidate.",
+        },
+        {
+            "tag": "quantifier_alternation",
+            "patterns": ["forall i. exists j. ...", "exists x. forall y. ..."],
+            "guidance": "Split the spec or return a constructible witness.",
+        },
+        {
+            "tag": "nested_aliasing",
+            "patterns": ["multiple ref mut parameters", "nested mutable acquire scopes"],
+            "guidance": "Serialize mutation through one owner or split the atom.",
+        },
+        {
+            "tag": "regex_semantics",
+            "patterns": ["regex_match(s, pattern)", "matches(s, pattern)"],
+            "guidance": "Use prefix/contains/bounded finite cases, or escalate to Lean.",
+        },
+        {
+            "tag": "array_without_bounds",
+            "patterns": ["a[i] without 0 <= i && i < len(a)"],
+            "guidance": "Add explicit index bounds in requires, ensures, or bounded forall.",
+        },
+    ],
+    "recommended_templates": {
+        "bounded_array_access": "requires: 0 <= i && i < len(a); ensures: result == a[i];",
+        "bounded_forall": "forall(i, 0, len(a), a[i] >= 0)",
+        "constructible_witness": "Return the witness and prove 0 <= result && result < bound.",
+        "explicit_fsm": "Declare states, initial state, and each transition explicitly.",
+    },
+    "doc": "docs/SPEC_GUIDE.md",
+}
+
 # Module-level session state for effect boundary overrides
 _session_effects: dict = {
     "allowed": [],
     "denied": [],
     "source": "default",  # "default" | "mumei.toml" | "session_override"
 }
+
+
+@mcp.tool()
+def get_spec_guideline() -> str:
+    """Return agent-facing Mumei spec-writing guidelines as JSON."""
+    return json.dumps(SPEC_GUIDELINE_SUMMARY, ensure_ascii=False, indent=2)
 
 
 def _env_nonempty(name: str) -> str | None:

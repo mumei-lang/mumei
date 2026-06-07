@@ -707,6 +707,18 @@ pub struct DecidableFragmentMetrics {
     pub warning_counts: HashMap<String, usize>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Diagnostic {
+    pub code: String,
+    pub severity: String,
+    pub atom: String,
+    pub message: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub escalation_reason: Option<String>,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ModuleVerificationReport {
     pub cross_spec: Option<CrossSpecResult>,
@@ -1119,6 +1131,11 @@ pub fn classify_atom_for_lean_escalation(
         } else {
             format!("z3_{}_complex_fragment", z3_result_class)
         });
+    } else if !logic_fragment_tags.is_empty()
+        && z3_result_class != "sat"
+        && !normalized_status.contains("failed")
+    {
+        reason = Some("outside_decidable_fragment".to_string());
     } else if atom.trust_level == TrustLevel::Trusted {
         reason = Some("trusted_atom_human_review".to_string());
     }

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, process::Command};
 
 use mumei_core::parser::{
     Atom, Effect, EffectDef, EffectTransition, EnumDef, EnumVariant, Param, Quantifier,
@@ -47,6 +47,13 @@ fn param(name: &str, type_name: &str) -> Param {
     }
 }
 
+fn ref_mut_param(name: &str, type_name: &str) -> Param {
+    Param {
+        is_ref_mut: true,
+        ..param(name, type_name)
+    }
+}
+
 fn assert_tag(atom: &Atom, module_env: &ModuleEnv, expected_tag: &str) {
     let tags = detect_logic_fragment_tags(atom, module_env);
     assert!(
@@ -57,6 +64,25 @@ fn assert_tag(atom: &Atom, module_env: &ModuleEnv, expected_tag: &str) {
         .expect("expected outside_decidable_fragment warning");
     assert!(warning.contains("outside_decidable_fragment"));
     assert!(warning.contains(expected_tag));
+}
+
+#[test]
+fn diagnostic_struct_uses_outside_decidable_fragment_code() {
+    let module_env = ModuleEnv::new();
+    let mut atom = base_atom("diagnostic_nonlinear");
+    atom.params = vec![param("x", "i64"), param("y", "i64")];
+    atom.ensures = "result == x * y".to_string();
+
+    let diagnostic =
+        mumei_core::verification::outside_decidable_fragment_diagnostic(&atom, &module_env)
+            .expect("expected diagnostic");
+
+    assert_eq!(diagnostic.code, "outside_decidable_fragment");
+    assert_eq!(diagnostic.severity, "warning");
+    assert_eq!(diagnostic.atom, "diagnostic_nonlinear");
+    assert!(diagnostic
+        .tags
+        .contains(&"nonlinear_arithmetic".to_string()));
 }
 
 #[test]
@@ -107,6 +133,25 @@ fn detects_quantifier_alternation() {
     ];
 
     assert_tag(&atom, &module_env, "quantifier_alternation");
+}
+
+#[test]
+fn detects_nested_mutable_aliasing() {
+    let module_env = ModuleEnv::new();
+    let mut atom = base_atom("nested_aliases");
+    atom.params = vec![ref_mut_param("left", "i64"), ref_mut_param("right", "i64")];
+
+    assert_tag(&atom, &module_env, "nested_aliasing");
+}
+
+#[test]
+fn detects_regex_semantics() {
+    let module_env = ModuleEnv::new();
+    let mut atom = base_atom("regex_check");
+    atom.params = vec![param("s", "Str")];
+    atom.requires = "regex_match(s, \"^[a-z]+$\")".to_string();
+
+    assert_tag(&atom, &module_env, "regex_semantics");
 }
 
 #[test]
@@ -211,4 +256,118 @@ fn collects_decidable_fragment_metrics_by_warning_tag() {
     assert_eq!(metrics.total_atoms_checked, 2);
     assert_eq!(metrics.atoms_with_warnings, 1);
     assert_eq!(metrics.warning_counts.get("nonlinear_arithmetic"), Some(&1));
+}
+
+#[test]
+fn verify_json_includes_outside_decidable_fragment_diagnostics() {
+    let bin = env!("CARGO_BIN_EXE_mumei");
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let temp_dir = std::env::temp_dir().join(format!(
+        "mumei_decidable_json_{}_{}",
+        std::process::id(),
+        "diagnostics"
+    ));
+    if temp_dir.exists() {
+        std::fs::remove_dir_all(&temp_dir).expect("clean stale diagnostics temp dir");
+    }
+    std::fs::create_dir_all(&temp_dir).expect("create diagnostics temp dir");
+    let fixture = temp_dir.join("nonlinear.mm");
+    std::fs::write(
+        &fixture,
+        r#"
+atom nonlinear(x: i64, y: i64) -> i64
+requires: true;
+ensures: result == x * y;
+body: x * y;
+"#,
+    )
+    .expect("write nonlinear fixture");
+
+    let output = Command::new(bin)
+        .arg("verify")
+        .arg("--json")
+        .arg("--report-dir")
+        .arg(&temp_dir)
+        .arg(&fixture)
+        .current_dir(manifest_dir)
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run mumei verify --json: {err}"));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let payload: serde_json::Value =
+        serde_json::from_str(&stdout).unwrap_or_else(|err| panic!("{err}: {stdout}"));
+    let diagnostics = payload["diagnostics"]
+        .as_array()
+        .expect("diagnostics should be an array");
+    assert!(
+        diagnostics.iter().any(
+            |diagnostic| diagnostic["code"] == "outside_decidable_fragment"
+                && diagnostic["tags"].as_array().is_some_and(|tags| tags
+                    .iter()
+                    .any(|tag| tag.as_str() == Some("nonlinear_arithmetic")))
+        ),
+        "expected outside_decidable_fragment nonlinear diagnostic in {payload}"
+    );
+
+    std::fs::remove_dir_all(temp_dir).expect("remove diagnostics temp dir");
+}
+
+#[test]
+fn escalate_lean_promotes_outside_fragment_to_candidate_bundle() {
+    let bin = env!("CARGO_BIN_EXE_mumei");
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let temp_dir = std::env::temp_dir().join(format!(
+        "mumei_decidable_escalation_{}_{}",
+        std::process::id(),
+        "bundle"
+    ));
+    if temp_dir.exists() {
+        std::fs::remove_dir_all(&temp_dir).expect("clean stale escalation temp dir");
+    }
+    std::fs::create_dir_all(&temp_dir).expect("create escalation temp dir");
+    let fixture = temp_dir.join("nonlinear.mm");
+    let cert_path = temp_dir.join("nonlinear.proof.json");
+    let bundle_path = cert_path.with_extension("escalation-bundle.json");
+    std::fs::write(
+        &fixture,
+        r#"
+atom nonlinear(x: i64, y: i64) -> i64
+requires: true;
+ensures: result == x * y;
+body: x * y;
+"#,
+    )
+    .expect("write nonlinear fixture");
+
+    let output = Command::new(bin)
+        .arg("verify")
+        .arg("--escalate-lean")
+        .arg("--emit")
+        .arg("escalation-bundle")
+        .arg("--output")
+        .arg(&cert_path)
+        .arg(&fixture)
+        .current_dir(manifest_dir)
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run mumei verify --escalate-lean: {err}"));
+
+    assert!(
+        output.status.success(),
+        "verify --escalate-lean should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let bundle: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&bundle_path).expect("read escalation bundle"),
+    )
+    .expect("parse escalation bundle");
+    assert_eq!(bundle["summary"]["candidate_count"], 1);
+    assert_eq!(bundle["candidates"][0]["name"], "nonlinear");
+    assert_eq!(
+        bundle["candidates"][0]["escalation_reason"],
+        "outside_decidable_fragment"
+    );
+    assert_eq!(bundle["candidates"][0]["status"], "escalation_candidate");
+
+    std::fs::remove_dir_all(temp_dir).expect("remove escalation temp dir");
 }
