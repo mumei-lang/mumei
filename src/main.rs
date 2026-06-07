@@ -5,6 +5,7 @@ mod lsp;
 mod setup;
 
 use clap::{Parser, Subcommand};
+use encoding_rs::{Encoding, SHIFT_JIS};
 use mumei_core::emitter::Emitter;
 #[cfg(test)]
 use mumei_core::hir::lower_atom_to_hir;
@@ -31,7 +32,7 @@ fn resolve_source_for_span(main_source: &str, span: &parser::Span) -> String {
     if span.file.is_empty() {
         main_source.to_string()
     } else {
-        std::fs::read_to_string(&span.file).unwrap_or_else(|_| main_source.to_string())
+        read_source_file(&span.file).unwrap_or_else(|_| main_source.to_string())
     }
 }
 
@@ -808,10 +809,34 @@ fn main() {
 
 /// ソースファイルを読み込む
 fn load_source(input: &str) -> String {
-    fs::read_to_string(input).unwrap_or_else(|_| {
+    read_source_file(input).unwrap_or_else(|_| {
         eprintln!("❌ Error: Could not read Mumei source file '{}'", input);
         std::process::exit(1);
     })
+}
+
+fn decode_source_bytes(bytes: &[u8]) -> Option<String> {
+    if let Some((encoding, bom_len)) = Encoding::for_bom(bytes) {
+        let (source, _, had_errors) = encoding.decode(&bytes[bom_len..]);
+        if !had_errors {
+            return Some(source.into_owned());
+        }
+    } else if let Ok(source) = std::str::from_utf8(bytes) {
+        return Some(source.to_owned());
+    } else {
+        let (source, _, had_errors) = SHIFT_JIS.decode(bytes);
+        if !had_errors {
+            return Some(source.into_owned());
+        }
+    }
+
+    None
+}
+
+fn read_source_file<P: AsRef<Path>>(path: P) -> Result<String, String> {
+    let path = path.as_ref();
+    let bytes = fs::read(path).map_err(|err| err.to_string())?;
+    decode_source_bytes(&bytes).ok_or_else(|| "unsupported source encoding".to_string())
 }
 
 /// Z3 が利用可能かチェックし、なければ親切なメッセージで終了する
@@ -1045,7 +1070,7 @@ fn try_load_and_prepare_with_full_options(
     allow_lean_verified: bool,
 ) -> Result<(Vec<Item>, verification::ModuleEnv, Vec<ImportDecl>, String), String> {
     let source =
-        fs::read_to_string(input).map_err(|e| format!("Could not read '{}': {}", input, e))?;
+        read_source_file(input).map_err(|e| format!("Could not read '{}': {}", input, e))?;
     let items = parser::parse_module(&source);
 
     let mut module_env = verification::ModuleEnv::new();
@@ -5421,7 +5446,7 @@ fn repl_type_expr(ctx: &ReplContext<'_>, expr: &str) {
 
 fn repl_load_single_file(ctx: &mut ReplContext<'_>, file: &Path) -> Option<usize> {
     println!("  Loading '{}'...", file.display());
-    let source = match fs::read_to_string(file) {
+    let source = match read_source_file(file) {
         Ok(source) => source,
         Err(err) => {
             eprintln!("  ❌ Failed to read '{}': {}", file.display(), err);
@@ -5876,7 +5901,7 @@ fn cmd_doc(input: &str, output_dir: &str, format: &str) {
     let mut all_docs: Vec<ModuleDoc> = Vec::new();
 
     for file in &files {
-        let source = match fs::read_to_string(file) {
+        let source = match read_source_file(file) {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("  ⚠️  Skipping '{}': {}", file.display(), e);
