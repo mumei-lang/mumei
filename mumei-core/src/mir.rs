@@ -20,6 +20,7 @@
 
 use crate::hir::{HirAtom, HirExpr, HirStmt};
 use crate::parser::Op;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 // =============================================================================
@@ -27,11 +28,11 @@ use std::collections::HashMap;
 // =============================================================================
 
 /// A unique identifier for a local variable or temporary.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Local(pub usize);
 
 /// A place in memory (variable or field access).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub enum Place {
     Local(Local),
@@ -40,7 +41,7 @@ pub enum Place {
 }
 
 /// Right-hand side of an assignment.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub enum Rvalue {
     Use(Operand),
@@ -64,14 +65,14 @@ pub enum Rvalue {
 }
 
 /// An operand: either a place (variable) or a constant.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub enum Operand {
     Place(Place),
     Constant(MirConstant),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub enum MirConstant {
     Int(i64),
@@ -84,7 +85,7 @@ pub enum MirConstant {
 }
 
 /// A single MIR statement (three-address code).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub enum MirStatement {
     Assign(Place, Rvalue),
@@ -95,7 +96,7 @@ pub enum MirStatement {
 }
 
 /// Block terminator: how control flow leaves a basic block.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub enum Terminator {
     Goto(BasicBlockId),
@@ -111,7 +112,7 @@ pub enum Terminator {
 pub type BasicBlockId = usize;
 
 /// A basic block: a sequence of statements followed by a terminator.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BasicBlock {
     pub id: BasicBlockId,
     pub statements: Vec<MirStatement>,
@@ -123,7 +124,7 @@ pub struct BasicBlock {
 pub const MIR_ANALYSIS_COMPLEXITY_LIMIT: usize = 10_000;
 
 /// A complete MIR body for one atom.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub struct MirBody {
     pub name: String,
@@ -207,7 +208,7 @@ impl MirBody {
 }
 
 /// Whether a local is Copy (bitwise-duplicable) or Move (ownership transfer).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Movability {
     /// Primitive types (i64, f64, bool) and refined type aliases (Nat, Pos, etc.) — assignment copies.
     Copy,
@@ -229,7 +230,7 @@ pub fn movability_from_type(ty: &Option<String>) -> Movability {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub struct LocalDecl {
     pub local: Local,
@@ -877,6 +878,8 @@ mod tests {
             type_params: vec![],
             where_bounds: vec![],
             params,
+            trace_id: None,
+            spec_metadata: std::collections::HashMap::new(),
             requires: "true".to_string(),
             forall_constraints: vec![],
             ensures: "true".to_string(),

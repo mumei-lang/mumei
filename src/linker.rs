@@ -72,26 +72,48 @@ fn find_clang() -> Result<PathBuf, String> {
     )
 }
 
-/// Link one or more .ll files into a native binary using clang.
+/// Find a C compiler that can link generated objects and runtime C sources.
+fn find_c_linker() -> Result<PathBuf, String> {
+    match find_clang() {
+        Ok(path) => Ok(path),
+        Err(clang_error) => {
+            if let Some(path) = find_on_path("cc") {
+                Ok(path)
+            } else if let Some(path) = find_on_path("gcc") {
+                Ok(path)
+            } else {
+                Err(format!(
+                    "{}\nAlso could not find a fallback C compiler (`cc` or `gcc`) for linking.",
+                    clang_error
+                ))
+            }
+        }
+    }
+}
+
+/// Link one or more LLVM/object/runtime inputs into a native binary.
 ///
 /// # Arguments
-/// * `ll_files` — paths to LLVM IR files to compile and link
+/// * `inputs` — LLVM IR, object files, C runtime sources, or archives
 /// * `output_path` — path for the output executable
-/// * `_runtime_lib_path` — optional path to a runtime library (reserved for future use)
+/// * `runtime_lib_path` — optional runtime object/archive/source to link
 pub fn link_to_binary(
-    ll_files: &[PathBuf],
+    inputs: &[PathBuf],
     output_path: &Path,
-    _runtime_lib_path: Option<&Path>,
+    runtime_lib_path: Option<&Path>,
 ) -> Result<(), String> {
-    let clang = find_clang()?;
+    let linker = find_c_linker()?;
 
-    let mut cmd = Command::new(&clang);
+    let mut cmd = Command::new(&linker);
     cmd.arg("-O2");
     cmd.arg("-o");
     cmd.arg(output_path);
 
-    for ll in ll_files {
-        cmd.arg(ll);
+    for input in inputs {
+        cmd.arg(input);
+    }
+    if let Some(runtime) = runtime_lib_path {
+        cmd.arg(runtime);
     }
 
     // Link math and pthread libraries (Unix only; Windows uses default CRT)
@@ -99,16 +121,18 @@ pub fn link_to_binary(
     {
         cmd.arg("-lm");
         cmd.arg("-lpthread");
+        cmd.arg("-ldl");
+        cmd.arg("-lz3");
     }
 
     let output = cmd
         .output()
-        .map_err(|e| format!("Failed to execute clang: {}", e))?;
+        .map_err(|e| format!("Failed to execute linker '{}': {}", linker.display(), e))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!(
-            "clang linking failed (exit {}):\n{}",
+            "native linking failed (exit {}):\n{}",
             output.status.code().unwrap_or(-1),
             stderr
         ));

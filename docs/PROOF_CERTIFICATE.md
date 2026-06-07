@@ -17,7 +17,16 @@ A proof certificate (`.proof-cert.json`) is a JSON file containing cryptographic
   "package_name": "my_math_lib",
   "package_version": "1.0.0",
   "certificate_hash": "sha256:abcdef...",
-  "all_verified": true
+  "all_verified": true,
+  "harness_contract": "contracts/nlah-harness.json",
+  "intent_fidelity": {
+    "natural_language_prompt_hash": "sha256:prompt...",
+    "spec_traceability_score": 0.97,
+    "semantic_drift_detected": false,
+    "manual_review_required": false
+  },
+  "artifact_paths": ["reports/proof.json", "docs_out/docs.json"],
+  "budget_policy_fingerprint": "sha256:budget..."
 }
 ```
 
@@ -31,6 +40,59 @@ A proof certificate (`.proof-cert.json`) is a JSON file containing cryptographic
 | `package_version` | `Option<String>` | Package version from `mumei.toml` (if available) |
 | `certificate_hash` | `String` | SHA-256 hash of the serialized certificate (excluding this field) |
 | `all_verified` | `bool` | `true` if every atom in the certificate passed verification |
+| `harness_contract` | `Option<String>` | Harness contract path or identifier that downstream scenario runners should validate |
+| `intent_fidelity` | `Option<IntentFidelityMetadata>` | Natural-language intent traceability metadata for harness review gates |
+| `artifact_paths` | `Option<Vec<String>>` | Generated artifacts that a harness should collect or compare |
+| `budget_policy_fingerprint` | `Option<String>` | Fingerprint of the harness retry/budget policy used for this certificate |
+
+### IntentFidelityMetadata
+
+```json
+{
+  "natural_language_prompt_hash": "sha256:prompt...",
+  "spec_traceability_score": 0.97,
+  "semantic_drift_detected": false,
+  "manual_review_required": false
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `natural_language_prompt_hash` | `Option<String>` | Hash of the prompt or intent artifact used to derive the specification |
+| `spec_traceability_score` | `f64` | Score from `0.0` to `1.0` indicating how well code/spec artifacts trace to the original intent |
+| `semantic_drift_detected` | `bool` | `true` when the harness detected meaningful drift from the original intent |
+| `manual_review_required` | `bool` | `true` when the harness requires a human to review intent/spec alignment |
+
+All top-level harness metadata fields are optional and use serde defaults, so older certificates that omit them remain loadable by existing consumers.
+
+### Harness metadata inputs
+
+`mumei verify --proof-cert` can set harness metadata from CLI options:
+
+```bash
+mumei verify --proof-cert src/math.mm \
+  --harness-contract contracts/nlah-harness.json \
+  --intent-fidelity '{"natural_language_prompt_hash":"sha256:prompt...","spec_traceability_score":0.97,"semantic_drift_detected":false,"manual_review_required":false}' \
+  --artifact-paths reports/proof.json,docs_out/docs.json \
+  --budget-policy-fingerprint sha256:budget...
+```
+
+The same values can be supplied via environment variables, which is useful for MCP or CI harnesses:
+
+```bash
+MUMEI_HARNESS_CONTRACT=contracts/nlah-harness.json \
+MUMEI_INTENT_PROMPT_HASH=sha256:prompt... \
+MUMEI_SPEC_TRACEABILITY_SCORE=0.97 \
+MUMEI_SEMANTIC_DRIFT_DETECTED=false \
+MUMEI_MANUAL_REVIEW_REQUIRED=false \
+MUMEI_ARTIFACT_PATHS=reports/proof.json,docs_out/docs.json \
+MUMEI_BUDGET_POLICY_FINGERPRINT=sha256:budget... \
+mumei verify --proof-cert src/math.mm
+```
+
+CLI values take precedence over environment values. `--intent-fidelity` accepts the `IntentFidelity` JSON object. The environment form builds the same object from `MUMEI_INTENT_PROMPT_HASH`, `MUMEI_SPEC_TRACEABILITY_SCORE`, `MUMEI_SEMANTIC_DRIFT_DETECTED`, and `MUMEI_MANUAL_REVIEW_REQUIRED`. `MUMEI_ARTIFACT_PATHS` and `--artifact-paths` are comma-separated; empty entries are ignored.
+
+`mcp_server.py::get_proof_certificate` preserves existing certificate payloads and fills only missing harness metadata from the same environment variables. `generate_doc` includes the same metadata in its returned payload (and in `mumei doc --format json` module entries when environment values are present), so harness consumers can correlate proof, docs, artifacts, and budget policy without requiring schema changes from older consumers.
 
 ### AtomCertificate (per-atom)
 
@@ -48,6 +110,18 @@ A proof certificate (`.proof-cert.json`) is a JSON file containing cryptographic
   "binder_mapping": { "x": "x", "result": "result" },
   "bridge_lemma_hash": "d8d270d6429a3e31c608dc109876df4ec99ee1243796430775a5b0ef18b5ac24",
   "manual_lemma_reason": null,
+  "retry_policy_fingerprint": "9bb6d4f2...",
+  "attempt_summary": {
+    "total_attempts": 2,
+    "attempts_by_action_class": { "llm_fix": 1, "lean_escalation": 1 },
+    "final_action_class": "lean_escalation"
+  },
+  "cost_success_metrics": {
+    "attempts_to_success": 2,
+    "tokens_to_success": 6400,
+    "solver_seconds_to_success": 4.25,
+    "spec_drift_score": 0.08
+  },
   "translator_ir": {
     "sort": "contract_obligation",
     "binders": [
@@ -80,6 +154,73 @@ A proof certificate (`.proof-cert.json`) is a JSON file containing cryptographic
 | `manual_lemma_reason` | `Option<String>` | Reason partial translation must be completed by a manual lemma |
 | `translator_ir` | `TranslatorIRMetadata` | Typed intermediate metadata: obligation sort, binders, theorem goal, provenance span, and lowering rules |
 | `lean_metadata` | `Option<LeanResultMetadata>` | Lean result metadata emitted by mumei-lean (`status`, theorem name, translator version, bridge lemma hash, proof path, diagnostics) |
+| `retry_policy_fingerprint` | `Option<String>` | SHA-256 fingerprint of the retry budget policy used by the agent/healing process |
+| `attempt_summary` | `Option<AttemptSummary>` | Total attempts, attempts by action class, and final action class before success or manual review |
+| `cost_success_metrics` | `Option<CostSuccessMetrics>` | Attempts, tokens, solver seconds, and spec drift observed before success |
+
+## Retry Budget Policy Schema (P8-G)
+
+Retry budget metadata makes self-healing and Lean escalation auditable. Policies are intentionally fingerprinted and embedded indirectly so certificates can prove which retry boundary governed an atom without storing full agent logs.
+
+```json
+{
+  "max_attempts": 5,
+  "max_tokens": 10000,
+  "max_solver_time_ms": 30000,
+  "max_semantic_delta": 0.5,
+  "action_class_limits": {
+    "llm_fix": {
+      "max_attempts": 3,
+      "max_tokens": 5000,
+      "max_lean_escalations": 0
+    },
+    "lean_escalation": {
+      "max_attempts": 1,
+      "max_tokens": 5000,
+      "max_lean_escalations": 1
+    }
+  }
+}
+```
+
+### Structs
+
+```rust
+pub struct BudgetPolicy {
+    pub max_attempts: u32,
+    pub max_tokens: u64,
+    pub max_solver_time_ms: u64,
+    pub max_semantic_delta: f64,
+    pub action_class_limits: HashMap<String, ActionClassLimit>,
+}
+
+pub struct ActionClassLimit {
+    pub max_attempts: u32,
+    pub max_tokens: u64,
+    pub max_lean_escalations: u32,
+}
+
+pub struct AttemptSummary {
+    pub total_attempts: u32,
+    pub attempts_by_action_class: HashMap<String, u32>,
+    pub final_action_class: String,
+}
+
+pub struct CostSuccessMetrics {
+    pub attempts_to_success: u32,
+    pub tokens_to_success: u64,
+    pub solver_seconds_to_success: f64,
+    pub spec_drift_score: f64,
+}
+```
+
+### Semantics
+
+- `max_attempts`, `max_tokens`, and `max_solver_time_ms` stop runaway repair searches.
+- `max_semantic_delta` prevents spec weakening from becoming an unreviewed false success.
+- `action_class_limits` bounds strategy-specific retries such as `llm_fix`, `effect_fix`, `precondition_strengthening`, `postcondition_fix`, and `lean_escalation`.
+- Repeating the same counterexample signature without a new action class yields `manual_review_required`.
+- `retry_policy_fingerprint` is computed from canonical JSON serialization with sorted keys.
 
 ## Lean Escalation Translator Contract
 

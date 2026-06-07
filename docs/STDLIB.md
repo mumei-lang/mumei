@@ -17,6 +17,11 @@
 | `std/math/fixed_point.mm` | ❌ `import "std/math/fixed_point"` | Fixed-point arithmetic (4 decimal places) |
 | `std/container/safe_queue.mm` | ❌ `import "std/container/safe_queue"` | Verified FIFO queue |
 | `std/http_secure.mm` | ❌ `import "std/http_secure"` | HTTPS-only HTTP client |
+| `std/concurrency/aviation.mm` | ❌ `import "std/concurrency/aviation"` | Ordered runway allocation state machine |
+| `std/container/sorted_map.mm` | ❌ `import "std/container/sorted_map"` | Verified sorted key-value map helpers |
+| `std/math/factorial.mm` | ❌ `import "std/math/factorial"` | Factorial safety and step helpers |
+| `std/math/fibonacci.mm` | ❌ `import "std/math/fibonacci"` | Fibonacci accumulator and termination helpers |
+| `std/string/validator.mm` | ❌ `import "std/string/validator"` | ASCII validator predicates |
 
 ---
 
@@ -577,6 +582,74 @@ Enforces `starts_with(url, "https://")` at compile time via parameterized effect
 | `body(handle)` | `handle >= 0` | `true` | Get response body |
 | `is_ok(handle)` | `handle >= 0` | `result in {0,1}` | Check success (2xx) |
 | `free(handle)` | `handle >= 0` | `result in {0,1}` | Release handle |
+
+---
+
+## vStd Forge Expansion Modules
+
+These modules were added or refreshed by the P9-D vStd autonomous expansion workflow.
+
+### std/concurrency/aviation.mm — Ordered Runway Allocation
+
+```mumei
+import "std/concurrency/aviation" as aviation;
+```
+
+Defines the `RunwayAllocation` temporal effect (`Idle -> Ordered -> Allocated`) and ordered exclusive runway resources.
+
+| Atom | Requires | Ensures | Description |
+|---|---|---|---|
+| `allocate_runway(flight, runway1, runway2, lock_state)` | `flight >= 0 && runway1 >= 0 && runway2 >= 0 && runway1 != runway2 && runway1 < runway2` | `result != 0 && result == runway1 + runway2` | Acquire runway resources in priority order |
+
+### std/container/sorted_map.mm — Verified Sorted Key-Value Map
+
+```mumei
+import "std/container/sorted_map" as smap;
+```
+
+| Atom | Requires | Ensures | Description |
+|---|---|---|---|
+| `sorted_map_insert_position(pos, len)` | `len >= 0 && pos >= 0 && pos <= len` | `result == pos && result <= len` | Insertion-position witness |
+| `sorted_map_insert_len(len, cap)` | `cap > 0 && len >= 0 && len < cap` | `result == len + 1 && result <= cap` | Length after insertion |
+| `sorted_map_key_ordered(left_key, right_key)` | `true` | `0 or 1` | Adjacent key order witness |
+| `sorted_map_new(initial_cap)` | `initial_cap > 0` | `result == 0` | Empty sorted map length |
+| `sorted_map_insert(map_len, map_cap, key, value)` | `map_len < map_cap` | `result == map_len + 1` | Trusted array-store insertion |
+| `sorted_map_get(map_len, key)` | `map_len >= 0` | `-1 or valid index` | Binary-search style index witness |
+| `sorted_map_remaining_capacity(map_len, map_cap)` | `map_len <= map_cap` | `result == map_cap - map_len` | Capacity bookkeeping |
+| `sorted_map_is_sorted(n)` | sorted-key witness | `result == 1` | Sortedness witness |
+
+### std/math/factorial.mm — Verified Factorial Helpers
+
+```mumei
+import "std/math/factorial" as factorial;
+```
+
+| Atom | Requires | Ensures | Description |
+|---|---|---|---|
+| `factorial_step(acc, n)` | `acc >= 1 && n >= 1 && n <= 20 && acc <= 1000000` | `result == acc * n && result >= 1` | One bounded factorial step |
+| `factorial_in_range(n)` | `true` | `0 or 1` | Range predicate for `0 <= n <= 20` |
+
+### std/math/fibonacci.mm — Verified Fibonacci Helpers
+
+```mumei
+import "std/math/fibonacci" as fib;
+```
+
+| Atom | Requires | Ensures | Description |
+|---|---|---|---|
+| `fib_step_next(a, b)` | `a >= 0 && b >= 0 && a + b <= i64::MAX` | `result == a + b && result >= b` | Next accumulator value |
+| `fib_remaining_decreases(remaining)` | `remaining > 0` | `result == remaining - 1 && result < remaining` | Loop termination witness |
+
+### std/string/validator.mm — Verified String Validators
+
+```mumei
+import "std/string/validator" as validator;
+```
+
+| Atom | Requires | Ensures | Description |
+|---|---|---|---|
+| `is_numeric_ascii_code(code)` | `code >= 0 && code <= 127` | `0 or 1` | ASCII digit predicate |
+| `is_alphanumeric_ascii_code(code)` | `code >= 0 && code <= 127` | `0 or 1` | ASCII digit/letter predicate |
 
 ---
 

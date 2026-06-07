@@ -1,9 +1,19 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import os
 import re
 import shutil
 import subprocess
-import json
 import tempfile
+import threading
+import time
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, Dict, Optional
 from mcp.server.fastmcp import FastMCP
 
 # ws5 / SI-5 Phase 1-C: std/ graph helpers live in std_graph_lib so that
@@ -24,12 +34,393 @@ from std_graph_lib import (  # noqa: F401 (re-exported for back-compat)
 
 mcp = FastMCP("Mumei-Forge")
 
+SPEC_GUIDELINE_SUMMARY: dict[str, Any] = {
+    "decidable_fragment": {
+        "linear_arithmetic": [
+            "Use i64/Nat addition, subtraction, comparisons, and constant multiplication.",
+            "Avoid variable-variable multiplication, symbolic division/modulo, and exponentiation.",
+        ],
+        "array_access": [
+            "Add explicit bounds for every access: 0 <= i && i < len(a).",
+            "Keep index expressions simple and near their requires/forall bounds.",
+        ],
+        "bounded_quantifiers": [
+            "Use forall only over bounded integer ranges or finite collections.",
+            "Prefer constructible witnesses over exists; avoid forall/exists alternation.",
+        ],
+        "finite_state_machines": [
+            "Model temporal effects with explicit finite states and transitions.",
+            "Avoid implicit history, regex-like traces, and large transition graphs.",
+        ],
+    },
+    "common_failure_patterns": [
+        {
+            "tag": "nonlinear_arithmetic",
+            "patterns": ["x * y", "x / y", "x % y", "pow(x, y)"],
+            "guidance": "Rewrite to linear bounds or mark as a Lean escalation candidate.",
+        },
+        {
+            "tag": "quantifier_alternation",
+            "patterns": ["forall i. exists j. ...", "exists x. forall y. ..."],
+            "guidance": "Split the spec or return a constructible witness.",
+        },
+        {
+            "tag": "nested_aliasing",
+            "patterns": ["multiple ref mut parameters", "nested mutable acquire scopes"],
+            "guidance": "Serialize mutation through one owner or split the atom.",
+        },
+        {
+            "tag": "regex_semantics",
+            "patterns": ["regex_match(s, pattern)", "matches(s, pattern)"],
+            "guidance": "Use prefix/contains/bounded finite cases, or escalate to Lean.",
+        },
+        {
+            "tag": "array_without_bounds",
+            "patterns": ["a[i] without 0 <= i && i < len(a)"],
+            "guidance": "Add explicit index bounds in requires, ensures, or bounded forall.",
+        },
+    ],
+    "recommended_templates": {
+        "bounded_array_access": "requires: 0 <= i && i < len(a); ensures: result == a[i];",
+        "bounded_forall": "forall(i, 0, len(a), a[i] >= 0)",
+        "constructible_witness": "Return the witness and prove 0 <= result && result < bound.",
+        "explicit_fsm": "Declare states, initial state, and each transition explicitly.",
+    },
+    "doc": "docs/SPEC_GUIDE.md",
+}
+
 # Module-level session state for effect boundary overrides
 _session_effects: dict = {
     "allowed": [],
     "denied": [],
     "source": "default",  # "default" | "mumei.toml" | "session_override"
 }
+
+
+@mcp.tool()
+def get_spec_guideline() -> str:
+    """Return agent-facing Mumei spec-writing guidelines as JSON."""
+    return json.dumps(SPEC_GUIDELINE_SUMMARY, ensure_ascii=False, indent=2)
+
+
+def _env_nonempty(name: str) -> str | None:
+    value = os.environ.get(name)
+    if value is None or value == "":
+        return None
+    return value
+
+
+def _harness_metadata_from_env() -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    harness_contract = _env_nonempty("MUMEI_HARNESS_CONTRACT")
+    if harness_contract is not None:
+        metadata["harness_contract"] = harness_contract
+    intent_prompt_hash = _env_nonempty("MUMEI_INTENT_PROMPT_HASH")
+    spec_traceability_score = _env_nonempty("MUMEI_SPEC_TRACEABILITY_SCORE")
+    semantic_drift_detected = _env_nonempty("MUMEI_SEMANTIC_DRIFT_DETECTED")
+    manual_review_required = _env_nonempty("MUMEI_MANUAL_REVIEW_REQUIRED")
+    intent_fidelity: dict[str, Any] = {}
+    if intent_prompt_hash is not None:
+        intent_fidelity["natural_language_prompt_hash"] = intent_prompt_hash
+    if spec_traceability_score is not None:
+        try:
+            intent_fidelity["spec_traceability_score"] = float(spec_traceability_score)
+        except ValueError:
+            pass
+    if semantic_drift_detected is not None:
+        intent_fidelity["semantic_drift_detected"] = (
+            semantic_drift_detected.lower() == "true"
+        )
+    if manual_review_required is not None:
+        intent_fidelity["manual_review_required"] = (
+            manual_review_required.lower() == "true"
+        )
+    if intent_fidelity:
+        metadata["intent_fidelity"] = intent_fidelity
+    artifact_paths = _env_nonempty("MUMEI_ARTIFACT_PATHS")
+    if artifact_paths is not None:
+        parsed_paths = [
+            path.strip() for path in artifact_paths.split(",") if path.strip()
+        ]
+        if parsed_paths:
+            metadata["artifact_paths"] = parsed_paths
+    budget_policy_fingerprint = _env_nonempty("MUMEI_BUDGET_POLICY_FINGERPRINT")
+    if budget_policy_fingerprint is not None:
+        metadata["budget_policy_fingerprint"] = budget_policy_fingerprint
+    return metadata
+
+
+def _harness_env_vars_from_env() -> dict[str, str]:
+    env_vars: dict[str, str] = {}
+    for name in (
+        "MUMEI_HARNESS_CONTRACT",
+        "MUMEI_INTENT_PROMPT_HASH",
+        "MUMEI_SPEC_TRACEABILITY_SCORE",
+        "MUMEI_SEMANTIC_DRIFT_DETECTED",
+        "MUMEI_MANUAL_REVIEW_REQUIRED",
+        "MUMEI_ARTIFACT_PATHS",
+        "MUMEI_BUDGET_POLICY_FINGERPRINT",
+    ):
+        value = _env_nonempty(name)
+        if value is not None:
+            env_vars[name] = value
+    return env_vars
+
+
+def _attach_harness_metadata(payload: dict[str, Any]) -> dict[str, Any]:
+    metadata = _harness_metadata_from_env()
+    for key, value in metadata.items():
+        payload.setdefault(key, value)
+    return payload
+
+
+@dataclass
+class Z3WorkerContext:
+    worker_id: str
+    solver_config_fingerprint: str
+    process: subprocess.Popen | None = None
+    start_time: float = field(default_factory=time.time)
+
+
+@dataclass
+class VerificationTask:
+    task_id: str
+    source_hash: str
+    cache_key: str
+    status: str = "pending"
+    result: dict | None = None
+    cancel_reason: str | None = None
+    worker_id: str | None = None
+    created_at: float = field(default_factory=time.time)
+    completed_at: float | None = None
+
+
+class VerificationTaskRegistry:
+    def __init__(self):
+        self._tasks: dict[str, VerificationTask] = {}
+        self._cache: dict[str, dict] = {}
+        self._lock = threading.RLock()
+
+    def register_task(self, source_hash: str, cache_key: str) -> str:
+        task_id = f"verify-{uuid.uuid4().hex}"
+        task = VerificationTask(task_id=task_id, source_hash=source_hash, cache_key=cache_key)
+        with self._lock:
+            self._tasks[task_id] = task
+        return task_id
+
+    def get_task(self, task_id: str) -> VerificationTask | None:
+        with self._lock:
+            return self._tasks.get(task_id)
+
+    def complete_task(self, task_id: str, result: dict, cache_result: bool = True):
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if task is None:
+                return
+            task.status = "completed"
+            task.result = result
+            task.completed_at = time.time()
+            task.cancel_reason = None
+            task.worker_id = None
+            if cache_result:
+                self._cache[task.cache_key] = result
+
+    def cancel_task(self, task_id: str, reason: str):
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if task is None:
+                return
+            task.status = "cancelled"
+            task.cancel_reason = reason
+            task.completed_at = time.time()
+            task.worker_id = None
+
+    def mark_running(self, task_id: str, worker_id: str):
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if task is None:
+                return
+            task.status = "running"
+            task.worker_id = worker_id
+
+    def get_cached_result(self, cache_key: str) -> dict | None:
+        with self._lock:
+            return self._cache.get(cache_key)
+
+
+class Z3WorkerPool:
+    def __init__(self, max_workers: int = 4, timeout_ms: int = 30000, memory_limit_mb: int = 1024):
+        self.max_workers = max(1, max_workers)
+        self.timeout_ms = timeout_ms
+        self.memory_limit_mb = memory_limit_mb
+        self._workers = [
+            Z3WorkerContext(
+                worker_id=f"z3-worker-{index}",
+                solver_config_fingerprint=_compute_mcp_solver_config_fingerprint(
+                    timeout_ms,
+                    memory_limit_mb,
+                ),
+            )
+            for index in range(self.max_workers)
+        ]
+        self._available = list(self._workers)
+        self._busy: dict[str, Z3WorkerContext] = {}
+        self._task_workers: dict[str, str] = {}
+        self._condition = threading.Condition()
+
+    def acquire_worker(self) -> Z3WorkerContext:
+        with self._condition:
+            while not self._available:
+                self._condition.wait()
+            worker = self._available.pop(0)
+            worker.start_time = time.time()
+            self._busy[worker.worker_id] = worker
+            return worker
+
+    def release_worker(self, worker_id: str):
+        with self._condition:
+            worker = self._busy.pop(worker_id, None)
+            if worker is None:
+                return
+            if worker.process is not None and worker.process.poll() is None:
+                worker.process.terminate()
+            worker.process = None
+            self._task_workers = {
+                task_id: mapped_worker_id
+                for task_id, mapped_worker_id in self._task_workers.items()
+                if mapped_worker_id != worker_id
+            }
+            self._available.append(worker)
+            self._condition.notify()
+
+    def cancel_task(self, task_id: str):
+        with self._condition:
+            worker_id = self._task_workers.get(task_id)
+            if worker_id is None:
+                return False
+            worker = self._busy.get(worker_id)
+            if worker is None or worker.process is None:
+                return False
+            if worker.process.poll() is None:
+                worker.process.terminate()
+            return True
+
+    def bind_task(self, task_id: str, worker_id: str):
+        with self._condition:
+            self._task_workers[task_id] = worker_id
+
+    def shutdown(self):
+        with self._condition:
+            for worker in self._workers:
+                if worker.process is not None and worker.process.poll() is None:
+                    worker.process.terminate()
+                worker.process = None
+            self._available = list(self._workers)
+            self._busy.clear()
+            self._task_workers.clear()
+            self._condition.notify_all()
+
+
+def _detect_mcp_solver_features(source_code: str) -> dict[str, bool]:
+    return {
+        "has_string_constraints": bool(
+            re.search(r"\b(Str|string|String)\b|starts_with|ends_with|contains", source_code)
+        ),
+        "has_array_forall": bool(
+            re.search(
+                r"forall\s*\([^\n;)]*\[[^\n;)]*\)|forall\s*\([^)]*\)[^\n;]*\[",
+                source_code,
+                re.DOTALL,
+            )
+        ),
+    }
+
+
+def _compute_mcp_solver_config_fingerprint(
+    timeout_ms: int,
+    memory_limit_mb: int,
+    mbqi: bool = True,
+    has_string_constraints: bool = False,
+    has_array_forall: bool = False,
+    enable_spurious_detection: bool = True,
+) -> str:
+    payload = json.dumps(
+        {
+            "engine": "mumei-z3",
+            "timeout_ms": timeout_ms,
+            "memory_limit_mb": memory_limit_mb,
+            "smt.mbqi": mbqi,
+            "string_constraints": has_string_constraints,
+            "array_forall": has_array_forall,
+            "spurious_detection": enable_spurious_detection,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _limit_worker_memory(memory_limit_mb: int):
+    if os.name != "posix":
+        return None
+
+    def _set_limit():
+        try:
+            import resource
+
+            limit_bytes = memory_limit_mb * 1024 * 1024
+            resource.setrlimit(resource.RLIMIT_AS, (limit_bytes, limit_bytes))
+        except (ImportError, OSError, ValueError):
+            pass
+
+    return _set_limit
+
+
+def _resume_task_validation_error(
+    task_id: str | None,
+    resumed_task: VerificationTask | None,
+    source_hash: str,
+    cache_key: str,
+) -> dict | None:
+    if task_id is None:
+        return None
+    if resumed_task is None:
+        return {"status": "error", "task_id": task_id, "error": "task_id not found"}
+    if resumed_task.source_hash != source_hash or resumed_task.cache_key != cache_key:
+        return {
+            "status": "error",
+            "task_id": task_id,
+            "error": "task_id does not match source_hash or solver configuration",
+            "expected_source_hash": resumed_task.source_hash,
+            "requested_source_hash": source_hash,
+            "expected_cache_key": resumed_task.cache_key,
+            "requested_cache_key": cache_key,
+        }
+    return None
+
+
+_task_registry = VerificationTaskRegistry()
+_z3_worker_pool = Z3WorkerPool()
+
+
+def _format_data_flow_trace(trace: dict) -> str:
+    parts = ["### Data Flow Trace"]
+    parts.append("**Initial State:**")
+    for var in trace.get("initial_state", []):
+        parts.append(f"- {var['name']} = {var['value']} (line {var['line']})")
+
+    parts.append("\n**Execution Path:**")
+    for step in trace.get("execution_path", []):
+        parts.append(f"- Line {step['line']}: {step['expression']}")
+        for mut in step.get("mutations", []):
+            parts.append(f"  - {mut['name']}: {mut['before']} → {mut['after']}")
+
+    violation = trace.get("violation", {})
+    parts.append(f"\n**Violation at line {violation.get('line')}:**")
+    parts.append(f"- {violation.get('contract_type')}: {violation.get('expression')}")
+    parts.append(f"- Evaluated as: {violation.get('evaluated_as')}")
+
+    return "\n".join(parts)
 
 def _format_semantic_feedback(report_json: str) -> str:
     """Parse report.json and format semantic_feedback into a readable section.
@@ -41,7 +432,10 @@ def _format_semantic_feedback(report_json: str) -> str:
         return ""
 
     feedback = report.get("semantic_feedback")
+    trace = report.get("data_flow_trace")
     if not feedback:
+        if isinstance(trace, dict):
+            return _format_data_flow_trace(trace)
         return ""
 
     parts = ["### Semantic Feedback"]
@@ -159,6 +553,9 @@ def _format_semantic_feedback(report_json: str) -> str:
     if span:
         parts.append(f"**Location:** {span.get('file', '?')}:{span.get('line', '?')}:{span.get('col', '?')}")
 
+    if isinstance(trace, dict):
+        parts.append(_format_data_flow_trace(trace))
+
     # Machine-readable section for AI agents
     machine_readable = _build_machine_readable(report, feedback)
     if machine_readable:
@@ -212,6 +609,10 @@ def _build_machine_readable(report: dict, feedback: dict) -> "dict | None":
     if data_flow:
         result["data_flow"] = data_flow
 
+    data_flow_trace = report.get("data_flow_trace")
+    if data_flow_trace:
+        result["data_flow_trace"] = data_flow_trace
+
     # Include related_locations in machine-readable output (Feature 3g)
     related_locations = feedback.get("related_locations", [])
     if related_locations:
@@ -219,6 +620,116 @@ def _build_machine_readable(report: dict, feedback: dict) -> "dict | None":
 
     result["suggestion"] = report.get("suggestion", "")
     return result
+
+
+def _structured_feedback_from_report(report_json: str) -> dict:
+    try:
+        report = json.loads(report_json)
+    except (json.JSONDecodeError, TypeError):
+        return {
+            "status": "verification_failed",
+            "error_type": None,
+            "location": None,
+            "reconstruction_loss": None,
+            "feedback_instruction": "Verification failed. Review the verifier report and repair the atom.",
+        }
+
+    structured_feedback = report.get("structured_feedback")
+    if isinstance(structured_feedback, dict):
+        return structured_feedback
+
+    failure_type = report.get("failure_type")
+    span = report.get("span") if isinstance(report.get("span"), dict) else {}
+    location = None
+    if span:
+        location = {
+            "file": span.get("file", ""),
+            "line": span.get("line", 0),
+        }
+    semantic_feedback = report.get("semantic_feedback")
+    reconstruction_loss = None
+    if isinstance(semantic_feedback, dict):
+        reconstruction_loss = semantic_feedback.get("reconstruction_loss")
+        failure_type = failure_type or semantic_feedback.get("failure_type")
+    violation_type = report.get("violation_type")
+    if not failure_type and isinstance(violation_type, str):
+        failure_type = (
+            "effect_not_allowed"
+            if violation_type.startswith("effect_")
+            else violation_type
+        )
+
+    passed = report.get("status") in {"success", "passed", "verified", "trusted", "unverified"}
+    suggestion = report.get("suggestion") or "Review the verifier report and repair the atom."
+    return {
+        "status": "verification_passed" if passed else "verification_failed",
+        "error_type": None if passed else failure_type,
+        "location": location,
+        "reconstruction_loss": reconstruction_loss,
+        "feedback_instruction": (
+            "Verification passed; no fix is required." if passed else suggestion
+        ),
+    }
+
+
+def _normalize_spec_metadata(spec_metadata: Optional[Dict[str, str]] = None) -> dict:
+    if spec_metadata is None:
+        return {}
+    if isinstance(spec_metadata, str):
+        try:
+            parsed = json.loads(spec_metadata)
+        except json.JSONDecodeError:
+            return {"value": spec_metadata}
+        if isinstance(parsed, dict):
+            spec_metadata = parsed
+        else:
+            return {"value": str(parsed)}
+    if not isinstance(spec_metadata, dict):
+        return {"value": str(spec_metadata)}
+    return {str(key): str(value) for key, value in spec_metadata.items()}
+
+
+def _traceability_payload(
+    source_code: str,
+    trace_id: Optional[str] = None,
+    spec_metadata: Optional[Dict[str, str]] = None,
+) -> dict:
+    normalized_metadata = _normalize_spec_metadata(spec_metadata)
+    requires = re.findall(r"\brequires\s*:\s*([^;]*);", source_code, re.S)
+    ensures = re.findall(r"\bensures\s*:\s*([^;]*);", source_code, re.S)
+    hasher = hashlib.sha256()
+    hasher.update((trace_id or "").encode("utf-8"))
+    for key, value in sorted(normalized_metadata.items()):
+        hasher.update(key.encode("utf-8"))
+        hasher.update(b"=")
+        hasher.update(value.encode("utf-8"))
+        hasher.update(b";")
+    hasher.update(" && ".join(item.strip() for item in requires).encode("utf-8"))
+    hasher.update(" && ".join(item.strip() for item in ensures).encode("utf-8"))
+    covered = sum([
+        bool((trace_id or "").strip()),
+        bool(normalized_metadata),
+        any(item.strip() and item.strip() != "true" for item in requires),
+        any(item.strip() and item.strip() != "true" for item in ensures),
+    ])
+    return {
+        "trace_id": trace_id or None,
+        "spec_metadata": normalized_metadata,
+        "traceability_hash": hasher.hexdigest(),
+        "traceability_coverage": covered / 4.0,
+    }
+
+
+def _traceability_env(trace_payload: dict) -> dict:
+    env = os.environ.copy()
+    if trace_payload["trace_id"]:
+        env["MUMEI_TRACE_ID"] = trace_payload["trace_id"]
+    env["MUMEI_SPEC_METADATA"] = json.dumps(trace_payload["spec_metadata"], sort_keys=True)
+    return env
+
+
+def _format_traceability_feedback(trace_payload: dict) -> str:
+    return "### Traceability\n```json\n" + json.dumps(trace_payload, indent=2, sort_keys=True) + "\n```"
 
 
 def _format_effect_feedback(report_json: str) -> str:
@@ -267,12 +778,19 @@ def _format_effect_feedback(report_json: str) -> str:
 
 
 @mcp.tool()
-def forge_blade(source_code: str, output_name: str = "katana") -> str:
+def forge_blade(
+    source_code: str,
+    output_name: str = "katana",
+    trace_id: Optional[str] = None,
+    spec_metadata: Optional[Dict[str, str]] = None,
+) -> str:
     """
     Verify Mumei code and generate LLVM IR output.
     The build command writes report.json to the -o directory, so reports are isolated per request.
+    Optional trace_id/spec_metadata are forwarded into proof certificates.
     """
     root_dir = Path(__file__).parent.absolute()
+    trace_payload = _traceability_payload(source_code, trace_id, spec_metadata)
 
     # 1. Create fully isolated temp directory per request
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -287,10 +805,11 @@ def forge_blade(source_code: str, output_name: str = "katana") -> str:
             ["cargo", "run", "--", "build", str(source_path), "-o", str(output_base)],
             cwd=root_dir,
             capture_output=True,
-            text=True
+            text=True,
+            env=_traceability_env(trace_payload),
         )
 
-        response_parts = []
+        response_parts = [_format_traceability_feedback(trace_payload)]
 
         # Inject effect boundary context if restricted
         effects_ctx = json.loads(get_allowed_effects(str(root_dir)))
@@ -317,6 +836,12 @@ def forge_blade(source_code: str, output_name: str = "katana") -> str:
             ef_section = _format_effect_feedback(report_data)
             if ef_section:
                 response_parts.append(ef_section)
+            structured_feedback = _structured_feedback_from_report(report_data)
+            response_parts.append(
+                "### Structured Feedback\n```json\n"
+                + json.dumps(structured_feedback, indent=2)
+                + "\n```"
+            )
         else:
             response_parts.append(
                 '### Semantic Feedback\n'
@@ -340,7 +865,11 @@ def forge_blade(source_code: str, output_name: str = "katana") -> str:
             return "\n".join(response_parts)
 
 @mcp.tool()
-def validate_logic(source_code: str) -> str:
+def validate_logic(
+    source_code: str,
+    trace_id: Optional[str] = None,
+    spec_metadata: Optional[Dict[str, str]] = None,
+) -> str:
     """
     Run formal verification (Z3) only on Mumei code.
     No code generation — returns verification results and counter-examples.
@@ -348,8 +877,10 @@ def validate_logic(source_code: str) -> str:
 
     Uses --report-dir to write report.json directly into a per-request temp
     directory, making concurrent calls safe.
+    Optional trace_id/spec_metadata are forwarded into proof certificates.
     """
     root_dir = Path(__file__).parent.absolute()
+    trace_payload = _traceability_payload(source_code, trace_id, spec_metadata)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_path = Path(tmpdir)
@@ -364,10 +895,11 @@ def validate_logic(source_code: str) -> str:
              str(source_path)],
             cwd=root_dir,
             capture_output=True,
-            text=True
+            text=True,
+            env=_traceability_env(trace_payload),
         )
 
-        response_parts = []
+        response_parts = [_format_traceability_feedback(trace_payload)]
 
         # Inject effect boundary context if restricted
         effects_ctx = json.loads(get_allowed_effects(str(root_dir)))
@@ -396,6 +928,12 @@ def validate_logic(source_code: str) -> str:
             ef_section = _format_effect_feedback(report_data)
             if ef_section:
                 response_parts.append(ef_section)
+            structured_feedback = _structured_feedback_from_report(report_data)
+            response_parts.append(
+                "### Structured Feedback\n```json\n"
+                + json.dumps(structured_feedback, indent=2)
+                + "\n```"
+            )
         else:
             # No report file — still include semantic feedback status
             response_parts.append(
@@ -427,6 +965,483 @@ def validate_logic(source_code: str) -> str:
                 )
 
         return "\n".join(response_parts)
+
+
+@mcp.tool()
+def get_structured_feedback(source_code: str) -> str:
+    """Return the P9-E structured feedback JSON for Mumei source code."""
+    root_dir = Path(__file__).parent.absolute()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        source_path = tmp_path / "input.mm"
+        output_path = tmp_path / "structured_feedback.json"
+        source_path.write_text(source_code, encoding="utf-8")
+
+        result = subprocess.run(
+            [
+                "cargo",
+                "run",
+                "--",
+                "verify",
+                "--emit",
+                "structured-feedback",
+                "--output",
+                str(output_path),
+                "--report-dir",
+                str(tmp_path),
+                str(source_path),
+            ],
+            cwd=root_dir,
+            capture_output=True,
+            text=True,
+        )
+
+        if output_path.exists():
+            return output_path.read_text(encoding="utf-8")
+
+        report_path = tmp_path / "report.json"
+        if report_path.exists():
+            return json.dumps(
+                _structured_feedback_from_report(report_path.read_text(encoding="utf-8")),
+                indent=2,
+            )
+
+        return json.dumps(
+            {
+                "status": "verification_failed",
+                "error_type": None,
+                "location": None,
+                "reconstruction_loss": None,
+                "feedback_instruction": (
+                    "Structured feedback was not emitted. "
+                    f"Verifier exited with code {result.returncode}: {result.stderr.strip()}"
+                ),
+            },
+            indent=2,
+        )
+
+
+@mcp.tool()
+def analyze_contract_conflicts(source_code: str) -> str:
+    """Analyze contract conflicts in Mumei source code."""
+    root_dir = Path(__file__).parent.absolute()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        source_path = tmp_path / "input.mm"
+        source_path.write_text(source_code, encoding="utf-8")
+
+        result = subprocess.run(
+            [
+                "cargo",
+                "run",
+                "--",
+                "verify",
+                "--cross-spec-verify",
+                "--report-dir",
+                str(tmp_path),
+                str(source_path),
+            ],
+            cwd=root_dir,
+            capture_output=True,
+            text=True,
+            env=os.environ.copy(),
+        )
+
+        cross_spec_path = tmp_path / "cross_spec.json"
+        if not cross_spec_path.exists():
+            return json.dumps(
+                {
+                    "conflicts": [],
+                    "circular_dependencies": [],
+                    "dependency_graph": [],
+                    "success": result.returncode == 0,
+                    "error": result.stderr.strip() or result.stdout.strip(),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+
+        try:
+            cross_spec = json.loads(cross_spec_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            return json.dumps(
+                {
+                    "conflicts": [],
+                    "circular_dependencies": [],
+                    "dependency_graph": [],
+                    "success": False,
+                    "error": f"invalid cross_spec.json: {exc}",
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        contracts = _extract_source_atom_contracts(source_code)
+        conflicts = []
+        for item in cross_spec.get("contract_consistency", []):
+            if item.get("is_consistent", True):
+                continue
+            caller_atom = str(item.get("caller_atom", ""))
+            callee_atom = str(item.get("callee_atom", ""))
+            conflicts.append(
+                {
+                    "caller_atom": caller_atom,
+                    "callee_atom": callee_atom,
+                    "caller_requires": contracts.get(caller_atom, {}).get("requires", "true"),
+                    "caller_ensures": contracts.get(caller_atom, {}).get("ensures", "true"),
+                    "callee_requires": contracts.get(callee_atom, {}).get("requires", "true"),
+                    "callee_ensures": contracts.get(callee_atom, {}).get("ensures", "true"),
+                    "violations": item.get("violations", []),
+                    "warnings": item.get("warnings", []),
+                }
+            )
+
+        return json.dumps(
+            {
+                "conflicts": conflicts,
+                "circular_dependencies": cross_spec.get("circular_dependencies", []),
+                "dependency_graph": cross_spec.get("dependency_graph", []),
+                "summary": cross_spec.get("summary", {}),
+                "success": result.returncode == 0,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+
+
+@mcp.tool()
+def propose_interface_refactoring(
+    source_code: str,
+    retry_history: dict | None = None,
+) -> str:
+    """Propose interface-level refactoring to resolve architectural issues."""
+    try:
+        analysis = json.loads(analyze_contract_conflicts(source_code))
+    except json.JSONDecodeError as exc:
+        return json.dumps(
+            {
+                "proposals": [],
+                "analysis_summary": {},
+                "conflict_count": 0,
+                "error": f"invalid analysis payload: {exc}",
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    proposals = []
+
+    for conflict in analysis.get("conflicts", []):
+        violations = " ".join(str(item) for item in conflict.get("violations", [])).lower()
+        if "requires" in violations or "caller contract provides" in violations:
+            callee_atom = conflict.get("callee_atom", "")
+            caller_atom = conflict.get("caller_atom", "")
+            proposals.append(
+                _proposal_dict(
+                    f"relax_{callee_atom}",
+                    (
+                        f"Relax {callee_atom} requires to match {caller_atom} guarantees"
+                    ),
+                    "relax_requires",
+                    [callee_atom],
+                    {
+                        "atom": callee_atom,
+                        "requires": conflict.get("caller_ensures", "true"),
+                    },
+                    "Resolves caller/callee contract mismatch by raising interface abstraction.",
+                )
+            )
+
+    for index, cycle in enumerate(analysis.get("circular_dependencies", []), start=1):
+        proposals.append(
+            _proposal_dict(
+                f"split_cycle_{index}",
+                f"Split atoms in cycle {cycle} to break circular dependency",
+                "split_atom",
+                cycle,
+                {"action": "extract_interface"},
+                "Breaks circular dependency by introducing an abstraction layer.",
+            )
+        )
+
+    if retry_history and not proposals:
+        attempts = retry_history.get("attempts", [])
+        graph = analysis.get("dependency_graph", [])
+        if isinstance(attempts, list) and len(attempts) >= 5 and graph:
+            central_node = max(
+                graph,
+                key=lambda node: len(node.get("dependents", [])),
+            )
+            atom = central_node.get("atom_name", "")
+            proposals.append(
+                _proposal_dict(
+                    f"abstract_{atom}",
+                    f"Extract interface boundary around {atom}",
+                    "split_atom",
+                    [atom],
+                    {"action": "extract_interface"},
+                    "Budget exhaustion without a local fix suggests raising interface abstraction.",
+                )
+            )
+
+    return json.dumps(
+        {
+            "proposals": proposals,
+            "analysis_summary": analysis.get("summary", {}),
+            "conflict_count": len(analysis.get("conflicts", [])),
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
+def _extract_source_atom_contracts(source_code: str) -> dict[str, dict[str, str]]:
+    contracts: dict[str, dict[str, str]] = {}
+    matches = list(re.finditer(r"\batom\s+([A-Za-z_][A-Za-z0-9_:]*)", source_code))
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(source_code)
+        atom_body = source_code[match.start():end]
+        contracts[match.group(1)] = {
+            "requires": _extract_contract_clause(atom_body, "requires") or "true",
+            "ensures": _extract_contract_clause(atom_body, "ensures") or "true",
+        }
+    return contracts
+
+
+def _extract_contract_clause(atom_body: str, clause: str) -> str | None:
+    match = re.search(rf"{clause}\s*:?\s*(.*?);", atom_body, flags=re.DOTALL)
+    if match is None:
+        return None
+    return " ".join(match.group(1).split())
+
+
+def _proposal_dict(
+    proposal_id: str,
+    description: str,
+    refactoring_type: str,
+    target_atoms: list,
+    changes: dict,
+    rationale: str,
+) -> dict:
+    return {
+        "proposal_id": proposal_id,
+        "description": description,
+        "refactoring_type": refactoring_type,
+        "target_atoms": target_atoms,
+        "changes": changes,
+        "rationale": rationale,
+    }
+
+
+@mcp.tool()
+def verify_with_orchestration(
+    source_code: str,
+    timeout_ms: int = 30000,
+    enable_cache: bool = True,
+    task_id: str | None = None,
+) -> str:
+    """
+    Run verification through an orchestration-aware Z3 worker pool.
+    This tool leaves validate_logic/forge_blade unchanged and adds task IDs,
+    cache isolation, bounded parallelism, timeout cancellation, and process metadata.
+    """
+    root_dir = Path(__file__).parent.absolute()
+    timeout_ms = max(1, timeout_ms)
+    source_hash = hashlib.sha256(source_code.encode("utf-8")).hexdigest()
+    solver_features = _detect_mcp_solver_features(source_code)
+    solver_fingerprint = _compute_mcp_solver_config_fingerprint(
+        timeout_ms,
+        _z3_worker_pool.memory_limit_mb,
+        mbqi=not solver_features["has_array_forall"],
+        has_string_constraints=solver_features["has_string_constraints"],
+        has_array_forall=solver_features["has_array_forall"],
+    )
+    cache_key = hashlib.sha256(
+        f"{source_hash}:{solver_fingerprint}".encode("utf-8")
+    ).hexdigest()
+
+    resumed_task = _task_registry.get_task(task_id) if task_id else None
+    resume_error = _resume_task_validation_error(task_id, resumed_task, source_hash, cache_key)
+    if resume_error is not None:
+        return json.dumps(resume_error, ensure_ascii=False, indent=2)
+
+    if resumed_task is not None:
+        if resumed_task.status == "completed" and resumed_task.result is not None:
+            response = dict(resumed_task.result)
+            response["resumed"] = True
+            return json.dumps(response, ensure_ascii=False, indent=2)
+        if resumed_task.status == "cancelled":
+            return json.dumps(
+                {
+                    "status": "cancelled",
+                    "task_id": resumed_task.task_id,
+                    "cache_key": resumed_task.cache_key,
+                    "cancel_reason": resumed_task.cancel_reason,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+
+    if enable_cache:
+        cached_result = _task_registry.get_cached_result(cache_key)
+        if cached_result is not None:
+            response = dict(cached_result)
+            response["cache_hit"] = True
+            response["cache_key"] = cache_key
+            return json.dumps(response, ensure_ascii=False, indent=2)
+
+    if resumed_task is not None:
+        active_task_id = resumed_task.task_id
+    else:
+        active_task_id = _task_registry.register_task(source_hash, cache_key)
+
+    worker = _z3_worker_pool.acquire_worker()
+    worker.solver_config_fingerprint = solver_fingerprint
+    _z3_worker_pool.bind_task(active_task_id, worker.worker_id)
+    _task_registry.mark_running(active_task_id, worker.worker_id)
+    generation_id = f"generation-{uuid.uuid4().hex}"
+    process_start_time = datetime.now(timezone.utc).isoformat()
+
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            source_path = tmp_path / "input.mm"
+            source_path.write_text(source_code, encoding="utf-8")
+            env = os.environ.copy()
+            env.update(
+                {
+                    "MUMEI_TASK_ID": active_task_id,
+                    "MUMEI_GENERATION_ID": generation_id,
+                    "MUMEI_SOLVER_CONFIG_FINGERPRINT": solver_fingerprint,
+                    "MUMEI_SOLVER_CACHE_KEY": cache_key,
+                    "MUMEI_VERIFICATION_TIMEOUT_MS": str(timeout_ms),
+                    "MUMEI_SOLVER_PROCESS_START_TIME": process_start_time,
+                }
+            )
+            harness_env_vars = _harness_env_vars_from_env()
+            harness_metadata = _harness_metadata_from_env()
+            env.update(harness_env_vars)
+            process = subprocess.Popen(
+                [
+                    "cargo",
+                    "run",
+                    "--",
+                    "verify",
+                    "--proof-cert",
+                    *(
+                        [
+                            "--harness-contract",
+                            os.environ["MUMEI_HARNESS_CONTRACT"],
+                        ]
+                        if _env_nonempty("MUMEI_HARNESS_CONTRACT") is not None
+                        else []
+                    ),
+                    *(
+                        [
+                            "--intent-fidelity",
+                            json.dumps(harness_metadata["intent_fidelity"]),
+                        ]
+                        if "intent_fidelity" in harness_metadata
+                        else []
+                    ),
+                    *(
+                        [
+                            "--artifact-paths",
+                            os.environ["MUMEI_ARTIFACT_PATHS"],
+                        ]
+                        if _env_nonempty("MUMEI_ARTIFACT_PATHS") is not None
+                        else []
+                    ),
+                    *(
+                        [
+                            "--budget-policy-fingerprint",
+                            os.environ["MUMEI_BUDGET_POLICY_FINGERPRINT"],
+                        ]
+                        if _env_nonempty("MUMEI_BUDGET_POLICY_FINGERPRINT") is not None
+                        else []
+                    ),
+                    "--output",
+                    str(tmp_path / "input.proof.json"),
+                    "--report-dir",
+                    str(tmp_path),
+                    str(source_path),
+                ],
+                cwd=root_dir,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+                preexec_fn=_limit_worker_memory(_z3_worker_pool.memory_limit_mb),
+            )
+            worker.process = process
+            try:
+                stdout, stderr = process.communicate(timeout=timeout_ms / 1000)
+            except subprocess.TimeoutExpired:
+                _z3_worker_pool.cancel_task(active_task_id)
+                try:
+                    stdout, stderr = process.communicate(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    stdout, stderr = process.communicate()
+                reason = f"timeout after {timeout_ms}ms"
+                _task_registry.cancel_task(active_task_id, reason)
+                result_payload = {
+                    "status": "cancelled",
+                    "task_id": active_task_id,
+                    "generation_id": generation_id,
+                    "worker_id": worker.worker_id,
+                    "source_hash": source_hash,
+                    "cache_key": cache_key,
+                    "solver_config_fingerprint": solver_fingerprint,
+                    "timeout_ms": timeout_ms,
+                    "cancel_reason": reason,
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "process_start_time": process_start_time,
+                    "process_end_time": datetime.now(timezone.utc).isoformat(),
+                }
+                return json.dumps(result_payload, ensure_ascii=False, indent=2)
+
+            report_file = tmp_path / "report.json"
+            report_data = None
+            if report_file.exists():
+                report_text = report_file.read_text(encoding="utf-8")
+                try:
+                    report_data = json.loads(report_text)
+                except json.JSONDecodeError:
+                    report_data = {"raw_report": report_text}
+
+            certificate_file = tmp_path / "input.proof.json"
+            certificate_data = None
+            if certificate_file.exists():
+                certificate_text = certificate_file.read_text(encoding="utf-8")
+                try:
+                    certificate_data = json.loads(certificate_text)
+                except json.JSONDecodeError:
+                    certificate_data = {"raw_certificate": certificate_text}
+
+            result_payload = {
+                "status": "passed" if process.returncode == 0 else "failed",
+                "task_id": active_task_id,
+                "generation_id": generation_id,
+                "worker_id": worker.worker_id,
+                "source_hash": source_hash,
+                "cache_key": cache_key,
+                "solver_config_fingerprint": solver_fingerprint,
+                "timeout_ms": timeout_ms,
+                "returncode": process.returncode,
+                "cache_hit": False,
+                "report": report_data,
+                "proof_certificate": certificate_data,
+                "stdout": stdout,
+                "stderr": stderr,
+                "process_start_time": process_start_time,
+                "process_end_time": datetime.now(timezone.utc).isoformat(),
+            }
+            _task_registry.complete_task(active_task_id, result_payload, cache_result=enable_cache)
+            return json.dumps(result_payload, ensure_ascii=False, indent=2)
+    finally:
+        _z3_worker_pool.release_worker(worker.worker_id)
 
 
 @mcp.tool()
@@ -1526,6 +2541,8 @@ def get_proof_certificate(module_path: str) -> str:
             cert = json.loads(candidate.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             return json.dumps({"error": f"failed to read certificate: {exc}"})
+        if isinstance(cert, dict):
+            cert = _attach_harness_metadata(cert)
         return json.dumps(
             {
                 "module": key_with_prefix,
@@ -1547,6 +2564,8 @@ def get_proof_certificate(module_path: str) -> str:
         modules = data.get("modules") or {}
         cert = modules.get(key_with_prefix) or modules.get(rel)
         if cert is not None:
+            if isinstance(cert, dict):
+                cert = _attach_harness_metadata(cert)
             return json.dumps(
                 {
                     "module": key_with_prefix,
@@ -1631,8 +2650,10 @@ def generate_doc(source_code: str, format: str = "json") -> str:
             if text:
                 try:
                     parsed = json.loads(text)
+                    payload = {"format": "json", "doc": parsed}
+                    payload.update(_harness_metadata_from_env())
                     return json.dumps(
-                        {"format": "json", "doc": parsed},
+                        payload,
                         indent=2,
                         ensure_ascii=False,
                     )
@@ -1652,8 +2673,10 @@ def generate_doc(source_code: str, format: str = "json") -> str:
                     except (OSError, json.JSONDecodeError):
                         continue
             if collected:
+                payload = {"format": "json", "doc": collected}
+                payload.update(_harness_metadata_from_env())
                 return json.dumps(
-                    {"format": "json", "doc": collected},
+                    payload,
                     indent=2,
                     ensure_ascii=False,
                 )
@@ -1673,14 +2696,13 @@ def generate_doc(source_code: str, format: str = "json") -> str:
                         )
                     except (OSError, UnicodeDecodeError):
                         continue
-        return json.dumps(
-            {
-                "format": fmt,
-                "stdout": result.stdout,
-                "files": files,
-            },
-            ensure_ascii=False,
-        )
+        payload = {
+            "format": fmt,
+            "stdout": result.stdout,
+            "files": files,
+        }
+        payload.update(_harness_metadata_from_env())
+        return json.dumps(payload, ensure_ascii=False)
 
 
 if __name__ == "__main__":

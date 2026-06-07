@@ -1,18 +1,28 @@
-# Module: iterable
-# Common interface for Vector/List/BoundedArray. Connects Sequential trait with iterator trait.
-import "std/prelude" as prelude;
-import "std/alloc" as alloc;
+// =============================================================
+// std/trait/iterable — verified traversal interface
+// =============================================================
+// Vector/List/BoundedArray で共有する走査境界の補助 atom 群。
 
-atom iterable_placeholder(x: i64)
-    effects: []
-    requires: true;
-    ensures: result >= 0 || result < 0;
-    body: {
-        return 0;
-    }
+// Iterable の長さが非負であることを保持して返す。
+atom iterable_len_nonneg(len: i64)
+requires: len >= 0;
+ensures: result == len && result >= 0;
+body: {
+    len
+};
 
-// Note: This is a trait placeholder atom that:
-// - Accepts any i64 input (no side effects from input)
-// - Returns any i64 value (the postcondition allows all i64)
-// - In a real implementation, this would typically call the iterator protocol methods
-// - Here we use return 0 as a placeholder to satisfy the contract
+// 論理位置が範囲内なら 1、それ以外なら 0 を返す。
+atom iterable_in_bounds(idx: i64, len: i64)
+requires: len >= 0;
+ensures: result == 0 || result == 1;
+body: {
+    if idx >= 0 && idx < len { 1 } else { 0 }
+};
+
+// 有効な位置を 1 つ進め、末尾境界 len までの範囲を保つ。
+atom iterable_advance(idx: i64, len: i64)
+requires: len >= 0 && idx >= 0 && idx < len;
+ensures: result == idx + 1 && result >= 1 && result <= len;
+body: {
+    idx + 1
+};

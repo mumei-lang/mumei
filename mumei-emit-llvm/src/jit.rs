@@ -66,7 +66,97 @@ impl<'ctx> JitEngine<'ctx> {
             hir_atom,
             module_env,
             extern_blocks,
-        )
+        )?;
+        self.register_runtime_symbols();
+        Ok(())
+    }
+
+    fn register_runtime_symbols(&self) {
+        macro_rules! map_symbol {
+            ($name:literal, $path:path) => {
+                if let Some(function) = self.module.get_function($name) {
+                    self.execution_engine
+                        .add_global_mapping(&function, $path as *const () as usize);
+                }
+            };
+        }
+
+        map_symbol!("file_read", mumei_core::ffi::file::file_read);
+        map_symbol!("file_write", mumei_core::ffi::file::file_write);
+        map_symbol!("file_exists", mumei_core::ffi::file::file_exists);
+        map_symbol!("file_delete", mumei_core::ffi::file::file_delete);
+
+        map_symbol!("json_parse", mumei_core::ffi::json::json_parse);
+        map_symbol!("json_stringify", mumei_core::ffi::json::json_stringify);
+        map_symbol!("json_get", mumei_core::ffi::json::json_get);
+        map_symbol!("json_get_int", mumei_core::ffi::json::json_get_int);
+        map_symbol!("json_get_str", mumei_core::ffi::json::json_get_str);
+        map_symbol!("json_get_bool", mumei_core::ffi::json::json_get_bool);
+        map_symbol!("json_array_len", mumei_core::ffi::json::json_array_len);
+        map_symbol!("json_array_get", mumei_core::ffi::json::json_array_get);
+        map_symbol!("json_is_null", mumei_core::ffi::json::json_is_null);
+        map_symbol!("json_is_object", mumei_core::ffi::json::json_is_object);
+        map_symbol!("json_is_array", mumei_core::ffi::json::json_is_array);
+        map_symbol!("json_object_new", mumei_core::ffi::json::json_object_new);
+        map_symbol!("json_object_set", mumei_core::ffi::json::json_object_set);
+        map_symbol!("json_array_new", mumei_core::ffi::json::json_array_new);
+        map_symbol!("json_array_push", mumei_core::ffi::json::json_array_push);
+        map_symbol!("json_from_int", mumei_core::ffi::json::json_from_int);
+        map_symbol!("json_from_str", mumei_core::ffi::json::json_from_str);
+        map_symbol!("json_from_bool", mumei_core::ffi::json::json_from_bool);
+        map_symbol!("mumei_str_concat", mumei_core::ffi::json::mumei_str_concat);
+        map_symbol!("mumei_str_eq", mumei_core::ffi::json::mumei_str_eq);
+        map_symbol!("json_free", mumei_core::ffi::json::json_free);
+        map_symbol!("string_free", mumei_core::ffi::json::string_free);
+        map_symbol!("mumei_str_alloc", mumei_core::ffi::json::mumei_str_alloc);
+        map_symbol!("mumei_str_free", mumei_core::ffi::json::mumei_str_free);
+        map_symbol!("mumei_str_get", mumei_core::ffi::json::mumei_str_get);
+
+        map_symbol!("http_get", mumei_core::ffi::http::http_get);
+        map_symbol!("http_post", mumei_core::ffi::http::http_post);
+        map_symbol!("http_put", mumei_core::ffi::http::http_put);
+        map_symbol!("http_delete", mumei_core::ffi::http::http_delete);
+        map_symbol!("http_status", mumei_core::ffi::http::http_status);
+        map_symbol!("http_body", mumei_core::ffi::http::http_body);
+        map_symbol!("http_body_json", mumei_core::ffi::http::http_body_json);
+        map_symbol!("http_header_get", mumei_core::ffi::http::http_header_get);
+        map_symbol!("http_header_set", mumei_core::ffi::http::http_header_set);
+        map_symbol!("http_is_ok", mumei_core::ffi::http::http_is_ok);
+        map_symbol!("http_is_error", mumei_core::ffi::http::http_is_error);
+        map_symbol!("http_free", mumei_core::ffi::http::http_free);
+
+        map_symbol!(
+            "http_server_bind",
+            mumei_core::ffi::http_server::http_server_bind
+        );
+        map_symbol!(
+            "http_server_listen",
+            mumei_core::ffi::http_server::http_server_listen
+        );
+        map_symbol!(
+            "http_server_accept",
+            mumei_core::ffi::http_server::http_server_accept
+        );
+        map_symbol!(
+            "http_request_path",
+            mumei_core::ffi::http_server::http_request_path
+        );
+        map_symbol!(
+            "http_request_method",
+            mumei_core::ffi::http_server::http_request_method
+        );
+        map_symbol!(
+            "http_server_respond",
+            mumei_core::ffi::http_server::http_server_respond
+        );
+        map_symbol!(
+            "http_server_free",
+            mumei_core::ffi::http_server::http_server_free
+        );
+        map_symbol!(
+            "http_request_free",
+            mumei_core::ffi::http_server::http_request_free
+        );
     }
 
     /// Execute a no-argument atom that returns i64.
@@ -133,6 +223,8 @@ mod tests {
                 type_params: vec![],
                 where_bounds: vec![],
                 params,
+                trace_id: None,
+                spec_metadata: std::collections::HashMap::new(),
                 requires: "true".to_string(),
                 forall_constraints: vec![],
                 ensures: "true".to_string(),

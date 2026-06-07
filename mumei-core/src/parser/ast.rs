@@ -6,12 +6,13 @@
 // This file contains all the core data structures used by the parser.
 
 use crate::ast::TypeRef;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 // --- 0. Source position information (Span) ---
 
 /// Source position information. Attached to all AST nodes for diagnostic accuracy.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub struct Span {
     pub file: String,
     pub line: usize,
@@ -42,7 +43,7 @@ impl std::fmt::Display for Span {
 
 // --- 1. Expression AST ---
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Op {
     Add,
     Sub,
@@ -297,6 +298,16 @@ pub enum JoinSemantics {
     Any,
 }
 
+impl JoinSemantics {
+    pub fn completes_after_first_child(&self) -> bool {
+        matches!(self, JoinSemantics::Any)
+    }
+
+    pub fn cancels_remaining_children(&self) -> bool {
+        matches!(self, JoinSemantics::Any)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Pattern {
     Wildcard,
@@ -378,6 +389,8 @@ pub struct Atom {
     /// 単相化時のトレイト境界バリデーションで使用
     pub where_bounds: Vec<TypeParamBound>,
     pub params: Vec<Param>,
+    pub trace_id: Option<String>,
+    pub spec_metadata: HashMap<String, String>,
     pub requires: String,
     pub forall_constraints: Vec<Quantifier>,
     pub ensures: String,

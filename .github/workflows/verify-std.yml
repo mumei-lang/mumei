@@ -150,14 +150,9 @@ jobs:
               fi
             done
             if [ ${#PATHS[@]} -gt 0 ]; then
-              # Delete std/ before restoring from base so that files added
-              # by the PR are completely removed.  `git checkout <tree> --
-              # std` only adds/overwrites entries present in the tree-ish;
-              # it does NOT remove index entries for PR-added files, so
-              # those would remain tracked and `git clean` would skip them.
-              # A clean rm + checkout guarantees the working tree and index
-              # match the base ref exactly for std/.
-              rm -rf std/
+              # Delete restored paths before checking out base versions so
+              # files added by the PR do not linger in compiler/std dirs.
+              rm -rf "${PATHS[@]}"
               git checkout "origin/${BASE_REF}" -- "${PATHS[@]}"
               # Remove PR-only mumei-emit-* crates so they don't affect
               # the base compiler build.

@@ -17,7 +17,7 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -67,6 +67,8 @@ struct ResolverContext {
 pub struct LeanEscalationMetrics {
     pub escalation_attempts: usize,
     pub lean_successes: usize,
+    #[serde(default)]
+    pub lean_verified_accepted: usize,
     pub partial_translation: usize,
     pub manual_required: usize,
     #[serde(default)]
@@ -75,23 +77,108 @@ pub struct LeanEscalationMetrics {
     pub by_logic_fragment: HashMap<String, usize>,
     #[serde(default)]
     pub by_failure_reason: HashMap<String, usize>,
+    #[serde(default)]
+    pub successes_by_failure_reason: HashMap<String, usize>,
 }
 
 impl LeanEscalationMetrics {
-    fn record_candidate(&mut self, atom: &proof_cert::AtomCertificate) {
+    pub fn record_candidate(&mut self, candidate: &proof_cert::EscalationCandidate) {
+        self.record_escalation(
+            &candidate.name,
+            &candidate.escalation_reason,
+            &candidate.logic_fragment_tags,
+        );
+        match candidate
+            .lean_metadata
+            .as_ref()
+            .map(|metadata| metadata.status.as_str())
+        {
+            Some("lean_verified") => {
+                self.lean_successes += 1;
+                *self
+                    .successes_by_failure_reason
+                    .entry(candidate.escalation_reason.clone())
+                    .or_insert(0) += 1;
+            }
+            Some("partial_translation") => self.partial_translation += 1,
+            _ if candidate.manual_lemma_reason.is_some() => self.manual_required += 1,
+            _ => {}
+        }
+    }
+
+    pub fn record_atom_certificate(&mut self, atom: &proof_cert::AtomCertificate) {
         if let Some(reason) = &atom.escalation_reason {
-            self.escalation_attempts += 1;
-            self.by_atom.insert(atom.name.clone(), reason.clone());
-            *self.by_failure_reason.entry(reason.clone()).or_insert(0) += 1;
-            for tag in &atom.logic_fragment_tags {
-                *self.by_logic_fragment.entry(tag.clone()).or_insert(0) += 1;
+            self.record_escalation(&atom.name, reason, &atom.logic_fragment_tags);
+        }
+    }
+
+    pub fn record_lean_verified_acceptance(&mut self, atom: &proof_cert::AtomCertificate) {
+        let reason = atom
+            .escalation_reason
+            .as_deref()
+            .unwrap_or("lean_verified_import_acceptance");
+        if !self.by_atom.contains_key(&atom.name) {
+            self.record_escalation(&atom.name, reason, &atom.logic_fragment_tags);
+        }
+        self.lean_successes += 1;
+        self.lean_verified_accepted += 1;
+        *self
+            .successes_by_failure_reason
+            .entry(reason.to_string())
+            .or_insert(0) += 1;
+    }
+
+    fn record_escalation(&mut self, name: &str, reason: &str, logic_fragment_tags: &[String]) {
+        self.escalation_attempts += 1;
+        self.by_atom.insert(name.to_string(), reason.to_string());
+        *self
+            .by_failure_reason
+            .entry(reason.to_string())
+            .or_insert(0) += 1;
+        for tag in logic_fragment_tags {
+            *self.by_logic_fragment.entry(tag.clone()).or_insert(0) += 1;
+        }
+    }
+
+    pub fn identify_low_success_categories(&self) -> Vec<String> {
+        let mut low_success = Vec::new();
+        for (reason, attempts) in &self.by_failure_reason {
+            let successes = self
+                .successes_by_failure_reason
+                .get(reason)
+                .copied()
+                .unwrap_or(0);
+            if *attempts > 0 && successes as f64 / (*attempts as f64) < 0.5 {
+                low_success.push(reason.clone());
             }
         }
+        low_success.sort();
+        low_success
+    }
+
+    pub fn to_summary_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "escalation_attempts": self.escalation_attempts,
+            "lean_successes": self.lean_successes,
+            "lean_verified_accepted": self.lean_verified_accepted,
+            "partial_translation": self.partial_translation,
+            "manual_required": self.manual_required,
+            "success_rate": if self.escalation_attempts > 0 {
+                self.lean_successes as f64 / self.escalation_attempts as f64
+            } else {
+                0.0
+            },
+            "by_failure_reason": self.by_failure_reason,
+            "successes_by_failure_reason": self.successes_by_failure_reason,
+            "by_logic_fragment": self.by_logic_fragment,
+            "low_success_categories": self.identify_low_success_categories(),
+        })
     }
 
     fn merge(&mut self, other: Self) {
         self.escalation_attempts += other.escalation_attempts;
         self.lean_successes += other.lean_successes;
+        self.lean_verified_accepted += other.lean_verified_accepted;
         self.partial_translation += other.partial_translation;
         self.manual_required += other.manual_required;
         self.by_atom.extend(other.by_atom);
@@ -100,6 +187,9 @@ impl LeanEscalationMetrics {
         }
         for (reason, count) in other.by_failure_reason {
             *self.by_failure_reason.entry(reason).or_insert(0) += count;
+        }
+        for (reason, count) in other.successes_by_failure_reason {
+            *self.successes_by_failure_reason.entry(reason).or_insert(0) += count;
         }
     }
 
@@ -233,6 +323,13 @@ fn check_cert_for_atom(cert_results: &HashMap<String, String>, atom_name: &str) 
         .is_some_and(|status| status == "proven")
 }
 
+fn unproven_cert_results(atom_refs: &[&parser::Atom]) -> HashMap<String, String> {
+    atom_refs
+        .iter()
+        .map(|atom| (atom.name.clone(), "unproven".to_string()))
+        .collect()
+}
+
 /// Collect atom references (including ImplBlock methods with qualified names)
 /// from a parsed module. Shared between local certificate verification and
 /// SI-5 Phase 3-C bundle-fallback verification so both paths recognise
@@ -285,7 +382,7 @@ fn log_lean_verified_acceptance(
         .map(|(name, status)| (name.as_str(), status.as_str()))
         .collect();
     for atom in &cert.atoms {
-        metrics.record_candidate(atom);
+        metrics.record_atom_certificate(atom);
         let lean_status = atom
             .lean_metadata
             .as_ref()
@@ -294,7 +391,7 @@ fn log_lean_verified_acceptance(
         if atom.z3_check_result == "lean_verified"
             && proven.get(atom.name.as_str()).copied() == Some("proven")
         {
-            metrics.lean_successes += 1;
+            metrics.record_lean_verified_acceptance(atom);
             eprintln!(
                 "  Lean-verified atom '{}' accepted as proven (--allow-lean-verified)",
                 atom.name,
@@ -344,13 +441,21 @@ fn verify_import_certificate(
         module_dir.join("proof_certificate.json"),
     ];
     if let Some(cert_path) = cert_candidates.iter().find(|p| p.exists()) {
-        match proof_cert::load_certificate(cert_path) {
+        match proof_cert::load_certificate_unvalidated(cert_path) {
             Ok(cert) => {
                 // Check if the certificate matches this source file.
                 let cert_file_path = Path::new(&cert.file);
                 let source_matches = source_file.ends_with(cert_file_path)
                     || cert_file_path.ends_with(source_file.file_name().unwrap_or_default());
                 if source_matches || cert.file.is_empty() {
+                    if let Err(err) = proof_cert::validate_certificate_translator_versions(&cert) {
+                        eprintln!(
+                            "  ⚠️  Local certificate {} has invalid Lean translator metadata: {}",
+                            cert_path.display(),
+                            err,
+                        );
+                        return Some(unproven_cert_results(&atom_refs));
+                    }
                     let results =
                         proof_cert::verify_certificate(&cert, &atom_refs, allow_lean_verified);
                     let mut metrics = LeanEscalationMetrics::default();
@@ -387,6 +492,15 @@ fn verify_import_certificate(
                 Ok(bundle) => {
                     if let Some(cert) = proof_cert::lookup_bundle_certificate(&bundle, source_file)
                     {
+                        if let Err(err) = proof_cert::validate_certificate_translator_versions(cert)
+                        {
+                            eprintln!(
+                                "  ⚠️  MUMEI_PROOF_BUNDLE certificate for {} has invalid Lean translator metadata: {}",
+                                source_file.display(),
+                                err,
+                            );
+                            return Some(unproven_cert_results(&atom_refs));
+                        }
                         let results =
                             proof_cert::verify_certificate(cert, &atom_refs, allow_lean_verified);
                         let mut metrics = LeanEscalationMetrics::default();
@@ -751,6 +865,7 @@ fn register_imported_items(items: &[Item], alias: Option<&str>, module_env: &mut
                 }
             }
             Item::ExternBlock(extern_block) => {
+                module_env.register_extern_block(extern_block);
                 // ExternBlock 内の関数を trusted atom として ModuleEnv に登録
                 for ext_fn in &extern_block.functions {
                     let params: Vec<crate::parser::Param> = ext_fn
@@ -777,6 +892,8 @@ fn register_imported_items(items: &[Item], alias: Option<&str>, module_env: &mut
                         type_params: vec![],
                         where_bounds: vec![],
                         params,
+                        trace_id: None,
+                        spec_metadata: std::collections::HashMap::new(),
                         requires: ext_fn
                             .requires
                             .clone()
@@ -1322,6 +1439,14 @@ pub struct VerificationCacheEntry {
 /// Compute a proof hash that includes transitive dependency signatures and type predicates.
 /// This extends compute_atom_hash with callee signatures and type predicate content.
 pub fn compute_proof_hash(atom: &crate::parser::Atom, module_env: &ModuleEnv) -> String {
+    compute_proof_hash_with_flags(atom, module_env, &[])
+}
+
+pub fn compute_proof_hash_with_flags(
+    atom: &crate::parser::Atom,
+    module_env: &ModuleEnv,
+    flags: &[&str],
+) -> String {
     let mut hasher = Sha256::new();
 
     // 1. Include everything from the basic atom hash
@@ -1389,6 +1514,10 @@ pub fn compute_proof_hash(atom: &crate::parser::Atom, module_env: &ModuleEnv) ->
         hasher.update(b"|max_unroll:");
         hasher.update(max.to_string().as_bytes());
     }
+    for flag in flags {
+        hasher.update(b"|verify_flag:");
+        hasher.update(flag.as_bytes());
+    }
 
     // 2. Include type predicate content for each param's refined type
     for p in &atom.params {
@@ -1441,6 +1570,80 @@ pub fn compute_proof_hash(atom: &crate::parser::Atom, module_env: &ModuleEnv) ->
     }
 
     format!("{:x}", hasher.finalize())
+}
+
+/// Compute a hash for the contract (specification) portion only.
+/// This is used to detect unauthorized specification mutations by the agent.
+pub fn compute_contract_hash(atom: &crate::parser::Atom) -> String {
+    let mut hasher = Sha256::new();
+
+    hash_field(&mut hasher, "name", &atom.name);
+    hash_field(&mut hasher, "requires", &atom.requires);
+    for q in &atom.forall_constraints {
+        let quantifier_type = match q.q_type {
+            crate::parser::QuantifierType::ForAll => "forall",
+            crate::parser::QuantifierType::Exists => "exists",
+        };
+        hash_field(&mut hasher, "quantifier.type", quantifier_type);
+        hash_field(&mut hasher, "quantifier.var", &q.var);
+        hash_field(&mut hasher, "quantifier.start", &q.start);
+        hash_field(&mut hasher, "quantifier.end", &q.end);
+        hash_field(&mut hasher, "quantifier.condition", &q.condition);
+    }
+    hash_field(&mut hasher, "ensures", &atom.ensures);
+    if let Some(ref inv) = atom.invariant {
+        hash_field(&mut hasher, "invariant", inv);
+    }
+    for e in &atom.effects {
+        hash_field(&mut hasher, "effect.name", &e.name);
+        hash_field(
+            &mut hasher,
+            "effect.negated",
+            if e.negated { "true" } else { "false" },
+        );
+        for p in &e.params {
+            hash_field(&mut hasher, "effect.param.value", &p.value);
+            hash_field(
+                &mut hasher,
+                "effect.param.is_constant",
+                if p.is_constant { "true" } else { "false" },
+            );
+            if let Some(ref refinement) = p.refinement {
+                hash_field(&mut hasher, "effect.param.refinement", refinement);
+            }
+        }
+    }
+    for p in &atom.params {
+        if let Some(ref req) = p.fn_contract_requires {
+            hash_field(&mut hasher, "fn_contract.param", &p.name);
+            hash_field(&mut hasher, "fn_contract.requires", req);
+        }
+        if let Some(ref ens) = p.fn_contract_ensures {
+            hash_field(&mut hasher, "fn_contract.param", &p.name);
+            hash_field(&mut hasher, "fn_contract.ensures", ens);
+        }
+    }
+    hash_string_map(&mut hasher, "effect_pre", &atom.effect_pre);
+    hash_string_map(&mut hasher, "effect_post", &atom.effect_post);
+
+    format!("{:x}", hasher.finalize())
+}
+
+fn hash_field(hasher: &mut Sha256, label: &str, value: &str) {
+    hasher.update(label.as_bytes());
+    hasher.update(b"#");
+    hasher.update(value.len().to_string().as_bytes());
+    hasher.update(b":");
+    hasher.update(value.as_bytes());
+    hasher.update(b";");
+}
+
+fn hash_string_map(hasher: &mut Sha256, label: &str, values: &HashMap<String, String>) {
+    let sorted: BTreeMap<&String, &String> = values.iter().collect();
+    for (key, value) in sorted {
+        hash_field(hasher, label, key);
+        hash_field(hasher, label, value);
+    }
 }
 
 /// Collect callee names from an atom's body expression string.
@@ -1775,6 +1978,30 @@ atom add(x: i64, y: i64) -> i64
                 assert_eq!(hash1, hash2, "same atom should produce same proof hash");
             }
         }
+    }
+
+    #[test]
+    fn test_proof_hash_includes_verification_flags() {
+        let source = r#"
+atom add(x: i64, y: i64) -> i64
+  requires: true;
+  ensures: result == x + y;
+  body: x + y;
+"#;
+        let module = parser::parse_module(source);
+        let mut module_env = ModuleEnv::new();
+        for item in &module {
+            if let parser::Item::Atom(atom) = item {
+                module_env.register_atom(atom);
+            }
+        }
+        let atom = module_env.get_atom("add").unwrap();
+
+        let default_hash = compute_proof_hash(atom, &module_env);
+        let vacuity_hash =
+            compute_proof_hash_with_flags(atom, &module_env, &["enable_vacuity_check"]);
+
+        assert_ne!(default_hash, vacuity_hash);
     }
 
     /// Test compute_proof_hash changes when callee signature changes
@@ -2155,6 +2382,7 @@ impl Stack {
             &module_env,
             None,
             None,
+            None,
         );
 
         // Verify that the cert contains the qualified method name
@@ -2208,6 +2436,7 @@ impl Stack {
             &module_env,
             Some("mumei-std"),
             Some("0.0.0"),
+            None,
         );
         let mut modules = HashMap::new();
         modules.insert(module_key.to_string(), cert);
@@ -2296,6 +2525,65 @@ atom add(x: i64, y: i64) -> i64
         let _ = fs::remove_dir_all(std_root.parent().unwrap());
     }
 
+    #[test]
+    fn test_verify_import_certificate_ignores_unmatched_stale_local_cert_for_bundle_fallback() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+        let source = r#"
+atom add(x: i64, y: i64) -> i64
+    requires: true;
+    ensures: true;
+    body: { x + y };
+"#;
+        let items = parser::parse_module(source);
+        let atom_refs: Vec<&parser::Atom> = items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Atom(a) => Some(a),
+                _ => None,
+            })
+            .collect();
+
+        let std_root = std::env::temp_dir().join("mumei_test_ws3_unmatched_stale/std");
+        let _ = fs::remove_dir_all(std_root.parent().unwrap());
+        fs::create_dir_all(&std_root).unwrap();
+        let logical_source = std_root.join("dummy_math.mm");
+        fs::write(&logical_source, source).unwrap();
+
+        let bundle = make_bundle_with_module("std/dummy_math", "std/dummy_math.mm", &atom_refs);
+        let bundle_path =
+            write_bundle_to_tempfile(&bundle, "mumei_test_bundle_unmatched_stale.json");
+
+        let mut local_results = HashMap::new();
+        local_results.insert(
+            "add".to_string(),
+            ("unsat".to_string(), "verified".to_string()),
+        );
+        let module_env = ModuleEnv::new();
+        let mut stale_local_cert = proof_cert::generate_certificate(
+            "std/other_module.mm",
+            &atom_refs,
+            &local_results,
+            &module_env,
+            None,
+            None,
+            None,
+        );
+        stale_local_cert.atoms[0].translator_version = "stale-translator".to_string();
+        proof_cert::save_certificate(&stale_local_cert, &std_root.join(".proof-cert.json"))
+            .unwrap();
+
+        std::env::set_var("MUMEI_PROOF_BUNDLE", &bundle_path);
+        let result = verify_import_certificate(&std_root, &logical_source, &items, false);
+        std::env::remove_var("MUMEI_PROOF_BUNDLE");
+
+        let result = result.expect("unmatched local cert should fall through to bundle fallback");
+        assert_eq!(result.get("add").map(|s| s.as_str()), Some("proven"));
+
+        let _ = fs::remove_file(&bundle_path);
+        let _ = fs::remove_dir_all(std_root.parent().unwrap());
+    }
+
     /// 3-C: missing/invalid MUMEI_PROOF_BUNDLE path simply falls through.
     #[test]
     fn test_verify_import_certificate_bundle_missing() {
@@ -2371,6 +2659,7 @@ atom mul(x: i64, y: i64) -> i64
             &local_env,
             None,
             None,
+            None,
         );
         let local_cert_path = std_root.join(".proof-cert.json");
         proof_cert::save_certificate(&local_cert, &local_cert_path).unwrap();
@@ -2389,6 +2678,59 @@ atom mul(x: i64, y: i64) -> i64
 
         let _ = fs::remove_file(&bundle_path);
         let _ = fs::remove_dir_all(std_root.parent().unwrap());
+    }
+
+    #[test]
+    fn test_verify_import_certificate_rejects_stale_lean_translator_local_cert() {
+        let source = r#"
+atom hard_lemma(x: i64) -> i64
+    requires: true;
+    ensures: true;
+    body: { x };
+"#;
+        let items = parser::parse_module(source);
+        let atom_refs: Vec<&parser::Atom> = items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Atom(a) => Some(a),
+                _ => None,
+            })
+            .collect();
+
+        let module_dir = std::env::temp_dir().join("mumei_test_stale_lean_local");
+        let _ = fs::remove_dir_all(&module_dir);
+        fs::create_dir_all(&module_dir).unwrap();
+        let source_file = module_dir.join("hard_lemma.mm");
+        fs::write(&source_file, source).unwrap();
+
+        let mut results = HashMap::new();
+        results.insert(
+            "hard_lemma".to_string(),
+            ("lean_verified".to_string(), "verified".to_string()),
+        );
+        let module_env = ModuleEnv::new();
+        let mut cert = proof_cert::generate_certificate(
+            source_file.to_str().unwrap(),
+            &atom_refs,
+            &results,
+            &module_env,
+            None,
+            None,
+            None,
+        );
+        cert.atoms[0].translator_version = "stale-translator".to_string();
+        proof_cert::save_certificate(&cert, &module_dir.join(".proof-cert.json"))
+            .expect("write stale cert");
+
+        let result = verify_import_certificate(&module_dir, &source_file, &items, true)
+            .expect("invalid cert should produce unproven results");
+        assert_eq!(
+            result.get("hard_lemma").map(|s| s.as_str()),
+            Some("unproven"),
+            "stale translator metadata must reject the cert"
+        );
+
+        let _ = fs::remove_dir_all(&module_dir);
     }
 
     /// PR 2: Bundle fallback honours `allow_lean_verified` opt-in.
@@ -2425,6 +2767,7 @@ atom hard_lemma(x: i64) -> i64
             &atom_refs,
             &results,
             &module_env,
+            None,
             None,
             None,
         );
@@ -2539,6 +2882,7 @@ atom hard_lemma(x: i64) -> i64
             &dep_atom_refs,
             &results,
             &module_env,
+            None,
             None,
             None,
         );

@@ -15,6 +15,8 @@ pub mod mir;
 pub mod mir_analysis;
 pub mod parser;
 pub mod proof_cert;
+pub mod reconstruction_loss;
 pub mod registry;
 pub mod resolver;
+pub mod structured_feedback;
 pub mod verification;

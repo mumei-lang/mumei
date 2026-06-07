@@ -63,7 +63,7 @@ curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash
 # Homebrew
 brew install mumei-lang/mumei/mumei
 
-# Specific version (latest is v0.5.9)
+# Specific version (latest is v0.6.0)
 curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash -s -- --version v0.6.0
 ```
 
@@ -97,13 +97,15 @@ mumei setup && source ~/.mumei/env
 mumei init my_app
 cd my_app
 mumei build src/main.mm -o dist/output
+mumei run src/main.mm
 ```
 
 ### CLI
 
 | Command | Description |
 |---------|-------------|
-| `mumei build <file> -o <out>` | Verify + codegen (`--emit llvm-ir` (default) / `c-header` / `verified-json` / `proof-book` / `rust` / `python` / external plugin name) |
+| `mumei build <file> -o <out>` | Verify + codegen (`--emit llvm-ir` (default) / `c-header` / `verified-json` / `proof-book` / `binary` / `rust` / `python` / external plugin name) |
+| `mumei run <file>` | Verify → codegen → link → execute `atom main()` as a native binary (`--emit binary` default, `--emit llvm-ir` keeps IR before linking) |
 | `mumei verify <file>` | Z3 verification only |
 | `mumei check <file>` | Parse + resolve (fast, no Z3) |
 | `mumei init <name>` | Generate project template |
@@ -338,6 +340,7 @@ The two approaches are **complementary**: the MCP Server enables any agent to ac
 | [Examples & Tests](docs/EXAMPLES.md) | Verification suite, pattern matching, negative tests |
 | [Architecture](docs/ARCHITECTURE.md) | Compiler internals |
 | [Cross-Spec Verification](docs/CROSS_SPEC_GUIDE.md) | System-wide contract consistency, invariants, and dependency cycles |
+| [Verification Workflow Guide](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/VERIFICATION_WORKFLOW_GUIDE.md) | 自然言語仕様・既存コードの検証手順、仕様↔コード整合性検証、人間向け操作ガイド |
 | [Toolchain](docs/TOOLCHAIN.md) | CLI commands, package management |
 | [LSP Integration](docs/LSP_INTEGRATION.md) | Editor CodeLens, intent drift, and spec-code mapping |
 | [Roadmap](docs/ROADMAP.md) | Strategic roadmap |

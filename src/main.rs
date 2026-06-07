@@ -5,6 +5,7 @@ mod lsp;
 mod setup;
 
 use clap::{Parser, Subcommand};
+use encoding_rs::{Encoding, SHIFT_JIS};
 use mumei_core::emitter::Emitter;
 #[cfg(test)]
 use mumei_core::hir::lower_atom_to_hir;
@@ -12,10 +13,13 @@ use mumei_core::hir::lower_atom_to_hir_with_env;
 use mumei_core::parser::{ImportDecl, Item};
 use mumei_core::{
     ast, cross_spec, emitter, hir, inspect, manifest, mir, mir_analysis, parser, proof_cert,
-    registry, resolver, verification,
+    reconstruction_loss::ReconstructionLoss,
+    registry, resolver,
+    structured_feedback::{Location, StructuredFeedback},
+    verification,
 };
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 // =============================================================================
 // Helpers
@@ -28,8 +32,93 @@ fn resolve_source_for_span(main_source: &str, span: &parser::Span) -> String {
     if span.file.is_empty() {
         main_source.to_string()
     } else {
-        std::fs::read_to_string(&span.file).unwrap_or_else(|_| main_source.to_string())
+        read_source_file(&span.file).unwrap_or_else(|_| main_source.to_string())
     }
+}
+
+fn structured_feedback_for_passed_atom(atom: &parser::Atom) -> StructuredFeedback {
+    StructuredFeedback {
+        location: Location::from_span(&atom.span),
+        ..StructuredFeedback::verification_passed()
+    }
+}
+
+fn structured_feedback_from_report_file(
+    output_dir: &Path,
+    atom: &parser::Atom,
+    error_text: Option<&str>,
+) -> StructuredFeedback {
+    let report_path = output_dir.join("report.json");
+    if let Ok(report_json) = std::fs::read_to_string(&report_path) {
+        if let Ok(report) = serde_json::from_str::<serde_json::Value>(&report_json) {
+            if report
+                .get("atom")
+                .and_then(serde_json::Value::as_str)
+                .map(|name| name == atom.name)
+                .unwrap_or(true)
+            {
+                return StructuredFeedback::from_report(&report);
+            }
+        }
+    }
+
+    let error_type = error_text.and_then(infer_failure_type_from_error_text);
+    StructuredFeedback::verification_failed(
+        error_type.map(str::to_string),
+        Location::from_span(&atom.span),
+        None,
+        None,
+    )
+}
+
+fn infer_failure_type_from_error_text(error_text: &str) -> Option<&'static str> {
+    let lower = error_text.to_lowercase();
+    if lower.contains("postcondition") || lower.contains("ensures") {
+        Some(verification::FAILURE_POSTCONDITION_VIOLATED)
+    } else if lower.contains("precondition") || lower.contains("requires") {
+        Some(verification::FAILURE_PRECONDITION_VIOLATED)
+    } else if lower.contains("linearity") || lower.contains("moved") {
+        Some(verification::FAILURE_LINEARITY_VIOLATED)
+    } else if lower.contains("contradiction") || lower.contains("invariant") {
+        Some(verification::FAILURE_INVARIANT_VIOLATED)
+    } else if lower.contains("effect") {
+        Some(verification::FAILURE_EFFECT_NOT_ALLOWED)
+    } else {
+        None
+    }
+}
+
+fn structured_feedback_payload(
+    structured_feedbacks: &[StructuredFeedback],
+    verified: usize,
+    failed: usize,
+    skipped: usize,
+    escalated: usize,
+) -> serde_json::Value {
+    if structured_feedbacks.len() == 1 {
+        return serde_json::json!(structured_feedbacks[0]);
+    }
+    serde_json::json!({
+        "structured_feedback": structured_feedbacks,
+        "summary": {
+            "verified": verified,
+            "failed": failed,
+            "skipped": skipped,
+            "escalation_candidates": escalated,
+        }
+    })
+}
+
+fn collect_decidable_fragment_diagnostic(
+    atom: &parser::Atom,
+    module_env: &verification::ModuleEnv,
+    suppress_output: bool,
+) -> Option<verification::Diagnostic> {
+    let diagnostic = verification::outside_decidable_fragment_diagnostic(atom, module_env)?;
+    if !suppress_output {
+        eprintln!("  ⚠️  {}: {}", diagnostic.code, diagnostic.message);
+    }
+    Some(diagnostic)
 }
 
 fn emit_decidable_fragment_warning(
@@ -37,26 +126,142 @@ fn emit_decidable_fragment_warning(
     module_env: &verification::ModuleEnv,
     suppress_output: bool,
 ) {
+    let _ = collect_decidable_fragment_diagnostic(atom, module_env, suppress_output);
+}
+
+fn enrich_verify_json_payload(
+    mut payload: serde_json::Value,
+    diagnostics: &[verification::Diagnostic],
+    loop_suggestions: &[serde_json::Value],
+) -> serde_json::Value {
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("diagnostics".to_string(), serde_json::json!(diagnostics));
+        if !loop_suggestions.is_empty() {
+            object.insert(
+                "cegis_suggestions".to_string(),
+                serde_json::Value::Array(loop_suggestions.to_vec()),
+            );
+        }
+    }
+    payload
+}
+
+fn emit_spurious_counterexample_diagnostic(
+    validation: &verification::CounterexampleValidationResult,
+    atom_name: &str,
+    suppress_output: bool,
+) {
     if suppress_output {
         return;
     }
-    if let Some(warning) = verification::outside_decidable_fragment_warning(atom, module_env) {
-        eprintln!("  ⚠️  {warning}");
+    match validation.validation_status.as_str() {
+        "validated" => eprintln!("  ✓ Counterexample validated for atom '{}'", atom_name),
+        "spurious_candidate" => {
+            eprintln!(
+                "  ⚠️  Spurious counterexample detected (candidate) for atom '{}'",
+                atom_name
+            );
+            let symbols = validation
+                .symbol_provenance
+                .iter()
+                .map(|symbol| format!("{} ({})", symbol.symbol_name, symbol.source))
+                .collect::<Vec<_>>()
+                .join(", ");
+            eprintln!("    Depends on uninterpreted symbols: {symbols}");
+        }
+        "unvalidated" => eprintln!("  ? Counterexample unvalidated for atom '{}'", atom_name),
+        _ => {}
     }
 }
 
-/// Collect all ExternBlock items from a list of Items.
-fn collect_extern_blocks(items: &[Item]) -> Vec<parser::ExternBlock> {
-    items
-        .iter()
-        .filter_map(|item| {
-            if let Item::ExternBlock(eb) = item {
-                Some(eb.clone())
-            } else {
-                None
+fn counterexample_model_from_error(
+    error: &verification::MumeiError,
+) -> std::collections::HashMap<String, i64> {
+    let mut model = std::collections::HashMap::new();
+    if let verification::MumeiError::VerificationError {
+        counterexample: Some(serde_json::Value::Object(values)),
+        ..
+    } = error
+    {
+        for (name, value) in values {
+            let parsed = match value {
+                serde_json::Value::Number(number) => number.as_i64(),
+                serde_json::Value::String(text) => text.parse::<i64>().ok(),
+                _ => None,
+            };
+            if let Some(value) = parsed {
+                model.insert(name.clone(), value);
             }
-        })
-        .collect()
+        }
+    }
+    model
+}
+
+fn reconstruction_loss_from_error(
+    error: &verification::MumeiError,
+    violated_property: &str,
+) -> Option<ReconstructionLoss> {
+    if let verification::MumeiError::VerificationError {
+        counterexample: Some(counterexample),
+        ..
+    } = error
+    {
+        ReconstructionLoss::from_counterexample_value(violated_property.to_string(), counterexample)
+    } else {
+        None
+    }
+}
+
+fn parse_artifact_paths(value: &str) -> Option<Vec<String>> {
+    let paths: Vec<String> = value
+        .split(',')
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(str::to_string)
+        .collect();
+    if paths.is_empty() {
+        None
+    } else {
+        Some(paths)
+    }
+}
+
+fn resolve_harness_contract(cli_value: Option<String>) -> Option<String> {
+    cli_value.or_else(proof_cert::harness_contract_from_env)
+}
+
+fn resolve_artifact_paths(cli_value: Option<String>) -> Option<Vec<String>> {
+    cli_value
+        .as_deref()
+        .and_then(parse_artifact_paths)
+        .or_else(proof_cert::artifact_paths_from_env)
+}
+
+fn parse_intent_fidelity_json(value: &str) -> Result<proof_cert::IntentFidelity, String> {
+    serde_json::from_str(value).map_err(|err| format!("invalid --intent-fidelity JSON: {err}"))
+}
+
+fn resolve_intent_fidelity(cli_value: Option<String>) -> Option<proof_cert::IntentFidelity> {
+    if let Some(value) = cli_value {
+        match parse_intent_fidelity_json(&value) {
+            Ok(intent_fidelity) => Some(intent_fidelity),
+            Err(message) => {
+                eprintln!("  ❌ {message}");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        proof_cert::intent_fidelity_from_env()
+    }
+}
+
+fn resolve_budget_policy_fingerprint(cli_value: Option<String>) -> Option<String> {
+    cli_value.or_else(proof_cert::budget_policy_fingerprint_from_env)
+}
+
+/// Collect extern declarations needed by binary codegen, including imported modules.
+fn collect_extern_blocks(module_env: &verification::ModuleEnv) -> Vec<parser::ExternBlock> {
+    module_env.extern_blocks.clone()
 }
 
 // =============================================================================
@@ -93,6 +298,7 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum Command {
     /// Verify + compile to LLVM IR (default)
     Build {
@@ -101,7 +307,7 @@ enum Command {
         /// Output base name
         #[arg(short, long, default_value = "katana")]
         output: String,
-        /// Emit target: llvm-ir (default), c-header, verified-json, proof-book, proof-cert, escalation-bundle
+        /// Emit target: llvm-ir (default), c-header, verified-json, decidable-metrics, proof-book, proof-cert, escalation-bundle
         #[arg(long, default_value = "llvm-ir")]
         emit: String,
         /// P5-C: Strict import mode — missing/invalid certificates cause hard errors
@@ -116,17 +322,29 @@ enum Command {
     },
     /// Z3 formal verification only (no codegen)
     Verify {
-        /// Input .mm file
+        /// Input .mm file or directory
         input: String,
+        /// Verification task ID for MCP/CI provenance
+        #[arg(long)]
+        task_id: Option<String>,
+        /// Override Z3 solver timeout in milliseconds
+        #[arg(long)]
+        solver_timeout: Option<u64>,
+        /// Verification cache scope: module (input directory) or global (current workspace)
+        #[arg(long, default_value = "module", value_parser = ["module", "global"])]
+        cache_scope: String,
         /// Generate Z3 proof certificate (.proof.json)
         #[arg(long)]
         proof_cert: bool,
         /// Emit Lean escalation candidate bundle alongside verification results
         #[arg(long)]
         escalate_lean: bool,
-        /// Emit target for verify-only output: escalation-bundle
+        /// Emit target for verify-only output: escalation-bundle, escalation-metrics, decidable-metrics, reconstruction-loss, or structured-feedback
         #[arg(long)]
         emit: Option<String>,
+        /// Disable verify-only output targets: escalation-metrics
+        #[arg(long = "no-emit")]
+        no_emit: Vec<String>,
         /// Output path for proof certificate (default: <input>.proof.json)
         #[arg(long)]
         output: Option<String>,
@@ -147,10 +365,55 @@ enum Command {
         /// Enable cross-specification consistency verification across atoms
         #[arg(long)]
         cross_spec_verify: bool,
+        /// Additional .mm files to include in cross-specification verification
+        #[arg(long, value_delimiter = ',')]
+        cross_spec_files: Vec<String>,
+        /// Enable P8-A spurious counterexample detection
+        #[arg(long, conflicts_with = "disable_spurious_detection")]
+        enable_spurious_detection: bool,
+        /// Disable P8-A spurious counterexample detection
+        #[arg(long)]
+        disable_spurious_detection: bool,
+        /// Run property-based validation synthesized from refinement types
+        #[arg(long)]
+        property_based_test: bool,
+        /// Number of generated property-based inputs per atom
+        #[arg(long, default_value_t = 100)]
+        property_based_test_count: usize,
+        /// Seed for deterministic property-based input generation
+        #[arg(long)]
+        property_based_test_seed: Option<u64>,
+        /// Maximum property-based shrinking steps per counterexample
+        #[arg(long, default_value_t = 64)]
+        property_based_test_max_shrink_steps: usize,
+        /// Harness contract path or identifier to embed in generated proof certificates
+        #[arg(long)]
+        harness_contract: Option<String>,
+        /// Intent fidelity metadata JSON to embed in generated proof certificates
+        #[arg(long)]
+        intent_fidelity: Option<String>,
+        /// Comma-separated artifact paths to embed in generated proof certificates
+        #[arg(long)]
+        artifact_paths: Option<String>,
+        /// Budget policy fingerprint to embed in generated proof certificates
+        #[arg(long)]
+        budget_policy_fingerprint: Option<String>,
+        /// Emit a contract manifest containing per-atom specification hashes
+        #[arg(long)]
+        emit_contract_manifest: bool,
+        /// Enable spec vacuity checking via mutation testing
+        #[arg(long)]
+        enable_vacuity_check: bool,
+        /// Detect loops that may need stronger invariants
+        #[arg(long)]
+        detect_loops: bool,
+        /// Include CEGIS loop-invariant suggestions in JSON/report output
+        #[arg(long, requires = "detect_loops")]
+        suggest_cegis: bool,
     },
     /// Parse + resolve + monomorphize only (no Z3, fast syntax check)
     Check {
-        /// Input .mm file
+        /// Input .mm file or directory
         input: String,
     },
     /// Generate a new Mumei project template
@@ -188,6 +451,9 @@ enum Command {
         /// Publish only the proof cache (no source code)
         #[arg(long)]
         proof_only: bool,
+        /// Accept mumei-lean-emitted certificates (`lean_verified`) as proven.
+        #[arg(long)]
+        allow_lean_verified: bool,
     },
     /// List available packages in the local registry
     List,
@@ -208,12 +474,12 @@ enum Command {
     },
     /// Infer required effects for all atoms (JSON output, for MCP integration)
     InferEffects {
-        /// Input .mm file
+        /// Input .mm file or directory
         input: String,
     },
     /// Infer contracts (requires/ensures) for all atoms (JSON output, Plan 13)
     InferContracts {
-        /// Input .mm file
+        /// Input .mm file or directory
         input: String,
     },
     /// Verify a proof certificate against current source
@@ -228,18 +494,19 @@ enum Command {
         #[arg(long)]
         allow_lean_verified: bool,
     },
-    // TODO(follow-up): `Run` and `Publish` do not yet accept
-    // `--allow-lean-verified`. They currently call `load_and_prepare` which
-    // hard-codes `allow_lean_verified=false`, so projects depending on
-    // mumei-lean-verified atoms will see those atoms as `"unproven"` during
-    // import resolution under `mumei run` / `mumei publish`. Add the flag to
-    // both subcommands and thread it through to
-    // `load_and_prepare_with_full_options` once the cross-project Proof
-    // Certificate Chain E2E test (PR 5) lands.
     /// P7-B: Build and run a mumei program as a native binary
     Run {
         /// Input .mm file
         input: String,
+        /// Emit target: binary (default) or llvm-ir
+        #[arg(long, default_value = "binary", value_parser = ["binary", "llvm-ir"])]
+        emit: String,
+        /// Output executable path (default: temporary binary)
+        #[arg(short, long)]
+        output: Option<String>,
+        /// Accept mumei-lean-emitted certificates (`lean_verified`) as proven.
+        #[arg(long)]
+        allow_lean_verified: bool,
         /// Arguments to pass to the compiled program
         #[arg(trailing_var_arg = true)]
         args: Vec<String>,
@@ -269,6 +536,7 @@ fn main() {
                 "llvm-ir" => emitter::EmitTarget::LlvmIr,
                 "c-header" => emitter::EmitTarget::CHeader,
                 "verified-json" => emitter::EmitTarget::VerifiedJson,
+                "decidable-metrics" => emitter::EmitTarget::DecidableMetrics,
                 "proof-book" => emitter::EmitTarget::ProofBook,
                 "proof-cert" => emitter::EmitTarget::ProofCert,
                 "escalation-bundle" => emitter::EmitTarget::EscalationBundle,
@@ -287,38 +555,184 @@ fn main() {
         }
         Some(Command::Verify {
             input,
+            task_id,
+            solver_timeout,
+            cache_scope,
             proof_cert,
             escalate_lean,
             emit,
+            no_emit,
             output,
             report_dir,
             json,
             strict_imports,
             allow_lean_verified,
             cross_spec_verify,
+            cross_spec_files,
+            enable_spurious_detection,
+            disable_spurious_detection,
+            property_based_test,
+            property_based_test_count,
+            property_based_test_seed,
+            property_based_test_max_shrink_steps,
+            harness_contract,
+            intent_fidelity,
+            artifact_paths,
+            budget_policy_fingerprint,
+            emit_contract_manifest,
+            enable_vacuity_check,
+            detect_loops,
+            suggest_cegis,
         }) => {
-            let emit_escalation_bundle = match emit.as_deref() {
-                Some("escalation-bundle") => true,
-                Some(other) => {
+            let no_emit_escalation_metrics =
+                no_emit.iter().any(|target| target == "escalation-metrics");
+            if let Some(other) = no_emit
+                .iter()
+                .find(|target| target.as_str() != "escalation-metrics")
+            {
+                eprintln!(
+                    "Unsupported verify --no-emit target '{}'. Supported values: escalation-metrics",
+                    other
+                );
+                std::process::exit(1);
+            }
+            let emit_escalation_bundle = matches!(emit.as_deref(), Some("escalation-bundle"));
+            let emit_escalation_metrics = matches!(emit.as_deref(), Some("escalation-metrics"))
+                && !no_emit_escalation_metrics;
+            let emit_decidable_metrics = matches!(emit.as_deref(), Some("decidable-metrics"));
+            let emit_reconstruction_loss = matches!(emit.as_deref(), Some("reconstruction-loss"));
+            let emit_structured_feedback = matches!(emit.as_deref(), Some("structured-feedback"));
+            if let Some(other) = emit.as_deref() {
+                if !emit_escalation_bundle
+                    && !matches!(other, "escalation-metrics")
+                    && !emit_decidable_metrics
+                    && !emit_reconstruction_loss
+                    && !emit_structured_feedback
+                {
                     eprintln!(
-                        "Unsupported verify --emit target '{}'. Supported value: escalation-bundle",
+                        "Unsupported verify --emit target '{}'. Supported values: escalation-bundle, escalation-metrics, decidable-metrics, reconstruction-loss, structured-feedback",
                         other
                     );
                     std::process::exit(1);
                 }
-                None => false,
-            };
-            cmd_verify(VerifyOptions {
-                input: &input,
-                generate_proof_cert: proof_cert,
-                emit_escalation_bundle: escalate_lean || emit_escalation_bundle,
-                cert_output: output.as_deref(),
-                report_dir: report_dir.as_deref(),
-                json_output: json,
-                strict_imports,
-                allow_lean_verified,
-                enable_cross_spec_verification: cross_spec_verify,
-            });
+            }
+            let harness_contract = resolve_harness_contract(harness_contract);
+            let intent_fidelity = resolve_intent_fidelity(intent_fidelity);
+            let artifact_paths = resolve_artifact_paths(artifact_paths);
+            let budget_policy_fingerprint =
+                resolve_budget_policy_fingerprint(budget_policy_fingerprint);
+            let enable_cross_spec = cross_spec_verify || !cross_spec_files.is_empty();
+            let enable_spurious = enable_spurious_detection || !disable_spurious_detection;
+            let input_path = Path::new(&input);
+            if input_path.is_dir() {
+                let mut files = collect_mm_files(input_path);
+                files.sort();
+                if files.is_empty() {
+                    eprintln!("❌ No .mm files found in '{}'", input);
+                    std::process::exit(1);
+                }
+                println!(
+                    "🗡️  Mumei verify: verifying {} file(s) in '{}'...",
+                    files.len(),
+                    input
+                );
+                let mut total_ok = 0usize;
+                let mut total_fail = 0usize;
+                for file in &files {
+                    let file_str = file.to_string_lossy().to_string();
+                    let has_failure =
+                        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            cmd_verify(VerifyOptions {
+                                input: &file_str,
+                                task_id: task_id.as_deref(),
+                                solver_timeout,
+                                cache_scope: &cache_scope,
+                                generate_proof_cert: proof_cert,
+                                escalate_lean,
+                                emit_escalation_bundle,
+                                emit_escalation_metrics,
+                                emit_decidable_metrics,
+                                emit_reconstruction_loss,
+                                emit_structured_feedback,
+                                cert_output: output.as_deref(),
+                                report_dir: report_dir.as_deref(),
+                                json_output: json,
+                                strict_imports,
+                                allow_lean_verified,
+                                enable_cross_spec_verification: enable_cross_spec,
+                                cross_spec_files: &cross_spec_files,
+                                enable_spurious_detection: enable_spurious,
+                                property_based_test,
+                                property_based_test_count,
+                                property_based_test_seed,
+                                property_based_test_max_shrink_steps,
+                                harness_contract: harness_contract.clone(),
+                                intent_fidelity: intent_fidelity.clone(),
+                                artifact_paths: artifact_paths.clone(),
+                                budget_policy_fingerprint: budget_policy_fingerprint.clone(),
+                                emit_contract_manifest,
+                                enable_vacuity_check,
+                                detect_loops,
+                                suggest_cegis,
+                            })
+                        })) {
+                            Ok(has_failure) => has_failure,
+                            Err(_) => {
+                                eprintln!("  ❌ '{}': parse error (panic)", file_str);
+                                true
+                            }
+                        };
+                    if has_failure {
+                        total_fail += 1;
+                    } else {
+                        total_ok += 1;
+                    }
+                }
+                println!(
+                    "\n🗡️  Directory verify summary: {} passed, {} failed",
+                    total_ok, total_fail
+                );
+                if total_fail > 0 {
+                    std::process::exit(1);
+                }
+            } else {
+                let has_failure = cmd_verify(VerifyOptions {
+                    input: &input,
+                    task_id: task_id.as_deref(),
+                    solver_timeout,
+                    cache_scope: &cache_scope,
+                    generate_proof_cert: proof_cert,
+                    escalate_lean,
+                    emit_escalation_bundle,
+                    emit_escalation_metrics,
+                    emit_decidable_metrics,
+                    emit_reconstruction_loss,
+                    emit_structured_feedback,
+                    cert_output: output.as_deref(),
+                    report_dir: report_dir.as_deref(),
+                    json_output: json,
+                    strict_imports,
+                    allow_lean_verified,
+                    enable_cross_spec_verification: enable_cross_spec,
+                    cross_spec_files: &cross_spec_files,
+                    enable_spurious_detection: enable_spurious,
+                    property_based_test,
+                    property_based_test_count,
+                    property_based_test_seed,
+                    property_based_test_max_shrink_steps,
+                    harness_contract,
+                    intent_fidelity,
+                    artifact_paths,
+                    budget_policy_fingerprint,
+                    emit_contract_manifest,
+                    enable_vacuity_check,
+                    detect_loops,
+                    suggest_cegis,
+                });
+                if has_failure {
+                    std::process::exit(1);
+                }
+            }
         }
         Some(Command::Check { input }) => {
             cmd_check(&input);
@@ -339,8 +753,11 @@ fn main() {
         Some(Command::Add { dep, version }) => {
             cmd_add(&dep, version.as_deref());
         }
-        Some(Command::Publish { proof_only }) => {
-            cmd_publish(proof_only);
+        Some(Command::Publish {
+            proof_only,
+            allow_lean_verified,
+        }) => {
+            cmd_publish(proof_only, allow_lean_verified);
         }
         Some(Command::List) => {
             cmd_list();
@@ -371,8 +788,14 @@ fn main() {
         }) => {
             cmd_verify_cert(&cert, &input, allow_lean_verified);
         }
-        Some(Command::Run { input, args }) => {
-            cmd_run(&input, &args);
+        Some(Command::Run {
+            input,
+            emit,
+            output,
+            allow_lean_verified,
+            args,
+        }) => {
+            cmd_run(&input, &emit, output.as_deref(), allow_lean_verified, &args);
         }
         None => {
             // 後方互換: `mumei input.mm -o dist/katana` → build として実行
@@ -410,10 +833,34 @@ fn main() {
 
 /// ソースファイルを読み込む
 fn load_source(input: &str) -> String {
-    fs::read_to_string(input).unwrap_or_else(|_| {
+    read_source_file(input).unwrap_or_else(|_| {
         eprintln!("❌ Error: Could not read Mumei source file '{}'", input);
         std::process::exit(1);
     })
+}
+
+fn decode_source_bytes(bytes: &[u8]) -> Option<String> {
+    if let Some((encoding, bom_len)) = Encoding::for_bom(bytes) {
+        let (source, _, had_errors) = encoding.decode(&bytes[bom_len..]);
+        if !had_errors {
+            return Some(source.into_owned());
+        }
+    } else if let Ok(source) = std::str::from_utf8(bytes) {
+        return Some(source.to_owned());
+    } else {
+        let (source, _, had_errors) = SHIFT_JIS.decode(bytes);
+        if !had_errors {
+            return Some(source.into_owned());
+        }
+    }
+
+    None
+}
+
+fn read_source_file<P: AsRef<Path>>(path: P) -> Result<String, String> {
+    let path = path.as_ref();
+    let bytes = fs::read(path).map_err(|err| err.to_string())?;
+    decode_source_bytes(&bytes).ok_or_else(|| "unsupported source encoding".to_string())
 }
 
 /// Z3 が利用可能かチェックし、なければ親切なメッセージで終了する
@@ -530,7 +977,7 @@ fn load_and_prepare_with_full_options(
 
     let mut mono = ast::Monomorphizer::new();
     mono.collect(&items);
-    let items = if mono.has_generics() {
+    let mut items = if mono.has_generics() {
         let mono_items = mono.monomorphize(&items, Some(&module_env));
         eprintln!(
             "  🔬 Monomorphization: {} generic instance(s) expanded.",
@@ -540,6 +987,7 @@ fn load_and_prepare_with_full_options(
     } else {
         items
     };
+    annotate_source_file(&mut items, input);
 
     let mut imports: Vec<ImportDecl> = Vec::new();
     for item in &items {
@@ -570,6 +1018,7 @@ fn load_and_prepare_with_full_options(
                 );
             }
             Item::ExternBlock(extern_block) => {
+                module_env.register_extern_block(extern_block);
                 for ext_fn in &extern_block.functions {
                     // ExternFn → trusted Atom に変換して ModuleEnv に登録
                     let params: Vec<parser::Param> = ext_fn
@@ -596,6 +1045,8 @@ fn load_and_prepare_with_full_options(
                         type_params: vec![],
                         where_bounds: vec![],
                         params,
+                        trace_id: None,
+                        spec_metadata: std::collections::HashMap::new(),
                         requires: ext_fn
                             .requires
                             .clone()
@@ -629,20 +1080,325 @@ fn load_and_prepare_with_full_options(
     (items, module_env, imports, source)
 }
 
+/// Non-exiting variant of `load_and_prepare` — returns `Err` on read/resolve
+/// failures instead of calling `std::process::exit(1)`.
+fn try_load_and_prepare(
+    input: &str,
+) -> Result<(Vec<Item>, verification::ModuleEnv, Vec<ImportDecl>, String), String> {
+    try_load_and_prepare_with_full_options(input, false, false)
+}
+
+fn try_load_and_prepare_with_full_options(
+    input: &str,
+    strict_imports: bool,
+    allow_lean_verified: bool,
+) -> Result<(Vec<Item>, verification::ModuleEnv, Vec<ImportDecl>, String), String> {
+    let source =
+        read_source_file(input).map_err(|e| format!("Could not read '{}': {}", input, e))?;
+    let items = parser::parse_module(&source);
+
+    let mut module_env = verification::ModuleEnv::new();
+    verification::register_builtin_traits(&mut module_env);
+    verification::register_builtin_effects(&mut module_env);
+    let input_path = Path::new(input);
+    let base_dir = input_path.parent().unwrap_or(Path::new("."));
+
+    if let Err(e) = resolver::resolve_prelude(base_dir, &mut module_env) {
+        eprintln!("  ⚠️  Prelude load warning: {}", e);
+    }
+
+    if let Some((proj_dir, m)) = manifest::find_and_load() {
+        if strict_imports || allow_lean_verified {
+            if let Err(e) = resolver::resolve_manifest_dependencies_with_full_options(
+                &m,
+                &proj_dir,
+                &mut module_env,
+                strict_imports,
+                allow_lean_verified,
+            ) {
+                if strict_imports {
+                    return Err(format!("Dependency resolution failed (strict mode): {}", e));
+                }
+                eprintln!("  ⚠️  Dependency resolution warning: {}", e);
+            }
+        } else if let Err(e) =
+            resolver::resolve_manifest_dependencies(&m, &proj_dir, &mut module_env)
+        {
+            eprintln!("  ⚠️  Dependency resolution warning: {}", e);
+        }
+    }
+
+    if strict_imports || allow_lean_verified {
+        if let Err(e) = resolver::resolve_imports_with_full_options(
+            &items,
+            base_dir,
+            &mut module_env,
+            strict_imports,
+            allow_lean_verified,
+        ) {
+            if strict_imports {
+                return Err(format!("Import resolution failed (strict mode): {}", e));
+            }
+            return Err(format!("Import resolution failed: {}", e));
+        }
+    } else if let Err(e) = resolver::resolve_imports(&items, base_dir, &mut module_env) {
+        return Err(format!("Import resolution failed: {}", e));
+    }
+
+    for item in &items {
+        match item {
+            Item::TraitDef(trait_def) => module_env.register_trait(trait_def),
+            Item::ImplDef(impl_def) => module_env.register_impl(impl_def),
+            Item::EffectDef(effect_def) => module_env.register_effect(effect_def),
+            _ => {}
+        }
+    }
+
+    let mut mono = ast::Monomorphizer::new();
+    mono.collect(&items);
+    let mut items = if mono.has_generics() {
+        let mono_items = mono.monomorphize(&items, Some(&module_env));
+        eprintln!(
+            "  🔬 Monomorphization: {} generic instance(s) expanded.",
+            mono.instances().len()
+        );
+        mono_items
+    } else {
+        items
+    };
+    annotate_source_file(&mut items, input);
+
+    let mut imports: Vec<ImportDecl> = Vec::new();
+    for item in &items {
+        match item {
+            Item::Import(decl) => imports.push(decl.clone()),
+            Item::TypeDef(refined_type) => module_env.register_type(refined_type),
+            Item::StructDef(struct_def) => module_env.register_struct(struct_def),
+            Item::EnumDef(enum_def) => module_env.register_enum(enum_def),
+            Item::Atom(atom) => module_env.register_atom(atom),
+            Item::TraitDef(_) => {}
+            Item::ImplDef(_) => {}
+            Item::ResourceDef(resource_def) => module_env.register_resource(resource_def),
+            Item::EffectDef(_) => {}
+            Item::ImplBlock(impl_block) => {
+                for method in &impl_block.methods {
+                    let mut qualified = method.clone();
+                    qualified.name = format!("{}::{}", impl_block.struct_name, method.name);
+                    module_env.register_atom(&qualified);
+                }
+            }
+            Item::ExternBlock(extern_block) => {
+                module_env.register_extern_block(extern_block);
+                for ext_fn in &extern_block.functions {
+                    let params: Vec<parser::Param> = ext_fn
+                        .param_types
+                        .iter()
+                        .enumerate()
+                        .map(|(i, ty)| parser::Param {
+                            name: ext_fn
+                                .param_names
+                                .get(i)
+                                .cloned()
+                                .unwrap_or_else(|| format!("arg{}", i)),
+                            type_name: Some(ty.clone()),
+                            type_ref: Some(parser::parse_type_ref(ty)),
+                            is_ref: false,
+                            is_ref_mut: false,
+                            fn_contract_requires: None,
+                            fn_contract_ensures: None,
+                        })
+                        .collect();
+
+                    let atom = parser::Atom {
+                        name: ext_fn.name.clone(),
+                        type_params: vec![],
+                        where_bounds: vec![],
+                        params,
+                        trace_id: None,
+                        spec_metadata: std::collections::HashMap::new(),
+                        requires: ext_fn
+                            .requires
+                            .clone()
+                            .unwrap_or_else(|| "true".to_string()),
+                        forall_constraints: vec![],
+                        ensures: ext_fn.ensures.clone().unwrap_or_else(|| "true".to_string()),
+                        body_expr: String::new(),
+                        consumed_params: vec![],
+                        resources: vec![],
+                        is_async: false,
+                        trust_level: parser::TrustLevel::Trusted,
+                        max_unroll: None,
+                        invariant: None,
+                        effects: vec![],
+                        return_type: Some(ext_fn.return_type.clone()),
+                        span: ext_fn.span.clone(),
+                        effect_pre: std::collections::HashMap::new(),
+                        effect_post: std::collections::HashMap::new(),
+                    };
+                    module_env.register_atom(&atom);
+                }
+            }
+        }
+    }
+
+    Ok((items, module_env, imports, source))
+}
+
+fn annotate_source_file(items: &mut [Item], input: &str) {
+    for item in items {
+        match item {
+            Item::Atom(atom) => annotate_atom_source_file(atom, input),
+            Item::TypeDef(refined_type) => refined_type.span.file = input.to_string(),
+            Item::StructDef(struct_def) => {
+                struct_def.span.file = input.to_string();
+                for method in &mut struct_def.methods {
+                    annotate_atom_source_file(method, input);
+                }
+            }
+            Item::EnumDef(enum_def) => enum_def.span.file = input.to_string(),
+            Item::Import(decl) => decl.span.file = input.to_string(),
+            Item::TraitDef(trait_def) => trait_def.span.file = input.to_string(),
+            Item::ImplDef(impl_def) => impl_def.span.file = input.to_string(),
+            Item::ResourceDef(resource_def) => resource_def.span.file = input.to_string(),
+            Item::ExternBlock(extern_block) => {
+                extern_block.span.file = input.to_string();
+                for function in &mut extern_block.functions {
+                    function.span.file = input.to_string();
+                }
+            }
+            Item::EffectDef(effect_def) => effect_def.span.file = input.to_string(),
+            Item::ImplBlock(impl_block) => {
+                impl_block.span.file = input.to_string();
+                for method in &mut impl_block.methods {
+                    annotate_atom_source_file(method, input);
+                }
+            }
+        }
+    }
+}
+
+fn annotate_atom_source_file(atom: &mut parser::Atom, input: &str) {
+    atom.span.file = input.to_string();
+    atom.spec_metadata
+        .insert("source_file".to_string(), input.to_string());
+}
+
+fn load_cross_spec_files(
+    cross_spec_files: &[String],
+    strict_imports: bool,
+    allow_lean_verified: bool,
+    items: &mut Vec<Item>,
+    module_env: &mut verification::ModuleEnv,
+    imports: &mut Vec<ImportDecl>,
+    verbose: bool,
+) {
+    for file in cross_spec_files {
+        if verbose {
+            println!("  🔗 Loading cross-spec file '{}'...", file);
+        }
+        let (mut extra_items, extra_env, mut extra_imports, _source) =
+            load_and_prepare_with_full_options(file, strict_imports, allow_lean_verified);
+        items.append(&mut extra_items);
+        imports.append(&mut extra_imports);
+        merge_module_env(module_env, extra_env);
+    }
+}
+
+fn merge_module_env(target: &mut verification::ModuleEnv, source: verification::ModuleEnv) {
+    target.types.extend(source.types);
+    target.structs.extend(source.structs);
+    target.atoms.extend(source.atoms);
+    target.extern_blocks.extend(source.extern_blocks);
+    target.enums.extend(source.enums);
+    target.traits.extend(source.traits);
+    target.impls.extend(source.impls);
+    target.verified_cache.extend(source.verified_cache);
+    target.resources.extend(source.resources);
+    target.effects.extend(source.effects);
+    target.effect_defs.extend(source.effect_defs);
+    target.path_id_map.extend(source.path_id_map);
+    target.next_path_id = target.next_path_id.max(source.next_path_id);
+    target.prefix_ranges.extend(source.prefix_ranges);
+    target.dependency_graph.extend(source.dependency_graph);
+    for (atom, dependents) in source.reverse_deps {
+        target
+            .reverse_deps
+            .entry(atom)
+            .or_default()
+            .extend(dependents);
+    }
+    if target.security_policy.is_none() {
+        target.security_policy = source.security_policy;
+    }
+    for (method, entries) in source.method_trait_index {
+        target
+            .method_trait_index
+            .entry(method)
+            .or_default()
+            .extend(entries);
+    }
+}
+
 // =============================================================================
 // mumei check — parse + resolve + monomorphize only
 // =============================================================================
 
 fn cmd_check(input: &str) {
-    println!("🗡️  Mumei check: parsing and resolving '{}'...", input);
-    let (items, _module_env, _imports, _source) = load_and_prepare(input);
+    let input_path = Path::new(input);
+    if input_path.is_dir() {
+        let mut files = collect_mm_files(input_path);
+        files.sort();
+        if files.is_empty() {
+            eprintln!("❌ No .mm files found in '{}'", input);
+            std::process::exit(1);
+        }
+        println!(
+            "🗡️  Mumei check: checking {} file(s) in '{}'...",
+            files.len(),
+            input
+        );
+        let mut total_ok = 0usize;
+        let mut total_fail = 0usize;
+        for file in &files {
+            let file_str = file.to_string_lossy().to_string();
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                try_load_and_prepare(&file_str)
+            })) {
+                Ok(Ok((items, ..))) => {
+                    cmd_check_print_items(&file_str, &items);
+                    total_ok += 1;
+                }
+                Ok(Err(e)) => {
+                    eprintln!("  ❌ '{}': {}", file_str, e);
+                    total_fail += 1;
+                }
+                Err(_) => {
+                    eprintln!("  ❌ '{}': parse error (panic)", file_str);
+                    total_fail += 1;
+                }
+            }
+        }
+        println!(
+            "\n🗡️  Directory check summary: {} passed, {} failed",
+            total_ok, total_fail
+        );
+        if total_fail > 0 {
+            std::process::exit(1);
+        }
+    } else {
+        println!("🗡️  Mumei check: parsing and resolving '{}'...", input);
+        let (items, _module_env, _imports, _source) = load_and_prepare(input);
+        cmd_check_print_items(input, &items);
+    }
+}
 
+fn cmd_check_print_items(_input: &str, items: &[Item]) {
     let mut type_count = 0;
     let mut struct_count = 0;
     let mut enum_count = 0;
     let mut trait_count = 0;
     let mut atom_count = 0;
-    for item in &items {
+    for item in items {
         match item {
             Item::Import(decl) => {
                 let alias_str = decl.alias.as_deref().unwrap_or("(none)");
@@ -719,28 +1475,82 @@ fn cmd_check(input: &str) {
 
 struct VerifyOptions<'a> {
     input: &'a str,
+    task_id: Option<&'a str>,
+    solver_timeout: Option<u64>,
+    cache_scope: &'a str,
     generate_proof_cert: bool,
+    escalate_lean: bool,
     emit_escalation_bundle: bool,
+    emit_escalation_metrics: bool,
+    emit_decidable_metrics: bool,
+    emit_reconstruction_loss: bool,
+    emit_structured_feedback: bool,
     cert_output: Option<&'a str>,
     report_dir: Option<&'a str>,
     json_output: bool,
     strict_imports: bool,
     allow_lean_verified: bool,
     enable_cross_spec_verification: bool,
+    cross_spec_files: &'a [String],
+    enable_spurious_detection: bool,
+    property_based_test: bool,
+    property_based_test_count: usize,
+    property_based_test_seed: Option<u64>,
+    property_based_test_max_shrink_steps: usize,
+    harness_contract: Option<String>,
+    intent_fidelity: Option<proof_cert::IntentFidelity>,
+    artifact_paths: Option<Vec<String>>,
+    budget_policy_fingerprint: Option<String>,
+    emit_contract_manifest: bool,
+    enable_vacuity_check: bool,
+    detect_loops: bool,
+    suggest_cegis: bool,
 }
 
-fn cmd_verify(options: VerifyOptions<'_>) {
+fn verify_escalation_bundle_path(input: &str, output: Option<&str>) -> PathBuf {
+    if let Some(output) = output {
+        PathBuf::from(output).with_extension("escalation-bundle.json")
+    } else {
+        PathBuf::from(format!("{input}.escalation-bundle.json"))
+    }
+}
+
+fn cmd_verify(options: VerifyOptions<'_>) -> bool {
     let VerifyOptions {
         input,
+        task_id,
+        solver_timeout,
+        cache_scope,
         generate_proof_cert,
+        escalate_lean,
         emit_escalation_bundle,
+        emit_escalation_metrics,
+        emit_decidable_metrics,
+        emit_reconstruction_loss,
+        emit_structured_feedback,
         cert_output,
         report_dir,
         json_output,
         strict_imports,
         allow_lean_verified,
         enable_cross_spec_verification,
+        cross_spec_files,
+        enable_spurious_detection,
+        property_based_test,
+        property_based_test_count,
+        property_based_test_seed,
+        property_based_test_max_shrink_steps,
+        harness_contract,
+        intent_fidelity,
+        artifact_paths,
+        budget_policy_fingerprint,
+        emit_contract_manifest,
+        enable_vacuity_check,
+        detect_loops,
+        suggest_cegis,
     } = options;
+    let structured_feedback_stdout = emit_structured_feedback && cert_output.is_none();
+    let quiet_output = json_output || structured_feedback_stdout;
     check_z3_available();
     let manifest_config = manifest::find_and_load();
     let (build_cfg, proof_cfg) = if let Some((_, ref m)) = manifest_config {
@@ -751,13 +1561,44 @@ fn cmd_verify(options: VerifyOptions<'_>) {
             manifest::ProofConfig::default(),
         )
     };
-    let enable_cross_spec_verification =
-        enable_cross_spec_verification || proof_cfg.cross_spec_verify;
-    if !json_output {
+    let enable_cross_spec_verification = enable_cross_spec_verification
+        || proof_cfg.cross_spec_verify
+        || !cross_spec_files.is_empty();
+    let effective_timeout_ms = solver_timeout.unwrap_or(proof_cfg.timeout_ms);
+    let property_based_config =
+        property_based_test.then(|| verification::PropertyBasedTestConfig {
+            test_count: property_based_test_count,
+            max_shrink_steps: property_based_test_max_shrink_steps,
+            seed: property_based_test_seed
+                .unwrap_or(verification::PropertyBasedTestConfig::default().seed),
+            ..verification::PropertyBasedTestConfig::default()
+        });
+    if !quiet_output {
         println!("🗡️  Mumei verify: verifying '{}'...", input);
+        if let Some(config) = &property_based_config {
+            println!(
+                "  🎲 Property-based validation: {} generated input(s), seed {}",
+                config.test_count, config.seed
+            );
+        }
     }
-    let (items, mut module_env, _imports, source) =
-        load_and_prepare_with_full_options(input, strict_imports, allow_lean_verified);
+    let (mut items, mut module_env, mut imports, source) =
+        match try_load_and_prepare_with_full_options(input, strict_imports, allow_lean_verified) {
+            Ok(result) => result,
+            Err(e) => {
+                eprintln!("  ❌ {e}");
+                return true;
+            }
+        };
+    load_cross_spec_files(
+        cross_spec_files,
+        strict_imports,
+        allow_lean_verified,
+        &mut items,
+        &mut module_env,
+        &mut imports,
+        !quiet_output,
+    );
 
     let output_dir = match report_dir {
         Some(dir) => Path::new(dir),
@@ -768,31 +1609,126 @@ fn cmd_verify(options: VerifyOptions<'_>) {
         let _ = std::fs::create_dir_all(output_dir);
     }
     let verification_config = verification::VerificationConfig {
-        timeout_ms: proof_cfg.timeout_ms,
+        timeout_ms: effective_timeout_ms,
         global_max_unroll: build_cfg.max_unroll,
         enable_cross_spec_verification,
+        collect_decidable_fragment_metrics: emit_decidable_metrics,
+        enable_spurious_detection,
+        enable_vacuity_check,
+        detect_loops,
+        suggest_cegis,
+        property_based_test: property_based_config,
     };
     let input_path = Path::new(input);
     let base_dir = input_path.parent().unwrap_or(Path::new("."));
+    let cache_base_dir = if cache_scope == "global" {
+        Path::new(".")
+    } else {
+        base_dir
+    };
+    if let Some(task_id) = task_id {
+        std::env::set_var("MUMEI_TASK_ID", task_id);
+    }
+    std::env::set_var(
+        "MUMEI_VERIFICATION_TIMEOUT_MS",
+        effective_timeout_ms.to_string(),
+    );
+    std::env::set_var("MUMEI_SOLVER_CACHE_SCOPE", cache_scope);
     let mut verified = 0;
     let mut failed = 0;
     let mut skipped = 0;
     let mut escalated = 0;
+    let mut loop_suggestions: Vec<serde_json::Value> = Vec::new();
+    let mut reconstruction_losses: std::collections::HashMap<String, ReconstructionLoss> =
+        std::collections::HashMap::new();
+    let mut structured_feedbacks: Vec<StructuredFeedback> = Vec::new();
+    let mut diagnostics: Vec<verification::Diagnostic> = Vec::new();
+    let emit_lean_artifacts = escalate_lean || emit_escalation_bundle || emit_escalation_metrics;
 
     // Plan 11B: Track per-atom verification results for proof certificates
     let mut cert_results: std::collections::HashMap<String, (String, String)> =
         std::collections::HashMap::new();
 
+    if emit_contract_manifest {
+        let manifest = verification::generate_contract_manifest(&module_env);
+        let manifest_path = if let (Some(output), false) = (
+            cert_output,
+            generate_proof_cert
+                || escalate_lean
+                || emit_escalation_bundle
+                || emit_escalation_metrics,
+        ) {
+            PathBuf::from(output)
+        } else {
+            output_dir.join("contract-manifest.json")
+        };
+        match serde_json::to_string_pretty(&manifest)
+            .map_err(|e| e.to_string())
+            .and_then(|json| std::fs::write(&manifest_path, json).map_err(|e| e.to_string()))
+        {
+            Ok(()) => {
+                if !quiet_output {
+                    println!(
+                        "  📜 Contract manifest written to: {}",
+                        manifest_path.display()
+                    );
+                }
+            }
+            Err(e) => {
+                if !quiet_output {
+                    eprintln!("  ⚠️  Failed to write contract manifest: {}", e);
+                }
+                failed += 1;
+            }
+        }
+    }
+
     // Feature 2: Register dependencies for all atoms before verification
     for item in &items {
         match item {
             Item::Atom(atom) => {
+                if verification_config.detect_loops {
+                    let loops = verification::detect_loops_needing_invariants(atom);
+                    if !loops.is_empty() {
+                        if !quiet_output {
+                            println!(
+                                "  🔁 '{}': {} loop(s) may need invariant strengthening",
+                                atom.name,
+                                loops.len()
+                            );
+                        }
+                        if verification_config.suggest_cegis {
+                            loop_suggestions.push(serde_json::json!({
+                                "atom": atom.name,
+                                "loops": loops,
+                            }));
+                        }
+                    }
+                }
                 let callees = resolver::collect_callees_from_body(&atom.body_expr);
                 module_env.register_dependencies(&atom.name, callees);
             }
             Item::ImplBlock(impl_block) => {
                 for method in &impl_block.methods {
                     let qualified_name = format!("{}::{}", impl_block.struct_name, method.name);
+                    if verification_config.detect_loops {
+                        let loops = verification::detect_loops_needing_invariants(method);
+                        if !loops.is_empty() {
+                            if !quiet_output {
+                                println!(
+                                    "  🔁 '{}': {} loop(s) may need invariant strengthening",
+                                    qualified_name,
+                                    loops.len()
+                                );
+                            }
+                            if verification_config.suggest_cegis {
+                                loop_suggestions.push(serde_json::json!({
+                                    "atom": qualified_name,
+                                    "loops": loops,
+                                }));
+                            }
+                        }
+                    }
                     let callees = resolver::collect_callees_from_body(&method.body_expr);
                     module_env.register_dependencies(&qualified_name, callees);
                 }
@@ -802,13 +1738,13 @@ fn cmd_verify(options: VerifyOptions<'_>) {
     }
 
     // Feature 2: Migrate old cache and load enhanced verification cache
-    resolver::migrate_old_cache(base_dir);
-    let mut verification_cache = resolver::load_verification_cache(base_dir);
+    resolver::migrate_old_cache(cache_base_dir);
+    let mut verification_cache = resolver::load_verification_cache(cache_base_dir);
 
     for item in &items {
         match item {
             Item::ImplDef(impl_def) => {
-                if !json_output {
+                if !quiet_output {
                     println!(
                         "  🔧 Verifying impl {} for {}...",
                         impl_def.trait_name, impl_def.target_type
@@ -816,13 +1752,13 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                 }
                 match verification::verify_impl(impl_def, &module_env, output_dir) {
                     Ok(_) => {
-                        if !json_output {
+                        if !quiet_output {
                             println!("    ✅ Laws verified");
                         }
                         verified += 1;
                     }
                     Err(e) => {
-                        if !json_output {
+                        if !quiet_output {
                             let resolved = resolve_source_for_span(&source, &impl_def.span);
                             let e = e.with_source(&resolved, &impl_def.span);
                             eprintln!("{:?}", miette::Report::new(e));
@@ -832,28 +1768,63 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                 }
             }
             Item::Atom(atom) => {
+                let has_fragment_warning =
+                    collect_decidable_fragment_diagnostic(atom, &module_env, json_output)
+                        .inspect(|d| diagnostics.push(d.clone()))
+                        .is_some();
+                let promote_outside_fragment = emit_lean_artifacts && has_fragment_warning;
                 if module_env.is_verified(&atom.name) {
-                    if !json_output {
+                    if !quiet_output {
                         println!(
                             "  ⚖️  '{}': skipped (imported, contract-trusted)",
                             atom.name
                         );
                     }
+                    if emit_structured_feedback {
+                        structured_feedbacks.push(structured_feedback_for_passed_atom(atom));
+                    }
+                    if promote_outside_fragment {
+                        cert_results.insert(
+                            atom.name.clone(),
+                            ("skipped".to_string(), "escalation_candidate".to_string()),
+                        );
+                        escalated += 1;
+                    }
                 } else {
                     // Feature 2: Use compute_proof_hash with dependency-aware hashing
-                    let proof_hash = resolver::compute_proof_hash(atom, &module_env);
+                    let proof_flags = if verification_config.enable_vacuity_check {
+                        &["enable_vacuity_check"][..]
+                    } else {
+                        &[][..]
+                    };
+                    let proof_hash =
+                        resolver::compute_proof_hash_with_flags(atom, &module_env, proof_flags);
 
                     if let Some(cached_entry) = verification_cache.get(&atom.name) {
                         if cached_entry.proof_hash == proof_hash {
-                            if !json_output {
+                            if !quiet_output {
                                 println!("  ⚖️  '{}': skipped (unchanged, cached) ⏩", atom.name);
                             }
                             module_env.mark_verified(&atom.name);
                             // Plan 11B: Record cached atoms as "unsat" (proven) for proof certificate
                             cert_results.insert(
                                 atom.name.clone(),
-                                ("unsat".to_string(), "verified".to_string()),
+                                (
+                                    "unsat".to_string(),
+                                    if promote_outside_fragment {
+                                        "escalation_candidate".to_string()
+                                    } else {
+                                        "verified".to_string()
+                                    },
+                                ),
                             );
+                            if promote_outside_fragment {
+                                escalated += 1;
+                            }
+                            if emit_structured_feedback {
+                                structured_feedbacks
+                                    .push(structured_feedback_for_passed_atom(atom));
+                            }
                             skipped += 1;
                             continue;
                         }
@@ -872,7 +1843,6 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                         .filter(|tn| module_env.get_type(tn).is_some())
                         .collect();
 
-                    emit_decidable_fragment_warning(atom, &module_env, json_output);
                     let hir_atom = lower_atom_to_hir_with_env(atom, Some(&module_env));
 
                     // MIR pipeline: lower to MIR and run analyses
@@ -895,15 +1865,29 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                         &verification_config,
                     ) {
                         Ok(_) => {
-                            if !json_output {
+                            if !quiet_output {
                                 println!("  ⚖️  '{}': verified ✅", atom.name);
                             }
                             module_env.mark_verified(&atom.name);
                             // Plan 11B: Record "unsat" (proven) for proof certificate
                             cert_results.insert(
                                 atom.name.clone(),
-                                ("unsat".to_string(), "verified".to_string()),
+                                (
+                                    "unsat".to_string(),
+                                    if promote_outside_fragment {
+                                        "escalation_candidate".to_string()
+                                    } else {
+                                        "verified".to_string()
+                                    },
+                                ),
                             );
+                            if promote_outside_fragment {
+                                escalated += 1;
+                            }
+                            if emit_structured_feedback {
+                                structured_feedbacks
+                                    .push(structured_feedback_for_passed_atom(atom));
+                            }
                             verification_cache.insert(
                                 atom.name.clone(),
                                 resolver::VerificationCacheEntry {
@@ -924,7 +1908,10 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                         }
                         Err(e) => {
                             let error_text = format!("{e}");
-                            if !json_output {
+                            let counterexample_model = counterexample_model_from_error(&e);
+                            let reconstruction_loss =
+                                reconstruction_loss_from_error(&e, &atom.ensures);
+                            if !quiet_output {
                                 let resolved = resolve_source_for_span(&source, &atom.span);
                                 let e = e.with_source(&resolved, &atom.span);
                                 eprintln!("{:?}", miette::Report::new(e));
@@ -932,15 +1919,39 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                             let z3_result = verification::z3_result_from_error_message(&error_text)
                                 .unwrap_or("sat")
                                 .to_string();
+                            if enable_spurious_detection && z3_result == "sat" {
+                                let validation = verification::validate_counterexample(
+                                    atom,
+                                    &counterexample_model,
+                                    &module_env,
+                                );
+                                emit_spurious_counterexample_diagnostic(
+                                    &validation,
+                                    &atom.name,
+                                    json_output,
+                                );
+                            }
+                            if z3_result == "sat" {
+                                if let Some(loss) = reconstruction_loss {
+                                    if !quiet_output {
+                                        println!(
+                                            "  🧭 Reconstruction loss for '{}': {:?}",
+                                            atom.name, loss.loss_vector
+                                        );
+                                    }
+                                    reconstruction_losses.insert(atom.name.clone(), loss);
+                                }
+                            }
                             let classification = verification::classify_atom_for_lean_escalation(
                                 atom,
                                 &module_env,
                                 &z3_result,
                                 "failed",
                             );
-                            let status = if emit_escalation_bundle && classification.should_escalate
-                            {
-                                if !json_output {
+                            let emit_lean_artifacts =
+                                escalate_lean || emit_escalation_bundle || emit_escalation_metrics;
+                            let status = if emit_lean_artifacts && classification.should_escalate {
+                                if !quiet_output {
                                     println!(
                                         "  [lean] '{}': marked for escalation ({})",
                                         atom.name,
@@ -957,6 +1968,13 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                                 "failed"
                             };
                             cert_results.insert(atom.name.clone(), (z3_result, status.to_string()));
+                            if emit_structured_feedback {
+                                structured_feedbacks.push(structured_feedback_from_report_file(
+                                    output_dir,
+                                    atom,
+                                    Some(&error_text),
+                                ));
+                            }
                             // 検証失敗した atom はキャッシュから除外
                             verification_cache.remove(&atom.name);
                         }
@@ -966,25 +1984,51 @@ fn cmd_verify(options: VerifyOptions<'_>) {
             Item::ImplBlock(impl_block) => {
                 for method in &impl_block.methods {
                     let qualified_name = format!("{}::{}", impl_block.struct_name, method.name);
+                    // Clone method with qualified name for consistent naming
+                    // throughout HIR lowering, proof hash, and cache lookup
+                    let mut qualified_method = method.clone();
+                    qualified_method.name = qualified_name.clone();
+                    let has_fragment_warning = collect_decidable_fragment_diagnostic(
+                        &qualified_method,
+                        &module_env,
+                        json_output,
+                    )
+                    .inspect(|d| diagnostics.push(d.clone()))
+                    .is_some();
+                    let promote_outside_fragment = emit_lean_artifacts && has_fragment_warning;
                     if module_env.is_verified(&qualified_name) {
-                        if !json_output {
+                        if !quiet_output {
                             println!(
                                 "  ⚖️  '{}': skipped (imported, contract-trusted)",
                                 qualified_name
                             );
                         }
+                        if emit_structured_feedback {
+                            structured_feedbacks
+                                .push(structured_feedback_for_passed_atom(&qualified_method));
+                        }
+                        if promote_outside_fragment {
+                            cert_results.insert(
+                                qualified_name.clone(),
+                                ("skipped".to_string(), "escalation_candidate".to_string()),
+                            );
+                            escalated += 1;
+                        }
                     } else {
-                        // Clone method with qualified name for consistent naming
-                        // throughout HIR lowering, proof hash, and cache lookup
-                        let mut qualified_method = method.clone();
-                        qualified_method.name = qualified_name.clone();
-
-                        let proof_hash =
-                            resolver::compute_proof_hash(&qualified_method, &module_env);
+                        let proof_flags = if verification_config.enable_vacuity_check {
+                            &["enable_vacuity_check"][..]
+                        } else {
+                            &[][..]
+                        };
+                        let proof_hash = resolver::compute_proof_hash_with_flags(
+                            &qualified_method,
+                            &module_env,
+                            proof_flags,
+                        );
 
                         if let Some(cached_entry) = verification_cache.get(&qualified_name) {
                             if cached_entry.proof_hash == proof_hash {
-                                if !json_output {
+                                if !quiet_output {
                                     println!(
                                         "  ⚖️  '{}': skipped (unchanged, cached) ⏩",
                                         qualified_name
@@ -993,8 +2037,23 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                                 module_env.mark_verified(&qualified_name);
                                 cert_results.insert(
                                     qualified_name.clone(),
-                                    ("unsat".to_string(), "verified".to_string()),
+                                    (
+                                        "unsat".to_string(),
+                                        if promote_outside_fragment {
+                                            "escalation_candidate".to_string()
+                                        } else {
+                                            "verified".to_string()
+                                        },
+                                    ),
                                 );
+                                if promote_outside_fragment {
+                                    escalated += 1;
+                                }
+                                if emit_structured_feedback {
+                                    structured_feedbacks.push(structured_feedback_for_passed_atom(
+                                        &qualified_method,
+                                    ));
+                                }
                                 skipped += 1;
                                 continue;
                             }
@@ -1012,11 +2071,6 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                             .filter(|tn| module_env.get_type(tn).is_some())
                             .collect();
 
-                        emit_decidable_fragment_warning(
-                            &qualified_method,
-                            &module_env,
-                            json_output,
-                        );
                         let hir_atom =
                             lower_atom_to_hir_with_env(&qualified_method, Some(&module_env));
 
@@ -1039,14 +2093,29 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                             &verification_config,
                         ) {
                             Ok(_) => {
-                                if !json_output {
+                                if !quiet_output {
                                     println!("  ⚖️  '{}': verified ✅", qualified_name);
                                 }
                                 module_env.mark_verified(&qualified_name);
                                 cert_results.insert(
                                     qualified_name.clone(),
-                                    ("unsat".to_string(), "verified".to_string()),
+                                    (
+                                        "unsat".to_string(),
+                                        if promote_outside_fragment {
+                                            "escalation_candidate".to_string()
+                                        } else {
+                                            "verified".to_string()
+                                        },
+                                    ),
                                 );
+                                if promote_outside_fragment {
+                                    escalated += 1;
+                                }
+                                if emit_structured_feedback {
+                                    structured_feedbacks.push(structured_feedback_for_passed_atom(
+                                        &qualified_method,
+                                    ));
+                                }
                                 verification_cache.insert(
                                     qualified_name.clone(),
                                     resolver::VerificationCacheEntry {
@@ -1067,7 +2136,10 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                             }
                             Err(e) => {
                                 let error_text = format!("{e}");
-                                if !json_output {
+                                let counterexample_model = counterexample_model_from_error(&e);
+                                let reconstruction_loss =
+                                    reconstruction_loss_from_error(&e, &qualified_method.ensures);
+                                if !quiet_output {
                                     let resolved = resolve_source_for_span(&source, &method.span);
                                     let e = e.with_source(&resolved, &method.span);
                                     eprintln!("{:?}", miette::Report::new(e));
@@ -1076,6 +2148,29 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                                     verification::z3_result_from_error_message(&error_text)
                                         .unwrap_or("sat")
                                         .to_string();
+                                if enable_spurious_detection && z3_result == "sat" {
+                                    let validation = verification::validate_counterexample(
+                                        &qualified_method,
+                                        &counterexample_model,
+                                        &module_env,
+                                    );
+                                    emit_spurious_counterexample_diagnostic(
+                                        &validation,
+                                        &qualified_name,
+                                        json_output,
+                                    );
+                                }
+                                if z3_result == "sat" {
+                                    if let Some(loss) = reconstruction_loss {
+                                        if !quiet_output {
+                                            println!(
+                                                "  🧭 Reconstruction loss for '{}': {:?}",
+                                                qualified_name, loss.loss_vector
+                                            );
+                                        }
+                                        reconstruction_losses.insert(qualified_name.clone(), loss);
+                                    }
+                                }
                                 let classification =
                                     verification::classify_atom_for_lean_escalation(
                                         &qualified_method,
@@ -1083,9 +2178,12 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                                         &z3_result,
                                         "failed",
                                     );
+                                let emit_lean_artifacts = escalate_lean
+                                    || emit_escalation_bundle
+                                    || emit_escalation_metrics;
                                 let status =
-                                    if emit_escalation_bundle && classification.should_escalate {
-                                        if !json_output {
+                                    if emit_lean_artifacts && classification.should_escalate {
+                                        if !quiet_output {
                                             println!(
                                                 "  [lean] '{}': marked for escalation ({})",
                                                 qualified_name,
@@ -1105,6 +2203,15 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                                     qualified_name.clone(),
                                     (z3_result, status.to_string()),
                                 );
+                                if emit_structured_feedback {
+                                    structured_feedbacks.push(
+                                        structured_feedback_from_report_file(
+                                            output_dir,
+                                            &qualified_method,
+                                            Some(&error_text),
+                                        ),
+                                    );
+                                }
                                 verification_cache.remove(&qualified_name);
                             }
                         }
@@ -1120,26 +2227,60 @@ fn cmd_verify(options: VerifyOptions<'_>) {
     // already includes callee signatures (requires/ensures) in the hash.
     // If a callee's contract changes, all callers will have different proof hashes
     // and be re-verified automatically.
-    resolver::save_verification_cache(base_dir, &verification_cache);
+    resolver::save_verification_cache(cache_base_dir, &verification_cache);
+
+    if emit_decidable_metrics {
+        let metrics_path = cert_output
+            .filter(|_| !generate_proof_cert)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| output_dir.join("decidable_metrics.json"));
+        match save_decidable_fragment_metrics(&module_env, &metrics_path, !quiet_output) {
+            Ok(()) => {}
+            Err(err) => {
+                eprintln!("❌ {err}");
+                failed += 1;
+            }
+        }
+    }
+
+    if emit_reconstruction_loss {
+        let loss_path = cert_output
+            .filter(|_| !generate_proof_cert && !emit_escalation_bundle && !emit_escalation_metrics)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| output_dir.join("reconstruction_loss.json"));
+        match save_reconstruction_losses(&reconstruction_losses, &loss_path, !quiet_output) {
+            Ok(()) => {}
+            Err(err) => {
+                eprintln!("❌ {err}");
+                failed += 1;
+            }
+        }
+    }
 
     if enable_cross_spec_verification {
-        match save_cross_spec_report(&module_env, output_dir, !json_output) {
+        match save_cross_spec_report(&module_env, output_dir, !quiet_output) {
             Ok(cross_spec_result) => {
-                if cross_spec_result.summary.inconsistent_calls > 0 && !json_output {
+                if cross_spec_result.summary.inconsistent_calls > 0 && !quiet_output {
                     eprintln!(
                         "Warning: {} inconsistent contract calls detected",
                         cross_spec_result.summary.inconsistent_calls
                     );
                 }
-                if cross_spec_result.summary.circular_dependency_count > 0 && !json_output {
+                if cross_spec_result.summary.circular_dependency_count > 0 && !quiet_output {
                     eprintln!(
                         "Warning: {} circular dependencies detected",
                         cross_spec_result.summary.circular_dependency_count
                     );
                 }
+                if cross_spec_result.summary.global_invariant_conflict_count > 0 && !quiet_output {
+                    eprintln!(
+                        "Warning: {} global invariant conflicts detected",
+                        cross_spec_result.summary.global_invariant_conflict_count
+                    );
+                }
             }
             Err(e) => {
-                if !json_output {
+                if !quiet_output {
                     eprintln!("  ⚠️  Failed to write cross-spec report: {}", e);
                 }
                 failed += 1;
@@ -1148,7 +2289,7 @@ fn cmd_verify(options: VerifyOptions<'_>) {
     }
 
     // Plan 11B: Generate proof certificate if requested
-    if generate_proof_cert || emit_escalation_bundle {
+    if generate_proof_cert || escalate_lean || emit_escalation_bundle || emit_escalation_metrics {
         let mut atom_refs: Vec<&parser::Atom> = items
             .iter()
             .filter_map(|item| {
@@ -1173,13 +2314,20 @@ fn cmd_verify(options: VerifyOptions<'_>) {
         for qm in &qualified_methods {
             atom_refs.push(qm);
         }
-        let cert = proof_cert::generate_certificate(
+        let cert = proof_cert::generate_certificate_with_reconstruction_losses(
             input,
             &atom_refs,
             &cert_results,
             &module_env,
             None,
             None,
+            Some(proof_cert::HarnessCertificateMetadata {
+                harness_contract: harness_contract.clone(),
+                intent_fidelity: intent_fidelity.clone(),
+                artifact_paths: artifact_paths.clone(),
+                budget_policy_fingerprint: budget_policy_fingerprint.clone(),
+            }),
+            Some(&reconstruction_losses),
         );
         let cert_path = if let Some(output) = cert_output {
             std::path::PathBuf::from(output)
@@ -1190,43 +2338,76 @@ fn cmd_verify(options: VerifyOptions<'_>) {
         if generate_proof_cert {
             match proof_cert::save_certificate(&cert, &cert_path) {
                 Ok(()) => {
-                    if !json_output {
+                    if !quiet_output {
                         println!("  📜 Proof certificate written to: {}", cert_path.display());
                     }
                 }
                 Err(e) => {
-                    if !json_output {
+                    if !quiet_output {
                         eprintln!("  ⚠️  Failed to write proof certificate: {}", e);
                     }
                 }
             }
         }
 
-        if emit_escalation_bundle {
+        if escalate_lean || emit_escalation_bundle || emit_escalation_metrics {
             let bundle = proof_cert::generate_escalation_bundle(&cert);
-            let bundle_path = cert_path.with_extension("escalation-bundle.json");
-            match proof_cert::save_escalation_bundle(&bundle, &bundle_path) {
-                Ok(()) => {
-                    if !json_output {
-                        println!(
-                            "  Lean escalation bundle written to: {} ({} candidate(s))",
-                            bundle_path.display(),
-                            bundle.summary.candidate_count
-                        );
+            if emit_escalation_bundle {
+                let bundle_path = verify_escalation_bundle_path(input, cert_output);
+                match proof_cert::save_escalation_bundle(&bundle, &bundle_path) {
+                    Ok(()) => {
+                        if !quiet_output {
+                            println!(
+                                "  Lean escalation bundle written to: {}",
+                                bundle_path.display()
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        if !quiet_output {
+                            eprintln!("  ⚠️  Failed to write escalation bundle: {}", e);
+                        }
                     }
                 }
-                Err(e) => {
-                    if !json_output {
-                        eprintln!("  ⚠️  Failed to write escalation bundle: {}", e);
+            }
+            if emit_escalation_metrics {
+                let mut metrics = resolver::LeanEscalationMetrics::default();
+                for candidate in &bundle.candidates {
+                    metrics.record_candidate(candidate);
+                }
+                let metrics_path = cert_path.with_extension("escalation-metrics.json");
+                let metrics_json = metrics.to_summary_json();
+                match serde_json::to_string_pretty(&metrics_json)
+                    .map_err(|e| e.to_string())
+                    .and_then(|json| std::fs::write(&metrics_path, json).map_err(|e| e.to_string()))
+                {
+                    Ok(()) => {
+                        if !quiet_output {
+                            println!(
+                                "  📊 Escalation metrics written to: {}",
+                                metrics_path.display()
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        if !quiet_output {
+                            eprintln!("  ⚠️  Failed to write escalation metrics: {}", e);
+                        }
                     }
                 }
+            }
+            if !quiet_output {
+                println!(
+                    "  Lean escalation bundle candidate_count: {}",
+                    bundle.summary.candidate_count
+                );
             }
         }
 
         // Task 1-B: When `--proof-cert` is active, surface atoms whose Z3
         // check returned `unknown` so the user knows which lemmas might
         // benefit from being discharged externally (e.g. via mumei-lean).
-        if !json_output {
+        if !quiet_output {
             let unknown_count = cert
                 .atoms
                 .iter()
@@ -1241,28 +2422,80 @@ fn cmd_verify(options: VerifyOptions<'_>) {
         }
     }
 
+    if emit_structured_feedback {
+        let payload = structured_feedback_payload(
+            &structured_feedbacks,
+            verified,
+            failed,
+            skipped,
+            escalated,
+        );
+        match serde_json::to_string_pretty(&payload) {
+            Ok(serialized) => {
+                if let Some(output) = cert_output {
+                    if let Err(err) = std::fs::write(output, &serialized) {
+                        eprintln!("❌ Failed to write structured feedback: {err}");
+                        failed += 1;
+                    } else if !quiet_output {
+                        println!("  🧾 Structured feedback written to: {output}");
+                    }
+                } else {
+                    println!("{serialized}");
+                }
+            }
+            Err(err) => {
+                eprintln!("❌ Failed to serialize structured feedback: {err}");
+                failed += 1;
+            }
+        }
+    }
+
     // Proposal B: --json outputs report.json content to stdout
     if json_output {
         let report_path = output_dir.join("report.json");
         if report_path.exists() {
             match std::fs::read_to_string(&report_path) {
-                Ok(content) => println!("{}", content),
+                Ok(content) => match serde_json::from_str::<serde_json::Value>(&content) {
+                    Ok(payload) => {
+                        let payload =
+                            enrich_verify_json_payload(payload, &diagnostics, &loop_suggestions);
+                        match serde_json::to_string_pretty(&payload) {
+                            Ok(json) => println!("{json}"),
+                            Err(_) => println!("{}", content),
+                        }
+                    }
+                    Err(_) => println!("{}", content),
+                },
                 Err(e) => {
                     eprintln!("Failed to read report.json: {}", e);
-                    std::process::exit(1);
+                    return true;
                 }
             }
         } else {
             // No report.json produced — emit minimal JSON status
             let status = if failed > 0 { "failed" } else { "passed" };
-            println!(
-                "{{\"status\":\"{}\",\"verified\":{},\"failed\":{},\"skipped\":{},\"escalation_candidates\":{}}}",
-                status, verified, failed, skipped, escalated
-            );
+            let mut payload = serde_json::json!({
+                "status": status,
+                "verified": verified,
+                "failed": failed,
+                "skipped": skipped,
+                "escalation_candidates": escalated,
+                "diagnostics": diagnostics,
+            });
+            if !loop_suggestions.is_empty() {
+                payload["cegis_suggestions"] = serde_json::Value::Array(loop_suggestions.clone());
+            }
+            match serde_json::to_string_pretty(&payload) {
+                Ok(json) => println!("{json}"),
+                Err(_) => println!(
+                    "{{\"status\":\"{}\",\"verified\":{},\"failed\":{},\"skipped\":{},\"escalation_candidates\":{}}}",
+                    status, verified, failed, skipped, escalated
+                ),
+            }
         }
-        if failed > 0 {
-            std::process::exit(1);
-        }
+        return failed > 0;
+    } else if structured_feedback_stdout {
+        return failed > 0;
     } else {
         println!();
         if failed > 0 {
@@ -1270,7 +2503,7 @@ fn cmd_verify(options: VerifyOptions<'_>) {
                 "❌ Verification: {} passed, {} failed, {} skipped (cached), {} Lean escalation candidate(s)",
                 verified, failed, skipped, escalated
             );
-            std::process::exit(1);
+            return true;
         }
         if skipped > 0 {
             println!(
@@ -1284,6 +2517,83 @@ fn cmd_verify(options: VerifyOptions<'_>) {
             );
         }
     }
+    false
+}
+
+fn save_decidable_fragment_metrics(
+    module_env: &verification::ModuleEnv,
+    metrics_path: &Path,
+    print_path: bool,
+) -> Result<(), String> {
+    let config = verification::VerificationConfig {
+        collect_decidable_fragment_metrics: true,
+        ..verification::VerificationConfig::default()
+    };
+    let module_report = verification::verify_module(module_env, &config)
+        .map_err(|err| format!("decidable-fragment metrics failed: {err}"))?;
+    let metrics = module_report
+        .decidable_fragment
+        .ok_or_else(|| "decidable-fragment metrics were not collected".to_string())?;
+    if let Some(parent) = metrics_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|err| format!("failed to create metrics directory: {err}"))?;
+    }
+    let payload = serde_json::to_string_pretty(&metrics)
+        .map_err(|err| format!("failed to serialize decidable-fragment metrics: {err}"))?;
+    std::fs::write(metrics_path, payload)
+        .map_err(|err| format!("failed to write {}: {err}", metrics_path.display()))?;
+    if print_path {
+        println!(
+            "  📊 Decidable-fragment metrics written to: {}",
+            metrics_path.display()
+        );
+    }
+    Ok(())
+}
+
+fn save_reconstruction_losses(
+    losses: &std::collections::HashMap<String, ReconstructionLoss>,
+    output_path: &Path,
+    print_path: bool,
+) -> Result<(), String> {
+    let mut atoms: Vec<&String> = losses.keys().collect();
+    atoms.sort();
+    let entries: Vec<serde_json::Value> = atoms
+        .into_iter()
+        .filter_map(|atom| {
+            losses.get(atom).map(|loss| {
+                serde_json::json!({
+                    "atom": atom,
+                    "violated_property": loss.violated_property,
+                    "counter_example": loss.counter_example,
+                    "loss_set_size": loss.loss_set_size,
+                    "is_zero_loss": loss.is_zero_loss,
+                    "loss_vector": loss.loss_vector,
+                })
+            })
+        })
+        .collect();
+    let payload = serde_json::json!({
+        "version": "1.0",
+        "reconstruction_loss_count": entries.len(),
+        "reconstruction_losses": entries,
+    });
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|err| format!("failed to create reconstruction-loss directory: {err}"))?;
+    }
+    let json = serde_json::to_string_pretty(&payload)
+        .map_err(|err| format!("failed to serialize reconstruction loss: {err}"))?;
+    std::fs::write(output_path, json)
+        .map_err(|err| format!("failed to write {}: {err}", output_path.display()))?;
+    if print_path {
+        println!(
+            "  🧭 Reconstruction loss written to: {} ({} atom(s))",
+            output_path.display(),
+            entries.len()
+        );
+    }
+    Ok(())
 }
 
 fn save_cross_spec_report(
@@ -1990,6 +3300,7 @@ fn dispatch_emit(
             module_env,
             extern_blocks,
         ),
+        emitter::EmitTarget::DecidableMetrics => Ok(vec![]),
         emitter::EmitTarget::ProofBook => mumei_emit_proofbook::ProofBookEmitter.emit(
             hir_atom,
             output_path,
@@ -2028,6 +3339,316 @@ fn dispatch_emit(
     }
 }
 
+fn sanitized_runtime_symbol(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn write_effect_and_resource_runtime_stubs(
+    module_env: &verification::ModuleEnv,
+    output_path: &Path,
+) -> Result<(), String> {
+    use std::fmt::Write;
+
+    let mut source =
+        String::from("#include <pthread.h>\n#include <stdint.h>\n#include <stddef.h>\n\n");
+    let mut resources: Vec<_> = module_env.resources.keys().cloned().collect();
+    resources.sort();
+    for resource in resources {
+        let symbol = sanitized_runtime_symbol(&resource);
+        writeln!(
+            source,
+            "pthread_mutex_t __mumei_resource_{symbol} = PTHREAD_MUTEX_INITIALIZER;"
+        )
+        .map_err(|err| err.to_string())?;
+    }
+    if !module_env.resources.is_empty() {
+        source.push('\n');
+    }
+
+    let mut effects: Vec<_> = module_env.effect_defs.keys().cloned().collect();
+    effects.sort();
+    for effect in effects {
+        let symbol = sanitized_runtime_symbol(&effect);
+        writeln!(
+            source,
+            "int64_t __effect_{symbol}_stub(int64_t value) {{ (void)value; return 0; }}"
+        )
+        .map_err(|err| err.to_string())?;
+    }
+
+    if source.ends_with("\n\n") {
+        source.push_str("/* No named resources or effect stubs required. */\n");
+    }
+    std::fs::write(output_path, source).map_err(|err| {
+        format!(
+            "failed to write runtime stubs '{}': {err}",
+            output_path.display()
+        )
+    })
+}
+
+fn uses_rust_ffi(extern_blocks: &[parser::ExternBlock]) -> bool {
+    extern_blocks
+        .iter()
+        .any(|block| block.language == "Rust" && !block.functions.is_empty())
+}
+
+fn generate_rust_ffi_staticlib(crate_dir: &Path, output_dir: &Path) -> Result<PathBuf, String> {
+    let ffi_lib_dir = output_dir.join("mumei_ffi_staticlib");
+    if ffi_lib_dir.exists() {
+        std::fs::remove_dir_all(&ffi_lib_dir).map_err(|err| {
+            format!(
+                "failed to remove stale FFI build dir '{}': {err}",
+                ffi_lib_dir.display()
+            )
+        })?;
+    }
+    std::fs::create_dir_all(ffi_lib_dir.join("src")).map_err(|err| {
+        format!(
+            "failed to create FFI build dir '{}': {err}",
+            ffi_lib_dir.display()
+        )
+    })?;
+
+    let core_dir = crate_dir.join("mumei-core");
+    let cargo_toml = "[package]\nname = \"mumei-ffi-staticlib\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\nname = \"mumei_ffi_staticlib\"\ncrate-type = [\"staticlib\"]\n\n[dependencies]\nlazy_static = \"1.4\"\nserde_json = \"1.0\"\nreqwest = { version = \"0.12\", default-features = false, features = [\"blocking\", \"json\", \"rustls-tls\"] }\n";
+    std::fs::write(ffi_lib_dir.join("Cargo.toml"), cargo_toml).map_err(|err| {
+        format!(
+            "failed to write FFI Cargo.toml in '{}': {err}",
+            ffi_lib_dir.display()
+        )
+    })?;
+    std::fs::write(
+        ffi_lib_dir.join("src/lib.rs"),
+        format!(
+            "mod json {{ include!({:?}); }}\nmod http {{ include!({:?}); }}\nmod http_server {{ include!({:?}); }}\nmod file {{ include!({:?}); }}\n",
+            core_dir.join("src/ffi/json.rs"),
+            core_dir.join("src/ffi/http.rs"),
+            core_dir.join("src/ffi/http_server.rs"),
+            core_dir.join("src/ffi/file.rs"),
+        ),
+    )
+    .map_err(|err| {
+        format!(
+            "failed to write FFI lib.rs in '{}': {err}",
+            ffi_lib_dir.display()
+        )
+    })?;
+
+    let mut cmd = std::process::Command::new("cargo");
+    cmd.arg("build")
+        .arg("--release")
+        .arg("--manifest-path")
+        .arg(ffi_lib_dir.join("Cargo.toml"));
+    for var in ["LLVM_SYS_170_PREFIX", "LIBCLANG_PATH"] {
+        if let Ok(value) = std::env::var(var) {
+            cmd.env(var, value);
+        }
+    }
+    let output = cmd
+        .output()
+        .map_err(|err| format!("failed to execute cargo for Rust FFI staticlib: {err}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "Rust FFI staticlib build failed (exit {}):\n{}{}",
+            output.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    let lib_name = if cfg!(windows) {
+        "mumei_ffi_staticlib.lib"
+    } else {
+        "libmumei_ffi_staticlib.a"
+    };
+    let lib_path = ffi_lib_dir.join("target/release").join(lib_name);
+    if lib_path.exists() {
+        Ok(lib_path)
+    } else {
+        Err(format!(
+            "Rust FFI staticlib build finished but '{}' was not produced",
+            lib_path.display()
+        ))
+    }
+}
+
+fn collect_hir_calls_from_atom(hir_atom: &hir::HirAtom, calls: &mut Vec<String>) {
+    collect_hir_calls_from_stmt(&hir_atom.body, calls);
+}
+
+fn collect_hir_calls_from_stmt(stmt: &hir::HirStmt, calls: &mut Vec<String>) {
+    match stmt {
+        hir::HirStmt::Let { value, .. } => collect_hir_calls_from_expr(value, calls),
+        hir::HirStmt::Assign { value, .. } => collect_hir_calls_from_expr(value, calls),
+        hir::HirStmt::ArrayStore { index, value, .. } => {
+            collect_hir_calls_from_expr(index, calls);
+            collect_hir_calls_from_expr(value, calls);
+        }
+        hir::HirStmt::While {
+            cond,
+            invariant,
+            decreases,
+            body,
+        } => {
+            collect_hir_calls_from_expr(cond, calls);
+            collect_hir_calls_from_expr(invariant, calls);
+            if let Some(decreases) = decreases {
+                collect_hir_calls_from_expr(decreases, calls);
+            }
+            collect_hir_calls_from_stmt(body, calls);
+        }
+        hir::HirStmt::Block { stmts, tail_expr } => {
+            for stmt in stmts {
+                collect_hir_calls_from_stmt(stmt, calls);
+            }
+            if let Some(tail_expr) = tail_expr {
+                collect_hir_calls_from_expr(tail_expr, calls);
+            }
+        }
+        hir::HirStmt::Acquire { body, .. } => collect_hir_calls_from_stmt(body, calls),
+        hir::HirStmt::Expr(expr) => collect_hir_calls_from_expr(expr, calls),
+    }
+}
+
+fn collect_hir_calls_from_expr(expr: &hir::HirExpr, calls: &mut Vec<String>) {
+    match expr {
+        hir::HirExpr::Call { name, args, .. } => {
+            calls.push(name.replace('.', "::"));
+            for arg in args {
+                collect_hir_calls_from_expr(arg, calls);
+            }
+        }
+        hir::HirExpr::BinaryOp(lhs, _, rhs) => {
+            collect_hir_calls_from_expr(lhs, calls);
+            collect_hir_calls_from_expr(rhs, calls);
+        }
+        hir::HirExpr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            collect_hir_calls_from_expr(cond, calls);
+            collect_hir_calls_from_stmt(then_branch, calls);
+            collect_hir_calls_from_stmt(else_branch, calls);
+        }
+        hir::HirExpr::StructInit { fields, .. } => {
+            for (_, value) in fields {
+                collect_hir_calls_from_expr(value, calls);
+            }
+        }
+        hir::HirExpr::FieldAccess(inner, _) => collect_hir_calls_from_expr(inner, calls),
+        hir::HirExpr::ArrayAccess(_, index) => collect_hir_calls_from_expr(index, calls),
+        hir::HirExpr::Match { target, arms } => {
+            collect_hir_calls_from_expr(target, calls);
+            for arm in arms {
+                collect_hir_calls_from_stmt(&arm.body, calls);
+                if let Some(guard) = &arm.guard {
+                    collect_hir_calls_from_expr(guard, calls);
+                }
+            }
+        }
+        hir::HirExpr::CallRef { callee, args } => {
+            collect_hir_calls_from_expr(callee, calls);
+            for arg in args {
+                collect_hir_calls_from_expr(arg, calls);
+            }
+        }
+        hir::HirExpr::Async { body } | hir::HirExpr::Task { body, .. } => {
+            collect_hir_calls_from_stmt(body, calls);
+        }
+        hir::HirExpr::Await { expr } => collect_hir_calls_from_expr(expr, calls),
+        hir::HirExpr::Perform { args, .. } | hir::HirExpr::VariantInit { fields: args, .. } => {
+            for arg in args {
+                collect_hir_calls_from_expr(arg, calls);
+            }
+        }
+        hir::HirExpr::TaskGroup { children, .. } => {
+            for child in children {
+                collect_hir_calls_from_stmt(child, calls);
+            }
+        }
+        hir::HirExpr::Lambda { body, .. } => collect_hir_calls_from_stmt(body, calls),
+        hir::HirExpr::ChanSend { channel, value } => {
+            collect_hir_calls_from_expr(channel, calls);
+            collect_hir_calls_from_expr(value, calls);
+        }
+        hir::HirExpr::ChanRecv { channel } => collect_hir_calls_from_expr(channel, calls),
+        hir::HirExpr::Number(_)
+        | hir::HirExpr::Float(_)
+        | hir::HirExpr::StringLit(_)
+        | hir::HirExpr::Variable(_)
+        | hir::HirExpr::AtomRef { .. } => {}
+    }
+}
+
+fn collect_binary_hir_atoms(
+    items: &[Item],
+    module_env: &verification::ModuleEnv,
+) -> Vec<hir::HirAtom> {
+    let mut hir_atoms = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut pending_calls = Vec::new();
+
+    for item in items {
+        match item {
+            Item::Atom(atom) => {
+                if seen.insert(atom.name.clone()) {
+                    let hir_atom = lower_atom_to_hir_with_env(atom, Some(module_env));
+                    collect_hir_calls_from_atom(&hir_atom, &mut pending_calls);
+                    hir_atoms.push(hir_atom);
+                }
+            }
+            Item::ImplBlock(impl_block) => {
+                for method in &impl_block.methods {
+                    let mut qualified = method.clone();
+                    qualified.name = format!("{}::{}", impl_block.struct_name, method.name);
+                    if seen.insert(qualified.name.clone()) {
+                        let hir_atom = lower_atom_to_hir_with_env(&qualified, Some(module_env));
+                        collect_hir_calls_from_atom(&hir_atom, &mut pending_calls);
+                        hir_atoms.push(hir_atom);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut queued = std::collections::HashSet::new();
+    while let Some(name) = pending_calls.pop() {
+        if !queued.insert(name.clone()) {
+            continue;
+        }
+        let Some(atom) = module_env.atoms.get(&name) else {
+            continue;
+        };
+        if seen.contains(&atom.name) {
+            continue;
+        }
+        if atom.body_expr.trim().is_empty() {
+            continue;
+        }
+        if atom.trust_level == parser::TrustLevel::Trusted {
+            continue;
+        }
+        if seen.insert(atom.name.clone()) {
+            let hir_atom = lower_atom_to_hir_with_env(atom, Some(module_env));
+            collect_hir_calls_from_atom(&hir_atom, &mut pending_calls);
+            hir_atoms.push(hir_atom);
+        }
+    }
+
+    hir_atoms
+}
+
 // =============================================================================
 // mumei build — full pipeline (verify + codegen)
 // =============================================================================
@@ -2044,7 +3665,7 @@ fn cmd_build(
             Ok(emitter) => Some(emitter),
             Err(err) => {
                 eprintln!(
-                    "\u{274c} Error: Unknown emit target '{}'. Valid built-in values: llvm-ir, c-header, verified-json, proof-book, proof-cert, escalation-bundle, binary, rust-wrapper, python-wrapper.",
+                    "\u{274c} Error: Unknown emit target '{}'. Valid built-in values: llvm-ir, c-header, verified-json, decidable-metrics, proof-book, proof-cert, escalation-bundle, binary, rust-wrapper, python-wrapper.",
                     name
                 );
                 eprintln!("  External plugin lookup failed: {}", err);
@@ -2116,6 +3737,16 @@ fn cmd_build(
         timeout_ms: proof_cfg.timeout_ms,
         global_max_unroll: build_cfg.max_unroll,
         enable_cross_spec_verification: proof_cfg.cross_spec_verify,
+        collect_decidable_fragment_metrics: matches!(
+            emit_target,
+            emitter::EmitTarget::DecidableMetrics
+        ),
+        enable_spurious_detection: true,
+        enable_vacuity_check: std::env::var("MUMEI_ENABLE_VACUITY_CHECK").unwrap_or_default()
+            == "1",
+        detect_loops: false,
+        suggest_cegis: false,
+        property_based_test: None,
     };
     let mut escalation_cert_results: std::collections::HashMap<String, (String, String)> =
         std::collections::HashMap::new();
@@ -2265,8 +3896,16 @@ fn cmd_build(
                     } else if module_env.is_verified(&qualified_name) {
                         println!("  ⚖️  [2/3] Verification: Skipped (imported, contract-trusted).");
                     } else {
-                        let proof_hash =
-                            resolver::compute_proof_hash(&qualified_method, &module_env);
+                        let proof_flags = if verification_config.enable_vacuity_check {
+                            &["enable_vacuity_check"][..]
+                        } else {
+                            &[][..]
+                        };
+                        let proof_hash = resolver::compute_proof_hash_with_flags(
+                            &qualified_method,
+                            &module_env,
+                            proof_flags,
+                        );
 
                         let cache_hit = verification_cache
                             .get(&qualified_name)
@@ -2358,7 +3997,7 @@ fn cmd_build(
 
                     let safe_name = qualified_name.replace("::", "__");
                     let atom_output_path = output_dir.join(format!("{}_{}", file_stem, safe_name));
-                    let extern_blocks = collect_extern_blocks(&items);
+                    let extern_blocks = collect_extern_blocks(&module_env);
                     match dispatch_emit(
                         emit_target,
                         external_emitter.as_deref(),
@@ -2390,26 +4029,30 @@ fn cmd_build(
                                     }
                                 }
                             }
-                            let target_desc: std::borrow::Cow<'static, str> = match emit_target {
-                                emitter::EmitTarget::LlvmIr => "LLVM IR".into(),
-                                emitter::EmitTarget::CHeader => "C header".into(),
-                                emitter::EmitTarget::VerifiedJson => "Verified JSON".into(),
-                                emitter::EmitTarget::ProofBook => "Proof-Book".into(),
-                                emitter::EmitTarget::ProofCert => "Proof-Cert".into(),
-                                emitter::EmitTarget::EscalationBundle => {
-                                    "Lean escalation bundle".into()
-                                }
-                                emitter::EmitTarget::Binary => "Binary".into(),
-                                emitter::EmitTarget::RustWrapper => "Rust wrapper".into(),
-                                emitter::EmitTarget::PythonWrapper => "Python wrapper".into(),
-                                emitter::EmitTarget::External(name) => {
-                                    format!("external plugin '{}'", name).into()
-                                }
-                            };
-                            println!(
-                                "  ⚙️  [3/3] Tempering: Done. Compiled '{}' to {}.",
-                                qualified_name, target_desc
-                            );
+                            if !matches!(emit_target, emitter::EmitTarget::DecidableMetrics) {
+                                let target_desc: std::borrow::Cow<'static, str> = match emit_target
+                                {
+                                    emitter::EmitTarget::LlvmIr => "LLVM IR".into(),
+                                    emitter::EmitTarget::CHeader => "C header".into(),
+                                    emitter::EmitTarget::VerifiedJson => "Verified JSON".into(),
+                                    emitter::EmitTarget::DecidableMetrics => unreachable!(),
+                                    emitter::EmitTarget::ProofBook => "Proof-Book".into(),
+                                    emitter::EmitTarget::ProofCert => "Proof-Cert".into(),
+                                    emitter::EmitTarget::EscalationBundle => {
+                                        "Lean escalation bundle".into()
+                                    }
+                                    emitter::EmitTarget::Binary => "Binary".into(),
+                                    emitter::EmitTarget::RustWrapper => "Rust wrapper".into(),
+                                    emitter::EmitTarget::PythonWrapper => "Python wrapper".into(),
+                                    emitter::EmitTarget::External(name) => {
+                                        format!("external plugin '{}'", name).into()
+                                    }
+                                };
+                                println!(
+                                    "  ⚙️  [3/3] Tempering: Done. Compiled '{}' to {}.",
+                                    qualified_name, target_desc
+                                );
+                            }
                         }
                         Err(e) => {
                             let resolved = resolve_source_for_span(&source, &method.span);
@@ -2462,7 +4105,13 @@ fn cmd_build(
                     println!("  ⚖️  [2/3] Verification: Skipped (imported, contract-trusted).");
                 } else {
                     // Feature 2: Use compute_proof_hash with dependency-aware hashing
-                    let proof_hash = resolver::compute_proof_hash(atom, &module_env);
+                    let proof_flags = if verification_config.enable_vacuity_check {
+                        &["enable_vacuity_check"][..]
+                    } else {
+                        &[][..]
+                    };
+                    let proof_hash =
+                        resolver::compute_proof_hash_with_flags(atom, &module_env, proof_flags);
 
                     let cache_hit = verification_cache
                         .get(&atom.name)
@@ -2554,7 +4203,7 @@ fn cmd_build(
                 // --- 3. Codegen / Emit ---
                 // 各 Atom ごとにターゲット形式のファイルを生成
                 let atom_output_path = output_dir.join(format!("{}_{}", file_stem, atom.name));
-                let extern_blocks = collect_extern_blocks(&items);
+                let extern_blocks = collect_extern_blocks(&module_env);
                 match dispatch_emit(
                     emit_target,
                     external_emitter.as_deref(),
@@ -2583,26 +4232,29 @@ fn cmd_build(
                                 }
                             }
                         }
-                        let target_desc: std::borrow::Cow<'static, str> = match emit_target {
-                            emitter::EmitTarget::LlvmIr => "LLVM IR".into(),
-                            emitter::EmitTarget::CHeader => "C header".into(),
-                            emitter::EmitTarget::VerifiedJson => "Verified JSON".into(),
-                            emitter::EmitTarget::ProofBook => "Proof-Book".into(),
-                            emitter::EmitTarget::ProofCert => "Proof-Cert".into(),
-                            emitter::EmitTarget::EscalationBundle => {
-                                "Lean escalation bundle".into()
-                            }
-                            emitter::EmitTarget::Binary => "Binary".into(),
-                            emitter::EmitTarget::RustWrapper => "Rust wrapper".into(),
-                            emitter::EmitTarget::PythonWrapper => "Python wrapper".into(),
-                            emitter::EmitTarget::External(name) => {
-                                format!("external plugin '{}'", name).into()
-                            }
-                        };
-                        println!(
-                            "  ⚙️  [3/3] Tempering: Done. Compiled '{}' to {}.",
-                            atom.name, target_desc
-                        );
+                        if !matches!(emit_target, emitter::EmitTarget::DecidableMetrics) {
+                            let target_desc: std::borrow::Cow<'static, str> = match emit_target {
+                                emitter::EmitTarget::LlvmIr => "LLVM IR".into(),
+                                emitter::EmitTarget::CHeader => "C header".into(),
+                                emitter::EmitTarget::VerifiedJson => "Verified JSON".into(),
+                                emitter::EmitTarget::DecidableMetrics => unreachable!(),
+                                emitter::EmitTarget::ProofBook => "Proof-Book".into(),
+                                emitter::EmitTarget::ProofCert => "Proof-Cert".into(),
+                                emitter::EmitTarget::EscalationBundle => {
+                                    "Lean escalation bundle".into()
+                                }
+                                emitter::EmitTarget::Binary => "Binary".into(),
+                                emitter::EmitTarget::RustWrapper => "Rust wrapper".into(),
+                                emitter::EmitTarget::PythonWrapper => "Python wrapper".into(),
+                                emitter::EmitTarget::External(name) => {
+                                    format!("external plugin '{}'", name).into()
+                                }
+                            };
+                            println!(
+                                "  ⚙️  [3/3] Tempering: Done. Compiled '{}' to {}.",
+                                atom.name, target_desc
+                            );
+                        }
                     }
                     Err(e) => {
                         let resolved = resolve_source_for_span(&source, &atom.span);
@@ -2618,33 +4270,15 @@ fn cmd_build(
     // P7-B: When --emit binary is requested, merge all atoms into a single
     // LLVM module with a C-compatible main wrapper and link to a native binary.
     if matches!(emit_target, emitter::EmitTarget::Binary) && atom_count > 0 {
-        // Collect all verified HirAtoms
-        let mut hir_atoms = Vec::new();
-        let extern_blocks = collect_extern_blocks(&items);
-        for item in &items {
-            match item {
-                Item::Atom(atom) => {
-                    let hir_atom = lower_atom_to_hir_with_env(atom, Some(&module_env));
-                    hir_atoms.push(hir_atom);
-                }
-                Item::ImplBlock(impl_block) => {
-                    for method in &impl_block.methods {
-                        let mut qualified = method.clone();
-                        qualified.name = format!("{}::{}", impl_block.struct_name, method.name);
-                        let hir_atom = lower_atom_to_hir_with_env(&qualified, Some(&module_env));
-                        hir_atoms.push(hir_atom);
-                    }
-                }
-                _ => {}
-            }
-        }
+        let extern_blocks = collect_extern_blocks(&module_env);
+        let hir_atoms = collect_binary_hir_atoms(&items, &module_env);
 
-        let ll_path = output_dir.join(format!("{}_merged.ll", file_stem));
-        if let Err(e) = mumei_emit_llvm::binary::compile_atoms_to_binary_ll(
+        let object_path = output_dir.join(format!("{}_merged.o", file_stem));
+        if let Err(e) = mumei_emit_llvm::binary::compile_atoms_to_binary_object(
             &hir_atoms,
             &module_env,
             &extern_blocks,
-            &ll_path,
+            &object_path,
         ) {
             eprintln!("❌ Binary codegen failed: {}", e);
             std::process::exit(1);
@@ -2655,17 +4289,49 @@ fn cmd_build(
             "  🔗 Linking {} atom(s) to native binary...",
             hir_atoms.len()
         );
-        if let Err(e) = linker::link_to_binary(std::slice::from_ref(&ll_path), &binary_output, None)
-        {
+        let runtime_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("runtime/mumei_runtime.c");
+        let runtime_stubs_path = output_dir.join(format!("{}_runtime_stubs.c", file_stem));
+        if let Err(e) = write_effect_and_resource_runtime_stubs(&module_env, &runtime_stubs_path) {
+            eprintln!("❌ Runtime stub generation failed: {}", e);
+            std::process::exit(1);
+        }
+        let mut link_inputs = vec![object_path.clone(), runtime_stubs_path.clone()];
+        let rust_ffi_lib = if uses_rust_ffi(&extern_blocks) {
+            match generate_rust_ffi_staticlib(Path::new(env!("CARGO_MANIFEST_DIR")), output_dir) {
+                Ok(path) => Some(path),
+                Err(e) => {
+                    eprintln!("❌ Rust FFI runtime build failed: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        } else {
+            None
+        };
+        if let Some(path) = &rust_ffi_lib {
+            link_inputs.push(path.clone());
+        }
+        if let Err(e) = linker::link_to_binary(&link_inputs, &binary_output, Some(&runtime_path)) {
             eprintln!("❌ Linking failed: {}", e);
             std::process::exit(1);
         }
         println!("  ✅ Binary written to: {}", binary_output.display());
-        // Clean up intermediate .ll file
-        let _ = fs::remove_file(&ll_path);
+        // Clean up intermediate files
+        let _ = fs::remove_file(&object_path);
+        let _ = fs::remove_file(&runtime_stubs_path);
     }
 
     // P5-A: Generate proof certificate or Lean escalation bundle when requested
+    if matches!(emit_target, emitter::EmitTarget::DecidableMetrics) {
+        let metrics_path = output_dir.join(format!("{}.decidable-metrics.json", file_stem));
+        match save_decidable_fragment_metrics(&module_env, &metrics_path, true) {
+            Ok(()) => {}
+            Err(err) => {
+                eprintln!("❌ {err}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     if matches!(
         emit_target,
         emitter::EmitTarget::ProofCert | emitter::EmitTarget::EscalationBundle
@@ -2721,6 +4387,12 @@ fn cmd_build(
             &module_env,
             pkg_name,
             pkg_version,
+            Some(proof_cert::HarnessCertificateMetadata {
+                harness_contract: proof_cert::harness_contract_from_env(),
+                intent_fidelity: proof_cert::intent_fidelity_from_env(),
+                artifact_paths: proof_cert::artifact_paths_from_env(),
+                budget_policy_fingerprint: proof_cert::budget_policy_fingerprint_from_env(),
+            }),
         );
 
         let cert_path = output_dir.join(format!("{}.proof-cert.json", file_stem));
@@ -2777,6 +4449,12 @@ fn cmd_build(
                         cross_spec_result.summary.circular_dependency_count
                     );
                 }
+                if cross_spec_result.summary.global_invariant_conflict_count > 0 {
+                    eprintln!(
+                        "Warning: {} global invariant conflicts detected",
+                        cross_spec_result.summary.global_invariant_conflict_count
+                    );
+                }
             }
             Err(e) => {
                 eprintln!("  ⚠️  Failed to write cross-spec report: {}", e);
@@ -2790,7 +4468,13 @@ fn cmd_build(
 // P7-B: mumei run — build and execute a native binary
 // =============================================================================
 
-fn cmd_run(input: &str, args: &[String]) {
+fn cmd_run(
+    input: &str,
+    emit: &str,
+    output: Option<&str>,
+    allow_lean_verified: bool,
+    args: &[String],
+) {
     use std::process::Command;
 
     let tmp_dir = std::env::temp_dir().join(format!("mumei_run_{}", std::process::id()));
@@ -2799,14 +4483,28 @@ fn cmd_run(input: &str, args: &[String]) {
         std::process::exit(1);
     }
 
-    let binary_path = tmp_dir.join("mumei_output");
+    let output_path = output.map(PathBuf::from);
+    let binary_path = output_path
+        .clone()
+        .unwrap_or_else(|| tmp_dir.join("mumei_output"));
+    if let Some(parent) = binary_path.parent() {
+        if let Err(e) = fs::create_dir_all(parent) {
+            eprintln!(
+                "❌ Failed to create output directory '{}': {}",
+                parent.display(),
+                e
+            );
+            let _ = fs::remove_dir_all(&tmp_dir);
+            std::process::exit(1);
+        }
+    }
 
-    // Build with Binary emit target (reuse cmd_build pipeline logic)
     check_z3_available();
-    println!("🗡️  Mumei Run: Building and executing...");
+    println!("🗡️  Mumei Run: verify → codegen → link → execute");
 
-    let (items, mut module_env, _imports, _source) = load_and_prepare(input);
-    let extern_blocks = collect_extern_blocks(&items);
+    let (items, mut module_env, _imports, _source) =
+        load_and_prepare_with_full_options(input, false, allow_lean_verified);
+    let extern_blocks = collect_extern_blocks(&module_env);
 
     // Check that a main atom exists and takes no parameters
     let main_atom = items
@@ -2861,7 +4559,6 @@ fn cmd_run(input: &str, args: &[String]) {
     }
 
     // Verify and collect all atoms
-    let mut hir_atoms = Vec::new();
     for item in &items {
         match item {
             Item::Atom(atom) => {
@@ -2877,7 +4574,6 @@ fn cmd_run(input: &str, args: &[String]) {
                         std::process::exit(1);
                     }
                 }
-                hir_atoms.push(hir_atom);
             }
             Item::ImplBlock(impl_block) => {
                 for method in &impl_block.methods {
@@ -2895,38 +4591,91 @@ fn cmd_run(input: &str, args: &[String]) {
                             std::process::exit(1);
                         }
                     }
-                    hir_atoms.push(hir_atom);
                 }
             }
             _ => {}
         }
     }
+    let hir_atoms = collect_binary_hir_atoms(&items, &module_env);
 
-    // Use the binary compilation pipeline from mumei-emit-llvm
-    let ll_path = tmp_dir.join("merged.ll");
-    if let Err(e) = mumei_emit_llvm::binary::compile_atoms_to_binary_ll(
-        &hir_atoms,
-        &module_env,
-        &extern_blocks,
-        &ll_path,
-    ) {
-        eprintln!("❌ Codegen failed: {}", e);
+    let runtime_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("runtime/mumei_runtime.c");
+    if !runtime_path.exists() {
+        eprintln!("❌ Runtime library not found: {}", runtime_path.display());
+        let _ = fs::remove_dir_all(&tmp_dir);
+        std::process::exit(1);
+    }
+    let runtime_stubs_path = tmp_dir.join("mumei_runtime_stubs.c");
+    if let Err(e) = write_effect_and_resource_runtime_stubs(&module_env, &runtime_stubs_path) {
+        eprintln!("❌ Runtime stub generation failed: {}", e);
         let _ = fs::remove_dir_all(&tmp_dir);
         std::process::exit(1);
     }
 
-    // Link to binary
+    let link_input = if emit == "llvm-ir" {
+        let ll_path = output_path
+            .as_ref()
+            .map(|path| path.with_extension("ll"))
+            .unwrap_or_else(|| tmp_dir.join("merged.ll"));
+        if let Err(e) = mumei_emit_llvm::binary::compile_atoms_to_binary_ll(
+            &hir_atoms,
+            &module_env,
+            &extern_blocks,
+            &ll_path,
+        ) {
+            eprintln!("❌ Codegen failed: {}", e);
+            let _ = fs::remove_dir_all(&tmp_dir);
+            std::process::exit(1);
+        }
+        let object_path = tmp_dir.join("mumei_output.o");
+        if let Err(e) = mumei_emit_llvm::codegen::compile_llvm_ir_to_object(&ll_path, &object_path)
+        {
+            eprintln!("❌ Codegen failed: {}", e);
+            let _ = fs::remove_dir_all(&tmp_dir);
+            std::process::exit(1);
+        }
+        object_path
+    } else {
+        let object_path = tmp_dir.join("mumei_output.o");
+        if let Err(e) = mumei_emit_llvm::binary::compile_atoms_to_binary_object(
+            &hir_atoms,
+            &module_env,
+            &extern_blocks,
+            &object_path,
+        ) {
+            eprintln!("❌ Codegen failed: {}", e);
+            let _ = fs::remove_dir_all(&tmp_dir);
+            std::process::exit(1);
+        }
+        object_path
+    };
+
     println!(
         "  🔗 Linking {} atom(s) to native binary...",
         hir_atoms.len()
     );
-    if let Err(e) = linker::link_to_binary(std::slice::from_ref(&ll_path), &binary_path, None) {
+    let mut link_inputs = vec![link_input.clone(), runtime_stubs_path.clone()];
+    let rust_ffi_lib = if uses_rust_ffi(&extern_blocks) {
+        match generate_rust_ffi_staticlib(Path::new(env!("CARGO_MANIFEST_DIR")), &tmp_dir) {
+            Ok(path) => Some(path),
+            Err(e) => {
+                eprintln!("❌ Rust FFI runtime build failed: {}", e);
+                let _ = fs::remove_dir_all(&tmp_dir);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        None
+    };
+    if let Some(path) = &rust_ffi_lib {
+        link_inputs.push(path.clone());
+    }
+    if let Err(e) = linker::link_to_binary(&link_inputs, &binary_path, Some(&runtime_path)) {
         eprintln!("❌ Linking failed: {}", e);
         let _ = fs::remove_dir_all(&tmp_dir);
         std::process::exit(1);
     }
 
-    println!("  🚀 Running...\n");
+    println!("  🚀 Running {}...\n", binary_path.display());
 
     // Execute the binary
     let status = Command::new(&binary_path)
@@ -2938,7 +4687,9 @@ fn cmd_run(input: &str, args: &[String]) {
             std::process::exit(1);
         });
 
-    // Clean up
+    if output_path.is_some() {
+        println!("\n  ✅ Binary written to: {}", binary_path.display());
+    }
     let _ = fs::remove_dir_all(&tmp_dir);
 
     // Exit with the child's exit code
@@ -3166,7 +4917,7 @@ fn cmd_add(dep: &str, version: Option<&str>) {
 // mumei publish — publish to local registry
 // =============================================================================
 
-fn cmd_publish(proof_only: bool) {
+fn cmd_publish(proof_only: bool, allow_lean_verified: bool) {
     println!("📦 Mumei publish: publishing to local registry...");
 
     // 1. mumei.toml を読み込み
@@ -3200,7 +4951,8 @@ fn cmd_publish(proof_only: bool) {
 
     // 3. 全 atom を Z3 で検証（未検証パッケージの公開を禁止）
     println!("  🔍 Verifying all atoms before publish...");
-    let (items, mut module_env, _imports, source) = load_and_prepare(entry);
+    let (items, mut module_env, _imports, source) =
+        load_and_prepare_with_full_options(entry, false, allow_lean_verified);
 
     let output_dir = Path::new(".");
     let mut atom_count = 0;
@@ -3366,6 +5118,12 @@ fn cmd_publish(proof_only: bool) {
             &module_env,
             Some(pkg_name),
             Some(pkg_version),
+            Some(proof_cert::HarnessCertificateMetadata {
+                harness_contract: proof_cert::harness_contract_from_env(),
+                intent_fidelity: proof_cert::intent_fidelity_from_env(),
+                artifact_paths: proof_cert::artifact_paths_from_env(),
+                budget_policy_fingerprint: proof_cert::budget_policy_fingerprint_from_env(),
+            }),
         );
         let cert_path = pkg_dir.join("proof_certificate.json");
         match proof_cert::save_certificate(&cert, &cert_path) {
@@ -3479,13 +5237,558 @@ fn cmd_list() {
 // mumei repl — Interactive REPL (Read-Eval-Print Loop)
 // =============================================================================
 
+const REPL_EVAL_ATOM: &str = "__repl_eval";
+
+struct ReplContext<'ctx> {
+    module_env: verification::ModuleEnv,
+    jit_engine: Option<mumei_emit_llvm::jit::JitEngine<'ctx>>,
+    extern_blocks: Vec<parser::ExternBlock>,
+}
+
+enum ReplAction {
+    Continue,
+    Quit,
+}
+
+fn repl_register_extern_fn(module_env: &mut verification::ModuleEnv, ext_fn: &parser::ExternFn) {
+    let params: Vec<parser::Param> = ext_fn
+        .param_types
+        .iter()
+        .enumerate()
+        .map(|(i, ty)| parser::Param {
+            name: ext_fn
+                .param_names
+                .get(i)
+                .cloned()
+                .unwrap_or_else(|| format!("arg{}", i)),
+            type_name: Some(ty.clone()),
+            type_ref: Some(parser::parse_type_ref(ty)),
+            is_ref: false,
+            is_ref_mut: false,
+            fn_contract_requires: None,
+            fn_contract_ensures: None,
+        })
+        .collect();
+    let atom = parser::Atom {
+        name: ext_fn.name.clone(),
+        type_params: vec![],
+        where_bounds: vec![],
+        params,
+        trace_id: None,
+        spec_metadata: std::collections::HashMap::new(),
+        requires: ext_fn
+            .requires
+            .clone()
+            .unwrap_or_else(|| "true".to_string()),
+        forall_constraints: vec![],
+        ensures: ext_fn.ensures.clone().unwrap_or_else(|| "true".to_string()),
+        body_expr: String::new(),
+        consumed_params: vec![],
+        resources: vec![],
+        is_async: false,
+        trust_level: parser::TrustLevel::Trusted,
+        max_unroll: None,
+        invariant: None,
+        effects: vec![],
+        return_type: Some(ext_fn.return_type.clone()),
+        span: ext_fn.span.clone(),
+        effect_pre: std::collections::HashMap::new(),
+        effect_post: std::collections::HashMap::new(),
+    };
+    module_env.register_atom(&atom);
+}
+
+fn repl_register_item(
+    ctx: &mut ReplContext<'_>,
+    item: &parser::Item,
+    compile_atoms: bool,
+) -> usize {
+    match item {
+        parser::Item::Atom(atom) => {
+            ctx.module_env.register_atom(atom);
+            if compile_atoms {
+                repl_verify_and_compile_atom(ctx, atom);
+            }
+            1
+        }
+        parser::Item::TypeDef(t) => {
+            ctx.module_env.register_type(t);
+            1
+        }
+        parser::Item::StructDef(s) => {
+            ctx.module_env.register_struct(s);
+            1
+        }
+        parser::Item::EnumDef(e) => {
+            ctx.module_env.register_enum(e);
+            1
+        }
+        parser::Item::TraitDef(t) => {
+            ctx.module_env.register_trait(t);
+            1
+        }
+        parser::Item::ImplDef(i) => {
+            ctx.module_env.register_impl(i);
+            1
+        }
+        parser::Item::ResourceDef(r) => {
+            ctx.module_env.register_resource(r);
+            1
+        }
+        parser::Item::EffectDef(e) => {
+            ctx.module_env.register_effect(e);
+            1
+        }
+        parser::Item::ExternBlock(eb) => {
+            ctx.extern_blocks.push(eb.clone());
+            for ext_fn in &eb.functions {
+                repl_register_extern_fn(&mut ctx.module_env, ext_fn);
+            }
+            eb.functions.len()
+        }
+        parser::Item::ImplBlock(ib) => {
+            for method in &ib.methods {
+                let mut qualified = method.clone();
+                qualified.name = format!("{}::{}", ib.struct_name, method.name);
+                ctx.module_env.register_atom(&qualified);
+                if compile_atoms {
+                    repl_verify_and_compile_atom(ctx, &qualified);
+                }
+            }
+            ib.methods.len()
+        }
+        parser::Item::Import(_) => 0,
+    }
+}
+
+fn repl_verify_and_compile_atom(ctx: &mut ReplContext<'_>, atom: &parser::Atom) -> bool {
+    let hir_atom = lower_atom_to_hir_with_env(atom, Some(&ctx.module_env));
+    match verification::verify(&hir_atom, Path::new("."), &ctx.module_env) {
+        Ok(()) => {
+            if let Some(engine) = ctx.jit_engine.as_ref() {
+                if let Err(err) =
+                    engine.compile_atom(&hir_atom, &ctx.module_env, &ctx.extern_blocks)
+                {
+                    eprintln!("  ⚠️  JIT compile warning for '{}': {}", atom.name, err);
+                }
+            }
+            println!("  ✅ Verified: {}", atom.name);
+            true
+        }
+        Err(err) => {
+            eprintln!("  ❌ Verification failed for '{}': {}", atom.name, err);
+            if let verification::MumeiError::VerificationError {
+                counterexample: Some(counterexample),
+                ..
+            } = &err
+            {
+                eprintln!("  counterexample: {}", counterexample);
+            }
+            println!("  ℹ️  Atom '{}' registered but not JIT-compiled", atom.name);
+            false
+        }
+    }
+}
+
+fn repl_infer_expr_type_name(ctx: &ReplContext<'_>, expr: &parser::Expr) -> Option<String> {
+    match expr {
+        parser::Expr::Float(_) => Some("f64".to_string()),
+        parser::Expr::StringLit(_) => Some("Str".to_string()),
+        parser::Expr::Number(_) => Some("i64".to_string()),
+        parser::Expr::Variable(name) if name == "true" || name == "false" => {
+            Some("bool".to_string())
+        }
+        parser::Expr::BinaryOp(left, op, right) => match op {
+            parser::Op::Eq
+            | parser::Op::Neq
+            | parser::Op::Gt
+            | parser::Op::Lt
+            | parser::Op::Ge
+            | parser::Op::Le
+            | parser::Op::And
+            | parser::Op::Or
+            | parser::Op::Implies => Some("bool".to_string()),
+            parser::Op::Add | parser::Op::Sub | parser::Op::Mul | parser::Op::Div => {
+                if repl_infer_expr_type_name(ctx, left)
+                    .is_some_and(|ty| ctx.module_env.resolve_base_type(&ty) == "f64")
+                    || repl_infer_expr_type_name(ctx, right)
+                        .is_some_and(|ty| ctx.module_env.resolve_base_type(&ty) == "f64")
+                {
+                    Some("f64".to_string())
+                } else {
+                    Some("i64".to_string())
+                }
+            }
+        },
+        parser::Expr::Call(name, _) if name == "sqrt" => Some("f64".to_string()),
+        parser::Expr::Call(name, _) => {
+            let fqn_name = name.replace('.', "::");
+            match ctx
+                .module_env
+                .get_atom(name)
+                .or_else(|| ctx.module_env.get_atom(&fqn_name))
+                .and_then(|atom| atom.return_type.as_deref())
+            {
+                Some(return_type) => Some(return_type.to_string()),
+                None => Some("i64".to_string()),
+            }
+        }
+        _ => None,
+    }
+}
+
+fn repl_wrap_expr(atom_name: &str, expr: &str, return_type: Option<&str>) -> String {
+    let return_annotation = return_type.map_or(String::new(), |ty| format!(" -> {ty}"));
+    format!(
+        "atom {atom_name}(){return_annotation}\n  requires: true;\n  ensures: true;\n  body: {{\n    {expr}\n  }}"
+    )
+}
+
+fn repl_compile_eval_atom(ctx: &mut ReplContext<'_>, atom: &parser::Atom) -> Option<&'static str> {
+    let engine = match ctx.jit_engine.as_ref() {
+        Some(engine) => engine,
+        None => {
+            eprintln!("  ❌ JIT engine not available");
+            return None;
+        }
+    };
+
+    engine.remove_function(REPL_EVAL_ATOM);
+    let hir_atom = lower_atom_to_hir_with_env(atom, Some(&ctx.module_env));
+    if let Err(err) = engine.compile_atom(&hir_atom, &ctx.module_env, &ctx.extern_blocks) {
+        engine.remove_function(REPL_EVAL_ATOM);
+        eprintln!("  ❌ JIT compile error: {}", err);
+        return None;
+    }
+
+    Some(
+        if atom
+            .return_type
+            .as_deref()
+            .is_some_and(|return_type| ctx.module_env.resolve_base_type(return_type) == "f64")
+        {
+            "f64"
+        } else {
+            "i64"
+        },
+    )
+}
+
+fn repl_execute_eval_atom(ctx: &mut ReplContext<'_>, return_type: &str) {
+    let Some(engine) = ctx.jit_engine.as_ref() else {
+        eprintln!("  ❌ JIT engine not available");
+        return;
+    };
+    let result = if return_type == "f64" {
+        engine
+            .execute_f64(REPL_EVAL_ATOM)
+            .map(|value| value.to_string())
+    } else {
+        engine
+            .execute_i64(REPL_EVAL_ATOM)
+            .map(|value| value.to_string())
+    };
+    match result {
+        Ok(value) => println!("  = {}", value),
+        Err(err) => eprintln!("  ❌ Execution error: {}", err),
+    }
+    engine.remove_function(REPL_EVAL_ATOM);
+}
+
+fn repl_eval_expr(ctx: &mut ReplContext<'_>, expr: &str, verify_first: bool) {
+    let parsed_expr = parser::parse_expression(expr);
+    let expr_type = repl_infer_expr_type_name(ctx, &parsed_expr);
+    let eval_return_type = expr_type
+        .as_deref()
+        .filter(|ty| ctx.module_env.resolve_base_type(ty) == "f64");
+    let wrapped = repl_wrap_expr(REPL_EVAL_ATOM, expr, eval_return_type);
+    let items = parser::parse_module(&wrapped);
+    let Some(parser::Item::Atom(atom)) = items.first() else {
+        eprintln!("  ❌ Syntax error: could not parse expression");
+        return;
+    };
+
+    if verify_first {
+        let hir_atom = lower_atom_to_hir_with_env(atom, Some(&ctx.module_env));
+        match verification::verify(&hir_atom, Path::new("."), &ctx.module_env) {
+            Ok(()) => {}
+            Err(err) => {
+                eprintln!("  ❌ Verification failed: {}", err);
+                if let verification::MumeiError::VerificationError {
+                    counterexample: Some(counterexample),
+                    ..
+                } = &err
+                {
+                    eprintln!("  counterexample: {}", counterexample);
+                }
+                return;
+            }
+        }
+    }
+
+    if let Some(return_type) = repl_compile_eval_atom(ctx, atom) {
+        repl_execute_eval_atom(ctx, return_type);
+    }
+}
+
+fn repl_type_expr(ctx: &ReplContext<'_>, expr: &str) {
+    let parsed = parser::parse_expression(expr);
+    match repl_infer_expr_type_name(ctx, &parsed) {
+        Some(return_type) => println!("  : {}", return_type),
+        None => println!("  : unknown"),
+    }
+}
+
+fn repl_load_single_file(ctx: &mut ReplContext<'_>, file: &Path) -> Option<usize> {
+    println!("  Loading '{}'...", file.display());
+    let source = match read_source_file(file) {
+        Ok(source) => source,
+        Err(err) => {
+            eprintln!("  ❌ Failed to read '{}': {}", file.display(), err);
+            return None;
+        }
+    };
+    let items = parser::parse_module(&source);
+    if items.is_empty() {
+        eprintln!(
+            "  ❌ Syntax error: no items parsed from '{}'",
+            file.display()
+        );
+        return None;
+    }
+    let mut count = 0;
+    for item in &items {
+        count += repl_register_item(ctx, item, true);
+    }
+    println!(
+        "  ✅ Loaded {} definition(s) from '{}'",
+        count,
+        file.display()
+    );
+    Some(count)
+}
+
+fn repl_load_file(ctx: &mut ReplContext<'_>, file: &str) {
+    let path = Path::new(file);
+    if path.is_dir() {
+        let mut files = collect_mm_files(path);
+        files.sort();
+
+        if files.is_empty() {
+            eprintln!("  ⚠️  No .mm files found in '{}'", file);
+            return;
+        }
+
+        let mut total_count = 0;
+        let mut loaded_files = 0;
+        for mm_file in &files {
+            if let Some(count) = repl_load_single_file(ctx, mm_file) {
+                total_count += count;
+                loaded_files += 1;
+            }
+        }
+
+        println!(
+            "  ✅ Total: {} definition(s) from {} file(s) in '{}'",
+            total_count, loaded_files, file
+        );
+        return;
+    }
+
+    repl_load_single_file(ctx, path);
+}
+
+fn repl_verify_named_atom(ctx: &mut ReplContext<'_>, atom_name: &str) {
+    match ctx.module_env.get_atom(atom_name).cloned() {
+        Some(atom) => {
+            repl_verify_and_compile_atom(ctx, &atom);
+        }
+        None => eprintln!("  ❌ Unknown atom '{}'", atom_name),
+    }
+}
+
+fn repl_print_env(ctx: &ReplContext<'_>) {
+    println!(
+        "  --- Registered Atoms ({}) ---",
+        ctx.module_env.atoms.len()
+    );
+    let mut names: Vec<&String> = ctx.module_env.atoms.keys().collect();
+    names.sort();
+    for name in names {
+        if let Some(atom) = ctx.module_env.atoms.get(name) {
+            let params_str: Vec<String> = atom
+                .params
+                .iter()
+                .map(|p| format!("{}: {}", p.name, p.type_name.as_deref().unwrap_or("?")))
+                .collect();
+            println!(
+                "    {} atom {}({}) [{:?}]",
+                if atom.is_async { "async" } else { "" },
+                name,
+                params_str.join(", "),
+                atom.trust_level
+            );
+        }
+    }
+    println!(
+        "  --- Registered Types ({}) ---",
+        ctx.module_env.types.len()
+    );
+    for name in ctx.module_env.types.keys() {
+        println!("    type {}", name);
+    }
+    println!(
+        "  --- Registered Structs ({}) ---",
+        ctx.module_env.structs.len()
+    );
+    for name in ctx.module_env.structs.keys() {
+        println!("    struct {}", name);
+    }
+    println!(
+        "  --- Registered Enums ({}) ---",
+        ctx.module_env.enums.len()
+    );
+    for name in ctx.module_env.enums.keys() {
+        println!("    enum {}", name);
+    }
+}
+
+fn repl_help() {
+    println!("  :help          — Show this help");
+    println!("  :quit/:exit    — Exit the REPL");
+    println!("  :load <file|dir> — Load atoms and extern declarations from .mm files");
+    println!("  :type <expr>   — Infer a simple expression type");
+    println!("  :verify <atom> — Verify and JIT-compile a registered atom");
+    println!("  :eval <expr>   — JIT compile and execute an expression without verification");
+    println!("  :check <expr>  — Parse and type-check an expression");
+    println!("  :env           — Show registered atoms and types");
+}
+
+fn repl_brace_balance(input: &str) -> i32 {
+    let mut balance = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+    for ch in input.chars() {
+        if in_string {
+            if ch == '"' && !escaped {
+                in_string = false;
+            }
+            escaped = ch == '\\' && !escaped;
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '{' => balance += 1,
+            '}' => balance -= 1,
+            _ => {}
+        }
+    }
+    balance
+}
+
+fn repl_input_incomplete(input: &str) -> bool {
+    let trimmed = input.trim_start();
+    let looks_like_atom = trimmed.starts_with("atom ")
+        || trimmed.starts_with("trusted atom ")
+        || trimmed.starts_with("unverified atom ")
+        || trimmed.starts_with("async atom ");
+    if looks_like_atom {
+        return !input.contains("body:") || repl_brace_balance(input) > 0;
+    }
+    trimmed.starts_with("extern ") && (!input.contains('}') || repl_brace_balance(input) > 0)
+}
+
+fn repl_handle_line(ctx: &mut ReplContext<'_>, input: &str) -> ReplAction {
+    match input {
+        ":quit" | ":q" | ":exit" => {
+            println!("Goodbye! 🗡️");
+            ReplAction::Quit
+        }
+        ":help" | ":h" => {
+            repl_help();
+            ReplAction::Continue
+        }
+        ":env" => {
+            repl_print_env(ctx);
+            ReplAction::Continue
+        }
+        _ if input.starts_with(":load ") => {
+            repl_load_file(ctx, input.strip_prefix(":load ").unwrap().trim());
+            ReplAction::Continue
+        }
+        _ if input.starts_with(":type ") => {
+            repl_type_expr(ctx, input.strip_prefix(":type ").unwrap().trim());
+            ReplAction::Continue
+        }
+        _ if input.starts_with(":verify ") => {
+            let target = input.strip_prefix(":verify ").unwrap().trim();
+            if ctx.module_env.get_atom(target).is_some() {
+                repl_verify_named_atom(ctx, target);
+            } else {
+                repl_eval_expr(ctx, target, true);
+            }
+            ReplAction::Continue
+        }
+        _ if input.starts_with(":check ") => {
+            let expr = input.strip_prefix(":check ").unwrap().trim();
+            let wrapped = repl_wrap_expr(REPL_EVAL_ATOM, expr, None);
+            if parser::parse_module(&wrapped).is_empty() {
+                eprintln!("  ❌ Syntax error: could not parse expression");
+            } else {
+                println!("  ✅ Parsed expression");
+            }
+            ReplAction::Continue
+        }
+        _ if input.starts_with(":eval ") => {
+            repl_eval_expr(ctx, input.strip_prefix(":eval ").unwrap().trim(), false);
+            ReplAction::Continue
+        }
+        _ => {
+            let items = parser::parse_module(input);
+            if items.is_empty() {
+                repl_eval_expr(ctx, input, true);
+            } else {
+                for item in &items {
+                    match item {
+                        parser::Item::Atom(atom) => {
+                            repl_register_item(ctx, item, false);
+                            repl_verify_and_compile_atom(ctx, atom);
+                        }
+                        parser::Item::TypeDef(t) => {
+                            repl_register_item(ctx, item, false);
+                            println!("  ✅ Registered type '{}'", t.name);
+                        }
+                        parser::Item::StructDef(s) => {
+                            repl_register_item(ctx, item, false);
+                            println!("  ✅ Registered struct '{}'", s.name);
+                        }
+                        parser::Item::EnumDef(e) => {
+                            repl_register_item(ctx, item, false);
+                            println!("  ✅ Registered enum '{}'", e.name);
+                        }
+                        parser::Item::ExternBlock(eb) => {
+                            repl_register_item(ctx, item, false);
+                            println!("  ✅ Registered {} extern function(s)", eb.functions.len());
+                        }
+                        _ => {
+                            repl_register_item(ctx, item, false);
+                            println!("  ✅ Processed");
+                        }
+                    }
+                }
+            }
+            ReplAction::Continue
+        }
+    }
+}
+
 fn cmd_repl() {
     println!(
         "🗡️  Mumei REPL v{} (JIT enabled)",
         env!("CARGO_PKG_VERSION")
     );
     println!("  Type expressions or atom definitions to evaluate.");
-    println!("  Commands: :help, :check <expr>, :verify <expr>, :eval <expr>, :load <file>, :quit");
+    println!("  Commands: :help, :type <expr>, :verify <atom>, :load <file|dir>, :quit");
     println!();
 
     let mut module_env = verification::ModuleEnv::new();
@@ -3508,13 +5811,22 @@ fn cmd_repl() {
             None
         }
     };
-    let mut extern_blocks_repl: Vec<parser::ExternBlock> = Vec::new();
+    let mut ctx = ReplContext {
+        module_env,
+        jit_engine,
+        extern_blocks: Vec::new(),
+    };
 
     let stdin = std::io::stdin();
     let mut line_buf = String::new();
+    let mut pending_input = String::new();
 
     loop {
-        eprint!("mumei> ");
+        if pending_input.is_empty() {
+            eprint!("mumei> ");
+        } else {
+            eprint!("....> ");
+        }
         line_buf.clear();
         match stdin.read_line(&mut line_buf) {
             Ok(0) => break, // EOF
@@ -3525,402 +5837,25 @@ fn cmd_repl() {
             }
         }
 
-        let input = line_buf.trim();
+        let input = line_buf.trim_end();
         if input.is_empty() {
             continue;
         }
 
-        match input {
-            ":quit" | ":q" | ":exit" => {
-                println!("Goodbye! 🗡️");
-                break;
-            }
-            ":help" | ":h" => {
-                println!("  :check <expr>  — Parse and type-check an expression");
-                println!("  :verify <expr> — Formally verify an expression with Z3");
-                println!("  :eval <expr>   — JIT compile and execute (skip verification)");
-                println!("  :load <file>   — Load and register a .mm file");
-                println!("  :env           — Show registered atoms and types");
-                println!("  :quit          — Exit the REPL");
-            }
-            _ if input.starts_with(":load ") => {
-                let file = input.strip_prefix(":load ").unwrap().trim();
-                println!("  Loading '{}'...", file);
-                let source = match fs::read_to_string(file) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        eprintln!("  ❌ Failed to read '{}': {}", file, e);
-                        continue;
-                    }
-                };
-                let items = parser::parse_module(&source);
-                let mut count = 0;
-                for item in &items {
-                    match item {
-                        parser::Item::Atom(atom) => {
-                            module_env.register_atom(atom);
-                            // P7-A: Compile loaded atoms into JIT module
-                            if let Some(ref engine) = jit_engine {
-                                let hir_atom = lower_atom_to_hir_with_env(atom, Some(&module_env));
-                                if let Err(e) =
-                                    engine.compile_atom(&hir_atom, &module_env, &extern_blocks_repl)
-                                {
-                                    eprintln!(
-                                        "  ⚠️  JIT compile warning for '{}': {}",
-                                        atom.name, e
-                                    );
-                                }
-                            }
-                            count += 1;
-                        }
-                        parser::Item::TypeDef(t) => module_env.register_type(t),
-                        parser::Item::StructDef(s) => module_env.register_struct(s),
-                        parser::Item::EnumDef(e) => module_env.register_enum(e),
-                        parser::Item::TraitDef(t) => module_env.register_trait(t),
-                        parser::Item::ImplDef(i) => module_env.register_impl(i),
-                        parser::Item::ResourceDef(r) => module_env.register_resource(r),
-                        parser::Item::ExternBlock(eb) => {
-                            extern_blocks_repl.push(eb.clone());
-                            for ext_fn in &eb.functions {
-                                let params: Vec<parser::Param> = ext_fn
-                                    .param_types
-                                    .iter()
-                                    .enumerate()
-                                    .map(|(i, ty)| parser::Param {
-                                        name: ext_fn
-                                            .param_names
-                                            .get(i)
-                                            .cloned()
-                                            .unwrap_or_else(|| format!("arg{}", i)),
-                                        type_name: Some(ty.clone()),
-                                        type_ref: Some(parser::parse_type_ref(ty)),
-                                        is_ref: false,
-                                        is_ref_mut: false,
-                                        fn_contract_requires: None,
-                                        fn_contract_ensures: None,
-                                    })
-                                    .collect();
-                                let atom = parser::Atom {
-                                    name: ext_fn.name.clone(),
-                                    type_params: vec![],
-                                    where_bounds: vec![],
-                                    params,
-                                    requires: ext_fn
-                                        .requires
-                                        .clone()
-                                        .unwrap_or_else(|| "true".to_string()),
-                                    forall_constraints: vec![],
-                                    ensures: ext_fn
-                                        .ensures
-                                        .clone()
-                                        .unwrap_or_else(|| "true".to_string()),
-                                    body_expr: String::new(),
-                                    consumed_params: vec![],
-                                    resources: vec![],
-                                    is_async: false,
-                                    trust_level: parser::TrustLevel::Trusted,
-                                    max_unroll: None,
-                                    invariant: None,
-                                    effects: vec![],
-                                    return_type: Some(ext_fn.return_type.clone()),
-                                    span: ext_fn.span.clone(),
-                                    effect_pre: std::collections::HashMap::new(),
-                                    effect_post: std::collections::HashMap::new(),
-                                };
-                                module_env.register_atom(&atom);
-                                count += 1;
-                            }
-                        }
-                        parser::Item::Import(_) => {}
-                        parser::Item::EffectDef(e) => module_env.register_effect(e),
-                        parser::Item::ImplBlock(ib) => {
-                            for method in &ib.methods {
-                                let mut qualified = method.clone();
-                                qualified.name = format!("{}::{}", ib.struct_name, method.name);
-                                module_env.register_atom(&qualified);
-                                count += 1;
-                            }
-                        }
-                    }
-                }
-                println!("  ✅ Loaded {} definition(s) from '{}'", count, file);
-            }
-            ":env" => {
-                println!("  --- Registered Atoms ({}) ---", module_env.atoms.len());
-                let mut names: Vec<&String> = module_env.atoms.keys().collect();
-                names.sort();
-                for name in names {
-                    if let Some(atom) = module_env.atoms.get(name) {
-                        let params_str: Vec<String> = atom
-                            .params
-                            .iter()
-                            .map(|p| {
-                                format!("{}: {}", p.name, p.type_name.as_deref().unwrap_or("?"))
-                            })
-                            .collect();
-                        println!(
-                            "    {} atom {}({}) [{:?}]",
-                            if atom.is_async { "async" } else { "" },
-                            name,
-                            params_str.join(", "),
-                            atom.trust_level
-                        );
-                    }
-                }
-                println!("  --- Registered Types ({}) ---", module_env.types.len());
-                for name in module_env.types.keys() {
-                    println!("    type {}", name);
-                }
-                println!(
-                    "  --- Registered Structs ({}) ---",
-                    module_env.structs.len()
-                );
-                for name in module_env.structs.keys() {
-                    println!("    struct {}", name);
-                }
-                println!("  --- Registered Enums ({}) ---", module_env.enums.len());
-                for name in module_env.enums.keys() {
-                    println!("    enum {}", name);
-                }
-            }
-            // P7-A: :eval command — skip verification, directly JIT compile and execute
-            _ if input.starts_with(":eval ") => {
-                let expr_str = input.strip_prefix(":eval ").unwrap().trim();
-                if jit_engine.is_none() {
-                    eprintln!("  ❌ JIT engine not available");
-                    continue;
-                }
-                let engine = jit_engine.as_ref().unwrap();
+        if pending_input.is_empty() {
+            pending_input.push_str(input);
+        } else {
+            pending_input.push('\n');
+            pending_input.push_str(input);
+        }
 
-                let wrapped = format!(
-                    "atom __repl_eval()\n  requires: true;\n  ensures: true;\n  body: {{\n    {}\n  }}",
-                    expr_str
-                );
-                let eval_items = parser::parse_module(&wrapped);
-                if eval_items.is_empty() {
-                    eprintln!("  ❌ Parse error");
-                    continue;
-                }
-                for eval_item in &eval_items {
-                    if let parser::Item::Atom(atom) = eval_item {
-                        let hir_atom = lower_atom_to_hir_with_env(atom, Some(&module_env));
-                        // Precautionary cleanup of any stale __repl_eval from previous failures
-                        engine.remove_function("__repl_eval");
-                        match engine.compile_atom(&hir_atom, &module_env, &extern_blocks_repl) {
-                            Ok(()) => {
-                                // Determine return type to pick execute_i64 vs execute_f64
-                                let is_f64 =
-                                    atom.return_type.as_deref().is_some_and(|rt| rt == "f64");
-                                if is_f64 {
-                                    match engine.execute_f64("__repl_eval") {
-                                        Ok(v) => println!("  = {}", v),
-                                        Err(e) => eprintln!("  ❌ Execution error: {}", e),
-                                    }
-                                } else {
-                                    match engine.execute_i64("__repl_eval") {
-                                        Ok(v) => println!("  = {}", v),
-                                        Err(e) => eprintln!("  ❌ Execution error: {}", e),
-                                    }
-                                }
-                                engine.remove_function("__repl_eval");
-                            }
-                            Err(e) => {
-                                engine.remove_function("__repl_eval");
-                                eprintln!("  ❌ JIT compile error: {}", e);
-                            }
-                        }
-                    }
-                }
-            }
-            _ if input.starts_with(":check ") || input.starts_with(":verify ") => {
-                let is_verify = input.starts_with(":verify ");
-                let expr_str = if is_verify {
-                    input.strip_prefix(":verify ").unwrap()
-                } else {
-                    input.strip_prefix(":check ").unwrap()
-                };
+        if repl_input_incomplete(&pending_input) {
+            continue;
+        }
 
-                // 式をパースして簡易検証
-                let wrapped = format!(
-                    "atom __repl_eval()\n  requires: true;\n  ensures: true;\n  body: {{\n    {}\n  }}",
-                    expr_str
-                );
-                let items = parser::parse_module(&wrapped);
-                if items.is_empty() {
-                    eprintln!("  ❌ Parse error");
-                    continue;
-                }
-                for item in &items {
-                    if let parser::Item::Atom(atom) = item {
-                        println!("  ✅ Parsed: atom {}()", atom.name);
-                        if is_verify {
-                            let hir_atom = lower_atom_to_hir_with_env(atom, Some(&module_env));
-                            match verification::verify(&hir_atom, Path::new("."), &module_env) {
-                                Ok(()) => {
-                                    println!("  ✅ Verification passed");
-                                    // P7-A: If verification passes, also JIT execute and show result
-                                    if let Some(ref engine) = jit_engine {
-                                        // Precautionary cleanup of any stale __repl_eval
-                                        engine.remove_function("__repl_eval");
-                                        match engine.compile_atom(
-                                            &hir_atom,
-                                            &module_env,
-                                            &extern_blocks_repl,
-                                        ) {
-                                            Ok(()) => {
-                                                let is_f64 = atom
-                                                    .return_type
-                                                    .as_deref()
-                                                    .is_some_and(|rt| rt == "f64");
-                                                if is_f64 {
-                                                    match engine.execute_f64("__repl_eval") {
-                                                        Ok(v) => println!("  = {}", v),
-                                                        Err(e) => {
-                                                            eprintln!("  ❌ Execution error: {}", e)
-                                                        }
-                                                    }
-                                                } else {
-                                                    match engine.execute_i64("__repl_eval") {
-                                                        Ok(v) => println!("  = {}", v),
-                                                        Err(e) => {
-                                                            eprintln!("  ❌ Execution error: {}", e)
-                                                        }
-                                                    }
-                                                }
-                                                engine.remove_function("__repl_eval");
-                                            }
-                                            Err(e) => {
-                                                engine.remove_function("__repl_eval");
-                                                eprintln!("  ⚠️  JIT compile warning: {}", e)
-                                            }
-                                        }
-                                    }
-                                }
-                                Err(e) => eprintln!("  ❌ Verification failed: {}", e),
-                            }
-                        }
-                    }
-                }
-            }
-            _ => {
-                // Try parsing as atom definition or other declaration
-                let items = parser::parse_module(input);
-                if items.is_empty() {
-                    // P7-A: Try parsing as expression for JIT evaluation
-                    // Wrap as __repl_eval atom and attempt verify + execute
-                    let wrapped = format!(
-                        "atom __repl_eval()\n  requires: true;\n  ensures: true;\n  body: {{\n    {}\n  }}",
-                        input
-                    );
-                    let eval_items = parser::parse_module(&wrapped);
-                    if eval_items.is_empty() {
-                        eprintln!("  ❌ Could not parse input. Try :help for commands.");
-                        continue;
-                    }
-                    for eval_item in &eval_items {
-                        if let parser::Item::Atom(atom) = eval_item {
-                            let hir_atom = lower_atom_to_hir_with_env(atom, Some(&module_env));
-                            // Verify first
-                            match verification::verify(&hir_atom, Path::new("."), &module_env) {
-                                Ok(()) => {
-                                    // JIT execute
-                                    if let Some(ref engine) = jit_engine {
-                                        // Precautionary cleanup of any stale __repl_eval
-                                        engine.remove_function("__repl_eval");
-                                        match engine.compile_atom(
-                                            &hir_atom,
-                                            &module_env,
-                                            &extern_blocks_repl,
-                                        ) {
-                                            Ok(()) => {
-                                                let is_f64 = atom
-                                                    .return_type
-                                                    .as_deref()
-                                                    .is_some_and(|rt| rt == "f64");
-                                                if is_f64 {
-                                                    match engine.execute_f64("__repl_eval") {
-                                                        Ok(v) => println!("  = {}", v),
-                                                        Err(e) => {
-                                                            eprintln!("  ❌ Execution error: {}", e)
-                                                        }
-                                                    }
-                                                } else {
-                                                    match engine.execute_i64("__repl_eval") {
-                                                        Ok(v) => println!("  = {}", v),
-                                                        Err(e) => {
-                                                            eprintln!("  ❌ Execution error: {}", e)
-                                                        }
-                                                    }
-                                                }
-                                                engine.remove_function("__repl_eval");
-                                            }
-                                            Err(e) => {
-                                                engine.remove_function("__repl_eval");
-                                                eprintln!("  ⚠️  JIT compile warning: {}", e)
-                                            }
-                                        }
-                                    } else {
-                                        println!("  ✅ Verification passed (JIT unavailable)");
-                                    }
-                                }
-                                Err(e) => eprintln!("  ❌ Verification failed: {}", e),
-                            }
-                        }
-                    }
-                    continue;
-                }
-                for item in &items {
-                    match item {
-                        parser::Item::Atom(atom) => {
-                            module_env.register_atom(atom);
-                            // P7-A: Verify and compile atom into JIT module
-                            let hir_atom = lower_atom_to_hir_with_env(atom, Some(&module_env));
-                            match verification::verify(&hir_atom, Path::new("."), &module_env) {
-                                Ok(()) => {
-                                    if let Some(ref engine) = jit_engine {
-                                        if let Err(e) = engine.compile_atom(
-                                            &hir_atom,
-                                            &module_env,
-                                            &extern_blocks_repl,
-                                        ) {
-                                            eprintln!(
-                                                "  ⚠️  JIT compile warning for '{}': {}",
-                                                atom.name, e
-                                            );
-                                        }
-                                    }
-                                    println!("  ✅ Verified: {}", atom.name);
-                                }
-                                Err(e) => {
-                                    eprintln!(
-                                        "  ❌ Verification failed for '{}': {}",
-                                        atom.name, e
-                                    );
-                                    println!(
-                                        "  ℹ️  Atom '{}' registered but not JIT-compiled",
-                                        atom.name
-                                    );
-                                }
-                            }
-                        }
-                        parser::Item::TypeDef(t) => {
-                            module_env.register_type(t);
-                            println!("  ✅ Registered type '{}'", t.name);
-                        }
-                        parser::Item::StructDef(s) => {
-                            module_env.register_struct(s);
-                            println!("  ✅ Registered struct '{}'", s.name);
-                        }
-                        parser::Item::EnumDef(e) => {
-                            module_env.register_enum(e);
-                            println!("  ✅ Registered enum '{}'", e.name);
-                        }
-                        _ => {
-                            println!("  ✅ Processed");
-                        }
-                    }
-                }
-            }
+        let input = std::mem::take(&mut pending_input);
+        if matches!(repl_handle_line(&mut ctx, input.trim()), ReplAction::Quit) {
+            break;
         }
     }
 }
@@ -3930,18 +5865,98 @@ fn cmd_repl() {
 // =============================================================================
 
 fn cmd_infer_effects(input: &str) {
-    let (items, module_env, _imports, _source) = load_and_prepare(input);
-    let result = verification::infer_effects_json(&items, &module_env);
-    // JSON 出力（MCP が stdout をパースする）
-    println!("{}", serde_json::to_string_pretty(&result).unwrap());
+    let input_path = Path::new(input);
+    if input_path.is_dir() {
+        let mut files = collect_mm_files(input_path);
+        files.sort();
+        if files.is_empty() {
+            eprintln!("❌ No .mm files found in '{}'", input);
+            std::process::exit(1);
+        }
+        let mut entries: Vec<serde_json::Value> = Vec::new();
+        for file in &files {
+            let file_str = file.to_string_lossy().to_string();
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                try_load_and_prepare(&file_str).map(|(items, module_env, _imports, _source)| {
+                    verification::infer_effects_json(&items, &module_env)
+                })
+            })) {
+                Ok(Ok(result)) => {
+                    entries.push(serde_json::json!({
+                        "file": file_str,
+                        "result": result,
+                    }));
+                }
+                Ok(Err(error)) => {
+                    entries.push(serde_json::json!({
+                        "file": file_str,
+                        "result": null,
+                        "error": error,
+                    }));
+                }
+                Err(_) => {
+                    entries.push(serde_json::json!({
+                        "file": file_str,
+                        "result": null,
+                        "error": "parse error",
+                    }));
+                }
+            }
+        }
+        println!("{}", serde_json::to_string_pretty(&entries).unwrap());
+    } else {
+        let (items, module_env, _imports, _source) = load_and_prepare(input);
+        let result = verification::infer_effects_json(&items, &module_env);
+        println!("{}", serde_json::to_string_pretty(&result).unwrap());
+    }
 }
 
 /// Plan 13-3: CLI command for contract inference
 fn cmd_infer_contracts(input: &str) {
-    let (items, module_env, _imports, _source) = load_and_prepare(input);
-    let result = verification::infer_contracts_json(&items, &module_env);
-    // JSON 出力（MCP が stdout をパースする）
-    println!("{}", serde_json::to_string_pretty(&result).unwrap());
+    let input_path = Path::new(input);
+    if input_path.is_dir() {
+        let mut files = collect_mm_files(input_path);
+        files.sort();
+        if files.is_empty() {
+            eprintln!("❌ No .mm files found in '{}'", input);
+            std::process::exit(1);
+        }
+        let mut entries: Vec<serde_json::Value> = Vec::new();
+        for file in &files {
+            let file_str = file.to_string_lossy().to_string();
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                try_load_and_prepare(&file_str).map(|(items, module_env, _imports, _source)| {
+                    verification::infer_contracts_json(&items, &module_env)
+                })
+            })) {
+                Ok(Ok(result)) => {
+                    entries.push(serde_json::json!({
+                        "file": file_str,
+                        "result": result,
+                    }));
+                }
+                Ok(Err(error)) => {
+                    entries.push(serde_json::json!({
+                        "file": file_str,
+                        "result": null,
+                        "error": error,
+                    }));
+                }
+                Err(_) => {
+                    entries.push(serde_json::json!({
+                        "file": file_str,
+                        "result": null,
+                        "error": "parse error",
+                    }));
+                }
+            }
+        }
+        println!("{}", serde_json::to_string_pretty(&entries).unwrap());
+    } else {
+        let (items, module_env, _imports, _source) = load_and_prepare(input);
+        let result = verification::infer_contracts_json(&items, &module_env);
+        println!("{}", serde_json::to_string_pretty(&result).unwrap());
+    }
 }
 
 // =============================================================================
@@ -3981,7 +5996,7 @@ fn cmd_doc(input: &str, output_dir: &str, format: &str) {
     let mut all_docs: Vec<ModuleDoc> = Vec::new();
 
     for file in &files {
-        let source = match fs::read_to_string(file) {
+        let source = match read_source_file(file) {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("  ⚠️  Skipping '{}': {}", file.display(), e);
@@ -4077,10 +6092,11 @@ fn cmd_doc(input: &str, output_dir: &str, format: &str) {
             // Emits the full set of contract metadata for every atom so that
             // downstream consumers (LSP, web frontends, code generators) can
             // ingest the docs without re-parsing Mumei source.
+            let harness_metadata = collect_harness_doc_metadata();
             let json_docs: Vec<serde_json::Value> = all_docs
                 .iter()
                 .map(|doc| {
-                    serde_json::json!({
+                    let mut module = serde_json::json!({
                         "name": doc.name,
                         "file_path": doc.file_path,
                         "atoms": doc.atoms.iter().map(|a| serde_json::json!({
@@ -4110,7 +6126,36 @@ fn cmd_doc(input: &str, output_dir: &str, format: &str) {
                             "name": t.name,
                             "comment": t.comment,
                         })).collect::<Vec<_>>(),
-                    })
+                    });
+                    if let serde_json::Value::Object(ref mut fields) = module {
+                        if let Some(ref harness_contract) = harness_metadata.harness_contract {
+                            fields.insert(
+                                "harness_contract".to_string(),
+                                serde_json::Value::String(harness_contract.clone()),
+                            );
+                        }
+                        if let Some(ref intent_fidelity) = harness_metadata.intent_fidelity {
+                            fields.insert(
+                                "intent_fidelity".to_string(),
+                                serde_json::json!(intent_fidelity),
+                            );
+                        }
+                        if let Some(ref artifact_paths) = harness_metadata.artifact_paths {
+                            fields.insert(
+                                "artifact_paths".to_string(),
+                                serde_json::json!(artifact_paths),
+                            );
+                        }
+                        if let Some(ref budget_policy_fingerprint) =
+                            harness_metadata.budget_policy_fingerprint
+                        {
+                            fields.insert(
+                                "budget_policy_fingerprint".to_string(),
+                                serde_json::Value::String(budget_policy_fingerprint.clone()),
+                            );
+                        }
+                    }
+                    module
                 })
                 .collect();
             let payload =
@@ -4158,6 +6203,22 @@ struct ItemDoc {
     body_expr: String,
     /// Declared effect names (e.g. `["FileRead"]`).
     effects: Vec<String>,
+}
+
+struct HarnessDocMetadata {
+    harness_contract: Option<String>,
+    intent_fidelity: Option<proof_cert::IntentFidelity>,
+    artifact_paths: Option<Vec<String>>,
+    budget_policy_fingerprint: Option<String>,
+}
+
+fn collect_harness_doc_metadata() -> HarnessDocMetadata {
+    HarnessDocMetadata {
+        harness_contract: proof_cert::harness_contract_from_env(),
+        intent_fidelity: proof_cert::intent_fidelity_from_env(),
+        artifact_paths: proof_cert::artifact_paths_from_env(),
+        budget_policy_fingerprint: proof_cert::budget_policy_fingerprint_from_env(),
+    }
 }
 
 struct TypeDoc {
@@ -4823,6 +6884,70 @@ atom json_parse(input: String) -> String
         assert_eq!(doc.atoms[1].params, vec!["input"]);
     }
 
+    #[test]
+    fn test_parse_artifact_paths_trims_and_ignores_empty_entries() {
+        assert_eq!(
+            parse_artifact_paths(" reports/a.json, ,out/b.json "),
+            Some(vec!["reports/a.json".to_string(), "out/b.json".to_string()])
+        );
+        assert!(parse_artifact_paths(" , ").is_none());
+    }
+
+    #[test]
+    fn test_parse_intent_fidelity_json() {
+        let metadata = parse_intent_fidelity_json(
+            r#"{"natural_language_prompt_hash":"sha256:prompt","spec_traceability_score":0.97,"semantic_drift_detected":false,"manual_review_required":true}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            metadata.natural_language_prompt_hash.as_deref(),
+            Some("sha256:prompt")
+        );
+        assert_eq!(metadata.spec_traceability_score, 0.97);
+        assert!(!metadata.semantic_drift_detected);
+        assert!(metadata.manual_review_required);
+        assert!(parse_intent_fidelity_json("not json").is_err());
+    }
+
+    #[test]
+    fn test_verify_cli_accepts_harness_metadata_options() {
+        let cli = Cli::try_parse_from([
+            "mumei",
+            "verify",
+            "--proof-cert",
+            "--harness-contract",
+            "contracts/harness.json",
+            "--intent-fidelity",
+            r#"{"natural_language_prompt_hash":"sha256:prompt"}"#,
+            "--artifact-paths",
+            "reports/a.json,out/b.json",
+            "--budget-policy-fingerprint",
+            "sha256:budget",
+            "input.mm",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Some(Command::Verify {
+                harness_contract,
+                intent_fidelity,
+                artifact_paths,
+                budget_policy_fingerprint,
+                ..
+            }) => {
+                assert_eq!(harness_contract.as_deref(), Some("contracts/harness.json"));
+                assert_eq!(
+                    intent_fidelity.as_deref(),
+                    Some(r#"{"natural_language_prompt_hash":"sha256:prompt"}"#)
+                );
+                assert_eq!(artifact_paths.as_deref(), Some("reports/a.json,out/b.json"));
+                assert_eq!(budget_policy_fingerprint.as_deref(), Some("sha256:budget"));
+            }
+            _ => panic!("expected verify command"),
+        }
+    }
+
     // --- P3-A: REPL ヘルパーテスト ---
 
     /// P3-A: REPL の atom ラッピングロジックテスト
@@ -4830,10 +6955,7 @@ atom json_parse(input: String) -> String
     fn test_repl_atom_wrapping() {
         // REPL は入力式を atom でラップして検証する
         let expr = "1 + 2";
-        let wrapped = format!(
-            "atom __repl_eval()\n  requires: true;\n  ensures: true;\n  body: {{\n    {}\n  }}",
-            expr
-        );
+        let wrapped = repl_wrap_expr(REPL_EVAL_ATOM, expr, None);
         assert!(wrapped.contains("__repl_eval"));
         assert!(wrapped.contains("1 + 2"));
         assert!(wrapped.contains("requires: true"));
@@ -4852,6 +6974,18 @@ atom json_parse(input: String) -> String
             .collect();
         assert_eq!(atoms.len(), 1);
         assert_eq!(atoms[0].name, "__repl_eval");
+    }
+
+    #[test]
+    fn test_repl_float_atom_wrapping_annotates_return_type() {
+        let wrapped = repl_wrap_expr(REPL_EVAL_ATOM, "1.5", Some("f64"));
+        let items = parser::parse_module(&wrapped);
+        let Some(parser::Item::Atom(atom)) = items.first() else {
+            panic!("expected wrapped expression atom");
+        };
+
+        assert_eq!(atom.name, "__repl_eval");
+        assert_eq!(atom.return_type.as_deref(), Some("f64"));
     }
 
     /// P3-A: REPL :load コマンドのパースロジックテスト
@@ -4935,6 +7069,8 @@ atom main() -> i64
                             type_params: vec![],
                             where_bounds: vec![],
                             params,
+                            trace_id: None,
+                            spec_metadata: std::collections::HashMap::new(),
                             requires: "true".to_string(),
                             forall_constraints: vec![],
                             ensures: "true".to_string(),

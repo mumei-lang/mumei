@@ -1,6 +1,6 @@
 [package]
 name = "mumei-emit-rust"
-version = "0.2.0"
+version = "0.6.0"
 edition = "2021"
 description = "FFI glue code generator for Rust — generates extern \"C\" bindings + safe wrappers for compiled mumei binaries"
 license = "MIT"

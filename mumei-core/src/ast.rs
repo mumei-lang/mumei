@@ -700,6 +700,8 @@ impl Monomorphizer {
             type_params: vec![],
             where_bounds: vec![], // 単相化後は境界なし
             params,
+            trace_id: None,
+            spec_metadata: std::collections::HashMap::new(),
             requires: mono_requires,
             forall_constraints: generic.forall_constraints.clone(),
             ensures: mono_ensures,

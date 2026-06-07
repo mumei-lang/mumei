@@ -18,7 +18,7 @@ fn binding_power(tok: &Token) -> Option<(u8, u8)> {
         Token::Eq | Token::Neq | Token::Gt | Token::Lt | Token::Ge | Token::Le => Some((7, 8)),
         Token::Plus | Token::Minus => Some((9, 10)),
         Token::Star | Token::Slash => Some((11, 12)),
-        Token::Dot => Some((15, 16)),
+        Token::Dot | Token::ColonColon => Some((15, 16)),
         _ => None,
     }
 }
@@ -48,23 +48,40 @@ pub fn parse_expr(ctx: &mut ParseContext, min_bp: u8) -> Expr {
 
     loop {
         let tok = ctx.peek().clone();
-        // Dot is handled specially for field access
-        if tok == Token::Dot {
+        // Dot/`::` are handled specially for field access and qualified calls.
+        if tok == Token::Dot || tok == Token::ColonColon {
             if let Some((l_bp, _)) = binding_power(&tok) {
                 if l_bp < min_bp {
                     break;
                 }
-                ctx.advance(); // consume .
+                let separator = if tok == Token::Dot { "." } else { "::" };
+                ctx.advance();
                 if let Token::Ident(field) = ctx.peek().clone() {
                     ctx.advance();
-                    lhs = Expr::FieldAccess(Box::new(lhs), field);
+                    let access = Expr::FieldAccess(Box::new(lhs), field);
+                    if ctx.peek() == &Token::LParen {
+                        if let Some(name) = expr_to_call_path(&access, separator) {
+                            let args = parse_call_args(ctx);
+                            lhs = Expr::Call(name, args);
+                            continue;
+                        }
+                    }
+                    lhs = access;
                     continue;
                 } else {
                     // Accept keyword tokens as field names (e.g., obj.mode, obj.priority)
                     let field_name = format!("{}", ctx.peek());
                     if field_name.chars().next().is_some_and(|c| c.is_alphabetic()) {
                         ctx.advance();
-                        lhs = Expr::FieldAccess(Box::new(lhs), field_name);
+                        let access = Expr::FieldAccess(Box::new(lhs), field_name);
+                        if ctx.peek() == &Token::LParen {
+                            if let Some(name) = expr_to_call_path(&access, separator) {
+                                let args = parse_call_args(ctx);
+                                lhs = Expr::Call(name, args);
+                                continue;
+                            }
+                        }
+                        lhs = access;
                         continue;
                     }
                 }
@@ -89,6 +106,30 @@ pub fn parse_expr(ctx: &mut ParseContext, min_bp: u8) -> Expr {
     }
 
     lhs
+}
+
+fn parse_call_args(ctx: &mut ParseContext) -> Vec<Expr> {
+    ctx.expect(Token::LParen);
+    let mut args = Vec::new();
+    while ctx.peek() != &Token::RParen && ctx.peek() != &Token::Eof {
+        args.push(parse_expr(ctx, 0));
+        if ctx.peek() == &Token::Comma {
+            ctx.advance();
+        }
+    }
+    ctx.expect(Token::RParen);
+    args
+}
+
+fn expr_to_call_path(expr: &Expr, separator: &str) -> Option<String> {
+    match expr {
+        Expr::Variable(name) => Some(name.clone()),
+        Expr::FieldAccess(inner, field) => {
+            let base = expr_to_call_path(inner, separator)?;
+            Some(format!("{base}{separator}{field}"))
+        }
+        _ => None,
+    }
 }
 
 /// Parse a prefix / primary expression.

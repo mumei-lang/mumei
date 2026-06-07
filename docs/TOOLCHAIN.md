@@ -14,6 +14,7 @@
 | `mumei inspect` | ✅ | Inspect development environment (Z3, LLVM, std library, toolchains) |
 | `mumei inspect <file> --ai` | ✅ | Structured JSON inspection report for AI agents (Plan 11) |
 | `mumei verify --proof-cert` | ✅ | Generate Z3 proof certificate (.proof.json) (Plan 11) |
+| `mumei verify --task-id <id> --solver-timeout <ms> --cache-scope module\|global` | ✅ | Orchestration metadata and cache isolation for MCP/CI parallel verification (P8-F) |
 | `mumei verify-cert` | ✅ | Verify proof certificate against current source (Plan 11) |
 | `mumei infer-effects` | ✅ | Infer required effects (JSON output for MCP) |
 | `mumei lsp` | ✅ | Language Server Protocol (hover, diagnostics) |
@@ -60,6 +61,16 @@ max_unroll = 3                          # BMC unroll depth
 cache = true         # incremental build cache
 timeout_ms = 10000   # Z3 solver timeout
 ```
+
+`mumei verify` may override proof runtime settings for orchestration:
+
+```bash
+mumei verify --task-id ci-shard-17 --solver-timeout 30000 --cache-scope module src/main.mm
+```
+
+- `--task-id` writes the logical task ID into verification reports and proof-certificate solver metadata.
+- `--solver-timeout` overrides `[proof].timeout_ms` for the current verification run.
+- `--cache-scope module` keeps `.mumei/cache/verification_cache.json` beside the input module directory; `global` shares the cache from the current workspace root.
 
 ---
 
@@ -160,6 +171,46 @@ mumei setup            # auto-detect OS/arch
 mumei setup --force    # re-download even if installed
 source ~/.mumei/env    # apply environment variables
 ```
+
+---
+
+## MCP parallel verification and cache isolation (P8-F)
+
+The MCP server exposes `verify_with_orchestration(source_code, timeout_ms=30000, enable_cache=true, task_id=None)` for AI agents, IDE integrations, and CI jobs that need concurrent Z3 verification without sharing mutable solver state.
+
+### Tool flow
+
+1. The MCP server hashes the source text and solver configuration to derive a `cache_key`.
+2. `VerificationTaskRegistry` allocates or resumes a task ID and validates that resumed requests use the same source hash and solver cache key.
+3. `Z3WorkerPool` leases a bounded worker, starts `cargo run -- verify --proof-cert --report-dir <tmp> --output <tmp/input.proof.json>`, and injects:
+   - `MUMEI_TASK_ID`
+   - `MUMEI_GENERATION_ID`
+   - `MUMEI_SOLVER_CONFIG_FINGERPRINT`
+   - `MUMEI_SOLVER_CACHE_KEY`
+   - `MUMEI_VERIFICATION_TIMEOUT_MS`
+   - `MUMEI_SOLVER_PROCESS_START_TIME`
+4. The proof certificate records `solver_process_metadata` for each atom when these variables are present.
+5. On timeout, the worker watchdog terminates the bound process, marks the task as cancelled, and returns a structured cancellation payload.
+
+### Task IDs and cache keys
+
+- `task_id` is provenance: it identifies the logical verification request and prevents resuming an unrelated source/config pair.
+- `cache_key` is correctness: it binds `source_hash` to the solver configuration fingerprint so cached results are reused only for the same obligation and solver settings.
+- `--cache-scope module` is the safe CLI default for local runs; MCP temp directories also isolate per-request report and certificate files.
+
+### Parallel safety guarantees
+
+- Bounded worker leasing prevents unbounded Z3 process growth.
+- Resume validation rejects mismatched task IDs before any cache lookup or solver launch.
+- Cache hits are accepted only when the cache key matches the source hash and solver fingerprint; hash mismatches are rejected and reverified.
+- Certificates include task/generation/cache metadata, so competing verifications of the same atom cannot swap provenance.
+
+### P8-F validation targets
+
+- 100 parallel `verify_with_orchestration` requests: 0 cache corruption incidents.
+- Hung Z3 watchdog recovery: 100% structured cancellation/recovery.
+- Competing verification of the same atom: 0 task ID / certificate provenance mix-ups.
+- Cache hit correctness: 100% of source/config hash mismatches are rejected instead of accepted.
 
 ### `mumei inspect`
 

@@ -1,5 +1,4 @@
 src/**
-node_modules/**
 .gitignore
 tsconfig.json
 **/*.ts
@@ -7,3 +6,4 @@ tsconfig.json
 .vscode/**
 *.vsix
 package-lock.json
+tests/**

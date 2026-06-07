@@ -141,6 +141,9 @@ class TestRenderMarkdownHistory:
             },
         ]
         md = gsm._render_markdown(rows, history)
+        assert "- **Trusted atom modules:** `std/core.mm` (1)" in md
+        assert "## Trusted atom inventory" in md
+        assert "| `std/core.mm` | 1 | 0.950 |" in md
         assert "## History" in md
         assert "| Date | Modules | Atoms | Proven | Trusted | TODOs | Health |" in md
         assert "| 2026-04-22 | 21 | 202 | 150 | 52 | 4 | 0.944 |" in md
@@ -154,6 +157,11 @@ class TestRenderMarkdownHistory:
         assert "_No history available._" in md
         # And the history table header should NOT appear.
         assert "| Date | Modules |" not in md
+
+    def test_zero_trusted_inventory_placeholder(self) -> None:
+        md = gsm._render_markdown([_sample_row(trusted=0)])
+        assert "- **Trusted atom modules:** none" in md
+        assert "_No trusted atoms remain in std/._" in md
 
     def test_history_defaults_to_empty(self) -> None:
         md = gsm._render_markdown([_sample_row()])

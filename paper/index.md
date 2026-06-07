@@ -2,7 +2,7 @@
 layout: default
 title: "Mumei Language - Technical Paper"
 description: "Mumei is a mathematical proof-driven programming language designed to transform probabilistic AI-generated code into verified, reliable software assets."
-keywords: "mumei, proof-driven programming, formal verification, z3, llvm, programming language"
+keywords: "mumei, mumei language, mumei-lang, proof-driven programming, proof driven programming, formal verification, autonomous formal verification, AI-native programming language, AI native programming language, trustless software engineering, verified software, verified programming language, mathematically verified code, proof certificates, proof certificate distribution, proof bundle, SMT solver, SMT verification, Z3, Z3 SMT, LLVM, LLVM IR, Lean 4, Lean theorem prover, mumei-lean, theorem proving, interactive theorem proving, solver escalation, Lean escalation, typed translator contract, TranslatorIRMetadata, bridge lemma hash, stale translator detection, refinement types, refinement typing, Hoare logic, Hoare triples, preconditions, postconditions, requires ensures, effect system, temporal effects, state machine verification, finite state machine effects, capability security, resource hierarchy, ownership verification, borrowing verification, concurrency safety, linearity checks, use-after-move detection, algebraic trait laws, trait law verification, match exhaustiveness, array bounds verification, loop invariants, invariant detection, CEGIS, counterexample guided inductive synthesis, vacuity checking, mutation testing, spec vacuity, Z3 timeout heatmap, solver heatmap profiler, data flow trace, structured counterexamples, semantic feedback, unsat core, structured diagnostics, contract isolation, manifest-based verification, mumei-agent, autonomous repair loop, generate verify fix, self-healing code, LLM repair, LLM verification, MCP integration, Model Context Protocol, MumeiMCPClient, bidirectional MCP, natural language specs, natural language to verified code, NLAE, Natural Language Autoencoders, latent-space debugging, dense property generation, latent protocol, multi-agent verification, NLAH, Natural Language Agent Harness, agent harness contracts, harness externalization, proof-friendly specifications, decidable fragment, standard library metrics, SI-5 standard library, forge tasks, proof health score, benchmark history, Zero-Human Challenge, SV-COMP benchmarks, Dafny puzzle port, verified standard library, Merkle tree verification, cryptographic verification, collision resistance, DeFi invariant verification, smart contract verification, ERC-20 verification, Uint256 bounds, ArkLib audit, audit theorem verification, RTGS settlement, financial conservation, RegTech compliance, medical device verification, insulin pump safety, safety-critical software, compliance verification, formal methods, programming language research, AkiraTamai, akiratamai, Akira Tamai"
 og:title: "Mumei Language - Technical Paper"
 og:description: "Technical paper describing Mumei, a proof-driven programming language with formal verification."
 og:type: "article"
@@ -20,9 +20,9 @@ mermaid: true
 
 **Source references:** [mumei README](https://github.com/mumei-lang/mumei/blob/main/README.md), [mumei architecture](https://github.com/mumei-lang/mumei/blob/main/docs/ARCHITECTURE.md), [mumei-agent README](https://github.com/mumei-lang/mumei-agent/blob/develop/README.md), [mumei-lean README](https://github.com/mumei-lang/mumei-lean/blob/develop/README.md).
 
-Large language models can produce programs that look idiomatic, compile, and pass superficial examples, yet violate latent safety, temporal, financial, or regulatory constraints. Mumei addresses this gap by treating every function-like unit, called an *atom*, as a proof obligation. A Mumei program is parsed, resolved, monomorphized, lowered, verified with Z3, and only then emitted as LLVM IR, C headers, or verified metadata. The companion system, mumei-agent, closes the loop by generating code from structured or natural-language specifications, invoking the compiler, reading structured verification feedback, and repairing failures until proofs pass. A second companion backend, mumei-lean, escalates proof obligations that fall outside the effective decidable fragments of SMT to Lean 4.
+Large language models can produce programs that look idiomatic, compile, and pass superficial examples, yet violate latent safety, temporal, financial, or regulatory constraints. Mumei addresses this gap by treating every function-like unit, called an *atom*, as a proof obligation. A Mumei program is parsed, resolved, monomorphized, lowered, verified with Z3, and only then emitted as LLVM IR, C headers, or verified metadata. Companion capabilities now include multi-file cross-spec verification and the planned P14 Cross-Validation Framework for natural-language, foreign-code, and spec/code consistency checks. The companion system, mumei-agent, closes the loop by generating code from structured or natural-language specifications, invoking the compiler, reading structured verification feedback, and repairing failures until proofs pass. A second companion backend, mumei-lean, escalates proof obligations that fall outside the effective decidable fragments of SMT to Lean 4.
 
-This paper draft presents Mumei as an autonomous proof-driven programming stack. The central thesis is that formal methods become practical for AI-generated software when proof obligations are made local, feedback is structured for machines, and proof backends are arranged as a hierarchy: fast SMT first, interactive theorem proving only when needed. We describe the core language, refinement types, effect and temporal-effect verification, ownership and concurrency checks, algebraic trait laws, the autonomous generate-verify-fix loop, Lean 4 escalation, and four case studies: ownership transfer, RTGS settlement, RegTech compliance, and medical-device control. We also report the current implementation status, including SI-5 autonomous standard-library expansion metrics: 24 standard-library modules, 223 atoms, 175 Z3-proven atoms, 48 reviewed trusted atoms, and a weighted health score of 0.957.
+This paper draft presents Mumei as an autonomous proof-driven programming stack. The central thesis is that formal methods become practical for AI-generated software when proof obligations are made local, feedback is structured for machines, and proof backends are arranged as a hierarchy: fast SMT first, interactive theorem proving only when needed. We describe the core language, refinement types, effect and temporal-effect verification, ownership and concurrency checks, algebraic trait laws, advanced verification features, the autonomous generate-verify-fix loop, Lean 4 escalation, and seven core case studies: ownership transfer, RTGS settlement, RegTech compliance, medical-device control, Merkle tree verification, DeFi invariant verification, and ArkLib-style audit. Companion demos now also cover self-correction and blockchain audit scenarios. We also report the current implementation status, including SI-5 autonomous standard-library expansion metrics as of 2026-06-02: 54 standard-library modules, 325 atoms, 320 Z3-proven atoms, 5 reviewed trusted atoms, and a weighted health score of 0.997.
 
 ## 1. Introduction
 
@@ -149,7 +149,7 @@ Mumei Core implements the language front end, semantic environment, and verifica
 - `mumei-core`: parser, HIR, MIR, verification, resolver, manifest, registry, FFI support, emitter traits;
 - `mumei-emit-llvm`: LLVM IR emitter;
 - `mumei-emit-json`: verified metadata emitter;
-- root `mumei` CLI: `build`, `verify`, `check`, `init`, `doc`, `infer-effects`, `infer-contracts`, and LSP support.
+- root `mumei` CLI: `build`, `verify`, `check`, `init`, `doc`, `infer-effects`, `infer-contracts`, and LSP support. The `verify`, `check`, `infer-effects`, and `infer-contracts` commands now also accept directory input, recursively processing all `.mm` files. The REPL `:load` command supports directories as well, and source loading automatically detects and handles non-UTF-8 encodings such as Shift-JIS.
 
 The verification environment tracks refined types, structs, enums, traits, implementations, resources, effects, imported atoms, proof certificates, path abstractions, and linearity state. The default compiler pipeline is:
 
@@ -402,6 +402,30 @@ $$
 
 This mechanism prevents a common abstraction bug: an interface that compiles structurally while violating the algebraic assumptions required by generic clients.
 
+### 3.7 Advanced Verification Features
+
+**Source references:** [spec guide](https://github.com/mumei-lang/mumei/blob/main/docs/SPEC_GUIDE.md), [verification diagnostics](https://github.com/mumei-lang/mumei/blob/main/docs/DIAGNOSTICS.md), [proof certificate schema](https://github.com/mumei-lang/mumei/blob/main/docs/PROOF_CERTIFICATE.md), [mumei-agent CEGIS strategy](https://github.com/mumei-lang/mumei-agent/tree/develop/agent/strategies).
+
+Mumei includes several advanced verification features that enhance the proof-driven development experience:
+
+**Vacuity Mutation Checking**: The compiler can detect vacuous specifications by systematically mutating implementations and re-running postcondition proofs against the original contract. This prevents false positives where contracts appear correct but provide no meaningful guarantees.
+
+**Z3 Timeout Heatmap Profiler**: A profiling tool records Z3 timeout patterns and solver resource pressure across obligations, helping developers identify performance bottlenecks in verification and optimize specifications for the decidable fragment.
+
+**Loop Invariant Detection**: Automatic inference of loop invariants using dataflow analysis and pattern matching reduces the manual annotation burden for common loop patterns while maintaining formal verification guarantees.
+
+**CEGIS Invariant Loop**: Counter-Example Guided Inductive Synthesis (CEGIS) automatically discovers and strengthens loop invariants when manual annotations are insufficient.
+
+**Contract Isolation**: Manifest-based contract isolation ensures that verification failures in one module do not propagate to dependent modules, enabling modular development and faster incremental verification.
+
+**Data Flow Trace**: Comprehensive dataflow tracking records how values flow through the program, enabling precise counterexample generation and better diagnostic messages when verification fails.
+
+Recent benchmark history also gives the agent loop a quantitative feedback channel. The Zero-Human Challenge history improved from a 0.667 success rate on 2026-05-04 to 0.857 on 2026-05-25, with additional 2026-05-25 SV-COMP-style and Dafny puzzle-port snapshots reporting 0.880 and 0.920 success rates respectively; subsequent work has focused on improving the verification surface, diagnostic precision, and cross-module checking needed to make those feedback loops more reliable.
+
+**Multi-file Cross-Spec Verification**: The compiler can verify contract consistency across multiple `.mm` files simultaneously. This enables cross-module invariant checking, detection of inter-module invariant violations, and dependency-cycle diagnostics before a multi-file verification run is accepted.
+
+**Decidable-Fragment Warnings**: The `outside_decidable_fragment` diagnostic warns when a specification leaves the solver-friendly fragment. False-positive markers for the `^` XOR operator and the Mumei built-in `matches()` have been removed, making the warning more precise for proof-friendly specification guidance.
+
 ## 4. Autonomous Proof Loop
 
 **Source references:** [mumei-agent README](https://github.com/mumei-lang/mumei-agent/blob/develop/README.md), [generate strategy](https://github.com/mumei-lang/mumei-agent/blob/develop/agent/strategies/generate_strategy.py), [prompts](https://github.com/mumei-lang/mumei-agent/tree/develop/agent/prompts), [mumei diagnostics](https://github.com/mumei-lang/mumei/blob/main/docs/DIAGNOSTICS.md).
@@ -455,7 +479,7 @@ $$
 
 ### 4.2 Structured Feedback
 
-**Source references:** [verification diagnostics](https://github.com/mumei-lang/mumei/blob/main/mumei-core/src/verification.rs), [report schema](https://github.com/mumei-lang/mumei/blob/main/docs/REPORT_SCHEMA.md), [report formatter](https://github.com/mumei-lang/mumei-agent/blob/develop/agent/prompts/report_formatter.py), [counterexample visualizer](https://github.com/mumei-lang/mumei-agent/tree/develop/visualizer).
+**Source references:** [verification diagnostics](https://github.com/mumei-lang/mumei/blob/main/mumei-core/src/verification.rs), [report schema](https://github.com/mumei-lang/mumei/blob/main/docs/REPORT_SCHEMA.md), [report formatter](https://github.com/mumei-lang/mumei-agent/blob/develop/agent/prompts/report_formatter.py), [counterexample visualizer](https://github.com/mumei-lang/mumei-agent/tree/develop/visualizer), [MCP-backed verification](https://github.com/mumei-lang/mumei-agent/blob/develop/README.md#mcp-backed-verification-opt-in).
 
 Structured feedback is the key interface between the verifier and the repair agent. Mumei's error detail includes messages, spans, suggestions, and counterexamples. Reports can include violation type, failing atom, counterexample, and structured unsat core. A simplified report shape is:
 
@@ -493,6 +517,22 @@ $$
 
 Structured feedback lets the agent repair the specification or implementation directly instead of guessing from raw solver logs.
 
+The MCP integration (P10) strengthens the feedback loop by providing richer semantic feedback through the mumei MCP server. The `MumeiMCPClient` can consume enhanced feedback including `semantic_feedback`, `machine_readable` diagnostics, detailed `counter_example` data, and `effect_violation` specifics, enabling more sophisticated repair strategies in the agent.
+
+The P9 reconstruction loss is now formalized as a set rather than a vector. The `ReconstructionLoss` structure carries:
+
+- `loss_set_size: usize`: the cardinality of $L_{recon}$; zero means no counterexamples were found;
+- `is_zero_loss: bool`: true iff $L_{recon} = \emptyset$ and the proof is complete;
+- `loss_vector: Vec<LossEntry>`: entries recording `violated_property`, `counter_example`, `magnitude`, and `components`.
+
+The zero-loss condition is:
+
+$$
+L_{recon} = \emptyset \iff \text{the verifier finds no counterexamples.}
+$$
+
+This replaces the previous scalar-magnitude formulation and makes the feedback schema machine-readable for the P9 self-correction loop.
+
 ### 4.3 Lean 4 Escalation
 
 **Source references:** [mumei-lean README](https://github.com/mumei-lang/mumei-lean/blob/develop/README.md), [ingest certificate script](https://github.com/mumei-lang/mumei-lean/blob/develop/scripts/ingest_cert.py), [export certificate script](https://github.com/mumei-lang/mumei-lean/blob/develop/scripts/export_cert.py), [Lean tactics](https://github.com/mumei-lang/mumei-lean/blob/develop/MumeiLean/Tactics.lean), [mumei-lean integration](https://github.com/mumei-lang/mumei-lean/blob/develop/docs/INTEGRATION.md).
@@ -501,9 +541,15 @@ Lean escalation is triggered when a property is desirable but not naturally disc
 
 #### 4.3.1 Typed Translator Contract
 
-The escalation boundary is a typed contract rather than a textual convention. Each eligible atom carries `translator_ir`, whose `TranslatorIR` shape records the obligation sort, a list of binders, a theorem goal, source provenance, lowering rules, and any `manual_lemma_reason`. The binder list maps each Mumei identifier to a Lean identifier and type; for example, scalar `i64` parameters lower to Lean `Int`, array-like values lower through the array-bounds bridge, and the special `result` identifier is recorded as the theorem result binder. This binder mapping lets diagnostics and upgraded certificates point back to the original Mumei names while allowing the Lean file to avoid reserved words and illegal identifiers.
+The escalation boundary uses a typed contract rather than textual conventions. Each eligible atom carries `translator_ir` with a `TranslatorIRMetadata` structure that records:
 
-The same contract includes `translator_version` and `bridge_lemma_hash`. The version identifies the Mumei-to-Lean translator surface, while the hash identifies the bridge lemma set for integer bounds, refinement/subtype lowering, guarded array access, string and regex bridge points, and effect-state tokens. Manual or partial translation cases remain explicit through `manual_lemma_reason`; they cannot be silently promoted to `lean_verified`.
+- the obligation sort (contract obligation, loop invariant, etc.);
+- a list of binders mapping Mumei identifiers to Lean identifiers and types;
+- the theorem goal in Lean syntax;
+- source provenance spans;
+- lowering rules used during translation.
+
+The contract includes `translator_version` and `bridge_lemma_hash` fields. The version identifies the Mumei-to-Lean translator surface, while the hash identifies the bridge lemma set for integer bounds, refinement/subtype lowering, guarded array access, string and regex bridge points, and effect-state tokens. Manual or partial translation cases remain explicit through `manual_lemma_reason`.
 
 With metadata validation, the escalation rule becomes:
 
@@ -518,13 +564,39 @@ $$
 \end{aligned}
 $$
 
-Here $v$ is the current translator version and $h$ is the current bridge lemma hash. Lean is not used to mask ordinary SMT failures. If Z3 finds a concrete counterexample, the candidate is wrong. Lean is reserved for obligations where SMT cannot decide, such as inductive trace properties.
+Here $v$ is the current translator version and $h$ is the current bridge lemma hash. With metadata validation, the escalation rule ensures that a `lean_verified` atom is accepted only when the certificate includes the current `translator_version` and `bridge_lemma_hash` fields together with the Lean result metadata. This ties a proof to the exact Mumei-to-Lean lowering rules and bridge lemma set that produced it; if either version changes, the resolver reports `stale_translator` and requires regeneration rather than silently reusing an obsolete proof.
+
+Lean is not used to mask ordinary SMT failures. If Z3 finds a concrete counterexample, the candidate is wrong. Lean is reserved for obligations where SMT cannot decide, such as inductive trace properties.
+
+The CLI now separates classification from artifact emission. `--escalate-lean` triggers escalation classification and prints `candidate_count` without writing a file. `--emit escalation-bundle` writes `<input>.escalation-bundle.json` to disk. `LeanEscalationMetrics` also tracks `lean_verified_accepted`, the count of `lean_verified` certificates accepted by the resolver, separately from `lean_successes`.
+
+mumei-lean now includes RTGS settlement proofs, with `Settlement.lean` extended for list-wide nonnegativity. Its advanced contract translator supports loop invariants and recursive encoding, and its Mathlib4 integration design outlines richer bridge lemmas for future escalation coverage.
+
+### 4.4 NLAE Integration (Experimental)
+
+**Source references:** [NLAE guide](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/NLAE_GUIDE.md), [mumei-agent roadmap P12](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#p12-nlae-integration-experimental--implemented), [latent protocol tests](https://github.com/mumei-lang/mumei-agent/blob/develop/tests/test_latent_protocol.py).
+
+Mumei-agent includes experimental integration with Natural Language Autoencoders (NLAE) concepts, providing three opt-in capabilities:
+
+**Latent-Space Debugging**: The `LatentDebugStrategy` encodes verification failures into a latent space, enabling pattern-based debugging that can identify similar failure modes across different codebases.
+
+**Dense Property Generation**: The `DensePropertyGenerator` creates high-density `requires`/`ensures` specifications from natural language descriptions, increasing proof density while maintaining decidability.
+
+**Latent Protocol for Agent Communication**: A standardized protocol for agent-to-agent communication using latent representations enables multi-agent workflows where different specialized agents collaborate on verification tasks.
+
+These features are disabled by default and can be enabled via `ENABLE_LATENT_DEBUG`, `ENABLE_DENSE_PROPERTIES`, and `ENABLE_LATENT_PROTOCOL` environment variables.
+
+### 4.5 P9 Self-Correction Loop
+
+**Source references:** [mumei-agent self-healing](https://github.com/mumei-lang/mumei-agent/blob/develop/agent/self_healing.py), [agent configuration](https://github.com/mumei-lang/mumei-agent/blob/develop/agent/config.py), [P9 self-correction tests](https://github.com/mumei-lang/mumei-agent/tree/develop/tests).
+
+mumei-agent now runs a dedicated `structured_self_correction_loop` with a configurable `self_correction_max_tokens` budget separate from `max_context_tokens`. The loop uses the formalized `ReconstructionLoss` as its convergence signal and terminates when `is_zero_loss == true`, i.e. when the verifier reports no remaining counterexamples. The decidable-fragment specification guide is automatically injected into every generation and repair prompt so the agent keeps candidates inside solver-friendly fragments while repairing failures.
 
 ## 5. Case Studies
 
-**Source references:** [mumei-demo scenarios](https://github.com/mumei-lang/mumei-demo/tree/main/scenarios), [std/ownership.mm](https://github.com/mumei-lang/mumei/blob/main/std/ownership.mm), [std/settlement.mm](https://github.com/mumei-lang/mumei/blob/main/std/settlement.mm), [std/compliance.mm](https://github.com/mumei-lang/mumei/blob/main/std/compliance.mm), [medical-device scenario](https://github.com/mumei-lang/mumei-demo/blob/main/scenarios/medical_device/README.md).
+**Source references:** [mumei-demo scenarios](https://github.com/mumei-lang/mumei-demo/tree/main/scenarios), [std/ownership.mm](https://github.com/mumei-lang/mumei/blob/main/std/ownership.mm), [std/settlement.mm](https://github.com/mumei-lang/mumei/blob/main/std/settlement.mm), [std/compliance.mm](https://github.com/mumei-lang/mumei/blob/main/std/compliance.mm), [medical-device scenario](https://github.com/mumei-lang/mumei-demo/blob/main/scenarios/medical_device/README.md), [self-correction demo](https://github.com/mumei-lang/mumei-demo/tree/main/scenarios/self_correction_demo), [blockchain audit demo](https://github.com/mumei-lang/mumei-demo/tree/main/scenarios/blockchain_audit), [demo harness contracts](https://github.com/mumei-lang/mumei-demo/blob/main/docs/HARNESS_CONTRACTS.md).
 
-The case studies demonstrate four classes of semantic properties: temporal authorization, financial conservation, regulatory exhaustiveness, and safety-critical dosage control.
+The case studies demonstrate seven classes of semantic properties: temporal authorization, financial conservation, regulatory exhaustiveness, safety-critical dosage control, cryptographic proof binding, smart-contract arithmetic safety, and audit-level theorem consistency. The broader demo suite now also includes a self-correction benchmark scenario for the P9-F repair loop and a blockchain audit scenario covering reentrancy, bounded-integer overflow, owner authorization, L1 Z3 certificates, and optional L3 Lean evidence.
 
 ### 5.1 Ownership Transfer
 
@@ -646,20 +718,38 @@ Idle -> SafetyChecked -> Delivered
 
 Z3 verifies the local dosage bounds and rejects the invalid delivery state with an `InvalidPreState` error. The Lean layer supplies the cumulative safety argument, represented in the scenario as `no_overdose_with_hourly_limit`: across a trace of checked deliveries, cumulative delivered insulin remains within the hourly limit. This case illustrates the intended split for safety-critical control software: bounded arithmetic and state preconditions are automatic SMT obligations, while trace-level cumulative safety is clearer as a Lean theorem.
 
+### 5.5 Merkle Tree Verification
+
+**Source references:** [merkle tree demo](https://github.com/mumei-lang/mumei-demo/tree/main/scenarios/merkle_tree_verification), [mumei-lean cryptographic proofs](https://github.com/mumei-lang/mumei-lean/blob/develop/MumeiLean/Crypto.lean).
+
+The Merkle tree verification scenario demonstrates cryptographic correctness proofs. A buggy verifier accepts a path computation without requiring `hash_function_secure`. Mumei rejects the unbound root proof with an unsatisfied postcondition. The corrected contract requires the security flag plus `leaf + sibling_hash == expected_root` and verifies with Z3. The optional Lean layer targets the mumei-lean cryptographic proof modules for collision-resistance-oriented proof assets.
+
+### 5.6 DeFi Invariant
+
+**Source references:** [DeFi demo](https://github.com/mumei-lang/mumei-demo/tree/main/scenarios/defi_invariant), [mumei-lean smart-contract proofs](https://github.com/mumei-lang/mumei-lean/blob/develop/MumeiLean/SmartContract.lean).
+
+The DeFi invariant scenario demonstrates financial safety in smart contracts. A buggy ERC-20 transfer calls a `Uint256` checker without proving the receiver-side upper bound. Mumei rejects the missing precondition as a boundary violation. The corrected `safe_transfer` requires `to_balance + amount <= 100`, the demo harness' bounded `Uint256` maximum, and verifies the refined result with Z3. The optional Lean layer targets the mumei-lean smart-contract proof modules for deeper invariant proofs.
+
+### 5.7 ArkLib-Style Audit
+
+**Source references:** [ArkLib audit demo](https://github.com/mumei-lang/mumei-demo/tree/main/scenarios/arklib_style_audit), [mumei-demo harness contracts](https://github.com/mumei-lang/mumei-demo/blob/main/docs/HARNESS_CONTRACTS.md).
+
+The ArkLib-style audit scenario demonstrates top-level theorem verification for audit claims. A buggy theorem requires commitments to be both equal and unequal. Mumei rejects the contradictory `requires` clauses. The corrected theorem binds the pre/post/invariant hash to the expected implementation commitment and verifies with Z3. The NLAH-style harness records the L1 proof certificate, optional L3 bridge certificate, and dashboard evidence as auditable artifacts.
+
 ## 6. Autonomous Standard Library Expansion (SI-5)
 
 **Source references:** [stdlib metrics](https://github.com/mumei-lang/mumei/blob/main/docs/STDLIB_METRICS.md), [forge tasks](https://github.com/mumei-lang/mumei-agent/tree/develop/forge_tasks), [forge task README](https://github.com/mumei-lang/mumei-agent/blob/develop/forge_tasks/README.md), [proof bundle workflow](https://github.com/mumei-lang/mumei/blob/main/.github/workflows/generate-std-certs.yml), [proof-friendly specification guidance](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#p8-c-proof-friendly-specification-metrics--complete-pr-87).
 
 SI-5 is the autonomous proliferation track for expanding the verified standard library. Each forge task describes a target module, atom set, contracts, effects, and expected verification properties. mumei-agent generates and verifies the implementation, and successful modules become part of the standard library and proof bundle.
 
-The current generated metrics report:
+The current generated metrics report (2026-06-02):
 
-- Modules: 24;
-- Atoms total: 223;
-- Proven atoms: 175;
-- Reviewed trusted atoms: 48;
+- Modules: 54;
+- Atoms total: 325;
+- Proven atoms: 320;
+- Reviewed trusted atoms: 5;
 - TODO/FIXME/XXX/HACK markers: 0;
-- Weighted health score: 0.957.
+- Weighted health score: 0.997.
 
 The health score is defined in the metrics document as:
 
@@ -667,7 +757,13 @@ $$
 Health = \frac{proven + 0.8 \times trusted}{atoms} - TODO\_penalty.
 $$
 
-Failing verification halves the score. The point is not to pretend that trusted atoms are proven; it is to make the trust surface explicit, measured, and reducible. Recent SI-5 modules include verified containers, math utilities, ownership, settlement, and compliance.
+With the current values and zero TODO penalty:
+
+$$
+Health = \frac{320 + 0.8 \times 5}{325} = 0.9969 \approx 0.997.
+$$
+
+Failing verification halves the score. The point is not to pretend that trusted atoms are proven; it is to make the trust surface explicit, measured, and reducible. Recent SI-5 work reduced the reviewed trusted-atom surface from 48 to 5 while increasing total atom coverage from 304 to 325, showing that verification coverage improved rather than merely reclassifying proof debt. Recent SI-5 modules include verified containers, math utilities, ownership, settlement, compliance, crypto, HTTP, and JSON support.
 
 ```mermaid
 flowchart LR
@@ -741,7 +837,7 @@ Mumei is less mature than Dafny or F* as a verification ecosystem, but it is opt
 
 ## 8. Implementation Status
 
-**Source references:** [mumei README](https://github.com/mumei-lang/mumei/blob/main/README.md), [architecture source-file table](https://github.com/mumei-lang/mumei/blob/main/docs/ARCHITECTURE.md#source-files), [mumei-agent README](https://github.com/mumei-lang/mumei-agent/blob/develop/README.md), [mumei-lean README](https://github.com/mumei-lang/mumei-lean/blob/develop/README.md), [stdlib metrics](https://github.com/mumei-lang/mumei/blob/main/docs/STDLIB_METRICS.md), [proof certificate schema](https://github.com/mumei-lang/mumei/blob/develop/docs/PROOF_CERTIFICATE.md).
+**Source references:** [mumei README](https://github.com/mumei-lang/mumei/blob/main/README.md), [architecture source-file table](https://github.com/mumei-lang/mumei/blob/main/docs/ARCHITECTURE.md#source-files), [mumei-agent README](https://github.com/mumei-lang/mumei-agent/blob/develop/README.md), [mumei-lean README](https://github.com/mumei-lang/mumei-lean/blob/develop/README.md), [stdlib metrics](https://github.com/mumei-lang/mumei/blob/main/docs/STDLIB_METRICS.md), [trusted atom plan](https://github.com/mumei-lang/mumei/blob/main/docs/TRUSTED_ATOMS.md), [concurrency docs](https://github.com/mumei-lang/mumei/blob/main/docs/CONCURRENCY.md), [proof certificate schema](https://github.com/mumei-lang/mumei/blob/develop/docs/PROOF_CERTIFICATE.md), [NLAE guide](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/NLAE_GUIDE.md), [agent harness spec](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/AGENT_HARNESS_SPEC.md).
 
 Implemented components include:
 
@@ -754,17 +850,40 @@ Implemented components include:
 - ownership/linearity checks including use-after-move and double-move detection;
 - emitters for LLVM IR, C headers, and verified JSON metadata;
 - proof certificate and proof bundle support;
+- directory input for `verify`, `check`, `infer-effects`, `infer-contracts`, and REPL `:load`;
+- non-UTF-8 encoding support with automatic detection via `chardet`;
+- multi-file cross-spec verification, including cross-module invariant and dependency-cycle detection;
+- Lean escalation CLI output for escalation bundles and metrics, including `--escalate-lean` separated from `--emit escalation-bundle`, `verify --emit escalation-metrics`, candidate grouping by `z3_result_class`, `lean_verified_accepted` in `LeanEscalationMetrics`, and acceptance metrics for `--allow-lean-verified` certificates;
+- improved `outside_decidable_fragment` warnings, with false-positive markers for `^` and `matches()` removed;
 - mumei-agent autonomous generation, verification, and repair;
 - natural-language to Mumei spec extraction pipeline;
-- mumei-lean bridge for certificate ingestion, Lean theorem generation, typed translator-contract validation, build-log parsing, and Lean certificate export;
-- demo scenarios for ownership transfer, RTGS settlement, RegTech compliance, medical-device control, and natural-language-to-verified pipelines;
-- SI-5 standard-library metrics and forge tasks, including proof-friendly specification guidance in generation prompts.
+- formalized P9 reconstruction loss with `LossEntry`, `loss_set_size`, and `is_zero_loss`;
+- structured P9 self-correction loop with a dedicated token budget;
+- spec guide auto-injection into generation and repair prompts;
+- mumei-lean bridge for certificate ingestion, Lean theorem generation, typed translator-contract validation, build-log parsing, Lean certificate export, RTGS settlement Lean proofs, an advanced contract translator for loop invariants and recursive encoding, and Mathlib4 integration design;
+- demo scenarios for ownership transfer, RTGS settlement, RegTech compliance, medical-device control, natural-language-to-verified pipelines, self-correction, and blockchain audit;
+- SI-5 standard-library metrics and forge tasks, including proof-friendly specification guidance in generation prompts;
+- vacuity mutation checking for specification validation;
+- Z3 timeout heatmap profiler for verification performance analysis;
+- loop invariant detection and CEGIS invariant loop;
+- contract isolation manifest support for modular verification;
+- data flow trace for enhanced diagnostics;
+- bidirectional MCP integration (P10) with richer semantic feedback;
+- NLAE integration (P12) for latent-space debugging and dense property generation;
+- NLAH-style harness contracts (P13) for scenario validation;
+- Phase 4-6 demo scenarios (Merkle Tree, DeFi Invariant, ArkLib-Style Audit);
+- FFI trusted atom tracking with a reduced trusted-atom budget, trusted-module inventory, and contract-coverage reporting for generated FFI property tests;
+- `task_group:any` winner cancellation, where the winning child atomically completes the group, requests cancellation for remaining children, and the parent still joins every child for cleanup;
+- Lean executable export and bridge harness contract metadata;
+- current public release line: v0.6.0;
+- updated standard library metrics: 54 modules, 325 atoms, 320 proven atoms, 5 reviewed trusted atoms, 0.997 health score.
 
 Known limitations and active areas include:
 
-- trusted atoms remain for FFI-heavy or solver-hard standard-library modules;
-- Lean escalation now has a typed translator contract, but richer theorem templates and bridge lemmas are still needed for additional obligation classes;
+- a small trusted-atom remainder remains in `std/http_server.mm` and `std/container/sorted_map.mm`;
+- Lean escalation now has a typed translator contract, CLI bundle/metrics output, and acceptance metrics, but richer theorem templates and bridge lemmas are still needed for additional obligation classes;
 - proof-friendly specification guidance is integrated into the generation pipeline, but its P8-C metrics must be monitored over larger task populations;
+- P14 Cross-Validation Framework (V1-A through V1-E) is planned but not yet implemented;
 - the natural-language extraction pipeline must conservatively distinguish missing requirements from underspecified intent;
 - arXiv-ready presentation will require replacing Mermaid diagrams with TikZ or figures;
 - benchmark evaluation should be expanded beyond current demos and standard-library health metrics.
@@ -781,10 +900,15 @@ Future work includes:
 2. reducing trusted standard-library atoms through SI-5 forging and Lean proofs;
 3. improving proof-friendly specification guidance with P8-C data from larger generation cohorts;
 4. improving natural-language specification extraction with ambiguity reporting;
-5. strengthening concurrency and ownership proofs over MIR;
+5. strengthening concurrency and ownership proofs over MIR, including additional coverage beyond implemented `task_group:any` winner cancellation;
 6. producing arXiv-ready figures and a quantitative evaluation suite;
 7. integrating proof artifacts with package distribution, CI, and editor diagnostics;
-8. validating the approach on larger safety-critical and compliance-heavy systems.
+8. validating the approach on larger safety-critical and compliance-heavy systems;
+9. expanding NLAE capabilities for multi-agent verification workflows;
+10. completing P13 agent harness externalization with telemetry and ablation metrics;
+11. enhancing Lean theorem templates for additional obligation classes;
+12. integrating benchmark evaluation results into the standard library expansion pipeline;
+13. implementing the P14 Cross-Validation Framework: natural-language specification soundness verification (V1-A), foreign-code logical soundness verification (V1-B), spec-to-code conformance checking (V1-C), code-to-spec traceability verification (V1-D), and human-friendly UX (V1-E).
 
 The broader claim is that formal methods and AI generation are complementary. LLMs are good at proposing candidates; solvers and proof assistants are good at rejecting invalid ones. Mumei combines them into a single forging loop.
 
@@ -808,9 +932,33 @@ The broader claim is that formal methods and AI generation are complementary. LL
 14. RTGS Settlement Demo. <https://github.com/mumei-lang/mumei-demo/tree/main/scenarios/rtgs_settlement>
 15. RegTech Compliance Demo. <https://github.com/mumei-lang/mumei-demo/tree/main/scenarios/regtech_compliance>
 16. Medical Device Control Demo. <https://github.com/mumei-lang/mumei-demo/tree/main/scenarios/medical_device>
-17. de Moura, L., and Bjørner, N. *Z3: An Efficient SMT Solver*. TACAS 2008. <https://github.com/Z3Prover/z3>
-18. de Moura, L., Ullrich, S. et al. *The Lean 4 Theorem Prover and Programming Language*. <https://lean-lang.org/>
-19. The Coq Development Team. *The Coq Proof Assistant*. <https://coq.inria.fr/>
-20. Leino, K. R. M. *Dafny: An Automatic Program Verifier for Functional Correctness*. LPAR 2010. <https://dafny.org/>
-21. Swamy, N. et al. *F*: A Higher-Order Effectful Language Designed for Program Verification*. <https://www.fstar-lang.org/>
-22. AWS. *Cedar Policy Language*. <https://www.cedarpolicy.com/>
+17. Self-Correction Demo. <https://github.com/mumei-lang/mumei-demo/tree/main/scenarios/self_correction_demo>
+18. Blockchain Audit Demo. <https://github.com/mumei-lang/mumei-demo/tree/main/scenarios/blockchain_audit>
+19. Mumei v0.6.0 Release. <https://github.com/mumei-lang/mumei/releases/tag/v0.6.0>
+20. Mumei Trusted Atom Tracking. <https://github.com/mumei-lang/mumei/blob/main/docs/TRUSTED_ATOMS.md>
+21. Mumei Concurrency Design. <https://github.com/mumei-lang/mumei/blob/main/docs/CONCURRENCY.md>
+22. de Moura, L., and Bjørner, N. *Z3: An Efficient SMT Solver*. TACAS 2008. <https://github.com/Z3Prover/z3>
+23. de Moura, L., Ullrich, S. et al. *The Lean 4 Theorem Prover and Programming Language*. <https://lean-lang.org/>
+24. The Coq Development Team. *The Coq Proof Assistant*. <https://coq.inria.fr/>
+25. Leino, K. R. M. *Dafny: An Automatic Program Verifier for Functional Correctness*. LPAR 2010. <https://dafny.org/>
+26. Swamy, N. et al. *F*: A Higher-Order Effectful Language Designed for Program Verification*. <https://www.fstar-lang.org/>
+27. AWS. *Cedar Policy Language*. <https://www.cedarpolicy.com/>
+28. Mumei Agent Harness Specification. <https://github.com/mumei-lang/mumei-agent/blob/develop/docs/AGENT_HARNESS_SPEC.md>
+29. Mumei Demo Harness Contracts. <https://github.com/mumei-lang/mumei-demo/blob/main/docs/HARNESS_CONTRACTS.md>
+30. Mumei LLM Benchmark History. <https://github.com/mumei-lang/mumei-agent/blob/develop/docs/BENCHMARK_HISTORY.md>
+
+---
+
+Copyright © 2026 Mumei Project Contributors
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.

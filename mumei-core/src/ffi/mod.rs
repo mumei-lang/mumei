@@ -4,6 +4,7 @@
 // Provides Rust-side #[no_mangle] implementations for std/json.mm
 // and std/http.mm extern declarations.
 
+pub mod crypto;
 pub mod file;
 pub mod http;
 pub mod http_server;

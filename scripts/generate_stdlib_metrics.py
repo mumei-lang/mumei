@@ -204,6 +204,10 @@ def _render_markdown(rows: list[dict], history: list[dict] | None = None) -> str
     total_trusted = sum(r["trusted"] for r in rows)
     total_proven = total_atoms - total_trusted
     total_todos = sum(r["todos"] for r in rows)
+    trusted_rows = [r for r in rows if r["trusted"] > 0]
+    trusted_modules = ", ".join(
+        f"`{r['path']}` ({r['trusted']})" for r in trusted_rows
+    ) or "none"
     fully_verified = sum(1 for r in rows if r["verified"] == "OK")
     failed = sum(1 for r in rows if r["verified"] == "FAIL")
     skipped = sum(1 for r in rows if r["verified"] == "SKIP")
@@ -232,14 +236,31 @@ def _render_markdown(rows: list[dict], history: list[dict] | None = None) -> str
         f"- **Modules:** {len(rows)} ({fully_verified} OK / {failed} FAIL / {skipped} SKIP)",
         f"- **Atoms total:** {total_atoms} ({total_proven} proven · {total_trusted} trusted)",
         f"- **Trusted atoms (reviewed contracts):** {total_trusted}",
+        f"- **Trusted atom modules:** {trusted_modules}",
         f"- **TODO/FIXME/XXX/HACK markers:** {total_todos}",
         f"- **Weighted health score:** {weighted_health:.3f} / 1.000",
+        "",
+        "## Trusted atom inventory",
+        "",
+    ]
+    if trusted_rows:
+        lines.extend(
+            [
+                "| Module | Trusted atoms | Health |",
+                "|--------|--------------:|------:|",
+            ]
+        )
+        for r in trusted_rows:
+            lines.append(f"| `{r['path']}` | {r['trusted']} | {r['health']:.3f} |")
+    else:
+        lines.append("_No trusted atoms remain in std/._")
+    lines.extend([
         "",
         "## Per-module breakdown",
         "",
         "| Module | Atoms | Trusted | TODOs | Verify | Health |",
         "|--------|------:|--------:|------:|:------:|------:|",
-    ]
+    ])
     for r in rows:
         lines.append(
             f"| `{r['path']}` | {r['atoms']} | {r['trusted']} | "

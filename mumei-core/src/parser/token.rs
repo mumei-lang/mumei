@@ -73,29 +73,30 @@ pub enum Token {
     Ident(String),
 
     // --- Operators ---
-    Plus,      // +
-    Minus,     // -
-    Star,      // *
-    Slash,     // /
-    Eq,        // ==
-    Neq,       // !=
-    Gt,        // >
-    Lt,        // <
-    Ge,        // >=
-    Le,        // <=
-    And,       // &&
-    Or,        // ||
-    Arrow,     // ->
-    FatArrow,  // =>
-    Pipe,      // |>
-    Bar,       // |
-    Assign,    // =
-    Dot,       // .
-    Comma,     // ,
-    Colon,     // :
-    Semicolon, // ;
-    Bang,      // !
-    At,        // @
+    Plus,       // +
+    Minus,      // -
+    Star,       // *
+    Slash,      // /
+    Eq,         // ==
+    Neq,        // !=
+    Gt,         // >
+    Lt,         // <
+    Ge,         // >=
+    Le,         // <=
+    And,        // &&
+    Or,         // ||
+    Arrow,      // ->
+    FatArrow,   // =>
+    Pipe,       // |>
+    Bar,        // |
+    Assign,     // =
+    Dot,        // .
+    Comma,      // ,
+    Colon,      // :
+    ColonColon, // ::
+    Semicolon,  // ;
+    Bang,       // !
+    At,         // @
 
     // --- Delimiters ---
     LParen,   // (
@@ -201,6 +202,7 @@ impl std::fmt::Display for Token {
             Token::Dot => write!(f, "."),
             Token::Comma => write!(f, ","),
             Token::Colon => write!(f, ":"),
+            Token::ColonColon => write!(f, "::"),
             Token::Semicolon => write!(f, ";"),
             Token::Bang => write!(f, "!"),
             Token::At => write!(f, "@"),
