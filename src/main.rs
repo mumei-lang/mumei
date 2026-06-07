@@ -2566,8 +2566,9 @@ fn save_reconstruction_losses(
                     "atom": atom,
                     "violated_property": loss.violated_property,
                     "counter_example": loss.counter_example,
+                    "loss_set_size": loss.loss_set_size,
+                    "is_zero_loss": loss.is_zero_loss,
                     "loss_vector": loss.loss_vector,
-                    "is_zero_loss": loss.is_zero_loss(),
                 })
             })
         })

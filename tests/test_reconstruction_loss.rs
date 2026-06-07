@@ -52,20 +52,25 @@ fn reconstruction_loss_from_counterexample_value_is_stable() {
         loss.counter_example.get("result"),
         Some(&Value::Number(6.into()))
     );
-    assert_eq!(loss.loss_vector, vec![6.0, 5.0]);
+    assert_eq!(loss.loss_set_size, 1);
+    assert_eq!(loss.loss_vector.len(), 1);
+    assert_eq!(loss.loss_vector[0].violated_property, "result > 10");
+    assert_eq!(loss.loss_vector[0].magnitude, 11.0);
     assert!(!loss.is_zero_loss());
 }
 
 #[test]
-fn zero_loss_detection_handles_empty_and_zero_components() {
+fn zero_loss_detection_tracks_empty_counterexample_set() {
     let empty = ReconstructionLoss::from_counter_example("result == 0", HashMap::new());
     assert!(empty.is_zero_loss());
+    assert_eq!(empty.loss_set_size, 0);
 
-    let zero = ReconstructionLoss::from_counter_example(
+    let zero_valued_counterexample = ReconstructionLoss::from_counter_example(
         "result == 0",
         HashMap::from([("x".to_string(), Value::Number(0.into()))]),
     );
-    assert!(zero.is_zero_loss());
+    assert!(!zero_valued_counterexample.is_zero_loss());
+    assert_eq!(zero_valued_counterexample.loss_set_size, 1);
 }
 
 #[test]
@@ -150,6 +155,8 @@ body: { x + 1 };
         "result > 10"
     );
     assert!(payload["reconstruction_losses"][0]["counter_example"]["x"].is_string());
+    assert_eq!(payload["reconstruction_losses"][0]["loss_set_size"], 1);
+    assert_eq!(payload["reconstruction_losses"][0]["is_zero_loss"], false);
     assert!(payload["reconstruction_losses"][0]["loss_vector"].is_array());
 
     let report: Value =
