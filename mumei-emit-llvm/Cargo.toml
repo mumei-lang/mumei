@@ -1,6 +1,6 @@
 [package]
 name = "mumei-emit-llvm"
-version = "0.2.0"
+version = "0.6.0"
 edition = "2021"
 description = "LLVM IR emitter for the Mumei compiler"
 license = "MIT"

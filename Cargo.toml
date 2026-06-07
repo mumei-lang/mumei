@@ -3,7 +3,7 @@ members = ["mumei-core", "mumei-emit-llvm", "mumei-emit-json", "mumei-emit-proof
 
 [package]
 name = "mumei"
-version = "0.2.0"
+version = "0.6.0"
 edition = "2021"
 description = "Mathematical Proof-Driven Programming Language — formally verified with Z3, compiled to LLVM IR"
 license = "MIT"
