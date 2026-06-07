@@ -678,6 +678,10 @@ graph TD
 | ✅ | Phase 5: DeFi Invariant | mumei-demo | Completed |
 | ✅ | Phase 6: ArkLib-Style Audit | mumei-demo + mumei-lean | Completed |
 | ✅ | P11: NLAH-style Harness Externalization | 全リポジトリ | Completed |
+| 📋 | P14-A: 自然言語仕様の健全性検証強化 | mumei-agent | Planned |
+| 📋 | P14-B: 他言語コードの論理的健全性検証 | mumei-agent | Planned |
+| 📋 | P14-C: 仕様↔コードのクロス検証 | mumei-agent + mumei | Planned |
+| 📋 | P14-D: 人間向けUX強化（Human-in-the-Loop） | mumei + mumei-agent + mumei-demo | Planned |
 | ✅ | SI-6: Lean 4 Executable Code Generation | mumei-lean | Completed |
 | ⏸️ | SI-4: no_std Ecosystem | mumei | Deferred |
 
@@ -1124,6 +1128,282 @@ graph TD
 | 契約式トランスレータ拡張 (mathlib4 active 利用) | ⏸️ Deferred | 量化子・有限体・群論ライブラリを使った暗号プリミティブの証明。ブリッジ v1 は算術比較 + 論理結合 + 整数リテラルのみ |
 | mumei 側 `"lean_verified"` 認識 | ✅ Implemented (PR 2 + Task 1-B) | `verify_certificate(.., allow_lean_verified)` と `--allow-lean-verified` CLI フラグ (`build` / `verify` / `verify-cert`) を追加。デフォルトでは `"unsat"` のみ受付、フラグ付けで `"lean_verified"` も `"proven"` として認識。Task 1-B で resolver の (a) `strict_imports` をマニフェスト dep 配下のサブ import (`path` / `git` / `registry` 全分岐) の `ResolverContext` にも伝播 (`test_strict_imports_propagated_to_sub_imports` で回帰)、(b) `allow_lean_verified` で `"lean_verified"` atom を `"proven"` として受理した際に `🔗 Lean-verified atom '{}' accepted as proven (--allow-lean-verified)` の audit ログを `eprintln!` に追加、(c) `mumei verify --proof-cert` 完了時に `z3_check_result == "unknown"` の atom 数を `ℹ️  N atom(s) returned 'unknown' from Z3. Consider running mumei-lean to discharge them.` として要約出力。 |
 | P8-B Counter-example Visualizer | ✅ Implemented (Plan 22) | LSP `relatedInformation` を活用した Z3 反例のインライン表示。mumei doc 拡張と同期して PR #167 でマージ |
+
+---
+
+## Priority 14
+現状の各リポジトリを把握できました。以下にロードマップ整理と新規追加提案をまとめます。
+
+---
+
+## 現状の整理
+
+まず、ユーザーが求める4機能と**既存実装の対応関係**を整理します。
+
+```
+求める機能                                    既存の実装（部分的）
+─────────────────────────────────────────────────────────────────
+① 自然言語仕様の検証・FB          ← ambiguity_detector.py, P8-B SpecContradiction
+② 他言語コードの検証・FB          ← code_to_spec.py (コード→仕様抽出のみ)
+③ 自然言語仕様→他言語コード整合   ← spec_code_mapper.py, intent_tracker.py (部分的)
+④ 他言語コード→自然言語仕様整合   ← code_to_spec.py (抽出のみ、比較なし)
+```
+
+①は`ambiguity_detector.py`と`P8-B`で部分実装済みですが、②③④は「抽出」止まりで**検証・フィードバック**まで届いていません。
+
+---
+
+## ロードマップ提案
+
+### 全体像
+
+```mermaid
+graph TD
+    NL["自然言語仕様\n(requirements.md等)"]
+    FC["他言語コード\n(Rust/Python/Go等)"]
+    MM["mumei atom\n(.mm)"]
+    Z3["Z3 / Lean 4\n形式検証"]
+
+    NL -->|"V1-A: 仕様の健全性検証"| FB_A["矛盾・曖昧・過剰拘束\nフィードバック"]
+    FC -->|"V1-B: コード単体検証"| FB_B["バグ・契約違反\nフィードバック"]
+    NL -->|"V1-C: 仕様→コード整合"| FB_C["実装漏れ・乖離\nフィードバック"]
+    FC -->|"V1-C"| FB_C
+    FC -->|"V1-D: コード→仕様整合"| FB_D["仕様不足・矛盾\nフィードバック"]
+    NL -->|"V1-D"| FB_D
+
+    NL --> MM
+    FC --> MM
+    MM --> Z3
+    Z3 --> FB_A
+    Z3 --> FB_B
+    Z3 --> FB_C
+    Z3 --> FB_D
+```
+
+---
+
+### V1-A: 自然言語仕様の健全性検証
+
+**対象リポジトリ**: `mumei-lang/mumei-agent`（主）、`mumei-lang/mumei`（MCP拡張）
+
+**現状のギャップ**:
+- `ambiguity_detector.py`は曖昧さを検出するが、**仕様の充足可能性・完全性・一貫性**は未検証
+- `P8-B SpecContradiction`はmumei atom内の矛盾検出だが、**自然言語テキスト段階**での検証がない
+- フィードバックが英語のみ・機械向けで、人が読みやすい形式になっていない
+
+**追加すべき機能**:
+
+```
+V1-A-1: 仕様充足可能性チェック
+  - requires同士の矛盾（例: "残高 >= 0 かつ 残高 < 0"）を抽出前に検出
+  - 暗黙の前提条件の欠落を警告（例: 除算があるのに分母 != 0 がない）
+  - Z3で充足可能性を事前チェックし、SpecContradictionを仕様テキスト段階に前出し
+
+V1-A-2: 仕様完全性チェック
+  - ドメインヒントに基づく必須条件の欠落検出
+  - 例: financial ドメインで "残高保存則" が ensures に含まれていない場合に警告
+  - 既存 DOMAIN_TEMPLATES を「チェックリスト」として活用
+
+V1-A-3: 人向けフィードバックレポート
+  - 日本語/英語対応の構造化フィードバック
+  - 問題箇所の引用 + 修正提案 + 重要度（error/warning/info）
+  - CLI: python -m agent verify-spec --text-file requirements.md --report report.md
+  - MCP: verify_spec_soundness(natural_language, domain_hint) → structured JSON
+```
+
+**実装ファイル**:
+- `agent/spec_verifier.py` — 新規: 仕様健全性検証エンジン
+- `agent/prompts/spec_verification.py` — 新規: 検証プロンプト
+- `agent/verify_spec.py` — 新規: CLIサブコマンド
+- `agent/mcp_server.py` — `verify_spec_soundness()` ツール追加
+- `mumei/mcp_server.py` — `check_spec_satisfiability()` ツール追加（Z3連携）
+
+---
+
+### V1-B: 既存他言語コードの検証・フィードバック
+
+**対象リポジトリ**: `mumei-lang/mumei-agent`（主）、`mumei-lang/mumei`（コンパイラ拡張）
+
+**現状のギャップ**:
+- `code_to_spec.py` + `extract_spec_from_code` は「コード → 仕様抽出」まで
+- 抽出した仕様をZ3で検証し、**元のコードの問題点にフィードバックを返す**部分が未実装
+- コードの行番号・関数名と検証失敗を紐付けるマッピングがない
+
+**追加すべき機能**:
+
+```
+V1-B-1: コード→仕様→Z3検証パイプライン
+  - code_to_spec.py で抽出した forge task spec を mumei verify にかける
+  - 検証失敗を元のコードの行番号・関数名にマッピングして返す
+  - 既存の spec_code_mapper.py を逆方向（検証結果→コード位置）に拡張
+
+V1-B-2: 言語別の検証ヒューリスティクス
+  - Rust: ownership/borrow違反パターン、unwrap()の危険箇所
+  - Python: 型アノテーション不整合、None安全性
+  - Go: goroutineリーク、エラー無視
+  - 各言語の「よくある問題」をdomain_templatesと同様に注入
+
+V1-B-3: 差分フィードバック
+  - 検証前後の比較（どの関数が問題か、どう直すか）
+  - CLI: python -m agent verify-code --code-file src/payment.rs --language rust
+  - MCP: verify_foreign_code(code_file, language, domain_hint)
+```
+
+**実装ファイル**:
+- `agent/code_verifier.py` — 新規: コード検証エンジン（code_to_spec + verify + map back）
+- `agent/verify_code.py` — 新規: CLIサブコマンド
+- `agent/mcp_server.py` — `verify_foreign_code()` ツール追加
+- `agent/prompts/code_verification.py` — 新規: 言語別検証プロンプト
+
+---
+
+### V1-C: 自然言語仕様 → 他言語コードの整合性検証
+
+**対象リポジトリ**: `mumei-lang/mumei-agent`（主）
+
+**現状のギャップ**:
+- `spec_code_mapper.py`は仕様とコードのマッピングを持つが、**仕様に書かれた条件がコードに実装されているか**の検証がない
+- `intent_tracker.py`はspec refinement時のdrift検出だが、**外部コードとの整合**には未対応
+
+**追加すべき機能**:
+
+```
+V1-C-1: 仕様→コード網羅性チェック
+  - 自然言語仕様の requires/ensures 相当の条件が、コード内に実装されているか検証
+  - 例: "残高不足はエラーにする" → コード内に balance < amount のチェックがあるか
+  - LLMによる意味的マッピング + Z3による形式的検証の2段階
+
+V1-C-2: 未実装条件の特定とフィードバック
+  - 仕様に書かれているが実装されていない条件を列挙
+  - 実装されているが仕様に書かれていない条件（隠れた仕様）を検出
+  - 修正提案（コードへの追加 or 仕様への追記）を提示
+
+V1-C-3: トレーサビリティマトリクス生成
+  - 仕様の各条件 ↔ コードの各関数/行のマッピング表を生成
+  - 人が確認しやすいMarkdown/HTML形式で出力
+  - CLI: python -m agent verify-conformance --spec req.md --code src/ --language rust
+  - MCP: verify_spec_code_conformance(spec_text, code_file, language)
+```
+
+**実装ファイル**:
+- `agent/conformance_verifier.py` — 新規: 整合性検証エンジン
+- `agent/verify_conformance.py` — 新規: CLIサブコマンド
+- `agent/mcp_server.py` — `verify_spec_code_conformance()` ツール追加
+- `agent/prompts/conformance_verification.py` — 新規
+
+---
+
+### V1-D: 他言語コード → 自然言語仕様の整合性検証
+
+**対象リポジトリ**: `mumei-lang/mumei-agent`（主）
+
+**現状のギャップ**:
+- `code_to_spec.py`でコードから仕様を抽出できるが、**元の自然言語仕様との比較・差分検出**がない
+- 「コードが仕様を超えた実装をしている」「仕様に書かれていない副作用がある」の検出がない
+
+**追加すべき機能**:
+
+```
+V1-D-1: コード→抽出仕様 vs 元仕様の差分検出
+  - code_to_spec.py で抽出した仕様と元の自然言語仕様を比較
+  - 仕様に書かれていない条件がコードに実装されている（仕様の不足）
+  - コードが仕様の条件を満たしていない（実装の問題）
+  - 既存 intent_tracker.py の IntentDriftResult を活用・拡張
+
+V1-D-2: 仕様ドリフトレポート
+  - 仕様とコードの乖離度スコア（0.0〜1.0）
+  - 乖離箇所の具体的な説明と修正提案
+  - 仕様側の修正案 or コード側の修正案を選択可能
+
+V1-D-3: 双方向整合性サマリ
+  - V1-C（仕様→コード）とV1-D（コード→仕様）を組み合わせた統合レポート
+  - CLI: python -m agent verify-traceability --code src/ --spec req.md
+  - MCP: verify_code_spec_traceability(code_file, spec_text, language)
+```
+
+**実装ファイル**:
+- `agent/traceability_verifier.py` — 新規: トレーサビリティ検証エンジン
+- `agent/verify_traceability.py` — 新規: CLIサブコマンド
+- `agent/mcp_server.py` — `verify_code_spec_traceability()` ツール追加
+
+---
+
+### V1-E: 人向けUX強化（Human-Friendly UX）
+
+**対象リポジトリ**: 全リポジトリ
+
+**現状のギャップ**:
+- フィードバックが機械向けJSON中心で、人が読む際の可読性が低い
+- CLIの出力が英語のみ
+- インタラクティブな対話フローがない（一方向の検証のみ）
+
+**追加すべき機能**:
+
+```
+V1-E-1: 人向けフィードバックフォーマット
+  - --format human|json|markdown の選択
+  - 問題の重要度（🔴 error / 🟡 warning / 🔵 info）の視覚的表示
+  - 日本語/英語の自動切り替え（LANG環境変数対応）
+  - 修正提案を「コピペできるコード」として提示
+
+V1-E-2: インタラクティブ検証モード
+  - mumei repl の拡張: :verify-spec, :verify-code コマンド追加
+  - 検証失敗時に「修正しますか？ (y/n)」の対話フロー
+  - 修正後の再検証を自動実行
+
+V1-E-3: エディタ統合（LSP拡張）
+  - 既存 LSP サーバー（src/lsp.rs）に diagnostics 追加
+  - 自然言語コメント（/// spec: ...）からリアルタイム仕様検証
+  - 他言語ファイルを開いた際の契約違反インライン表示
+
+V1-E-4: mumei-demo への統合
+  - V1-A〜D の4モードをデモシナリオとして追加
+  - "仕様のバグを証明で潰す" ストーリーを可視化
+  - Phase 7: Spec-Code Verification Suite デモ
+```
+
+---
+
+## 既存ロードマップへの組み込み位置
+
+| 新規項目 | 組み込み先 | 前提条件 |
+|---------|-----------|---------|
+| V1-A: NL仕様健全性検証 | mumei-agent P14 | P11（extract-spec）✅ |
+| V1-B: 他言語コード検証 | mumei-agent P15 | code_to_spec.py ✅ |
+| V1-C: 仕様→コード整合 | mumei-agent P16 | V1-A + V1-B |
+| V1-D: コード→仕様整合 | mumei-agent P17 | V1-B + intent_tracker ✅ |
+| V1-E: 人向けUX | mumei P10 / mumei-agent P18 | V1-A〜D |
+| mumei-lean連携 | mumei-lean PR-next | V1-A〜D（Z3 unknown時） |
+
+---
+
+## 推奨実装順序
+
+```mermaid
+graph LR
+    A["V1-A\nNL仕様健全性検証\n(mumei-agent P14)"] --> C["V1-C\n仕様→コード整合\n(mumei-agent P16)"]
+    B["V1-B\n他言語コード検証\n(mumei-agent P15)"] --> C
+    B --> D["V1-D\nコード→仕様整合\n(mumei-agent P17)"]
+    C --> E["V1-E\n人向けUX\n(P18)"]
+    D --> E
+    E --> Demo["Phase 7 Demo\n(mumei-demo)"]
+```
+
+**V1-A と V1-B は並行実装可能**。V1-C・V1-D はその両方に依存します。
+
+---
+
+## 既存思想との整合性
+
+| mumei の思想 | V1 での体現 |
+|-------------|------------|
+| Proof-First | 自然言語仕様も「証明前に健全性を検証」する対象として扱う |
+| AI生成コード → 検証済み資産 | 他言語コードも「検証済み資産への変換」の対象に拡張 |
+| Logic Fortress | 仕様とコードの両方が「要塞の壁」として機能するか検証 |
+| Structured Feedback | 人向けフィードバックも `structured_unsat_core` と同じ構造化原則で設計 |
+| Harness Externalization (P11/P13) | V1の各検証モードも AGENT_HARNESS_SPEC.md のステージとして定義 |
+
+既存の `agent/spec_extractor.py`、`agent/code_to_spec.py`、`agent/ambiguity_detector.py`、`agent/spec_code_mapper.py`、`agent/intent_tracker.py` はすべて**変更せず再利用**し、新規モジュールがそれらを組み合わせる設計にすることで、既存パイプラインへの影響を最小化できます。 [0-cite-1](#0-cite-1) [0-cite-8](#0-cite-8) [0-cite-2](#0-cite-2) [0-cite-4](#0-cite-4) [0-cite-9](#0-cite-9)
 
 ---
 
