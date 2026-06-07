@@ -5123,25 +5123,58 @@ fn repl_type_expr(ctx: &ReplContext<'_>, expr: &str) {
     }
 }
 
-fn repl_load_file(ctx: &mut ReplContext<'_>, file: &str) {
-    println!("  Loading '{}'...", file);
+fn repl_load_single_file(ctx: &mut ReplContext<'_>, file: &Path) -> Option<usize> {
+    println!("  Loading '{}'...", file.display());
     let source = match fs::read_to_string(file) {
         Ok(source) => source,
         Err(err) => {
-            eprintln!("  ❌ Failed to read '{}': {}", file, err);
-            return;
+            eprintln!("  ❌ Failed to read '{}': {}", file.display(), err);
+            return None;
         }
     };
     let items = parser::parse_module(&source);
     if items.is_empty() {
-        eprintln!("  ❌ Syntax error: no items parsed from '{}'", file);
-        return;
+        eprintln!(
+            "  ❌ Syntax error: no items parsed from '{}'",
+            file.display()
+        );
+        return None;
     }
     let mut count = 0;
     for item in &items {
         count += repl_register_item(ctx, item, true);
     }
-    println!("  ✅ Loaded {} definition(s) from '{}'", count, file);
+    println!(
+        "  ✅ Loaded {} definition(s) from '{}'",
+        count,
+        file.display()
+    );
+    Some(count)
+}
+
+fn repl_load_file(ctx: &mut ReplContext<'_>, file: &str) {
+    let path = Path::new(file);
+    if path.is_dir() {
+        let mut files = collect_mm_files(path);
+        files.sort();
+
+        let mut total_count = 0;
+        let mut loaded_files = 0;
+        for mm_file in &files {
+            if let Some(count) = repl_load_single_file(ctx, mm_file) {
+                total_count += count;
+                loaded_files += 1;
+            }
+        }
+
+        println!(
+            "  ✅ Total: {} definition(s) from {} file(s) in '{}'",
+            total_count, loaded_files, file
+        );
+        return;
+    }
+
+    repl_load_single_file(ctx, path);
 }
 
 fn repl_verify_named_atom(ctx: &mut ReplContext<'_>, atom_name: &str) {
@@ -5202,7 +5235,7 @@ fn repl_print_env(ctx: &ReplContext<'_>) {
 fn repl_help() {
     println!("  :help          — Show this help");
     println!("  :quit/:exit    — Exit the REPL");
-    println!("  :load <file>   — Load atoms and extern declarations from a .mm file");
+    println!("  :load <file|dir> — Load atoms and extern declarations from .mm files");
     println!("  :type <expr>   — Infer a simple expression type");
     println!("  :verify <atom> — Verify and JIT-compile a registered atom");
     println!("  :eval <expr>   — JIT compile and execute an expression without verification");
@@ -5334,7 +5367,7 @@ fn cmd_repl() {
         env!("CARGO_PKG_VERSION")
     );
     println!("  Type expressions or atom definitions to evaluate.");
-    println!("  Commands: :help, :type <expr>, :verify <atom>, :load <file>, :quit");
+    println!("  Commands: :help, :type <expr>, :verify <atom>, :load <file|dir>, :quit");
     println!();
 
     let mut module_env = verification::ModuleEnv::new();
