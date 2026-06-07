@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Number, Value};
 use std::collections::HashMap;
 use z3::ast::Dynamic;
@@ -29,6 +29,15 @@ pub struct LossComponent {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LossEntry {
+    pub violated_property: String,
+    pub counter_example: HashMap<String, Value>,
+    pub magnitude: f32,
+    #[serde(default)]
+    pub components: Vec<LossComponent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ReconstructionLossFormalization {
     pub specification_space: FormalSpace,
     pub implementation_space: FormalSpace,
@@ -51,14 +60,13 @@ impl Default for ReconstructionLossFormalization {
             },
             metric: "L_recon(S,V,c) = ||eval_S(c) - eval_V(c)|| over the Z3 counterexample c."
                 .to_string(),
-            zero_loss_condition:
-                "L_recon = 0 iff no counterexample component has non-zero magnitude."
-                    .to_string(),
+            zero_loss_condition: "L_recon = ∅ iff the verifier finds no counterexamples."
+                .to_string(),
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ReconstructionLoss {
     #[serde(default = "default_schema_version")]
     pub schema_version: String,
@@ -66,9 +74,70 @@ pub struct ReconstructionLoss {
     pub formalization: ReconstructionLossFormalization,
     pub violated_property: String,
     pub counter_example: HashMap<String, Value>,
-    pub loss_vector: Vec<f32>,
+    pub loss_set_size: usize,
+    pub is_zero_loss: bool,
+    pub loss_vector: Vec<LossEntry>,
     #[serde(default)]
     pub loss_components: Vec<LossComponent>,
+}
+
+impl<'de> Deserialize<'de> for ReconstructionLoss {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct RawReconstructionLoss {
+            #[serde(default = "default_schema_version")]
+            schema_version: String,
+            #[serde(default)]
+            formalization: ReconstructionLossFormalization,
+            violated_property: String,
+            #[serde(default)]
+            counter_example: HashMap<String, Value>,
+            #[serde(default)]
+            loss_set_size: Option<usize>,
+            #[serde(default)]
+            is_zero_loss: Option<bool>,
+            #[serde(default)]
+            loss_vector: Value,
+            #[serde(default)]
+            loss_components: Vec<LossComponent>,
+        }
+
+        let raw = RawReconstructionLoss::deserialize(deserializer)?;
+        let mut loss_components = raw.loss_components;
+        if loss_components.is_empty() {
+            loss_components = sorted_loss_components(&raw.counter_example);
+        }
+        let loss_vector = parse_loss_vector(
+            &raw.loss_vector,
+            &raw.violated_property,
+            &raw.counter_example,
+            &loss_components,
+        );
+        let is_zero_loss = raw
+            .is_zero_loss
+            .unwrap_or(raw.counter_example.is_empty() && loss_vector.is_empty());
+        let loss_set_size = raw.loss_set_size.unwrap_or_else(|| {
+            if is_zero_loss {
+                0
+            } else {
+                loss_vector.len().max(1)
+            }
+        });
+
+        Ok(Self {
+            schema_version: raw.schema_version,
+            formalization: raw.formalization,
+            violated_property: raw.violated_property,
+            counter_example: raw.counter_example,
+            loss_set_size,
+            is_zero_loss,
+            loss_vector,
+            loss_components,
+        })
+    }
 }
 
 impl ReconstructionLoss {
@@ -90,29 +159,30 @@ impl ReconstructionLoss {
         violated_property: impl Into<String>,
         counter_example: HashMap<String, Value>,
     ) -> Self {
-        let mut keys: Vec<&String> = counter_example.keys().collect();
-        keys.sort();
-        let loss_components = keys
-            .into_iter()
-            .filter_map(|key| {
-                counter_example.get(key).and_then(|value| {
-                    value_to_loss_component(value).map(|magnitude| LossComponent {
-                        variable: key.clone(),
-                        observed: value.clone(),
-                        magnitude,
-                    })
-                })
-            })
-            .collect::<Vec<_>>();
-        let loss_vector = loss_components
+        let violated_property = violated_property.into();
+        let loss_components = sorted_loss_components(&counter_example);
+        let total_magnitude = loss_components
             .iter()
-            .map(|component| component.magnitude)
-            .collect();
+            .map(|component| component.magnitude.abs())
+            .sum();
+        let is_zero_loss = counter_example.is_empty();
+        let loss_vector = if is_zero_loss {
+            Vec::new()
+        } else {
+            vec![LossEntry {
+                violated_property: violated_property.clone(),
+                counter_example: counter_example.clone(),
+                magnitude: total_magnitude,
+                components: loss_components.clone(),
+            }]
+        };
         Self {
             schema_version: default_schema_version(),
             formalization: ReconstructionLossFormalization::default(),
-            violated_property: violated_property.into(),
+            violated_property,
             counter_example,
+            loss_set_size: loss_vector.len(),
+            is_zero_loss,
             loss_vector,
             loss_components,
         }
@@ -134,26 +204,18 @@ impl ReconstructionLoss {
     }
 
     pub fn is_zero_loss(&self) -> bool {
-        self.loss_vector.is_empty()
-            || self
-                .loss_vector
-                .iter()
-                .all(|component| component.abs() <= f32::EPSILON)
+        self.is_zero_loss
     }
 
     pub fn total_magnitude(&self) -> f32 {
         self.loss_vector
             .iter()
-            .map(|component| component.abs())
+            .map(|entry| entry.magnitude.abs())
             .sum()
     }
 
     pub fn verifies_zero_loss(&self) -> bool {
-        self.total_magnitude() <= f32::EPSILON
-            && self
-                .loss_components
-                .iter()
-                .all(|component| component.magnitude.abs() <= f32::EPSILON)
+        self.is_zero_loss && self.loss_set_size == 0 && self.loss_vector.is_empty()
     }
 }
 
@@ -205,6 +267,74 @@ fn value_to_loss_component(value: &Value) -> Option<f32> {
     }
 }
 
+fn sorted_loss_components(counter_example: &HashMap<String, Value>) -> Vec<LossComponent> {
+    let mut keys: Vec<&String> = counter_example.keys().collect();
+    keys.sort();
+    keys.into_iter()
+        .filter_map(|key| {
+            counter_example.get(key).and_then(|value| {
+                value_to_loss_component(value).map(|magnitude| LossComponent {
+                    variable: key.clone(),
+                    observed: value.clone(),
+                    magnitude,
+                })
+            })
+        })
+        .collect()
+}
+
+fn parse_loss_vector(
+    value: &Value,
+    violated_property: &str,
+    counter_example: &HashMap<String, Value>,
+    loss_components: &[LossComponent],
+) -> Vec<LossEntry> {
+    match value {
+        Value::Array(entries) => {
+            if entries.is_empty() {
+                return Vec::new();
+            }
+            if entries.iter().all(Value::is_number) {
+                let magnitude = entries
+                    .iter()
+                    .filter_map(Value::as_f64)
+                    .map(|value| value.abs() as f32)
+                    .sum();
+                if counter_example.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![LossEntry {
+                        violated_property: violated_property.to_string(),
+                        counter_example: counter_example.clone(),
+                        magnitude,
+                        components: loss_components.to_vec(),
+                    }]
+                }
+            } else {
+                entries
+                    .iter()
+                    .filter_map(|entry| serde_json::from_value(entry.clone()).ok())
+                    .collect()
+            }
+        }
+        _ => {
+            if counter_example.is_empty() {
+                Vec::new()
+            } else {
+                vec![LossEntry {
+                    violated_property: violated_property.to_string(),
+                    counter_example: counter_example.clone(),
+                    magnitude: loss_components
+                        .iter()
+                        .map(|component| component.magnitude.abs())
+                        .sum(),
+                    components: loss_components.to_vec(),
+                }]
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -232,7 +362,14 @@ mod tests {
             loss.counter_example.get("x"),
             Some(&Value::Number(7.into()))
         );
-        assert_eq!(loss.loss_vector, vec![7.0]);
+        assert_eq!(loss.loss_set_size, 1);
+        assert_eq!(loss.loss_vector.len(), 1);
+        assert_eq!(loss.loss_vector[0].violated_property, "result > 10");
+        assert_eq!(
+            loss.loss_vector[0].counter_example.get("x"),
+            Some(&Value::Number(7.into()))
+        );
+        assert_eq!(loss.loss_vector[0].magnitude, 7.0);
         assert_eq!(loss.loss_components[0].variable, "x");
         assert_eq!(loss.loss_components[0].magnitude, 7.0);
         assert!(!loss.is_zero_loss());
@@ -244,12 +381,13 @@ mod tests {
         let empty = ReconstructionLoss::from_counter_example("result == 0", HashMap::new());
         assert!(empty.is_zero_loss());
 
-        let zero = ReconstructionLoss::from_counter_example(
+        let zero_valued_counterexample = ReconstructionLoss::from_counter_example(
             "result == 0",
             HashMap::from([("x".to_string(), Value::Number(0.into()))]),
         );
-        assert!(zero.is_zero_loss());
-        assert!(zero.verifies_zero_loss());
+        assert!(!zero_valued_counterexample.is_zero_loss());
+        assert!(!zero_valued_counterexample.verifies_zero_loss());
+        assert_eq!(zero_valued_counterexample.loss_set_size, 1);
     }
 
     #[test]
@@ -264,7 +402,11 @@ mod tests {
 
         assert_eq!(loss.schema_version, RECONSTRUCTION_LOSS_SCHEMA_VERSION);
         assert_eq!(loss.formalization.specification_space.symbol, "S");
-        assert!(loss.loss_components.is_empty());
+        assert_eq!(loss.loss_set_size, 1);
+        assert!(!loss.is_zero_loss());
+        assert_eq!(loss.loss_vector.len(), 1);
+        assert_eq!(loss.loss_vector[0].magnitude, 1.0);
+        assert_eq!(loss.loss_components[0].variable, "x");
         assert_eq!(loss.total_magnitude(), 1.0);
     }
 }

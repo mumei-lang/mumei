@@ -185,6 +185,8 @@ impl StructuredFeedback {
                         "formalization",
                         "violated_property",
                         "counter_example",
+                        "loss_set_size",
+                        "is_zero_loss",
                         "loss_vector",
                         "loss_components"
                     ],
@@ -221,9 +223,43 @@ impl StructuredFeedback {
                         },
                         "violated_property": {"type": "string"},
                         "counter_example": {"type": "object"},
+                        "loss_set_size": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "description": "Cardinality of L_recon; zero means no counterexamples were found."
+                        },
+                        "is_zero_loss": {
+                            "type": "boolean",
+                            "description": "True iff L_recon is empty and the proof is complete."
+                        },
                         "loss_vector": {
                             "type": "array",
-                            "items": {"type": "number"}
+                            "items": {
+                                "type": "object",
+                                "required": [
+                                    "violated_property",
+                                    "counter_example",
+                                    "magnitude",
+                                    "components"
+                                ],
+                                "properties": {
+                                    "violated_property": {"type": "string"},
+                                    "counter_example": {"type": "object"},
+                                    "magnitude": {"type": "number"},
+                                    "components": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "object",
+                                            "required": ["variable", "observed", "magnitude"],
+                                            "properties": {
+                                                "variable": {"type": "string"},
+                                                "observed": {},
+                                                "magnitude": {"type": "number"}
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         },
                         "loss_components": {
                             "type": "array",
