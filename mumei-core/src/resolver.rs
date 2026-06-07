@@ -67,6 +67,8 @@ struct ResolverContext {
 pub struct LeanEscalationMetrics {
     pub escalation_attempts: usize,
     pub lean_successes: usize,
+    #[serde(default)]
+    pub lean_verified_accepted: usize,
     pub partial_translation: usize,
     pub manual_required: usize,
     #[serde(default)]
@@ -119,6 +121,7 @@ impl LeanEscalationMetrics {
             self.record_escalation(&atom.name, reason, &atom.logic_fragment_tags);
         }
         self.lean_successes += 1;
+        self.lean_verified_accepted += 1;
         *self
             .successes_by_failure_reason
             .entry(reason.to_string())
@@ -157,6 +160,7 @@ impl LeanEscalationMetrics {
         serde_json::json!({
             "escalation_attempts": self.escalation_attempts,
             "lean_successes": self.lean_successes,
+            "lean_verified_accepted": self.lean_verified_accepted,
             "partial_translation": self.partial_translation,
             "manual_required": self.manual_required,
             "success_rate": if self.escalation_attempts > 0 {
@@ -174,6 +178,7 @@ impl LeanEscalationMetrics {
     fn merge(&mut self, other: Self) {
         self.escalation_attempts += other.escalation_attempts;
         self.lean_successes += other.lean_successes;
+        self.lean_verified_accepted += other.lean_verified_accepted;
         self.partial_translation += other.partial_translation;
         self.manual_required += other.manual_required;
         self.by_atom.extend(other.by_atom);

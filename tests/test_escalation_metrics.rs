@@ -168,6 +168,7 @@ fn test_metrics_json_output() {
 
     assert_eq!(json["escalation_attempts"], 1);
     assert_eq!(json["lean_successes"], 1);
+    assert_eq!(json["lean_verified_accepted"], 0);
     assert_eq!(json["partial_translation"], 0);
     assert_eq!(json["manual_required"], 0);
     assert_eq!(json["success_rate"], 1.0);
@@ -194,6 +195,7 @@ fn test_lean_verified_acceptance_tracks_success_by_reason() {
 
     assert_eq!(metrics.escalation_attempts, 1);
     assert_eq!(metrics.lean_successes, 1);
+    assert_eq!(metrics.lean_verified_accepted, 1);
     assert_eq!(
         metrics
             .successes_by_failure_reason
@@ -212,6 +214,7 @@ fn test_lean_verified_acceptance_without_escalation_reason_has_fallback_bucket()
 
     assert_eq!(metrics.escalation_attempts, 1);
     assert_eq!(metrics.lean_successes, 1);
+    assert_eq!(metrics.lean_verified_accepted, 1);
     assert_eq!(
         metrics
             .by_failure_reason
