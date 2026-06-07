@@ -1,3 +1,4 @@
+use std::fs;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
@@ -35,6 +36,7 @@ fn repl_launches_and_shows_help() {
         "repl should exit successfully\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
     assert!(stdout.contains("Mumei REPL"));
+    assert!(stdout.contains(":load <file|dir>"));
     assert!(stdout.contains(":type <expr>"));
     assert!(stdout.contains(":verify <atom>"));
     assert!(stdout.contains("Goodbye"));
@@ -101,4 +103,50 @@ fn repl_loads_json_ffi_and_executes_symbol() {
         !stderr.contains("Symbols not found") && !stderr.contains("JIT compile error"),
         "json FFI symbols should resolve in JIT\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
+}
+
+#[test]
+fn repl_loads_mm_files_from_directory() {
+    let fixture_dir = std::env::temp_dir().join(format!(
+        "mumei-repl-load-dir-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let nested_dir = fixture_dir.join("nested");
+    let _ = fs::remove_dir_all(&fixture_dir);
+    fs::create_dir_all(&nested_dir).expect("create fixture directories");
+    fs::write(
+        fixture_dir.join("foo.mm"),
+        r#"
+atom dir_inc(x: i64) -> i64
+  requires: true;
+  ensures: result == x + 1;
+  body: { x + 1 }
+"#,
+    )
+    .expect("write foo fixture");
+    fs::write(
+        nested_dir.join("bar.mm"),
+        r#"
+atom dir_double(x: i64) -> i64
+  requires: true;
+  ensures: result == x * 2;
+  body: { x * 2 }
+"#,
+    )
+    .expect("write bar fixture");
+
+    let input = format!(":load {}\ndir_inc(1)\n:quit\n", fixture_dir.display());
+    let (success, stdout, stderr) = run_repl_session(&input);
+    let _ = fs::remove_dir_all(&fixture_dir);
+
+    assert!(
+        success,
+        "repl should exit successfully\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(stdout.contains("Loaded 1 definition(s)"));
+    assert!(stdout.contains("Total: 2 definition(s) from 2 file(s)"));
+    assert!(stdout.contains("Verified: dir_inc"));
+    assert!(stdout.contains("Verified: dir_double"));
+    assert!(stdout.contains("= 2"));
 }
