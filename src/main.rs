@@ -109,17 +109,48 @@ fn structured_feedback_payload(
     })
 }
 
+fn collect_decidable_fragment_diagnostic(
+    atom: &parser::Atom,
+    module_env: &verification::ModuleEnv,
+    suppress_output: bool,
+) -> Option<verification::Diagnostic> {
+    let diagnostic = verification::outside_decidable_fragment_diagnostic(atom, module_env)?;
+    if !suppress_output {
+        eprintln!("  ⚠️  {}: {}", diagnostic.code, diagnostic.message);
+    }
+    Some(diagnostic)
+}
+
 fn emit_decidable_fragment_warning(
     atom: &parser::Atom,
     module_env: &verification::ModuleEnv,
     suppress_output: bool,
 ) {
-    if suppress_output {
-        return;
+    let _ = collect_decidable_fragment_diagnostic(atom, module_env, suppress_output);
+}
+
+fn has_outside_decidable_fragment(
+    atom: &parser::Atom,
+    module_env: &verification::ModuleEnv,
+) -> bool {
+    verification::outside_decidable_fragment_diagnostic(atom, module_env).is_some()
+}
+
+fn enrich_verify_json_payload(
+    mut payload: serde_json::Value,
+    diagnostics: &[verification::Diagnostic],
+    loop_suggestions: &[serde_json::Value],
+) -> serde_json::Value {
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("diagnostics".to_string(), serde_json::json!(diagnostics));
+        if !loop_suggestions.is_empty() {
+            object.insert(
+                "cegis_suggestions".to_string(),
+                serde_json::Value::Array(loop_suggestions.to_vec()),
+            );
+        }
     }
-    if let Some(warning) = verification::outside_decidable_fragment_warning(atom, module_env) {
-        eprintln!("  ⚠️  {warning}");
-    }
+    payload
 }
 
 fn emit_spurious_counterexample_diagnostic(
@@ -1618,6 +1649,8 @@ fn cmd_verify(options: VerifyOptions<'_>) -> bool {
     let mut reconstruction_losses: std::collections::HashMap<String, ReconstructionLoss> =
         std::collections::HashMap::new();
     let mut structured_feedbacks: Vec<StructuredFeedback> = Vec::new();
+    let mut diagnostics: Vec<verification::Diagnostic> = Vec::new();
+    let emit_lean_artifacts = escalate_lean || emit_escalation_bundle || emit_escalation_metrics;
 
     // Plan 11B: Track per-atom verification results for proof certificates
     let mut cert_results: std::collections::HashMap<String, (String, String)> =
@@ -1742,6 +1775,13 @@ fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                 }
             }
             Item::Atom(atom) => {
+                if let Some(diagnostic) =
+                    collect_decidable_fragment_diagnostic(atom, &module_env, json_output)
+                {
+                    diagnostics.push(diagnostic);
+                }
+                let promote_outside_fragment =
+                    emit_lean_artifacts && has_outside_decidable_fragment(atom, &module_env);
                 if module_env.is_verified(&atom.name) {
                     if !quiet_output {
                         println!(
@@ -1751,6 +1791,13 @@ fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                     }
                     if emit_structured_feedback {
                         structured_feedbacks.push(structured_feedback_for_passed_atom(atom));
+                    }
+                    if promote_outside_fragment {
+                        cert_results.insert(
+                            atom.name.clone(),
+                            ("skipped".to_string(), "escalation_candidate".to_string()),
+                        );
+                        escalated += 1;
                     }
                 } else {
                     // Feature 2: Use compute_proof_hash with dependency-aware hashing
@@ -1771,8 +1818,18 @@ fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                             // Plan 11B: Record cached atoms as "unsat" (proven) for proof certificate
                             cert_results.insert(
                                 atom.name.clone(),
-                                ("unsat".to_string(), "verified".to_string()),
+                                (
+                                    "unsat".to_string(),
+                                    if promote_outside_fragment {
+                                        "escalation_candidate".to_string()
+                                    } else {
+                                        "verified".to_string()
+                                    },
+                                ),
                             );
+                            if promote_outside_fragment {
+                                escalated += 1;
+                            }
                             if emit_structured_feedback {
                                 structured_feedbacks
                                     .push(structured_feedback_for_passed_atom(atom));
@@ -1795,7 +1852,6 @@ fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                         .filter(|tn| module_env.get_type(tn).is_some())
                         .collect();
 
-                    emit_decidable_fragment_warning(atom, &module_env, json_output);
                     let hir_atom = lower_atom_to_hir_with_env(atom, Some(&module_env));
 
                     // MIR pipeline: lower to MIR and run analyses
@@ -1825,8 +1881,18 @@ fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                             // Plan 11B: Record "unsat" (proven) for proof certificate
                             cert_results.insert(
                                 atom.name.clone(),
-                                ("unsat".to_string(), "verified".to_string()),
+                                (
+                                    "unsat".to_string(),
+                                    if promote_outside_fragment {
+                                        "escalation_candidate".to_string()
+                                    } else {
+                                        "verified".to_string()
+                                    },
+                                ),
                             );
+                            if promote_outside_fragment {
+                                escalated += 1;
+                            }
                             if emit_structured_feedback {
                                 structured_feedbacks
                                     .push(structured_feedback_for_passed_atom(atom));
@@ -1927,6 +1993,19 @@ fn cmd_verify(options: VerifyOptions<'_>) -> bool {
             Item::ImplBlock(impl_block) => {
                 for method in &impl_block.methods {
                     let qualified_name = format!("{}::{}", impl_block.struct_name, method.name);
+                    // Clone method with qualified name for consistent naming
+                    // throughout HIR lowering, proof hash, and cache lookup
+                    let mut qualified_method = method.clone();
+                    qualified_method.name = qualified_name.clone();
+                    if let Some(diagnostic) = collect_decidable_fragment_diagnostic(
+                        &qualified_method,
+                        &module_env,
+                        json_output,
+                    ) {
+                        diagnostics.push(diagnostic);
+                    }
+                    let promote_outside_fragment = emit_lean_artifacts
+                        && has_outside_decidable_fragment(&qualified_method, &module_env);
                     if module_env.is_verified(&qualified_name) {
                         if !quiet_output {
                             println!(
@@ -1935,17 +2014,17 @@ fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                             );
                         }
                         if emit_structured_feedback {
-                            let mut qualified_method = method.clone();
-                            qualified_method.name = qualified_name.clone();
                             structured_feedbacks
                                 .push(structured_feedback_for_passed_atom(&qualified_method));
                         }
+                        if promote_outside_fragment {
+                            cert_results.insert(
+                                qualified_name.clone(),
+                                ("skipped".to_string(), "escalation_candidate".to_string()),
+                            );
+                            escalated += 1;
+                        }
                     } else {
-                        // Clone method with qualified name for consistent naming
-                        // throughout HIR lowering, proof hash, and cache lookup
-                        let mut qualified_method = method.clone();
-                        qualified_method.name = qualified_name.clone();
-
                         let proof_flags = if verification_config.enable_vacuity_check {
                             &["enable_vacuity_check"][..]
                         } else {
@@ -1968,8 +2047,18 @@ fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                                 module_env.mark_verified(&qualified_name);
                                 cert_results.insert(
                                     qualified_name.clone(),
-                                    ("unsat".to_string(), "verified".to_string()),
+                                    (
+                                        "unsat".to_string(),
+                                        if promote_outside_fragment {
+                                            "escalation_candidate".to_string()
+                                        } else {
+                                            "verified".to_string()
+                                        },
+                                    ),
                                 );
+                                if promote_outside_fragment {
+                                    escalated += 1;
+                                }
                                 if emit_structured_feedback {
                                     structured_feedbacks.push(structured_feedback_for_passed_atom(
                                         &qualified_method,
@@ -1992,11 +2081,6 @@ fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                             .filter(|tn| module_env.get_type(tn).is_some())
                             .collect();
 
-                        emit_decidable_fragment_warning(
-                            &qualified_method,
-                            &module_env,
-                            json_output,
-                        );
                         let hir_atom =
                             lower_atom_to_hir_with_env(&qualified_method, Some(&module_env));
 
@@ -2025,8 +2109,18 @@ fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                                 module_env.mark_verified(&qualified_name);
                                 cert_results.insert(
                                     qualified_name.clone(),
-                                    ("unsat".to_string(), "verified".to_string()),
+                                    (
+                                        "unsat".to_string(),
+                                        if promote_outside_fragment {
+                                            "escalation_candidate".to_string()
+                                        } else {
+                                            "verified".to_string()
+                                        },
+                                    ),
                                 );
+                                if promote_outside_fragment {
+                                    escalated += 1;
+                                }
                                 if emit_structured_feedback {
                                     structured_feedbacks.push(structured_feedback_for_passed_atom(
                                         &qualified_method,
@@ -2371,27 +2465,17 @@ fn cmd_verify(options: VerifyOptions<'_>) -> bool {
         let report_path = output_dir.join("report.json");
         if report_path.exists() {
             match std::fs::read_to_string(&report_path) {
-                Ok(content) => {
-                    if loop_suggestions.is_empty() {
-                        println!("{}", content);
-                    } else {
-                        match serde_json::from_str::<serde_json::Value>(&content) {
-                            Ok(mut payload) => {
-                                if let Some(object) = payload.as_object_mut() {
-                                    object.insert(
-                                        "cegis_suggestions".to_string(),
-                                        serde_json::Value::Array(loop_suggestions.clone()),
-                                    );
-                                }
-                                match serde_json::to_string_pretty(&payload) {
-                                    Ok(json) => println!("{json}"),
-                                    Err(_) => println!("{}", content),
-                                }
-                            }
+                Ok(content) => match serde_json::from_str::<serde_json::Value>(&content) {
+                    Ok(payload) => {
+                        let payload =
+                            enrich_verify_json_payload(payload, &diagnostics, &loop_suggestions);
+                        match serde_json::to_string_pretty(&payload) {
+                            Ok(json) => println!("{json}"),
                             Err(_) => println!("{}", content),
                         }
                     }
-                }
+                    Err(_) => println!("{}", content),
+                },
                 Err(e) => {
                     eprintln!("Failed to read report.json: {}", e);
                     return true;
@@ -2406,6 +2490,7 @@ fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                 "failed": failed,
                 "skipped": skipped,
                 "escalation_candidates": escalated,
+                "diagnostics": diagnostics,
             });
             if !loop_suggestions.is_empty() {
                 payload["cegis_suggestions"] = serde_json::Value::Array(loop_suggestions.clone());

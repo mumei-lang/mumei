@@ -82,6 +82,21 @@ def test_structured_feedback_from_report_helper() -> None:
     assert "When x = 0" in payload["feedback_instruction"]
 
 
+def test_get_spec_guideline_returns_decidable_fragment_summary() -> None:
+    from mcp_server import get_spec_guideline
+
+    payload = json.loads(get_spec_guideline())
+
+    assert "decidable_fragment" in payload
+    assert "linear_arithmetic" in payload["decidable_fragment"]
+    tags = {entry["tag"] for entry in payload["common_failure_patterns"]}
+    assert "nonlinear_arithmetic" in tags
+    assert "quantifier_alternation" in tags
+    assert "nested_aliasing" in tags
+    assert "regex_semantics" in tags
+    assert payload["doc"] == "docs/SPEC_GUIDE.md"
+
+
 def test_get_structured_feedback_returns_cli_payload() -> None:
     from mcp_server import get_structured_feedback
 

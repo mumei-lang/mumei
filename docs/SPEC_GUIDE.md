@@ -99,6 +99,8 @@ The verifier emits an `outside_decidable_fragment` warning when it detects patte
 | `inductive_data_type` | Recursive enum/match shape | Prefer finite enum cases or Lean proofs |
 | `recursive_invariant` | While loop or recursive invariant | Keep invariants linear and local, or escalate to Lean |
 | `complex_temporal_effect` | Many states/transitions or implicit history | Reduce to finite explicit transitions |
+| `nested_aliasing` | Multiple `ref mut` aliases or nested mutable scopes | Split the atom or serialize mutation through one owner |
+| `regex_semantics` | `regex_match`, `matches`, or equivalent regex constraints | Replace with prefix/contains/bounded finite cases or escalate to Lean |
 
 ## Property-based validation
 
@@ -223,7 +225,7 @@ Track the following quarterly:
 - `outside_decidable_fragment` warning rate: `atoms_with_warnings / total_atoms_checked`
 - Z3 `unknown` rate from verification reports
 - first-pass verification success rate for AI-generated specifications
-- per-fragment warning counts for the seven tags in the anti-pattern table
+- per-fragment warning counts for the tags in the anti-pattern table
 
 Use the P8-C feedback loop after each quarterly rollup:
 

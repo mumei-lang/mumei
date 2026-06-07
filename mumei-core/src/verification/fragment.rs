@@ -79,21 +79,42 @@ pub fn detect_logic_fragment_tags(atom: &Atom, module_env: &ModuleEnv) -> Vec<St
     if atom_uses_complex_temporal_effect(atom, module_env) {
         push_unique_tag(&mut tags, "complex_temporal_effect");
     }
+    if atom_has_nested_mutable_aliasing(atom, &body_stmt) {
+        push_unique_tag(&mut tags, "nested_aliasing");
+    }
+    if atom_has_regex_semantics(atom, &requires_expr, &ensures_expr, &body_stmt) {
+        push_unique_tag(&mut tags, "regex_semantics");
+    }
 
     tags
 }
 
-pub fn outside_decidable_fragment_warning(atom: &Atom, module_env: &ModuleEnv) -> Option<String> {
+pub fn outside_decidable_fragment_diagnostic(
+    atom: &Atom,
+    module_env: &ModuleEnv,
+) -> Option<Diagnostic> {
     let tags = detect_logic_fragment_tags(atom, module_env);
     if tags.is_empty() {
         None
     } else {
-        Some(format!(
-            "outside_decidable_fragment: atom '{}' uses {}; prefer the Z3-stable fragment in docs/SPEC_GUIDE.md or escalate to Lean",
-            atom.name,
-            tags.join(", ")
-        ))
+        Some(Diagnostic {
+            code: "outside_decidable_fragment".to_string(),
+            severity: "warning".to_string(),
+            atom: atom.name.clone(),
+            message: format!(
+                "atom '{}' uses {}; prefer the Z3-stable fragment in docs/SPEC_GUIDE.md or escalate to Lean",
+                atom.name,
+                tags.join(", ")
+            ),
+            tags,
+            escalation_reason: Some("outside_decidable_fragment".to_string()),
+        })
     }
+}
+
+pub fn outside_decidable_fragment_warning(atom: &Atom, module_env: &ModuleEnv) -> Option<String> {
+    outside_decidable_fragment_diagnostic(atom, module_env)
+        .map(|diagnostic| format!("{}: {}", diagnostic.code, diagnostic.message))
 }
 
 pub fn collect_decidable_fragment_metrics(module_env: &ModuleEnv) -> DecidableFragmentMetrics {
@@ -139,10 +160,57 @@ pub(crate) fn atom_contract_text(atom: &Atom) -> String {
 
 pub(crate) fn text_has_nonlinear_arithmetic_marker(text: &str) -> bool {
     text.contains('%')
+        || text.contains('^')
         || text.contains("**")
         || text.contains("pow(")
         || text.contains("mod(")
         || text.contains("exp(")
+}
+
+pub(crate) fn atom_has_nested_mutable_aliasing(atom: &Atom, body_stmt: &Stmt) -> bool {
+    let mutable_refs = atom.params.iter().filter(|param| param.is_ref_mut).count();
+    mutable_refs > 1 || stmt_has_nested_mutable_scope(body_stmt, 0)
+}
+
+pub(crate) fn stmt_has_nested_mutable_scope(stmt: &Stmt, depth: usize) -> bool {
+    match stmt {
+        Stmt::Acquire { body, .. } => depth > 0 || stmt_has_nested_mutable_scope(body, depth + 1),
+        Stmt::Block(stmts, _) => stmts
+            .iter()
+            .any(|stmt| stmt_has_nested_mutable_scope(stmt, depth)),
+        Stmt::While { body, .. } | Stmt::Task { body, .. } => {
+            stmt_has_nested_mutable_scope(body, depth)
+        }
+        Stmt::TaskGroup { children, .. } => children
+            .iter()
+            .any(|child| stmt_has_nested_mutable_scope(child, depth)),
+        Stmt::Let { .. }
+        | Stmt::Assign { .. }
+        | Stmt::Expr(_, _)
+        | Stmt::ArrayStore { .. }
+        | Stmt::Cancel { .. } => false,
+    }
+}
+
+pub(crate) fn atom_has_regex_semantics(
+    atom: &Atom,
+    requires_expr: &Expr,
+    ensures_expr: &Expr,
+    body_stmt: &Stmt,
+) -> bool {
+    expr_has_regex_semantics(requires_expr)
+        || expr_has_regex_semantics(ensures_expr)
+        || stmt_has_regex_semantics(body_stmt)
+        || text_has_regex_semantics(&atom_contract_text(atom))
+}
+
+pub(crate) fn text_has_regex_semantics(text: &str) -> bool {
+    let normalized = text.to_ascii_lowercase();
+    normalized.contains("regex")
+        || normalized.contains("regexp")
+        || normalized.contains("matches(")
+        || normalized.contains("match_regex(")
+        || normalized.contains("re_match(")
 }
 
 pub(crate) fn atom_has_unbounded_array_access(
@@ -383,6 +451,73 @@ pub(crate) fn stmt_has_nonlinear_arithmetic(stmt: &Stmt) -> bool {
         }
         Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => stmt_has_nonlinear_arithmetic(body),
         Stmt::TaskGroup { children, .. } => children.iter().any(stmt_has_nonlinear_arithmetic),
+        Stmt::Cancel { .. } => false,
+    }
+}
+
+pub(crate) fn expr_has_regex_semantics(expr: &Expr) -> bool {
+    match expr {
+        Expr::Call(name, args) => {
+            text_has_regex_semantics(name) || args.iter().any(expr_has_regex_semantics)
+        }
+        Expr::BinaryOp(left, _, right) => {
+            expr_has_regex_semantics(left) || expr_has_regex_semantics(right)
+        }
+        Expr::ArrayAccess(_, idx) => expr_has_regex_semantics(idx),
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            expr_has_regex_semantics(cond)
+                || stmt_has_regex_semantics(then_branch)
+                || stmt_has_regex_semantics(else_branch)
+        }
+        Expr::StructInit { fields, .. } => fields
+            .iter()
+            .any(|(_, field_expr)| expr_has_regex_semantics(field_expr)),
+        Expr::FieldAccess(base, field) => {
+            text_has_regex_semantics(field) || expr_has_regex_semantics(base)
+        }
+        Expr::Match { target, arms } => {
+            expr_has_regex_semantics(target)
+                || arms.iter().any(|arm| stmt_has_regex_semantics(&arm.body))
+        }
+        Expr::Async { body } | Expr::Lambda { body, .. } => stmt_has_regex_semantics(body),
+        Expr::Await { expr } => expr_has_regex_semantics(expr),
+        Expr::CallRef { callee, args } => {
+            expr_has_regex_semantics(callee) || args.iter().any(expr_has_regex_semantics)
+        }
+        Expr::Perform { args, .. } => args.iter().any(expr_has_regex_semantics),
+        Expr::ChanSend { channel, value } => {
+            expr_has_regex_semantics(channel) || expr_has_regex_semantics(value)
+        }
+        Expr::ChanRecv { channel } => expr_has_regex_semantics(channel),
+        Expr::StringLit(value) => text_has_regex_semantics(value),
+        Expr::Number(_) | Expr::Float(_) | Expr::Variable(_) | Expr::AtomRef { .. } => false,
+    }
+}
+
+pub(crate) fn stmt_has_regex_semantics(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Let { value, .. } | Stmt::Assign { value, .. } => expr_has_regex_semantics(value),
+        Stmt::Expr(value, _) => expr_has_regex_semantics(value),
+        Stmt::ArrayStore { index, value, .. } => {
+            expr_has_regex_semantics(index) || expr_has_regex_semantics(value)
+        }
+        Stmt::Block(stmts, _) => stmts.iter().any(stmt_has_regex_semantics),
+        Stmt::While {
+            cond,
+            invariant,
+            body,
+            ..
+        } => {
+            expr_has_regex_semantics(cond)
+                || expr_has_regex_semantics(invariant)
+                || stmt_has_regex_semantics(body)
+        }
+        Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => stmt_has_regex_semantics(body),
+        Stmt::TaskGroup { children, .. } => children.iter().any(stmt_has_regex_semantics),
         Stmt::Cancel { .. } => false,
     }
 }
