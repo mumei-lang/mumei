@@ -313,6 +313,62 @@ body: x * y;
 }
 
 #[test]
+fn verify_stderr_prints_outside_decidable_fragment_warning_with_location_and_hint() {
+    let bin = env!("CARGO_BIN_EXE_mumei");
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let temp_dir = std::env::temp_dir().join(format!(
+        "mumei_decidable_warning_{}_{}",
+        std::process::id(),
+        "stderr"
+    ));
+    if temp_dir.exists() {
+        std::fs::remove_dir_all(&temp_dir).expect("clean stale warning temp dir");
+    }
+    std::fs::create_dir_all(&temp_dir).expect("create warning temp dir");
+    let fixture = temp_dir.join("vault.mm");
+    std::fs::write(
+        &fixture,
+        "atom nonlinear(x: i64, y: i64) -> i64\nrequires: true;\nensures: result == x * y;\nbody: x * y;\n",
+    )
+    .expect("write nonlinear fixture");
+
+    let output = Command::new(bin)
+        .arg("verify")
+        .arg("--report-dir")
+        .arg(&temp_dir)
+        .arg(&fixture)
+        .current_dir(manifest_dir)
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run mumei verify: {err}"));
+
+    assert!(
+        output.status.success(),
+        "verify should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(
+            "warning[outside_decidable_fragment]: atom `nonlinear` uses nonlinear_arithmetic"
+        ),
+        "missing warning header in stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(&format!("  --> {}:1", fixture.display())),
+        "missing warning source location in stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(
+            "  = hint: Z3 may return `unknown`; consider escalating to Lean 4 with `--escalate-lean`"
+        ),
+        "missing warning hint in stderr:\n{stderr}"
+    );
+
+    std::fs::remove_dir_all(temp_dir).expect("remove warning temp dir");
+}
+
+#[test]
 fn escalate_lean_promotes_outside_fragment_to_candidate_bundle() {
     let bin = env!("CARGO_BIN_EXE_mumei");
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
