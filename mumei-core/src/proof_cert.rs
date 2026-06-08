@@ -8,7 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::reconstruction_loss::ReconstructionLoss;
@@ -682,12 +682,36 @@ pub fn generate_escalation_bundle(cert: &ProofCertificate) -> EscalationBundle {
     }
 }
 
+/// Generate a human review queue from a proof certificate.
+/// Collects atoms requiring human judgment (manual lemma, z3 unknown,
+/// escalation candidate, trusted) and sorts by priority.
 pub fn generate_human_review_queue(cert: &ProofCertificate) -> HumanReviewQueue {
     let mut atoms: Vec<HumanReviewEntry> = cert
         .atoms
         .iter()
         .filter_map(human_review_entry_for_atom)
         .collect();
+    if cert
+        .intent_fidelity
+        .as_ref()
+        .is_some_and(|intent| intent.manual_review_required)
+    {
+        let queued: HashSet<String> = atoms.iter().map(|entry| entry.atom_name.clone()).collect();
+        atoms.extend(
+            cert.atoms
+                .iter()
+                .filter(|atom| !queued.contains(&atom.name))
+                .map(|atom| HumanReviewEntry {
+                    atom_name: atom.name.clone(),
+                    review_reason: "manual_review_required".to_string(),
+                    priority: "high".to_string(),
+                    spec_text: atom_spec_text(atom),
+                    suggested_action:
+                        "Review this atom because the certificate intent metadata requires human approval."
+                            .to_string(),
+                }),
+        );
+    }
     atoms.sort_by(|left, right| {
         priority_rank(&left.priority)
             .cmp(&priority_rank(&right.priority))
