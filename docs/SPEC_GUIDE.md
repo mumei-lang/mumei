@@ -102,6 +102,34 @@ The verifier emits an `outside_decidable_fragment` warning when it detects patte
 | `nested_aliasing` | Multiple `ref mut` aliases or nested mutable scopes | Split the atom or serialize mutation through one owner |
 | `regex_semantics` | `regex_match`, `matches`, or equivalent regex constraints | Replace with prefix/contains/bounded finite cases or escalate to Lean |
 
+## Responding to `outside_decidable_fragment` warnings
+
+When `mumei verify` detects logic outside the decidable fragment, it prints:
+
+```
+warning[outside_decidable_fragment]: atom `foo` uses nonlinear_arithmetic
+  --> vault.mm:12
+  = hint: Z3 may return `unknown`; consider escalating to Lean 4 with `--escalate-lean`
+```
+
+In `--json` mode the same information appears in the `diagnostics` array:
+
+```json
+{
+  "code": "outside_decidable_fragment",
+  "severity": "warning",
+  "atom": "foo",
+  "message": "atom 'foo' uses nonlinear_arithmetic; prefer the Z3-stable fragment in docs/SPEC_GUIDE.md or escalate to Lean",
+  "tags": ["nonlinear_arithmetic"]
+}
+```
+
+### Resolution options
+
+1. **Rewrite the specification** to stay inside the decidable fragment (see patterns above).
+2. **Escalate to Lean 4** with `mumei verify --escalate-lean` to produce an escalation bundle that the Lean bridge can translate into a formal proof.
+3. **Accept the instability** when the property genuinely requires nonlinear/inductive reasoning and a Z3 `unknown` is tolerable for your workflow.
+
 ## Property-based validation
 
 Use property-based validation when a specification is outside Z3's most reliable fragment or you want an executable sanity check before Lean escalation.
