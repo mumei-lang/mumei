@@ -274,6 +274,8 @@ The mumei CLI provides the verification interface:
 - `mumei verify --report-dir <dir> file.mm` — write report.json to specified directory
 - See [docs/REPORT_SCHEMA.md](docs/REPORT_SCHEMA.md) for the output schema.
 
+For end-to-end verification workflows (natural-language spec validation, foreign-code verification, spec↔code alignment, and human-friendly operation guide), see the [Verification Workflow Guide](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/VERIFICATION_WORKFLOW_GUIDE.md) in mumei-agent.
+
 ### MCP Tools
 
 | Tool | Description |
