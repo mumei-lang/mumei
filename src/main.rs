@@ -116,7 +116,21 @@ fn collect_decidable_fragment_diagnostic(
 ) -> Option<verification::Diagnostic> {
     let diagnostic = verification::outside_decidable_fragment_diagnostic(atom, module_env)?;
     if !suppress_output {
-        eprintln!("  ⚠️  {}: {}", diagnostic.code, diagnostic.message);
+        let location = if atom.span.file.is_empty() {
+            format!("<unknown>:{}", atom.span.line)
+        } else {
+            format!("{}:{}", atom.span.file, atom.span.line)
+        };
+        eprintln!(
+            "warning[{}]: atom `{}` uses {}",
+            diagnostic.code,
+            atom.name,
+            diagnostic.tags.join(", ")
+        );
+        eprintln!("  --> {}", location);
+        eprintln!(
+            "  = hint: Z3 may return `unknown`; consider escalating to Lean 4 with `--escalate-lean`"
+        );
     }
     Some(diagnostic)
 }
