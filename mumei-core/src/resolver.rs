@@ -201,6 +201,16 @@ impl LeanEscalationMetrics {
     }
 }
 
+/// Build and write an `EscalationBundle` from a `ProofCertificate` using the
+/// same candidate filtering as `proof_cert::generate_escalation_bundle`.
+pub fn emit_escalation_bundle(
+    cert: &proof_cert::ProofCertificate,
+    output_path: &std::path::Path,
+) -> Result<(), String> {
+    let bundle = proof_cert::generate_escalation_bundle(cert);
+    proof_cert::save_escalation_bundle(&bundle, output_path)
+}
+
 impl ResolverContext {
     fn new() -> Self {
         Self {

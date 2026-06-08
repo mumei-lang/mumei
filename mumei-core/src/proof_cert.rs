@@ -23,6 +23,7 @@ pub struct ProofCertificate {
     /// ISO 8601 timestamp of certificate generation
     pub timestamp: String,
     /// Mumei compiler version
+    #[serde(default)]
     pub mumei_version: String,
     /// Z3 solver version (if available)
     pub z3_version: String,
@@ -351,6 +352,8 @@ pub struct EscalationBundle {
     pub version: String,
     pub timestamp: String,
     pub file: String,
+    #[serde(default)]
+    pub mumei_version: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub package_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -656,6 +659,7 @@ pub fn generate_escalation_bundle(cert: &ProofCertificate) -> EscalationBundle {
         version: "1.0".to_string(),
         timestamp: cert.timestamp.clone(),
         file: cert.file.clone(),
+        mumei_version: cert.mumei_version.clone(),
         package_name: cert.package_name.clone(),
         package_version: cert.package_version.clone(),
         summary,
@@ -1081,6 +1085,7 @@ pub struct ProofBundle {
     /// ISO 8601 timestamp of bundle generation.
     pub generated_at: String,
     /// mumei version string the bundle was produced for.
+    #[serde(default)]
     pub mumei_version: String,
     /// Module key → embedded ProofCertificate.
     ///
