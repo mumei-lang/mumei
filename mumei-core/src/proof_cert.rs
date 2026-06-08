@@ -365,9 +365,35 @@ pub struct HumanReviewEntry {
     pub atom_name: String,
     #[serde(rename = "reason")]
     pub review_reason: String,
-    pub priority: String,
+    pub priority: HumanReviewPriority,
     pub spec_text: String,
     pub suggested_action: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HumanReviewPriority {
+    Critical,
+    High,
+    Medium,
+}
+
+impl HumanReviewPriority {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            HumanReviewPriority::Critical => "critical",
+            HumanReviewPriority::High => "high",
+            HumanReviewPriority::Medium => "medium",
+        }
+    }
+
+    fn rank(self) -> u8 {
+        match self {
+            HumanReviewPriority::Critical => 0,
+            HumanReviewPriority::High => 1,
+            HumanReviewPriority::Medium => 2,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -704,7 +730,7 @@ pub fn generate_human_review_queue(cert: &ProofCertificate) -> HumanReviewQueue 
                 .map(|atom| HumanReviewEntry {
                     atom_name: atom.name.clone(),
                     review_reason: "manual_review_required".to_string(),
-                    priority: "high".to_string(),
+                    priority: HumanReviewPriority::High,
                     spec_text: atom_spec_text(atom),
                     suggested_action:
                         "Review this atom because the certificate intent metadata requires human approval."
@@ -731,7 +757,7 @@ fn human_review_entry_for_atom(atom: &AtomCertificate) -> Option<HumanReviewEntr
         return Some(HumanReviewEntry {
             atom_name: atom.name.clone(),
             review_reason: reason.clone(),
-            priority: "critical".to_string(),
+            priority: HumanReviewPriority::Critical,
             spec_text: atom_spec_text(atom),
             suggested_action:
                 "Review the generated obligation and author or approve the required Lean lemma."
@@ -743,7 +769,7 @@ fn human_review_entry_for_atom(atom: &AtomCertificate) -> Option<HumanReviewEntr
         return Some(HumanReviewEntry {
             atom_name: atom.name.clone(),
             review_reason: "z3_unknown".to_string(),
-            priority: "high".to_string(),
+            priority: HumanReviewPriority::High,
             spec_text: atom_spec_text(atom),
             suggested_action: "Escalate this atom with --escalate-lean or simplify the specification into a Z3-decidable fragment.".to_string(),
         });
@@ -756,7 +782,7 @@ fn human_review_entry_for_atom(atom: &AtomCertificate) -> Option<HumanReviewEntr
                 .escalation_reason
                 .clone()
                 .unwrap_or_else(|| "lean_promotion_pending".to_string()),
-            priority: "high".to_string(),
+            priority: HumanReviewPriority::High,
             spec_text: atom_spec_text(atom),
             suggested_action:
                 "Review the Lean escalation candidate and track promotion to lean_verified."
@@ -773,7 +799,7 @@ fn human_review_entry_for_atom(atom: &AtomCertificate) -> Option<HumanReviewEntr
         return Some(HumanReviewEntry {
             atom_name: atom.name.clone(),
             review_reason: "trusted_atom".to_string(),
-            priority: "medium".to_string(),
+            priority: HumanReviewPriority::Medium,
             spec_text: atom_spec_text(atom),
             suggested_action: "Confirm the trusted implementation boundary and record human approval before relying on the atom.".to_string(),
         });
@@ -782,13 +808,8 @@ fn human_review_entry_for_atom(atom: &AtomCertificate) -> Option<HumanReviewEntr
     None
 }
 
-fn priority_rank(priority: &str) -> u8 {
-    match priority {
-        "critical" => 0,
-        "high" => 1,
-        "medium" => 2,
-        _ => 3,
-    }
+fn priority_rank(priority: &HumanReviewPriority) -> u8 {
+    priority.rank()
 }
 
 fn atom_spec_text(atom: &AtomCertificate) -> String {
