@@ -201,6 +201,19 @@ impl LeanEscalationMetrics {
     }
 }
 
+/// Build an `EscalationBundle` from a `ProofCertificate` and return the
+/// serialised JSON bytes.  Extracts atoms whose `z3_check_result` is
+/// `"unknown"` (the same filtering performed by
+/// `proof_cert::generate_escalation_bundle`) and writes the bundle to
+/// `output_path`.
+pub fn emit_escalation_bundle(
+    cert: &proof_cert::ProofCertificate,
+    output_path: &std::path::Path,
+) -> Result<(), String> {
+    let bundle = proof_cert::generate_escalation_bundle(cert);
+    proof_cert::save_escalation_bundle(&bundle, output_path)
+}
+
 impl ResolverContext {
     fn new() -> Self {
         Self {

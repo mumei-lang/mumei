@@ -351,6 +351,7 @@ pub struct EscalationBundle {
     pub version: String,
     pub timestamp: String,
     pub file: String,
+    pub mumei_version: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub package_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -656,6 +657,7 @@ pub fn generate_escalation_bundle(cert: &ProofCertificate) -> EscalationBundle {
         version: "1.0".to_string(),
         timestamp: cert.timestamp.clone(),
         file: cert.file.clone(),
+        mumei_version: cert.mumei_version.clone(),
         package_name: cert.package_name.clone(),
         package_version: cert.package_version.clone(),
         summary,
