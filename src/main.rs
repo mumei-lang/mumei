@@ -353,7 +353,7 @@ enum Command {
         /// Emit Lean escalation candidate bundle alongside verification results
         #[arg(long)]
         escalate_lean: bool,
-        /// Emit target for verify-only output: escalation-bundle, escalation-metrics, decidable-metrics, reconstruction-loss, or structured-feedback
+        /// Emit target for verify-only output: escalation-bundle, escalation-metrics, decidable-metrics, reconstruction-loss, structured-feedback, or human-review-queue
         #[arg(long)]
         emit: Option<String>,
         /// Disable verify-only output targets: escalation-metrics
@@ -620,15 +620,17 @@ fn main() {
             let emit_decidable_metrics = matches!(emit.as_deref(), Some("decidable-metrics"));
             let emit_reconstruction_loss = matches!(emit.as_deref(), Some("reconstruction-loss"));
             let emit_structured_feedback = matches!(emit.as_deref(), Some("structured-feedback"));
+            let emit_human_review_queue = matches!(emit.as_deref(), Some("human-review-queue"));
             if let Some(other) = emit.as_deref() {
                 if !emit_escalation_bundle
                     && !matches!(other, "escalation-metrics")
                     && !emit_decidable_metrics
                     && !emit_reconstruction_loss
                     && !emit_structured_feedback
+                    && !emit_human_review_queue
                 {
                     eprintln!(
-                        "Unsupported verify --emit target '{}'. Supported values: escalation-bundle, escalation-metrics, decidable-metrics, reconstruction-loss, structured-feedback",
+                        "Unsupported verify --emit target '{}'. Supported values: escalation-bundle, escalation-metrics, decidable-metrics, reconstruction-loss, structured-feedback, human-review-queue",
                         other
                     );
                     std::process::exit(1);
@@ -672,6 +674,7 @@ fn main() {
                                 emit_decidable_metrics,
                                 emit_reconstruction_loss,
                                 emit_structured_feedback,
+                                emit_human_review_queue,
                                 cert_output: output.as_deref(),
                                 report_dir: report_dir.as_deref(),
                                 json_output: json,
@@ -726,6 +729,7 @@ fn main() {
                     emit_decidable_metrics,
                     emit_reconstruction_loss,
                     emit_structured_feedback,
+                    emit_human_review_queue,
                     cert_output: output.as_deref(),
                     report_dir: report_dir.as_deref(),
                     json_output: json,
@@ -1580,6 +1584,7 @@ struct VerifyOptions<'a> {
     emit_decidable_metrics: bool,
     emit_reconstruction_loss: bool,
     emit_structured_feedback: bool,
+    emit_human_review_queue: bool,
     cert_output: Option<&'a str>,
     report_dir: Option<&'a str>,
     json_output: bool,
@@ -1610,6 +1615,14 @@ fn verify_escalation_bundle_path(input: &str, output: Option<&str>) -> PathBuf {
     }
 }
 
+fn verify_human_review_queue_path(output_dir: &Path, output: Option<&str>) -> PathBuf {
+    if let Some(output) = output {
+        PathBuf::from(output).with_extension("human-review-queue.json")
+    } else {
+        output_dir.join("human_review_queue.json")
+    }
+}
+
 fn cmd_verify(options: VerifyOptions<'_>) -> bool {
     let VerifyOptions {
         input,
@@ -1623,6 +1636,7 @@ fn cmd_verify(options: VerifyOptions<'_>) -> bool {
         emit_decidable_metrics,
         emit_reconstruction_loss,
         emit_structured_feedback,
+        emit_human_review_queue,
         cert_output,
         report_dir,
         json_output,
@@ -2384,7 +2398,12 @@ fn cmd_verify(options: VerifyOptions<'_>) -> bool {
     }
 
     // Plan 11B: Generate proof certificate if requested
-    if generate_proof_cert || escalate_lean || emit_escalation_bundle || emit_escalation_metrics {
+    if generate_proof_cert
+        || escalate_lean
+        || emit_escalation_bundle
+        || emit_escalation_metrics
+        || emit_human_review_queue
+    {
         let mut atom_refs: Vec<&parser::Atom> = items
             .iter()
             .filter_map(|item| {
@@ -2496,6 +2515,26 @@ fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                     "  Lean escalation bundle candidate_count: {}",
                     bundle.summary.candidate_count
                 );
+            }
+        }
+
+        if emit_human_review_queue {
+            let queue = proof_cert::generate_human_review_queue(&cert);
+            let queue_path = verify_human_review_queue_path(output_dir, cert_output);
+            match proof_cert::save_human_review_queue(&queue, &queue_path) {
+                Ok(()) => {
+                    if !quiet_output {
+                        println!(
+                            "  👥 Human review queue written to: {}",
+                            queue_path.display()
+                        );
+                    }
+                }
+                Err(e) => {
+                    if !quiet_output {
+                        eprintln!("  ⚠️  Failed to write human review queue: {}", e);
+                    }
+                }
             }
         }
 
