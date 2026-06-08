@@ -424,6 +424,9 @@ enum Command {
         /// Include CEGIS loop-invariant suggestions in JSON/report output
         #[arg(long, requires = "detect_loops")]
         suggest_cegis: bool,
+        /// Path to an old proof certificate for spec drift detection
+        #[arg(long)]
+        detect_spec_drift: Option<String>,
     },
     /// Parse + resolve + monomorphize only (no Z3, fast syntax check)
     Check {
@@ -597,6 +600,7 @@ fn main() {
             enable_vacuity_check,
             detect_loops,
             suggest_cegis,
+            detect_spec_drift,
         }) => {
             let no_emit_escalation_metrics =
                 no_emit.iter().any(|target| target == "escalation-metrics");
@@ -743,6 +747,83 @@ fn main() {
                     detect_loops,
                     suggest_cegis,
                 });
+                // --detect-spec-drift: compare old cert with newly generated cert
+                if let Some(ref old_cert_path) = detect_spec_drift {
+                    let old_cert_file = std::fs::read_to_string(old_cert_path);
+                    match old_cert_file {
+                        Ok(old_json) => {
+                            let old_cert_parsed: Result<proof_cert::ProofCertificate, _> =
+                                serde_json::from_str(&old_json);
+                            match old_cert_parsed {
+                                Ok(old_cert) => {
+                                    // Determine the path to the new cert
+                                    let new_cert_path = if let Some(ref out) = output {
+                                        PathBuf::from(out)
+                                    } else {
+                                        let stem = Path::new(&input)
+                                            .file_stem()
+                                            .unwrap_or_default()
+                                            .to_string_lossy()
+                                            .to_string();
+                                        PathBuf::from(format!("{}.proof.json", stem))
+                                    };
+                                    if let Ok(new_json) = std::fs::read_to_string(&new_cert_path) {
+                                        if let Ok(new_cert) =
+                                            serde_json::from_str::<proof_cert::ProofCertificate>(
+                                                &new_json,
+                                            )
+                                        {
+                                            let drift_report =
+                                                cross_spec::drift_detector::detect_spec_drift(
+                                                    &old_cert, &new_cert,
+                                                );
+                                            if drift_report.drift_detected {
+                                                eprintln!("⚠️  Spec drift detected:");
+                                                if !drift_report.changed_atoms.is_empty() {
+                                                    eprintln!(
+                                                        "  Changed: {:?}",
+                                                        drift_report.changed_atoms
+                                                    );
+                                                }
+                                                if !drift_report.new_atoms.is_empty() {
+                                                    eprintln!(
+                                                        "  New: {:?}",
+                                                        drift_report.new_atoms
+                                                    );
+                                                }
+                                                if !drift_report.removed_atoms.is_empty() {
+                                                    eprintln!(
+                                                        "  Removed: {:?}",
+                                                        drift_report.removed_atoms
+                                                    );
+                                                }
+                                                let drift_json =
+                                                    serde_json::to_string_pretty(&drift_report)
+                                                        .unwrap_or_default();
+                                                eprintln!("{}", drift_json);
+                                            } else {
+                                                eprintln!("✅ No spec drift detected.");
+                                            }
+                                        } else {
+                                            eprintln!("⚠️  --detect-spec-drift: could not parse new proof certificate at {:?}", new_cert_path);
+                                        }
+                                    } else {
+                                        eprintln!("⚠️  --detect-spec-drift: no new proof certificate found at {:?}. Use --proof-cert to generate one.", new_cert_path);
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("⚠️  --detect-spec-drift: failed to parse old certificate: {}", e);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "⚠️  --detect-spec-drift: failed to read old certificate {}: {}",
+                                old_cert_path, e
+                            );
+                        }
+                    }
+                }
                 if has_failure {
                     std::process::exit(1);
                 }

@@ -3,6 +3,7 @@
 //! This module verifies consistency between multiple atoms, infers global
 //! invariants, and detects dependency cycles.
 
+pub mod drift_detector;
 use crate::parser::Atom;
 use crate::verification::ModuleEnv;
 use serde::{Deserialize, Serialize};
