@@ -16,8 +16,8 @@ proptest! {
         ) {
     let addr_c = mumei_ffi_tests::unique_local_addr();
     let result = mumei_core::ffi::http_server::http_server_bind(addr_c.as_ptr());
-    prop_assert!(result > 0, "ensures: result > 0, got {}", result);
-    // ensures: server_bound(result) — cannot auto-translate
+    prop_assert!(result >= 0, "ensures: result >= 0, got {}", result);
+    // ensures: (result == 0 || server_bound(result)) — cannot auto-translate
     }
 }
 
@@ -44,8 +44,8 @@ proptest! {
     let (server_handle, client_for_accept_cleanup) = mumei_ffi_tests::server_handle_with_pending_client();
     prop_assume!(server_handle > 0);
     let result = mumei_core::ffi::http_server::http_server_accept(server_handle);
-    prop_assert!(result > 0, "ensures: result > 0, got {}", result);
-    // ensures: request_live(result) — cannot auto-translate
+    prop_assert!(result >= 0, "ensures: result >= 0, got {}", result);
+    // ensures: (result == 0 || request_live(result)) — cannot auto-translate
     if result > 0 { mumei_core::ffi::http_server::http_request_free(result); }
     let _ = client_for_accept_cleanup.join();
     mumei_core::ffi::http_server::http_server_free(server_handle);

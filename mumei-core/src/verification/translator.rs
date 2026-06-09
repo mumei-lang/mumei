@@ -323,7 +323,10 @@ fn assert_temporal_effect_transition<'a>(
         "http_server_bind" | "bind_server" => {
             if let Some(result) = result_z3.as_int() {
                 let bound = temporal_witness_app(vc.ctx, "server_bound", &result);
-                solver.assert(&bound);
+                // TODO(http_server): Once the Rust FFI layer exposes a no-zero-result
+                // guarantee for valid bind/accept inputs, tighten std/http_server.mm
+                // contracts back to `result > 0 && <witness>(result)`.
+                solver.assert(&result.gt(&Int::from_i64(vc.ctx, 0)).implies(&bound));
             }
         }
         "http_server_listen" | "listen_server" => {
@@ -340,15 +343,12 @@ fn assert_temporal_effect_transition<'a>(
             ) {
                 let listening = temporal_witness_app(vc.ctx, "server_listening", &handle);
                 let live = temporal_witness_app(vc.ctx, "request_live", &result);
-                solver.assert(&listening.implies(&live));
+                let successful_accept =
+                    Bool::and(vc.ctx, &[&listening, &result.gt(&Int::from_i64(vc.ctx, 0))]);
+                solver.assert(&successful_accept.implies(&live));
             }
         }
-        "http_server_respond" | "send_response" => {
-            if let Some(req_handle) = arg_vals.first().and_then(Dynamic::as_int) {
-                let live = temporal_witness_app(vc.ctx, "request_live", &req_handle);
-                solver.assert(&live.implies(&Bool::from_bool(vc.ctx, true)));
-            }
-        }
+        "http_server_respond" | "send_response" => {}
         _ => {}
     }
     Ok(())

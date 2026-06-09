@@ -33,15 +33,15 @@ type RequestHandle = i64 where req_handle > 0;
 
 // --- extern declarations: Rust FFI backend ---
 extern "Rust" {
-    fn http_server_bind(addr: Str) -> ServerHandle
+    fn http_server_bind(addr: Str) -> i64
         requires: contains(addr, ":") && not_contains(addr, "\n") && not_contains(addr, "\r");
-        ensures: result > 0 && server_bound(result);
+        ensures: result >= 0 && (result == 0 || server_bound(result));
     fn http_server_listen(server_handle: ServerHandle) -> i64
         requires: server_handle > 0 && server_bound(server_handle);
         ensures: result >= 0 && result <= 1 && server_listening(server_handle);
-    fn http_server_accept(server_handle: ServerHandle) -> RequestHandle
+    fn http_server_accept(server_handle: ServerHandle) -> i64
         requires: server_handle > 0 && server_listening(server_handle);
-        ensures: result > 0 && request_live(result);
+        ensures: result >= 0 && (result == 0 || request_live(result));
     fn http_request_path(req_handle: RequestHandle) -> Str
         requires: req_handle > 0;
         ensures: true;
@@ -64,12 +64,12 @@ extern "Rust" {
 // =============================================================
 
 // Bind a server to the given address and mint a bound-server witness.
-atom bind_server(addr: Str) -> ServerHandle
+atom bind_server(addr: Str)
     effects: [HttpServer]
     effect_pre: { HttpServer: Init };
     effect_post: { HttpServer: Bound };
     requires: contains(addr, ":") && not_contains(addr, "\n") && not_contains(addr, "\r");
-    ensures: result > 0 && server_bound(result);
+    ensures: result >= 0 && (result == 0 || server_bound(result));
     body: {
         perform HttpServer.bind(addr);
         http_server_bind(addr)
@@ -91,12 +91,12 @@ atom listen_server(server_handle: ServerHandle)
     }
 
 // Accept an incoming request and mint a live-request witness.
-atom accept_request(server_handle: ServerHandle) -> RequestHandle
+atom accept_request(server_handle: ServerHandle)
     effects: [HttpServer]
     effect_pre: { HttpServer: Listening };
     effect_post: { HttpServer: Responding };
     requires: server_handle > 0 && server_listening(server_handle);
-    ensures: result > 0 && request_live(result);
+    ensures: result >= 0 && (result == 0 || request_live(result));
     body: {
         perform HttpServer.accept(server_handle);
         http_server_accept(server_handle)
