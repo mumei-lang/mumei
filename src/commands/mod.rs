@@ -1,0 +1,13 @@
+pub(crate) mod add;
+pub(crate) mod build;
+pub(crate) mod check;
+pub(crate) mod doc;
+pub(crate) mod infer;
+pub(crate) mod init;
+pub(crate) mod inspect;
+pub(crate) mod list;
+pub(crate) mod publish;
+pub(crate) mod repl;
+pub(crate) mod run;
+pub(crate) mod verify;
+pub(crate) mod verify_cert;

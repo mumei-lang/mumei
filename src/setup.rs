@@ -18,7 +18,7 @@
 //! │       └── include/
 //! └── env                  # source ~/.mumei/env で環境変数設定
 //! ```
-use crate::manifest;
+use mumei_core::manifest;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command as Cmd;
