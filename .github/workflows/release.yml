@@ -272,7 +272,7 @@ jobs:
           echo "Z3_ROOT=$z3Root" >> $env:GITHUB_ENV
       - name: Build release binary
         if: "!contains(matrix.target, 'musl')"
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --target ${{ matrix.target }} --features static-link-z3
       # Plan 7: Verify musl binary and record its dynamic dependencies.
       #
       # The `z3/static-link-z3` feature links libz3 statically. The musl libc
