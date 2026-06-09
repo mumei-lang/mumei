@@ -4,6 +4,7 @@ use super::profiler::IncrementalProfiler;
 use super::support::*;
 use super::types::*;
 use super::*;
+use z3::{FuncDecl, Sort};
 
 /// Default constraint budget per atom (max number of solver.assert() calls).
 pub const DEFAULT_CONSTRAINT_BUDGET: usize = 1000;
@@ -267,6 +268,92 @@ pub(crate) fn profile_solver_check(vc: &VCtx<'_>, start_index: Option<usize>) {
     }
 }
 
+fn is_temporal_witness_predicate(name: &str) -> bool {
+    matches!(name, "server_bound" | "server_listening" | "request_live")
+}
+
+fn temporal_witness_app<'a>(ctx: &'a Context, predicate: &str, handle: &Int<'a>) -> Bool<'a> {
+    let int_sort = Sort::int(ctx);
+    let bool_sort = Sort::bool(ctx);
+    let decl = FuncDecl::new(ctx, predicate, &[&int_sort], &bool_sort);
+    decl.apply(&[handle as &dyn Ast])
+        .as_bool()
+        .unwrap_or_else(|| {
+            Bool::new_const(
+                ctx,
+                format!("__{}_{}", predicate, handle)
+                    .replace(' ', "_")
+                    .as_str(),
+            )
+        })
+}
+
+fn temporal_witness_call_to_z3<'a>(
+    vc: &VCtx<'a>,
+    predicate: &str,
+    args: &[Expr],
+    env: &mut Env<'a>,
+    solver_opt: Option<&Solver<'a>>,
+) -> DynResult<'a> {
+    if args.len() != 1 {
+        return Err(MumeiError::verification(format!(
+            "{}() requires exactly one handle argument",
+            predicate
+        )));
+    }
+
+    let handle = expr_to_z3(vc, &args[0], env, solver_opt)?
+        .as_int()
+        .ok_or_else(|| MumeiError::type_error(format!("{}() handle must be integer", predicate)))?;
+    let witness = temporal_witness_app(vc.ctx, predicate, &handle);
+    if let Some(solver) = solver_opt {
+        solver.assert(&witness.implies(&handle.gt(&Int::from_i64(vc.ctx, 0))));
+    }
+    Ok(witness.into())
+}
+
+fn assert_temporal_effect_transition<'a>(
+    vc: &VCtx<'a>,
+    solver: &Solver<'a>,
+    callee_name: &str,
+    arg_vals: &[Dynamic<'a>],
+    result_z3: &Dynamic<'a>,
+) -> MumeiResult<()> {
+    match callee_name {
+        "http_server_bind" | "bind_server" => {
+            if let Some(result) = result_z3.as_int() {
+                let bound = temporal_witness_app(vc.ctx, "server_bound", &result);
+                solver.assert(&bound);
+            }
+        }
+        "http_server_listen" | "listen_server" => {
+            if let Some(handle) = arg_vals.first().and_then(Dynamic::as_int) {
+                let bound = temporal_witness_app(vc.ctx, "server_bound", &handle);
+                let listening = temporal_witness_app(vc.ctx, "server_listening", &handle);
+                solver.assert(&bound.implies(&listening));
+            }
+        }
+        "http_server_accept" | "accept_request" => {
+            if let (Some(handle), Some(result)) = (
+                arg_vals.first().and_then(Dynamic::as_int),
+                result_z3.as_int(),
+            ) {
+                let listening = temporal_witness_app(vc.ctx, "server_listening", &handle);
+                let live = temporal_witness_app(vc.ctx, "request_live", &result);
+                solver.assert(&listening.implies(&live));
+            }
+        }
+        "http_server_respond" | "send_response" => {
+            if let Some(req_handle) = arg_vals.first().and_then(Dynamic::as_int) {
+                let live = temporal_witness_app(vc.ctx, "request_live", &req_handle);
+                solver.assert(&live.implies(&Bool::from_bool(vc.ctx, true)));
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 pub(crate) fn apply_refinement_constraint<'a>(
     vc: &VCtx<'a>,
     solver: &Solver<'a>,
@@ -507,6 +594,9 @@ pub(crate) fn expr_to_z3<'a>(
             Ok(Int::new_const(ctx, name.as_str()).into())
         }
         Expr::Call(name, args) => {
+            if is_temporal_witness_predicate(name) {
+                return temporal_witness_call_to_z3(vc, name, args, env, solver_opt);
+            }
             match name.as_str() {
                 // =============================================================
                 // ensures / invariant 内の forall/exists 量化子サポート
@@ -987,6 +1077,16 @@ pub(crate) fn expr_to_z3<'a>(
                                 &result_z3,
                                 &mut call_env,
                                 solver_opt,
+                            )?;
+                        }
+
+                        if let Some(solver) = solver_opt {
+                            assert_temporal_effect_transition(
+                                vc,
+                                solver,
+                                &callee.name,
+                                &arg_vals,
+                                &result_z3,
                             )?;
                         }
 
