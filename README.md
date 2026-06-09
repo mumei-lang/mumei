@@ -64,7 +64,7 @@ curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash
 brew install mumei-lang/mumei/mumei
 
 # Specific version (latest is v0.6.0)
-curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash -s -- --version v0.6.1
+curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash -s -- --version v0.6.0
 ```
 
 See [Releases](https://github.com/mumei-lang/mumei/releases) for older versions and changelogs.
@@ -272,7 +272,10 @@ autonomous fix loop that combines LLM and Z3 formal verification.
 The mumei CLI provides the verification interface:
 - `mumei verify --json file.mm` — structured JSON output to stdout
 - `mumei verify --report-dir <dir> file.mm` — write report.json to specified directory
+- `mumei verify --cross-spec-verify file.mm` — cross-spec consistency check (outputs `cross_spec.json`)
+- `mumei verify --cross-spec-files dep.mm file.mm` — multi-file cross-spec verification
 - See [docs/REPORT_SCHEMA.md](docs/REPORT_SCHEMA.md) for the output schema.
+- See [docs/CROSS_SPEC_GUIDE.md](docs/CROSS_SPEC_GUIDE.md) for the cross-spec output schema.
 
 For end-to-end verification workflows (natural-language spec validation, foreign-code verification, spec↔code alignment, and human-friendly operation guide), see the [Verification Workflow Guide](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/VERIFICATION_WORKFLOW_GUIDE.md) in mumei-agent.
 
@@ -286,6 +289,14 @@ For end-to-end verification workflows (natural-language spec validation, foreign
 | `get_inferred_effects` | Pre-check: infer required effects before writing code |
 | `get_allowed_effects` | Query current effect boundary for the session |
 | `set_allowed_effects` | Override effect boundary dynamically |
+| `analyze_std_gaps` | Identify gaps in std/ coverage |
+| `list_std_catalog` | List all atoms in the std/ catalog |
+| `visualize_std_graph` | Render std/ dependency graph (Mermaid or DOT) |
+| `measure_std_health` | Measure std/ health metrics |
+| `get_proof_certificate` | Retrieve proof certificate for a module |
+| `generate_doc` | Generate structured documentation (`mumei doc --format json`) |
+| `analyze_contract_conflicts` | Analyze cross-atom contract conflicts and circular dependencies (Meta-Architect) |
+| `propose_interface_refactoring` | Propose interface-level refactorings for architectural issues (Meta-Architect) |
 
 ### MCP Setup
 
@@ -363,6 +374,7 @@ mumei/
 ├── mumei-emit-proofbook/   # Markdown proof-certificate emitter
 ├── mumei-emit-rust/        # Rust FFI binding emitter
 ├── mumei-emit-python/      # Python FFI binding emitter
+├── mumei-ffi-tests/        # Generated Rust property tests for FFI contracts
 ├── src/                    # CLI binary (main.rs, lsp.rs, setup.rs)
 ├── std/                    # Standard library (.mm files)
 ├── editors/vscode/         # VS Code extension (LSP client + counter-example decorations)
