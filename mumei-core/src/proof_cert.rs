@@ -834,7 +834,11 @@ fn compute_certificate_hash(cert: &ProofCertificate) -> String {
 
 pub fn refresh_certificate_integrity(cert: &mut ProofCertificate) {
     cert.all_verified = cert.atoms.iter().all(|ac| {
-        (ac.status == "verified" || ac.status == "trusted")
+        (ac.status == "trusted"
+            || (ac.status == "verified"
+                && (ac.z3_check_result == "unsat"
+                    || (ac.z3_check_result == "lean_verified"
+                        && lean_certificate_metadata_is_current(ac)))))
             && ac
                 .spec_validation_result
                 .as_ref()

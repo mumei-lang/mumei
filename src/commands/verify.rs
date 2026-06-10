@@ -651,18 +651,14 @@ fn apply_lean_cert_to_proof_certificate(
             continue;
         };
         atom.lean_metadata = candidate.lean_metadata.clone();
-        atom.translator_version = candidate.translator_version.clone();
-        atom.bridge_lemma_hash = candidate.bridge_lemma_hash.clone();
         if candidate.z3_check_result == "lean_verified"
-            && candidate
-                .lean_metadata
-                .as_ref()
-                .map(|metadata| metadata.status == "lean_verified")
-                .unwrap_or(false)
+            && lean_candidate_metadata_is_current(candidate)
         {
             let was_already_proven = atom.z3_check_result == "unsat" && atom.status == "verified";
             atom.z3_check_result = "lean_verified".to_string();
             atom.status = "verified".to_string();
+            atom.translator_version = candidate.translator_version.clone();
+            atom.bridge_lemma_hash = candidate.bridge_lemma_hash.clone();
             stats.lean_verified += 1;
             if !was_already_proven {
                 stats.newly_proven += 1;
@@ -671,6 +667,21 @@ fn apply_lean_cert_to_proof_certificate(
     }
     proof_cert::refresh_certificate_integrity(cert);
     stats
+}
+
+fn lean_candidate_metadata_is_current(candidate: &proof_cert::EscalationCandidate) -> bool {
+    if candidate.translator_version != verification::LEAN_TRANSLATOR_VERSION
+        || candidate.bridge_lemma_hash != verification::LEAN_BRIDGE_LEMMA_HASH
+    {
+        return false;
+    }
+    let Some(metadata) = candidate.lean_metadata.as_ref() else {
+        return false;
+    };
+    metadata.status == "lean_verified"
+        && !metadata.theorem_name.is_empty()
+        && metadata.translator_version == verification::LEAN_TRANSLATOR_VERSION
+        && metadata.bridge_lemma_hash == verification::LEAN_BRIDGE_LEMMA_HASH
 }
 
 fn run_lean_bridge(
