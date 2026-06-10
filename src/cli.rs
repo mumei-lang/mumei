@@ -59,11 +59,11 @@ pub(crate) enum Command {
         /// Generate Z3 proof certificate (.proof.json)
         #[arg(long)]
         proof_cert: bool,
-        /// Emit Lean escalation candidate bundle alongside verification results
+        /// Escalate Z3 unknown obligations to Lean 4 via mumei-lean bridge.
         #[arg(long)]
         escalate_lean: bool,
-        /// Emit target for verify-only output: escalation-bundle, escalation-metrics, decidable-metrics, reconstruction-loss, structured-feedback, or human-review-queue
-        #[arg(long)]
+        /// Emit format: "escalation-bundle" writes .escalation-bundle.json
+        #[arg(long, value_name = "FORMAT")]
         emit: Option<String>,
         /// Disable verify-only output targets: escalation-metrics
         #[arg(long = "no-emit")]
