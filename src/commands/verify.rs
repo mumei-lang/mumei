@@ -9,6 +9,7 @@ use mumei_core::{
     verification,
 };
 use std::path::{Path, PathBuf};
+use std::process::Command as ProcessCommand;
 
 pub(crate) fn cmd_verify_command(command: Command) {
     let Command::Verify {
@@ -46,6 +47,7 @@ pub(crate) fn cmd_verify_command(command: Command) {
     else {
         unreachable!("cmd_verify_command called with non-verify command");
     };
+    let allow_lean_verified = allow_lean_verified || escalate_lean;
     let no_emit_escalation_metrics = no_emit.iter().any(|target| target == "escalation-metrics");
     if let Some(other) = no_emit
         .iter()
@@ -535,7 +537,7 @@ pub(crate) fn verify_escalation_bundle_path(input: &str, output: Option<&str>) -
     if let Some(output) = output {
         PathBuf::from(output).with_extension("escalation-bundle.json")
     } else {
-        PathBuf::from(format!("{input}.escalation-bundle.json"))
+        Path::new(input).with_extension("escalation-bundle.json")
     }
 }
 
@@ -545,6 +547,193 @@ pub(crate) fn verify_human_review_queue_path(output_dir: &Path, output: Option<&
     } else {
         output_dir.join("human_review_queue.json")
     }
+}
+
+#[derive(Debug, Default)]
+struct LeanBridgeApplyStats {
+    lean_verified: usize,
+    newly_proven: usize,
+}
+
+fn format_count_map(map: &std::collections::HashMap<String, usize>) -> String {
+    if map.is_empty() {
+        return String::new();
+    }
+    let mut entries: Vec<_> = map.iter().collect();
+    entries.sort_by_key(|(key, _)| *key);
+    entries
+        .into_iter()
+        .map(|(key, count)| format!("{key}: {count}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn print_escalation_bundle_summary(bundle: &proof_cert::EscalationBundle) {
+    println!(
+        "  Lean escalation bundle summary: candidates={}, by_reason={{{}}}",
+        bundle.summary.candidate_count,
+        format_count_map(&bundle.summary.by_reason)
+    );
+    println!(
+        "  Lean escalation z3_result_class: {{{}}}",
+        format_count_map(&bundle.summary.by_z3_result_class)
+    );
+}
+
+fn resolve_mumei_lean_bridge() -> Result<(PathBuf, PathBuf), String> {
+    if let Ok(raw) = std::env::var("MUMEI_LEAN_PATH") {
+        let configured = PathBuf::from(raw);
+        let script = if configured.is_file() {
+            configured.clone()
+        } else {
+            configured.join("scripts").join("bridge.py")
+        };
+        if script.exists() {
+            let repo_dir = script
+                .parent()
+                .and_then(Path::parent)
+                .map(Path::to_path_buf)
+                .unwrap_or(configured);
+            return Ok((repo_dir, script));
+        }
+        return Err(format!(
+            "MUMEI_LEAN_PATH is set but scripts/bridge.py was not found at {}",
+            script.display()
+        ));
+    }
+
+    let mut candidates = Vec::new();
+    if let Ok(current_dir) = std::env::current_dir() {
+        if let Some(parent) = current_dir.parent() {
+            candidates.push(parent.join("mumei-lean"));
+        }
+        candidates.push(current_dir.join("mumei-lean"));
+    }
+    candidates.push(PathBuf::from("../mumei-lean"));
+    candidates.push(PathBuf::from("/home/ubuntu/repos/mumei-lean"));
+
+    for repo_dir in candidates {
+        let script = repo_dir.join("scripts").join("bridge.py");
+        if script.exists() {
+            return Ok((repo_dir, script));
+        }
+    }
+
+    Err(
+        "mumei-lean bridge.py not found. Set MUMEI_LEAN_PATH to the mumei-lean repository."
+            .to_string(),
+    )
+}
+
+fn lean_escalation_temp_path(prefix: &str, extension: &str) -> PathBuf {
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    std::env::temp_dir().join(format!(
+        "mumei-{prefix}-{}-{timestamp}.{extension}",
+        std::process::id()
+    ))
+}
+
+fn apply_lean_cert_to_proof_certificate(
+    cert: &mut proof_cert::ProofCertificate,
+    lean_bundle: &proof_cert::EscalationBundle,
+) -> LeanBridgeApplyStats {
+    let candidates: std::collections::HashMap<_, _> = lean_bundle
+        .candidates
+        .iter()
+        .map(|candidate| (candidate.name.as_str(), candidate))
+        .collect();
+    let mut stats = LeanBridgeApplyStats::default();
+    for atom in &mut cert.atoms {
+        let Some(candidate) = candidates.get(atom.name.as_str()) else {
+            continue;
+        };
+        atom.lean_metadata = candidate.lean_metadata.clone();
+        atom.translator_version = candidate.translator_version.clone();
+        atom.bridge_lemma_hash = candidate.bridge_lemma_hash.clone();
+        if candidate.z3_check_result == "lean_verified"
+            && candidate
+                .lean_metadata
+                .as_ref()
+                .map(|metadata| metadata.status == "lean_verified")
+                .unwrap_or(false)
+        {
+            let was_already_proven = atom.z3_check_result == "unsat" && atom.status == "verified";
+            atom.z3_check_result = "lean_verified".to_string();
+            atom.status = "verified".to_string();
+            stats.lean_verified += 1;
+            if !was_already_proven {
+                stats.newly_proven += 1;
+            }
+        }
+    }
+    proof_cert::refresh_certificate_integrity(cert);
+    stats
+}
+
+fn run_lean_bridge(
+    bundle: &proof_cert::EscalationBundle,
+    bundle_path: &Path,
+    quiet_output: bool,
+) -> Result<(PathBuf, proof_cert::EscalationBundle), String> {
+    if bundle.summary.candidate_count == 0 {
+        if !quiet_output {
+            println!("  Lean escalation: no candidates; skipping mumei-lean bridge");
+        }
+        return Err("no Lean escalation candidates".to_string());
+    }
+
+    let (repo_dir, bridge_script) = resolve_mumei_lean_bridge()?;
+    let lean_cert_path = lean_escalation_temp_path("lean-cert", "json");
+    let generated_dir = lean_escalation_temp_path("lean-generated", "dir");
+    let status = ProcessCommand::new("python3")
+        .arg(&bridge_script)
+        .arg("--escalation-bundle")
+        .arg(bundle_path)
+        .arg("--lean-cert-out")
+        .arg(&lean_cert_path)
+        .arg("--out-dir")
+        .arg(&generated_dir)
+        .current_dir(&repo_dir)
+        .output()
+        .map_err(|err| {
+            format!(
+                "Failed to invoke mumei-lean bridge at {}: {}",
+                bridge_script.display(),
+                err
+            )
+        })?;
+
+    if !quiet_output {
+        let stdout = String::from_utf8_lossy(&status.stdout);
+        if !stdout.trim().is_empty() {
+            println!("  mumei-lean bridge stdout:\n{}", stdout.trim());
+        }
+        let stderr = String::from_utf8_lossy(&status.stderr);
+        if !stderr.trim().is_empty() {
+            eprintln!("  mumei-lean bridge stderr:\n{}", stderr.trim());
+        }
+    }
+
+    if !status.status.success() {
+        return Err(format!(
+            "mumei-lean bridge exited with status {}",
+            status.status
+        ));
+    }
+    if !lean_cert_path.exists() {
+        return Err(format!(
+            "mumei-lean bridge did not write {}",
+            lean_cert_path.display()
+        ));
+    }
+    let lean_json = std::fs::read_to_string(&lean_cert_path)
+        .map_err(|err| format!("Failed to read {}: {}", lean_cert_path.display(), err))?;
+    let lean_bundle: proof_cert::EscalationBundle = serde_json::from_str(&lean_json)
+        .map_err(|err| format!("Failed to parse {}: {}", lean_cert_path.display(), err))?;
+    Ok((lean_cert_path, lean_bundle))
 }
 
 pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
@@ -952,7 +1141,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
         for qm in &qualified_methods {
             atom_refs.push(qm);
         }
-        let cert = proof_cert::generate_certificate_with_reconstruction_losses(
+        let mut cert = proof_cert::generate_certificate_with_reconstruction_losses(
             input,
             &atom_refs,
             &cert_results,
@@ -973,20 +1162,6 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
             let stem = Path::new(input).file_stem().unwrap_or_default();
             Path::new(".").join(format!("{}.proof.json", stem.to_string_lossy()))
         };
-        if generate_proof_cert {
-            match proof_cert::save_certificate(&cert, &cert_path) {
-                Ok(()) => {
-                    if !quiet_output {
-                        println!("  📜 Proof certificate written to: {}", cert_path.display());
-                    }
-                }
-                Err(e) => {
-                    if !quiet_output {
-                        eprintln!("  ⚠️  Failed to write proof certificate: {}", e);
-                    }
-                }
-            }
-        }
 
         if escalate_lean || emit_escalation_bundle || emit_escalation_metrics {
             let bundle = proof_cert::generate_escalation_bundle(&cert);
@@ -1004,6 +1179,38 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                     Err(e) => {
                         if !quiet_output {
                             eprintln!("  ⚠️  Failed to write escalation bundle: {}", e);
+                        }
+                    }
+                }
+            }
+            if escalate_lean {
+                if bundle.summary.candidate_count == 0 {
+                    if !quiet_output {
+                        println!("  Lean escalation: no candidates; skipping mumei-lean bridge");
+                    }
+                } else {
+                    let temp_bundle_path = lean_escalation_temp_path("escalation-bundle", "json");
+                    match proof_cert::save_escalation_bundle(&bundle, &temp_bundle_path)
+                        .and_then(|_| run_lean_bridge(&bundle, &temp_bundle_path, quiet_output))
+                    {
+                        Ok((lean_cert_path, lean_bundle)) => {
+                            let stats =
+                                apply_lean_cert_to_proof_certificate(&mut cert, &lean_bundle);
+                            verified += stats.newly_proven;
+                            escalated = escalated.saturating_sub(stats.lean_verified);
+                            if !quiet_output {
+                                println!(
+                                    "  Lean bridge certificate applied: {} lean_verified atom(s) from {}",
+                                    stats.lean_verified,
+                                    lean_cert_path.display()
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            if !quiet_output {
+                                eprintln!("  ⚠️  Lean escalation bridge failed: {}", e);
+                            }
+                            failed += 1;
                         }
                     }
                 }
@@ -1035,10 +1242,22 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                 }
             }
             if !quiet_output {
-                println!(
-                    "  Lean escalation bundle candidate_count: {}",
-                    bundle.summary.candidate_count
-                );
+                print_escalation_bundle_summary(&bundle);
+            }
+        }
+
+        if generate_proof_cert {
+            match proof_cert::save_certificate(&cert, &cert_path) {
+                Ok(()) => {
+                    if !quiet_output {
+                        println!("  📜 Proof certificate written to: {}", cert_path.display());
+                    }
+                }
+                Err(e) => {
+                    if !quiet_output {
+                        eprintln!("  ⚠️  Failed to write proof certificate: {}", e);
+                    }
+                }
             }
         }
 

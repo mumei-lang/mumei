@@ -832,6 +832,19 @@ fn compute_certificate_hash(cert: &ProofCertificate) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+pub fn refresh_certificate_integrity(cert: &mut ProofCertificate) {
+    cert.all_verified = cert.atoms.iter().all(|ac| {
+        (ac.status == "verified" || ac.status == "trusted")
+            && ac
+                .spec_validation_result
+                .as_ref()
+                .map(|validation| validation.is_satisfiable)
+                .unwrap_or(true)
+    });
+    cert.certificate_hash = String::new();
+    cert.certificate_hash = compute_certificate_hash(cert);
+}
+
 fn parse_unsat_core_labels(z3_result: &str) -> Option<Vec<String>> {
     let (_, labels) = z3_result.split_once("unsat_core=")?;
     let labels = labels.trim();
