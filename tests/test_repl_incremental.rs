@@ -58,3 +58,34 @@ atom b() -> i64
         "incremental atoms should resolve in ORC JIT\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
 }
+
+#[test]
+fn repl_recompiles_redefined_atom() {
+    let input = r#"
+atom value() -> i64
+  requires: true;
+  ensures: true;
+  body: { 1 }
+:eval value()
+atom value() -> i64
+  requires: true;
+  ensures: true;
+  body: { 2 }
+:eval value()
+:quit
+"#;
+    let (success, stdout, stderr) = run_repl_session(input);
+
+    assert!(
+        success,
+        "repl should exit successfully\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(stdout.contains("= 1"));
+    assert!(stdout.contains("= 2"));
+    assert!(
+        !stderr.contains("Duplicate function definition")
+            && !stderr.contains("JIT compile error")
+            && !stderr.contains("Execution error"),
+        "redefined atom should be recompiled in ORC JIT\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+}

@@ -12,9 +12,9 @@ use llvm_sys::error::{
 };
 use llvm_sys::orc2::lljit::{
     LLVMOrcCreateLLJIT, LLVMOrcCreateLLJITBuilder, LLVMOrcDisposeLLJIT,
-    LLVMOrcLLJITAddLLVMIRModule, LLVMOrcLLJITAddLLVMIRModuleWithRT, LLVMOrcLLJITGetDataLayoutStr,
-    LLVMOrcLLJITGetGlobalPrefix, LLVMOrcLLJITGetMainJITDylib, LLVMOrcLLJITGetTripleString,
-    LLVMOrcLLJITLookup, LLVMOrcLLJITMangleAndIntern, LLVMOrcLLJITRef,
+    LLVMOrcLLJITAddLLVMIRModuleWithRT, LLVMOrcLLJITGetDataLayoutStr, LLVMOrcLLJITGetGlobalPrefix,
+    LLVMOrcLLJITGetMainJITDylib, LLVMOrcLLJITGetTripleString, LLVMOrcLLJITLookup,
+    LLVMOrcLLJITMangleAndIntern, LLVMOrcLLJITRef,
 };
 use llvm_sys::orc2::{
     LLVMJITEvaluatedSymbol, LLVMJITSymbolFlags, LLVMJITSymbolGenericFlags, LLVMOrcAbsoluteSymbols,
@@ -149,10 +149,8 @@ impl<'ctx> JitEngine<'ctx> {
         extern_blocks: &[mumei_core::parser::ExternBlock],
     ) -> MumeiResult<()> {
         let atom_name = hir_atom.atom.name.clone();
-        if self.resource_trackers.borrow().contains_key(&atom_name) {
+        if self.compiled_functions.borrow().contains(&atom_name) {
             self.remove_function(&atom_name);
-        } else if self.compiled_functions.borrow().contains(&atom_name) {
-            return Ok(());
         }
 
         let thread_safe_context = unsafe { LLVMOrcCreateNewThreadSafeContext() };
@@ -198,45 +196,39 @@ impl<'ctx> JitEngine<'ctx> {
             return Err(err);
         }
 
+        let resource_tracker = unsafe { LLVMOrcJITDylibCreateResourceTracker(self.main_jit_dylib) };
+        if resource_tracker.is_null() {
+            drop(module);
+            mem::forget(context);
+            unsafe {
+                LLVMOrcDisposeThreadSafeContext(thread_safe_context);
+            }
+            return Err(MumeiError::codegen("Failed to create ORC resource tracker"));
+        }
+
         let module_ref = module.as_mut_ptr();
-        mem::forget(module);
-        mem::forget(context);
         let thread_safe_module =
             unsafe { LLVMOrcCreateNewThreadSafeModule(module_ref, thread_safe_context) };
         if thread_safe_module.is_null() {
+            drop(module);
+            mem::forget(context);
             unsafe {
                 LLVMOrcDisposeThreadSafeContext(thread_safe_context);
+                Self::consume_error(LLVMOrcResourceTrackerRemove(resource_tracker));
             }
             return Err(MumeiError::codegen(
                 "Failed to create ORC thread-safe module",
             ));
         }
-
-        let resource_tracker = if atom_name == "__repl_eval" {
-            let tracker = unsafe { LLVMOrcJITDylibCreateResourceTracker(self.main_jit_dylib) };
-            if tracker.is_null() {
-                return Err(MumeiError::codegen("Failed to create ORC resource tracker"));
-            }
-            Some(tracker)
-        } else {
-            None
-        };
+        mem::forget(module);
+        mem::forget(context);
 
         let add_err = unsafe {
-            match resource_tracker {
-                Some(tracker) => {
-                    LLVMOrcLLJITAddLLVMIRModuleWithRT(self.lljit, tracker, thread_safe_module)
-                }
-                None => {
-                    LLVMOrcLLJITAddLLVMIRModule(self.lljit, self.main_jit_dylib, thread_safe_module)
-                }
-            }
+            LLVMOrcLLJITAddLLVMIRModuleWithRT(self.lljit, resource_tracker, thread_safe_module)
         };
         if let Err(err) = Self::take_error(add_err, "Failed to add module to ORC JIT") {
-            if let Some(tracker) = resource_tracker {
-                unsafe {
-                    Self::consume_error(LLVMOrcResourceTrackerRemove(tracker));
-                }
+            unsafe {
+                Self::consume_error(LLVMOrcResourceTrackerRemove(resource_tracker));
             }
             return Err(err);
         }
@@ -244,11 +236,9 @@ impl<'ctx> JitEngine<'ctx> {
         self.compiled_functions
             .borrow_mut()
             .insert(atom_name.clone());
-        if let Some(tracker) = resource_tracker {
-            self.resource_trackers
-                .borrow_mut()
-                .insert(atom_name, tracker);
-        }
+        self.resource_trackers
+            .borrow_mut()
+            .insert(atom_name, resource_tracker);
         Ok(())
     }
 
