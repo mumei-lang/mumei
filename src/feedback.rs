@@ -69,16 +69,22 @@ pub(crate) fn infer_failure_type_from_error_text(error_text: &str) -> Option<&'s
 
 pub(crate) fn structured_feedback_payload(
     structured_feedbacks: &[StructuredFeedback],
+    warnings: &[verification::Diagnostic],
     verified: usize,
     failed: usize,
     skipped: usize,
     escalated: usize,
 ) -> serde_json::Value {
     if structured_feedbacks.len() == 1 {
-        return serde_json::json!(structured_feedbacks[0]);
+        let mut payload = serde_json::json!(structured_feedbacks[0]);
+        if !warnings.is_empty() {
+            payload["warnings"] = serde_json::json!(warnings);
+        }
+        return payload;
     }
     serde_json::json!({
         "structured_feedback": structured_feedbacks,
+        "warnings": warnings,
         "summary": {
             "verified": verified,
             "failed": failed,
@@ -101,15 +107,16 @@ pub(crate) fn collect_decidable_fragment_diagnostic(
             format!("{}:{}", atom.span.file, atom.span.line)
         };
         eprintln!(
-            "warning[{}]: atom `{}` uses {}",
+            "warning[{}]: atom `{}` uses fragments outside Z3-stable range: [{}]",
             diagnostic.code,
             atom.name,
             diagnostic.tags.join(", ")
         );
         eprintln!("  --> {}", location);
         eprintln!(
-            "  = hint: Z3 may return `unknown`; consider escalating to Lean 4 with `--escalate-lean`"
+            "  hint: simplify to linear arithmetic, or use `mumei verify --escalate-lean` to delegate to Lean 4"
         );
+        eprintln!("  see: docs/SPEC_GUIDE.md#decidable-fragment");
     }
     Some(diagnostic)
 }
@@ -129,6 +136,7 @@ pub(crate) fn enrich_verify_json_payload(
 ) -> serde_json::Value {
     if let Some(object) = payload.as_object_mut() {
         object.insert("diagnostics".to_string(), serde_json::json!(diagnostics));
+        object.insert("warnings".to_string(), serde_json::json!(diagnostics));
         if !loop_suggestions.is_empty() {
             object.insert(
                 "cegis_suggestions".to_string(),

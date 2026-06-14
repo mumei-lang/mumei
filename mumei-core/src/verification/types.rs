@@ -1131,7 +1131,7 @@ pub fn classify_atom_for_lean_escalation(
         } else {
             format!("z3_{}_complex_fragment", z3_result_class)
         });
-    } else if !logic_fragment_tags.is_empty()
+    } else if is_outside_decidable_fragment(&logic_fragment_tags)
         && z3_result_class != "sat"
         && !normalized_status.contains("failed")
     {
