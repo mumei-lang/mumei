@@ -2,7 +2,7 @@
 
 **Verify existing code and specifications with formal methods — before you write `.mm`.**
 
-Mumei is a formal verification toolchain that can start from existing Python/Rust code, natural-language requirements, or Mumei `.mm` modules. It uses Z3, proof certificates, and AI-agent workflows to find bugs, spec drift, and contradictions, then gives you a path to gradually move critical logic into mathematically checked `.mm` code.
+Mumei is a formal verification toolchain that can start from existing foreign-language code (for example Python, Rust, Go, or TypeScript), natural-language requirements, or Mumei `.mm` modules. It uses Z3, proof certificates, and AI-agent workflows to find bugs, spec drift, and contradictions, then gives you a path to gradually move critical logic into mathematically checked `.mm` code.
 
 [Technical Paper](paper/) — proof-driven programming architecture, autonomous verification loop, and case studies.
 
@@ -16,7 +16,7 @@ See the mumei-agent [Verification Workflow Guide](https://github.com/mumei-lang/
 
 ### 1. Existing code: find likely bug locations
 
-Give the agent a Python/Rust file and ask it to extract contracts, verify them, and report suspicious paths.
+Give the agent an existing source file and ask it to extract contracts, verify them, and report suspicious paths. The supported language set depends on the workflow; current agent paths cover Python/Rust/Go for cross-validation and Python/TypeScript/Rust for foreign-code verification.
 
 ```bash
 uv run python -m agent validate-code --input src/payment.py --language python
