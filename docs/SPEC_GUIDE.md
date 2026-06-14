@@ -1,12 +1,17 @@
 # Proof-Friendly Specification Guide
 
-This guide describes the decidable specification fragment that Mumei expects Z3 to verify reliably. Stay inside these patterns for first-pass verification; use Lean escalation for specifications that intentionally need stronger reasoning.
+This guide describes the P8-D decidable specification fragment that Mumei expects Z3 to verify reliably. Stay inside these patterns for first-pass verification; use Lean escalation for specifications that intentionally need stronger reasoning.
 
 ## Decidable Fragment
 
 ### Linear arithmetic
 
-Use linear `i64` or `Nat` refinements with addition, subtraction, comparisons, and multiplication by constants.
+Use linear `i64` or `Nat` refinements with addition, subtraction, comparisons, and multiplication by constants. Prefer refinements and preconditions that expose direct lower/upper bounds:
+
+- define `Nat`-like types as `v >= 0`
+- put input ranges in `requires`, not only in prose
+- express postconditions as linear equalities or inequalities over inputs and `result`
+- use constant scaling (`3 * x`) instead of symbolic products (`x * y`)
 
 Recommended:
 
@@ -33,7 +38,7 @@ Lean escalation candidates:
 
 ### Array and sequence access
 
-Every array or sequence read/write must have an explicit bounds condition of the form `0 <= i && i < len(a)` or an equivalent bounded quantifier range. Prefer single-index reads/writes and length-preserving updates.
+Every array or sequence read/write must have an explicit bounds condition of the form `0 <= i && i < len(a)` or an equivalent bounded quantifier range. In current `.mm` examples this is usually written as `i >= 0 && i < n`, where `n` is the array length tracked by the contract. Prefer single-index reads/writes and length-preserving updates.
 
 Recommended:
 
@@ -67,11 +72,11 @@ ensures: result == n && forall(i, 0, result - 1, arr[i] <= arr[i + 1]);
 body: n;
 ```
 
-Keep quantifier bodies simple: linear arithmetic, a single array access pattern, or a single implication over a bounded range. Nested quantifiers, mixed `forall`/`exists`, and quantifiers over array reads are trigger-sensitive and may need Lean.
+Keep quantifier bodies simple: linear arithmetic, a single array access pattern, or a single implication over a bounded range. Nested quantifiers, mixed `forall`/`exists`, and quantifiers over array reads are trigger-sensitive and may need Lean. Treat quantifier alternation (`forall exists`, `exists forall`) as a Lean escalation candidate unless the witness is explicitly returned or bound by the surrounding code.
 
 ### Effects and temporal state
 
-Stateful effects should be finite state machines with explicit transitions. Keep effect preconditions local to the current state and avoid encoding unbounded histories in contracts.
+Stateful effects should be finite state machines with explicit transitions. Keep effect preconditions local to the current state and avoid encoding unbounded histories in contracts. Path, URL, and regex constraints should be reduced to bounded string predicates or finite cases when possible; otherwise they are outside the most reliable Z3 fragment.
 
 Recommended:
 
@@ -101,6 +106,48 @@ The verifier emits an `outside_decidable_fragment` warning for tags that indicat
 | `complex_temporal_effect` | Many states/transitions or implicit history | Reduce to finite explicit transitions |
 | `nested_aliasing` | Multiple `ref mut` aliases or nested mutable scopes | Split the atom or serialize mutation through one owner |
 | `regex_semantics` | `regex_match`, `matches`, or equivalent regex constraints | Replace with prefix/contains/bounded finite cases or escalate to Lean |
+
+### Anti-pattern examples
+
+Avoid nonlinear arithmetic in core postconditions:
+
+```mumei
+atom area(width: i64, height: i64)
+requires: width >= 0 && height >= 0;
+ensures: result == width * height;
+body: width * height;
+```
+
+Prefer a weaker linear contract for Z3, or send the exact multiplicative property to Lean if it is the property under review.
+
+Avoid array access without a nearby bound:
+
+```mumei
+atom unsafe_read(i: i64)
+requires: true;
+ensures: result == arr[i];
+body: arr[i];
+```
+
+State the length and index range explicitly:
+
+```mumei
+atom safe_read(n: i64, i: i64)
+requires: n >= 0 && i >= 0 && i < n;
+ensures: result == arr[i];
+body: arr[i];
+```
+
+Avoid alternating quantifiers unless a witness is constructed:
+
+```mumei
+atom unstable_match(n: i64)
+requires: n >= 0;
+ensures: forall(i, 0, n, exists(j, 0, n, arr[i] == arr[j]));
+body: n;
+```
+
+Split the property, return the witness, or escalate the obligation to Lean.
 
 ## Responding to `outside_decidable_fragment` warnings
 
@@ -181,6 +228,17 @@ Best practices:
 
 ## Recommended Templates
 
+### Bank transfer template
+
+```mumei
+atom transfer(balance: i64, amount: i64)
+requires: balance >= 0 && amount > 0 && amount <= balance;
+ensures: result == balance - amount && result >= 0;
+body: balance - amount;
+```
+
+Use the precondition to make invalid transfers uncallable, and keep the postcondition linear. If the product must encode fees or exchange rates, model constant rates first; symbolic rates are Lean escalation candidates.
+
 ### Linear refinement template
 
 ```mumei
@@ -213,6 +271,20 @@ body: {
 };
 ```
 
+### Array operation template
+
+```mumei
+atom replace_with_max(n: i64, i: i64, value: i64, max_value: i64)
+requires: n >= 0 && i >= 0 && i < n && value <= max_value;
+ensures: result <= max_value;
+body: {
+    arr[i] = value;
+    arr[i]
+};
+```
+
+Keep the modified index explicit and prove one local property at a time. Permutation, sortedness preservation after arbitrary swaps, or nested mutable aliasing should be treated as Lean escalation candidates.
+
 ### Bounded universal template
 
 ```mumei
@@ -244,6 +316,19 @@ effect Session
 ```
 
 Keep transition names aligned with `perform` operations so MIR temporal analysis can track them directly.
+
+### State machine template
+
+```mumei
+effect Transfer
+    states: [Draft, Authorized, Settled, Rejected];
+    initial: Draft;
+    transition authorize: Draft -> Authorized;
+    transition settle: Authorized -> Settled;
+    transition reject: Draft -> Rejected;
+```
+
+Represent protocols as finite states plus explicit transitions. Avoid temporal specs that depend on unbounded histories such as "was never authorized by an expired user"; encode those checks as separate bounded predicates or escalate them.
 
 ## Metrics and review cadence
 
