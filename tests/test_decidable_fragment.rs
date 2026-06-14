@@ -5,8 +5,8 @@ use mumei_core::parser::{
     QuantifierType, Span, TrustLevel,
 };
 use mumei_core::verification::{
-    collect_decidable_fragment_metrics, detect_logic_fragment_tags, is_outside_decidable_fragment,
-    outside_decidable_fragment_warning, ModuleEnv,
+    collect_decidable_fragment_metrics, detect_logic_fragment, detect_logic_fragment_tags,
+    is_outside_decidable_fragment, outside_decidable_fragment_warning, LogicFragment, ModuleEnv,
 };
 
 fn base_atom(name: &str) -> Atom {
@@ -105,6 +105,48 @@ fn detects_nonlinear_arithmetic_in_symbolic_mul_and_div() {
     div_atom.requires = "y != 0".to_string();
     div_atom.ensures = "result == x / y".to_string();
     assert_outside_tag(&div_atom, &module_env, "nonlinear_arithmetic");
+}
+
+#[test]
+fn detect_logic_fragment_returns_requested_fragment_categories() {
+    let mut module_env = ModuleEnv::new();
+    module_env.register_effect(&EffectDef {
+        name: "Protocol".to_string(),
+        params: Vec::new(),
+        constraint: None,
+        includes: Vec::new(),
+        refinement: None,
+        parent: Vec::new(),
+        span: Span::default(),
+        states: vec!["Idle".to_string(), "Ready".to_string()],
+        transitions: vec![EffectTransition {
+            operation: "start".to_string(),
+            from_state: "Idle".to_string(),
+            to_state: "Ready".to_string(),
+        }],
+        initial_state: Some("Idle".to_string()),
+    });
+
+    let mut atom = base_atom("fragment_mix");
+    atom.params = vec![param("i", "i64")];
+    atom.requires = "i >= 0 && i < n".to_string();
+    atom.ensures = "result == arr[i] && exists(j, 0, n, arr[j] == result)".to_string();
+    atom.body_expr = "arr[i]".to_string();
+    atom.forall_constraints = vec![Quantifier {
+        q_type: QuantifierType::ForAll,
+        var: "k".to_string(),
+        start: "0".to_string(),
+        end: "n".to_string(),
+        condition: "arr[k] >= 0".to_string(),
+    }];
+    atom.effects = vec![Effect::simple("Protocol")];
+
+    let fragments = detect_logic_fragment(&atom, &module_env);
+
+    assert!(fragments.contains(&LogicFragment::LinearArithmetic));
+    assert!(fragments.contains(&LogicFragment::ArrayAccess));
+    assert!(fragments.contains(&LogicFragment::QuantifierAlternation));
+    assert!(fragments.contains(&LogicFragment::TemporalState));
 }
 
 #[test]
@@ -301,6 +343,7 @@ body: x * y;
 
     let output = Command::new(bin)
         .arg("verify")
+        .arg("--warn-fragment")
         .arg("--json")
         .arg("--report-dir")
         .arg(&temp_dir)
@@ -362,6 +405,7 @@ fn verify_stderr_prints_outside_decidable_fragment_warning_with_location_and_hin
 
     let output = Command::new(bin)
         .arg("verify")
+        .arg("--warn-fragment")
         .arg("--report-dir")
         .arg(&temp_dir)
         .arg(&fixture)
@@ -378,7 +422,7 @@ fn verify_stderr_prints_outside_decidable_fragment_warning_with_location_and_hin
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains(
-            "warning[outside_decidable_fragment]: atom `nonlinear` uses fragments outside Z3-stable range: [nonlinear_arithmetic]"
+            "warning[outside_decidable_fragment]: atom `nonlinear` uses nonlinear arithmetic (x * y), consider Lean escalation"
         ),
         "missing warning header in stderr:\n{stderr}"
     );
@@ -395,6 +439,50 @@ fn verify_stderr_prints_outside_decidable_fragment_warning_with_location_and_hin
     assert!(
         stderr.contains("  see: docs/SPEC_GUIDE.md#decidable-fragment"),
         "missing warning guide link in stderr:\n{stderr}"
+    );
+
+    std::fs::remove_dir_all(temp_dir).expect("remove warning temp dir");
+}
+
+#[test]
+fn verify_does_not_print_fragment_warning_without_flag() {
+    let bin = env!("CARGO_BIN_EXE_mumei");
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let temp_dir = std::env::temp_dir().join(format!(
+        "mumei_decidable_warning_{}_{}",
+        std::process::id(),
+        "default_off"
+    ));
+    if temp_dir.exists() {
+        std::fs::remove_dir_all(&temp_dir).expect("clean stale warning temp dir");
+    }
+    std::fs::create_dir_all(&temp_dir).expect("create warning temp dir");
+    let fixture = temp_dir.join("vault.mm");
+    std::fs::write(
+        &fixture,
+        "atom nonlinear(x: i64, y: i64) -> i64\nrequires: true;\nensures: result == x * y;\nbody: x * y;\n",
+    )
+    .expect("write nonlinear fixture");
+
+    let output = Command::new(bin)
+        .arg("verify")
+        .arg("--report-dir")
+        .arg(&temp_dir)
+        .arg(&fixture)
+        .current_dir(manifest_dir)
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run mumei verify: {err}"));
+
+    assert!(
+        output.status.success(),
+        "verify should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("warning[outside_decidable_fragment]"),
+        "fragment warning should require --warn-fragment:\n{stderr}"
     );
 
     std::fs::remove_dir_all(temp_dir).expect("remove warning temp dir");

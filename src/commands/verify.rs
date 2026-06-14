@@ -31,6 +31,7 @@ pub(crate) fn cmd_verify_command(command: Command) {
         enable_spurious_detection,
         disable_spurious_detection,
         property_based_test,
+        warn_fragment,
         property_based_test_count,
         property_based_test_seed,
         property_based_test_max_shrink_steps,
@@ -127,6 +128,7 @@ pub(crate) fn cmd_verify_command(command: Command) {
                     cross_spec_files: &cross_spec_files,
                     enable_spurious_detection: enable_spurious,
                     property_based_test,
+                    warn_fragment,
                     property_based_test_count,
                     property_based_test_seed,
                     property_based_test_max_shrink_steps,
@@ -182,6 +184,7 @@ pub(crate) fn cmd_verify_command(command: Command) {
             cross_spec_files: &cross_spec_files,
             enable_spurious_detection: enable_spurious,
             property_based_test,
+            warn_fragment,
             property_based_test_count,
             property_based_test_seed,
             property_based_test_max_shrink_steps,
@@ -297,6 +300,7 @@ pub(crate) struct VerifyOptions<'a> {
     pub(crate) cross_spec_files: &'a [String],
     pub(crate) enable_spurious_detection: bool,
     pub(crate) property_based_test: bool,
+    pub(crate) warn_fragment: bool,
     pub(crate) property_based_test_count: usize,
     pub(crate) property_based_test_seed: Option<u64>,
     pub(crate) property_based_test_max_shrink_steps: usize,
@@ -321,6 +325,7 @@ struct VerifyContext<'a> {
     emit_structured_feedback: bool,
     emit_lean_artifacts: bool,
     enable_spurious_detection: bool,
+    warn_fragment: bool,
     diagnostics: &'a mut Vec<verification::Diagnostic>,
     structured_feedbacks: &'a mut Vec<StructuredFeedback>,
     reconstruction_losses: &'a mut std::collections::HashMap<String, ReconstructionLoss>,
@@ -333,9 +338,12 @@ struct VerifyContext<'a> {
 
 fn verify_single_atom(atom: &parser::Atom, name: &str, ctx: &mut VerifyContext<'_>) {
     let has_fragment_warning =
-        collect_decidable_fragment_diagnostic(atom, ctx.module_env, ctx.json_output)
+        verification::outside_decidable_fragment_diagnostic(atom, ctx.module_env).is_some();
+    if ctx.warn_fragment {
+        let _ = collect_decidable_fragment_diagnostic(atom, ctx.module_env, ctx.json_output)
             .inspect(|d| ctx.diagnostics.push(d.clone()))
             .is_some();
+    }
     let promote_outside_fragment = ctx.emit_lean_artifacts && has_fragment_warning;
     if ctx.module_env.is_verified(name) {
         if !ctx.quiet_output {
@@ -788,6 +796,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
         cross_spec_files,
         enable_spurious_detection,
         property_based_test,
+        warn_fragment,
         property_based_test_count,
         property_based_test_seed,
         property_based_test_max_shrink_steps,
@@ -1030,6 +1039,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                     emit_structured_feedback,
                     emit_lean_artifacts,
                     enable_spurious_detection,
+                    warn_fragment,
                     diagnostics: &mut diagnostics,
                     structured_feedbacks: &mut structured_feedbacks,
                     reconstruction_losses: &mut reconstruction_losses,
@@ -1057,6 +1067,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                         emit_structured_feedback,
                         emit_lean_artifacts,
                         enable_spurious_detection,
+                        warn_fragment,
                         diagnostics: &mut diagnostics,
                         structured_feedbacks: &mut structured_feedbacks,
                         reconstruction_losses: &mut reconstruction_losses,

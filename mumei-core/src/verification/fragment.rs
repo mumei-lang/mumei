@@ -89,6 +89,56 @@ pub fn detect_logic_fragment_tags(atom: &Atom, module_env: &ModuleEnv) -> Vec<St
     tags
 }
 
+pub fn detect_logic_fragment(atom: &Atom, module_env: &ModuleEnv) -> Vec<LogicFragment> {
+    let requires_expr = parse_expression(&atom.requires);
+    let ensures_expr = parse_expression(&atom.ensures);
+    let body_stmt = parse_body_expr(&atom.body_expr);
+    let contract_text = atom_contract_text(atom);
+    let mut fragments = Vec::new();
+
+    if expr_has_nonlinear_arithmetic(&requires_expr)
+        || expr_has_nonlinear_arithmetic(&ensures_expr)
+        || stmt_has_nonlinear_arithmetic(&body_stmt)
+        || text_has_nonlinear_arithmetic_marker(&contract_text)
+    {
+        push_unique_fragment(&mut fragments, LogicFragment::NonlinearArithmetic);
+    } else if expr_has_linear_arithmetic(&requires_expr)
+        || expr_has_linear_arithmetic(&ensures_expr)
+        || stmt_has_linear_arithmetic(&body_stmt)
+        || atom.forall_constraints.iter().any(|q| {
+            expression_text_has_linear_arithmetic(&q.start)
+                || expression_text_has_linear_arithmetic(&q.end)
+                || expr_has_linear_arithmetic(&parse_expression(&q.condition))
+        })
+    {
+        push_unique_fragment(&mut fragments, LogicFragment::LinearArithmetic);
+    }
+
+    if expr_has_array_access(&requires_expr)
+        || expr_has_array_access(&ensures_expr)
+        || stmt_has_array_access(&body_stmt)
+        || atom.forall_constraints.iter().any(|q| {
+            expr_has_array_access(&parse_expression(&q.condition)) || q.condition.contains('[')
+        })
+    {
+        push_unique_fragment(&mut fragments, LogicFragment::ArrayAccess);
+    }
+
+    if atom_has_quantifier_alternation(atom) {
+        push_unique_fragment(&mut fragments, LogicFragment::QuantifierAlternation);
+    }
+
+    if atom_uses_temporal_effect(atom, module_env) {
+        push_unique_fragment(&mut fragments, LogicFragment::TemporalState);
+    }
+
+    if fragments.is_empty() {
+        push_unique_fragment(&mut fragments, LogicFragment::LinearArithmetic);
+    }
+
+    fragments
+}
+
 /// Returns true if the atom's logic fragment tags indicate it is outside
 /// the Z3-decidable fragment and should trigger a warning.
 pub fn is_outside_decidable_fragment(tags: &[String]) -> bool {
@@ -113,11 +163,7 @@ pub fn outside_decidable_fragment_diagnostic(
             code: "outside_decidable_fragment".to_string(),
             severity: "warning".to_string(),
             atom: atom.name.clone(),
-            message: format!(
-                "atom `{}` uses fragments outside Z3-stable range: [{}]",
-                atom.name,
-                tags.join(", ")
-            ),
+            message: outside_decidable_fragment_message(atom, &tags),
             tags,
             escalation_reason: Some("outside_decidable_fragment".to_string()),
         })
@@ -125,8 +171,14 @@ pub fn outside_decidable_fragment_diagnostic(
 }
 
 pub fn outside_decidable_fragment_warning(atom: &Atom, module_env: &ModuleEnv) -> Option<String> {
-    outside_decidable_fragment_diagnostic(atom, module_env)
-        .map(|diagnostic| format!("{}: {}", diagnostic.code, diagnostic.message))
+    outside_decidable_fragment_diagnostic(atom, module_env).map(|diagnostic| {
+        format!(
+            "{}: {} [{}]",
+            diagnostic.code,
+            diagnostic.message,
+            diagnostic.tags.join(", ")
+        )
+    })
 }
 
 pub fn collect_decidable_fragment_metrics(module_env: &ModuleEnv) -> DecidableFragmentMetrics {
@@ -153,6 +205,12 @@ pub(crate) fn push_unique_tag(tags: &mut Vec<String>, tag: &str) {
     }
 }
 
+pub(crate) fn push_unique_fragment(fragments: &mut Vec<LogicFragment>, fragment: LogicFragment) {
+    if !fragments.contains(&fragment) {
+        fragments.push(fragment);
+    }
+}
+
 pub(crate) fn atom_contract_text(atom: &Atom) -> String {
     let mut parts = vec![
         atom.requires.as_str(),
@@ -170,12 +228,125 @@ pub(crate) fn atom_contract_text(atom: &Atom) -> String {
     parts.join(" ")
 }
 
+pub(crate) fn outside_decidable_fragment_message(atom: &Atom, tags: &[String]) -> String {
+    if tags.iter().any(|tag| tag == "nonlinear_arithmetic") {
+        if let Some(pattern) = first_nonlinear_arithmetic_pattern(atom) {
+            format!(
+                "atom `{}` uses nonlinear arithmetic ({}), consider Lean escalation",
+                atom.name, pattern
+            )
+        } else {
+            format!(
+                "atom `{}` uses nonlinear arithmetic, consider Lean escalation",
+                atom.name
+            )
+        }
+    } else if tags.iter().any(|tag| tag == "quantifier_alternation") {
+        let pattern = quantifier_alternation_pattern(atom);
+        format!(
+            "atom `{}` uses quantifier alternation ({}), escalation recommended",
+            atom.name, pattern
+        )
+    } else if tags.iter().any(|tag| tag == "array_without_bounds") {
+        if let Some(pattern) = first_array_access_pattern(atom) {
+            format!(
+                "atom `{}` accesses array without explicit bounds ({}), add 0 <= i && i < len(a)",
+                atom.name, pattern
+            )
+        } else {
+            format!(
+                "atom `{}` accesses array without explicit bounds, add 0 <= i && i < len(a)",
+                atom.name
+            )
+        }
+    } else {
+        format!(
+            "atom `{}` uses fragments outside Z3-stable range: [{}]",
+            atom.name,
+            tags.join(", ")
+        )
+    }
+}
+
 pub(crate) fn text_has_nonlinear_arithmetic_marker(text: &str) -> bool {
     text.contains('%')
         || text.contains("**")
         || text.contains("pow(")
         || text.contains("mod(")
         || text.contains("exp(")
+}
+
+pub(crate) fn first_nonlinear_arithmetic_pattern(atom: &Atom) -> Option<String> {
+    let contract_text = atom_contract_text(atom);
+    let symbolic_op =
+        regex::Regex::new(r"([A-Za-z_][A-Za-z0-9_]*)\s*(\*\*|\*|/|%)\s*([A-Za-z_][A-Za-z0-9_]*)")
+            .ok()?;
+    if let Some(captures) = symbolic_op.captures(&contract_text) {
+        return Some(format!(
+            "{} {} {}",
+            captures.get(1)?.as_str(),
+            captures.get(2)?.as_str(),
+            captures.get(3)?.as_str()
+        ));
+    }
+    let call_op = regex::Regex::new(r"\b(pow|mod|exp)\s*\(([^)]*)\)").ok()?;
+    call_op
+        .captures(&contract_text)
+        .and_then(|captures| captures.get(0).map(|matched| matched.as_str().to_string()))
+}
+
+pub(crate) fn first_array_access_pattern(atom: &Atom) -> Option<String> {
+    let contract_text = atom_contract_text(atom);
+    let re = regex::Regex::new(r"([A-Za-z_][A-Za-z0-9_]*)\s*\[\s*([^]]+?)\s*\]").ok()?;
+    re.captures(&contract_text).and_then(|captures| {
+        Some(format!(
+            "{}[{}]",
+            captures.get(1)?.as_str(),
+            captures.get(2)?.as_str().trim()
+        ))
+    })
+}
+
+pub(crate) fn quantifier_alternation_pattern(atom: &Atom) -> &'static str {
+    let text = atom_contract_text(atom).to_ascii_lowercase();
+    let forall_pos = text.find("forall");
+    let exists_pos = text.find("exists");
+    match (forall_pos, exists_pos) {
+        (Some(forall), Some(exists)) if forall < exists => "forall exists",
+        (Some(_), Some(_)) => "exists forall",
+        _ if atom
+            .forall_constraints
+            .iter()
+            .any(|q| q.q_type == QuantifierType::ForAll)
+            && atom
+                .forall_constraints
+                .iter()
+                .any(|q| q.q_type == QuantifierType::Exists) =>
+        {
+            "forall exists"
+        }
+        _ => "mixed quantifiers",
+    }
+}
+
+pub(crate) fn atom_has_quantifier_alternation(atom: &Atom) -> bool {
+    let has_forall = atom
+        .forall_constraints
+        .iter()
+        .any(|q| q.q_type == QuantifierType::ForAll)
+        || atom.requires.contains("forall(")
+        || atom.ensures.contains("forall(");
+    let has_exists = atom
+        .forall_constraints
+        .iter()
+        .any(|q| q.q_type == QuantifierType::Exists)
+        || atom.requires.contains("exists(")
+        || atom.ensures.contains("exists(");
+    has_forall && has_exists
+}
+
+pub(crate) fn expression_text_has_linear_arithmetic(text: &str) -> bool {
+    expr_has_linear_arithmetic(&parse_expression(text))
 }
 
 pub(crate) fn atom_has_nested_mutable_aliasing(atom: &Atom, body_stmt: &Stmt) -> bool {
@@ -383,6 +554,156 @@ pub(crate) fn atom_uses_complex_temporal_effect(atom: &Atom, module_env: &Module
             .or_else(|| module_env.effects.get(&effect.name))
             .is_some_and(|def| def.states.len() > 4 || def.transitions.len() > 8)
     })
+}
+
+pub(crate) fn atom_uses_temporal_effect(atom: &Atom, module_env: &ModuleEnv) -> bool {
+    atom.effects.iter().any(|effect| {
+        module_env
+            .effect_defs
+            .get(&effect.name)
+            .or_else(|| module_env.effects.get(&effect.name))
+            .is_some_and(|def| !def.states.is_empty() || !def.transitions.is_empty())
+    })
+}
+
+pub(crate) fn expr_has_array_access(expr: &Expr) -> bool {
+    match expr {
+        Expr::ArrayAccess(_, _) => true,
+        Expr::BinaryOp(left, _, right) => {
+            expr_has_array_access(left) || expr_has_array_access(right)
+        }
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            expr_has_array_access(cond)
+                || stmt_has_array_access(then_branch)
+                || stmt_has_array_access(else_branch)
+        }
+        Expr::Call(_, args) => args.iter().any(expr_has_array_access),
+        Expr::StructInit { fields, .. } => fields
+            .iter()
+            .any(|(_, field_expr)| expr_has_array_access(field_expr)),
+        Expr::FieldAccess(base, _) => expr_has_array_access(base),
+        Expr::Match { target, arms } => {
+            expr_has_array_access(target) || arms.iter().any(|arm| stmt_has_array_access(&arm.body))
+        }
+        Expr::Async { body } | Expr::Lambda { body, .. } => stmt_has_array_access(body),
+        Expr::Await { expr } => expr_has_array_access(expr),
+        Expr::CallRef { callee, args } => {
+            expr_has_array_access(callee) || args.iter().any(expr_has_array_access)
+        }
+        Expr::Perform { args, .. } => args.iter().any(expr_has_array_access),
+        Expr::ChanSend { channel, value } => {
+            expr_has_array_access(channel) || expr_has_array_access(value)
+        }
+        Expr::ChanRecv { channel } => expr_has_array_access(channel),
+        Expr::Number(_)
+        | Expr::Float(_)
+        | Expr::StringLit(_)
+        | Expr::Variable(_)
+        | Expr::AtomRef { .. } => false,
+    }
+}
+
+pub(crate) fn stmt_has_array_access(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Let { value, .. } | Stmt::Assign { value, .. } => expr_has_array_access(value),
+        Stmt::Expr(value, _) => expr_has_array_access(value),
+        Stmt::ArrayStore { .. } => true,
+        Stmt::Block(stmts, _) => stmts.iter().any(stmt_has_array_access),
+        Stmt::While {
+            cond,
+            invariant,
+            body,
+            ..
+        } => {
+            expr_has_array_access(cond)
+                || expr_has_array_access(invariant)
+                || stmt_has_array_access(body)
+        }
+        Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => stmt_has_array_access(body),
+        Stmt::TaskGroup { children, .. } => children.iter().any(stmt_has_array_access),
+        Stmt::Cancel { .. } => false,
+    }
+}
+
+pub(crate) fn expr_has_linear_arithmetic(expr: &Expr) -> bool {
+    match expr {
+        Expr::BinaryOp(
+            _,
+            Op::Add | Op::Sub | Op::Eq | Op::Neq | Op::Gt | Op::Lt | Op::Ge | Op::Le,
+            _,
+        ) => true,
+        Expr::BinaryOp(left, Op::Mul, right) => {
+            expr_is_numeric_literal(left)
+                || expr_is_numeric_literal(right)
+                || expr_has_linear_arithmetic(left)
+                || expr_has_linear_arithmetic(right)
+        }
+        Expr::BinaryOp(left, _, right) => {
+            expr_has_linear_arithmetic(left) || expr_has_linear_arithmetic(right)
+        }
+        Expr::ArrayAccess(_, idx) => expr_has_linear_arithmetic(idx),
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            expr_has_linear_arithmetic(cond)
+                || stmt_has_linear_arithmetic(then_branch)
+                || stmt_has_linear_arithmetic(else_branch)
+        }
+        Expr::Call(_, args) => args.iter().any(expr_has_linear_arithmetic),
+        Expr::StructInit { fields, .. } => fields
+            .iter()
+            .any(|(_, field_expr)| expr_has_linear_arithmetic(field_expr)),
+        Expr::FieldAccess(base, _) => expr_has_linear_arithmetic(base),
+        Expr::Match { target, arms } => {
+            expr_has_linear_arithmetic(target)
+                || arms.iter().any(|arm| stmt_has_linear_arithmetic(&arm.body))
+        }
+        Expr::Async { body } | Expr::Lambda { body, .. } => stmt_has_linear_arithmetic(body),
+        Expr::Await { expr } => expr_has_linear_arithmetic(expr),
+        Expr::CallRef { callee, args } => {
+            expr_has_linear_arithmetic(callee) || args.iter().any(expr_has_linear_arithmetic)
+        }
+        Expr::Perform { args, .. } => args.iter().any(expr_has_linear_arithmetic),
+        Expr::ChanSend { channel, value } => {
+            expr_has_linear_arithmetic(channel) || expr_has_linear_arithmetic(value)
+        }
+        Expr::ChanRecv { channel } => expr_has_linear_arithmetic(channel),
+        Expr::Number(_)
+        | Expr::Float(_)
+        | Expr::StringLit(_)
+        | Expr::Variable(_)
+        | Expr::AtomRef { .. } => false,
+    }
+}
+
+pub(crate) fn stmt_has_linear_arithmetic(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Let { value, .. } | Stmt::Assign { value, .. } => expr_has_linear_arithmetic(value),
+        Stmt::Expr(value, _) => expr_has_linear_arithmetic(value),
+        Stmt::ArrayStore { index, value, .. } => {
+            expr_has_linear_arithmetic(index) || expr_has_linear_arithmetic(value)
+        }
+        Stmt::Block(stmts, _) => stmts.iter().any(stmt_has_linear_arithmetic),
+        Stmt::While {
+            cond,
+            invariant,
+            body,
+            ..
+        } => {
+            expr_has_linear_arithmetic(cond)
+                || expr_has_linear_arithmetic(invariant)
+                || stmt_has_linear_arithmetic(body)
+        }
+        Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => stmt_has_linear_arithmetic(body),
+        Stmt::TaskGroup { children, .. } => children.iter().any(stmt_has_linear_arithmetic),
+        Stmt::Cancel { .. } => false,
+    }
 }
 
 pub(crate) fn expr_has_nonlinear_arithmetic(expr: &Expr) -> bool {
