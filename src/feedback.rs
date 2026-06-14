@@ -106,12 +106,7 @@ pub(crate) fn collect_decidable_fragment_diagnostic(
         } else {
             format!("{}:{}", atom.span.file, atom.span.line)
         };
-        eprintln!(
-            "warning[{}]: atom `{}` uses fragments outside Z3-stable range: [{}]",
-            diagnostic.code,
-            atom.name,
-            diagnostic.tags.join(", ")
-        );
+        eprintln!("warning[{}]: {}", diagnostic.code, diagnostic.message);
         eprintln!("  --> {}", location);
         eprintln!(
             "  hint: simplify to linear arithmetic, or use `mumei verify --escalate-lean` to delegate to Lean 4"

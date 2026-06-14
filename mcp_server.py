@@ -103,6 +103,12 @@ def get_spec_guideline() -> str:
     return json.dumps(SPEC_GUIDELINE_SUMMARY, ensure_ascii=False, indent=2)
 
 
+@mcp.tool()
+def get_spec_guidelines() -> dict:
+    """Return decidable fragment guidelines for spec writing."""
+    return SPEC_GUIDELINE_SUMMARY
+
+
 def _env_nonempty(name: str) -> str | None:
     value = os.environ.get(name)
     if value is None or value == "":

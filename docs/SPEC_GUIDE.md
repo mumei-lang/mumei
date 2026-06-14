@@ -93,7 +93,7 @@ Prefer small state sets, deterministic transitions, and explicit operation order
 
 ## Anti-patterns
 
-The verifier emits an `outside_decidable_fragment` warning for tags that indicate the atom is outside the Z3-stable range (`nonlinear_arithmetic`, `quantifier_alternation`, `array_without_bounds`, or `inductive_data_type`). Other tags are diagnostic metadata that should still guide prompt and spec review:
+With `mumei verify --warn-fragment`, the verifier emits an `outside_decidable_fragment` warning for tags that indicate the atom is outside the Z3-stable range (`nonlinear_arithmetic`, `quantifier_alternation`, `array_without_bounds`, or `inductive_data_type`). Other tags are diagnostic metadata that should still guide prompt and spec review:
 
 | Fragment tag | Typical pattern | Recommended response |
 |---|---|---|

@@ -83,12 +83,14 @@ def test_structured_feedback_from_report_helper() -> None:
 
 
 def test_get_spec_guideline_returns_decidable_fragment_summary() -> None:
-    from mcp_server import get_spec_guideline
+    from mcp_server import get_spec_guideline, get_spec_guidelines
 
     payload = json.loads(get_spec_guideline())
+    direct_payload = get_spec_guidelines()
 
     assert "decidable_fragment" in payload
     assert "linear_arithmetic" in payload["decidable_fragment"]
+    assert direct_payload["decidable_fragment"] == payload["decidable_fragment"]
     tags = {entry["tag"] for entry in payload["common_failure_patterns"]}
     assert "nonlinear_arithmetic" in tags
     assert "quantifier_alternation" in tags

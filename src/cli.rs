@@ -100,6 +100,9 @@ pub(crate) enum Command {
         /// Run property-based validation synthesized from refinement types
         #[arg(long)]
         property_based_test: bool,
+        /// Emit outside_decidable_fragment warnings for atoms outside the Z3-stable fragment
+        #[arg(long)]
+        warn_fragment: bool,
         /// Number of generated property-based inputs per atom
         #[arg(long, default_value_t = 100)]
         property_based_test_count: usize,

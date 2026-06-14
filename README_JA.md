@@ -230,7 +230,7 @@ mumei setup && source ~/.mumei/env
 | `generate_doc` | structured documentation を生成（`mumei doc --format json`） |
 | `analyze_contract_conflicts` | cross-atom contract conflict と circular dependency を解析（Meta-Architect） |
 | `propose_interface_refactoring` | architecture issue に対する interface-level refactoring を提案（Meta-Architect） |
-| `get_spec_guideline` | agent 向け spec-writing guideline を JSON として返す |
+| `get_spec_guideline` / `get_spec_guidelines` | agent 向け spec-writing guideline を返す |
 | `get_structured_feedback` | source code に対する P9-E structured feedback JSON を返す |
 
 ### プロジェクト構成

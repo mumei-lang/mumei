@@ -1092,10 +1092,11 @@ pub enum LogicFragment {
     #[serde(alias = "array_without_bounds")]
     ArrayAccess,
     #[serde(
+        alias = "quantified_formula",
         alias = "quantifier_alternation",
         alias = "trigger_sensitive_quantifier"
     )]
-    QuantifiedFormula,
+    QuantifierAlternation,
     #[serde(alias = "recursive_invariant", alias = "complex_temporal_effect")]
     TemporalState,
 }
@@ -1106,7 +1107,7 @@ impl LogicFragment {
             Self::LinearArithmetic => "linear_arithmetic",
             Self::NonlinearArithmetic => "nonlinear_arithmetic",
             Self::ArrayAccess => "array_access",
-            Self::QuantifiedFormula => "quantified_formula",
+            Self::QuantifierAlternation => "quantifier_alternation",
             Self::TemporalState => "temporal_state",
         }
     }
@@ -1125,7 +1126,7 @@ pub fn primary_logic_fragment_tag(tags: &[String]) -> LogicFragment {
         .iter()
         .any(|tag| tag == "quantifier_alternation" || tag == "trigger_sensitive_quantifier")
     {
-        LogicFragment::QuantifiedFormula
+        LogicFragment::QuantifierAlternation
     } else if tags
         .iter()
         .any(|tag| tag == "array_without_bounds" || tag == "array_access")
@@ -1232,7 +1233,11 @@ pub fn classify_atom_for_lean_escalation(
             _ if matches!(logic_fragment_tag, Some(LogicFragment::NonlinearArithmetic)) => {
                 EscalationReason::NonlinearArithmetic
             }
-            _ if matches!(logic_fragment_tag, Some(LogicFragment::QuantifiedFormula)) => {
+            _ if matches!(
+                logic_fragment_tag,
+                Some(LogicFragment::QuantifierAlternation)
+            ) =>
+            {
                 EscalationReason::QuantifierAlternation
             }
             _ => EscalationReason::Z3Unknown,
@@ -1242,7 +1247,7 @@ pub fn classify_atom_for_lean_escalation(
         && !normalized_status.contains("failed")
     {
         reason = Some(match logic_fragment_tag {
-            Some(LogicFragment::QuantifiedFormula) => EscalationReason::QuantifierAlternation,
+            Some(LogicFragment::QuantifierAlternation) => EscalationReason::QuantifierAlternation,
             _ => EscalationReason::NonlinearArithmetic,
         });
     } else if atom.trust_level == TrustLevel::Trusted {
