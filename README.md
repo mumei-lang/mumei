@@ -13,6 +13,7 @@ Mumei is a formal verification toolchain that can start from existing foreign-la
 ## Start without writing .mm (mumei-agent)
 
 mumei-agentを使うと、既存コードや仕様をそのまま検証できます。
+`.mm` を書かない入口から段階的に `.mm` へ移行する手順は [Onboarding Guide](docs/ONBOARDING.md) を参照してください。
 
 ### インストール
 
@@ -269,6 +270,7 @@ mumei/
 | [Report Schema](docs/REPORT_SCHEMA.md) | `report.json`, semantic feedback, and rich diagnostics JSON |
 | [Cross-Spec Verification](docs/CROSS_SPEC_GUIDE.md) | System-wide contract consistency, invariants, and dependency cycles |
 | [Toolchain](docs/TOOLCHAIN.md) | CLI commands, package management, CI/release |
+| [Onboarding Guide](docs/ONBOARDING.md) | Gradual path from existing code and natural language to `.mm` |
 | [LSP Integration](docs/LSP_INTEGRATION.md) | Editor CodeLens, intent drift, and spec-code mapping |
 | [Roadmap](docs/ROADMAP.md) | Strategic roadmap |
 | [Capability Security](docs/CAPABILITY_SECURITY.md) | Effect-based capability security evaluation |

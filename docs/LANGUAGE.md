@@ -1,4 +1,6 @@
 # 🔬 Mumei Language Reference
+For proof-friendly refinements, bounded quantifiers, array access, and temporal-effect patterns, see [Proof-Friendly Specification Guide](SPEC_GUIDE.md).
+
 ## Type System
 ### Refinement Types
 Types with embedded logical predicates verified by Z3. For Z3-stable refinement patterns, see [Linear arithmetic](SPEC_GUIDE.md#linear-arithmetic).
