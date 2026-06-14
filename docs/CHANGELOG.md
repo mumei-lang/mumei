@@ -114,9 +114,8 @@
   alternative spawn-join-spawn-join layout would deadlock simple
   `recv` / `send` rendezvous patterns inside the group. A regression
   test `chan_rendezvous_in_group` exercises exactly this case.
-  `task_group:any` is parsed but currently uses the same
-  spawn-all-then-join-all — atomic completion-flag (cancel-the-rest)
-  semantics are a follow-up.
+  `task_group:any` now waits on the first completed child via a runtime
+  completion flag, cancels the remaining children, and joins them for cleanup.
 - **Diagnostic for dropped task captures**: when a `task` body
   references a parent-scope free variable that the IR closure
   conversion can't yet marshal (anything that isn't `i64` — `f64`,

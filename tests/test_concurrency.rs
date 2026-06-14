@@ -19,24 +19,12 @@ fn write_fixture(name: &str, source: &str) -> std::path::PathBuf {
 fn task_group_any_cancels_blocked_sibling_after_first_completion() {
     let bin = env!("CARGO_BIN_EXE_mumei");
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let fixture = write_fixture(
-        "task_group_any_cancel",
-        r#"
-atom main()
-requires: true;
-ensures: true;
-body: {
-    task_group:any {
-        task { 7 };
-        task { recv(0) }
-    }
-};
-"#,
-    );
 
-    let output = Command::new(bin)
+    let output = Command::new("timeout")
+        .arg("5s")
+        .arg(bin)
         .arg("run")
-        .arg(&fixture)
+        .arg("tests/test_task_group_any.mm")
         .current_dir(manifest_dir)
         .output()
         .unwrap_or_else(|err| panic!("failed to run task_group:any fixture: {err}"));
@@ -51,8 +39,6 @@ body: {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Mumei Run: verify"));
     assert!(stdout.contains("Running"));
-
-    std::fs::remove_dir_all(fixture.parent().unwrap()).expect("remove concurrency fixture dir");
 }
 
 #[test]
@@ -178,6 +164,57 @@ body: {
         output.status.code(),
         Some(7),
         "outer task_group:any cancellation should propagate through nested task_group:any and avoid hanging on inner recv\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    std::fs::remove_dir_all(fixture.parent().unwrap()).expect("remove concurrency fixture dir");
+}
+
+#[test]
+fn task_group_any_nested_leave_restores_outer_cancel_scope() {
+    let bin = env!("CARGO_BIN_EXE_mumei");
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let fixture = write_fixture(
+        "task_group_any_nested_leave_scope",
+        r#"
+trusted atom main()
+requires: true;
+ensures: true;
+body: {
+    task_group:any {
+        task { 7 };
+        task {
+            task_group:any {
+                task { recv(0) }
+            };
+            let i = 0;
+            while i < 1000000000000
+            invariant: i >= 0
+            decreases: 1000000000000 - i
+            {
+                i = i + 1;
+            };
+            9
+        }
+    }
+};
+"#,
+    );
+
+    let output = Command::new("timeout")
+        .arg("5s")
+        .arg(bin)
+        .arg("run")
+        .arg(&fixture)
+        .current_dir(manifest_dir)
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run nested task_group:any scope fixture: {err}"));
+
+    assert_eq!(
+        output.status.code(),
+        Some(7),
+        "task_group:any cancellation should still be visible after leaving a nested group\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
