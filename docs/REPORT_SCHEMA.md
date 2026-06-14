@@ -8,6 +8,105 @@ External tools (e.g., [mumei-agent](https://github.com/mumei-lang/mumei-agent)) 
 - `mumei verify --json file.mm` — outputs report to stdout
 - `mumei verify --report-dir <dir> file.mm` — writes report.json to specified directory
 
+## Rich Diagnostics
+
+Human-facing diagnostics are powered by [miette](https://crates.io/crates/miette): multi-span source locations, compound constraint decomposition, and expression-level dataflow tracking can all be attached to one verification error.
+
+### Multi-span output
+
+```text
+  × Verification Error: Effect constraint not satisfied for 'perform SafeFileRead.read(path)'
+   ╭─[examples/server.mm:15:9]
+14 │         let path = "/tmp/" + user_id + "/config.txt";
+15 │         perform SafeFileRead.read(path);
+   ·         ─────────────────────────────── constraint violated here
+16 │
+   ╰────
+   ╭─[examples/server.mm:14:20]
+14 │         let path = "/tmp/" + user_id + "/config.txt";
+   ·                    ──────────────────────────────────── path constructed here
+   ╰────
+   ╭─[std/file.mm:3:5]
+ 3 │     where starts_with(path, "/tmp/") && not_contains(path, "..");
+   ·           ──────────────────────────────────────────────────────── constraint defined here
+   ╰────
+  help: Sub-constraint [2/2] 'not_contains(path, "..")' may be violated.
+        user_id に ".." が含まれていないか確認してください。
+```
+
+### Compound constraint decomposition
+
+Each `&&`-joined sub-constraint can be evaluated and reported separately:
+
+```text
+  × Verification Error: Postcondition (ensures) is not satisfied.
+   ╭─[examples/basic.mm:5:1]
+ 4 │   ensures: result > 0;
+ 5 │   body: x - 1;
+   ·   ──────────── verification failed here
+ 6 │
+   ╰────
+  help: ensures の条件を確認してください。body の返り値が事後条件を満たすか検討してください
+```
+
+### Rich MCP JSON example
+
+MCP clients consume the same information through `semantic_feedback`:
+
+```json
+{
+  "failure_type": "precondition_violated",
+  "semantic_feedback": {
+    "violated_constraints": [
+      {
+        "param": "path",
+        "constraint": "starts_with(path, \"/tmp/\") && not_contains(path, \"..\")",
+        "sub_constraints": [
+          {
+            "index": 0,
+            "raw": "starts_with(path, \"/tmp/\")",
+            "satisfied": true
+          },
+          {
+            "index": 1,
+            "raw": "not_contains(path, \"..\")",
+            "satisfied": false,
+            "explanation": "'path' must not contain \"..\""
+          }
+        ]
+      }
+    ],
+    "data_flow": [
+      {
+        "step": "concat",
+        "line": 14,
+        "col": 20
+      },
+      {
+        "step": "perform",
+        "line": 15,
+        "col": 9,
+        "constraint": "starts_with(path, \"/tmp/\") && not_contains(path, \"..\")"
+      }
+    ],
+    "related_locations": [
+      {
+        "file": "examples/server.mm",
+        "line": 14,
+        "label": "path constructed here"
+      },
+      {
+        "file": "std/file.mm",
+        "line": 3,
+        "label": "constraint defined here"
+      }
+    ]
+  }
+}
+```
+
+LSP diagnostics include `relatedInformation` for multi-location errors, enabling IDE inline display of all related spans.
+
 ## Top-level Fields
 
 | Field | Type | Required | Description |

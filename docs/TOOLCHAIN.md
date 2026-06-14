@@ -4,19 +4,27 @@
 
 | Command | Status | Description |
 |---|---|---|
-| `mumei build` | ✅ | Full pipeline: verify + codegen (reads `mumei.toml` settings) |
-| `mumei verify` | ✅ | Z3 verification only |
-| `mumei check` | ✅ | Parse + resolve + monomorphize (no Z3) |
-| `mumei init` | ✅ | Project scaffolding with `mumei.toml` + example atoms |
-| `mumei add` | ✅ | Add dependency (local path / git URL / registry name) |
+| `mumei build <file> -o <out>` | ✅ | Full pipeline: verify + codegen; supports `--emit llvm-ir` (default), `c-header`, `verified-json`, `proof-book`, `binary`, `rust`, `python`, or an external plugin name |
+| `mumei run <file>` | ✅ | Verify → codegen → link → execute `atom main()` as a native binary; `--emit binary` is default and `--emit llvm-ir` keeps IR before linking |
+| `mumei verify <file>` | ✅ | Z3 verification only |
+| `mumei verify --json <file>` | ✅ | Structured JSON report to stdout |
+| `mumei verify --report-dir <dir> <file>` | ✅ | Write `report.json` to a specified directory for MCP/CI isolation |
+| `mumei verify --cross-spec-verify <file>` | ✅ | Cross-spec consistency check; outputs `cross_spec.json` |
+| `mumei verify --cross-spec-files <dep.mm> <file.mm>` | ✅ | Multi-file cross-spec verification |
+| `mumei verify --proof-cert <file>` | ✅ | Generate Z3 proof certificate (`.proof.json`) |
+| `mumei verify --task-id <id> --solver-timeout <ms> --cache-scope module\|global <file>` | ✅ | Orchestration metadata and cache isolation for MCP/CI parallel verification |
+| `mumei verify-cert` | ✅ | Verify proof certificate against current source |
+| `mumei check <file>` | ✅ | Parse + resolve + monomorphize (no Z3) |
+| `mumei init <name>` | ✅ | Project scaffolding with `mumei.toml` + example atoms |
+| `mumei add <dep>` | ✅ | Add dependency (local path / git URL / registry name) |
 | `mumei publish` | ✅ | Publish to local registry (`~/.mumei/packages/`) |
 | `mumei setup` | ✅ | Download & configure Z3 + LLVM into `~/.mumei/toolchains/` |
 | `mumei inspect` | ✅ | Inspect development environment (Z3, LLVM, std library, toolchains) |
-| `mumei inspect <file> --ai` | ✅ | Structured JSON inspection report for AI agents (Plan 11) |
-| `mumei verify --proof-cert` | ✅ | Generate Z3 proof certificate (.proof.json) (Plan 11) |
-| `mumei verify --task-id <id> --solver-timeout <ms> --cache-scope module\|global` | ✅ | Orchestration metadata and cache isolation for MCP/CI parallel verification (P8-F) |
-| `mumei verify-cert` | ✅ | Verify proof certificate against current source (Plan 11) |
-| `mumei infer-effects` | ✅ | Infer required effects (JSON output for MCP) |
+| `mumei inspect <file> --ai` | ✅ | Structured JSON inspection report for AI agents |
+| `mumei infer-effects <file>` | ✅ | Infer required effects (JSON output for MCP) |
+| `mumei infer-contracts <file>` | ✅ | Infer contracts for all atoms (JSON output) |
+| `mumei repl` | ✅ | Interactive REPL |
+| `mumei doc <file> -o <dir>` | ✅ | Generate documentation (`--format html` default, `markdown`, or `json`) |
 | `mumei lsp` | ✅ | Language Server Protocol (hover, diagnostics) |
 
 ### Installation

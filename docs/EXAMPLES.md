@@ -1,4 +1,117 @@
 # 📄 Mumei Examples & Test Suite Reference
+
+## Introductory `.mm` Samples
+
+These samples were previously shown in the README. They are useful after the no-`.mm` workflow has identified contracts worth migrating into Mumei source.
+
+### Refinement types
+
+```mumei
+type Nat = i64 where v >= 0;
+
+atom increment(n: Nat)
+  requires: n >= 0;
+  ensures: result >= 1;
+  body: n + 1;
+
+// Explicit return types for Str, f64, enums (Plan 18)
+atom greet(name: Str) -> Str
+  requires: true;
+  ensures: true;
+  body: "Hello, " + name;
+```
+
+### Effects
+
+Side effects are verified at compile time — undeclared effects will not compile.
+
+```mumei
+effect FileWrite;
+effect Log;
+
+atom write_log(msg: Nat)
+    effects: [FileWrite, Log];
+    requires: msg >= 0;
+    ensures: result == msg;
+    body: {
+        perform FileWrite.write(msg);
+        perform Log.info(msg);
+        msg
+    };
+```
+
+### Traits with algebraic laws
+
+Z3 proves every implementation satisfies the trait laws.
+
+```mumei
+trait Comparable {
+    fn leq(a: Self, b: Self) -> bool;
+    law reflexive: leq(x, x) == true;
+    law transitive: leq(a, b) && leq(b, c) => leq(a, c);
+}
+
+impl Comparable for i64 {
+    fn leq(a: i64, b: i64) -> bool { a <= b }
+}
+```
+
+## Additional `.mm` Examples
+
+### Loop invariant + termination proof
+
+Z3 proves the loop terminates and the invariant holds inductively.
+
+```mumei
+atom sum_up_to(n: i64)
+    requires: n >= 0;
+    ensures: result >= 0;
+    body: {
+        let s = 0;
+        let i = 0;
+        while i < n
+        invariant: s >= 0 && i <= n
+        decreases: n - i
+        {
+            s = s + i;
+            i = i + 1;
+        };
+        s
+    };
+```
+
+### Higher-order function contracts
+
+`contract(f)` lets Z3 verify generic callbacks without `trusted`.
+
+```mumei
+atom apply_twice(x: i64, f: atom_ref(i64) -> i64)
+    requires: x >= 0;
+    ensures: result >= 0;
+    contract(f): requires: x >= 0, ensures: result >= 0;
+    body: {
+        let first = call(f, x);
+        call(f, first)
+    };
+```
+
+### Deadlock-free concurrency
+
+Resource priorities are verified at compile time.
+
+```mumei
+resource db   priority: 1 mode: exclusive;
+resource cache priority: 2 mode: shared;
+
+async atom transfer(amount: i64)
+    resources: [db, cache];
+    requires: amount >= 0;
+    ensures: result >= 0;
+    body: {
+        acquire db { acquire cache { amount } }
+    };
+```
+
 ## Verification Suite (`sword_test.mm`)
 The test suite exercises **8 atoms**, **2 structs**, **1 generic struct**, **1 generic enum**, **1 trait + impl**, covering every verification feature:
 ```mumei

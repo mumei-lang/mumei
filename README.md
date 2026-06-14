@@ -1,55 +1,122 @@
 # Mumei (無銘) [![GitHub](https://img.shields.io/github/stars/mumei-lang/mumei?style=social)](https://github.com/mumei-lang/mumei)
 
-**Mathematical Proof-Driven Programming Language**
+**Verify existing code and specifications with formal methods — before you write `.mm`.**
 
-Mumei formally verifies every function with Z3 before compiling to LLVM IR.
+Mumei is a formal verification toolchain that can start from existing foreign-language code (for example Python, Rust, Go, or TypeScript), natural-language requirements, or Mumei `.mm` modules. It uses Z3, proof certificates, and AI-agent workflows to find bugs, spec drift, and contradictions, then gives you a path to gradually move critical logic into mathematically checked `.mm` code.
 
 [Technical Paper](paper/) — proof-driven programming architecture, autonomous verification loop, and case studies.
 
-> parse → resolve → monomorphize → lower_to_hir → **verify (Z3)** → emit (LLVM IR / C Header / Verified JSON)
+> existing code / natural language spec → MCP or mumei-agent → Z3-backed diagnostics → optional `.mm` migration → LLVM / proof artifacts
 
-```mumei
-type Nat = i64 where v >= 0;
+---
 
-atom increment(n: Nat)
-  requires: n >= 0;
-  ensures: result >= 1;
-  body: n + 1;
+## Start without writing `.mm`
 
-// Explicit return types for Str, f64, enums (Plan 18)
-atom greet(name: Str) -> Str
-  requires: true;
-  ensures: true;
-  body: "Hello, " + name;
+See the mumei-agent [Verification Workflow Guide](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/VERIFICATION_WORKFLOW_GUIDE.md) for the full no-`.mm` workflow, including natural-language spec validation, foreign-code verification, and spec↔code alignment.
+
+### 1. Existing code: find likely bug locations
+
+Give the agent an existing source file and ask it to extract contracts, verify them, and report suspicious paths. The supported language set depends on the workflow; current agent paths cover Python/Rust/Go for cross-validation and Python/TypeScript/Rust for foreign-code verification.
+
+```bash
+uv run python -m agent validate-code --input src/payment.py --language python
+uv run python -m agent verify-foreign --file src/lib.rs --language rust
 ```
 
-```mumei
-// Side effects are verified at compile time — undeclared effects won't compile.
-effect FileWrite;
-effect Log;
+MCP agents can use mumei's verification backend directly once they synthesize or receive `.mm`:
 
-atom write_log(msg: Nat)
-    effects: [FileWrite, Log];
-    requires: msg >= 0;
-    ensures: result == msg;
-    body: {
-        perform FileWrite.write(msg);
-        perform Log.info(msg);
-        msg
-    };
+```json
+{
+  "tool": "validate_logic",
+  "arguments": {
+    "source_code": "atom debit(balance: i64, amount: i64) requires: amount > 0; ensures: result >= 0; body: balance - amount;"
+  }
+}
 ```
 
-```mumei
-// Algebraic laws on traits — Z3 proves every impl satisfies them.
-trait Comparable {
-    fn leq(a: Self, b: Self) -> bool;
-    law reflexive: leq(x, x) == true;
-    law transitive: leq(a, b) && leq(b, c) => leq(a, c);
-}
+### 2. Natural-language spec + existing code: detect spec↔code drift
 
-impl Comparable for i64 {
-    fn leq(a: i64, b: i64) -> bool { a <= b }
+Compare requirements against an implementation and ask for mismatches before migrating anything to `.mm`.
+
+```bash
+uv run python -m agent validate-spec-to-code \
+  --spec docs/requirements/payment.txt \
+  --code src/payment.py \
+  --language python
+```
+
+For reverse drift detection:
+
+```bash
+uv run python -m agent validate-code-to-spec \
+  --code src/payment.py \
+  --spec docs/requirements/payment.txt \
+  --language python
+```
+
+### 3. Spec only: find contradictions and under-specified behavior
+
+Start from prose requirements and check for direct contradictions, vacuity, ambiguity, and over-constraints.
+
+```bash
+uv run python -m agent validate-spec --input docs/requirements/payment.txt --format nl
+uv run python -m agent extract-spec \
+  --text-file docs/requirements/payment.txt \
+  --check-contradiction-only \
+  --output reports/payment_spec_report.json
+```
+
+MCP agents can call spec-health or verification tools depending on whether the input is prose, extracted contracts, or `.mm`:
+
+```json
+{
+  "tool": "forge_blade",
+  "arguments": {
+    "source_code": "atom safe_div(a: i64, b: i64) requires: b != 0; ensures: true; body: a / b;",
+    "output_name": "safe_div"
+  }
 }
+```
+
+---
+
+## Gradual migration path
+
+### Step 0: Verify existing assets through MCP or mumei-agent
+
+Run the agent on existing code and specs first. No `.mm` source is required.
+
+```bash
+uv run python -m agent validate-code --input src/payment.py --language python
+uv run python -m agent validate-spec-to-code --spec spec.txt --code src/payment.py --language python
+```
+
+Use the resulting counter-examples, drift reports, and suggested contracts as the migration backlog.
+
+### Step 1: Start writing the critical spec surface in `.mm`
+
+Convert the smallest high-risk contracts into `.mm` atoms and verify them with the CLI or MCP:
+
+```bash
+mumei verify specs/payment.mm
+```
+
+```json
+{
+  "tool": "validate_logic",
+  "arguments": {
+    "source_code": "atom transfer(balance: i64, amount: i64) requires: balance >= amount && amount > 0; ensures: result >= 0; body: balance - amount;"
+  }
+}
+```
+
+### Step 2: Write new verified code in `.mm`
+
+Once the core contracts are stable, implement new logic directly in `.mm` and emit runnable artifacts.
+
+```bash
+mumei build src/main.mm -o dist/output
+mumei run src/main.mm
 ```
 
 ---
@@ -91,304 +158,24 @@ mumei setup && source ~/.mumei/env
 
 ---
 
-## Getting Started
-
-```bash
-mumei init my_app
-cd my_app
-mumei build src/main.mm -o dist/output
-mumei run src/main.mm
-```
-
-### CLI
-
-| Command | Description |
-|---------|-------------|
-| `mumei build <file> -o <out>` | Verify + codegen (`--emit llvm-ir` (default) / `c-header` / `verified-json` / `proof-book` / `binary` / `rust` / `python` / external plugin name) |
-| `mumei run <file>` | Verify → codegen → link → execute `atom main()` as a native binary (`--emit binary` default, `--emit llvm-ir` keeps IR before linking) |
-| `mumei verify <file>` | Z3 verification only |
-| `mumei check <file>` | Parse + resolve (fast, no Z3) |
-| `mumei init <name>` | Generate project template |
-| `mumei add <dep>` | Add dependency (path / git / registry) |
-| `mumei publish` | Publish to local registry |
-| `mumei setup` | Download Z3 + LLVM toolchain |
-| `mumei inspect` | Show development environment |
-| `mumei infer-effects <file>` | Infer required effects (JSON output) |
-| `mumei infer-contracts <file>` | Infer contracts for all atoms (JSON output) |
-| `mumei repl` | Interactive REPL |
-| `mumei doc <file> -o <dir>` | Generate documentation (`--format html` (default) / `markdown` / `json`); HTML output renders requires/ensures/effects contracts inline with syntax-highlighted bodies and a client-side search filter |
-| `mumei lsp` | Start LSP server |
-
----
-
-## Features
-
-| Category | Highlights |
-|----------|-----------|
-| **Types** | Refinement types (`i64 where v >= 0`), Structs, Enums (ADT), Generics, explicit return types (`-> Str`) |
-| **Verification** | Pre/postconditions, [loop invariants + termination proof](docs/LANGUAGE.md#termination-checking), `forall`/`exists` quantifiers, [temporal effect Z3 probes](docs/ARCHITECTURE.md#stateful-effects-temporal-effect-verification), Lean translator contract metadata in proof certificates (`translator_version`, `binder_mapping`, `bridge_lemma_hash`) |
-| **Traits** | [Algebraic laws verified by Z3](docs/LANGUAGE.md#trait-definitions-with-laws) (`law reflexive: leq(x, x) == true`) |
-| **Ownership** | [`ref` / `ref mut` / `consume`](docs/LANGUAGE.md#ownership-and-borrowing) with Z3 aliasing prevention, MIR-based move analysis |
-| **Concurrency** | `async`/`await`, `task_group:all`/`task_group:any`, [deadlock-free proof via resource hierarchy](docs/LANGUAGE.md#asyncawait-and-resource-hierarchy) |
-| **Effects** | Compile-time side-effect verification, `perform`/`effects:`, effect hierarchy, parameterized effects, [effect polymorphism (`<E: Effect>`)](docs/LANGUAGE.md), [capability security](docs/CAPABILITY_SECURITY.md), stateful effects with temporal ordering |
-| **Lambda** | First-class closures `\|x, y\| x + y`, capture analysis |
-| **Safety** | `trusted` / `unverified` atoms, taint analysis, BMC + inductive invariant, [`call_with_contract`](docs/LANGUAGE.md#higher-order-functions-phase-a) for higher-order function verification |
-| **FFI** | `extern "Rust"` / `extern "C"` blocks, handle-based memory management (`json_free`, `http_free`), Str type interop |
-| **Std Library** | Option, Result, List, BoundedArray, Vector, HashMap, JSON, HTTP, sort algorithms, effect definitions |
-| **Output** | LLVM IR (native binary), C header (`.h`) via `--emit c-header`, verified JSON metadata via `--emit verified-json`, Markdown proof certificates via `--emit proof-book`, Lean escalation bundles via `--proof-cert`, Rust / Python FFI bindings via `--emit rust` / `--emit python`, and runtime-loaded emitter plugins from `~/.mumei/emitters/<name>/`. Cargo workspace with emitter plugin architecture (`mumei-core`, `mumei-emit-llvm`, `mumei-emit-json`, `mumei-emit-proofbook`, `mumei-emit-rust`, `mumei-emit-python`) — see [Plugin Guide](docs/PLUGIN_GUIDE.md) and [Roadmap](docs/CROSS_PROJECT_ROADMAP.md) |
-| **Tooling** | LSP server, VS Code extension (counter-example ghost-text decorations — v0.2.0+), `mumei.toml` manifest, dependency manager, MCP server, contract-aware `mumei doc` (HTML / Markdown / JSON with client-side search), semantic feedback (bilingual EN/JP) |
-
-<details>
-<summary><b>More examples</b></summary>
-
-**Loop invariant + termination proof** — Z3 proves the loop terminates and the invariant holds inductively:
-
-```mumei
-atom sum_up_to(n: i64)
-    requires: n >= 0;
-    ensures: result >= 0;
-    body: {
-        let s = 0;
-        let i = 0;
-        while i < n
-        invariant: s >= 0 && i <= n
-        decreases: n - i
-        {
-            s = s + i;
-            i = i + 1;
-        };
-        s
-    };
-```
-
-**Higher-order function contracts** — `contract(f)` lets Z3 verify generic callbacks without `trusted`:
-
-```mumei
-atom apply_twice(x: i64, f: atom_ref(i64) -> i64)
-    requires: x >= 0;
-    ensures: result >= 0;
-    contract(f): requires: x >= 0, ensures: result >= 0;
-    body: {
-        let first = call(f, x);
-        call(f, first)
-    };
-```
-
-**Deadlock-free concurrency** — resource priorities are verified at compile time:
-
-```mumei
-resource db   priority: 1 mode: exclusive;
-resource cache priority: 2 mode: shared;
-
-async atom transfer(amount: i64)
-    resources: [db, cache];
-    requires: amount >= 0;
-    ensures: result >= 0;
-    body: {
-        acquire db { acquire cache { amount } }
-    };
-```
-
-See [Language Reference](docs/LANGUAGE.md) for full syntax documentation.
-
-</details>
-
-### Rich Diagnostics
-
-Multi-span diagnostics powered by [miette](https://crates.io/crates/miette) — multiple related source locations, compound constraint decomposition, and expression-level dataflow tracking on every error.
-
-**Multi-span output** — primary error + related constraint/dataflow locations:
-
-```
-  × Verification Error: Effect constraint not satisfied for 'perform SafeFileRead.read(path)'
-   ╭─[examples/server.mm:15:9]
-14 │         let path = "/tmp/" + user_id + "/config.txt";
-15 │         perform SafeFileRead.read(path);
-   ·         ─────────────────────────────── constraint violated here
-16 │
-   ╰────
-   ╭─[examples/server.mm:14:20]
-14 │         let path = "/tmp/" + user_id + "/config.txt";
-   ·                    ──────────────────────────────────── path constructed here
-   ╰────
-   ╭─[std/file.mm:3:5]
- 3 │     where starts_with(path, "/tmp/") && not_contains(path, "..");
-   ·           ──────────────────────────────────────────────────────── constraint defined here
-   ╰────
-  help: Sub-constraint [2/2] 'not_contains(path, "..")' may be violated.
-        user_id に ".." が含まれていないか確認してください。
-```
-
-**Compound constraint decomposition** — each `&&`-joined sub-constraint is individually evaluated:
-
-```
-  × Verification Error: Postcondition (ensures) is not satisfied.
-   ╭─[examples/basic.mm:5:1]
- 4 │   ensures: result > 0;
- 5 │   body: x - 1;
-   ·   ──────────── verification failed here
- 6 │
-   ╰────
-  help: ensures の条件を確認してください。body の返り値が事後条件を満たすか検討してください
-```
-
-**MCP JSON output** — structured data for AI agent consumption:
-
-```json
-{
-  "failure_type": "precondition_violated",
-  "semantic_feedback": {
-    "violated_constraints": [{
-      "param": "path",
-      "constraint": "starts_with(path, \"/tmp/\") && not_contains(path, \"..\")",
-      "sub_constraints": [
-        {"index": 0, "raw": "starts_with(path, \"/tmp/\")", "satisfied": true},
-        {"index": 1, "raw": "not_contains(path, \"..\")", "satisfied": false,
-         "explanation": "'path' must not contain \"..\""}
-      ]
-    }],
-    "data_flow": [
-      {"step": "concat", "line": 14, "col": 20},
-      {"step": "perform", "line": 15, "col": 9,
-       "constraint": "starts_with(path, \"/tmp/\") && not_contains(path, \"..\")"}
-    ],
-    "related_locations": [
-      {"file": "examples/server.mm", "line": 14, "label": "path constructed here"},
-      {"file": "std/file.mm", "line": 3, "label": "constraint defined here"}
-    ]
-  }
-}
-```
-
-LSP diagnostics include `relatedInformation` for multi-location errors, enabling IDE inline display of all related spans.
-
----
-
-## Self-Healing Loop (AI + Z3)
-
-See [mumei-agent](https://github.com/mumei-lang/mumei-agent) for the AI-driven
-autonomous fix loop that combines LLM and Z3 formal verification.
-
-The mumei CLI provides the verification interface:
-- `mumei verify --json file.mm` — structured JSON output to stdout
-- `mumei verify --report-dir <dir> file.mm` — write report.json to specified directory
-- `mumei verify --cross-spec-verify file.mm` — cross-spec consistency check (outputs `cross_spec.json`)
-- `mumei verify --cross-spec-files dep.mm file.mm` — multi-file cross-spec verification
-- See [docs/REPORT_SCHEMA.md](docs/REPORT_SCHEMA.md) for the output schema.
-- See [docs/CROSS_SPEC_GUIDE.md](docs/CROSS_SPEC_GUIDE.md) for the cross-spec output schema.
-
-For end-to-end verification workflows (natural-language spec validation, foreign-code verification, spec↔code alignment, and human-friendly operation guide), see the [Verification Workflow Guide](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/VERIFICATION_WORKFLOW_GUIDE.md) in mumei-agent.
-
-### MCP Tools
-
-| Tool | Description |
-|------|-------------|
-| `forge_blade` | Verify + code generation in one step |
-| `validate_logic` | Z3 verification only (returns counter-example data) |
-| `execute_mm` | General-purpose build / check execution |
-| `get_inferred_effects` | Pre-check: infer required effects before writing code |
-| `get_allowed_effects` | Query current effect boundary for the session |
-| `set_allowed_effects` | Override effect boundary dynamically |
-| `analyze_std_gaps` | Identify gaps in std/ coverage |
-| `list_std_catalog` | List all atoms in the std/ catalog |
-| `visualize_std_graph` | Render std/ dependency graph (Mermaid or DOT) |
-| `measure_std_health` | Measure std/ health metrics |
-| `get_proof_certificate` | Retrieve proof certificate for a module |
-| `generate_doc` | Generate structured documentation (`mumei doc --format json`) |
-| `analyze_contract_conflicts` | Analyze cross-atom contract conflicts and circular dependencies (Meta-Architect) |
-| `propose_interface_refactoring` | Propose interface-level refactorings for architectural issues (Meta-Architect) |
-
-### MCP Setup
-
-```bash
-pip install "mcp[cli]>=1.0"
-python mcp_server.py
-```
-
-**Demo Recording:**
-
-[MCP + Rich Diagnostics Demo](https://github.com/user-attachments/assets/0f0594a4-8946-422c-9d54-bd81af45fc14)
-
-[Demo 2: Compound Constraint Decomposition (Path Safety)](https://github.com/user-attachments/assets/cc5f7d93-a759-418d-9b46-520500c38672)
-
-### Multi-Agent Collaboration
-
-The MCP Server (`mcp_server.py`) is implemented as **FastMCP("Mumei-Forge")** and exposes mumei's formal verification capabilities to any MCP-compatible AI agent — Claude Code, Devin, Codex, Qwen, and others — without requiring agent-specific integration work.
-
-```mermaid
-graph TD
-    D1["Claude Code"] -->|"MCP"| M["mcp_server.py (Mumei-Forge)"]
-    D2["Devin"] -->|"MCP"| M
-    D3["Codex"] -->|"MCP"| M
-    D4["Qwen (via MCP client)"] -->|"MCP"| M
-    M -->|"validate_logic"| V["mumei verify"]
-    M -->|"forge_blade"| B["mumei build"]
-    M -->|"get_inferred_effects"| I["mumei infer-effects"]
-```
-
-#### AI Agent Features
-
-- **Machine-readable output**: `_build_machine_readable()` parses `report.json` and returns structured JSON containing `failure_type`, `actions`, `counter_example`, `conflicting_constraints`, `data_flow`, `related_locations`, and more — ready for programmatic consumption by any agent.
-- **Concurrent-safe verification**: `validate_logic` uses `mumei verify --report-dir` with a unique temporary directory per invocation, enabling multiple agents to run verification in parallel without conflicts.
-- **Zero-configuration usage**: Any MCP-compatible agent can start using mumei's verification, build, and effect inference capabilities by simply connecting to `python mcp_server.py`.
-
-#### mumei-agent vs. MCP Server
-
-| | MCP Server (`mcp_server.py`) | [mumei-agent](https://github.com/mumei-lang/mumei-agent) |
-|---|---|---|
-| **Approach** | Generic interface — the agent's own LLM decides how to fix issues | Turnkey solution — LLM call + verification + retry integrated in one loop |
-| **Integration** | Any MCP-compatible agent (Claude Code, Devin, Codex, Qwen, etc.) | Standalone CLI: `python -m agent file.mm` |
-| **LLM** | Agent brings its own | Configurable via `.env` (Ollama, OpenAI, DashScope, etc.) |
-
-The two approaches are **complementary**: the MCP Server enables any agent to access mumei's verification without requiring mumei-agent, while mumei-agent provides an out-of-the-box autonomous fix loop for users who want a single-command experience.
-
----
-
 ## Documentation
 
 | Document | Content |
 |----------|---------|
+| [Verification Workflow Guide](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/VERIFICATION_WORKFLOW_GUIDE.md) | No-`.mm` entry paths: natural-language specs, foreign-code verification, and spec↔code alignment |
+| [MCP Integration](docs/MCP.md) | MCP tools, setup, and multi-agent collaboration |
 | [Language Reference](docs/LANGUAGE.md) | Types, generics, traits, ownership, async |
+| [Features](docs/FEATURES.md) | Feature matrix formerly summarized in this README |
 | [Standard Library](docs/STDLIB.md) | Option, Result, List, BoundedArray, sort |
-| [Examples & Tests](docs/EXAMPLES.md) | Verification suite, pattern matching, negative tests |
-| [Architecture](docs/ARCHITECTURE.md) | Compiler internals |
+| [Examples & Tests](docs/EXAMPLES.md) | Verification suite, `.mm` code samples, and negative tests |
+| [Architecture](docs/ARCHITECTURE.md) | Compiler internals and repository structure |
+| [Report Schema](docs/REPORT_SCHEMA.md) | `report.json`, semantic feedback, and rich diagnostics JSON |
 | [Cross-Spec Verification](docs/CROSS_SPEC_GUIDE.md) | System-wide contract consistency, invariants, and dependency cycles |
-| [Verification Workflow Guide](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/VERIFICATION_WORKFLOW_GUIDE.md) | 自然言語仕様・既存コードの検証手順、仕様↔コード整合性検証、人間向け操作ガイド |
-| [Toolchain](docs/TOOLCHAIN.md) | CLI commands, package management |
+| [Toolchain](docs/TOOLCHAIN.md) | CLI commands, package management, CI/release |
 | [LSP Integration](docs/LSP_INTEGRATION.md) | Editor CodeLens, intent drift, and spec-code mapping |
 | [Roadmap](docs/ROADMAP.md) | Strategic roadmap |
 | [Capability Security](docs/CAPABILITY_SECURITY.md) | Effect-based capability security evaluation |
 | [Changelog](docs/CHANGELOG.md) | Release history |
-
----
-
-## Project Structure
-
-Mumei is organized as a Cargo workspace:
-
-```
-mumei/
-├── mumei-core/             # Core library: parser, HIR, verification, MIR, emitter trait
-├── mumei-emit-llvm/        # LLVM IR emitter (LlvmEmitter + codegen)
-├── mumei-emit-json/        # Verified JSON metadata emitter (VerifiedJsonEmitter)
-├── mumei-emit-proofbook/   # Markdown proof-certificate emitter
-├── mumei-emit-rust/        # Rust FFI binding emitter
-├── mumei-emit-python/      # Python FFI binding emitter
-├── mumei-ffi-tests/        # Generated Rust property tests for FFI contracts
-├── src/                    # CLI binary (main.rs, lsp.rs, setup.rs)
-├── std/                    # Standard library (.mm files)
-├── editors/vscode/         # VS Code extension (LSP client + counter-example decorations)
-├── examples/               # Example programs
-└── tests/                  # Integration tests (.mm files)
-```
-
-## Development
-
-```bash
-pip install pre-commit && pre-commit install
-cargo test
-cargo clippy
-```
 
 ---
 
