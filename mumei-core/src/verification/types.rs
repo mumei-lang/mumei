@@ -1042,11 +1042,111 @@ pub(crate) fn mumei_type_to_lean_type(type_name: &str) -> String {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EscalationReason {
+    #[serde(
+        alias = "z3_timeout_complex_fragment",
+        alias = "z3_timeout_or_resource_limit"
+    )]
+    Z3Timeout,
+    #[serde(
+        alias = "z3_unknown_complex_fragment",
+        alias = "z3_resource_limit",
+        alias = "z3_resource_limit_complex_fragment"
+    )]
+    Z3Unknown,
+    #[serde(alias = "outside_decidable_fragment")]
+    NonlinearArithmetic,
+    QuantifierAlternation,
+    #[serde(alias = "spurious_counterexample")]
+    SpuriousCandidate,
+    #[serde(alias = "trusted_atom_human_review", alias = "manual_review")]
+    HumanReviewRequired,
+}
+
+impl EscalationReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Z3Timeout => "z3_timeout",
+            Self::Z3Unknown => "z3_unknown",
+            Self::NonlinearArithmetic => "nonlinear_arithmetic",
+            Self::QuantifierAlternation => "quantifier_alternation",
+            Self::SpuriousCandidate => "spurious_candidate",
+            Self::HumanReviewRequired => "human_review_required",
+        }
+    }
+}
+
+impl std::fmt::Display for EscalationReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LogicFragment {
+    LinearArithmetic,
+    NonlinearArithmetic,
+    #[serde(alias = "array_without_bounds")]
+    ArrayAccess,
+    #[serde(
+        alias = "quantifier_alternation",
+        alias = "trigger_sensitive_quantifier"
+    )]
+    QuantifiedFormula,
+    #[serde(alias = "recursive_invariant", alias = "complex_temporal_effect")]
+    TemporalState,
+}
+
+impl LogicFragment {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LinearArithmetic => "linear_arithmetic",
+            Self::NonlinearArithmetic => "nonlinear_arithmetic",
+            Self::ArrayAccess => "array_access",
+            Self::QuantifiedFormula => "quantified_formula",
+            Self::TemporalState => "temporal_state",
+        }
+    }
+}
+
+impl std::fmt::Display for LogicFragment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+pub fn primary_logic_fragment_tag(tags: &[String]) -> LogicFragment {
+    if tags.iter().any(|tag| tag == "nonlinear_arithmetic") {
+        LogicFragment::NonlinearArithmetic
+    } else if tags
+        .iter()
+        .any(|tag| tag == "quantifier_alternation" || tag == "trigger_sensitive_quantifier")
+    {
+        LogicFragment::QuantifiedFormula
+    } else if tags
+        .iter()
+        .any(|tag| tag == "array_without_bounds" || tag == "array_access")
+    {
+        LogicFragment::ArrayAccess
+    } else if tags
+        .iter()
+        .any(|tag| tag == "recursive_invariant" || tag == "complex_temporal_effect")
+    {
+        LogicFragment::TemporalState
+    } else {
+        LogicFragment::LinearArithmetic
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LeanEscalationClassification {
     pub z3_result_class: String,
     pub should_escalate: bool,
-    pub escalation_reason: Option<String>,
+    pub escalation_reason: Option<EscalationReason>,
+    pub logic_fragment_tag: Option<LogicFragment>,
     pub logic_fragment_tags: Vec<String>,
 }
 
@@ -1107,6 +1207,7 @@ pub fn classify_atom_for_lean_escalation(
 ) -> LeanEscalationClassification {
     let z3_result_class = classify_z3_result(z3_result).to_string();
     let logic_fragment_tags = detect_logic_fragment_tags(atom, module_env);
+    let logic_fragment_tag = Some(primary_logic_fragment_tag(&logic_fragment_tags));
     let normalized_result = z3_result.to_ascii_lowercase();
     let normalized_status = status.to_ascii_lowercase();
 
@@ -1121,29 +1222,38 @@ pub fn classify_atom_for_lean_escalation(
     } else if normalized_result.contains("spurious_candidate")
         || normalized_status.contains("spurious_candidate")
     {
-        reason = Some("spurious_counterexample".to_string());
+        reason = Some(EscalationReason::SpuriousCandidate);
     } else if matches!(
         z3_result_class.as_str(),
         "unknown" | "timeout" | "resource_limit"
     ) {
-        reason = Some(if logic_fragment_tags.is_empty() {
-            format!("z3_{}", z3_result_class)
-        } else {
-            format!("z3_{}_complex_fragment", z3_result_class)
+        reason = Some(match z3_result_class.as_str() {
+            "timeout" => EscalationReason::Z3Timeout,
+            _ if matches!(logic_fragment_tag, Some(LogicFragment::NonlinearArithmetic)) => {
+                EscalationReason::NonlinearArithmetic
+            }
+            _ if matches!(logic_fragment_tag, Some(LogicFragment::QuantifiedFormula)) => {
+                EscalationReason::QuantifierAlternation
+            }
+            _ => EscalationReason::Z3Unknown,
         });
     } else if is_outside_decidable_fragment(&logic_fragment_tags)
         && z3_result_class != "sat"
         && !normalized_status.contains("failed")
     {
-        reason = Some("outside_decidable_fragment".to_string());
+        reason = Some(match logic_fragment_tag {
+            Some(LogicFragment::QuantifiedFormula) => EscalationReason::QuantifierAlternation,
+            _ => EscalationReason::NonlinearArithmetic,
+        });
     } else if atom.trust_level == TrustLevel::Trusted {
-        reason = Some("trusted_atom_human_review".to_string());
+        reason = Some(EscalationReason::HumanReviewRequired);
     }
 
     LeanEscalationClassification {
         z3_result_class,
         should_escalate: reason.is_some(),
         escalation_reason: reason,
+        logic_fragment_tag,
         logic_fragment_tags,
     }
 }

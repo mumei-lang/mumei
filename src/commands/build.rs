@@ -380,7 +380,7 @@ pub(crate) fn cmd_build(
                                             "  ⚖️  [2/3] Verification: Deferred to Lean ({})",
                                             classification
                                                 .escalation_reason
-                                                .as_deref()
+                                                .map(|reason| reason.as_str())
                                                 .unwrap_or("lean_escalation")
                                         );
                                         escalation_cert_results.insert(
@@ -585,7 +585,7 @@ pub(crate) fn cmd_build(
                                         "  ⚖️  [2/3] Verification: Deferred to Lean ({})",
                                         classification
                                             .escalation_reason
-                                            .as_deref()
+                                            .map(|reason| reason.as_str())
                                             .unwrap_or("lean_escalation")
                                     );
                                     escalation_cert_results.insert(

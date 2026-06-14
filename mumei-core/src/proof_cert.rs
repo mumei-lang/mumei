@@ -15,6 +15,8 @@ use crate::reconstruction_loss::ReconstructionLoss;
 use crate::resolver;
 use crate::verification::{self, ModuleEnv, SymbolProvenance, TranslatorIRMetadata};
 
+pub use crate::verification::{EscalationReason, LogicFragment};
+
 /// Top-level proof certificate for a Mumei source file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProofCertificate {
@@ -96,7 +98,10 @@ pub struct AtomCertificate {
     pub z3_result_class: String,
     /// Reason this atom should be escalated to Lean, when applicable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub escalation_reason: Option<String>,
+    pub escalation_reason: Option<EscalationReason>,
+    /// Primary logical fragment for bridge routing and metrics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logic_fragment_tag: Option<LogicFragment>,
     /// Logical fragments detected in this proof obligation.
     #[serde(default)]
     pub logic_fragment_tags: Vec<String>,
@@ -118,6 +123,9 @@ pub struct AtomCertificate {
     /// Lean-side result metadata populated by mumei-lean.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lean_metadata: Option<LeanResultMetadata>,
+    /// Structured Lean-side result metadata populated by mumei-lean.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lean_result_metadata: Option<LeanResultMetadata>,
     /// P8-A: Counterexample validation status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub counterexample_validation: Option<CounterexampleValidationMetadata>,
@@ -320,7 +328,9 @@ pub struct EscalationCandidate {
     pub effects: Vec<String>,
     pub requires: String,
     pub ensures: String,
-    pub escalation_reason: String,
+    pub escalation_reason: EscalationReason,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logic_fragment_tag: Option<LogicFragment>,
     pub logic_fragment_tags: Vec<String>,
     #[serde(default)]
     pub translator_version: String,
@@ -334,6 +344,8 @@ pub struct EscalationCandidate {
     pub translator_ir: TranslatorIRMetadata,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lean_metadata: Option<LeanResultMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lean_result_metadata: Option<LeanResultMetadata>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -580,6 +592,7 @@ pub fn generate_certificate_with_reconstruction_losses(
                 ensures: atom.ensures.clone(),
                 z3_result_class: classification.z3_result_class,
                 escalation_reason: classification.escalation_reason,
+                logic_fragment_tag: classification.logic_fragment_tag,
                 logic_fragment_tags: classification.logic_fragment_tags,
                 translator_version: verification::LEAN_TRANSLATOR_VERSION.to_string(),
                 binder_mapping,
@@ -587,6 +600,7 @@ pub fn generate_certificate_with_reconstruction_losses(
                 manual_lemma_reason,
                 translator_ir,
                 lean_metadata: None,
+                lean_result_metadata: None,
                 counterexample_validation,
                 reconstruction_loss,
                 self_correction_metadata,
@@ -654,7 +668,7 @@ pub fn generate_escalation_bundle(cert: &ProofCertificate) -> EscalationBundle {
         .atoms
         .iter()
         .filter_map(|atom| {
-            let escalation_reason = atom.escalation_reason.clone()?;
+            let escalation_reason = atom.escalation_reason?;
             Some(EscalationCandidate {
                 name: atom.name.clone(),
                 z3_check_result: atom.z3_check_result.clone(),
@@ -667,6 +681,7 @@ pub fn generate_escalation_bundle(cert: &ProofCertificate) -> EscalationBundle {
                 requires: atom.requires.clone(),
                 ensures: atom.ensures.clone(),
                 escalation_reason,
+                logic_fragment_tag: atom.logic_fragment_tag,
                 logic_fragment_tags: atom.logic_fragment_tags.clone(),
                 translator_version: atom.translator_version.clone(),
                 binder_mapping: atom.binder_mapping.clone(),
@@ -674,6 +689,7 @@ pub fn generate_escalation_bundle(cert: &ProofCertificate) -> EscalationBundle {
                 manual_lemma_reason: atom.manual_lemma_reason.clone(),
                 translator_ir: atom.translator_ir.clone(),
                 lean_metadata: atom.lean_metadata.clone(),
+                lean_result_metadata: atom.lean_result_metadata.clone(),
             })
         })
         .collect();
@@ -686,7 +702,7 @@ pub fn generate_escalation_bundle(cert: &ProofCertificate) -> EscalationBundle {
     for candidate in &candidates {
         *summary
             .by_reason
-            .entry(candidate.escalation_reason.clone())
+            .entry(candidate.escalation_reason.as_str().to_string())
             .or_insert(0) += 1;
         *summary
             .by_z3_result_class
@@ -780,7 +796,7 @@ fn human_review_entry_for_atom(atom: &AtomCertificate) -> Option<HumanReviewEntr
             atom_name: atom.name.clone(),
             review_reason: atom
                 .escalation_reason
-                .clone()
+                .map(|reason| reason.as_str().to_string())
                 .unwrap_or_else(|| "lean_promotion_pending".to_string()),
             priority: HumanReviewPriority::High,
             spec_text: atom_spec_text(atom),
@@ -793,8 +809,7 @@ fn human_review_entry_for_atom(atom: &AtomCertificate) -> Option<HumanReviewEntr
     if atom.status == "trusted"
         || atom
             .escalation_reason
-            .as_deref()
-            .is_some_and(|reason| reason == "trusted_atom_human_review")
+            .is_some_and(|reason| reason == EscalationReason::HumanReviewRequired)
     {
         return Some(HumanReviewEntry {
             atom_name: atom.name.clone(),
@@ -943,7 +958,11 @@ fn lean_certificate_metadata_is_current(atom: &AtomCertificate) -> bool {
     {
         return false;
     }
-    let Some(metadata) = atom.lean_metadata.as_ref() else {
+    let Some(metadata) = atom
+        .lean_result_metadata
+        .as_ref()
+        .or(atom.lean_metadata.as_ref())
+    else {
         return false;
     };
     metadata.status == "lean_verified"
@@ -972,7 +991,11 @@ pub fn validate_translator_version(
         ));
     }
 
-    if let Some(metadata) = cert.lean_metadata.as_ref() {
+    if let Some(metadata) = cert
+        .lean_result_metadata
+        .as_ref()
+        .or(cert.lean_metadata.as_ref())
+    {
         if metadata.translator_version != expected_version {
             issues.push(format!(
                 "lean_metadata.translator_version '{}' does not match expected '{}'",

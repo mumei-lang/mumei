@@ -503,14 +503,21 @@ fn verify_single_atom(atom: &parser::Atom, name: &str, ctx: &mut VerifyContext<'
             );
             let status = if ctx.emit_lean_artifacts && classification.should_escalate {
                 if !ctx.quiet_output {
-                    println!(
-                        "  [lean] '{}': marked for escalation ({})",
-                        name,
-                        classification
-                            .escalation_reason
-                            .as_deref()
-                            .unwrap_or("lean_escalation")
-                    );
+                    if z3_result == "unknown" {
+                        println!(
+                            "  Z3 returned unknown for atom '{}', escalating to Lean 4...",
+                            name
+                        );
+                    } else {
+                        println!(
+                            "  [lean] '{}': marked for escalation ({})",
+                            name,
+                            classification
+                                .escalation_reason
+                                .map(|reason| reason.as_str())
+                                .unwrap_or("lean_escalation")
+                        );
+                    }
                 }
                 *ctx.escalated += 1;
                 "escalation_candidate"
@@ -553,6 +560,7 @@ pub(crate) fn verify_human_review_queue_path(output_dir: &Path, output: Option<&
 struct LeanBridgeApplyStats {
     lean_verified: usize,
     newly_proven: usize,
+    lean_verified_atoms: Vec<String>,
 }
 
 fn format_count_map(map: &std::collections::HashMap<String, usize>) -> String {
@@ -650,7 +658,12 @@ fn apply_lean_cert_to_proof_certificate(
         let Some(candidate) = candidates.get(atom.name.as_str()) else {
             continue;
         };
-        atom.lean_metadata = candidate.lean_metadata.clone();
+        let lean_metadata = candidate
+            .lean_result_metadata
+            .clone()
+            .or_else(|| candidate.lean_metadata.clone());
+        atom.lean_metadata = lean_metadata.clone();
+        atom.lean_result_metadata = lean_metadata;
         if candidate.z3_check_result == "lean_verified"
             && lean_candidate_metadata_is_current(candidate)
         {
@@ -660,6 +673,7 @@ fn apply_lean_cert_to_proof_certificate(
             atom.translator_version = candidate.translator_version.clone();
             atom.bridge_lemma_hash = candidate.bridge_lemma_hash.clone();
             stats.lean_verified += 1;
+            stats.lean_verified_atoms.push(atom.name.clone());
             if !was_already_proven {
                 stats.newly_proven += 1;
             }
@@ -675,7 +689,11 @@ fn lean_candidate_metadata_is_current(candidate: &proof_cert::EscalationCandidat
     {
         return false;
     }
-    let Some(metadata) = candidate.lean_metadata.as_ref() else {
+    let Some(metadata) = candidate
+        .lean_result_metadata
+        .as_ref()
+        .or(candidate.lean_metadata.as_ref())
+    else {
         return false;
     };
     metadata.status == "lean_verified"
@@ -1210,6 +1228,9 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                             verified += stats.newly_proven;
                             escalated = escalated.saturating_sub(stats.lean_verified);
                             if !quiet_output {
+                                for atom_name in &stats.lean_verified_atoms {
+                                    println!("  lean_verified: {atom_name}");
+                                }
                                 println!(
                                     "  Lean bridge certificate applied: {} lean_verified atom(s) from {}",
                                     stats.lean_verified,

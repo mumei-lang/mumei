@@ -73,6 +73,10 @@ fn verify_emit_escalation_bundle_writes_unknown_candidates() {
         "expected at least one unknown Lean escalation candidate: {payload:#}"
     );
     assert_eq!(
+        candidates[0]["logic_fragment_tag"], "nonlinear_arithmetic",
+        "candidate should expose the primary P8-C logic fragment"
+    );
+    assert_eq!(
         payload["summary"]["by_z3_result_class"]["unknown"], 1,
         "summary should include unknown result class"
     );
@@ -153,6 +157,7 @@ Path(args.lean_cert_out).write_text(json.dumps(payload))
     assert_eq!(atom["z3_check_result"], "lean_verified");
     assert_eq!(atom["status"], "verified");
     assert_eq!(atom["lean_metadata"]["status"], "lean_verified");
+    assert_eq!(atom["lean_result_metadata"]["status"], "lean_verified");
     assert_eq!(cert["all_verified"], true);
 
     std::fs::remove_dir_all(dir).expect("remove temp dir");
