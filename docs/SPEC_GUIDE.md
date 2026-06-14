@@ -2,7 +2,7 @@
 
 This guide describes the decidable specification fragment that Mumei expects Z3 to verify reliably. Stay inside these patterns for first-pass verification; use Lean escalation for specifications that intentionally need stronger reasoning.
 
-## Decidable fragment catalog
+## Decidable Fragment
 
 ### Linear arithmetic
 
@@ -88,7 +88,7 @@ Prefer small state sets, deterministic transitions, and explicit operation order
 
 ## Anti-patterns
 
-The verifier emits an `outside_decidable_fragment` warning when it detects patterns that are often unstable for Z3:
+The verifier emits an `outside_decidable_fragment` warning for tags that indicate the atom is outside the Z3-stable range (`nonlinear_arithmetic`, `quantifier_alternation`, `array_without_bounds`, or `inductive_data_type`). Other tags are diagnostic metadata that should still guide prompt and spec review:
 
 | Fragment tag | Typical pattern | Recommended response |
 |---|---|---|
@@ -107,9 +107,10 @@ The verifier emits an `outside_decidable_fragment` warning when it detects patte
 When `mumei verify` detects logic outside the decidable fragment, it prints:
 
 ```
-warning[outside_decidable_fragment]: atom `foo` uses nonlinear_arithmetic
+warning[outside_decidable_fragment]: atom `foo` uses fragments outside Z3-stable range: [nonlinear_arithmetic]
   --> vault.mm:12
-  = hint: Z3 may return `unknown`; consider escalating to Lean 4 with `--escalate-lean`
+  hint: simplify to linear arithmetic, or use `mumei verify --escalate-lean` to delegate to Lean 4
+  see: docs/SPEC_GUIDE.md#decidable-fragment
 ```
 
 In `--json` mode the same information appears in the `diagnostics` array:
@@ -119,12 +120,12 @@ In `--json` mode the same information appears in the `diagnostics` array:
   "code": "outside_decidable_fragment",
   "severity": "warning",
   "atom": "foo",
-  "message": "atom 'foo' uses nonlinear_arithmetic; prefer the Z3-stable fragment in docs/SPEC_GUIDE.md or escalate to Lean",
+  "message": "atom `foo` uses fragments outside Z3-stable range: [nonlinear_arithmetic]",
   "tags": ["nonlinear_arithmetic"]
 }
 ```
 
-### Resolution options
+## Lean Escalation
 
 1. **Rewrite the specification** to stay inside the decidable fragment (see patterns above).
 2. **Escalate to Lean 4** with `mumei verify --escalate-lean` to produce an escalation bundle that the Lean bridge can translate into a formal proof.
@@ -178,7 +179,7 @@ Best practices:
 3. Use a fixed seed in CI when investigating a failure.
 4. Treat property-based success as a sanity check, not a proof. Z3/Lean verification remains the source of formal assurance.
 
-## Recommended templates
+## Recommended Templates
 
 ### Linear refinement template
 

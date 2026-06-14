@@ -5,7 +5,7 @@ use mumei_core::parser::{
     QuantifierType, Span, TrustLevel,
 };
 use mumei_core::verification::{
-    collect_decidable_fragment_metrics, detect_logic_fragment_tags,
+    collect_decidable_fragment_metrics, detect_logic_fragment_tags, is_outside_decidable_fragment,
     outside_decidable_fragment_warning, ModuleEnv,
 };
 
@@ -54,12 +54,18 @@ fn ref_mut_param(name: &str, type_name: &str) -> Param {
     }
 }
 
-fn assert_tag(atom: &Atom, module_env: &ModuleEnv, expected_tag: &str) {
+fn assert_detected_tag(atom: &Atom, module_env: &ModuleEnv, expected_tag: &str) -> Vec<String> {
     let tags = detect_logic_fragment_tags(atom, module_env);
     assert!(
         tags.iter().any(|tag| tag == expected_tag),
         "expected tag {expected_tag:?}, got {tags:?}"
     );
+    tags
+}
+
+fn assert_outside_tag(atom: &Atom, module_env: &ModuleEnv, expected_tag: &str) {
+    let tags = assert_detected_tag(atom, module_env, expected_tag);
+    assert!(is_outside_decidable_fragment(&tags));
     let warning = outside_decidable_fragment_warning(atom, module_env)
         .expect("expected outside_decidable_fragment warning");
     assert!(warning.contains("outside_decidable_fragment"));
@@ -92,13 +98,13 @@ fn detects_nonlinear_arithmetic_in_symbolic_mul_and_div() {
     let mut mul_atom = base_atom("symbolic_mul");
     mul_atom.params = vec![param("x", "i64"), param("y", "i64")];
     mul_atom.ensures = "result == x * y".to_string();
-    assert_tag(&mul_atom, &module_env, "nonlinear_arithmetic");
+    assert_outside_tag(&mul_atom, &module_env, "nonlinear_arithmetic");
 
     let mut div_atom = base_atom("symbolic_div");
     div_atom.params = vec![param("x", "i64"), param("y", "i64")];
     div_atom.requires = "y != 0".to_string();
     div_atom.ensures = "result == x / y".to_string();
-    assert_tag(&div_atom, &module_env, "nonlinear_arithmetic");
+    assert_outside_tag(&div_atom, &module_env, "nonlinear_arithmetic");
 }
 
 #[test]
@@ -108,7 +114,7 @@ fn detects_array_access_without_explicit_bounds() {
     atom.params = vec![param("i", "i64")];
     atom.ensures = "result == arr[i]".to_string();
 
-    assert_tag(&atom, &module_env, "array_without_bounds");
+    assert_outside_tag(&atom, &module_env, "array_without_bounds");
 }
 
 #[test]
@@ -132,7 +138,7 @@ fn detects_quantifier_alternation() {
         },
     ];
 
-    assert_tag(&atom, &module_env, "quantifier_alternation");
+    assert_outside_tag(&atom, &module_env, "quantifier_alternation");
 }
 
 #[test]
@@ -141,7 +147,9 @@ fn detects_nested_mutable_aliasing() {
     let mut atom = base_atom("nested_aliases");
     atom.params = vec![ref_mut_param("left", "i64"), ref_mut_param("right", "i64")];
 
-    assert_tag(&atom, &module_env, "nested_aliasing");
+    let tags = assert_detected_tag(&atom, &module_env, "nested_aliasing");
+    assert!(!is_outside_decidable_fragment(&tags));
+    assert!(outside_decidable_fragment_warning(&atom, &module_env).is_none());
 }
 
 #[test]
@@ -151,7 +159,9 @@ fn detects_regex_semantics() {
     atom.params = vec![param("s", "Str")];
     atom.requires = "regex_match(s, \"^[a-z]+$\")".to_string();
 
-    assert_tag(&atom, &module_env, "regex_semantics");
+    let tags = assert_detected_tag(&atom, &module_env, "regex_semantics");
+    assert!(!is_outside_decidable_fragment(&tags));
+    assert!(outside_decidable_fragment_warning(&atom, &module_env).is_none());
 }
 
 #[test]
@@ -166,7 +176,9 @@ fn detects_trigger_sensitive_quantifier_with_array_access() {
         condition: "arr[i] >= 0".to_string(),
     }];
 
-    assert_tag(&atom, &module_env, "trigger_sensitive_quantifier");
+    let tags = assert_detected_tag(&atom, &module_env, "trigger_sensitive_quantifier");
+    assert!(!is_outside_decidable_fragment(&tags));
+    assert!(outside_decidable_fragment_warning(&atom, &module_env).is_none());
 }
 
 #[test]
@@ -195,7 +207,7 @@ fn detects_inductive_data_type_from_recursive_enum_parameter() {
     let mut atom = base_atom("list_len");
     atom.params = vec![param("xs", "List")];
 
-    assert_tag(&atom, &module_env, "inductive_data_type");
+    assert_outside_tag(&atom, &module_env, "inductive_data_type");
 }
 
 #[test]
@@ -204,7 +216,9 @@ fn detects_recursive_invariant_from_while_loop() {
     let mut atom = base_atom("loop_sum");
     atom.body_expr = "{ let i = 0; while i < n invariant i >= 0 { i = i + 1; }; i }".to_string();
 
-    assert_tag(&atom, &module_env, "recursive_invariant");
+    let tags = assert_detected_tag(&atom, &module_env, "recursive_invariant");
+    assert!(!is_outside_decidable_fragment(&tags));
+    assert!(outside_decidable_fragment_warning(&atom, &module_env).is_none());
 }
 
 #[test]
@@ -238,7 +252,9 @@ fn detects_complex_temporal_effect_with_many_states() {
     let mut atom = base_atom("protocol_step");
     atom.effects = vec![Effect::simple("Protocol")];
 
-    assert_tag(&atom, &module_env, "complex_temporal_effect");
+    let tags = assert_detected_tag(&atom, &module_env, "complex_temporal_effect");
+    assert!(!is_outside_decidable_fragment(&tags));
+    assert!(outside_decidable_fragment_warning(&atom, &module_env).is_none());
 }
 
 #[test]
@@ -308,6 +324,18 @@ body: x * y;
         ),
         "expected outside_decidable_fragment nonlinear diagnostic in {payload}"
     );
+    let warnings = payload["warnings"]
+        .as_array()
+        .expect("warnings should be an array");
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning["code"] == "outside_decidable_fragment"
+                && warning["tags"].as_array().is_some_and(|tags| tags
+                    .iter()
+                    .any(|tag| tag.as_str() == Some("nonlinear_arithmetic")))),
+        "expected outside_decidable_fragment nonlinear warning in {payload}"
+    );
 
     std::fs::remove_dir_all(temp_dir).expect("remove diagnostics temp dir");
 }
@@ -350,7 +378,7 @@ fn verify_stderr_prints_outside_decidable_fragment_warning_with_location_and_hin
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains(
-            "warning[outside_decidable_fragment]: atom `nonlinear` uses nonlinear_arithmetic"
+            "warning[outside_decidable_fragment]: atom `nonlinear` uses fragments outside Z3-stable range: [nonlinear_arithmetic]"
         ),
         "missing warning header in stderr:\n{stderr}"
     );
@@ -360,9 +388,13 @@ fn verify_stderr_prints_outside_decidable_fragment_warning_with_location_and_hin
     );
     assert!(
         stderr.contains(
-            "  = hint: Z3 may return `unknown`; consider escalating to Lean 4 with `--escalate-lean`"
+            "  hint: simplify to linear arithmetic, or use `mumei verify --escalate-lean` to delegate to Lean 4"
         ),
         "missing warning hint in stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("  see: docs/SPEC_GUIDE.md#decidable-fragment"),
+        "missing warning guide link in stderr:\n{stderr}"
     );
 
     std::fs::remove_dir_all(temp_dir).expect("remove warning temp dir");

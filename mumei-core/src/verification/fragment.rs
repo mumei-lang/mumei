@@ -89,12 +89,24 @@ pub fn detect_logic_fragment_tags(atom: &Atom, module_env: &ModuleEnv) -> Vec<St
     tags
 }
 
+/// Returns true if the atom's logic fragment tags indicate it is outside
+/// the Z3-decidable fragment and should trigger a warning.
+pub fn is_outside_decidable_fragment(tags: &[String]) -> bool {
+    const OUTSIDE_TAGS: &[&str] = &[
+        "nonlinear_arithmetic",
+        "quantifier_alternation",
+        "array_without_bounds",
+        "inductive_data_type",
+    ];
+    tags.iter().any(|tag| OUTSIDE_TAGS.contains(&tag.as_str()))
+}
+
 pub fn outside_decidable_fragment_diagnostic(
     atom: &Atom,
     module_env: &ModuleEnv,
 ) -> Option<Diagnostic> {
     let tags = detect_logic_fragment_tags(atom, module_env);
-    if tags.is_empty() {
+    if !is_outside_decidable_fragment(&tags) {
         None
     } else {
         Some(Diagnostic {
@@ -102,7 +114,7 @@ pub fn outside_decidable_fragment_diagnostic(
             severity: "warning".to_string(),
             atom: atom.name.clone(),
             message: format!(
-                "atom '{}' uses {}; prefer the Z3-stable fragment in docs/SPEC_GUIDE.md or escalate to Lean",
+                "atom `{}` uses fragments outside Z3-stable range: [{}]",
                 atom.name,
                 tags.join(", ")
             ),
@@ -123,7 +135,7 @@ pub fn collect_decidable_fragment_metrics(module_env: &ModuleEnv) -> DecidableFr
     for atom in module_env.atoms.values() {
         metrics.total_atoms_checked += 1;
         let tags = detect_logic_fragment_tags(atom, module_env);
-        if tags.is_empty() {
+        if !is_outside_decidable_fragment(&tags) {
             continue;
         }
         metrics.atoms_with_warnings += 1;

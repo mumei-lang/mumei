@@ -1313,6 +1313,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
     if emit_structured_feedback {
         let payload = structured_feedback_payload(
             &structured_feedbacks,
+            &diagnostics,
             verified,
             failed,
             skipped,
@@ -1368,7 +1369,8 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                 "failed": failed,
                 "skipped": skipped,
                 "escalation_candidates": escalated,
-                "diagnostics": diagnostics,
+                "diagnostics": &diagnostics,
+                "warnings": &diagnostics,
             });
             if !loop_suggestions.is_empty() {
                 payload["cegis_suggestions"] = serde_json::Value::Array(loop_suggestions.clone());
