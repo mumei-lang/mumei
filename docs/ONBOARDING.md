@@ -9,8 +9,9 @@ Mumei can start from existing code or natural-language requirements, then gradua
 ```bash
 # 既存コードを渡すだけ
 python -m agent audit --code-file payment.py
-python -m agent verify-foreign --code-file payment.py --language python
-python -m agent validate-spec-to-code --spec "残高不足の場合はエラーを返す" --code-file payment.py
+python -m agent verify-foreign --file payment.py --language python
+printf '%s\n' "残高不足の場合はエラーを返す" > spec.txt
+python -m agent validate-spec-to-code --spec spec.txt --code payment.py --language python
 ```
 
 この段階では `.mm` ファイルは不要です。出力された counterexample、仕様とコードの不一致、足りない事前条件を移行バックログとして扱います。
@@ -33,7 +34,7 @@ mumei verify transfer.mm
 
 - LSP (`mumei lsp`) を使い、エディタ上で diagnostics、hover、補完、定義ジャンプを確認する。
 - REPL (`mumei repl`) を使い、小さい式や atom をインタラクティブに検証する。
-- `check-spec-health` で矛盾、到達不能な `requires`、過剰拘束、曖昧な postcondition を確認する。
+- `python -m agent check-spec-health transfer.mm` で矛盾、到達不能な `requires`、過剰拘束、曖昧な postcondition を確認する。
 - verifier の counterexample を仕様レビューの単位にし、1 回の修正で 1 つの失敗原因だけを潰す。
 
 レビュー時は、仕様を証明しやすい形へ寄せることを優先します。特に配列境界、有限範囲の量化子、線形算術、明示的な状態遷移は [`SPEC_GUIDE.md`](SPEC_GUIDE.md) の推奨形に合わせます。
