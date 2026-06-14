@@ -2230,10 +2230,24 @@ fn emit_task_spawn_only<'a>(
         let group_result_ptr =
             llvm!(builder.build_load(ptr_type, group_result_ptr_ptr, "task_group_result_ptr"))
                 .into_pointer_value();
-        let (_complete_fn, _flag_fn, _reset_fn, _cancel_fn, _wait_fn, _, enter_fn, leave_fn) =
+        let (_complete_fn, flag_fn, _reset_fn, _cancel_fn, _wait_fn, _, enter_fn, leave_fn) =
             declare_task_group_any_externs(context, module);
         llvm!(builder.build_call(enter_fn, &[group_id.into()], "task_group_enter_call",));
         let should_cancel_fn = declare_task_group_should_cancel_extern(context, module);
+        let done_flag =
+            llvm!(builder.build_call(flag_fn, &[group_id.into()], "task_group_start_done_check",))
+                .try_as_basic_value()
+                .left()
+                .ok_or_else(|| {
+                    MumeiError::codegen("task_group:any flag returned void".to_string())
+                })?
+                .into_int_value();
+        let is_done = llvm!(builder.build_int_compare(
+            IntPredicate::NE,
+            done_flag,
+            i64_type.const_int(0, false),
+            "task_group_start_done",
+        ));
         let cancel_flag = llvm!(builder.build_call(
             should_cancel_fn,
             &[group_id.into()],
@@ -2249,9 +2263,10 @@ fn emit_task_spawn_only<'a>(
             i64_type.const_int(0, false),
             "task_group_start_cancelled",
         ));
+        let should_exit = llvm!(builder.build_or(is_done, is_cancelled, "task_group_start_exit"));
         let cancelled_block = context.append_basic_block(wrapper_fn, "task_group_cancelled_entry");
         let body_block = context.append_basic_block(wrapper_fn, "task_group_body_entry");
-        llvm!(builder.build_conditional_branch(is_cancelled, cancelled_block, body_block));
+        llvm!(builder.build_conditional_branch(should_exit, cancelled_block, body_block));
 
         builder.position_at_end(cancelled_block);
         llvm!(builder.build_call(leave_fn, &[], "task_group_leave_cancelled_call"));

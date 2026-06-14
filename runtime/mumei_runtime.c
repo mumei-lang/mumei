@@ -161,7 +161,11 @@ void __mumei_task_group_enter(int64_t group_id) {
 }
 
 void __mumei_task_group_leave(void) {
-    g_current_task_group_id = -1;
+    if (g_current_task_group_id < 0) {
+        return;
+    }
+    MumeiTaskGroupAny *group = mumei_task_group_get(g_current_task_group_id);
+    g_current_task_group_id = atomic_load_explicit(&group->parent_id, memory_order_acquire);
 }
 
 int64_t __mumei_task_group_should_cancel(int64_t group_id) {
