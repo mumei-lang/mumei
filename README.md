@@ -10,17 +10,17 @@ Mumei is a formal verification toolchain that can start from existing foreign-la
 
 ---
 
-## Start without writing `.mm`
+## Self-Healing Loop: start without writing `.mm`
 
 See the mumei-agent [Verification Workflow Guide](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/VERIFICATION_WORKFLOW_GUIDE.md) for the full no-`.mm` workflow, including natural-language spec validation, foreign-code verification, and spec↔code alignment.
+If you work from a source checkout of `mumei-agent`, run `uv sync` once; after that, the same commands are available as `uv run mumei-agent <subcommand>`.
 
 ### 1. Existing code: find likely bug locations
 
-Give the agent an existing source file and ask it to extract contracts, verify them, and report suspicious paths. The supported language set depends on the workflow; current agent paths cover Python/Rust/Go for cross-validation and Python/TypeScript/Rust for foreign-code verification.
+Give the agent an existing source file and ask it to infer contracts, verify them, and report suspicious paths. `--input` is required and points to a single source file. `--language` is required and must be `python`, `rust`, or `go`.
 
 ```bash
-uv run python -m agent validate-code --input src/payment.py --language python
-uv run python -m agent verify-foreign --file src/lib.rs --language rust
+mumei-agent validate-code --input src/payment.py --language python  # --language 必須: python|rust|go
 ```
 
 MCP agents can use mumei's verification backend directly once they synthesize or receive `.mm`:
@@ -36,34 +36,27 @@ MCP agents can use mumei's verification backend directly once they synthesize or
 
 ### 2. Natural-language spec + existing code: detect spec↔code drift
 
-Compare requirements against an implementation and ask for mismatches before migrating anything to `.mm`.
+Compare requirements against an implementation and ask for mismatches before migrating anything to `.mm`. `--spec` and `--code` are required; `--code` points to a single source file. `--language` is optional and can be `python`, `rust`, or `go`.
 
 ```bash
-uv run python -m agent validate-spec-to-code \
-  --spec docs/requirements/payment.txt \
-  --code src/payment.py \
-  --language python
+mumei-agent validate-spec-to-code --spec docs/spec.txt --code src/payment.py
 ```
 
 For reverse drift detection:
 
 ```bash
-uv run python -m agent validate-code-to-spec \
+mumei-agent validate-code-to-spec \
   --code src/payment.py \
-  --spec docs/requirements/payment.txt \
-  --language python
+  --spec docs/spec.txt \
+  --language python  # 任意: python|rust|go
 ```
 
 ### 3. Spec only: find contradictions and under-specified behavior
 
-Start from prose requirements and check for direct contradictions, vacuity, ambiguity, and over-constraints.
+Start from prose requirements and check for direct contradictions, vacuity, ambiguity, and over-constraints. `--input` is required; `--domain` is optional when you want domain-specific hints.
 
 ```bash
-uv run python -m agent validate-spec --input docs/requirements/payment.txt --format nl
-uv run python -m agent extract-spec \
-  --text-file docs/requirements/payment.txt \
-  --check-contradiction-only \
-  --output reports/payment_spec_report.json
+mumei-agent validate-spec --input docs/spec.txt --domain payment  # --domain 任意
 ```
 
 MCP agents can call spec-health or verification tools depending on whether the input is prose, extracted contracts, or `.mm`:
@@ -87,8 +80,8 @@ MCP agents can call spec-health or verification tools depending on whether the i
 Run the agent on existing code and specs first. No `.mm` source is required.
 
 ```bash
-uv run python -m agent validate-code --input src/payment.py --language python
-uv run python -m agent validate-spec-to-code --spec spec.txt --code src/payment.py --language python
+mumei-agent validate-code --input src/payment.py --language python
+mumei-agent validate-spec-to-code --spec spec.txt --code src/payment.py --language python
 ```
 
 Use the resulting counter-examples, drift reports, and suggested contracts as the migration backlog.
