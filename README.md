@@ -1,5 +1,7 @@
 # Mumei (無銘) [![GitHub](https://img.shields.io/github/stars/mumei-lang/mumei?style=social)](https://github.com/mumei-lang/mumei)
 
+[日本語版はこちら](README_JA.md)
+
 **Verify existing code and specifications with formal methods — before you write `.mm`.**
 
 Mumei is a formal verification toolchain that can start from existing foreign-language code (for example Python, Rust, Go, or TypeScript), natural-language requirements, or Mumei `.mm` modules. It uses Z3, proof certificates, and AI-agent workflows to find bugs, spec drift, and contradictions, then gives you a path to gradually move critical logic into mathematically checked `.mm` code.
@@ -12,39 +14,39 @@ Mumei is a formal verification toolchain that can start from existing foreign-la
 
 ## Start without writing .mm (mumei-agent)
 
-mumei-agentを使うと、既存コードや仕様をそのまま検証できます。
-`.mm` を書かない入口から段階的に `.mm` へ移行する手順は [Onboarding Guide](docs/ONBOARDING.md) を参照してください。
+mumei-agent lets you verify existing code and specifications as they are.
+See the [Onboarding Guide](docs/ONBOARDING.md) for the path from no-`.mm` entry points to gradual `.mm` migration.
 
-### インストール
+### Install
 
 ```bash
 git clone https://github.com/mumei-lang/mumei-agent
 cd mumei-agent
-cp .env.example .env  # LLM_BASE_URL / LLM_API_KEY / LLM_MODEL を設定
+cp .env.example .env  # Set LLM_BASE_URL / LLM_API_KEY / LLM_MODEL
 uv sync
-# 以降は uv run mumei-agent <subcommand> で実行可能
+# After this, run commands as uv run mumei-agent <subcommand>
 ```
 
-### 3つのユースケース
+### Three use cases
 
-**1. 既存コードのバグ指摘**
+**1. Find likely bugs in existing code**
 ```bash
-uv run mumei-agent validate-code --input src/payment.py --language python  # --language は必須: python|rust|go
+uv run mumei-agent validate-code --input src/payment.py --language python  # --language is required: python|rust|go
 ```
 
-**2. 仕様↔コード不整合の検出**
+**2. Detect spec↔code drift**
 ```bash
 uv run mumei-agent validate-spec-to-code --spec docs/spec.txt --code src/payment.py
 ```
 
-**3. 仕様単独の矛盾検出**
+**3. Find contradictions in specs only**
 ```bash
-uv run mumei-agent validate-spec --input docs/spec.txt --format nl  # --format は任意（デフォルト: nl）
+uv run mumei-agent validate-spec --input docs/spec.txt --format nl  # --format is optional (default: nl)
 ```
 
-`--domain financial` などのドメインヒントは任意引数です。単一ファイルだけでなくディレクトリも指定できます（例: `--input src/`）。
+Domain hints such as `--domain financial` are optional. You can pass a directory as well as a single file (for example, `--input src/`).
 
-詳細は [Verification Workflow Guide](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/VERIFICATION_WORKFLOW_GUIDE.md) を参照。
+See the [Verification Workflow Guide](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/VERIFICATION_WORKFLOW_GUIDE.md) for details.
 
 ## Self-Healing Loop: start without writing `.mm`
 
@@ -56,7 +58,7 @@ If you work from a source checkout of `mumei-agent`, run `uv sync` once; after t
 Give the agent an existing source file and ask it to infer contracts, verify them, and report suspicious paths. `--input` is required and points to a single source file. `--language` is required and must be `python`, `rust`, or `go`.
 
 ```bash
-mumei-agent validate-code --input src/payment.py --language python  # --language 必須: python|rust|go
+mumei-agent validate-code --input src/payment.py --language python  # --language is required: python|rust|go
 ```
 
 MCP agents can use mumei's verification backend directly once they synthesize or receive `.mm`:
@@ -84,7 +86,7 @@ For reverse drift detection:
 mumei-agent validate-code-to-spec \
   --code src/payment.py \
   --spec docs/spec.txt \
-  --language python  # 任意: python|rust|go
+  --language python  # Optional: python|rust|go
 ```
 
 ### 3. Spec only: find contradictions and under-specified behavior
@@ -92,7 +94,7 @@ mumei-agent validate-code-to-spec \
 Start from prose requirements and check for direct contradictions, vacuity, ambiguity, and over-constraints. `--input` is required; `--domain` is optional when you want domain-specific hints.
 
 ```bash
-mumei-agent validate-spec --input docs/spec.txt --domain payment  # --domain 任意
+mumei-agent validate-spec --input docs/spec.txt --domain payment  # --domain is optional
 ```
 
 MCP agents can call spec-health or verification tools depending on whether the input is prose, extracted contracts, or `.mm`:
@@ -260,7 +262,7 @@ mumei/
 
 | Document | Content |
 |----------|---------|
-| [Verification Workflow Guide](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/VERIFICATION_WORKFLOW_GUIDE.md) | No-`.mm` entry paths: natural-language specs, foreign-code verification, and spec↔code alignment |
+| [Verification Workflow Guide](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/VERIFICATION_WORKFLOW_GUIDE.md) | Natural-language spec validation, foreign-code verification, spec↔code alignment, and human-friendly operation guide |
 | [MCP Integration](docs/MCP.md) | MCP tools, setup, and multi-agent collaboration |
 | [Language Reference](docs/LANGUAGE.md) | Types, generics, traits, ownership, async |
 | [Features](docs/FEATURES.md) | Feature matrix formerly summarized in this README |
