@@ -158,6 +158,75 @@ mumei setup && source ~/.mumei/env
 
 ---
 
+## Tooling reference
+
+### CLI
+
+| Command | Description |
+|---------|-------------|
+| `mumei build <file> -o <out>` | Verify + codegen (`--emit llvm-ir` (default) / `c-header` / `verified-json` / `proof-book` / `decidable-metrics` / `proof-cert` / `escalation-bundle` / `binary` / `rust` / `python` / external plugin name) |
+| `mumei run <file>` | Verify → codegen → link → execute `atom main()` as a native binary (`--emit binary` default, `--emit llvm-ir` keeps IR before linking) |
+| `mumei verify <file>` | Z3 verification only |
+| `mumei check <file>` | Parse + resolve (fast, no Z3) |
+| `mumei init <name>` | Generate project template |
+| `mumei add <dep>` | Add dependency (path / git / registry) |
+| `mumei publish` | Publish to local registry |
+| `mumei list` | List available packages in the local registry |
+| `mumei setup` | Download Z3 + LLVM toolchain |
+| `mumei inspect` | Show development environment |
+| `mumei infer-effects <file>` | Infer required effects (JSON output) |
+| `mumei infer-contracts <file>` | Infer contracts for all atoms (JSON output) |
+| `mumei repl` | Interactive REPL |
+| `mumei doc <file> -o <dir>` | Generate documentation (`--format html` (default) / `markdown` / `json`) |
+| `mumei lsp` | Start LSP server |
+| `mumei verify-cert <cert> <file>` | Verify a proof certificate against current source |
+
+### MCP Tools
+
+| Tool | Description |
+|------|-------------|
+| `forge_blade` | Verify + code generation in one step |
+| `validate_logic` | Z3 verification only; returns counter-example and semantic feedback data |
+| `execute_mm` | General-purpose build / check execution |
+| `get_inferred_effects` | Pre-check: infer required effects before writing code |
+| `get_allowed_effects` | Query current effect boundary for the session |
+| `set_allowed_effects` | Override effect boundary dynamically |
+| `analyze_std_gaps` | Identify gaps in std/ coverage |
+| `list_std_catalog` | List all atoms in the std/ catalog |
+| `visualize_std_graph` | Render std/ dependency graph (Mermaid or DOT) |
+| `measure_std_health` | Measure std/ health metrics |
+| `get_proof_certificate` | Retrieve proof certificate for a module |
+| `generate_doc` | Generate structured documentation (`mumei doc --format json`) |
+| `analyze_contract_conflicts` | Analyze cross-atom contract conflicts and circular dependencies (Meta-Architect) |
+| `propose_interface_refactoring` | Propose interface-level refactorings for architectural issues (Meta-Architect) |
+| `get_spec_guideline` | Return agent-facing spec-writing guidelines as JSON |
+| `get_structured_feedback` | Return P9-E structured feedback JSON for source code |
+
+### Project Structure
+
+```text
+mumei/
+├── mumei-core/             # Core library: parser, HIR, verification, MIR, emitter trait
+├── mumei-emit-llvm/        # LLVM IR emitter (LlvmEmitter + codegen)
+├── mumei-emit-json/        # Verified JSON metadata emitter (VerifiedJsonEmitter)
+├── mumei-emit-proofbook/   # Markdown proof-certificate emitter
+├── mumei-emit-rust/        # Rust FFI binding emitter
+├── mumei-emit-python/      # Python FFI binding emitter
+├── mumei-ffi-tests/        # Generated Rust property tests for FFI contracts
+├── src/                    # CLI binary (main.rs, cli.rs, lsp.rs, setup.rs)
+├── std/                    # Standard library (.mm files)
+├── runtime/                # C runtime library (mumei_runtime.c)
+├── visualizer/             # std/ dependency graph generation scripts
+├── scripts/                # Install script, utility scripts (install.sh, etc.)
+├── benchmarks/             # Dafny-style and SV-COMP-style benchmarks
+├── paper/                  # Technical paper
+├── editors/vscode/         # VS Code extension (LSP client + counter-example decorations)
+├── examples/               # Example programs
+└── tests/                  # Integration tests (.mm files)
+```
+
+---
+
 ## Documentation
 
 | Document | Content |
@@ -176,6 +245,19 @@ mumei setup && source ~/.mumei/env
 | [Roadmap](docs/ROADMAP.md) | Strategic roadmap |
 | [Capability Security](docs/CAPABILITY_SECURITY.md) | Effect-based capability security evaluation |
 | [Changelog](docs/CHANGELOG.md) | Release history |
+| [Diagnostics](docs/DIAGNOSTICS.md) | Multi-span diagnostics, compound constraint decomposition |
+| [Meta-Architect](docs/META_ARCHITECT.md) | Contract conflict analysis and interface refactoring tools |
+| [Plugin Guide](docs/PLUGIN_GUIDE.md) | Emitter plugin development |
+| [Proof Certificate](docs/PROOF_CERTIFICATE.md) | Proof certificate schema and usage |
+| [Spec Guide](docs/SPEC_GUIDE.md) | Spec-writing guidelines for Z3-decidable fragments |
+| [FFI](docs/FFI.md) | Foreign function interface (Rust/C) |
+| [Concurrency](docs/CONCURRENCY.md) | Async/await and deadlock-free resource hierarchy |
+| [Editors](docs/EDITORS.md) | VS Code and LSP editor integration |
+| [Patterns](docs/PATTERNS.md) | Design patterns and idioms |
+| [Trusted Atoms](docs/TRUSTED_ATOMS.md) | trusted/unverified atom usage |
+| [Structured Feedback Schema](docs/STRUCTURED_FEEDBACK_SCHEMA.md) | P9-E structured feedback JSON schema |
+| [Cross-Project Roadmap](docs/CROSS_PROJECT_ROADMAP.md) | mumei + mumei-agent ecosystem roadmap |
+| [Claude Code Quickstart](docs/CLAUDE_CODE_QUICKSTART.md) | Quickstart guide for Claude Code users |
 
 ---
 
