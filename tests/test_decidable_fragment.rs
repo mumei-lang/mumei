@@ -453,7 +453,11 @@ body: x * y;
     assert_eq!(bundle["candidates"][0]["name"], "nonlinear");
     assert_eq!(
         bundle["candidates"][0]["escalation_reason"],
-        "outside_decidable_fragment"
+        "nonlinear_arithmetic"
+    );
+    assert_eq!(
+        bundle["candidates"][0]["logic_fragment_tag"],
+        "nonlinear_arithmetic"
     );
     assert_eq!(bundle["candidates"][0]["status"], "escalation_candidate");
 
