@@ -10,6 +10,41 @@ Mumei is a formal verification toolchain that can start from existing foreign-la
 
 ---
 
+## Start without writing .mm (mumei-agent)
+
+mumei-agentを使うと、既存コードや仕様をそのまま検証できます。
+
+### インストール
+
+```bash
+git clone https://github.com/mumei-lang/mumei-agent
+cd mumei-agent
+cp .env.example .env  # LLM_BASE_URL / LLM_API_KEY / LLM_MODEL を設定
+uv sync
+# 以降は uv run mumei-agent <subcommand> で実行可能
+```
+
+### 3つのユースケース
+
+**1. 既存コードのバグ指摘**
+```bash
+uv run mumei-agent validate-code --input src/payment.py --language python  # --language は必須: python|rust|go
+```
+
+**2. 仕様↔コード不整合の検出**
+```bash
+uv run mumei-agent validate-spec-to-code --spec docs/spec.txt --code src/payment.py
+```
+
+**3. 仕様単独の矛盾検出**
+```bash
+uv run mumei-agent validate-spec --input docs/spec.txt --format nl  # --format は任意（デフォルト: nl）
+```
+
+`--domain financial` などのドメインヒントは任意引数です。単一ファイルだけでなくディレクトリも指定できます（例: `--input src/`）。
+
+詳細は [Verification Workflow Guide](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/VERIFICATION_WORKFLOW_GUIDE.md) を参照。
+
 ## Self-Healing Loop: start without writing `.mm`
 
 See the mumei-agent [Verification Workflow Guide](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/VERIFICATION_WORKFLOW_GUIDE.md) for the full no-`.mm` workflow, including natural-language spec validation, foreign-code verification, and spec↔code alignment.
