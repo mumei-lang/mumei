@@ -9,7 +9,7 @@ Mumei can start from existing code or natural-language requirements, then gradua
 ```bash
 # 既存コードを渡すだけ
 uv run mumei-agent audit --code-file payment.py
-uv run mumei-agent verify-foreign --input payment.py --language python
+uv run mumei-agent validate-code --input payment.py --language python
 printf '%s\n' "残高不足の場合はエラーを返す" > spec.txt
 uv run mumei-agent validate-spec-to-code --spec spec.txt --code payment.py --language python
 ```

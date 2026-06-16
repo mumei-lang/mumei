@@ -4,7 +4,7 @@
 
 **Verify existing code and specifications with formal methods — before you write `.mm`.**
 
-Mumei is a formal verification toolchain that can start from existing foreign-language code (for example Python, Rust, Go, or TypeScript), natural-language requirements, or Mumei `.mm` modules. It uses Z3, proof certificates, and AI-agent workflows to find bugs, spec drift, and contradictions, then gives you a path to gradually move critical logic into mathematically checked `.mm` code.
+Mumei is a formal verification toolchain that can start from existing code (for example Python, Rust, Go, or TypeScript), natural-language requirements, or Mumei `.mm` modules. It uses Z3, proof certificates, and AI-agent workflows to find bugs, spec drift, and contradictions, then gives you a path to gradually move critical logic into mathematically checked `.mm` code.
 
 [Technical Paper](paper/) — proof-driven programming architecture, autonomous verification loop, and case studies.
 
@@ -50,7 +50,7 @@ See the [Verification Workflow Guide](https://github.com/mumei-lang/mumei-agent/
 
 ## Self-Healing Loop: start without writing `.mm`
 
-See the mumei-agent [Verification Workflow Guide](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/VERIFICATION_WORKFLOW_GUIDE.md) for the full no-`.mm` workflow, including natural-language spec validation, foreign-code verification, and spec↔code alignment.
+See the mumei-agent [Verification Workflow Guide](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/VERIFICATION_WORKFLOW_GUIDE.md) for the full no-`.mm` workflow, including natural-language spec validation, existing-code verification, and spec↔code alignment.
 If you work from a source checkout of `mumei-agent`, run `uv sync` once; after that, the same commands are available as `uv run mumei-agent <subcommand>`.
 
 ### 1. Existing code: find likely bug locations
@@ -262,7 +262,7 @@ mumei/
 
 | Document | Content |
 |----------|---------|
-| [Verification Workflow Guide](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/VERIFICATION_WORKFLOW_GUIDE.md) | Natural-language spec validation, foreign-code verification, spec↔code alignment, and human-friendly operation guide |
+| [Verification Workflow Guide](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/VERIFICATION_WORKFLOW_GUIDE.md) | Natural-language spec validation, existing-code verification, spec↔code alignment, and human-friendly operation guide |
 | [MCP Integration](docs/MCP.md) | MCP tools, setup, and multi-agent collaboration |
 | [Language Reference](docs/LANGUAGE.md) | Types, generics, traits, ownership, async |
 | [Features](docs/FEATURES.md) | Feature matrix formerly summarized in this README |
