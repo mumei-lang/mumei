@@ -650,6 +650,139 @@ graph TD
 
 ---
 
+## P14: `.mm`を書かない入口と Human-in-the-Loop UX（2026-06-15 実装状態）
+
+P14 は「既存コード/自然言語仕様を入口に、必要になった部分だけ `.mm` へ段階移行する」
+ためのクロスプロジェクト層。P11 の harness contract を前提に、mumei 側は
+multi-file cross-spec と MCP 向け conflict analysis を提供し、mumei-agent 側は
+audit / migration / self-healing / MCP の 1 コマンド導線を提供する。
+
+### P14-A: 自然言語仕様の健全性検証強化 ✅ Implemented
+
+**Repository**: `mumei-lang/mumei-agent`（主）、`mumei-lang/mumei`（検証バックエンド）
+
+**実装タスク**:
+
+1. `validate-spec` / `extract-spec --check-contradiction-only` で自然言語仕様を
+   Mumei contract atom に変換し、矛盾・曖昧さ・過制約・vacuity を検出する。
+2. `contradiction_type` を structured result と human/markdown report に含め、
+   `direct_contradiction` / `overconstraint` / `satisfiability` 系の原因を人間と MCP client が
+   同じキーで扱えるようにする。
+3. MCP から `check_spec_contradiction` を呼び、コード生成前に spec-only の fail-fast
+   verification を実行できるようにする。
+
+**対象ファイル**:
+
+- `mumei-agent/agent/cross_validation.py` — `NLSpecValidationResult.contradiction_type`
+- `mumei-agent/agent/extract_spec.py` — contradiction-only extraction / report generation
+- `mumei-agent/agent/report_formatter.py` — `contradiction_type` の human / markdown 表示
+- `mumei-agent/agent/mcp_server.py` — `check_spec_contradiction`
+- `mumei/mumei-core/src/proof_cert.rs` / `mumei-core/src/verification/*` — Z3 result と
+  proof metadata の検証基盤
+
+**成功指標**:
+
+- 仕様だけを入力した場合に `.mm` 生成へ進む前に直接矛盾を検出できる。
+- CLI / MCP / report のすべてで `contradiction_type` が同じ意味で読める。
+- `validate-spec` の出力が human review で原因分類・修正対象・再検証手順を追える。
+
+### P14-B: 他言語コードの論理的健全性検証 ✅ Implemented
+
+**Repository**: `mumei-lang/mumei-agent`
+
+**実装タスク**:
+
+1. `audit --code-file <file>` で既存 Python/Rust/TypeScript から仕様を抽出し、
+   spec health、foreign-code contract verification、cross-validation をまとめて実行する。
+2. `audit --code-file src/` のディレクトリスキャンで対応拡張子を再帰収集し、
+   ファイルごとの `AuditResult` と集約 `AuditDirectoryResult` を返す。
+3. 問題がある関数に対して `migrate-suggest` の `.mm` skeleton を生成し、
+   `--auto-migrate --auto-heal` で skeleton 生成から self-healing まで 1 コマンド化する。
+4. MCP tool `scan_and_fix` で同じ audit → migrate → optional heal flow を外部 agent から呼べるようにする。
+
+**対象ファイル**:
+
+- `mumei-agent/agent/audit.py` — `AuditPipeline.audit_file()` / `audit_directory()`,
+  `--auto-migrate`, `--auto-heal`, `--heal-output-dir`
+- `mumei-agent/agent/extract_spec.py` — `_collect_code_files()` と directory extraction
+- `mumei-agent/agent/mm_migration_advisor.py` — `.mm` migration skeleton generation
+- `mumei-agent/agent/mcp_server.py` — `scan_and_fix`
+
+**成功指標**:
+
+- 単一ファイルとディレクトリを同じ `--code-file` 導線で監査できる。
+- 問題なしなら `.mm` を書かずに監査完了、問題ありなら skeleton / heal 結果が機械可読に返る。
+- MCP 経由でも `scan_and_fix(code_file, language, auto_heal=true)` で同等の flow を再現できる。
+
+### P14-C: 仕様↔コードのクロス検証 ✅ Implemented
+
+**Repository**: `mumei-lang/mumei-agent`（主）、`mumei-lang/mumei`（multi-file cross-spec）
+
+**実装タスク**:
+
+1. mumei PR #285 の multi-file cross-spec verification を基盤に、
+   `mumei verify --cross-spec-files a.mm,b.mm --report-dir reports/ main.mm` で複数 `.mm`
+   の contract consistency / global invariant / circular dependency を検査する。
+2. `validate-spec-to-code` で自然言語仕様の制約が既存コードに実装されているかを検査する。
+3. `validate-code-to-spec` でコード変更に仕様が追従しているかを drift として検査する。
+4. mumei-agent PR #121 の MCP tools で `check_cross_spec_consistency` を公開し、
+   cross-spec report を外部 agent が利用できる JSON に正規化する。
+5. mumei MCP 側では `analyze_contract_conflicts` / `propose_interface_refactoring`
+   が `cross_spec.json` を読み、interface-level refactoring proposal を返す。
+
+**対象ファイル**:
+
+- `mumei/src/cli.rs` — `verify --cross-spec-verify`, `--cross-spec-files`, `--report-dir`
+- `mumei/src/pipeline.rs` — `load_cross_spec_files()` / `merge_module_env()`
+- `mumei/mumei-core/src/cross_spec/mod.rs` — `CrossSpecVerifier`,
+  `CrossSpecResult`, `GlobalInvariantConflict`
+- `mumei/mcp_server.py` — `analyze_contract_conflicts`, `propose_interface_refactoring`
+- `mumei-agent/agent/cross_validation.py` — spec↔code alignment / drift result
+- `mumei-agent/agent/mcp_server.py` — `check_cross_spec_consistency`,
+  `validate_spec_to_code`, `validate_code_to_spec`
+
+**成功指標**:
+
+- `reports/cross_spec.json` に `contract_consistency[]`, `global_invariants[]`,
+  `global_invariant_conflicts[]`, `circular_dependencies[]` が出力される。
+- 複数ファイル間の caller/callee contract mismatch が `caller_file` / `callee_file`
+  付きで説明される。
+- spec↔code drift が `missing_constraints[]`, `divergences[]`, `drift_issues[]`
+  として CLI / MCP の両方で取得できる。
+
+### P14-D: 人間向けUX強化（Human-in-the-Loop）✅ Implemented
+
+**Repository**: `mumei-lang/mumei`, `mumei-lang/mumei-agent`, `mumei-lang/mumei-demo`
+
+**実装タスク**:
+
+1. `.mm` を書かない入口を README / workflow guide / demo scenario に明文化し、
+   `audit --auto-migrate --auto-heal` と MCP `scan_and_fix` を標準導線にする。
+2. 反例・仕様矛盾・cross-validation gap を human-readable report と structured JSON の
+   両方で出し、人間レビュー対象を `contradiction_type` や migration hints で分類する。
+3. mumei 側の cross-spec diagnostics と mumei-agent 側の audit summary をつなぎ、
+   「完了」「移行候補」「要 human review」の判断を同じ artifact set で追跡する。
+4. mumei-demo では no-`.mm` audit scenario / human review workflow をデモ化し、
+   人間が判断する境界を可視化する。
+
+**対象ファイル**:
+
+- `mumei-agent/README.md` — `.mmを書かない入口` flowchart
+- `mumei-agent/docs/VERIFICATION_WORKFLOW_GUIDE.md` — audit / directory scan / MCP guide
+- `mumei-agent/agent/human_review.py`, `agent/audit.py`, `agent/report_formatter.py`
+- `mumei/docs/ROADMAP.md`, `docs/CROSS_PROJECT_ROADMAP.md`
+- `mumei-demo/scenarios/*`, `scripts/run_scenario.sh`, `reports/*`（demo 側）
+
+**成功指標**:
+
+- ユーザーは既存コードに対して `mumei-agent audit --code-file src/ --auto-migrate --auto-heal`
+  または MCP `scan_and_fix` から開始できる。
+- `.mm` を手で書く前に「監査完了」「自動移行」「human review」の分岐が説明される。
+- demo / docs / CLI output が同じ P14 用語（audit, migration hints, contradiction_type,
+  cross-validation gaps）で揃っている。
+
+---
+
 ## 優先度マトリクス（更新版）
 
 | 優先度 | 項目 | リポジトリ | 状態 |
@@ -678,10 +811,10 @@ graph TD
 | ✅ | Phase 5: DeFi Invariant | mumei-demo | Completed |
 | ✅ | Phase 6: ArkLib-Style Audit | mumei-demo + mumei-lean | Completed |
 | ✅ | P11: NLAH-style Harness Externalization | 全リポジトリ | Completed |
-| 📋 | P14-A: 自然言語仕様の健全性検証強化 | mumei-agent | Planned |
-| 📋 | P14-B: 他言語コードの論理的健全性検証 | mumei-agent | Planned |
-| 📋 | P14-C: 仕様↔コードのクロス検証 | mumei-agent + mumei | Planned |
-| 📋 | P14-D: 人間向けUX強化（Human-in-the-Loop） | mumei + mumei-agent + mumei-demo | Planned |
+| ✅ | P14-A: 自然言語仕様の健全性検証強化 | mumei-agent | Implemented |
+| ✅ | P14-B: 他言語コードの論理的健全性検証 | mumei-agent | Implemented |
+| ✅ | P14-C: 仕様↔コードのクロス検証 | mumei-agent + mumei | Implemented |
+| ✅ | P14-D: 人間向けUX強化（Human-in-the-Loop） | mumei + mumei-agent + mumei-demo | Implemented |
 | ✅ | SI-6: Lean 4 Executable Code Generation | mumei-lean | Completed |
 | ⏸️ | SI-4: no_std Ecosystem | mumei | Deferred |
 
