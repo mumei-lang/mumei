@@ -1,3 +1,10 @@
+---
+layout: default
+title: "Compiler Architecture — Mumei"
+description: "Mumei compiler architecture, verification pipeline, HIR/MIR lowering, Z3 checking, LLVM emission, and proof certificate flow."
+keywords: "mumei, compiler architecture, formal verification, Z3, LLVM, proof certificates"
+---
+
 # 🏗️ Mumei Compiler Architecture
 
 ## Pipeline
@@ -22,6 +29,24 @@ The repository is a Cargo workspace with 3 library crates + 1 CLI binary:
 | `mumei-emit-llvm` | LLVM IR emitter (`LlvmEmitter` + `codegen.rs`) |
 | `mumei-emit-json` | Verified JSON metadata emitter (`VerifiedJsonEmitter`, `--emit verified-json`) |
 | `mumei` (root) | CLI binary (`main.rs`, `lsp.rs`, `setup.rs`) |
+
+## Project Structure
+
+```text
+mumei/
+├── mumei-core/             # Core library: parser, HIR, verification, MIR, emitter trait
+├── mumei-emit-llvm/        # LLVM IR emitter (LlvmEmitter + codegen)
+├── mumei-emit-json/        # Verified JSON metadata emitter (VerifiedJsonEmitter)
+├── mumei-emit-proofbook/   # Markdown proof-certificate emitter
+├── mumei-emit-rust/        # Rust FFI binding emitter
+├── mumei-emit-python/      # Python FFI binding emitter
+├── mumei-ffi-tests/        # Generated Rust property tests for FFI contracts
+├── src/                    # CLI binary (main.rs, lsp.rs, setup.rs)
+├── std/                    # Standard library (.mm files)
+├── editors/vscode/         # VS Code extension (LSP client + counter-example decorations)
+├── examples/               # Example programs
+└── tests/                  # Integration tests (.mm files)
+```
 
 ## Source Files
 

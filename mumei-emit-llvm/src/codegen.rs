@@ -1253,7 +1253,7 @@ fn compile_hir_expr<'a>(
                     builder.position_at_end(block);
                 }
                 llvm!(builder.build_store(group_result_ptr, i64_type.const_int(0, false)));
-                let (_complete_fn, _flag_fn, reset_fn, _cancel_fn, _yield_fn, _, _, _) =
+                let (_complete_fn, _flag_fn, reset_fn, _cancel_fn, _wait_fn, _, _, _) =
                     declare_task_group_any_externs(context, module);
                 llvm!(builder.build_call(
                     reset_fn,
@@ -1279,68 +1279,18 @@ fn compile_hir_expr<'a>(
             }
             if let Some(any_ctx) = any_ctx {
                 let i64_type = context.i64_type();
-                let (_complete_fn, flag_fn, _reset_fn, _cancel_fn, yield_fn, group_cancel_fn, _, _) =
+                let (_complete_fn, _flag_fn, _reset_fn, _cancel_fn, wait_fn, group_cancel_fn, _, _) =
                     declare_task_group_any_externs(context, module);
                 if builder.get_insert_block().is_none() {
                     return Err(MumeiError::codegen(String::from(
                         "task_group:any has no insertion block",
                     )));
                 }
-                let check_block = context.append_basic_block(*function, "task_group_any_check");
-                let wait_block = context.append_basic_block(*function, "task_group_any_wait");
-                let yield_block = context.append_basic_block(*function, "task_group_any_yield");
-                let done_block = context.append_basic_block(*function, "task_group_any_done");
-                llvm!(builder.build_unconditional_branch(check_block));
-
-                builder.position_at_end(check_block);
-                let flag = llvm!(builder.build_call(
-                    flag_fn,
+                llvm!(builder.build_call(
+                    wait_fn,
                     &[i64_type.const_int(any_ctx.group_id, false).into()],
-                    "task_group_any_flag_call",
-                ))
-                .try_as_basic_value()
-                .left()
-                .ok_or_else(|| {
-                    MumeiError::codegen("task_group:any flag returned void".to_string())
-                })?
-                .into_int_value();
-                let is_done = llvm!(builder.build_int_compare(
-                    IntPredicate::NE,
-                    flag,
-                    i64_type.const_int(0, false),
-                    "task_group_any_is_done",
+                    "task_group_any_wait_call",
                 ));
-                llvm!(builder.build_conditional_branch(is_done, done_block, wait_block));
-
-                builder.position_at_end(wait_block);
-                let should_cancel_fn =
-                    declare_task_group_should_cancel_current_extern(context, module);
-                let cancel_flag = llvm!(builder.build_call(
-                    should_cancel_fn,
-                    &[],
-                    "task_group_any_parent_cancel_check",
-                ))
-                .try_as_basic_value()
-                .left()
-                .ok_or_else(|| MumeiError::codegen("cancel check returned void".to_string()))?
-                .into_int_value();
-                let is_parent_cancelled = llvm!(builder.build_int_compare(
-                    IntPredicate::NE,
-                    cancel_flag,
-                    i64_type.const_int(0, false),
-                    "task_group_any_parent_cancelled",
-                ));
-                llvm!(builder.build_conditional_branch(
-                    is_parent_cancelled,
-                    done_block,
-                    yield_block
-                ));
-
-                builder.position_at_end(yield_block);
-                llvm!(builder.build_call(yield_fn, &[], "sched_yield_call"));
-                llvm!(builder.build_unconditional_branch(check_block));
-
-                builder.position_at_end(done_block);
                 llvm!(builder.build_call(
                     group_cancel_fn,
                     &[i64_type.const_int(any_ctx.group_id, false).into()],
@@ -1991,7 +1941,6 @@ fn declare_task_group_any_externs<'a>(
     FunctionValue<'a>,
 ) {
     let i64_type = context.i64_type();
-    let i32_type = context.i32_type();
     let ptr_type = context.ptr_type(AddressSpace::default());
     let void_type = context.void_type();
 
@@ -2036,14 +1985,16 @@ fn declare_task_group_any_externs<'a>(
                 Some(inkwell::module::Linkage::External),
             )
         });
-    let yield_fn = module.get_function("sched_yield").unwrap_or_else(|| {
-        let fn_type = i32_type.fn_type(&[], false);
-        module.add_function(
-            "sched_yield",
-            fn_type,
-            Some(inkwell::module::Linkage::External),
-        )
-    });
+    let wait_fn = module
+        .get_function("__mumei_task_group_any_wait")
+        .unwrap_or_else(|| {
+            let fn_type = void_type.fn_type(&[i64_type.into()], false);
+            module.add_function(
+                "__mumei_task_group_any_wait",
+                fn_type,
+                Some(inkwell::module::Linkage::External),
+            )
+        });
     let group_cancel_fn = module
         .get_function("__mumei_task_group_cancel")
         .unwrap_or_else(|| {
@@ -2080,11 +2031,28 @@ fn declare_task_group_any_externs<'a>(
         flag_fn,
         reset_fn,
         cancel_fn,
-        yield_fn,
+        wait_fn,
         group_cancel_fn,
         group_enter_fn,
         group_leave_fn,
     )
+}
+
+fn declare_task_group_should_cancel_extern<'a>(
+    context: &'a Context,
+    module: &Module<'a>,
+) -> FunctionValue<'a> {
+    let i64_type = context.i64_type();
+    module
+        .get_function("__mumei_task_group_should_cancel")
+        .unwrap_or_else(|| {
+            let fn_type = i64_type.fn_type(&[i64_type.into()], false);
+            module.add_function(
+                "__mumei_task_group_should_cancel",
+                fn_type,
+                Some(inkwell::module::Linkage::External),
+            )
+        })
 }
 
 fn declare_task_group_should_cancel_current_extern<'a>(
@@ -2262,9 +2230,50 @@ fn emit_task_spawn_only<'a>(
         let group_result_ptr =
             llvm!(builder.build_load(ptr_type, group_result_ptr_ptr, "task_group_result_ptr"))
                 .into_pointer_value();
-        let (_complete_fn, _flag_fn, _reset_fn, _cancel_fn, _yield_fn, _, enter_fn, _leave_fn) =
+        let (_complete_fn, flag_fn, _reset_fn, _cancel_fn, _wait_fn, _, enter_fn, leave_fn) =
             declare_task_group_any_externs(context, module);
         llvm!(builder.build_call(enter_fn, &[group_id.into()], "task_group_enter_call",));
+        let should_cancel_fn = declare_task_group_should_cancel_extern(context, module);
+        let done_flag =
+            llvm!(builder.build_call(flag_fn, &[group_id.into()], "task_group_start_done_check",))
+                .try_as_basic_value()
+                .left()
+                .ok_or_else(|| {
+                    MumeiError::codegen("task_group:any flag returned void".to_string())
+                })?
+                .into_int_value();
+        let is_done = llvm!(builder.build_int_compare(
+            IntPredicate::NE,
+            done_flag,
+            i64_type.const_int(0, false),
+            "task_group_start_done",
+        ));
+        let cancel_flag = llvm!(builder.build_call(
+            should_cancel_fn,
+            &[group_id.into()],
+            "task_group_start_cancel_check",
+        ))
+        .try_as_basic_value()
+        .left()
+        .ok_or_else(|| MumeiError::codegen("cancel check returned void".to_string()))?
+        .into_int_value();
+        let is_cancelled = llvm!(builder.build_int_compare(
+            IntPredicate::NE,
+            cancel_flag,
+            i64_type.const_int(0, false),
+            "task_group_start_cancelled",
+        ));
+        let should_exit = llvm!(builder.build_or(is_done, is_cancelled, "task_group_start_exit"));
+        let cancelled_block = context.append_basic_block(wrapper_fn, "task_group_cancelled_entry");
+        let body_block = context.append_basic_block(wrapper_fn, "task_group_body_entry");
+        llvm!(builder.build_conditional_branch(should_exit, cancelled_block, body_block));
+
+        builder.position_at_end(cancelled_block);
+        llvm!(builder.build_call(leave_fn, &[], "task_group_leave_cancelled_call"));
+        let null_ret = ptr_type.const_null();
+        llvm!(builder.build_return(Some(&null_ret)));
+
+        builder.position_at_end(body_block);
         Some((group_id, group_result_ptr))
     } else {
         None
@@ -2299,7 +2308,7 @@ fn emit_task_spawn_only<'a>(
     llvm!(builder.build_store(result_ptr, body_i64));
 
     if let Some((group_id, group_result_ptr)) = task_group_runtime {
-        let (complete_fn, _flag_fn, _reset_fn, _cancel_fn, _yield_fn, group_cancel_fn, _, leave_fn) =
+        let (complete_fn, _flag_fn, _reset_fn, _cancel_fn, _wait_fn, group_cancel_fn, _, leave_fn) =
             declare_task_group_any_externs(context, module);
         let completed = llvm!(builder.build_call(
             complete_fn,

@@ -1,12 +1,24 @@
+---
+layout: default
+title: "Proof-Friendly Specification Guide — Mumei"
+description: "Guidance for writing Mumei specifications in Z3-decidable fragments with reliable preconditions, postconditions, and invariants."
+keywords: "mumei specification guide, Z3 decidable fragment, formal methods, proof-friendly specifications"
+---
+
 # Proof-Friendly Specification Guide
 
-This guide describes the decidable specification fragment that Mumei expects Z3 to verify reliably. Stay inside these patterns for first-pass verification; use Lean escalation for specifications that intentionally need stronger reasoning.
+This guide describes the P8-D decidable specification fragment that Mumei expects Z3 to verify reliably. Stay inside these patterns for first-pass verification; use Lean escalation for specifications that intentionally need stronger reasoning.
 
-## Decidable fragment catalog
+## Decidable Fragment
 
 ### Linear arithmetic
 
-Use linear `i64` or `Nat` refinements with addition, subtraction, comparisons, and multiplication by constants.
+Use linear `i64` or `Nat` refinements with addition, subtraction, comparisons, and multiplication by constants. Prefer refinements and preconditions that expose direct lower/upper bounds:
+
+- define `Nat`-like types as `v >= 0`
+- put input ranges in `requires`, not only in prose
+- express postconditions as linear equalities or inequalities over inputs and `result`
+- use constant scaling (`3 * x`) instead of symbolic products (`x * y`)
 
 Recommended:
 
@@ -33,7 +45,7 @@ Lean escalation candidates:
 
 ### Array and sequence access
 
-Every array or sequence read/write must have an explicit bounds condition of the form `0 <= i && i < len(a)` or an equivalent bounded quantifier range. Prefer single-index reads/writes and length-preserving updates.
+Every array or sequence read/write must have an explicit bounds condition of the form `0 <= i && i < len(a)` or an equivalent bounded quantifier range. In current `.mm` examples this is usually written as `i >= 0 && i < n`, where `n` is the array length tracked by the contract. Prefer single-index reads/writes and length-preserving updates.
 
 Recommended:
 
@@ -67,11 +79,11 @@ ensures: result == n && forall(i, 0, result - 1, arr[i] <= arr[i + 1]);
 body: n;
 ```
 
-Keep quantifier bodies simple: linear arithmetic, a single array access pattern, or a single implication over a bounded range. Nested quantifiers, mixed `forall`/`exists`, and quantifiers over array reads are trigger-sensitive and may need Lean.
+Keep quantifier bodies simple: linear arithmetic, a single array access pattern, or a single implication over a bounded range. Nested quantifiers, mixed `forall`/`exists`, and quantifiers over array reads are trigger-sensitive and may need Lean. Treat quantifier alternation (`forall exists`, `exists forall`) as a Lean escalation candidate unless the witness is explicitly returned or bound by the surrounding code.
 
 ### Effects and temporal state
 
-Stateful effects should be finite state machines with explicit transitions. Keep effect preconditions local to the current state and avoid encoding unbounded histories in contracts.
+Stateful effects should be finite state machines with explicit transitions. Keep effect preconditions local to the current state and avoid encoding unbounded histories in contracts. Path, URL, and regex constraints should be reduced to bounded string predicates or finite cases when possible; otherwise they are outside the most reliable Z3 fragment.
 
 Recommended:
 
@@ -88,7 +100,7 @@ Prefer small state sets, deterministic transitions, and explicit operation order
 
 ## Anti-patterns
 
-The verifier emits an `outside_decidable_fragment` warning when it detects patterns that are often unstable for Z3:
+With `mumei verify --warn-fragment`, the verifier emits an `outside_decidable_fragment` warning for tags that indicate the atom is outside the Z3-stable range (`nonlinear_arithmetic`, `quantifier_alternation`, `array_without_bounds`, or `inductive_data_type`). Other tags are diagnostic metadata that should still guide prompt and spec review:
 
 | Fragment tag | Typical pattern | Recommended response |
 |---|---|---|
@@ -101,6 +113,77 @@ The verifier emits an `outside_decidable_fragment` warning when it detects patte
 | `complex_temporal_effect` | Many states/transitions or implicit history | Reduce to finite explicit transitions |
 | `nested_aliasing` | Multiple `ref mut` aliases or nested mutable scopes | Split the atom or serialize mutation through one owner |
 | `regex_semantics` | `regex_match`, `matches`, or equivalent regex constraints | Replace with prefix/contains/bounded finite cases or escalate to Lean |
+
+### Anti-pattern examples
+
+Avoid nonlinear arithmetic in core postconditions:
+
+```mumei
+atom area(width: i64, height: i64)
+requires: width >= 0 && height >= 0;
+ensures: result == width * height;
+body: width * height;
+```
+
+Prefer a weaker linear contract for Z3, or send the exact multiplicative property to Lean if it is the property under review.
+
+Avoid array access without a nearby bound:
+
+```mumei
+atom unsafe_read(i: i64)
+requires: true;
+ensures: result == arr[i];
+body: arr[i];
+```
+
+State the length and index range explicitly:
+
+```mumei
+atom safe_read(n: i64, i: i64)
+requires: n >= 0 && i >= 0 && i < n;
+ensures: result == arr[i];
+body: arr[i];
+```
+
+Avoid alternating quantifiers unless a witness is constructed:
+
+```mumei
+atom unstable_match(n: i64)
+requires: n >= 0;
+ensures: forall(i, 0, n, exists(j, 0, n, arr[i] == arr[j]));
+body: n;
+```
+
+Split the property, return the witness, or escalate the obligation to Lean.
+
+## Responding to `outside_decidable_fragment` warnings
+
+When `mumei verify` detects logic outside the decidable fragment, it prints:
+
+```
+warning[outside_decidable_fragment]: atom `foo` uses fragments outside Z3-stable range: [nonlinear_arithmetic]
+  --> vault.mm:12
+  hint: simplify to linear arithmetic, or use `mumei verify --escalate-lean` to delegate to Lean 4
+  see: docs/SPEC_GUIDE.md#decidable-fragment
+```
+
+In `--json` mode the same information appears in the `diagnostics` array:
+
+```json
+{
+  "code": "outside_decidable_fragment",
+  "severity": "warning",
+  "atom": "foo",
+  "message": "atom `foo` uses fragments outside Z3-stable range: [nonlinear_arithmetic]",
+  "tags": ["nonlinear_arithmetic"]
+}
+```
+
+## Lean Escalation
+
+1. **Rewrite the specification** to stay inside the decidable fragment (see patterns above).
+2. **Escalate to Lean 4** with `mumei verify --escalate-lean` to produce an escalation bundle that the Lean bridge can translate into a formal proof.
+3. **Accept the instability** when the property genuinely requires nonlinear/inductive reasoning and a Z3 `unknown` is tolerable for your workflow.
 
 ## Property-based validation
 
@@ -150,7 +233,18 @@ Best practices:
 3. Use a fixed seed in CI when investigating a failure.
 4. Treat property-based success as a sanity check, not a proof. Z3/Lean verification remains the source of formal assurance.
 
-## Recommended templates
+## Recommended Templates
+
+### Bank transfer template
+
+```mumei
+atom transfer(balance: i64, amount: i64)
+requires: balance >= 0 && amount > 0 && amount <= balance;
+ensures: result == balance - amount && result >= 0;
+body: balance - amount;
+```
+
+Use the precondition to make invalid transfers uncallable, and keep the postcondition linear. If the product must encode fees or exchange rates, model constant rates first; symbolic rates are Lean escalation candidates.
 
 ### Linear refinement template
 
@@ -184,6 +278,20 @@ body: {
 };
 ```
 
+### Array operation template
+
+```mumei
+atom replace_with_max(n: i64, i: i64, value: i64, max_value: i64)
+requires: n >= 0 && i >= 0 && i < n && value <= max_value;
+ensures: result <= max_value;
+body: {
+    arr[i] = value;
+    arr[i]
+};
+```
+
+Keep the modified index explicit and prove one local property at a time. Permutation, sortedness preservation after arbitrary swaps, or nested mutable aliasing should be treated as Lean escalation candidates.
+
 ### Bounded universal template
 
 ```mumei
@@ -215,6 +323,19 @@ effect Session
 ```
 
 Keep transition names aligned with `perform` operations so MIR temporal analysis can track them directly.
+
+### State machine template
+
+```mumei
+effect Transfer
+    states: [Draft, Authorized, Settled, Rejected];
+    initial: Draft;
+    transition authorize: Draft -> Authorized;
+    transition settle: Authorized -> Settled;
+    transition reject: Draft -> Rejected;
+```
+
+Represent protocols as finite states plus explicit transitions. Avoid temporal specs that depend on unbounded histories such as "was never authorized by an expired user"; encode those checks as separate bounded predicates or escalate them.
 
 ## Metrics and review cadence
 

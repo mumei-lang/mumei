@@ -1,12 +1,14 @@
 use std::{collections::HashMap, process::Command};
 
-use mumei_core::proof_cert::{AtomCertificate, EscalationCandidate, LeanResultMetadata};
+use mumei_core::proof_cert::{
+    AtomCertificate, EscalationCandidate, EscalationReason, LeanResultMetadata, LogicFragment,
+};
 use mumei_core::resolver::LeanEscalationMetrics;
 use mumei_core::verification::TranslatorIRMetadata;
 
 fn candidate(
     name: &str,
-    reason: &str,
+    reason: EscalationReason,
     tags: &[&str],
     lean_status: Option<&str>,
     manual_lemma_reason: Option<&str>,
@@ -22,7 +24,8 @@ fn candidate(
         effects: Vec::new(),
         requires: "true".to_string(),
         ensures: "result >= 0".to_string(),
-        escalation_reason: reason.to_string(),
+        escalation_reason: reason,
+        logic_fragment_tag: Some(LogicFragment::NonlinearArithmetic),
         logic_fragment_tags: tags.iter().map(|tag| tag.to_string()).collect(),
         translator_version: "mumei-lean-translator-ir-v1".to_string(),
         binder_mapping: HashMap::new(),
@@ -33,10 +36,15 @@ fn candidate(
             status: status.to_string(),
             ..LeanResultMetadata::default()
         }),
+        lean_result_metadata: None,
     }
 }
 
-fn lean_verified_atom(name: &str, reason: Option<&str>, tags: &[&str]) -> AtomCertificate {
+fn lean_verified_atom(
+    name: &str,
+    reason: Option<EscalationReason>,
+    tags: &[&str],
+) -> AtomCertificate {
     AtomCertificate {
         name: name.to_string(),
         z3_check_result: "lean_verified".to_string(),
@@ -49,7 +57,8 @@ fn lean_verified_atom(name: &str, reason: Option<&str>, tags: &[&str]) -> AtomCe
         requires: "true".to_string(),
         ensures: "result >= 0".to_string(),
         z3_result_class: "unknown".to_string(),
-        escalation_reason: reason.map(str::to_string),
+        escalation_reason: reason,
+        logic_fragment_tag: Some(LogicFragment::NonlinearArithmetic),
         logic_fragment_tags: tags.iter().map(|tag| tag.to_string()).collect(),
         translator_version: "mumei-lean-translator-ir-v1".to_string(),
         binder_mapping: HashMap::new(),
@@ -60,6 +69,7 @@ fn lean_verified_atom(name: &str, reason: Option<&str>, tags: &[&str]) -> AtomCe
             status: "lean_verified".to_string(),
             ..LeanResultMetadata::default()
         }),
+        lean_result_metadata: None,
         counterexample_validation: None,
         reconstruction_loss: None,
         self_correction_metadata: None,
@@ -77,21 +87,21 @@ fn test_escalation_metrics_collection() {
     let mut metrics = LeanEscalationMetrics::default();
     metrics.record_candidate(&candidate(
         "proved",
-        "z3_unknown_complex_fragment",
+        EscalationReason::NonlinearArithmetic,
         &["nonlinear_arithmetic"],
         Some("lean_verified"),
         None,
     ));
     metrics.record_candidate(&candidate(
         "partial",
-        "z3_unknown_complex_fragment",
+        EscalationReason::NonlinearArithmetic,
         &["nonlinear_arithmetic"],
         Some("partial_translation"),
         None,
     ));
     metrics.record_candidate(&candidate(
         "manual",
-        "trusted_atom_human_review",
+        EscalationReason::HumanReviewRequired,
         &["inductive_data_type"],
         None,
         Some("manual lemma needed"),
@@ -102,13 +112,13 @@ fn test_escalation_metrics_collection() {
     assert_eq!(
         metrics
             .successes_by_failure_reason
-            .get("z3_unknown_complex_fragment"),
+            .get("nonlinear_arithmetic"),
         Some(&1)
     );
     assert_eq!(metrics.partial_translation, 1);
     assert_eq!(metrics.manual_required, 1);
     assert_eq!(
-        metrics.by_failure_reason.get("z3_unknown_complex_fragment"),
+        metrics.by_failure_reason.get("nonlinear_arithmetic"),
         Some(&2)
     );
     assert_eq!(
@@ -127,7 +137,7 @@ fn test_low_success_category_identification() {
     for index in 0..3 {
         metrics.record_candidate(&candidate(
             &format!("unknown_{index}"),
-            "z3_unknown_complex_fragment",
+            EscalationReason::NonlinearArithmetic,
             &["nonlinear_arithmetic"],
             if index == 0 {
                 Some("lean_verified")
@@ -140,7 +150,7 @@ fn test_low_success_category_identification() {
     for index in 0..2 {
         metrics.record_candidate(&candidate(
             &format!("trusted_{index}"),
-            "trusted_atom_human_review",
+            EscalationReason::HumanReviewRequired,
             &["trusted_atom"],
             Some("lean_verified"),
             None,
@@ -149,7 +159,7 @@ fn test_low_success_category_identification() {
 
     assert_eq!(
         metrics.identify_low_success_categories(),
-        vec!["z3_unknown_complex_fragment".to_string()]
+        vec!["nonlinear_arithmetic".to_string()]
     );
 }
 
@@ -158,7 +168,7 @@ fn test_metrics_json_output() {
     let mut metrics = LeanEscalationMetrics::default();
     metrics.record_candidate(&candidate(
         "proved",
-        "z3_unknown_complex_fragment",
+        EscalationReason::NonlinearArithmetic,
         &["nonlinear_arithmetic"],
         Some("lean_verified"),
         None,
@@ -172,9 +182,9 @@ fn test_metrics_json_output() {
     assert_eq!(json["partial_translation"], 0);
     assert_eq!(json["manual_required"], 0);
     assert_eq!(json["success_rate"], 1.0);
-    assert_eq!(json["by_failure_reason"]["z3_unknown_complex_fragment"], 1);
+    assert_eq!(json["by_failure_reason"]["nonlinear_arithmetic"], 1);
     assert_eq!(
-        json["successes_by_failure_reason"]["z3_unknown_complex_fragment"],
+        json["successes_by_failure_reason"]["nonlinear_arithmetic"],
         1
     );
     assert_eq!(json["by_logic_fragment"]["nonlinear_arithmetic"], 1);
@@ -186,7 +196,7 @@ fn test_lean_verified_acceptance_tracks_success_by_reason() {
     let mut metrics = LeanEscalationMetrics::default();
     let atom = lean_verified_atom(
         "accepted",
-        Some("z3_unknown_complex_fragment"),
+        Some(EscalationReason::NonlinearArithmetic),
         &["nonlinear_arithmetic"],
     );
 
@@ -199,7 +209,7 @@ fn test_lean_verified_acceptance_tracks_success_by_reason() {
     assert_eq!(
         metrics
             .successes_by_failure_reason
-            .get("z3_unknown_complex_fragment"),
+            .get("nonlinear_arithmetic"),
         Some(&1)
     );
     assert_eq!(metrics.to_summary_json()["success_rate"], 1.0);

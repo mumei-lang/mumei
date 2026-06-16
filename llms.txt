@@ -1,0 +1,34 @@
+# Mumei
+
+> Mumei (無銘) is a formal verification toolchain and proof-driven programming language. It verifies existing code (Python, Rust, Go, TypeScript), natural-language specifications, and `.mm` modules using Z3, proof certificates, and AI-agent workflows.
+
+## What Mumei does
+
+- Finds bugs and spec drift in existing code without requiring `.mm` migration
+- Verifies `.mm` source files using Z3 SMT solver
+- Emits LLVM IR, Rust/Python FFI bindings, and proof certificates
+- Provides MCP tools for integration with Claude Code, Devin, and other AI agents
+- Supports gradual migration from existing code to formally verified `.mm` modules
+
+## Key links
+
+- [GitHub Repository](https://github.com/mumei-lang/mumei)
+- [GitHub Pages / Documentation](https://mumei-lang.github.io/mumei)
+- [Language Reference](https://mumei-lang.github.io/mumei/docs/LANGUAGE)
+- [Onboarding Guide](https://mumei-lang.github.io/mumei/docs/ONBOARDING)
+- [Architecture](https://mumei-lang.github.io/mumei/docs/ARCHITECTURE)
+- [MCP Integration](https://mumei-lang.github.io/mumei/docs/MCP)
+- [Roadmap](https://mumei-lang.github.io/mumei/docs/ROADMAP)
+- [Technical Paper](https://github.com/mumei-lang/mumei/tree/develop/paper)
+- [Mumei Agent](https://github.com/mumei-lang/mumei-agent)
+
+## Install
+
+```bash
+curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash
+# or: brew install mumei-lang/mumei/mumei
+```
+
+## License
+
+Apache-2.0

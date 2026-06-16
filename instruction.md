@@ -206,9 +206,12 @@ Mumei caches verification results per-atom in `.mumei/cache/verification_cache.j
 | Document | Purpose |
 | --- | --- |
 | `README.md` | Language overview, features, quickstart |
+| `docs/LANGUAGE.md` | Language reference — types, generics, traits, ownership, async |
 | `docs/ROADMAP.md` | **Strategic roadmap v0.3.0+** — 3 priorities, phases, dependencies, timeline |
+| `docs/CROSS_PROJECT_ROADMAP.md` | Cross-project roadmap (mumei + mumei-agent + mumei-lean + mumei-demo) |
 | `docs/ARCHITECTURE.md` | Compiler internals, pipeline, ModuleEnv, LinearityCtx |
 | `docs/STDLIB.md` | Standard library reference (all modules + atoms + planned std.json/std.http) |
+| `docs/EXAMPLES.md` | Verification suite, pattern matching, negative tests |
 | `docs/CHANGELOG.md` | Change history |
 | `docs/CAPABILITY_SECURITY.md` | Effect-based capability security evaluation |
 | `docs/DIAGNOSTICS.md` | Span-based diagnostics design and implementation status |
@@ -216,6 +219,22 @@ Mumei caches verification results per-atom in `.mumei/cache/verification_cache.j
 | `docs/CONCURRENCY.md` | Structured concurrency (task/task_group) design, implementation status, and std.http integration plan |
 | `docs/TOOLCHAIN.md` | CLI commands, distribution, and future roadmap (3 priorities) |
 | `docs/PATTERNS.md` | Verification patterns — Verified Configuration, Verified State Machine |
+| `docs/CROSS_SPEC_GUIDE.md` | System-wide contract consistency, invariants, dependency cycles |
+| `docs/PLUGIN_GUIDE.md` | Emitter plugin architecture and external plugin development |
+| `docs/SPEC_GUIDE.md` | Decidable fragment guide, spec validation, property-based testing |
+| `docs/EDITORS.md` | Editor configuration (Neovim, Helix, Emacs, Sublime Text, Zed) |
+| `docs/LSP_INTEGRATION.md` | LSP CodeLens, intent drift, spec-code mapping |
+| `docs/PROOF_CERTIFICATE.md` | Proof certificate format and verification |
+| `docs/REPORT_SCHEMA.md` | `report.json` output schema for AI agent consumption |
+| `docs/STDLIB_METRICS.md` | Standard library proof health metrics (auto-updated by CI) |
+| `docs/STRUCTURED_FEEDBACK_SCHEMA.md` | Structured semantic feedback schema |
+| `docs/TRUSTED_ATOMS.md` | Trusted atom reduction roadmap and FFI contract test harness |
+| `docs/ZERO_HUMAN_CHALLENGE.md` | Zero-Human Challenge analysis and results |
+| `docs/META_ARCHITECT.md` | Meta-architect design notes |
+| `docs/SESSION_PLANS.md` | Detailed session plans for implementation priorities |
+| `docs/CLI.md` | CLI command reference |
+| `docs/CLAUDE_CODE_QUICKSTART.md` | Claude Code + mumei setup and workflow guide |
+| [`mumei-agent/docs/VERIFICATION_WORKFLOW_GUIDE.md`](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/VERIFICATION_WORKFLOW_GUIDE.md) | End-to-end verification workflows — NL spec validation, foreign-code verification, spec↔code alignment, cross-spec, MCP usage, self-healing loop |
 | `instruction.md` | This file — forging guidelines, development phase, coding conventions |
 
 ---

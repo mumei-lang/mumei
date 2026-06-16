@@ -1,4 +1,13 @@
+---
+layout: default
+title: "Language Reference — Mumei"
+description: "Types, generics, traits, ownership, async, effects, and proof-friendly contracts in the Mumei formal verification language."
+keywords: "mumei, formal verification, language reference, Z3, refinement types, proof-driven programming"
+---
+
 # 🔬 Mumei Language Reference
+For proof-friendly refinements, bounded quantifiers, array access, and temporal-effect patterns, see [Proof-Friendly Specification Guide](SPEC_GUIDE.md).
+
 ## Type System
 ### Refinement Types
 Types with embedded logical predicates verified by Z3. For Z3-stable refinement patterns, see [Linear arithmetic](SPEC_GUIDE.md#linear-arithmetic).

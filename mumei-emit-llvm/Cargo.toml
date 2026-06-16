@@ -9,3 +9,5 @@ repository = "https://github.com/mumei-lang/mumei"
 [dependencies]
 mumei-core = { path = "../mumei-core" }
 inkwell = { version = "0.5.0", features = ["llvm17-0"] }
+llvm-sys = "170.4.0"
+libc = "0.2"

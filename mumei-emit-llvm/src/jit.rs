@@ -2,23 +2,46 @@
 // P7-A: JIT Execution Engine for REPL
 // =============================================================================
 // Provides in-memory compilation and execution of verified mumei atoms
-// using inkwell's ExecutionEngine (LLVM MCJIT).
+// using LLVM ORC LLJIT.
 
 use inkwell::context::Context;
-use inkwell::execution_engine::ExecutionEngine;
-use inkwell::module::Module;
-use inkwell::OptimizationLevel;
+use inkwell::targets::{InitializationConfig, Target};
+use llvm_sys::core::{LLVMSetDataLayout, LLVMSetTarget};
+use llvm_sys::error::{
+    LLVMConsumeError, LLVMDisposeErrorMessage, LLVMErrorRef, LLVMGetErrorMessage,
+};
+use llvm_sys::orc2::lljit::{
+    LLVMOrcCreateLLJIT, LLVMOrcCreateLLJITBuilder, LLVMOrcDisposeLLJIT,
+    LLVMOrcLLJITAddLLVMIRModuleWithRT, LLVMOrcLLJITGetDataLayoutStr, LLVMOrcLLJITGetGlobalPrefix,
+    LLVMOrcLLJITGetMainJITDylib, LLVMOrcLLJITGetTripleString, LLVMOrcLLJITLookup,
+    LLVMOrcLLJITMangleAndIntern, LLVMOrcLLJITRef,
+};
+use llvm_sys::orc2::{
+    LLVMJITEvaluatedSymbol, LLVMJITSymbolFlags, LLVMJITSymbolGenericFlags, LLVMOrcAbsoluteSymbols,
+    LLVMOrcCreateDynamicLibrarySearchGeneratorForProcess, LLVMOrcCreateNewThreadSafeContext,
+    LLVMOrcCreateNewThreadSafeModule, LLVMOrcDisposeThreadSafeContext, LLVMOrcJITDylibAddGenerator,
+    LLVMOrcJITDylibCreateResourceTracker, LLVMOrcJITDylibDefine, LLVMOrcJITDylibRef,
+    LLVMOrcResourceTrackerRef, LLVMOrcResourceTrackerRemove, LLVMOrcThreadSafeContextGetContext,
+};
 use mumei_core::hir::HirAtom;
 use mumei_core::verification::{ModuleEnv, MumeiError, MumeiResult};
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
+use std::ffi::{CStr, CString};
+use std::marker::PhantomData;
+use std::mem::{self, MaybeUninit};
+use std::ptr;
 
 use crate::codegen;
 
-/// JIT execution engine that owns an LLVM Context, Module, and ExecutionEngine.
-/// Atoms are compiled into the module and can be executed immediately.
+/// JIT execution engine backed by LLVM ORC LLJIT.
+/// Atoms are compiled as independent modules and linked into one JITDylib.
 pub struct JitEngine<'ctx> {
-    context: &'ctx Context,
-    module: Module<'ctx>,
-    execution_engine: ExecutionEngine<'ctx>,
+    lljit: LLVMOrcLLJITRef,
+    main_jit_dylib: LLVMOrcJITDylibRef,
+    compiled_functions: RefCell<HashSet<String>>,
+    resource_trackers: RefCell<HashMap<String, LLVMOrcResourceTrackerRef>>,
+    _marker: PhantomData<&'ctx Context>,
 }
 
 /// Result of JIT execution — the return value of the executed atom.
@@ -38,19 +61,84 @@ impl std::fmt::Display for JitValue {
 }
 
 impl<'ctx> JitEngine<'ctx> {
-    /// Create a new JIT engine from an externally-owned Context.
-    pub fn new(context: &'ctx Context) -> MumeiResult<Self> {
-        let module = context.create_module("mumei_jit");
+    /// Create a new LLJIT engine. The context parameter is kept for API compatibility.
+    pub fn new(_context: &'ctx Context) -> MumeiResult<Self> {
+        Target::initialize_native(&InitializationConfig::default()).map_err(|e| {
+            MumeiError::codegen(format!("Failed to initialize native LLVM target: {e}"))
+        })?;
+        Self::promote_llvm_symbols_for_orc()?;
 
-        let execution_engine = module
-            .create_jit_execution_engine(OptimizationLevel::Default)
-            .map_err(|e| MumeiError::codegen(format!("Failed to create JIT engine: {}", e)))?;
+        let lljit = unsafe {
+            let builder = LLVMOrcCreateLLJITBuilder();
+            if builder.is_null() {
+                return Err(MumeiError::codegen("Failed to create ORC JIT builder"));
+            }
 
-        Ok(JitEngine {
-            context,
-            module,
-            execution_engine,
-        })
+            let mut lljit = MaybeUninit::uninit();
+            let err = LLVMOrcCreateLLJIT(lljit.as_mut_ptr(), builder);
+            Self::take_error(err, "Failed to create ORC JIT")?;
+            let lljit = lljit.assume_init();
+            if lljit.is_null() {
+                return Err(MumeiError::codegen("Failed to create ORC JIT"));
+            }
+            lljit
+        };
+
+        let main_jit_dylib = unsafe { LLVMOrcLLJITGetMainJITDylib(lljit) };
+        if main_jit_dylib.is_null() {
+            unsafe {
+                Self::consume_error(LLVMOrcDisposeLLJIT(lljit));
+            }
+            return Err(MumeiError::codegen("Failed to get ORC main JITDylib"));
+        }
+
+        let engine = JitEngine {
+            lljit,
+            main_jit_dylib,
+            compiled_functions: RefCell::new(HashSet::new()),
+            resource_trackers: RefCell::new(HashMap::new()),
+            _marker: PhantomData,
+        };
+        engine.register_process_symbols()?;
+        engine.register_runtime_symbols()?;
+        Ok(engine)
+    }
+
+    #[cfg(unix)]
+    fn promote_llvm_symbols_for_orc() -> MumeiResult<()> {
+        const CANDIDATES: &[&str] = &[
+            "libLLVM-17.so.1",
+            "libLLVM-17.so",
+            "/usr/lib/llvm-17/lib/libLLVM-17.so.1",
+            "/usr/lib/llvm-17/lib/libLLVM-17.so",
+            "/usr/lib/x86_64-linux-gnu/libLLVM-17.so.1",
+            "/usr/lib/x86_64-linux-gnu/libLLVM-17.so",
+        ];
+
+        let mut last_error = None;
+        for candidate in CANDIDATES {
+            let lib = CString::new(*candidate).map_err(|e| {
+                MumeiError::codegen(format!("Invalid LLVM shared library path: {e}"))
+            })?;
+            let handle = unsafe { libc::dlopen(lib.as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL) };
+            if !handle.is_null() {
+                return Ok(());
+            }
+            let err = unsafe { libc::dlerror() };
+            if !err.is_null() {
+                last_error = Some(unsafe { CStr::from_ptr(err).to_string_lossy().into_owned() });
+            }
+        }
+
+        Err(MumeiError::codegen(format!(
+            "Failed to expose LLVM ORC process symbols{}",
+            last_error.map(|err| format!(": {err}")).unwrap_or_default()
+        )))
+    }
+
+    #[cfg(not(unix))]
+    fn promote_llvm_symbols_for_orc() -> MumeiResult<()> {
+        Ok(())
     }
 
     /// Compile an atom into the JIT module so it can be called.
@@ -60,24 +148,183 @@ impl<'ctx> JitEngine<'ctx> {
         module_env: &ModuleEnv,
         extern_blocks: &[mumei_core::parser::ExternBlock],
     ) -> MumeiResult<()> {
-        codegen::compile_atom_into_module(
-            self.context,
-            &self.module,
+        let atom_name = hir_atom.atom.name.clone();
+        if self.compiled_functions.borrow().contains(&atom_name) {
+            self.remove_function(&atom_name);
+        }
+
+        let thread_safe_context = unsafe { LLVMOrcCreateNewThreadSafeContext() };
+        if thread_safe_context.is_null() {
+            return Err(MumeiError::codegen(
+                "Failed to create ORC thread-safe context",
+            ));
+        }
+
+        let context_ref = unsafe { LLVMOrcThreadSafeContextGetContext(thread_safe_context) };
+        if context_ref.is_null() {
+            unsafe {
+                LLVMOrcDisposeThreadSafeContext(thread_safe_context);
+            }
+            return Err(MumeiError::codegen("Failed to get LLVM context from ORC"));
+        }
+
+        let context = unsafe { Context::new(context_ref) };
+        let module = context.create_module(&atom_name);
+        unsafe {
+            let triple = LLVMOrcLLJITGetTripleString(self.lljit);
+            if !triple.is_null() {
+                LLVMSetTarget(module.as_mut_ptr(), triple);
+            }
+            let data_layout = LLVMOrcLLJITGetDataLayoutStr(self.lljit);
+            if !data_layout.is_null() {
+                LLVMSetDataLayout(module.as_mut_ptr(), data_layout);
+            }
+        }
+
+        if let Err(err) = codegen::compile_atom_into_module(
+            &context,
+            &module,
             hir_atom,
             module_env,
             extern_blocks,
-        )?;
-        self.register_runtime_symbols();
+        ) {
+            drop(module);
+            mem::forget(context);
+            unsafe {
+                LLVMOrcDisposeThreadSafeContext(thread_safe_context);
+            }
+            return Err(err);
+        }
+
+        let resource_tracker = unsafe { LLVMOrcJITDylibCreateResourceTracker(self.main_jit_dylib) };
+        if resource_tracker.is_null() {
+            drop(module);
+            mem::forget(context);
+            unsafe {
+                LLVMOrcDisposeThreadSafeContext(thread_safe_context);
+            }
+            return Err(MumeiError::codegen("Failed to create ORC resource tracker"));
+        }
+
+        let module_ref = module.as_mut_ptr();
+        let thread_safe_module =
+            unsafe { LLVMOrcCreateNewThreadSafeModule(module_ref, thread_safe_context) };
+        if thread_safe_module.is_null() {
+            drop(module);
+            mem::forget(context);
+            unsafe {
+                LLVMOrcDisposeThreadSafeContext(thread_safe_context);
+                Self::consume_error(LLVMOrcResourceTrackerRemove(resource_tracker));
+            }
+            return Err(MumeiError::codegen(
+                "Failed to create ORC thread-safe module",
+            ));
+        }
+        mem::forget(module);
+        mem::forget(context);
+
+        let add_err = unsafe {
+            LLVMOrcLLJITAddLLVMIRModuleWithRT(self.lljit, resource_tracker, thread_safe_module)
+        };
+        if let Err(err) = Self::take_error(add_err, "Failed to add module to ORC JIT") {
+            unsafe {
+                Self::consume_error(LLVMOrcResourceTrackerRemove(resource_tracker));
+            }
+            return Err(err);
+        }
+
+        self.compiled_functions
+            .borrow_mut()
+            .insert(atom_name.clone());
+        self.resource_trackers
+            .borrow_mut()
+            .insert(atom_name, resource_tracker);
         Ok(())
     }
 
-    fn register_runtime_symbols(&self) {
+    fn take_error(err: LLVMErrorRef, context: &str) -> MumeiResult<()> {
+        if err.is_null() {
+            return Ok(());
+        }
+
+        let message = unsafe {
+            let message_ptr = LLVMGetErrorMessage(err);
+            if message_ptr.is_null() {
+                return Err(MumeiError::codegen(context.to_string()));
+            }
+            let message = CStr::from_ptr(message_ptr).to_string_lossy().into_owned();
+            LLVMDisposeErrorMessage(message_ptr);
+            message
+        };
+        Err(MumeiError::codegen(format!("{context}: {message}")))
+    }
+
+    unsafe fn consume_error(err: LLVMErrorRef) {
+        if !err.is_null() {
+            LLVMConsumeError(err);
+        }
+    }
+
+    fn register_process_symbols(&self) -> MumeiResult<()> {
+        let mut generator = ptr::null_mut();
+        let err = unsafe {
+            LLVMOrcCreateDynamicLibrarySearchGeneratorForProcess(
+                &mut generator,
+                LLVMOrcLLJITGetGlobalPrefix(self.lljit),
+                None,
+                ptr::null_mut(),
+            )
+        };
+        Self::take_error(err, "Failed to create ORC process symbol generator")?;
+        if !generator.is_null() {
+            unsafe {
+                LLVMOrcJITDylibAddGenerator(self.main_jit_dylib, generator);
+            }
+        }
+        Ok(())
+    }
+
+    fn register_runtime_symbols(&self) -> MumeiResult<()> {
+        for (name, address) in Self::runtime_symbols() {
+            let c_name = CString::new(name)
+                .map_err(|e| MumeiError::codegen(format!("Invalid symbol name '{name}': {e}")))?;
+            let symbol = unsafe { LLVMOrcLLJITMangleAndIntern(self.lljit, c_name.as_ptr()) };
+            if symbol.is_null() {
+                return Err(MumeiError::codegen(format!(
+                    "Failed to intern runtime symbol '{name}'"
+                )));
+            }
+
+            let mut pair = llvm_sys::orc2::LLVMOrcCSymbolMapPair {
+                Name: symbol,
+                Sym: LLVMJITEvaluatedSymbol {
+                    Address: address as u64,
+                    Flags: LLVMJITSymbolFlags {
+                        GenericFlags: (LLVMJITSymbolGenericFlags::LLVMJITSymbolGenericFlagsExported
+                            as u8)
+                            | (LLVMJITSymbolGenericFlags::LLVMJITSymbolGenericFlagsCallable as u8),
+                        TargetFlags: 0,
+                    },
+                },
+            };
+
+            let materialization_unit = unsafe { LLVMOrcAbsoluteSymbols(&mut pair, 1) };
+            if materialization_unit.is_null() {
+                return Err(MumeiError::codegen(format!(
+                    "Failed to create ORC absolute symbol for '{name}'"
+                )));
+            }
+            let err = unsafe { LLVMOrcJITDylibDefine(self.main_jit_dylib, materialization_unit) };
+            Self::take_error(err, &format!("Failed to define runtime symbol '{name}'"))?;
+        }
+        Ok(())
+    }
+
+    fn runtime_symbols() -> Vec<(&'static str, usize)> {
+        let mut symbols = Vec::new();
         macro_rules! map_symbol {
             ($name:literal, $path:path) => {
-                if let Some(function) = self.module.get_function($name) {
-                    self.execution_engine
-                        .add_global_mapping(&function, $path as *const () as usize);
-                }
+                symbols.push(($name, $path as *const () as usize));
             };
         }
 
@@ -157,46 +404,75 @@ impl<'ctx> JitEngine<'ctx> {
             "http_request_free",
             mumei_core::ffi::http_server::http_request_free
         );
+
+        map_symbol!("crypto_sha256", mumei_core::ffi::crypto::crypto_sha256);
+        map_symbol!("crypto_hash_eq", mumei_core::ffi::crypto::crypto_hash_eq);
+        map_symbol!(
+            "crypto_hmac_sha256",
+            mumei_core::ffi::crypto::crypto_hmac_sha256
+        );
+        map_symbol!(
+            "crypto_verify_signature",
+            mumei_core::ffi::crypto::crypto_verify_signature
+        );
+
+        symbols
     }
 
     /// Execute a no-argument atom that returns i64.
     pub fn execute_i64(&self, func_name: &str) -> MumeiResult<i64> {
         unsafe {
-            let func = self
-                .execution_engine
-                .get_function::<unsafe extern "C" fn() -> i64>(func_name)
-                .map_err(|e| {
-                    MumeiError::codegen(format!("JIT function '{}' not found: {}", func_name, e))
-                })?;
-            Ok(func.call())
+            let address = self.lookup_function(func_name)?;
+            let func = mem::transmute::<u64, unsafe extern "C" fn() -> i64>(address);
+            Ok(func())
         }
     }
 
     /// Execute a no-argument atom that returns f64.
     pub fn execute_f64(&self, func_name: &str) -> MumeiResult<f64> {
         unsafe {
-            let func = self
-                .execution_engine
-                .get_function::<unsafe extern "C" fn() -> f64>(func_name)
-                .map_err(|e| {
-                    MumeiError::codegen(format!("JIT function '{}' not found: {}", func_name, e))
-                })?;
-            Ok(func.call())
+            let address = self.lookup_function(func_name)?;
+            let func = mem::transmute::<u64, unsafe extern "C" fn() -> f64>(address);
+            Ok(func())
         }
+    }
+
+    unsafe fn lookup_function(&self, func_name: &str) -> MumeiResult<u64> {
+        let c_name = CString::new(func_name).map_err(|e| {
+            MumeiError::codegen(format!("Invalid JIT function name '{}': {}", func_name, e))
+        })?;
+        let mut address = MaybeUninit::uninit();
+        let err = LLVMOrcLLJITLookup(self.lljit, address.as_mut_ptr(), c_name.as_ptr());
+        Self::take_error(err, &format!("JIT function '{}' not found", func_name))?;
+        Ok(address.assume_init())
     }
 
     /// Remove a function from the module (used for temporary __repl_eval atoms).
     pub fn remove_function(&self, func_name: &str) {
-        if let Some(func) = self.module.get_function(func_name) {
+        if let Some(tracker) = self.resource_trackers.borrow_mut().remove(func_name) {
             unsafe {
-                func.delete();
+                Self::consume_error(LLVMOrcResourceTrackerRemove(tracker));
             }
+            self.compiled_functions.borrow_mut().remove(func_name);
         }
     }
 
     /// Check if a function exists in the module.
     pub fn has_function(&self, func_name: &str) -> bool {
-        self.module.get_function(func_name).is_some()
+        self.compiled_functions.borrow().contains(func_name)
+    }
+}
+
+impl Drop for JitEngine<'_> {
+    fn drop(&mut self) {
+        for (_, tracker) in self.resource_trackers.borrow_mut().drain() {
+            unsafe {
+                Self::consume_error(LLVMOrcResourceTrackerRemove(tracker));
+            }
+        }
+        unsafe {
+            Self::consume_error(LLVMOrcDisposeLLJIT(self.lljit));
+        }
     }
 }
 

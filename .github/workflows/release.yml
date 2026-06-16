@@ -270,8 +270,11 @@ jobs:
           echo "LIB=$z3LibDir;$currentLib" >> $env:GITHUB_ENV
           # Save z3Root for later DLL copy step
           echo "Z3_ROOT=$z3Root" >> $env:GITHUB_ENV
-      - name: Build release binary
-        if: "!contains(matrix.target, 'musl')"
+      - name: Build release binary (Unix non-musl)
+        if: "!contains(matrix.target, 'musl') && runner.os != 'Windows'"
+        run: cargo build --release --target ${{ matrix.target }} --features static-link-z3
+      - name: Build release binary (Windows)
+        if: runner.os == 'Windows'
         run: cargo build --release --target ${{ matrix.target }}
       # Plan 7: Verify musl binary and record its dynamic dependencies.
       #

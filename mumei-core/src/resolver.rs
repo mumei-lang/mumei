@@ -85,19 +85,19 @@ impl LeanEscalationMetrics {
     pub fn record_candidate(&mut self, candidate: &proof_cert::EscalationCandidate) {
         self.record_escalation(
             &candidate.name,
-            &candidate.escalation_reason,
+            candidate.escalation_reason.as_str(),
             &candidate.logic_fragment_tags,
         );
-        match candidate
-            .lean_metadata
+        let lean_metadata = candidate
+            .lean_result_metadata
             .as_ref()
-            .map(|metadata| metadata.status.as_str())
-        {
+            .or(candidate.lean_metadata.as_ref());
+        match lean_metadata.map(|metadata| metadata.status.as_str()) {
             Some("lean_verified") => {
                 self.lean_successes += 1;
                 *self
                     .successes_by_failure_reason
-                    .entry(candidate.escalation_reason.clone())
+                    .entry(candidate.escalation_reason.as_str().to_string())
                     .or_insert(0) += 1;
             }
             Some("partial_translation") => self.partial_translation += 1,
@@ -108,14 +108,14 @@ impl LeanEscalationMetrics {
 
     pub fn record_atom_certificate(&mut self, atom: &proof_cert::AtomCertificate) {
         if let Some(reason) = &atom.escalation_reason {
-            self.record_escalation(&atom.name, reason, &atom.logic_fragment_tags);
+            self.record_escalation(&atom.name, reason.as_str(), &atom.logic_fragment_tags);
         }
     }
 
     pub fn record_lean_verified_acceptance(&mut self, atom: &proof_cert::AtomCertificate) {
         let reason = atom
             .escalation_reason
-            .as_deref()
+            .map(|reason| reason.as_str())
             .unwrap_or("lean_verified_import_acceptance");
         if !self.by_atom.contains_key(&atom.name) {
             self.record_escalation(&atom.name, reason, &atom.logic_fragment_tags);

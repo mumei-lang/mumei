@@ -8,12 +8,14 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::reconstruction_loss::ReconstructionLoss;
 use crate::resolver;
 use crate::verification::{self, ModuleEnv, SymbolProvenance, TranslatorIRMetadata};
+
+pub use crate::verification::{EscalationReason, LogicFragment};
 
 /// Top-level proof certificate for a Mumei source file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -97,7 +99,10 @@ pub struct AtomCertificate {
     pub z3_result_class: String,
     /// Reason this atom should be escalated to Lean, when applicable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub escalation_reason: Option<String>,
+    pub escalation_reason: Option<EscalationReason>,
+    /// Primary logical fragment for bridge routing and metrics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logic_fragment_tag: Option<LogicFragment>,
     /// Logical fragments detected in this proof obligation.
     #[serde(default)]
     pub logic_fragment_tags: Vec<String>,
@@ -119,6 +124,9 @@ pub struct AtomCertificate {
     /// Lean-side result metadata populated by mumei-lean.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lean_metadata: Option<LeanResultMetadata>,
+    /// Structured Lean-side result metadata populated by mumei-lean.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lean_result_metadata: Option<LeanResultMetadata>,
     /// P8-A: Counterexample validation status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub counterexample_validation: Option<CounterexampleValidationMetadata>,
@@ -321,7 +329,9 @@ pub struct EscalationCandidate {
     pub effects: Vec<String>,
     pub requires: String,
     pub ensures: String,
-    pub escalation_reason: String,
+    pub escalation_reason: EscalationReason,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logic_fragment_tag: Option<LogicFragment>,
     pub logic_fragment_tags: Vec<String>,
     #[serde(default)]
     pub translator_version: String,
@@ -335,6 +345,8 @@ pub struct EscalationCandidate {
     pub translator_ir: TranslatorIRMetadata,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lean_metadata: Option<LeanResultMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lean_result_metadata: Option<LeanResultMetadata>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -360,6 +372,51 @@ pub struct EscalationBundle {
     pub package_version: Option<String>,
     pub summary: EscalationBundleSummary,
     pub candidates: Vec<EscalationCandidate>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HumanReviewEntry {
+    #[serde(rename = "name")]
+    pub atom_name: String,
+    #[serde(rename = "reason")]
+    pub review_reason: String,
+    pub priority: HumanReviewPriority,
+    pub spec_text: String,
+    pub suggested_action: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HumanReviewPriority {
+    Critical,
+    High,
+    Medium,
+}
+
+impl HumanReviewPriority {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            HumanReviewPriority::Critical => "critical",
+            HumanReviewPriority::High => "high",
+            HumanReviewPriority::Medium => "medium",
+        }
+    }
+
+    fn rank(self) -> u8 {
+        match self {
+            HumanReviewPriority::Critical => 0,
+            HumanReviewPriority::High => 1,
+            HumanReviewPriority::Medium => 2,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HumanReviewQueue {
+    pub version: String,
+    pub timestamp: String,
+    pub file: String,
+    pub atoms: Vec<HumanReviewEntry>,
 }
 
 /// Compute SHA-256 hash of an atom's logical content.
@@ -538,6 +595,7 @@ pub fn generate_certificate_with_reconstruction_losses(
                 ensures: atom.ensures.clone(),
                 z3_result_class: classification.z3_result_class,
                 escalation_reason: classification.escalation_reason,
+                logic_fragment_tag: classification.logic_fragment_tag,
                 logic_fragment_tags: classification.logic_fragment_tags,
                 translator_version: verification::LEAN_TRANSLATOR_VERSION.to_string(),
                 binder_mapping,
@@ -545,6 +603,7 @@ pub fn generate_certificate_with_reconstruction_losses(
                 manual_lemma_reason,
                 translator_ir,
                 lean_metadata: None,
+                lean_result_metadata: None,
                 counterexample_validation,
                 reconstruction_loss,
                 self_correction_metadata,
@@ -612,7 +671,7 @@ pub fn generate_escalation_bundle(cert: &ProofCertificate) -> EscalationBundle {
         .atoms
         .iter()
         .filter_map(|atom| {
-            let escalation_reason = atom.escalation_reason.clone()?;
+            let escalation_reason = atom.escalation_reason?;
             Some(EscalationCandidate {
                 name: atom.name.clone(),
                 z3_check_result: atom.z3_check_result.clone(),
@@ -625,6 +684,7 @@ pub fn generate_escalation_bundle(cert: &ProofCertificate) -> EscalationBundle {
                 requires: atom.requires.clone(),
                 ensures: atom.ensures.clone(),
                 escalation_reason,
+                logic_fragment_tag: atom.logic_fragment_tag,
                 logic_fragment_tags: atom.logic_fragment_tags.clone(),
                 translator_version: atom.translator_version.clone(),
                 binder_mapping: atom.binder_mapping.clone(),
@@ -632,6 +692,7 @@ pub fn generate_escalation_bundle(cert: &ProofCertificate) -> EscalationBundle {
                 manual_lemma_reason: atom.manual_lemma_reason.clone(),
                 translator_ir: atom.translator_ir.clone(),
                 lean_metadata: atom.lean_metadata.clone(),
+                lean_result_metadata: atom.lean_result_metadata.clone(),
             })
         })
         .collect();
@@ -644,7 +705,7 @@ pub fn generate_escalation_bundle(cert: &ProofCertificate) -> EscalationBundle {
     for candidate in &candidates {
         *summary
             .by_reason
-            .entry(candidate.escalation_reason.clone())
+            .entry(candidate.escalation_reason.as_str().to_string())
             .or_insert(0) += 1;
         *summary
             .by_z3_result_class
@@ -667,6 +728,117 @@ pub fn generate_escalation_bundle(cert: &ProofCertificate) -> EscalationBundle {
     }
 }
 
+/// Generate a human review queue from a proof certificate.
+/// Collects atoms requiring human judgment (manual lemma, z3 unknown,
+/// escalation candidate, trusted) and sorts by priority.
+pub fn generate_human_review_queue(cert: &ProofCertificate) -> HumanReviewQueue {
+    let mut atoms: Vec<HumanReviewEntry> = cert
+        .atoms
+        .iter()
+        .filter_map(human_review_entry_for_atom)
+        .collect();
+    if cert
+        .intent_fidelity
+        .as_ref()
+        .is_some_and(|intent| intent.manual_review_required)
+    {
+        let queued: HashSet<String> = atoms.iter().map(|entry| entry.atom_name.clone()).collect();
+        atoms.extend(
+            cert.atoms
+                .iter()
+                .filter(|atom| !queued.contains(&atom.name))
+                .map(|atom| HumanReviewEntry {
+                    atom_name: atom.name.clone(),
+                    review_reason: "manual_review_required".to_string(),
+                    priority: HumanReviewPriority::High,
+                    spec_text: atom_spec_text(atom),
+                    suggested_action:
+                        "Review this atom because the certificate intent metadata requires human approval."
+                            .to_string(),
+                }),
+        );
+    }
+    atoms.sort_by(|left, right| {
+        priority_rank(&left.priority)
+            .cmp(&priority_rank(&right.priority))
+            .then_with(|| left.atom_name.cmp(&right.atom_name))
+    });
+
+    HumanReviewQueue {
+        version: "1.0".to_string(),
+        timestamp: cert.timestamp.clone(),
+        file: cert.file.clone(),
+        atoms,
+    }
+}
+
+fn human_review_entry_for_atom(atom: &AtomCertificate) -> Option<HumanReviewEntry> {
+    if let Some(reason) = atom.manual_lemma_reason.as_ref() {
+        return Some(HumanReviewEntry {
+            atom_name: atom.name.clone(),
+            review_reason: reason.clone(),
+            priority: HumanReviewPriority::Critical,
+            spec_text: atom_spec_text(atom),
+            suggested_action:
+                "Review the generated obligation and author or approve the required Lean lemma."
+                    .to_string(),
+        });
+    }
+
+    if atom.z3_result_class == "unknown" || atom.z3_check_result == "unknown" {
+        return Some(HumanReviewEntry {
+            atom_name: atom.name.clone(),
+            review_reason: "z3_unknown".to_string(),
+            priority: HumanReviewPriority::High,
+            spec_text: atom_spec_text(atom),
+            suggested_action: "Escalate this atom with --escalate-lean or simplify the specification into a Z3-decidable fragment.".to_string(),
+        });
+    }
+
+    if atom.status == "escalation_candidate" {
+        return Some(HumanReviewEntry {
+            atom_name: atom.name.clone(),
+            review_reason: atom
+                .escalation_reason
+                .map(|reason| reason.as_str().to_string())
+                .unwrap_or_else(|| "lean_promotion_pending".to_string()),
+            priority: HumanReviewPriority::High,
+            spec_text: atom_spec_text(atom),
+            suggested_action:
+                "Review the Lean escalation candidate and track promotion to lean_verified."
+                    .to_string(),
+        });
+    }
+
+    if atom.status == "trusted"
+        || atom
+            .escalation_reason
+            .is_some_and(|reason| reason == EscalationReason::HumanReviewRequired)
+    {
+        return Some(HumanReviewEntry {
+            atom_name: atom.name.clone(),
+            review_reason: "trusted_atom".to_string(),
+            priority: HumanReviewPriority::Medium,
+            spec_text: atom_spec_text(atom),
+            suggested_action: "Confirm the trusted implementation boundary and record human approval before relying on the atom.".to_string(),
+        });
+    }
+
+    None
+}
+
+fn priority_rank(priority: &HumanReviewPriority) -> u8 {
+    priority.rank()
+}
+
+fn atom_spec_text(atom: &AtomCertificate) -> String {
+    format!(
+        "requires: {}\nensures: {}",
+        atom.requires.trim(),
+        atom.ensures.trim()
+    )
+}
+
 /// Compute SHA-256 hash of the serialized certificate.
 /// The `certificate_hash` field is set to empty before hashing for determinism.
 fn compute_certificate_hash(cert: &ProofCertificate) -> String {
@@ -677,6 +849,23 @@ fn compute_certificate_hash(cert: &ProofCertificate) -> String {
     let mut hasher = Sha256::new();
     hasher.update(json.as_bytes());
     format!("{:x}", hasher.finalize())
+}
+
+pub fn refresh_certificate_integrity(cert: &mut ProofCertificate) {
+    cert.all_verified = cert.atoms.iter().all(|ac| {
+        (ac.status == "trusted"
+            || (ac.status == "verified"
+                && (ac.z3_check_result == "unsat"
+                    || (ac.z3_check_result == "lean_verified"
+                        && lean_certificate_metadata_is_current(ac)))))
+            && ac
+                .spec_validation_result
+                .as_ref()
+                .map(|validation| validation.is_satisfiable)
+                .unwrap_or(true)
+    });
+    cert.certificate_hash = String::new();
+    cert.certificate_hash = compute_certificate_hash(cert);
 }
 
 fn parse_unsat_core_labels(z3_result: &str) -> Option<Vec<String>> {
@@ -773,7 +962,11 @@ fn lean_certificate_metadata_is_current(atom: &AtomCertificate) -> bool {
     {
         return false;
     }
-    let Some(metadata) = atom.lean_metadata.as_ref() else {
+    let Some(metadata) = atom
+        .lean_result_metadata
+        .as_ref()
+        .or(atom.lean_metadata.as_ref())
+    else {
         return false;
     };
     metadata.status == "lean_verified"
@@ -802,7 +995,11 @@ pub fn validate_translator_version(
         ));
     }
 
-    if let Some(metadata) = cert.lean_metadata.as_ref() {
+    if let Some(metadata) = cert
+        .lean_result_metadata
+        .as_ref()
+        .or(cert.lean_metadata.as_ref())
+    {
         if metadata.translator_version != expected_version {
             issues.push(format!(
                 "lean_metadata.translator_version '{}' does not match expected '{}'",
@@ -1060,6 +1257,12 @@ pub fn save_certificate(cert: &ProofCertificate, path: &Path) -> Result<(), Stri
 pub fn save_escalation_bundle(bundle: &EscalationBundle, path: &Path) -> Result<(), String> {
     let json = serde_json::to_string_pretty(bundle)
         .map_err(|e| format!("Failed to serialize escalation bundle: {}", e))?;
+    std::fs::write(path, json).map_err(|e| format!("Failed to write {}: {}", path.display(), e))
+}
+
+pub fn save_human_review_queue(queue: &HumanReviewQueue, path: &Path) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(queue)
+        .map_err(|e| format!("Failed to serialize human review queue: {}", e))?;
     std::fs::write(path, json).map_err(|e| format!("Failed to write {}: {}", path.display(), e))
 }
 
@@ -1911,6 +2114,46 @@ mod tests {
 
         let status = verify_certificate(&cert, &modified_refs, true);
         assert_eq!(status[0], ("hard_lemma".to_string(), "changed".to_string()));
+    }
+
+    #[test]
+    fn test_generate_human_review_queue_prioritizes_manual_unknown_and_trusted_atoms() {
+        let manual = make_test_atom("manual_case", "true", "true", "match x { _ => 0 }");
+        let unknown = make_test_atom("unknown_case", "n > 0", "result > n", "n * n");
+        let mut trusted = make_test_atom("trusted_case", "true", "result >= 0", "0");
+        trusted.trust_level = parser::TrustLevel::Trusted;
+        let atoms: Vec<&parser::Atom> = vec![&trusted, &unknown, &manual];
+        let mut results = HashMap::new();
+        results.insert(
+            "manual_case".to_string(),
+            ("unsat".to_string(), "verified".to_string()),
+        );
+        results.insert(
+            "unknown_case".to_string(),
+            ("unknown".to_string(), "failed".to_string()),
+        );
+        results.insert(
+            "trusted_case".to_string(),
+            ("unsat".to_string(), "verified".to_string()),
+        );
+        let module_env = ModuleEnv::new();
+
+        let cert = generate_certificate("test.mm", &atoms, &results, &module_env, None, None, None);
+        let queue = generate_human_review_queue(&cert);
+
+        assert_eq!(
+            queue
+                .atoms
+                .iter()
+                .map(|entry| (entry.atom_name.as_str(), entry.priority.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("manual_case", "critical"),
+                ("unknown_case", "high"),
+                ("trusted_case", "medium")
+            ]
+        );
+        assert!(queue.atoms[1].spec_text.contains("requires: n > 0"));
     }
 
     /// P5-A: certificate_hash is deterministic
