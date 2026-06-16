@@ -1,3 +1,10 @@
+---
+layout: default
+title: "Proof Certificate Format — Mumei"
+description: "Mumei proof certificate format, verification records, trusted imports, certificate chains, and package registry flow."
+keywords: "mumei proof certificate, formal verification, verified imports, Z3, Lean4"
+---
+
 # Proof Certificate Format & Verification Flow
 
 > Documentation for P5 — Verified Asset Distribution (Proof Certificate Chain + Package Registry + Verified Import)

@@ -1,12 +1,15 @@
 <!doctype html>
-<html lang="en">
+<html lang="{{ site.lang | default: 'en' }}">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="google-site-verification" content="HmaB6mF09IpxecOcaGcwADW-Mg92-rj0c2Te3iPA0g0" />
     <title>{% if page.title %}{{ page.title | escape }}{% else %}{{ site.title | escape }}{% endif %}</title>
     <meta name="description" content="{{ page.description | default: site.description | escape }}">
-    {% if page.keywords %}<meta name="keywords" content="{{ page.keywords | escape }}">{% endif %}
+    {% capture meta_keywords %}{{ site.keywords }}{% if page.keywords %}, {{ page.keywords }}{% endif %}{% endcapture %}
+    {% if meta_keywords %}<meta name="keywords" content="{{ meta_keywords | strip | escape }}">{% endif %}
+    {% if site.author %}<meta name="author" content="{{ site.author | escape }}">{% endif %}
+    <meta name="robots" content="{{ page.robots | default: 'index, follow, max-snippet:-1, max-image-preview:large, max-video-preview:-1' | escape }}">
     <link rel="canonical" href="{{ page.url | absolute_url }}">
     <meta property="og:title" content="{{ page['og:title'] | default: page.title | default: site.title | escape }}">
     <meta property="og:description" content="{{ page['og:description'] | default: page.description | default: site.description | escape }}">
@@ -15,9 +18,22 @@
     <meta property="og:site_name" content="{{ site.title | escape }}">
     {% if page['og:image'] %}<meta property="og:image" content="{{ page['og:image'] | absolute_url }}">{% endif %}
     <meta name="twitter:card" content="{{ page['twitter:card'] | default: 'summary' | escape }}">
+    {% if site.twitter.username %}<meta name="twitter:site" content="@{{ site.twitter.username | escape }}">{% endif %}
     <meta name="twitter:title" content="{{ page['og:title'] | default: page.title | default: site.title | escape }}">
     <meta name="twitter:description" content="{{ page['og:description'] | default: page.description | default: site.description | escape }}">
     {% if page['og:image'] %}<meta name="twitter:image" content="{{ page['og:image'] | absolute_url }}">{% endif %}
+    <script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "Mumei",
+  "description": "Mathematical proof-driven programming language with Z3 formal verification",
+  "url": "https://mumei-lang.github.io/mumei",
+  "applicationCategory": "DeveloperApplication",
+  "operatingSystem": "macOS, Linux",
+  "license": "https://www.apache.org/licenses/LICENSE-2.0"
+}
+    </script>
     <style>
       :root { color-scheme: light dark; --bg: #ffffff; --fg: #24292f; --muted: #57606a; --accent: #0969da; --border: #d0d7de; --code-bg: #f6f8fa; }
       @media (prefers-color-scheme: dark) { :root { --bg: #0d1117; --fg: #c9d1d9; --muted: #8b949e; --accent: #58a6ff; --border: #30363d; --code-bg: #161b22; } }

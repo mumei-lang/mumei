@@ -1,3 +1,10 @@
+---
+layout: default
+title: "Onboarding Guide — Mumei"
+description: "Start using Mumei from existing code, natural-language specifications, or direct .mm modules, then migrate toward formal verification."
+keywords: "mumei onboarding, formal verification, existing code audit, mumei-agent, proof-driven programming"
+---
+
 # Mumei Onboarding: from existing code to `.mm`
 
 Mumei can start from existing code or natural-language requirements, then gradually move the most important logic into `.mm`. Use this path when you want formal feedback before committing to a full `.mm` rewrite.

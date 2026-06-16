@@ -1,3 +1,10 @@
+---
+layout: default
+title: "MCP Integration — Mumei"
+description: "Mumei MCP server integration for AI agents, verifier tools, proof certificates, stdlib inspection, and semantic feedback."
+keywords: "mumei MCP, Model Context Protocol, AI agents, formal verification, Devin, Claude Code"
+---
+
 # MCP Integration
 
 Mumei exposes formal verification capabilities through `mcp_server.py`, implemented as **FastMCP("Mumei-Forge")**. Any MCP-compatible AI agent can call the same verifier, builder, effect inference, proof-certificate, and stdlib-inspection tools without agent-specific integration.

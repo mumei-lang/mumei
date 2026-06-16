@@ -1,3 +1,10 @@
+---
+layout: default
+title: "Roadmap — Mumei"
+description: "Strategic roadmap for Mumei language, runtime portability, developer experience, verification depth, and AI-agent workflows."
+keywords: "mumei roadmap, formal verification roadmap, Z3, Lean4, LLVM, proof-driven programming"
+---
+
 # 🗺️ Strategic Roadmap — Mumei v0.3.0+
 
 > Three strategic roadmap priorities to evolve Mumei from an experimental language to a practical tool.
