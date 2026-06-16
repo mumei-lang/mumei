@@ -55,10 +55,10 @@ If you work from a source checkout of `mumei-agent`, run `uv sync` once; after t
 
 ### 1. Existing code: find likely bug locations
 
-Give the agent an existing source file and ask it to infer contracts, verify them, and report suspicious paths. `--input` is required and points to a single source file. `--language` is required and must be `python`, `rust`, or `go`.
+Give the agent an existing source file and ask it to infer contracts, verify them, and report suspicious paths. `--input` is required and points to a source file or directory. `--language` is required and must be `python`, `rust`, or `go`.
 
 ```bash
-mumei-agent validate-code --input src/payment.py --language python  # --language is required: python|rust|go
+uv run mumei-agent validate-code --input src/payment.py --language python  # --language is required: python|rust|go
 ```
 
 MCP agents can use mumei's verification backend directly once they synthesize or receive `.mm`:
@@ -77,13 +77,13 @@ MCP agents can use mumei's verification backend directly once they synthesize or
 Compare requirements against an implementation and ask for mismatches before migrating anything to `.mm`. `--spec` and `--code` are required; `--code` points to a single source file. `--language` is optional and can be `python`, `rust`, or `go`.
 
 ```bash
-mumei-agent validate-spec-to-code --spec docs/spec.txt --code src/payment.py
+uv run mumei-agent validate-spec-to-code --spec docs/spec.txt --code src/payment.py
 ```
 
 For reverse drift detection:
 
 ```bash
-mumei-agent validate-code-to-spec \
+uv run mumei-agent validate-code-to-spec \
   --code src/payment.py \
   --spec docs/spec.txt \
   --language python  # Optional: python|rust|go
@@ -94,7 +94,7 @@ mumei-agent validate-code-to-spec \
 Start from prose requirements and check for direct contradictions, vacuity, ambiguity, and over-constraints. `--input` is required; `--domain` is optional when you want domain-specific hints.
 
 ```bash
-mumei-agent validate-spec --input docs/spec.txt --domain payment  # --domain is optional
+uv run mumei-agent validate-spec --input docs/spec.txt --domain payment  # --domain is optional
 ```
 
 MCP agents can call spec-health or verification tools depending on whether the input is prose, extracted contracts, or `.mm`:

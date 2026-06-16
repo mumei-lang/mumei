@@ -8,23 +8,26 @@ Mumei can start from existing code or natural-language requirements, then gradua
 
 ```bash
 # 既存コードを渡すだけ
-python -m agent audit --code-file payment.py
-python -m agent verify-foreign --file payment.py --language python
+uv run mumei-agent audit --code-file payment.py
+uv run mumei-agent verify-foreign --input payment.py --language python
 printf '%s\n' "残高不足の場合はエラーを返す" > spec.txt
-python -m agent validate-spec-to-code --spec spec.txt --code payment.py --language python
+uv run mumei-agent validate-spec-to-code --spec spec.txt --code payment.py --language python
 ```
 
 この段階では `.mm` ファイルは不要です。出力された counterexample、仕様とコードの不一致、足りない事前条件を移行バックログとして扱います。
+`audit` の出力に `verification_violations` や `cross_validation_gaps` が含まれる場合は、`next_steps:` フィールドも確認してください。各項目は、次に実行すべき確認コマンド、仕様・コードの修正候補、または `.mm` 移行前に解消すべきギャップを示します。
 
 ## Step 1: 自然言語からスペックを生成して検証
 
 自然言語の意図を JSON spec に落とし、そこから `.mm` を生成して Mumei の verifier に渡します。
 
 ```bash
-python -m agent extract-spec --text "安全な銀行送金" --output spec.json
-python -m agent generate --spec spec.json --output transfer.mm
+uv run mumei-agent extract-spec --text "安全な銀行送金" --output spec.json
+uv run mumei-agent generate --spec-file spec.json --output transfer.mm
 mumei verify transfer.mm
 ```
+
+`mumei verify transfer.mm` を実行するには、Mumei CLI の `mumei` バイナリが必要です。まだインストールしていない場合は、先に `curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash` を実行してください。
 
 この時点の `.mm` は最初の候補です。検証エラーは「仕様が強すぎる」「境界条件が足りない」「Z3 の決定可能断片を超えている」のどれかとして分類し、必要に応じて spec か実装を修正します。
 
@@ -34,7 +37,7 @@ mumei verify transfer.mm
 
 - LSP (`mumei lsp`) を使い、エディタ上で diagnostics、hover、補完、定義ジャンプを確認する。
 - REPL (`mumei repl`) を使い、小さい式や atom をインタラクティブに検証する。
-- `python -m agent check-spec-health transfer.mm` で矛盾、到達不能な `requires`、過剰拘束、曖昧な postcondition を確認する。
+- `uv run mumei-agent check-spec-health transfer.mm` で矛盾、到達不能な `requires`、過剰拘束、曖昧な postcondition を確認する。
 - verifier の counterexample を仕様レビューの単位にし、1 回の修正で 1 つの失敗原因だけを潰す。
 
 レビュー時は、仕様を証明しやすい形へ寄せることを優先します。特に配列境界、有限範囲の量化子、線形算術、明示的な状態遷移は [`SPEC_GUIDE.md`](SPEC_GUIDE.md) の推奨形に合わせます。
