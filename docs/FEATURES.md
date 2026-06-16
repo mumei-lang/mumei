@@ -1,3 +1,10 @@
+---
+layout: default
+title: "Feature Matrix — Mumei"
+description: "Feature matrix for Mumei types, verification, traits, ownership, effects, FFI, standard library, emitters, and tooling."
+keywords: "mumei features, formal verification, refinement types, effects, FFI, LLVM, Lean4"
+---
+
 # Mumei Feature Matrix
 
 | Category | Highlights |

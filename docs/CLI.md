@@ -1,3 +1,10 @@
+---
+layout: default
+title: "CLI Reference — Mumei"
+description: "Mumei CLI commands for running, verifying, emitting LLVM IR or binaries, and executing proof-driven programs."
+keywords: "mumei CLI, formal verification CLI, LLVM, Z3, mumei run"
+---
+
 # Mumei CLI
 
 ## `mumei run`

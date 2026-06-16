@@ -1,3 +1,10 @@
+---
+layout: default
+title: "Compiler Architecture — Mumei"
+description: "Mumei compiler architecture, verification pipeline, HIR/MIR lowering, Z3 checking, LLVM emission, and proof certificate flow."
+keywords: "mumei, compiler architecture, formal verification, Z3, LLVM, proof certificates"
+---
+
 # 🏗️ Mumei Compiler Architecture
 
 ## Pipeline

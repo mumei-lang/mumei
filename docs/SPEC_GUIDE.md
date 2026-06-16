@@ -1,3 +1,10 @@
+---
+layout: default
+title: "Proof-Friendly Specification Guide — Mumei"
+description: "Guidance for writing Mumei specifications in Z3-decidable fragments with reliable preconditions, postconditions, and invariants."
+keywords: "mumei specification guide, Z3 decidable fragment, formal methods, proof-friendly specifications"
+---
+
 # Proof-Friendly Specification Guide
 
 This guide describes the P8-D decidable specification fragment that Mumei expects Z3 to verify reliably. Stay inside these patterns for first-pass verification; use Lean escalation for specifications that intentionally need stronger reasoning.

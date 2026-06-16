@@ -2,12 +2,23 @@ title: Mumei Language
 description: Mathematical proof-driven programming language
 url: "https://mumei-lang.github.io/mumei"
 baseurl: ""
+lang: en
+author: mumei-lang
+keywords: "mumei, 無銘, むめい, formal verification, proof-driven programming, AI-native formal verification, compile-time formal verification, Z3, Z3 theorem prover, SMT solver, LLVM, Lean4, Lean 4, proof assistant, programming language, formal methods, mathematical proof, automated theorem proving, refinement types, type safety, effect system, side-effect verification, structured concurrency, async/await, deadlock prevention, AI agent, AI integration, Model Context Protocol, MCP, Claude Code, Devin, Codex, LLM, self-healing loop, mumei-agent, AI code generation, FFI, Rust, Dafny, Coq, F*, Moonbit, Haskell, OCaml, WebAssembly, proof certificate, high-assurance systems, safety-critical systems, medical systems, aviation control, financial systems, cryptographic verification, Merkle tree, DeFi, RegTech, type theory, polymorphism, generics, JSON, Markdown, programming language research, 形式検証, 定理証明, SMTソルバー, 自動証明, 精緻化型, 型安全, エフェクトシステム, 副作用検証, 構造化並行性, AIエージェント, AI統合, 自己修復ループ, 自動コード生成, プログラミング言語, 数学的証明, 形式仕様, 事前条件, 事後条件, ループ不変条件, 高信頼システム"
 markdown: kramdown
 kramdown:
   input: GFM
+plugins: [jekyll-sitemap]
+twitter:
+  username: mumei_lang
+social:
+  name: Mumei
+  links:
+    - https://github.com/mumei-lang/mumei
 exclude:
   - target
   - .git
   - .github
   - .agents
   - .claude
+  - editors/vscode/node_modules
