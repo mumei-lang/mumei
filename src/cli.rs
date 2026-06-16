@@ -68,8 +68,8 @@ pub(crate) enum Command {
         /// Disable verify-only output targets: escalation-metrics
         #[arg(long = "no-emit")]
         no_emit: Vec<String>,
-        /// Output path for proof certificate (default: <input>.proof.json)
-        #[arg(long)]
+        /// Output path for proof certificate or escalation bundle
+        #[arg(long, alias = "out")]
         output: Option<String>,
         /// Directory to write report.json into (default: current directory)
         #[arg(long)]

@@ -502,8 +502,7 @@ fn escalate_lean_promotes_outside_fragment_to_candidate_bundle() {
     }
     std::fs::create_dir_all(&temp_dir).expect("create escalation temp dir");
     let fixture = temp_dir.join("nonlinear.mm");
-    let cert_path = temp_dir.join("nonlinear.proof.json");
-    let bundle_path = cert_path.with_extension("escalation-bundle.json");
+    let bundle_path = temp_dir.join("nonlinear.escalation-bundle.json");
     std::fs::write(
         &fixture,
         r#"
@@ -521,7 +520,7 @@ body: x * y;
         .arg("--emit")
         .arg("escalation-bundle")
         .arg("--output")
-        .arg(&cert_path)
+        .arg(&bundle_path)
         .arg(&fixture)
         .current_dir(manifest_dir)
         .output()

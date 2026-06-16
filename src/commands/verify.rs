@@ -550,7 +550,7 @@ fn verify_single_atom(atom: &parser::Atom, name: &str, ctx: &mut VerifyContext<'
 
 pub(crate) fn verify_escalation_bundle_path(input: &str, output: Option<&str>) -> PathBuf {
     if let Some(output) = output {
-        PathBuf::from(output).with_extension("escalation-bundle.json")
+        PathBuf::from(output)
     } else {
         Path::new(input).with_extension("escalation-bundle.json")
     }
@@ -908,6 +908,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
     // Plan 11B: Track per-atom verification results for proof certificates
     let mut cert_results: std::collections::HashMap<String, (String, String)> =
         std::collections::HashMap::new();
+    let mut lean_escalation_metrics_json: Option<serde_json::Value> = None;
 
     if emit_contract_manifest {
         let manifest = verification::generate_contract_manifest(&module_env);
@@ -1205,6 +1206,13 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
 
         if escalate_lean || emit_escalation_bundle || emit_escalation_metrics {
             let bundle = proof_cert::generate_escalation_bundle(&cert);
+            if escalate_lean {
+                let mut metrics = resolver::LeanEscalationMetrics::default();
+                for candidate in &bundle.candidates {
+                    metrics.record_candidate(candidate);
+                }
+                lean_escalation_metrics_json = Some(metrics.to_summary_json());
+            }
             if emit_escalation_bundle {
                 let bundle_path = verify_escalation_bundle_path(input, cert_output);
                 match proof_cert::save_escalation_bundle(&bundle, &bundle_path) {
@@ -1378,8 +1386,11 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
             match std::fs::read_to_string(&report_path) {
                 Ok(content) => match serde_json::from_str::<serde_json::Value>(&content) {
                     Ok(payload) => {
-                        let payload =
+                        let mut payload =
                             enrich_verify_json_payload(payload, &diagnostics, &loop_suggestions);
+                        if let Some(ref metrics) = lean_escalation_metrics_json {
+                            payload["lean_escalation_metrics"] = metrics.clone();
+                        }
                         match serde_json::to_string_pretty(&payload) {
                             Ok(json) => println!("{json}"),
                             Err(_) => println!("{}", content),
@@ -1404,6 +1415,9 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                 "diagnostics": &diagnostics,
                 "warnings": &diagnostics,
             });
+            if let Some(ref metrics) = lean_escalation_metrics_json {
+                payload["lean_escalation_metrics"] = metrics.clone();
+            }
             if !loop_suggestions.is_empty() {
                 payload["cegis_suggestions"] = serde_json::Value::Array(loop_suggestions.clone());
             }
