@@ -2,6 +2,14 @@
 
 ---
 
+### P9-D/E/F/G: NLAE integration completion
+
+- **Loss Vector + structured feedback JSON**: `mumei verify --emit loss-vector <file.mm>` now emits P9-E structured feedback JSON, including reconstruction-loss details, violated property, counterexample values, source location, and an agent-facing repair instruction.
+- **Self-Correction Protocol support**: verification failure reports can carry the Loss Vector into mumei-agent's P9-F self-correction loop, with `ENABLE_SELF_CORRECTION` enriching the feedback instruction for bounded retry workflows.
+- **P9-G ecosystem fixture**: `examples/nlae_integration_demo.mm` provides the Module B (AR) side of the four-repository NLAE pipeline used by mumei-agent, mumei-lean, and mumei-demo.
+
+---
+
 ### PR #221: Lean translator contract metadata
 
 - **Typed translator metadata in proof certificates**: `AtomCertificate` now records `TranslatorIRMetadata` so Lean escalation bundles carry obligation sort, binders, theorem goal, provenance span, and lowering rules alongside the source contract.
