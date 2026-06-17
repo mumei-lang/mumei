@@ -76,6 +76,7 @@ pub fn verify_module(
     Ok(ModuleVerificationReport {
         cross_spec,
         decidable_fragment,
+        loss_vector: None,
     })
 }
 
@@ -381,6 +382,7 @@ pub(crate) fn verify_inner(
                 Some(&atom.span),
                 None,
                 None,
+                None,
             );
             return Ok(());
         }
@@ -405,6 +407,7 @@ pub(crate) fn verify_inner(
                     "",
                     None,
                     Some(&atom.span),
+                    None,
                     None,
                     None,
                 );
@@ -1519,6 +1522,7 @@ pub(crate) fn verify_inner(
                 Some(&atom.span),
                 Some(&constraint_mappings),
                 None,
+                None,
             );
             return Err(e);
         }
@@ -1635,6 +1639,17 @@ pub(crate) fn verify_inner(
                 if let (Some(feedback), Some(loss)) = (&mut semantic_fb, reconstruction_loss) {
                     feedback["reconstruction_loss"] = json!(loss);
                 }
+                let loss_vector = if reconstruction_loss_output_enabled() {
+                    let candidate = build_loss_vector(
+                        atom,
+                        FAILURE_POSTCONDITION_VIOLATED,
+                        ce_value.as_ref(),
+                        &atom.span,
+                    );
+                    (!is_reconstruction_loss_empty(&candidate)).then_some(candidate)
+                } else {
+                    None
+                };
                 save_visualizer_report(
                     output_dir,
                     "failed",
@@ -1648,6 +1663,7 @@ pub(crate) fn verify_inner(
                     Some(&atom.span),
                     Some(&constraint_mappings),
                     data_flow_trace.as_ref(),
+                    loss_vector.as_ref(),
                 );
                 metrics.record_phase(
                     "Phase 5: ensures verification (failed)",
@@ -1746,6 +1762,7 @@ pub(crate) fn verify_inner(
                 Some(&atom.span),
                 None,
                 None,
+                None,
             );
             return Err(MumeiError::verification_at(
                 format!(
@@ -1800,6 +1817,7 @@ pub(crate) fn verify_inner(
             FAILURE_INVARIANT_VIOLATED,
             Some(&contradiction_fb),
             Some(&atom.span),
+            None,
             None,
             None,
         );
@@ -1881,6 +1899,7 @@ pub(crate) fn verify_inner(
         Some(&atom.span),
         None,
         None,
+        None,
     );
     Ok(())
 }
@@ -1906,6 +1925,7 @@ pub(crate) fn save_visualizer_report(
     span: Option<&Span>,
     constraint_mappings: Option<&[ConstraintMapping]>,
     data_flow_trace: Option<&DataFlowTrace>,
+    loss_vector: Option<&serde_json::Value>,
 ) {
     let mut report = json!({
         "status": status,
@@ -1925,6 +1945,11 @@ pub(crate) fn save_visualizer_report(
     }
     if let Some(trace) = data_flow_trace {
         report["data_flow_trace"] = json!(trace);
+    }
+    if reconstruction_loss_output_enabled() {
+        if let Some(loss_vector) = loss_vector {
+            report["loss_vector"] = loss_vector.clone();
+        }
     }
     if let Some(task_id) = orchestration_task_id_from_env() {
         report["task_id"] = json!(task_id);

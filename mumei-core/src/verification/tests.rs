@@ -1588,6 +1588,131 @@ fn test_build_semantic_feedback_sub_constraints() {
     assert_eq!(subs[1]["satisfied"], false);
 }
 
+#[test]
+fn test_build_loss_vector_returns_p9e_json_structure() {
+    let mut atom = test_atom(
+        "withdraw",
+        vec![test_param("from", Some("i64"))],
+        "true",
+        "from_after == from - amount",
+        "from + amount",
+        Some("i64"),
+    );
+    atom.span = Span {
+        file: "vault.mu".to_string(),
+        line: 12,
+        col: 1,
+        len: 8,
+    };
+    let counterexample = json!({
+        "from": 100,
+        "to": 0,
+        "amount": -50,
+        "from_after": 150
+    });
+
+    let loss_vector = build_loss_vector(
+        &atom,
+        FAILURE_POSTCONDITION_VIOLATED,
+        Some(&counterexample),
+        &atom.span,
+    );
+
+    assert_eq!(loss_vector["status"], "verification_failed");
+    assert_eq!(loss_vector["error_type"], FAILURE_POSTCONDITION_VIOLATED);
+    assert_eq!(loss_vector["location"]["file"], "vault.mu");
+    assert_eq!(loss_vector["location"]["line"], 12);
+    assert_eq!(
+        loss_vector["reconstruction_loss"]["violated_property"],
+        "from_after == from - amount"
+    );
+    assert_eq!(
+        loss_vector["reconstruction_loss"]["counter_example"]["amount"],
+        -50
+    );
+    assert!(loss_vector["feedback_instruction"]
+        .as_str()
+        .unwrap()
+        .contains("ensures"));
+}
+
+#[test]
+fn test_build_loss_vector_enhances_feedback_for_self_correction() {
+    let mut atom = test_atom(
+        "withdraw",
+        vec![test_param("amount", Some("i64"))],
+        "true",
+        "result >= 0",
+        "amount",
+        Some("i64"),
+    );
+    atom.span = Span {
+        file: "vault.mu".to_string(),
+        line: 12,
+        col: 1,
+        len: 8,
+    };
+    let counterexample = json!({"amount": -1});
+
+    std::env::set_var(ENABLE_SELF_CORRECTION_ENV, "1");
+    let loss_vector = build_loss_vector(
+        &atom,
+        FAILURE_POSTCONDITION_VIOLATED,
+        Some(&counterexample),
+        &atom.span,
+    );
+    std::env::remove_var(ENABLE_SELF_CORRECTION_ENV);
+
+    let instruction = loss_vector["feedback_instruction"].as_str().unwrap();
+    assert!(instruction.contains("Self-Correction Protocol"));
+    assert!(instruction.contains("mumei verify --emit loss-vector"));
+    assert!(instruction.contains("result >= 0"));
+}
+
+#[test]
+fn test_is_reconstruction_loss_empty_detects_zero_loss_vector() {
+    let empty = json!({
+        "status": "verification_failed",
+        "reconstruction_loss": {
+            "violated_property": "result > 0",
+            "counter_example": {}
+        }
+    });
+    assert!(is_reconstruction_loss_empty(&empty));
+
+    let non_empty = json!({
+        "status": "verification_failed",
+        "reconstruction_loss": {
+            "violated_property": "result > 0",
+            "counter_example": {"x": -1}
+        }
+    });
+    assert!(!is_reconstruction_loss_empty(&non_empty));
+}
+
+#[test]
+fn test_module_verification_report_serializes_loss_vector() {
+    let loss_vector = json!({
+        "status": "verification_failed",
+        "error_type": FAILURE_POSTCONDITION_VIOLATED,
+        "location": {"file": "main.mm", "line": 7},
+        "reconstruction_loss": {
+            "violated_property": "result > 10",
+            "counter_example": {"x": 5}
+        },
+        "feedback_instruction": "Repair ensures."
+    });
+    let report = ModuleVerificationReport {
+        cross_spec: None,
+        decidable_fragment: None,
+        loss_vector: Some(loss_vector.clone()),
+    };
+
+    let encoded = serde_json::to_value(report).expect("serialize module report");
+
+    assert_eq!(encoded["loss_vector"], loss_vector);
+}
+
 // ---- build_contextual_suggestion tests ----
 
 #[test]

@@ -33,6 +33,25 @@ pub const FAILURE_LINEARITY_VIOLATED: &str = "linearity_violated";
 pub const FAILURE_INVARIANT_VIOLATED: &str = "invariant_violated";
 pub const FAILURE_EXHAUSTIVENESS_FAILED: &str = "exhaustiveness_failed";
 pub const FAILURE_RESOURCE_CONFLICT: &str = "resource_conflict";
+pub const ENABLE_RECONSTRUCTION_LOSS_ENV: &str = "ENABLE_RECONSTRUCTION_LOSS";
+pub const ENABLE_SELF_CORRECTION_ENV: &str = "ENABLE_SELF_CORRECTION";
+
+pub fn reconstruction_loss_output_enabled() -> bool {
+    env_flag_enabled(ENABLE_RECONSTRUCTION_LOSS_ENV)
+}
+
+pub fn self_correction_enabled() -> bool {
+    env_flag_enabled(ENABLE_SELF_CORRECTION_ENV)
+}
+
+fn env_flag_enabled(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            !normalized.is_empty() && normalized != "0" && normalized != "false"
+        })
+        .unwrap_or(false)
+}
 
 // =============================================================================
 // Suggestion Templates per Failure Type (Feature 1-e)
@@ -795,6 +814,83 @@ pub fn build_semantic_feedback(
     });
 
     Some(feedback)
+}
+
+/// Build the P9-E Loss Vector JSON for a verification failure.
+pub fn build_loss_vector(
+    atom: &Atom,
+    failure_type: &str,
+    counterexample: Option<&serde_json::Value>,
+    span: &Span,
+) -> serde_json::Value {
+    let counter_example = counterexample
+        .cloned()
+        .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+
+    let base_instruction = build_contextual_suggestion(failure_type, counterexample, None);
+    let feedback_instruction = if self_correction_enabled() {
+        build_self_correction_feedback_instruction(atom, &base_instruction, counterexample)
+    } else {
+        base_instruction
+    };
+
+    json!({
+        "status": "verification_failed",
+        "error_type": failure_type,
+        "location": {
+            "file": span.file.clone(),
+            "line": span.line
+        },
+        "reconstruction_loss": {
+            "violated_property": atom.ensures.trim(),
+            "counter_example": counter_example
+        },
+        "feedback_instruction": feedback_instruction
+    })
+}
+
+fn build_self_correction_feedback_instruction(
+    atom: &Atom,
+    base_instruction: &str,
+    counterexample: Option<&serde_json::Value>,
+) -> String {
+    let counterexample_text = counterexample
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "{}".to_string());
+    format!(
+        "Self-Correction Protocol enabled. Repair atom '{}' using the loss vector: keep the public contract intentional, change the minimal body/contract fragment needed to eliminate the counterexample {}, then rerun `mumei verify --emit loss-vector` until status is verification_passed. Violated property: `{}`. Base hint: {}",
+        atom.name,
+        counterexample_text,
+        atom.ensures.trim(),
+        base_instruction
+    )
+}
+
+/// Return true when the Loss Vector represents zero reconstruction loss.
+pub fn is_reconstruction_loss_empty(loss_vector: &serde_json::Value) -> bool {
+    let Some(reconstruction_loss) = loss_vector.get("reconstruction_loss") else {
+        return true;
+    };
+    if reconstruction_loss.is_null() {
+        return true;
+    }
+    if reconstruction_loss
+        .get("is_zero_loss")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        return true;
+    }
+
+    reconstruction_loss
+        .get("counter_example")
+        .map(|counter_example| match counter_example {
+            serde_json::Value::Object(entries) => entries.is_empty(),
+            serde_json::Value::Array(entries) => entries.is_empty(),
+            serde_json::Value::Null => true,
+            _ => false,
+        })
+        .unwrap_or(true)
 }
 
 /// Build semantic feedback for division-by-zero violations.
