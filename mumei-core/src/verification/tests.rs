@@ -1637,6 +1637,39 @@ fn test_build_loss_vector_returns_p9e_json_structure() {
 }
 
 #[test]
+fn test_build_loss_vector_enhances_feedback_for_self_correction() {
+    let mut atom = test_atom(
+        "withdraw",
+        vec![test_param("amount", Some("i64"))],
+        "true",
+        "result >= 0",
+        "amount",
+        Some("i64"),
+    );
+    atom.span = Span {
+        file: "vault.mu".to_string(),
+        line: 12,
+        col: 1,
+        len: 8,
+    };
+    let counterexample = json!({"amount": -1});
+
+    std::env::set_var(ENABLE_SELF_CORRECTION_ENV, "1");
+    let loss_vector = build_loss_vector(
+        &atom,
+        FAILURE_POSTCONDITION_VIOLATED,
+        Some(&counterexample),
+        &atom.span,
+    );
+    std::env::remove_var(ENABLE_SELF_CORRECTION_ENV);
+
+    let instruction = loss_vector["feedback_instruction"].as_str().unwrap();
+    assert!(instruction.contains("Self-Correction Protocol"));
+    assert!(instruction.contains("mumei verify --emit loss-vector"));
+    assert!(instruction.contains("result >= 0"));
+}
+
+#[test]
 fn test_is_reconstruction_loss_empty_detects_zero_loss_vector() {
     let empty = json!({
         "status": "verification_failed",

@@ -62,7 +62,7 @@ pub(crate) enum Command {
         /// Escalate Z3 unknown obligations to Lean 4 via mumei-lean bridge.
         #[arg(long)]
         escalate_lean: bool,
-        /// Emit format: "escalation-bundle" writes .escalation-bundle.json
+        /// Emit format: "loss-vector" prints P9-E Loss Vector JSON; "escalation-bundle" writes .escalation-bundle.json
         #[arg(long, value_name = "FORMAT")]
         emit: Option<String>,
         /// Disable verify-only output targets: escalation-metrics
