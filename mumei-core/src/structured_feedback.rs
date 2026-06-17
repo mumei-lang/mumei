@@ -129,6 +129,11 @@ impl StructuredFeedback {
         let reconstruction_loss = report
             .get("semantic_feedback")
             .and_then(|feedback| feedback.get("reconstruction_loss"))
+            .or_else(|| {
+                report
+                    .get("loss_vector")
+                    .and_then(|loss_vector| loss_vector.get("reconstruction_loss"))
+            })
             .or_else(|| report.get("reconstruction_loss"))
             .and_then(|value| serde_json::from_value(value.clone()).ok());
 

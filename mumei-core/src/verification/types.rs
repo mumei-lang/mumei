@@ -723,7 +723,11 @@ pub struct Diagnostic {
 pub struct ModuleVerificationReport {
     pub cross_spec: Option<CrossSpecResult>,
     pub decidable_fragment: Option<DecidableFragmentMetrics>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loss_vector: Option<serde_json::Value>,
 }
+
+pub type VerificationReport = ModuleVerificationReport;
 
 pub const LEAN_TRANSLATOR_VERSION: &str = "mumei-lean-translator-ir-v1";
 pub const LEAN_BRIDGE_LEMMA_HASH: &str =
