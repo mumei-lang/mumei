@@ -65,6 +65,7 @@ pub(crate) fn cmd_verify_command(command: Command) {
         matches!(emit.as_deref(), Some("escalation-metrics")) && !no_emit_escalation_metrics;
     let emit_decidable_metrics = matches!(emit.as_deref(), Some("decidable-metrics"));
     let emit_reconstruction_loss = matches!(emit.as_deref(), Some("reconstruction-loss"));
+    let emit_loss_vector = matches!(emit.as_deref(), Some("loss-vector"));
     let emit_structured_feedback = matches!(emit.as_deref(), Some("structured-feedback"));
     let emit_human_review_queue = matches!(emit.as_deref(), Some("human-review-queue"));
     if let Some(other) = emit.as_deref() {
@@ -72,11 +73,12 @@ pub(crate) fn cmd_verify_command(command: Command) {
             && !matches!(other, "escalation-metrics")
             && !emit_decidable_metrics
             && !emit_reconstruction_loss
+            && !emit_loss_vector
             && !emit_structured_feedback
             && !emit_human_review_queue
         {
             eprintln!(
-                    "Unsupported verify --emit target '{}'. Supported values: escalation-bundle, escalation-metrics, decidable-metrics, reconstruction-loss, structured-feedback, human-review-queue",
+                    "Unsupported verify --emit target '{}'. Supported values: escalation-bundle, escalation-metrics, decidable-metrics, reconstruction-loss, loss-vector, structured-feedback, human-review-queue",
                     other
                 );
             std::process::exit(1);
@@ -117,6 +119,7 @@ pub(crate) fn cmd_verify_command(command: Command) {
                     emit_escalation_metrics,
                     emit_decidable_metrics,
                     emit_reconstruction_loss,
+                    emit_loss_vector,
                     emit_structured_feedback,
                     emit_human_review_queue,
                     cert_output: output.as_deref(),
@@ -173,6 +176,7 @@ pub(crate) fn cmd_verify_command(command: Command) {
             emit_escalation_metrics,
             emit_decidable_metrics,
             emit_reconstruction_loss,
+            emit_loss_vector,
             emit_structured_feedback,
             emit_human_review_queue,
             cert_output: output.as_deref(),
@@ -289,6 +293,7 @@ pub(crate) struct VerifyOptions<'a> {
     pub(crate) emit_escalation_metrics: bool,
     pub(crate) emit_decidable_metrics: bool,
     pub(crate) emit_reconstruction_loss: bool,
+    pub(crate) emit_loss_vector: bool,
     pub(crate) emit_structured_feedback: bool,
     pub(crate) emit_human_review_queue: bool,
     pub(crate) cert_output: Option<&'a str>,
@@ -327,6 +332,7 @@ struct VerifyContext<'a> {
     enable_spurious_detection: bool,
     warn_fragment: bool,
     diagnostics: &'a mut Vec<verification::Diagnostic>,
+    loss_vectors: &'a mut Vec<serde_json::Value>,
     structured_feedbacks: &'a mut Vec<StructuredFeedback>,
     reconstruction_losses: &'a mut std::collections::HashMap<String, ReconstructionLoss>,
     cert_results: &'a mut std::collections::HashMap<String, (String, String)>,
@@ -475,6 +481,15 @@ fn verify_single_atom(atom: &parser::Atom, name: &str, ctx: &mut VerifyContext<'
         Err(e) => {
             let error_text = format!("{e}");
             let counterexample_model = counterexample_model_from_error(&e);
+            let counterexample_value = if let verification::MumeiError::VerificationError {
+                counterexample: Some(counterexample),
+                ..
+            } = &e
+            {
+                Some(counterexample.clone())
+            } else {
+                None
+            };
             let reconstruction_loss = reconstruction_loss_from_error(&e, &atom.ensures);
             if !ctx.quiet_output {
                 let resolved = resolve_source_for_span(ctx.source, &atom.span);
@@ -501,6 +516,17 @@ fn verify_single_atom(atom: &parser::Atom, name: &str, ctx: &mut VerifyContext<'
                         );
                     }
                     ctx.reconstruction_losses.insert(name.to_string(), loss);
+                }
+            }
+            if z3_result == "sat" {
+                let loss_vector = verification::build_loss_vector(
+                    atom,
+                    verification::FAILURE_POSTCONDITION_VIOLATED,
+                    counterexample_value.as_ref(),
+                    &atom.span,
+                );
+                if !verification::is_reconstruction_loss_empty(&loss_vector) {
+                    ctx.loss_vectors.push(loss_vector);
                 }
             }
             let classification = verification::classify_atom_for_lean_escalation(
@@ -785,6 +811,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
         emit_escalation_metrics,
         emit_decidable_metrics,
         emit_reconstruction_loss,
+        emit_loss_vector,
         emit_structured_feedback,
         emit_human_review_queue,
         cert_output,
@@ -809,8 +836,12 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
         detect_loops,
         suggest_cegis,
     } = options;
+    if emit_loss_vector {
+        std::env::set_var(verification::ENABLE_RECONSTRUCTION_LOSS_ENV, "1");
+    }
     let structured_feedback_stdout = emit_structured_feedback && cert_output.is_none();
-    let quiet_output = json_output || structured_feedback_stdout;
+    let loss_vector_stdout = emit_loss_vector && cert_output.is_none();
+    let quiet_output = json_output || structured_feedback_stdout || loss_vector_stdout;
     check_z3_available();
     let manifest_config = manifest::find_and_load();
     let (build_cfg, proof_cfg) = if let Some((_, ref m)) = manifest_config {
@@ -901,6 +932,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
     let mut loop_suggestions: Vec<serde_json::Value> = Vec::new();
     let mut reconstruction_losses: std::collections::HashMap<String, ReconstructionLoss> =
         std::collections::HashMap::new();
+    let mut loss_vectors: Vec<serde_json::Value> = Vec::new();
     let mut structured_feedbacks: Vec<StructuredFeedback> = Vec::new();
     let mut diagnostics: Vec<verification::Diagnostic> = Vec::new();
     let emit_lean_artifacts = escalate_lean || emit_escalation_bundle || emit_escalation_metrics;
@@ -1042,6 +1074,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                     enable_spurious_detection,
                     warn_fragment,
                     diagnostics: &mut diagnostics,
+                    loss_vectors: &mut loss_vectors,
                     structured_feedbacks: &mut structured_feedbacks,
                     reconstruction_losses: &mut reconstruction_losses,
                     cert_results: &mut cert_results,
@@ -1070,6 +1103,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                         enable_spurious_detection,
                         warn_fragment,
                         diagnostics: &mut diagnostics,
+                        loss_vectors: &mut loss_vectors,
                         structured_feedbacks: &mut structured_feedbacks,
                         reconstruction_losses: &mut reconstruction_losses,
                         cert_results: &mut cert_results,
@@ -1379,6 +1413,28 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
         }
     }
 
+    if emit_loss_vector {
+        let payload = loss_vector_payload(&loss_vectors, failed);
+        match serde_json::to_string_pretty(&payload) {
+            Ok(serialized) => {
+                if let Some(output) = cert_output {
+                    if let Err(err) = std::fs::write(output, &serialized) {
+                        eprintln!("❌ Failed to write loss vector: {err}");
+                        failed += 1;
+                    } else if !quiet_output {
+                        println!("  🧭 Loss vector written to: {output}");
+                    }
+                } else {
+                    println!("{serialized}");
+                }
+            }
+            Err(err) => {
+                eprintln!("❌ Failed to serialize loss vector: {err}");
+                failed += 1;
+            }
+        }
+    }
+
     // Proposal B: --json outputs report.json content to stdout
     if json_output {
         let report_path = output_dir.join("report.json");
@@ -1430,7 +1486,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
             }
         }
         return failed > 0;
-    } else if structured_feedback_stdout {
+    } else if structured_feedback_stdout || loss_vector_stdout {
         return failed > 0;
     } else {
         println!();
@@ -1485,6 +1541,28 @@ pub(crate) fn save_decidable_fragment_metrics(
         );
     }
     Ok(())
+}
+
+fn loss_vector_payload(loss_vectors: &[serde_json::Value], failed: usize) -> serde_json::Value {
+    if let Some(first) = loss_vectors.first() {
+        first.clone()
+    } else if failed > 0 {
+        serde_json::json!({
+            "status": "verification_failed",
+            "error_type": null,
+            "location": null,
+            "reconstruction_loss": null,
+            "feedback_instruction": "Verification failed before a counterexample loss vector could be produced."
+        })
+    } else {
+        serde_json::json!({
+            "status": "verification_passed",
+            "error_type": null,
+            "location": null,
+            "reconstruction_loss": null,
+            "feedback_instruction": "Verification passed; no fix is required."
+        })
+    }
 }
 
 pub(crate) fn save_reconstruction_losses(

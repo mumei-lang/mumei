@@ -34,9 +34,18 @@ pub const FAILURE_INVARIANT_VIOLATED: &str = "invariant_violated";
 pub const FAILURE_EXHAUSTIVENESS_FAILED: &str = "exhaustiveness_failed";
 pub const FAILURE_RESOURCE_CONFLICT: &str = "resource_conflict";
 pub const ENABLE_RECONSTRUCTION_LOSS_ENV: &str = "ENABLE_RECONSTRUCTION_LOSS";
+pub const ENABLE_SELF_CORRECTION_ENV: &str = "ENABLE_SELF_CORRECTION";
 
 pub fn reconstruction_loss_output_enabled() -> bool {
-    std::env::var(ENABLE_RECONSTRUCTION_LOSS_ENV)
+    env_flag_enabled(ENABLE_RECONSTRUCTION_LOSS_ENV)
+}
+
+pub fn self_correction_enabled() -> bool {
+    env_flag_enabled(ENABLE_SELF_CORRECTION_ENV)
+}
+
+fn env_flag_enabled(name: &str) -> bool {
+    std::env::var(name)
         .map(|value| {
             let normalized = value.trim().to_ascii_lowercase();
             !normalized.is_empty() && normalized != "0" && normalized != "false"
@@ -818,6 +827,13 @@ pub fn build_loss_vector(
         .cloned()
         .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
 
+    let base_instruction = build_contextual_suggestion(failure_type, counterexample, None);
+    let feedback_instruction = if self_correction_enabled() {
+        build_self_correction_feedback_instruction(atom, &base_instruction, counterexample)
+    } else {
+        base_instruction
+    };
+
     json!({
         "status": "verification_failed",
         "error_type": failure_type,
@@ -829,8 +845,25 @@ pub fn build_loss_vector(
             "violated_property": atom.ensures.trim(),
             "counter_example": counter_example
         },
-        "feedback_instruction": build_contextual_suggestion(failure_type, counterexample, None)
+        "feedback_instruction": feedback_instruction
     })
+}
+
+fn build_self_correction_feedback_instruction(
+    atom: &Atom,
+    base_instruction: &str,
+    counterexample: Option<&serde_json::Value>,
+) -> String {
+    let counterexample_text = counterexample
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "{}".to_string());
+    format!(
+        "Self-Correction Protocol enabled. Repair atom '{}' using the loss vector: keep the public contract intentional, change the minimal body/contract fragment needed to eliminate the counterexample {}, then rerun `mumei verify --emit loss-vector` until status is verification_passed. Violated property: `{}`. Base hint: {}",
+        atom.name,
+        counterexample_text,
+        atom.ensures.trim(),
+        base_instruction
+    )
 }
 
 /// Return true when the Loss Vector represents zero reconstruction loss.
