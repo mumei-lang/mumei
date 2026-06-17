@@ -152,6 +152,37 @@ mumei run src/main.mm
 
 ---
 
+## P9 NLAE Integration
+
+Mumei now participates in the four-repository NLAE pipeline as Module B (AR):
+it reconstructs Mumei contracts into Z3 obligations, reports reconstruction
+loss as structured JSON, and hands that Loss Vector to mumei-agent's
+self-correction loop and mumei-lean's Fidelity Checker.
+
+```text
+mumei-agent (Module A / AV)
+      ↓ generated .mm
+mumei (Module B / AR)
+      ↓ Loss Vector JSON
+mumei-agent self-correct
+      ↓ repaired certificate
+mumei-lean Fidelity Checker
+      ↓
+mumei-demo Evaluation Loop
+```
+
+To inspect a verification failure as P9-E structured feedback:
+
+```bash
+mumei verify --emit loss-vector examples/nlae_integration_demo.mm
+```
+
+The output includes `status`, `error_type`, `location`,
+`reconstruction_loss`, and `feedback_instruction`; agents can feed it into
+`mumei-agent self-correct` or the `run_nlae_pipeline` MCP tool.
+
+---
+
 ## Install
 
 ```bash
@@ -197,7 +228,7 @@ mumei setup && source ~/.mumei/env
 |---------|-------------|
 | `mumei build <file> -o <out>` | Verify + codegen (`--emit llvm-ir` (default) / `c-header` / `verified-json` / `proof-book` / `decidable-metrics` / `proof-cert` / `escalation-bundle` / `binary` / `rust` / `python` / external plugin name) |
 | `mumei run <file>` | Verify → codegen → link → execute `atom main()` as a native binary (`--emit binary` default, `--emit llvm-ir` keeps IR before linking) |
-| `mumei verify <file>` | Z3 verification only |
+| `mumei verify <file>` | Z3 verification only (`--emit loss-vector` prints P9-E structured feedback JSON) |
 | `mumei check <file>` | Parse + resolve (fast, no Z3) |
 | `mumei init <name>` | Generate project template |
 | `mumei add <dep>` | Add dependency (path / git / registry) |

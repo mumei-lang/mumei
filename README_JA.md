@@ -152,6 +152,37 @@ mumei run src/main.mm
 
 ---
 
+## P9 NLAE Integration
+
+Mumei は 4 リポジトリ NLAE pipeline の Module B (AR) として、Mumei contract を
+Z3 obligation に再構築し、復元誤差を Loss Vector JSON として出力します。この
+Loss Vector は mumei-agent の self-correction loop と mumei-lean の Fidelity
+Checker に渡されます。
+
+```text
+mumei-agent (Module A / AV)
+      ↓ generated .mm
+mumei (Module B / AR)
+      ↓ Loss Vector JSON
+mumei-agent self-correct
+      ↓ repaired certificate
+mumei-lean Fidelity Checker
+      ↓
+mumei-demo Evaluation Loop
+```
+
+検証失敗を P9-E structured feedback として確認する例:
+
+```bash
+mumei verify --emit loss-vector examples/nlae_integration_demo.mm
+```
+
+出力には `status`, `error_type`, `location`, `reconstruction_loss`,
+`feedback_instruction` が含まれ、agent は `mumei-agent self-correct` または
+`run_nlae_pipeline` MCP tool に渡せます。
+
+---
+
 ## インストール
 
 ```bash
@@ -197,7 +228,7 @@ mumei setup && source ~/.mumei/env
 |---------|------|
 | `mumei build <file> -o <out>` | 検証 + codegen（`--emit llvm-ir`（デフォルト）/ `c-header` / `verified-json` / `proof-book` / `decidable-metrics` / `proof-cert` / `escalation-bundle` / `binary` / `rust` / `python` / external plugin name） |
 | `mumei run <file>` | 検証 → codegen → link → `atom main()` を native binary として実行（`--emit binary` がデフォルト、`--emit llvm-ir` は link 前に IR を保持） |
-| `mumei verify <file>` | Z3 検証のみ |
+| `mumei verify <file>` | Z3 検証のみ（`--emit loss-vector` で P9-E structured feedback JSON を出力） |
 | `mumei check <file>` | parse + resolve（高速、Z3 なし） |
 | `mumei init <name>` | project template を生成 |
 | `mumei add <dep>` | dependency（path / git / registry）を追加 |
