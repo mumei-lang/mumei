@@ -1067,7 +1067,7 @@ Mumei DSL を、AI にとっての究極の NLA（Natural Language Activation：
 **Success Metrics**:
 - エージェント間通信のデータ転送量が 50% 削減
 
-**P9-D: Reconstruction Loss Formalization（復元誤差の定式化）** — Planned
+**P9-D: Reconstruction Loss Formalization（復元誤差の定式化）** — ✅ Implemented
 
 プログラム状態の写像と復元誤差を数学的に定義する。
 
@@ -1080,7 +1080,7 @@ Mumei DSL を、AI にとっての究極の NLA（Natural Language Activation：
 **Success Metrics**:
 - 復元誤差の検出精度: ≥ 95%
 
-**P9-E: Structured Feedback JSON Schema（構造化フィードバック JSON 規格）** — Planned
+**P9-E: Structured Feedback JSON Schema（構造化フィードバック JSON 規格）** — ✅ Implemented
 
 AI が解釈しやすい構造化 JSON（Loss Vector）の規格を定義・実装する。
 

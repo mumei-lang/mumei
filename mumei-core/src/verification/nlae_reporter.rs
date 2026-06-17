@@ -33,6 +33,16 @@ pub const FAILURE_LINEARITY_VIOLATED: &str = "linearity_violated";
 pub const FAILURE_INVARIANT_VIOLATED: &str = "invariant_violated";
 pub const FAILURE_EXHAUSTIVENESS_FAILED: &str = "exhaustiveness_failed";
 pub const FAILURE_RESOURCE_CONFLICT: &str = "resource_conflict";
+pub const ENABLE_RECONSTRUCTION_LOSS_ENV: &str = "ENABLE_RECONSTRUCTION_LOSS";
+
+pub fn reconstruction_loss_output_enabled() -> bool {
+    std::env::var(ENABLE_RECONSTRUCTION_LOSS_ENV)
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            !normalized.is_empty() && normalized != "0" && normalized != "false"
+        })
+        .unwrap_or(false)
+}
 
 // =============================================================================
 // Suggestion Templates per Failure Type (Feature 1-e)
@@ -795,6 +805,59 @@ pub fn build_semantic_feedback(
     });
 
     Some(feedback)
+}
+
+/// Build the P9-E Loss Vector JSON for a verification failure.
+pub fn build_loss_vector(
+    atom: &Atom,
+    failure_type: &str,
+    counterexample: Option<&serde_json::Value>,
+    span: &Span,
+) -> serde_json::Value {
+    let counter_example = counterexample
+        .cloned()
+        .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+
+    json!({
+        "status": "verification_failed",
+        "error_type": failure_type,
+        "location": {
+            "file": span.file.clone(),
+            "line": span.line
+        },
+        "reconstruction_loss": {
+            "violated_property": atom.ensures.trim(),
+            "counter_example": counter_example
+        },
+        "feedback_instruction": build_contextual_suggestion(failure_type, counterexample, None)
+    })
+}
+
+/// Return true when the Loss Vector represents zero reconstruction loss.
+pub fn is_reconstruction_loss_empty(loss_vector: &serde_json::Value) -> bool {
+    let Some(reconstruction_loss) = loss_vector.get("reconstruction_loss") else {
+        return true;
+    };
+    if reconstruction_loss.is_null() {
+        return true;
+    }
+    if reconstruction_loss
+        .get("is_zero_loss")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        return true;
+    }
+
+    reconstruction_loss
+        .get("counter_example")
+        .map(|counter_example| match counter_example {
+            serde_json::Value::Object(entries) => entries.is_empty(),
+            serde_json::Value::Array(entries) => entries.is_empty(),
+            serde_json::Value::Null => true,
+            _ => false,
+        })
+        .unwrap_or(true)
 }
 
 /// Build semantic feedback for division-by-zero violations.

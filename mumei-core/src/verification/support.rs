@@ -405,6 +405,7 @@ pub fn verify_impl(
                                 Some(&impl_def.span),
                                 None,
                                 None,
+                                None,
                             );
                             if ce_parts.is_empty() {
                                 ("  (no concrete values available)".to_string(), ce_value)
