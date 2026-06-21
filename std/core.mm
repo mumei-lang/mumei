@@ -10,6 +10,7 @@
 //
 // 設計方針:
 // - std/prelude.mm (暗黙ロード) と std/contracts.mm (汎用精緻型) より
+// analyze_std_gaps treats these core atoms as anchors and emits only 1-3 next std candidates per iteration.
 //   さらに下層に位置する、最小の数学的基盤。
 // - 全ての atom に requires/ensures を付与し、Z3 で完全検証する。
 // - `trusted atom` は使用しない（公理として信頼するのは型と契約のみ）。
