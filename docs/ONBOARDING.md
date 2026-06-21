@@ -15,11 +15,13 @@ Mumei can start from existing code or natural-language requirements, then gradua
 
 ```bash
 # 既存コードを渡すだけ
-uv run mumei-agent audit --code-file payment.py
+uv run mumei-agent audit --code-file payment.py --auto-migrate --auto-heal
 uv run mumei-agent validate-code --input payment.py --language python
 printf '%s\n' "残高不足の場合はエラーを返す" > spec.txt
 uv run mumei-agent validate-spec-to-code --spec spec.txt --code payment.py --language python
 ```
+
+`audit --auto-migrate --auto-heal` and MCP `scan_and_fix` are the canonical no-`.mm` route. Read their artifacts as `spec_health_issues`, `verification_violations`, `cross_validation_gaps`, `next_steps`, `migration_hints`, `healed_files`, and `heal_errors`. `cross_spec.json.contract_consistency[]` maps to agent `missing_constraints[]`; `global_invariant_conflicts[]` maps to `divergences[]`; `circular_dependencies[]` maps to `drift_issues[]`.
 
 この段階では `.mm` ファイルは不要です。出力された counterexample、仕様とコードの不一致、足りない事前条件を移行バックログとして扱います。
 `audit` の出力に `verification_violations` や `cross_validation_gaps` が含まれる場合は、`next_steps:` フィールドも確認してください。各項目は、次に実行すべき確認コマンド、仕様・コードの修正候補、または `.mm` 移行前に解消すべきギャップを示します。

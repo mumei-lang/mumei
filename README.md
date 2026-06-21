@@ -10,6 +10,13 @@ Mumei is a formal verification toolchain that can start from existing code (for 
 
 > existing code / natural language spec → MCP or mumei-agent → Z3-backed diagnostics → optional `.mm` migration → LLVM / proof artifacts
 
+Canonical no-`.mm` artifact set: `mumei-agent audit --auto-migrate --auto-heal`
+and MCP `scan_and_fix` both return `spec_health_issues`,
+`verification_violations`, `cross_validation_gaps`, `next_steps`,
+`migration_hints`, `healed_files`, and `heal_errors`. Spec-only checks and
+spec↔code checks share `contradiction_type` values `spec_internal`,
+`spec_overconstraint`, `spec_vacuity`, and `spec_vs_code`.
+
 ---
 
 ## Start without writing .mm (mumei-agent)
@@ -118,10 +125,17 @@ MCP agents can call spec-health or verification tools depending on whether the i
 Run the agent on existing code and specs first. No `.mm` source is required.
 
 ```bash
+mumei-agent audit --code-file src/payment.py --auto-migrate --auto-heal
 mumei-agent validate-code --input src/payment.py --language python
 mumei-agent validate-spec-to-code --spec spec.txt --code src/payment.py --language python
 ```
 
+
+MCP clients should use `scan_and_fix` for the same audit → migrate-suggest →
+heal route. Cross-spec compiler artifacts use the same artifact vocabulary:
+`cross_spec.json.contract_consistency[]` maps to agent `missing_constraints[]`,
+`global_invariant_conflicts[]` maps to `divergences[]`, and
+`circular_dependencies[]` maps to `drift_issues[]`.
 Use the resulting counter-examples, drift reports, and suggested contracts as the migration backlog.
 
 ### Step 1: Start writing the critical spec surface in `.mm`

@@ -415,6 +415,7 @@ The report includes:
 - `global_invariants[]`: repeated postcondition invariants and the `source_files` that contributed them.
 - `global_invariant_conflicts[]`: directly contradictory postcondition bounds across atoms or files, with a natural-language `message` and `suggested_fix`.
 - `dependency_graph[]` and `circular_dependencies[]`: cross-file atom call relationships.
+- `agent_artifact_mapping[]`: mechanical correspondence for human/MCP consumers: `contract_consistency[]` ↔ mumei-agent `missing_constraints[]`, `global_invariant_conflicts[]` ↔ `divergences[]`, and `circular_dependencies[]` ↔ `drift_issues[]`.
 
 When reading a conflict, first compare the reported files, then decide whether the bounds should be unified, made conditional with stronger `requires`, or split into domain-specific atoms.
 

@@ -11,7 +11,7 @@ keywords: "mumei proof certificate, formal verification, verified imports, Z3, L
 
 ## Roadmap authority and vocabulary
 
-`docs/CROSS_PROJECT_ROADMAP.md` is the single top-level roadmap for cross-repository harness work. This certificate spec is the mumei-side contract surface for that roadmap and uses these canonical fields without aliases: `harness_contract`, `intent_fidelity`, `artifact_paths`, `budget_policy_fingerprint`, and `lean_verified`.
+`docs/CROSS_PROJECT_ROADMAP.md` is the single top-level roadmap for cross-repository harness work. This certificate spec is the mumei-side contract surface for that roadmap and uses these canonical fields without aliases: `harness_contract`, `intent_fidelity`, `artifact_paths`, `budget_policy_fingerprint`, and `lean_verified`. Cross-spec and no-`.mm` review artifacts use the same names as mumei-agent: `contract_consistency[]` maps to `missing_constraints[]`, `global_invariant_conflicts[]` maps to `divergences[]`, `circular_dependencies[]` maps to `drift_issues[]`, and Lean escalation remains limited to Z3 `unknown` / timeout / resource-limit obligations that cannot be closed automatically.
 
 ## Certificate Format
 
