@@ -9,6 +9,26 @@ keywords: "mumei roadmap, formal verification roadmap, Z3, Lean4, LLVM, proof-dr
 
 > Three strategic roadmap priorities to evolve Mumei from an experimental language to a practical tool.
 
+## Cross-project source of truth
+
+`docs/CROSS_PROJECT_ROADMAP.md` is the only top-level roadmap for cross-repository priority order. This file keeps mumei-local implementation checkpoints and must use the same contract vocabulary: `harness_contract`, `intent_fidelity`, `artifact_paths`, `budget_policy_fingerprint`, and `lean_verified`. Future work is prioritized toward docs-sync and harness-contract regression prevention before reopening deferred portability projects.
+
+### Contract regression gate
+
+When this roadmap or the cross-project roadmap changes, reviewers should include the major referenced docs in the diff review:
+
+- `docs/CROSS_PROJECT_ROADMAP.md`
+- `docs/ROADMAP.md`
+- `docs/PROOF_CERTIFICATE.md`
+- `../mumei-agent/README.md`
+- `../mumei-agent/docs/VERIFICATION_WORKFLOW_GUIDE.md`
+- `../mumei-agent/docs/ROADMAP.md`
+- `../mumei-lean/README.md`
+- `../mumei-lean/docs/BRIDGE_HARNESS_SPEC.md`
+- `../mumei-lean/docs/LEAN_HARNESS_CONTRACT.md`
+
+The same PR/changeset should record the relevant bridge/MCP/audit/spec test commands run in `mumei-agent/tests/` and `mumei-lean/tests/`.
+
 ## Overview
 
 | Priority | Theme | Goal | Status |
@@ -654,13 +674,18 @@ Enables mumei's verified code to actually run — both interactively in the REPL
 - ✅ Verified State Machine Pattern (`examples/order_state_machine.mm`) — temporal effects for business process modeling
 - See [`docs/PATTERNS.md`](PATTERNS.md) for detailed pattern documentation
 
-**P7-C: Wasm Target** — Deferred
+**P7-C: Wasm Target** — Deferred / 今は着手しない
 - WebAssembly compilation target for browser/edge execution
-- Will be implemented after P7-A/B stabilize
+- Not started now because runtime ABI, distribution evidence, and `artifact_paths` / `harness_contract` expectations are still changing
+- Revisit only after docs-sync and harness-contract regression gates are stable
 
 **Future: Developer Experience** — Deferred
 - Enhanced error messages, IDE integration improvements, debugging tools
 - Will be implemented after runtime completion is stable
+
+**SI-4: no_std Ecosystem** — Deferred / 今は着手しない
+- Not started now because `reqwest`, `serde_json`, pthread/runtime pieces, and stdlib FFI assumptions require a broader redesign
+- Keep completed runtime portability work intact; current priority is contract vocabulary drift prevention across docs and harnesses
 
 **Files**:
 - `mumei-emit-llvm/src/jit.rs` — JIT execution engine (5 unit tests)

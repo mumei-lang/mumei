@@ -2,6 +2,22 @@
 
 > mumei エコシステム全体の次期ロードマップ。mumei の思想（proof-first / AI生成コード → 検証済み資産への変換）に沿って優先度を設定。
 
+## Canonical cross-project contract
+
+This file is the single top-level roadmap for `mumei`, `mumei-agent`, `mumei-lean`, and demo/tap follow-ups. Repository-local roadmaps may track local acceptance details, but they must not introduce a competing priority order. When wording diverges, align local docs back to this file first.
+
+Canonical harness vocabulary:
+
+| Term | Contract meaning | Primary owners |
+| --- | --- | --- |
+| `harness_contract` | Identifier/path for the policy that binds stages, gates, failure taxonomy, and evidence expectations. | `mumei` certificate metadata; agent/Lean/demo harness docs |
+| `intent_fidelity` | Review metadata showing whether generated specs/artifacts still match the original natural-language intent. | `mumei-agent`, `mumei-demo`, certificate consumers |
+| `artifact_paths` | Ordered evidence paths that CI, demos, or MCP clients must collect/compare. | compiler proof certificates, agent audit reports, Lean bridge summaries |
+| `budget_policy_fingerprint` | Stable hash of the retry/search policy used when producing evidence. | agent self-healing/audit, compiler proof certificates |
+| `lean_verified` | Certificate status for an atom whose Lean theorem was accepted by the current translator contract and source hash. | `mumei-lean` bridge; `mumei` certificate resolver |
+
+Current priority after the completed P11/P14 integration is docs-sync and harness-contract regression prevention: keep the vocabulary above stable, keep local docs subordinate to this roadmap, and run the bridge/MCP/audit/spec regression gates whenever those contracts move.
+
 ## 現状サマリ
 
 **mumei (コンパイラ)**: P1〜P3の戦略ロードマップ、Plan 1〜24すべて実装済み。エフェクトシステム、MIR、temporal verification、modular verification、LSP completion/definitionまで到達。
@@ -276,9 +292,11 @@ inkwell の ExecutionEngine (MCJIT) を使用した JIT 実行:
 - `atom main()` をエントリポイントとして C の `main` にエクスポート
 - ランタイムライブラリ: `@__mumei_resource_{name}` mutex / `@__effect_{name}` ハンドラのスタブ
 
-### P7-C: Wasm ターゲット — ⏸️ Deferred
+### P7-C: Wasm Target — ⏸ Deferred / not starting now
 
 **Repository**: `mumei-lang/mumei`
+
+**Not starting now**: Emitter Plugin Architecture lets `mumei-emit-wasm` be added later as an external library without moving it into core. Runtime ABI, distribution evidence, and `artifact_paths` / `harness_contract` are still changing, so near-term priority stays on docs-sync and harness-contract regression prevention.
 
 **意図的に保留**。Emitter Plugin Architecture (Phase 3) により、`mumei-emit-wasm` を外部プラグインとして core に触れずに後から追加可能。P7-A/P7-B の実行基盤が安定した後に検討する。
 
@@ -462,7 +480,9 @@ graph TD
 
 ---
 
-### SI-4: no_std Ecosystem（ベアメタル）— ⏸️ Deferred
+### SI-4: no_std Ecosystem — ⏸ Deferred / not starting now
+
+**Not starting now**: `no_std` requires redesigning `reqwest`, `serde_json`, pthread/runtime, and stdlib FFI assumptions. Completed items remain in place; future priority is docs-sync plus regression prevention for `harness_contract`, `artifact_paths`, `budget_policy_fingerprint`, and `lean_verified`.
 
 **目的**: no_std 環境での動作を安定させ、マイコン等で「スタックオーバーフローが物理的に起きない」制御ソフトのデモを作る。
 

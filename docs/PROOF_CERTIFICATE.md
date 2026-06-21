@@ -9,6 +9,10 @@ keywords: "mumei proof certificate, formal verification, verified imports, Z3, L
 
 > Documentation for P5 — Verified Asset Distribution (Proof Certificate Chain + Package Registry + Verified Import)
 
+## Roadmap authority and vocabulary
+
+`docs/CROSS_PROJECT_ROADMAP.md` is the single top-level roadmap for cross-repository harness work. This certificate spec is the mumei-side contract surface for that roadmap and uses these canonical fields without aliases: `harness_contract`, `intent_fidelity`, `artifact_paths`, `budget_policy_fingerprint`, and `lean_verified`.
+
 ## Certificate Format
 
 A proof certificate (`.proof-cert.json`) is a JSON file containing cryptographically verifiable records of atom verification results.
@@ -237,7 +241,7 @@ Mumei emits a typed escalation bundle for Z3 obligations that are outside the de
 escalation_bundle.json -> generated Lean source -> .olean/result certificate -> upgraded proof certificate
 ```
 
-The Mumei compiler never accepts an upgraded `lean_verified` atom unless the atom source hash still matches and the translator contract metadata is current. A mismatched `translator_version` or `bridge_lemma_hash` is reported as stale and requires re-translation/rebuild.
+The Mumei compiler never accepts an upgraded `lean_verified` atom unless the atom source hash still matches and the translator contract metadata is current. A mismatched `translator_version` or `bridge_lemma_hash` is reported as `stale_translator`; missing Lean tooling is `lake_missing`; incomplete generated obligations are `partial_translation`. These names match the Lean bridge contract and are the only failure-class terms consumers should key on.
 
 ### Type system mapping
 
