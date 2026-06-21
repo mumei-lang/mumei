@@ -419,6 +419,13 @@ class TestArchitecturalRefactoringTools:
                                 "warnings": [],
                             }
                         ],
+                        "global_invariant_conflicts": [
+                            {
+                                "left_invariant": "result >= 0",
+                                "right_invariant": "result < 0",
+                                "message": "global invariant conflict",
+                            }
+                        ],
                         "circular_dependencies": [],
                         "dependency_graph": [
                             {
@@ -457,6 +464,10 @@ body: x;
 
         assert payload["conflicts"][0]["caller_atom"] == "caller"
         assert payload["conflicts"][0]["callee_requires"] == "x >= 10"
+        assert payload["contract_consistency"][0]["caller_atom"] == "caller"
+        assert payload["global_invariant_conflicts"][0]["message"] == (
+            "global invariant conflict"
+        )
         assert payload["agent_artifact_mapping"][0]["agent_field"] == "missing_constraints[]"
         assert payload["artifact_set"]["mumei_agent"] == [
             "missing_constraints[]",

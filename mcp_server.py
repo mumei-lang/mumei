@@ -1105,7 +1105,11 @@ def analyze_contract_conflicts(source_code: str) -> str:
 
         return json.dumps(
             {
+                "contract_consistency": cross_spec.get("contract_consistency", []),
                 "conflicts": conflicts,
+                "global_invariant_conflicts": cross_spec.get(
+                    "global_invariant_conflicts", []
+                ),
                 "circular_dependencies": cross_spec.get("circular_dependencies", []),
                 "dependency_graph": cross_spec.get("dependency_graph", []),
                 "agent_artifact_mapping": cross_spec.get("agent_artifact_mapping", []),
