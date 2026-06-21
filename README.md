@@ -17,6 +17,20 @@ and MCP `scan_and_fix` both return `spec_health_issues`,
 spec↔code checks share `contradiction_type` values `spec_internal`,
 `spec_overconstraint`, `spec_vacuity`, and `spec_vs_code`.
 
+## Canonical harness and Lean vocabulary
+
+`docs/CROSS_PROJECT_ROADMAP.md` is the top-level contract. Mumei-side user docs, MCP outputs, and proof certificates use these field names as the only canonical vocabulary; do not add synonyms in local docs or JSON payloads:
+
+| Field | Canonical meaning |
+| --- | --- |
+| `harness_contract` | Path or identifier for the scenario/harness policy that binds stages, gates, failure taxonomy, and evidence expectations. |
+| `intent_fidelity` | Natural-language intent traceability metadata used to review whether generated specs/artifacts still match the original request. |
+| `artifact_paths` | Ordered evidence paths that CI, demos, MCP clients, or certificate consumers should collect and compare. |
+| `budget_policy_fingerprint` | Stable fingerprint of the retry/search/budget policy used when evidence was produced. |
+| `lean_verified` | Atom status accepted only when the current `translator_version` and `bridge_lemma_hash` match both the atom certificate fields and Lean result metadata. Stale or missing metadata is rejected as `stale_translator`, not treated as proven. |
+
+No-`.mm` entry remains delegated to mumei-agent: `audit --code-file ... --auto-migrate --auto-heal` and MCP `scan_and_fix` emit `spec_health_issues`, `verification_violations`, `cross_validation_gaps`, `migration_hints`, `healed_files`, and `heal_errors`. Mumei consumes the generated `.mm`, proof certificates, MCP summaries, and Lean bridge outputs without renaming those fields.
+
 ---
 
 ## Start without writing .mm (mumei-agent)
