@@ -1869,6 +1869,8 @@ def list_std_catalog() -> str:
 
 # std/ ディレクトリの「欠落コンポーネント」を推論するためのルール。
 # (condition_fn, proposal_factory) のタプルで、条件を満たすときに提案を生成する。
+_STD_GAP_MAX_NEXT_CANDIDATES = 3
+
 _STD_GAP_RULES: list[dict] = [
     {
         "target": "std/iter.mm",
@@ -2317,9 +2319,12 @@ def analyze_std_gaps() -> str:
         return (-p["score"], unmet, diff)
 
     proposals.sort(key=_rank_key)
-    for i, p in enumerate(proposals[:3], start=1):
+    next_implementation_candidates = proposals[
+        :_STD_GAP_MAX_NEXT_CANDIDATES
+    ]
+    for i, p in enumerate(next_implementation_candidates, start=1):
         p["priority"] = i
-    proposals = proposals[:3]
+    proposals = next_implementation_candidates
 
     # Stable order for JSON output.
     usage_frequency_sorted = dict(
@@ -2332,6 +2337,16 @@ def analyze_std_gaps() -> str:
         "todo_comments": todo_comments,
         "usage_frequency": usage_frequency_sorted,
         "core_seed": core_seed,
+        "candidate_policy": {
+            "min_candidates": 1 if proposals else 0,
+            "max_candidates": _STD_GAP_MAX_NEXT_CANDIDATES,
+            "selection": (
+                "rank by score, unmet dependencies, and difficulty; implement "
+                "only the returned next_implementation_candidates before "
+                "rerunning analyze_std_gaps"
+            ),
+        },
+        "next_implementation_candidates": next_implementation_candidates,
         "proposals": proposals,
     }
     return json.dumps(result, indent=2, ensure_ascii=False)
