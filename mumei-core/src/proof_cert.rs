@@ -1915,6 +1915,28 @@ mod tests {
             status_opt_in[0],
             ("hard_lemma".to_string(), "proven".to_string())
         );
+
+        cert.atoms[0].bridge_lemma_hash = "old-bridge-hash".to_string();
+        let status_stale_atom_hash = verify_certificate(&cert, &atoms, true);
+        assert_eq!(
+            status_stale_atom_hash[0],
+            ("hard_lemma".to_string(), "stale_translator".to_string())
+        );
+
+        cert.atoms[0].bridge_lemma_hash = verification::LEAN_BRIDGE_LEMMA_HASH.to_string();
+        cert.atoms[0].lean_result_metadata = Some(LeanResultMetadata {
+            status: "lean_verified".to_string(),
+            theorem_name: "hard_lemma_correct".to_string(),
+            translator_version: verification::LEAN_TRANSLATOR_VERSION.to_string(),
+            bridge_lemma_hash: "old-bridge-hash".to_string(),
+            proof_path: "Generated/Test.lean".to_string(),
+            diagnostics: vec![],
+        });
+        let status_stale_result_metadata = verify_certificate(&cert, &atoms, true);
+        assert_eq!(
+            status_stale_result_metadata[0],
+            ("hard_lemma".to_string(), "stale_translator".to_string())
+        );
     }
 
     #[test]

@@ -718,6 +718,7 @@ fn apply_lean_cert_to_proof_certificate(
 }
 
 fn lean_candidate_metadata_is_current(candidate: &proof_cert::EscalationCandidate) -> bool {
+    // `lean_verified` is accepted only under the current mumei-lean translator contract.
     if candidate.translator_version != verification::LEAN_TRANSLATOR_VERSION
         || candidate.bridge_lemma_hash != verification::LEAN_BRIDGE_LEMMA_HASH
     {
