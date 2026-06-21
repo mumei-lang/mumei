@@ -6,14 +6,15 @@ keywords: "mumei onboarding, formal verification, existing code audit, mumei-age
 ---
 
 
+# Mumei Onboarding: from existing code to `.mm`
+
+Mumei can start from existing code or natural-language requirements, then gradually move the most important logic into `.mm`. Use this path when you want formal feedback before committing to a full `.mm` rewrite.
+
 ## Canonical vocabulary
 
 Follow `docs/CROSS_PROJECT_ROADMAP.md` as the top-level contract. User-facing onboarding uses only `harness_contract`, `intent_fidelity`, `artifact_paths`, `budget_policy_fingerprint`, and `lean_verified` for mumei-side evidence. The no-`.mm` path keeps the mumei-agent names `spec_health_issues`, `verification_violations`, `cross_validation_gaps`, `migration_hints`, `healed_files`, and `heal_errors`; do not rename them when handing users from `audit` / `scan_and_fix` into generated `.mm` verification.
 
 `lean_verified` is not a generic success label. Mumei accepts it only when the atom certificate and Lean metadata both carry the current `translator_version` and `bridge_lemma_hash`; otherwise CLI, MCP consumers, and certificate verification must treat the atom as stale/unproven.
-# Mumei Onboarding: from existing code to `.mm`
-
-Mumei can start from existing code or natural-language requirements, then gradually move the most important logic into `.mm`. Use this path when you want formal feedback before committing to a full `.mm` rewrite.
 
 ## Step 0: `.mm`を書かずにバグ指摘を受ける
 

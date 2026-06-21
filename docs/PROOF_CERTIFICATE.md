@@ -10,7 +10,7 @@ keywords: "mumei proof certificate, formal verification, verified imports, Z3, L
 > Documentation for P5 — Verified Asset Distribution (Proof Certificate Chain + Package Registry + Verified Import)
 
 
-### `lean_verified` acceptance contract
+## `lean_verified` acceptance contract
 
 `lean_verified` is accepted by mumei only when all of the following are true:
 
