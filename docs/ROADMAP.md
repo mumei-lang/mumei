@@ -46,8 +46,9 @@ The 2026-Q2 forge pass added or refreshed high-priority standard-library modules
 - `std/math/factorial.mm` — bounded factorial step and safe-range predicate
 - `std/math/fibonacci.mm` — accumulator-step and loop-decrease witnesses
 - `std/string/validator.mm` — ASCII numeric and alphanumeric predicates
+- `std/core.mm` — `safe_to_index` and `is_nonzero` were added as the next core-seed atoms for bounded-index and NonZero follow-on work
 
-All listed modules were checked with `mumei verify --proof-cert`; proof certificates were emitted without Lean escalation candidates.
+All listed modules were checked with `mumei verify --proof-cert`; proof certificates were emitted without Lean escalation candidates. `analyze_std_gaps` now exposes a `core_seed` block and per-proposal `extension_anchor` metadata for proposals that depend on `std/core.mm`, keeping vStd continuation anchored on the existing core axioms.
 
 ---
 

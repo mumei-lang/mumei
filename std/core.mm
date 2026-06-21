@@ -83,6 +83,25 @@ atom safe_narrow(x: i64, min_val: i64, max_val: i64)
         else { if x > max_val { max_val } else { x } }
     };
 
+// --- safe_to_index ---
+// Build a safe array index satisfying 0 <= result < len.
+atom safe_to_index(x: i64, len: i64)
+    requires: len > 0;
+    ensures: result >= 0 && result < len;
+    body: {
+        if x < 0 { 0 }
+        else { if x >= len { len - 1 } else { x } }
+    };
+
+// --- is_nonzero ---
+// Lightweight NonZero predicate projection (0 = false, 1 = true).
+atom is_nonzero(x: i64)
+    requires: true;
+    ensures: result >= 0 && result <= 1;
+    body: {
+        if x != 0 { 1 } else { 0 }
+    };
+
 // --- checked_add ---
 // オーバーフロー検出付き飽和加算。
 // 両オペランドが非負かつ max_val 以下のとき、合計が max_val を超えたら max_val を返す。
