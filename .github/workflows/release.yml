@@ -276,9 +276,12 @@ jobs:
           echo "LIB=$z3LibDir;$currentLib" >> $env:GITHUB_ENV
           # Save z3Root for later DLL copy step
           echo "Z3_ROOT=$z3Root" >> $env:GITHUB_ENV
-      - name: Build release binary (Unix non-musl)
-        if: "!contains(matrix.target, 'musl') && runner.os != 'Windows'"
+      - name: Build release binary (Linux non-musl)
+        if: runner.os == 'Linux' && !contains(matrix.target, 'musl')
         run: cargo build --release --target ${{ matrix.target }} --features static-link-z3
+      - name: Build release binary (macOS)
+        if: runner.os == 'macOS'
+        run: cargo build --release --target ${{ matrix.target }}
       - name: Build release binary (Windows)
         if: runner.os == 'Windows'
         run: cargo build --release --target ${{ matrix.target }}
@@ -532,34 +535,42 @@ jobs:
           publish_dir: ./gh-pages-dist
           publish_branch: gh-pages
 
-  # --- Homebrew Formula 自動更新 ---
+  # --- Homebrew Formula auto-update ---
   update-homebrew:
     needs: release
     runs-on: ubuntu-latest
-    # Homebrew tap の更新失敗でリリース全体を失敗にしない
-    continue-on-error: true
+    if: github.event_name != 'workflow_dispatch' || inputs.dry_run != true
     steps:
-      - name: Checkout mumei (for generate_formula.py)
-        uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-      - name: Validate HOMEBREW_TAP_TOKEN
+      - name: Check HOMEBREW_TAP_TOKEN
+        id: homebrew-token
         env:
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
           if [ -z "${HOMEBREW_TAP_TOKEN}" ]; then
-            echo "::error::HOMEBREW_TAP_TOKEN secret is not set. Please configure a valid Personal Access Token with 'contents:write' permission for mumei-lang/homebrew-mumei."
-            exit 1
+            echo "::warning::HOMEBREW_TAP_TOKEN is not set; skipping Homebrew tap update. GitHub Release creation is already complete."
+            echo "should_update=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
-          # トークンの読み取り権限を検証
-          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: token ${HOMEBREW_TAP_TOKEN}" https://api.github.com/repos/mumei-lang/homebrew-mumei)
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${HOMEBREW_TAP_TOKEN}" https://api.github.com/repos/mumei-lang/homebrew-mumei)
           if [ "${HTTP_STATUS}" != "200" ]; then
-            echo "::error::HOMEBREW_TAP_TOKEN is invalid or does not have access to mumei-lang/homebrew-mumei (HTTP ${HTTP_STATUS}). Please update the secret with a valid token."
-            exit 1
+            echo "::warning::HOMEBREW_TAP_TOKEN is invalid or cannot access mumei-lang/homebrew-mumei (HTTP ${HTTP_STATUS}); skipping Homebrew tap update. GitHub Release creation is already complete."
+            echo "should_update=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          echo "should_update=true" >> "$GITHUB_OUTPUT"
           echo "Token validation passed."
+      - name: Skip Homebrew Formula update
+        if: steps.homebrew-token.outputs.should_update != 'true'
+        run: echo "Homebrew Formula update skipped; release artifacts remain published."
+      - name: Checkout mumei (for generate_formula.py)
+        if: steps.homebrew-token.outputs.should_update == 'true'
+        uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        if: steps.homebrew-token.outputs.should_update == 'true'
+        with:
+          path: artifacts
       - name: Compute SHA256 checksums
+        if: steps.homebrew-token.outputs.should_update == 'true'
         id: sha256
         run: |
           for f in artifacts/*/mumei-*.tar.gz artifacts/*/mumei-*.zip; do
@@ -571,6 +582,7 @@ jobs:
             echo "${name}: ${sha}"
           done
       - name: Checkout homebrew-mumei
+        if: steps.homebrew-token.outputs.should_update == 'true'
         env:
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
@@ -581,6 +593,7 @@ jobs:
             git remote add origin "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/mumei-lang/homebrew-mumei.git"
           }
       - name: Generate Homebrew Formula
+        if: steps.homebrew-token.outputs.should_update == 'true'
         env:
           VERSION: ${{ github.ref_name }}
           SHA_MACOS_ARM: ${{ steps.sha256.outputs['mumei-aarch64-apple-darwin_sha256'] }}
@@ -597,13 +610,13 @@ jobs:
             --sha-arm-linux "${SHA_LINUX_ARM}" \
             --output homebrew-mumei/Formula/mumei.rb
       - name: Push formula to homebrew-mumei
+        if: steps.homebrew-token.outputs.should_update == 'true'
         env:
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
           cd homebrew-mumei
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          # push 前にリモート URL へトークンを明示的に設定
           git remote set-url origin "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/mumei-lang/homebrew-mumei.git"
           git add -A
           if git diff --cached --quiet; then
@@ -611,5 +624,7 @@ jobs:
             exit 0
           fi
           git commit -m "Update Mumei formula to ${{ github.ref_name }}"
-          # Push to main (handles both empty and existing repos)
-          git push origin HEAD:main
+          if ! git push origin HEAD:main; then
+            echo "::warning::Failed to push Formula to mumei-lang/homebrew-mumei; GitHub Release creation is already complete."
+            exit 0
+          fi
