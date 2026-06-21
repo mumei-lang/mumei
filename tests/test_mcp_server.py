@@ -419,12 +419,27 @@ class TestArchitecturalRefactoringTools:
                                 "warnings": [],
                             }
                         ],
+                        "global_invariant_conflicts": [
+                            {
+                                "left_invariant": "result >= 0",
+                                "right_invariant": "result < 0",
+                                "message": "global invariant conflict",
+                            }
+                        ],
                         "circular_dependencies": [],
                         "dependency_graph": [
                             {
                                 "atom_name": "caller",
                                 "dependencies": ["callee"],
                                 "dependents": [],
+                            }
+                        ],
+                        "agent_artifact_mapping": [
+                            {
+                                "cross_spec_field": "contract_consistency[]",
+                                "agent_field": "missing_constraints[]",
+                                "contradiction_type": "spec_vs_code",
+                                "description": "contract mismatch",
                             }
                         ],
                         "summary": {"inconsistent_calls": 1},
@@ -449,6 +464,16 @@ body: x;
 
         assert payload["conflicts"][0]["caller_atom"] == "caller"
         assert payload["conflicts"][0]["callee_requires"] == "x >= 10"
+        assert payload["contract_consistency"][0]["caller_atom"] == "caller"
+        assert payload["global_invariant_conflicts"][0]["message"] == (
+            "global invariant conflict"
+        )
+        assert payload["agent_artifact_mapping"][0]["agent_field"] == "missing_constraints[]"
+        assert payload["artifact_set"]["mumei_agent"] == [
+            "missing_constraints[]",
+            "divergences[]",
+            "drift_issues[]",
+        ]
         assert payload["summary"]["inconsistent_calls"] == 1
 
     def test_propose_interface_refactoring_returns_relax_requires(self) -> None:

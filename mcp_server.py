@@ -1105,9 +1105,28 @@ def analyze_contract_conflicts(source_code: str) -> str:
 
         return json.dumps(
             {
+                "contract_consistency": cross_spec.get("contract_consistency", []),
                 "conflicts": conflicts,
+                "global_invariant_conflicts": cross_spec.get(
+                    "global_invariant_conflicts", []
+                ),
                 "circular_dependencies": cross_spec.get("circular_dependencies", []),
                 "dependency_graph": cross_spec.get("dependency_graph", []),
+                "agent_artifact_mapping": cross_spec.get("agent_artifact_mapping", []),
+                "artifact_set": {
+                    "mumei_cross_spec": [
+                        "contract_consistency[]",
+                        "global_invariant_conflicts[]",
+                        "circular_dependencies[]",
+                    ],
+                    "mumei_agent": [
+                        "missing_constraints[]",
+                        "divergences[]",
+                        "drift_issues[]",
+                    ],
+                    "human_review_branch": "P14-D",
+                    "mcp_tool": "analyze_contract_conflicts",
+                },
                 "summary": cross_spec.get("summary", {}),
                 "success": result.returncode == 0,
             },

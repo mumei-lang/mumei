@@ -299,7 +299,10 @@ pub(crate) fn load_cross_spec_files(
 ) {
     for file in cross_spec_files {
         if verbose {
-            println!("  🔗 Loading cross-spec file '{}'...", file);
+            println!(
+                "  🔗 Loading cross-spec file '{}' for shared human/MCP artifact mapping...",
+                file
+            );
         }
         let (mut extra_items, extra_env, mut extra_imports, _source) =
             load_and_prepare_with_full_options(file, strict_imports, allow_lean_verified);
