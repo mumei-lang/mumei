@@ -10,6 +10,18 @@ Mumei は、既存の外部言語コード（たとえば Python、Rust、Go、T
 
 > existing code / natural language spec → MCP or mumei-agent → Z3-backed diagnostics → optional `.mm` migration → LLVM / proof artifacts
 
+## no-`.mm` の最前面導線
+
+最初の入口は `.mm` を書かない監査契約です。CLI では `mumei-agent audit --code-file ... --auto-migrate --auto-heal`、MCP では `scan_and_fix` を使い、どちらも `audit → migrate-suggest → heal` の順で同じ成果物を返します。ユーザー向けの説明では次の三文言を固定します。
+
+1. 既存コードを渡すだけでバグ箇所を指摘
+2. 仕様から既存コードとの差分を指摘
+3. 仕様単独でおかしい場合を指摘
+
+固定語彙は `harness_contract` / `intent_fidelity` / `artifact_paths` / `budget_policy_fingerprint` / `lean_verified` です。no-`.mm` 成果物は `spec_health_issues` / `verification_violations` / `cross_validation_gaps` / `next_steps` / `migration_hints` / `healed_files` / `heal_errors` を別名なしで使います。
+
+V1 の実装順は `V1-A` と `V1-B` を並行、その後に `V1-C` と `V1-D`、最後に `V1-E` です。`mumei-lean` は Z3 が `unknown` とした義務だけを補完し、`translator_version` と `bridge_lemma_hash` が一致した場合だけ `lean_verified` として扱います。
+
 ---
 
 ## `.mm`を書かずに始める（mumei-agent）

@@ -29,7 +29,25 @@ spec↔code checks share `contradiction_type` values `spec_internal`,
 | `budget_policy_fingerprint` | Stable fingerprint of the retry/search/budget policy used when evidence was produced. |
 | `lean_verified` | Atom status accepted only when the current `translator_version` and `bridge_lemma_hash` match both the atom certificate fields and Lean result metadata. Stale or missing metadata is rejected as `stale_translator`, not treated as proven. |
 
-No-`.mm` entry remains delegated to mumei-agent: `audit --code-file ... --auto-migrate --auto-heal` and MCP `scan_and_fix` emit `spec_health_issues`, `verification_violations`, `cross_validation_gaps`, `migration_hints`, `healed_files`, and `heal_errors`. Mumei consumes the generated `.mm`, proof certificates, MCP summaries, and Lean bridge outputs without renaming those fields.
+## No-`.mm` front door and V1 priority
+
+The first user-facing route is always the no-`.mm` audit contract:
+
+```bash
+mumei-agent audit --code-file ... --auto-migrate --auto-heal
+```
+
+MCP clients use `scan_and_fix` for the same `audit -> migrate-suggest -> heal` gate order. Treat that route as the front door before asking users to author `.mm` files. The V1 rollout order is fixed:
+
+1. `V1-A` natural-language spec health and `V1-B` existing-code audit can land in parallel.
+2. `V1-C` spec-to-code conformance and `V1-D` code-to-spec conformance come after both V1-A and V1-B have stable artifacts.
+3. `V1-E` human review is last and starts from `next_steps`, not from renamed issue buckets.
+
+`mumei-lean` is extended only as the complement for Z3 `unknown` obligations. Do not route `sat`, `unsat`, parser failures, or ordinary audit findings through Lean; only matching `translator_version` + `bridge_lemma_hash` evidence can upgrade an `unknown` atom to `lean_verified`.
+
+Every PR that changes this contract should review `docs/CROSS_PROJECT_ROADMAP.md` and the local roadmap together, then record the bridge/MCP/audit/spec regression commands from `mumei-agent/tests/` and `mumei-lean/tests/` in the PR evidence.
+
+No-`.mm` entry remains delegated to mumei-agent: `audit --code-file ... --auto-migrate --auto-heal` and MCP `scan_and_fix` emit `spec_health_issues`, `verification_violations`, `cross_validation_gaps`, `next_steps`, `migration_hints`, `healed_files`, and `heal_errors`. Mumei consumes the generated `.mm`, proof certificates, MCP summaries, and Lean bridge outputs without renaming those fields.
 
 ---
 

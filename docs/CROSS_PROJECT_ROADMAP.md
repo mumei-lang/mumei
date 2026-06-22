@@ -20,6 +20,24 @@ Canonical harness vocabulary:
 
 Current priority after the completed P11/P14 integration is docs-sync and harness-contract regression prevention: keep the vocabulary above stable, keep local docs subordinate to this roadmap, and run the bridge/MCP/audit/spec regression gates whenever those contracts move.
 
+## No-`.mm` front door and V1 order
+
+The canonical no-`.mm` route is `mumei-agent audit --code-file ... --auto-migrate --auto-heal` and MCP `scan_and_fix`. Both names describe the same contract and must keep the gate order `audit -> migrate-suggest -> heal`:
+
+- `audit` classifies `spec_health_issues`, `verification_violations`, `cross_validation_gaps`, and `next_steps`.
+- `migrate-suggest` / `--auto-migrate` emits `migration_hints` and generated `.mm` skeleton evidence.
+- `heal` / `--auto-heal` emits `healed_files` and `heal_errors`.
+
+The V1 implementation order is fixed across repositories:
+
+1. `V1-A` natural-language spec health and `V1-B` existing-code audit run in parallel.
+2. `V1-C` spec→code conformance and `V1-D` code→spec conformance run after V1-A/V1-B stabilize the artifact contract.
+3. `V1-E` human review comes last and starts from `next_steps` plus `intent_fidelity` evidence.
+
+`mumei-lean` is a complement for Z3 `unknown` only. It must not be documented as a general fallback for `sat`, `unsat`, parser failures, or audit findings; promotion to `lean_verified` requires current `translator_version` and `bridge_lemma_hash`, otherwise the failure condition is `stale_translator`.
+
+Every PR in this area should review this file together with the local roadmap it changes and record the bridge/MCP/audit/spec regression commands from `mumei-agent/tests/` and `mumei-lean/tests/`.
+
 ## 現状サマリ
 
 **mumei (コンパイラ)**: P1〜P3の戦略ロードマップ、Plan 1〜24すべて実装済み。エフェクトシステム、MIR、temporal verification、modular verification、LSP completion/definitionまで到達。

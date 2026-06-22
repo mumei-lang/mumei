@@ -29,6 +29,18 @@ When this roadmap or the cross-project roadmap changes, reviewers should include
 
 The same PR/changeset should record the relevant bridge/MCP/audit/spec test commands run in `mumei-agent/tests/` and `mumei-lean/tests/`.
 
+### V1 execution order
+
+The current cross-repo execution order is fixed and should be reviewed with `docs/CROSS_PROJECT_ROADMAP.md` whenever this local roadmap changes:
+
+| Order | Workstream | Local meaning |
+| --- | --- | --- |
+| 1 | `V1-A` and `V1-B` in parallel | `V1-A` validates natural-language spec health; `V1-B` audits existing code through `mumei-agent audit --code-file ... --auto-migrate --auto-heal` and MCP `scan_and_fix`. |
+| 2 | `V1-C` and `V1-D` | Compare spec→code and code→spec only after V1-A/V1-B artifacts use the stable names `spec_health_issues`, `verification_violations`, `cross_validation_gaps`, `next_steps`, `migration_hints`, `healed_files`, and `heal_errors`. |
+| 3 | `V1-E` | Human review enters through `next_steps` and the traceability metadata, not through renamed issue fields. |
+
+The no-`.mm` front door remains `audit -> migrate-suggest -> heal`. `mumei-lean` is expanded only for Z3 `unknown` obligations and promotes an atom to `lean_verified` only when `translator_version` and `bridge_lemma_hash` match; stale metadata is `stale_translator`.
+
 ## Overview
 
 | Priority | Theme | Goal | Status |
