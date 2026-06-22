@@ -24,7 +24,7 @@ Use `mumei-agent audit --code-file ... --auto-migrate --auto-heal` or MCP `scan_
 2. `migrate-suggest` / `--auto-migrate` emits `migration_hints` and generated `.mm` skeleton paths.
 3. `heal` / `--auto-heal` emits `healed_files` and `heal_errors`.
 
-User-facing wording is fixed to: "既存コードを渡すだけでバグ箇所を指摘", "仕様から既存コードとの差分を指摘", and "仕様単独でおかしい場合を指摘". `next_steps` is the handoff to human review; do not create synonyms for the issue buckets.
+User-facing wording is fixed to: "既存コードを渡すだけでバグ箇所を指摘", "仕様から既存コードとの差分を指摘", and "仕様単独でおかしい場合を指摘". `next_steps` is the handoff to human review; do not create synonyms for the issue buckets or for the post-audit keys `migration_hints`, `healed_files`, and `heal_errors`.
 
 V1 implementation order is fixed: `V1-A` spec health and `V1-B` code audit can proceed in parallel, then `V1-C` spec→code and `V1-D` code→spec conformance, then `V1-E` human review. Lean work is only the Z3-`unknown` complement and must not become a general audit path.
 
