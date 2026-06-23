@@ -9,6 +9,22 @@ keywords: "mumei proof certificate, formal verification, verified imports, Z3, L
 
 > Documentation for P5 — Verified Asset Distribution (Proof Certificate Chain + Package Registry + Verified Import)
 
+
+## `lean_verified` acceptance contract
+
+`lean_verified` is accepted by mumei only when all of the following are true:
+
+1. The atom has `z3_check_result == "lean_verified"` and unchanged `content_hash`.
+2. The atom-level `translator_version` equals the current `LEAN_TRANSLATOR_VERSION` compiled into mumei.
+3. The atom-level `bridge_lemma_hash` equals the current `LEAN_BRIDGE_LEMMA_HASH` compiled into mumei.
+4. `lean_result_metadata` (or the legacy-compatible `lean_metadata`) has `status == "lean_verified"`, a non-empty `theorem_name`, and the same current `translator_version` and `bridge_lemma_hash`.
+
+If any value is missing or stale, certificate verification returns `stale_translator` when `--allow-lean-verified` is enabled and `unproven` when it is not. The same meaning applies to proof-certificate metadata, MCP consumers of certificate JSON, and CLI output from `mumei verify --allow-lean-verified` / `verify-cert --allow-lean-verified`.
+
+## Roadmap authority and vocabulary
+
+`docs/CROSS_PROJECT_ROADMAP.md` is the single top-level roadmap for cross-repository harness work. This certificate spec is the mumei-side contract surface for that roadmap and uses these canonical fields without aliases: `harness_contract`, `intent_fidelity`, `artifact_paths`, `budget_policy_fingerprint`, and `lean_verified`. Cross-spec and no-`.mm` review artifacts use the same names as mumei-agent: `contract_consistency[]` maps to `missing_constraints[]`, `global_invariant_conflicts[]` maps to `divergences[]`, `circular_dependencies[]` maps to `drift_issues[]`, and Lean escalation remains limited to Z3 `unknown` / timeout / resource-limit obligations that cannot be closed automatically.
+
 ## Certificate Format
 
 A proof certificate (`.proof-cert.json`) is a JSON file containing cryptographically verifiable records of atom verification results.
@@ -115,7 +131,7 @@ CLI values take precedence over environment values. `--intent-fidelity` accepts 
   "ensures": "result >= x",
   "translator_version": "mumei-lean-translator-ir-v1",
   "binder_mapping": { "x": "x", "result": "result" },
-  "bridge_lemma_hash": "d8d270d6429a3e31c608dc109876df4ec99ee1243796430775a5b0ef18b5ac24",
+  "bridge_lemma_hash": "a8fd0b115fd29a6e87190bd041dbd5ab7a09ec89af6ac5b10ef152a1a0c0f643",
   "manual_lemma_reason": null,
   "retry_policy_fingerprint": "9bb6d4f2...",
   "attempt_summary": {
@@ -237,7 +253,7 @@ Mumei emits a typed escalation bundle for Z3 obligations that are outside the de
 escalation_bundle.json -> generated Lean source -> .olean/result certificate -> upgraded proof certificate
 ```
 
-The Mumei compiler never accepts an upgraded `lean_verified` atom unless the atom source hash still matches and the translator contract metadata is current. A mismatched `translator_version` or `bridge_lemma_hash` is reported as stale and requires re-translation/rebuild.
+The Mumei compiler never accepts an upgraded `lean_verified` atom unless the atom source hash still matches and the translator contract metadata is current. A mismatched `translator_version` or `bridge_lemma_hash` is reported as `stale_translator`; missing Lean tooling is `lake_missing`; incomplete generated obligations are `partial_translation`. These names match the Lean bridge contract and are the only failure-class terms consumers should key on.
 
 ### Type system mapping
 

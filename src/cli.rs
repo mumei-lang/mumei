@@ -85,10 +85,10 @@ pub(crate) enum Command {
         /// resolution. Off by default for backwards compatibility.
         #[arg(long)]
         allow_lean_verified: bool,
-        /// Enable cross-specification consistency verification across atoms
+        /// Enable cross-specification consistency verification across atoms and emit cross_spec.json with agent_artifact_mapping
         #[arg(long)]
         cross_spec_verify: bool,
-        /// Additional .mm files to include in cross-specification verification
+        /// Additional .mm files to include in cross-specification verification; contract_consistency/global_invariant_conflicts/circular_dependencies map to mumei-agent missing_constraints/divergences/drift_issues
         #[arg(long, value_delimiter = ',')]
         cross_spec_files: Vec<String>,
         /// Enable P8-A spurious counterexample detection

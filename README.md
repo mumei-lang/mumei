@@ -10,6 +10,45 @@ Mumei is a formal verification toolchain that can start from existing code (for 
 
 > existing code / natural language spec → MCP or mumei-agent → Z3-backed diagnostics → optional `.mm` migration → LLVM / proof artifacts
 
+Canonical no-`.mm` artifact set: `mumei-agent audit --auto-migrate --auto-heal`
+and MCP `scan_and_fix` both return `spec_health_issues`,
+`verification_violations`, `cross_validation_gaps`, `next_steps`,
+`migration_hints`, `healed_files`, and `heal_errors`. Spec-only checks and
+spec↔code checks share `contradiction_type` values `spec_internal`,
+`spec_overconstraint`, `spec_vacuity`, and `spec_vs_code`.
+
+## Canonical harness and Lean vocabulary
+
+`docs/CROSS_PROJECT_ROADMAP.md` is the top-level contract. Mumei-side user docs, MCP outputs, and proof certificates use these field names as the only canonical vocabulary; do not add synonyms in local docs or JSON payloads:
+
+| Field | Canonical meaning |
+| --- | --- |
+| `harness_contract` | Path or identifier for the scenario/harness policy that binds stages, gates, failure taxonomy, and evidence expectations. |
+| `intent_fidelity` | Natural-language intent traceability metadata used to review whether generated specs/artifacts still match the original request. |
+| `artifact_paths` | Ordered evidence paths that CI, demos, MCP clients, or certificate consumers should collect and compare. |
+| `budget_policy_fingerprint` | Stable fingerprint of the retry/search/budget policy used when evidence was produced. |
+| `lean_verified` | Atom status accepted only when the current `translator_version` and `bridge_lemma_hash` match both the atom certificate fields and Lean result metadata. Stale or missing metadata is rejected as `stale_translator`, not treated as proven. |
+
+## No-`.mm` front door and V1 priority
+
+The first user-facing route is always the no-`.mm` audit contract:
+
+```bash
+mumei-agent audit --code-file ... --auto-migrate --auto-heal
+```
+
+MCP clients use `scan_and_fix` for the same `audit -> migrate-suggest -> heal` gate order. Treat that route as the front door before asking users to author `.mm` files. The V1 rollout order is fixed:
+
+1. `V1-A` natural-language spec health and `V1-B` existing-code audit can land in parallel.
+2. `V1-C` spec-to-code conformance and `V1-D` code-to-spec conformance come after both V1-A and V1-B have stable artifacts.
+3. `V1-E` human review is last and starts from `next_steps`, not from renamed issue buckets.
+
+`mumei-lean` is extended only as the complement for Z3 `unknown` obligations. Do not route `sat`, `unsat`, parser failures, or ordinary audit findings through Lean; only matching `translator_version` + `bridge_lemma_hash` evidence can upgrade an `unknown` atom to `lean_verified`.
+
+Every PR that changes this contract should review `docs/CROSS_PROJECT_ROADMAP.md` and the local roadmap together, then record the bridge/MCP/audit/spec regression commands from `mumei-agent/tests/` and `mumei-lean/tests/` in the PR evidence.
+
+No-`.mm` entry remains delegated to mumei-agent: `audit --code-file ... --auto-migrate --auto-heal` and MCP `scan_and_fix` emit `spec_health_issues`, `verification_violations`, `cross_validation_gaps`, `next_steps`, `migration_hints`, `healed_files`, and `heal_errors`. Mumei consumes the generated `.mm`, proof certificates, MCP summaries, and Lean bridge outputs without renaming those fields.
+
 ---
 
 ## Start without writing .mm (mumei-agent)
@@ -118,10 +157,17 @@ MCP agents can call spec-health or verification tools depending on whether the i
 Run the agent on existing code and specs first. No `.mm` source is required.
 
 ```bash
+mumei-agent audit --code-file src/payment.py --auto-migrate --auto-heal
 mumei-agent validate-code --input src/payment.py --language python
 mumei-agent validate-spec-to-code --spec spec.txt --code src/payment.py --language python
 ```
 
+
+MCP clients should use `scan_and_fix` for the same audit → migrate-suggest →
+heal route. Cross-spec compiler artifacts use the same artifact vocabulary:
+`cross_spec.json.contract_consistency[]` maps to agent `missing_constraints[]`,
+`global_invariant_conflicts[]` maps to `divergences[]`, and
+`circular_dependencies[]` maps to `drift_issues[]`.
 Use the resulting counter-examples, drift reports, and suggested contracts as the migration backlog.
 
 ### Step 1: Start writing the critical spec surface in `.mm`
@@ -193,7 +239,7 @@ curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash
 brew install mumei-lang/mumei/mumei
 
 # Specific version (latest is v0.6.2)
-curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash -s -- --version v0.6.2
+curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash -s -- --version v0.6.3
 ```
 
 See [Releases](https://github.com/mumei-lang/mumei/releases) for older versions and changelogs.

@@ -1105,9 +1105,28 @@ def analyze_contract_conflicts(source_code: str) -> str:
 
         return json.dumps(
             {
+                "contract_consistency": cross_spec.get("contract_consistency", []),
                 "conflicts": conflicts,
+                "global_invariant_conflicts": cross_spec.get(
+                    "global_invariant_conflicts", []
+                ),
                 "circular_dependencies": cross_spec.get("circular_dependencies", []),
                 "dependency_graph": cross_spec.get("dependency_graph", []),
+                "agent_artifact_mapping": cross_spec.get("agent_artifact_mapping", []),
+                "artifact_set": {
+                    "mumei_cross_spec": [
+                        "contract_consistency[]",
+                        "global_invariant_conflicts[]",
+                        "circular_dependencies[]",
+                    ],
+                    "mumei_agent": [
+                        "missing_constraints[]",
+                        "divergences[]",
+                        "drift_issues[]",
+                    ],
+                    "human_review_branch": "P14-D",
+                    "mcp_tool": "analyze_contract_conflicts",
+                },
                 "summary": cross_spec.get("summary", {}),
                 "success": result.returncode == 0,
             },
@@ -1869,6 +1888,8 @@ def list_std_catalog() -> str:
 
 # std/ ディレクトリの「欠落コンポーネント」を推論するためのルール。
 # (condition_fn, proposal_factory) のタプルで、条件を満たすときに提案を生成する。
+_STD_GAP_MAX_NEXT_CANDIDATES = 3
+
 _STD_GAP_RULES: list[dict] = [
     {
         "target": "std/iter.mm",
@@ -2023,6 +2044,31 @@ def _count_usage(names: list, roots: list) -> dict:
             for name, pat in patterns.items():
                 counts[name] += len(pat.findall(text))
     return {k: v for k, v in counts.items() if v > 0}
+
+
+def _core_seed_summary(std_dir: Path, usage_frequency: dict) -> dict:
+    """Return the std/core.mm atoms that seed follow-on vStd proposals."""
+    core_path = std_dir / "core.mm"
+    atoms: list[str] = []
+    if core_path.exists():
+        atom_re = re.compile(r"^\s*(?:trusted\s+|async\s+)?atom\s+(\w+)")
+        try:
+            for line in core_path.read_text(encoding="utf-8").splitlines():
+                match = atom_re.match(line)
+                if match:
+                    atoms.append(match.group(1))
+        except OSError:
+            atoms = []
+    return {
+        "module": "std/core.mm",
+        "exists": core_path.exists(),
+        "atoms": atoms,
+        "usage_frequency": {
+            name: usage_frequency.get(name, 0)
+            for name in atoms
+            if usage_frequency.get(name, 0) > 0
+        },
+    }
 
 
 def _evaluate_rule(
@@ -2246,6 +2292,7 @@ def analyze_std_gaps() -> str:
     atom_names = _atom_name_index(std_dir)
     usage_roots = [repo_root / "tests", repo_root / "examples"]
     usage_frequency = _count_usage(atom_names, usage_roots)
+    core_seed = _core_seed_summary(std_dir, usage_frequency)
 
     existing_paths = set(dependency_graph.keys())
 
@@ -2259,6 +2306,9 @@ def analyze_std_gaps() -> str:
                 "reason": rule["reason"],
                 "depends_on": rule["depends_on"],
                 "difficulty": rule["difficulty"],
+                "extension_anchor": (
+                    core_seed if "std/core.mm" in rule["depends_on"] else None
+                ),
             },
         )
 
@@ -2288,9 +2338,12 @@ def analyze_std_gaps() -> str:
         return (-p["score"], unmet, diff)
 
     proposals.sort(key=_rank_key)
-    for i, p in enumerate(proposals[:3], start=1):
+    next_implementation_candidates = proposals[
+        :_STD_GAP_MAX_NEXT_CANDIDATES
+    ]
+    for i, p in enumerate(next_implementation_candidates, start=1):
         p["priority"] = i
-    proposals = proposals[:3]
+    proposals = next_implementation_candidates
 
     # Stable order for JSON output.
     usage_frequency_sorted = dict(
@@ -2302,6 +2355,17 @@ def analyze_std_gaps() -> str:
         "trusted_atoms": trusted_atoms,
         "todo_comments": todo_comments,
         "usage_frequency": usage_frequency_sorted,
+        "core_seed": core_seed,
+        "candidate_policy": {
+            "min_candidates": 1 if proposals else 0,
+            "max_candidates": _STD_GAP_MAX_NEXT_CANDIDATES,
+            "selection": (
+                "rank by score, unmet dependencies, and difficulty; implement "
+                "only the returned next_implementation_candidates before "
+                "rerunning analyze_std_gaps"
+            ),
+        },
+        "next_implementation_candidates": next_implementation_candidates,
         "proposals": proposals,
     }
     return json.dumps(result, indent=2, ensure_ascii=False)

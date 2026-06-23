@@ -51,6 +51,15 @@ pub struct GlobalInvariantConflict {
     pub suggested_fix: String,
 }
 
+/// Mapping from mumei cross-spec artifacts to mumei-agent alignment artifacts.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentArtifactMapping {
+    pub cross_spec_field: String,
+    pub agent_field: String,
+    pub contradiction_type: String,
+    pub description: String,
+}
+
 /// Cross-specification verification result.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CrossSpecResult {
@@ -59,6 +68,7 @@ pub struct CrossSpecResult {
     pub global_invariant_conflicts: Vec<GlobalInvariantConflict>,
     pub circular_dependencies: Vec<Vec<String>>,
     pub dependency_graph: Vec<DependencyNode>,
+    pub agent_artifact_mapping: Vec<AgentArtifactMapping>,
     pub summary: CrossSpecSummary,
 }
 
@@ -471,6 +481,7 @@ impl<'env> CrossSpecVerifier<'env> {
             global_invariant_conflicts,
             circular_dependencies,
             dependency_graph,
+            agent_artifact_mapping: agent_artifact_mapping(),
             summary,
         }
     }
@@ -492,6 +503,29 @@ impl<'env> CrossSpecVerifier<'env> {
         dependencies.dedup();
         dependencies
     }
+}
+
+fn agent_artifact_mapping() -> Vec<AgentArtifactMapping> {
+    vec![
+        AgentArtifactMapping {
+            cross_spec_field: "contract_consistency[]".to_string(),
+            agent_field: "missing_constraints[]".to_string(),
+            contradiction_type: "spec_vs_code".to_string(),
+            description: "Caller/callee contract violations correspond to agent-reported constraints that the implementation path does not enforce.".to_string(),
+        },
+        AgentArtifactMapping {
+            cross_spec_field: "global_invariant_conflicts[]".to_string(),
+            agent_field: "divergences[]".to_string(),
+            contradiction_type: "spec_internal".to_string(),
+            description: "Conflicting global invariants correspond to spec-level divergences before migration or repair.".to_string(),
+        },
+        AgentArtifactMapping {
+            cross_spec_field: "circular_dependencies[]".to_string(),
+            agent_field: "drift_issues[]".to_string(),
+            contradiction_type: "spec_vs_code".to_string(),
+            description: "Cycles that change dependency meaning are surfaced as drift issues for human and MCP review.".to_string(),
+        },
+    ]
 }
 
 fn split_conjuncts(constraint: &str) -> impl Iterator<Item = &str> {

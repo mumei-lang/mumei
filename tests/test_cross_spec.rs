@@ -93,6 +93,14 @@ fn cross_spec_verify_merges_multiple_files() {
             >= 4
     );
     assert_eq!(report["summary"]["inconsistent_calls"], 1);
+    assert_eq!(
+        report["agent_artifact_mapping"][0]["cross_spec_field"],
+        "contract_consistency[]"
+    );
+    assert_eq!(
+        report["agent_artifact_mapping"][0]["agent_field"],
+        "missing_constraints[]"
+    );
     assert!(
         report["summary"]["global_invariant_conflict_count"]
             .as_u64()

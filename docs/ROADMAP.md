@@ -9,6 +9,38 @@ keywords: "mumei roadmap, formal verification roadmap, Z3, Lean4, LLVM, proof-dr
 
 > Three strategic roadmap priorities to evolve Mumei from an experimental language to a practical tool.
 
+## Cross-project source of truth
+
+`docs/CROSS_PROJECT_ROADMAP.md` is the only top-level roadmap for cross-repository priority order. This file keeps mumei-local implementation checkpoints and must use the same contract vocabulary: `harness_contract`, `intent_fidelity`, `artifact_paths`, `budget_policy_fingerprint`, and `lean_verified`. Future work is prioritized toward docs-sync and harness-contract regression prevention before reopening deferred portability projects.
+
+### Contract regression gate
+
+When this roadmap or the cross-project roadmap changes, reviewers should include the major referenced docs in the diff review:
+
+- `docs/CROSS_PROJECT_ROADMAP.md`
+- `docs/ROADMAP.md`
+- `docs/PROOF_CERTIFICATE.md`
+- `../mumei-agent/README.md`
+- `../mumei-agent/docs/VERIFICATION_WORKFLOW_GUIDE.md`
+- `../mumei-agent/docs/ROADMAP.md`
+- `../mumei-lean/README.md`
+- `../mumei-lean/docs/BRIDGE_HARNESS_SPEC.md`
+- `../mumei-lean/docs/LEAN_HARNESS_CONTRACT.md`
+
+The same PR/changeset should record the relevant bridge/MCP/audit/spec test commands run in `mumei-agent/tests/` and `mumei-lean/tests/`.
+
+### V1 execution order
+
+The current cross-repo execution order is fixed and should be reviewed with `docs/CROSS_PROJECT_ROADMAP.md` whenever this local roadmap changes:
+
+| Order | Workstream | Local meaning |
+| --- | --- | --- |
+| 1 | `V1-A` and `V1-B` in parallel | `V1-A` validates natural-language spec health; `V1-B` audits existing code through `mumei-agent audit --code-file ... --auto-migrate --auto-heal` and MCP `scan_and_fix`. |
+| 2 | `V1-C` and `V1-D` | Compare spec→code and code→spec only after V1-A/V1-B artifacts use the stable names `spec_health_issues`, `verification_violations`, `cross_validation_gaps`, `next_steps`, `migration_hints`, `healed_files`, and `heal_errors`. |
+| 3 | `V1-E` | Human review enters through `next_steps` and the traceability metadata, not through renamed issue fields. |
+
+The no-`.mm` front door remains `audit -> migrate-suggest -> heal`. `mumei-lean` is expanded only for Z3 `unknown` obligations and promotes an atom to `lean_verified` only when `translator_version` and `bridge_lemma_hash` match; stale metadata is `stale_translator`.
+
 ## Overview
 
 | Priority | Theme | Goal | Status |
@@ -26,8 +58,9 @@ The 2026-Q2 forge pass added or refreshed high-priority standard-library modules
 - `std/math/factorial.mm` — bounded factorial step and safe-range predicate
 - `std/math/fibonacci.mm` — accumulator-step and loop-decrease witnesses
 - `std/string/validator.mm` — ASCII numeric and alphanumeric predicates
+- `std/core.mm` — `safe_to_index` and `is_nonzero` were added as the next core-seed atoms for bounded-index and NonZero follow-on work
 
-All listed modules were checked with `mumei verify --proof-cert`; proof certificates were emitted without Lean escalation candidates.
+All listed modules were checked with `mumei verify --proof-cert`; proof certificates were emitted without Lean escalation candidates. `analyze_std_gaps` now exposes a `core_seed` block and per-proposal `extension_anchor` metadata for proposals that depend on `std/core.mm`, keeping vStd continuation anchored on the existing core axioms.
 
 ---
 
@@ -654,13 +687,18 @@ Enables mumei's verified code to actually run — both interactively in the REPL
 - ✅ Verified State Machine Pattern (`examples/order_state_machine.mm`) — temporal effects for business process modeling
 - See [`docs/PATTERNS.md`](PATTERNS.md) for detailed pattern documentation
 
-**P7-C: Wasm Target** — Deferred
+**P7-C: Wasm Target** — Deferred / 今は着手しない
 - WebAssembly compilation target for browser/edge execution
-- Will be implemented after P7-A/B stabilize
+- Not started now because runtime ABI, distribution evidence, and `artifact_paths` / `harness_contract` expectations are still changing
+- Revisit only after docs-sync and harness-contract regression gates are stable
 
 **Future: Developer Experience** — Deferred
 - Enhanced error messages, IDE integration improvements, debugging tools
 - Will be implemented after runtime completion is stable
+
+**SI-4: no_std Ecosystem** — Deferred / 今は着手しない
+- Not started now because `reqwest`, `serde_json`, pthread/runtime pieces, and stdlib FFI assumptions require a broader redesign
+- Keep completed runtime portability work intact; current priority is contract vocabulary drift prevention across docs and harnesses
 
 **Files**:
 - `mumei-emit-llvm/src/jit.rs` — JIT execution engine (5 unit tests)

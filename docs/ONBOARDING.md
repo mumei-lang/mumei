@@ -5,9 +5,28 @@ description: "Start using Mumei from existing code, natural-language specificati
 keywords: "mumei onboarding, formal verification, existing code audit, mumei-agent, proof-driven programming"
 ---
 
+
 # Mumei Onboarding: from existing code to `.mm`
 
 Mumei can start from existing code or natural-language requirements, then gradually move the most important logic into `.mm`. Use this path when you want formal feedback before committing to a full `.mm` rewrite.
+
+## Canonical vocabulary
+
+Follow `docs/CROSS_PROJECT_ROADMAP.md` as the top-level contract. User-facing onboarding uses only `harness_contract`, `intent_fidelity`, `artifact_paths`, `budget_policy_fingerprint`, and `lean_verified` for mumei-side evidence. The no-`.mm` path keeps the mumei-agent names `spec_health_issues`, `verification_violations`, `cross_validation_gaps`, `next_steps`, `migration_hints`, `healed_files`, and `heal_errors`; do not rename them when handing users from `audit` / `scan_and_fix` into generated `.mm` verification.
+
+`lean_verified` is not a generic success label. Mumei accepts it only when the atom certificate and Lean metadata both carry the current `translator_version` and `bridge_lemma_hash`; otherwise CLI, MCP consumers, and certificate verification must treat the atom as stale/unproven.
+
+## First path: audit before `.mm`
+
+Use `mumei-agent audit --code-file ... --auto-migrate --auto-heal` or MCP `scan_and_fix` before asking a new user to author `.mm`. Both entrypoints must present the same gate order and the same names:
+
+1. `audit` emits `spec_health_issues`, `verification_violations`, `cross_validation_gaps`, and `next_steps`.
+2. `migrate-suggest` / `--auto-migrate` emits `migration_hints` and generated `.mm` skeleton paths.
+3. `heal` / `--auto-heal` emits `healed_files` and `heal_errors`.
+
+User-facing wording is fixed to: "既存コードを渡すだけでバグ箇所を指摘", "仕様から既存コードとの差分を指摘", and "仕様単独でおかしい場合を指摘". `next_steps` is the handoff to human review; do not create synonyms for the issue buckets or for the post-audit keys `migration_hints`, `healed_files`, and `heal_errors`.
+
+V1 implementation order is fixed: `V1-A` spec health and `V1-B` code audit can proceed in parallel, then `V1-C` spec→code and `V1-D` code→spec conformance, then `V1-E` human review. Lean work is only the Z3-`unknown` complement and must not become a general audit path.
 
 ## Step 0: `.mm`を書かずにバグ指摘を受ける
 
@@ -15,11 +34,13 @@ Mumei can start from existing code or natural-language requirements, then gradua
 
 ```bash
 # 既存コードを渡すだけ
-uv run mumei-agent audit --code-file payment.py
+uv run mumei-agent audit --code-file payment.py --auto-migrate --auto-heal
 uv run mumei-agent validate-code --input payment.py --language python
 printf '%s\n' "残高不足の場合はエラーを返す" > spec.txt
 uv run mumei-agent validate-spec-to-code --spec spec.txt --code payment.py --language python
 ```
+
+`audit --auto-migrate --auto-heal` and MCP `scan_and_fix` are the canonical no-`.mm` route. Read their artifacts as `spec_health_issues`, `verification_violations`, `cross_validation_gaps`, `next_steps`, `migration_hints`, `healed_files`, and `heal_errors`. `cross_spec.json.contract_consistency[]` maps to agent `missing_constraints[]`; `global_invariant_conflicts[]` maps to `divergences[]`; `circular_dependencies[]` maps to `drift_issues[]`.
 
 この段階では `.mm` ファイルは不要です。出力された counterexample、仕様とコードの不一致、足りない事前条件を移行バックログとして扱います。
 `audit` の出力に `verification_violations` や `cross_validation_gaps` が含まれる場合は、`next_steps:` フィールドも確認してください。各項目は、次に実行すべき確認コマンド、仕様・コードの修正候補、または `.mm` 移行前に解消すべきギャップを示します。

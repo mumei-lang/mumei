@@ -10,6 +10,7 @@
 //
 // 設計方針:
 // - std/prelude.mm (暗黙ロード) と std/contracts.mm (汎用精緻型) より
+// analyze_std_gaps treats these core atoms as anchors and emits only 1-3 next std candidates per iteration.
 //   さらに下層に位置する、最小の数学的基盤。
 // - 全ての atom に requires/ensures を付与し、Z3 で完全検証する。
 // - `trusted atom` は使用しない（公理として信頼するのは型と契約のみ）。
@@ -81,6 +82,25 @@ atom safe_narrow(x: i64, min_val: i64, max_val: i64)
     body: {
         if x < min_val { min_val }
         else { if x > max_val { max_val } else { x } }
+    };
+
+// --- safe_to_index ---
+// Build a safe array index satisfying 0 <= result < len.
+atom safe_to_index(x: i64, len: i64)
+    requires: len > 0;
+    ensures: result >= 0 && result < len;
+    body: {
+        if x < 0 { 0 }
+        else { if x >= len { len - 1 } else { x } }
+    };
+
+// --- is_nonzero ---
+// Lightweight NonZero predicate projection (0 = false, 1 = true).
+atom is_nonzero(x: i64)
+    requires: true;
+    ensures: result >= 0 && result <= 1;
+    body: {
+        if x != 0 { 1 } else { 0 }
     };
 
 // --- checked_add ---
