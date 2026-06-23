@@ -26,7 +26,9 @@ Use `mumei-agent audit --code-file ... --auto-migrate --auto-heal` or MCP `scan_
 
 User-facing wording is fixed to: "既存コードを渡すだけでバグ箇所を指摘", "仕様から既存コードとの差分を指摘", and "仕様単独でおかしい場合を指摘". `next_steps` is the handoff to human review; do not create synonyms for the issue buckets or for the post-audit keys `migration_hints`, `healed_files`, and `heal_errors`.
 
-V1 implementation order is fixed: `V1-A` spec health and `V1-B` code audit can proceed in parallel, then `V1-C` spec→code and `V1-D` code→spec conformance, then `V1-E` human review. Lean work is only the Z3-`unknown` complement and must not become a general audit path.
+V1 implementation order is fixed: `V1-A` spec health and `V1-B` code audit can proceed in parallel, then `V1-C` spec→code and `V1-D` code→spec conformance, then `V1-E` human review. V1-E is only the `next_steps`-origin review flow; do not expose `recommendations`, `review_actions`, or other aliases as user-facing contract keys. Lean work is only the Z3-`unknown` complement and must not become a general audit path.
+
+When `scan_and_fix` receives a spec, read `audit`, `spec_alignment`, and `conformance_verification` as separate views. `audit` owns the no-`.mm` buckets and migration/heal artifacts, `spec_alignment` owns spec↔code gaps, and `conformance_verification` owns traceability plus the next_steps-first human/markdown report.
 
 ## Step 0: `.mm`を書かずにバグ指摘を受ける
 
