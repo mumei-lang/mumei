@@ -29,6 +29,7 @@ The canonical no-`.mm` route is `mumei-agent audit --code-file ... --auto-migrat
 - `heal` / `--auto-heal` emits `healed_files` and `heal_errors`.
 
 Those seven no-`.mm` keys are the public contract for CLI JSON, MCP `scan_and_fix`, report formatting, and demo artifacts. Do not document `recommendations`, `actions`, `audit_issues`, `verification_gaps`, `repair_hints`, or other aliases as alternate keys.
+`mumei-demo` scenario metadata may list these same keys as `artifact_keys` so demo reviewers can compare them against ordered evidence paths; `artifact_keys` must not introduce alternate audit field names.
 
 The V1 implementation order is fixed across repositories:
 
