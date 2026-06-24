@@ -311,7 +311,7 @@ task_group:all {
 **Goal**: "Best-in-class CLI development experience, no IDE required."
 
 **Phases**:
-1. **P3-A: mumei repl** — Interactive REPL with incremental definition, verification feedback
+1. **P3-A: mumei repl** — Interactive REPL with incremental definition, verification feedback, and `:verify-spec` / `:verify-code` handoff to `mumei-agent` (`spec_health_issues` / `verification_violations` / `cross_validation_gaps` / `next_steps`)
 2. **P3-B: mumei doc** — rustdoc-style HTML documentation generation from `///` comments
 3. **P3-C: REPL + HTTP Integration** — Try HTTP requests interactively in REPL
 

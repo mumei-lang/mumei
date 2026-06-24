@@ -68,7 +68,7 @@ mumei verify transfer.mm
 生成された `.mm` は、人間がレビューしながら小さく修正します。
 
 - LSP (`mumei lsp`) を使い、エディタ上で diagnostics、hover、補完、定義ジャンプを確認する。
-- REPL (`mumei repl`) を使い、小さい式や atom をインタラクティブに検証する。
+- REPL (`mumei repl`) を使い、小さい式や atom をインタラクティブに検証する。自然言語仕様は `:verify-spec <path|inline>`、他言語コードは `:verify-code <path>` で `mumei-agent` の `spec_health_issues` / `verification_violations` / `cross_validation_gaps` / `next_steps` を確認できる。
 - `uv run mumei-agent check-spec-health transfer.mm` で矛盾、到達不能な `requires`、過剰拘束、曖昧な postcondition を確認する。
 - verifier の counterexample を仕様レビューの単位にし、1 回の修正で 1 つの失敗原因だけを潰す。
 

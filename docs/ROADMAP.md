@@ -329,6 +329,9 @@ mumei> :quit
 3. Special commands
    - :help, :quit, :load, :env (list current definitions)
    - :type <expr> (display type inference result)
+   - :verify <atom> (.mm atom verification path)
+   - :verify-spec <path|inline> (mumei-agent validate-spec JSON; displays spec_health_issues / verification_violations / cross_validation_gaps / next_steps)
+   - :verify-code <path> (mumei-agent validate-code JSON; displays spec_health_issues / verification_violations / cross_validation_gaps / next_steps)
 
 4. HTTP/JSON integration (after P1 completion)
    - Execute http.get() directly from REPL
@@ -452,7 +455,7 @@ P3-B (mumei doc)       (independent)
 | P2-A: Static Link | 1 week | musl build + CI |
 | P2-B: Homebrew | 1 week | `brew install mumei` |
 | P2-C: WebInstall | 1 week | `curl \| sh` |
-| P3-A: REPL | 2 weeks | `mumei repl` basic functionality |
+| P3-A: REPL | 2 weeks | `mumei repl` basic functionality plus `:verify-spec` / `:verify-code` interactive checks |
 | P3-B: Doc Gen | 2-3 weeks | `mumei doc` HTML generation |
 | P3-C: Integration | 1 week | REPL + HTTP integration |
 

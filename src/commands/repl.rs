@@ -1,7 +1,11 @@
 use crate::pipeline::*;
 use mumei_core::hir::lower_atom_to_hir_with_env;
 use mumei_core::{parser, resolver, verification};
-use std::path::Path;
+use serde_json::Value;
+use std::io::{IsTerminal, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(crate) const REPL_EVAL_ATOM: &str = "__repl_eval";
 
@@ -14,6 +18,336 @@ pub(crate) struct ReplContext<'ctx> {
 pub(crate) enum ReplAction {
     Continue,
     Quit,
+}
+
+enum ReplAgentCommand {
+    ValidateSpec {
+        input: PathBuf,
+        display_input: String,
+    },
+    ValidateCode {
+        input: PathBuf,
+        language: String,
+        display_input: String,
+    },
+}
+
+struct ReplAgentReport {
+    success: bool,
+    spec_health_issues: Vec<Value>,
+    verification_violations: Vec<Value>,
+    cross_validation_gaps: Vec<Value>,
+    next_steps: Vec<Value>,
+}
+
+fn repl_json_array(value: &Value, key: &str) -> Vec<Value> {
+    value
+        .get(key)
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn repl_json_values(value: &Value, keys: &[&str]) -> Vec<Value> {
+    keys.iter()
+        .flat_map(|key| repl_json_array(value, key))
+        .collect()
+}
+
+fn repl_agent_report(value: &Value, success_hint: bool, is_spec: bool) -> ReplAgentReport {
+    let mut spec_health_issues = repl_json_array(value, "spec_health_issues");
+    if spec_health_issues.is_empty() && is_spec {
+        spec_health_issues = repl_json_values(
+            value,
+            &[
+                "contradictions",
+                "ambiguities",
+                "overconstraints",
+                "completeness_warnings",
+                "vacuity_warnings",
+                "errors",
+            ],
+        );
+    }
+
+    let mut verification_violations = repl_json_array(value, "verification_violations");
+    if verification_violations.is_empty() && !is_spec {
+        verification_violations = repl_json_values(value, &["issues", "errors"]);
+    }
+
+    let mut cross_validation_gaps = repl_json_array(value, "cross_validation_gaps");
+    if cross_validation_gaps.is_empty() {
+        cross_validation_gaps = repl_json_values(
+            value,
+            &[
+                "missing_constraints",
+                "divergences",
+                "drift_issues",
+                "missing_constraint_issues",
+            ],
+        );
+    }
+
+    let next_steps = repl_json_array(value, "next_steps");
+    let success = value
+        .get("success")
+        .and_then(Value::as_bool)
+        .unwrap_or(success_hint)
+        && spec_health_issues.is_empty()
+        && verification_violations.is_empty()
+        && cross_validation_gaps.is_empty();
+
+    ReplAgentReport {
+        success,
+        spec_health_issues,
+        verification_violations,
+        cross_validation_gaps,
+        next_steps,
+    }
+}
+
+fn repl_print_json_value(value: &Value) {
+    let rendered = serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string());
+    for line in rendered.lines() {
+        println!("    {}", line);
+    }
+}
+
+fn repl_print_json_array(name: &str, values: &[Value]) {
+    println!("  {}:", name);
+    if values.is_empty() {
+        println!("    []");
+        return;
+    }
+    for value in values {
+        repl_print_json_value(value);
+    }
+}
+
+fn repl_first_next_step_command(report: &ReplAgentReport) -> Option<&str> {
+    report.next_steps.first().and_then(|step| {
+        step.get("command")
+            .and_then(Value::as_str)
+            .or_else(|| step.as_str())
+    })
+}
+
+fn repl_prompt_for_fix(report: &ReplAgentReport) {
+    if report.success {
+        return;
+    }
+    print!("  修正しますか？ (y/n) ");
+    if let Err(err) = std::io::stdout().flush() {
+        eprintln!("  ❌ Prompt error: {}", err);
+        return;
+    }
+
+    let mut answer = String::new();
+    match std::io::stdin().read_line(&mut answer) {
+        Ok(_) if answer.trim().eq_ignore_ascii_case("y") => {
+            if let Some(command) = repl_first_next_step_command(report) {
+                println!("  next_steps[0].command: {}", command);
+            } else {
+                println!("  next_steps[0].command: <none>");
+            }
+            println!("  自動実行はしていません。修正後に再検証してください。");
+        }
+        Ok(_) => {
+            println!("  継続します。");
+        }
+        Err(err) => {
+            eprintln!("  ❌ Prompt error: {}", err);
+        }
+    }
+}
+
+fn repl_parse_agent_json(output: &Output) -> Result<Value, String> {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let trimmed = stdout.trim();
+    let candidate = if trimmed.starts_with('{') {
+        trimmed.to_string()
+    } else if let (Some(start), Some(end)) = (trimmed.find('{'), trimmed.rfind('}')) {
+        trimmed[start..=end].to_string()
+    } else {
+        String::new()
+    };
+
+    if candidate.is_empty() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "mumei-agent did not emit JSON (exit: {}). stderr: {}",
+            output.status,
+            stderr.trim()
+        ));
+    }
+
+    serde_json::from_str(&candidate).map_err(|err| {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        format!(
+            "failed to parse mumei-agent JSON: {}. stderr: {}",
+            err,
+            stderr.trim()
+        )
+    })
+}
+
+fn repl_run_agent(command: ReplAgentCommand) -> Result<ReplAgentReport, String> {
+    let mut process = Command::new("mumei-agent");
+    let is_spec = matches!(command, ReplAgentCommand::ValidateSpec { .. });
+    match command {
+        ReplAgentCommand::ValidateSpec {
+            input,
+            display_input,
+        } => {
+            println!(
+                "  mumei-agent validate-spec --input {} --format json",
+                display_input
+            );
+            process
+                .arg("validate-spec")
+                .arg("--input")
+                .arg(input)
+                .arg("--format")
+                .arg("json");
+        }
+        ReplAgentCommand::ValidateCode {
+            input,
+            language,
+            display_input,
+        } => {
+            println!(
+                "  mumei-agent validate-code --input {} --language {}",
+                display_input, language
+            );
+            process
+                .arg("validate-code")
+                .arg("--input")
+                .arg(input)
+                .arg("--language")
+                .arg(language);
+        }
+    }
+
+    let output = process.output().map_err(|err| {
+        if err.kind() == std::io::ErrorKind::NotFound {
+            "mumei-agent not found in PATH; install mumei-agent or add it to PATH to use :verify-spec/:verify-code".to_string()
+        } else {
+            format!("failed to run mumei-agent: {}", err)
+        }
+    })?;
+    let value = repl_parse_agent_json(&output)?;
+    Ok(repl_agent_report(&value, output.status.success(), is_spec))
+}
+
+fn repl_infer_code_language(path: &Path) -> Result<String, String> {
+    match path.extension().and_then(|ext| ext.to_str()) {
+        Some("py") => Ok("python".to_string()),
+        Some("rs") => Ok("rust".to_string()),
+        Some("go") => Ok("go".to_string()),
+        _ => Err(format!(
+            "unsupported code file extension for '{}'; expected .py, .rs, or .go",
+            path.display()
+        )),
+    }
+}
+
+fn repl_inline_spec_path(input: &str) -> Result<PathBuf, String> {
+    let mut path = std::env::temp_dir();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|err| format!("failed to create inline spec path: {}", err))?
+        .as_nanos();
+    path.push(format!(
+        "mumei-repl-inline-spec-{}-{}.txt",
+        std::process::id(),
+        now
+    ));
+    std::fs::write(&path, input)
+        .map_err(|err| format!("failed to write inline spec for mumei-agent: {}", err))?;
+    Ok(path)
+}
+
+fn repl_verify_agent_report(command: ReplAgentCommand, prompt_for_fixes: bool) {
+    match repl_run_agent(command) {
+        Ok(report) => {
+            if report.success {
+                println!("  PASS");
+            } else {
+                println!("  FAIL");
+            }
+            repl_print_json_array("spec_health_issues", &report.spec_health_issues);
+            repl_print_json_array("verification_violations", &report.verification_violations);
+            repl_print_json_array("cross_validation_gaps", &report.cross_validation_gaps);
+            repl_print_json_array("next_steps", &report.next_steps);
+            if prompt_for_fixes {
+                repl_prompt_for_fix(&report);
+            }
+        }
+        Err(err) => {
+            eprintln!("  ❌ {}", err);
+        }
+    }
+}
+
+fn repl_verify_spec(input: &str, prompt_for_fixes: bool) {
+    let input = input.trim();
+    if input.is_empty() {
+        eprintln!("  ❌ Usage: :verify-spec <path|inline>");
+        return;
+    }
+
+    let path = Path::new(input);
+    let (input_path, display_input, cleanup_path) = if path.is_file() {
+        (path.to_path_buf(), input.to_string(), None)
+    } else {
+        match repl_inline_spec_path(input) {
+            Ok(path) => (path.clone(), "<inline>".to_string(), Some(path)),
+            Err(err) => {
+                eprintln!("  ❌ {}", err);
+                return;
+            }
+        }
+    };
+
+    repl_verify_agent_report(
+        ReplAgentCommand::ValidateSpec {
+            input: input_path,
+            display_input,
+        },
+        prompt_for_fixes,
+    );
+    if let Some(path) = cleanup_path {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+fn repl_verify_code(input: &str, prompt_for_fixes: bool) {
+    let input = input.trim();
+    if input.is_empty() {
+        eprintln!("  ❌ Usage: :verify-code <path>");
+        return;
+    }
+    let path = Path::new(input);
+    if !path.is_file() {
+        eprintln!("  ❌ Code file not found: {}", input);
+        return;
+    }
+    let language = match repl_infer_code_language(path) {
+        Ok(language) => language,
+        Err(err) => {
+            eprintln!("  ❌ {}", err);
+            return;
+        }
+    };
+
+    repl_verify_agent_report(
+        ReplAgentCommand::ValidateCode {
+            input: path.to_path_buf(),
+            language,
+            display_input: input.to_string(),
+        },
+        prompt_for_fixes,
+    );
 }
 
 pub(crate) fn repl_register_extern_fn(
@@ -434,6 +768,8 @@ pub(crate) fn repl_help() {
     println!("  :load <file|dir> — Load atoms and extern declarations from .mm files");
     println!("  :type <expr>   — Infer a simple expression type");
     println!("  :verify <atom> — Verify and JIT-compile a registered atom");
+    println!("  :verify-spec <path|inline> — Validate a natural-language spec with mumei-agent");
+    println!("  :verify-code <path> — Validate foreign-language code with mumei-agent");
     println!("  :eval <expr>   — JIT compile and execute an expression without verification");
     println!("  :check <expr>  — Parse and type-check an expression");
     println!("  :env           — Show registered atoms and types");
@@ -473,7 +809,11 @@ pub(crate) fn repl_input_incomplete(input: &str) -> bool {
     trimmed.starts_with("extern ") && (!input.contains('}') || repl_brace_balance(input) > 0)
 }
 
-pub(crate) fn repl_handle_line(ctx: &mut ReplContext<'_>, input: &str) -> ReplAction {
+pub(crate) fn repl_handle_line(
+    ctx: &mut ReplContext<'_>,
+    input: &str,
+    prompt_for_fixes: bool,
+) -> ReplAction {
     match input {
         ":quit" | ":q" | ":exit" => {
             println!("Goodbye! 🗡️");
@@ -502,6 +842,28 @@ pub(crate) fn repl_handle_line(ctx: &mut ReplContext<'_>, input: &str) -> ReplAc
             } else {
                 repl_eval_expr(ctx, target, true);
             }
+            ReplAction::Continue
+        }
+        ":verify-spec" => {
+            eprintln!("  ❌ Usage: :verify-spec <path|inline>");
+            ReplAction::Continue
+        }
+        _ if input.starts_with(":verify-spec ") => {
+            repl_verify_spec(
+                input.strip_prefix(":verify-spec ").unwrap().trim(),
+                prompt_for_fixes,
+            );
+            ReplAction::Continue
+        }
+        ":verify-code" => {
+            eprintln!("  ❌ Usage: :verify-code <path>");
+            ReplAction::Continue
+        }
+        _ if input.starts_with(":verify-code ") => {
+            repl_verify_code(
+                input.strip_prefix(":verify-code ").unwrap().trim(),
+                prompt_for_fixes,
+            );
             ReplAction::Continue
         }
         _ if input.starts_with(":check ") => {
@@ -563,7 +925,7 @@ pub(crate) fn cmd_repl() {
         env!("CARGO_PKG_VERSION")
     );
     println!("  Type expressions or atom definitions to evaluate.");
-    println!("  Commands: :help, :type <expr>, :verify <atom>, :load <file|dir>, :quit");
+    println!("  Commands: :help, :type <expr>, :verify <atom>, :verify-spec <path|inline>, :verify-code <path>, :load <file|dir>, :quit");
     println!();
 
     let mut module_env = verification::ModuleEnv::new();
@@ -593,6 +955,7 @@ pub(crate) fn cmd_repl() {
     };
 
     let stdin = std::io::stdin();
+    let prompt_for_fixes = stdin.is_terminal();
     let mut line_buf = String::new();
     let mut pending_input = String::new();
 
@@ -629,7 +992,10 @@ pub(crate) fn cmd_repl() {
         }
 
         let input = std::mem::take(&mut pending_input);
-        if matches!(repl_handle_line(&mut ctx, input.trim()), ReplAction::Quit) {
+        if matches!(
+            repl_handle_line(&mut ctx, input.trim(), prompt_for_fixes),
+            ReplAction::Quit
+        ) {
             break;
         }
     }
