@@ -51,6 +51,8 @@ Every PR that changes this contract should review `docs/CROSS_PROJECT_ROADMAP.md
 
 No-`.mm` entry remains delegated to mumei-agent: `audit --code-file ... --auto-migrate --auto-heal` and MCP `scan_and_fix` emit `spec_health_issues`, `verification_violations`, `cross_validation_gaps`, `next_steps`, `migration_hints`, `healed_files`, and `heal_errors`. Mumei consumes the generated `.mm`, proof certificates, MCP summaries, and Lean bridge outputs without renaming those fields.
 
+The Phase 7 Spec-Code Verification Suite in [`mumei-demo`](https://github.com/mumei-lang/mumei-demo/tree/main/scenarios/spec_code_verification_suite) demonstrates this no-`.mm` path end to end: V1-A spec health, V1-B existing-code audit, V1-C spec→code conformance, and V1-D code→spec drift all surface `next_steps` before any migration or Lean escalation. Run it from the demo repo with `make demo-spec-code`.
+
 ---
 
 ## Start without writing .mm (mumei-agent)

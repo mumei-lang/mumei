@@ -37,7 +37,7 @@ The current cross-repo execution order is fixed and should be reviewed with `doc
 | --- | --- | --- |
 | 1 | `V1-A` and `V1-B` in parallel | `V1-A` validates natural-language spec health; `V1-B` audits existing code through `mumei-agent audit --code-file ... --auto-migrate --auto-heal` and MCP `scan_and_fix`. |
 | 2 | `V1-C` and `V1-D` | Compare spec→code and code→spec only after V1-A/V1-B artifacts use the stable names `spec_health_issues`, `verification_violations`, `cross_validation_gaps`, `next_steps`, `migration_hints`, `healed_files`, and `heal_errors`. |
-| 3 | `V1-E` | Human review enters through `next_steps` and the traceability metadata, not through renamed issue fields. |
+| 3 | `V1-E` | Human review enters through `next_steps` and the traceability metadata, not through renamed issue fields. The Phase 7 `mumei-demo/scenarios/spec_code_verification_suite` scenario now demonstrates V1-A〜V1-D in one fixture-safe flow before migration or Lean escalation. |
 
 The no-`.mm` front door remains `audit -> migrate-suggest -> heal`. `mumei-lean` is expanded only for Z3 `unknown` obligations and promotes an atom to `lean_verified` only when `translator_version` and `bridge_lemma_hash` match; stale metadata is `stale_translator`.
 
@@ -1271,9 +1271,10 @@ mumei は P14 の verification substrate を担当し、user-facing workflow は
 
 **Related docs**:
 
-- `docs/CROSS_PROJECT_ROADMAP.md` — P14-A/B/C/D の横断仕様
+- `docs/CROSS_PROJECT_ROADMAP.md` — P14-A/B/C/D の横断仕様と V1-E-4 実装済み状態
 - `mumei-agent/docs/ROADMAP.md` — agent 側 P14 の詳細
 - `mumei-agent/docs/VERIFICATION_WORKFLOW_GUIDE.md` — no-`.mm` audit workflow
+- `mumei-demo/scenarios/spec_code_verification_suite` — Phase 7 demo that bundles V1-A〜V1-D before migration/heal or Lean escalation
 
 ---
 
