@@ -23,7 +23,7 @@
 | `mumei inspect <file> --ai` | ✅ | Structured JSON inspection report for AI agents |
 | `mumei infer-effects <file>` | ✅ | Infer required effects (JSON output for MCP) |
 | `mumei infer-contracts <file>` | ✅ | Infer contracts for all atoms (JSON output) |
-| `mumei repl` | ✅ | Interactive REPL |
+| `mumei repl` | ✅ | Interactive REPL; supports `:verify-spec <path|inline>` and `:verify-code <path>` via `mumei-agent` JSON output |
 | `mumei doc <file> -o <dir>` | ✅ | Generate documentation (`--format html` default, `markdown`, or `json`) |
 | `mumei lsp` | ✅ | Language Server Protocol (hover, diagnostics) |
 
@@ -263,7 +263,7 @@ Inspects all tools with multi-path std library search (cwd → exe dir → `MUME
 
 | Phase | Item | Description | Status |
 |---|---|---|---|
-| P3-A | **`mumei repl`** | Interactive REPL (parse → verify → eval loop) | ❌ Planned |
+| P3-A | **`mumei repl`** | Interactive REPL (parse → verify → eval loop, plus `:verify-spec` / `:verify-code` no-`.mm` checks) | ✅ Implemented |
 | P3-B | **`mumei doc`** | rustdoc-style HTML doc generation from `///` comments | ❌ Planned |
 | P3-C | **REPL + HTTP** | Try HTTP requests interactively in REPL | ❌ Planned |
 

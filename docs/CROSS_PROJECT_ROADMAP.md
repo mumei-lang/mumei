@@ -1568,10 +1568,11 @@ V1-E-1: 人向けフィードバックフォーマット
   - 日本語/英語の自動切り替え（LANG環境変数対応）
   - 修正提案を「コピペできるコード」として提示
 
-V1-E-2: インタラクティブ検証モード
+V1-E-2: インタラクティブ検証モード（実装済み）
   - mumei repl の拡張: :verify-spec, :verify-code コマンド追加
-  - 検証失敗時に「修正しますか？ (y/n)」の対話フロー
-  - 修正後の再検証を自動実行
+  - mumei-agent CLI サブプロセス連携を採用: `validate-spec --format json` / `validate-code` JSON stdout を parse
+  - 出力語彙は `spec_health_issues` / `verification_violations` / `cross_validation_gaps` / `next_steps` に固定
+  - 検証失敗時に「修正しますか？ (y/n)」の対話フローを出し、`next_steps[0].command` を提示（自動実行はしない）
 
 V1-E-3: エディタ統合（LSP拡張）
   - 既存 LSP サーバー（src/lsp.rs）に diagnostics 追加
