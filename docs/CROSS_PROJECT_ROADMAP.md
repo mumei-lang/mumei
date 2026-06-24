@@ -29,7 +29,7 @@ The canonical no-`.mm` route is `mumei-agent audit --code-file ... --auto-migrat
 - `heal` / `--auto-heal` emits `healed_files` and `heal_errors`.
 
 Those seven no-`.mm` keys are the public contract for CLI JSON, MCP `scan_and_fix`, report formatting, and demo artifacts. Do not document `recommendations`, `actions`, `audit_issues`, `verification_gaps`, `repair_hints`, or other aliases as alternate keys.
-`mumei-demo` scenario metadata may list these same keys as `artifact_keys` so demo reviewers can compare them against ordered evidence paths; `artifact_keys` must not introduce alternate audit field names.
+`mumei-demo` scenario metadata may list these same keys as `artifact_keys` so demo reviewers can compare them against ordered evidence paths; `artifact_keys` must not introduce alternate audit field names. Phase 7 is now materialized as `mumei-demo/scenarios/spec_code_verification_suite`, which runs V1-A〜V1-D as `mode_a -> mode_b -> mode_c -> mode_d` and still keeps `next_steps` as the only human-review entrypoint before migration/heal evidence.
 
 The V1 implementation order is fixed across repositories:
 
@@ -1578,10 +1578,10 @@ V1-E-3: エディタ統合（LSP拡張）
   - 自然言語コメント（/// spec: ...）からリアルタイム仕様検証
   - 他言語ファイルを開いた際の契約違反インライン表示
 
-V1-E-4: mumei-demo への統合
-  - V1-A〜D の4モードをデモシナリオとして追加
-  - "仕様のバグを証明で潰す" ストーリーを可視化
-  - Phase 7: Spec-Code Verification Suite デモ
+V1-E-4: mumei-demo への統合 — 実装済み
+  - `mumei-demo/scenarios/spec_code_verification_suite/` に V1-A〜D の4モードをデモシナリオとして追加
+  - "仕様のバグを証明で潰す" ストーリーを `mode_a` (spec health) / `mode_b` (code audit) / `mode_c` (spec→code conformance) / `mode_d` (code→spec drift) で可視化
+  - Phase 7: Spec-Code Verification Suite デモは no-`.mm` 入力を前面に出し、`next_steps` を唯一の human-review 入口として固定
 ```
 
 ---
@@ -1608,10 +1608,10 @@ graph LR
     B --> D["V1-D\nコード→仕様整合\n(mumei-agent P17)"]
     C --> E["V1-E\n人向けUX\n(P18)"]
     D --> E
-    E --> Demo["Phase 7 Demo\n(mumei-demo)"]
+    E --> Demo["Phase 7 Demo\nspec_code_verification_suite\n(mumei-demo)"]
 ```
 
-**V1-A と V1-B は並行実装可能**。V1-C・V1-D はその両方に依存します。
+**V1-A と V1-B は並行実装可能**。V1-C・V1-D はその両方に依存します。`Phase 7 Demo` は `mumei-demo/scenarios/spec_code_verification_suite` として実体化済みで、推奨順序を壊さずに4モードを1本の CI fixture シナリオで確認できます。
 
 ---
 

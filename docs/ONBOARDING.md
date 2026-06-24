@@ -30,6 +30,8 @@ V1 implementation order is fixed: `V1-A` spec health and `V1-B` code audit can p
 
 When `scan_and_fix` receives a spec, read `audit`, `spec_alignment`, and `conformance_verification` as separate views. `audit` owns the no-`.mm` buckets and migration/heal artifacts, `spec_alignment` owns spec↔code gaps, and `conformance_verification` owns traceability plus the next_steps-first human/markdown report. For the explicit V1-C/V1-D bidirectional summary, use mumei-agent `verify-traceability` or MCP `verify_code_spec_traceability`; they keep `conformance`, `drift`, `cross_validation_gaps`, `drift_score`, and `next_steps` as fixed keys.
 
+To see the no-`.mm` route before writing `.mm`, run the Phase 7 Spec-Code Verification Suite in [`mumei-demo`](https://github.com/mumei-lang/mumei-demo/tree/main/scenarios/spec_code_verification_suite): `make demo-spec-code`. It bundles V1-A spec health, V1-B code audit, V1-C spec→code conformance, and V1-D code→spec drift while keeping `next_steps` as the only human-review entrypoint.
+
 ## Step 0: `.mm`を書かずにバグ指摘を受ける
 
 まずは既存コードや仕様をそのまま渡し、バグ候補・仕様ドリフト・境界条件漏れを洗い出します。
