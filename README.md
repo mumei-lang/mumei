@@ -41,7 +41,9 @@ MCP clients use `scan_and_fix` for the same `audit -> migrate-suggest -> heal` g
 
 1. `V1-A` natural-language spec health and `V1-B` existing-code audit can land in parallel.
 2. `V1-C` spec-to-code conformance and `V1-D` code-to-spec conformance come after both V1-A and V1-B have stable artifacts.
-3. `V1-E` human review is last and starts from `next_steps`, not from renamed issue buckets.
+3. `V1-E` human review is last and starts only from `next_steps`, not from renamed issue buckets or alternate keys such as `recommendations` / `review_actions`.
+
+When MCP `scan_and_fix` is called with a spec, `audit`, `spec_alignment`, and `conformance_verification` are separate views: audit owns the no-`.mm` buckets plus migration/heal artifacts, spec alignment owns spec↔code comparison, and conformance verification owns traceability plus next_steps-first human/markdown report text. This still keeps `next_steps` as the only V1-E human-review entrypoint.
 
 `mumei-lean` is extended only as the complement for Z3 `unknown` obligations. Do not route `sat`, `unsat`, parser failures, or ordinary audit findings through Lean; only matching `translator_version` + `bridge_lemma_hash` evidence can upgrade an `unknown` atom to `lean_verified`.
 
