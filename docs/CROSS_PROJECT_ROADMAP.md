@@ -1535,16 +1535,18 @@ V1-D-2: 仕様ドリフトレポート
   - 乖離箇所の具体的な説明と修正提案
   - 仕様側の修正案 or コード側の修正案を選択可能
 
-V1-D-3: 双方向整合性サマリ
+V1-D-3: 双方向整合性サマリ（実装済み）
   - V1-C（仕様→コード）とV1-D（コード→仕様）を組み合わせた統合レポート
   - CLI: python -m agent verify-traceability --code src/ --spec req.md
   - MCP: verify_code_spec_traceability(code_file, spec_text, language)
+  - 出力: conformance / drift / cross_validation_gaps / drift_score / next_steps
+  - next_steps が唯一の human-review 入口で、recommendations 等の alias は出さない
 ```
 
 **実装ファイル**:
-- `agent/traceability_verifier.py` — 新規: トレーサビリティ検証エンジン
-- `agent/verify_traceability.py` — 新規: CLIサブコマンド
-- `agent/mcp_server.py` — `verify_code_spec_traceability()` ツール追加
+- `agent/traceability_verifier.py` — 実装済み: トレーサビリティ検証エンジン
+- `agent/verify_traceability.py` — 実装済み: CLIサブコマンド
+- `agent/mcp_server.py` — 実装済み: `verify_code_spec_traceability()` ツール追加
 
 ---
 
