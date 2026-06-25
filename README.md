@@ -291,7 +291,7 @@ mumei setup && source ~/.mumei/env
 | `mumei infer-contracts <file>` | Infer contracts for all atoms (JSON output) |
 | `mumei repl` | Interactive REPL; use `:verify-spec <path|inline>` / `:verify-code <path>` to validate natural-language specs and foreign code through `mumei-agent` |
 | `mumei doc <file> -o <dir>` | Generate documentation (`--format html` (default) / `markdown` / `json`) |
-| `mumei lsp` | Start LSP server; shows Z3 diagnostics, `/// spec:` natural-language spec health, and Python/Rust/Go contract violations from `mumei-agent` inline |
+| `mumei lsp` | Start LSP server; shows Z3 diagnostics, `/// spec:` natural-language spec health, and `.py` / `.rs` / `.go` contract diagnostics from `mumei-agent` inline, with graceful fallback when the agent is unavailable |
 | `mumei verify-cert <cert> <file>` | Verify a proof certificate against current source |
 
 ### MCP Tools
@@ -355,7 +355,7 @@ mumei/
 | [Cross-Spec Verification](docs/CROSS_SPEC_GUIDE.md) | System-wide contract consistency, invariants, and dependency cycles |
 | [Toolchain](docs/TOOLCHAIN.md) | CLI commands, package management, CI/release |
 | [Onboarding Guide](docs/ONBOARDING.md) | Gradual path from existing code and natural language to `.mm` |
-| [LSP Integration](docs/LSP_INTEGRATION.md) | Editor CodeLens, intent drift, and spec-code mapping |
+| [LSP Integration](docs/LSP_INTEGRATION.md) | Editor CodeLens, intent drift, spec-code mapping, and `mumei-agent` spec/code diagnostics |
 | [Roadmap](docs/ROADMAP.md) | Strategic roadmap |
 | [Capability Security](docs/CAPABILITY_SECURITY.md) | Effect-based capability security evaluation |
 | [Changelog](docs/CHANGELOG.md) | Release history |

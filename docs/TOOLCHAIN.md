@@ -25,7 +25,7 @@
 | `mumei infer-contracts <file>` | ✅ | Infer contracts for all atoms (JSON output) |
 | `mumei repl` | ✅ | Interactive REPL; supports `:verify-spec <path|inline>` and `:verify-code <path>` via `mumei-agent` JSON output |
 | `mumei doc <file> -o <dir>` | ✅ | Generate documentation (`--format html` default, `markdown`, or `json`) |
-| `mumei lsp` | ✅ | Language Server Protocol (hover, Z3 diagnostics, `/// spec:` health checks, Python/Rust/Go contract diagnostics via `mumei-agent`) |
+| `mumei lsp` | ✅ | Language Server Protocol (hover, Z3 diagnostics, `/// spec:` health checks, `.py` / `.rs` / `.go` contract diagnostics via `mumei-agent`, graceful fallback without the agent) |
 
 ### Installation
 
@@ -145,7 +145,7 @@ npm run compile
 
 ### LSP Features
 
-> LSP is considered complete for the current V1-E phase, including editor diagnostics that reuse `mumei-agent` JSON output.
+> LSP is considered complete for the current V1-E phase, including editor diagnostics that reuse `mumei-agent` JSON output and keep `next_steps` as the only human-review entrypoint.
 
 | Feature | Status |
 |---|---|

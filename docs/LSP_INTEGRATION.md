@@ -82,6 +82,20 @@ The diagnostic `data` field includes:
 }
 ```
 
+For `.mm` files, comments beginning with `/// spec:` are sent to
+`mumei-agent validate-spec --format json`. Returned `spec_health_issues` become
+diagnostics on the original comment lines, with `next_steps` attached as the
+human-review handoff rather than renamed into a separate recommendation bucket.
+
+For foreign code, opening a `.py`, `.rs`, or `.go` document runs
+`mumei-agent validate-code --input <path> --language <language>` when available.
+Returned `verification_violations` and `cross_validation_gaps` are shown inline
+using the source line/column metadata from the JSON payload.
+
+If `mumei-agent` is not installed or returns malformed JSON, the server
+gracefully degrades: `.mm` documents still receive the existing parse/Z3
+diagnostics, and foreign-code agent diagnostics are omitted.
+
 ## VS Code Extension Hooks
 
 The bundled VS Code extension registers:
