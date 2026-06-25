@@ -1578,7 +1578,8 @@ V1-E-3: エディタ統合（LSP拡張） — 実装済み
   - 既存 LSP サーバー（src/lsp.rs）に mumei-agent diagnostics を追加
   - `.mm` 内の自然言語コメント（/// spec: ...）を `validate-spec --format json` で検証し、`spec_health_issues` を該当コメント行へ表示
   - `.py` / `.rs` / `.go` を開いた際に `validate-code --input <path> --language <lang>` を呼び、`verification_violations` / `cross_validation_gaps` をインライン表示
-  - 出力語彙は `spec_health_issues` / `verification_violations` / `cross_validation_gaps` / `next_steps` に固定し、`mumei-agent` 不在・JSON parse 失敗時は既存 `.mm` diagnostics のみ返す
+  - `mumei-agent` JSON サブプロセス連携を採用し、`mumei-agent` 不在・JSON parse 失敗時は既存 `.mm` diagnostics のみ返す graceful degrade
+  - 出力語彙は `spec_health_issues` / `verification_violations` / `cross_validation_gaps` / `next_steps` に固定し、`next_steps` を唯一の human-review 入口として表示する
 
 V1-E-4: mumei-demo への統合 — 実装済み
   - `mumei-demo/scenarios/spec_code_verification_suite/` に V1-A〜D の4モードをデモシナリオとして追加
@@ -1586,7 +1587,7 @@ V1-E-4: mumei-demo への統合 — 実装済み
   - Phase 7: Spec-Code Verification Suite デモは no-`.mm` 入力を前面に出し、`next_steps` を唯一の human-review 入口として固定
 ```
 
-V1-E-3 の LSP diagnostics 拡張により、V1-E 系は V1-E-1〜V1-E-4 まで全完了。local roadmap (`docs/ROADMAP.md`) も P3 / LSP の完了項目として同時更新済み。
+V1-E-3 の LSP diagnostics 拡張により、V1-E 系は V1-E-1〜V1-E-4 まで全完了。これで V1-A〜V1-E はすべて実装済み。local roadmap (`docs/ROADMAP.md`) も P3 / LSP の完了項目としてレビュー済み。
 
 ---
 
