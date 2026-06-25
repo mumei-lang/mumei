@@ -12,10 +12,13 @@
 //! - `textDocument/codeLens` — intent drift と spec-code mapping のインライン表示
 //! - `textDocument/publishDiagnostics` — Z3 検証エラーのリアルタイム表示
 //! - `shutdown` / `exit`
+use crate::agent;
 use mumei_core::parser;
 use mumei_core::verification;
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 // =============================================================================
 // メイン処理
 // =============================================================================
@@ -263,6 +266,15 @@ pub fn run() {
 // =============================================================================
 /// ソースコードをパースして diagnostics を生成
 fn diagnose(uri: &str, source: &str) -> Vec<serde_json::Value> {
+    let path = uri_to_path(uri);
+    if let Some(path) = path.as_deref() {
+        if let Ok(language) = agent::infer_code_language(path) {
+            let mut diagnostics = Vec::new();
+            append_agent_code_diagnostics(uri, path, &language, &mut diagnostics);
+            return diagnostics;
+        }
+    }
+
     // Phase 1: パースできるか
     let items = parser::parse_module(source);
     let mut diagnostics = Vec::new();
@@ -283,8 +295,8 @@ fn diagnose(uri: &str, source: &str) -> Vec<serde_json::Value> {
     }
 
     // Phase 2: Z3 検証 diagnostics（file:// URI の場合のみ実行）
-    if let Some(path) = uri_to_path(uri) {
-        if let Err(e) = verify_source_for_lsp(&path, source) {
+    if let Some(path) = path.as_deref() {
+        if let Err(e) = verify_source_for_lsp(path, source) {
             let detail = e.to_detail();
             // ErrorDetail の Span から直接位置を取得（substring マッチ不要）
             let (line, col) = if detail.span.line > 0 {
@@ -352,8 +364,347 @@ fn diagnose(uri: &str, source: &str) -> Vec<serde_json::Value> {
     }
 
     append_intent_drift_diagnostics(source, &items, &mut diagnostics);
+    if let Some(path) = path.as_deref() {
+        if path.extension().and_then(|ext| ext.to_str()) == Some("mm") {
+            append_agent_spec_diagnostics(uri, source, &mut diagnostics);
+        }
+    }
 
     diagnostics
+}
+
+struct SpecComment {
+    line: usize,
+    value_start: usize,
+    line_end: usize,
+    text: String,
+}
+
+fn append_agent_code_diagnostics(
+    uri: &str,
+    path: &Path,
+    language: &str,
+    diagnostics: &mut Vec<serde_json::Value>,
+) {
+    let Ok(report) = agent::validate_code(path, language) else {
+        return;
+    };
+
+    append_agent_issue_diagnostics(
+        uri,
+        &report.verification_violations,
+        "verification_violations",
+        &report.next_steps,
+        1,
+        None,
+        diagnostics,
+    );
+    append_agent_issue_diagnostics(
+        uri,
+        &report.cross_validation_gaps,
+        "cross_validation_gaps",
+        &report.next_steps,
+        2,
+        None,
+        diagnostics,
+    );
+}
+
+fn append_agent_spec_diagnostics(
+    uri: &str,
+    source: &str,
+    diagnostics: &mut Vec<serde_json::Value>,
+) {
+    let spec_comments = extract_spec_comments(source);
+    if spec_comments.is_empty() {
+        return;
+    }
+
+    let Ok(input_path) = write_lsp_spec_tempfile(&spec_comments) else {
+        return;
+    };
+    let report = agent::validate_spec(&input_path);
+    let _ = std::fs::remove_file(&input_path);
+    let Ok(report) = report else {
+        return;
+    };
+
+    append_agent_issue_diagnostics(
+        uri,
+        &report.spec_health_issues,
+        "spec_health_issues",
+        &report.next_steps,
+        2,
+        Some(&spec_comments),
+        diagnostics,
+    );
+}
+
+fn append_agent_issue_diagnostics(
+    uri: &str,
+    issues: &[serde_json::Value],
+    bucket: &str,
+    next_steps: &[serde_json::Value],
+    default_severity: u64,
+    spec_comments: Option<&[SpecComment]>,
+    diagnostics: &mut Vec<serde_json::Value>,
+) {
+    for issue in issues {
+        let (line, character, end_character) = issue_position(issue, spec_comments);
+        let message = agent_issue_message(bucket, issue, next_steps);
+        diagnostics.push(serde_json::json!({
+            "range": {
+                "start": { "line": line, "character": character },
+                "end": { "line": line, "character": end_character.max(character + 1) }
+            },
+            "severity": agent_issue_severity(issue, default_severity),
+            "source": "mumei-agent",
+            "message": message,
+            "relatedInformation": agent_next_step_related_information(
+                uri,
+                line,
+                character,
+                end_character.max(character + 1),
+                next_steps
+            )
+        }));
+    }
+}
+
+fn extract_spec_comments(source: &str) -> Vec<SpecComment> {
+    source
+        .lines()
+        .enumerate()
+        .filter_map(|(line_idx, line)| {
+            let prefix_start = line.find("/// spec:")?;
+            if !line[..prefix_start].trim().is_empty() {
+                return None;
+            }
+            let value_start = prefix_start + "/// spec:".len();
+            Some(SpecComment {
+                line: line_idx,
+                value_start,
+                line_end: line.len(),
+                text: line[value_start..].trim().to_string(),
+            })
+        })
+        .collect()
+}
+
+fn write_lsp_spec_tempfile(spec_comments: &[SpecComment]) -> Result<PathBuf, std::io::Error> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let mut path = std::env::temp_dir();
+    path.push(format!("mumei-lsp-spec-{}-{}.txt", std::process::id(), now));
+    let body = spec_comments
+        .iter()
+        .map(|spec| spec.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(&path, body)?;
+    Ok(path)
+}
+
+fn agent_issue_message(
+    bucket: &str,
+    issue: &serde_json::Value,
+    next_steps: &[serde_json::Value],
+) -> String {
+    let mut message = format!("{}: {}", bucket, agent_issue_summary(issue));
+    let steps = format_next_steps(next_steps);
+    if !steps.is_empty() {
+        message.push_str("\nnext_steps:");
+        for step in steps {
+            message.push_str("\n- ");
+            message.push_str(&step);
+        }
+    }
+    message
+}
+
+fn agent_issue_summary(issue: &serde_json::Value) -> String {
+    if let Some(object) = issue.as_object() {
+        let kind = object
+            .get("kind")
+            .or_else(|| object.get("type"))
+            .and_then(serde_json::Value::as_str);
+        let message = object
+            .get("message")
+            .or_else(|| object.get("detail"))
+            .or_else(|| object.get("description"))
+            .or_else(|| object.get("title"))
+            .and_then(serde_json::Value::as_str);
+        return match (kind, message) {
+            (Some(kind), Some(message)) => format!("{}: {}", kind, message),
+            (Some(kind), None) => kind.to_string(),
+            (None, Some(message)) => message.to_string(),
+            (None, None) => serde_json::to_string(issue).unwrap_or_else(|_| issue.to_string()),
+        };
+    }
+
+    issue
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| issue.to_string())
+}
+
+fn format_next_steps(next_steps: &[serde_json::Value]) -> Vec<String> {
+    next_steps
+        .iter()
+        .map(|step| {
+            step.get("command")
+                .or_else(|| step.get("message"))
+                .or_else(|| step.get("action"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+                .or_else(|| step.as_str().map(str::to_string))
+                .unwrap_or_else(|| serde_json::to_string(step).unwrap_or_else(|_| step.to_string()))
+        })
+        .collect()
+}
+
+fn agent_next_step_related_information(
+    uri: &str,
+    line: usize,
+    character: usize,
+    end_character: usize,
+    next_steps: &[serde_json::Value],
+) -> Vec<serde_json::Value> {
+    format_next_steps(next_steps)
+        .into_iter()
+        .map(|step| {
+            serde_json::json!({
+                "location": {
+                    "uri": uri,
+                    "range": {
+                        "start": { "line": line, "character": character },
+                        "end": { "line": line, "character": end_character }
+                    }
+                },
+                "message": format!("next_steps: {}", step)
+            })
+        })
+        .collect()
+}
+
+fn agent_issue_severity(issue: &serde_json::Value, default_severity: u64) -> u64 {
+    let text = [
+        "severity",
+        "level",
+        "importance",
+        "kind",
+        "type",
+        "category",
+        "message",
+    ]
+    .iter()
+    .filter_map(|key| issue.get(key).and_then(serde_json::Value::as_str))
+    .collect::<Vec<_>>()
+    .join(" ")
+    .to_ascii_lowercase();
+
+    if text.contains("error")
+        || text.contains("critical")
+        || text.contains("fatal")
+        || text.contains("violation")
+        || text.contains("contradiction")
+        || text.contains("unsat")
+    {
+        1
+    } else if text.contains("warn") || text.contains("gap") || text.contains("drift") {
+        2
+    } else if text.contains("info") {
+        3
+    } else if text.contains("hint") {
+        4
+    } else {
+        default_severity
+    }
+}
+
+fn issue_position(
+    issue: &serde_json::Value,
+    spec_comments: Option<&[SpecComment]>,
+) -> (usize, usize, usize) {
+    if let Some(spec_comments) = spec_comments {
+        let spec_index = issue_line(issue).and_then(|line| {
+            if line == 0 {
+                Some(0)
+            } else {
+                line.checked_sub(1)
+            }
+        });
+        let spec = spec_index
+            .and_then(|index| spec_comments.get(index))
+            .or_else(|| spec_comments.first());
+        if let Some(spec) = spec {
+            let character = issue_column(issue)
+                .map(|column| spec.value_start + column.saturating_sub(1))
+                .unwrap_or(spec.value_start);
+            return (spec.line, character, spec.line_end);
+        }
+    }
+
+    let line = issue_line(issue).map(one_based_to_zero_based).unwrap_or(0);
+    let character = issue_column(issue)
+        .map(one_based_to_zero_based)
+        .unwrap_or(0);
+    (line, character, character + 1)
+}
+
+fn issue_line(issue: &serde_json::Value) -> Option<usize> {
+    issue_position_value(issue, &["line", "source_line", "start_line", "line_number"])
+        .or_else(|| issue.pointer("/location/line").and_then(json_usize))
+        .or_else(|| issue.pointer("/location/source_line").and_then(json_usize))
+        .or_else(|| issue.pointer("/range/start/line").and_then(json_usize))
+        .or_else(|| issue.pointer("/span/start/line").and_then(json_usize))
+}
+
+fn issue_column(issue: &serde_json::Value) -> Option<usize> {
+    issue_position_value(
+        issue,
+        &[
+            "column",
+            "source_column",
+            "col",
+            "character",
+            "start_column",
+            "start_col",
+        ],
+    )
+    .or_else(|| issue.pointer("/location/column").and_then(json_usize))
+    .or_else(|| {
+        issue
+            .pointer("/location/source_column")
+            .and_then(json_usize)
+    })
+    .or_else(|| issue.pointer("/location/col").and_then(json_usize))
+    .or_else(|| issue.pointer("/range/start/character").and_then(json_usize))
+    .or_else(|| issue.pointer("/range/start/column").and_then(json_usize))
+    .or_else(|| issue.pointer("/span/start/character").and_then(json_usize))
+    .or_else(|| issue.pointer("/span/start/column").and_then(json_usize))
+}
+
+fn issue_position_value(issue: &serde_json::Value, keys: &[&str]) -> Option<usize> {
+    keys.iter()
+        .find_map(|key| issue.get(key).and_then(json_usize))
+}
+
+fn json_usize(value: &serde_json::Value) -> Option<usize> {
+    value
+        .as_u64()
+        .and_then(|number| usize::try_from(number).ok())
+        .or_else(|| {
+            value
+                .as_i64()
+                .and_then(|number| usize::try_from(number).ok())
+        })
+}
+
+fn one_based_to_zero_based(value: usize) -> usize {
+    value.saturating_sub(1)
 }
 
 /// エラーメッセージから関連する atom の Span 情報を検索し、行・列を返す。

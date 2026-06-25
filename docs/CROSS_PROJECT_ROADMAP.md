@@ -1562,7 +1562,7 @@ V1-D-3: 双方向整合性サマリ（実装済み）
 **追加すべき機能**:
 
 ```
-V1-E-1: 人向けフィードバックフォーマット
+V1-E-1: 人向けフィードバックフォーマット（実装済み）
   - --format human|json|markdown の選択
   - 問題の重要度（🔴 error / 🟡 warning / 🔵 info）の視覚的表示
   - 日本語/英語の自動切り替え（LANG環境変数対応）
@@ -1574,16 +1574,19 @@ V1-E-2: インタラクティブ検証モード（実装済み）
   - 出力語彙は `spec_health_issues` / `verification_violations` / `cross_validation_gaps` / `next_steps` に固定
   - 検証失敗時に「修正しますか？ (y/n)」の対話フローを出し、`next_steps[0].command` を提示（自動実行はしない）
 
-V1-E-3: エディタ統合（LSP拡張）
-  - 既存 LSP サーバー（src/lsp.rs）に diagnostics 追加
-  - 自然言語コメント（/// spec: ...）からリアルタイム仕様検証
-  - 他言語ファイルを開いた際の契約違反インライン表示
+V1-E-3: エディタ統合（LSP拡張） — 実装済み
+  - 既存 LSP サーバー（src/lsp.rs）に mumei-agent diagnostics を追加
+  - `.mm` 内の自然言語コメント（/// spec: ...）を `validate-spec --format json` で検証し、`spec_health_issues` を該当コメント行へ表示
+  - `.py` / `.rs` / `.go` を開いた際に `validate-code --input <path> --language <lang>` を呼び、`verification_violations` / `cross_validation_gaps` をインライン表示
+  - 出力語彙は `spec_health_issues` / `verification_violations` / `cross_validation_gaps` / `next_steps` に固定し、`mumei-agent` 不在・JSON parse 失敗時は既存 `.mm` diagnostics のみ返す
 
 V1-E-4: mumei-demo への統合 — 実装済み
   - `mumei-demo/scenarios/spec_code_verification_suite/` に V1-A〜D の4モードをデモシナリオとして追加
   - "仕様のバグを証明で潰す" ストーリーを `mode_a` (spec health) / `mode_b` (code audit) / `mode_c` (spec→code conformance) / `mode_d` (code→spec drift) で可視化
   - Phase 7: Spec-Code Verification Suite デモは no-`.mm` 入力を前面に出し、`next_steps` を唯一の human-review 入口として固定
 ```
+
+V1-E-3 の LSP diagnostics 拡張により、V1-E 系は V1-E-1〜V1-E-4 まで全完了。local roadmap (`docs/ROADMAP.md`) も P3 / LSP の完了項目として同時更新済み。
 
 ---
 

@@ -291,7 +291,7 @@ mumei setup && source ~/.mumei/env
 | `mumei infer-contracts <file>` | Infer contracts for all atoms (JSON output) |
 | `mumei repl` | Interactive REPL; use `:verify-spec <path|inline>` / `:verify-code <path>` to validate natural-language specs and foreign code through `mumei-agent` |
 | `mumei doc <file> -o <dir>` | Generate documentation (`--format html` (default) / `markdown` / `json`) |
-| `mumei lsp` | Start LSP server |
+| `mumei lsp` | Start LSP server; shows Z3 diagnostics, `/// spec:` natural-language spec health, and Python/Rust/Go contract violations from `mumei-agent` inline |
 | `mumei verify-cert <cert> <file>` | Verify a proof certificate against current source |
 
 ### MCP Tools
