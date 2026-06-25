@@ -20,11 +20,11 @@ fn write_fake_mumei_agent(dir: &Path) {
         r#"#!/bin/sh
 case "$1" in
   validate-spec)
-    printf '%s\n' '{"success":false,"spec_health_issues":[{"kind":"contradiction","severity":"error","line":1,"column":1,"message":"contradictory natural-language spec"}],"verification_violations":[],"cross_validation_gaps":[],"next_steps":[{"command":"mumei-agent validate-spec --input <spec> --format human"}]}'
+    printf '%s\n' '{"success":false,"spec_health_issues":[{"kind":"contradiction","severity":"error","source_line":1,"message":"contradictory natural-language spec"}],"verification_violations":[],"cross_validation_gaps":[],"next_steps":[{"command":"mumei-agent validate-spec --input <spec> --format human"}]}'
     exit 1
     ;;
   validate-code)
-    printf '%s\n' '{"success":false,"spec_health_issues":[],"verification_violations":[{"kind":"contract_violation","severity":"error","line":3,"column":5,"message":"return value violates inferred contract"}],"cross_validation_gaps":[],"next_steps":[{"command":"mumei-agent validate-code --input <path> --language python"}]}'
+    printf '%s\n' '{"success":false,"spec_health_issues":[],"verification_violations":[{"kind":"contract_violation","severity":"error","source_line":3,"message":"return value violates inferred contract"}],"cross_validation_gaps":[],"next_steps":[{"command":"mumei-agent validate-code --input <path> --language python"}]}'
     exit 1
     ;;
 esac
@@ -220,7 +220,7 @@ fn lsp_reports_code_verification_violations_for_other_languages() {
         diagnostic
             .pointer("/range/start/character")
             .and_then(Value::as_u64),
-        Some(4)
+        Some(0)
     );
     assert_eq!(diagnostic.get("severity").and_then(Value::as_u64), Some(1));
     let message = diagnostic

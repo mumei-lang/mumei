@@ -655,8 +655,9 @@ fn issue_position(
 }
 
 fn issue_line(issue: &serde_json::Value) -> Option<usize> {
-    issue_position_value(issue, &["line", "start_line", "line_number"])
+    issue_position_value(issue, &["line", "source_line", "start_line", "line_number"])
         .or_else(|| issue.pointer("/location/line").and_then(json_usize))
+        .or_else(|| issue.pointer("/location/source_line").and_then(json_usize))
         .or_else(|| issue.pointer("/range/start/line").and_then(json_usize))
         .or_else(|| issue.pointer("/span/start/line").and_then(json_usize))
 }
@@ -664,9 +665,21 @@ fn issue_line(issue: &serde_json::Value) -> Option<usize> {
 fn issue_column(issue: &serde_json::Value) -> Option<usize> {
     issue_position_value(
         issue,
-        &["column", "col", "character", "start_column", "start_col"],
+        &[
+            "column",
+            "source_column",
+            "col",
+            "character",
+            "start_column",
+            "start_col",
+        ],
     )
     .or_else(|| issue.pointer("/location/column").and_then(json_usize))
+    .or_else(|| {
+        issue
+            .pointer("/location/source_column")
+            .and_then(json_usize)
+    })
     .or_else(|| issue.pointer("/location/col").and_then(json_usize))
     .or_else(|| issue.pointer("/range/start/character").and_then(json_usize))
     .or_else(|| issue.pointer("/range/start/column").and_then(json_usize))
