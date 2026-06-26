@@ -37,18 +37,21 @@ uv sync
 
 **1. Find likely bugs in existing code**
 ```bash
-uv run mumei-agent validate-code --input src/payment.py --language python  # --language is required: python|rust|go
+# --language is required: python|rust|go
+uv run mumei-agent validate-code --input src/payment.py --language python
 ```
 
 **2. Detect spec↔code drift**
 ```bash
+# Optional: python|rust|go; omitted values are inferred from the extension
 uv run mumei-agent validate-spec-to-code --spec docs/spec.txt --code src/payment.py \
-  --language python  # Optional: python|rust|go; omitted values are inferred from the extension
+  --language python  
 ```
 
 **3. Find contradictions in specs only**
 ```bash
-uv run mumei-agent validate-spec --input docs/spec.txt --format nl  # Optional; default: nl; other choices: human|json|markdown
+# Optional; default: nl; other choices: human|json|markdown
+uv run mumei-agent validate-spec --input docs/spec.txt --format nl
 ```
 
 Domain hints such as `--domain financial` are optional. `validate-code --input`, `validate-spec-to-code --code`, and `validate-code-to-spec --code` take a single source file; directory recursion is available through `audit --code-file` and `extract-spec --code-file`.
@@ -210,7 +213,7 @@ curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash
 brew install mumei-lang/mumei/mumei
 
 # Specific version (latest is v0.6.2)
-curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash -s -- --version v0.6.3
+curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash -s -- --version v0.6.6
 ```
 
 See [Releases](https://github.com/mumei-lang/mumei/releases) for older versions and changelogs.
