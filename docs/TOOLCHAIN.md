@@ -23,9 +23,9 @@
 | `mumei inspect <file> --ai` | ✅ | Structured JSON inspection report for AI agents |
 | `mumei infer-effects <file>` | ✅ | Infer required effects (JSON output for MCP) |
 | `mumei infer-contracts <file>` | ✅ | Infer contracts for all atoms (JSON output) |
-| `mumei repl` | ✅ | Interactive REPL |
+| `mumei repl` | ✅ | Interactive REPL; supports `:verify-spec <path|inline>` and `:verify-code <path>` via `mumei-agent` JSON output |
 | `mumei doc <file> -o <dir>` | ✅ | Generate documentation (`--format html` default, `markdown`, or `json`) |
-| `mumei lsp` | ✅ | Language Server Protocol (hover, diagnostics) |
+| `mumei lsp` | ✅ | Language Server Protocol (hover, Z3 diagnostics, `/// spec:` health checks, `.py` / `.rs` / `.go` contract diagnostics via `mumei-agent`, graceful fallback without the agent) |
 
 ### Installation
 
@@ -143,18 +143,19 @@ npm run compile
 # Then "Run Extension" from VS Code (F5)
 ```
 
-### LSP Features (Frozen — not actively developed)
+### LSP Features
 
-> LSP is considered complete for the current phase. Focus is shifting to language feature enrichment.
-> See [`instruction.md`](../instruction.md) §11 for details.
+> LSP is considered complete for the current V1-E phase, including editor diagnostics that reuse `mumei-agent` JSON output and keep `next_steps` as the only human-review entrypoint.
 
 | Feature | Status |
 |---|---|
 | `textDocument/didOpen` / `didChange` | ✅ Parse error diagnostics |
 | `textDocument/hover` | ✅ Atom contract display (requires/ensures) |
 | Z3 verification diagnostics | ✅ Errors shown as diagnostics (with Span) |
-| `textDocument/completion` | ⏸ Deferred |
-| `textDocument/definition` | ⏸ Deferred |
+| `textDocument/completion` | ✅ Keywords, atoms, effects, and types |
+| `textDocument/definition` | ✅ Jump to cached parsed definitions |
+| `/// spec:` diagnostics | ✅ `spec_health_issues` from `mumei-agent validate-spec --format json` |
+| Foreign-code diagnostics | ✅ `.py` / `.rs` / `.go` `verification_violations` and `cross_validation_gaps` from `mumei-agent validate-code` |
 
 ---
 
@@ -263,7 +264,7 @@ Inspects all tools with multi-path std library search (cwd → exe dir → `MUME
 
 | Phase | Item | Description | Status |
 |---|---|---|---|
-| P3-A | **`mumei repl`** | Interactive REPL (parse → verify → eval loop) | ❌ Planned |
+| P3-A | **`mumei repl`** | Interactive REPL (parse → verify → eval loop, plus `:verify-spec` / `:verify-code` no-`.mm` checks) | ✅ Implemented |
 | P3-B | **`mumei doc`** | rustdoc-style HTML doc generation from `///` comments | ❌ Planned |
 | P3-C | **REPL + HTTP** | Try HTTP requests interactively in REPL | ❌ Planned |
 
@@ -271,8 +272,8 @@ Inspects all tools with multi-path std library search (cwd → exe dir → `MUME
 
 - [ ] Remote package registry (central server for `mumei add <name>`)
 - [x] VS Code Marketplace publishing
-- [ ] LSP completion + definition jump (⏸ Deferred)
-- [ ] Counter-example highlighting in editors (⏸ Deferred)
+- [x] LSP completion + definition jump
+- [x] Counter-example highlighting in editors
 - [ ] Rich Diagnostics (miette/ariadne)
 - [x] `mumei inspect --ai` (structured JSON output for AI agents) — **Plan 11 implemented**
 - [x] Z3 proof certificates in published packages — **Plan 11 implemented**

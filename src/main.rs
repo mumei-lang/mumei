@@ -1,5 +1,6 @@
 #![allow(clippy::result_large_err)]
 
+mod agent;
 mod cli;
 mod codegen;
 mod commands;

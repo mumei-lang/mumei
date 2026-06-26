@@ -97,6 +97,14 @@ textDocument/publishDiagnostics:
   - severity: 1 (Error)
 ```
 
+The LSP also reuses `mumei-agent` JSON diagnostics. `/// spec:` comments in `.mm`
+files are checked with `validate-spec --format json` and surfaced as
+`spec_health_issues`; opened `.py` / `.rs` / `.go` files are checked with
+`validate-code` and surfaced as inline `verification_violations` /
+`cross_validation_gaps`. `next_steps` remains the only human-review entrypoint,
+and missing `mumei-agent` support gracefully falls back to the existing `.mm`
+parse/Z3 diagnostics.
+
 ### Rich Diagnostics Output Examples (miette)
 
 Examples of rich error output powered by miette:

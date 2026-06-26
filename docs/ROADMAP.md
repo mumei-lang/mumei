@@ -37,9 +37,9 @@ The current cross-repo execution order is fixed and should be reviewed with `doc
 | --- | --- | --- |
 | 1 | `V1-A` and `V1-B` in parallel | `V1-A` validates natural-language spec health; `V1-B` audits existing code through `mumei-agent audit --code-file ... --auto-migrate --auto-heal` and MCP `scan_and_fix`. |
 | 2 | `V1-C` and `V1-D` | Compare spec→code and code→spec only after V1-A/V1-B artifacts use the stable names `spec_health_issues`, `verification_violations`, `cross_validation_gaps`, `next_steps`, `migration_hints`, `healed_files`, and `heal_errors`. |
-| 3 | `V1-E` | Human review enters through `next_steps` and the traceability metadata, not through renamed issue fields. |
+| 3 | `V1-E` | Human review enters through `next_steps` and the traceability metadata, not through renamed issue fields. The Phase 7 `mumei-demo/scenarios/spec_code_verification_suite` scenario now demonstrates V1-A〜V1-D in one fixture-safe flow before migration or Lean escalation. |
 
-The no-`.mm` front door remains `audit -> migrate-suggest -> heal`. `mumei-lean` is expanded only for Z3 `unknown` obligations and promotes an atom to `lean_verified` only when `translator_version` and `bridge_lemma_hash` match; stale metadata is `stale_translator`.
+The no-`.mm` front door remains `audit -> migrate-suggest -> heal`. `mumei-lean` is expanded only for Z3 `unknown` obligations and now completes the V1 live generated theorem path: `Generated.Std.Math.Abs.abs_saturating_correct` exports `lean_verified` with `known_witness_used = false` when `translator_version` and `bridge_lemma_hash` match; stale metadata is `stale_translator`, and `known_witness_used = true` remains fallback witness evidence only.
 
 ## Overview
 
@@ -329,6 +329,9 @@ mumei> :quit
 3. Special commands
    - :help, :quit, :load, :env (list current definitions)
    - :type <expr> (display type inference result)
+   - :verify <atom> (.mm atom verification path)
+   - :verify-spec <path|inline> (mumei-agent validate-spec JSON; displays spec_health_issues / verification_violations / cross_validation_gaps / next_steps)
+   - :verify-code <path> (mumei-agent validate-code JSON; displays spec_health_issues / verification_violations / cross_validation_gaps / next_steps)
 
 4. HTTP/JSON integration (after P1 completion)
    - Execute http.get() directly from REPL
@@ -452,7 +455,7 @@ P3-B (mumei doc)       (independent)
 | P2-A: Static Link | 1 week | musl build + CI |
 | P2-B: Homebrew | 1 week | `brew install mumei` |
 | P2-C: WebInstall | 1 week | `curl \| sh` |
-| P3-A: REPL | 2 weeks | `mumei repl` basic functionality |
+| P3-A: REPL | 2 weeks | `mumei repl` basic functionality plus `:verify-spec` / `:verify-code` interactive checks |
 | P3-B: Doc Gen | 2-3 weeks | `mumei doc` HTML generation |
 | P3-C: Integration | 1 week | REPL + HTTP integration |
 
@@ -558,6 +561,7 @@ Detailed session plans for the next 8 implementation priorities are documented i
 | 17 | Plan 23: Regex Path Policies + URL Validation | ✅ RegexSafeFileRead, SecureHttpGet/Post, Z3 approximation improvements |
 | 18 | Plan 24: Modular Verification | ✅ effect_pre/effect_post contracts, cross-atom temporal state tracking |
 | 19 | Plan 25: LSP Completion & Definition | ✅ textDocument/completion, textDocument/definition, multi-editor docs |
+| 20 | V1-E-3: LSP Agent Diagnostics | ✅ `/// spec:` `spec_health_issues`, `.py`/`.rs`/`.go` `verification_violations` / `cross_validation_gaps`, graceful `mumei-agent` degrade |
 
 ### Plan 22: PII Pipeline Example
 
@@ -655,6 +659,17 @@ Unfreezes the LSP server and adds two major features: textDocument/completion an
 - `docs/EDITORS.md` — Editor configuration documentation (5 editors)
 - `instruction.md` — §11 LSP status changed from "Frozen" to "Active"
 - `docs/ROADMAP.md` — This plan entry
+
+### V1-E-3: LSP Agent Diagnostics
+
+Extends `mumei lsp` diagnostics beyond `.mm` parse/Z3 feedback by reusing the same `mumei-agent` JSON contract as the REPL:
+
+- `.mm` comments matching `/// spec: ...` are extracted into a temporary spec input and checked with `mumei-agent validate-spec --input <tmpfile> --format json`; `spec_health_issues` appear on the original comment line.
+- `.py`, `.rs`, and `.go` files are checked with `mumei-agent validate-code --input <path> --language <lang>`; `verification_violations` and `cross_validation_gaps` appear as `source: "mumei-agent"` diagnostics.
+- `next_steps` remains the human-review entrypoint and is included in diagnostic messages / related information without renaming the fixed buckets.
+- Missing `mumei-agent` or malformed JSON silently degrades to existing `.mm` diagnostics, preserving Z3 `relatedInformation` and `data.counterexample`.
+
+**Regression test**: `LLVM_SYS_170_PREFIX=/usr/lib/llvm-17 LIBCLANG_PATH=/usr/lib/x86_64-linux-gnu cargo test --test test_lsp_spec_diagnostics` uses a fake `mumei-agent` on `PATH` to pin spec-comment diagnostics, foreign-code diagnostics, and graceful missing-agent behavior.
 
 ### P7: Runtime Completion (REPL JIT + Binary Execution)
 
@@ -1271,9 +1286,10 @@ mumei は P14 の verification substrate を担当し、user-facing workflow は
 
 **Related docs**:
 
-- `docs/CROSS_PROJECT_ROADMAP.md` — P14-A/B/C/D の横断仕様
+- `docs/CROSS_PROJECT_ROADMAP.md` — P14-A/B/C/D の横断仕様と V1-E-4 実装済み状態
 - `mumei-agent/docs/ROADMAP.md` — agent 側 P14 の詳細
 - `mumei-agent/docs/VERIFICATION_WORKFLOW_GUIDE.md` — no-`.mm` audit workflow
+- `mumei-demo/scenarios/spec_code_verification_suite` — Phase 7 demo that bundles V1-A〜V1-D before migration/heal or Lean escalation
 
 ---
 

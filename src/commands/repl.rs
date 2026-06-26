@@ -1,7 +1,10 @@
+use crate::agent;
 use crate::pipeline::*;
 use mumei_core::hir::lower_atom_to_hir_with_env;
 use mumei_core::{parser, resolver, verification};
-use std::path::Path;
+use std::io::{IsTerminal, Write};
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(crate) const REPL_EVAL_ATOM: &str = "__repl_eval";
 
@@ -14,6 +17,198 @@ pub(crate) struct ReplContext<'ctx> {
 pub(crate) enum ReplAction {
     Continue,
     Quit,
+}
+
+enum ReplAgentCommand {
+    ValidateSpec {
+        input: PathBuf,
+        display_input: String,
+    },
+    ValidateCode {
+        input: PathBuf,
+        language: String,
+        display_input: String,
+    },
+}
+
+fn repl_print_json_value(value: &serde_json::Value) {
+    let rendered = serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string());
+    for line in rendered.lines() {
+        println!("    {}", line);
+    }
+}
+
+fn repl_print_json_array(name: &str, values: &[serde_json::Value]) {
+    println!("  {}:", name);
+    if values.is_empty() {
+        println!("    []");
+        return;
+    }
+    for value in values {
+        repl_print_json_value(value);
+    }
+}
+
+fn repl_first_next_step_command(report: &agent::AgentReport) -> Option<&str> {
+    report.next_steps.first().and_then(|step| {
+        step.get("command")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| step.as_str())
+    })
+}
+
+fn repl_prompt_for_fix(report: &agent::AgentReport) {
+    if report.success {
+        return;
+    }
+    print!("  修正しますか？ (y/n) ");
+    if let Err(err) = std::io::stdout().flush() {
+        eprintln!("  ❌ Prompt error: {}", err);
+        return;
+    }
+
+    let mut answer = String::new();
+    match std::io::stdin().read_line(&mut answer) {
+        Ok(_) if answer.trim().eq_ignore_ascii_case("y") => {
+            if let Some(command) = repl_first_next_step_command(report) {
+                println!("  next_steps[0].command: {}", command);
+            } else {
+                println!("  next_steps[0].command: <none>");
+            }
+            println!("  自動実行はしていません。修正後に再検証してください。");
+        }
+        Ok(_) => {
+            println!("  継続します。");
+        }
+        Err(err) => {
+            eprintln!("  ❌ Prompt error: {}", err);
+        }
+    }
+}
+
+fn repl_run_agent(command: ReplAgentCommand) -> Result<agent::AgentReport, String> {
+    match command {
+        ReplAgentCommand::ValidateSpec {
+            input,
+            display_input,
+        } => {
+            println!(
+                "  mumei-agent validate-spec --input {} --format json",
+                display_input
+            );
+            agent::validate_spec(&input)
+        }
+        ReplAgentCommand::ValidateCode {
+            input,
+            language,
+            display_input,
+        } => {
+            println!(
+                "  mumei-agent validate-code --input {} --language {}",
+                display_input, language
+            );
+            agent::validate_code(&input, &language)
+        }
+    }
+}
+
+fn repl_inline_spec_path(input: &str) -> Result<PathBuf, String> {
+    let mut path = std::env::temp_dir();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|err| format!("failed to create inline spec path: {}", err))?
+        .as_nanos();
+    path.push(format!(
+        "mumei-repl-inline-spec-{}-{}.txt",
+        std::process::id(),
+        now
+    ));
+    std::fs::write(&path, input)
+        .map_err(|err| format!("failed to write inline spec for mumei-agent: {}", err))?;
+    Ok(path)
+}
+
+fn repl_verify_agent_report(command: ReplAgentCommand, prompt_for_fixes: bool) {
+    match repl_run_agent(command) {
+        Ok(report) => {
+            if report.success {
+                println!("  PASS");
+            } else {
+                println!("  FAIL");
+            }
+            repl_print_json_array("spec_health_issues", &report.spec_health_issues);
+            repl_print_json_array("verification_violations", &report.verification_violations);
+            repl_print_json_array("cross_validation_gaps", &report.cross_validation_gaps);
+            repl_print_json_array("next_steps", &report.next_steps);
+            if prompt_for_fixes {
+                repl_prompt_for_fix(&report);
+            }
+        }
+        Err(err) => {
+            eprintln!("  ❌ {}", err);
+        }
+    }
+}
+
+fn repl_verify_spec(input: &str, prompt_for_fixes: bool) {
+    let input = input.trim();
+    if input.is_empty() {
+        eprintln!("  ❌ Usage: :verify-spec <path|inline>");
+        return;
+    }
+
+    let path = Path::new(input);
+    let (input_path, display_input, cleanup_path) = if path.is_file() {
+        (path.to_path_buf(), input.to_string(), None)
+    } else {
+        match repl_inline_spec_path(input) {
+            Ok(path) => (path.clone(), "<inline>".to_string(), Some(path)),
+            Err(err) => {
+                eprintln!("  ❌ {}", err);
+                return;
+            }
+        }
+    };
+
+    repl_verify_agent_report(
+        ReplAgentCommand::ValidateSpec {
+            input: input_path,
+            display_input,
+        },
+        prompt_for_fixes,
+    );
+    if let Some(path) = cleanup_path {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+fn repl_verify_code(input: &str, prompt_for_fixes: bool) {
+    let input = input.trim();
+    if input.is_empty() {
+        eprintln!("  ❌ Usage: :verify-code <path>");
+        return;
+    }
+    let path = Path::new(input);
+    if !path.is_file() {
+        eprintln!("  ❌ Code file not found: {}", input);
+        return;
+    }
+    let language = match agent::infer_code_language(path) {
+        Ok(language) => language,
+        Err(err) => {
+            eprintln!("  ❌ {}", err);
+            return;
+        }
+    };
+
+    repl_verify_agent_report(
+        ReplAgentCommand::ValidateCode {
+            input: path.to_path_buf(),
+            language,
+            display_input: input.to_string(),
+        },
+        prompt_for_fixes,
+    );
 }
 
 pub(crate) fn repl_register_extern_fn(
@@ -434,6 +629,8 @@ pub(crate) fn repl_help() {
     println!("  :load <file|dir> — Load atoms and extern declarations from .mm files");
     println!("  :type <expr>   — Infer a simple expression type");
     println!("  :verify <atom> — Verify and JIT-compile a registered atom");
+    println!("  :verify-spec <path|inline> — Validate a natural-language spec with mumei-agent");
+    println!("  :verify-code <path> — Validate foreign-language code with mumei-agent");
     println!("  :eval <expr>   — JIT compile and execute an expression without verification");
     println!("  :check <expr>  — Parse and type-check an expression");
     println!("  :env           — Show registered atoms and types");
@@ -473,7 +670,11 @@ pub(crate) fn repl_input_incomplete(input: &str) -> bool {
     trimmed.starts_with("extern ") && (!input.contains('}') || repl_brace_balance(input) > 0)
 }
 
-pub(crate) fn repl_handle_line(ctx: &mut ReplContext<'_>, input: &str) -> ReplAction {
+pub(crate) fn repl_handle_line(
+    ctx: &mut ReplContext<'_>,
+    input: &str,
+    prompt_for_fixes: bool,
+) -> ReplAction {
     match input {
         ":quit" | ":q" | ":exit" => {
             println!("Goodbye! 🗡️");
@@ -502,6 +703,28 @@ pub(crate) fn repl_handle_line(ctx: &mut ReplContext<'_>, input: &str) -> ReplAc
             } else {
                 repl_eval_expr(ctx, target, true);
             }
+            ReplAction::Continue
+        }
+        ":verify-spec" => {
+            eprintln!("  ❌ Usage: :verify-spec <path|inline>");
+            ReplAction::Continue
+        }
+        _ if input.starts_with(":verify-spec ") => {
+            repl_verify_spec(
+                input.strip_prefix(":verify-spec ").unwrap().trim(),
+                prompt_for_fixes,
+            );
+            ReplAction::Continue
+        }
+        ":verify-code" => {
+            eprintln!("  ❌ Usage: :verify-code <path>");
+            ReplAction::Continue
+        }
+        _ if input.starts_with(":verify-code ") => {
+            repl_verify_code(
+                input.strip_prefix(":verify-code ").unwrap().trim(),
+                prompt_for_fixes,
+            );
             ReplAction::Continue
         }
         _ if input.starts_with(":check ") => {
@@ -563,7 +786,7 @@ pub(crate) fn cmd_repl() {
         env!("CARGO_PKG_VERSION")
     );
     println!("  Type expressions or atom definitions to evaluate.");
-    println!("  Commands: :help, :type <expr>, :verify <atom>, :load <file|dir>, :quit");
+    println!("  Commands: :help, :type <expr>, :verify <atom>, :verify-spec <path|inline>, :verify-code <path>, :load <file|dir>, :quit");
     println!();
 
     let mut module_env = verification::ModuleEnv::new();
@@ -593,6 +816,7 @@ pub(crate) fn cmd_repl() {
     };
 
     let stdin = std::io::stdin();
+    let prompt_for_fixes = stdin.is_terminal();
     let mut line_buf = String::new();
     let mut pending_input = String::new();
 
@@ -629,7 +853,10 @@ pub(crate) fn cmd_repl() {
         }
 
         let input = std::mem::take(&mut pending_input);
-        if matches!(repl_handle_line(&mut ctx, input.trim()), ReplAction::Quit) {
+        if matches!(
+            repl_handle_line(&mut ctx, input.trim(), prompt_for_fixes),
+            ReplAction::Quit
+        ) {
             break;
         }
     }

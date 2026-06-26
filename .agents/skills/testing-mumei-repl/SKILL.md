@@ -32,8 +32,8 @@ printf ':help\natom inc(x: i64) -> i64\n  requires: true;\n  ensures: result == 
 
 Expected assertions:
 
-- Output includes `Mumei REPL v0.2.0 (JIT enabled)`.
-- `:help` output includes `:load <file>`, `:type <expr>`, and `:verify <atom>`.
+- Output includes `Mumei REPL` and `(JIT enabled)`.
+- `:help` output includes `:load <file|dir>`, `:type <expr>`, `:verify <atom>`, `:verify-spec <path|inline>`, and `:verify-code <path>`.
 - Multiline `atom inc(...)` is buffered as one atom; output does not include `Undefined variable: requires`, `Undefined variable: ensures`, or `Undefined variable: body`.
 - `inc` is verified on definition and via `:verify inc`; output includes `Verified: inc` at least twice and does not include `JIT compile warning for 'inc'`.
 - `:type inc(5)` prints `: i64`.
@@ -41,6 +41,26 @@ Expected assertions:
 - `:load std/json.mm` prints `Loaded 40 definition(s) from 'std/json.mm'`.
 - `:eval json_parse("{}")` prints `= <positive integer>` and output does not include `Symbols not found`, `JIT compile error`, or `Execution error`.
 - `:quit` prints `Goodbye!`.
+
+## No-.mm Agent Verification Flow
+
+Use this flow when validating `:verify-spec` / `:verify-code` command handling. CI must not require a real `mumei-agent`; use a temporary fake `mumei-agent` on `PATH` for bucket-format assertions, and a separate empty `PATH` fixture to assert graceful missing-agent degradation.
+
+Expected assertions for a fake-agent `:verify-spec` session:
+
+- A contradictory spec prints `FAIL` and the fixed bucket names `spec_health_issues`, `verification_violations`, `cross_validation_gaps`, and `next_steps`.
+- A healthy spec prints `PASS` with the same fixed bucket names.
+- Piped/non-interactive stdin exits through `:quit`; it must not consume `:quit` as the answer to `修正しますか？ (y/n)`.
+- With no `mumei-agent` on `PATH`, stderr includes `mumei-agent not found in PATH` and the REPL still prints `Goodbye!`.
+
+The real CLI contract is:
+
+```text
+:verify-spec <path|inline>  -> mumei-agent validate-spec --input <tmp-or-file> --format json
+:verify-code <path>         -> mumei-agent validate-code --input <file> --language <python|rust|go>
+```
+
+`validate-code` currently emits JSON by default and does not accept `--format json`; do not add that flag unless the mumei-agent CLI grows support for it.
 
 ## JIT Error Handling Flow
 

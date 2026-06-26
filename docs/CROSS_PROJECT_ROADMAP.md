@@ -29,7 +29,7 @@ The canonical no-`.mm` route is `mumei-agent audit --code-file ... --auto-migrat
 - `heal` / `--auto-heal` emits `healed_files` and `heal_errors`.
 
 Those seven no-`.mm` keys are the public contract for CLI JSON, MCP `scan_and_fix`, report formatting, and demo artifacts. Do not document `recommendations`, `actions`, `audit_issues`, `verification_gaps`, `repair_hints`, or other aliases as alternate keys.
-`mumei-demo` scenario metadata may list these same keys as `artifact_keys` so demo reviewers can compare them against ordered evidence paths; `artifact_keys` must not introduce alternate audit field names.
+`mumei-demo` scenario metadata may list these same keys as `artifact_keys` so demo reviewers can compare them against ordered evidence paths; `artifact_keys` must not introduce alternate audit field names. Phase 7 is now materialized as `mumei-demo/scenarios/spec_code_verification_suite`, which runs V1-A〜V1-D as `mode_a -> mode_b -> mode_c -> mode_d` and still keeps `next_steps` as the only human-review entrypoint before migration/heal evidence.
 
 The V1 implementation order is fixed across repositories:
 
@@ -1535,16 +1535,18 @@ V1-D-2: 仕様ドリフトレポート
   - 乖離箇所の具体的な説明と修正提案
   - 仕様側の修正案 or コード側の修正案を選択可能
 
-V1-D-3: 双方向整合性サマリ
+V1-D-3: 双方向整合性サマリ（実装済み）
   - V1-C（仕様→コード）とV1-D（コード→仕様）を組み合わせた統合レポート
   - CLI: python -m agent verify-traceability --code src/ --spec req.md
   - MCP: verify_code_spec_traceability(code_file, spec_text, language)
+  - 出力: conformance / drift / cross_validation_gaps / drift_score / next_steps
+  - next_steps が唯一の human-review 入口で、recommendations 等の alias は出さない
 ```
 
 **実装ファイル**:
-- `agent/traceability_verifier.py` — 新規: トレーサビリティ検証エンジン
-- `agent/verify_traceability.py` — 新規: CLIサブコマンド
-- `agent/mcp_server.py` — `verify_code_spec_traceability()` ツール追加
+- `agent/traceability_verifier.py` — 実装済み: トレーサビリティ検証エンジン
+- `agent/verify_traceability.py` — 実装済み: CLIサブコマンド
+- `agent/mcp_server.py` — 実装済み: `verify_code_spec_traceability()` ツール追加
 
 ---
 
@@ -1560,27 +1562,32 @@ V1-D-3: 双方向整合性サマリ
 **追加すべき機能**:
 
 ```
-V1-E-1: 人向けフィードバックフォーマット
+V1-E-1: 人向けフィードバックフォーマット（実装済み）
   - --format human|json|markdown の選択
   - 問題の重要度（🔴 error / 🟡 warning / 🔵 info）の視覚的表示
   - 日本語/英語の自動切り替え（LANG環境変数対応）
   - 修正提案を「コピペできるコード」として提示
 
-V1-E-2: インタラクティブ検証モード
+V1-E-2: インタラクティブ検証モード（実装済み）
   - mumei repl の拡張: :verify-spec, :verify-code コマンド追加
-  - 検証失敗時に「修正しますか？ (y/n)」の対話フロー
-  - 修正後の再検証を自動実行
+  - mumei-agent CLI サブプロセス連携を採用: `validate-spec --format json` / `validate-code` JSON stdout を parse
+  - 出力語彙は `spec_health_issues` / `verification_violations` / `cross_validation_gaps` / `next_steps` に固定
+  - 検証失敗時に「修正しますか？ (y/n)」の対話フローを出し、`next_steps[0].command` を提示（自動実行はしない）
 
-V1-E-3: エディタ統合（LSP拡張）
-  - 既存 LSP サーバー（src/lsp.rs）に diagnostics 追加
-  - 自然言語コメント（/// spec: ...）からリアルタイム仕様検証
-  - 他言語ファイルを開いた際の契約違反インライン表示
+V1-E-3: エディタ統合（LSP拡張） — 実装済み
+  - 既存 LSP サーバー（src/lsp.rs）に mumei-agent diagnostics を追加
+  - `.mm` 内の自然言語コメント（/// spec: ...）を `validate-spec --format json` で検証し、`spec_health_issues` を該当コメント行へ表示
+  - `.py` / `.rs` / `.go` を開いた際に `validate-code --input <path> --language <lang>` を呼び、`verification_violations` / `cross_validation_gaps` をインライン表示
+  - `mumei-agent` JSON サブプロセス連携を採用し、`mumei-agent` 不在・JSON parse 失敗時は既存 `.mm` diagnostics のみ返す graceful degrade
+  - 出力語彙は `spec_health_issues` / `verification_violations` / `cross_validation_gaps` / `next_steps` に固定し、`next_steps` を唯一の human-review 入口として表示する
 
-V1-E-4: mumei-demo への統合
-  - V1-A〜D の4モードをデモシナリオとして追加
-  - "仕様のバグを証明で潰す" ストーリーを可視化
-  - Phase 7: Spec-Code Verification Suite デモ
+V1-E-4: mumei-demo への統合 — 実装済み
+  - `mumei-demo/scenarios/spec_code_verification_suite/` に V1-A〜D の4モードをデモシナリオとして追加
+  - "仕様のバグを証明で潰す" ストーリーを `mode_a` (spec health) / `mode_b` (code audit) / `mode_c` (spec→code conformance) / `mode_d` (code→spec drift) で可視化
+  - Phase 7: Spec-Code Verification Suite デモは no-`.mm` 入力を前面に出し、`next_steps` を唯一の human-review 入口として固定
 ```
+
+V1-E-3 の LSP diagnostics 拡張により、V1-E 系は V1-E-1〜V1-E-4 まで全完了。これで V1-A〜V1-E はすべて実装済み。local roadmap (`docs/ROADMAP.md`) も P3 / LSP の完了項目としてレビュー済み。
 
 ---
 
@@ -1593,7 +1600,7 @@ V1-E-4: mumei-demo への統合
 | V1-C: 仕様→コード整合 | mumei-agent P16 | V1-A + V1-B |
 | V1-D: コード→仕様整合 | mumei-agent P17 | V1-B + intent_tracker ✅ |
 | V1-E: 人向けUX | mumei P10 / mumei-agent P18 | V1-A〜D |
-| mumei-lean連携 | mumei-lean PR-next | V1-A〜D（Z3 unknown時） |
+| mumei-lean連携 | ✅ 実装済み（`Generated.Std.Math.Abs.abs_saturating_correct` live generated theorem path が `known_witness_used = false` で `lean_verified` を E2E export） | V1-A〜D（Z3 unknown時）✅ |
 
 ---
 
@@ -1606,10 +1613,10 @@ graph LR
     B --> D["V1-D\nコード→仕様整合\n(mumei-agent P17)"]
     C --> E["V1-E\n人向けUX\n(P18)"]
     D --> E
-    E --> Demo["Phase 7 Demo\n(mumei-demo)"]
+    E --> Demo["Phase 7 Demo\nspec_code_verification_suite\n(mumei-demo)"]
 ```
 
-**V1-A と V1-B は並行実装可能**。V1-C・V1-D はその両方に依存します。
+**V1 系はすべて実装済み**。`mumei-lean連携` は Z3 `unknown` 専用の補完経路として live generated theorem path を通し、`Generated.Std.Math.Abs.abs_saturating_correct` が `known_witness_used = false` のまま `lean_verified` を E2E export することを確認済みです。`Phase 7 Demo` は `mumei-demo/scenarios/spec_code_verification_suite` として実体化済みで、推奨順序を壊さずに4モードを1本の CI fixture シナリオで確認できます。
 
 ---
 

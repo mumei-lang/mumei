@@ -41,13 +41,17 @@ MCP clients use `scan_and_fix` for the same `audit -> migrate-suggest -> heal` g
 
 1. `V1-A` natural-language spec health and `V1-B` existing-code audit can land in parallel.
 2. `V1-C` spec-to-code conformance and `V1-D` code-to-spec conformance come after both V1-A and V1-B have stable artifacts.
-3. `V1-E` human review is last and starts from `next_steps`, not from renamed issue buckets.
+3. `V1-E` human review is last and starts only from `next_steps`, not from renamed issue buckets or alternate keys such as `recommendations` / `review_actions`.
 
-`mumei-lean` is extended only as the complement for Z3 `unknown` obligations. Do not route `sat`, `unsat`, parser failures, or ordinary audit findings through Lean; only matching `translator_version` + `bridge_lemma_hash` evidence can upgrade an `unknown` atom to `lean_verified`.
+When MCP `scan_and_fix` is called with a spec, `audit`, `spec_alignment`, and `conformance_verification` are separate views: audit owns the no-`.mm` buckets plus migration/heal artifacts, spec alignment owns spec↔code comparison, and conformance verification owns traceability plus next_steps-first human/markdown report text. For the explicit V1-C/V1-D bidirectional summary, mumei-agent exposes `verify-traceability` and MCP `verify_code_spec_traceability`, returning `conformance`, `drift`, `cross_validation_gaps`, `drift_score`, and `next_steps` without renaming the fixed keys. This still keeps `next_steps` as the only V1-E human-review entrypoint.
+
+`mumei-lean` is extended only as the complement for Z3 `unknown` obligations. Do not route `sat`, `unsat`, parser failures, or ordinary audit findings through Lean; only matching `translator_version` + `bridge_lemma_hash` evidence can upgrade an `unknown` atom to `lean_verified`. The mumei resolver treats `lean_verified` as proven only when callers opt in with `--allow-lean-verified`. The current live generated theorem path emits `abs_saturating` as `Generated.Std.Math.Abs.abs_saturating_correct` with `known_witness_used = false`; `known_witness_used = true` remains fallback witness evidence.
 
 Every PR that changes this contract should review `docs/CROSS_PROJECT_ROADMAP.md` and the local roadmap together, then record the bridge/MCP/audit/spec regression commands from `mumei-agent/tests/` and `mumei-lean/tests/` in the PR evidence.
 
 No-`.mm` entry remains delegated to mumei-agent: `audit --code-file ... --auto-migrate --auto-heal` and MCP `scan_and_fix` emit `spec_health_issues`, `verification_violations`, `cross_validation_gaps`, `next_steps`, `migration_hints`, `healed_files`, and `heal_errors`. Mumei consumes the generated `.mm`, proof certificates, MCP summaries, and Lean bridge outputs without renaming those fields.
+
+The Phase 7 Spec-Code Verification Suite in [`mumei-demo`](https://github.com/mumei-lang/mumei-demo/tree/main/scenarios/spec_code_verification_suite) demonstrates this no-`.mm` path end to end: V1-A spec health, V1-B existing-code audit, V1-C spec→code conformance, and V1-D code→spec drift all surface `next_steps` before any migration or Lean escalation. Run it from the demo repo with `make demo-spec-code`.
 
 ---
 
@@ -194,6 +198,7 @@ Once the core contracts are stable, implement new logic directly in `.mm` and em
 ```bash
 mumei build src/main.mm -o dist/output
 mumei run src/main.mm
+mumei repl  # :verify-spec <path|inline>, :verify-code <path>, :verify <atom>
 ```
 
 ---
@@ -284,9 +289,9 @@ mumei setup && source ~/.mumei/env
 | `mumei inspect` | Show development environment |
 | `mumei infer-effects <file>` | Infer required effects (JSON output) |
 | `mumei infer-contracts <file>` | Infer contracts for all atoms (JSON output) |
-| `mumei repl` | Interactive REPL |
+| `mumei repl` | Interactive REPL; use `:verify-spec <path|inline>` / `:verify-code <path>` to validate natural-language specs and foreign code through `mumei-agent` |
 | `mumei doc <file> -o <dir>` | Generate documentation (`--format html` (default) / `markdown` / `json`) |
-| `mumei lsp` | Start LSP server |
+| `mumei lsp` | Start LSP server; shows Z3 diagnostics, `/// spec:` natural-language spec health, and `.py` / `.rs` / `.go` contract diagnostics from `mumei-agent` inline, with graceful fallback when the agent is unavailable |
 | `mumei verify-cert <cert> <file>` | Verify a proof certificate against current source |
 
 ### MCP Tools
@@ -350,7 +355,7 @@ mumei/
 | [Cross-Spec Verification](docs/CROSS_SPEC_GUIDE.md) | System-wide contract consistency, invariants, and dependency cycles |
 | [Toolchain](docs/TOOLCHAIN.md) | CLI commands, package management, CI/release |
 | [Onboarding Guide](docs/ONBOARDING.md) | Gradual path from existing code and natural language to `.mm` |
-| [LSP Integration](docs/LSP_INTEGRATION.md) | Editor CodeLens, intent drift, and spec-code mapping |
+| [LSP Integration](docs/LSP_INTEGRATION.md) | Editor CodeLens, intent drift, spec-code mapping, and `mumei-agent` spec/code diagnostics |
 | [Roadmap](docs/ROADMAP.md) | Strategic roadmap |
 | [Capability Security](docs/CAPABILITY_SECURITY.md) | Effect-based capability security evaluation |
 | [Changelog](docs/CHANGELOG.md) | Release history |
