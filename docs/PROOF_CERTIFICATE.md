@@ -21,6 +21,8 @@ keywords: "mumei proof certificate, formal verification, verified imports, Z3, L
 
 If any value is missing or stale, certificate verification returns `stale_translator` when `--allow-lean-verified` is enabled and `unproven` when it is not. The same meaning applies to proof-certificate metadata, MCP consumers of certificate JSON, and CLI output from `mumei verify --allow-lean-verified` / `verify-cert --allow-lean-verified`.
 
+The standard mumei-lean bridge path is live theorem generation for the current Z3 `unknown` obligation. For the body-semantics fixture, `abs_saturating` is emitted as `Generated.Std.Math.Abs.abs_saturating_correct`, exported as `lean_verified`, and recorded with `known_witness_used = false`. Pre-registered known witnesses remain fallback evidence and are recorded with `known_witness_used = true`; they do not replace the live generated theorem path when that path builds successfully.
+
 ## Roadmap authority and vocabulary
 
 `docs/CROSS_PROJECT_ROADMAP.md` is the single top-level roadmap for cross-repository harness work. This certificate spec is the mumei-side contract surface for that roadmap and uses these canonical fields without aliases: `harness_contract`, `intent_fidelity`, `artifact_paths`, `budget_policy_fingerprint`, and `lean_verified`. Cross-spec and no-`.mm` review artifacts use the same names as mumei-agent: `contract_consistency[]` maps to `missing_constraints[]`, `global_invariant_conflicts[]` maps to `divergences[]`, `circular_dependencies[]` maps to `drift_issues[]`, and Lean escalation remains limited to Z3 `unknown` / timeout / resource-limit obligations that cannot be closed automatically.

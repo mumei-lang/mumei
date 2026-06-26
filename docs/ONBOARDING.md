@@ -14,7 +14,7 @@ Mumei can start from existing code or natural-language requirements, then gradua
 
 Follow `docs/CROSS_PROJECT_ROADMAP.md` as the top-level contract. User-facing onboarding uses only `harness_contract`, `intent_fidelity`, `artifact_paths`, `budget_policy_fingerprint`, and `lean_verified` for mumei-side evidence. The no-`.mm` path keeps the mumei-agent names `spec_health_issues`, `verification_violations`, `cross_validation_gaps`, `next_steps`, `migration_hints`, `healed_files`, and `heal_errors`; do not rename them when handing users from `audit` / `scan_and_fix` into generated `.mm` verification.
 
-`lean_verified` is not a generic success label. Z3 `unknown` atoms may escalate to mumei-lean, but Mumei accepts the result as proven only when callers opt in with `--allow-lean-verified` and the atom certificate plus Lean metadata both carry the current `translator_version` and `bridge_lemma_hash`; otherwise CLI, MCP consumers, and certificate verification must treat the atom as stale/unproven.
+`lean_verified` is not a generic success label. Z3 `unknown` atoms may escalate to mumei-lean, but Mumei accepts the result as proven only when callers opt in with `--allow-lean-verified` and the atom certificate plus Lean metadata both carry the current `translator_version` and `bridge_lemma_hash`; otherwise CLI, MCP consumers, and certificate verification must treat the atom as stale/unproven. The current no-`.mm` handoff emits `abs_saturating` through the live generated theorem `Generated.Std.Math.Abs.abs_saturating_correct` with `known_witness_used = false`; `known_witness_used = true` remains fallback witness evidence.
 
 ## First path: audit before `.mm`
 
