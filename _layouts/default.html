@@ -11,6 +11,7 @@
     {% if site.author %}<meta name="author" content="{{ site.author | escape }}">{% endif %}
     <meta name="robots" content="{{ page.robots | default: 'index, follow, max-snippet:-1, max-image-preview:large, max-video-preview:-1' | escape }}">
     <link rel="canonical" href="{{ page.url | absolute_url }}">
+    {% feed_meta %}
     <meta property="og:title" content="{{ page['og:title'] | default: page.title | default: site.title | escape }}">
     <meta property="og:description" content="{{ page['og:description'] | default: page.description | default: site.description | escape }}">
     <meta property="og:type" content="{{ page['og:type'] | default: 'website' | escape }}">
