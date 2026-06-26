@@ -70,7 +70,8 @@ If you work from a source checkout of `mumei-agent`, run `uv sync` once; after t
 Give the agent an existing source file and ask it to infer contracts, verify them, and report suspicious paths. `--input` is required and points to a single source file. `--language` is required and must be `python`, `rust`, or `go`.
 
 ```bash
-uv run mumei-agent validate-code --input src/payment.py --language python  # --language is required: python|rust|go
+# --language is required: python|rust|go
+uv run mumei-agent validate-code --input src/payment.py --language python
 ```
 
 MCP agents can use mumei's verification backend directly once they synthesize or receive `.mm`:
@@ -106,6 +107,7 @@ uv run mumei-agent validate-code-to-spec \
 Start from prose requirements and check for direct contradictions, vacuity, ambiguity, and over-constraints. `--input` is required; `--domain` is optional when you want domain-specific hints.
 
 ```bash
+# --domain is optional
 uv run mumei-agent validate-spec --input docs/spec.txt --domain payment  # --domain is optional
 ```
 
@@ -212,8 +214,8 @@ curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash
 # Homebrew
 brew install mumei-lang/mumei/mumei
 
-# Specific version (latest is v0.6.2)
-curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash -s -- --version v0.6.6
+# Specific version (latest is v0.6.7)
+curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash -s -- --version v0.6.7
 ```
 
 See [Releases](https://github.com/mumei-lang/mumei/releases) for older versions and changelogs.
