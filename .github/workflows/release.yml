@@ -41,7 +41,7 @@ jobs:
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             name: mumei-x86_64-unknown-linux-musl
-          # Plan 7: Windows target (LLVM built from source, Z3 prebuilt)
+          # Plan 7: Windows target (LLVM prebuilt installer, Z3 prebuilt)
           - target: x86_64-pc-windows-msvc
             os: windows-2022
             name: mumei-x86_64-pc-windows-msvc
