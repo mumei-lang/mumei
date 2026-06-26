@@ -12,15 +12,9 @@ Mumei は、既存の外部言語コード（たとえば Python、Rust、Go、T
 
 ## no-`.mm` の最前面導線
 
-最初の入口は `.mm` を書かない監査契約です。CLI では `mumei-agent audit --code-file ... --auto-migrate --auto-heal`、MCP では `scan_and_fix` を使い、どちらも `audit → migrate-suggest → heal` の順で同じ成果物を返します。ユーザー向けの説明では次の三文言を固定します。
+最初の入口は `.mm` を書かない監査パスです。CLI では `mumei-agent audit --code-file ... --auto-migrate --auto-heal`、MCP では `scan_and_fix` を使い、`.mm` 作成を求める前に既存コードを監査します。
 
-1. 既存コードを渡すだけでバグ箇所を指摘
-2. 仕様から既存コードとの差分を指摘
-3. 仕様単独でおかしい場合を指摘
-
-固定語彙は `harness_contract` / `intent_fidelity` / `artifact_paths` / `budget_policy_fingerprint` / `lean_verified` です。no-`.mm` 成果物は `spec_health_issues` / `verification_violations` / `cross_validation_gaps` / `next_steps` / `migration_hints` / `healed_files` / `heal_errors` を別名なしで使います。
-
-V1 の実装順は `V1-A` と `V1-B` を並行、その後に `V1-C` と `V1-D`、最後に `V1-E` です。`mumei-lean` は Z3 が `unknown` とした義務だけを補完し、`translator_version` と `bridge_lemma_hash` が一致した場合だけ `lean_verified` として扱います。
+詳細な契約、固定語彙、V1-A〜E の順序、Lean 昇格条件、PR evidence ルールは [`docs/CROSS_PROJECT_ROADMAP.md`](docs/CROSS_PROJECT_ROADMAP.md)、[`docs/ROADMAP.md`](docs/ROADMAP.md)、[`docs/ONBOARDING.md`](docs/ONBOARDING.md) を参照してください。
 
 ---
 
@@ -48,15 +42,18 @@ uv run mumei-agent validate-code --input src/payment.py --language python  # --l
 
 **2. 仕様↔コードのドリフトを検出する**
 ```bash
-uv run mumei-agent validate-spec-to-code --spec docs/spec.txt --code src/payment.py
+uv run mumei-agent validate-spec-to-code --spec docs/spec.txt --code src/payment.py \
+  --language python  # Optional: python|rust|go; omitted values are inferred from the extension
 ```
 
 **3. 仕様単体の矛盾を見つける**
 ```bash
-uv run mumei-agent validate-spec --input docs/spec.txt --format nl  # --format is optional (default: nl)
+uv run mumei-agent validate-spec --input docs/spec.txt --format nl  # Optional; default: nl; other choices: human|json|markdown
 ```
 
-`--domain financial` などのドメインヒントは任意です。単一ファイルだけでなくディレクトリも指定できます（例: `--input src/`）。
+`--domain financial` などのドメインヒントは任意です。`validate-code --input`、`validate-spec-to-code --code`、`validate-code-to-spec --code` は単一ソースファイルを指定します。ディレクトリ再帰は `audit --code-file` と `extract-spec --code-file` で利用できます。
+
+コード検証・整合性検証コマンドの対応言語は `python|rust|go` です。`extract-spec` は拡張子から `rust`、`c`、`cpp`、`go`、`python`、`javascript`、`typescript`、`java` を自動検出します。
 
 詳細は [Verification Workflow Guide](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/VERIFICATION_WORKFLOW_GUIDE.md) を参照してください。
 
