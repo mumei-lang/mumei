@@ -41,7 +41,7 @@ jobs:
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             name: mumei-x86_64-unknown-linux-musl
-          # Plan 7: Windows target (LLVM built from source, Z3 prebuilt)
+          # Plan 7: Windows target (LLVM prebuilt installer, Z3 prebuilt)
           - target: x86_64-pc-windows-msvc
             os: windows-2022
             name: mumei-x86_64-pc-windows-msvc
@@ -142,64 +142,41 @@ jobs:
           echo "Z3_SYS_Z3_HEADER=$(brew --prefix z3)/include/z3.h" >> $GITHUB_ENV
           echo "Z3_SYS_Z3_LIB_DIR=$(brew --prefix z3)/lib" >> $GITHUB_ENV
       # Plan 7: Windows dependencies
-      # Build LLVM 17 from source because the LLVM project does not publish
-      # a Windows development SDK package with llvm-config.exe and individual
-      # .lib files for LLVM 17.0.x. The NSIS installer is still useful for
-      # libclang.dll, which bindgen needs while compiling z3-sys.
-      - name: Cache LLVM 17 build (Windows)
+      # Use the official LLVM 17 Windows installer instead of building LLVM
+      # from source. The installer provides LLVM-C.dll/LLVM-C.lib for llvm-sys
+      # and libclang.dll for bindgen; a tiny llvm-config shim supplies the
+      # metadata llvm-sys expects at build time.
+      - name: Cache LLVM 17 tools (Windows)
         if: runner.os == 'Windows'
         id: cache-llvm-win
         uses: actions/cache@v4
         with:
-          path: |
-            C:\LLVM17
-            C:\LLVM17Tools
-          key: llvm-17.0.6-win64-msvc-x86-llvm-only-release-v5
-      - name: Build LLVM 17 from source (Windows)
+          path: C:\LLVM17
+          key: llvm-17.0.6-win64-msvc-prebuilt-tools-v1
+      - name: Install LLVM 17 tools (Windows)
         if: runner.os == 'Windows' && steps.cache-llvm-win.outputs.cache-hit != 'true'
-        timeout-minutes: 150
+        timeout-minutes: 30
         shell: pwsh
         run: |
           $ProgressPreference = 'SilentlyContinue'
           $llvmVersion = "17.0.6"
           $releaseBase = "https://github.com/llvm/llvm-project/releases/download/llvmorg-$llvmVersion"
-          $srcUrl = "$releaseBase/llvm-$llvmVersion.src.tar.xz"
           $toolsUrl = "$releaseBase/LLVM-$llvmVersion-win64.exe"
-          $archivePath = "$env:RUNNER_TEMP\llvm.tar.xz"
           $toolsInstallerPath = "$env:RUNNER_TEMP\llvm-tools.exe"
-          Write-Host "Downloading LLVM $llvmVersion source..."
+          $llvmDir = "C:\LLVM17"
           $maxAttempts = 5
-          for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
-            try {
-              Invoke-WebRequest -Uri $srcUrl -OutFile $archivePath -TimeoutSec 600
-              if ((Get-Item $archivePath).Length -lt 10MB) {
-                throw "Downloaded file is suspiciously small"
-              }
-              Write-Host "LLVM source downloaded on attempt $attempt"
-              break
-            } catch {
-              Write-Host "Download attempt $attempt failed: $_"
-              if ($attempt -eq $maxAttempts) {
-                throw "Failed to download LLVM source after $maxAttempts attempts: $_"
-              }
-              Remove-Item -Force $archivePath -ErrorAction SilentlyContinue
-              $sleepSeconds = [math]::Pow(2, $attempt) * 5
-              Write-Host "Retrying in $sleepSeconds seconds..."
-              Start-Sleep -Seconds $sleepSeconds
-            }
-          }
 
-          Write-Host "Downloading LLVM $llvmVersion Windows tools for libclang..."
+          Write-Host "Downloading LLVM $llvmVersion Windows tools..."
           for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
             try {
               Invoke-WebRequest -Uri $toolsUrl -OutFile $toolsInstallerPath -TimeoutSec 600
               if ((Get-Item $toolsInstallerPath).Length -lt 10MB) {
-                throw "Downloaded tools installer is suspiciously small"
+                throw "Downloaded LLVM installer is suspiciously small"
               }
               Write-Host "LLVM Windows tools downloaded on attempt $attempt"
               break
             } catch {
-              Write-Host "Tools download attempt $attempt failed: $_"
+              Write-Host "LLVM tools download attempt $attempt failed: $_"
               if ($attempt -eq $maxAttempts) {
                 throw "Failed to download LLVM Windows tools after $maxAttempts attempts: $_"
               }
@@ -210,15 +187,6 @@ jobs:
             }
           }
 
-          Write-Host "Extracting LLVM source..."
-          cd $env:RUNNER_TEMP
-          tar xf llvm.tar.xz
-
-          $srcDir = (Get-ChildItem -Path $env:RUNNER_TEMP -Directory -Filter "llvm-*.src" | Select-Object -First 1).FullName
-          $buildDir = "$env:RUNNER_TEMP\llvm-build"
-          $installDir = "C:\LLVM17"
-          $toolsDir = "C:\LLVM17Tools"
-
           Write-Host "Extracting LLVM Windows tools..."
           $sevenZip = (Get-Command 7z -ErrorAction SilentlyContinue).Source
           if (-not $sevenZip) {
@@ -228,58 +196,115 @@ jobs:
             Write-Error "7-Zip not found; cannot extract LLVM Windows tools"
             exit 1
           }
-          & $sevenZip x $toolsInstallerPath "-o$toolsDir" -y | Out-Null
-          if (Test-Path "$toolsDir\bin\libclang.dll") {
-            Write-Host "libclang.dll extracted successfully"
-          } else {
-            Write-Error "libclang.dll not found at $toolsDir\bin"
-            exit 1
+          Remove-Item -Recurse -Force $llvmDir -ErrorAction SilentlyContinue
+          & $sevenZip x $toolsInstallerPath "-o$llvmDir" -y | Out-Null
+
+          New-Item -ItemType Directory -Force -Path "$llvmDir\include\llvm-c" | Out-Null
+          @'
+          #ifndef LLVM_C_TARGET_H
+          #define LLVM_C_TARGET_H
+          #ifdef __cplusplus
+          extern "C" {
+          #endif
+          typedef int LLVMBool;
+          void LLVMInitializeX86TargetInfo(void);
+          void LLVMInitializeX86Target(void);
+          void LLVMInitializeX86TargetMC(void);
+          void LLVMInitializeX86AsmPrinter(void);
+          void LLVMInitializeX86AsmParser(void);
+          void LLVMInitializeX86Disassembler(void);
+          static inline void LLVMInitializeAllTargetInfos(void) { LLVMInitializeX86TargetInfo(); }
+          static inline void LLVMInitializeAllTargets(void) { LLVMInitializeX86Target(); }
+          static inline void LLVMInitializeAllTargetMCs(void) { LLVMInitializeX86TargetMC(); }
+          static inline void LLVMInitializeAllAsmPrinters(void) { LLVMInitializeX86AsmPrinter(); }
+          static inline void LLVMInitializeAllAsmParsers(void) { LLVMInitializeX86AsmParser(); }
+          static inline void LLVMInitializeAllDisassemblers(void) { LLVMInitializeX86Disassembler(); }
+          static inline LLVMBool LLVMInitializeNativeTarget(void) { LLVMInitializeX86TargetInfo(); LLVMInitializeX86Target(); LLVMInitializeX86TargetMC(); return 0; }
+          static inline LLVMBool LLVMInitializeNativeAsmPrinter(void) { LLVMInitializeX86AsmPrinter(); return 0; }
+          static inline LLVMBool LLVMInitializeNativeAsmParser(void) { LLVMInitializeX86AsmParser(); return 0; }
+          static inline LLVMBool LLVMInitializeNativeDisassembler(void) { LLVMInitializeX86Disassembler(); return 0; }
+          #ifdef __cplusplus
           }
+          #endif
+          #endif
+          '@ | Set-Content -Encoding ASCII "$llvmDir\include\llvm-c\Target.h"
 
-          Write-Host "Configuring LLVM (Release, X86 target only)..."
-          cmake -S "$srcDir" -B "$buildDir" -G "Visual Studio 17 2022" -A x64 -Thost=x64 `
-            "-DCMAKE_BUILD_TYPE=Release" `
-            "-DCMAKE_INSTALL_PREFIX=$installDir" `
-            "-DLLVM_TARGETS_TO_BUILD=X86" `
-            "-DLLVM_ENABLE_ZLIB=OFF" `
-            "-DLLVM_ENABLE_ZSTD=OFF" `
-            "-DLLVM_ENABLE_TERMINFO=OFF" `
-            "-DLLVM_INCLUDE_TESTS=OFF" `
-            "-DLLVM_INCLUDE_BENCHMARKS=OFF" `
-            "-DLLVM_INCLUDE_EXAMPLES=OFF"
+          $shimSource = "$env:RUNNER_TEMP\llvm-config-shim.rs"
+          @'
+          use std::{env, process};
 
-          Write-Host "Building LLVM (this will take a while)..."
-          cmake --build $buildDir --config Release --target install -- /m
+          fn main() {
+              let args: Vec<String> = env::args().skip(1).collect();
+              let exe = env::current_exe().expect("current exe");
+              let prefix = exe.parent().and_then(|p| p.parent()).expect("LLVM prefix");
+              let include = prefix.join("include");
+              let lib = prefix.join("lib");
+              let has = |flag: &str| args.iter().any(|arg| arg == flag);
 
-          Write-Host "LLVM installed to $installDir"
-          if (Test-Path "$installDir\lib\cmake\llvm\LLVMConfig.cmake") {
-            Write-Host "LLVM development files installed successfully"
-          } else {
-            Write-Error "LLVM development files not found at $installDir"
-            exit 1
+              if has("--version") {
+                  println!("17.0.6");
+              } else if has("--cflags") {
+                  println!("/I{}", include.display());
+              } else if has("--libdir") {
+                  println!("{}", lib.display());
+              } else if has("--libnames") {
+                  println!("LLVM-C.lib");
+              } else if has("--system-libs") {
+                  println!("");
+              } else if has("--build-mode") {
+                  println!("Release");
+              } else if has("--includedir") {
+                  println!("{}", include.display());
+              } else if has("--prefix") {
+                  println!("{}", prefix.display());
+              } else {
+                  eprintln!("unsupported llvm-config args: {:?}", args);
+                  process::exit(1);
+              }
           }
+          '@ | Set-Content -Encoding UTF8 $shimSource
+          rustc $shimSource -o "$llvmDir\bin\llvm-config.exe"
+
+          $requiredFiles = @(
+            "$llvmDir\bin\LLVM-C.dll",
+            "$llvmDir\bin\libclang.dll",
+            "$llvmDir\lib\LLVM-C.lib",
+            "$llvmDir\include\llvm-c\Target.h",
+            "$llvmDir\bin\llvm-config.exe"
+          )
+          foreach ($file in $requiredFiles) {
+            if (-not (Test-Path $file)) {
+              Write-Error "Required LLVM file not found: $file"
+              exit 1
+            }
+          }
+          & "$llvmDir\bin\llvm-config.exe" --version
+          & "$llvmDir\bin\llvm-config.exe" --libnames --link-static
+          Write-Host "LLVM Windows tools installed to $llvmDir"
       - name: Set LLVM & Z3 environment variables (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $llvmDir = "C:\LLVM17"
-          $llvmToolsDir = "C:\LLVM17Tools"
-          # Verify that development libraries are present
-          # llvm-sys requires llvm-config.exe, while bindgen requires libclang.dll.
-          $llvmCmake = "$llvmDir\lib\cmake\llvm\LLVMConfig.cmake"
           $llvmConfig = "$llvmDir\bin\llvm-config.exe"
-          $libclang = "$llvmToolsDir\bin\libclang.dll"
-          if ((Test-Path $llvmCmake) -and (Test-Path $llvmConfig) -and (Test-Path $libclang)) {
-            Write-Host "LLVM development files found at $llvmDir and libclang found at $llvmToolsDir"
+          $llvmCDll = "$llvmDir\bin\LLVM-C.dll"
+          $llvmCLib = "$llvmDir\lib\LLVM-C.lib"
+          $libclang = "$llvmDir\bin\libclang.dll"
+          $targetHeader = "$llvmDir\include\llvm-c\Target.h"
+          if ((Test-Path $llvmConfig) -and (Test-Path $llvmCDll) -and (Test-Path $llvmCLib) -and (Test-Path $libclang) -and (Test-Path $targetHeader)) {
+            Write-Host "LLVM prebuilt files found at $llvmDir"
           } else {
-            Write-Error "LLVM development files or libclang not found — LLVM setup may have failed"
-            Write-Host "LLVMConfig.cmake: $llvmCmake exists=$(Test-Path $llvmCmake)"
+            Write-Error "LLVM prebuilt files not found — LLVM setup may have failed"
             Write-Host "llvm-config.exe: $llvmConfig exists=$(Test-Path $llvmConfig)"
+            Write-Host "LLVM-C.dll: $llvmCDll exists=$(Test-Path $llvmCDll)"
+            Write-Host "LLVM-C.lib: $llvmCLib exists=$(Test-Path $llvmCLib)"
             Write-Host "libclang.dll: $libclang exists=$(Test-Path $libclang)"
+            Write-Host "Target.h: $targetHeader exists=$(Test-Path $targetHeader)"
             exit 1
           }
           echo "LLVM_SYS_170_PREFIX=$llvmDir" >> $env:GITHUB_ENV
-          echo "LIBCLANG_PATH=$llvmToolsDir\bin" >> $env:GITHUB_ENV
+          echo "LIBCLANG_PATH=$llvmDir\bin" >> $env:GITHUB_ENV
+          echo "PATH=$llvmDir\bin;$env:PATH" >> $env:GITHUB_ENV
           # Install Z3 pre-built release (faster than vcpkg source build)
           $z3Version = "4.13.4"
           $z3Archive = "z3-$z3Version-x64-win"
@@ -301,28 +326,30 @@ jobs:
                 throw "Failed to download Z3 after $maxAttempts attempts: $_"
               }
               Remove-Item -Force $z3ZipPath -ErrorAction SilentlyContinue
-              Start-Sleep -Seconds ([math]::Pow(2, $attempt) * 3)
+              $sleepSeconds = [math]::Pow(2, $attempt) * 5
+              Write-Host "Retrying in $sleepSeconds seconds..."
+              Start-Sleep -Seconds $sleepSeconds
             }
           }
           Expand-Archive -Path $z3ZipPath -DestinationPath $z3Dir -Force
-          $z3Root = (Get-ChildItem -Path $z3Dir -Directory | Select-Object -First 1).FullName
-          echo "Z3_SYS_Z3_HEADER=$z3Root\include\z3.h" >> $env:GITHUB_ENV
-          # The .lib import library is typically in lib/, while .dll is in bin/
-          if (Test-Path "$z3Root\lib\libz3.lib") {
-            $z3LibDir = "$z3Root\lib"
-          } elseif (Test-Path "$z3Root\bin\libz3.lib") {
-            $z3LibDir = "$z3Root\bin"
-          } else {
-            Write-Error "libz3.lib not found in $z3Root"
-            Get-ChildItem -Recurse $z3Root | Select-Object FullName
+          $z3Root = Join-Path $z3Dir $z3Archive
+          $z3LibDir = Join-Path $z3Root "bin"
+          $z3Header = Join-Path $z3Root "include\z3.h"
+          if (-not (Test-Path $z3Header)) {
+            Write-Error "Z3 header not found at $z3Header"
             exit 1
           }
+          if (-not (Test-Path (Join-Path $z3LibDir "libz3.lib"))) {
+            Write-Error "Z3 library not found in $z3LibDir"
+            exit 1
+          }
+          echo "Z3_SYS_Z3_HEADER=$z3Header" >> $env:GITHUB_ENV
           echo "Z3_SYS_Z3_LIB_DIR=$z3LibDir" >> $env:GITHUB_ENV
           # z3-sys does not emit cargo:rustc-link-search for the Z3 lib
           # directory in non-static mode; add it to the linker search path
-          # so the MSVC linker can find libz3.lib.
+          # so the MSVC linker can find libz3.lib. Include LLVM-C.lib too.
           $currentLib = if ($env:LIB) { $env:LIB } else { "" }
-          echo "LIB=$z3LibDir;$currentLib" >> $env:GITHUB_ENV
+          echo "LIB=$llvmDir\lib;$z3LibDir;$currentLib" >> $env:GITHUB_ENV
           # Save z3Root for later DLL copy step
           echo "Z3_ROOT=$z3Root" >> $env:GITHUB_ENV
       - name: Build release binary (Linux non-musl)
@@ -409,7 +436,14 @@ jobs:
           if (Test-Path "release-pkg/std/certs") {
             Remove-Item -Recurse -Force "release-pkg/std/certs"
           }
-          # Include libz3.dll so the binary can find it at runtime
+          # Include required runtime DLLs so the binary can start outside CI
+          $llvmCDll = "$env:LLVM_SYS_170_PREFIX\bin\LLVM-C.dll"
+          if (Test-Path $llvmCDll) {
+            Copy-Item $llvmCDll "release-pkg/"
+            Write-Host "Included LLVM-C.dll in release package"
+          } else {
+            Write-Warning "LLVM-C.dll not found at $llvmCDll — runtime may fail"
+          }
           $z3Bin = "$env:Z3_ROOT\bin\libz3.dll"
           if (Test-Path $z3Bin) {
             Copy-Item $z3Bin "release-pkg/"
