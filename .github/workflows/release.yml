@@ -143,25 +143,30 @@ jobs:
           echo "Z3_SYS_Z3_LIB_DIR=$(brew --prefix z3)/lib" >> $GITHUB_ENV
       # Plan 7: Windows dependencies
       # Build LLVM 17 from source because the LLVM project does not publish
-      # a Windows development SDK package (with llvm-config.exe, individual
-      # .lib files, CMake config) for LLVM 17.0.x — only the NSIS installer
-      # is available, which contains only compiler binaries.
+      # a Windows development SDK package with llvm-config.exe and individual
+      # .lib files for LLVM 17.0.x. The NSIS installer is still useful for
+      # libclang.dll, which bindgen needs while compiling z3-sys.
       - name: Cache LLVM 17 build (Windows)
         if: runner.os == 'Windows'
         id: cache-llvm-win
         uses: actions/cache@v4
         with:
-          path: C:\LLVM17
-          key: llvm-17.0.6-win64-msvc-x86-release-v4
+          path: |
+            C:\LLVM17
+            C:\LLVM17Tools
+          key: llvm-17.0.6-win64-msvc-x86-llvm-only-release-v5
       - name: Build LLVM 17 from source (Windows)
         if: runner.os == 'Windows' && steps.cache-llvm-win.outputs.cache-hit != 'true'
-        timeout-minutes: 90
+        timeout-minutes: 150
         shell: pwsh
         run: |
           $ProgressPreference = 'SilentlyContinue'
           $llvmVersion = "17.0.6"
-          $srcUrl = "https://github.com/llvm/llvm-project/releases/download/llvmorg-$llvmVersion/llvm-project-$llvmVersion.src.tar.xz"
-          $archivePath = "$env:RUNNER_TEMP\llvm-project.tar.xz"
+          $releaseBase = "https://github.com/llvm/llvm-project/releases/download/llvmorg-$llvmVersion"
+          $srcUrl = "$releaseBase/llvm-$llvmVersion.src.tar.xz"
+          $toolsUrl = "$releaseBase/LLVM-$llvmVersion-win64.exe"
+          $archivePath = "$env:RUNNER_TEMP\llvm.tar.xz"
+          $toolsInstallerPath = "$env:RUNNER_TEMP\llvm-tools.exe"
           Write-Host "Downloading LLVM $llvmVersion source..."
           $maxAttempts = 5
           for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
@@ -184,19 +189,57 @@ jobs:
             }
           }
 
-          # Extract (tar.xz)
-          cd $env:RUNNER_TEMP
-          tar xf llvm-project.tar.xz
+          Write-Host "Downloading LLVM $llvmVersion Windows tools for libclang..."
+          for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+            try {
+              Invoke-WebRequest -Uri $toolsUrl -OutFile $toolsInstallerPath -TimeoutSec 600
+              if ((Get-Item $toolsInstallerPath).Length -lt 10MB) {
+                throw "Downloaded tools installer is suspiciously small"
+              }
+              Write-Host "LLVM Windows tools downloaded on attempt $attempt"
+              break
+            } catch {
+              Write-Host "Tools download attempt $attempt failed: $_"
+              if ($attempt -eq $maxAttempts) {
+                throw "Failed to download LLVM Windows tools after $maxAttempts attempts: $_"
+              }
+              Remove-Item -Force $toolsInstallerPath -ErrorAction SilentlyContinue
+              $sleepSeconds = [math]::Pow(2, $attempt) * 5
+              Write-Host "Retrying in $sleepSeconds seconds..."
+              Start-Sleep -Seconds $sleepSeconds
+            }
+          }
 
-          $srcDir = (Get-ChildItem -Path $env:RUNNER_TEMP -Directory -Filter "llvm-project-*" | Select-Object -First 1).FullName
+          Write-Host "Extracting LLVM source..."
+          cd $env:RUNNER_TEMP
+          tar xf llvm.tar.xz
+
+          $srcDir = (Get-ChildItem -Path $env:RUNNER_TEMP -Directory -Filter "llvm-*.src" | Select-Object -First 1).FullName
           $buildDir = "$env:RUNNER_TEMP\llvm-build"
           $installDir = "C:\LLVM17"
+          $toolsDir = "C:\LLVM17Tools"
 
-          Write-Host "Configuring LLVM (Release, host only)..."
-          cmake -S "$srcDir\llvm" -B "$buildDir" -G "Visual Studio 17 2022" -A x64 `
+          Write-Host "Extracting LLVM Windows tools..."
+          $sevenZip = (Get-Command 7z -ErrorAction SilentlyContinue).Source
+          if (-not $sevenZip) {
+            $sevenZip = "$env:ProgramFiles\7-Zip\7z.exe"
+          }
+          if (-not (Test-Path $sevenZip)) {
+            Write-Error "7-Zip not found; cannot extract LLVM Windows tools"
+            exit 1
+          }
+          & $sevenZip x $toolsInstallerPath "-o$toolsDir" -y | Out-Null
+          if (Test-Path "$toolsDir\bin\libclang.dll") {
+            Write-Host "libclang.dll extracted successfully"
+          } else {
+            Write-Error "libclang.dll not found at $toolsDir\bin"
+            exit 1
+          }
+
+          Write-Host "Configuring LLVM (Release, X86 target only)..."
+          cmake -S "$srcDir" -B "$buildDir" -G "Visual Studio 17 2022" -A x64 -Thost=x64 `
             "-DCMAKE_BUILD_TYPE=Release" `
             "-DCMAKE_INSTALL_PREFIX=$installDir" `
-            "-DLLVM_ENABLE_PROJECTS=clang" `
             "-DLLVM_TARGETS_TO_BUILD=X86" `
             "-DLLVM_ENABLE_ZLIB=OFF" `
             "-DLLVM_ENABLE_ZSTD=OFF" `
@@ -220,18 +263,23 @@ jobs:
         shell: pwsh
         run: |
           $llvmDir = "C:\LLVM17"
+          $llvmToolsDir = "C:\LLVM17Tools"
           # Verify that development libraries are present
-          # llvm-config.exe is not produced by the Visual Studio generator;
-          # llvm-sys finds LLVM via LLVM_SYS_170_PREFIX, so check cmake files instead.
+          # llvm-sys requires llvm-config.exe, while bindgen requires libclang.dll.
           $llvmCmake = "$llvmDir\lib\cmake\llvm\LLVMConfig.cmake"
-          if (Test-Path $llvmCmake) {
-            Write-Host "LLVM development files found at $llvmDir"
+          $llvmConfig = "$llvmDir\bin\llvm-config.exe"
+          $libclang = "$llvmToolsDir\bin\libclang.dll"
+          if ((Test-Path $llvmCmake) -and (Test-Path $llvmConfig) -and (Test-Path $libclang)) {
+            Write-Host "LLVM development files found at $llvmDir and libclang found at $llvmToolsDir"
           } else {
-            Write-Error "LLVM development files not found at $llvmDir — LLVM build may have failed"
+            Write-Error "LLVM development files or libclang not found — LLVM setup may have failed"
+            Write-Host "LLVMConfig.cmake: $llvmCmake exists=$(Test-Path $llvmCmake)"
+            Write-Host "llvm-config.exe: $llvmConfig exists=$(Test-Path $llvmConfig)"
+            Write-Host "libclang.dll: $libclang exists=$(Test-Path $libclang)"
             exit 1
           }
           echo "LLVM_SYS_170_PREFIX=$llvmDir" >> $env:GITHUB_ENV
-          echo "LIBCLANG_PATH=$llvmDir\lib" >> $env:GITHUB_ENV
+          echo "LIBCLANG_PATH=$llvmToolsDir\bin" >> $env:GITHUB_ENV
           # Install Z3 pre-built release (faster than vcpkg source build)
           $z3Version = "4.13.4"
           $z3Archive = "z3-$z3Version-x64-win"
