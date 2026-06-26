@@ -10,48 +10,11 @@ Mumei is a formal verification toolchain that can start from existing code (for 
 
 > existing code / natural language spec → MCP or mumei-agent → Z3-backed diagnostics → optional `.mm` migration → LLVM / proof artifacts
 
-Canonical no-`.mm` artifact set: `mumei-agent audit --auto-migrate --auto-heal`
-and MCP `scan_and_fix` both return `spec_health_issues`,
-`verification_violations`, `cross_validation_gaps`, `next_steps`,
-`migration_hints`, `healed_files`, and `heal_errors`. Spec-only checks and
-spec↔code checks share `contradiction_type` values `spec_internal`,
-`spec_overconstraint`, `spec_vacuity`, and `spec_vs_code`.
+## No-`.mm` front door and roadmap
 
-## Canonical harness and Lean vocabulary
+The first user-facing route is the no-`.mm` audit path: run `mumei-agent audit --code-file ... --auto-migrate --auto-heal`, or use MCP `scan_and_fix`, before asking users to author `.mm` files.
 
-`docs/CROSS_PROJECT_ROADMAP.md` is the top-level contract. Mumei-side user docs, MCP outputs, and proof certificates use these field names as the only canonical vocabulary; do not add synonyms in local docs or JSON payloads:
-
-| Field | Canonical meaning |
-| --- | --- |
-| `harness_contract` | Path or identifier for the scenario/harness policy that binds stages, gates, failure taxonomy, and evidence expectations. |
-| `intent_fidelity` | Natural-language intent traceability metadata used to review whether generated specs/artifacts still match the original request. |
-| `artifact_paths` | Ordered evidence paths that CI, demos, MCP clients, or certificate consumers should collect and compare. |
-| `budget_policy_fingerprint` | Stable fingerprint of the retry/search/budget policy used when evidence was produced. |
-| `lean_verified` | Atom status accepted only when the current `translator_version` and `bridge_lemma_hash` match both the atom certificate fields and Lean result metadata. Stale or missing metadata is rejected as `stale_translator`, not treated as proven. |
-
-## No-`.mm` front door and V1 priority
-
-The first user-facing route is always the no-`.mm` audit contract:
-
-```bash
-mumei-agent audit --code-file ... --auto-migrate --auto-heal
-```
-
-MCP clients use `scan_and_fix` for the same `audit -> migrate-suggest -> heal` gate order. Treat that route as the front door before asking users to author `.mm` files. The V1 rollout order is fixed:
-
-1. `V1-A` natural-language spec health and `V1-B` existing-code audit can land in parallel.
-2. `V1-C` spec-to-code conformance and `V1-D` code-to-spec conformance come after both V1-A and V1-B have stable artifacts.
-3. `V1-E` human review is last and starts only from `next_steps`, not from renamed issue buckets or alternate keys such as `recommendations` / `review_actions`.
-
-When MCP `scan_and_fix` is called with a spec, `audit`, `spec_alignment`, and `conformance_verification` are separate views: audit owns the no-`.mm` buckets plus migration/heal artifacts, spec alignment owns spec↔code comparison, and conformance verification owns traceability plus next_steps-first human/markdown report text. For the explicit V1-C/V1-D bidirectional summary, mumei-agent exposes `verify-traceability` and MCP `verify_code_spec_traceability`, returning `conformance`, `drift`, `cross_validation_gaps`, `drift_score`, and `next_steps` without renaming the fixed keys. This still keeps `next_steps` as the only V1-E human-review entrypoint.
-
-`mumei-lean` is extended only as the complement for Z3 `unknown` obligations. Do not route `sat`, `unsat`, parser failures, or ordinary audit findings through Lean; only matching `translator_version` + `bridge_lemma_hash` evidence can upgrade an `unknown` atom to `lean_verified`. The mumei resolver treats `lean_verified` as proven only when callers opt in with `--allow-lean-verified`. The current live generated theorem path emits `abs_saturating` as `Generated.Std.Math.Abs.abs_saturating_correct` with `known_witness_used = false`; `known_witness_used = true` remains fallback witness evidence.
-
-Every PR that changes this contract should review `docs/CROSS_PROJECT_ROADMAP.md` and the local roadmap together, then record the bridge/MCP/audit/spec regression commands from `mumei-agent/tests/` and `mumei-lean/tests/` in the PR evidence.
-
-No-`.mm` entry remains delegated to mumei-agent: `audit --code-file ... --auto-migrate --auto-heal` and MCP `scan_and_fix` emit `spec_health_issues`, `verification_violations`, `cross_validation_gaps`, `next_steps`, `migration_hints`, `healed_files`, and `heal_errors`. Mumei consumes the generated `.mm`, proof certificates, MCP summaries, and Lean bridge outputs without renaming those fields.
-
-The Phase 7 Spec-Code Verification Suite in [`mumei-demo`](https://github.com/mumei-lang/mumei-demo/tree/main/scenarios/spec_code_verification_suite) demonstrates this no-`.mm` path end to end: V1-A spec health, V1-B existing-code audit, V1-C spec→code conformance, and V1-D code→spec drift all surface `next_steps` before any migration or Lean escalation. Run it from the demo repo with `make demo-spec-code`.
+For the detailed contract, canonical vocabulary, V1-A〜E order, Lean escalation rules, and PR evidence expectations, see [`docs/CROSS_PROJECT_ROADMAP.md`](docs/CROSS_PROJECT_ROADMAP.md), [`docs/ROADMAP.md`](docs/ROADMAP.md), and [`docs/ONBOARDING.md`](docs/ONBOARDING.md).
 
 ---
 
@@ -74,20 +37,26 @@ uv sync
 
 **1. Find likely bugs in existing code**
 ```bash
-uv run mumei-agent validate-code --input src/payment.py --language python  # --language is required: python|rust|go
+# --language is required: python|rust|go
+uv run mumei-agent validate-code --input src/payment.py --language python
 ```
 
 **2. Detect spec↔code drift**
 ```bash
-uv run mumei-agent validate-spec-to-code --spec docs/spec.txt --code src/payment.py
+# Optional: python|rust|go; omitted values are inferred from the extension
+uv run mumei-agent validate-spec-to-code --spec docs/spec.txt --code src/payment.py \
+  --language python  
 ```
 
 **3. Find contradictions in specs only**
 ```bash
-uv run mumei-agent validate-spec --input docs/spec.txt --format nl  # --format is optional (default: nl)
+# Optional; default: nl; other choices: human|json|markdown
+uv run mumei-agent validate-spec --input docs/spec.txt --format nl
 ```
 
-Domain hints such as `--domain financial` are optional. You can pass a directory as well as a single file (for example, `--input src/`).
+Domain hints such as `--domain financial` are optional. `validate-code --input`, `validate-spec-to-code --code`, and `validate-code-to-spec --code` take a single source file; directory recursion is available through `audit --code-file` and `extract-spec --code-file`.
+
+Code validation and alignment commands use `python|rust|go`. `extract-spec` auto-detects a broader set from file extensions: `rust`, `c`, `cpp`, `go`, `python`, `javascript`, `typescript`, and `java`.
 
 See the [Verification Workflow Guide](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/VERIFICATION_WORKFLOW_GUIDE.md) for details.
 
@@ -98,7 +67,7 @@ If you work from a source checkout of `mumei-agent`, run `uv sync` once; after t
 
 ### 1. Existing code: find likely bug locations
 
-Give the agent an existing source file and ask it to infer contracts, verify them, and report suspicious paths. `--input` is required and points to a source file or directory. `--language` is required and must be `python`, `rust`, or `go`.
+Give the agent an existing source file and ask it to infer contracts, verify them, and report suspicious paths. `--input` is required and points to a single source file. `--language` is required and must be `python`, `rust`, or `go`.
 
 ```bash
 uv run mumei-agent validate-code --input src/payment.py --language python  # --language is required: python|rust|go
@@ -244,7 +213,7 @@ curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash
 brew install mumei-lang/mumei/mumei
 
 # Specific version (latest is v0.6.2)
-curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash -s -- --version v0.6.3
+curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash -s -- --version v0.6.6
 ```
 
 See [Releases](https://github.com/mumei-lang/mumei/releases) for older versions and changelogs.
