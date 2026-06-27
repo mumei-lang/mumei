@@ -13,9 +13,14 @@ sitemap: false
   <author>
     <name>{{ site.author | default: site.title | xml_escape }}</name>
   </author>
-  {% assign feed_pages = site.pages | where_exp: "feed_page", "feed_page.url != '/feed.xml' and feed_page.url != '/jekyll-feed.xml' and feed_page.url != '/sitemap.xml' and feed_page.url != '/robots.txt' and feed_page.url != '/404.html'" | sort: "url" %}
+  {% assign feed_pages = site.pages | sort: "url" %}
   {% for feed_page in feed_pages %}
-  {% unless feed_page.url contains '/feed.xml' %}
+  {% assign feed_url = feed_page.url %}
+  {% unless feed_url == '/feed.xml' %}
+  {% unless feed_url == '/jekyll-feed.xml' %}
+  {% unless feed_url == '/sitemap.xml' %}
+  {% unless feed_url == '/robots.txt' %}
+  {% unless feed_url == '/404.html' %}
   <entry>
     <title>{{ feed_page.title | default: site.title | xml_escape }}</title>
     <link href="{{ feed_page.url | absolute_url }}" rel="alternate" type="text/html" />
@@ -23,6 +28,10 @@ sitemap: false
     <updated>{{ site.time | date_to_xmlschema }}</updated>
     <summary>{{ feed_page.description | default: site.description | strip_html | xml_escape }}</summary>
   </entry>
+  {% endunless %}
+  {% endunless %}
+  {% endunless %}
+  {% endunless %}
   {% endunless %}
   {% endfor %}
 </feed>
