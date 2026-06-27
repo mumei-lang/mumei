@@ -9,6 +9,8 @@ markdown: kramdown
 kramdown:
   input: GFM
 plugins: [jekyll-sitemap, jekyll-feed]
+feed:
+  path: jekyll-feed.xml
 twitter:
   username: mumei_lang
 social:

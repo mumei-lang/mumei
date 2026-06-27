@@ -612,21 +612,57 @@ jobs:
           Allow: /
           Sitemap: https://mumei-lang.github.io/mumei/sitemap.xml
           ROBOTSEOF
-      - name: Generate feed.xml
+      - name: Generate Atom feeds
         run: |
           UPDATED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          mkdir -p gh-pages-dist/paper
           cat > gh-pages-dist/feed.xml <<ATOMEOF
           <?xml version="1.0" encoding="utf-8"?>
-          <feed xmlns="http://www.w3.org/2005/Atom">
+          <feed xmlns="http://www.w3.org/2005/Atom" xml:lang="en">
             <title>Mumei Language</title>
             <subtitle>Mathematical proof-driven programming language</subtitle>
-            <link href="https://mumei-lang.github.io/mumei/" rel="alternate" type="text/html" />
             <link href="https://mumei-lang.github.io/mumei/feed.xml" rel="self" type="application/atom+xml" />
-            <id>https://mumei-lang.github.io/mumei/</id>
+            <link href="https://mumei-lang.github.io/mumei/" rel="alternate" type="text/html" />
+            <id>https://mumei-lang.github.io/mumei/feed.xml</id>
             <updated>${UPDATED}</updated>
             <author>
               <name>mumei-lang</name>
             </author>
+            <entry>
+              <title>Mumei Language</title>
+              <link href="https://mumei-lang.github.io/mumei/" rel="alternate" type="text/html" />
+              <id>https://mumei-lang.github.io/mumei/</id>
+              <updated>${UPDATED}</updated>
+              <summary>Mathematical proof-driven programming language.</summary>
+            </entry>
+            <entry>
+              <title>Mumei Language Technical Paper</title>
+              <link href="https://mumei-lang.github.io/mumei/paper/" rel="alternate" type="text/html" />
+              <id>https://mumei-lang.github.io/mumei/paper/</id>
+              <updated>${UPDATED}</updated>
+              <summary>Technical paper for the Mumei mathematical proof-driven programming language.</summary>
+            </entry>
+          </feed>
+          ATOMEOF
+          cat > gh-pages-dist/paper/feed.xml <<ATOMEOF
+          <?xml version="1.0" encoding="utf-8"?>
+          <feed xmlns="http://www.w3.org/2005/Atom" xml:lang="en">
+            <title>Mumei Language Technical Paper</title>
+            <subtitle>Technical paper for the Mumei mathematical proof-driven programming language.</subtitle>
+            <link href="https://mumei-lang.github.io/mumei/paper/feed.xml" rel="self" type="application/atom+xml" />
+            <link href="https://mumei-lang.github.io/mumei/paper/" rel="alternate" type="text/html" />
+            <id>https://mumei-lang.github.io/mumei/paper/feed.xml</id>
+            <updated>${UPDATED}</updated>
+            <author>
+              <name>mumei-lang</name>
+            </author>
+            <entry>
+              <title>Mumei Language Technical Paper</title>
+              <link href="https://mumei-lang.github.io/mumei/paper/" rel="alternate" type="text/html" />
+              <id>https://mumei-lang.github.io/mumei/paper/</id>
+              <updated>${UPDATED}</updated>
+              <summary>Technical paper for the Mumei mathematical proof-driven programming language.</summary>
+            </entry>
           </feed>
           ATOMEOF
       - name: Deploy to GitHub Pages
