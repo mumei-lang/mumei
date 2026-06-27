@@ -1,0 +1,28 @@
+---
+layout: null
+sitemap: false
+---
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xml:lang="{{ site.lang | default: 'en' | xml_escape }}">
+  <title>{{ site.title | xml_escape }}</title>
+  <subtitle>{{ site.description | xml_escape }}</subtitle>
+  <link href="{{ '/feed.xml' | absolute_url }}" rel="self" type="application/atom+xml" />
+  <link href="{{ '/' | absolute_url }}" rel="alternate" type="text/html" />
+  <id>{{ '/feed.xml' | absolute_url }}</id>
+  <updated>{{ site.time | date_to_xmlschema }}</updated>
+  <author>
+    <name>{{ site.author | default: site.title | xml_escape }}</name>
+  </author>
+  {% assign feed_pages = site.pages | where_exp: "feed_page", "feed_page.url != '/feed.xml' and feed_page.url != '/jekyll-feed.xml' and feed_page.url != '/sitemap.xml' and feed_page.url != '/robots.txt' and feed_page.url != '/404.html'" | sort: "url" %}
+  {% for feed_page in feed_pages %}
+  {% unless feed_page.url contains '/feed.xml' %}
+  <entry>
+    <title>{{ feed_page.title | default: site.title | xml_escape }}</title>
+    <link href="{{ feed_page.url | absolute_url }}" rel="alternate" type="text/html" />
+    <id>{{ feed_page.url | absolute_url }}</id>
+    <updated>{{ site.time | date_to_xmlschema }}</updated>
+    <summary>{{ feed_page.description | default: site.description | strip_html | xml_escape }}</summary>
+  </entry>
+  {% endunless %}
+  {% endfor %}
+</feed>
