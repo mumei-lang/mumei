@@ -170,8 +170,8 @@ CLI values take precedence over environment values. `--intent-fidelity` accepts 
 | `effects` | `Vec<String>` | Declared effect names |
 | `requires` | `String` | Precondition contract text |
 | `ensures` | `String` | Postcondition contract text |
-| `z3_result_class` | `String` | Normalized solver class used for Lean routing (`unknown`, `timeout`, `resource_limit`, `unsat`, etc.) |
-| `escalation_reason` | `Option<String>` | Reason an obligation is routed to Lean |
+| `z3_result_class` | `String` | Normalized solver class used for Lean routing; only `unknown` is a Lean candidate, and `sat` / `unsat` classes are not candidates. |
+| `escalation_reason` | `Option<String>` | Reason a Z3-`unknown` obligation is routed to Lean |
 | `logic_fragment_tags` | `Vec<String>` | Detected fragments such as arrays, quantifiers, strings, non-linear arithmetic, or temporal effects |
 | `translator_version` | `String` | Lean translator contract version. Version mismatch invalidates Lean proof cache acceptance. |
 | `binder_mapping` | `HashMap<String, String>` | Mumei witness/result names mapped to generated Lean binder names |
