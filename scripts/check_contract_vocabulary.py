@@ -108,11 +108,11 @@ def _check_canonical_doc() -> list[Violation]:
 def _alias_key_patterns(alias: str) -> list[re.Pattern[str]]:
     quoted = re.escape(alias)
     return [
-        re.compile(rf"`{quoted}`"),
-        re.compile(rf'"{quoted}"\s*:'),
-        re.compile(rf"'{quoted}'\s*:"),
-        re.compile(rf"(?m)^\s*[-*]?\s*{quoted}\s*:"),
-        re.compile(rf"\b{quoted}\[\]\b"),
+        re.compile(rf"`{quoted}(?:\[\])?`"),
+        re.compile(rf'"{quoted}(?:\[\])?"\s*:'),
+        re.compile(rf"'{quoted}(?:\[\])?'\s*:"),
+        re.compile(rf"(?m)^\s*[-*]?\s*{quoted}(?:\[\])?\s*:"),
+        re.compile(rf"\b{quoted}\[\]"),
     ]
 
 
