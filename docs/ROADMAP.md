@@ -27,7 +27,14 @@ When this roadmap or the cross-project roadmap changes, reviewers should include
 - `../mumei-lean/docs/BRIDGE_HARNESS_SPEC.md`
 - `../mumei-lean/docs/LEAN_HARNESS_CONTRACT.md`
 
-The same PR/changeset should record the relevant bridge/MCP/audit/spec test commands run in `mumei-agent/tests/` and `mumei-lean/tests/`.
+The same PR/changeset should record both the automatic docs-sync gate and the relevant bridge/MCP/audit/spec test commands:
+
+```bash
+python3 scripts/check_contract_vocabulary.py
+(cd ../mumei-agent && uv run pytest tests/test_contract_vocabulary.py -q)
+(cd ../mumei-lean && PYTHONPATH=scripts MUMEI_LEAN_SKIP_LIVE=1 python -m pytest tests/test_contract_vocabulary.py -q)
+(cd ../mumei-demo && python3 scripts/check_scenario_contracts.py)
+```
 
 ### V1 execution order
 
