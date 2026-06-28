@@ -21,6 +21,11 @@ SYNC_DOCS = [
     REPO_ROOT / "README.md",
     REPO_ROOT / "instruction.md",
 ]
+NO_MM_LANGUAGE_DOCS = [
+    CANONICAL_DOC,
+    REPO_ROOT / "docs" / "ROADMAP.md",
+    REPO_ROOT / "docs" / "ONBOARDING.md",
+]
 
 HARNESS_KEYS = [
     "harness_contract",
@@ -46,6 +51,15 @@ FORBIDDEN_ALIASES = [
     "repair_hints",
     "review_actions",
     "human_review",
+]
+REQUIRED_NO_MM_LANGUAGE_PHRASES = [
+    "Python, Rust, TypeScript, and Go",
+    "parser path",
+    "deterministic/no-LLM",
+    "Rust `a + b` i64 overflow",
+    "TypeScript `name!.length` null/undefined",
+    "Go `values[idx]` bounds",
+    "Z3 counterexample",
 ]
 
 
@@ -187,6 +201,19 @@ def _check_meaning_contradictions(path: Path) -> list[Violation]:
     return violations
 
 
+def _check_no_mm_language_sync(path: Path) -> list[Violation]:
+    text = path.read_text(encoding="utf-8")
+    normalized = " ".join(text.split()).lower()
+    violations: list[Violation] = []
+    for phrase in REQUIRED_NO_MM_LANGUAGE_PHRASES:
+        if phrase.lower() not in normalized:
+            violations.append(Violation(path, f"no-.mm language sync is missing phrase: {phrase}"))
+    for key in NO_MM_KEYS:
+        if key not in text:
+            violations.append(Violation(path, f"no-.mm language sync is missing `{key}`"))
+    return violations
+
+
 def main() -> int:
     violations = _check_canonical_doc()
     for path in SYNC_DOCS:
@@ -195,6 +222,8 @@ def main() -> int:
             continue
         violations.extend(_check_forbidden_alias_keys(path))
         violations.extend(_check_meaning_contradictions(path))
+    for path in NO_MM_LANGUAGE_DOCS:
+        violations.extend(_check_no_mm_language_sync(path))
 
     if violations:
         print("Contract vocabulary check failed:", file=sys.stderr)

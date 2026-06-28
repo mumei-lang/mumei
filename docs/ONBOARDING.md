@@ -18,7 +18,9 @@ Follow `docs/CROSS_PROJECT_ROADMAP.md` as the top-level contract. User-facing on
 
 ## First path: audit before `.mm`
 
-Use `mumei-agent audit --code-file ... --auto-migrate --auto-heal` or MCP `scan_and_fix` before asking a new user to author `.mm`. Both entrypoints must present the same gate order and the same names:
+Use `mumei-agent audit --code-file ... --auto-migrate --auto-heal` or MCP `scan_and_fix` before asking a new user to author `.mm`. Both entrypoints must present the same gate order and the same names. The
+front door supports Python, Rust, TypeScript, and Go; language selection only
+changes the parser path, not the seven keys or their meanings:
 
 1. `audit` emits `spec_health_issues`, `verification_violations`, `cross_validation_gaps`, and `next_steps`.
 2. `migrate-suggest` / `--auto-migrate` emits `migration_hints` and generated `.mm` skeleton paths.
@@ -31,6 +33,8 @@ V1 implementation order is fixed: `V1-A` spec health and `V1-B` code audit can p
 When `scan_and_fix` receives a spec, read `audit`, `spec_alignment`, and `conformance_verification` as separate views. `audit` owns the no-`.mm` buckets and migration/heal artifacts, `spec_alignment` owns spec↔code gaps, and `conformance_verification` owns traceability plus the next_steps-first human/markdown report. For the explicit V1-C/V1-D bidirectional summary, use mumei-agent `verify-traceability` or MCP `verify_code_spec_traceability`; they keep `conformance`, `drift`, `cross_validation_gaps`, `drift_score`, and `next_steps` as fixed keys.
 
 To see the no-`.mm` route before writing `.mm`, run the Phase 7 Spec-Code Verification Suite in [`mumei-demo`](https://github.com/mumei-lang/mumei-demo/tree/main/scenarios/spec_code_verification_suite): `make demo-spec-code`. It bundles V1-A spec health, V1-B code audit, V1-C spec→code conformance, and V1-D code→spec drift while keeping `next_steps` as the only human-review entrypoint.
+
+For the four-language audit fixture, run [`mumei-demo/scenarios/no_mm_audit`](https://github.com/mumei-lang/mumei-demo/tree/main/scenarios/no_mm_audit) with `make demo-no-mm`. In deterministic/no-LLM `CI_FIXTURE_MODE=1`, Python negative balance, Rust `a + b` i64 overflow/bounds, TypeScript `name!.length` null/undefined, and Go `values[idx]` bounds stay on the deterministic Z3 counterexample route through `verification_violations`; the demo stops before Lean escalation and does not expect `lean_verified`.
 
 ## Step 0: `.mm`を書かずにバグ指摘を受ける
 
