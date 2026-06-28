@@ -21,7 +21,8 @@
   `known_witness_used = false`.
 - **Algebra finite-field live Lean bridge fixture**: documented the fourth live
   generated theorem path, `std/algebra/finite_field.mm::ff_zero_eq_zero`, which
-  lowers `ff_zero(p)` body semantics to
+  emits a mumei proof-certificate atom with `z3_result_class = "unknown"` for
+  `ff_eq(result, 0, p)`, then lowers `ff_zero(p)` body semantics to
   `Generated.Std.Algebra.Finite_field.ff_zero_eq_zero_correct` and exports
   `known_witness_used = false`.
 
