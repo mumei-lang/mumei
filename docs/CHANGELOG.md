@@ -2,17 +2,27 @@
 
 ---
 
-### 2026-06-28: core-seeded deterministic forge and crypto Lean bridge path
+### 2026-06-28: core-seeded deterministic forge and Lean bridge paths
 
 - **vStd core predicates forge**: added `std/core_predicates.mm` from
   `forge_tasks/vstd_core_predicates.json` with explicit atom bodies and
   `deterministic_bodies: true`; `safe_index_or_zero`, `is_nonzero_flag`, and
   `preserve_safe_index` verify in the Z3-decidable fragment with no Lean
   escalation.
+- **vStd core guards forge**: added `std/core_guards.mm` from
+  `forge_tasks/vstd_core_guards.json` with explicit atom bodies and
+  `deterministic_bodies: true`; `is_in_bounds`, `safe_abs_diff`,
+  `clamp_to_positive`, and `both_positive` verify in the Z3-decidable
+  fragment with no Lean escalation.
 - **Crypto live Lean bridge fixture**: documented the third live generated
   theorem path, `std/crypto/primitives.mm::constant_time_eq_flag`, which lowers
   braced conditional body semantics to
   `Generated.Std.Crypto.Primitives.constant_time_eq_flag_correct` and exports
+  `known_witness_used = false`.
+- **Algebra finite-field live Lean bridge fixture**: documented the fourth live
+  generated theorem path, `std/algebra/finite_field.mm::ff_zero_eq_zero`, which
+  lowers `ff_zero(p)` body semantics to
+  `Generated.Std.Algebra.Finite_field.ff_zero_eq_zero_correct` and exports
   `known_witness_used = false`.
 
 ---
