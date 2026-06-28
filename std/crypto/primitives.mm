@@ -1,5 +1,5 @@
 // =============================================================
-// std/crypto/primitives.mm — deterministic forge output
+// std/crypto/primitives — verified crypto primitives
 // =============================================================
 // 明示 body を持つ forge task から決定的に生成した検証対象。
 // LLM 呼び出しなしで forge できる構造的契約のみを含む。
