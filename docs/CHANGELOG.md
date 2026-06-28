@@ -2,6 +2,20 @@
 
 ---
 
+### 2026-06-28: vStd crypto primitives forge verification
+
+- **vStd crypto primitives forge**: added `std/crypto/primitives.mm` from `forge_tasks/vstd_crypto_primitives.json` with `is_valid_key_len`, `is_valid_nonce_len`, `constant_time_eq_flag`, and `digest_len_ok`; `mumei verify --proof-cert std/crypto/primitives.mm` completes in the Z3-decidable fragment with no Lean escalation.
+
+---
+
+### 2026-06-28: Multi-language no-`.mm` audit contract sync
+
+- **Multi-language no-`.mm` audit contract**: documented the canonical deterministic/no-LLM parser path for Python, Rust, TypeScript, and Go, including Rust `a + b` i64 overflow/bounds, TypeScript `name!.length` null/undefined, and Go `values[idx]` bounds findings normalized into `verification_violations` with Z3 counterexamples.
+- **Contract vocabulary docs gate**: added the cross-project vocabulary check that keeps local docs aligned with `docs/CROSS_PROJECT_ROADMAP.md`, preserves the fixed no-`.mm` seven-key schema (`spec_health_issues`, `verification_violations`, `cross_validation_gaps`, `next_steps`, `migration_hints`, `healed_files`, `heal_errors`), and rejects legacy alias keys as public contract fields.
+- **Lean bridge contract metadata**: kept the `translator_version` / `bridge_lemma_hash` synchronization requirement explicit so stale Lean translator output remains gated by `stale_translator` instead of being accepted as proof evidence.
+
+---
+
 ### P9-D/E/F/G: NLAE integration completion
 
 - **Loss Vector + structured feedback JSON**: `mumei verify --emit loss-vector <file.mm>` now emits P9-E structured feedback JSON, including reconstruction-loss details, violated property, counterexample values, source location, and an agent-facing repair instruction.
