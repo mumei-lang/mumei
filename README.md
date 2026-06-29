@@ -42,13 +42,13 @@ uv sync
 
 **1. Find likely bugs in existing code**
 ```bash
-# --language is required: python|rust|go
+# --language is required: python|rust|typescript|go
 uv run mumei-agent validate-code --input src/payment.py --language python
 ```
 
 **2. Detect spec↔code drift**
 ```bash
-# Optional: python|rust|go; omitted values are inferred from the extension
+# Optional: python|rust|typescript|go; omitted values are inferred from the extension
 uv run mumei-agent validate-spec-to-code --spec docs/spec.txt --code src/payment.py \
   --language python
 ```
@@ -61,7 +61,7 @@ uv run mumei-agent validate-spec --input docs/spec.txt --format nl
 
 Domain hints such as `--domain financial` are optional. `validate-code --input`, `validate-spec-to-code --code`, and `validate-code-to-spec --code` take a single source file; directory recursion is available through `audit --code-file` and `extract-spec --code-file`.
 
-Code validation and alignment commands use `python|rust|go`. `extract-spec` auto-detects a broader set from file extensions: `rust`, `c`, `cpp`, `go`, `python`, `javascript`, `typescript`, and `java`.
+Code validation and alignment commands use `python|rust|typescript|go`. `extract-spec` auto-detects a broader set from file extensions: `rust`, `c`, `cpp`, `go`, `python`, `javascript`, `typescript`, and `java`.
 
 See the [Verification Workflow Guide](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/VERIFICATION_WORKFLOW_GUIDE.md) for details.
 
@@ -72,10 +72,10 @@ If you work from a source checkout of `mumei-agent`, run `uv sync` once; after t
 
 ### 1. Existing code: find likely bug locations
 
-Give the agent an existing source file and ask it to infer contracts, verify them, and report suspicious paths. `--input` is required and points to a single source file. `--language` is required and must be `python`, `rust`, or `go`.
+Give the agent an existing source file and ask it to infer contracts, verify them, and report suspicious paths. `--input` is required and points to a single source file. `--language` is required and must be `python`, `rust`, `typescript`, or `go`.
 
 ```bash
-# --language is required: python|rust|go
+# --language is required: python|rust|typescript|go
 uv run mumei-agent validate-code --input src/payment.py --language python
 ```
 
@@ -92,7 +92,7 @@ MCP agents can use mumei's verification backend directly once they synthesize or
 
 ### 2. Natural-language spec + existing code: detect spec↔code drift
 
-Compare requirements against an implementation and ask for mismatches before migrating anything to `.mm`. `--spec` and `--code` are required; `--code` points to a single source file. `--language` is optional and can be `python`, `rust`, or `go`.
+Compare requirements against an implementation and ask for mismatches before migrating anything to `.mm`. `--spec` and `--code` are required; `--code` points to a single source file. `--language` is optional and can be `python`, `rust`, `typescript`, or `go`.
 
 ```bash
 uv run mumei-agent validate-spec-to-code --spec docs/spec.txt --code src/payment.py
@@ -104,7 +104,7 @@ For reverse drift detection:
 uv run mumei-agent validate-code-to-spec \
   --code src/payment.py \
   --spec docs/spec.txt \
-  --language python  # Optional: python|rust|go
+  --language python  # Optional: python|rust|typescript|go
 ```
 
 ### 3. Spec only: find contradictions and under-specified behavior
@@ -267,7 +267,7 @@ mumei setup && source ~/.mumei/env
 | `mumei infer-contracts <file>` | Infer contracts for all atoms (JSON output) |
 | `mumei repl` | Interactive REPL; use `:verify-spec <path|inline>` / `:verify-code <path>` to validate natural-language specs and foreign code through `mumei-agent` |
 | `mumei doc <file> -o <dir>` | Generate documentation (`--format html` (default) / `markdown` / `json`) |
-| `mumei lsp` | Start LSP server; shows Z3 diagnostics, `/// spec:` natural-language spec health, and `.py` / `.rs` / `.go` contract diagnostics from `mumei-agent` inline, with graceful fallback when the agent is unavailable |
+| `mumei lsp` | Start LSP server; shows Z3 diagnostics, `/// spec:` natural-language spec health, and `.py` / `.rs` / `.ts` / `.tsx` / `.go` contract diagnostics from `mumei-agent` inline, with graceful fallback when the agent is unavailable |
 | `mumei verify-cert <cert> <file>` | Verify a proof certificate against current source |
 
 ### MCP Tools

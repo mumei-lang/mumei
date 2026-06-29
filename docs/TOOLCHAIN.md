@@ -25,7 +25,7 @@
 | `mumei infer-contracts <file>` | ✅ | Infer contracts for all atoms (JSON output) |
 | `mumei repl` | ✅ | Interactive REPL; supports `:verify-spec <path|inline>` and `:verify-code <path>` via `mumei-agent` JSON output |
 | `mumei doc <file> -o <dir>` | ✅ | Generate documentation (`--format html` default, `markdown`, or `json`) |
-| `mumei lsp` | ✅ | Language Server Protocol (hover, Z3 diagnostics, `/// spec:` health checks, `.py` / `.rs` / `.go` contract diagnostics via `mumei-agent`, graceful fallback without the agent) |
+| `mumei lsp` | ✅ | Language Server Protocol (hover, Z3 diagnostics, `/// spec:` health checks, `.py` / `.rs` / `.ts` / `.tsx` / `.go` contract diagnostics via `mumei-agent`, graceful fallback without the agent) |
 
 ### Installation
 
@@ -155,7 +155,7 @@ npm run compile
 | `textDocument/completion` | ✅ Keywords, atoms, effects, and types |
 | `textDocument/definition` | ✅ Jump to cached parsed definitions |
 | `/// spec:` diagnostics | ✅ `spec_health_issues` from `mumei-agent validate-spec --format json` |
-| Foreign-code diagnostics | ✅ `.py` / `.rs` / `.go` `verification_violations` and `cross_validation_gaps` from `mumei-agent validate-code` |
+| Foreign-code diagnostics | ✅ `.py` / `.rs` / `.ts` / `.tsx` / `.go` `verification_violations` and `cross_validation_gaps` from `mumei-agent validate-code` |
 
 ---
 

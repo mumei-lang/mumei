@@ -575,7 +575,7 @@ Detailed session plans for the next 8 implementation priorities are documented i
 | 17 | Plan 23: Regex Path Policies + URL Validation | ✅ RegexSafeFileRead, SecureHttpGet/Post, Z3 approximation improvements |
 | 18 | Plan 24: Modular Verification | ✅ effect_pre/effect_post contracts, cross-atom temporal state tracking |
 | 19 | Plan 25: LSP Completion & Definition | ✅ textDocument/completion, textDocument/definition, multi-editor docs |
-| 20 | V1-E-3: LSP Agent Diagnostics | ✅ `/// spec:` `spec_health_issues`, `.py`/`.rs`/`.go` `verification_violations` / `cross_validation_gaps`, graceful `mumei-agent` degrade |
+| 20 | V1-E-3: LSP Agent Diagnostics | ✅ `/// spec:` `spec_health_issues`, `.py`/`.rs`/`.ts`/`.tsx`/`.go` `verification_violations` / `cross_validation_gaps`, graceful `mumei-agent` degrade |
 
 ### Plan 22: PII Pipeline Example
 
@@ -679,7 +679,7 @@ Unfreezes the LSP server and adds two major features: textDocument/completion an
 Extends `mumei lsp` diagnostics beyond `.mm` parse/Z3 feedback by reusing the same `mumei-agent` JSON contract as the REPL:
 
 - `.mm` comments matching `/// spec: ...` are extracted into a temporary spec input and checked with `mumei-agent validate-spec --input <tmpfile> --format json`; `spec_health_issues` appear on the original comment line.
-- `.py`, `.rs`, and `.go` files are checked with `mumei-agent validate-code --input <path> --language <lang>`; `verification_violations` and `cross_validation_gaps` appear as `source: "mumei-agent"` diagnostics.
+- `.py`, `.rs`, `.ts`, `.tsx`, and `.go` files are checked with `mumei-agent validate-code --input <path> --language <lang>`; `verification_violations` and `cross_validation_gaps` appear as `source: "mumei-agent"` diagnostics.
 - `next_steps` remains the human-review entrypoint and is included in diagnostic messages / related information without renaming the fixed buckets.
 - Missing `mumei-agent` or malformed JSON silently degrades to existing `.mm` diagnostics, preserving Z3 `relatedInformation` and `data.counterexample`.
 

@@ -234,6 +234,84 @@ fn lsp_reports_code_verification_violations_for_other_languages() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn lsp_reports_code_verification_violations_for_typescript() {
+    let fixture_dir = unique_temp_dir("mumei-lsp-ts-agent");
+    let _ = fs::remove_dir_all(&fixture_dir);
+    fs::create_dir_all(&fixture_dir).expect("create fake agent dir");
+    write_fake_mumei_agent(&fixture_dir);
+
+    let source_path = fixture_dir.join("service.ts");
+    let source = "function debit(balance: number, amount: number): number {\n  return balance + amount;\n}\n";
+    fs::write(&source_path, source).expect("write typescript source");
+    let uri = format!("file://{}", source_path.display());
+
+    let (success, messages, stderr) = run_lsp_did_open(&fixture_dir, &uri, source);
+    let diagnostics = diagnostics(&messages);
+    let _ = fs::remove_dir_all(&fixture_dir);
+
+    assert!(success, "lsp should exit successfully\nstderr:\n{stderr}");
+    let diagnostic = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.get("source").and_then(Value::as_str) == Some("mumei-agent"))
+        .unwrap_or_else(|| {
+            panic!(
+                "mumei-agent diagnostic for .ts\nmessages:\n{messages:#?}\ndiagnostics:\n{diagnostics:#?}\nstderr:\n{stderr}"
+            )
+        });
+    assert_eq!(
+        diagnostic
+            .pointer("/range/start/line")
+            .and_then(Value::as_u64),
+        Some(2)
+    );
+    assert_eq!(diagnostic.get("severity").and_then(Value::as_u64), Some(1));
+    let message = diagnostic
+        .get("message")
+        .and_then(Value::as_str)
+        .expect("diagnostic message");
+    assert!(message.contains("verification_violations"), "{message}");
+    assert!(
+        message.contains("return value violates inferred contract"),
+        "{message}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn lsp_reports_code_verification_violations_for_tsx() {
+    let fixture_dir = unique_temp_dir("mumei-lsp-tsx-agent");
+    let _ = fs::remove_dir_all(&fixture_dir);
+    fs::create_dir_all(&fixture_dir).expect("create fake agent dir");
+    write_fake_mumei_agent(&fixture_dir);
+
+    let source_path = fixture_dir.join("component.tsx");
+    let source = "const App = () => {\n  return <div>hello</div>;\n}\n";
+    fs::write(&source_path, source).expect("write tsx source");
+    let uri = format!("file://{}", source_path.display());
+
+    let (success, messages, stderr) = run_lsp_did_open(&fixture_dir, &uri, source);
+    let diagnostics = diagnostics(&messages);
+    let _ = fs::remove_dir_all(&fixture_dir);
+
+    assert!(success, "lsp should exit successfully\nstderr:\n{stderr}");
+    let diagnostic = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.get("source").and_then(Value::as_str) == Some("mumei-agent"))
+        .unwrap_or_else(|| {
+            panic!(
+                "mumei-agent diagnostic for .tsx\nmessages:\n{messages:#?}\ndiagnostics:\n{diagnostics:#?}\nstderr:\n{stderr}"
+            )
+        });
+    assert_eq!(diagnostic.get("severity").and_then(Value::as_u64), Some(1));
+    let message = diagnostic
+        .get("message")
+        .and_then(Value::as_str)
+        .expect("diagnostic message");
+    assert!(message.contains("verification_violations"), "{message}");
+}
+
 #[test]
 fn lsp_missing_agent_keeps_existing_z3_diagnostics() {
     let fixture_dir = unique_temp_dir("mumei-lsp-no-agent");
