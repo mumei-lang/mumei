@@ -9,9 +9,15 @@ Since ws-cli-mcp this gate also checks:
 - ``mcp_server.py`` tool docstrings for forbidden aliases
 - ``src/cli.rs`` help/about strings for forbidden aliases
 - both surfaces for ``contradiction_type`` alias drift
+
+The MCP docstring extraction uses the ``ast`` module (standard library) to
+reliably extract docstrings from all ``@mcp.tool``-decorated functions regardless
+of decorator arguments, multi-line signatures, or blank lines before the
+docstring.  A count assertion ensures silent extraction failures are caught.
 """
 from __future__ import annotations
 
+import ast
 import re
 import sys
 from dataclasses import dataclass
@@ -213,29 +219,87 @@ def _check_meaning_contradictions(path: Path) -> list[Violation]:
     return violations
 
 
-def _extract_mcp_docstrings(text: str) -> str:
-    """Extract tool docstring blocks from MCP server source text via regex."""
+def _extract_mcp_docstrings_ast(text: str) -> list[str]:
+    """Extract docstrings from all @mcp.tool-decorated functions via AST.
+
+    This handles decorator arguments (@mcp.tool(name=...)), multi-line
+    signatures, and blank lines before the docstring without false negatives.
+    """
+    tree = ast.parse(text)
     blocks: list[str] = []
-    for match in re.finditer(
-        r'@mcp\.tool\(\)\s*\ndef\s+\w+\([^)]*\)\s*(?:->\s*[^:]+)?:\s*\n\s+"""(.*?)"""',
-        text,
-        re.DOTALL,
-    ):
-        blocks.append(match.group(1))
-    return "\n".join(blocks)
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for decorator in node.decorator_list:
+            is_mcp_tool = False
+            if isinstance(decorator, ast.Call):
+                func = decorator.func
+                if (
+                    isinstance(func, ast.Attribute)
+                    and func.attr == "tool"
+                    and isinstance(func.value, ast.Attribute)
+                    and func.value.attr == "mcp"
+                ):
+                    is_mcp_tool = True
+                elif (
+                    isinstance(func, ast.Attribute)
+                    and func.attr == "tool"
+                    and isinstance(func.value, ast.Name)
+                    and func.value.id == "mcp"
+                ):
+                    is_mcp_tool = True
+            elif isinstance(decorator, ast.Attribute):
+                if (
+                    decorator.attr == "tool"
+                    and isinstance(decorator.value, ast.Name)
+                    and decorator.value.id == "mcp"
+                ):
+                    is_mcp_tool = True
+            if is_mcp_tool:
+                docstring = ast.get_docstring(node)
+                if docstring:
+                    blocks.append(docstring)
+                break
+    return blocks
+
+
+def _count_mcp_tool_decorators(text: str) -> int:
+    """Count @mcp.tool( occurrences to cross-check against AST extraction."""
+    return len(re.findall(r"@mcp\.tool\(", text))
 
 
 def _check_mcp_forbidden_aliases(path: Path) -> list[Violation]:
-    """Check MCP tool docstrings for forbidden aliases (text-only, no import)."""
+    """Check MCP tool docstrings for forbidden aliases via AST extraction.
+
+    Includes a count assertion: if the number of extracted docstrings does not
+    match the number of @mcp.tool( decorators in the source, a violation is
+    raised to prevent silent false-negatives.
+    """
     if not path.exists():
         return [Violation(path, "MCP server file is missing")]
     text = path.read_text(encoding="utf-8")
-    docstrings = _extract_mcp_docstrings(text)
-    if not docstrings:
-        return []
     violations: list[Violation] = []
+
+    decorator_count = _count_mcp_tool_decorators(text)
+    docstring_blocks = _extract_mcp_docstrings_ast(text)
+
+    if decorator_count != len(docstring_blocks):
+        violations.append(
+            Violation(
+                path,
+                f"MCP docstring extraction count mismatch: "
+                f"{len(docstring_blocks)} docstrings extracted but "
+                f"{decorator_count} @mcp.tool decorators found — "
+                f"some tools may be missing docstrings or extraction failed",
+            )
+        )
+
+    combined = "\n".join(docstring_blocks)
+    if not combined:
+        return violations
+
     for alias in FORBIDDEN_ALIASES:
-        if re.search(rf"\b{re.escape(alias)}\b", docstrings):
+        if re.search(rf"\b{re.escape(alias)}\b", combined):
             violations.append(
                 Violation(
                     path,
@@ -244,7 +308,7 @@ def _check_mcp_forbidden_aliases(path: Path) -> list[Violation]:
                 )
             )
     for alias in CONTRADICTION_TYPE_ALIASES:
-        if re.search(rf"\b{re.escape(alias)}\b", docstrings):
+        if re.search(rf"\b{re.escape(alias)}\b", combined):
             violations.append(
                 Violation(
                     path,

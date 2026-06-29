@@ -9,6 +9,7 @@ on:
       - 'mcp_server.py'
       - 'src/cli.rs'
       - 'scripts/check_contract_vocabulary.py'
+      - 'tests/test_check_contract_vocabulary.py'
       - '.github/workflows/contract-vocabulary.yml'
   workflow_dispatch:
 
@@ -20,3 +21,6 @@ jobs:
 
       - name: Check docs contract vocabulary
         run: python3 scripts/check_contract_vocabulary.py
+
+      - name: Run extraction tests
+        run: python3 -m pytest tests/test_check_contract_vocabulary.py -v
