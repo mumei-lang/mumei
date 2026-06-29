@@ -43,7 +43,7 @@ For the four-language audit fixture, run [`mumei-demo/scenarios/no_mm_audit`](ht
 ```bash
 # 既存コードを渡すだけ
 uv run mumei-agent audit --code-file payment.py --auto-migrate --auto-heal
-uv run mumei-agent validate-code --input payment.py --language python
+uv run mumei-agent validate-code --input payment.py
 printf '%s\n' "残高不足の場合はエラーを返す" > spec.txt
 uv run mumei-agent validate-spec-to-code --spec spec.txt --code payment.py --language python
 ```

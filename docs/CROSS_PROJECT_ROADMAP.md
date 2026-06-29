@@ -1604,7 +1604,7 @@ V1-E-2: インタラクティブ検証モード（実装済み）
 V1-E-3: エディタ統合（LSP拡張） — 実装済み
   - 既存 LSP サーバー（src/lsp.rs）に mumei-agent diagnostics を追加
   - `.mm` 内の自然言語コメント（/// spec: ...）を `validate-spec --format json` で検証し、`spec_health_issues` を該当コメント行へ表示
-  - `.py` / `.rs` / `.ts` / `.tsx` / `.go` を開いた際に `validate-code --input <path> --language <lang>` を呼び、`verification_violations` / `cross_validation_gaps` をインライン表示
+  - `.py` / `.rs` / `.ts` / `.tsx` / `.go` を開いた際に `validate-code --input <path>` を呼び（`--language` は任意、拡張子から推定）、`verification_violations` / `cross_validation_gaps` をインライン表示
   - `mumei-agent` JSON サブプロセス連携を採用し、`mumei-agent` 不在・JSON parse 失敗時は既存 `.mm` diagnostics のみ返す graceful degrade
   - 出力語彙は `spec_health_issues` / `verification_violations` / `cross_validation_gaps` / `next_steps` に固定し、`next_steps` を唯一の human-review 入口として表示する
 

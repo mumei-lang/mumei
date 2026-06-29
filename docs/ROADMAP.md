@@ -345,7 +345,7 @@ mumei> :quit
    - :type <expr> (display type inference result)
    - :verify <atom> (.mm atom verification path)
    - :verify-spec <path|inline> (mumei-agent validate-spec JSON; displays spec_health_issues / verification_violations / cross_validation_gaps / next_steps)
-   - :verify-code <path> (mumei-agent validate-code JSON; displays spec_health_issues / verification_violations / cross_validation_gaps / next_steps)
+   - :verify-code <path> (mumei-agent validate-code --input <path> JSON; --language is optional, inferred from extension; displays spec_health_issues / verification_violations / cross_validation_gaps / next_steps)
 
 4. HTTP/JSON integration (after P1 completion)
    - Execute http.get() directly from REPL
@@ -679,7 +679,7 @@ Unfreezes the LSP server and adds two major features: textDocument/completion an
 Extends `mumei lsp` diagnostics beyond `.mm` parse/Z3 feedback by reusing the same `mumei-agent` JSON contract as the REPL:
 
 - `.mm` comments matching `/// spec: ...` are extracted into a temporary spec input and checked with `mumei-agent validate-spec --input <tmpfile> --format json`; `spec_health_issues` appear on the original comment line.
-- `.py`, `.rs`, `.ts`, `.tsx`, and `.go` files are checked with `mumei-agent validate-code --input <path> --language <lang>`; `verification_violations` and `cross_validation_gaps` appear as `source: "mumei-agent"` diagnostics.
+- `.py`, `.rs`, `.ts`, `.tsx`, and `.go` files are checked with `mumei-agent validate-code --input <path>` (`--language` is optional; inferred from extension); `verification_violations` and `cross_validation_gaps` appear as `source: "mumei-agent"` diagnostics.
 - `next_steps` remains the human-review entrypoint and is included in diagnostic messages / related information without renaming the fixed buckets.
 - Missing `mumei-agent` or malformed JSON silently degrades to existing `.mm` diagnostics, preserving Z3 `relatedInformation` and `data.counterexample`.
 

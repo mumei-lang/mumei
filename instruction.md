@@ -251,7 +251,7 @@ The LSP server (`mumei lsp`) has the following features implemented:
 - `textDocument/hover` → atom requires/ensures display
 - Z3 verification error diagnostics (with Span-based position info)
 - Real-time `/// spec:` natural-language comment validation via `mumei-agent validate-spec`
-- Inline contract diagnostics for opened `.py` / `.rs` / `.go` files via `mumei-agent validate-code`
+- Inline contract diagnostics for opened `.py` / `.rs` / `.ts` / `.tsx` / `.go` files via `mumei-agent validate-code`
 - `textDocument/completion` → keyword, atom, effect, type/struct/enum completion (trigger characters: `.`, `:`)
 - `textDocument/definition` → jump to atom, type, struct, enum, effect, trait, and resource definitions
 - `shutdown` / `exit` handling
