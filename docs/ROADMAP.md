@@ -11,7 +11,7 @@ keywords: "mumei roadmap, formal verification roadmap, Z3, Lean4, LLVM, proof-dr
 
 ## Cross-project source of truth
 
-`docs/CROSS_PROJECT_ROADMAP.md` is the only top-level roadmap for cross-repository priority order. This file keeps mumei-local implementation checkpoints and must use the same contract vocabulary: `harness_contract`, `intent_fidelity`, `artifact_paths`, `budget_policy_fingerprint`, and `lean_verified`. Future work is prioritized toward docs-sync and harness-contract regression prevention before reopening deferred portability projects.
+`docs/CROSS_PROJECT_ROADMAP.md` is the only top-level roadmap for cross-repository priority order. This file keeps mumei-local implementation checkpoints and must use the same contract vocabulary: `harness_contract`, `intent_fidelity`, `artifact_paths`, `budget_policy_fingerprint`, and `lean_verified`. Future work is prioritized toward docs-sync and harness-contract regression prevention before reopening deferred portability projects. The `scripts/check_contract_vocabulary.py` gate now covers docs, CLI help (`src/cli.rs`), and MCP tool docstrings (`mcp_server.py`) for forbidden-alias and `contradiction_type` drift detection.
 
 ### Contract regression gate
 
@@ -27,7 +27,14 @@ When this roadmap or the cross-project roadmap changes, reviewers should include
 - `../mumei-lean/docs/BRIDGE_HARNESS_SPEC.md`
 - `../mumei-lean/docs/LEAN_HARNESS_CONTRACT.md`
 
-The same PR/changeset should record the relevant bridge/MCP/audit/spec test commands run in `mumei-agent/tests/` and `mumei-lean/tests/`.
+The same PR/changeset should record both the automatic docs-sync gate and the relevant bridge/MCP/audit/spec test commands:
+
+```bash
+python3 scripts/check_contract_vocabulary.py
+(cd ../mumei-agent && uv run pytest tests/test_contract_vocabulary.py -q)
+(cd ../mumei-lean && PYTHONPATH=scripts MUMEI_LEAN_SKIP_LIVE=1 python -m pytest tests/test_contract_vocabulary.py -q)
+(cd ../mumei-demo && python3 scripts/check_scenario_contracts.py)
+```
 
 ### V1 execution order
 
@@ -39,7 +46,14 @@ The current cross-repo execution order is fixed and should be reviewed with `doc
 | 2 | `V1-C` and `V1-D` | Compare spec→code and code→spec only after V1-A/V1-B artifacts use the stable names `spec_health_issues`, `verification_violations`, `cross_validation_gaps`, `next_steps`, `migration_hints`, `healed_files`, and `heal_errors`. |
 | 3 | `V1-E` | Human review enters through `next_steps` and the traceability metadata, not through renamed issue fields. The Phase 7 `mumei-demo/scenarios/spec_code_verification_suite` scenario now demonstrates V1-A〜V1-D in one fixture-safe flow before migration or Lean escalation. |
 
-The no-`.mm` front door remains `audit -> migrate-suggest -> heal`. `mumei-lean` is expanded only for Z3 `unknown` obligations and now completes the V1 live generated theorem path: `Generated.Std.Math.Abs.abs_saturating_correct` exports `lean_verified` with `known_witness_used = false` when `translator_version` and `bridge_lemma_hash` match; stale metadata is `stale_translator`, and `known_witness_used = true` remains fallback witness evidence only.
+The no-`.mm` front door remains `audit -> migrate-suggest -> heal`. `mumei-lean` is expanded only for Z3 `unknown` obligations, not `sat` / `unsat` / parser failure / audit findings, and now completes the V1 live generated theorem path: `Generated.Std.Math.Abs.abs_saturating_correct` exports `lean_verified` with `known_witness_used = false` when `translator_version` and `bridge_lemma_hash` match; stale metadata is `stale_translator`, and `known_witness_used = true` remains fallback witness evidence only.
+
+Local docs were reviewed with the four-language no-`.mm` contract: Python, Rust,
+TypeScript, and Go all use the same seven audit keys, and language selection
+only swaps parser paths. Deterministic/no-LLM demos must keep Rust `a + b` i64
+overflow/bounds, TypeScript `name!.length` null/undefined, and Go `values[idx]`
+bounds / `user.Name` nil / `a + b` overflow in the Z3 counterexample `verification_violations` path, with
+`next_steps` as the only human-review entrypoint before migration/heal evidence.
 
 ## Overview
 

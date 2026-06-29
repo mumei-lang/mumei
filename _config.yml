@@ -8,7 +8,9 @@ keywords: "mumei, 無銘, むめい, formal verification, proof-driven programmi
 markdown: kramdown
 kramdown:
   input: GFM
-plugins: [jekyll-sitemap]
+plugins: [jekyll-sitemap, jekyll-feed]
+feed:
+  path: jekyll-feed.xml
 twitter:
   username: mumei_lang
 social:

@@ -184,6 +184,20 @@ fn detects_quantifier_alternation() {
 }
 
 #[test]
+fn detects_finite_field_helpers_as_lean_bridge_fragment() {
+    let module_env = ModuleEnv::new();
+    let mut atom = base_atom("ff_zero_eq_zero");
+    atom.params = vec![param("p", "i64")];
+    atom.requires = "p > 0".to_string();
+    atom.ensures = "ff_eq(result, 0, p)".to_string();
+    atom.body_expr = "ff_zero(p)".to_string();
+
+    assert_outside_tag(&atom, &module_env, "finite_field");
+    let fragments = detect_logic_fragment(&atom, &module_env);
+    assert!(fragments.contains(&LogicFragment::FiniteField));
+}
+
+#[test]
 fn detects_nested_mutable_aliasing() {
     let module_env = ModuleEnv::new();
     let mut atom = base_atom("nested_aliases");

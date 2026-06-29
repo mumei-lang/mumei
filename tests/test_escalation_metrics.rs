@@ -56,6 +56,8 @@ fn lean_verified_atom(
         effects: Vec::new(),
         requires: "true".to_string(),
         ensures: "result >= 0".to_string(),
+        body_expr: "0".to_string(),
+        body_summary: "0".to_string(),
         z3_result_class: "unknown".to_string(),
         escalation_reason: reason,
         logic_fragment_tag: Some(LogicFragment::NonlinearArithmetic),

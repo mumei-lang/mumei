@@ -343,14 +343,34 @@ struct VerifyContext<'a> {
 }
 
 fn verify_single_atom(atom: &parser::Atom, name: &str, ctx: &mut VerifyContext<'_>) {
-    let has_fragment_warning =
-        verification::outside_decidable_fragment_diagnostic(atom, ctx.module_env).is_some();
+    let fragment_tags = verification::detect_logic_fragment_tags(atom, ctx.module_env);
+    let has_finite_field_semantics = fragment_tags.iter().any(|tag| tag == "finite_field");
+    let has_fragment_warning = verification::is_outside_decidable_fragment(&fragment_tags);
     if ctx.warn_fragment {
         let _ = collect_decidable_fragment_diagnostic(atom, ctx.module_env, ctx.json_output)
             .inspect(|d| ctx.diagnostics.push(d.clone()))
             .is_some();
     }
     let promote_outside_fragment = ctx.emit_lean_artifacts && has_fragment_warning;
+    if has_finite_field_semantics {
+        if !ctx.quiet_output {
+            println!(
+                "  Z3 returned unknown for atom '{}', finite-field semantics require Lean bridge.",
+                name
+            );
+        }
+        ctx.cert_results.insert(
+            name.to_string(),
+            ("unknown".to_string(), "unknown".to_string()),
+        );
+        *ctx.escalated += 1;
+        if ctx.emit_structured_feedback {
+            ctx.structured_feedbacks
+                .push(structured_feedback_for_passed_atom(atom));
+        }
+        ctx.verification_cache.remove(name);
+        return;
+    }
     if ctx.module_env.is_verified(name) {
         if !ctx.quiet_output {
             println!("  ⚖️  '{}': skipped (imported, contract-trusted)", name);

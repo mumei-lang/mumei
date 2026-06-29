@@ -85,6 +85,9 @@ pub fn detect_logic_fragment_tags(atom: &Atom, module_env: &ModuleEnv) -> Vec<St
     if atom_has_regex_semantics(atom, &requires_expr, &ensures_expr, &body_stmt) {
         push_unique_tag(&mut tags, "regex_semantics");
     }
+    if atom_uses_finite_field_semantics(atom) {
+        push_unique_tag(&mut tags, "finite_field");
+    }
 
     tags
 }
@@ -131,6 +134,9 @@ pub fn detect_logic_fragment(atom: &Atom, module_env: &ModuleEnv) -> Vec<LogicFr
     if atom_uses_temporal_effect(atom, module_env) {
         push_unique_fragment(&mut fragments, LogicFragment::TemporalState);
     }
+    if atom_uses_finite_field_semantics(atom) {
+        push_unique_fragment(&mut fragments, LogicFragment::FiniteField);
+    }
 
     if fragments.is_empty() {
         push_unique_fragment(&mut fragments, LogicFragment::LinearArithmetic);
@@ -147,6 +153,7 @@ pub fn is_outside_decidable_fragment(tags: &[String]) -> bool {
         "quantifier_alternation",
         "array_without_bounds",
         "inductive_data_type",
+        "finite_field",
     ];
     tags.iter().any(|tag| OUTSIDE_TAGS.contains(&tag.as_str()))
 }
@@ -228,6 +235,20 @@ pub(crate) fn atom_contract_text(atom: &Atom) -> String {
     parts.join(" ")
 }
 
+fn atom_uses_finite_field_semantics(atom: &Atom) -> bool {
+    let text = atom_contract_text(atom);
+    [
+        "ff_eq(",
+        "ff_zero(",
+        "ff_one(",
+        "ff_add(",
+        "ff_mul(",
+        "ff_in_field(",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle))
+}
+
 pub(crate) fn outside_decidable_fragment_message(atom: &Atom, tags: &[String]) -> String {
     if tags.iter().any(|tag| tag == "nonlinear_arithmetic") {
         if let Some(pattern) = first_nonlinear_arithmetic_pattern(atom) {
@@ -259,6 +280,11 @@ pub(crate) fn outside_decidable_fragment_message(atom: &Atom, tags: &[String]) -
                 atom.name
             )
         }
+    } else if tags.iter().any(|tag| tag == "finite_field") {
+        format!(
+            "atom `{}` uses finite-field helper semantics, route through Lean escalation",
+            atom.name
+        )
     } else {
         format!(
             "atom `{}` uses fragments outside Z3-stable range: [{}]",

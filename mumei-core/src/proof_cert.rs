@@ -94,6 +94,12 @@ pub struct AtomCertificate {
     /// Postcondition contract text (P5-A)
     #[serde(default)]
     pub ensures: String,
+    /// Source body expression used by Lean body-semantics lowering.
+    #[serde(default)]
+    pub body_expr: String,
+    /// Human-readable body summary for bridge diagnostics.
+    #[serde(default)]
+    pub body_summary: String,
     /// Deterministic Z3 outcome class used by Lean escalation routing.
     #[serde(default)]
     pub z3_result_class: String,
@@ -593,6 +599,8 @@ pub fn generate_certificate_with_reconstruction_losses(
                 effects,
                 requires: atom.requires.clone(),
                 ensures: atom.ensures.clone(),
+                body_expr: atom.body_expr.clone(),
+                body_summary: atom.body_expr.clone(),
                 z3_result_class: classification.z3_result_class,
                 escalation_reason: classification.escalation_reason,
                 logic_fragment_tag: classification.logic_fragment_tag,
@@ -1514,6 +1522,8 @@ mod tests {
         assert_eq!(cert.atoms[0].name, "add");
         assert_eq!(cert.atoms[0].requires, "x > 0");
         assert_eq!(cert.atoms[0].ensures, "result > 0");
+        assert_eq!(cert.atoms[0].body_expr, "x + 1");
+        assert_eq!(cert.atoms[0].body_summary, "x + 1");
         assert!(!cert.atoms[0].proof_hash.is_empty());
         assert!(cert.atoms[0].solver_process_metadata.is_none());
         assert!(cert.atoms[0].retry_policy_fingerprint.is_none());
@@ -1528,6 +1538,7 @@ mod tests {
         let parsed: ProofCertificate = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.atoms[0].requires, "x > 0");
         assert_eq!(parsed.atoms[0].ensures, "result > 0");
+        assert_eq!(parsed.atoms[0].body_expr, "x + 1");
     }
 
     #[test]

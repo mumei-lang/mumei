@@ -16,6 +16,11 @@ The first user-facing route is the no-`.mm` audit path: run `mumei-agent audit -
 
 For the detailed contract, canonical vocabulary, V1-A〜E order, Lean escalation rules, and PR evidence expectations, see [`docs/CROSS_PROJECT_ROADMAP.md`](docs/CROSS_PROJECT_ROADMAP.md), [`docs/ROADMAP.md`](docs/ROADMAP.md), and [`docs/ONBOARDING.md`](docs/ONBOARDING.md).
 
+Recent standard-library sync points: `std/crypto/primitives.mm` is a forged,
+Z3-decidable crypto predicate module that does not require Lean escalation;
+mumei-lean live generated theorem coverage includes `abs_saturating`,
+`bounded_mul_with_overflow_check`, and the crypto `constant_time_eq_flag` path.
+
 ---
 
 ## Start without writing .mm (mumei-agent)
@@ -45,7 +50,7 @@ uv run mumei-agent validate-code --input src/payment.py --language python
 ```bash
 # Optional: python|rust|go; omitted values are inferred from the extension
 uv run mumei-agent validate-spec-to-code --spec docs/spec.txt --code src/payment.py \
-  --language python  
+  --language python
 ```
 
 **3. Find contradictions in specs only**
@@ -214,8 +219,8 @@ curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash
 # Homebrew
 brew install mumei-lang/mumei/mumei
 
-# Specific version (latest is v0.6.8)
-curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash -s -- --version v0.6.8
+# Specific version (latest is v0.6.9)
+curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash -s -- --version v0.6.9
 ```
 
 See [Releases](https://github.com/mumei-lang/mumei/releases) for older versions and changelogs.

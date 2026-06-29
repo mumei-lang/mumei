@@ -1,0 +1,28 @@
+name: Contract Vocabulary
+
+on:
+  pull_request:
+    paths:
+      - 'docs/**'
+      - 'README.md'
+      - 'instruction.md'
+      - 'mcp_server.py'
+      - 'src/cli.rs'
+      - 'scripts/check_contract_vocabulary.py'
+      - 'tests/test_check_contract_vocabulary.py'
+      - '.github/workflows/contract-vocabulary.yml'
+  workflow_dispatch:
+
+jobs:
+  contract-vocabulary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check docs contract vocabulary
+        run: python3 scripts/check_contract_vocabulary.py
+
+      - name: Run extraction tests
+        run: |
+          pip install --quiet pytest
+          python3 -m pytest tests/test_check_contract_vocabulary.py -v

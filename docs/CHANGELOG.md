@@ -2,6 +2,46 @@
 
 ---
 
+### 2026-06-28: core-seeded deterministic forge and Lean bridge paths
+
+- **vStd core predicates forge**: added `std/core_predicates.mm` from
+  `forge_tasks/vstd_core_predicates.json` with explicit atom bodies and
+  `deterministic_bodies: true`; `safe_index_or_zero`, `is_nonzero_flag`, and
+  `preserve_safe_index` verify in the Z3-decidable fragment with no Lean
+  escalation.
+- **vStd core guards forge**: added `std/core_guards.mm` from
+  `forge_tasks/vstd_core_guards.json` with explicit atom bodies and
+  `deterministic_bodies: true`; `is_in_bounds`, `safe_abs_diff`,
+  `clamp_to_positive`, and `both_positive` verify in the Z3-decidable
+  fragment with no Lean escalation.
+- **Crypto live Lean bridge fixture**: documented the third live generated
+  theorem path, `std/crypto/primitives.mm::constant_time_eq_flag`, which lowers
+  braced conditional body semantics to
+  `Generated.Std.Crypto.Primitives.constant_time_eq_flag_correct` and exports
+  `known_witness_used = false`.
+- **Algebra finite-field live Lean bridge fixture**: documented the fourth live
+  generated theorem path, `std/algebra/finite_field.mm::ff_zero_eq_zero`, which
+  emits a mumei proof-certificate atom with `z3_result_class = "unknown"` for
+  `ff_eq(result, 0, p)`, then lowers `ff_zero(p)` body semantics to
+  `Generated.Std.Algebra.Finite_field.ff_zero_eq_zero_correct` and exports
+  `known_witness_used = false`.
+
+---
+
+### 2026-06-28: vStd crypto primitives forge verification
+
+- **vStd crypto primitives forge**: added `std/crypto/primitives.mm` from `forge_tasks/vstd_crypto_primitives.json` with `is_valid_key_len`, `is_valid_nonce_len`, `constant_time_eq_flag`, and `digest_len_ok`; `mumei verify --proof-cert std/crypto/primitives.mm` completes in the Z3-decidable fragment with no Lean escalation.
+
+---
+
+### 2026-06-28: Multi-language no-`.mm` audit contract sync
+
+- **Multi-language no-`.mm` audit contract**: documented the canonical deterministic/no-LLM parser path for Python, Rust, TypeScript, and Go, including Rust `a + b` i64 overflow/bounds, TypeScript `name!.length` null/undefined, and Go `values[idx]` bounds findings normalized into `verification_violations` with Z3 counterexamples.
+- **Contract vocabulary docs gate**: added the cross-project vocabulary check that keeps local docs aligned with `docs/CROSS_PROJECT_ROADMAP.md`, preserves the fixed no-`.mm` seven-key schema (`spec_health_issues`, `verification_violations`, `cross_validation_gaps`, `next_steps`, `migration_hints`, `healed_files`, `heal_errors`), and rejects legacy alias keys as public contract fields.
+- **Lean bridge contract metadata**: kept the `translator_version` / `bridge_lemma_hash` synchronization requirement explicit so stale Lean translator output remains gated by `stale_translator` instead of being accepted as proof evidence.
+
+---
+
 ### P9-D/E/F/G: NLAE integration completion
 
 - **Loss Vector + structured feedback JSON**: `mumei verify --emit loss-vector <file.mm>` now emits P9-E structured feedback JSON, including reconstruction-loss details, violated property, counterexample values, source location, and an agent-facing repair instruction.
