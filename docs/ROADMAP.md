@@ -690,7 +690,7 @@ Extends `mumei lsp` diagnostics beyond `.mm` parse/Z3 feedback by reusing the sa
 Enables mumei's verified code to actually run — both interactively in the REPL and as standalone native binaries.
 
 **P7-A: REPL Execution Engine (JIT)** — ✅ Implemented
-- `mumei-emit-llvm/src/jit.rs` — JitEngine struct wrapping inkwell's ExecutionEngine (MCJIT)
+- `mumei-emit-llvm/src/jit.rs` — JitEngine struct backed by LLVM ORC LLJIT (migrated from MCJIT)
 - Refactored `codegen::compile()` into `compile_atom_into_module()` (in-memory) + `compile()` (file-based)
 - `compile_to_module()` returns LLVM IR as string for standalone use
 - REPL (`cmd_repl()`) enhanced with JIT: atom definitions are verified then JIT-compiled; expressions are wrapped as `__repl_eval` atoms, verified, executed, and results displayed
@@ -706,7 +706,7 @@ Enables mumei's verified code to actually run — both interactively in the REPL
 - Examples: `examples/run_demo.mm`, `examples/run_with_calls.mm`
 
 **Known Limitations**:
-- **MCJIT incremental compilation**: The JIT engine uses MCJIT, which finalizes the entire module on first `get_function` call. Defining multiple interdependent atoms across REPL iterations and then calling them may fail. Single-eval usage (`:eval`, `:verify`, bare expressions) works correctly. A future migration to ORC JIT would resolve this.
+- ~~**MCJIT incremental compilation**: The JIT engine uses MCJIT, which finalizes the entire module on first `get_function` call. Defining multiple interdependent atoms across REPL iterations and then calling them may fail.~~ **Resolved**: Migrated to ORC LLJIT. Each atom is compiled as an independent module and linked into a shared JITDylib, enabling incremental compilation of interdependent atoms and atom redefinition via `ResourceTracker` removal + recompilation. Regression tests in `tests/test_repl_incremental.rs` cover cross-atom resolution and redefine flows.
 - ~~**Binary compilation: top-level atoms only**: `mumei run` and `mumei build --emit binary` only compile top-level `atom` definitions. `impl` block methods are not included in the binary. Programs using struct methods will fail to link.~~ **Fixed**: `impl` block methods are now included in binary compilation with qualified names (`StructName::method_name`).
 - ~~**Self-recursive `main` atom**: The rename strategy (`main` → `__mumei_user_main`) does not rename recursive calls inside the body. If `main` calls itself, the call target will reference the C wrapper instead.~~ **Fixed**: `rename_calls_in_hir_stmt/expr` now recursively renames all `main` calls to `__mumei_user_main` in the HIR tree.
 - ~~**`find_clang()` is Unix-only**: Uses the `which` command, which is not available on Windows.~~ **Fixed**: `find_on_path()` helper uses `which` on Unix and `where` on Windows, with `clang.exe` fallback for Windows toolchain paths.
