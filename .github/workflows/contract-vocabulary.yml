@@ -23,4 +23,6 @@ jobs:
         run: python3 scripts/check_contract_vocabulary.py
 
       - name: Run extraction tests
-        run: python3 -m pytest tests/test_check_contract_vocabulary.py -v
+        run: |
+          pip install --quiet pytest
+          python3 -m pytest tests/test_check_contract_vocabulary.py -v
