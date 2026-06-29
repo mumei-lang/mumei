@@ -119,6 +119,32 @@ pub fn check_spec_satisfiability_with_property_based(
         ));
     }
 
+    if super::detect_logic_fragment_tags(atom, module_env)
+        .iter()
+        .any(|tag| tag == "finite_field")
+    {
+        let trace_id = effective_trace_id(atom);
+        let spec_metadata = effective_spec_metadata(atom);
+        return Ok(SpecValidationResult {
+            status: "unknown_fragment".to_string(),
+            is_satisfiable: true,
+            contradiction_details: None,
+            trace_id: trace_id.clone(),
+            spec_metadata: spec_metadata.clone(),
+            traceability_hash: calculate_traceability_hash(atom),
+            traceability_coverage: traceability_coverage(atom, trace_id.as_ref(), &spec_metadata),
+            checked_requires: true,
+            checked_ensures: 0,
+            checked_refinements,
+            ensures_implication_checks: 0,
+            property_based_test: None,
+            diagnostics: vec![
+                "finite_field helpers are checked by the Lean bridge after Z3 unknown routing"
+                    .to_string(),
+            ],
+        });
+    }
+
     let ensure_clauses = split_top_level_conjunctions(&atom.ensures);
     for (index, clause) in ensure_clauses.iter().enumerate() {
         let local_solver = Solver::new(&ctx);

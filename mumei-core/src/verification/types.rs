@@ -870,6 +870,10 @@ pub fn build_translator_ir_metadata(atom: &Atom, module_env: &ModuleEnv) -> Tran
     {
         lowering_rules.push("refinement_predicate_lowering".to_string());
     }
+    if tags.iter().any(|tag| tag == "finite_field") {
+        lowering_rules.push("finite_field_lowering".to_string());
+        lowering_rules.push("mathlib4_bridge".to_string());
+    }
 
     lowering_rules.sort();
     lowering_rules.dedup();
@@ -933,6 +937,15 @@ fn semantic_gap_notes_for_rules(lowering_rules: &[String]) -> Vec<String> {
                 .to_string(),
         );
     }
+    if lowering_rules
+        .iter()
+        .any(|rule| rule == "finite_field_lowering")
+    {
+        notes.push(
+            "finite_field_lowering: GF(p)-style helpers are lowered through MumeiLean.Algebra helpers."
+                .to_string(),
+        );
+    }
     notes
 }
 
@@ -964,6 +977,14 @@ fn proof_trace_hints_for_rules(lowering_rules: &[String]) -> Vec<String> {
         .any(|rule| rule == "refinement_predicate_lowering")
     {
         hints.push("carry subtype predicate witnesses through quantifier lowering".to_string());
+    }
+    if lowering_rules
+        .iter()
+        .any(|rule| rule == "finite_field_lowering")
+    {
+        hints.push(
+            "try finite-field equality helpers before falling back to manual proof".to_string(),
+        );
     }
     hints
 }
@@ -997,6 +1018,12 @@ fn bridge_lemmas_for_rules(lowering_rules: &[String]) -> Vec<String> {
         .any(|rule| rule == "refinement_predicate_lowering")
     {
         lemmas.push("mumei_subtype_predicate_bridge".to_string());
+    }
+    if lowering_rules
+        .iter()
+        .any(|rule| rule == "finite_field_lowering")
+    {
+        lemmas.push("mumei_finite_field_bridge".to_string());
     }
     lemmas
 }
@@ -1103,6 +1130,7 @@ pub enum LogicFragment {
     QuantifierAlternation,
     #[serde(alias = "recursive_invariant", alias = "complex_temporal_effect")]
     TemporalState,
+    FiniteField,
 }
 
 impl LogicFragment {
@@ -1113,6 +1141,7 @@ impl LogicFragment {
             Self::ArrayAccess => "array_access",
             Self::QuantifierAlternation => "quantifier_alternation",
             Self::TemporalState => "temporal_state",
+            Self::FiniteField => "finite_field",
         }
     }
 }
@@ -1141,6 +1170,8 @@ pub fn primary_logic_fragment_tag(tags: &[String]) -> LogicFragment {
         .any(|tag| tag == "recursive_invariant" || tag == "complex_temporal_effect")
     {
         LogicFragment::TemporalState
+    } else if tags.iter().any(|tag| tag == "finite_field") {
+        LogicFragment::FiniteField
     } else {
         LogicFragment::LinearArithmetic
     }
