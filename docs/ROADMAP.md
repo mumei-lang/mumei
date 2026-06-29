@@ -11,7 +11,7 @@ keywords: "mumei roadmap, formal verification roadmap, Z3, Lean4, LLVM, proof-dr
 
 ## Cross-project source of truth
 
-`docs/CROSS_PROJECT_ROADMAP.md` is the only top-level roadmap for cross-repository priority order. This file keeps mumei-local implementation checkpoints and must use the same contract vocabulary: `harness_contract`, `intent_fidelity`, `artifact_paths`, `budget_policy_fingerprint`, and `lean_verified`. Future work is prioritized toward docs-sync and harness-contract regression prevention before reopening deferred portability projects.
+`docs/CROSS_PROJECT_ROADMAP.md` is the only top-level roadmap for cross-repository priority order. This file keeps mumei-local implementation checkpoints and must use the same contract vocabulary: `harness_contract`, `intent_fidelity`, `artifact_paths`, `budget_policy_fingerprint`, and `lean_verified`. Future work is prioritized toward docs-sync and harness-contract regression prevention before reopening deferred portability projects. The `scripts/check_contract_vocabulary.py` gate now covers docs, CLI help (`src/cli.rs`), and MCP tool docstrings (`mcp_server.py`) for forbidden-alias and `contradiction_type` drift detection.
 
 ### Contract regression gate
 

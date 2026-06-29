@@ -6,6 +6,8 @@ on:
       - 'docs/**'
       - 'README.md'
       - 'instruction.md'
+      - 'mcp_server.py'
+      - 'src/cli.rs'
       - 'scripts/check_contract_vocabulary.py'
       - '.github/workflows/contract-vocabulary.yml'
   workflow_dispatch:
