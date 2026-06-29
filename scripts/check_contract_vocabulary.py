@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
-"""Check cross-project contract vocabulary in mumei docs.
+"""Check cross-project contract vocabulary in mumei docs, CLI help, and MCP docstrings.
 
 The canonical source is docs/CROSS_PROJECT_ROADMAP.md.  This script keeps the
 small fixed vocabulary mirrored by local docs from drifting into alternate audit
 keys or a broader Lean fallback contract.
+
+Since ws-cli-mcp this gate also checks:
+- ``mcp_server.py`` tool docstrings for forbidden aliases
+- ``src/cli.rs`` help/about strings for forbidden aliases
+- both surfaces for ``contradiction_type`` alias drift
 """
 from __future__ import annotations
 
@@ -25,6 +30,13 @@ NO_MM_LANGUAGE_DOCS = [
     CANONICAL_DOC,
     REPO_ROOT / "docs" / "ROADMAP.md",
     REPO_ROOT / "docs" / "ONBOARDING.md",
+]
+MCP_SERVER = REPO_ROOT / "mcp_server.py"
+CLI_SOURCE = REPO_ROOT / "src" / "cli.rs"
+CONTRADICTION_TYPE_ALIASES = [
+    "contradiction_kind",
+    "contradiction_class",
+    "contradiction_category",
 ]
 
 HARNESS_KEYS = [
@@ -201,6 +213,75 @@ def _check_meaning_contradictions(path: Path) -> list[Violation]:
     return violations
 
 
+def _extract_mcp_docstrings(text: str) -> str:
+    """Extract tool docstring blocks from MCP server source text via regex."""
+    blocks: list[str] = []
+    for match in re.finditer(
+        r'@mcp\.tool\(\)\s*\ndef\s+\w+\([^)]*\)\s*(?:->\s*[^:]+)?:\s*\n\s+"""(.*?)"""',
+        text,
+        re.DOTALL,
+    ):
+        blocks.append(match.group(1))
+    return "\n".join(blocks)
+
+
+def _check_mcp_forbidden_aliases(path: Path) -> list[Violation]:
+    """Check MCP tool docstrings for forbidden aliases (text-only, no import)."""
+    if not path.exists():
+        return [Violation(path, "MCP server file is missing")]
+    text = path.read_text(encoding="utf-8")
+    docstrings = _extract_mcp_docstrings(text)
+    if not docstrings:
+        return []
+    violations: list[Violation] = []
+    for alias in FORBIDDEN_ALIASES:
+        if re.search(rf"\b{re.escape(alias)}\b", docstrings):
+            violations.append(
+                Violation(
+                    path,
+                    f"MCP docstring contains forbidden alias: `{alias}`",
+                    _line_number(text, alias),
+                )
+            )
+    for alias in CONTRADICTION_TYPE_ALIASES:
+        if re.search(rf"\b{re.escape(alias)}\b", docstrings):
+            violations.append(
+                Violation(
+                    path,
+                    f"MCP docstring contains contradiction_type alias: `{alias}`",
+                    _line_number(text, alias),
+                )
+            )
+    return violations
+
+
+def _check_cli_forbidden_aliases(path: Path) -> list[Violation]:
+    """Check CLI help/about strings in Rust source for forbidden aliases."""
+    if not path.exists():
+        return [Violation(path, "CLI source file is missing")]
+    text = path.read_text(encoding="utf-8")
+    violations: list[Violation] = []
+    for alias in FORBIDDEN_ALIASES:
+        if re.search(rf"\b{re.escape(alias)}\b", text):
+            violations.append(
+                Violation(
+                    path,
+                    f"CLI help contains forbidden alias: `{alias}`",
+                    _line_number(text, alias),
+                )
+            )
+    for alias in CONTRADICTION_TYPE_ALIASES:
+        if re.search(rf"\b{re.escape(alias)}\b", text):
+            violations.append(
+                Violation(
+                    path,
+                    f"CLI help contains contradiction_type alias: `{alias}`",
+                    _line_number(text, alias),
+                )
+            )
+    return violations
+
+
 def _check_no_mm_language_sync(path: Path) -> list[Violation]:
     text = path.read_text(encoding="utf-8")
     normalized = " ".join(text.split()).lower()
@@ -225,6 +306,10 @@ def main() -> int:
     for path in NO_MM_LANGUAGE_DOCS:
         violations.extend(_check_no_mm_language_sync(path))
 
+    # CLI help and MCP docstring forbidden-alias checks
+    violations.extend(_check_mcp_forbidden_aliases(MCP_SERVER))
+    violations.extend(_check_cli_forbidden_aliases(CLI_SOURCE))
+
     if violations:
         print("Contract vocabulary check failed:", file=sys.stderr)
         for violation in violations:
@@ -232,7 +317,15 @@ def main() -> int:
         return 1
 
     checked = ", ".join(path.relative_to(REPO_ROOT).as_posix() for path in SYNC_DOCS)
-    print(f"Contract vocabulary check passed: {CANONICAL_DOC.relative_to(REPO_ROOT)} + {checked}")
+    extra = ", ".join(
+        p.relative_to(REPO_ROOT).as_posix()
+        for p in (MCP_SERVER, CLI_SOURCE)
+        if p.exists()
+    )
+    print(
+        f"Contract vocabulary check passed: "
+        f"{CANONICAL_DOC.relative_to(REPO_ROOT)} + {checked} + {extra}"
+    )
     return 0
 
 
