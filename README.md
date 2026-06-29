@@ -42,8 +42,8 @@ uv sync
 
 **1. Find likely bugs in existing code**
 ```bash
-# --language is required: python|rust|typescript|go
-uv run mumei-agent validate-code --input src/payment.py --language python
+# --language is optional: python|rust|typescript|go (inferred from extension when omitted)
+uv run mumei-agent validate-code --input src/payment.py
 ```
 
 **2. Detect spec↔code drift**
@@ -61,7 +61,7 @@ uv run mumei-agent validate-spec --input docs/spec.txt --format nl
 
 Domain hints such as `--domain financial` are optional. `validate-code --input`, `validate-spec-to-code --code`, and `validate-code-to-spec --code` take a single source file; directory recursion is available through `audit --code-file` and `extract-spec --code-file`.
 
-Code validation and alignment commands use `python|rust|typescript|go`. `extract-spec` auto-detects a broader set from file extensions: `rust`, `c`, `cpp`, `go`, `python`, `javascript`, `typescript`, and `java`.
+Code validation and alignment commands (Layer B: Z3 strict verification) support `python|rust|typescript|go`. `extract-spec` (Layer A: spec extraction) auto-detects a broader set from file extensions: `rust`, `c`, `cpp`, `go`, `python`, `javascript`, `typescript`, and `java`.
 
 See the [Verification Workflow Guide](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/VERIFICATION_WORKFLOW_GUIDE.md) for details.
 
@@ -72,11 +72,11 @@ If you work from a source checkout of `mumei-agent`, run `uv sync` once; after t
 
 ### 1. Existing code: find likely bug locations
 
-Give the agent an existing source file and ask it to infer contracts, verify them, and report suspicious paths. `--input` is required and points to a single source file. `--language` is required and must be `python`, `rust`, `typescript`, or `go`.
+Give the agent an existing source file and ask it to infer contracts, verify them, and report suspicious paths. `--input` is required and points to a single source file. `--language` is optional (`python`, `rust`, `typescript`, or `go`); when omitted it is inferred from the file extension.
 
 ```bash
-# --language is required: python|rust|typescript|go
-uv run mumei-agent validate-code --input src/payment.py --language python
+# --language is optional: inferred from extension when omitted
+uv run mumei-agent validate-code --input src/payment.py
 ```
 
 MCP agents can use mumei's verification backend directly once they synthesize or receive `.mm`:
@@ -138,8 +138,8 @@ Run the agent on existing code and specs first. No `.mm` source is required.
 
 ```bash
 mumei-agent audit --code-file src/payment.py --auto-migrate --auto-heal
-mumei-agent validate-code --input src/payment.py --language python
-mumei-agent validate-spec-to-code --spec spec.txt --code src/payment.py --language python
+mumei-agent validate-code --input src/payment.py
+mumei-agent validate-spec-to-code --spec spec.txt --code src/payment.py
 ```
 
 

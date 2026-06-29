@@ -88,7 +88,7 @@ diagnostics on the original comment lines, with `next_steps` attached as the
 human-review handoff rather than renamed into a separate recommendation bucket.
 
 For foreign code, opening a `.py`, `.rs`, `.ts`, `.tsx`, or `.go` document runs
-`mumei-agent validate-code --input <path> --language <language>` when available.
+`mumei-agent validate-code --input <path>` when available (`--language` is optional; inferred from extension).
 Returned `verification_violations` and `cross_validation_gaps` are shown inline
 using the source line/column metadata from the JSON payload.
 

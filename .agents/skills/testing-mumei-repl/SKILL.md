@@ -57,7 +57,7 @@ The real CLI contract is:
 
 ```text
 :verify-spec <path|inline>  -> mumei-agent validate-spec --input <tmp-or-file> --format json
-:verify-code <path>         -> mumei-agent validate-code --input <file> --language <python|rust|go>
+:verify-code <path>         -> mumei-agent validate-code --input <file> (--language is optional: python|rust|typescript|go)
 ```
 
 `validate-code` currently emits JSON by default and does not accept `--format json`; do not add that flag unless the mumei-agent CLI grows support for it.
