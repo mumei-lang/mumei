@@ -213,9 +213,8 @@ def _check_meaning_contradictions(path: Path) -> list[Violation]:
     return violations
 
 
-def _extract_mcp_docstrings(path: Path) -> str:
-    """Extract tool docstring blocks from *path* via regex (no import needed)."""
-    text = path.read_text(encoding="utf-8")
+def _extract_mcp_docstrings(text: str) -> str:
+    """Extract tool docstring blocks from MCP server source text via regex."""
     blocks: list[str] = []
     for match in re.finditer(
         r'@mcp\.tool\(\)\s*\ndef\s+\w+\([^)]*\)\s*(?:->\s*[^:]+)?:\s*\n\s+"""(.*?)"""',
@@ -230,18 +229,18 @@ def _check_mcp_forbidden_aliases(path: Path) -> list[Violation]:
     """Check MCP tool docstrings for forbidden aliases (text-only, no import)."""
     if not path.exists():
         return [Violation(path, "MCP server file is missing")]
-    docstrings = _extract_mcp_docstrings(path)
+    text = path.read_text(encoding="utf-8")
+    docstrings = _extract_mcp_docstrings(text)
     if not docstrings:
         return []
     violations: list[Violation] = []
-    full_text = path.read_text(encoding="utf-8")
     for alias in FORBIDDEN_ALIASES:
         if re.search(rf"\b{re.escape(alias)}\b", docstrings):
             violations.append(
                 Violation(
                     path,
                     f"MCP docstring contains forbidden alias: `{alias}`",
-                    _line_number(full_text, alias),
+                    _line_number(text, alias),
                 )
             )
     for alias in CONTRADICTION_TYPE_ALIASES:
@@ -250,7 +249,7 @@ def _check_mcp_forbidden_aliases(path: Path) -> list[Violation]:
                 Violation(
                     path,
                     f"MCP docstring contains contradiction_type alias: `{alias}`",
-                    _line_number(full_text, alias),
+                    _line_number(text, alias),
                 )
             )
     return violations
