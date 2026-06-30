@@ -17,6 +17,56 @@ use crate::verification::{self, ModuleEnv, SymbolProvenance, TranslatorIRMetadat
 
 pub use crate::verification::{EscalationReason, LogicFragment};
 
+/// Canonical proof-certificate contract values.
+///
+/// These constants are the single source of truth for the string values that
+/// appear in the `z3_check_result` and `status` fields of an emitted
+/// [`AtomCertificate`]. They are mirrored by the `$defs` enums in
+/// `schema/proof-cert.schema.json` (the cross-repository contract consumed by
+/// `mumei-agent` and `mumei-lean`); the Python test
+/// `tests/test_proof_cert_schema.py` guards against the two drifting apart.
+///
+/// Prefer referencing these constants over inline string literals so that the
+/// accepted vocabulary stays defined in exactly one place.
+pub mod status {
+    /// `z3_check_result`: Z3 proved the obligation (no counter-example).
+    pub const Z3_UNSAT: &str = "unsat";
+    /// `z3_check_result`: Z3 found a counter-example.
+    pub const Z3_SAT: &str = "sat";
+    /// `z3_check_result`: Z3 could not decide the obligation.
+    pub const Z3_UNKNOWN: &str = "unknown";
+    /// `z3_check_result`: the obligation was not checked by Z3.
+    pub const Z3_SKIPPED: &str = "skipped";
+    /// `z3_check_result`: discharged by the mumei-lean Lean 4 bridge.
+    pub const Z3_LEAN_VERIFIED: &str = "lean_verified";
+
+    /// All accepted `z3_check_result` values, in schema order.
+    pub const Z3_CHECK_RESULTS: [&str; 5] =
+        [Z3_UNSAT, Z3_SAT, Z3_UNKNOWN, Z3_SKIPPED, Z3_LEAN_VERIFIED];
+
+    /// `status`: atom proven.
+    pub const VERIFIED: &str = "verified";
+    /// `status`: atom refuted by a counter-example.
+    pub const FAILED: &str = "failed";
+    /// `status`: atom not checked.
+    pub const SKIPPED: &str = "skipped";
+    /// `status`: atom assumed (e.g. trusted FFI boundary).
+    pub const TRUSTED: &str = "trusted";
+    /// `status`: atom pending escalation to the Lean bridge.
+    pub const ESCALATION_CANDIDATE: &str = "escalation_candidate";
+
+    /// All accepted `status` values, in schema order.
+    pub const VERIFICATION_STATUSES: [&str; 5] =
+        [VERIFIED, FAILED, SKIPPED, TRUSTED, ESCALATION_CANDIDATE];
+
+    /// `LeanResultMetadata.status`: the Lean bridge discharged the obligation.
+    ///
+    /// This is the mumei-lean-side result status (distinct from the
+    /// certificate-level `z3_check_result`/`status` fields above), even though
+    /// it shares the `"lean_verified"` spelling with [`Z3_LEAN_VERIFIED`].
+    pub const LEAN_STATUS_VERIFIED: &str = "lean_verified";
+}
+
 /// Top-level proof certificate for a Mumei source file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProofCertificate {
@@ -525,7 +575,7 @@ pub fn generate_certificate_with_reconstruction_losses(
             let (z3_result, status) = verification_results
                 .get(&atom.name)
                 .cloned()
-                .unwrap_or_else(|| ("skipped".to_string(), "skipped".to_string()));
+                .unwrap_or_else(|| (status::Z3_SKIPPED.to_string(), status::SKIPPED.to_string()));
 
             // P5-A: Compute proof hash with transitive dependencies
             let proof_hash = resolver::compute_proof_hash(atom, module_env);
@@ -555,7 +605,7 @@ pub fn generate_certificate_with_reconstruction_losses(
                 .iter()
                 .map(|binder| (binder.mumei_name.clone(), binder.lean_name.clone()))
                 .collect();
-            let counterexample_validation = if z3_result == "sat" {
+            let counterexample_validation = if z3_result == status::Z3_SAT {
                 let validation =
                     verification::validate_counterexample(atom, &HashMap::new(), module_env);
                 Some(CounterexampleValidationMetadata {
@@ -626,7 +676,7 @@ pub fn generate_certificate_with_reconstruction_losses(
         .collect();
 
     let all_verified = atom_certs.iter().all(|ac| {
-        (ac.status == "verified" || ac.status == "trusted")
+        (ac.status == status::VERIFIED || ac.status == status::TRUSTED)
             && ac
                 .spec_validation_result
                 .as_ref()
@@ -793,7 +843,7 @@ fn human_review_entry_for_atom(atom: &AtomCertificate) -> Option<HumanReviewEntr
         });
     }
 
-    if atom.z3_result_class == "unknown" || atom.z3_check_result == "unknown" {
+    if atom.z3_result_class == status::Z3_UNKNOWN || atom.z3_check_result == status::Z3_UNKNOWN {
         return Some(HumanReviewEntry {
             atom_name: atom.name.clone(),
             review_reason: "z3_unknown".to_string(),
@@ -803,7 +853,7 @@ fn human_review_entry_for_atom(atom: &AtomCertificate) -> Option<HumanReviewEntr
         });
     }
 
-    if atom.status == "escalation_candidate" {
+    if atom.status == status::ESCALATION_CANDIDATE {
         return Some(HumanReviewEntry {
             atom_name: atom.name.clone(),
             review_reason: atom
@@ -818,7 +868,7 @@ fn human_review_entry_for_atom(atom: &AtomCertificate) -> Option<HumanReviewEntr
         });
     }
 
-    if atom.status == "trusted"
+    if atom.status == status::TRUSTED
         || atom
             .escalation_reason
             .is_some_and(|reason| reason == EscalationReason::HumanReviewRequired)
@@ -861,10 +911,10 @@ fn compute_certificate_hash(cert: &ProofCertificate) -> String {
 
 pub fn refresh_certificate_integrity(cert: &mut ProofCertificate) {
     cert.all_verified = cert.atoms.iter().all(|ac| {
-        (ac.status == "trusted"
-            || (ac.status == "verified"
-                && (ac.z3_check_result == "unsat"
-                    || (ac.z3_check_result == "lean_verified"
+        (ac.status == status::TRUSTED
+            || (ac.status == status::VERIFIED
+                && (ac.z3_check_result == status::Z3_UNSAT
+                    || (ac.z3_check_result == status::Z3_LEAN_VERIFIED
                         && lean_certificate_metadata_is_current(ac)))))
             && ac
                 .spec_validation_result
@@ -928,9 +978,9 @@ pub fn verify_certificate(
             let status = if let Some(current_hash) = current_hashes.get(&ac.name) {
                 if current_hash != &ac.content_hash {
                     "changed".to_string()
-                } else if ac.z3_check_result == "unsat" {
+                } else if ac.z3_check_result == status::Z3_UNSAT {
                     "proven".to_string()
-                } else if allow_lean_verified && ac.z3_check_result == "lean_verified" {
+                } else if allow_lean_verified && ac.z3_check_result == status::Z3_LEAN_VERIFIED {
                     if lean_certificate_metadata_is_current(ac) {
                         "proven".to_string()
                     } else {
@@ -977,7 +1027,7 @@ fn lean_certificate_metadata_is_current(atom: &AtomCertificate) -> bool {
     else {
         return false;
     };
-    metadata.status == "lean_verified"
+    metadata.status == status::LEAN_STATUS_VERIFIED
         && !metadata.theorem_name.is_empty()
         && metadata.translator_version == verification::LEAN_TRANSLATOR_VERSION
         && metadata.bridge_lemma_hash == verification::LEAN_BRIDGE_LEMMA_HASH
@@ -1433,6 +1483,8 @@ mod tests {
     use super::*;
     use crate::parser;
     use crate::verification::ModuleEnv;
+    use serde_json::Value;
+    use std::path::PathBuf;
 
     fn solver_env_lock() -> &'static std::sync::Mutex<()> {
         static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
@@ -1473,6 +1525,38 @@ mod tests {
             effect_pre: HashMap::new(),
             effect_post: HashMap::new(),
         }
+    }
+
+    #[test]
+    fn test_status_constants_match_schema_enums() {
+        let schema_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../schema/proof-cert.schema.json");
+        let schema: Value = serde_json::from_str(
+            &std::fs::read_to_string(schema_path).expect("read proof-cert schema"),
+        )
+        .expect("parse proof-cert schema");
+
+        let z3_check_result_enum = schema["$defs"]["z3CheckResult"]["enum"]
+            .as_array()
+            .expect("z3CheckResult enum");
+        let verification_status_enum = schema["$defs"]["verificationStatus"]["enum"]
+            .as_array()
+            .expect("verificationStatus enum");
+
+        let z3_check_result_values: Vec<&str> = z3_check_result_enum
+            .iter()
+            .map(|value| value.as_str().expect("string enum entry"))
+            .collect();
+        let verification_status_values: Vec<&str> = verification_status_enum
+            .iter()
+            .map(|value| value.as_str().expect("string enum entry"))
+            .collect();
+
+        assert_eq!(&status::Z3_CHECK_RESULTS, z3_check_result_values.as_slice());
+        assert_eq!(
+            &status::VERIFICATION_STATUSES,
+            verification_status_values.as_slice()
+        );
     }
 
     /// P5-A: generate_certificate produces valid JSON with proof_hash, dependencies, effects, requires, ensures
