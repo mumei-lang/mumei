@@ -2,6 +2,14 @@
 
 ---
 
+### 2026-06-30: MCJIT→ORC docs-sync completion and sort ascending Lean escalation path
+
+- **MCJIT→ORC docs-sync**: removed residual `(migrated from MCJIT)` parentheticals from `docs/ROADMAP.md` and `docs/CROSS_PROJECT_ROADMAP.md`; only the strikethrough+Resolved entry in Known Limitations remains as historical context.
+- **Sort ascending Lean escalation fixture**: `tests/fixtures/sort_ascending.mm::verified_insertion_sort_ascending` provides an atom whose `forall(i, 0, n-1, arr[i] <= arr[i+1])` ensures triggers Z3 `unknown` (Array+forall quantifier timeout), making it a Lean escalation candidate. The mumei-lean bridge connects this to `MumeiLean.Sort.insertion_sort_ascending_bridge` backed by mathlib's `List.Sorted`.
+- **Live generated theorem coverage**: updated from four to **five** paths across `README.md`, `docs/CROSS_PROJECT_ROADMAP.md`, and `docs/ROADMAP.md`.
+
+---
+
 ### 2026-06-28: core-seeded deterministic forge and Lean bridge paths
 
 - **vStd core predicates forge**: added `std/core_predicates.mm` from

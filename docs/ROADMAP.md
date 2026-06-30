@@ -690,7 +690,7 @@ Extends `mumei lsp` diagnostics beyond `.mm` parse/Z3 feedback by reusing the sa
 Enables mumei's verified code to actually run — both interactively in the REPL and as standalone native binaries.
 
 **P7-A: REPL Execution Engine (JIT)** — ✅ Implemented
-- `mumei-emit-llvm/src/jit.rs` — JitEngine struct backed by LLVM ORC LLJIT (migrated from MCJIT)
+- `mumei-emit-llvm/src/jit.rs` — JitEngine struct backed by LLVM ORC LLJIT
 - Refactored `codegen::compile()` into `compile_atom_into_module()` (in-memory) + `compile()` (file-based)
 - `compile_to_module()` returns LLVM IR as string for standalone use
 - REPL (`cmd_repl()`) enhanced with JIT: atom definitions are verified then JIT-compiled; expressions are wrapped as `__repl_eval` atoms, verified, executed, and results displayed

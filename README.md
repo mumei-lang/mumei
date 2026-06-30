@@ -18,8 +18,11 @@ For the detailed contract, canonical vocabulary, V1-A〜E order, Lean escalation
 
 Recent standard-library sync points: `std/crypto/primitives.mm` is a forged,
 Z3-decidable crypto predicate module that does not require Lean escalation;
-mumei-lean live generated theorem coverage includes `abs_saturating`,
-`bounded_mul_with_overflow_check`, and the crypto `constant_time_eq_flag` path.
+mumei-lean live generated theorem coverage includes five paths —
+`abs_saturating`, `bounded_mul_with_overflow_check`, `constant_time_eq_flag`,
+`ff_zero_eq_zero`, and the sort ascending-preservation path
+(`verified_insertion_sort_ascending`) which lowers `forall(i, 0, n-1, arr[i] <= arr[i+1])`
+to mathlib's `List.Sorted` via the `MumeiLean.Sort` bridge.
 
 ---
 
