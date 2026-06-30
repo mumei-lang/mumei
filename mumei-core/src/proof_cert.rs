@@ -58,6 +58,13 @@ pub mod status {
     /// All accepted `status` values, in schema order.
     pub const VERIFICATION_STATUSES: [&str; 5] =
         [VERIFIED, FAILED, SKIPPED, TRUSTED, ESCALATION_CANDIDATE];
+
+    /// `LeanResultMetadata.status`: the Lean bridge discharged the obligation.
+    ///
+    /// This is the mumei-lean-side result status (distinct from the
+    /// certificate-level `z3_check_result`/`status` fields above), even though
+    /// it shares the `"lean_verified"` spelling with [`Z3_LEAN_VERIFIED`].
+    pub const LEAN_STATUS_VERIFIED: &str = "lean_verified";
 }
 
 /// Top-level proof certificate for a Mumei source file.
@@ -1020,7 +1027,7 @@ fn lean_certificate_metadata_is_current(atom: &AtomCertificate) -> bool {
     else {
         return false;
     };
-    metadata.status == status::Z3_LEAN_VERIFIED
+    metadata.status == status::LEAN_STATUS_VERIFIED
         && !metadata.theorem_name.is_empty()
         && metadata.translator_version == verification::LEAN_TRANSLATOR_VERSION
         && metadata.bridge_lemma_hash == verification::LEAN_BRIDGE_LEMMA_HASH
