@@ -1,0 +1,286 @@
+{
+  "all_verified": true,
+  "atoms": [
+    {
+      "binder_mapping": {
+        "max_val": "max_val",
+        "min_val": "min_val",
+        "result": "result",
+        "val": "val"
+      },
+      "body_expr": "{ if val >= min_val && val <= max_val { 1 } else { 0 } }",
+      "body_summary": "{ if val >= min_val && val <= max_val { 1 } else { 0 } }",
+      "bridge_lemma_hash": "a8fd0b115fd29a6e87190bd041dbd5ab7a09ec89af6ac5b10ef152a1a0c0f643",
+      "content_hash": "99cb63daeb4b52b39c3d63fb66436ae52e44019d14de054ea2f79334c5fda839",
+      "dependencies": [],
+      "effects": [],
+      "ensures": "result >= 0 && result <= 1",
+      "logic_fragment_tag": "linear_arithmetic",
+      "logic_fragment_tags": [],
+      "name": "is_within_range",
+      "proof_hash": "f3bbc2c36984b284e97058d81285bde9d2b25f0b7a23833057d6c85e19ef4385",
+      "requires": "min_val <= max_val",
+      "solver_process_metadata": {
+        "cache_key": "0e7256c6b3aaa4345e2357cd1126db9ff27f90dd7a88258d2c6d6e9f2a8446e6",
+        "cancel_reason": null,
+        "generation_id": "",
+        "process_end_time": "2024-01-01T00:00:00Z",
+        "process_start_time": "",
+        "solver_config_fingerprint": "4eb8092c0cb08dd4c8d6494173a480c7fae3ce88feef61311d32f80092aad8dc",
+        "task_id": null,
+        "timeout_ms": 10000
+      },
+      "spec_validation_result": {
+        "checked_ensures": 2,
+        "checked_refinements": 11,
+        "checked_requires": true,
+        "diagnostics": [],
+        "ensures_implication_checks": 2,
+        "is_satisfiable": true,
+        "spec_metadata": {
+          "source_file": "std/contracts.mm"
+        },
+        "status": "satisfiable",
+        "trace_id": null,
+        "traceability_coverage": 0.75,
+        "traceability_hash": "aa243e6f9dbacefff3dfbe07d9fa63211a1d53133e5a38f3ebf7bbe2397e941e"
+      },
+      "status": "verified",
+      "symbol_provenance": [],
+      "translator_ir": {
+        "binders": [
+          {
+            "lean_name": "val",
+            "lean_type": "Int",
+            "mumei_name": "val",
+            "mumei_type": "i64",
+            "role": "param"
+          },
+          {
+            "lean_name": "min_val",
+            "lean_type": "Int",
+            "mumei_name": "min_val",
+            "mumei_type": "i64",
+            "role": "param"
+          },
+          {
+            "lean_name": "max_val",
+            "lean_type": "Int",
+            "mumei_name": "max_val",
+            "mumei_type": "i64",
+            "role": "param"
+          },
+          {
+            "lean_name": "result",
+            "lean_type": "Int",
+            "mumei_name": "result",
+            "mumei_type": "i64",
+            "role": "result"
+          }
+        ],
+        "lowering_rules": [
+          "contract_lowering",
+          "type_system_mapping"
+        ],
+        "proof_trace_hints": [],
+        "provenance_span": {
+          "col": 1,
+          "file": "std/contracts.mm",
+          "len": 4,
+          "line": 31
+        },
+        "requires_bridge_lemmas": [],
+        "semantic_gap_notes": [],
+        "sort": "contract_obligation",
+        "theorem_goal": "(min_val <= max_val) -> (result >= 0 && result <= 1)"
+      },
+      "translator_version": "mumei-lean-translator-ir-v1",
+      "z3_check_result": "unsat",
+      "z3_result_class": "unsat"
+    },
+    {
+      "binder_mapping": {
+        "max_val": "max_val",
+        "min_val": "min_val",
+        "result": "result",
+        "val": "val"
+      },
+      "body_expr": "{ if val < min_val { min_val } else { if val > max_val { max_val } else { val } } }",
+      "body_summary": "{ if val < min_val { min_val } else { if val > max_val { max_val } else { val } } }",
+      "bridge_lemma_hash": "a8fd0b115fd29a6e87190bd041dbd5ab7a09ec89af6ac5b10ef152a1a0c0f643",
+      "content_hash": "31a4eb552a3f61dad072ecec50360be12198af4464ebfdfaf90351acb2027187",
+      "dependencies": [],
+      "effects": [],
+      "ensures": "result >= min_val && result <= max_val",
+      "logic_fragment_tag": "linear_arithmetic",
+      "logic_fragment_tags": [],
+      "name": "clamp",
+      "proof_hash": "16988447f9d6242db6e052aab90585b90d397045a021c2fa64b16b926f5134b0",
+      "requires": "min_val <= max_val",
+      "solver_process_metadata": {
+        "cache_key": "6ea70cd58063be880f14f5b2ad61adf21a2fc3c3bec137154ba8ec146acc3ee5",
+        "cancel_reason": null,
+        "generation_id": "",
+        "process_end_time": "2024-01-01T00:00:00Z",
+        "process_start_time": "",
+        "solver_config_fingerprint": "4eb8092c0cb08dd4c8d6494173a480c7fae3ce88feef61311d32f80092aad8dc",
+        "task_id": null,
+        "timeout_ms": 10000
+      },
+      "spec_validation_result": {
+        "checked_ensures": 2,
+        "checked_refinements": 11,
+        "checked_requires": true,
+        "diagnostics": [],
+        "ensures_implication_checks": 2,
+        "is_satisfiable": true,
+        "spec_metadata": {
+          "source_file": "std/contracts.mm"
+        },
+        "status": "satisfiable",
+        "trace_id": null,
+        "traceability_coverage": 0.75,
+        "traceability_hash": "7f2d2941eda81c2e93ec340c97be7e4e4dbfb4fc90881476dd1a99558c35b441"
+      },
+      "status": "verified",
+      "symbol_provenance": [],
+      "translator_ir": {
+        "binders": [
+          {
+            "lean_name": "val",
+            "lean_type": "Int",
+            "mumei_name": "val",
+            "mumei_type": "i64",
+            "role": "param"
+          },
+          {
+            "lean_name": "min_val",
+            "lean_type": "Int",
+            "mumei_name": "min_val",
+            "mumei_type": "i64",
+            "role": "param"
+          },
+          {
+            "lean_name": "max_val",
+            "lean_type": "Int",
+            "mumei_name": "max_val",
+            "mumei_type": "i64",
+            "role": "param"
+          },
+          {
+            "lean_name": "result",
+            "lean_type": "Int",
+            "mumei_name": "result",
+            "mumei_type": "i64",
+            "role": "result"
+          }
+        ],
+        "lowering_rules": [
+          "contract_lowering",
+          "type_system_mapping"
+        ],
+        "proof_trace_hints": [],
+        "provenance_span": {
+          "col": 1,
+          "file": "std/contracts.mm",
+          "len": 4,
+          "line": 39
+        },
+        "requires_bridge_lemmas": [],
+        "semantic_gap_notes": [],
+        "sort": "contract_obligation",
+        "theorem_goal": "(min_val <= max_val) -> (result >= min_val && result <= max_val)"
+      },
+      "translator_version": "mumei-lean-translator-ir-v1",
+      "z3_check_result": "unsat",
+      "z3_result_class": "unsat"
+    },
+    {
+      "binder_mapping": {
+        "result": "result",
+        "x": "x"
+      },
+      "body_expr": "{ if x >= 0 { x } else { 0 - x } }",
+      "body_summary": "{ if x >= 0 { x } else { 0 - x } }",
+      "bridge_lemma_hash": "a8fd0b115fd29a6e87190bd041dbd5ab7a09ec89af6ac5b10ef152a1a0c0f643",
+      "content_hash": "624f48f0fb6d6313ff87fd60ace579c2664bdcd4daeabba50dcbf5f8b4b52f63",
+      "dependencies": [],
+      "effects": [],
+      "ensures": "result >= 0",
+      "logic_fragment_tag": "linear_arithmetic",
+      "logic_fragment_tags": [],
+      "name": "abs_val",
+      "proof_hash": "0d5abc3b50a7450627e8d265b11115cf02ab4721cc813c8e91c0a5a8af873a36",
+      "requires": "true",
+      "solver_process_metadata": {
+        "cache_key": "6c9fdacf6b64d48530bd5fb8e493178490f0c6f1da0e52bf07c1b969b1f620b5",
+        "cancel_reason": null,
+        "generation_id": "",
+        "process_end_time": "2024-01-01T00:00:00Z",
+        "process_start_time": "",
+        "solver_config_fingerprint": "4eb8092c0cb08dd4c8d6494173a480c7fae3ce88feef61311d32f80092aad8dc",
+        "task_id": null,
+        "timeout_ms": 10000
+      },
+      "spec_validation_result": {
+        "checked_ensures": 1,
+        "checked_refinements": 11,
+        "checked_requires": true,
+        "diagnostics": [],
+        "ensures_implication_checks": 0,
+        "is_satisfiable": true,
+        "spec_metadata": {
+          "source_file": "std/contracts.mm"
+        },
+        "status": "satisfiable",
+        "trace_id": null,
+        "traceability_coverage": 0.5,
+        "traceability_hash": "abdad90a0f022425be5921894e436aa609147ad4b2fe9713cba57c0d00c95afb"
+      },
+      "status": "verified",
+      "symbol_provenance": [],
+      "translator_ir": {
+        "binders": [
+          {
+            "lean_name": "x",
+            "lean_type": "Int",
+            "mumei_name": "x",
+            "mumei_type": "i64",
+            "role": "param"
+          },
+          {
+            "lean_name": "result",
+            "lean_type": "Int",
+            "mumei_name": "result",
+            "mumei_type": "i64",
+            "role": "result"
+          }
+        ],
+        "lowering_rules": [
+          "contract_lowering",
+          "type_system_mapping"
+        ],
+        "proof_trace_hints": [],
+        "provenance_span": {
+          "col": 1,
+          "file": "std/contracts.mm",
+          "len": 4,
+          "line": 48
+        },
+        "requires_bridge_lemmas": [],
+        "semantic_gap_notes": [],
+        "sort": "contract_obligation",
+        "theorem_goal": "(true) -> (result >= 0)"
+      },
+      "translator_version": "mumei-lean-translator-ir-v1",
+      "z3_check_result": "unsat",
+      "z3_result_class": "unsat"
+    }
+  ],
+  "certificate_hash": "585b3e8bce81967fae50f29d63a47335cf1e0c38ee30264a6601b2d9b64e08f4",
+  "file": "std/contracts.mm",
+  "mumei_version": "0.6.0",
+  "timestamp": "2024-01-01T00:00:00Z",
+  "version": "1.0",
+  "z3_version": "Z3 version 4.8.12 - 64 bit"
+}
