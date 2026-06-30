@@ -269,6 +269,8 @@ enum List { Nil, Cons(i64, Self) }
 | `binary_search(n, target)` | `n >= 0` | `result >= -1 && result < n` | Binary search with termination proof |
 | `binary_search_sorted(n, target)` | `n >= 0 && forall(...)` | `result >= -1 && result < n` | Binary search with sorted precondition |
 
+> **Lean escalation fixture**: `tests/fixtures/sort_ascending.mm` defines `verified_insertion_sort_ascending(n)` with `ensures: result == n && forall(i, 0, result - 1, arr[i] <= arr[i + 1])`. Z3 returns `unknown` on the Array+forall quantifier (spurious counterexample), so this atom is a Lean escalation candidate via `--escalate-lean`. The mumei-lean bridge connects it to `MumeiLean.Sort.insertion_sort_ascending_bridge` backed by mathlib's `List.Sorted`. This fixture is kept outside `std/` to avoid `verify-std` regression.
+
 ---
 
 ## std/container/verified\_vector.mm
