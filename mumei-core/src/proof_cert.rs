@@ -868,7 +868,7 @@ fn human_review_entry_for_atom(atom: &AtomCertificate) -> Option<HumanReviewEntr
         });
     }
 
-    if atom.status == "trusted"
+    if atom.status == status::TRUSTED
         || atom
             .escalation_reason
             .is_some_and(|reason| reason == EscalationReason::HumanReviewRequired)
