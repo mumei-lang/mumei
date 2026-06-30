@@ -1,0 +1,20 @@
+{
+  "all_verified": false,
+  "atoms": [
+    {
+      "name": "spurious_candidate_example",
+      "z3_check_result": "spurious_candidate",
+      "content_hash": "fixture-spurious-candidate",
+      "status": "failed",
+      "proof_hash": "fixture-proof-spurious-candidate",
+      "dependencies": [],
+      "effects": [],
+      "requires": "true",
+      "ensures": "true"
+    }
+  ],
+  "file": "std/spurious.mm",
+  "timestamp": "2024-01-01T00:00:00Z",
+  "version": "1.0",
+  "z3_version": "4.12.2"
+}

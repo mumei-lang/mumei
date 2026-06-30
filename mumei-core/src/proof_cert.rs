@@ -39,10 +39,24 @@ pub mod status {
     pub const Z3_SKIPPED: &str = "skipped";
     /// `z3_check_result`: discharged by the mumei-lean Lean 4 bridge.
     pub const Z3_LEAN_VERIFIED: &str = "lean_verified";
+    /// `z3_check_result`: Z3 timed out before deciding the obligation.
+    pub const Z3_TIMEOUT: &str = "timeout";
+    /// `z3_check_result`: Z3 hit a resource limit.
+    pub const Z3_RESOURCE_LIMIT: &str = "resource_limit";
+    /// `z3_check_result`: Z3 produced a spurious candidate.
+    pub const Z3_SPURIOUS_CANDIDATE: &str = "spurious_candidate";
 
     /// All accepted `z3_check_result` values, in schema order.
-    pub const Z3_CHECK_RESULTS: [&str; 5] =
-        [Z3_UNSAT, Z3_SAT, Z3_UNKNOWN, Z3_SKIPPED, Z3_LEAN_VERIFIED];
+    pub const Z3_CHECK_RESULTS: [&str; 8] = [
+        Z3_UNSAT,
+        Z3_SAT,
+        Z3_UNKNOWN,
+        Z3_SKIPPED,
+        Z3_LEAN_VERIFIED,
+        Z3_TIMEOUT,
+        Z3_RESOURCE_LIMIT,
+        Z3_SPURIOUS_CANDIDATE,
+    ];
 
     /// `status`: atom proven.
     pub const VERIFIED: &str = "verified";
@@ -120,7 +134,9 @@ pub struct ProofCertificate {
 pub struct AtomCertificate {
     /// Atom name
     pub name: String,
-    /// Z3 solver check result: "unsat" (proven), "sat" (counter-example found), "unknown", "skipped"
+    /// Z3 solver check result: "unsat" (proven), "sat" (counter-example found),
+    /// "unknown", "skipped", "lean_verified", "timeout", "resource_limit",
+    /// or "spurious_candidate"
     pub z3_check_result: String,
     /// SHA-256 hash of the atom's source text (requires + ensures + body)
     pub content_hash: String,
@@ -524,7 +540,8 @@ fn self_correction_metadata_from_env(atom_name: &str) -> Option<SelfCorrectionMe
 /// Generate a proof certificate from verification results.
 ///
 /// `verification_results` maps atom_name → (z3_check_result, status).
-/// z3_check_result is "unsat"/"sat"/"unknown"/"skipped".
+/// z3_check_result is "unsat"/"sat"/"unknown"/"skipped"/"lean_verified"/
+/// "timeout"/"resource_limit"/"spurious_candidate".
 /// status is "verified"/"failed"/"skipped"/"trusted".
 ///
 /// P5-A: Extended with `module_env` for proof hash and dependency info,

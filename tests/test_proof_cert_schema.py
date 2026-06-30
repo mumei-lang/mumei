@@ -25,7 +25,7 @@ FIXTURE_DIR = REPO_ROOT / "tests" / "fixtures" / "proof-cert"
 # `mumei-core/src/proof_cert.rs` (module `status`) and the `$defs` enums in the
 # schema. Changing a value here is intentional and forces a coordinated update
 # of the Rust producer and the Python consumers.
-EXPECTED_Z3_CHECK_RESULTS = ["unsat", "sat", "unknown", "skipped", "lean_verified"]
+EXPECTED_Z3_CHECK_RESULTS = ["unsat", "sat", "unknown", "skipped", "lean_verified", "timeout", "resource_limit", "spurious_candidate"]
 EXPECTED_VERIFICATION_STATUSES = [
     "verified",
     "failed",
