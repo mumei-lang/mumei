@@ -63,9 +63,9 @@
   },
   "$defs": {
     "z3CheckResult": {
-      "description": "Z3 solver check outcome. 'unsat' = proven, 'sat' = counter-example found, 'unknown' = solver gave up, 'skipped' = not checked, 'lean_verified' = discharged by the mumei-lean bridge.",
+      "description": "Z3 solver check outcome. 'unsat' = proven, 'sat' = counter-example found, 'unknown' = solver gave up, 'skipped' = not checked, 'lean_verified' = discharged by the mumei-lean bridge, 'timeout' = solver timed out, 'resource_limit' = solver hit a resource limit, 'spurious_candidate' = solver returned a spurious escalation candidate.",
       "type": "string",
-      "enum": ["unsat", "sat", "unknown", "skipped", "lean_verified"]
+      "enum": ["unsat", "sat", "unknown", "skipped", "lean_verified", "timeout", "resource_limit", "spurious_candidate"]
     },
     "verificationStatus": {
       "description": "Atom verification status. 'verified' = proven, 'failed' = counter-example, 'skipped' = not checked, 'trusted' = assumed (e.g. FFI), 'escalation_candidate' = pending Lean escalation.",
