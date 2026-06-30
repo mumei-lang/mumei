@@ -268,7 +268,7 @@ mumei setup && source ~/.mumei/env
 | `mumei inspect` | Show development environment |
 | `mumei infer-effects <file>` | Infer required effects (JSON output) |
 | `mumei infer-contracts <file>` | Infer contracts for all atoms (JSON output) |
-| `mumei repl` | Interactive REPL; use `:verify-spec <path|inline>` / `:verify-code <path>` to validate natural-language specs and foreign code through `mumei-agent` |
+| `mumei repl` | Interactive REPL backed by ORC LLJIT — incremental atom compilation, cross-atom resolution, and atom redefinition; use `:verify-spec <path|inline>` / `:verify-code <path>` to validate natural-language specs and foreign code through `mumei-agent` |
 | `mumei doc <file> -o <dir>` | Generate documentation (`--format html` (default) / `markdown` / `json`) |
 | `mumei lsp` | Start LSP server; shows Z3 diagnostics, `/// spec:` natural-language spec health, and `.py` / `.rs` / `.ts` / `.tsx` / `.go` contract diagnostics from `mumei-agent` inline, with graceful fallback when the agent is unavailable |
 | `mumei verify-cert <cert> <file>` | Verify a proof certificate against current source |
