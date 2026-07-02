@@ -607,23 +607,7 @@ pub(crate) fn cmd_build(
                             }
                         }
                         if !matches!(emit_target, emitter::EmitTarget::DecidableMetrics) {
-                            let target_desc: std::borrow::Cow<'static, str> = match emit_target {
-                                emitter::EmitTarget::LlvmIr => "LLVM IR".into(),
-                                emitter::EmitTarget::CHeader => "C header".into(),
-                                emitter::EmitTarget::VerifiedJson => "Verified JSON".into(),
-                                emitter::EmitTarget::DecidableMetrics => unreachable!(),
-                                emitter::EmitTarget::ProofBook => "Proof-Book".into(),
-                                emitter::EmitTarget::ProofCert => "Proof-Cert".into(),
-                                emitter::EmitTarget::EscalationBundle => {
-                                    "Lean escalation bundle".into()
-                                }
-                                emitter::EmitTarget::Binary => "Binary".into(),
-                                emitter::EmitTarget::RustWrapper => "Rust wrapper".into(),
-                                emitter::EmitTarget::PythonWrapper => "Python wrapper".into(),
-                                emitter::EmitTarget::External(name) => {
-                                    format!("external plugin '{}'", name).into()
-                                }
-                            };
+                            let target_desc = emit_target.label();
                             println!(
                                 "  ⚙️  [3/3] Tempering: Done. Compiled '{}' to {}.",
                                 atom.name, target_desc
