@@ -2,9 +2,9 @@ use crate::ast::TypeRef;
 use crate::cross_spec::{CrossSpecResult, CrossSpecVerifier};
 use crate::hir::HirAtom;
 use crate::parser::{
-    parse_body_expr, parse_expression, Atom, Effect, EffectDef, EnumDef, Expr, ImplDef, Item,
-    JoinSemantics, MatchArm, Op, Pattern, QuantifierType, RefinedType, ResourceDef, ResourceMode,
-    Span, Stmt, StructDef, TraitDef, TraitMethod, TrustLevel,
+    parse_body_expr, parse_expression, Atom, EffectDef, EnumDef, Expr, ImplDef, JoinSemantics,
+    MatchArm, Op, Pattern, QuantifierType, RefinedType, ResourceDef, Span, Stmt, StructDef,
+    TraitDef, TraitMethod, TrustLevel,
 };
 use crate::resolver::compute_contract_hash;
 use miette::SourceSpan;
