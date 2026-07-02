@@ -38,19 +38,7 @@ pub(crate) fn cmd_build_default(input: &str, output: &str) {
 }
 
 fn emit_target_from_cli(emit: &str) -> emitter::EmitTarget {
-    match emit {
-        "llvm-ir" => emitter::EmitTarget::LlvmIr,
-        "c-header" => emitter::EmitTarget::CHeader,
-        "verified-json" => emitter::EmitTarget::VerifiedJson,
-        "decidable-metrics" => emitter::EmitTarget::DecidableMetrics,
-        "proof-book" => emitter::EmitTarget::ProofBook,
-        "proof-cert" => emitter::EmitTarget::ProofCert,
-        "escalation-bundle" => emitter::EmitTarget::EscalationBundle,
-        "binary" => emitter::EmitTarget::Binary,
-        "rust-wrapper" => emitter::EmitTarget::RustWrapper,
-        "python-wrapper" => emitter::EmitTarget::PythonWrapper,
-        other => emitter::EmitTarget::External(other.to_string()),
-    }
+    emitter::EmitTarget::from_cli(emit)
 }
 
 pub(crate) fn cmd_build(
@@ -65,8 +53,11 @@ pub(crate) fn cmd_build(
             Ok(emitter) => Some(emitter),
             Err(err) => {
                 eprintln!(
-                    "\u{274c} Error: Unknown emit target '{}'. Valid built-in values: llvm-ir, c-header, verified-json, decidable-metrics, proof-book, proof-cert, escalation-bundle, binary, rust-wrapper, python-wrapper.",
-                    name
+                    "\u{274c} Error: Unknown emit target '{}'. Valid built-in values: {}.",
+                    name,
+                    emitter::EmitTarget::builtin_cli_names()
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 );
                 eprintln!("  External plugin lookup failed: {}", err);
                 std::process::exit(1);
@@ -430,24 +421,7 @@ pub(crate) fn cmd_build(
                                 }
                             }
                             if !matches!(emit_target, emitter::EmitTarget::DecidableMetrics) {
-                                let target_desc: std::borrow::Cow<'static, str> = match emit_target
-                                {
-                                    emitter::EmitTarget::LlvmIr => "LLVM IR".into(),
-                                    emitter::EmitTarget::CHeader => "C header".into(),
-                                    emitter::EmitTarget::VerifiedJson => "Verified JSON".into(),
-                                    emitter::EmitTarget::DecidableMetrics => unreachable!(),
-                                    emitter::EmitTarget::ProofBook => "Proof-Book".into(),
-                                    emitter::EmitTarget::ProofCert => "Proof-Cert".into(),
-                                    emitter::EmitTarget::EscalationBundle => {
-                                        "Lean escalation bundle".into()
-                                    }
-                                    emitter::EmitTarget::Binary => "Binary".into(),
-                                    emitter::EmitTarget::RustWrapper => "Rust wrapper".into(),
-                                    emitter::EmitTarget::PythonWrapper => "Python wrapper".into(),
-                                    emitter::EmitTarget::External(name) => {
-                                        format!("external plugin '{}'", name).into()
-                                    }
-                                };
+                                let target_desc = emit_target.label();
                                 println!(
                                     "  ⚙️  [3/3] Tempering: Done. Compiled '{}' to {}.",
                                     qualified_name, target_desc
