@@ -406,10 +406,14 @@ pub(crate) fn collect_array_accesses_in_stmt(stmt: &Stmt, out: &mut Vec<(String,
             }
         }
         Stmt::While {
-            cond, invariant, ..
+            cond,
+            invariant,
+            body,
+            ..
         } => {
             collect_array_accesses_inner(cond, out);
             collect_array_accesses_inner(invariant, out);
+            collect_array_accesses_in_stmt(body, out);
         }
         _ => {}
     }
@@ -630,7 +634,7 @@ pub(crate) fn verify_call_graph_cycles(atom: &Atom, module_env: &ModuleEnv) -> M
 pub(crate) fn check_taint_propagation(
     atom: &Atom,
     body_stmt: &Stmt,
-    env: &Env,
+    _env: &Env,
     module_env: &ModuleEnv,
 ) {
     // body 内で呼び出されている関数を収集
@@ -646,16 +650,10 @@ pub(crate) fn check_taint_propagation(
     }
 
     if !tainted_sources.is_empty() {
-        // env 内の __tainted_* マーカーを確認
-        let taint_markers: Vec<&String> =
-            env.keys().filter(|k| k.starts_with("__tainted_")).collect();
-
-        if !taint_markers.is_empty() || !tainted_sources.is_empty() {
-            eprintln!(
-                "  ⚠️  Taint warning for atom '{}': verification depends on unverified function(s): [{}]. \
-                 Results may be unsound.",
-                atom.name, tainted_sources.join(", ")
-            );
-        }
+        eprintln!(
+            "  ⚠  Taint warning for atom '{}': verification depends on unverified function(s): [{}]. \
+             Results may be unsound.",
+            atom.name, tainted_sources.join(", ")
+        );
     }
 }
