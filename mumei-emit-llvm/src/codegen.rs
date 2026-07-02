@@ -93,6 +93,15 @@ fn resolve_param_type<'a>(
     match type_name {
         Some(name) => {
             let base = module_env.resolve_base_type(name);
+            // TODO(strict-preservation): `lower()` unifies `Str`/`String` into
+            // `LoweredType::Str`, so `"String"` now maps to a pointer here.
+            // Pre-P1-b the arm matched only `"Str"`, so `"String"` fell through
+            // to `i64`. This unification is intentional (consistency with the
+            // FFI emitters; no `.mm` fixture declares a `String` type today).
+            // If exact legacy behavior is ever required, distinguish the Str
+            // spelling from String at the `lower()` layer (e.g. a dedicated
+            // variant) rather than re-adding a string match here. Same note
+            // applies to `param_z3_value` in verification/translator.rs.
             match lower(&base) {
                 LoweredType::F64 => context.f64_type().into(),
                 LoweredType::Str => context.ptr_type(inkwell::AddressSpace::default()).into(),

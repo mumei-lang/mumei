@@ -187,6 +187,13 @@ pub(crate) fn param_z3_value<'a>(
         )
         .into()
     } else {
+        // TODO(strict-preservation): `lower()` unifies `Str`/`String` into
+        // `LoweredType::Str`, so `"String"` now encodes as a Z3 string sort.
+        // Pre-P1-b only `"Str"` did; `"String"` fell through to `Int`. This is
+        // an intentional consistency fix (no `.mm` fixture declares `String`).
+        // For exact legacy behavior, distinguish the spelling at the `lower()`
+        // layer rather than re-adding a string match. Mirrors the note in
+        // mumei-emit-llvm `resolve_param_type`.
         match lower(&base) {
             // `f64` params are encoded as Z3 `Real` (exact rationals), not IEEE 754.
             // See `real_from_f64` and
