@@ -4,6 +4,7 @@ use super::profiler::IncrementalProfiler;
 use super::support::*;
 use super::types::*;
 use super::*;
+use crate::lowering::{lower, LoweredType};
 use z3::{FuncDecl, Sort};
 
 /// Default constraint budget per atom (max number of solver.assert() calls).
@@ -74,9 +75,9 @@ pub(crate) fn array_element_type_name(name: &str, vc: &VCtx<'_>) -> String {
 }
 
 pub(crate) fn array_element_sort_from_type(type_name: &str) -> ArrayElementSort {
-    match type_name {
-        "f64" => ArrayElementSort::Real,
-        "bool" => ArrayElementSort::Bool,
+    match lower(type_name) {
+        LoweredType::F64 => ArrayElementSort::Real,
+        LoweredType::Bool => ArrayElementSort::Bool,
         _ => ArrayElementSort::Int,
     }
 }
@@ -186,15 +187,35 @@ pub(crate) fn param_z3_value<'a>(
         )
         .into()
     } else {
-        match base.as_str() {
+        // TODO(strict-preservation): `lower()` unifies `Str`/`String` into
+        // `LoweredType::Str`, so `"String"` now encodes as a Z3 string sort.
+        // Pre-P1-b only `"Str"` did; `"String"` fell through to `Int`. This is
+        // an intentional consistency fix (no `.mm` fixture declares `String`).
+        // For exact legacy behavior, distinguish the spelling at the `lower()`
+        // layer rather than re-adding a string match. Mirrors the note in
+        // mumei-emit-llvm `resolve_param_type`.
+        match lower(&base) {
             // `f64` params are encoded as Z3 `Real` (exact rationals), not IEEE 754.
             // See `real_from_f64` and
             // `docs/ARCHITECTURE.md` § "`f64` Verification Sort".
-            "f64" => Real::new_const(ctx, name).into(),
-            "Str" => Z3String::new_const(ctx, name).into(),
-            "bool" => Bool::new_const(ctx, name).into(),
+            LoweredType::F64 => Real::new_const(ctx, name).into(),
+            LoweredType::Str => Z3String::new_const(ctx, name).into(),
+            LoweredType::Bool => Bool::new_const(ctx, name).into(),
             _ => Int::new_const(ctx, name).into(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_array_element_sort_from_type_uses_lowered_types() {
+        assert_eq!(array_element_sort_from_type("f64"), ArrayElementSort::Real);
+        assert_eq!(array_element_sort_from_type("bool"), ArrayElementSort::Bool);
+        assert_eq!(array_element_sort_from_type("i64"), ArrayElementSort::Int);
+        assert_eq!(array_element_sort_from_type("[f64]"), ArrayElementSort::Int);
     }
 }
 

@@ -11,6 +11,7 @@ use inkwell::FloatPredicate;
 use inkwell::IntPredicate;
 use inkwell::OptimizationLevel;
 use mumei_core::hir::{collect_free_variables_stmt, HirAtom, HirExpr, HirStmt};
+use mumei_core::lowering::{lower, LoweredType};
 use mumei_core::parser::{JoinSemantics, Op, Pattern};
 use mumei_core::verification::{ModuleEnv, MumeiError, MumeiResult};
 use std::collections::HashMap;
@@ -57,9 +58,11 @@ fn enum_llvm_type<'a>(
                 let slot_type = if let Some(menv) = module_env {
                     resolve_param_type(context, Some(type_name.as_str()), menv)
                 } else {
-                    match type_name.as_str() {
-                        "f64" => context.f64_type().into(),
-                        "Str" => context.ptr_type(inkwell::AddressSpace::default()).into(),
+                    match lower(type_name.as_str()) {
+                        LoweredType::F64 => context.f64_type().into(),
+                        LoweredType::Str => {
+                            context.ptr_type(inkwell::AddressSpace::default()).into()
+                        }
                         _ => context.i64_type().into(),
                     }
                 };
@@ -90,12 +93,21 @@ fn resolve_param_type<'a>(
     match type_name {
         Some(name) => {
             let base = module_env.resolve_base_type(name);
-            match base.as_str() {
-                "f64" => context.f64_type().into(),
-                "u64" => context.i64_type().into(),
-                "[i64]" => array_struct_type(context).into(),
-                // Plan 9: Str type as pointer
-                "Str" => context.ptr_type(inkwell::AddressSpace::default()).into(),
+            // TODO(strict-preservation): `lower()` unifies `Str`/`String` into
+            // `LoweredType::Str`, so `"String"` now maps to a pointer here.
+            // Pre-P1-b the arm matched only `"Str"`, so `"String"` fell through
+            // to `i64`. This unification is intentional (consistency with the
+            // FFI emitters; no `.mm` fixture declares a `String` type today).
+            // If exact legacy behavior is ever required, distinguish the Str
+            // spelling from String at the `lower()` layer (e.g. a dedicated
+            // variant) rather than re-adding a string match here. Same note
+            // applies to `param_z3_value` in verification/translator.rs.
+            match lower(&base) {
+                LoweredType::F64 => context.f64_type().into(),
+                LoweredType::Str => context.ptr_type(inkwell::AddressSpace::default()).into(),
+                LoweredType::Array(inner) if matches!(inner.as_ref(), LoweredType::I64) => {
+                    array_struct_type(context).into()
+                }
                 _ => {
                     // Plan 14: Check if type is an enum
                     if let Some(enum_def) = module_env.get_enum(name) {
@@ -130,10 +142,10 @@ pub fn declare_extern_functions<'ctx>(
                 .collect();
 
             let ret_base = module_env.resolve_base_type(&ext_fn.return_type);
-            let fn_type = match ret_base.as_str() {
-                "f64" => context.f64_type().fn_type(&param_types, false),
+            let fn_type = match lower(&ret_base) {
+                LoweredType::F64 => context.f64_type().fn_type(&param_types, false),
                 // Plan 9: Str return type as pointer
-                "Str" => context
+                LoweredType::Str => context
                     .ptr_type(inkwell::AddressSpace::default())
                     .fn_type(&param_types, false),
                 _ => context.i64_type().fn_type(&param_types, false),
@@ -158,10 +170,12 @@ fn resolve_return_type<'a>(
 ) -> inkwell::types::BasicTypeEnum<'a> {
     if let Some(ref ret_type) = atom.return_type {
         let base = module_env.resolve_base_type(ret_type);
-        match base.as_str() {
-            "f64" => context.f64_type().into(),
-            "Str" => context.ptr_type(AddressSpace::default()).into(),
-            "[i64]" => array_struct_type(context).into(),
+        match lower(&base) {
+            LoweredType::F64 => context.f64_type().into(),
+            LoweredType::Str => context.ptr_type(AddressSpace::default()).into(),
+            LoweredType::Array(inner) if matches!(inner.as_ref(), LoweredType::I64) => {
+                array_struct_type(context).into()
+            }
             _ => {
                 if let Some(enum_def) = module_env.get_enum(&base) {
                     return enum_llvm_type(context, enum_def, Some(module_env)).into();
@@ -2426,6 +2440,92 @@ fn emit_task_spawn_only<'a>(
         thread_ptr,
         result_idx,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mumei_core::parser::ast::Span;
+    use mumei_core::parser::Atom;
+
+    fn atom_with_return_type(return_type: Option<&str>) -> Atom {
+        Atom {
+            name: "test".to_string(),
+            type_params: vec![],
+            where_bounds: vec![],
+            params: vec![],
+            trace_id: None,
+            spec_metadata: Default::default(),
+            requires: "true".to_string(),
+            forall_constraints: vec![],
+            ensures: "true".to_string(),
+            body_expr: "true".to_string(),
+            consumed_params: vec![],
+            resources: vec![],
+            is_async: false,
+            trust_level: mumei_core::parser::TrustLevel::Verified,
+            max_unroll: None,
+            invariant: None,
+            effects: vec![],
+            return_type: return_type.map(str::to_string),
+            span: Span::default(),
+            effect_pre: Default::default(),
+            effect_post: Default::default(),
+        }
+    }
+
+    #[test]
+    fn test_resolve_param_type_uses_lowered_types() {
+        let context = Context::create();
+        let module_env = ModuleEnv::new();
+
+        assert_eq!(
+            resolve_param_type(&context, Some("f64"), &module_env),
+            context.f64_type().into()
+        );
+        assert_eq!(
+            resolve_param_type(&context, Some("Str"), &module_env),
+            context.ptr_type(AddressSpace::default()).into()
+        );
+        assert_eq!(
+            resolve_param_type(&context, Some("[i64]"), &module_env),
+            array_struct_type(&context).into()
+        );
+        assert_eq!(
+            resolve_param_type(&context, Some("String"), &module_env),
+            context.ptr_type(AddressSpace::default()).into()
+        );
+    }
+
+    #[test]
+    fn test_resolve_return_type_uses_lowered_types() {
+        let context = Context::create();
+        let module_env = ModuleEnv::new();
+
+        let f64_atom = atom_with_return_type(Some("f64"));
+        assert_eq!(
+            resolve_return_type(&context, &f64_atom, &module_env),
+            context.f64_type().into()
+        );
+
+        let str_atom = atom_with_return_type(Some("Str"));
+        assert_eq!(
+            resolve_return_type(&context, &str_atom, &module_env),
+            context.ptr_type(AddressSpace::default()).into()
+        );
+
+        let array_atom = atom_with_return_type(Some("[i64]"));
+        assert_eq!(
+            resolve_return_type(&context, &array_atom, &module_env),
+            array_struct_type(&context).into()
+        );
+
+        let string_atom = atom_with_return_type(Some("String"));
+        assert_eq!(
+            resolve_return_type(&context, &string_atom, &module_env),
+            context.ptr_type(AddressSpace::default()).into()
+        );
+    }
 }
 
 /// Plan 21 — concurrency runtime: emit `pthread_join` for `pending`
