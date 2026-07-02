@@ -12,36 +12,45 @@
 
 use mumei_core::emitter::{Artifact, ArtifactKind, Emitter};
 use mumei_core::hir::HirAtom;
+use mumei_core::lowering::{lower, LoweredType};
 use mumei_core::parser::ExternBlock;
 use mumei_core::verification::{ModuleEnv, MumeiResult};
 use std::path::Path;
 
+fn format_lowered_type_to_ctypes(lowered: &LoweredType) -> &'static str {
+    match lowered {
+        LoweredType::I64 => "c_int64",
+        LoweredType::I32 => "c_int32",
+        LoweredType::U64 => "c_uint64",
+        LoweredType::U32 => "c_uint32",
+        LoweredType::F64 => "c_double",
+        LoweredType::F32 => "c_float",
+        LoweredType::Bool => "c_int64",
+        LoweredType::Str => "c_char_p",
+        LoweredType::Array(inner) if matches!(**inner, LoweredType::I64) => "POINTER(c_int64)",
+        LoweredType::Array(_) | LoweredType::Other(_) => "c_int64",
+    }
+}
+
 /// Map a mumei type name to its Python ctypes equivalent.
 fn mumei_type_to_ctypes(type_name: &str) -> &str {
-    match type_name {
-        "i64" => "c_int64",
-        "i32" => "c_int32",
-        "u64" => "c_uint64",
-        "u32" => "c_uint32",
-        "f64" => "c_double",
-        "f32" => "c_float",
-        "bool" => "c_int64", // mumei compiles bool to i64 in LLVM IR
-        "Str" | "String" => "c_char_p",
-        "[i64]" => "POINTER(c_int64)",
-        _ => "c_int64", // default fallback for refined types based on i64
+    format_lowered_type_to_ctypes(&lower(type_name))
+}
+
+fn format_lowered_type_to_python_annotation(lowered: &LoweredType) -> &'static str {
+    match lowered {
+        LoweredType::I64 | LoweredType::I32 | LoweredType::U64 | LoweredType::U32 => "int",
+        LoweredType::F64 | LoweredType::F32 => "float",
+        LoweredType::Bool => "bool",
+        LoweredType::Str => "bytes",
+        LoweredType::Array(inner) if matches!(**inner, LoweredType::I64) => "ctypes.Array",
+        LoweredType::Array(_) | LoweredType::Other(_) => "int",
     }
 }
 
 /// Map a mumei type name to its Python type annotation.
 fn mumei_type_to_python_annotation(type_name: &str) -> &str {
-    match type_name {
-        "i64" | "i32" | "u64" | "u32" => "int",
-        "f64" | "f32" => "float",
-        "bool" => "bool",
-        "Str" | "String" => "bytes",
-        "[i64]" => "ctypes.Array",
-        _ => "int",
-    }
+    format_lowered_type_to_python_annotation(&lower(type_name))
 }
 
 /// FFI glue code generator for Python.
@@ -380,6 +389,12 @@ mod tests {
             translate_contract_to_python("result == false || x > 0"),
             "result == False or x > 0"
         );
+    }
+
+    #[test]
+    fn test_type_mapping_array_edge_cases() {
+        assert_eq!(mumei_type_to_ctypes("[f64]"), "c_int64");
+        assert_eq!(mumei_type_to_python_annotation("[[i64]]"), "int");
     }
 
     #[test]

@@ -12,6 +12,7 @@
 // =============================================================================
 
 use crate::hir::HirAtom;
+use crate::lowering::{lower, LoweredType};
 use crate::parser::ExternBlock;
 use crate::verification::{ModuleEnv, MumeiError, MumeiResult};
 use std::ffi::c_void;
@@ -276,20 +277,24 @@ pub fn load_external_emitter(name: &str) -> MumeiResult<BoxedEmitter> {
 
 pub struct CHeaderEmitter;
 
+fn format_lowered_type_to_c(lowered: &LoweredType) -> &'static str {
+    match lowered {
+        LoweredType::I64 => "int64_t",
+        LoweredType::I32 => "int32_t",
+        LoweredType::U64 => "uint64_t",
+        LoweredType::U32 => "uint32_t",
+        LoweredType::F64 => "double",
+        LoweredType::F32 => "float",
+        LoweredType::Bool => "int",
+        LoweredType::Str => "const char*",
+        LoweredType::Array(inner) if matches!(**inner, LoweredType::I64) => "const int64_t*",
+        LoweredType::Array(_) | LoweredType::Other(_) => "int64_t",
+    }
+}
+
 /// Map a mumei type name to its C equivalent.
 pub fn mumei_type_to_c(type_name: &str) -> &str {
-    match type_name {
-        "i64" => "int64_t",
-        "i32" => "int32_t",
-        "u64" => "uint64_t",
-        "u32" => "uint32_t",
-        "f64" => "double",
-        "f32" => "float",
-        "bool" => "int",
-        "Str" | "String" => "const char*",
-        "[i64]" => "const int64_t*",
-        _ => "int64_t", // default fallback for refined types based on i64
-    }
+    format_lowered_type_to_c(&lower(type_name))
 }
 
 /// Map a mumei return type to its C equivalent, defaulting to int64_t.
@@ -486,6 +491,12 @@ mod tests {
         assert_eq!(mumei_type_to_c("bool"), "int");
         assert_eq!(mumei_type_to_c("Str"), "const char*");
         assert_eq!(mumei_type_to_c("String"), "const char*");
+    }
+
+    #[test]
+    fn test_mumei_type_to_c_array_edge_cases() {
+        assert_eq!(mumei_type_to_c("[f64]"), "int64_t");
+        assert_eq!(mumei_type_to_c("[[i64]]"), "int64_t");
     }
 
     // ---- CHeaderEmitter Doxygen format tests ----
