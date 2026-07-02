@@ -2521,6 +2521,33 @@ fn test_collect_array_accesses_nested_index() {
 }
 
 #[test]
+fn test_collect_array_accesses_recurses_into_while_body() {
+    let while_stmt = crate::parser::Stmt::While {
+        cond: Box::new(Expr::Variable("cond".to_string())),
+        invariant: Box::new(Expr::Variable("invariant".to_string())),
+        decreases: None,
+        body: Box::new(crate::parser::Stmt::Block(
+            vec![crate::parser::Stmt::Expr(
+                Expr::ArrayAccess("arr".to_string(), Box::new(Expr::Variable("i".to_string()))),
+                Span::default(),
+            )],
+            Span::default(),
+        )),
+        span: Span::default(),
+    };
+
+    let mut accesses = Vec::new();
+    collect_array_accesses_in_stmt(&while_stmt, &mut accesses);
+
+    assert_eq!(accesses.len(), 1);
+    assert_eq!(accesses[0].0, "arr");
+    match &accesses[0].1 {
+        Expr::Variable(v) => assert_eq!(v, "i"),
+        other => panic!("expected Variable(\"i\"), got {:?}", other),
+    }
+}
+
+#[test]
 fn test_collect_array_accesses_none() {
     // No array access at all → empty
     let body = Expr::BinaryOp(
