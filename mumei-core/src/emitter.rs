@@ -15,6 +15,7 @@ use crate::hir::HirAtom;
 use crate::lowering::{lower, LoweredType};
 use crate::parser::ExternBlock;
 use crate::verification::{ModuleEnv, MumeiError, MumeiResult};
+use std::borrow::Cow;
 use std::ffi::c_void;
 use std::path::Path;
 
@@ -59,7 +60,7 @@ pub trait Emitter {
 }
 
 /// Available emit targets, selected via --emit CLI flag.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum EmitTarget {
     #[default]
     LlvmIr,
@@ -82,6 +83,131 @@ pub enum EmitTarget {
     /// Resolution is delegated to [`load_external_emitter`]. Used when
     /// the `--emit` CLI flag does not match any built-in target.
     External(String),
+}
+
+#[derive(Clone, Copy)]
+struct BuiltinEmitTargetMeta {
+    cli_name: &'static str,
+    label: &'static str,
+    ctor: fn() -> EmitTarget,
+}
+
+fn make_llvm_ir() -> EmitTarget {
+    EmitTarget::LlvmIr
+}
+
+fn make_c_header() -> EmitTarget {
+    EmitTarget::CHeader
+}
+
+fn make_verified_json() -> EmitTarget {
+    EmitTarget::VerifiedJson
+}
+
+fn make_decidable_metrics() -> EmitTarget {
+    EmitTarget::DecidableMetrics
+}
+
+fn make_proof_book() -> EmitTarget {
+    EmitTarget::ProofBook
+}
+
+fn make_proof_cert() -> EmitTarget {
+    EmitTarget::ProofCert
+}
+
+fn make_escalation_bundle() -> EmitTarget {
+    EmitTarget::EscalationBundle
+}
+
+fn make_binary() -> EmitTarget {
+    EmitTarget::Binary
+}
+
+fn make_rust_wrapper() -> EmitTarget {
+    EmitTarget::RustWrapper
+}
+
+fn make_python_wrapper() -> EmitTarget {
+    EmitTarget::PythonWrapper
+}
+
+const BUILTIN_EMIT_TARGETS: &[BuiltinEmitTargetMeta] = &[
+    BuiltinEmitTargetMeta {
+        cli_name: "llvm-ir",
+        label: "LLVM IR",
+        ctor: make_llvm_ir,
+    },
+    BuiltinEmitTargetMeta {
+        cli_name: "c-header",
+        label: "C header",
+        ctor: make_c_header,
+    },
+    BuiltinEmitTargetMeta {
+        cli_name: "verified-json",
+        label: "Verified JSON",
+        ctor: make_verified_json,
+    },
+    BuiltinEmitTargetMeta {
+        cli_name: "decidable-metrics",
+        label: "Decidable metrics",
+        ctor: make_decidable_metrics,
+    },
+    BuiltinEmitTargetMeta {
+        cli_name: "proof-book",
+        label: "Proof-Book",
+        ctor: make_proof_book,
+    },
+    BuiltinEmitTargetMeta {
+        cli_name: "proof-cert",
+        label: "Proof-Cert",
+        ctor: make_proof_cert,
+    },
+    BuiltinEmitTargetMeta {
+        cli_name: "escalation-bundle",
+        label: "Lean escalation bundle",
+        ctor: make_escalation_bundle,
+    },
+    BuiltinEmitTargetMeta {
+        cli_name: "binary",
+        label: "Binary",
+        ctor: make_binary,
+    },
+    BuiltinEmitTargetMeta {
+        cli_name: "rust-wrapper",
+        label: "Rust wrapper",
+        ctor: make_rust_wrapper,
+    },
+    BuiltinEmitTargetMeta {
+        cli_name: "python-wrapper",
+        label: "Python wrapper",
+        ctor: make_python_wrapper,
+    },
+];
+
+impl EmitTarget {
+    pub fn from_cli(emit: &str) -> Self {
+        BUILTIN_EMIT_TARGETS
+            .iter()
+            .find(|meta| meta.cli_name == emit)
+            .map(|meta| (meta.ctor)())
+            .unwrap_or_else(|| Self::External(emit.to_string()))
+    }
+
+    pub fn builtin_cli_names() -> impl Iterator<Item = &'static str> {
+        BUILTIN_EMIT_TARGETS.iter().map(|meta| meta.cli_name)
+    }
+
+    pub fn label(&self) -> Cow<'static, str> {
+        BUILTIN_EMIT_TARGETS
+            .iter()
+            .find(|meta| self == &(meta.ctor)())
+            .map(|meta| Cow::Borrowed(meta.label))
+            .unwrap_or_else(|| match self {
+                Self::External(name) => Cow::Owned(format!("external plugin '{name}'")),
+                _ => unreachable!("missing built-in emit target metadata"),
+            })
+    }
 }
 
 // =============================================================================
@@ -694,6 +820,38 @@ mod tests {
             msg.contains(".mumei") && msg.contains("emitters"),
             "error must point to the ~/.mumei/emitters install path; got: {msg}"
         );
+    }
+
+    #[test]
+    fn test_emit_target_from_cli_and_label_round_trip() {
+        for meta in BUILTIN_EMIT_TARGETS {
+            let cli_name = meta.cli_name;
+            let expected_label = meta.label;
+            let target = EmitTarget::from_cli(cli_name);
+            assert_eq!(target.label(), expected_label);
+            assert_eq!(EmitTarget::from_cli(cli_name), target);
+        }
+    }
+
+    #[test]
+    fn test_emit_target_from_cli_unknown_falls_back_to_external() {
+        let target = EmitTarget::from_cli("made-up-target");
+        assert_eq!(target, EmitTarget::External("made-up-target".to_string()));
+        assert_eq!(target.label(), "external plugin 'made-up-target'");
+    }
+
+    #[test]
+    fn test_builtin_cli_names_exact_join() {
+        assert_eq!(
+            EmitTarget::builtin_cli_names().collect::<Vec<_>>().join(", "),
+            "llvm-ir, c-header, verified-json, decidable-metrics, proof-book, proof-cert, escalation-bundle, binary, rust-wrapper, python-wrapper"
+        );
+    }
+
+    #[test]
+    fn test_emit_target_external_label_format() {
+        let target = EmitTarget::External("wasm".to_string());
+        assert_eq!(target.label(), "external plugin 'wasm'");
     }
 
     #[test]
