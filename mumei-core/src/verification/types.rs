@@ -1065,7 +1065,16 @@ fn format_lowered_type_to_lean(lowered: &LoweredType) -> String {
         LoweredType::F32 => "f32".to_string(),
         LoweredType::Bool => "Bool".to_string(),
         LoweredType::Str => "String".to_string(),
-        LoweredType::Array(inner) => format!("List {}", format_lowered_type_to_lean(inner)),
+        LoweredType::Array(inner) => {
+            let inner_str = format_lowered_type_to_lean(inner);
+            // Lean function application is left-associative, so a compound
+            // element type must be parenthesized: `List (List Int)`.
+            if matches!(**inner, LoweredType::Array(_)) {
+                format!("List ({})", inner_str)
+            } else {
+                format!("List {}", inner_str)
+            }
+        }
         LoweredType::Other(name) => match name.as_str() {
             "int" | "Int" => "Int".to_string(),
             "string" | "String" | "Str" => "String".to_string(),
@@ -1314,7 +1323,7 @@ mod tests {
 
     #[test]
     fn test_mumei_type_to_lean_type_array_and_alias_edges() {
-        assert_eq!(mumei_type_to_lean_type("[[i64]]"), "List List Int");
+        assert_eq!(mumei_type_to_lean_type("[[i64]]"), "List (List Int)");
         assert_eq!(mumei_type_to_lean_type("unit"), "Unit");
         assert_eq!(mumei_type_to_lean_type("[]<i64>"), "List Int");
     }
