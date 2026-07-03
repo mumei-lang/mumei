@@ -449,17 +449,23 @@ pub(crate) fn compile_hir_expr<'a>(
                 for (field_name, _) in fields.iter() {
                     let qualified = format!("__struct_{}_{}", type_name, field_name);
                     if let Some(val) = variables.get(&qualified) {
-                        if let Some(def_idx) =
-                            sdef.fields.iter().position(|f| f.name == *field_name)
-                        {
-                            struct_val = llvm!(builder.build_insert_value(
-                                struct_val,
-                                *val,
-                                def_idx as u32,
-                                &format!("struct_{}", field_name)
-                            ))
-                            .into_struct_value();
-                        }
+                        let def_idx = sdef
+                            .fields
+                            .iter()
+                            .position(|f| f.name == *field_name)
+                            .ok_or_else(|| {
+                                MumeiError::codegen(format!(
+                                    "Field '{}' not found in struct '{}'",
+                                    field_name, type_name
+                                ))
+                            })?;
+                        struct_val = llvm!(builder.build_insert_value(
+                            struct_val,
+                            *val,
+                            def_idx as u32,
+                            &format!("struct_{}", field_name)
+                        ))
+                        .into_struct_value();
                     }
                 }
                 last_val = struct_val.into();
@@ -1059,11 +1065,16 @@ mod tests {
     use mumei_core::parser::parse_type_ref;
 
     #[test]
-    fn struct_init_uses_definition_order_for_field_insertion() {
+    fn struct_init_uses_definition_order_for_field_insertion(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let context = Context::create();
         let module = context.create_module("test");
         let builder = context.create_builder();
-        let function_type = context.i64_type().fn_type(&[], false);
+        let struct_type = context.struct_type(
+            &[context.i64_type().into(), context.f64_type().into()],
+            false,
+        );
+        let function_type = struct_type.fn_type(&[], false);
         let function = module.add_function("test", function_type, None);
         let entry = context.append_basic_block(function, "entry");
         builder.position_at_end(entry);
@@ -1113,6 +1124,13 @@ mod tests {
         );
 
         assert!(result.is_ok());
-        assert!(result.unwrap().is_struct_value());
+        let struct_val = result.unwrap().into_struct_value();
+        let a_field = llvm!(builder.build_extract_value(struct_val, 0, "a_field"));
+        let b_field = llvm!(builder.build_extract_value(struct_val, 1, "b_field"));
+        assert!(a_field.is_int_value());
+        assert!(b_field.is_float_value());
+        llvm!(builder.build_return(Some(&struct_val)));
+        assert!(function.verify(false));
+        Ok(())
     }
 }
