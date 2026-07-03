@@ -49,6 +49,7 @@ pub(crate) fn enum_llvm_type<'a>(
                 match resolved_type {
                     None => resolved_type = Some(slot_type),
                     Some(existing) => {
+                        // TODO(followup): when variants disagree on a slot's payload type, defaulting to i64 discards an f64's bit-width, corrupting heterogeneous payloads. Proper fix uses a union/largest-type slot layout. See PR #388 review.
                         // If types differ across variants, use the largest compatible type.
                         // ptr and i64 are same size on 64-bit; f64 needs its own slot.
                         if existing != slot_type {
@@ -161,6 +162,7 @@ pub(crate) fn resolve_return_type<'a>(
             }
         }
     } else {
+        // TODO(followup): inferring f64 return from f64 params is unsound for unannotated atoms that return a non-f64 (e.g. compare(f64,f64)->i64). A proper fix propagates an inferred return type onto Atom during an earlier phase, since the callee-resolution path only has parser::Atom (no typed body). See PR #388 review.
         // Fallback heuristic: if any parameter is f64, assume f64 return type.
         // This preserves backward compatibility for atoms without explicit -> Type.
         let has_float = atom.params.iter().any(|p| {

@@ -152,6 +152,7 @@ pub(crate) fn bind_pattern_variables<'a>(
     }
 }
 
+// TODO(followup): name-only lookup returns the first struct globally matching the field name, so it can pick the wrong index when multiple structs share a field name. Proper fix threads the receiver's struct type through FieldAccess codegen. See PR #388 review.
 /// フィールド名のみから全構造体定義を走査してインデックスを検索（ネスト構造体用）
 pub(crate) fn find_field_index_by_name(field_name: &str, module_env: &ModuleEnv) -> Option<u32> {
     for sdef in module_env.structs.values() {
@@ -177,6 +178,7 @@ pub(crate) fn find_field_index(
             .position(|f| f.name == field_name)
             .map(|i| i as u32);
     }
+    // TODO(followup): name-only lookup returns the first struct globally matching the field name, so it can pick the wrong index when multiple structs share a field name. Proper fix threads the receiver's struct type through FieldAccess codegen. See PR #388 review.
     // フォールバック: 全構造体定義を走査してフィールド名が一致するものを探す
     for sdef in module_env.structs.values() {
         if let Some(pos) = sdef.fields.iter().position(|f| f.name == field_name) {
