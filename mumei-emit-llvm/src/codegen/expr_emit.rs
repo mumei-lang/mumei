@@ -446,16 +446,20 @@ pub(crate) fn compile_hir_expr<'a>(
                     .collect();
                 let struct_type = context.struct_type(&field_types.to_vec(), false);
                 let mut struct_val = struct_type.get_undef();
-                for (i, (field_name, _)) in fields.iter().enumerate() {
+                for (field_name, _) in fields.iter() {
                     let qualified = format!("__struct_{}_{}", type_name, field_name);
                     if let Some(val) = variables.get(&qualified) {
-                        struct_val = llvm!(builder.build_insert_value(
-                            struct_val,
-                            *val,
-                            i as u32,
-                            &format!("struct_{}", field_name)
-                        ))
-                        .into_struct_value();
+                        if let Some(def_idx) =
+                            sdef.fields.iter().position(|f| f.name == *field_name)
+                        {
+                            struct_val = llvm!(builder.build_insert_value(
+                                struct_val,
+                                *val,
+                                def_idx as u32,
+                                &format!("struct_{}", field_name)
+                            ))
+                            .into_struct_value();
+                        }
                     }
                 }
                 last_val = struct_val.into();
@@ -1045,5 +1049,70 @@ pub(crate) fn compile_hir_expr<'a>(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mumei_core::parser::ast::{Span, StructDef, StructField};
+    use mumei_core::parser::parse_type_ref;
+
+    #[test]
+    fn struct_init_uses_definition_order_for_field_insertion() {
+        let context = Context::create();
+        let module = context.create_module("test");
+        let builder = context.create_builder();
+        let function_type = context.i64_type().fn_type(&[], false);
+        let function = module.add_function("test", function_type, None);
+        let entry = context.append_basic_block(function, "entry");
+        builder.position_at_end(entry);
+
+        let mut module_env = ModuleEnv::new();
+        module_env.register_struct(&StructDef {
+            name: "Pair".to_string(),
+            type_params: vec![],
+            fields: vec![
+                StructField {
+                    name: "a".to_string(),
+                    type_name: "i64".to_string(),
+                    type_ref: parse_type_ref("i64"),
+                    constraint: None,
+                },
+                StructField {
+                    name: "b".to_string(),
+                    type_name: "f64".to_string(),
+                    type_ref: parse_type_ref("f64"),
+                    constraint: None,
+                },
+            ],
+            method_names: vec![],
+            methods: vec![],
+            span: Span::default(),
+        });
+
+        let expr = HirExpr::StructInit {
+            type_name: "Pair".to_string(),
+            fields: vec![
+                ("b".to_string(), HirExpr::Float(1.0)),
+                ("a".to_string(), HirExpr::Number(2)),
+            ],
+        };
+
+        let mut variables = HashMap::new();
+        let array_ptrs = HashMap::new();
+        let result = compile_hir_expr(
+            &context,
+            &builder,
+            &module,
+            &function,
+            &expr,
+            &mut variables,
+            &array_ptrs,
+            &module_env,
+        );
+
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_struct_value());
     }
 }
