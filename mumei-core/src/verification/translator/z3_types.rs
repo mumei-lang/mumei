@@ -24,6 +24,10 @@ pub(crate) const F64_SBITS: u32 = 53;
 /// the pointer at offset 0 is sound for a single-field struct: the field lives
 /// at the start of the struct and the pointer value is `Copy`.
 fn raw_z3_context(ctx: &Context) -> z3_sys::Z3_context {
+    // Catch a layout change (e.g. an added field) in a future `z3` upgrade at
+    // compile time rather than as silent undefined behavior.
+    const _: () =
+        assert!(std::mem::size_of::<Context>() == std::mem::size_of::<z3_sys::Z3_context>());
     unsafe { *(ctx as *const Context as *const z3_sys::Z3_context) }
 }
 
@@ -32,6 +36,12 @@ fn raw_z3_context(ctx: &Context) -> z3_sys::Z3_context {
 /// This is the default rounding mode used by hardware `f64` arithmetic, so it
 /// is the faithful choice for `--ieee754-f64` verification (e.g. it makes
 /// `0.1 + 0.2 != 0.3` hold, which round-toward-zero would not).
+///
+/// The returned AST has Z3's `RoundingMode` sort, not a floating-point sort;
+/// it is deliberately wrapped as `Float` because that is the receiver type the
+/// `z3` crate's `Float::add`/`sub`/`mul`/`div` use for the rounding-mode
+/// argument of `Z3_mk_fpa_add` etc. It must only be passed in that position,
+/// never used as a floating-point operand.
 pub(crate) fn round_nearest_even(ctx: &Context) -> Float<'_> {
     let raw = raw_z3_context(ctx);
     let rne = unsafe { z3_sys::Z3_mk_fpa_round_nearest_ties_to_even(raw) };

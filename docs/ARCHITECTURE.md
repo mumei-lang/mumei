@@ -126,6 +126,8 @@ Passing `--ieee754-f64` to `mumei verify` switches `f64` to faithful IEEE 754 bi
 
 The differential fixture `tests/test_ieee754_f64.mm` (and integration test `tests/test_ieee754_f64.rs`) pins the behavior: `0.1 + 0.2 != 0.3` verifies **only** under `--ieee754-f64` and fails in the default `Real` mode, while ordinary `f64` contracts (`tests/test_verified_ffi.mm`, the `f64` cases in `tests/test_polymorphic_array.mm`) continue to verify in both modes.
 
+**Known limitation**: the flag currently applies to atom contract verification (`requires`/`ensures`/`body`/`invariant`). Trait law verification (`support/law_verification.rs`) and inductive atom-invariant checking (`support/call_graph.rs`) construct their own `VCtx` with `ieee754_f64: false` and therefore always use the `Real` encoding — a trait law that depends on IEEE 754 rounding behavior cannot yet be verified faithfully.
+
 ---
 
 ## ModuleEnv
