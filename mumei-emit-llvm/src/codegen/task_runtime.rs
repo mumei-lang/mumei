@@ -254,21 +254,15 @@ pub(crate) struct TaskGroupAnyContext<'a> {
 /// The wrapper has signature `i8* (i8*)`. Its `arg` is a
 /// stack-allocated args struct populated by the parent before
 /// `pthread_create`; the struct layout is
-/// `{ <captured i64s…>, [i64 group_id, i64* group_result], i64 result }`.
+/// `{ <captured values…>, [i64 group_id, i64* group_result], i64 result }`.
 ///
-/// Captures are the intersection of the body's free variables and the
-/// parent's currently-live i64 variables. Free variables that exist in
-/// the parent's `variables` map but are *not* i64 (f64 / struct /
-/// pointer / Str / array fat-pointers) are silently skipped today —
-/// LLVM-IR-level closure conversion for those types is out-of-scope
-/// for Plan 21 and tracked as a follow-up. We emit a `eprintln!`
-/// diagnostic naming each dropped capture so users notice immediately
-/// rather than only when their task body silently reads a zero. A
-/// proper user-facing diagnostic (via `MumeiError`) is the right
-/// long-term home for this warning, but at the time of writing the
-/// codegen pass has no way to thread non-fatal diagnostics back to the
-/// driver, so a stderr line is the best we can do without a larger
-/// refactor.
+/// Captures are the body's free variables that are bound in the
+/// parent's `variables` map. Each capture is marshalled through the
+/// args struct using its own LLVM type (i64, f64, pointers for
+/// Str/struct/heap values, etc.), so the wrapper observes the same
+/// value the parent held rather than a zero. Because `task` bodies are
+/// always joined before the parent returns, pointer captures remain
+/// valid for the lifetime of the spawned thread.
 ///
 /// Allocations (args struct, `pthread_t` slot) live in the parent's
 /// *entry* block so subsequent basic blocks dominate them — this also
@@ -289,37 +283,22 @@ pub(crate) fn emit_task_spawn_only<'a>(
     let i64_type = context.i64_type();
     let ptr_type = context.ptr_type(AddressSpace::default());
 
-    // 1. Determine captures: i64 free vars from `body` that are bound in `variables`.
+    // 1. Determine captures: free vars from `body` that are bound in `variables`.
+    //    Every captured value is marshalled through the args struct using its
+    //    own LLVM type, so f64 / pointer / Str / struct captures survive.
     let free_vars = collect_free_variables_stmt(body);
     let mut captures: Vec<(String, BasicValueEnum<'a>)> = Vec::new();
-    let mut dropped: Vec<String> = Vec::new();
     for name in &free_vars {
         if let Some(v) = variables.get(name.as_str()) {
-            if v.is_int_value() && v.into_int_value().get_type() == i64_type {
-                captures.push((name.clone(), *v));
-            } else {
-                dropped.push(name.clone());
-            }
+            captures.push((name.clone(), *v));
         }
     }
     captures.sort_by(|a, b| a.0.cmp(&b.0));
-    if !dropped.is_empty() {
-        dropped.sort();
-        let parent_label = parent_function.get_name().to_str().unwrap_or("anon");
-        eprintln!(
-            "[mumei codegen] warning: in atom '{}', task body references non-i64 \
-             free variable(s) {:?} which were silently dropped from the pthread \
-             closure. The wrapper sees them as zero. (Plan 21 only marshals i64 \
-             captures; floats/structs/pointers/Str/arrays are tracked as a \
-             follow-up.)",
-            parent_label, dropped
-        );
-    }
 
-    // 2. Build args struct type: { i64 capture_0, …, [i64 group, i64* group_result], i64 result }.
+    // 2. Build args struct type: { <capture types…>, [i64 group, i64* group_result], i64 result }.
     let mut field_types = captures
         .iter()
-        .map(|_| i64_type.into())
+        .map(|(_, v)| v.get_type())
         .collect::<Vec<inkwell::types::BasicTypeEnum>>();
     let group_fields = if task_group_any.is_some() {
         let group_id_idx = field_types.len() as u32;
@@ -353,18 +332,22 @@ pub(crate) fn emit_task_spawn_only<'a>(
     builder.position_at_end(wrapper_entry);
     let arg_ptr = wrapper_fn.get_nth_param(0).unwrap().into_pointer_value();
 
-    // Build inner variables map by loading each capture from args struct.
+    // Build inner variables map by loading each capture from args struct
+    // using the capture's own LLVM type.
     let mut inner_vars: HashMap<String, BasicValueEnum> = HashMap::new();
     let mut inner_var_types: HashMap<String, String> = var_types.clone();
-    for (i, (name, _val)) in captures.iter().enumerate() {
+    for (i, (name, val)) in captures.iter().enumerate() {
         let field_ptr = llvm!(builder.build_struct_gep(
             args_struct_type,
             arg_ptr,
             i as u32,
             &format!("task_capture_{}_ptr", name),
         ));
-        let loaded =
-            llvm!(builder.build_load(i64_type, field_ptr, &format!("task_capture_{}", name),));
+        let loaded = llvm!(builder.build_load(
+            val.get_type(),
+            field_ptr,
+            &format!("task_capture_{}", name),
+        ));
         inner_vars.insert(name.clone(), loaded);
     }
 
@@ -527,7 +510,7 @@ pub(crate) fn emit_task_spawn_only<'a>(
         (alloca, thread_alloca)
     };
 
-    // Store captures.
+    // Store captures, each with its own LLVM type.
     for (i, (name, val)) in captures.iter().enumerate() {
         let field_ptr = llvm!(builder.build_struct_gep(
             args_struct_type,
@@ -535,7 +518,7 @@ pub(crate) fn emit_task_spawn_only<'a>(
             i as u32,
             &format!("task_arg_{}_ptr", name),
         ));
-        llvm!(builder.build_store(field_ptr, val.into_int_value()));
+        llvm!(builder.build_store(field_ptr, *val));
     }
     if let (Some(any_ctx), Some((group_id_idx, group_result_idx))) = (task_group_any, group_fields)
     {
