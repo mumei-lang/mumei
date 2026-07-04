@@ -276,6 +276,7 @@ pub(crate) fn emit_task_spawn_only<'a>(
     parent_function: &FunctionValue<'a>,
     body: &HirStmt,
     variables: &HashMap<String, BasicValueEnum<'a>>,
+    var_types: &HashMap<String, String>,
     module_env: &ModuleEnv,
     task_group_any: Option<TaskGroupAnyContext<'a>>,
 ) -> MumeiResult<PendingTask<'a>> {
@@ -334,6 +335,7 @@ pub(crate) fn emit_task_spawn_only<'a>(
     // Build inner variables map by loading each capture from args struct
     // using the capture's own LLVM type.
     let mut inner_vars: HashMap<String, BasicValueEnum> = HashMap::new();
+    let mut inner_var_types: HashMap<String, String> = var_types.clone();
     for (i, (name, val)) in captures.iter().enumerate() {
         let field_ptr = llvm!(builder.build_struct_gep(
             args_struct_type,
@@ -427,6 +429,7 @@ pub(crate) fn emit_task_spawn_only<'a>(
         &wrapper_fn,
         body,
         &mut inner_vars,
+        &mut inner_var_types,
         &empty_array_ptrs,
         module_env,
     )?;
@@ -594,6 +597,7 @@ pub(crate) fn emit_task_join_only<'a>(
 /// callers spawn each child via `emit_task_spawn_only` first and then
 /// join them via `emit_task_join_only`, so children actually execute
 /// in parallel.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn compile_task_spawn<'a>(
     context: &'a Context,
     builder: &Builder<'a>,
@@ -601,6 +605,7 @@ pub(crate) fn compile_task_spawn<'a>(
     parent_function: &FunctionValue<'a>,
     body: &HirStmt,
     variables: &HashMap<String, BasicValueEnum<'a>>,
+    var_types: &HashMap<String, String>,
     module_env: &ModuleEnv,
 ) -> MumeiResult<BasicValueEnum<'a>> {
     let pending = emit_task_spawn_only(
@@ -610,6 +615,7 @@ pub(crate) fn compile_task_spawn<'a>(
         parent_function,
         body,
         variables,
+        var_types,
         module_env,
         None,
     )?;
