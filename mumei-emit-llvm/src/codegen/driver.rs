@@ -51,10 +51,17 @@ pub fn compile_atom_into_module<'ctx>(
     builder.position_at_end(entry_block);
 
     let mut variables = HashMap::new();
+    let mut var_types: HashMap<String, String> = HashMap::new();
     let mut array_ptrs: HashMap<String, (BasicValueEnum, BasicValueEnum)> = HashMap::new();
 
     for (i, param) in atom.params.iter().enumerate() {
         let val = function.get_nth_param(i as u32).unwrap();
+        if let Some(type_name) = &param.type_name {
+            let base = module_env.resolve_base_type(type_name);
+            if module_env.get_struct(&base).is_some() {
+                var_types.insert(param.name.clone(), base);
+            }
+        }
         // Fat Pointer 配列パラメータの場合、len と data_ptr を分解して保持
         if val.is_struct_value() {
             let struct_val = val.into_struct_value();
@@ -76,6 +83,7 @@ pub fn compile_atom_into_module<'ctx>(
         &function,
         &hir_atom.body,
         &mut variables,
+        &mut var_types,
         &array_ptrs,
         module_env,
     )?;

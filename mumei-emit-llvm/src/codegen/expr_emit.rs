@@ -19,6 +19,36 @@ use mumei_core::parser::{JoinSemantics, Op};
 use mumei_core::verification::{ModuleEnv, MumeiError, MumeiResult};
 use std::collections::HashMap;
 
+pub(crate) fn infer_struct_type_name(
+    expr: &HirExpr,
+    var_types: &HashMap<String, String>,
+    module_env: &ModuleEnv,
+) -> Option<String> {
+    match expr {
+        HirExpr::Variable(name) => var_types.get(name).cloned(),
+        HirExpr::StructInit { type_name, .. } => {
+            let base = module_env.resolve_base_type(type_name);
+            if module_env.get_struct(&base).is_some() {
+                Some(base)
+            } else {
+                None
+            }
+        }
+        HirExpr::FieldAccess(inner, field) => {
+            let inner_ty = infer_struct_type_name(inner, var_types, module_env)?;
+            let sdef = module_env.get_struct(&inner_ty)?;
+            let f = sdef.fields.iter().find(|f| f.name == *field)?;
+            let base = module_env.resolve_base_type(&f.type_name);
+            if module_env.get_struct(&base).is_some() {
+                Some(base)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn compile_hir_expr<'a>(
     context: &'a Context,
@@ -27,6 +57,7 @@ pub(crate) fn compile_hir_expr<'a>(
     function: &FunctionValue<'a>,
     expr: &HirExpr,
     variables: &mut HashMap<String, BasicValueEnum<'a>>,
+    var_types: &mut HashMap<String, String>,
     array_ptrs: &HashMap<String, (BasicValueEnum<'a>, BasicValueEnum<'a>)>,
     module_env: &ModuleEnv,
 ) -> MumeiResult<BasicValueEnum<'a>> {
@@ -51,7 +82,8 @@ pub(crate) fn compile_hir_expr<'a>(
         HirExpr::Call { name, args, .. } => match name.as_str() {
             "sqrt" => {
                 let arg = compile_hir_expr(
-                    context, builder, module, function, &args[0], variables, array_ptrs, module_env,
+                    context, builder, module, function, &args[0], variables, var_types, array_ptrs,
+                    module_env,
                 )?;
                 let sqrt_func = module.get_function("llvm.sqrt.f64").unwrap_or_else(|| {
                     let type_f64 = context.f64_type();
@@ -74,7 +106,8 @@ pub(crate) fn compile_hir_expr<'a>(
             }
             "alloc_raw" => {
                 let size_val = compile_hir_expr(
-                    context, builder, module, function, &args[0], variables, array_ptrs, module_env,
+                    context, builder, module, function, &args[0], variables, var_types, array_ptrs,
+                    module_env,
                 )?;
                 let malloc_fn = module.get_function("malloc").unwrap_or_else(|| {
                     let ptr_type = context.ptr_type(AddressSpace::default());
@@ -96,7 +129,8 @@ pub(crate) fn compile_hir_expr<'a>(
             }
             "dealloc_raw" => {
                 let ptr_int = compile_hir_expr(
-                    context, builder, module, function, &args[0], variables, array_ptrs, module_env,
+                    context, builder, module, function, &args[0], variables, var_types, array_ptrs,
+                    module_env,
                 )?;
                 let free_fn = module.get_function("free").unwrap_or_else(|| {
                     let ptr_type = context.ptr_type(AddressSpace::default());
@@ -142,8 +176,8 @@ pub(crate) fn compile_hir_expr<'a>(
                     let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
                     for arg in args {
                         let val = compile_hir_expr(
-                            context, builder, module, function, arg, variables, array_ptrs,
-                            module_env,
+                            context, builder, module, function, arg, variables, var_types,
+                            array_ptrs, module_env,
                         )?;
                         arg_vals.push(val.into());
                     }
@@ -171,7 +205,8 @@ pub(crate) fn compile_hir_expr<'a>(
 
         HirExpr::ArrayAccess(name, index_expr) => {
             let idx = compile_hir_expr(
-                context, builder, module, function, index_expr, variables, array_ptrs, module_env,
+                context, builder, module, function, index_expr, variables, var_types, array_ptrs,
+                module_env,
             )?
             .into_int_value();
             if let Some((len_val, data_ptr_val)) = array_ptrs.get(name.as_str()) {
@@ -224,10 +259,12 @@ pub(crate) fn compile_hir_expr<'a>(
 
         HirExpr::BinaryOp(left, op, right) => {
             let lhs = compile_hir_expr(
-                context, builder, module, function, left, variables, array_ptrs, module_env,
+                context, builder, module, function, left, variables, var_types, array_ptrs,
+                module_env,
             )?;
             let rhs = compile_hir_expr(
-                context, builder, module, function, right, variables, array_ptrs, module_env,
+                context, builder, module, function, right, variables, var_types, array_ptrs,
+                module_env,
             )?;
 
             // Plan 9-8: String operations — if both operands are pointer (Str) type
@@ -375,7 +412,8 @@ pub(crate) fn compile_hir_expr<'a>(
             else_branch,
         } => {
             let cond_val = compile_hir_expr(
-                context, builder, module, function, cond, variables, array_ptrs, module_env,
+                context, builder, module, function, cond, variables, var_types, array_ptrs,
+                module_env,
             )?
             .into_int_value();
             let cond_bool = llvm!(builder.build_int_compare(
@@ -399,6 +437,7 @@ pub(crate) fn compile_hir_expr<'a>(
                 function,
                 then_branch,
                 variables,
+                var_types,
                 array_ptrs,
                 module_env,
             )?;
@@ -413,6 +452,7 @@ pub(crate) fn compile_hir_expr<'a>(
                 function,
                 else_branch,
                 variables,
+                var_types,
                 array_ptrs,
                 module_env,
             )?;
@@ -430,8 +470,8 @@ pub(crate) fn compile_hir_expr<'a>(
             if let Some(sdef) = module_env.get_struct(type_name) {
                 for (field_name, field_expr) in fields {
                     let val = compile_hir_expr(
-                        context, builder, module, function, field_expr, variables, array_ptrs,
-                        module_env,
+                        context, builder, module, function, field_expr, variables, var_types,
+                        array_ptrs, module_env,
                     )?;
                     let qualified = format!("__struct_{}_{}", type_name, field_name);
                     variables.insert(qualified, val);
@@ -472,8 +512,8 @@ pub(crate) fn compile_hir_expr<'a>(
             } else {
                 for (field_name, field_expr) in fields {
                     let val = compile_hir_expr(
-                        context, builder, module, function, field_expr, variables, array_ptrs,
-                        module_env,
+                        context, builder, module, function, field_expr, variables, var_types,
+                        array_ptrs, module_env,
                     )?;
                     let qualified = format!("__struct_{}_{}", type_name, field_name);
                     variables.insert(qualified, val);
@@ -485,7 +525,8 @@ pub(crate) fn compile_hir_expr<'a>(
 
         HirExpr::Match { target, arms } => {
             let target_val = compile_hir_expr(
-                context, builder, module, function, target, variables, array_ptrs, module_env,
+                context, builder, module, function, target, variables, var_types, array_ptrs,
+                module_env,
             )?;
 
             let merge_block = context.append_basic_block(*function, "match.merge");
@@ -523,6 +564,7 @@ pub(crate) fn compile_hir_expr<'a>(
 
                 let full_cond = if let Some(guard) = &arm.guard {
                     let mut guard_vars = variables.clone();
+                    let mut guard_var_types = var_types.clone();
                     bind_pattern_variables(
                         context,
                         builder,
@@ -537,6 +579,7 @@ pub(crate) fn compile_hir_expr<'a>(
                         function,
                         guard,
                         &mut guard_vars,
+                        &mut guard_var_types,
                         array_ptrs,
                         module_env,
                     )?
@@ -558,6 +601,7 @@ pub(crate) fn compile_hir_expr<'a>(
 
                 builder.position_at_end(body_block);
                 let mut arm_vars = variables.clone();
+                let mut arm_var_types = var_types.clone();
                 bind_pattern_variables(context, builder, &arm.pattern, target_val, &mut arm_vars);
 
                 let body_val = compile_hir_stmt(
@@ -567,6 +611,7 @@ pub(crate) fn compile_hir_expr<'a>(
                     function,
                     &arm.body,
                     &mut arm_vars,
+                    &mut arm_var_types,
                     array_ptrs,
                     module_env,
                 )?;
@@ -612,17 +657,18 @@ pub(crate) fn compile_hir_expr<'a>(
         // 非同期処理の LLVM IR 生成
         // =================================================================
         HirExpr::Async { body } => compile_hir_stmt(
-            context, builder, module, function, body, variables, array_ptrs, module_env,
+            context, builder, module, function, body, variables, var_types, array_ptrs, module_env,
         ),
         HirExpr::Await { expr: await_expr } => compile_hir_expr(
-            context, builder, module, function, await_expr, variables, array_ptrs, module_env,
+            context, builder, module, function, await_expr, variables, var_types, array_ptrs,
+            module_env,
         ),
 
         // Plan 21 — concurrency runtime: spawn the task body on its own
         // pthread, join it, and return the joined i64 result. See
         // `compile_task_spawn` for layout / capture details.
         HirExpr::Task { body, .. } => compile_task_spawn(
-            context, builder, module, function, body, variables, module_env,
+            context, builder, module, function, body, variables, var_types, module_env,
         ),
         HirExpr::TaskGroup {
             children,
@@ -673,7 +719,8 @@ pub(crate) fn compile_hir_expr<'a>(
                     other => other,
                 };
                 pending.push(emit_task_spawn_only(
-                    context, builder, module, function, task_body, variables, module_env, any_ctx,
+                    context, builder, module, function, task_body, variables, var_types,
+                    module_env, any_ctx,
                 )?);
             }
             if let Some(any_ctx) = any_ctx {
@@ -742,13 +789,15 @@ pub(crate) fn compile_hir_expr<'a>(
         }
         HirExpr::CallRef { callee, args } => {
             let callee_val = compile_hir_expr(
-                context, builder, module, function, callee, variables, array_ptrs, module_env,
+                context, builder, module, function, callee, variables, var_types, array_ptrs,
+                module_env,
             )?;
 
             let mut arg_vals: Vec<BasicValueEnum> = Vec::new();
             for arg in args {
                 let val = compile_hir_expr(
-                    context, builder, module, function, arg, variables, array_ptrs, module_env,
+                    context, builder, module, function, arg, variables, var_types, array_ptrs,
+                    module_env,
                 )?;
                 arg_vals.push(val);
             }
@@ -832,7 +881,8 @@ pub(crate) fn compile_hir_expr<'a>(
             let mut arg_vals = Vec::new();
             for arg in perform_args {
                 let val = compile_hir_expr(
-                    context, builder, module, function, arg, variables, array_ptrs, module_env,
+                    context, builder, module, function, arg, variables, var_types, array_ptrs,
+                    module_env,
                 )?;
                 arg_vals.push(val);
             }
@@ -893,10 +943,12 @@ pub(crate) fn compile_hir_expr<'a>(
         // lowers to a fresh i64, so this just threads the handle through).
         HirExpr::ChanSend { channel, value } => {
             let chan_val = compile_hir_expr(
-                context, builder, module, function, channel, variables, array_ptrs, module_env,
+                context, builder, module, function, channel, variables, var_types, array_ptrs,
+                module_env,
             )?;
             let val = compile_hir_expr(
-                context, builder, module, function, value, variables, array_ptrs, module_env,
+                context, builder, module, function, value, variables, var_types, array_ptrs,
+                module_env,
             )?;
             let chan_i64 = if chan_val.is_int_value() {
                 chan_val.into_int_value()
@@ -933,7 +985,8 @@ pub(crate) fn compile_hir_expr<'a>(
         // `runtime/mumei_runtime.c`.
         HirExpr::ChanRecv { channel } => {
             let chan_val = compile_hir_expr(
-                context, builder, module, function, channel, variables, array_ptrs, module_env,
+                context, builder, module, function, channel, variables, var_types, array_ptrs,
+                module_env,
             )?;
             let chan_i64 = if chan_val.is_int_value() {
                 chan_val.into_int_value()
@@ -983,8 +1036,8 @@ pub(crate) fn compile_hir_expr<'a>(
             // Set payload fields
             for (i, field_expr) in fields.iter().enumerate() {
                 let field_val = compile_hir_expr(
-                    context, builder, module, function, field_expr, variables, array_ptrs,
-                    module_env,
+                    context, builder, module, function, field_expr, variables, var_types,
+                    array_ptrs, module_env,
                 )?;
                 val = llvm!(builder.build_insert_value(
                     val,
@@ -1011,7 +1064,10 @@ pub(crate) fn compile_hir_expr<'a>(
                 if let Some(struct_val) = variables.get(var_name.as_str()) {
                     if struct_val.is_struct_value() {
                         let sv = struct_val.into_struct_value();
-                        if let Some(idx) = find_field_index(var_name, field_name, module_env) {
+                        let idx = infer_struct_type_name(inner_expr, var_types, module_env)
+                            .and_then(|t| find_field_index(&t, field_name, module_env))
+                            .or_else(|| find_field_index(var_name, field_name, module_env));
+                        if let Some(idx) = idx {
                             let extracted = llvm!(builder.build_extract_value(
                                 sv,
                                 idx,
@@ -1027,12 +1083,15 @@ pub(crate) fn compile_hir_expr<'a>(
                 )))
             } else {
                 let base_val = compile_hir_expr(
-                    context, builder, module, function, inner_expr, variables, array_ptrs,
-                    module_env,
+                    context, builder, module, function, inner_expr, variables, var_types,
+                    array_ptrs, module_env,
                 )?;
                 if base_val.is_struct_value() {
                     let sv = base_val.into_struct_value();
-                    if let Some(idx) = find_field_index_by_name(field_name, module_env) {
+                    let idx = infer_struct_type_name(inner_expr, var_types, module_env)
+                        .and_then(|t| find_field_index(&t, field_name, module_env))
+                        .or_else(|| find_field_index_by_name(field_name, module_env));
+                    if let Some(idx) = idx {
                         let extracted = llvm!(builder.build_extract_value(
                             sv,
                             idx,
@@ -1111,6 +1170,7 @@ mod tests {
         };
 
         let mut variables = HashMap::new();
+        let mut var_types = HashMap::new();
         let array_ptrs = HashMap::new();
         let result = compile_hir_expr(
             &context,
@@ -1119,6 +1179,7 @@ mod tests {
             &function,
             &expr,
             &mut variables,
+            &mut var_types,
             &array_ptrs,
             &module_env,
         );
@@ -1130,6 +1191,108 @@ mod tests {
         assert!(a_field.is_int_value());
         assert!(b_field.is_float_value());
         llvm!(builder.build_return(Some(&struct_val)));
+        assert!(function.verify(false));
+        Ok(())
+    }
+
+    #[test]
+    fn field_access_resolves_against_known_struct_type() -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::create();
+        let module = context.create_module("test");
+        let builder = context.create_builder();
+        let function_type = context.f64_type().fn_type(&[], false);
+        let function = module.add_function("test", function_type, None);
+        let entry = context.append_basic_block(function, "entry");
+        builder.position_at_end(entry);
+
+        let mut module_env = ModuleEnv::new();
+        module_env.register_struct(&StructDef {
+            name: "A".to_string(),
+            type_params: vec![],
+            fields: vec![
+                StructField {
+                    name: "pad".to_string(),
+                    type_name: "i64".to_string(),
+                    type_ref: parse_type_ref("i64"),
+                    constraint: None,
+                },
+                StructField {
+                    name: "val".to_string(),
+                    type_name: "f64".to_string(),
+                    type_ref: parse_type_ref("f64"),
+                    constraint: None,
+                },
+            ],
+            method_names: vec![],
+            methods: vec![],
+            span: Span::default(),
+        });
+        module_env.register_struct(&StructDef {
+            name: "B".to_string(),
+            type_params: vec![],
+            fields: vec![
+                StructField {
+                    name: "val".to_string(),
+                    type_name: "i64".to_string(),
+                    type_ref: parse_type_ref("i64"),
+                    constraint: None,
+                },
+                StructField {
+                    name: "extra".to_string(),
+                    type_name: "f64".to_string(),
+                    type_ref: parse_type_ref("f64"),
+                    constraint: None,
+                },
+            ],
+            method_names: vec![],
+            methods: vec![],
+            span: Span::default(),
+        });
+
+        let a_struct_type = context.struct_type(
+            &[context.i64_type().into(), context.f64_type().into()],
+            false,
+        );
+        let mut a_struct = a_struct_type.get_undef();
+        a_struct = llvm!(builder.build_insert_value(
+            a_struct,
+            context.i64_type().const_int(0, false),
+            0,
+            "a_pad"
+        ))
+        .into_struct_value();
+        a_struct = llvm!(builder.build_insert_value(
+            a_struct,
+            context.f64_type().const_float(3.5),
+            1,
+            "a_val"
+        ))
+        .into_struct_value();
+
+        let expr = HirExpr::FieldAccess(
+            Box::new(HirExpr::Variable("B".to_string())),
+            "val".to_string(),
+        );
+
+        let mut variables = HashMap::new();
+        variables.insert("B".to_string(), a_struct.into());
+        let mut var_types = HashMap::new();
+        var_types.insert("B".to_string(), "A".to_string());
+        let array_ptrs = HashMap::new();
+        let result = compile_hir_expr(
+            &context,
+            &builder,
+            &module,
+            &function,
+            &expr,
+            &mut variables,
+            &mut var_types,
+            &array_ptrs,
+            &module_env,
+        )?;
+
+        assert!(result.is_float_value());
+        llvm!(builder.build_return(Some(&result)));
         assert!(function.verify(false));
         Ok(())
     }
