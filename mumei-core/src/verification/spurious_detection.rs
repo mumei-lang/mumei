@@ -29,17 +29,68 @@ pub struct UnusedHypothesisReport {
 #[derive(Debug, Clone, PartialEq)]
 enum EvalValue {
     Int(i64),
+    Float(f64),
     Bool(bool),
     String(String),
 }
 
+/// A concrete counterexample value extracted from a Z3 model.
+///
+/// Extends the historical integer-only model representation so that `f64`
+/// counterexamples (encoded as Z3 `Real` rationals or IEEE 754 `Float`s) can be
+/// replayed under Mumei semantics. `Bool` keeps `result`-style boolean models
+/// exact instead of round-tripping through `0`/`1`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CexValue {
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+}
+
+impl CexValue {
+    fn to_eval(self) -> EvalValue {
+        match self {
+            CexValue::Int(value) => EvalValue::Int(value),
+            CexValue::Float(value) => EvalValue::Float(value),
+            CexValue::Bool(value) => EvalValue::Bool(value),
+        }
+    }
+}
+
+impl From<i64> for CexValue {
+    fn from(value: i64) -> Self {
+        CexValue::Int(value)
+    }
+}
+
+impl From<f64> for CexValue {
+    fn from(value: f64) -> Self {
+        CexValue::Float(value)
+    }
+}
+
+impl From<bool> for CexValue {
+    fn from(value: bool) -> Self {
+        CexValue::Bool(value)
+    }
+}
+
+type EvalEnv = HashMap<String, EvalValue>;
+
+fn eval_env_from_model(model: &HashMap<String, CexValue>) -> EvalEnv {
+    model
+        .iter()
+        .map(|(name, value)| (name.clone(), value.to_eval()))
+        .collect()
+}
+
 pub fn validate_counterexample(
     atom: &Atom,
-    model: &HashMap<String, i64>,
+    model: &HashMap<String, CexValue>,
     module_env: &ModuleEnv,
 ) -> CounterexampleValidationResult {
     let symbol_provenance = detect_uninterpreted_symbols(atom, model, module_env);
-    let mut eval_env = model.clone();
+    let mut eval_env = eval_env_from_model(model);
 
     match eval_bool_clause(&atom.requires, &mut eval_env, module_env) {
         Ok(true) => {}
@@ -63,33 +114,17 @@ pub fn validate_counterexample(
 
     let body_stmt = parse_body_expr(&atom.body_expr);
     match eval_stmt(&body_stmt, &mut eval_env, module_env, 0) {
-        Ok(EvalValue::Int(result)) => {
+        Ok(result @ (EvalValue::Int(_) | EvalValue::Float(_) | EvalValue::Bool(_))) => {
             if let Some(model_result) = model.get("result") {
-                if *model_result != result {
+                if !cex_matches_eval(model_result, &result) {
                     return invalid_counterexample_result(
                         atom,
                         symbol_provenance,
                         true,
                         format!(
                             "Z3 model result {} does not match Mumei body result {}",
-                            model_result, result
-                        ),
-                    );
-                }
-            }
-            eval_env.insert("result".to_string(), result);
-        }
-        Ok(EvalValue::Bool(result)) => {
-            let result = if result { 1 } else { 0 };
-            if let Some(model_result) = model.get("result") {
-                if *model_result != result {
-                    return invalid_counterexample_result(
-                        atom,
-                        symbol_provenance,
-                        true,
-                        format!(
-                            "Z3 model result {} does not match Mumei body result {}",
-                            model_result, result
+                            format_cex_value(model_result),
+                            format_eval_value(&result)
                         ),
                     );
                 }
@@ -159,7 +194,7 @@ fn invalid_counterexample_result(
 
 pub fn detect_uninterpreted_symbols(
     atom: &Atom,
-    _model: &HashMap<String, i64>,
+    _model: &HashMap<String, CexValue>,
     module_env: &ModuleEnv,
 ) -> Vec<SymbolProvenance> {
     let mut symbols = Vec::new();
@@ -234,7 +269,7 @@ pub fn detect_unused_hypotheses(
 
 fn eval_bool_clause(
     clause: &str,
-    env: &mut HashMap<String, i64>,
+    env: &mut EvalEnv,
     module_env: &ModuleEnv,
 ) -> Result<bool, String> {
     if clause.trim().is_empty() || clause.trim() == "true" {
@@ -243,24 +278,26 @@ fn eval_bool_clause(
     match eval_expr(&parse_expression(clause), env, module_env, 0)? {
         EvalValue::Bool(value) => Ok(value),
         EvalValue::Int(value) => Ok(value != 0),
+        EvalValue::Float(value) => Ok(value != 0.0),
         EvalValue::String(_) => Err("string clause cannot be evaluated as bool".to_string()),
     }
 }
 
 fn eval_stmt(
     stmt: &Stmt,
-    env: &mut HashMap<String, i64>,
+    env: &mut EvalEnv,
     module_env: &ModuleEnv,
     depth: usize,
 ) -> Result<EvalValue, String> {
     match stmt {
         Stmt::Let { var, value, .. } | Stmt::Assign { var, value, .. } => {
             let eval = eval_expr(value, env, module_env, depth)?;
-            if let EvalValue::Int(value) = eval {
-                env.insert(var.clone(), value);
-                Ok(EvalValue::Int(value))
-            } else {
-                Err(format!("{} is not an integer binding", var))
+            match eval {
+                EvalValue::Int(_) | EvalValue::Float(_) | EvalValue::Bool(_) => {
+                    env.insert(var.clone(), eval.clone());
+                    Ok(eval)
+                }
+                EvalValue::String(_) => Err(format!("{} is not a scalar binding", var)),
             }
         }
         Stmt::Block(stmts, _) => {
@@ -284,7 +321,7 @@ fn eval_stmt(
 
 fn eval_expr(
     expr: &Expr,
-    env: &mut HashMap<String, i64>,
+    env: &mut EvalEnv,
     module_env: &ModuleEnv,
     depth: usize,
 ) -> Result<EvalValue, String> {
@@ -294,14 +331,13 @@ fn eval_expr(
 
     match expr {
         Expr::Number(value) => Ok(EvalValue::Int(*value)),
-        Expr::Float(_) => Err("float counterexample replay is not supported".to_string()),
+        Expr::Float(value) => Ok(EvalValue::Float(*value)),
         Expr::StringLit(value) => Ok(EvalValue::String(value.clone())),
         Expr::Variable(name) if name == "true" => Ok(EvalValue::Bool(true)),
         Expr::Variable(name) if name == "false" => Ok(EvalValue::Bool(false)),
         Expr::Variable(name) => env
             .get(name)
-            .copied()
-            .map(EvalValue::Int)
+            .cloned()
             .ok_or_else(|| format!("missing model value for '{}'", name)),
         Expr::BinaryOp(left, op, right) => {
             let left_value = eval_expr(left, env, module_env, depth)?;
@@ -317,6 +353,10 @@ fn eval_expr(
             EvalValue::Bool(false) => eval_stmt(else_branch, env, module_env, depth),
             EvalValue::Int(value) if value != 0 => eval_stmt(then_branch, env, module_env, depth),
             EvalValue::Int(_) => eval_stmt(else_branch, env, module_env, depth),
+            EvalValue::Float(value) if value != 0.0 => {
+                eval_stmt(then_branch, env, module_env, depth)
+            }
+            EvalValue::Float(_) => eval_stmt(else_branch, env, module_env, depth),
             EvalValue::String(_) => Err("if condition is not boolean".to_string()),
         },
         Expr::Call(name, args) => eval_atom_call(name, args, env, module_env, depth + 1),
@@ -340,7 +380,7 @@ fn eval_expr(
 fn eval_atom_call(
     name: &str,
     args: &[Expr],
-    env: &mut HashMap<String, i64>,
+    env: &mut EvalEnv,
     module_env: &ModuleEnv,
     depth: usize,
 ) -> Result<EvalValue, String> {
@@ -354,13 +394,13 @@ fn eval_atom_call(
         return Err(format!("arity mismatch for atom '{}'", name));
     }
 
-    let mut call_env = HashMap::new();
+    let mut call_env: EvalEnv = HashMap::new();
     for (param, arg) in callee.params.iter().zip(args) {
         match eval_expr(arg, env, module_env, depth)? {
-            EvalValue::Int(value) => {
+            value @ (EvalValue::Int(_) | EvalValue::Float(_) | EvalValue::Bool(_)) => {
                 call_env.insert(param.name.clone(), value);
             }
-            _ => return Err(format!("non-integer argument for atom '{}'", name)),
+            EvalValue::String(_) => return Err(format!("non-scalar argument for atom '{}'", name)),
         }
     }
 
@@ -370,11 +410,8 @@ fn eval_atom_call(
     let body = parse_body_expr(&callee.body_expr);
     let result = eval_stmt(&body, &mut call_env, module_env, depth)?;
     match &result {
-        EvalValue::Int(value) => {
-            call_env.insert("result".to_string(), *value);
-        }
-        EvalValue::Bool(value) => {
-            call_env.insert("result".to_string(), i64::from(*value));
+        EvalValue::Int(_) | EvalValue::Float(_) | EvalValue::Bool(_) => {
+            call_env.insert("result".to_string(), result.clone());
         }
         EvalValue::String(_) => {}
     }
@@ -385,58 +422,80 @@ fn eval_atom_call(
 }
 
 fn eval_binary(left: EvalValue, op: &Op, right: EvalValue) -> Result<EvalValue, String> {
-    match (left, right) {
-        (EvalValue::Int(left), EvalValue::Int(right)) => match op {
-            Op::Add => Ok(EvalValue::Int(left + right)),
-            Op::Sub => Ok(EvalValue::Int(left - right)),
-            Op::Mul => Ok(EvalValue::Int(left * right)),
-            Op::Div if right != 0 => Ok(EvalValue::Int(left / right)),
-            Op::Div => Err("division by zero during counterexample replay".to_string()),
-            Op::Eq => Ok(EvalValue::Bool(left == right)),
-            Op::Neq => Ok(EvalValue::Bool(left != right)),
-            Op::Gt => Ok(EvalValue::Bool(left > right)),
-            Op::Lt => Ok(EvalValue::Bool(left < right)),
-            Op::Ge => Ok(EvalValue::Bool(left >= right)),
-            Op::Le => Ok(EvalValue::Bool(left <= right)),
-            Op::And => Ok(EvalValue::Bool(left != 0 && right != 0)),
-            Op::Or => Ok(EvalValue::Bool(left != 0 || right != 0)),
-            Op::Implies => Ok(EvalValue::Bool(left == 0 || right != 0)),
-        },
-        (EvalValue::Bool(left), EvalValue::Bool(right)) => match op {
-            Op::Eq => Ok(EvalValue::Bool(left == right)),
-            Op::Neq => Ok(EvalValue::Bool(left != right)),
-            Op::And => Ok(EvalValue::Bool(left && right)),
-            Op::Or => Ok(EvalValue::Bool(left || right)),
-            Op::Implies => Ok(EvalValue::Bool(!left || right)),
-            _ => Err("unsupported boolean arithmetic in counterexample replay".to_string()),
-        },
+    match (&left, &right) {
+        (EvalValue::Int(left), EvalValue::Int(right)) => {
+            let (left, right) = (*left, *right);
+            match op {
+                Op::Add => Ok(EvalValue::Int(left + right)),
+                Op::Sub => Ok(EvalValue::Int(left - right)),
+                Op::Mul => Ok(EvalValue::Int(left * right)),
+                Op::Div if right != 0 => Ok(EvalValue::Int(left / right)),
+                Op::Div => Err("division by zero during counterexample replay".to_string()),
+                Op::Eq => Ok(EvalValue::Bool(left == right)),
+                Op::Neq => Ok(EvalValue::Bool(left != right)),
+                Op::Gt => Ok(EvalValue::Bool(left > right)),
+                Op::Lt => Ok(EvalValue::Bool(left < right)),
+                Op::Ge => Ok(EvalValue::Bool(left >= right)),
+                Op::Le => Ok(EvalValue::Bool(left <= right)),
+                Op::And => Ok(EvalValue::Bool(left != 0 && right != 0)),
+                Op::Or => Ok(EvalValue::Bool(left != 0 || right != 0)),
+                Op::Implies => Ok(EvalValue::Bool(left == 0 || right != 0)),
+            }
+        }
+        (EvalValue::Bool(left), EvalValue::Bool(right)) => {
+            let (left, right) = (*left, *right);
+            match op {
+                Op::Eq => Ok(EvalValue::Bool(left == right)),
+                Op::Neq => Ok(EvalValue::Bool(left != right)),
+                Op::And => Ok(EvalValue::Bool(left && right)),
+                Op::Or => Ok(EvalValue::Bool(left || right)),
+                Op::Implies => Ok(EvalValue::Bool(!left || right)),
+                _ => Err("unsupported boolean arithmetic in counterexample replay".to_string()),
+            }
+        }
         (EvalValue::String(left), EvalValue::String(right)) => match op {
             Op::Eq => Ok(EvalValue::Bool(left == right)),
             Op::Neq => Ok(EvalValue::Bool(left != right)),
             _ => Err("unsupported string operation in counterexample replay".to_string()),
         },
-        (left, right) => {
-            let left_int = value_as_int(&left);
-            let right_int = value_as_int(&right);
+        _ => {
+            // Numeric path with at least one `f64`: replay under IEEE 754 `f64`
+            // semantics (matching Mumei's runtime `f64`), promoting `i64`
+            // operands to `f64`.
+            if let (Some(l), Some(r)) = (value_as_f64(&left), value_as_f64(&right)) {
+                return match op {
+                    Op::Add => Ok(EvalValue::Float(l + r)),
+                    Op::Sub => Ok(EvalValue::Float(l - r)),
+                    Op::Mul => Ok(EvalValue::Float(l * r)),
+                    Op::Div => Ok(EvalValue::Float(l / r)),
+                    Op::Eq => Ok(EvalValue::Bool(l == r)),
+                    Op::Neq => Ok(EvalValue::Bool(l != r)),
+                    Op::Gt => Ok(EvalValue::Bool(l > r)),
+                    Op::Lt => Ok(EvalValue::Bool(l < r)),
+                    Op::Ge => Ok(EvalValue::Bool(l >= r)),
+                    Op::Le => Ok(EvalValue::Bool(l <= r)),
+                    Op::And => Ok(EvalValue::Bool(l != 0.0 && r != 0.0)),
+                    Op::Or => Ok(EvalValue::Bool(l != 0.0 || r != 0.0)),
+                    Op::Implies => Ok(EvalValue::Bool(l == 0.0 || r != 0.0)),
+                };
+            }
             let left_bool = value_as_bool(&left);
             let right_bool = value_as_bool(&right);
-            match (left_int, right_int, left_bool, right_bool, op) {
-                (Some(left), Some(right), _, _, Op::Eq) => Ok(EvalValue::Bool(left == right)),
-                (Some(left), Some(right), _, _, Op::Neq) => Ok(EvalValue::Bool(left != right)),
-                (_, _, Some(left), Some(right), Op::And) => Ok(EvalValue::Bool(left && right)),
-                (_, _, Some(left), Some(right), Op::Or) => Ok(EvalValue::Bool(left || right)),
-                (_, _, Some(left), Some(right), Op::Implies) => Ok(EvalValue::Bool(!left || right)),
+            match (left_bool, right_bool, op) {
+                (Some(left), Some(right), Op::And) => Ok(EvalValue::Bool(left && right)),
+                (Some(left), Some(right), Op::Or) => Ok(EvalValue::Bool(left || right)),
+                (Some(left), Some(right), Op::Implies) => Ok(EvalValue::Bool(!left || right)),
                 _ => Err("type mismatch during counterexample replay".to_string()),
             }
         }
     }
 }
 
-fn value_as_int(value: &EvalValue) -> Option<i64> {
+fn value_as_f64(value: &EvalValue) -> Option<f64> {
     match value {
-        EvalValue::Int(value) => Some(*value),
-        EvalValue::Bool(value) => Some(i64::from(*value)),
-        EvalValue::String(_) => None,
+        EvalValue::Int(value) => Some(*value as f64),
+        EvalValue::Float(value) => Some(*value),
+        EvalValue::Bool(_) | EvalValue::String(_) => None,
     }
 }
 
@@ -444,7 +503,79 @@ fn value_as_bool(value: &EvalValue) -> Option<bool> {
     match value {
         EvalValue::Bool(value) => Some(*value),
         EvalValue::Int(value) => Some(*value != 0),
+        EvalValue::Float(value) => Some(*value != 0.0),
         EvalValue::String(_) => None,
+    }
+}
+
+/// Relative/absolute tolerance for comparing a Z3 model `result` against the
+/// body value recomputed under Mumei `f64` semantics. When the default `Real`
+/// encoding is used, the model returns an exact rational that may not be a
+/// representable `f64`, so an exact comparison would spuriously reject valid
+/// counterexamples. IEEE 754 mode reproduces the value exactly and still passes.
+fn floats_close(a: f64, b: f64) -> bool {
+    if a == b {
+        return true;
+    }
+    if a.is_nan() && b.is_nan() {
+        return true;
+    }
+    let diff = (a - b).abs();
+    let scale = a.abs().max(b.abs()).max(1.0);
+    diff <= 1e-9 * scale
+}
+
+fn cex_matches_eval(model: &CexValue, body: &EvalValue) -> bool {
+    match (model, body) {
+        (CexValue::Int(m), EvalValue::Int(b)) => m == b,
+        (CexValue::Bool(m), EvalValue::Bool(b)) => m == b,
+        (CexValue::Int(m), EvalValue::Bool(b)) => *m == i64::from(*b),
+        (CexValue::Bool(m), EvalValue::Int(b)) => i64::from(*m) == *b,
+        _ => match (cex_as_f64(model), value_as_f64(body)) {
+            (Some(m), Some(b)) => floats_close(m, b),
+            _ => false,
+        },
+    }
+}
+
+/// Parse Z3's printed numeric forms into `f64`: decimals (`0.3`, `3.0?`),
+/// rationals (`1/10`), and integers. The trailing `?` that Z3 appends to
+/// approximate reals is stripped.
+pub fn parse_z3_numeric_to_f64(text: &str) -> Option<f64> {
+    let trimmed = text.trim().trim_end_matches('?').trim();
+    if let Some((num, den)) = trimmed.split_once('/') {
+        let num: f64 = num.trim().parse().ok()?;
+        let den: f64 = den.trim().parse().ok()?;
+        if den == 0.0 {
+            return None;
+        }
+        return Some(num / den);
+    }
+    trimmed.parse::<f64>().ok()
+}
+
+fn cex_as_f64(value: &CexValue) -> Option<f64> {
+    match value {
+        CexValue::Int(value) => Some(*value as f64),
+        CexValue::Float(value) => Some(*value),
+        CexValue::Bool(_) => None,
+    }
+}
+
+fn format_cex_value(value: &CexValue) -> String {
+    match value {
+        CexValue::Int(value) => value.to_string(),
+        CexValue::Float(value) => value.to_string(),
+        CexValue::Bool(value) => value.to_string(),
+    }
+}
+
+fn format_eval_value(value: &EvalValue) -> String {
+    match value {
+        EvalValue::Int(value) => value.to_string(),
+        EvalValue::Float(value) => value.to_string(),
+        EvalValue::Bool(value) => value.to_string(),
+        EvalValue::String(value) => value.clone(),
     }
 }
 

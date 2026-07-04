@@ -320,6 +320,7 @@ pub fn verify_impl(
             has_string_constraints: None,
             path_cond_stack: std::cell::RefCell::new(Vec::new()),
             profiler: None,
+            ieee754_f64: false,
         };
 
         let mut env: Env = HashMap::new();

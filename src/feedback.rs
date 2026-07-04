@@ -116,6 +116,30 @@ pub(crate) fn collect_decidable_fragment_diagnostic(
     Some(diagnostic)
 }
 
+pub(crate) fn collect_untyped_array_access_diagnostic(
+    atom: &parser::Atom,
+    strict: bool,
+    suppress_output: bool,
+) -> Option<verification::Diagnostic> {
+    let diagnostic = verification::untyped_array_access_diagnostic(atom, strict)?;
+    if !suppress_output {
+        let location = if atom.span.file.is_empty() {
+            format!("<unknown>:{}", atom.span.line)
+        } else {
+            format!("{}:{}", atom.span.file, atom.span.line)
+        };
+        eprintln!(
+            "{}[{}]: {}",
+            diagnostic.severity, diagnostic.code, diagnostic.message
+        );
+        eprintln!("  --> {}", location);
+        eprintln!(
+            "  hint: annotate the parameter as `[i64]`, `[f64]`, or `[bool]` to select the element sort"
+        );
+    }
+    Some(diagnostic)
+}
+
 pub(crate) fn emit_decidable_fragment_warning(
     atom: &parser::Atom,
     module_env: &verification::ModuleEnv,
@@ -172,7 +196,7 @@ pub(crate) fn emit_spurious_counterexample_diagnostic(
 
 pub(crate) fn counterexample_model_from_error(
     error: &verification::MumeiError,
-) -> std::collections::HashMap<String, i64> {
+) -> std::collections::HashMap<String, verification::CexValue> {
     let mut model = std::collections::HashMap::new();
     if let verification::MumeiError::VerificationError {
         counterexample: Some(serde_json::Value::Object(values)),
@@ -181,8 +205,19 @@ pub(crate) fn counterexample_model_from_error(
     {
         for (name, value) in values {
             let parsed = match value {
-                serde_json::Value::Number(number) => number.as_i64(),
-                serde_json::Value::String(text) => text.parse::<i64>().ok(),
+                serde_json::Value::Bool(flag) => Some(verification::CexValue::Bool(*flag)),
+                serde_json::Value::Number(number) => number
+                    .as_i64()
+                    .map(verification::CexValue::Int)
+                    .or_else(|| number.as_f64().map(verification::CexValue::Float)),
+                serde_json::Value::String(text) => text
+                    .parse::<i64>()
+                    .ok()
+                    .map(verification::CexValue::Int)
+                    .or_else(|| {
+                        verification::parse_z3_numeric_to_f64(text)
+                            .map(verification::CexValue::Float)
+                    }),
                 _ => None,
             };
             if let Some(value) = parsed {

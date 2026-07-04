@@ -206,6 +206,181 @@ pub fn collect_decidable_fragment_metrics(module_env: &ModuleEnv) -> DecidableFr
     metrics
 }
 
+/// Collect the distinct names of arrays accessed as `name[...]` in `atom`
+/// whose element type is *not* annotated (i.e. there is no `[T]` parameter
+/// annotation for `name`), and which therefore fall back to the default `i64`
+/// element sort during Z3 verification. Names are returned sorted and unique.
+pub fn detect_untyped_array_accesses(atom: &Atom) -> Vec<String> {
+    let mut names = Vec::new();
+    collect_array_access_names_in_expr(&parse_expression(&atom.requires), &mut names);
+    collect_array_access_names_in_expr(&parse_expression(&atom.ensures), &mut names);
+    collect_array_access_names_in_stmt(&parse_body_expr(&atom.body_expr), &mut names);
+    if let Some(invariant) = &atom.invariant {
+        collect_array_access_names_in_expr(&parse_expression(invariant), &mut names);
+    }
+    for constraint in &atom.forall_constraints {
+        collect_array_access_names_in_expr(&parse_expression(&constraint.condition), &mut names);
+    }
+
+    let mut untyped: Vec<String> = names
+        .into_iter()
+        .filter(|name| is_untyped_array_param(atom, name))
+        .collect();
+    untyped.sort();
+    untyped.dedup();
+    untyped
+}
+
+/// A `name[...]` access is untyped when `name` is either not a parameter, or a
+/// parameter whose annotation is not a `[T]` array type. Both cases lower to
+/// the `i64` element-sort fallback.
+fn is_untyped_array_param(atom: &Atom, name: &str) -> bool {
+    match atom.params.iter().find(|param| param.name == name) {
+        Some(param) => !param
+            .type_name
+            .as_deref()
+            .map(is_array_annotation)
+            .unwrap_or(false),
+        None => true,
+    }
+}
+
+fn is_array_annotation(type_name: &str) -> bool {
+    let trimmed = type_name.trim();
+    trimmed.starts_with('[') && trimmed.ends_with(']')
+}
+
+fn collect_array_access_names_in_expr(expr: &Expr, names: &mut Vec<String>) {
+    match expr {
+        Expr::ArrayAccess(name, index) => {
+            names.push(name.clone());
+            collect_array_access_names_in_expr(index, names);
+        }
+        Expr::BinaryOp(left, _, right) => {
+            collect_array_access_names_in_expr(left, names);
+            collect_array_access_names_in_expr(right, names);
+        }
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            collect_array_access_names_in_expr(cond, names);
+            collect_array_access_names_in_stmt(then_branch, names);
+            collect_array_access_names_in_stmt(else_branch, names);
+        }
+        Expr::Call(_, args) | Expr::Perform { args, .. } => {
+            for arg in args {
+                collect_array_access_names_in_expr(arg, names);
+            }
+        }
+        Expr::CallRef { callee, args } => {
+            collect_array_access_names_in_expr(callee, names);
+            for arg in args {
+                collect_array_access_names_in_expr(arg, names);
+            }
+        }
+        Expr::StructInit { fields, .. } => {
+            for (_, field_expr) in fields {
+                collect_array_access_names_in_expr(field_expr, names);
+            }
+        }
+        Expr::FieldAccess(base, _) => collect_array_access_names_in_expr(base, names),
+        Expr::Match { target, arms } => {
+            collect_array_access_names_in_expr(target, names);
+            for arm in arms {
+                collect_array_access_names_in_stmt(&arm.body, names);
+            }
+        }
+        Expr::Async { body } | Expr::Lambda { body, .. } => {
+            collect_array_access_names_in_stmt(body, names)
+        }
+        Expr::Await { expr } => collect_array_access_names_in_expr(expr, names),
+        Expr::ChanSend { channel, value } => {
+            collect_array_access_names_in_expr(channel, names);
+            collect_array_access_names_in_expr(value, names);
+        }
+        Expr::ChanRecv { channel } => collect_array_access_names_in_expr(channel, names),
+        Expr::Number(_)
+        | Expr::Float(_)
+        | Expr::StringLit(_)
+        | Expr::Variable(_)
+        | Expr::AtomRef { .. } => {}
+    }
+}
+
+fn collect_array_access_names_in_stmt(stmt: &Stmt, names: &mut Vec<String>) {
+    match stmt {
+        Stmt::Let { value, .. } | Stmt::Assign { value, .. } => {
+            collect_array_access_names_in_expr(value, names)
+        }
+        Stmt::Expr(value, _) => collect_array_access_names_in_expr(value, names),
+        Stmt::ArrayStore {
+            array,
+            index,
+            value,
+            ..
+        } => {
+            names.push(array.clone());
+            collect_array_access_names_in_expr(index, names);
+            collect_array_access_names_in_expr(value, names);
+        }
+        Stmt::Block(stmts, _) => {
+            for stmt in stmts {
+                collect_array_access_names_in_stmt(stmt, names);
+            }
+        }
+        Stmt::While {
+            cond,
+            invariant,
+            body,
+            ..
+        } => {
+            collect_array_access_names_in_expr(cond, names);
+            collect_array_access_names_in_expr(invariant, names);
+            collect_array_access_names_in_stmt(body, names);
+        }
+        Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => {
+            collect_array_access_names_in_stmt(body, names)
+        }
+        Stmt::TaskGroup { children, .. } => {
+            for child in children {
+                collect_array_access_names_in_stmt(child, names);
+            }
+        }
+        Stmt::Cancel { .. } => {}
+    }
+}
+
+/// Build a diagnostic for untyped array accesses in `atom`, or `None` when the
+/// atom has no untyped accesses. `strict` selects the severity: `"error"` under
+/// the opt-in strict mode, `"warning"` otherwise. This never changes the
+/// verification encoding — untyped arrays still lower to the `i64` element sort.
+pub fn untyped_array_access_diagnostic(atom: &Atom, strict: bool) -> Option<Diagnostic> {
+    let names = detect_untyped_array_accesses(atom);
+    if names.is_empty() {
+        return None;
+    }
+    let rendered = names
+        .iter()
+        .map(|name| format!("`{}`", name))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let plural = if names.len() == 1 { "" } else { "s" };
+    Some(Diagnostic {
+        code: "untyped_array_access".to_string(),
+        severity: if strict { "error" } else { "warning" }.to_string(),
+        atom: atom.name.clone(),
+        message: format!(
+            "unannotated array access{plural} {rendered} default{} to element type `i64`; \
+             add an explicit `[i64]`/`[f64]`/`[bool]` annotation to select the element sort",
+            if names.len() == 1 { "s" } else { "" }
+        ),
+        tags: vec!["untyped_array_access".to_string()],
+        escalation_reason: None,
+    })
+}
+
 pub(crate) fn push_unique_tag(tags: &mut Vec<String>, tag: &str) {
     if !tags.iter().any(|existing| existing == tag) {
         tags.push(tag.to_string());

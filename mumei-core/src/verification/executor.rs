@@ -29,6 +29,7 @@ pub fn verify_with_config(
             global_max_unroll,
             enable_spurious_detection: true,
             enable_vacuity_check: false,
+            ieee754_f64: false,
             property_based_config: None,
             task_id: orchestration_task_id_from_env(),
             generation_id: orchestration_generation_id_from_env(),
@@ -51,6 +52,7 @@ pub fn verify_with_verification_config(
             global_max_unroll: config.global_max_unroll,
             enable_spurious_detection: config.enable_spurious_detection,
             enable_vacuity_check: config.enable_vacuity_check,
+            ieee754_f64: config.ieee754_f64,
             property_based_config: config.property_based_test.as_ref(),
             task_id: orchestration_task_id_from_env(),
             generation_id: orchestration_generation_id_from_env(),
@@ -90,6 +92,7 @@ pub fn verify(hir_atom: &HirAtom, output_dir: &Path, module_env: &ModuleEnv) -> 
             global_max_unroll: BMC_DEFAULT_UNROLL_DEPTH,
             enable_spurious_detection: true,
             enable_vacuity_check: false,
+            ieee754_f64: false,
             property_based_config: None,
             task_id: orchestration_task_id_from_env(),
             generation_id: orchestration_generation_id_from_env(),
@@ -102,6 +105,7 @@ pub(crate) struct VerifyInnerOptions<'a> {
     global_max_unroll: usize,
     enable_spurious_detection: bool,
     enable_vacuity_check: bool,
+    ieee754_f64: bool,
     property_based_config: Option<&'a PropertyBasedTestConfig>,
     task_id: Option<String>,
     generation_id: Option<String>,
@@ -337,6 +341,7 @@ pub(crate) fn verify_inner(
         global_max_unroll,
         enable_spurious_detection,
         enable_vacuity_check,
+        ieee754_f64,
         property_based_config,
         task_id,
         generation_id: _generation_id,
@@ -355,8 +360,13 @@ pub(crate) fn verify_inner(
     // Phase 0a: 仕様健全性チェック（proof attempt 前の requires/ensures/refinement SAT）
     let phase_start = std::time::Instant::now();
     let _spec_validation_result =
-        check_spec_satisfiability_with_property_based(atom, module_env, property_based_config)
-            .map_err(|err| {
+        check_spec_satisfiability_with_property_based(
+            atom,
+            module_env,
+            property_based_config,
+            ieee754_f64,
+        )
+        .map_err(|err| {
                 MumeiError::verification_at(err.to_string(), err.span.clone()).with_help(format!(
                     "SpecValidation failed before proof attempt (kind: {}, constraints: {:?}). {} Suggested fix: {}",
                     err.kind, err.constraints, err.natural_language_explanation, err.suggested_fix
@@ -1063,6 +1073,7 @@ pub(crate) fn verify_inner(
         has_string_constraints: Some(&has_string_constraints_cell),
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
         profiler: Some(&profiler_cell),
+        ieee754_f64,
     };
 
     let mut env: Env = HashMap::new();
@@ -1078,6 +1089,7 @@ pub(crate) fn verify_inner(
             param.name.as_str(),
             param.type_name.as_deref(),
             module_env,
+            ieee754_f64,
         );
         env.insert(param.name.clone(), var);
     }
@@ -1561,11 +1573,15 @@ pub(crate) fn verify_inner(
                         }
                     }
                     let mut reconstruction_variables = HashMap::new();
+                    let mut model_values: HashMap<String, CexValue> = HashMap::new();
                     for (name, var_z3) in &env {
                         reconstruction_variables.insert(name.clone(), var_z3.clone());
                         if let Some(val) = model.eval(var_z3, true) {
                             if let Some(int_value) = z3_dynamic_to_i64(&val) {
                                 model_map.insert(name.clone(), int_value);
+                            }
+                            if let Some(cex_value) = z3_dynamic_to_cex_value(&val) {
+                                model_values.insert(name.clone(), cex_value);
                             }
                         }
                     }
@@ -1592,7 +1608,7 @@ pub(crate) fn verify_inner(
                         &reconstruction_variables,
                     ));
                     if enable_spurious_detection {
-                        let validation = validate_counterexample(atom, &model_map, module_env);
+                        let validation = validate_counterexample(atom, &model_values, module_env);
                         if validation.validation_status == "spurious_candidate" {
                             solver.pop(1);
                             let symbols = validation
@@ -1909,6 +1925,29 @@ fn z3_dynamic_to_i64(value: &Dynamic) -> Option<i64> {
         .as_int()
         .and_then(|int_value| int_value.as_i64())
         .or_else(|| format!("{}", value).parse::<i64>().ok())
+}
+
+/// Extract a concrete counterexample value from a Z3 model term, covering the
+/// `f64` encodings used by verification: `Int`, `Bool`, exact-rational `Real`
+/// (default `f64`), and IEEE 754 `Float` (under `--ieee754-f64`).
+fn z3_dynamic_to_cex_value(value: &Dynamic) -> Option<CexValue> {
+    if let Some(int_value) = value.as_int().and_then(|v| v.as_i64()) {
+        return Some(CexValue::Int(int_value));
+    }
+    if let Some(bool_value) = value.as_bool().and_then(|v| v.as_bool()) {
+        return Some(CexValue::Bool(bool_value));
+    }
+    if value.as_real().is_some() || value.as_float().is_some() {
+        if let Some(float_value) = parse_z3_numeric_to_f64(&format!("{}", value)) {
+            return Some(CexValue::Float(float_value));
+        }
+    }
+    // Fall back to parsing the printed form (e.g. plain integers).
+    let text = format!("{}", value);
+    if let Ok(int_value) = text.parse::<i64>() {
+        return Some(CexValue::Int(int_value));
+    }
+    parse_z3_numeric_to_f64(&text).map(CexValue::Float)
 }
 
 #[allow(clippy::too_many_arguments)]

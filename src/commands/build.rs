@@ -137,6 +137,7 @@ pub(crate) fn cmd_build(
             == "1",
         detect_loops: false,
         suggest_cegis: false,
+        ieee754_f64: false,
         property_based_test: None,
     };
     let mut escalation_cert_results: std::collections::HashMap<String, (String, String)> =
