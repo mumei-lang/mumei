@@ -424,6 +424,23 @@ pub fn lower_hir_to_mir(hir_atom: &HirAtom) -> MirBody {
     }
 }
 
+/// Infer an atom's return type from its lowered body expression.
+pub fn infer_atom_return_type(atom: &crate::parser::Atom) -> Option<String> {
+    let hir = crate::hir::lower_atom_to_hir(atom);
+    let mut ctx = LowerCtx::new();
+    for param in &hir.atom.params {
+        ctx.alloc_local(Some(param.name.clone()), param.type_name.clone());
+    }
+    match &hir.body {
+        crate::hir::HirStmt::Expr(expr) => ctx.infer_hir_ty(expr),
+        crate::hir::HirStmt::Block {
+            tail_expr: Some(expr),
+            ..
+        } => ctx.infer_hir_ty(expr),
+        _ => None,
+    }
+}
+
 /// Lower a HirStmt, returning an optional Operand for the value it produces.
 fn lower_stmt(ctx: &mut LowerCtx, stmt: &HirStmt) -> Option<Operand> {
     match stmt {
@@ -911,19 +928,7 @@ mod tests {
     }
 
     fn infer_body_expr_type(atom: &Atom) -> Option<String> {
-        let hir = lower_atom_to_hir(atom);
-        let mut ctx = LowerCtx::new();
-        for param in &hir.atom.params {
-            ctx.alloc_local(Some(param.name.clone()), param.type_name.clone());
-        }
-        match &hir.body {
-            crate::hir::HirStmt::Expr(expr) => ctx.infer_hir_ty(expr),
-            crate::hir::HirStmt::Block {
-                tail_expr: Some(expr),
-                ..
-            } => ctx.infer_hir_ty(expr),
-            _ => None,
-        }
+        infer_atom_return_type(atom)
     }
 
     #[test]
