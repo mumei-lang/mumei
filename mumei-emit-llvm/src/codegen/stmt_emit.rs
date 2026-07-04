@@ -36,6 +36,10 @@ pub(crate) fn compile_hir_stmt<'a>(
                 .or_else(|| infer_struct_type_name(value, var_types, module_env));
             if let Some(struct_ty) = inferred_ty {
                 var_types.insert(var.clone(), struct_ty);
+            } else {
+                // Clear any stale type from a prior binding of this name so a
+                // later field access cannot resolve against the wrong struct.
+                var_types.remove(var);
             }
             Ok(val)
         }
@@ -47,6 +51,10 @@ pub(crate) fn compile_hir_stmt<'a>(
             variables.insert(var.clone(), val);
             if let Some(struct_ty) = infer_struct_type_name(value, var_types, module_env) {
                 var_types.insert(var.clone(), struct_ty);
+            } else {
+                // Reassignment to a value with no known struct type must not
+                // leave a stale mapping from the previous binding.
+                var_types.remove(var);
             }
             Ok(val)
         }
