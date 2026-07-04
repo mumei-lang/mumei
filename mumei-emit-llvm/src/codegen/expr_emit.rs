@@ -1,4 +1,6 @@
-use crate::codegen::lowering::{enum_llvm_type, resolve_param_type, resolve_return_type};
+use crate::codegen::lowering::{
+    bitpreserve_cast, enum_llvm_type, resolve_param_type, resolve_return_type,
+};
 use crate::codegen::pattern_emit::{
     bind_pattern_variables, compile_pattern_test, find_field_index, find_field_index_by_name,
 };
@@ -571,7 +573,8 @@ pub(crate) fn compile_hir_expr<'a>(
                         &arm.pattern,
                         target_val,
                         &mut guard_vars,
-                    );
+                        module_env,
+                    )?;
                     let guard_val = compile_hir_expr(
                         context,
                         builder,
@@ -602,7 +605,14 @@ pub(crate) fn compile_hir_expr<'a>(
                 builder.position_at_end(body_block);
                 let mut arm_vars = variables.clone();
                 let mut arm_var_types = var_types.clone();
-                bind_pattern_variables(context, builder, &arm.pattern, target_val, &mut arm_vars);
+                bind_pattern_variables(
+                    context,
+                    builder,
+                    &arm.pattern,
+                    target_val,
+                    &mut arm_vars,
+                    module_env,
+                )?;
 
                 let body_val = compile_hir_stmt(
                     context,
@@ -1039,6 +1049,19 @@ pub(crate) fn compile_hir_expr<'a>(
                     context, builder, module, function, field_expr, variables, var_types,
                     array_ptrs, module_env,
                 )?;
+                let slot_ty = enum_type
+                    .get_field_type_at_index((i + 1) as u32)
+                    .ok_or_else(|| {
+                        MumeiError::codegen(format!(
+                            "Enum '{}' missing payload slot {}",
+                            enum_name, i
+                        ))
+                    })?;
+                let field_val = if field_val.get_type() != slot_ty {
+                    bitpreserve_cast(builder, field_val, slot_ty)?
+                } else {
+                    field_val
+                };
                 val = llvm!(builder.build_insert_value(
                     val,
                     field_val,

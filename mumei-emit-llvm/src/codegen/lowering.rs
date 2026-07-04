@@ -1,9 +1,11 @@
+use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Module;
-use inkwell::types::BasicMetadataTypeEnum;
+use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum};
+use inkwell::values::BasicValueEnum;
 use inkwell::AddressSpace;
 use mumei_core::lowering::{lower, LoweredType};
-use mumei_core::verification::ModuleEnv;
+use mumei_core::verification::{ModuleEnv, MumeiError};
 
 pub(crate) fn array_struct_type(context: &Context) -> inkwell::types::StructType<'_> {
     let i64_type = context.i64_type();
@@ -11,11 +13,62 @@ pub(crate) fn array_struct_type(context: &Context) -> inkwell::types::StructType
     context.struct_type(&[i64_type.into(), ptr_type.into()], false)
 }
 
-/// Plan 14: Generate LLVM struct type for an enum (tagged union).
-/// Layout: { i64 tag, i64 payload_0, i64 payload_1, ... }
-/// The number of payload slots is the maximum field count across all variants.
-///
-/// Payload slots are resolved from `EnumDef` variant field types.
+fn basic_type_rank<'a>(ty: BasicTypeEnum<'a>) -> (u32, bool, bool) {
+    match ty {
+        BasicTypeEnum::FloatType(float_ty) => {
+            let name = float_ty.print_to_string().to_string();
+            let bits = match name.as_str() {
+                "float" => 32,
+                "double" => 64,
+                "half" => 16,
+                "fp128" | "quad" => 128,
+                _ => 64,
+            };
+            (bits, true, false)
+        }
+        BasicTypeEnum::IntType(int_ty) => (int_ty.get_bit_width(), false, false),
+        BasicTypeEnum::PointerType(_) => (64, false, true),
+        _ => (64, false, false),
+    }
+}
+
+fn float_type_bit_width<'a>(ty: inkwell::types::FloatType<'a>) -> u32 {
+    match ty.print_to_string().to_string().as_str() {
+        "float" => 32,
+        "double" => 64,
+        "half" => 16,
+        "fp128" | "quad" => 128,
+        _ => 64,
+    }
+}
+
+fn union_slot_type<'a>(a: BasicTypeEnum<'a>, b: BasicTypeEnum<'a>) -> BasicTypeEnum<'a> {
+    if a == b {
+        return a;
+    }
+
+    let (a_bits, a_is_float, a_is_ptr) = basic_type_rank(a);
+    let (b_bits, b_is_float, b_is_ptr) = basic_type_rank(b);
+
+    if a_bits != b_bits {
+        return if a_bits > b_bits { a } else { b };
+    }
+
+    if a_is_float != b_is_float {
+        return if a_is_float { a } else { b };
+    }
+
+    if a_is_ptr != b_is_ptr {
+        return if a_is_ptr { b } else { a };
+    }
+
+    a
+}
+
+/// Generate LLVM struct type for an enum (tagged union).
+/// Layout: { i64 tag, payload_slot_0, payload_slot_1, ... }
+/// Each payload slot uses the largest type needed by any variant at that
+/// position, preferring floating-point types on equal bit-widths.
 pub(crate) fn enum_llvm_type<'a>(
     context: &'a Context,
     enum_def: &mumei_core::parser::EnumDef,
@@ -48,21 +101,95 @@ pub(crate) fn enum_llvm_type<'a>(
                 };
                 match resolved_type {
                     None => resolved_type = Some(slot_type),
-                    Some(existing) => {
-                        // TODO(followup): when variants disagree on a slot's payload type, defaulting to i64 discards an f64's bit-width, corrupting heterogeneous payloads. Proper fix uses a union/largest-type slot layout. See PR #388 review.
-                        // If types differ across variants, use the largest compatible type.
-                        // ptr and i64 are same size on 64-bit; f64 needs its own slot.
-                        if existing != slot_type {
-                            // Default to i64 as the most general integer type
-                            resolved_type = Some(context.i64_type().into());
-                        }
-                    }
+                    Some(existing) => resolved_type = Some(union_slot_type(existing, slot_type)),
                 }
             }
         }
         field_types.push(resolved_type.unwrap_or(context.i64_type().into()));
     }
     context.struct_type(&field_types, false)
+}
+
+pub(crate) fn bitpreserve_cast<'a>(
+    builder: &Builder<'a>,
+    value: BasicValueEnum<'a>,
+    target_ty: inkwell::types::BasicTypeEnum<'a>,
+) -> mumei_core::verification::MumeiResult<BasicValueEnum<'a>> {
+    let source_ty = value.get_type();
+    if source_ty == target_ty {
+        return Ok(value);
+    }
+
+    match (value, target_ty) {
+        (BasicValueEnum::IntValue(int_val), inkwell::types::BasicTypeEnum::IntType(target_int)) => {
+            let source_bits = int_val.get_type().get_bit_width();
+            let target_bits = target_int.get_bit_width();
+            if source_bits < target_bits {
+                Ok(llvm!(builder.build_int_z_extend(int_val, target_int, "payload_zext")).into())
+            } else if source_bits > target_bits {
+                Ok(llvm!(builder.build_int_truncate(int_val, target_int, "payload_trunc")).into())
+            } else {
+                Ok(llvm!(builder.build_bit_cast(
+                    int_val,
+                    target_int,
+                    "payload_cast"
+                )))
+            }
+        }
+        (
+            BasicValueEnum::IntValue(int_val),
+            inkwell::types::BasicTypeEnum::FloatType(target_float),
+        ) => {
+            if int_val.get_type().get_bit_width() == float_type_bit_width(target_float) {
+                Ok(llvm!(builder.build_bit_cast(
+                    int_val,
+                    target_float,
+                    "payload_cast"
+                )))
+            } else {
+                Err(mumei_core::verification::MumeiError::codegen(
+                    "unsupported int-to-float payload cast with mismatched width".to_string(),
+                ))
+            }
+        }
+        (
+            BasicValueEnum::FloatValue(float_val),
+            inkwell::types::BasicTypeEnum::IntType(target_int),
+        ) => {
+            if float_type_bit_width(float_val.get_type()) == target_int.get_bit_width() {
+                Ok(llvm!(builder.build_bit_cast(
+                    float_val,
+                    target_int,
+                    "payload_cast"
+                )))
+            } else {
+                Err(mumei_core::verification::MumeiError::codegen(
+                    "unsupported float-to-int payload cast with mismatched width".to_string(),
+                ))
+            }
+        }
+        (
+            BasicValueEnum::PointerValue(ptr_val),
+            inkwell::types::BasicTypeEnum::IntType(target_int),
+        ) => Ok(llvm!(builder.build_ptr_to_int(ptr_val, target_int, "payload_ptr_to_int")).into()),
+        (
+            BasicValueEnum::IntValue(int_val),
+            inkwell::types::BasicTypeEnum::PointerType(target_ptr),
+        ) => Ok(llvm!(builder.build_int_to_ptr(int_val, target_ptr, "payload_int_to_ptr")).into()),
+        (
+            BasicValueEnum::PointerValue(ptr_val),
+            inkwell::types::BasicTypeEnum::PointerType(target_ptr),
+        ) => Ok(llvm!(builder.build_bit_cast(
+            ptr_val,
+            target_ptr,
+            "payload_ptr_cast"
+        ))),
+        (value, target_ty) => Err(mumei_core::verification::MumeiError::codegen(format!(
+            "unsupported payload cast from {:?} to {:?}",
+            value.get_type(),
+            target_ty
+        ))),
+    }
 }
 
 /// パラメータの LLVM 型を解決する
@@ -162,17 +289,10 @@ pub(crate) fn resolve_return_type<'a>(
             }
         }
     } else {
-        // TODO(followup): inferring f64 return from f64 params is unsound for unannotated atoms that return a non-f64 (e.g. compare(f64,f64)->i64). A proper fix propagates an inferred return type onto Atom during an earlier phase, since the callee-resolution path only has parser::Atom (no typed body). See PR #388 review.
-        // Fallback heuristic: if any parameter is f64, assume f64 return type.
-        // This preserves backward compatibility for atoms without explicit -> Type.
-        let has_float = atom.params.iter().any(|p| {
-            p.type_name
-                .as_deref()
-                .map(|t| module_env.resolve_base_type(t) == "f64")
-                .unwrap_or(false)
-        });
-        if has_float {
-            context.f64_type().into()
+        // Infer the return type from the body when possible; otherwise fall
+        // back to a conservative i64 default.
+        if let Some(ret_type) = mumei_core::mir::infer_atom_return_type(atom) {
+            resolve_param_type(context, Some(&ret_type), module_env)
         } else {
             context.i64_type().into()
         }

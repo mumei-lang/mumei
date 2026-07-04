@@ -1,10 +1,55 @@
+use crate::codegen::lowering::{bitpreserve_cast, resolve_param_type};
 use inkwell::builder::Builder;
 use inkwell::context::Context;
+use inkwell::types::BasicTypeEnum;
 use inkwell::values::BasicValueEnum;
 use inkwell::IntPredicate;
 use mumei_core::parser::Pattern;
 use mumei_core::verification::{ModuleEnv, MumeiError, MumeiResult};
 use std::collections::HashMap;
+
+fn variant_field_type<'a>(
+    context: &'a Context,
+    variant_name: &str,
+    field_idx: usize,
+    module_env: &ModuleEnv,
+) -> Option<BasicTypeEnum<'a>> {
+    let enum_def = module_env.find_enum_by_variant(variant_name)?;
+    let variant = enum_def.variants.iter().find(|v| v.name == variant_name)?;
+    let field_type = variant.field_types.get(field_idx)?;
+    Some(resolve_param_type(
+        context,
+        Some(field_type.name.as_str()),
+        module_env,
+    ))
+}
+
+fn extract_variant_field_value<'a>(
+    context: &'a Context,
+    builder: &Builder<'a>,
+    target: BasicValueEnum<'a>,
+    variant_name: &str,
+    field_idx: usize,
+    module_env: &ModuleEnv,
+) -> MumeiResult<BasicValueEnum<'a>> {
+    let extracted = if target.is_struct_value() {
+        llvm!(builder.build_extract_value(
+            target.into_struct_value(),
+            (field_idx + 1) as u32,
+            &format!("variant_payload_{}", field_idx),
+        ))
+    } else {
+        context.i64_type().const_int(0, false).into()
+    };
+
+    if let Some(slot_ty) = variant_field_type(context, variant_name, field_idx, module_env) {
+        if extracted.get_type() != slot_ty {
+            return bitpreserve_cast(builder, extracted, slot_ty);
+        }
+    }
+
+    Ok(extracted)
+}
 
 pub(crate) fn compile_pattern_test<'a>(
     context: &'a Context,
@@ -15,10 +60,7 @@ pub(crate) fn compile_pattern_test<'a>(
     module_env: &ModuleEnv,
 ) -> MumeiResult<inkwell::values::IntValue<'a>> {
     match pattern {
-        Pattern::Wildcard | Pattern::Variable(_) => {
-            // 常にマッチ
-            Ok(context.bool_type().const_int(1, false))
-        }
+        Pattern::Wildcard | Pattern::Variable(_) => Ok(context.bool_type().const_int(1, false)),
         Pattern::Literal(n) => {
             let target_int = target.into_int_value();
             let lit = context.i64_type().const_int(*n as u64, true);
@@ -30,7 +72,6 @@ pub(crate) fn compile_pattern_test<'a>(
             variant_name,
             fields,
         } => {
-            // Plan 14: Enum variant pattern matching with payload support
             let tag_val = if let Some(enum_def) = module_env.find_enum_by_variant(variant_name) {
                 enum_def
                     .variants
@@ -38,13 +79,11 @@ pub(crate) fn compile_pattern_test<'a>(
                     .position(|v| v.name == *variant_name)
                     .unwrap_or(0) as u64
             } else {
-                // Enum 定義が見つからない場合はハッシュベースのフォールバック
                 variant_name
                     .bytes()
                     .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64))
             };
 
-            // Extract tag from target (struct or int)
             let target_tag = if target.is_struct_value() {
                 llvm!(builder.build_extract_value(target.into_struct_value(), 0, "pat_tag"))
                     .into_int_value()
@@ -60,24 +99,19 @@ pub(crate) fn compile_pattern_test<'a>(
                 "pat_tag_eq"
             ));
 
-            // ネストパターンの再帰処理: 各フィールドの条件を AND 結合
             let mut result = tag_match;
             for (field_idx, field_pat) in fields.iter().enumerate() {
                 match field_pat {
-                    Pattern::Wildcard | Pattern::Variable(_) => {
-                        // 常にマッチ → AND しても変わらない
-                    }
+                    Pattern::Wildcard | Pattern::Variable(_) => {}
                     _ => {
-                        // Plan 14: Extract actual payload field from struct
-                        let field_val = if target.is_struct_value() {
-                            llvm!(builder.build_extract_value(
-                                target.into_struct_value(),
-                                (field_idx + 1) as u32,
-                                &format!("pat_payload_{}", field_idx)
-                            ))
-                        } else {
-                            context.i64_type().const_int(0, false).into()
-                        };
+                        let field_val = extract_variant_field_value(
+                            context,
+                            builder,
+                            target,
+                            variant_name,
+                            field_idx,
+                            module_env,
+                        )?;
                         let field_test = compile_pattern_test(
                             context, builder, field_pat, field_val, _variables, module_env,
                         )?;
@@ -92,63 +126,56 @@ pub(crate) fn compile_pattern_test<'a>(
 
 /// パターンから変数バインドを variables に登録する（再帰的）。
 /// - Variable(name) → target の値を name にバインド
-/// - Variant の fields 内の Variable → Plan 14: payload から extract_value で取得
+/// - Variant の fields 内の Variable → payload から extract_value で取得
 pub(crate) fn bind_pattern_variables<'a>(
     context: &'a Context,
     builder: &Builder<'a>,
     pattern: &Pattern,
     target: BasicValueEnum<'a>,
     variables: &mut HashMap<String, BasicValueEnum<'a>>,
-) {
+    module_env: &ModuleEnv,
+) -> MumeiResult<()> {
     match pattern {
         Pattern::Variable(name) => {
             variables.insert(name.clone(), target);
+            Ok(())
         }
         Pattern::Variant {
-            variant_name: _,
+            variant_name,
             fields,
         } => {
             for (field_idx, field_pat) in fields.iter().enumerate() {
                 match field_pat {
                     Pattern::Variable(fname) => {
-                        // Plan 14: Extract payload field from tagged union struct
-                        if target.is_struct_value() {
-                            if let Ok(field_val) = builder.build_extract_value(
-                                target.into_struct_value(),
-                                (field_idx + 1) as u32,
-                                &format!("bind_{}", fname),
-                            ) {
-                                variables.insert(fname.clone(), field_val);
-                            }
-                        } else {
-                            // Fallback for non-struct targets (legacy tag-only enums)
-                            let dummy: BasicValueEnum =
-                                context.i64_type().const_int(0, false).into();
-                            variables.insert(fname.clone(), dummy);
-                        }
+                        let field_val = extract_variant_field_value(
+                            context,
+                            builder,
+                            target,
+                            variant_name,
+                            field_idx,
+                            module_env,
+                        )?;
+                        variables.insert(fname.clone(), field_val);
                     }
                     Pattern::Variant { .. } => {
-                        // ネストした Variant: 再帰的にバインド
-                        let nested_val = if target.is_struct_value() {
-                            builder
-                                .build_extract_value(
-                                    target.into_struct_value(),
-                                    (field_idx + 1) as u32,
-                                    &format!("nested_payload_{}", field_idx),
-                                )
-                                .unwrap_or(context.i64_type().const_int(0, false).into())
-                        } else {
-                            context.i64_type().const_int(0, false).into()
-                        };
-                        bind_pattern_variables(context, builder, field_pat, nested_val, variables);
+                        let nested_val = extract_variant_field_value(
+                            context,
+                            builder,
+                            target,
+                            variant_name,
+                            field_idx,
+                            module_env,
+                        )?;
+                        bind_pattern_variables(
+                            context, builder, field_pat, nested_val, variables, module_env,
+                        )?;
                     }
                     _ => {}
                 }
             }
+            Ok(())
         }
-        Pattern::Wildcard | Pattern::Literal(_) => {
-            // バインドなし
-        }
+        Pattern::Wildcard | Pattern::Literal(_) => Ok(()),
     }
 }
 

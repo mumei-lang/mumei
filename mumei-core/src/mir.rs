@@ -424,6 +424,31 @@ pub fn lower_hir_to_mir(hir_atom: &HirAtom) -> MirBody {
     }
 }
 
+/// Infer an atom's return type from its lowered body expression.
+pub fn infer_atom_return_type(atom: &crate::parser::Atom) -> Option<String> {
+    let hir = crate::hir::lower_atom_to_hir(atom);
+    let mut ctx = LowerCtx::new();
+    for param in &hir.atom.params {
+        ctx.alloc_local(Some(param.name.clone()), param.type_name.clone());
+    }
+    match &hir.body {
+        crate::hir::HirStmt::Expr(expr) => ctx.infer_hir_ty(expr),
+        crate::hir::HirStmt::Block { stmts, tail_expr } => {
+            // Register let-bound locals so the tail expression can resolve
+            // their types. Infer each binding with the param-aware context
+            // rather than the HIR-recorded `ty`, which is param-blind.
+            for stmt in stmts {
+                if let crate::hir::HirStmt::Let { var, value, .. } = stmt {
+                    let ty = ctx.infer_hir_ty(value);
+                    ctx.alloc_local(Some(var.clone()), ty);
+                }
+            }
+            tail_expr.as_ref().and_then(|expr| ctx.infer_hir_ty(expr))
+        }
+        _ => None,
+    }
+}
+
 /// Lower a HirStmt, returning an optional Operand for the value it produces.
 fn lower_stmt(ctx: &mut LowerCtx, stmt: &HirStmt) -> Option<Operand> {
     match stmt {
@@ -869,7 +894,7 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &HirExpr) -> Operand {
 mod tests {
     use super::*;
     use crate::hir::lower_atom_to_hir;
-    use crate::parser::{self, Atom, Param, Span, TrustLevel};
+    use crate::parser::{self, Atom, Expr, Param, Span, Stmt, TrustLevel};
 
     /// Helper: create a minimal Atom with given body expression and params.
     fn make_atom(name: &str, params: Vec<Param>, body_expr: &str) -> Atom {
@@ -911,19 +936,7 @@ mod tests {
     }
 
     fn infer_body_expr_type(atom: &Atom) -> Option<String> {
-        let hir = lower_atom_to_hir(atom);
-        let mut ctx = LowerCtx::new();
-        for param in &hir.atom.params {
-            ctx.alloc_local(Some(param.name.clone()), param.type_name.clone());
-        }
-        match &hir.body {
-            crate::hir::HirStmt::Expr(expr) => ctx.infer_hir_ty(expr),
-            crate::hir::HirStmt::Block {
-                tail_expr: Some(expr),
-                ..
-            } => ctx.infer_hir_ty(expr),
-            _ => None,
-        }
+        infer_atom_return_type(atom)
     }
 
     #[test]
@@ -954,6 +967,45 @@ mod tests {
             "arr[i]",
         );
         assert_eq!(infer_body_expr_type(&atom), Some("i64".to_string()));
+    }
+
+    #[test]
+    fn test_parse_body_block_with_let_tail_expr() {
+        let stmt = parser::parse_body_expr("{ let x = a + b; x }");
+        match stmt {
+            Stmt::Block(stmts, _) => {
+                assert_eq!(stmts.len(), 2);
+                match &stmts[0] {
+                    Stmt::Let { var, .. } => assert_eq!(var, "x"),
+                    other => panic!("expected let statement, got {:?}", other),
+                }
+                match &stmts[1] {
+                    Stmt::Expr(Expr::Variable(name), _) => assert_eq!(name, "x"),
+                    other => panic!("expected tail expr `x`, got {:?}", other),
+                }
+            }
+            other => panic!("expected block statement, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_infer_hir_ty_block_let_tail_f64() {
+        let atom = make_atom(
+            "block_let_tail_f64",
+            vec![make_param("a", "f64"), make_param("b", "f64")],
+            "{ let x = a + b; x }",
+        );
+        assert_eq!(infer_body_expr_type(&atom), Some("f64".to_string()));
+    }
+
+    #[test]
+    fn test_infer_hir_ty_comparison_returns_bool() {
+        let atom = make_atom(
+            "comparison_returns_bool",
+            vec![make_param("a", "f64"), make_param("b", "f64")],
+            "a < b",
+        );
+        assert_eq!(infer_body_expr_type(&atom), Some("bool".to_string()));
     }
 
     #[test]
