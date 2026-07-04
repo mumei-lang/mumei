@@ -1,4 +1,4 @@
-use crate::codegen::expr_emit::compile_hir_expr;
+use crate::codegen::expr_emit::{compile_hir_expr, infer_struct_type_name};
 use crate::codegen::task_runtime::declare_task_group_should_cancel_current_extern;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
@@ -18,22 +18,36 @@ pub(crate) fn compile_hir_stmt<'a>(
     function: &FunctionValue<'a>,
     stmt: &HirStmt,
     variables: &mut HashMap<String, BasicValueEnum<'a>>,
+    var_types: &mut HashMap<String, String>,
     array_ptrs: &HashMap<String, (BasicValueEnum<'a>, BasicValueEnum<'a>)>,
     module_env: &ModuleEnv,
 ) -> MumeiResult<BasicValueEnum<'a>> {
     match stmt {
-        HirStmt::Let { var, value, .. } => {
+        HirStmt::Let { var, ty, value } => {
             let val = compile_hir_expr(
-                context, builder, module, function, value, variables, array_ptrs, module_env,
+                context, builder, module, function, value, variables, var_types, array_ptrs,
+                module_env,
             )?;
             variables.insert(var.clone(), val);
+            let inferred_ty = ty
+                .as_deref()
+                .map(|ty_name| module_env.resolve_base_type(ty_name))
+                .filter(|base| module_env.get_struct(base).is_some())
+                .or_else(|| infer_struct_type_name(value, var_types, module_env));
+            if let Some(struct_ty) = inferred_ty {
+                var_types.insert(var.clone(), struct_ty);
+            }
             Ok(val)
         }
         HirStmt::Assign { var, value } => {
             let val = compile_hir_expr(
-                context, builder, module, function, value, variables, array_ptrs, module_env,
+                context, builder, module, function, value, variables, var_types, array_ptrs,
+                module_env,
             )?;
             variables.insert(var.clone(), val);
+            if let Some(struct_ty) = infer_struct_type_name(value, var_types, module_env) {
+                var_types.insert(var.clone(), struct_ty);
+            }
             Ok(val)
         }
         HirStmt::ArrayStore {
@@ -42,10 +56,12 @@ pub(crate) fn compile_hir_stmt<'a>(
             value,
         } => {
             let val = compile_hir_expr(
-                context, builder, module, function, value, variables, array_ptrs, module_env,
+                context, builder, module, function, value, variables, var_types, array_ptrs,
+                module_env,
             )?;
             let idx = compile_hir_expr(
-                context, builder, module, function, index, variables, array_ptrs, module_env,
+                context, builder, module, function, index, variables, var_types, array_ptrs,
+                module_env,
             )?
             .into_int_value();
             if let Some((len_val, data_ptr_val)) = array_ptrs.get(array.as_str()) {
@@ -130,7 +146,8 @@ pub(crate) fn compile_hir_stmt<'a>(
 
             builder.position_at_end(cond_block);
             let cond_val = compile_hir_expr(
-                context, builder, module, function, cond, variables, array_ptrs, module_env,
+                context, builder, module, function, cond, variables, var_types, array_ptrs,
+                module_env,
             )?
             .into_int_value();
             let cond_bool = llvm!(builder.build_int_compare(
@@ -143,7 +160,8 @@ pub(crate) fn compile_hir_stmt<'a>(
 
             builder.position_at_end(body_block);
             compile_hir_stmt(
-                context, builder, module, function, body, variables, array_ptrs, module_env,
+                context, builder, module, function, body, variables, var_types, array_ptrs,
+                module_env,
             )?;
             let body_end_block = builder.get_insert_block().unwrap();
 
@@ -165,12 +183,14 @@ pub(crate) fn compile_hir_stmt<'a>(
             let mut last_val: BasicValueEnum = context.i64_type().const_int(0, false).into();
             for s in stmts {
                 last_val = compile_hir_stmt(
-                    context, builder, module, function, s, variables, array_ptrs, module_env,
+                    context, builder, module, function, s, variables, var_types, array_ptrs,
+                    module_env,
                 )?;
             }
             if let Some(tail) = tail_expr {
                 last_val = compile_hir_expr(
-                    context, builder, module, function, tail, variables, array_ptrs, module_env,
+                    context, builder, module, function, tail, variables, var_types, array_ptrs,
+                    module_env,
                 )?;
             }
             Ok(last_val)
@@ -228,7 +248,8 @@ pub(crate) fn compile_hir_stmt<'a>(
             llvm!(builder.build_call(lock_fn, &[mutex_ptr.into()], &format!("lock_{}", resource)));
 
             let body_result = compile_hir_stmt(
-                context, builder, module, function, body, variables, array_ptrs, module_env,
+                context, builder, module, function, body, variables, var_types, array_ptrs,
+                module_env,
             )?;
 
             llvm!(builder.build_call(
@@ -240,7 +261,7 @@ pub(crate) fn compile_hir_stmt<'a>(
             Ok(body_result)
         }
         HirStmt::Expr(expr) => compile_hir_expr(
-            context, builder, module, function, expr, variables, array_ptrs, module_env,
+            context, builder, module, function, expr, variables, var_types, array_ptrs, module_env,
         ),
     }
 }
