@@ -1573,11 +1573,15 @@ pub(crate) fn verify_inner(
                         }
                     }
                     let mut reconstruction_variables = HashMap::new();
+                    let mut model_values: HashMap<String, CexValue> = HashMap::new();
                     for (name, var_z3) in &env {
                         reconstruction_variables.insert(name.clone(), var_z3.clone());
                         if let Some(val) = model.eval(var_z3, true) {
                             if let Some(int_value) = z3_dynamic_to_i64(&val) {
                                 model_map.insert(name.clone(), int_value);
+                            }
+                            if let Some(cex_value) = z3_dynamic_to_cex_value(&val) {
+                                model_values.insert(name.clone(), cex_value);
                             }
                         }
                     }
@@ -1604,7 +1608,7 @@ pub(crate) fn verify_inner(
                         &reconstruction_variables,
                     ));
                     if enable_spurious_detection {
-                        let validation = validate_counterexample(atom, &model_map, module_env);
+                        let validation = validate_counterexample(atom, &model_values, module_env);
                         if validation.validation_status == "spurious_candidate" {
                             solver.pop(1);
                             let symbols = validation
@@ -1921,6 +1925,29 @@ fn z3_dynamic_to_i64(value: &Dynamic) -> Option<i64> {
         .as_int()
         .and_then(|int_value| int_value.as_i64())
         .or_else(|| format!("{}", value).parse::<i64>().ok())
+}
+
+/// Extract a concrete counterexample value from a Z3 model term, covering the
+/// `f64` encodings used by verification: `Int`, `Bool`, exact-rational `Real`
+/// (default `f64`), and IEEE 754 `Float` (under `--ieee754-f64`).
+fn z3_dynamic_to_cex_value(value: &Dynamic) -> Option<CexValue> {
+    if let Some(int_value) = value.as_int().and_then(|v| v.as_i64()) {
+        return Some(CexValue::Int(int_value));
+    }
+    if let Some(bool_value) = value.as_bool().and_then(|v| v.as_bool()) {
+        return Some(CexValue::Bool(bool_value));
+    }
+    if value.as_real().is_some() || value.as_float().is_some() {
+        if let Some(float_value) = parse_z3_numeric_to_f64(&format!("{}", value)) {
+            return Some(CexValue::Float(float_value));
+        }
+    }
+    // Fall back to parsing the printed form (e.g. plain integers).
+    let text = format!("{}", value);
+    if let Ok(int_value) = text.parse::<i64>() {
+        return Some(CexValue::Int(int_value));
+    }
+    parse_z3_numeric_to_f64(&text).map(CexValue::Float)
 }
 
 #[allow(clippy::too_many_arguments)]
