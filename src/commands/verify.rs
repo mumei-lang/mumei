@@ -33,6 +33,8 @@ pub(crate) fn cmd_verify_command(command: Command) {
         property_based_test,
         warn_fragment,
         ieee754_f64,
+        warn_untyped_arrays,
+        strict_array_types,
         property_based_test_count,
         property_based_test_seed,
         property_based_test_max_shrink_steps,
@@ -134,6 +136,8 @@ pub(crate) fn cmd_verify_command(command: Command) {
                     property_based_test,
                     warn_fragment,
                     ieee754_f64,
+                    warn_untyped_arrays,
+                    strict_array_types,
                     property_based_test_count,
                     property_based_test_seed,
                     property_based_test_max_shrink_steps,
@@ -192,6 +196,8 @@ pub(crate) fn cmd_verify_command(command: Command) {
             property_based_test,
             warn_fragment,
             ieee754_f64,
+            warn_untyped_arrays,
+            strict_array_types,
             property_based_test_count,
             property_based_test_seed,
             property_based_test_max_shrink_steps,
@@ -310,6 +316,8 @@ pub(crate) struct VerifyOptions<'a> {
     pub(crate) property_based_test: bool,
     pub(crate) warn_fragment: bool,
     pub(crate) ieee754_f64: bool,
+    pub(crate) warn_untyped_arrays: bool,
+    pub(crate) strict_array_types: bool,
     pub(crate) property_based_test_count: usize,
     pub(crate) property_based_test_seed: Option<u64>,
     pub(crate) property_based_test_max_shrink_steps: usize,
@@ -335,6 +343,8 @@ struct VerifyContext<'a> {
     emit_lean_artifacts: bool,
     enable_spurious_detection: bool,
     warn_fragment: bool,
+    warn_untyped_arrays: bool,
+    strict_array_types: bool,
     diagnostics: &'a mut Vec<verification::Diagnostic>,
     loss_vectors: &'a mut Vec<serde_json::Value>,
     structured_feedbacks: &'a mut Vec<StructuredFeedback>,
@@ -354,6 +364,18 @@ fn verify_single_atom(atom: &parser::Atom, name: &str, ctx: &mut VerifyContext<'
         let _ = collect_decidable_fragment_diagnostic(atom, ctx.module_env, ctx.json_output)
             .inspect(|d| ctx.diagnostics.push(d.clone()))
             .is_some();
+    }
+    if (ctx.warn_untyped_arrays || ctx.strict_array_types) && !ctx.module_env.is_verified(name) {
+        if let Some(diagnostic) =
+            collect_untyped_array_access_diagnostic(atom, ctx.strict_array_types, ctx.json_output)
+        {
+            ctx.diagnostics.push(diagnostic);
+            if ctx.strict_array_types {
+                *ctx.failed += 1;
+                ctx.verification_cache.remove(name);
+                return;
+            }
+        }
     }
     let promote_outside_fragment = ctx.emit_lean_artifacts && has_fragment_warning;
     if has_finite_field_semantics {
@@ -854,6 +876,8 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
         property_based_test,
         warn_fragment,
         ieee754_f64,
+        warn_untyped_arrays,
+        strict_array_types,
         property_based_test_count,
         property_based_test_seed,
         property_based_test_max_shrink_steps,
@@ -1104,6 +1128,8 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                     emit_lean_artifacts,
                     enable_spurious_detection,
                     warn_fragment,
+                    warn_untyped_arrays,
+                    strict_array_types,
                     diagnostics: &mut diagnostics,
                     loss_vectors: &mut loss_vectors,
                     structured_feedbacks: &mut structured_feedbacks,
@@ -1133,6 +1159,8 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                         emit_lean_artifacts,
                         enable_spurious_detection,
                         warn_fragment,
+                        warn_untyped_arrays,
+                        strict_array_types,
                         diagnostics: &mut diagnostics,
                         loss_vectors: &mut loss_vectors,
                         structured_feedbacks: &mut structured_feedbacks,

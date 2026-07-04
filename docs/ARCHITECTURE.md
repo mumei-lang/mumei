@@ -81,6 +81,31 @@ Type annotations include primitive scalar types (`i64`, `f64`, `bool`, `Str`), r
 
 During Z3 verification, array indices use `Int` sort and the array element sort is selected from the declared element type: `Int` for `[i64]`, `Real` for `[f64]` (or IEEE 754 `Float(11,53)` under the opt-in `--ieee754-f64` mode, see below), and `Bool` for `[bool]`.
 
+#### Untyped array access diagnostics (`--warn-untyped-arrays` / `--strict-array-types`)
+
+Because the `i64` fallback is silent, an array intended to hold `f64` or `bool`
+values is still lowered to the `Int` element sort when its access is
+unannotated, which can mask element-type mismatches. Two opt-in flags surface
+this without changing the default behavior:
+
+- `--warn-untyped-arrays` emits an `untyped_array_access` **warning** for every
+  atom that accesses an array as `arr[i]` where `arr` lacks an explicit `[T]`
+  element-type annotation (either it is not a parameter, or its annotation is
+  not an array type). The `i64` fallback is still applied — this is diagnostic
+  only.
+- `--strict-array-types` escalates the same finding to an **error**, failing the
+  atom. This is the opt-in strict mode intended to eventually require explicit
+  element-type annotations; it is off by default so the `i64` fallback and the
+  `std/list.mm` / `forall(i, 0, n, arr[i] >= 0)` idioms keep verifying unchanged.
+
+Detection lives in `verification::untyped_array_access_diagnostic` /
+`detect_untyped_array_accesses` (`mumei-core/src/verification/fragment.rs`),
+wired through `src/commands/verify.rs` and rendered by
+`collect_untyped_array_access_diagnostic` in `src/feedback.rs`, mirroring the
+`--warn-fragment` diagnostic path. Explicitly annotated `[i64]`/`[f64]`/`[bool]`
+arrays never trigger the diagnostic. See `tests/test_untyped_array_access.mm`
+and `tests/test_untyped_array_access.rs`.
+
 ### `f64` Verification Sort: Real by default, IEEE 754 Float opt-in
 
 By default, `f64` parameters and `f64` literals are encoded as Z3 `Real` sort (exact mathematical reals over ℚ), not Z3 `Float` sort (IEEE 754 binary64). This is a deliberate trade-off:

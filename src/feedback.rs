@@ -116,6 +116,30 @@ pub(crate) fn collect_decidable_fragment_diagnostic(
     Some(diagnostic)
 }
 
+pub(crate) fn collect_untyped_array_access_diagnostic(
+    atom: &parser::Atom,
+    strict: bool,
+    suppress_output: bool,
+) -> Option<verification::Diagnostic> {
+    let diagnostic = verification::untyped_array_access_diagnostic(atom, strict)?;
+    if !suppress_output {
+        let location = if atom.span.file.is_empty() {
+            format!("<unknown>:{}", atom.span.line)
+        } else {
+            format!("{}:{}", atom.span.file, atom.span.line)
+        };
+        eprintln!(
+            "{}[{}]: {}",
+            diagnostic.severity, diagnostic.code, diagnostic.message
+        );
+        eprintln!("  --> {}", location);
+        eprintln!(
+            "  hint: annotate the parameter as `[i64]`, `[f64]`, or `[bool]` to select the element sort"
+        );
+    }
+    Some(diagnostic)
+}
+
 pub(crate) fn emit_decidable_fragment_warning(
     atom: &parser::Atom,
     module_env: &verification::ModuleEnv,
