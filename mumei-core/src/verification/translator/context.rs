@@ -39,6 +39,11 @@ pub(crate) struct VCtx<'a> {
     /// satisfiability query without leaking into sibling branches.
     pub(crate) path_cond_stack: std::cell::RefCell<Vec<Bool<'a>>>,
     pub(crate) profiler: Option<&'a std::cell::RefCell<IncrementalProfiler<'a>>>,
+    /// Opt-in IEEE 754 `f64` verification (`--ieee754-f64`). When `true`,
+    /// `f64` parameters/literals are encoded as Z3 IEEE 754 binary64 `Float`
+    /// and `f64` arithmetic is lowered to the FP theory (round-nearest-even).
+    /// When `false` (default), `f64` uses the exact-rational `Real` encoding.
+    pub(crate) ieee754_f64: bool,
 }
 
 impl<'a> VCtx<'a> {

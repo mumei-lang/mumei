@@ -89,13 +89,14 @@ pub fn check_spec_satisfiability(
     atom: &Atom,
     module_env: &ModuleEnv,
 ) -> Result<SpecValidationResult, SpecContradiction> {
-    check_spec_satisfiability_with_property_based(atom, module_env, None)
+    check_spec_satisfiability_with_property_based(atom, module_env, None, false)
 }
 
 pub fn check_spec_satisfiability_with_property_based(
     atom: &Atom,
     module_env: &ModuleEnv,
     property_based_config: Option<&PropertyBasedTestConfig>,
+    ieee754_f64: bool,
 ) -> Result<SpecValidationResult, SpecContradiction> {
     let mut diagnostics = Vec::new();
     let checked_refinements = check_standalone_refinements(atom, module_env)?;
@@ -104,8 +105,8 @@ pub fn check_spec_satisfiability_with_property_based(
     cfg.set_timeout_msec(5000);
     let ctx = super::Context::new(&cfg);
     let solver = Solver::new(&ctx);
-    let vc = validation_ctx(&ctx, module_env, atom);
-    let mut env = seed_env(&ctx, atom, module_env);
+    let vc = validation_ctx(&ctx, module_env, atom, ieee754_f64);
+    let mut env = seed_env(&ctx, atom, module_env, ieee754_f64);
     assert_parameter_refinements(&vc, &solver, atom, module_env, &mut env)?;
     assert_clause(&vc, &solver, &mut env, atom, &atom.requires, "requires")?;
 
@@ -148,7 +149,7 @@ pub fn check_spec_satisfiability_with_property_based(
     let ensure_clauses = split_top_level_conjunctions(&atom.ensures);
     for (index, clause) in ensure_clauses.iter().enumerate() {
         let local_solver = Solver::new(&ctx);
-        let mut local_env = seed_env(&ctx, atom, module_env);
+        let mut local_env = seed_env(&ctx, atom, module_env, ieee754_f64);
         assert_parameter_refinements(&vc, &local_solver, atom, module_env, &mut local_env)?;
         assert_clause(
             &vc,
@@ -172,7 +173,7 @@ pub fn check_spec_satisfiability_with_property_based(
 
     if !ensure_clauses.is_empty() {
         let combined_solver = Solver::new(&ctx);
-        let mut combined_env = seed_env(&ctx, atom, module_env);
+        let mut combined_env = seed_env(&ctx, atom, module_env, ieee754_f64);
         assert_parameter_refinements(&vc, &combined_solver, atom, module_env, &mut combined_env)?;
         assert_clause(
             &vc,
@@ -214,7 +215,7 @@ pub fn check_spec_satisfiability_with_property_based(
             }
             implication_checks += 1;
             let local_solver = Solver::new(&ctx);
-            let mut local_env = seed_env(&ctx, atom, module_env);
+            let mut local_env = seed_env(&ctx, atom, module_env, ieee754_f64);
             assert_parameter_refinements(&vc, &local_solver, atom, module_env, &mut local_env)?;
             assert_clause(
                 &vc,
@@ -271,6 +272,7 @@ fn validation_ctx<'a>(
     ctx: &'a super::Context,
     module_env: &'a ModuleEnv,
     atom: &'a Atom,
+    ieee754_f64: bool,
 ) -> VCtx<'a> {
     VCtx {
         ctx,
@@ -283,22 +285,34 @@ fn validation_ctx<'a>(
         has_string_constraints: None,
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
         profiler: None,
+        ieee754_f64,
     }
 }
 
-fn seed_env<'a>(ctx: &'a super::Context, atom: &Atom, module_env: &ModuleEnv) -> Env<'a> {
+fn seed_env<'a>(
+    ctx: &'a super::Context,
+    atom: &Atom,
+    module_env: &ModuleEnv,
+    ieee754_f64: bool,
+) -> Env<'a> {
     let mut env: Env<'a> = HashMap::new();
     env.insert("true".to_string(), Bool::from_bool(ctx, true).into());
     env.insert("false".to_string(), Bool::from_bool(ctx, false).into());
     for param in &atom.params {
         env.insert(
             param.name.clone(),
-            param_z3_value(ctx, &param.name, param.type_name.as_deref(), module_env),
+            param_z3_value(
+                ctx,
+                &param.name,
+                param.type_name.as_deref(),
+                module_env,
+                ieee754_f64,
+            ),
         );
     }
     env.insert(
         "result".to_string(),
-        result_z3_value(ctx, atom.return_type.as_deref(), module_env),
+        result_z3_value(ctx, atom.return_type.as_deref(), module_env, ieee754_f64),
     );
     env
 }
@@ -307,9 +321,10 @@ fn result_z3_value<'a>(
     ctx: &'a super::Context,
     return_type: Option<&str>,
     module_env: &ModuleEnv,
+    ieee754_f64: bool,
 ) -> Dynamic<'a> {
     match return_type {
-        Some(type_name) => param_z3_value(ctx, "result", Some(type_name), module_env),
+        Some(type_name) => param_z3_value(ctx, "result", Some(type_name), module_env, ieee754_f64),
         None => Int::new_const(ctx, "result").into(),
     }
 }
@@ -429,7 +444,7 @@ fn check_standalone_refinements(
         cfg.set_timeout_msec(5000);
         let ctx = super::Context::new(&cfg);
         let solver = Solver::new(&ctx);
-        let vc = validation_ctx(&ctx, module_env, atom);
+        let vc = validation_ctx(&ctx, module_env, atom, false);
         let mut env: Env<'_> = HashMap::new();
         env.insert("true".to_string(), Bool::from_bool(&ctx, true).into());
         env.insert("false".to_string(), Bool::from_bool(&ctx, false).into());

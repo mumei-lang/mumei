@@ -103,6 +103,12 @@ pub(crate) enum Command {
         /// Emit outside_decidable_fragment warnings for atoms outside the Z3-stable fragment
         #[arg(long)]
         warn_fragment: bool,
+        /// Opt-in IEEE 754 (binary64) verification for `f64`: encode `f64` as
+        /// Z3 `Float(11,53)` with round-nearest-even FP arithmetic instead of
+        /// the default exact-rational `Real` encoding. Models rounding so e.g.
+        /// `0.1 + 0.2 != 0.3` holds. Default off (keeps `Real` semantics).
+        #[arg(long)]
+        ieee754_f64: bool,
         /// Number of generated property-based inputs per atom
         #[arg(long, default_value_t = 100)]
         property_based_test_count: usize,

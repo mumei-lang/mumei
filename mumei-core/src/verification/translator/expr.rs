@@ -25,7 +25,15 @@ pub(crate) fn expr_to_z3<'a>(
     let ctx = vc.ctx;
     match expr {
         Expr::Number(n) => Ok(Int::from_i64(ctx, *n).into()),
-        Expr::Float(f) => Ok(real_from_f64(ctx, *f).into()),
+        Expr::Float(f) => {
+            if vc.ieee754_f64 {
+                // Opt-in IEEE 754: preserve the exact binary64 bit pattern.
+                Ok(float_from_f64(ctx, *f).into())
+            } else {
+                // Default: exact-rational `Real` encoding.
+                Ok(real_from_f64(ctx, *f).into())
+            }
+        }
         // Plan 9: String literal to Z3 String Sort
         Expr::StringLit(s) => Ok(Z3String::from_str(ctx, s).unwrap().into()),
         Expr::Variable(name) => {
@@ -697,21 +705,25 @@ pub(crate) fn expr_to_z3<'a>(
                     _ => Err("Invalid real op".into()),
                 }
             } else if l.as_float().is_some() || r.as_float().is_some() {
-                let lf = l.as_float().unwrap_or(Float::from_f64(ctx, 0.0));
-                let rf = r.as_float().unwrap_or(Float::from_f64(ctx, 0.0));
+                // Opt-in IEEE 754 (`--ieee754-f64`) path: `f64` values are Z3
+                // binary64 `Float`s. Lower arithmetic to the FP theory with the
+                // round-nearest-ties-to-even mode (matching hardware `f64`) and
+                // use `fp` comparisons / `fp.eq` — never an unconstrained fresh
+                // constant, so the actual FP semantics are modeled.
+                let rne = round_nearest_even(ctx);
+                let lf = coerce_to_float(ctx, &l, &rne).ok_or("Expected float operand")?;
+                let rf = coerce_to_float(ctx, &r, &rne).ok_or("Expected float operand")?;
                 match op {
                     Op::Gt => Ok(lf.gt(&rf).into()),
                     Op::Lt => Ok(lf.lt(&rf).into()),
                     Op::Ge => Ok(lf.ge(&rf).into()),
                     Op::Le => Ok(lf.le(&rf).into()),
-                    Op::Eq => Ok(lf._eq(&rf).into()),
-                    Op::Neq => Ok(lf._eq(&rf).not().into()),
-                    Op::Add | Op::Sub | Op::Mul | Op::Div => {
-                        static FLOAT_COUNTER: std::sync::atomic::AtomicUsize =
-                            std::sync::atomic::AtomicUsize::new(0);
-                        let id = FLOAT_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                        Ok(Float::new_const(ctx, format!("float_arith_{}", id), 11, 53).into())
-                    }
+                    Op::Eq => Ok(float_eq(ctx, &lf, &rf).into()),
+                    Op::Neq => Ok(float_eq(ctx, &lf, &rf).not().into()),
+                    Op::Add => Ok(rne.add(&lf, &rf).into()),
+                    Op::Sub => Ok(rne.sub(&lf, &rf).into()),
+                    Op::Mul => Ok(rne.mul(&lf, &rf).into()),
+                    Op::Div => Ok(rne.div(&lf, &rf).into()),
                     _ => Err("Invalid float op".into()),
                 }
             } else {

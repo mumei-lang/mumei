@@ -52,6 +52,7 @@ pub(crate) fn verify_atom_invariant(
         has_string_constraints: None,
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
         profiler: None,
+        ieee754_f64: false,
     };
 
     let mut env: Env = HashMap::new();
@@ -63,6 +64,7 @@ pub(crate) fn verify_atom_invariant(
             param.name.as_str(),
             param.type_name.as_deref(),
             module_env,
+            false,
         );
         env.insert(param.name.clone(), var);
 

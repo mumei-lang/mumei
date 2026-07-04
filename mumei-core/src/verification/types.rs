@@ -682,6 +682,10 @@ pub struct VerificationConfig {
     pub enable_vacuity_check: bool,
     pub detect_loops: bool,
     pub suggest_cegis: bool,
+    /// Opt-in IEEE 754 binary64 encoding for `f64` verification
+    /// (`--ieee754-f64`). Default `false` keeps the exact-rational `Real`
+    /// encoding, preserving decidability/speed for existing fixtures.
+    pub ieee754_f64: bool,
     pub property_based_test: Option<PropertyBasedTestConfig>,
 }
 
@@ -696,6 +700,7 @@ impl Default for VerificationConfig {
             enable_vacuity_check: false,
             detect_loops: false,
             suggest_cegis: false,
+            ieee754_f64: false,
             property_based_test: None,
         }
     }

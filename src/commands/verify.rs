@@ -32,6 +32,7 @@ pub(crate) fn cmd_verify_command(command: Command) {
         disable_spurious_detection,
         property_based_test,
         warn_fragment,
+        ieee754_f64,
         property_based_test_count,
         property_based_test_seed,
         property_based_test_max_shrink_steps,
@@ -132,6 +133,7 @@ pub(crate) fn cmd_verify_command(command: Command) {
                     enable_spurious_detection: enable_spurious,
                     property_based_test,
                     warn_fragment,
+                    ieee754_f64,
                     property_based_test_count,
                     property_based_test_seed,
                     property_based_test_max_shrink_steps,
@@ -189,6 +191,7 @@ pub(crate) fn cmd_verify_command(command: Command) {
             enable_spurious_detection: enable_spurious,
             property_based_test,
             warn_fragment,
+            ieee754_f64,
             property_based_test_count,
             property_based_test_seed,
             property_based_test_max_shrink_steps,
@@ -306,6 +309,7 @@ pub(crate) struct VerifyOptions<'a> {
     pub(crate) enable_spurious_detection: bool,
     pub(crate) property_based_test: bool,
     pub(crate) warn_fragment: bool,
+    pub(crate) ieee754_f64: bool,
     pub(crate) property_based_test_count: usize,
     pub(crate) property_based_test_seed: Option<u64>,
     pub(crate) property_based_test_max_shrink_steps: usize,
@@ -389,12 +393,16 @@ fn verify_single_atom(atom: &parser::Atom, name: &str, ctx: &mut VerifyContext<'
         return;
     }
 
-    let proof_flags = if ctx.verification_config.enable_vacuity_check {
-        &["enable_vacuity_check"][..]
-    } else {
-        &[][..]
-    };
-    let proof_hash = resolver::compute_proof_hash_with_flags(atom, ctx.module_env, proof_flags);
+    // Proof flags that alter the verification outcome must participate in the
+    // incremental-cache key, otherwise switching modes reuses a stale result.
+    let mut proof_flags: Vec<&str> = Vec::new();
+    if ctx.verification_config.enable_vacuity_check {
+        proof_flags.push("enable_vacuity_check");
+    }
+    if ctx.verification_config.ieee754_f64 {
+        proof_flags.push("ieee754_f64");
+    }
+    let proof_hash = resolver::compute_proof_hash_with_flags(atom, ctx.module_env, &proof_flags);
 
     if let Some(cached_entry) = ctx.verification_cache.get(name) {
         if cached_entry.proof_hash == proof_hash {
@@ -845,6 +853,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
         enable_spurious_detection,
         property_based_test,
         warn_fragment,
+        ieee754_f64,
         property_based_test_count,
         property_based_test_seed,
         property_based_test_max_shrink_steps,
@@ -929,6 +938,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
         enable_vacuity_check,
         detect_loops,
         suggest_cegis,
+        ieee754_f64,
         property_based_test: property_based_config,
     };
     let input_path = Path::new(input);

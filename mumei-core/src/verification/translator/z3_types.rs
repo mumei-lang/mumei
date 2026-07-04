@@ -3,11 +3,90 @@ use super::super::support::*;
 use super::super::*;
 use super::*;
 use crate::lowering::{lower, LoweredType};
+use z3::ast::Ast as _;
+
+/// Number of exponent / significand bits for IEEE 754 binary64 (`f64`).
+///
+/// binary64 has an 11-bit exponent and a 53-bit significand (52 stored +
+/// 1 implicit). `Sort::float(11, 53)` / `Float::from_f64` (which uses
+/// `Sort::double`) both denote this sort.
+pub(crate) const F64_EBITS: u32 = 11;
+pub(crate) const F64_SBITS: u32 = 53;
+
+/// Extract the raw `z3_sys::Z3_context` backing a `z3::Context`.
+///
+/// `z3` 0.12's `Context` is a single-field newtype over
+/// `z3_sys::Z3_context` (`pub struct Context { z3_ctx: Z3_context }`), but
+/// that field is private and the crate exposes no accessor. The IEEE 754
+/// floating-point theory helpers below need the raw context to call the
+/// `Z3_mk_fpa_*` builders that `z3` 0.12 does not wrap (notably the
+/// round-nearest-ties-to-even rounding mode and real→float coercion). Reading
+/// the pointer at offset 0 is sound for a single-field struct: the field lives
+/// at the start of the struct and the pointer value is `Copy`.
+fn raw_z3_context(ctx: &Context) -> z3_sys::Z3_context {
+    unsafe { *(ctx as *const Context as *const z3_sys::Z3_context) }
+}
+
+/// The IEEE 754 round-nearest-ties-to-even rounding mode.
+///
+/// This is the default rounding mode used by hardware `f64` arithmetic, so it
+/// is the faithful choice for `--ieee754-f64` verification (e.g. it makes
+/// `0.1 + 0.2 != 0.3` hold, which round-toward-zero would not).
+pub(crate) fn round_nearest_even(ctx: &Context) -> Float<'_> {
+    let raw = raw_z3_context(ctx);
+    let rne = unsafe { z3_sys::Z3_mk_fpa_round_nearest_ties_to_even(raw) };
+    unsafe { Float::wrap(ctx, rne) }
+}
+
+/// Convert an `f64` literal to a Z3 IEEE 754 binary64 `Float` numeral.
+///
+/// Unlike `real_from_f64`, this preserves the exact binary64 bit pattern of
+/// the literal (e.g. `0.1` becomes `0x3FB999999999999A`, not the rational
+/// ⅒), modeling true IEEE 754 semantics.
+pub(crate) fn float_from_f64<'a>(ctx: &'a Context, value: f64) -> Float<'a> {
+    Float::from_f64(ctx, value)
+}
+
+/// Coerce a `Dynamic` value to an IEEE 754 binary64 `Float`.
+///
+/// Already-`Float` values pass through unchanged. `Real` and `Int` operands
+/// (e.g. a mixed `f64`/integer subexpression) are lowered into binary64 via
+/// the FP theory's real→float conversion under the given rounding mode.
+pub(crate) fn coerce_to_float<'a>(
+    ctx: &'a Context,
+    value: &Dynamic<'a>,
+    rne: &Float<'a>,
+) -> Option<Float<'a>> {
+    if let Some(f) = value.as_float() {
+        return Some(f);
+    }
+    let real = value
+        .as_real()
+        .or_else(|| value.as_int().map(|i| i.to_real()))?;
+    let raw = raw_z3_context(ctx);
+    let sort = unsafe { z3_sys::Z3_mk_fpa_sort_double(raw) };
+    let ast =
+        unsafe { z3_sys::Z3_mk_fpa_to_fp_real(raw, rne.get_z3_ast(), real.get_z3_ast(), sort) };
+    Some(unsafe { Float::wrap(ctx, ast) })
+}
+
+/// IEEE 754 floating-point equality (`fp.eq`).
+///
+/// This differs from structural equality (`Z3_mk_eq`): `NaN != NaN` and
+/// `+0.0 == -0.0` under `fp.eq`, matching runtime `f64` comparison.
+pub(crate) fn float_eq<'a>(ctx: &'a Context, lhs: &Float<'a>, rhs: &Float<'a>) -> Bool<'a> {
+    let raw = raw_z3_context(ctx);
+    let ast = unsafe { z3_sys::Z3_mk_fpa_eq(raw, lhs.get_z3_ast(), rhs.get_z3_ast()) };
+    unsafe { Bool::wrap(ctx, ast) }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ArrayElementSort {
     Int,
     Real,
+    /// IEEE 754 binary64 elements, selected for `[f64]` arrays only under
+    /// the opt-in `--ieee754-f64` mode (default `f64` arrays use `Real`).
+    Float,
     Bool,
 }
 
@@ -33,8 +112,9 @@ pub(crate) fn array_element_type_name(name: &str, vc: &VCtx<'_>) -> String {
         .unwrap_or_else(|| "i64".to_string())
 }
 
-pub(crate) fn array_element_sort_from_type(type_name: &str) -> ArrayElementSort {
+pub(crate) fn array_element_sort_from_type(type_name: &str, ieee754_f64: bool) -> ArrayElementSort {
     match lower(type_name) {
+        LoweredType::F64 if ieee754_f64 => ArrayElementSort::Float,
         LoweredType::F64 => ArrayElementSort::Real,
         LoweredType::Bool => ArrayElementSort::Bool,
         _ => ArrayElementSort::Int,
@@ -42,7 +122,7 @@ pub(crate) fn array_element_sort_from_type(type_name: &str) -> ArrayElementSort 
 }
 
 pub(crate) fn array_element_sort(name: &str, vc: &VCtx<'_>) -> ArrayElementSort {
-    array_element_sort_from_type(&array_element_type_name(name, vc))
+    array_element_sort_from_type(&array_element_type_name(name, vc), vc.ieee754_f64)
 }
 
 /// Convert an `f64` literal to a Z3 `Real` (exact rational) value.
@@ -87,6 +167,10 @@ pub(crate) fn z3_array_for_sort<'a>(
             let real_sort = z3::Sort::real(ctx);
             Array::new_const(ctx, name, &int_sort, &real_sort)
         }
+        ArrayElementSort::Float => {
+            let float_sort = z3::Sort::float(ctx, F64_EBITS, F64_SBITS);
+            Array::new_const(ctx, name, &int_sort, &float_sort)
+        }
         ArrayElementSort::Bool => {
             let bool_sort = z3::Sort::bool(ctx);
             Array::new_const(ctx, name, &int_sort, &bool_sort)
@@ -120,6 +204,12 @@ pub(crate) fn coerce_array_store_value<'a>(
             .or_else(|| value.as_int().map(|i| i.to_real()))
             .map(Into::into)
             .ok_or_else(|| MumeiError::type_error("Array store value must be real")),
+        ArrayElementSort::Float => {
+            let rne = round_nearest_even(vc.ctx);
+            coerce_to_float(vc.ctx, &value, &rne)
+                .map(Into::into)
+                .ok_or_else(|| MumeiError::type_error("Array store value must be float"))
+        }
         ArrayElementSort::Bool => value
             .as_bool()
             .map(Into::into)
@@ -132,6 +222,7 @@ pub(crate) fn param_z3_value<'a>(
     name: &str,
     type_name: Option<&str>,
     module_env: &ModuleEnv,
+    ieee754_f64: bool,
 ) -> Dynamic<'a> {
     let base = type_name
         .map(|t| module_env.resolve_base_type(t))
@@ -140,9 +231,10 @@ pub(crate) fn param_z3_value<'a>(
         z3_array_for_sort(
             ctx,
             name,
-            array_element_sort_from_type(&array_element_type_from_annotation(
-                type_name, module_env,
-            )),
+            array_element_sort_from_type(
+                &array_element_type_from_annotation(type_name, module_env),
+                ieee754_f64,
+            ),
         )
         .into()
     } else {
@@ -154,9 +246,13 @@ pub(crate) fn param_z3_value<'a>(
         // layer rather than re-adding a string match. Mirrors the note in
         // mumei-emit-llvm `resolve_param_type`.
         match lower(&base) {
-            // `f64` params are encoded as Z3 `Real` (exact rationals), not IEEE 754.
-            // See `real_from_f64` and
+            // `f64` params default to Z3 `Real` (exact rationals). Under the
+            // opt-in `--ieee754-f64` mode they are instead declared as IEEE 754
+            // binary64 `Float`. See `real_from_f64` / `float_from_f64` and
             // `docs/ARCHITECTURE.md` § "`f64` Verification Sort".
+            LoweredType::F64 if ieee754_f64 => {
+                Float::new_const(ctx, name, F64_EBITS, F64_SBITS).into()
+            }
             LoweredType::F64 => Real::new_const(ctx, name).into(),
             LoweredType::Str => Z3String::new_const(ctx, name).into(),
             LoweredType::Bool => Bool::new_const(ctx, name).into(),
