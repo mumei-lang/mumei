@@ -8,7 +8,8 @@ mod temporal;
 mod z3_types;
 
 pub(crate) use constraints::{
-    apply_refinement_constraint, check_contract_subsumption, propagate_equality_from_ensures,
+    apply_refinement_constraint, assert_result_equality, check_contract_subsumption,
+    propagate_equality_from_ensures,
 };
 pub use context::DEFAULT_CONSTRAINT_BUDGET;
 pub(crate) use context::{

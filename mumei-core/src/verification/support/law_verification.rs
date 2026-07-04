@@ -244,6 +244,18 @@ pub fn verify_impl(
     module_env: &ModuleEnv,
     output_dir: &Path,
 ) -> MumeiResult<()> {
+    verify_impl_with_options(impl_def, module_env, output_dir, false)
+}
+
+/// `verify_impl` の IEEE 754 モード対応版。`ieee754_f64` が true の場合、
+/// f64 対象型の law 変数と式の lowering に Z3 FP 理論（Float(11,53)）を
+/// 使い、atom 契約検証と同じ f64 エンコーディングで law を検証する。
+pub fn verify_impl_with_options(
+    impl_def: &ImplDef,
+    module_env: &ModuleEnv,
+    output_dir: &Path,
+    ieee754_f64: bool,
+) -> MumeiResult<()> {
     let trait_def = module_env.get_trait(&impl_def.trait_name).ok_or_else(|| {
         MumeiError::type_error_at(
             format!(
@@ -320,15 +332,18 @@ pub fn verify_impl(
             has_string_constraints: None,
             path_cond_stack: std::cell::RefCell::new(Vec::new()),
             profiler: None,
-            ieee754_f64: false,
+            ieee754_f64,
         };
 
         let mut env: Env = HashMap::new();
-        // law 内の自由変数をシンボリック整数として登録
+        // law 内の自由変数をシンボリック変数として登録。
+        // f64 は atom 契約検証と同じエンコーディング（デフォルト Real、
+        // `--ieee754-f64` で Float）を使う。
         for var_name in &["a", "b", "c", "x", "y", "z"] {
             let base = module_env.resolve_base_type(&impl_def.target_type);
             let var: Dynamic = match base.as_str() {
-                "f64" => Float::new_const(&ctx, *var_name, 11, 53).into(),
+                "f64" if ieee754_f64 => Float::new_const(&ctx, *var_name, 11, 53).into(),
+                "f64" => Real::new_const(&ctx, *var_name).into(),
                 // Plan 9: Str parameters as Z3 String Sort
                 "Str" => Z3String::new_const(&ctx, *var_name).into(),
                 _ => Int::new_const(&ctx, *var_name).into(),

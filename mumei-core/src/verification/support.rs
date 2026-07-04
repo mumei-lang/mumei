@@ -5,10 +5,10 @@ mod effects;
 mod law_verification;
 mod resource_safety;
 
-pub use law_verification::verify_impl;
 pub(crate) use law_verification::{
     contains_method_call, replace_word, split_args, substitute_method_calls,
 };
+pub use law_verification::{verify_impl, verify_impl_with_options};
 
 pub(crate) use effects::{
     check_constant_constraint, evaluate_string_constraint, parse_constraint_to_z3_string,

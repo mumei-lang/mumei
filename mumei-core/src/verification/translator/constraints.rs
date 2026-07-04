@@ -15,7 +15,11 @@ pub(crate) fn apply_refinement_constraint<'a>(
     let ctx = vc.ctx;
     // Type System 2.0: ベース型に基づいて変数を生成
     let var_z3: Dynamic = match refined._base_type.as_str() {
-        "f64" => Float::new_const(ctx, var_name, 11, 53).into(),
+        // f64 エンコーディング（デフォルト Real、`--ieee754-f64` で
+        // Float）に合わせ、パラメータ側の `param_z3_value` と同一
+        // ソートにする。
+        "f64" if vc.ieee754_f64 => Float::new_const(ctx, var_name, 11, 53).into(),
+        "f64" => Real::new_const(ctx, var_name).into(),
         "u64" => {
             let v = Int::new_const(ctx, var_name);
             let track_u64 = Bool::new_const(ctx, format!("track_u64_nonneg_{}", var_name).as_str());
@@ -214,29 +218,13 @@ pub(crate) fn propagate_equality_from_ensures<'a>(
             if is_result_left {
                 if let Ok(rhs_val) = expr_to_z3(vc, right, call_env, None) {
                     if let Some(solver) = solver_opt {
-                        if let (Some(res_int), Some(rhs_int)) =
-                            (result_z3.as_int(), rhs_val.as_int())
-                        {
-                            solver.assert(&res_int._eq(&rhs_int));
-                        } else if let (Some(res_float), Some(rhs_float)) =
-                            (result_z3.as_float(), rhs_val.as_float())
-                        {
-                            solver.assert(&res_float._eq(&rhs_float));
-                        }
+                        assert_result_equality(vc, solver, result_z3, &rhs_val);
                     }
                 }
             } else if is_result_right {
                 if let Ok(lhs_val) = expr_to_z3(vc, left, call_env, None) {
                     if let Some(solver) = solver_opt {
-                        if let (Some(res_int), Some(lhs_int)) =
-                            (result_z3.as_int(), lhs_val.as_int())
-                        {
-                            solver.assert(&res_int._eq(&lhs_int));
-                        } else if let (Some(res_float), Some(lhs_float)) =
-                            (result_z3.as_float(), lhs_val.as_float())
-                        {
-                            solver.assert(&res_float._eq(&lhs_float));
-                        }
+                        assert_result_equality(vc, solver, result_z3, &lhs_val);
                     }
                 }
             }
@@ -246,4 +234,35 @@ pub(crate) fn propagate_equality_from_ensures<'a>(
         }
     }
     Ok(())
+}
+
+/// `result == <expr>` の等式伝搬で、シンボリック result を値に束縛する。
+/// result のソート（Int / Real / Float / Bool / String）ごとに値側を必要に
+/// 応じて強制変換する。ソートが合わず強制変換もできない場合は何も
+/// assert しない（全体の ensures assert には影響しない）。
+pub(crate) fn assert_result_equality<'a>(
+    vc: &VCtx<'a>,
+    solver: &Solver<'a>,
+    result_z3: &Dynamic<'a>,
+    value: &Dynamic<'a>,
+) {
+    if let (Some(res), Some(val)) = (result_z3.as_int(), value.as_int()) {
+        solver.assert(&res._eq(&val));
+    } else if let Some(res) = result_z3.as_real() {
+        if let Some(val) = value
+            .as_real()
+            .or_else(|| value.as_int().map(|i| i.to_real()))
+        {
+            solver.assert(&res._eq(&val));
+        }
+    } else if let Some(res) = result_z3.as_float() {
+        let rne = round_nearest_even(vc.ctx);
+        if let Some(val) = coerce_to_float(vc.ctx, value, &rne) {
+            solver.assert(&res._eq(&val));
+        }
+    } else if let (Some(res), Some(val)) = (result_z3.as_bool(), value.as_bool()) {
+        solver.assert(&res._eq(&val));
+    } else if let (Some(res), Some(val)) = (result_z3.as_string(), value.as_string()) {
+        solver.assert(&res._eq(&val));
+    }
 }

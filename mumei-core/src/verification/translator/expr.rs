@@ -206,15 +206,34 @@ pub(crate) fn expr_to_z3<'a>(
                     Ok(len_var.into())
                 }
                 "sqrt" => {
-                    // Z3 0.12 の Float には sqrt メソッドがないため、
-                    // シンボリック変数として扱い、sqrt(x) >= 0 の制約を付与
+                    // Z3 0.12 の Float/Real には sqrt メソッドがないため、
+                    // シンボリック変数として扱い、sqrt(x) >= 0 の制約を付与。
+                    // ソートは f64 エンコーディング（デフォルト Real、
+                    // `--ieee754-f64` で Float）に合わせる。
                     let _val = expr_to_z3(vc, &args[0], env, solver_opt)?;
-                    let result = Float::new_const(ctx, "sqrt_result", 11, 53);
-                    if let Some(solver) = solver_opt {
-                        let zero = Float::from_f64(ctx, 0.0);
-                        solver.assert(&result.ge(&zero));
+                    // 呼び出しごとに一意な名前を使い、`sqrt(a) + sqrt(b)` の
+                    // ような複数呼び出しが同一の Z3 変数に潰れないようにする。
+                    static SQRT_COUNTER: std::sync::atomic::AtomicUsize =
+                        std::sync::atomic::AtomicUsize::new(0);
+                    let result_name = format!(
+                        "sqrt_result_{}",
+                        SQRT_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    );
+                    if vc.ieee754_f64 {
+                        let result = Float::new_const(ctx, result_name.as_str(), 11, 53);
+                        if let Some(solver) = solver_opt {
+                            let zero = Float::from_f64(ctx, 0.0);
+                            solver.assert(&result.ge(&zero));
+                        }
+                        Ok(result.into())
+                    } else {
+                        let result = Real::new_const(ctx, result_name.as_str());
+                        if let Some(solver) = solver_opt {
+                            let zero = Real::from_real(ctx, 0, 1);
+                            solver.assert(&result.ge(&zero));
+                        }
+                        Ok(result.into())
                     }
-                    Ok(result.into())
                 }
                 "cast_to_int" => {
                     // Z3 0.12 では Float->Int 直接変換がないため、シンボリック整数を返す
@@ -453,18 +472,29 @@ pub(crate) fn expr_to_z3<'a>(
                             CALL_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         let result_name = format!("call_{}_{}", name, call_id);
 
-                        // 戻り値型の推定: 呼び出し先パラメータに f64 型があれば Float、なければ Int
+                        // 戻り値型から Z3 ソートを選択する。明示的な `-> T` 注釈が
+                        // あればそれを使い、なければ従来のヒューリスティック
+                        // （f64 パラメータを含む呼び出し先は f64 を返す）に
+                        // フォールバックする。ソートは呼び出し先の `result`
+                        // エンコーディング（デフォルト Real、`--ieee754-f64` で
+                        // Float）と一致させる。
                         let has_float = callee.params.iter().any(|p| {
                             p.type_name
                                 .as_deref()
                                 .map(|t| vc.module_env.resolve_base_type(t) == "f64")
                                 .unwrap_or(false)
                         });
-                        let result_z3: Dynamic = if has_float {
-                            Float::new_const(ctx, result_name.as_str(), 11, 53).into()
-                        } else {
-                            Int::new_const(ctx, result_name.as_str()).into()
-                        };
+                        let result_type: Option<&str> = callee
+                            .return_type
+                            .as_deref()
+                            .or(if has_float { Some("f64") } else { None });
+                        let result_z3: Dynamic = param_z3_value(
+                            ctx,
+                            result_name.as_str(),
+                            result_type,
+                            vc.module_env,
+                            vc.ieee754_f64,
+                        );
 
                         // ensures を事実として solver に追加（result を呼び出し結果に束縛）
                         //
@@ -505,15 +535,9 @@ pub(crate) fn expr_to_z3<'a>(
                                             expr_to_z3(vc, right, &mut call_env, None)
                                         {
                                             if let Some(solver) = solver_opt {
-                                                if let (Some(res_int), Some(rhs_int)) =
-                                                    (result_z3.as_int(), rhs_val.as_int())
-                                                {
-                                                    solver.assert(&res_int._eq(&rhs_int));
-                                                } else if let (Some(res_float), Some(rhs_float)) =
-                                                    (result_z3.as_float(), rhs_val.as_float())
-                                                {
-                                                    solver.assert(&res_float._eq(&rhs_float));
-                                                }
+                                                assert_result_equality(
+                                                    vc, solver, &result_z3, &rhs_val,
+                                                );
                                             }
                                         }
                                     }
@@ -525,15 +549,9 @@ pub(crate) fn expr_to_z3<'a>(
                                             expr_to_z3(vc, left, &mut call_env, None)
                                         {
                                             if let Some(solver) = solver_opt {
-                                                if let (Some(res_int), Some(lhs_int)) =
-                                                    (result_z3.as_int(), lhs_val.as_int())
-                                                {
-                                                    solver.assert(&res_int._eq(&lhs_int));
-                                                } else if let (Some(res_float), Some(lhs_float)) =
-                                                    (result_z3.as_float(), lhs_val.as_float())
-                                                {
-                                                    solver.assert(&res_float._eq(&lhs_float));
-                                                }
+                                                assert_result_equality(
+                                                    vc, solver, &result_z3, &lhs_val,
+                                                );
                                             }
                                         }
                                     }

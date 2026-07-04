@@ -206,7 +206,12 @@ pub(crate) fn cmd_build(
                 if skip_verify {
                     println!("    ⚖️  Laws verification skipped (verify=false in mumei.toml)");
                 } else {
-                    match verification::verify_impl(impl_def, &module_env, output_dir) {
+                    match verification::verify_impl_with_options(
+                        impl_def,
+                        &module_env,
+                        output_dir,
+                        verification_config.ieee754_f64,
+                    ) {
                         Ok(_) => println!(
                             "    ✅ Laws verified for impl {} for {}",
                             impl_def.trait_name, impl_def.target_type

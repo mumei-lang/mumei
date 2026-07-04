@@ -531,7 +531,13 @@ pub(crate) fn verify_inner(
     // Phase 1d: atom レベル invariant の帰納的検証
     let phase_start = std::time::Instant::now();
     if let Some(ref invariant_expr) = atom.invariant {
-        verify_atom_invariant(atom, &hir_atom.body_stmt, invariant_expr, module_env)?;
+        verify_atom_invariant(
+            atom,
+            &hir_atom.body_stmt,
+            invariant_expr,
+            module_env,
+            ieee754_f64,
+        )?;
     }
     metrics.record_phase("Phase 1d: atom invariant", phase_start.elapsed());
 

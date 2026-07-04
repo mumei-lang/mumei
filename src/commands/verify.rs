@@ -1098,7 +1098,12 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                         impl_def.trait_name, impl_def.target_type
                     );
                 }
-                match verification::verify_impl(impl_def, &module_env, output_dir) {
+                match verification::verify_impl_with_options(
+                    impl_def,
+                    &module_env,
+                    output_dir,
+                    verification_config.ieee754_f64,
+                ) {
                     Ok(_) => {
                         if !quiet_output {
                             println!("    ✅ Laws verified");
