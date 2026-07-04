@@ -10,6 +10,7 @@ import tempfile
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,6 +34,7 @@ from std_graph_lib import (  # noqa: F401 (re-exported for back-compat)
 )
 
 mcp = FastMCP("Mumei-Forge")
+REPO_ROOT = Path(__file__).parent.absolute()
 
 SPEC_GUIDELINE_SUMMARY: dict[str, Any] = {
     "decidable_fragment": {
@@ -178,6 +180,15 @@ def _attach_harness_metadata(payload: dict[str, Any]) -> dict[str, Any]:
     for key, value in metadata.items():
         payload.setdefault(key, value)
     return payload
+
+
+@contextmanager
+def _temp_source_input(source_code: str):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        source_path = tmp_path / "input.mm"
+        source_path.write_text(source_code, encoding="utf-8")
+        yield tmp_path, source_path
 
 
 @dataclass
@@ -795,21 +806,16 @@ def forge_blade(
     The build command writes report.json to the -o directory, so reports are isolated per request.
     Optional trace_id/spec_metadata are forwarded into proof certificates.
     """
-    root_dir = Path(__file__).parent.absolute()
     trace_payload = _traceability_payload(source_code, trace_id, spec_metadata)
 
     # 1. Create fully isolated temp directory per request
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmp_path = Path(tmpdir)
-        source_path = tmp_path / "input.mm"
-        source_path.write_text(source_code, encoding="utf-8")
-
+    with _temp_source_input(source_code) as (tmp_path, source_path):
         # 2. Run compiler (output to temp directory)
         output_base = tmp_path / output_name
 
         result = subprocess.run(
             ["cargo", "run", "--", "build", str(source_path), "-o", str(output_base)],
-            cwd=root_dir,
+            cwd=REPO_ROOT,
             capture_output=True,
             text=True,
             env=_traceability_env(trace_payload),
@@ -818,7 +824,7 @@ def forge_blade(
         response_parts = [_format_traceability_feedback(trace_payload)]
 
         # Inject effect boundary context if restricted
-        effects_ctx = json.loads(get_allowed_effects(str(root_dir)))
+        effects_ctx = json.loads(get_allowed_effects(str(REPO_ROOT)))
         if not effects_ctx.get("unrestricted", True):
             response_parts.append(
                 f"### Effect Boundary\n{effects_ctx['summary']}\n"
@@ -885,21 +891,16 @@ def validate_logic(
     directory, making concurrent calls safe.
     Optional trace_id/spec_metadata are forwarded into proof certificates.
     """
-    root_dir = Path(__file__).parent.absolute()
     trace_payload = _traceability_payload(source_code, trace_id, spec_metadata)
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmp_path = Path(tmpdir)
-        source_path = tmp_path / "input.mm"
-        source_path.write_text(source_code, encoding="utf-8")
-
+    with _temp_source_input(source_code) as (tmp_path, source_path):
         # Run mumei verify with --report-dir to write report.json directly
         # into the per-request temp directory (concurrent-safe).
         result = subprocess.run(
             ["cargo", "run", "--", "verify",
              "--report-dir", str(tmp_path),
              str(source_path)],
-            cwd=root_dir,
+            cwd=REPO_ROOT,
             capture_output=True,
             text=True,
             env=_traceability_env(trace_payload),
@@ -908,7 +909,7 @@ def validate_logic(
         response_parts = [_format_traceability_feedback(trace_payload)]
 
         # Inject effect boundary context if restricted
-        effects_ctx = json.loads(get_allowed_effects(str(root_dir)))
+        effects_ctx = json.loads(get_allowed_effects(str(REPO_ROOT)))
         if not effects_ctx.get("unrestricted", True):
             response_parts.append(
                 f"### Effect Boundary\n{effects_ctx['summary']}\n"
@@ -976,13 +977,8 @@ def validate_logic(
 @mcp.tool()
 def get_structured_feedback(source_code: str) -> str:
     """Return the P9-E structured feedback JSON for Mumei source code."""
-    root_dir = Path(__file__).parent.absolute()
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmp_path = Path(tmpdir)
-        source_path = tmp_path / "input.mm"
+    with _temp_source_input(source_code) as (tmp_path, source_path):
         output_path = tmp_path / "structured_feedback.json"
-        source_path.write_text(source_code, encoding="utf-8")
 
         result = subprocess.run(
             [
@@ -998,7 +994,7 @@ def get_structured_feedback(source_code: str) -> str:
                 str(tmp_path),
                 str(source_path),
             ],
-            cwd=root_dir,
+            cwd=REPO_ROOT,
             capture_output=True,
             text=True,
         )
@@ -1031,12 +1027,7 @@ def get_structured_feedback(source_code: str) -> str:
 @mcp.tool()
 def analyze_contract_conflicts(source_code: str) -> str:
     """Analyze contract conflicts in Mumei source code."""
-    root_dir = Path(__file__).parent.absolute()
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmp_path = Path(tmpdir)
-        source_path = tmp_path / "input.mm"
-        source_path.write_text(source_code, encoding="utf-8")
+    with _temp_source_input(source_code) as (tmp_path, source_path):
 
         result = subprocess.run(
             [
@@ -1049,7 +1040,7 @@ def analyze_contract_conflicts(source_code: str) -> str:
                 str(tmp_path),
                 str(source_path),
             ],
-            cwd=root_dir,
+            cwd=REPO_ROOT,
             capture_output=True,
             text=True,
             env=os.environ.copy(),
@@ -1270,7 +1261,6 @@ def verify_with_orchestration(
     This tool leaves validate_logic/forge_blade unchanged and adds task IDs,
     cache isolation, bounded parallelism, timeout cancellation, and process metadata.
     """
-    root_dir = Path(__file__).parent.absolute()
     timeout_ms = max(1, timeout_ms)
     source_hash = hashlib.sha256(source_code.encode("utf-8")).hexdigest()
     solver_features = _detect_mcp_solver_features(source_code)
@@ -1328,10 +1318,7 @@ def verify_with_orchestration(
     process_start_time = datetime.now(timezone.utc).isoformat()
 
     try:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_path = Path(tmpdir)
-            source_path = tmp_path / "input.mm"
-            source_path.write_text(source_code, encoding="utf-8")
+        with _temp_source_input(source_code) as (tmp_path, source_path):
             env = os.environ.copy()
             env.update(
                 {
@@ -1391,7 +1378,7 @@ def verify_with_orchestration(
                     str(tmp_path),
                     str(source_path),
                 ],
-                cwd=root_dir,
+                cwd=REPO_ROOT,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -1483,12 +1470,8 @@ def execute_mm(
     Note: "build" and "verify" are concurrent-safe (report isolated via -o / --report-dir).
     "check" still writes report.json to cwd, so concurrent calls may race.
     """
-    root_dir = Path(__file__).parent.absolute()
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmp_path = Path(tmpdir)
-        source_path = tmp_path / "input.mm"
-        source_path.write_text(source_code, encoding="utf-8")
+    with _temp_source_input(source_code) as (tmp_path, source_path):
 
         output_base = tmp_path / output_name
 
@@ -1508,7 +1491,7 @@ def execute_mm(
 
         result = subprocess.run(
             cmd_args,
-            cwd=root_dir,
+            cwd=REPO_ROOT,
             capture_output=True,
             text=True,
             timeout=300,
@@ -1521,7 +1504,7 @@ def execute_mm(
         # For "check", report.json is still written to cwd (no --report-dir yet).
         report_file = tmp_path / "report.json"
         if not report_file.exists() and command == "check":
-            cwd_report = root_dir / "report.json"
+            cwd_report = REPO_ROOT / "report.json"
             if cwd_report.exists():
                 try:
                     shutil.move(str(cwd_report), str(report_file))
@@ -1588,16 +1571,12 @@ def get_inferred_effects(source_code: str) -> str:
     code will need. This enables AI to "check its own permissions" before
     committing to a code path.
     """
-    root_dir = Path(__file__).parent.absolute()
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmp_path = Path(tmpdir)
-        source_path = tmp_path / "input.mm"
-        source_path.write_text(source_code, encoding="utf-8")
+    with _temp_source_input(source_code) as (tmp_path, source_path):
 
         result = subprocess.run(
             ["cargo", "run", "--", "infer-effects", str(source_path)],
-            cwd=root_dir,
+            cwd=REPO_ROOT,
             capture_output=True,
             text=True,
             timeout=60,
@@ -1734,7 +1713,7 @@ def list_std_catalog() -> str:
     before generating new code from scratch.
     Returns JSON with module names, atom signatures, refinement types,
     requires/ensures contracts, effects, and module descriptions."""
-    std_dir = Path(__file__).parent.absolute() / "std"
+    std_dir = REPO_ROOT / "std"
     if not std_dir.exists():
         return json.dumps({"error": "std/ directory not found"})
 
@@ -2229,7 +2208,7 @@ def visualize_std_graph(format: str = "mermaid") -> str:
     proof holes is immediately visible. Intended to be consumed by SI-5
     Phase 1-C visualizers and by AI agents planning std/ work.
     """
-    repo_root = Path(__file__).parent.absolute()
+    repo_root = REPO_ROOT
     std_dir = repo_root / "std"
     if not std_dir.exists():
         return json.dumps({"error": "std/ directory not found"})
@@ -2280,7 +2259,7 @@ def analyze_std_gaps() -> str:
     from four axes: usage demand, dependency depth, trusted density, and a
     difficulty penalty (SI-5 Phase 1-C weighted scoring).
     """
-    repo_root = Path(__file__).parent.absolute()
+    repo_root = REPO_ROOT
     std_dir = repo_root / "std"
     if not std_dir.exists():
         return json.dumps({"error": "std/ directory not found"})
@@ -2468,7 +2447,7 @@ def measure_std_health() -> str:
     ``trusted_atoms``, ``health_score``, ``todo_count``, and
     per-file ``details``.
     """
-    root_dir = Path(__file__).parent.absolute()
+    root_dir = REPO_ROOT
     std_dir = root_dir / "std"
     if not std_dir.exists():
         return json.dumps({"error": "std/ directory not found"})
@@ -2585,7 +2564,7 @@ def get_proof_certificate(module_path: str) -> str:
     Returns a JSON object with either the certificate payload or an
     ``error`` field describing why no certificate is available.
     """
-    root_dir = Path(__file__).parent.absolute()
+    root_dir = REPO_ROOT
     if not module_path or not isinstance(module_path, str):
         return json.dumps({"error": "module_path is required"})
 
@@ -2678,12 +2657,8 @@ def generate_doc(source_code: str, format: str = "json") -> str:
     if fmt not in ("json", "markdown", "html"):
         return json.dumps({"error": f"unsupported format: {format!r}"})
 
-    root_dir = Path(__file__).parent.absolute()
     cmd_prefix = _resolve_mumei_invocation()
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmp_path = Path(tmpdir)
-        source_path = tmp_path / "input.mm"
-        source_path.write_text(source_code, encoding="utf-8")
+    with _temp_source_input(source_code) as (tmp_path, source_path):
 
         try:
             result = subprocess.run(
@@ -2696,7 +2671,7 @@ def generate_doc(source_code: str, format: str = "json") -> str:
                     "--format",
                     fmt,
                 ],
-                cwd=root_dir,
+                cwd=REPO_ROOT,
                 capture_output=True,
                 text=True,
                 timeout=120,

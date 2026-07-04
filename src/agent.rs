@@ -143,9 +143,54 @@ pub(crate) fn infer_code_language(path: &Path) -> Result<String, String> {
         Some("py") => Ok("python".to_string()),
         Some("rs") => Ok("rust".to_string()),
         Some("go") => Ok("go".to_string()),
+        Some("ts") | Some("tsx") => Ok("typescript".to_string()),
         _ => Err(format!(
-            "unsupported code file extension for '{}'; expected .py, .rs, or .go",
+            "unsupported code file extension for '{}'; expected .py, .rs, .ts, .tsx, or .go",
             path.display()
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn infer_code_language_python() {
+        assert_eq!(infer_code_language(Path::new("app.py")).unwrap(), "python");
+    }
+
+    #[test]
+    fn infer_code_language_rust() {
+        assert_eq!(infer_code_language(Path::new("lib.rs")).unwrap(), "rust");
+    }
+
+    #[test]
+    fn infer_code_language_go() {
+        assert_eq!(infer_code_language(Path::new("main.go")).unwrap(), "go");
+    }
+
+    #[test]
+    fn infer_code_language_typescript() {
+        assert_eq!(
+            infer_code_language(Path::new("service.ts")).unwrap(),
+            "typescript"
+        );
+    }
+
+    #[test]
+    fn infer_code_language_tsx() {
+        assert_eq!(
+            infer_code_language(Path::new("component.tsx")).unwrap(),
+            "typescript"
+        );
+    }
+
+    #[test]
+    fn infer_code_language_unsupported() {
+        let err = infer_code_language(Path::new("data.json")).unwrap_err();
+        assert!(err.contains("unsupported code file extension"));
+        assert!(err.contains(".ts, .tsx"));
     }
 }

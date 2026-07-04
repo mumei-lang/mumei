@@ -345,7 +345,7 @@ mumei> :quit
    - :type <expr> (display type inference result)
    - :verify <atom> (.mm atom verification path)
    - :verify-spec <path|inline> (mumei-agent validate-spec JSON; displays spec_health_issues / verification_violations / cross_validation_gaps / next_steps)
-   - :verify-code <path> (mumei-agent validate-code JSON; displays spec_health_issues / verification_violations / cross_validation_gaps / next_steps)
+   - :verify-code <path> (mumei-agent validate-code --input <path> JSON; --language is optional, inferred from extension; displays spec_health_issues / verification_violations / cross_validation_gaps / next_steps)
 
 4. HTTP/JSON integration (after P1 completion)
    - Execute http.get() directly from REPL
@@ -575,7 +575,7 @@ Detailed session plans for the next 8 implementation priorities are documented i
 | 17 | Plan 23: Regex Path Policies + URL Validation | ✅ RegexSafeFileRead, SecureHttpGet/Post, Z3 approximation improvements |
 | 18 | Plan 24: Modular Verification | ✅ effect_pre/effect_post contracts, cross-atom temporal state tracking |
 | 19 | Plan 25: LSP Completion & Definition | ✅ textDocument/completion, textDocument/definition, multi-editor docs |
-| 20 | V1-E-3: LSP Agent Diagnostics | ✅ `/// spec:` `spec_health_issues`, `.py`/`.rs`/`.go` `verification_violations` / `cross_validation_gaps`, graceful `mumei-agent` degrade |
+| 20 | V1-E-3: LSP Agent Diagnostics | ✅ `/// spec:` `spec_health_issues`, `.py`/`.rs`/`.ts`/`.tsx`/`.go` `verification_violations` / `cross_validation_gaps`, graceful `mumei-agent` degrade |
 
 ### Plan 22: PII Pipeline Example
 
@@ -679,7 +679,7 @@ Unfreezes the LSP server and adds two major features: textDocument/completion an
 Extends `mumei lsp` diagnostics beyond `.mm` parse/Z3 feedback by reusing the same `mumei-agent` JSON contract as the REPL:
 
 - `.mm` comments matching `/// spec: ...` are extracted into a temporary spec input and checked with `mumei-agent validate-spec --input <tmpfile> --format json`; `spec_health_issues` appear on the original comment line.
-- `.py`, `.rs`, and `.go` files are checked with `mumei-agent validate-code --input <path> --language <lang>`; `verification_violations` and `cross_validation_gaps` appear as `source: "mumei-agent"` diagnostics.
+- `.py`, `.rs`, `.ts`, `.tsx`, and `.go` files are checked with `mumei-agent validate-code --input <path>` (`--language` is optional; inferred from extension); `verification_violations` and `cross_validation_gaps` appear as `source: "mumei-agent"` diagnostics.
 - `next_steps` remains the human-review entrypoint and is included in diagnostic messages / related information without renaming the fixed buckets.
 - Missing `mumei-agent` or malformed JSON silently degrades to existing `.mm` diagnostics, preserving Z3 `relatedInformation` and `data.counterexample`.
 
@@ -690,7 +690,7 @@ Extends `mumei lsp` diagnostics beyond `.mm` parse/Z3 feedback by reusing the sa
 Enables mumei's verified code to actually run — both interactively in the REPL and as standalone native binaries.
 
 **P7-A: REPL Execution Engine (JIT)** — ✅ Implemented
-- `mumei-emit-llvm/src/jit.rs` — JitEngine struct wrapping inkwell's ExecutionEngine (MCJIT)
+- `mumei-emit-llvm/src/jit.rs` — JitEngine struct backed by LLVM ORC LLJIT
 - Refactored `codegen::compile()` into `compile_atom_into_module()` (in-memory) + `compile()` (file-based)
 - `compile_to_module()` returns LLVM IR as string for standalone use
 - REPL (`cmd_repl()`) enhanced with JIT: atom definitions are verified then JIT-compiled; expressions are wrapped as `__repl_eval` atoms, verified, executed, and results displayed
@@ -706,7 +706,7 @@ Enables mumei's verified code to actually run — both interactively in the REPL
 - Examples: `examples/run_demo.mm`, `examples/run_with_calls.mm`
 
 **Known Limitations**:
-- **MCJIT incremental compilation**: The JIT engine uses MCJIT, which finalizes the entire module on first `get_function` call. Defining multiple interdependent atoms across REPL iterations and then calling them may fail. Single-eval usage (`:eval`, `:verify`, bare expressions) works correctly. A future migration to ORC JIT would resolve this.
+- ~~**MCJIT incremental compilation**: The JIT engine uses MCJIT, which finalizes the entire module on first `get_function` call. Defining multiple interdependent atoms across REPL iterations and then calling them may fail.~~ **Resolved**: Migrated to ORC LLJIT. Each atom is compiled as an independent module and linked into a shared JITDylib, enabling incremental compilation of interdependent atoms and atom redefinition via `ResourceTracker` removal + recompilation. Regression tests in `tests/test_repl_incremental.rs` cover cross-atom resolution and redefine flows.
 - ~~**Binary compilation: top-level atoms only**: `mumei run` and `mumei build --emit binary` only compile top-level `atom` definitions. `impl` block methods are not included in the binary. Programs using struct methods will fail to link.~~ **Fixed**: `impl` block methods are now included in binary compilation with qualified names (`StructName::method_name`).
 - ~~**Self-recursive `main` atom**: The rename strategy (`main` → `__mumei_user_main`) does not rename recursive calls inside the body. If `main` calls itself, the call target will reference the C wrapper instead.~~ **Fixed**: `rename_calls_in_hir_stmt/expr` now recursively renames all `main` calls to `__mumei_user_main` in the HIR tree.
 - ~~**`find_clang()` is Unix-only**: Uses the `which` command, which is not available on Windows.~~ **Fixed**: `find_on_path()` helper uses `which` on Unix and `where` on Windows, with `clang.exe` fallback for Windows toolchain paths.

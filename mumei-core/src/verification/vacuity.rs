@@ -147,13 +147,20 @@ fn verify_mutated_body(
         has_string_constraints: None,
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
         profiler: None,
+        ieee754_f64: false,
     };
     let mut env: Env = HashMap::new();
 
     for param in &atom.params {
         env.insert(
             param.name.clone(),
-            param_z3_value(&ctx, &param.name, param.type_name.as_deref(), module_env),
+            param_z3_value(
+                &ctx,
+                &param.name,
+                param.type_name.as_deref(),
+                module_env,
+                false,
+            ),
         );
     }
 

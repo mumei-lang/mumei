@@ -402,10 +402,12 @@ body: {
 //   1. 要素数保存: result == n のみを ensures とする
 //
 // 備考: 「出力が昇順 (forall(i, 0, result-1, arr[i] <= arr[i+1]))」の保証は
-//   Z3 Array + forall 量化子の自動証明が現状 timeout するため、虚偽の
-//   `trusted` 保証を避けて ensures から外した。ソート済み出力を契約として
-//   要求する用途には、下記の `verified_insertion_sort_identity`
-//   (sorted-in → sorted-out の証明可能な identity 版) を使用すること。
+//   Z3 Array + forall 量化子で spurious counterexample を生成するため、
+//   本 atom では ensures から外した。昇順保持の証明義務は別途
+//   `verified_insertion_sort_ascending` で Lean escalation 経路に接続し、
+//   Lean 4 で discharge する。ソート済み出力を契約として要求する用途には、
+//   下記の `verified_insertion_sort_identity`（sorted-in → sorted-out の
+//   証明可能な identity 版）または Lean 証明済み経路を使用すること。
 //
 //   旧来は二重 while 内側ループの `let key = arr[i]` で move 解析が
 //   false-positive を出していたため `trusted` を付けていたが、
@@ -458,13 +460,35 @@ requires: n >= 0 && forall(i, 0, n - 1, arr[i] <= arr[i + 1]);
 ensures: result == n && forall(i, 0, result - 1, arr[i] <= arr[i + 1]);
 body: n;
 
+// --- 挿入ソート（昇順保持・Lean escalation 候補）---
+// 方針 A の拡張: 実 body で要素数保存 AND 昇順保持を ensures に含める。
+// Z3 は Array + forall 量化子の組み合わせで spurious counterexample を
+// 生成するため、この proof obligation は `mumei verify --proof-cert
+// --escalate-lean` で escalation 候補
+// （`escalation_reason == "spurious_candidate"`）として出力される。
+// Lean bridge (`mumei-lean`) 側で昇順保持の証明を discharge する経路
+// （5番目の live generated theorem path）に接続する。
+// `MumeiLean.Sort.insertion_sort_ascending_bridge` が mathlib の
+// `List.sorted_insertionSort` を使って昇順保持を Lean 4 で証明する。
+// Lean 証明成功時は `lean_verified` に昇格し、Z3 の spurious_candidate は
+// Lean 側で解決されたことになる。
+//
+// ⚠ atom 定義は `tests/fixtures/sort_ascending.mm` に配置。
+//   `std/` 配下の CI verify-std ゲートは `--escalate-lean` なしで実行
+//   されるため、Z3 単体で discharge できない atom をここに置くと
+//   regression として検出される。Lean escalation 対象 atom は fixture
+//   として管理し、`mumei verify --proof-cert --escalate-lean` で
+//   proof-cert を生成 → mumei-lean bridge に渡す運用とする。
+
 // --- マージソート（実 body 骨格 + 要素数保存 ensures）---
 // 再帰 + 補助配列が必要だが、現行 mumei には補助配列パラメータの
 // 標準表現がないため、分割統治の制御フローのみを記述する。
 //
 // 検証する性質（方針 A）: 要素数保存 (result == n) のみ。
-// 「出力が昇順」の保証はソート本体が省略されているため成立せず、
-// 偽の `trusted` 保証を避けて ensures から外した。
+// 「出力が昇順」の保証はソート本体が省略されているため成立せず、偽の
+// `trusted` 保証を避けて ensures から外した。昇順保持の証明義務は
+// `verified_insertion_sort_ascending`（`tests/fixtures/sort_ascending.mm`）
+// 経由で Lean escalation に接続する。
 // `let left = …` / `let right = …` は再帰呼び出しの戻り値を一度だけ
 // (`left + right` で) 使うのみで、現在の `mir.rs::infer_hir_ty()` は
 // `HirExpr::Call` の戻り値型を推論しない (`_ => None`) ため `Move`

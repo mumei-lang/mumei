@@ -79,17 +79,56 @@ mumei/
 
 Type annotations include primitive scalar types (`i64`, `f64`, `bool`, `Str`), refined types registered in `ModuleEnv`, generic type references such as `Stack<i64>`, higher-order `atom_ref(...) -> ...` types, and polymorphic array types written as `[T]`. Array annotations preserve their element type through parsing and MIR inference: `[i64]` accesses produce `i64`, `[f64]` accesses produce `f64`, and `[bool]` accesses produce `bool`. Untyped legacy array accesses such as `arr[i]` still default to `i64` for backward compatibility with existing `std/list.mm` contracts and `forall(i, 0, n, arr[i] >= 0)` patterns.
 
-During Z3 verification, array indices use `Int` sort and the array element sort is selected from the declared element type: `Int` for `[i64]`, `Real` for `[f64]`, and `Bool` for `[bool]`.
+During Z3 verification, array indices use `Int` sort and the array element sort is selected from the declared element type: `Int` for `[i64]`, `Real` for `[f64]` (or IEEE 754 `Float(11,53)` under the opt-in `--ieee754-f64` mode, see below), and `Bool` for `[bool]`.
 
-### `f64` Verification Sort: Real (not IEEE 754 Float)
+#### Untyped array access diagnostics (`--warn-untyped-arrays` / `--strict-array-types`)
 
-`f64` parameters and `f64` literals are encoded as Z3 `Real` sort (exact mathematical reals over ℚ), not Z3 `Float` sort (IEEE 754 binary64). This is a deliberate trade-off:
+Because the `i64` fallback is silent, an array intended to hold `f64` or `bool`
+values is still lowered to the `Int` element sort when its access is
+unannotated, which can mask element-type mismatches. Two opt-in flags surface
+this without changing the default behavior:
+
+- `--warn-untyped-arrays` emits an `untyped_array_access` **warning** for every
+  atom that accesses an array as `arr[i]` where `arr` lacks an explicit `[T]`
+  element-type annotation (either it is not a parameter, or its annotation is
+  not an array type). The `i64` fallback is still applied — this is diagnostic
+  only.
+- `--strict-array-types` escalates the same finding to an **error**, failing the
+  atom. This is the opt-in strict mode intended to eventually require explicit
+  element-type annotations; it is off by default so the `i64` fallback and the
+  `std/list.mm` / `forall(i, 0, n, arr[i] >= 0)` idioms keep verifying unchanged.
+
+Detection lives in `verification::untyped_array_access_diagnostic` /
+`detect_untyped_array_accesses` (`mumei-core/src/verification/fragment.rs`),
+wired through `src/commands/verify.rs` and rendered by
+`collect_untyped_array_access_diagnostic` in `src/feedback.rs`, mirroring the
+`--warn-fragment` diagnostic path. Explicitly annotated `[i64]`/`[f64]`/`[bool]`
+arrays never trigger the diagnostic. See `tests/test_untyped_array_access.mm`
+and `tests/test_untyped_array_access.rs`.
+
+### `f64` Verification Sort: Real by default, IEEE 754 Float opt-in
+
+By default, `f64` parameters and `f64` literals are encoded as Z3 `Real` sort (exact mathematical reals over ℚ), not Z3 `Float` sort (IEEE 754 binary64). This is a deliberate trade-off:
 
 - **Pro**: `Real` is decidable in linear arithmetic, fast to solve, and supports the full set of arithmetic operators (`+`, `-`, `*`, `/`, comparisons) needed by current `f64` verification fixtures (e.g., `tests/test_verified_ffi.mm`).
 - **Con**: Properties that depend on IEEE 754 semantics — rounding, subnormals, `NaN`/`Infinity`, the fact that `0.1 + 0.2 != 0.3` — are **not** modeled. Atoms that rely on IEEE 754 corner cases for correctness (e.g., bit-level reinterpretation, deterministic rounding) would verify successfully under `Real` but may misbehave at runtime.
-- **Migration path**: When IEEE 754-faithful verification is required, individual atoms can be re-encoded with Z3 `Float` sort by reintroducing the `Float::new_const` / `Float::from_f64` paths in `param_z3_value` and `Expr::Float` lowering (`mumei-core/src/verification.rs`). Until then, `f64` should be treated as "real-arithmetic-faithful" rather than "IEEE 754-faithful".
 
-`f64` literals are converted to `Real` via `real_from_f64` (`mumei-core/src/verification.rs`), which interprets the Rust `to_string()` output as an exact decimal fraction (e.g., `0.1` → `1/10`). This intentionally diverges from IEEE 754: the literal `0.1` is treated as the rational ⅒, not as the IEEE 754 binary approximation `0x3FB999999999999A`.
+By default, `f64` literals are converted to `Real` via `real_from_f64` (`mumei-core/src/verification/translator/z3_types.rs`), which interprets the Rust `to_string()` output as an exact decimal fraction (e.g., `0.1` → `1/10`). This intentionally diverges from IEEE 754: the literal `0.1` is treated as the rational ⅒, not as the IEEE 754 binary approximation `0x3FB999999999999A`.
+
+#### Opt-in IEEE 754 mode (`--ieee754-f64`)
+
+Passing `--ieee754-f64` to `mumei verify` switches `f64` to faithful IEEE 754 binary64 semantics (implemented in `mumei-core/src/verification/translator/`):
+
+- `f64` parameters/`result` become Z3 `Float(11, 53)` (`Float::new_const`) instead of `Real::new_const`; `f64` literals become `Float::from_f64(ctx, value)`, preserving the exact binary64 bit pattern (`0.1` → `0x3FB999999999999A`).
+- `f64` arithmetic (`+`, `-`, `*`, `/`) is lowered to the Z3 FP theory with the round-nearest-ties-to-even rounding mode (matching hardware `f64`); equality uses `fp.eq`. These are real FP operations, **not** approximated by fresh unconstrained constants.
+- `[f64]` arrays use `Float(11, 53)` element sort (`ArrayElementSort::Float`).
+- The `--ieee754-f64` flag participates in the incremental-verification cache key, so switching modes never reuses a stale result. The default (flag absent) keeps the `Real` encoding byte-for-byte, preserving decidability/speed for existing fixtures.
+
+The differential fixture `tests/test_ieee754_f64.mm` (and integration test `tests/test_ieee754_f64.rs`) pins the behavior: `0.1 + 0.2 != 0.3` verifies **only** under `--ieee754-f64` and fails in the default `Real` mode, while ordinary `f64` contracts (`tests/test_verified_ffi.mm`, the `f64` cases in `tests/test_polymorphic_array.mm`) continue to verify in both modes.
+
+The flag is threaded through atom contract verification (`requires`/`ensures`/`body`), inductive atom-invariant checking (`support/call_graph.rs::verify_atom_invariant`), trait law verification (`support/law_verification.rs::verify_impl_with_options`), refinement-type constraints (`translator/constraints.rs::apply_refinement_constraint`), and call-site symbolic results. Call-site return sorts are selected from the callee's declared `-> T` return type (falling back to the legacy "any `f64` parameter implies an `f64` return" heuristic only when the annotation is absent), so an `f64`-returning callee binds a `Real` result by default and a `Float(11,53)` result under `--ieee754-f64` — never an `Int` placeholder that silently drops `ensures` equalities.
+
+**Known limitation**: the opt-in vacuity check (`verification/vacuity.rs`) and property-based concrete validation (`verification/property_based.rs`) still construct their `VCtx` with `ieee754_f64: false` and evaluate under the `Real` encoding regardless of the flag.
 
 ---
 

@@ -1065,6 +1065,7 @@ fn test_constraint_budget_exceeded() {
         has_string_constraints: Some(&has_string_cell),
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
         profiler: None,
+        ieee754_f64: false,
     };
 
     // Each call increments and checks
@@ -1099,6 +1100,7 @@ fn test_constraint_budget_no_limit() {
         has_string_constraints: None,
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
         profiler: None,
+        ieee754_f64: false,
     };
 
     // Should always succeed when no constraint tracking
@@ -1860,6 +1862,7 @@ fn test_subsumption_check_holds_with_requires() {
         has_string_constraints: None,
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
         profiler: None,
+        ieee754_f64: false,
     };
     let concrete = Atom {
         name: "increment".to_string(),
@@ -1928,6 +1931,7 @@ fn test_subsumption_check_fails_without_requires() {
         has_string_constraints: None,
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
         profiler: None,
+        ieee754_f64: false,
     };
     let concrete = Atom {
         name: "negate".to_string(),
@@ -1999,6 +2003,7 @@ fn test_subsumption_check_crossed_param_names() {
         has_string_constraints: None,
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
         profiler: None,
+        ieee754_f64: false,
     };
     let concrete = Atom {
         name: "compute".to_string(),
@@ -2077,6 +2082,7 @@ fn test_subsumption_check_trivial_contract_ensures_skipped() {
         has_string_constraints: None,
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
         profiler: None,
+        ieee754_f64: false,
     };
     let concrete = Atom {
         name: "something".to_string(),
@@ -2137,6 +2143,7 @@ fn test_subsumption_check_concrete_true_ensures_warns() {
         has_string_constraints: None,
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
         profiler: None,
+        ieee754_f64: false,
     };
     let concrete = Atom {
         name: "no_guarantee".to_string(),
@@ -2521,6 +2528,33 @@ fn test_collect_array_accesses_nested_index() {
 }
 
 #[test]
+fn test_collect_array_accesses_recurses_into_while_body() {
+    let while_stmt = crate::parser::Stmt::While {
+        cond: Box::new(Expr::Variable("cond".to_string())),
+        invariant: Box::new(Expr::Variable("invariant".to_string())),
+        decreases: None,
+        body: Box::new(crate::parser::Stmt::Block(
+            vec![crate::parser::Stmt::Expr(
+                Expr::ArrayAccess("arr".to_string(), Box::new(Expr::Variable("i".to_string()))),
+                Span::default(),
+            )],
+            Span::default(),
+        )),
+        span: Span::default(),
+    };
+
+    let mut accesses = Vec::new();
+    collect_array_accesses_in_stmt(&while_stmt, &mut accesses);
+
+    assert_eq!(accesses.len(), 1);
+    assert_eq!(accesses[0].0, "arr");
+    match &accesses[0].1 {
+        Expr::Variable(v) => assert_eq!(v, "i"),
+        other => panic!("expected Variable(\"i\"), got {:?}", other),
+    }
+}
+
+#[test]
 fn test_collect_array_accesses_none() {
     // No array access at all → empty
     let body = Expr::BinaryOp(
@@ -2562,6 +2596,7 @@ fn test_expr_to_z3_true_false_are_bool() {
         has_string_constraints: Some(&has_string_constraints_cell),
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
         profiler: None,
+        ieee754_f64: false,
     };
     let mut env: Env = HashMap::new();
 

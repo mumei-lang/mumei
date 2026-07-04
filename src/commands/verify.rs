@@ -32,6 +32,9 @@ pub(crate) fn cmd_verify_command(command: Command) {
         disable_spurious_detection,
         property_based_test,
         warn_fragment,
+        ieee754_f64,
+        warn_untyped_arrays,
+        strict_array_types,
         property_based_test_count,
         property_based_test_seed,
         property_based_test_max_shrink_steps,
@@ -132,6 +135,9 @@ pub(crate) fn cmd_verify_command(command: Command) {
                     enable_spurious_detection: enable_spurious,
                     property_based_test,
                     warn_fragment,
+                    ieee754_f64,
+                    warn_untyped_arrays,
+                    strict_array_types,
                     property_based_test_count,
                     property_based_test_seed,
                     property_based_test_max_shrink_steps,
@@ -189,6 +195,9 @@ pub(crate) fn cmd_verify_command(command: Command) {
             enable_spurious_detection: enable_spurious,
             property_based_test,
             warn_fragment,
+            ieee754_f64,
+            warn_untyped_arrays,
+            strict_array_types,
             property_based_test_count,
             property_based_test_seed,
             property_based_test_max_shrink_steps,
@@ -306,6 +315,9 @@ pub(crate) struct VerifyOptions<'a> {
     pub(crate) enable_spurious_detection: bool,
     pub(crate) property_based_test: bool,
     pub(crate) warn_fragment: bool,
+    pub(crate) ieee754_f64: bool,
+    pub(crate) warn_untyped_arrays: bool,
+    pub(crate) strict_array_types: bool,
     pub(crate) property_based_test_count: usize,
     pub(crate) property_based_test_seed: Option<u64>,
     pub(crate) property_based_test_max_shrink_steps: usize,
@@ -331,6 +343,8 @@ struct VerifyContext<'a> {
     emit_lean_artifacts: bool,
     enable_spurious_detection: bool,
     warn_fragment: bool,
+    warn_untyped_arrays: bool,
+    strict_array_types: bool,
     diagnostics: &'a mut Vec<verification::Diagnostic>,
     loss_vectors: &'a mut Vec<serde_json::Value>,
     structured_feedbacks: &'a mut Vec<StructuredFeedback>,
@@ -350,6 +364,18 @@ fn verify_single_atom(atom: &parser::Atom, name: &str, ctx: &mut VerifyContext<'
         let _ = collect_decidable_fragment_diagnostic(atom, ctx.module_env, ctx.json_output)
             .inspect(|d| ctx.diagnostics.push(d.clone()))
             .is_some();
+    }
+    if (ctx.warn_untyped_arrays || ctx.strict_array_types) && !ctx.module_env.is_verified(name) {
+        if let Some(diagnostic) =
+            collect_untyped_array_access_diagnostic(atom, ctx.strict_array_types, ctx.json_output)
+        {
+            ctx.diagnostics.push(diagnostic);
+            if ctx.strict_array_types {
+                *ctx.failed += 1;
+                ctx.verification_cache.remove(name);
+                return;
+            }
+        }
     }
     let promote_outside_fragment = ctx.emit_lean_artifacts && has_fragment_warning;
     if has_finite_field_semantics {
@@ -389,12 +415,16 @@ fn verify_single_atom(atom: &parser::Atom, name: &str, ctx: &mut VerifyContext<'
         return;
     }
 
-    let proof_flags = if ctx.verification_config.enable_vacuity_check {
-        &["enable_vacuity_check"][..]
-    } else {
-        &[][..]
-    };
-    let proof_hash = resolver::compute_proof_hash_with_flags(atom, ctx.module_env, proof_flags);
+    // Proof flags that alter the verification outcome must participate in the
+    // incremental-cache key, otherwise switching modes reuses a stale result.
+    let mut proof_flags: Vec<&str> = Vec::new();
+    if ctx.verification_config.enable_vacuity_check {
+        proof_flags.push("enable_vacuity_check");
+    }
+    if ctx.verification_config.ieee754_f64 {
+        proof_flags.push("ieee754_f64");
+    }
+    let proof_hash = resolver::compute_proof_hash_with_flags(atom, ctx.module_env, &proof_flags);
 
     if let Some(cached_entry) = ctx.verification_cache.get(name) {
         if cached_entry.proof_hash == proof_hash {
@@ -845,6 +875,9 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
         enable_spurious_detection,
         property_based_test,
         warn_fragment,
+        ieee754_f64,
+        warn_untyped_arrays,
+        strict_array_types,
         property_based_test_count,
         property_based_test_seed,
         property_based_test_max_shrink_steps,
@@ -929,6 +962,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
         enable_vacuity_check,
         detect_loops,
         suggest_cegis,
+        ieee754_f64,
         property_based_test: property_based_config,
     };
     let input_path = Path::new(input);
@@ -1064,7 +1098,12 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                         impl_def.trait_name, impl_def.target_type
                     );
                 }
-                match verification::verify_impl(impl_def, &module_env, output_dir) {
+                match verification::verify_impl_with_options(
+                    impl_def,
+                    &module_env,
+                    output_dir,
+                    verification_config.ieee754_f64,
+                ) {
                     Ok(_) => {
                         if !quiet_output {
                             println!("    ✅ Laws verified");
@@ -1094,6 +1133,8 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                     emit_lean_artifacts,
                     enable_spurious_detection,
                     warn_fragment,
+                    warn_untyped_arrays,
+                    strict_array_types,
                     diagnostics: &mut diagnostics,
                     loss_vectors: &mut loss_vectors,
                     structured_feedbacks: &mut structured_feedbacks,
@@ -1123,6 +1164,8 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                         emit_lean_artifacts,
                         enable_spurious_detection,
                         warn_fragment,
+                        warn_untyped_arrays,
+                        strict_array_types,
                         diagnostics: &mut diagnostics,
                         loss_vectors: &mut loss_vectors,
                         structured_feedbacks: &mut structured_feedbacks,

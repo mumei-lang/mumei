@@ -10,6 +10,7 @@ pub mod emitter;
 pub mod ffi;
 pub mod hir;
 pub mod inspect;
+pub mod lowering;
 pub mod manifest;
 pub mod mir;
 pub mod mir_analysis;

@@ -13,24 +13,29 @@
 
 use mumei_core::emitter::{Artifact, ArtifactKind, Emitter};
 use mumei_core::hir::HirAtom;
+use mumei_core::lowering::{lower, LoweredType};
 use mumei_core::parser::ExternBlock;
 use mumei_core::verification::{ModuleEnv, MumeiResult};
 use std::path::Path;
 
+fn format_lowered_type_to_rust(lowered: &LoweredType) -> &'static str {
+    match lowered {
+        LoweredType::I64 => "i64",
+        LoweredType::I32 => "i32",
+        LoweredType::U64 => "u64",
+        LoweredType::U32 => "u32",
+        LoweredType::F64 => "f64",
+        LoweredType::F32 => "f32",
+        LoweredType::Bool => "i64",
+        LoweredType::Str => "*const std::os::raw::c_char",
+        LoweredType::Array(inner) if matches!(**inner, LoweredType::I64) => "*const i64",
+        LoweredType::Array(_) | LoweredType::Other(_) => "i64",
+    }
+}
+
 /// Map a mumei type name to its Rust FFI equivalent.
 fn mumei_type_to_rust(type_name: &str) -> &str {
-    match type_name {
-        "i64" => "i64",
-        "i32" => "i32",
-        "u64" => "u64",
-        "u32" => "u32",
-        "f64" => "f64",
-        "f32" => "f32",
-        "bool" => "i64", // mumei compiles bool to i64 in LLVM IR
-        "Str" | "String" => "*const std::os::raw::c_char",
-        "[i64]" => "*const i64",
-        _ => "i64", // default fallback for refined types based on i64
-    }
+    format_lowered_type_to_rust(&lower(type_name))
 }
 
 /// FFI glue code generator for Rust.
@@ -286,6 +291,12 @@ mod tests {
         assert!(!rs.contains("debug_assert!("));
         assert!(!rs.contains("/// # Precondition"));
         assert!(!rs.contains("/// # Postcondition"));
+    }
+
+    #[test]
+    fn test_mumei_type_to_rust_array_edge_cases() {
+        assert_eq!(mumei_type_to_rust("[f64]"), "i64");
+        assert_eq!(mumei_type_to_rust("[[i64]]"), "i64");
     }
 
     #[test]

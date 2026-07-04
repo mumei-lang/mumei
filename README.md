@@ -18,8 +18,11 @@ For the detailed contract, canonical vocabulary, V1-A〜E order, Lean escalation
 
 Recent standard-library sync points: `std/crypto/primitives.mm` is a forged,
 Z3-decidable crypto predicate module that does not require Lean escalation;
-mumei-lean live generated theorem coverage includes `abs_saturating`,
-`bounded_mul_with_overflow_check`, and the crypto `constant_time_eq_flag` path.
+mumei-lean live generated theorem coverage includes five paths —
+`abs_saturating`, `bounded_mul_with_overflow_check`, `constant_time_eq_flag`,
+`ff_zero_eq_zero`, and the sort ascending-preservation path
+(`verified_insertion_sort_ascending`) which lowers `forall(i, 0, n-1, arr[i] <= arr[i+1])`
+to mathlib's `List.Sorted` via the `MumeiLean.Sort` bridge.
 
 ---
 
@@ -42,13 +45,13 @@ uv sync
 
 **1. Find likely bugs in existing code**
 ```bash
-# --language is required: python|rust|go
-uv run mumei-agent validate-code --input src/payment.py --language python
+# --language is optional: python|rust|typescript|go (inferred from extension when omitted)
+uv run mumei-agent validate-code --input src/payment.py
 ```
 
 **2. Detect spec↔code drift**
 ```bash
-# Optional: python|rust|go; omitted values are inferred from the extension
+# Optional: python|rust|typescript|go; omitted values are inferred from the extension
 uv run mumei-agent validate-spec-to-code --spec docs/spec.txt --code src/payment.py \
   --language python
 ```
@@ -61,7 +64,7 @@ uv run mumei-agent validate-spec --input docs/spec.txt --format nl
 
 Domain hints such as `--domain financial` are optional. `validate-code --input`, `validate-spec-to-code --code`, and `validate-code-to-spec --code` take a single source file; directory recursion is available through `audit --code-file` and `extract-spec --code-file`.
 
-Code validation and alignment commands use `python|rust|go`. `extract-spec` auto-detects a broader set from file extensions: `rust`, `c`, `cpp`, `go`, `python`, `javascript`, `typescript`, and `java`.
+Code validation and alignment commands (Layer B: Z3 strict verification) support `python|rust|typescript|go`. `extract-spec` (Layer A: spec extraction) auto-detects a broader set from file extensions: `rust`, `c`, `cpp`, `go`, `python`, `javascript`, `typescript`, and `java`.
 
 See the [Verification Workflow Guide](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/VERIFICATION_WORKFLOW_GUIDE.md) for details.
 
@@ -72,11 +75,11 @@ If you work from a source checkout of `mumei-agent`, run `uv sync` once; after t
 
 ### 1. Existing code: find likely bug locations
 
-Give the agent an existing source file and ask it to infer contracts, verify them, and report suspicious paths. `--input` is required and points to a single source file. `--language` is required and must be `python`, `rust`, or `go`.
+Give the agent an existing source file and ask it to infer contracts, verify them, and report suspicious paths. `--input` is required and points to a single source file. `--language` is optional (`python`, `rust`, `typescript`, or `go`); when omitted it is inferred from the file extension.
 
 ```bash
-# --language is required: python|rust|go
-uv run mumei-agent validate-code --input src/payment.py --language python
+# --language is optional: inferred from extension when omitted
+uv run mumei-agent validate-code --input src/payment.py
 ```
 
 MCP agents can use mumei's verification backend directly once they synthesize or receive `.mm`:
@@ -92,7 +95,7 @@ MCP agents can use mumei's verification backend directly once they synthesize or
 
 ### 2. Natural-language spec + existing code: detect spec↔code drift
 
-Compare requirements against an implementation and ask for mismatches before migrating anything to `.mm`. `--spec` and `--code` are required; `--code` points to a single source file. `--language` is optional and can be `python`, `rust`, or `go`.
+Compare requirements against an implementation and ask for mismatches before migrating anything to `.mm`. `--spec` and `--code` are required; `--code` points to a single source file. `--language` is optional and can be `python`, `rust`, `typescript`, or `go`.
 
 ```bash
 uv run mumei-agent validate-spec-to-code --spec docs/spec.txt --code src/payment.py
@@ -104,7 +107,7 @@ For reverse drift detection:
 uv run mumei-agent validate-code-to-spec \
   --code src/payment.py \
   --spec docs/spec.txt \
-  --language python  # Optional: python|rust|go
+  --language python  # Optional: python|rust|typescript|go
 ```
 
 ### 3. Spec only: find contradictions and under-specified behavior
@@ -138,8 +141,8 @@ Run the agent on existing code and specs first. No `.mm` source is required.
 
 ```bash
 mumei-agent audit --code-file src/payment.py --auto-migrate --auto-heal
-mumei-agent validate-code --input src/payment.py --language python
-mumei-agent validate-spec-to-code --spec spec.txt --code src/payment.py --language python
+mumei-agent validate-code --input src/payment.py
+mumei-agent validate-spec-to-code --spec spec.txt --code src/payment.py
 ```
 
 
@@ -219,8 +222,8 @@ curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash
 # Homebrew
 brew install mumei-lang/mumei/mumei
 
-# Specific version (latest is v0.6.9)
-curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash -s -- --version v0.6.9
+# Specific version (latest is v0.6.10)
+curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash -s -- --version v0.6.10
 ```
 
 See [Releases](https://github.com/mumei-lang/mumei/releases) for older versions and changelogs.
@@ -265,9 +268,9 @@ mumei setup && source ~/.mumei/env
 | `mumei inspect` | Show development environment |
 | `mumei infer-effects <file>` | Infer required effects (JSON output) |
 | `mumei infer-contracts <file>` | Infer contracts for all atoms (JSON output) |
-| `mumei repl` | Interactive REPL; use `:verify-spec <path|inline>` / `:verify-code <path>` to validate natural-language specs and foreign code through `mumei-agent` |
+| `mumei repl` | Interactive REPL backed by ORC LLJIT — incremental atom compilation, cross-atom resolution, and atom redefinition; use `:verify-spec <path|inline>` / `:verify-code <path>` to validate natural-language specs and foreign code through `mumei-agent` |
 | `mumei doc <file> -o <dir>` | Generate documentation (`--format html` (default) / `markdown` / `json`) |
-| `mumei lsp` | Start LSP server; shows Z3 diagnostics, `/// spec:` natural-language spec health, and `.py` / `.rs` / `.go` contract diagnostics from `mumei-agent` inline, with graceful fallback when the agent is unavailable |
+| `mumei lsp` | Start LSP server; shows Z3 diagnostics, `/// spec:` natural-language spec health, and `.py` / `.rs` / `.ts` / `.tsx` / `.go` contract diagnostics from `mumei-agent` inline, with graceful fallback when the agent is unavailable |
 | `mumei verify-cert <cert> <file>` | Verify a proof certificate against current source |
 
 ### MCP Tools

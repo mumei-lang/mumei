@@ -862,6 +862,7 @@ fn validation_ctx<'a>(
         has_string_constraints: None,
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
         profiler: None,
+        ieee754_f64: false,
     }
 }
 
@@ -880,7 +881,13 @@ fn seed_concrete_env<'a>(
             .get(&param.name)
             .map(|value| value_to_dynamic(ctx, &param.name, value))
             .unwrap_or_else(|| {
-                param_z3_value(ctx, &param.name, param.type_name.as_deref(), module_env)
+                param_z3_value(
+                    ctx,
+                    &param.name,
+                    param.type_name.as_deref(),
+                    module_env,
+                    false,
+                )
             });
         env.insert(param.name.clone(), value.clone());
         if let Some(GeneratedValue::Array(values)) = assignment.get(&param.name) {
@@ -893,7 +900,15 @@ fn seed_concrete_env<'a>(
     }
     let result_value = result
         .map(|value| value_to_dynamic(ctx, "result", value))
-        .unwrap_or_else(|| param_z3_value(ctx, "result", atom.return_type.as_deref(), module_env));
+        .unwrap_or_else(|| {
+            param_z3_value(
+                ctx,
+                "result",
+                atom.return_type.as_deref(),
+                module_env,
+                false,
+            )
+        });
     env.insert("result".to_string(), result_value);
     env
 }

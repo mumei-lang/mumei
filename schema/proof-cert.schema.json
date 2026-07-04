@@ -1,0 +1,169 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mumei-lang.org/schema/proof-cert.schema.json",
+  "title": "Mumei Proof Certificate",
+  "description": "Canonical, cross-repository contract for Mumei `.proof.json` / `.proof-cert.json` certificates. This schema is the single source of truth shared by the Rust producer (`mumei-core/src/proof_cert.rs`) and the Python consumers in `mumei-agent` and `mumei-lean`. It validates the well-known contract fields strictly (presence and enum values) while permitting additional, forward-compatible fields so that adding new metadata in the Rust structs does not break existing consumers.",
+  "type": "object",
+  "required": ["version", "timestamp", "z3_version", "file", "atoms"],
+  "additionalProperties": true,
+  "properties": {
+    "version": {
+      "type": "string",
+      "description": "Certificate format version."
+    },
+    "timestamp": {
+      "type": "string",
+      "description": "ISO 8601 timestamp of certificate generation."
+    },
+    "mumei_version": {
+      "type": "string",
+      "description": "Mumei compiler version."
+    },
+    "z3_version": {
+      "type": "string",
+      "description": "Z3 solver version, or 'unknown' if unavailable."
+    },
+    "file": {
+      "type": "string",
+      "description": "Source file path the certificate was generated for."
+    },
+    "atoms": {
+      "type": "array",
+      "description": "Per-atom verification certificates.",
+      "items": { "$ref": "#/$defs/atomCertificate" }
+    },
+    "reconstruction_loss": {
+      "type": ["array", "null"],
+      "items": { "type": "object" }
+    },
+    "self_correction_summary": {
+      "type": ["object", "null"],
+      "additionalProperties": true
+    },
+    "package_name": { "type": ["string", "null"] },
+    "package_version": { "type": ["string", "null"] },
+    "certificate_hash": {
+      "type": "string",
+      "description": "SHA-256 of the serialized certificate (excluding this field) for chain verification."
+    },
+    "all_verified": {
+      "type": "boolean",
+      "description": "True if every atom in the certificate is verified."
+    },
+    "harness_contract": { "type": ["string", "null"] },
+    "intent_fidelity": {
+      "type": ["object", "null"],
+      "additionalProperties": true
+    },
+    "artifact_paths": {
+      "type": ["array", "null"],
+      "items": { "type": "string" }
+    },
+    "budget_policy_fingerprint": { "type": ["string", "null"] }
+  },
+  "$defs": {
+    "z3CheckResult": {
+      "description": "Z3 solver check outcome. 'unsat' = proven, 'sat' = counter-example found, 'unknown' = solver gave up, 'skipped' = not checked, 'lean_verified' = discharged by the mumei-lean bridge, 'timeout' = solver timed out, 'resource_limit' = solver hit a resource limit, 'spurious_candidate' = solver returned a spurious escalation candidate.",
+      "type": "string",
+      "enum": ["unsat", "sat", "unknown", "skipped", "lean_verified", "timeout", "resource_limit", "spurious_candidate"]
+    },
+    "verificationStatus": {
+      "description": "Atom verification status. 'verified' = proven, 'failed' = counter-example, 'skipped' = not checked, 'trusted' = assumed (e.g. FFI), 'escalation_candidate' = pending Lean escalation.",
+      "type": "string",
+      "enum": ["verified", "failed", "skipped", "trusted", "escalation_candidate"]
+    },
+    "atomCertificate": {
+      "type": "object",
+      "required": ["name", "z3_check_result", "content_hash", "status"],
+      "additionalProperties": true,
+      "properties": {
+        "name": { "type": "string" },
+        "z3_check_result": { "$ref": "#/$defs/z3CheckResult" },
+        "content_hash": {
+          "type": "string",
+          "description": "SHA-256 of the atom's source text (name + requires + ensures + body)."
+        },
+        "status": { "$ref": "#/$defs/verificationStatus" },
+        "spec_validation_result": {
+          "type": ["object", "null"],
+          "additionalProperties": true
+        },
+        "proof_hash": { "type": "string" },
+        "dependencies": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "effects": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "requires": { "type": "string" },
+        "ensures": { "type": "string" },
+        "body_expr": { "type": "string" },
+        "body_summary": { "type": "string" },
+        "z3_result_class": {
+          "type": "string",
+          "description": "Deterministic Z3 outcome class used by Lean escalation routing."
+        },
+        "escalation_reason": { "type": ["string", "object", "null"] },
+        "logic_fragment_tag": { "type": ["string", "null"] },
+        "logic_fragment_tags": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "translator_version": { "type": "string" },
+        "binder_mapping": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "bridge_lemma_hash": { "type": "string" },
+        "manual_lemma_reason": { "type": ["string", "null"] },
+        "translator_ir": {
+          "type": ["object", "null"],
+          "additionalProperties": true
+        },
+        "lean_metadata": {
+          "type": ["object", "null"],
+          "additionalProperties": true
+        },
+        "lean_result_metadata": {
+          "type": ["object", "null"],
+          "additionalProperties": true
+        },
+        "counterexample_validation": {
+          "type": ["object", "null"],
+          "additionalProperties": true
+        },
+        "reconstruction_loss": {
+          "type": ["object", "null"],
+          "additionalProperties": true
+        },
+        "self_correction_metadata": {
+          "type": ["object", "null"],
+          "additionalProperties": true
+        },
+        "symbol_provenance": {
+          "type": "array",
+          "items": { "type": "object" }
+        },
+        "unused_hypotheses": {
+          "type": ["object", "null"],
+          "additionalProperties": true
+        },
+        "solver_process_metadata": {
+          "type": ["object", "null"],
+          "additionalProperties": true
+        },
+        "retry_policy_fingerprint": { "type": ["string", "null"] },
+        "attempt_summary": {
+          "type": ["object", "null"],
+          "additionalProperties": true
+        },
+        "cost_success_metrics": {
+          "type": ["object", "null"],
+          "additionalProperties": true
+        }
+      }
+    }
+  }
+}

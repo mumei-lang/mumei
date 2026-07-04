@@ -1,5 +1,6 @@
 use super::module_env::ModuleEnv;
 use super::*;
+use crate::lowering::{lower, LoweredType};
 
 /// Word-boundary-aware replacement of the placeholder `v` in constraint strings.
 /// Uses regex `\bv\b` to avoid corrupting identifiers like "value" or "divisor".
@@ -681,6 +682,10 @@ pub struct VerificationConfig {
     pub enable_vacuity_check: bool,
     pub detect_loops: bool,
     pub suggest_cegis: bool,
+    /// Opt-in IEEE 754 binary64 encoding for `f64` verification
+    /// (`--ieee754-f64`). Default `false` keeps the exact-rational `Real`
+    /// encoding, preserving decidability/speed for existing fixtures.
+    pub ieee754_f64: bool,
     pub property_based_test: Option<PropertyBasedTestConfig>,
 }
 
@@ -695,6 +700,7 @@ impl Default for VerificationConfig {
             enable_vacuity_check: false,
             detect_loops: false,
             suggest_cegis: false,
+            ieee754_f64: false,
             property_based_test: None,
         }
     }
@@ -1054,23 +1060,38 @@ pub(crate) fn is_lean_reserved_word(name: &str) -> bool {
     )
 }
 
-pub(crate) fn mumei_type_to_lean_type(type_name: &str) -> String {
-    let normalized = type_name.trim();
-    if normalized.starts_with('[') && normalized.ends_with(']') {
-        let inner = &normalized[1..normalized.len() - 1];
-        format!("List {}", mumei_type_to_lean_type(inner))
-    } else if normalized.starts_with("[]<") && normalized.ends_with('>') {
-        let inner = &normalized[3..normalized.len() - 1];
-        format!("List {}", mumei_type_to_lean_type(inner))
-    } else {
-        match normalized {
-            "i64" | "int" | "Int" => "Int".to_string(),
-            "bool" | "Bool" => "Bool".to_string(),
-            "string" | "Str" | "String" => "String".to_string(),
-            "unit" | "Unit" => "Unit".to_string(),
-            other => other.to_string(),
+fn format_lowered_type_to_lean(lowered: &LoweredType) -> String {
+    match lowered {
+        LoweredType::I64 => "Int".to_string(),
+        LoweredType::I32 => "i32".to_string(),
+        LoweredType::U64 => "u64".to_string(),
+        LoweredType::U32 => "u32".to_string(),
+        LoweredType::F64 => "f64".to_string(),
+        LoweredType::F32 => "f32".to_string(),
+        LoweredType::Bool => "Bool".to_string(),
+        LoweredType::Str => "String".to_string(),
+        LoweredType::Array(inner) => {
+            let inner_str = format_lowered_type_to_lean(inner);
+            // Lean function application is left-associative, so a compound
+            // element type must be parenthesized: `List (List Int)`.
+            if matches!(**inner, LoweredType::Array(_)) {
+                format!("List ({})", inner_str)
+            } else {
+                format!("List {}", inner_str)
+            }
         }
+        LoweredType::Other(name) => match name.as_str() {
+            "int" | "Int" => "Int".to_string(),
+            "string" | "String" | "Str" => "String".to_string(),
+            "unit" | "Unit" => "Unit".to_string(),
+            "bool" | "Bool" => "Bool".to_string(),
+            other => other.to_string(),
+        },
     }
+}
+
+pub(crate) fn mumei_type_to_lean_type(type_name: &str) -> String {
+    format_lowered_type_to_lean(&lower(type_name))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -1300,3 +1321,15 @@ pub fn classify_atom_for_lean_escalation(
 
 pub(crate) type Env<'a> = HashMap<String, Dynamic<'a>>;
 pub(crate) type DynResult<'a> = MumeiResult<Dynamic<'a>>;
+
+#[cfg(test)]
+mod tests {
+    use super::mumei_type_to_lean_type;
+
+    #[test]
+    fn test_mumei_type_to_lean_type_array_and_alias_edges() {
+        assert_eq!(mumei_type_to_lean_type("[[i64]]"), "List (List Int)");
+        assert_eq!(mumei_type_to_lean_type("unit"), "Unit");
+        assert_eq!(mumei_type_to_lean_type("[]<i64>"), "List Int");
+    }
+}

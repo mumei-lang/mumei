@@ -1,0 +1,1322 @@
+use crate::codegen::lowering::{
+    bitpreserve_cast, enum_llvm_type, resolve_param_type, resolve_return_type,
+};
+use crate::codegen::pattern_emit::{
+    bind_pattern_variables, compile_pattern_test, find_field_index, find_field_index_by_name,
+};
+use crate::codegen::stmt_emit::compile_hir_stmt;
+use crate::codegen::task_runtime::{
+    compile_task_spawn, declare_task_group_any_externs, emit_task_join_only, emit_task_spawn_only,
+    static_next_task_group_id, PendingTask, TaskGroupAnyContext,
+};
+use inkwell::builder::Builder;
+use inkwell::context::Context;
+use inkwell::module::Module;
+use inkwell::types::{BasicMetadataTypeEnum, BasicType};
+use inkwell::values::{AnyValue, BasicMetadataValueEnum, BasicValueEnum, FunctionValue};
+use inkwell::AddressSpace;
+use inkwell::{FloatPredicate, IntPredicate};
+use mumei_core::hir::{HirExpr, HirStmt};
+use mumei_core::parser::{JoinSemantics, Op};
+use mumei_core::verification::{ModuleEnv, MumeiError, MumeiResult};
+use std::collections::HashMap;
+
+pub(crate) fn infer_struct_type_name(
+    expr: &HirExpr,
+    var_types: &HashMap<String, String>,
+    module_env: &ModuleEnv,
+) -> Option<String> {
+    match expr {
+        HirExpr::Variable(name) => var_types.get(name).cloned(),
+        HirExpr::StructInit { type_name, .. } => {
+            let base = module_env.resolve_base_type(type_name);
+            if module_env.get_struct(&base).is_some() {
+                Some(base)
+            } else {
+                None
+            }
+        }
+        HirExpr::FieldAccess(inner, field) => {
+            let inner_ty = infer_struct_type_name(inner, var_types, module_env)?;
+            let sdef = module_env.get_struct(&inner_ty)?;
+            let f = sdef.fields.iter().find(|f| f.name == *field)?;
+            let base = module_env.resolve_base_type(&f.type_name);
+            if module_env.get_struct(&base).is_some() {
+                Some(base)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn compile_hir_expr<'a>(
+    context: &'a Context,
+    builder: &Builder<'a>,
+    module: &Module<'a>,
+    function: &FunctionValue<'a>,
+    expr: &HirExpr,
+    variables: &mut HashMap<String, BasicValueEnum<'a>>,
+    var_types: &mut HashMap<String, String>,
+    array_ptrs: &HashMap<String, (BasicValueEnum<'a>, BasicValueEnum<'a>)>,
+    module_env: &ModuleEnv,
+) -> MumeiResult<BasicValueEnum<'a>> {
+    match expr {
+        HirExpr::Number(n) => Ok(context.i64_type().const_int(*n as u64, true).into()),
+
+        HirExpr::Float(f) => Ok(context.f64_type().const_float(*f).into()),
+
+        // Plan 9: String literal as global string pointer
+        HirExpr::StringLit(s) => {
+            let global = builder.build_global_string_ptr(s, "str_lit").map_err(|e| {
+                MumeiError::codegen(format!("Failed to build string literal: {:?}", e))
+            })?;
+            Ok(global.as_pointer_value().into())
+        }
+
+        HirExpr::Variable(name) => variables
+            .get(name.as_str())
+            .cloned()
+            .ok_or_else(|| MumeiError::codegen(format!("Undefined variable: {}", name))),
+
+        HirExpr::Call { name, args, .. } => match name.as_str() {
+            "sqrt" => {
+                let arg = compile_hir_expr(
+                    context, builder, module, function, &args[0], variables, var_types, array_ptrs,
+                    module_env,
+                )?;
+                let sqrt_func = module.get_function("llvm.sqrt.f64").unwrap_or_else(|| {
+                    let type_f64 = context.f64_type();
+                    let fn_type = type_f64.fn_type(&[type_f64.into()], false);
+                    module.add_function("llvm.sqrt.f64", fn_type, None)
+                });
+                let call = llvm!(builder.build_call(sqrt_func, &[arg.into()], "sqrt_tmp"));
+                let result = call.as_any_value_enum();
+                Ok(result.into_float_value().into())
+            }
+            "len" => {
+                if !args.is_empty() {
+                    if let HirExpr::Variable(arr_name) = &args[0] {
+                        if let Some((len_val, _)) = array_ptrs.get(arr_name.as_str()) {
+                            return Ok(*len_val);
+                        }
+                    }
+                }
+                Ok(context.i64_type().const_int(0, false).into())
+            }
+            "alloc_raw" => {
+                let size_val = compile_hir_expr(
+                    context, builder, module, function, &args[0], variables, var_types, array_ptrs,
+                    module_env,
+                )?;
+                let malloc_fn = module.get_function("malloc").unwrap_or_else(|| {
+                    let ptr_type = context.ptr_type(AddressSpace::default());
+                    let fn_type = ptr_type.fn_type(&[context.i64_type().into()], false);
+                    module.add_function("malloc", fn_type, Some(inkwell::module::Linkage::External))
+                });
+                let byte_size = llvm!(builder.build_int_mul(
+                    size_val.into_int_value(),
+                    context.i64_type().const_int(8, false),
+                    "byte_size"
+                ));
+                let ptr =
+                    llvm!(builder.build_call(malloc_fn, &[byte_size.into()], "malloc_result"));
+                let ptr_val = ptr.as_any_value_enum().into_pointer_value();
+                Ok(
+                    llvm!(builder.build_ptr_to_int(ptr_val, context.i64_type(), "ptr_as_int"))
+                        .into(),
+                )
+            }
+            "dealloc_raw" => {
+                let ptr_int = compile_hir_expr(
+                    context, builder, module, function, &args[0], variables, var_types, array_ptrs,
+                    module_env,
+                )?;
+                let free_fn = module.get_function("free").unwrap_or_else(|| {
+                    let ptr_type = context.ptr_type(AddressSpace::default());
+                    let fn_type = context.void_type().fn_type(&[ptr_type.into()], false);
+                    module.add_function("free", fn_type, Some(inkwell::module::Linkage::External))
+                });
+                let ptr_val = llvm!(builder.build_int_to_ptr(
+                    ptr_int.into_int_value(),
+                    context.ptr_type(AddressSpace::default()),
+                    "int_as_ptr"
+                ));
+                llvm!(builder.build_call(free_fn, &[ptr_val.into()], "free_call"));
+                Ok(context.i64_type().const_int(0, false).into())
+            }
+            _ => {
+                let fqn_name = name.replace('.', "::");
+                let resolved_callee = module_env
+                    .get_atom(name)
+                    .or_else(|| module_env.get_atom(&fqn_name));
+                if let Some(callee) = resolved_callee {
+                    let callee_symbol = callee.name.as_str();
+                    let callee_param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = callee
+                        .params
+                        .iter()
+                        .map(|p| {
+                            resolve_param_type(context, p.type_name.as_deref(), module_env).into()
+                        })
+                        .collect();
+
+                    // Plan 18: Resolve callee return type from its return_type annotation
+                    let callee_ret_type = resolve_return_type(context, callee, module_env);
+                    let callee_fn = {
+                        let fn_type = callee_ret_type.fn_type(&callee_param_types, false);
+                        module.get_function(callee_symbol).unwrap_or_else(|| {
+                            module.add_function(
+                                callee_symbol,
+                                fn_type,
+                                Some(inkwell::module::Linkage::External),
+                            )
+                        })
+                    };
+
+                    let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
+                    for arg in args {
+                        let val = compile_hir_expr(
+                            context, builder, module, function, arg, variables, var_types,
+                            array_ptrs, module_env,
+                        )?;
+                        arg_vals.push(val.into());
+                    }
+
+                    let call_name = format!(
+                        "call_{}",
+                        callee_symbol.replace("::", "_").replace('.', "_")
+                    );
+                    let call_result = llvm!(builder.build_call(callee_fn, &arg_vals, &call_name));
+                    let result = call_result.as_any_value_enum();
+                    if result.is_float_value() {
+                        Ok(result.into_float_value().into())
+                    } else if result.is_pointer_value() {
+                        Ok(result.into_pointer_value().into())
+                    } else if result.is_struct_value() {
+                        Ok(result.into_struct_value().into())
+                    } else {
+                        Ok(result.into_int_value().into())
+                    }
+                } else {
+                    Err(MumeiError::codegen(format!("Unknown function {}", name)))
+                }
+            }
+        },
+
+        HirExpr::ArrayAccess(name, index_expr) => {
+            let idx = compile_hir_expr(
+                context, builder, module, function, index_expr, variables, var_types, array_ptrs,
+                module_env,
+            )?
+            .into_int_value();
+            if let Some((len_val, data_ptr_val)) = array_ptrs.get(name.as_str()) {
+                let data_ptr = data_ptr_val.into_pointer_value();
+                let len_int = len_val.into_int_value();
+                let in_bounds = llvm!(builder.build_int_compare(
+                    IntPredicate::SLT,
+                    idx,
+                    len_int,
+                    "bounds_check"
+                ));
+                let non_neg = llvm!(builder.build_int_compare(
+                    IntPredicate::SGE,
+                    idx,
+                    context.i64_type().const_int(0, false),
+                    "non_neg_check"
+                ));
+                let safe = llvm!(builder.build_and(in_bounds, non_neg, "safe_access"));
+
+                let safe_block = context.append_basic_block(*function, "arr.safe");
+                let oob_block = context.append_basic_block(*function, "arr.oob");
+                let merge_block = context.append_basic_block(*function, "arr.merge");
+
+                llvm!(builder.build_conditional_branch(safe, safe_block, oob_block));
+
+                builder.position_at_end(safe_block);
+                let elem_ptr = unsafe {
+                    llvm!(builder.build_gep(context.i64_type(), data_ptr, &[idx], "elem_ptr"))
+                };
+                let loaded = llvm!(builder.build_load(context.i64_type(), elem_ptr, "elem_val"));
+                let safe_end = builder.get_insert_block().unwrap();
+                llvm!(builder.build_unconditional_branch(merge_block));
+
+                builder.position_at_end(oob_block);
+                let zero_val = context.i64_type().const_int(0, false);
+                let oob_end = builder.get_insert_block().unwrap();
+                llvm!(builder.build_unconditional_branch(merge_block));
+
+                builder.position_at_end(merge_block);
+                let phi = llvm!(builder.build_phi(context.i64_type(), "arr_result"));
+                phi.add_incoming(&[(&loaded, safe_end), (&zero_val, oob_end)]);
+                Ok(phi.as_basic_value())
+            } else {
+                Err(MumeiError::codegen(format!(
+                    "Array '{}' not found as fat pointer parameter",
+                    name
+                )))
+            }
+        }
+
+        HirExpr::BinaryOp(left, op, right) => {
+            let lhs = compile_hir_expr(
+                context, builder, module, function, left, variables, var_types, array_ptrs,
+                module_env,
+            )?;
+            let rhs = compile_hir_expr(
+                context, builder, module, function, right, variables, var_types, array_ptrs,
+                module_env,
+            )?;
+
+            // Plan 9-8: String operations — if both operands are pointer (Str) type
+            if lhs.is_pointer_value() && rhs.is_pointer_value() {
+                let ptr_type = context.ptr_type(inkwell::AddressSpace::default());
+                match op {
+                    Op::Add => {
+                        // Call runtime helper mumei_str_concat(a, b) -> *const c_char
+                        let str_concat_fn =
+                            module.get_function("mumei_str_concat").unwrap_or_else(|| {
+                                let fn_type =
+                                    ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+                                module.add_function("mumei_str_concat", fn_type, None)
+                            });
+                        let result = llvm!(builder.build_call(
+                            str_concat_fn,
+                            &[lhs.into(), rhs.into()],
+                            "str_concat_tmp"
+                        ));
+                        return result
+                            .try_as_basic_value()
+                            .left()
+                            .ok_or(MumeiError::codegen("str_concat returned void".to_string()));
+                    }
+                    Op::Eq | Op::Neq => {
+                        // Call runtime helper mumei_str_eq(a, b) -> i64 (0 or 1)
+                        let str_eq_fn = module.get_function("mumei_str_eq").unwrap_or_else(|| {
+                            let fn_type = context
+                                .i64_type()
+                                .fn_type(&[ptr_type.into(), ptr_type.into()], false);
+                            module.add_function("mumei_str_eq", fn_type, None)
+                        });
+                        let result = llvm!(builder.build_call(
+                            str_eq_fn,
+                            &[lhs.into(), rhs.into()],
+                            "str_eq_tmp"
+                        ));
+                        let eq_val = result
+                            .try_as_basic_value()
+                            .left()
+                            .ok_or(MumeiError::codegen("str_eq returned void".to_string()))?
+                            .into_int_value();
+                        if matches!(op, Op::Neq) {
+                            // Negate: result == 0 means not equal → flip
+                            let negated = llvm!(builder.build_int_compare(
+                                IntPredicate::EQ,
+                                eq_val,
+                                context.i64_type().const_int(0, false),
+                                "str_neq_tmp"
+                            ));
+                            return Ok(llvm!(builder.build_int_z_extend(
+                                negated,
+                                context.i64_type(),
+                                "str_neq_ext"
+                            ))
+                            .into());
+                        }
+                        return Ok(eq_val.into());
+                    }
+                    _ => {
+                        return Err(MumeiError::codegen(format!(
+                            "Unsupported operator {:?} for Str type in codegen",
+                            op
+                        )));
+                    }
+                }
+            }
+
+            if lhs.is_float_value() || rhs.is_float_value() {
+                let l = if lhs.is_float_value() {
+                    lhs.into_float_value()
+                } else {
+                    llvm!(builder.build_signed_int_to_float(
+                        lhs.into_int_value(),
+                        context.f64_type(),
+                        "int_to_float_l"
+                    ))
+                };
+                let r = if rhs.is_float_value() {
+                    rhs.into_float_value()
+                } else {
+                    llvm!(builder.build_signed_int_to_float(
+                        rhs.into_int_value(),
+                        context.f64_type(),
+                        "int_to_float_r"
+                    ))
+                };
+                match op {
+                    Op::Add => Ok(llvm!(builder.build_float_add(l, r, "fadd_tmp")).into()),
+                    Op::Sub => Ok(llvm!(builder.build_float_sub(l, r, "fsub_tmp")).into()),
+                    Op::Mul => Ok(llvm!(builder.build_float_mul(l, r, "fmul_tmp")).into()),
+                    Op::Div => Ok(llvm!(builder.build_float_div(l, r, "fdiv_tmp")).into()),
+                    Op::Eq => {
+                        let cmp = llvm!(builder.build_float_compare(
+                            FloatPredicate::OEQ,
+                            l,
+                            r,
+                            "fcmp_tmp"
+                        ));
+                        Ok(
+                            llvm!(builder.build_int_z_extend(cmp, context.i64_type(), "fbool_tmp"))
+                                .into(),
+                        )
+                    }
+                    _ => Err(MumeiError::codegen(format!(
+                        "Unsupported float operator {:?}",
+                        op
+                    ))),
+                }
+            } else {
+                let l = lhs.into_int_value();
+                let r = rhs.into_int_value();
+                match op {
+                    Op::Add => Ok(llvm!(builder.build_int_add(l, r, "add_tmp")).into()),
+                    Op::Sub => Ok(llvm!(builder.build_int_sub(l, r, "sub_tmp")).into()),
+                    Op::Mul => Ok(llvm!(builder.build_int_mul(l, r, "mul_tmp")).into()),
+                    Op::Div => Ok(llvm!(builder.build_int_signed_div(l, r, "div_tmp")).into()),
+                    Op::Eq | Op::Neq | Op::Lt | Op::Gt | Op::Ge | Op::Le => {
+                        let pred = match op {
+                            Op::Eq => IntPredicate::EQ,
+                            Op::Neq => IntPredicate::NE,
+                            Op::Lt => IntPredicate::SLT,
+                            Op::Gt => IntPredicate::SGT,
+                            Op::Ge => IntPredicate::SGE,
+                            Op::Le => IntPredicate::SLE,
+                            _ => unreachable!(),
+                        };
+                        let cmp = llvm!(builder.build_int_compare(pred, l, r, "cmp_tmp"));
+                        Ok(
+                            llvm!(builder.build_int_z_extend(cmp, context.i64_type(), "bool_tmp"))
+                                .into(),
+                        )
+                    }
+                    _ => Err(MumeiError::codegen(format!(
+                        "Unsupported int operator {:?}",
+                        op
+                    ))),
+                }
+            }
+        }
+
+        HirExpr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            let cond_val = compile_hir_expr(
+                context, builder, module, function, cond, variables, var_types, array_ptrs,
+                module_env,
+            )?
+            .into_int_value();
+            let cond_bool = llvm!(builder.build_int_compare(
+                IntPredicate::NE,
+                cond_val,
+                context.i64_type().const_int(0, false),
+                "if_cond"
+            ));
+
+            let then_block = context.append_basic_block(*function, "then");
+            let else_block = context.append_basic_block(*function, "else");
+            let merge_block = context.append_basic_block(*function, "merge");
+
+            llvm!(builder.build_conditional_branch(cond_bool, then_block, else_block));
+
+            builder.position_at_end(then_block);
+            let then_val = compile_hir_stmt(
+                context,
+                builder,
+                module,
+                function,
+                then_branch,
+                variables,
+                var_types,
+                array_ptrs,
+                module_env,
+            )?;
+            let then_end_block = builder.get_insert_block().unwrap();
+            llvm!(builder.build_unconditional_branch(merge_block));
+
+            builder.position_at_end(else_block);
+            let else_val = compile_hir_stmt(
+                context,
+                builder,
+                module,
+                function,
+                else_branch,
+                variables,
+                var_types,
+                array_ptrs,
+                module_env,
+            )?;
+            let else_end_block = builder.get_insert_block().unwrap();
+            llvm!(builder.build_unconditional_branch(merge_block));
+
+            builder.position_at_end(merge_block);
+            let phi = llvm!(builder.build_phi(then_val.get_type(), "if_result"));
+            phi.add_incoming(&[(&then_val, then_end_block), (&else_val, else_end_block)]);
+            Ok(phi.as_basic_value())
+        }
+
+        HirExpr::StructInit { type_name, fields } => {
+            let mut last_val: BasicValueEnum = context.i64_type().const_int(0, false).into();
+            if let Some(sdef) = module_env.get_struct(type_name) {
+                for (field_name, field_expr) in fields {
+                    let val = compile_hir_expr(
+                        context, builder, module, function, field_expr, variables, var_types,
+                        array_ptrs, module_env,
+                    )?;
+                    let qualified = format!("__struct_{}_{}", type_name, field_name);
+                    variables.insert(qualified, val);
+                }
+                let field_types: Vec<inkwell::types::BasicTypeEnum> = sdef
+                    .fields
+                    .iter()
+                    .map(|f| {
+                        // Plan 9: Use resolve_param_type for consistent type resolution
+                        resolve_param_type(context, Some(f.type_name.as_str()), module_env)
+                    })
+                    .collect();
+                let struct_type = context.struct_type(&field_types.to_vec(), false);
+                let mut struct_val = struct_type.get_undef();
+                for (field_name, _) in fields.iter() {
+                    let qualified = format!("__struct_{}_{}", type_name, field_name);
+                    if let Some(val) = variables.get(&qualified) {
+                        let def_idx = sdef
+                            .fields
+                            .iter()
+                            .position(|f| f.name == *field_name)
+                            .ok_or_else(|| {
+                                MumeiError::codegen(format!(
+                                    "Field '{}' not found in struct '{}'",
+                                    field_name, type_name
+                                ))
+                            })?;
+                        struct_val = llvm!(builder.build_insert_value(
+                            struct_val,
+                            *val,
+                            def_idx as u32,
+                            &format!("struct_{}", field_name)
+                        ))
+                        .into_struct_value();
+                    }
+                }
+                last_val = struct_val.into();
+            } else {
+                for (field_name, field_expr) in fields {
+                    let val = compile_hir_expr(
+                        context, builder, module, function, field_expr, variables, var_types,
+                        array_ptrs, module_env,
+                    )?;
+                    let qualified = format!("__struct_{}_{}", type_name, field_name);
+                    variables.insert(qualified, val);
+                    last_val = val;
+                }
+            }
+            Ok(last_val)
+        }
+
+        HirExpr::Match { target, arms } => {
+            let target_val = compile_hir_expr(
+                context, builder, module, function, target, variables, var_types, array_ptrs,
+                module_env,
+            )?;
+
+            let merge_block = context.append_basic_block(*function, "match.merge");
+            let unreachable_block = context.append_basic_block(*function, "match.unreachable");
+
+            let mut incoming: Vec<(BasicValueEnum<'a>, inkwell::basic_block::BasicBlock<'a>)> =
+                Vec::new();
+
+            let arm_count = arms.len();
+            let mut try_blocks: Vec<inkwell::basic_block::BasicBlock<'a>> = Vec::new();
+            for i in 0..arm_count {
+                try_blocks.push(context.append_basic_block(*function, &format!("match.try_{}", i)));
+            }
+
+            llvm!(builder.build_unconditional_branch(try_blocks[0]));
+
+            for (i, arm) in arms.iter().enumerate() {
+                let try_block = try_blocks[i];
+                let fail_block = if i + 1 < arm_count {
+                    try_blocks[i + 1]
+                } else {
+                    unreachable_block
+                };
+
+                builder.position_at_end(try_block);
+
+                let pattern_matches = compile_pattern_test(
+                    context,
+                    builder,
+                    &arm.pattern,
+                    target_val,
+                    variables,
+                    module_env,
+                )?;
+
+                let full_cond = if let Some(guard) = &arm.guard {
+                    let mut guard_vars = variables.clone();
+                    let mut guard_var_types = var_types.clone();
+                    bind_pattern_variables(
+                        context,
+                        builder,
+                        &arm.pattern,
+                        target_val,
+                        &mut guard_vars,
+                        module_env,
+                    )?;
+                    let guard_val = compile_hir_expr(
+                        context,
+                        builder,
+                        module,
+                        function,
+                        guard,
+                        &mut guard_vars,
+                        &mut guard_var_types,
+                        array_ptrs,
+                        module_env,
+                    )?
+                    .into_int_value();
+                    let guard_bool = llvm!(builder.build_int_compare(
+                        IntPredicate::NE,
+                        guard_val,
+                        context.i64_type().const_int(0, false),
+                        "guard_cond"
+                    ));
+                    llvm!(builder.build_and(pattern_matches, guard_bool, "match_and_guard"))
+                } else {
+                    pattern_matches
+                };
+
+                let body_block =
+                    context.append_basic_block(*function, &format!("match.body_{}", i));
+                llvm!(builder.build_conditional_branch(full_cond, body_block, fail_block));
+
+                builder.position_at_end(body_block);
+                let mut arm_vars = variables.clone();
+                let mut arm_var_types = var_types.clone();
+                bind_pattern_variables(
+                    context,
+                    builder,
+                    &arm.pattern,
+                    target_val,
+                    &mut arm_vars,
+                    module_env,
+                )?;
+
+                let body_val = compile_hir_stmt(
+                    context,
+                    builder,
+                    module,
+                    function,
+                    &arm.body,
+                    &mut arm_vars,
+                    &mut arm_var_types,
+                    array_ptrs,
+                    module_env,
+                )?;
+                let body_end = builder.get_insert_block().unwrap();
+                llvm!(builder.build_unconditional_branch(merge_block));
+                incoming.push((body_val, body_end));
+            }
+
+            // Plan 18: Infer phi type from the first arm's body value type
+            // (must be determined before creating the unreachable block value)
+            let phi_type = incoming
+                .first()
+                .map(|(v, _)| v.get_type())
+                .unwrap_or_else(|| context.i64_type().into());
+
+            builder.position_at_end(unreachable_block);
+            // Create a zero/null value matching the inferred phi type
+            let unreachable_val: BasicValueEnum = if phi_type.is_float_type() {
+                context.f64_type().const_float(0.0).into()
+            } else if phi_type.is_pointer_type() {
+                context
+                    .ptr_type(AddressSpace::default())
+                    .const_null()
+                    .into()
+            } else if phi_type.is_struct_type() {
+                phi_type.into_struct_type().get_undef().into()
+            } else {
+                context.i64_type().const_int(0, false).into()
+            };
+            llvm!(builder.build_unconditional_branch(merge_block));
+            incoming.push((unreachable_val, unreachable_block));
+
+            builder.position_at_end(merge_block);
+            let phi = llvm!(builder.build_phi(phi_type, "match_result"));
+            for (val, block) in &incoming {
+                phi.add_incoming(&[(val, *block)]);
+            }
+
+            Ok(phi.as_basic_value())
+        }
+
+        // =================================================================
+        // 非同期処理の LLVM IR 生成
+        // =================================================================
+        HirExpr::Async { body } => compile_hir_stmt(
+            context, builder, module, function, body, variables, var_types, array_ptrs, module_env,
+        ),
+        HirExpr::Await { expr: await_expr } => compile_hir_expr(
+            context, builder, module, function, await_expr, variables, var_types, array_ptrs,
+            module_env,
+        ),
+
+        // Plan 21 — concurrency runtime: spawn the task body on its own
+        // pthread, join it, and return the joined i64 result. See
+        // `compile_task_spawn` for layout / capture details.
+        HirExpr::Task { body, .. } => compile_task_spawn(
+            context, builder, module, function, body, variables, var_types, module_env,
+        ),
+        HirExpr::TaskGroup {
+            children,
+            join_semantics,
+        } => {
+            // Each child is constructed in `hir::lower_stmt` as
+            // `HirStmt::Expr(HirExpr::Task { body, … })`. We unwrap
+            // that here so `emit_task_spawn_only` operates on the
+            // *task body*, not the surrounding `Task` expression.
+            let any_ctx = if matches!(join_semantics, JoinSemantics::Any) && !children.is_empty() {
+                let i64_type = context.i64_type();
+                let group_id = static_next_task_group_id()
+                    .ok_or_else(|| MumeiError::codegen("task_group id overflow".to_string()))?;
+                let parent_entry = function.get_first_basic_block().ok_or_else(|| {
+                    MumeiError::codegen(String::from("parent function has no entry block"))
+                })?;
+                let saved = builder.get_insert_block();
+                let group_result_ptr =
+                    if let Some(first_inst) = parent_entry.get_first_instruction() {
+                        builder.position_before(&first_inst);
+                        llvm!(builder.build_alloca(i64_type, "task_group_any_result"))
+                    } else {
+                        builder.position_at_end(parent_entry);
+                        llvm!(builder.build_alloca(i64_type, "task_group_any_result"))
+                    };
+                if let Some(block) = saved {
+                    builder.position_at_end(block);
+                }
+                llvm!(builder.build_store(group_result_ptr, i64_type.const_int(0, false)));
+                let (_complete_fn, _flag_fn, reset_fn, _cancel_fn, _wait_fn, _, _, _) =
+                    declare_task_group_any_externs(context, module);
+                llvm!(builder.build_call(
+                    reset_fn,
+                    &[i64_type.const_int(group_id, false).into()],
+                    "task_group_reset_call",
+                ));
+                Some(TaskGroupAnyContext {
+                    group_id,
+                    result_ptr: group_result_ptr,
+                })
+            } else {
+                None
+            };
+            let mut pending: Vec<PendingTask<'_>> = Vec::with_capacity(children.len());
+            for child in children {
+                let task_body: &HirStmt = match child {
+                    HirStmt::Expr(HirExpr::Task { body, .. }) => body.as_ref(),
+                    other => other,
+                };
+                pending.push(emit_task_spawn_only(
+                    context, builder, module, function, task_body, variables, var_types,
+                    module_env, any_ctx,
+                )?);
+            }
+            if let Some(any_ctx) = any_ctx {
+                let i64_type = context.i64_type();
+                let (_complete_fn, _flag_fn, _reset_fn, _cancel_fn, wait_fn, group_cancel_fn, _, _) =
+                    declare_task_group_any_externs(context, module);
+                if builder.get_insert_block().is_none() {
+                    return Err(MumeiError::codegen(String::from(
+                        "task_group:any has no insertion block",
+                    )));
+                }
+                llvm!(builder.build_call(
+                    wait_fn,
+                    &[i64_type.const_int(any_ctx.group_id, false).into()],
+                    "task_group_any_wait_call",
+                ));
+                llvm!(builder.build_call(
+                    group_cancel_fn,
+                    &[i64_type.const_int(any_ctx.group_id, false).into()],
+                    "task_group_cancel_call",
+                ));
+                for p in &pending {
+                    let _ = emit_task_join_only(context, builder, module, p)?;
+                }
+                let result = llvm!(builder.build_load(
+                    i64_type,
+                    any_ctx.result_ptr,
+                    "task_group_any_result"
+                ));
+                Ok(result)
+            } else {
+                let mut last_val: BasicValueEnum = context.i64_type().const_int(0, false).into();
+                for p in &pending {
+                    last_val = emit_task_join_only(context, builder, module, p)?;
+                }
+                Ok(last_val)
+            }
+        }
+
+        HirExpr::AtomRef { name } => {
+            let func = if let Some(f) = module.get_function(name) {
+                f
+            } else if let Some(callee_atom) = module_env.get_atom(name) {
+                let callee_param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = callee_atom
+                    .params
+                    .iter()
+                    .map(|p| resolve_param_type(context, p.type_name.as_deref(), module_env).into())
+                    .collect();
+                // Plan 18: Use resolve_return_type for consistent type resolution
+                let callee_ret = resolve_return_type(context, callee_atom, module_env);
+                let fn_type = callee_ret.fn_type(&callee_param_types, false);
+                module.add_function(name, fn_type, Some(inkwell::module::Linkage::External))
+            } else {
+                return Err(MumeiError::codegen(format!(
+                    "atom_ref: unknown function '{}'",
+                    name
+                )));
+            };
+            let fn_ptr = func.as_global_value().as_pointer_value();
+            let ptr_int = llvm!(builder.build_ptr_to_int(
+                fn_ptr,
+                context.i64_type(),
+                &format!("atom_ref_{}", name)
+            ));
+            Ok(ptr_int.into())
+        }
+        HirExpr::CallRef { callee, args } => {
+            let callee_val = compile_hir_expr(
+                context, builder, module, function, callee, variables, var_types, array_ptrs,
+                module_env,
+            )?;
+
+            let mut arg_vals: Vec<BasicValueEnum> = Vec::new();
+            for arg in args {
+                let val = compile_hir_expr(
+                    context, builder, module, function, arg, variables, var_types, array_ptrs,
+                    module_env,
+                )?;
+                arg_vals.push(val);
+            }
+
+            if let HirExpr::AtomRef { name } = callee.as_ref() {
+                if let Some(callee_fn) = module.get_function(name) {
+                    let args_meta: Vec<BasicMetadataValueEnum> =
+                        arg_vals.iter().map(|v| (*v).into()).collect();
+                    let call_result = llvm!(builder.build_call(
+                        callee_fn,
+                        &args_meta,
+                        &format!("call_ref_{}", name)
+                    ));
+                    return Ok(call_result
+                        .try_as_basic_value()
+                        .left()
+                        .unwrap_or(context.i64_type().const_int(0, false).into()));
+                }
+            }
+
+            let callee_int = callee_val.into_int_value();
+            let param_types: Vec<BasicMetadataTypeEnum> = arg_vals
+                .iter()
+                .map(|v| {
+                    if v.is_float_value() {
+                        context.f64_type().into()
+                    } else if v.is_pointer_value() {
+                        context.ptr_type(AddressSpace::default()).into()
+                    } else {
+                        context.i64_type().into()
+                    }
+                })
+                .collect();
+            // Plan 18: Try to resolve return type from callee atom definition.
+            // For indirect calls via AtomRef, look up the atom name in module_env.
+            let indirect_ret_type = if let HirExpr::AtomRef { name } = callee.as_ref() {
+                module_env
+                    .get_atom(name)
+                    .map(|a| resolve_return_type(context, a, module_env))
+            } else {
+                None
+            };
+            let fn_type = if let Some(ret) = indirect_ret_type {
+                ret.fn_type(&param_types, false)
+            } else {
+                // Fallback: infer from argument types (no atom definition available)
+                let has_float_arg = arg_vals.iter().any(|v| v.is_float_value());
+                if has_float_arg {
+                    context.f64_type().fn_type(&param_types, false)
+                } else {
+                    context.i64_type().fn_type(&param_types, false)
+                }
+            };
+            let fn_ptr = llvm!(builder.build_int_to_ptr(
+                callee_int,
+                context.ptr_type(inkwell::AddressSpace::default()),
+                "call_ref_fn_ptr"
+            ));
+            let args_meta: Vec<BasicMetadataValueEnum> =
+                arg_vals.iter().map(|v| (*v).into()).collect();
+            let call_result = llvm!(builder.build_indirect_call(
+                fn_type,
+                fn_ptr,
+                &args_meta,
+                "call_ref_indirect"
+            ));
+            Ok(call_result
+                .try_as_basic_value()
+                .left()
+                .unwrap_or(context.i64_type().const_int(0, false).into()))
+        }
+
+        HirExpr::Perform {
+            effect,
+            operation,
+            args: perform_args,
+            ..
+        } => {
+            let fn_name = format!("__effect_{}_{}", effect, operation);
+
+            let mut arg_vals = Vec::new();
+            for arg in perform_args {
+                let val = compile_hir_expr(
+                    context, builder, module, function, arg, variables, var_types, array_ptrs,
+                    module_env,
+                )?;
+                arg_vals.push(val);
+            }
+
+            let param_types: Vec<BasicMetadataTypeEnum> = arg_vals
+                .iter()
+                .map(|v| {
+                    if v.is_float_value() {
+                        context.f64_type().into()
+                    } else {
+                        context.i64_type().into()
+                    }
+                })
+                .collect();
+            let fn_type = context.i64_type().fn_type(&param_types, false);
+            let callee_fn = if let Some(function) = module.get_function(&fn_name) {
+                function
+            } else {
+                let function = module.add_function(&fn_name, fn_type, None);
+                let current_block = builder.get_insert_block();
+                let entry = context.append_basic_block(function, "entry");
+                builder.position_at_end(entry);
+                llvm!(builder.build_return(Some(&context.i64_type().const_int(0, false))));
+                if let Some(block) = current_block {
+                    builder.position_at_end(block);
+                }
+                function
+            };
+
+            let args_meta: Vec<BasicMetadataValueEnum> =
+                arg_vals.iter().map(|v| (*v).into()).collect();
+            let call_result = llvm!(builder.build_call(callee_fn, &args_meta, "perform_result"));
+            Ok(call_result
+                .try_as_basic_value()
+                .left()
+                .unwrap_or(context.i64_type().const_int(0, false).into()))
+        }
+
+        HirExpr::Lambda {
+            params, captures, ..
+        } => {
+            // LLVM IR: Lambda as closure struct (function pointer + captured env)
+            // For now, represent as an i64 tag (closure ID) — full closure conversion
+            // will be added in a future phase with __Closure_N struct generation.
+            let _param_count = params.len();
+            let _capture_count = captures.len();
+            // Return a symbolic closure ID
+            Ok(context.i64_type().const_int(0, false).into())
+        }
+
+        // Plan 21 — concurrency runtime: channel send compiles to a call
+        // into the runtime helper `__mumei_chan_send(chan_id: i64, value:
+        // i64) -> void`. The runtime is responsible for the
+        // `pthread_mutex_lock` / `pthread_cond_signal` / unlock sequence —
+        // see `runtime/mumei_runtime.c`. The channel is referred to by an
+        // i64 handle; the front-end is responsible for binding `let ch =
+        // chan_new()` to a unique id (current grammar's `chan` literal
+        // lowers to a fresh i64, so this just threads the handle through).
+        HirExpr::ChanSend { channel, value } => {
+            let chan_val = compile_hir_expr(
+                context, builder, module, function, channel, variables, var_types, array_ptrs,
+                module_env,
+            )?;
+            let val = compile_hir_expr(
+                context, builder, module, function, value, variables, var_types, array_ptrs,
+                module_env,
+            )?;
+            let chan_i64 = if chan_val.is_int_value() {
+                chan_val.into_int_value()
+            } else {
+                context.i64_type().const_int(0, false)
+            };
+            let val_i64 = if val.is_int_value() {
+                val.into_int_value()
+            } else {
+                context.i64_type().const_int(0, false)
+            };
+            let send_fn = module.get_function("__mumei_chan_send").unwrap_or_else(|| {
+                let i64_type = context.i64_type();
+                let fn_type = context
+                    .void_type()
+                    .fn_type(&[i64_type.into(), i64_type.into()], false);
+                module.add_function(
+                    "__mumei_chan_send",
+                    fn_type,
+                    Some(inkwell::module::Linkage::External),
+                )
+            });
+            llvm!(builder.build_call(
+                send_fn,
+                &[chan_i64.into(), val_i64.into()],
+                "chan_send_call"
+            ));
+            Ok(context.i64_type().const_int(0, false).into())
+        }
+
+        // Plan 21 — concurrency runtime: channel receive calls
+        // `__mumei_chan_recv(chan_id: i64) -> i64`, which performs a
+        // `pthread_cond_wait` loop until a value is available. See
+        // `runtime/mumei_runtime.c`.
+        HirExpr::ChanRecv { channel } => {
+            let chan_val = compile_hir_expr(
+                context, builder, module, function, channel, variables, var_types, array_ptrs,
+                module_env,
+            )?;
+            let chan_i64 = if chan_val.is_int_value() {
+                chan_val.into_int_value()
+            } else {
+                context.i64_type().const_int(0, false)
+            };
+            let recv_fn = module.get_function("__mumei_chan_recv").unwrap_or_else(|| {
+                let i64_type = context.i64_type();
+                let fn_type = i64_type.fn_type(&[i64_type.into()], false);
+                module.add_function(
+                    "__mumei_chan_recv",
+                    fn_type,
+                    Some(inkwell::module::Linkage::External),
+                )
+            });
+            let call = llvm!(builder.build_call(recv_fn, &[chan_i64.into()], "chan_recv_call"));
+            Ok(call
+                .try_as_basic_value()
+                .left()
+                .unwrap_or(context.i64_type().const_int(0, false).into()))
+        }
+
+        // Plan 14: Enum variant construction — build tagged union struct
+        HirExpr::VariantInit {
+            enum_name,
+            variant_name,
+            fields,
+        } => {
+            let enum_def = module_env.get_enum(enum_name).ok_or_else(|| {
+                MumeiError::codegen(format!("Enum '{}' not found in module_env", enum_name))
+            })?;
+            let variant_idx = enum_def
+                .variants
+                .iter()
+                .position(|v| v.name == *variant_name)
+                .unwrap_or(0);
+            let enum_type = enum_llvm_type(context, enum_def, Some(module_env));
+            let mut val = enum_type.get_undef();
+            // Set tag
+            val = llvm!(builder.build_insert_value(
+                val,
+                context.i64_type().const_int(variant_idx as u64, false),
+                0,
+                "tag"
+            ))
+            .into_struct_value();
+            // Set payload fields
+            for (i, field_expr) in fields.iter().enumerate() {
+                let field_val = compile_hir_expr(
+                    context, builder, module, function, field_expr, variables, var_types,
+                    array_ptrs, module_env,
+                )?;
+                let slot_ty = enum_type
+                    .get_field_type_at_index((i + 1) as u32)
+                    .ok_or_else(|| {
+                        MumeiError::codegen(format!(
+                            "Enum '{}' missing payload slot {}",
+                            enum_name, i
+                        ))
+                    })?;
+                let field_val = if field_val.get_type() != slot_ty {
+                    bitpreserve_cast(builder, field_val, slot_ty)?
+                } else {
+                    field_val
+                };
+                val = llvm!(builder.build_insert_value(
+                    val,
+                    field_val,
+                    (i + 1) as u32,
+                    &format!("payload_{}", i)
+                ))
+                .into_struct_value();
+            }
+            Ok(val.into())
+        }
+
+        HirExpr::FieldAccess(inner_expr, field_name) => {
+            if let HirExpr::Variable(var_name) = inner_expr.as_ref() {
+                let candidates = [
+                    format!("__struct_{}_{}", var_name, field_name),
+                    format!("{}_{}", var_name, field_name),
+                ];
+                for candidate in &candidates {
+                    if let Some(val) = variables.get(candidate) {
+                        return Ok(*val);
+                    }
+                }
+                if let Some(struct_val) = variables.get(var_name.as_str()) {
+                    if struct_val.is_struct_value() {
+                        let sv = struct_val.into_struct_value();
+                        let idx = infer_struct_type_name(inner_expr, var_types, module_env)
+                            .and_then(|t| find_field_index(&t, field_name, module_env))
+                            .or_else(|| find_field_index(var_name, field_name, module_env));
+                        if let Some(idx) = idx {
+                            let extracted = llvm!(builder.build_extract_value(
+                                sv,
+                                idx,
+                                &format!("{}.{}", var_name, field_name)
+                            ));
+                            return Ok(extracted);
+                        }
+                    }
+                }
+                Err(MumeiError::codegen(format!(
+                    "Field '{}' not found on '{}'",
+                    field_name, var_name
+                )))
+            } else {
+                let base_val = compile_hir_expr(
+                    context, builder, module, function, inner_expr, variables, var_types,
+                    array_ptrs, module_env,
+                )?;
+                if base_val.is_struct_value() {
+                    let sv = base_val.into_struct_value();
+                    let idx = infer_struct_type_name(inner_expr, var_types, module_env)
+                        .and_then(|t| find_field_index(&t, field_name, module_env))
+                        .or_else(|| find_field_index_by_name(field_name, module_env));
+                    if let Some(idx) = idx {
+                        let extracted = llvm!(builder.build_extract_value(
+                            sv,
+                            idx,
+                            &format!("nested.{}", field_name)
+                        ));
+                        Ok(extracted)
+                    } else {
+                        let extracted = llvm!(builder.build_extract_value(
+                            sv,
+                            0,
+                            &format!("field_{}", field_name)
+                        ));
+                        Ok(extracted)
+                    }
+                } else {
+                    Err(MumeiError::codegen(format!(
+                        "Cannot access field '{}' on non-struct value",
+                        field_name
+                    )))
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mumei_core::parser::ast::{Span, StructDef, StructField};
+    use mumei_core::parser::parse_type_ref;
+
+    #[test]
+    fn struct_init_uses_definition_order_for_field_insertion(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::create();
+        let module = context.create_module("test");
+        let builder = context.create_builder();
+        let struct_type = context.struct_type(
+            &[context.i64_type().into(), context.f64_type().into()],
+            false,
+        );
+        let function_type = struct_type.fn_type(&[], false);
+        let function = module.add_function("test", function_type, None);
+        let entry = context.append_basic_block(function, "entry");
+        builder.position_at_end(entry);
+
+        let mut module_env = ModuleEnv::new();
+        module_env.register_struct(&StructDef {
+            name: "Pair".to_string(),
+            type_params: vec![],
+            fields: vec![
+                StructField {
+                    name: "a".to_string(),
+                    type_name: "i64".to_string(),
+                    type_ref: parse_type_ref("i64"),
+                    constraint: None,
+                },
+                StructField {
+                    name: "b".to_string(),
+                    type_name: "f64".to_string(),
+                    type_ref: parse_type_ref("f64"),
+                    constraint: None,
+                },
+            ],
+            method_names: vec![],
+            methods: vec![],
+            span: Span::default(),
+        });
+
+        let expr = HirExpr::StructInit {
+            type_name: "Pair".to_string(),
+            fields: vec![
+                ("b".to_string(), HirExpr::Float(1.0)),
+                ("a".to_string(), HirExpr::Number(2)),
+            ],
+        };
+
+        let mut variables = HashMap::new();
+        let mut var_types = HashMap::new();
+        let array_ptrs = HashMap::new();
+        let result = compile_hir_expr(
+            &context,
+            &builder,
+            &module,
+            &function,
+            &expr,
+            &mut variables,
+            &mut var_types,
+            &array_ptrs,
+            &module_env,
+        );
+
+        assert!(result.is_ok());
+        let struct_val = result.unwrap().into_struct_value();
+        let a_field = llvm!(builder.build_extract_value(struct_val, 0, "a_field"));
+        let b_field = llvm!(builder.build_extract_value(struct_val, 1, "b_field"));
+        assert!(a_field.is_int_value());
+        assert!(b_field.is_float_value());
+        llvm!(builder.build_return(Some(&struct_val)));
+        assert!(function.verify(false));
+        Ok(())
+    }
+
+    #[test]
+    fn field_access_resolves_against_known_struct_type() -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::create();
+        let module = context.create_module("test");
+        let builder = context.create_builder();
+        let function_type = context.f64_type().fn_type(&[], false);
+        let function = module.add_function("test", function_type, None);
+        let entry = context.append_basic_block(function, "entry");
+        builder.position_at_end(entry);
+
+        let mut module_env = ModuleEnv::new();
+        module_env.register_struct(&StructDef {
+            name: "A".to_string(),
+            type_params: vec![],
+            fields: vec![
+                StructField {
+                    name: "pad".to_string(),
+                    type_name: "i64".to_string(),
+                    type_ref: parse_type_ref("i64"),
+                    constraint: None,
+                },
+                StructField {
+                    name: "val".to_string(),
+                    type_name: "f64".to_string(),
+                    type_ref: parse_type_ref("f64"),
+                    constraint: None,
+                },
+            ],
+            method_names: vec![],
+            methods: vec![],
+            span: Span::default(),
+        });
+        module_env.register_struct(&StructDef {
+            name: "B".to_string(),
+            type_params: vec![],
+            fields: vec![
+                StructField {
+                    name: "val".to_string(),
+                    type_name: "i64".to_string(),
+                    type_ref: parse_type_ref("i64"),
+                    constraint: None,
+                },
+                StructField {
+                    name: "extra".to_string(),
+                    type_name: "f64".to_string(),
+                    type_ref: parse_type_ref("f64"),
+                    constraint: None,
+                },
+            ],
+            method_names: vec![],
+            methods: vec![],
+            span: Span::default(),
+        });
+
+        let a_struct_type = context.struct_type(
+            &[context.i64_type().into(), context.f64_type().into()],
+            false,
+        );
+        let mut a_struct = a_struct_type.get_undef();
+        a_struct = llvm!(builder.build_insert_value(
+            a_struct,
+            context.i64_type().const_int(0, false),
+            0,
+            "a_pad"
+        ))
+        .into_struct_value();
+        a_struct = llvm!(builder.build_insert_value(
+            a_struct,
+            context.f64_type().const_float(3.5),
+            1,
+            "a_val"
+        ))
+        .into_struct_value();
+
+        let expr = HirExpr::FieldAccess(
+            Box::new(HirExpr::Variable("B".to_string())),
+            "val".to_string(),
+        );
+
+        let mut variables = HashMap::new();
+        variables.insert("B".to_string(), a_struct.into());
+        let mut var_types = HashMap::new();
+        var_types.insert("B".to_string(), "A".to_string());
+        let array_ptrs = HashMap::new();
+        let result = compile_hir_expr(
+            &context,
+            &builder,
+            &module,
+            &function,
+            &expr,
+            &mut variables,
+            &mut var_types,
+            &array_ptrs,
+            &module_env,
+        )?;
+
+        assert!(result.is_float_value());
+        llvm!(builder.build_return(Some(&result)));
+        assert!(function.verify(false));
+        Ok(())
+    }
+}

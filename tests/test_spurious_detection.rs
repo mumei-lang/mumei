@@ -2,7 +2,8 @@ use std::collections::HashMap;
 
 use mumei_core::parser::{Atom, Param, Span, TrustLevel};
 use mumei_core::verification::{
-    detect_uninterpreted_symbols, detect_unused_hypotheses, validate_counterexample, ModuleEnv,
+    detect_uninterpreted_symbols, detect_unused_hypotheses, validate_counterexample, CexValue,
+    ModuleEnv,
 };
 
 fn base_atom(name: &str) -> Atom {
@@ -52,7 +53,7 @@ fn test_validated_counterexample() {
     atom.ensures = "result > 10".to_string();
     atom.body_expr = "x + 1".to_string();
 
-    let model = HashMap::from([("x".to_string(), 0)]);
+    let model = HashMap::from([("x".to_string(), CexValue::Int(0))]);
     let validation = validate_counterexample(&atom, &model, &module_env);
 
     assert!(validation.is_valid);
@@ -68,7 +69,7 @@ fn test_spurious_candidate_uninterpreted_symbol() {
     atom.params = vec![param("x", "i64")];
     atom.ensures = "mystery(x) > 0".to_string();
 
-    let model = HashMap::from([("x".to_string(), 0)]);
+    let model = HashMap::from([("x".to_string(), CexValue::Int(0))]);
     let validation = validate_counterexample(&atom, &model, &module_env);
     let symbols = detect_uninterpreted_symbols(&atom, &model, &module_env);
 
@@ -88,7 +89,10 @@ fn test_bool_result_counterexample_replays_result_equality() {
     atom.ensures = "result == false".to_string();
     atom.body_expr = "x > 0".to_string();
 
-    let model = HashMap::from([("x".to_string(), 1), ("result".to_string(), 1)]);
+    let model = HashMap::from([
+        ("x".to_string(), CexValue::Int(1)),
+        ("result".to_string(), CexValue::Int(1)),
+    ]);
     let validation = validate_counterexample(&atom, &model, &module_env);
 
     assert!(validation.is_valid);
@@ -108,7 +112,10 @@ fn test_spurious_candidate_when_model_result_disagrees_with_body() {
     atom.ensures = "result >= 0".to_string();
     atom.body_expr = "x + 1".to_string();
 
-    let model = HashMap::from([("x".to_string(), 0), ("result".to_string(), -1)]);
+    let model = HashMap::from([
+        ("x".to_string(), CexValue::Int(0)),
+        ("result".to_string(), CexValue::Int(-1)),
+    ]);
     let validation = validate_counterexample(&atom, &model, &module_env);
 
     assert!(!validation.is_valid);
@@ -126,7 +133,10 @@ fn test_spurious_candidate_when_body_uses_uninterpreted_symbol() {
     atom.params = vec![param("x", "i64")];
     atom.body_expr = "mystery(x)".to_string();
 
-    let model = HashMap::from([("x".to_string(), 0), ("result".to_string(), -1)]);
+    let model = HashMap::from([
+        ("x".to_string(), CexValue::Int(0)),
+        ("result".to_string(), CexValue::Int(-1)),
+    ]);
     let validation = validate_counterexample(&atom, &model, &module_env);
 
     assert!(!validation.is_valid);
@@ -134,6 +144,76 @@ fn test_spurious_candidate_when_body_uses_uninterpreted_symbol() {
     assert!(validation.symbol_provenance.iter().any(|symbol| {
         symbol.symbol_name == "mystery" && symbol.source == "uninterpreted_function"
     }));
+}
+
+#[test]
+fn test_f64_counterexample_validated_under_mumei_semantics() {
+    // atom with an f64 parameter whose ensures is genuinely violated by the
+    // model: x = 2.0, body = x, ensures result < 1.0 is false under f64
+    // semantics -> the counterexample is a real violation ("validated").
+    let module_env = ModuleEnv::new();
+    let mut atom = base_atom("f64_validated");
+    atom.params = vec![param("x", "f64")];
+    atom.requires = "true".to_string();
+    atom.ensures = "result < 1.0".to_string();
+    atom.body_expr = "x".to_string();
+
+    let model = HashMap::from([
+        ("x".to_string(), CexValue::Float(2.0)),
+        ("result".to_string(), CexValue::Float(2.0)),
+    ]);
+    let validation = validate_counterexample(&atom, &model, &module_env);
+
+    assert!(validation.is_valid);
+    assert_eq!(validation.validation_status, "validated");
+}
+
+#[test]
+fn test_f64_counterexample_spurious_when_body_result_disagrees() {
+    // The model claims result = 5.0 but the body computes x + 1.0 = 3.0, so the
+    // model is internally inconsistent with Mumei f64 semantics -> spurious.
+    let module_env = ModuleEnv::new();
+    let mut atom = base_atom("f64_mismatch");
+    atom.params = vec![param("x", "f64")];
+    atom.requires = "true".to_string();
+    atom.ensures = "result >= 0.0".to_string();
+    atom.body_expr = "x + 1.0".to_string();
+
+    let model = HashMap::from([
+        ("x".to_string(), CexValue::Float(2.0)),
+        ("result".to_string(), CexValue::Float(5.0)),
+    ]);
+    let validation = validate_counterexample(&atom, &model, &module_env);
+
+    assert!(!validation.is_valid);
+    assert_eq!(validation.validation_status, "spurious_candidate");
+    assert!(validation
+        .failed_constraints
+        .iter()
+        .any(|constraint| constraint.contains("does not match Mumei body result")));
+}
+
+#[test]
+fn test_f64_counterexample_tolerates_real_rational_result() {
+    // Under the default `Real` encoding, Z3 returns exact rationals. The body is
+    // recomputed in `f64`; small rounding differences must not be misclassified
+    // as a body-result mismatch. Here 0.1 + 0.2 recomputes to 0.30000000000000004
+    // while the model reports 0.3 -- these are "close" and should validate.
+    let module_env = ModuleEnv::new();
+    let mut atom = base_atom("f64_real_tolerant");
+    atom.params = vec![param("x", "f64")];
+    atom.requires = "true".to_string();
+    atom.ensures = "result < 0.0".to_string();
+    atom.body_expr = "x + 0.2".to_string();
+
+    let model = HashMap::from([
+        ("x".to_string(), CexValue::Float(0.1)),
+        ("result".to_string(), CexValue::Float(0.3)),
+    ]);
+    let validation = validate_counterexample(&atom, &model, &module_env);
+
+    assert!(validation.is_valid);
+    assert_eq!(validation.validation_status, "validated");
 }
 
 #[test]
