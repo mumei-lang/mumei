@@ -335,7 +335,9 @@ fn generated_programs_agree_across_verify_and_run() {
 /// oracle is sensitive — both pipelines actually compute the program result.
 #[test]
 fn mutated_programs_are_rejected_by_both_pipelines() {
-    for seed in [3u64, 5] {
+    // Scale with MUMEI_FUZZ_CASES like the positive test, but keep the
+    // default CI cost lower (each seed drives three pipeline invocations).
+    for seed in 1..=fuzz_cases().div_ceil(3) {
         let prog = gen_program(seed.wrapping_mul(0x9E3779B97F4A7C15));
         let wrong = prog.expected.wrapping_add(1);
         // want_match=true asserts `result == 0`, but the comparison constant is
