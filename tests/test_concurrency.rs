@@ -15,19 +15,35 @@ fn write_fixture(name: &str, source: &str) -> std::path::PathBuf {
     path
 }
 
+// Regression tests for the non-i64 task-capture bug: before the fix,
+// `emit_task_spawn_only` only marshalled i64 captures and silently dropped
+// every other type, so a captured struct became a zeroed value in the spawned
+// thread (its fields were then "not found" / read as zero). These fixtures
+// capture an aggregate (`struct`) value into a spawned task and return a field
+// from inside the task body — which only yields the expected value if the whole
+// captured value is round-tripped through the pthread args struct with its own
+// LLVM type. They fail on `develop` (capture dropped -> field not found) and
+// pass after the fix.
+//
+// Scalar (i64/f64) captures are constant-folded before capture analysis, so a
+// standalone scalar never reaches the drop path; aggregates are the smallest
+// value that genuinely exercises the generalized marshalling here.
+
 #[test]
-fn task_spawn_captures_f64_value_into_thread_wrapper() {
+fn task_spawn_captures_struct_first_field_into_thread_wrapper() {
     let bin = env!("CARGO_BIN_EXE_mumei");
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let fixture = write_fixture(
-        "task_spawn_capture_f64",
+        "task_spawn_capture_struct_first",
         r#"
+struct Point { x: i64, y: i64 }
+
 trusted atom main()
 requires: true;
 ensures: true;
 body: {
-    let x = 7.0;
-    task { if x == 7.0 { 7 } else { 0 } }
+    let p = Point { x: 7, y: 0 };
+    task { p.x }
 };
 "#,
     );
@@ -37,12 +53,49 @@ body: {
         .arg(&fixture)
         .current_dir(manifest_dir)
         .output()
-        .unwrap_or_else(|err| panic!("failed to run f64 capture fixture: {err}"));
+        .unwrap_or_else(|err| panic!("failed to run struct capture fixture: {err}"));
 
     assert_eq!(
         output.status.code(),
         Some(7),
-        "task spawn should preserve f64 captures in the pthread wrapper\nstdout:\n{}\nstderr:\n{}",
+        "task spawn should preserve captured struct's first field in the pthread wrapper\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    std::fs::remove_dir_all(fixture.parent().unwrap()).expect("remove concurrency fixture dir");
+}
+
+#[test]
+fn task_spawn_captures_struct_second_field_into_thread_wrapper() {
+    let bin = env!("CARGO_BIN_EXE_mumei");
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let fixture = write_fixture(
+        "task_spawn_capture_struct_second",
+        r#"
+struct Pair { a: i64, b: i64 }
+
+trusted atom main()
+requires: true;
+ensures: true;
+body: {
+    let p = Pair { a: 0, b: 7 };
+    task { p.b }
+};
+"#,
+    );
+
+    let output = Command::new(bin)
+        .arg("run")
+        .arg(&fixture)
+        .current_dir(manifest_dir)
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run struct capture fixture: {err}"));
+
+    assert_eq!(
+        output.status.code(),
+        Some(7),
+        "task spawn should preserve captured struct's non-leading field (offset survives) in the pthread wrapper\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
