@@ -211,15 +211,23 @@ pub(crate) fn expr_to_z3<'a>(
                     // ソートは f64 エンコーディング（デフォルト Real、
                     // `--ieee754-f64` で Float）に合わせる。
                     let _val = expr_to_z3(vc, &args[0], env, solver_opt)?;
+                    // 呼び出しごとに一意な名前を使い、`sqrt(a) + sqrt(b)` の
+                    // ような複数呼び出しが同一の Z3 変数に潰れないようにする。
+                    static SQRT_COUNTER: std::sync::atomic::AtomicUsize =
+                        std::sync::atomic::AtomicUsize::new(0);
+                    let result_name = format!(
+                        "sqrt_result_{}",
+                        SQRT_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    );
                     if vc.ieee754_f64 {
-                        let result = Float::new_const(ctx, "sqrt_result", 11, 53);
+                        let result = Float::new_const(ctx, result_name.as_str(), 11, 53);
                         if let Some(solver) = solver_opt {
                             let zero = Float::from_f64(ctx, 0.0);
                             solver.assert(&result.ge(&zero));
                         }
                         Ok(result.into())
                     } else {
-                        let result = Real::new_const(ctx, "sqrt_result");
+                        let result = Real::new_const(ctx, result_name.as_str());
                         if let Some(solver) = solver_opt {
                             let zero = Real::from_real(ctx, 0, 1);
                             solver.assert(&result.ge(&zero));
