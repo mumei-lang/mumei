@@ -16,6 +16,41 @@ fn write_fixture(name: &str, source: &str) -> std::path::PathBuf {
 }
 
 #[test]
+fn task_spawn_captures_f64_value_into_thread_wrapper() {
+    let bin = env!("CARGO_BIN_EXE_mumei");
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let fixture = write_fixture(
+        "task_spawn_capture_f64",
+        r#"
+trusted atom main()
+requires: true;
+ensures: true;
+body: {
+    let x = 7.0;
+    task { if x == 7.0 { 7 } else { 0 } }
+};
+"#,
+    );
+
+    let output = Command::new(bin)
+        .arg("run")
+        .arg(&fixture)
+        .current_dir(manifest_dir)
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run f64 capture fixture: {err}"));
+
+    assert_eq!(
+        output.status.code(),
+        Some(7),
+        "task spawn should preserve f64 captures in the pthread wrapper\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    std::fs::remove_dir_all(fixture.parent().unwrap()).expect("remove concurrency fixture dir");
+}
+
+#[test]
 fn task_group_any_cancels_blocked_sibling_after_first_completion() {
     let bin = env!("CARGO_BIN_EXE_mumei");
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
