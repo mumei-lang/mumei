@@ -100,12 +100,15 @@ pub(crate) fn cmd_verify_command(command: Command) {
     let enable_spurious = enable_spurious_detection || !disable_spurious_detection;
 
     #[cfg(feature = "otel")]
-    let _verify_span = tracing::info_span!(
-        "mumei.verify.cli",
-        source_path = %input,
-        timeout_ms = solver_timeout.unwrap_or(0),
-    )
-    .entered();
+    let _verify_span = {
+        let timeout_val: i64 = solver_timeout.map_or(-1, |v| v as i64);
+        tracing::info_span!(
+            "mumei.verify.cli",
+            source_path = %input,
+            cli_timeout_ms = timeout_val,
+        )
+        .entered()
+    };
 
     let input_path = Path::new(&input);
     if input_path.is_dir() {

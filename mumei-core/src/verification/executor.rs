@@ -349,14 +349,6 @@ pub(crate) fn verify_inner(
     let timeout_ms = orchestration_timeout_ms_from_env().unwrap_or(timeout_ms);
     let atom = &hir_atom.atom;
 
-    #[cfg(feature = "otel")]
-    let _z3_span = tracing::info_span!(
-        "mumei.z3.solve",
-        atom_name = %atom.name,
-        timeout_ms = timeout_ms,
-    )
-    .entered();
-
     let mut metrics = VerificationMetrics::new(&atom.name);
     metrics.task_id = task_id;
 
@@ -437,6 +429,14 @@ pub(crate) fn verify_inner(
             // 通常の検証フロー
         }
     }
+
+    #[cfg(feature = "otel")]
+    let _z3_span = tracing::info_span!(
+        "mumei.z3.solve",
+        atom_name = %atom.name,
+        timeout_ms = timeout_ms,
+    )
+    .entered();
 
     // Phase 1a: リソース階層検証（デッドロック防止）
     let phase_start = std::time::Instant::now();
