@@ -348,6 +348,15 @@ pub(crate) fn verify_inner(
     } = options;
     let timeout_ms = orchestration_timeout_ms_from_env().unwrap_or(timeout_ms);
     let atom = &hir_atom.atom;
+
+    #[cfg(feature = "otel")]
+    let _z3_span = tracing::info_span!(
+        "mumei.z3.solve",
+        atom_name = %atom.name,
+        timeout_ms = timeout_ms,
+    )
+    .entered();
+
     let mut metrics = VerificationMetrics::new(&atom.name);
     metrics.task_id = task_id;
 
