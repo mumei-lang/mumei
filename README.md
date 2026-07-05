@@ -222,8 +222,8 @@ curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash
 # Homebrew
 brew install mumei-lang/mumei/mumei
 
-# Specific version (latest is v0.6.10)
-curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash -s -- --version v0.6.10
+# Specific version (latest is v0.6.11)
+curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash -s -- --version v0.6.11
 ```
 
 See [Releases](https://github.com/mumei-lang/mumei/releases) for older versions and changelogs.
@@ -351,6 +351,18 @@ mumei/
 | [Structured Feedback Schema](docs/STRUCTURED_FEEDBACK_SCHEMA.md) | P9-E structured feedback JSON schema |
 | [Cross-Project Roadmap](docs/CROSS_PROJECT_ROADMAP.md) | mumei + mumei-agent ecosystem roadmap |
 | [Claude Code Quickstart](docs/CLAUDE_CODE_QUICKSTART.md) | Quickstart guide for Claude Code users |
+
+---
+
+## Distributed Tracing (OpenTelemetry)
+
+When built with `cargo build --features otel` and run with `OTEL_ENABLED=true`, `mumei verify` exports spans via OTLP. If `TRACEPARENT` is set in the environment (W3C Trace Context), the Rust spans become children of the caller's trace — enabling end-to-end distributed tracing from `mumei-agent` through the Z3 verification pipeline.
+
+```bash
+OTEL_ENABLED=true TRACEPARENT="00-..." mumei verify example.mm
+```
+
+See [`docs/ROADMAP.md` § P15](docs/ROADMAP.md#p15-opentelemetry-分散トレース連携実装済み) for details.
 
 ---
 

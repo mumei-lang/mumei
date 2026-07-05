@@ -12,6 +12,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 
 pub(crate) fn cmd_verify_command(command: Command) {
+    // Attach parent OTel context from TRACEPARENT/TRACESTATE env vars so that
+    // all spans created within this command are children of the caller's trace.
+    #[cfg(feature = "otel")]
+    let _otel_parent_guard = crate::telemetry::attach_parent_context();
+
     let Command::Verify {
         input,
         task_id,
@@ -93,6 +98,18 @@ pub(crate) fn cmd_verify_command(command: Command) {
     let budget_policy_fingerprint = resolve_budget_policy_fingerprint(budget_policy_fingerprint);
     let enable_cross_spec = cross_spec_verify || !cross_spec_files.is_empty();
     let enable_spurious = enable_spurious_detection || !disable_spurious_detection;
+
+    #[cfg(feature = "otel")]
+    let _verify_span = {
+        let timeout_val: i64 = solver_timeout.map_or(-1, |v| v as i64);
+        tracing::info_span!(
+            "mumei.verify.cli",
+            source_path = %input,
+            cli_timeout_ms = timeout_val,
+        )
+        .entered()
+    };
+
     let input_path = Path::new(&input);
     if input_path.is_dir() {
         let mut files = collect_mm_files(input_path);

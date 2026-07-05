@@ -9,6 +9,7 @@ mod linker;
 mod lsp;
 mod pipeline;
 mod setup;
+mod telemetry;
 
 use clap::Parser;
 use cli::{Cli, Command};
@@ -20,6 +21,8 @@ fn main() {
         )
     }))
     .ok();
+
+    telemetry::init_telemetry();
 
     let cli = Cli::parse();
 
@@ -84,4 +87,6 @@ fn main() {
             }
         }
     }
+
+    telemetry::shutdown_telemetry();
 }
