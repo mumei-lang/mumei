@@ -354,6 +354,18 @@ mumei/
 
 ---
 
+## Distributed Tracing (OpenTelemetry)
+
+When built with `cargo build --features otel` and run with `OTEL_ENABLED=true`, `mumei verify` exports spans via OTLP. If `TRACEPARENT` is set in the environment (W3C Trace Context), the Rust spans become children of the caller's trace — enabling end-to-end distributed tracing from `mumei-agent` through the Z3 verification pipeline.
+
+```bash
+OTEL_ENABLED=true TRACEPARENT="00-..." mumei verify example.mm
+```
+
+See [`docs/ROADMAP.md` § P15](docs/ROADMAP.md#p15-opentelemetry-分散トレース連携実装済み) for details.
+
+---
+
 ## License
 
 [Apache-2.0 license](LICENSE)
