@@ -31,9 +31,15 @@ pub fn shutdown_telemetry() {
         if !otel_enabled() {
             return;
         }
-        opentelemetry::global::shutdown_tracer_provider();
+        if let Some(provider) = PROVIDER.get() {
+            let _ = provider.shutdown();
+        }
     }
 }
+
+#[cfg(feature = "otel")]
+static PROVIDER: std::sync::OnceLock<opentelemetry_sdk::trace::SdkTracerProvider> =
+    std::sync::OnceLock::new();
 
 /// Attach the parent OTel context extracted from `TRACEPARENT` / `TRACESTATE`
 /// environment variables.
@@ -96,8 +102,7 @@ fn otel_enabled() -> bool {
 #[cfg(feature = "otel")]
 fn try_init_otel() -> Result<(), Box<dyn std::error::Error>> {
     use opentelemetry::trace::TracerProvider as _;
-    use opentelemetry::KeyValue;
-    use opentelemetry_sdk::trace::TracerProvider;
+    use opentelemetry_sdk::trace::SdkTracerProvider;
     use opentelemetry_sdk::Resource;
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
@@ -106,12 +111,13 @@ fn try_init_otel() -> Result<(), Box<dyn std::error::Error>> {
         .with_http()
         .build()?;
 
-    let provider = TracerProvider::builder()
+    let provider = SdkTracerProvider::builder()
         .with_simple_exporter(exporter)
-        .with_resource(Resource::new(vec![KeyValue::new("service.name", "mumei")]))
+        .with_resource(Resource::builder().with_service_name("mumei").build())
         .build();
 
     opentelemetry::global::set_tracer_provider(provider.clone());
+    let _ = PROVIDER.set(provider.clone());
     let tracer = provider.tracer("mumei");
 
     let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
