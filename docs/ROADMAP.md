@@ -1355,7 +1355,8 @@ echo "atom inc(n: i64) requires: n >= 0; ensures: result > 0; body: n + 1;" | mu
 
 ### 構成
 
-- **`otel` feature flag**（Cargo.toml、デフォルト無効）: `tracing` / `tracing-opentelemetry` / `opentelemetry` / `opentelemetry_sdk` / `opentelemetry-otlp` を opt-in で有効化。feature 無効時はゼロコスト（依存追加なし、条件コンパイルで全 OTel コードを除外）。
+- **`otel` feature flag**（Cargo.toml、デフォルト無効）: `tracing` / `tracing-opentelemetry` / `opentelemetry` / `opentelemetry_sdk` / `opentelemetry-otlp`（0.32 系）を opt-in で有効化。feature 無効時はゼロコスト（依存追加なし、条件コンパイルで全 OTel コードを除外）。exporter は OTLP/HTTP（`opentelemetry-otlp` の `http-proto`）を使用するため、エンドポイントは OTLP/HTTP ポート（リファレンススタックでは `:4318`）を指定する。
+  - opentelemetry-rust は 0.28 未満（0.27 系）の `TraceContextPropagator` が W3C trace-flags の未使用ビットを厳格に棄却したため、Python SDK（1.43+）が発行する `flags=03`（SAMPLED + W3C level-2 の random ビット）を持つ `TRACEPARENT` を受理できず親コンテキストを破棄していた。0.32 系は未使用ビットを仕様どおり無視するため、Python → Rust の trace-ID 貫通が成立する。
 - **`src/telemetry.rs`**: `init_telemetry()` / `shutdown_telemetry()` / `attach_parent_context()` を提供。`OTEL_ENABLED` 環境変数が truthy かつ `otel` feature が有効な場合のみ OTLP exporter を初期化。`TRACEPARENT` / `TRACESTATE` 環境変数から `TraceContextPropagator` で親コンテキストを抽出。
 - **`src/commands/verify.rs`**: `cmd_verify_command` に `mumei.verify.cli` root span（属性 `source_path` / `timeout_ms`）を追加。`TRACEPARENT` から抽出した親コンテキストにぶら下げる。
 - **`mumei-core/src/verification/executor.rs`**: `verify_inner` に `mumei.z3.solve` 子 span（属性 `atom_name` / `timeout_ms`）を追加。
@@ -1385,6 +1386,10 @@ OTEL_ENABLED=true OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 \
 ```
 
 mumei-agent 側で `OTEL_ENABLED=true` の場合、`MumeiClient.verify` 等の `subprocess.run` が自動的に現在の span の `traceparent` を `TRACEPARENT` 環境変数として子プロセスに注入する。Rust 側の `mumei verify` は `TRACEPARENT` を読んで親コンテキストとして接続し、`mumei.verify.cli` → `mumei.z3.solve` span が Python 側の同一 trace ID で表示される。
+
+### 運用・検証（リファレンススタック）
+
+ローカル検証用のリファレンス OTLP バックエンド（OTel Collector / Jaeger / Prometheus / Grafana）と運用手順は `mumei-lang/mumei-agent` 側に整備済み: [`docker-compose.otel.yml`](https://github.com/mumei-lang/mumei-agent/blob/develop/docker-compose.otel.yml) と [`docs/OBSERVABILITY.md`](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/OBSERVABILITY.md)。`--features otel` ビルドの `mumei verify` を `TRACEPARENT` 付きで呼ぶと、Rust 側 `mumei.verify.cli` → `mumei.z3.solve` span が Python 側 trace と同一 trace ID で Jaeger に現れることを、このスタックで疎通確認できる。
 
 ---
 
