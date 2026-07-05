@@ -1386,6 +1386,10 @@ OTEL_ENABLED=true OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 \
 
 mumei-agent 側で `OTEL_ENABLED=true` の場合、`MumeiClient.verify` 等の `subprocess.run` が自動的に現在の span の `traceparent` を `TRACEPARENT` 環境変数として子プロセスに注入する。Rust 側の `mumei verify` は `TRACEPARENT` を読んで親コンテキストとして接続し、`mumei.verify.cli` → `mumei.z3.solve` span が Python 側の同一 trace ID で表示される。
 
+### 運用・検証（リファレンススタック）
+
+ローカル検証用のリファレンス OTLP バックエンド（OTel Collector / Jaeger / Prometheus / Grafana）と運用手順は `mumei-lang/mumei-agent` 側に整備済み: [`docker-compose.otel.yml`](https://github.com/mumei-lang/mumei-agent/blob/develop/docker-compose.otel.yml) と [`docs/OBSERVABILITY.md`](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/OBSERVABILITY.md)。`--features otel` ビルドの `mumei verify` を `TRACEPARENT` 付きで呼ぶと、Rust 側 `mumei.verify.cli` → `mumei.z3.solve` span が Python 側 trace と同一 trace ID で Jaeger に現れることを、このスタックで疎通確認できる。
+
 ---
 
 ## Related Documents
