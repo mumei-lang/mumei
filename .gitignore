@@ -35,3 +35,4 @@ editors/vscode/*.vsix
 
 # テスト用一時ファイル
 sword_test.mm
+cross_spec.json
