@@ -45,7 +45,7 @@ def _find_mumei_binary() -> str | None:
 
 def _count_atoms(path: Path) -> dict[str, int]:
     text = path.read_text(encoding="utf-8")
-    total = len(re.findall(r"(?m)^\s*(?:trusted\s+)?atom\s+", text))
+    total = len(re.findall(r"(?m)^\s*(?:trusted\s+|async\s+)?atom\s+", text))
     trusted = len(re.findall(r"(?m)^\s*trusted\s+atom\s+", text))
     return {"total": total, "trusted": trusted, "proven": total - trusted}
 
