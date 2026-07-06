@@ -880,13 +880,13 @@ Implemented components include:
 
 Known limitations and active areas include:
 
-- a small trusted-atom remainder remains in `std/http_server.mm` and `std/container/sorted_map.mm`;
-- Lean escalation now has a typed translator contract, CLI bundle/metrics output, and acceptance metrics, but richer theorem templates and bridge lemmas are still needed for additional obligation classes;
+- `std/http_server.mm` relies on extern FFI contracts that are trusted at the language boundary; `std/container/sorted_map.mm` trusted-atom remainder has been eliminated (sorted_map_insert is now Z3-verified or Lean-escalatable);
+- Lean escalation now has a typed translator v2 contract with obligation class taxonomy, CLI bundle/metrics output, and acceptance metrics; bridge lemmas cover quantifier, finite-field, group-theory, crypto, smart-contract, RTGS, and unknown obligation classes;
 - proof-friendly specification guidance is integrated into the generation pipeline, but its P8-C metrics must be monitored over larger task populations;
 - P14 Cross-Validation Framework (V1-A through V1-E) is planned but not yet implemented;
 - the natural-language extraction pipeline must conservatively distinguish missing requirements from underspecified intent;
 - arXiv-ready presentation will require replacing Mermaid diagrams with TikZ or figures;
-- benchmark evaluation should be expanded beyond current demos and standard-library health metrics.
+- benchmark evaluation suite (`benchmarks/run_benchmarks.py`) now collects verification success rates, solver times, and trusted atom ratios across `dafny_puzzles` and `svcomp_style` categories, with time-series accumulation in `docs/BENCHMARK_RESULTS.md`; further expansion to cover more categories and Lean solver times is planned.
 
 ## 9. Conclusion and Future Work
 

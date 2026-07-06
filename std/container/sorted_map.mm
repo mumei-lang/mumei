@@ -57,7 +57,11 @@ body: {
 
 // ソート済みマップ末尾への挿入。挿入スロットには境界 key witness を書き、
 // Z3 Array::store 追跡により挿入後のソート不変量が保たれる。
-trusted atom sorted_map_insert(map_len: i64, map_cap: i64, key: i64, value: i64)
+// Z3 decidable fragment: 末尾挿入は map_len 位置への store のみ。
+// 前提 forall(i, 0, map_len, keys[i] <= key) から
+// keys[map_len - 1] <= key が得られ、既存ソート順と合わせて不変量が維持される。
+// Z3 が unknown を返す場合は mumei-lean Lean 4 escalation 対象。
+atom sorted_map_insert(map_len: i64, map_cap: i64, key: i64, value: i64)
 requires: map_len >= 0
     && map_cap > 0
     && map_len < map_cap
