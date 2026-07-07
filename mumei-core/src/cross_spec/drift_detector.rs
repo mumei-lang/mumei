@@ -80,7 +80,7 @@ mod tests {
         let json = serde_json::json!({
             "version": "1.0",
             "timestamp": "2024-01-01T00:00:00Z",
-            "mumei_version": "0.6.0",
+            "mumei_version": "0.6.12",
             "z3_version": "4.12.0",
             "file": "test.mm",
             "certificate_hash": "",
