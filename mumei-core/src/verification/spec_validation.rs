@@ -451,7 +451,7 @@ fn assert_clause<'a>(
     if trimmed.is_empty() || trimmed == "true" {
         return Ok(ClauseLoweringOutcome::Applied);
     }
-    let clause_ast = crate::parser::expr::normalize_comparison_chains(parse_expression(trimmed));
+    let clause_ast = parse_expression(trimmed);
     let clause_z3 = match expr_to_z3(vc, &clause_ast, env, None) {
         Ok(value) => value,
         Err(err) if is_unsupported_clause_error(&err) => {
@@ -495,7 +495,7 @@ fn assert_negated_clause<'a>(
         solver.assert(&Bool::from_bool(vc.ctx, false));
         return Ok(ClauseLoweringOutcome::Applied);
     }
-    let clause_ast = crate::parser::expr::normalize_comparison_chains(parse_expression(trimmed));
+    let clause_ast = parse_expression(trimmed);
     let clause_z3 = match expr_to_z3(vc, &clause_ast, env, None) {
         Ok(value) => value,
         Err(err) if is_unsupported_clause_error(&err) => {

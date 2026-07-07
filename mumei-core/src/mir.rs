@@ -364,7 +364,15 @@ impl LowerCtx {
                 | crate::parser::Op::And
                 | crate::parser::Op::Or
                 | crate::parser::Op::Implies => Some("bool".to_string()),
-                crate::parser::Op::Pow => Some("i64".to_string()),
+                crate::parser::Op::Pow => {
+                    if self.infer_hir_ty(lhs).as_deref() == Some("f64")
+                        || self.infer_hir_ty(rhs).as_deref() == Some("f64")
+                    {
+                        Some("f64".to_string())
+                    } else {
+                        Some("i64".to_string())
+                    }
+                }
                 _ => self.infer_hir_ty(lhs).or_else(|| self.infer_hir_ty(rhs)),
             },
             HirExpr::ArrayAccess(name, _) => self

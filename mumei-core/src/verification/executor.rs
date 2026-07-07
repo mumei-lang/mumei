@@ -1136,7 +1136,7 @@ pub(crate) fn verify_inner(
         let start = if let Ok(val) = q.start.parse::<i64>() {
             Int::from_i64(&ctx, val)
         } else {
-            let ast = crate::parser::expr::normalize_comparison_chains(parse_expression(&q.start));
+            let ast = parse_expression(&q.start);
             expr_to_z3(&vc, &ast, &mut env, None)?
                 .as_int()
                 .unwrap_or(Int::new_const(&ctx, q.start.as_str()))
@@ -1145,15 +1145,14 @@ pub(crate) fn verify_inner(
             Int::from_i64(&ctx, val)
         } else {
             // Parse end as expression to support `n - 1` etc.
-            let ast = crate::parser::expr::normalize_comparison_chains(parse_expression(&q.end));
+            let ast = parse_expression(&q.end);
             expr_to_z3(&vc, &ast, &mut env, None)?
                 .as_int()
                 .unwrap_or(Int::new_const(&ctx, q.end.as_str()))
         };
 
         let range_cond = Bool::and(&ctx, &[&i.ge(&start), &i.lt(&end)]);
-        let expr_ast =
-            crate::parser::expr::normalize_comparison_chains(parse_expression(&q.condition));
+        let expr_ast = parse_expression(&q.condition);
         let condition_z3 = expr_to_z3(&vc, &expr_ast, &mut env, None)?
             .as_bool()
             .ok_or(MumeiError::verification_at(
@@ -1413,8 +1412,7 @@ pub(crate) fn verify_inner(
     // NOTE: requires は エイリアシング検証より先に assert する必要がある。
     // requires: x != y; のような制約がエイリアシング検証で活用されるため。
     if atom.requires.trim() != "true" {
-        let req_ast =
-            crate::parser::expr::normalize_comparison_chains(parse_expression(&atom.requires));
+        let req_ast = parse_expression(&atom.requires);
         let req_z3 = expr_to_z3(&vc, &req_ast, &mut env, None)?;
         if let Some(req_bool) = req_z3.as_bool() {
             let track_requires = Bool::new_const(&ctx, "track_requires");
@@ -1568,8 +1566,7 @@ pub(crate) fn verify_inner(
     let phase_start = std::time::Instant::now();
     if atom.ensures.trim() != "true" {
         env.insert("result".to_string(), body_result);
-        let ens_ast =
-            crate::parser::expr::normalize_comparison_chains(parse_expression(&atom.ensures));
+        let ens_ast = parse_expression(&atom.ensures);
         let ens_z3 = expr_to_z3(&vc, &ens_ast, &mut env, None)?;
         if let Some(ens_bool) = ens_z3.as_bool() {
             solver.push();

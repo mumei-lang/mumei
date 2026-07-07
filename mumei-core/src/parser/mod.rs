@@ -119,7 +119,7 @@ pub fn parse_expression(input: &str) -> Expr {
     let mut lexer = lexer::Lexer::new(input);
     let tokens = lexer.tokenize();
     let mut ctx = ParseContext::new(tokens);
-    expr::parse_expr(&mut ctx, 0)
+    expr::normalize_comparison_chains(expr::parse_expr(&mut ctx, 0))
 }
 
 /// Parse a body expression (blocks and statements).
@@ -762,6 +762,18 @@ atom transfer(x: i64)
     }
 
     #[test]
+    fn test_parse_expression_normalizes_comparison_chain() {
+        let expr = parse_expression("0 <= result <= 10");
+        match expr {
+            Expr::BinaryOp(left, Op::And, right) => match (*left, *right) {
+                (Expr::BinaryOp(_, Op::Le, _), Expr::BinaryOp(_, Op::Le, _)) => {}
+                other => panic!("Expected two comparisons joined by And, got {:?}", other),
+            },
+            other => panic!("Expected And at top level, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn test_parse_exponent_right_associative() {
         let expr = parse_expression("2 ** 3 ** 2");
         match expr {
@@ -799,8 +811,7 @@ atom transfer(x: i64)
 
     #[test]
     fn test_normalize_comparison_chain() {
-        let expr =
-            crate::parser::expr::normalize_comparison_chains(parse_expression("a <= b <= c <= d"));
+        let expr = parse_expression("a <= b <= c <= d");
 
         fn count_op(expr: &Expr, target: &Op) -> usize {
             match expr {
