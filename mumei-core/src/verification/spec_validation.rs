@@ -108,7 +108,11 @@ pub fn check_spec_satisfiability_with_property_based(
     let vc = validation_ctx(&ctx, module_env, atom, ieee754_f64);
     let mut env = seed_env(&ctx, atom, module_env, ieee754_f64);
     assert_parameter_refinements(&vc, &solver, atom, module_env, &mut env)?;
-    assert_clause(&vc, &solver, &mut env, atom, &atom.requires, "requires")?;
+    if let ClauseLoweringOutcome::Skipped(warning) =
+        assert_clause(&vc, &solver, &mut env, atom, &atom.requires, "requires")?
+    {
+        diagnostics.push(warning);
+    }
 
     if solver.check() == SatResult::Unsat {
         return Err(SpecContradiction::new(
@@ -151,15 +155,21 @@ pub fn check_spec_satisfiability_with_property_based(
         let local_solver = Solver::new(&ctx);
         let mut local_env = seed_env(&ctx, atom, module_env, ieee754_f64);
         assert_parameter_refinements(&vc, &local_solver, atom, module_env, &mut local_env)?;
-        assert_clause(
+        if let ClauseLoweringOutcome::Skipped(warning) = assert_clause(
             &vc,
             &local_solver,
             &mut local_env,
             atom,
             &atom.requires,
             "requires",
-        )?;
-        assert_clause(&vc, &local_solver, &mut local_env, atom, clause, "ensures")?;
+        )? {
+            diagnostics.push(warning);
+        }
+        if let ClauseLoweringOutcome::Skipped(warning) =
+            assert_clause(&vc, &local_solver, &mut local_env, atom, clause, "ensures")?
+        {
+            diagnostics.push(warning);
+        }
         if local_solver.check() == SatResult::Unsat {
             return Err(SpecContradiction::new(
                 &atom.name,
@@ -175,23 +185,27 @@ pub fn check_spec_satisfiability_with_property_based(
         let combined_solver = Solver::new(&ctx);
         let mut combined_env = seed_env(&ctx, atom, module_env, ieee754_f64);
         assert_parameter_refinements(&vc, &combined_solver, atom, module_env, &mut combined_env)?;
-        assert_clause(
+        if let ClauseLoweringOutcome::Skipped(warning) = assert_clause(
             &vc,
             &combined_solver,
             &mut combined_env,
             atom,
             &atom.requires,
             "requires",
-        )?;
+        )? {
+            diagnostics.push(warning);
+        }
         for clause in &ensure_clauses {
-            assert_clause(
+            if let ClauseLoweringOutcome::Skipped(warning) = assert_clause(
                 &vc,
                 &combined_solver,
                 &mut combined_env,
                 atom,
                 clause,
                 "ensures",
-            )?;
+            )? {
+                diagnostics.push(warning);
+            }
         }
         if combined_solver.check() == SatResult::Unsat {
             let mut constraints = Vec::with_capacity(ensure_clauses.len() + 1);
@@ -217,16 +231,29 @@ pub fn check_spec_satisfiability_with_property_based(
             let local_solver = Solver::new(&ctx);
             let mut local_env = seed_env(&ctx, atom, module_env, ieee754_f64);
             assert_parameter_refinements(&vc, &local_solver, atom, module_env, &mut local_env)?;
-            assert_clause(
+            if let ClauseLoweringOutcome::Skipped(warning) = assert_clause(
                 &vc,
                 &local_solver,
                 &mut local_env,
                 atom,
                 &atom.requires,
                 "requires",
-            )?;
-            assert_clause(&vc, &local_solver, &mut local_env, atom, left, "ensures")?;
-            assert_negated_clause(&vc, &local_solver, &mut local_env, atom, right, "ensures")?;
+            )? {
+                diagnostics.push(warning);
+                continue;
+            }
+            if let ClauseLoweringOutcome::Skipped(warning) =
+                assert_clause(&vc, &local_solver, &mut local_env, atom, left, "ensures")?
+            {
+                diagnostics.push(warning);
+                continue;
+            }
+            if let ClauseLoweringOutcome::Skipped(warning) =
+                assert_negated_clause(&vc, &local_solver, &mut local_env, atom, right, "ensures")?
+            {
+                diagnostics.push(warning);
+                continue;
+            }
             if local_solver.check() == SatResult::Unsat {
                 diagnostics.push(format!(
                     "ensures clause {} implies clause {} under requires",
@@ -329,6 +356,29 @@ fn result_z3_value<'a>(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ClauseLoweringOutcome {
+    Applied,
+    Skipped(String),
+}
+
+fn unsupported_clause_warning(label: &str, clause: &str, err: &impl std::fmt::Display) -> String {
+    format!(
+        "Skipped unsupported Z3 clause: {} clause '{}': {}",
+        label, clause, err
+    )
+}
+
+fn is_unsupported_clause_error(err: &impl std::fmt::Display) -> bool {
+    let message = err.to_string();
+    message.contains("Unknown function:")
+        || message.contains("requires exactly 4 arguments")
+        || message.contains("first argument must be a variable name")
+        || message.contains("start must be integer")
+        || message.contains("end must be integer")
+        || message.contains("condition must be boolean")
+}
+
 fn assert_parameter_refinements<'a>(
     vc: &VCtx<'a>,
     solver: &Solver<'a>,
@@ -366,21 +416,29 @@ fn assert_clause<'a>(
     atom: &Atom,
     clause: &str,
     label: &str,
-) -> Result<(), SpecContradiction> {
+) -> Result<ClauseLoweringOutcome, SpecContradiction> {
     let trimmed = clause.trim();
     if trimmed.is_empty() || trimmed == "true" {
-        return Ok(());
+        return Ok(ClauseLoweringOutcome::Applied);
     }
     let clause_ast = parse_expression(trimmed);
-    let clause_z3 = expr_to_z3(vc, &clause_ast, env, None).map_err(|err| {
-        SpecContradiction::new(
-            &atom.name,
-            "spec_lowering_failed",
-            format!("failed to lower {} clause '{}': {}", label, trimmed, err),
-            vec![trimmed.to_string()],
-            atom.span.clone(),
-        )
-    })?;
+    let clause_z3 = match expr_to_z3(vc, &clause_ast, env, None) {
+        Ok(value) => value,
+        Err(err) if is_unsupported_clause_error(&err) => {
+            return Ok(ClauseLoweringOutcome::Skipped(unsupported_clause_warning(
+                label, trimmed, &err,
+            )));
+        }
+        Err(err) => {
+            return Err(SpecContradiction::new(
+                &atom.name,
+                "spec_lowering_failed",
+                format!("failed to lower {} clause '{}': {}", label, trimmed, err),
+                vec![trimmed.to_string()],
+                atom.span.clone(),
+            ));
+        }
+    };
     let Some(clause_bool) = clause_z3.as_bool() else {
         return Err(SpecContradiction::new(
             &atom.name,
@@ -391,7 +449,7 @@ fn assert_clause<'a>(
         ));
     };
     solver.assert(&clause_bool);
-    Ok(())
+    Ok(ClauseLoweringOutcome::Applied)
 }
 
 fn assert_negated_clause<'a>(
@@ -401,25 +459,33 @@ fn assert_negated_clause<'a>(
     atom: &Atom,
     clause: &str,
     label: &str,
-) -> Result<(), SpecContradiction> {
+) -> Result<ClauseLoweringOutcome, SpecContradiction> {
     let trimmed = clause.trim();
     if trimmed.is_empty() || trimmed == "true" {
         solver.assert(&Bool::from_bool(vc.ctx, false));
-        return Ok(());
+        return Ok(ClauseLoweringOutcome::Applied);
     }
     let clause_ast = parse_expression(trimmed);
-    let clause_z3 = expr_to_z3(vc, &clause_ast, env, None).map_err(|err| {
-        SpecContradiction::new(
-            &atom.name,
-            "spec_lowering_failed",
-            format!(
-                "failed to lower negated {} clause '{}': {}",
-                label, trimmed, err
-            ),
-            vec![trimmed.to_string()],
-            atom.span.clone(),
-        )
-    })?;
+    let clause_z3 = match expr_to_z3(vc, &clause_ast, env, None) {
+        Ok(value) => value,
+        Err(err) if is_unsupported_clause_error(&err) => {
+            return Ok(ClauseLoweringOutcome::Skipped(unsupported_clause_warning(
+                label, trimmed, &err,
+            )));
+        }
+        Err(err) => {
+            return Err(SpecContradiction::new(
+                &atom.name,
+                "spec_lowering_failed",
+                format!(
+                    "failed to lower negated {} clause '{}': {}",
+                    label, trimmed, err
+                ),
+                vec![trimmed.to_string()],
+                atom.span.clone(),
+            ));
+        }
+    };
     let Some(clause_bool) = clause_z3.as_bool() else {
         return Err(SpecContradiction::new(
             &atom.name,
@@ -430,7 +496,7 @@ fn assert_negated_clause<'a>(
         ));
     };
     solver.assert(&clause_bool.not());
-    Ok(())
+    Ok(ClauseLoweringOutcome::Applied)
 }
 
 fn check_standalone_refinements(
@@ -618,5 +684,53 @@ atom increment(x: i64) -> i64
         assert_eq!(result.trace_id.as_deref(), Some("REQ-42"));
         assert_eq!(result.traceability_hash.len(), 64);
         assert_eq!(result.traceability_coverage, 1.0);
+    }
+
+    #[test]
+    fn unsupported_function_clause_is_skipped_without_failing_verification() {
+        let atom = parse_atom(
+            r#"
+atom passthrough(x: i64) -> i64
+  requires: x >= 0;
+  ensures: result == x && is_hex_digit(x);
+  body: x;
+"#,
+        );
+        let module_env = ModuleEnv::new();
+
+        let result = check_spec_satisfiability(&atom, &module_env).unwrap();
+
+        assert!(result.is_satisfiable);
+        assert_eq!(result.status, "satisfiable");
+        assert!(
+            result.diagnostics.iter().any(|diag| diag
+                .starts_with("Skipped unsupported Z3 clause: ensures clause 'is_hex_digit(x)'")),
+            "expected skipped-clause warning in diagnostics: {:?}",
+            result.diagnostics
+        );
+    }
+
+    #[test]
+    fn malformed_quantifier_clause_is_skipped_without_failing_verification() {
+        let atom = parse_atom(
+            r#"
+atom passthrough_with_quantifier(x: i64) -> i64
+  requires: x >= 0;
+  ensures: result == x && forall(i, 0, x);
+  body: x;
+"#,
+        );
+        let module_env = ModuleEnv::new();
+
+        let result = check_spec_satisfiability(&atom, &module_env).unwrap();
+
+        assert!(result.is_satisfiable);
+        assert_eq!(result.status, "satisfiable");
+        assert!(
+            result.diagnostics.iter().any(|diag| diag
+                .starts_with("Skipped unsupported Z3 clause: ensures clause 'forall(i, 0, x)'")),
+            "expected skipped-clause warning in diagnostics: {:?}",
+            result.diagnostics
+        );
     }
 }
