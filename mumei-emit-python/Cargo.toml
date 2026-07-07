@@ -1,9 +1,9 @@
 [package]
 name = "mumei-emit-python"
-version = "0.6.0"
+version = "0.6.12"
 edition = "2021"
 description = "FFI glue code generator for Python — generates ctypes-based wrappers for compiled mumei binaries"
-license = "MIT"
+license = "Apache-2.0"
 repository = "https://github.com/mumei-lang/mumei"
 
 [dependencies]
