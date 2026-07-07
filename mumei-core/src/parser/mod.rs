@@ -119,7 +119,7 @@ pub fn parse_expression(input: &str) -> Expr {
     let mut lexer = lexer::Lexer::new(input);
     let tokens = lexer.tokenize();
     let mut ctx = ParseContext::new(tokens);
-    expr::parse_expr(&mut ctx, 0)
+    expr::normalize_comparison_chains(expr::parse_expr(&mut ctx, 0))
 }
 
 /// Parse a body expression (blocks and statements).
@@ -758,6 +758,86 @@ atom transfer(x: i64)
         match expr {
             Expr::BinaryOp(_, Op::And, _) => {}
             _ => panic!("Expected And at top level"),
+        }
+    }
+
+    #[test]
+    fn test_parse_expression_normalizes_comparison_chain() {
+        let expr = parse_expression("0 <= result <= 10");
+        match expr {
+            Expr::BinaryOp(left, Op::And, right) => match (*left, *right) {
+                (Expr::BinaryOp(_, Op::Le, _), Expr::BinaryOp(_, Op::Le, _)) => {}
+                other => panic!("Expected two comparisons joined by And, got {:?}", other),
+            },
+            other => panic!("Expected And at top level, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_exponent_right_associative() {
+        let expr = parse_expression("2 ** 3 ** 2");
+        match expr {
+            Expr::BinaryOp(left, Op::Pow, right) => {
+                assert!(matches!(*left, Expr::Number(2)));
+                match *right {
+                    Expr::BinaryOp(inner_left, Op::Pow, inner_right) => {
+                        assert!(matches!(*inner_left, Expr::Number(3)));
+                        assert!(matches!(*inner_right, Expr::Number(2)));
+                    }
+                    other => panic!("Expected right-associative Pow, got {:?}", other),
+                }
+            }
+            other => panic!("Expected Pow at top level, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_exponent_binds_tighter_than_mul() {
+        let expr = parse_expression("2 ** 3 * 4");
+        match expr {
+            Expr::BinaryOp(left, Op::Mul, right) => {
+                assert!(matches!(*right, Expr::Number(4)));
+                match *left {
+                    Expr::BinaryOp(pow_left, Op::Pow, pow_right) => {
+                        assert!(matches!(*pow_left, Expr::Number(2)));
+                        assert!(matches!(*pow_right, Expr::Number(3)));
+                    }
+                    other => panic!("Expected Pow on left side, got {:?}", other),
+                }
+            }
+            other => panic!("Expected Mul at top level, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_normalize_comparison_chain() {
+        let expr = parse_expression("a <= b <= c <= d");
+
+        fn count_op(expr: &Expr, target: &Op) -> usize {
+            match expr {
+                Expr::BinaryOp(left, op, right) => {
+                    count_op(left, target) + count_op(right, target) + usize::from(op == target)
+                }
+                _ => 0,
+            }
+        }
+
+        assert_eq!(count_op(&expr, &Op::And), 2);
+        assert_eq!(count_op(&expr, &Op::Le), 3);
+    }
+
+    #[test]
+    fn test_normalize_non_chain_comparison_is_unchanged() {
+        let expr = crate::parser::expr::normalize_comparison_chains(parse_expression("a < b && c"));
+        match expr {
+            Expr::BinaryOp(left, Op::And, right) => {
+                assert!(matches!(*right, Expr::Variable(_)));
+                match *left {
+                    Expr::BinaryOp(_, Op::Lt, _) => {}
+                    other => panic!("Expected comparison on left side, got {:?}", other),
+                }
+            }
+            other => panic!("Expected And at top level, got {:?}", other),
         }
     }
 

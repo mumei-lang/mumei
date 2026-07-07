@@ -287,6 +287,8 @@ fn trace_eval_binary(left: TraceValue, op: &Op, right: TraceValue) -> Option<Tra
             Op::Add => Some(TraceValue::Int(left + right)),
             Op::Sub => Some(TraceValue::Int(left - right)),
             Op::Mul => Some(TraceValue::Int(left * right)),
+            Op::Pow if right >= 0 => left.checked_pow(right as u32).map(TraceValue::Int),
+            Op::Pow => None,
             Op::Div if right != 0 => Some(TraceValue::Int(left / right)),
             Op::Div => None,
             Op::Eq => Some(TraceValue::Bool(left == right)),
@@ -393,6 +395,7 @@ fn trace_op_symbol(op: &Op) -> &'static str {
         Op::And => "&&",
         Op::Or => "||",
         Op::Implies => "==>",
+        Op::Pow => "**",
     }
 }
 

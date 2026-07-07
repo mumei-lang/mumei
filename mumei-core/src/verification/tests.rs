@@ -2630,6 +2630,110 @@ fn test_expr_to_z3_true_false_are_bool() {
     assert!(composite_z3.as_bool().is_some());
 }
 
+#[test]
+fn test_expr_to_z3_pow_constant_folds_full_precision() {
+    use crate::parser::parse_expression;
+    use z3::{Config, Context, Solver};
+
+    let cfg = Config::new();
+    let ctx = Context::new(&cfg);
+    let solver = Solver::new(&ctx);
+    let module_env = ModuleEnv::new();
+    let linearity_ctx_cell = std::cell::RefCell::new(LinearityCtx::new());
+    let effect_ctx_cell = std::cell::RefCell::new(EffectCtx::new(std::collections::HashSet::new()));
+    let constraint_count_cell = std::cell::Cell::new(0usize);
+    let has_string_constraints_cell = std::cell::Cell::new(false);
+    let vc = VCtx {
+        ctx: &ctx,
+        module_env: &module_env,
+        current_atom: None,
+        linearity_ctx: Some(&linearity_ctx_cell),
+        effect_ctx: Some(&effect_ctx_cell),
+        constraint_count: Some(&constraint_count_cell),
+        constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
+        has_string_constraints: Some(&has_string_constraints_cell),
+        path_cond_stack: std::cell::RefCell::new(Vec::new()),
+        profiler: None,
+        ieee754_f64: false,
+    };
+    let mut env: Env = HashMap::new();
+
+    let folded_64 = expr_to_z3(
+        &vc,
+        &parse_expression("2 ** 64 - 1"),
+        &mut env,
+        Some(&solver),
+    )
+    .expect("2**64-1 should fold");
+    assert_eq!(folded_64.to_string(), "18446744073709551615");
+
+    let folded_256 = expr_to_z3(
+        &vc,
+        &parse_expression("2 ** 256 - 1"),
+        &mut env,
+        Some(&solver),
+    )
+    .expect("2**256-1 should fold");
+    assert_eq!(
+        folded_256.to_string(),
+        "115792089237316195423570985008687907853269984665640564039457584007913129639935"
+    );
+}
+
+#[test]
+fn test_chained_comparison_normalizes_before_lowering() {
+    use crate::parser::expr::normalize_comparison_chains;
+    use crate::parser::parse_expression;
+    use z3::{Config, Context, Solver};
+
+    let cfg = Config::new();
+    let ctx = Context::new(&cfg);
+    let solver = Solver::new(&ctx);
+    let module_env = ModuleEnv::new();
+    let linearity_ctx_cell = std::cell::RefCell::new(LinearityCtx::new());
+    let effect_ctx_cell = std::cell::RefCell::new(EffectCtx::new(std::collections::HashSet::new()));
+    let constraint_count_cell = std::cell::Cell::new(0usize);
+    let has_string_constraints_cell = std::cell::Cell::new(false);
+    let vc = VCtx {
+        ctx: &ctx,
+        module_env: &module_env,
+        current_atom: None,
+        linearity_ctx: Some(&linearity_ctx_cell),
+        effect_ctx: Some(&effect_ctx_cell),
+        constraint_count: Some(&constraint_count_cell),
+        constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
+        has_string_constraints: Some(&has_string_constraints_cell),
+        path_cond_stack: std::cell::RefCell::new(Vec::new()),
+        profiler: None,
+        ieee754_f64: false,
+    };
+    let mut env: Env = HashMap::new();
+
+    let sat = expr_to_z3(
+        &vc,
+        &normalize_comparison_chains(parse_expression("0 <= 3 <= 5")),
+        &mut env,
+        Some(&solver),
+    )
+    .expect("satisfiable chain should lower")
+    .as_bool()
+    .expect("chain should lower to bool");
+    solver.assert(&sat);
+    assert_eq!(solver.check(), SatResult::Sat);
+
+    let unsat = expr_to_z3(
+        &vc,
+        &normalize_comparison_chains(parse_expression("0 <= 6 <= 5")),
+        &mut env,
+        Some(&solver),
+    )
+    .expect("refutable chain should lower")
+    .as_bool()
+    .expect("chain should lower to bool");
+    solver.assert(&unsat);
+    assert_eq!(solver.check(), SatResult::Unsat);
+}
+
 // ---- forall-over-arr + E-matching pattern end-to-end ----
 //
 // Exercises the full forall_constraints path by asserting

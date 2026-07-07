@@ -48,6 +48,7 @@ pub enum Op {
     Add,
     Sub,
     Mul,
+    Pow,
     Div,
     Eq,
     Neq,

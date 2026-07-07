@@ -326,6 +326,11 @@ pub(crate) fn compile_hir_expr<'a>(
                         }
                         return Ok(eq_val.into());
                     }
+                    Op::Pow => {
+                        return Err(MumeiError::codegen(
+                            "Unsupported operator Pow for Str type in codegen".to_string(),
+                        ));
+                    }
                     _ => {
                         return Err(MumeiError::codegen(format!(
                             "Unsupported operator {:?} for Str type in codegen",
@@ -359,6 +364,9 @@ pub(crate) fn compile_hir_expr<'a>(
                     Op::Sub => Ok(llvm!(builder.build_float_sub(l, r, "fsub_tmp")).into()),
                     Op::Mul => Ok(llvm!(builder.build_float_mul(l, r, "fmul_tmp")).into()),
                     Op::Div => Ok(llvm!(builder.build_float_div(l, r, "fdiv_tmp")).into()),
+                    Op::Pow => Err(MumeiError::codegen(
+                        "Unsupported float operator Pow".to_string(),
+                    )),
                     Op::Eq => {
                         let cmp = llvm!(builder.build_float_compare(
                             FloatPredicate::OEQ,
@@ -384,6 +392,9 @@ pub(crate) fn compile_hir_expr<'a>(
                     Op::Sub => Ok(llvm!(builder.build_int_sub(l, r, "sub_tmp")).into()),
                     Op::Mul => Ok(llvm!(builder.build_int_mul(l, r, "mul_tmp")).into()),
                     Op::Div => Ok(llvm!(builder.build_int_signed_div(l, r, "div_tmp")).into()),
+                    Op::Pow => Err(MumeiError::codegen(
+                        "Unsupported int operator Pow".to_string(),
+                    )),
                     Op::Eq | Op::Neq | Op::Lt | Op::Gt | Op::Ge | Op::Le => {
                         let pred = match op {
                             Op::Eq => IntPredicate::EQ,

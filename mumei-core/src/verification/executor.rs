@@ -1294,7 +1294,9 @@ pub(crate) fn verify_inner(
                     if let Some(constraint_raw) = &field.constraint {
                         let mut local_env = env.clone();
                         local_env.insert("v".to_string(), field_z3);
-                        let constraint_ast = parse_expression(constraint_raw);
+                        let constraint_ast = crate::parser::expr::normalize_comparison_chains(
+                            parse_expression(constraint_raw),
+                        );
                         let constraint_z3 = expr_to_z3(&vc, &constraint_ast, &mut local_env, None)?;
                         if let Some(constraint_bool) = constraint_z3.as_bool() {
                             let track_label =

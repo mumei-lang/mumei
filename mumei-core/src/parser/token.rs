@@ -76,6 +76,7 @@ pub enum Token {
     Plus,       // +
     Minus,      // -
     Star,       // *
+    StarStar,   // **
     Slash,      // /
     Eq,         // ==
     Neq,        // !=
@@ -185,6 +186,7 @@ impl std::fmt::Display for Token {
             Token::Plus => write!(f, "+"),
             Token::Minus => write!(f, "-"),
             Token::Star => write!(f, "*"),
+            Token::StarStar => write!(f, "**"),
             Token::Slash => write!(f, "/"),
             Token::Eq => write!(f, "=="),
             Token::Neq => write!(f, "!="),
