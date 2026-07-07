@@ -92,7 +92,14 @@ impl<'a> Lexer<'a> {
 
         let token = match c {
             '+' => Token::Plus,
-            '*' => Token::Star,
+            '*' => {
+                if self.peek() == Some('*') {
+                    self.advance();
+                    Token::StarStar
+                } else {
+                    Token::Star
+                }
+            }
             ',' => Token::Comma,
             ':' => {
                 if self.peek() == Some(':') {

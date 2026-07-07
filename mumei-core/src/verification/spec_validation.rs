@@ -404,6 +404,9 @@ fn is_unsupported_clause_error(err: &impl std::fmt::Display) -> bool {
         || message.contains("start must be integer")
         || message.contains("end must be integer")
         || message.contains("condition must be boolean")
+        || message.contains(
+            "Unsupported exponentiation: exponent must be a non-negative integer constant",
+        )
 }
 
 fn assert_parameter_refinements<'a>(
@@ -448,7 +451,7 @@ fn assert_clause<'a>(
     if trimmed.is_empty() || trimmed == "true" {
         return Ok(ClauseLoweringOutcome::Applied);
     }
-    let clause_ast = parse_expression(trimmed);
+    let clause_ast = crate::parser::expr::normalize_comparison_chains(parse_expression(trimmed));
     let clause_z3 = match expr_to_z3(vc, &clause_ast, env, None) {
         Ok(value) => value,
         Err(err) if is_unsupported_clause_error(&err) => {
@@ -492,7 +495,7 @@ fn assert_negated_clause<'a>(
         solver.assert(&Bool::from_bool(vc.ctx, false));
         return Ok(ClauseLoweringOutcome::Applied);
     }
-    let clause_ast = parse_expression(trimmed);
+    let clause_ast = crate::parser::expr::normalize_comparison_chains(parse_expression(trimmed));
     let clause_z3 = match expr_to_z3(vc, &clause_ast, env, None) {
         Ok(value) => value,
         Err(err) if is_unsupported_clause_error(&err) => {
@@ -764,6 +767,38 @@ atom passthrough_with_quantifier(x: i64) -> i64
         assert!(result.checked_requires);
         assert_eq!(result.checked_ensures, 1);
         let warning_prefix = "Skipped unsupported Z3 clause: ensures clause 'forall(i, 0, x)': Verification Error: forall() requires exactly 4 arguments: (var, start, end, condition)";
+        assert_eq!(
+            result
+                .diagnostics
+                .iter()
+                .filter(|diag| diag.starts_with(warning_prefix))
+                .count(),
+            1,
+            "expected skipped-clause warning exactly once in diagnostics: {:?}",
+            result.diagnostics
+        );
+    }
+
+    #[test]
+    fn symbolic_exponent_clause_is_skipped_without_failing_verification() {
+        let atom = parse_atom(
+            r#"
+atom passthrough_pow(x: i64, y: i64) -> i64
+  requires: x >= 0;
+  ensures: result == x**y && result == x;
+  body: x;
+"#,
+        );
+        let module_env = ModuleEnv::new();
+
+        let result = check_spec_satisfiability(&atom, &module_env).unwrap();
+
+        assert!(result.is_satisfiable);
+        assert_eq!(result.status, "satisfiable_with_skips");
+        assert!(result.checked_requires);
+        assert_eq!(result.checked_ensures, 1);
+        let warning_prefix =
+            "Skipped unsupported Z3 clause: ensures clause 'result == x ** y': Verification Error: Unsupported exponentiation: exponent must be a non-negative integer constant";
         assert_eq!(
             result
                 .diagnostics

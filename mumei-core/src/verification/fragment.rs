@@ -837,6 +837,7 @@ pub(crate) fn expr_has_linear_arithmetic(expr: &Expr) -> bool {
             Op::Add | Op::Sub | Op::Eq | Op::Neq | Op::Gt | Op::Lt | Op::Ge | Op::Le,
             _,
         ) => true,
+        Expr::BinaryOp(_, Op::Pow, _) => false,
         Expr::BinaryOp(left, Op::Mul, right) => {
             expr_is_numeric_literal(left)
                 || expr_is_numeric_literal(right)
@@ -909,6 +910,7 @@ pub(crate) fn stmt_has_linear_arithmetic(stmt: &Stmt) -> bool {
 
 pub(crate) fn expr_has_nonlinear_arithmetic(expr: &Expr) -> bool {
     match expr {
+        Expr::BinaryOp(_, Op::Pow, _) => true,
         Expr::BinaryOp(left, Op::Mul, right) => {
             (!expr_is_numeric_literal(left) && !expr_is_numeric_literal(right))
                 || expr_has_nonlinear_arithmetic(left)

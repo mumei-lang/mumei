@@ -5,6 +5,76 @@ use super::*;
 use crate::lowering::{lower, LoweredType};
 use serde_json::json;
 
+fn decimal_mul(lhs: &str, rhs: &str) -> String {
+    if lhs == "0" || rhs == "0" {
+        return "0".to_string();
+    }
+
+    let lhs_digits: Vec<u32> = lhs.bytes().rev().map(|b| (b - b'0') as u32).collect();
+    let rhs_digits: Vec<u32> = rhs.bytes().rev().map(|b| (b - b'0') as u32).collect();
+    let mut result = vec![0u32; lhs_digits.len() + rhs_digits.len() + 1];
+
+    for (i, &lhs_digit) in lhs_digits.iter().enumerate() {
+        let mut carry = 0u32;
+        for (j, &rhs_digit) in rhs_digits.iter().enumerate() {
+            let idx = i + j;
+            let total = result[idx] + lhs_digit * rhs_digit + carry;
+            result[idx] = total % 10;
+            carry = total / 10;
+        }
+        let mut idx = i + rhs_digits.len();
+        while carry > 0 {
+            let total = result[idx] + carry;
+            result[idx] = total % 10;
+            carry = total / 10;
+            idx += 1;
+        }
+    }
+
+    while result.len() > 1 && result.last() == Some(&0) {
+        result.pop();
+    }
+
+    result
+        .into_iter()
+        .rev()
+        .map(|digit| char::from(b'0' + digit as u8))
+        .collect()
+}
+
+fn pow_i64_to_decimal_string(base: i64, exponent: u64) -> String {
+    if exponent == 0 {
+        return "1".to_string();
+    }
+
+    let negative = base < 0 && exponent % 2 == 1;
+    let mut factor = i128::from(base).abs().to_string();
+    let mut power = exponent;
+    let mut result = "1".to_string();
+
+    while power > 0 {
+        if power & 1 == 1 {
+            result = decimal_mul(&result, &factor);
+        }
+        power >>= 1;
+        if power > 0 {
+            factor = decimal_mul(&factor, &factor);
+        }
+    }
+
+    if negative {
+        format!("-{result}")
+    } else {
+        result
+    }
+}
+
+fn unsupported_exponentiation_error() -> MumeiError {
+    MumeiError::verification(
+        "Unsupported exponentiation: exponent must be a non-negative integer constant",
+    )
+}
+
 pub(crate) fn expr_to_z3<'a>(
     vc: &VCtx<'a>,
     expr: &Expr,
@@ -680,6 +750,24 @@ pub(crate) fn expr_to_z3<'a>(
             Ok(z3_dynamic_array(vc, name, env).select(&idx))
         }
         Expr::BinaryOp(left, op, right) => {
+            if matches!(op, Op::Pow) {
+                if let (Expr::Number(base), Expr::Number(exponent)) = (&**left, &**right) {
+                    if *exponent < 0 {
+                        return Err(unsupported_exponentiation_error());
+                    }
+                    let folded = pow_i64_to_decimal_string(*base, *exponent as u64);
+                    return Ok(Int::from_str(ctx, &folded)
+                        .ok_or_else(|| {
+                            MumeiError::verification(format!(
+                                "Failed to build integer literal from {}",
+                                folded
+                            ))
+                        })?
+                        .into());
+                }
+                return Err(unsupported_exponentiation_error());
+            }
+
             let l = expr_to_z3(vc, left, env, solver_opt)?;
             let r = expr_to_z3(vc, right, env, solver_opt)?;
 
@@ -777,9 +865,9 @@ pub(crate) fn expr_to_z3<'a>(
                 let li = l.as_int().ok_or("Expected int")?;
                 let ri = r.as_int().ok_or("Expected int")?;
                 match op {
-                    Op::Add => Ok((&li + &ri).into()),
-                    Op::Sub => Ok((&li - &ri).into()),
-                    Op::Mul => Ok((&li * &ri).into()),
+                    Op::Add => Ok((&li + &ri).simplify().into()),
+                    Op::Sub => Ok((&li - &ri).simplify().into()),
+                    Op::Mul => Ok((&li * &ri).simplify().into()),
                     Op::Div => {
                         if let Some(solver) = solver_opt {
                             solver.push();

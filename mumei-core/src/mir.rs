@@ -364,6 +364,7 @@ impl LowerCtx {
                 | crate::parser::Op::And
                 | crate::parser::Op::Or
                 | crate::parser::Op::Implies => Some("bool".to_string()),
+                crate::parser::Op::Pow => Some("i64".to_string()),
                 _ => self.infer_hir_ty(lhs).or_else(|| self.infer_hir_ty(rhs)),
             },
             HirExpr::ArrayAccess(name, _) => self
