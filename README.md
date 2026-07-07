@@ -292,6 +292,7 @@ mumei setup && source ~/.mumei/env
 | `analyze_contract_conflicts` | Analyze cross-atom contract conflicts and circular dependencies (Meta-Architect) |
 | `propose_interface_refactoring` | Propose interface-level refactorings for architectural issues (Meta-Architect) |
 | `get_spec_guideline` / `get_spec_guidelines` | Return agent-facing spec-writing guidelines |
+| `verify_with_orchestration` | Z3 verification with worker-pool orchestration, caching, and task tracking |
 | `get_structured_feedback` | Return P9-E structured feedback JSON for source code |
 
 ### Project Structure
