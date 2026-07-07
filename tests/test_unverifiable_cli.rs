@@ -111,3 +111,43 @@ atom safe_add_with_bound(x: i64, y: i64) -> i64
 
     std::fs::remove_dir_all(fixture.parent().unwrap()).expect("remove multi-requires fixture dir");
 }
+
+#[test]
+fn verify_treats_trivial_ensures_conjunct_as_noop() {
+    let bin = env!("CARGO_BIN_EXE_mumei");
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let fixture = write_fixture(
+        "trivial_ensures",
+        r#"
+atom trivial_ensures(x: i64) -> i64
+  requires: x >= 0;
+  ensures: result == x && true;
+  body: x;
+"#,
+    );
+
+    let output = Command::new(bin)
+        .arg("verify")
+        .arg(&fixture)
+        .current_dir(manifest_dir)
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run mumei verify: {err}"));
+
+    assert!(
+        output.status.success(),
+        "trivial ensures fixture should verify\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        combined.contains("'trivial_ensures': verified ✅"),
+        "expected trivial_ensures to verify, got:\n{combined}"
+    );
+
+    std::fs::remove_dir_all(fixture.parent().unwrap()).expect("remove trivial ensures fixture dir");
+}
