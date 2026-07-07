@@ -277,7 +277,7 @@
       "z3_result_class": "unsat"
     }
   ],
-  "certificate_hash": "585b3e8bce81967fae50f29d63a47335cf1e0c38ee30264a6601b2d9b64e08f4",
+  "certificate_hash": "d946b65ad1d5dfce67f6be55c5975a4c4ee73a4f283ac184dc5231e83dc33cc6",
   "file": "std/contracts.mm",
   "mumei_version": "0.6.12",
   "timestamp": "2024-01-01T00:00:00Z",
