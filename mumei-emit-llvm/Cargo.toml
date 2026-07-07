@@ -1,9 +1,9 @@
 [package]
 name = "mumei-emit-llvm"
-version = "0.6.0"
+version = "0.6.12"
 edition = "2021"
 description = "LLVM IR emitter for the Mumei compiler"
-license = "MIT"
+license = "Apache-2.0"
 repository = "https://github.com/mumei-lang/mumei"
 
 [dependencies]

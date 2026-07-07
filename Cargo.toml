@@ -3,10 +3,10 @@ members = ["mumei-core", "mumei-emit-llvm", "mumei-emit-json", "mumei-emit-proof
 
 [package]
 name = "mumei"
-version = "0.6.0"
+version = "0.6.12"
 edition = "2021"
 description = "Mathematical Proof-Driven Programming Language — formally verified with Z3, compiled to LLVM IR"
-license = "MIT"
+license = "Apache-2.0"
 repository = "https://github.com/mumei-lang/mumei"
 homepage = "https://github.com/mumei-lang/mumei"
 keywords = ["formal-verification", "z3", "llvm", "programming-language", "proof"]
