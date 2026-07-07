@@ -72,6 +72,7 @@ pub(crate) fn structured_feedback_payload(
     warnings: &[verification::Diagnostic],
     verified: usize,
     failed: usize,
+    unverifiable: usize,
     skipped: usize,
     escalated: usize,
 ) -> serde_json::Value {
@@ -88,6 +89,7 @@ pub(crate) fn structured_feedback_payload(
         "summary": {
             "verified": verified,
             "failed": failed,
+            "unverifiable": unverifiable,
             "skipped": skipped,
             "escalation_candidates": escalated,
         }

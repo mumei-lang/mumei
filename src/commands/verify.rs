@@ -369,6 +369,7 @@ struct VerifyContext<'a> {
     cert_results: &'a mut std::collections::HashMap<String, (String, String)>,
     verified: &'a mut usize,
     failed: &'a mut usize,
+    unverifiable: &'a mut usize,
     skipped: &'a mut usize,
     escalated: &'a mut usize,
 }
@@ -563,9 +564,54 @@ fn verify_single_atom(atom: &parser::Atom, name: &str, ctx: &mut VerifyContext<'
                 let e = e.with_source(&resolved, &atom.span);
                 eprintln!("{:?}", miette::Report::new(e));
             }
-            let z3_result = verification::z3_result_from_error_message(&error_text)
-                .unwrap_or("sat")
-                .to_string();
+            let is_unverifiable = verification::is_unverifiable_error_message(&error_text);
+            let z3_result = if is_unverifiable {
+                "skipped".to_string()
+            } else {
+                verification::z3_result_from_error_message(&error_text)
+                    .unwrap_or("sat")
+                    .to_string()
+            };
+            let classification = verification::classify_atom_for_lean_escalation(
+                atom,
+                ctx.module_env,
+                &z3_result,
+                if is_unverifiable {
+                    "unverifiable"
+                } else {
+                    "failed"
+                },
+            );
+            let status = if is_unverifiable {
+                *ctx.unverifiable += 1;
+                if !ctx.quiet_output {
+                    println!("  ⚖️  '{}': unverifiable ⚠️", name);
+                }
+                "unverifiable"
+            } else if ctx.emit_lean_artifacts && classification.should_escalate {
+                if !ctx.quiet_output {
+                    if z3_result == "unknown" {
+                        println!(
+                            "  Z3 returned unknown for atom '{}', escalating to Lean 4...",
+                            name
+                        );
+                    } else {
+                        println!(
+                            "  [lean] '{}': marked for escalation ({})",
+                            name,
+                            classification
+                                .escalation_reason
+                                .map(|reason| reason.as_str())
+                                .unwrap_or("lean_escalation")
+                        );
+                    }
+                }
+                *ctx.escalated += 1;
+                "escalation_candidate"
+            } else {
+                *ctx.failed += 1;
+                "failed"
+            };
             if ctx.enable_spurious_detection && z3_result == "sat" {
                 let validation = verification::validate_counterexample(
                     atom,
@@ -596,36 +642,6 @@ fn verify_single_atom(atom: &parser::Atom, name: &str, ctx: &mut VerifyContext<'
                     ctx.loss_vectors.push(loss_vector);
                 }
             }
-            let classification = verification::classify_atom_for_lean_escalation(
-                atom,
-                ctx.module_env,
-                &z3_result,
-                "failed",
-            );
-            let status = if ctx.emit_lean_artifacts && classification.should_escalate {
-                if !ctx.quiet_output {
-                    if z3_result == "unknown" {
-                        println!(
-                            "  Z3 returned unknown for atom '{}', escalating to Lean 4...",
-                            name
-                        );
-                    } else {
-                        println!(
-                            "  [lean] '{}': marked for escalation ({})",
-                            name,
-                            classification
-                                .escalation_reason
-                                .map(|reason| reason.as_str())
-                                .unwrap_or("lean_escalation")
-                        );
-                    }
-                }
-                *ctx.escalated += 1;
-                "escalation_candidate"
-            } else {
-                *ctx.failed += 1;
-                "failed"
-            };
             ctx.cert_results
                 .insert(name.to_string(), (z3_result, status.to_string()));
             if ctx.emit_structured_feedback {
@@ -999,6 +1015,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
     std::env::set_var("MUMEI_SOLVER_CACHE_SCOPE", cache_scope);
     let mut verified = 0;
     let mut failed = 0;
+    let mut unverifiable = 0;
     let mut skipped = 0;
     let mut escalated = 0;
     let mut loop_suggestions: Vec<serde_json::Value> = Vec::new();
@@ -1159,6 +1176,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                     cert_results: &mut cert_results,
                     verified: &mut verified,
                     failed: &mut failed,
+                    unverifiable: &mut unverifiable,
                     skipped: &mut skipped,
                     escalated: &mut escalated,
                 };
@@ -1190,6 +1208,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                         cert_results: &mut cert_results,
                         verified: &mut verified,
                         failed: &mut failed,
+                        unverifiable: &mut unverifiable,
                         skipped: &mut skipped,
                         escalated: &mut escalated,
                     };
@@ -1471,6 +1490,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
             &diagnostics,
             verified,
             failed,
+            unverifiable,
             skipped,
             escalated,
         );
@@ -1495,7 +1515,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
     }
 
     if emit_loss_vector {
-        let payload = loss_vector_payload(&loss_vectors, failed);
+        let payload = loss_vector_payload(&loss_vectors, failed, unverifiable);
         match serde_json::to_string_pretty(&payload) {
             Ok(serialized) => {
                 if let Some(output) = cert_output {
@@ -1542,11 +1562,18 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
             }
         } else {
             // No report.json produced — emit minimal JSON status
-            let status = if failed > 0 { "failed" } else { "passed" };
+            let status = if failed > 0 {
+                "failed"
+            } else if unverifiable > 0 {
+                "unverifiable"
+            } else {
+                "passed"
+            };
             let mut payload = serde_json::json!({
                 "status": status,
                 "verified": verified,
                 "failed": failed,
+                "unverifiable": unverifiable,
                 "skipped": skipped,
                 "escalation_candidates": escalated,
                 "diagnostics": &diagnostics,
@@ -1561,20 +1588,27 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
             match serde_json::to_string_pretty(&payload) {
                 Ok(json) => println!("{json}"),
                 Err(_) => println!(
-                    "{{\"status\":\"{}\",\"verified\":{},\"failed\":{},\"skipped\":{},\"escalation_candidates\":{}}}",
-                    status, verified, failed, skipped, escalated
+                    "{{\"status\":\"{}\",\"verified\":{},\"failed\":{},\"unverifiable\":{},\"skipped\":{},\"escalation_candidates\":{}}}",
+                    status, verified, failed, unverifiable, skipped, escalated
                 ),
             }
         }
-        return failed > 0;
+        return failed > 0 || unverifiable > 0;
     } else if structured_feedback_stdout || loss_vector_stdout {
-        return failed > 0;
+        return failed > 0 || unverifiable > 0;
     } else {
         println!();
         if failed > 0 {
             eprintln!(
-                "❌ Verification: {} passed, {} failed, {} skipped (cached), {} Lean escalation candidate(s)",
-                verified, failed, skipped, escalated
+                "❌ Verification: {} passed, {} failed, {} unverifiable, {} skipped (cached), {} Lean escalation candidate(s)",
+                verified, failed, unverifiable, skipped, escalated
+            );
+            return true;
+        }
+        if unverifiable > 0 {
+            eprintln!(
+                "⚠️  Verification: {} passed, {} unverifiable, {} skipped (cached), {} Lean escalation candidate(s)",
+                verified, unverifiable, skipped, escalated
             );
             return true;
         }
@@ -1624,7 +1658,11 @@ pub(crate) fn save_decidable_fragment_metrics(
     Ok(())
 }
 
-fn loss_vector_payload(loss_vectors: &[serde_json::Value], failed: usize) -> serde_json::Value {
+fn loss_vector_payload(
+    loss_vectors: &[serde_json::Value],
+    failed: usize,
+    unverifiable: usize,
+) -> serde_json::Value {
     if let Some(first) = loss_vectors.first() {
         first.clone()
     } else if failed > 0 {
@@ -1634,6 +1672,14 @@ fn loss_vector_payload(loss_vectors: &[serde_json::Value], failed: usize) -> ser
             "location": null,
             "reconstruction_loss": null,
             "feedback_instruction": "Verification failed before a counterexample loss vector could be produced."
+        })
+    } else if unverifiable > 0 {
+        serde_json::json!({
+            "status": "verification_unverifiable",
+            "error_type": null,
+            "location": null,
+            "reconstruction_loss": null,
+            "feedback_instruction": "Verification was unverifiable before a counterexample loss vector could be produced."
         })
     } else {
         serde_json::json!({

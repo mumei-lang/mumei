@@ -1256,6 +1256,13 @@ pub fn z3_result_from_error_message(message: &str) -> Option<&'static str> {
     }
 }
 
+pub const UNVERIFIABLE_ERROR_PREFIX: &str =
+    "Unverifiable: skipped unsupported Z3 clause(s) in ensures.";
+
+pub fn is_unverifiable_error_message(message: &str) -> bool {
+    message.contains(UNVERIFIABLE_ERROR_PREFIX)
+}
+
 pub fn classify_atom_for_lean_escalation(
     atom: &Atom,
     module_env: &ModuleEnv,

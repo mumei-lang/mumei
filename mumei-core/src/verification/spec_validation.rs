@@ -382,21 +382,25 @@ enum ClauseLoweringOutcome {
     Skipped(String),
 }
 
-fn unsupported_clause_warning(label: &str, clause: &str, err: &impl std::fmt::Display) -> String {
+pub(crate) fn unsupported_clause_warning(
+    label: &str,
+    clause: &str,
+    err: &impl std::fmt::Display,
+) -> String {
     format!(
         "Skipped unsupported Z3 clause: {} clause '{}': {}",
         label, clause, err
     )
 }
 
-fn push_skip_warning(diagnostics: &mut Vec<String>, warning: String) {
+pub(crate) fn push_skip_warning(diagnostics: &mut Vec<String>, warning: String) {
     if warning.starts_with("Skipped unsupported Z3 clause:") && diagnostics.contains(&warning) {
         return;
     }
     diagnostics.push(warning);
 }
 
-fn is_unsupported_clause_error(err: &impl std::fmt::Display) -> bool {
+pub(crate) fn is_unsupported_clause_error(err: &impl std::fmt::Display) -> bool {
     let message = err.to_string();
     message.contains("Unknown function:")
         || message.contains("requires exactly 4 arguments")
@@ -571,7 +575,7 @@ fn check_standalone_refinements(
     Ok(checked)
 }
 
-fn split_top_level_conjunctions(input: &str) -> Vec<String> {
+pub(crate) fn split_top_level_conjunctions(input: &str) -> Vec<String> {
     let trimmed = input.trim();
     if trimmed.is_empty() || trimmed == "true" {
         return Vec::new();
@@ -609,7 +613,32 @@ fn split_top_level_conjunctions(input: &str) -> Vec<String> {
 
 fn strip_wrapping_parens(input: &str) -> &str {
     let trimmed = input.trim();
-    if trimmed.starts_with('(') && trimmed.ends_with(')') {
+    if !(trimmed.starts_with('(') && trimmed.ends_with(')')) {
+        return trimmed;
+    }
+
+    let mut depth = 0i32;
+    let mut chars = trimmed.char_indices().peekable();
+    while let Some((idx, ch)) = chars.next() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 && chars.peek().is_some() {
+                    return trimmed;
+                }
+                if depth < 0 {
+                    return trimmed;
+                }
+                if depth == 0 && idx + ch.len_utf8() != trimmed.len() {
+                    return trimmed;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if depth == 0 {
         &trimmed[1..trimmed.len() - 1]
     } else {
         trimmed
@@ -808,6 +837,24 @@ atom passthrough_pow(x: i64, y: i64) -> i64
             1,
             "expected skipped-clause warning exactly once in diagnostics: {:?}",
             result.diagnostics
+        );
+    }
+
+    #[test]
+    fn unsupported_clause_whitelist_includes_symbolic_exponent_errors() {
+        let err = crate::verification::MumeiError::verification(
+            "Unsupported exponentiation: exponent must be a non-negative integer constant",
+        );
+
+        assert!(is_unsupported_clause_error(&err));
+    }
+
+    #[test]
+    fn strip_wrapping_parens_only_removes_enclosing_pairs() {
+        assert_eq!(strip_wrapping_parens("(a == b)"), "a == b");
+        assert_eq!(
+            split_top_level_conjunctions("(a && b) || (c && d)"),
+            vec!["(a && b) || (c && d)".to_string()]
         );
     }
 

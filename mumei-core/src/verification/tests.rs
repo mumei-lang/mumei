@@ -377,6 +377,47 @@ fn test_array_store_rejects_out_of_bounds_ffi_buffers() {
     assert!(err.to_string().contains("Potential Out-of-Bounds store"));
 }
 
+#[test]
+fn test_executor_marks_symbolic_exponent_ensures_unverifiable() {
+    let atom = test_atom(
+        "pow_unverifiable",
+        vec![test_param("x", Some("i64")), test_param("y", Some("i64"))],
+        "x >= 0",
+        "result == x**y && result == x",
+        "x",
+        Some("i64"),
+    );
+    let mut module_env = ModuleEnv::new();
+    register_builtin_traits(&mut module_env);
+    module_env.register_atom(&atom);
+    let hir = lower_atom_to_hir_with_env(&atom, Some(&module_env));
+
+    let output_dir = std::env::temp_dir().join(format!(
+        "mumei-unverifiable-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&output_dir).unwrap();
+
+    let err = verify(&hir, &output_dir, &module_env).unwrap_err();
+    assert!(err.to_string().contains("Unverifiable"));
+
+    let report = std::fs::read_to_string(output_dir.join("report.json")).unwrap();
+    let report_json: serde_json::Value = serde_json::from_str(&report).unwrap();
+    assert_eq!(report_json["status"], "unverifiable");
+    let diagnostics = report_json["diagnostics"].as_array().unwrap();
+    assert!(diagnostics.iter().any(|diag| {
+        diag.as_str()
+            .map(|diag| {
+                diag.starts_with("Skipped unsupported Z3 clause: ensures clause 'result == x")
+                    && diag.contains("Unsupported exponentiation")
+            })
+            .unwrap_or(false)
+    }));
+}
+
 // ---- constraint_to_natural_language tests ----
 
 #[test]
