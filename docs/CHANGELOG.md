@@ -2,6 +2,24 @@
 
 ---
 
+### 2026-07-06: Trusted atom reduction, benchmark suite, and CROSS_PROJECT_ROADMAP sync
+
+- **Trusted atom reduction**: removed `trusted` from `std/sorted_map.mm` atoms now that the Z3-decidable fragment covers their contracts; overall trusted-atom count reduced across the standard library.
+- **Benchmark suite**: added `benchmarks/` directory with Dafny-style and SV-COMP-style verification benchmarks for comparing Z3 solver performance across contract styles; benchmark atom regex now supports `async` prefix atoms.
+- **STDLIB_METRICS auto-update**: regenerated `docs/STDLIB_METRICS.md` with current atom/trusted counts using the mumei binary.
+- **CROSS_PROJECT_ROADMAP sync**: updated `docs/CROSS_PROJECT_ROADMAP.md` to reflect translator v2 completion, `sorted_map` trusted atom removal, benchmark suite addition, and OTel Phase 1 status.
+
+---
+
+### 2026-07-05: P15 OpenTelemetry distributed tracing and OTel upgrade
+
+- **P15 OpenTelemetry distributed tracing with TRACEPARENT propagation** (commit `1cd6117`): when built with `cargo build --features otel` and run with `OTEL_ENABLED=true`, `mumei verify` exports spans via OTLP. If `TRACEPARENT` is set in the environment (W3C Trace Context), the Rust spans become children of the caller's trace — enabling end-to-end distributed tracing from `mumei-agent` through the Z3 verification pipeline. Z3 span placement moved after early returns; `cli_timeout_ms` defaults to `-1` for unset.
+- **OTel opentelemetry-rust 0.27→0.32 upgrade** (commit `2a4143a`): upgraded `opentelemetry-rust` from 0.27 to 0.32 so that W3C traceparent `flags=03` is accepted instead of silently rejected. This resolves W3C Trace Context interoperability when `mumei-agent` injects `TRACEPARENT` with both `sampled` and `random` flags.
+- **CI pages deploy retry** (commit `0fc2097`): `deploy-pages` GitHub Actions step now retries on transient "Deployment failed" errors.
+- **Roadmap docs sync**: updated `docs/ROADMAP.md` to note the opentelemetry 0.32 requirement and OTLP/HTTP endpoint for P15 trace penetration; added reference to mumei-agent's P15 OTLP stack and `OBSERVABILITY.md` for end-to-end trace verification.
+
+---
+
 ### 2026-06-30: MCJIT→ORC docs-sync completion and sort ascending Lean escalation path
 
 - **MCJIT→ORC docs-sync**: removed residual `(migrated from MCJIT)` parentheticals from `docs/ROADMAP.md` and `docs/CROSS_PROJECT_ROADMAP.md`; only the strikethrough+Resolved entry in Known Limitations remains as historical context.

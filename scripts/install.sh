@@ -4,7 +4,7 @@
 # =============================================================
 # Usage:
 #   curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash
-#   curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash -s -- --version v0.5.6
+#   curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash -s -- --version v0.6.11
 #   curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash -s -- --uninstall
 #
 # Environment variables:
@@ -39,13 +39,13 @@ Usage:
   install.sh [OPTIONS]
 
 Options:
-  --version <VERSION>   Install a specific version (e.g. v0.5.6)
+  --version <VERSION>   Install a specific version (e.g. v0.6.11)
   --uninstall           Show uninstall instructions
   --help                Show this help message
 
 Examples:
   curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash
-  curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash -s -- --version v0.5.6
+  curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash -s -- --version v0.6.11
 EOF
     exit 0
 }
@@ -76,7 +76,7 @@ parse_args() {
             --version)
                 shift
                 if [ $# -eq 0 ]; then
-                    err "--version requires an argument (e.g. --version v0.5.6)"
+                    err "--version requires an argument (e.g. --version v0.6.11)"
                 fi
                 REQUESTED_VERSION="$1"
                 ;;
