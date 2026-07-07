@@ -613,7 +613,32 @@ pub(crate) fn split_top_level_conjunctions(input: &str) -> Vec<String> {
 
 fn strip_wrapping_parens(input: &str) -> &str {
     let trimmed = input.trim();
-    if trimmed.starts_with('(') && trimmed.ends_with(')') {
+    if !(trimmed.starts_with('(') && trimmed.ends_with(')')) {
+        return trimmed;
+    }
+
+    let mut depth = 0i32;
+    let mut chars = trimmed.char_indices().peekable();
+    while let Some((idx, ch)) = chars.next() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 && chars.peek().is_some() {
+                    return trimmed;
+                }
+                if depth < 0 {
+                    return trimmed;
+                }
+                if depth == 0 && idx + ch.len_utf8() != trimmed.len() {
+                    return trimmed;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if depth == 0 {
         &trimmed[1..trimmed.len() - 1]
     } else {
         trimmed
@@ -822,6 +847,15 @@ atom passthrough_pow(x: i64, y: i64) -> i64
         );
 
         assert!(is_unsupported_clause_error(&err));
+    }
+
+    #[test]
+    fn strip_wrapping_parens_only_removes_enclosing_pairs() {
+        assert_eq!(strip_wrapping_parens("(a == b)"), "a == b");
+        assert_eq!(
+            split_top_level_conjunctions("(a && b) || (c && d)"),
+            vec!["(a && b) || (c && d)".to_string()]
+        );
     }
 
     #[test]
