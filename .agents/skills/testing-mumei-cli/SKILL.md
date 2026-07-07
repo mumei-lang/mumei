@@ -399,6 +399,44 @@ OTEL_ENABLED=false uv run python3 -c "from agent import telemetry; assert teleme
 OTEL_ENABLED=false uv run python3 -c "from agent.mumei_client import MumeiClient; assert MumeiClient._env_with_traceparent() is None"
 ```
 
+### Exponent (`**`) and Chained-Comparison Lowering
+
+Use this flow when changes touch `**`/`Op::Pow` handling, `normalize_comparison_chains`
+in `parser/expr.rs`, `parse_expression` in `parser/mod.rs`, or Z3 clause lowering in
+`verification/translator/expr.rs` / `spec_validation.rs`.
+
+Best evidence is a **BEFORE/AFTER** comparison built via a git worktree:
+```bash
+cd /home/ubuntu/repos/mumei
+git worktree add -f /home/ubuntu/mumei-develop-base origin/develop   # or the PR base
+( cd /home/ubuntu/mumei-develop-base && LLVM_SYS_170_PREFIX=/usr/lib/llvm-17 \
+  LIBCLANG_PATH=/usr/lib/x86_64-linux-gnu cargo build )
+# ...run both target/debug/mumei binaries on the same fixture, clearing cache each time...
+git worktree remove --force /home/ubuntu/mumei-develop-base   # cleanup
+```
+
+Fixture (`tests/test_pow_chain.mm`) exercising the geth overflow idiom:
+```
+atom safe_add_with_bound(x: i64, y: i64) -> i64
+requires: x >= 0 && y >= 0 && x + y <= 2**64 - 1;
+ensures: 0 <= result <= 2**64 - 1 && result == x + y;
+body: x + y;
+```
+Expected assertions:
+- AFTER: `⚖  'safe_add_with_bound': verified ✅`, exit 0. BEFORE (no `**`/chain support):
+  hard-fails with `spec_lowering_failed` / `Expected int` on `0 <= result <= 2 * * 64 - 1`.
+- Full-precision fold is adversarial: `ensures: 2**64 - 1 > 9223372036854775807;` (RHS is
+  i64::MAX) must **verify**, and the flipped `<=` must **fail** (`ensures_unsat`). A verify
+  on the `<=` form would mean the fold truncated/overflowed i64 — the fold must use decimal
+  string math (`Int::from_str`), not i64.
+- Chained comparison `a <= b <= c` should lower to a conjunction; a `parse_expression`
+  unit test asserting this guards against regressions in un-normalized paths (vacuity,
+  spurious-detection, call-graph, refinement checks all route through `parse_expression`).
+- KNOWN LIMITATION (may change): a symbolic/non-constant exponent (`x**y`) is skipped only
+  during spec-consistency validation; end-to-end `mumei verify` reports a hard
+  `Unsupported exponentiation` error (exit 1). This is sound (never falsely verifies) but is
+  not yet surfaced as a clean `unverifiable` verdict — verify it fails rather than passes.
+
 ## Notes
 
 - Prefer using absolute `LLVM_SYS_170_PREFIX=/usr/lib/llvm-17 LIBCLANG_PATH=/usr/lib/x86_64-linux-gnu` env vars for all cargo/CLI commands in this repo.
