@@ -222,8 +222,8 @@ curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash
 # Homebrew
 brew install mumei-lang/mumei/mumei
 
-# Specific version (latest is v0.6.11)
-curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash -s -- --version v0.6.11
+# Specific version (latest is v0.6.12)
+curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash -s -- --version v0.6.12
 ```
 
 See [Releases](https://github.com/mumei-lang/mumei/releases) for older versions and changelogs.
