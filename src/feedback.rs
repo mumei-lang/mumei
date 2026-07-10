@@ -5,6 +5,7 @@ use mumei_core::{
     structured_feedback::{Location, StructuredFeedback},
     verification,
 };
+use std::collections::HashSet;
 use std::path::Path;
 
 pub(crate) fn resolve_source_for_span(main_source: &str, span: &parser::Span) -> String {
@@ -155,9 +156,53 @@ pub(crate) fn enrich_verify_json_payload(
     diagnostics: &[verification::Diagnostic],
     loop_suggestions: &[serde_json::Value],
 ) -> serde_json::Value {
+    fn merge_json_arrays(
+        existing: Option<&serde_json::Value>,
+        additions: &[serde_json::Value],
+    ) -> serde_json::Value {
+        fn merge_key(value: &serde_json::Value) -> String {
+            if let Some(message) = value.as_str() {
+                return message.to_string();
+            }
+            if let Some(message) = value
+                .as_object()
+                .and_then(|object| object.get("message"))
+                .and_then(serde_json::Value::as_str)
+            {
+                return message.to_string();
+            }
+            serde_json::to_string(value).unwrap_or_else(|_| value.to_string())
+        }
+
+        let mut merged = Vec::new();
+        let mut seen = HashSet::new();
+
+        let mut push_unique = |value: &serde_json::Value| {
+            let key = merge_key(value);
+            if seen.insert(key) {
+                merged.push(value.clone());
+            }
+        };
+
+        if let Some(serde_json::Value::Array(items)) = existing {
+            for item in items {
+                push_unique(item);
+            }
+        }
+        for item in additions {
+            push_unique(item);
+        }
+
+        serde_json::Value::Array(merged)
+    }
+
     if let Some(object) = payload.as_object_mut() {
-        object.insert("diagnostics".to_string(), serde_json::json!(diagnostics));
-        object.insert("warnings".to_string(), serde_json::json!(diagnostics));
+        let diagnostics_json = serde_json::json!(diagnostics);
+        let diagnostics_items = diagnostics_json.as_array().cloned().unwrap_or_default();
+        let merged_diagnostics = merge_json_arrays(object.get("diagnostics"), &diagnostics_items);
+        let merged_warnings = merge_json_arrays(object.get("warnings"), &diagnostics_items);
+        object.insert("diagnostics".to_string(), merged_diagnostics);
+        object.insert("warnings".to_string(), merged_warnings);
         if !loop_suggestions.is_empty() {
             object.insert(
                 "cegis_suggestions".to_string(),

@@ -151,3 +151,75 @@ atom trivial_ensures(x: i64) -> i64
 
     std::fs::remove_dir_all(fixture.parent().unwrap()).expect("remove trivial ensures fixture dir");
 }
+
+#[test]
+fn verify_json_preserves_skip_diagnostics_for_unverifiable_atoms() {
+    let bin = env!("CARGO_BIN_EXE_mumei");
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let fixture = write_fixture(
+        "json_unverifiable",
+        r#"
+atom symbolic_pow(x: i64, y: i64) -> i64
+  requires: x >= 0;
+  ensures: result == x**y && result == x;
+  body: x;
+"#,
+    );
+
+    let output = Command::new(bin)
+        .arg("verify")
+        .arg("--json")
+        .arg("--report-dir")
+        .arg(fixture.parent().unwrap())
+        .arg(&fixture)
+        .current_dir(manifest_dir)
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run mumei verify --json: {err}"));
+
+    assert!(
+        !output.status.success(),
+        "--json unverifiable fixture should exit non-zero\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let payload: serde_json::Value =
+        serde_json::from_str(&stdout).unwrap_or_else(|err| panic!("{err}: {stdout}"));
+    let diagnostics = payload["diagnostics"]
+        .as_array()
+        .expect("diagnostics should be an array");
+    assert!(
+        !diagnostics.is_empty(),
+        "expected diagnostics to be preserved in --json payload, got:\n{payload}"
+    );
+    assert!(
+        diagnostics.iter().any(|diagnostic| {
+            diagnostic
+                .as_str()
+                .map(|s| s.contains("Skipped unsupported Z3 clause"))
+                .unwrap_or(false)
+                || diagnostic
+                    .get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .map(|s| s.contains("Skipped unsupported Z3 clause"))
+                    .unwrap_or(false)
+        }),
+        "expected skip diagnostic to be present in diagnostics, got:\n{payload}"
+    );
+    let warnings = payload["warnings"]
+        .as_array()
+        .expect("warnings should be an array");
+    assert!(
+        warnings.iter().all(|warning| {
+            warning
+                .as_str()
+                .map(|s| !s.is_empty())
+                .unwrap_or_else(|| warning.is_object())
+        }),
+        "expected warnings array to remain well-formed, got:\n{payload}"
+    );
+
+    std::fs::remove_dir_all(fixture.parent().unwrap())
+        .expect("remove json unverifiable fixture dir");
+}
