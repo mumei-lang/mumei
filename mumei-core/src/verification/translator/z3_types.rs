@@ -3,41 +3,22 @@ use super::super::support::*;
 use super::super::*;
 use super::*;
 use crate::lowering::{lower, LoweredType};
+use crate::parser::parse_type_ref;
 use z3::ast::Ast as _;
 
 /// Prefix for tuple result bindings; it cannot collide with source identifiers.
 pub(crate) const TUPLE_RESULT_PREFIX: &str = "__mumei_tuple_result_";
+pub(crate) const UNSUPPORTED_TUPLE_RESULT_INDEXING: &str = "Unsupported tuple result indexing:";
 
 pub(crate) fn tuple_component_types(return_type: Option<&str>) -> Option<Vec<String>> {
-    let ty = return_type?.trim();
-    if !(ty.starts_with('(') && ty.ends_with(')')) {
-        return None;
-    }
-    let inner = &ty[1..ty.len() - 1];
-    let mut components = Vec::new();
-    let mut depth = 0i32;
-    let mut start = 0usize;
-    for (index, ch) in inner.char_indices() {
-        match ch {
-            '(' | '[' | '<' => depth += 1,
-            ')' | ']' | '>' => depth -= 1,
-            ',' if depth == 0 => {
-                let component = inner[start..index].trim();
-                if component.is_empty() {
-                    return None;
-                }
-                components.push(component.to_string());
-                start = index + ch.len_utf8();
-            }
-            _ => {}
-        }
-    }
-    let component = inner[start..].trim();
-    if component.is_empty() {
-        return None;
-    }
-    components.push(component.to_string());
-    (components.len() > 1).then_some(components)
+    parse_type_ref(return_type?.trim())
+        .tuple_element_types()
+        .map(|components| {
+            components
+                .iter()
+                .map(|component| component.display_name())
+                .collect()
+        })
 }
 
 pub(crate) fn tuple_result_component_key(binding: &str, index: usize) -> String {

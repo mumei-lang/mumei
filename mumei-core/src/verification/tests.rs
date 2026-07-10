@@ -2800,6 +2800,10 @@ fn test_tuple_result_indexing_uses_typed_components() {
         .expect_err("symbolic tuple index should be unsupported");
     assert!(is_unsupported_clause_error(&symbolic));
 
+    let bare_result = expr_to_z3(&vc, &parse_expression("result == 0"), &mut env, None)
+        .expect_err("bare tuple result should be unsupported");
+    assert!(is_unsupported_clause_error(&bare_result));
+
     let mut plain_env: Env = HashMap::new();
     let plain_array_access = expr_to_z3(
         &vc,

@@ -1636,7 +1636,9 @@ pub(crate) fn verify_inner(
     let phase_start = std::time::Instant::now();
     let mut skipped_ensures = false;
     if atom.ensures.trim() != "true" {
-        env.insert("result".to_string(), body_result);
+        if tuple_component_types(atom.return_type.as_deref()).is_none() {
+            env.insert("result".to_string(), body_result);
+        }
         for ens_clause in split_top_level_conjunctions(&atom.ensures) {
             match lower_clause_with_skip(
                 &vc,

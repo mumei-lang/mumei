@@ -30,7 +30,7 @@ pub(crate) use z3_types::{
     mark_string_constraints, param_z3_value, real_from_f64, round_nearest_even,
     seed_tuple_result_components, tuple_component_types, tuple_result_arity_key,
     tuple_result_component_key, z3_array_for_name, z3_array_for_sort, z3_dynamic_array,
-    ArrayElementSort, F64_EBITS, F64_SBITS,
+    ArrayElementSort, F64_EBITS, F64_SBITS, UNSUPPORTED_TUPLE_RESULT_INDEXING,
 };
 
 #[cfg(test)]

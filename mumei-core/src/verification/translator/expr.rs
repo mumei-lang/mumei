@@ -126,6 +126,11 @@ pub(crate) fn expr_to_z3<'a>(
             if let Some(existing) = env.get(name) {
                 return Ok(existing.clone());
             }
+            if name == "result" && env.contains_key(&tuple_result_arity_key(name)) {
+                return Err(MumeiError::verification(format!(
+                    "{UNSUPPORTED_TUPLE_RESULT_INDEXING} bare result is unavailable for tuple return"
+                )));
+            }
             if name == "true" {
                 return Ok(Bool::from_bool(ctx, true).into());
             }
@@ -722,20 +727,20 @@ pub(crate) fn expr_to_z3<'a>(
                     .and_then(|value| value.as_i64())
                 {
                     let Expr::Number(index) = &**index_expr else {
-                        return Err(MumeiError::verification(
-                            "Unsupported tuple result indexing: index must be a non-negative integer constant",
-                        ));
+                        return Err(MumeiError::verification(format!(
+                            "{UNSUPPORTED_TUPLE_RESULT_INDEXING} index must be a non-negative integer constant"
+                        )));
                     };
                     if *index < 0 || *index >= arity {
-                        return Err(MumeiError::verification(
-                            "Unsupported tuple result indexing: index is out of range",
-                        ));
+                        return Err(MumeiError::verification(format!(
+                            "{UNSUPPORTED_TUPLE_RESULT_INDEXING} index is out of range"
+                        )));
                     }
                     let key = tuple_result_component_key(name, *index as usize);
                     return env.get(&key).cloned().ok_or_else(|| {
-                        MumeiError::verification(
-                            "Unsupported tuple result indexing: component is unavailable",
-                        )
+                        MumeiError::verification(format!(
+                            "{UNSUPPORTED_TUPLE_RESULT_INDEXING} component is unavailable"
+                        ))
                     });
                 }
             }
