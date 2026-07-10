@@ -2722,6 +2722,102 @@ fn test_expr_to_z3_pow_constant_folds_full_precision() {
 }
 
 #[test]
+fn test_tuple_result_indexing_uses_typed_components() {
+    use crate::parser::parse_expression;
+    use crate::verification::spec_validation::is_unsupported_clause_error;
+    use z3::{Config, Context, Solver};
+
+    let cfg = Config::new();
+    let ctx = Context::new(&cfg);
+    let solver = Solver::new(&ctx);
+    let module_env = ModuleEnv::new();
+    let linearity_ctx_cell = std::cell::RefCell::new(LinearityCtx::new());
+    let effect_ctx_cell = std::cell::RefCell::new(EffectCtx::new(std::collections::HashSet::new()));
+    let constraint_count_cell = std::cell::Cell::new(0usize);
+    let has_string_constraints_cell = std::cell::Cell::new(false);
+    let vc = VCtx {
+        ctx: &ctx,
+        module_env: &module_env,
+        current_atom: None,
+        linearity_ctx: Some(&linearity_ctx_cell),
+        effect_ctx: Some(&effect_ctx_cell),
+        constraint_count: Some(&constraint_count_cell),
+        constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
+        has_string_constraints: Some(&has_string_constraints_cell),
+        path_cond_stack: std::cell::RefCell::new(Vec::new()),
+        profiler: None,
+        ieee754_f64: false,
+    };
+    let mut env: Env = HashMap::new();
+    seed_tuple_result_components(
+        &ctx,
+        &mut env,
+        "result",
+        Some("(u64, bool)"),
+        &module_env,
+        false,
+    );
+
+    let bool_clause = expr_to_z3(
+        &vc,
+        &parse_expression("result[1] == false"),
+        &mut env,
+        Some(&solver),
+    )
+    .expect("bool tuple component should lower")
+    .as_bool()
+    .expect("tuple component comparison should be boolean");
+    solver.assert(&bool_clause);
+    assert_eq!(solver.check(), SatResult::Sat);
+
+    let first = expr_to_z3(
+        &vc,
+        &parse_expression("result[0] == 7"),
+        &mut env,
+        Some(&solver),
+    )
+    .expect("integer tuple component should lower")
+    .as_bool()
+    .expect("tuple component comparison should be boolean");
+    let conflicting = expr_to_z3(
+        &vc,
+        &parse_expression("result[0] == 8"),
+        &mut env,
+        Some(&solver),
+    )
+    .expect("integer tuple component should lower")
+    .as_bool()
+    .expect("tuple component comparison should be boolean");
+    solver.assert(&first);
+    solver.assert(&conflicting);
+    assert_eq!(solver.check(), SatResult::Unsat);
+
+    let out_of_range = expr_to_z3(&vc, &parse_expression("result[2] == 0"), &mut env, None)
+        .expect_err("out-of-range tuple index should be unsupported");
+    assert!(is_unsupported_clause_error(&out_of_range));
+
+    let symbolic = expr_to_z3(&vc, &parse_expression("result[x] == 0"), &mut env, None)
+        .expect_err("symbolic tuple index should be unsupported");
+    assert!(is_unsupported_clause_error(&symbolic));
+
+    let bare_result = expr_to_z3(&vc, &parse_expression("result == 0"), &mut env, None)
+        .expect_err("bare tuple result should be unsupported");
+    assert!(is_unsupported_clause_error(&bare_result));
+
+    let mut plain_env: Env = HashMap::new();
+    let plain_array_access = expr_to_z3(
+        &vc,
+        &parse_expression("result[0] == 7"),
+        &mut plain_env,
+        None,
+    )
+    .expect("non-tuple result indexing should retain array semantics")
+    .as_bool()
+    .expect("generic array comparison should be boolean");
+    assert!(plain_array_access.to_string().contains("result"));
+}
+
+#[test]
 fn test_chained_comparison_normalizes_before_lowering() {
     use crate::parser::expr::normalize_comparison_chains;
     use crate::parser::parse_expression;

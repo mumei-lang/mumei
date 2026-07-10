@@ -3,7 +3,8 @@ use super::property_based::{
     run_property_based_test, PropertyBasedTestConfig, PropertyBasedTestResult,
 };
 use super::translator::{
-    apply_refinement_constraint, expr_to_z3, param_z3_value, VCtx, DEFAULT_CONSTRAINT_BUDGET,
+    apply_refinement_constraint, expr_to_z3, param_z3_value, seed_tuple_result_components,
+    tuple_component_types, VCtx, DEFAULT_CONSTRAINT_BUDGET, UNSUPPORTED_TUPLE_RESULT_INDEXING,
 };
 use super::types::Env;
 use super::SpecContradiction;
@@ -357,9 +358,19 @@ fn seed_env<'a>(
             ),
         );
     }
-    env.insert(
-        "result".to_string(),
-        result_z3_value(ctx, atom.return_type.as_deref(), module_env, ieee754_f64),
+    if tuple_component_types(atom.return_type.as_deref()).is_none() {
+        env.insert(
+            "result".to_string(),
+            result_z3_value(ctx, atom.return_type.as_deref(), module_env, ieee754_f64),
+        );
+    }
+    seed_tuple_result_components(
+        ctx,
+        &mut env,
+        "result",
+        atom.return_type.as_deref(),
+        module_env,
+        ieee754_f64,
     );
     env
 }
@@ -411,6 +422,7 @@ pub(crate) fn is_unsupported_clause_error(err: &impl std::fmt::Display) -> bool 
         || message.contains(
             "Unsupported exponentiation: exponent must be a non-negative integer constant",
         )
+        || message.contains(UNSUPPORTED_TUPLE_RESULT_INDEXING)
 }
 
 fn assert_parameter_refinements<'a>(

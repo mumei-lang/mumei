@@ -1155,6 +1155,14 @@ pub(crate) fn verify_inner(
         );
         env.insert(param.name.clone(), var);
     }
+    seed_tuple_result_components(
+        &ctx,
+        &mut env,
+        "result",
+        atom.return_type.as_deref(),
+        module_env,
+        ieee754_f64,
+    );
 
     // Phase 1h (continued): ConflictingMerge Z3 infrastructure.
     // With Phase 4c Copy/Move type distinction integrated, move violations for
@@ -1628,7 +1636,9 @@ pub(crate) fn verify_inner(
     let phase_start = std::time::Instant::now();
     let mut skipped_ensures = false;
     if atom.ensures.trim() != "true" {
-        env.insert("result".to_string(), body_result);
+        if tuple_component_types(atom.return_type.as_deref()).is_none() {
+            env.insert("result".to_string(), body_result);
+        }
         for ens_clause in split_top_level_conjunctions(&atom.ensures) {
             match lower_clause_with_skip(
                 &vc,

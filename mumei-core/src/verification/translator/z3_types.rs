@@ -3,7 +3,55 @@ use super::super::support::*;
 use super::super::*;
 use super::*;
 use crate::lowering::{lower, LoweredType};
+use crate::parser::parse_type_ref;
 use z3::ast::Ast as _;
+
+/// Prefix for tuple result bindings; it cannot collide with source identifiers.
+pub(crate) const TUPLE_RESULT_PREFIX: &str = "__mumei_tuple_result_";
+pub(crate) const UNSUPPORTED_TUPLE_RESULT_INDEXING: &str = "Unsupported tuple result indexing:";
+
+pub(crate) fn tuple_component_types(return_type: Option<&str>) -> Option<Vec<String>> {
+    parse_type_ref(return_type?.trim())
+        .tuple_element_types()
+        .map(|components| {
+            components
+                .iter()
+                .map(|component| component.display_name())
+                .collect()
+        })
+}
+
+pub(crate) fn tuple_result_component_key(binding: &str, index: usize) -> String {
+    format!("{TUPLE_RESULT_PREFIX}{binding}_{index}")
+}
+
+pub(crate) fn tuple_result_arity_key(binding: &str) -> String {
+    format!("{TUPLE_RESULT_PREFIX}{binding}_arity")
+}
+
+pub(crate) fn seed_tuple_result_components<'a>(
+    ctx: &'a Context,
+    env: &mut Env<'a>,
+    binding: &str,
+    return_type: Option<&str>,
+    module_env: &ModuleEnv,
+    ieee754_f64: bool,
+) {
+    let Some(components) = tuple_component_types(return_type) else {
+        return;
+    };
+    env.insert(
+        tuple_result_arity_key(binding),
+        Int::from_i64(ctx, components.len() as i64).into(),
+    );
+    for (index, component_type) in components.iter().enumerate() {
+        let key = tuple_result_component_key(binding, index);
+        env.insert(
+            key.clone(),
+            param_z3_value(ctx, &key, Some(component_type), module_env, ieee754_f64),
+        );
+    }
+}
 
 /// Number of exponent / significand bits for IEEE 754 binary64 (`f64`).
 ///
