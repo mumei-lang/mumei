@@ -348,6 +348,47 @@ Expected assertions:
 - Verify output includes 2 verified atoms or 2 skipped atoms if the verification cache is warm.
 - `verify-cert` exits zero and prints a valid/verified certificate message.
 
+### Multi-return Tuple Result Indexing
+
+Use this flow when changes touch tuple return types (`-> (T0, T1, ...)`), the
+`Expr::ArrayAccess` arm in `mumei-core/src/verification/translator/expr.rs`,
+tuple component seeding in `z3_types.rs` / `spec_validation.rs` / `executor.rs`,
+or `tuple_component_types` / `is_unsupported_clause_error`.
+
+The feature lets contracts on tuple-returning atoms index the result
+(`result[0]`, `result[1]`) with each component encoded as its own typed Z3
+value (heterogeneous types supported, e.g. `u64`→Int, `bool`→Bool).
+
+**IMPORTANT — clear the verification cache before every run.** A warm cache
+prints `'X': skipped (unchanged, cached)` and hides the real verdict, producing
+a false pass. Use a fresh temp dir per run, or `rm -rf .mumei .mumei_cache
+.mumei_build_cache` beside the source first.
+
+Best signal is a BEFORE/AFTER comparison (build one binary from `develop`, one
+from the branch). Fixture (`SafeAdd`, the #407 motivating example):
+```
+trusted atom SafeAdd(x: u64, y: u64) -> (u64, bool)
+requires: x + y <= 2**64 - 1;
+ensures: result[0] == x + y && result[1] == false;
+body: x + y;
+```
+Expected assertions:
+- BEFORE (feature absent): exit 1, output contains
+  `failed to lower ensures clause 'result[1] == false'` / `Expected bool for ==`
+  (heterogeneous bool component is un-encodable → `spec_lowering_failed`).
+- AFTER: exit 0, output contains `'SafeAdd': verified` and `1 item(s) verified`,
+  and does NOT contain `Skipped unsupported Z3 clause`, `satisfiable_with_skips`,
+  `unverifiable`, or `Expected bool`.
+
+Adversarial check that components are genuinely constrained (not vacuous). Use
+`ensures: result[0] == x + y && result[0] == x + y + 1;`:
+- AFTER: exit 1, output contains `ensures clauses are mutually inconsistent` /
+  `ensures_conflict`. If tuple indices were left unconstrained this would falsely
+  report `verified`.
+
+Note: `body:` tuple construction and call-result indexing (`foo(...)[0]`) are out
+of scope; `SafeAdd` must be a `trusted atom` (contract-only, body not checked).
+
 ### OpenTelemetry / TRACEPARENT Distributed Tracing
 
 Use this flow when changes touch `src/telemetry.rs`, `Cargo.toml` `otel` feature, `#[cfg(feature = "otel")]` span instrumentation in `verify.rs` or `executor.rs`, or the Python-side `current_traceparent()` / `_env_with_traceparent()` in `mumei-agent`.
