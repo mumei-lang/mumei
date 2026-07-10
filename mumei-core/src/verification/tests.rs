@@ -2804,6 +2804,60 @@ fn test_tuple_result_indexing_uses_typed_components() {
         .expect_err("bare tuple result should be unsupported");
     assert!(is_unsupported_clause_error(&bare_result));
 
+    let dot_bool_clause = expr_to_z3(
+        &vc,
+        &parse_expression("result._1 == false"),
+        &mut env,
+        Some(&solver),
+    )
+    .expect("bool tuple component dot access should lower")
+    .as_bool()
+    .expect("dot tuple component comparison should be boolean");
+    assert!(dot_bool_clause.to_string().contains("false"));
+
+    let dot_solver = Solver::new(&ctx);
+    let dot_first = expr_to_z3(
+        &vc,
+        &parse_expression("result._0 == 7"),
+        &mut env,
+        Some(&dot_solver),
+    )
+    .expect("integer tuple component dot access should lower")
+    .as_bool()
+    .expect("dot tuple component comparison should be boolean");
+    let dot_conflicting = expr_to_z3(
+        &vc,
+        &parse_expression("result._0 == 8"),
+        &mut env,
+        Some(&dot_solver),
+    )
+    .expect("integer tuple component dot access should lower")
+    .as_bool()
+    .expect("dot tuple component comparison should be boolean");
+    dot_solver.assert(&dot_first);
+    dot_solver.assert(&dot_conflicting);
+    assert_eq!(dot_solver.check(), SatResult::Unsat);
+
+    let dot_out_of_range = expr_to_z3(&vc, &parse_expression("result._9 == 0"), &mut env, None)
+        .expect_err("out-of-range tuple dot index should be unsupported");
+    assert!(is_unsupported_clause_error(&dot_out_of_range));
+
+    let mut plain_struct_env: Env = HashMap::new();
+    let struct_field = Int::new_const(&ctx, "__struct_result_field");
+    plain_struct_env.insert("__struct_result_field".to_string(), struct_field.into());
+    let plain_struct_access = expr_to_z3(
+        &vc,
+        &parse_expression("result.field == 7"),
+        &mut plain_struct_env,
+        None,
+    )
+    .expect("non-tuple struct field access should retain existing semantics")
+    .as_bool()
+    .expect("struct field comparison should be boolean");
+    assert!(plain_struct_access
+        .to_string()
+        .contains("__struct_result_field"));
+
     let mut plain_env: Env = HashMap::new();
     let plain_array_access = expr_to_z3(
         &vc,

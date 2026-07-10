@@ -1746,6 +1746,36 @@ pub(crate) fn expr_to_z3<'a>(
         }
 
         Expr::FieldAccess(inner_expr, field_name) => {
+            if let Expr::Variable(name) = inner_expr.as_ref() {
+                if name == "result" && env.contains_key(&tuple_result_arity_key(name)) {
+                    let Some(index) = field_name
+                        .strip_prefix('_')
+                        .and_then(|value| value.parse::<usize>().ok())
+                    else {
+                        return Err(MumeiError::verification(format!(
+                            "{UNSUPPORTED_TUPLE_RESULT_INDEXING} field must be a non-negative integer constant"
+                        )));
+                    };
+                    let arity = env
+                        .get(&tuple_result_arity_key(name))
+                        .and_then(|value| value.as_int())
+                        .and_then(|value| value.as_i64())
+                        .and_then(|value| usize::try_from(value).ok())
+                        .unwrap_or(0);
+                    if index >= arity {
+                        return Err(MumeiError::verification(format!(
+                            "{UNSUPPORTED_TUPLE_RESULT_INDEXING} index is out of range"
+                        )));
+                    }
+                    let key = tuple_result_component_key(name, index);
+                    return env.get(&key).cloned().ok_or_else(|| {
+                        MumeiError::verification(format!(
+                            "{UNSUPPORTED_TUPLE_RESULT_INDEXING} component is unavailable"
+                        ))
+                    });
+                }
+            }
+
             // ネスト構造体のフィールドアクセスを再帰的に解決する。
             //
             // 1段階: v.x → env["__struct_v_x"] or env["v_x"]
