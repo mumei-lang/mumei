@@ -432,10 +432,44 @@ Expected assertions:
 - Chained comparison `a <= b <= c` should lower to a conjunction; a `parse_expression`
   unit test asserting this guards against regressions in un-normalized paths (vacuity,
   spurious-detection, call-graph, refinement checks all route through `parse_expression`).
-- KNOWN LIMITATION (may change): a symbolic/non-constant exponent (`x**y`) is skipped only
-  during spec-consistency validation; end-to-end `mumei verify` reports a hard
-  `Unsupported exponentiation` error (exit 1). This is sound (never falsely verifies) but is
-  not yet surfaced as a clean `unverifiable` verdict — verify it fails rather than passes.
+- A symbolic/non-constant exponent (`x**y`) in an ensures clause is now surfaced as a clean
+  `unverifiable ⚠` verdict end-to-end (see the flow below); older builds instead hard-errored
+  with `Unsupported exponentiation` (exit 1). Both are sound; the verdict form is the current
+  behavior.
+
+### Executor `unverifiable` Verdict for Unencodable Clauses
+
+Use this flow when changes touch the executor proof path in `verification/executor.rs`
+(esp. `lower_clause_with_skip` / `ClauseLoweringOutcome`, the requires/ensures loops), the
+tri-state verdict plumbing in `commands/verify.rs`, or `split_top_level_conjunctions` /
+`strip_wrapping_parens` in `spec_validation.rs`. Clear caches (`rm -rf .mumei tests/.mumei
+cross_spec.json`) before every run — a warm cache masks verdict changes.
+
+Fixtures and expected verdicts (each distinguishes a broken build):
+- Symbolic exponent in ensures (`ensures: result == x**y && result == x;`) → `unverifiable ⚠`,
+  exit 1. Must NOT be `verified` and must NOT hard-error.
+- Encodable-but-false postcondition (`ensures: result > x + 1; body: x;`) → `refuted/failed`,
+  `0 unverifiable`, exit 1. Guards that a genuine counterexample is never downgraded to
+  unverifiable.
+- Trivially-true conjunct (`ensures: result == x && true; body: x;`) → `verified`, exit 0.
+  A broken build reports `unverifiable` (trivial `true`/empty conjunct misclassified as an
+  unsupported skip — `split_top_level_conjunctions` yields `["result == x", "true"]`, and
+  `lower_clause_with_skip` must return `Trivial`, not `Skipped`, for the `true` conjunct).
+- `(A && B) || (C && D)` ensures (e.g. `std/option.mm::option_unwrap_or`) → `verified`, no
+  `Spurious counterexample`. A broken `strip_wrapping_parens` mangles the disjunction.
+- Mixed multi-atom file (unverifiable atom then refuted atom) → summary
+  `0 passed, 1 failed, 1 unverifiable`; the refuted atom must stay `failed`, not read a stale
+  shared `report.json` status. Verdict detection is error-based, not stale-file-based.
+
+Machine-readable surfacing:
+- `--report-dir <dir>`: `report.json` has `status="unverifiable"`,
+  `reason="Skipped unsupported Z3 clause(s) in ensures."`, and a per-clause `diagnostics`
+  entry (`"Skipped unsupported Z3 clause: ensures clause '...': ... Unsupported exponentiation ..."`).
+  This is the artifact mumei-agent consumes; assert against it.
+- `--json` stdout: exposes `status="unverifiable"` + `reason`, but its `diagnostics` array may
+  be `[]` — `enrich_verify_json_payload` (`src/feedback.rs`) overwrites report diagnostics with
+  the CLI-level vector. This is pre-existing and also affects the #408 spec-skip path; prefer
+  `--report-dir`/`report.json` for diagnostic assertions rather than `--json` stdout.
 
 ## Notes
 
