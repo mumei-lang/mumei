@@ -3,7 +3,8 @@ use super::property_based::{
     run_property_based_test, PropertyBasedTestConfig, PropertyBasedTestResult,
 };
 use super::translator::{
-    apply_refinement_constraint, expr_to_z3, param_z3_value, VCtx, DEFAULT_CONSTRAINT_BUDGET,
+    apply_refinement_constraint, expr_to_z3, param_z3_value, seed_tuple_result_components, VCtx,
+    DEFAULT_CONSTRAINT_BUDGET,
 };
 use super::types::Env;
 use super::SpecContradiction;
@@ -361,6 +362,14 @@ fn seed_env<'a>(
         "result".to_string(),
         result_z3_value(ctx, atom.return_type.as_deref(), module_env, ieee754_f64),
     );
+    seed_tuple_result_components(
+        ctx,
+        &mut env,
+        "result",
+        atom.return_type.as_deref(),
+        module_env,
+        ieee754_f64,
+    );
     env
 }
 
@@ -411,6 +420,7 @@ pub(crate) fn is_unsupported_clause_error(err: &impl std::fmt::Display) -> bool 
         || message.contains(
             "Unsupported exponentiation: exponent must be a non-negative integer constant",
         )
+        || message.contains("Unsupported tuple result indexing:")
 }
 
 fn assert_parameter_refinements<'a>(

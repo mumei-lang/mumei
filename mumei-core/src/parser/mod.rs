@@ -177,6 +177,20 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_tuple_return_type() {
+        let atom = parse_atom(
+            "atom tuple_result(x: u64, y: u64) -> (u64, bool)\n\
+             requires: true;\n\
+             ensures: true;\n\
+             body: x;",
+        );
+        assert_eq!(atom.return_type.as_deref(), Some("(u64, bool)"));
+        let tuple = parse_type_ref("(u64, bool)");
+        assert_eq!(tuple.name, "tuple");
+        assert_eq!(tuple.tuple_element_types().unwrap().len(), 2);
+    }
+
+    #[test]
     fn test_parse_type_ref_nested() {
         let tr = parse_type_ref("Map<String, List<i64>>");
         assert_eq!(tr.name, "Map");

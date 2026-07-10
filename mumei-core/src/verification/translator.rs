@@ -27,8 +27,10 @@ pub(crate) use temporal::{
 pub(crate) use z3_types::{
     array_element_sort, array_element_sort_from_type, array_element_type_from_annotation,
     array_element_type_name, coerce_array_store_value, coerce_to_float, float_eq, float_from_f64,
-    mark_string_constraints, param_z3_value, real_from_f64, round_nearest_even, z3_array_for_name,
-    z3_array_for_sort, z3_dynamic_array, ArrayElementSort, F64_EBITS, F64_SBITS,
+    mark_string_constraints, param_z3_value, real_from_f64, round_nearest_even,
+    seed_tuple_result_components, tuple_component_types, tuple_result_arity_key,
+    tuple_result_component_key, z3_array_for_name, z3_array_for_sort, z3_dynamic_array,
+    ArrayElementSort, F64_EBITS, F64_SBITS,
 };
 
 #[cfg(test)]

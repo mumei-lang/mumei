@@ -1155,6 +1155,14 @@ pub(crate) fn verify_inner(
         );
         env.insert(param.name.clone(), var);
     }
+    seed_tuple_result_components(
+        &ctx,
+        &mut env,
+        "result",
+        atom.return_type.as_deref(),
+        module_env,
+        ieee754_f64,
+    );
 
     // Phase 1h (continued): ConflictingMerge Z3 infrastructure.
     // With Phase 4c Copy/Move type distinction integrated, move violations for

@@ -5,6 +5,73 @@ use super::*;
 use crate::lowering::{lower, LoweredType};
 use z3::ast::Ast as _;
 
+/// Prefix for tuple result bindings; it cannot collide with source identifiers.
+pub(crate) const TUPLE_RESULT_PREFIX: &str = "__mumei_tuple_result_";
+
+pub(crate) fn tuple_component_types(return_type: Option<&str>) -> Option<Vec<String>> {
+    let ty = return_type?.trim();
+    if !(ty.starts_with('(') && ty.ends_with(')')) {
+        return None;
+    }
+    let inner = &ty[1..ty.len() - 1];
+    let mut components = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0usize;
+    for (index, ch) in inner.char_indices() {
+        match ch {
+            '(' | '[' | '<' => depth += 1,
+            ')' | ']' | '>' => depth -= 1,
+            ',' if depth == 0 => {
+                let component = inner[start..index].trim();
+                if component.is_empty() {
+                    return None;
+                }
+                components.push(component.to_string());
+                start = index + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    let component = inner[start..].trim();
+    if component.is_empty() {
+        return None;
+    }
+    components.push(component.to_string());
+    (components.len() > 1).then_some(components)
+}
+
+pub(crate) fn tuple_result_component_key(binding: &str, index: usize) -> String {
+    format!("{TUPLE_RESULT_PREFIX}{binding}_{index}")
+}
+
+pub(crate) fn tuple_result_arity_key(binding: &str) -> String {
+    format!("{TUPLE_RESULT_PREFIX}{binding}_arity")
+}
+
+pub(crate) fn seed_tuple_result_components<'a>(
+    ctx: &'a Context,
+    env: &mut Env<'a>,
+    binding: &str,
+    return_type: Option<&str>,
+    module_env: &ModuleEnv,
+    ieee754_f64: bool,
+) {
+    let Some(components) = tuple_component_types(return_type) else {
+        return;
+    };
+    env.insert(
+        tuple_result_arity_key(binding),
+        Int::from_i64(ctx, components.len() as i64).into(),
+    );
+    for (index, component_type) in components.iter().enumerate() {
+        let key = tuple_result_component_key(binding, index);
+        env.insert(
+            key.clone(),
+            param_z3_value(ctx, &key, Some(component_type), module_env, ieee754_f64),
+        );
+    }
+}
+
 /// Number of exponent / significand bits for IEEE 754 binary64 (`f64`).
 ///
 /// binary64 has an 11-bit exponent and a 53-bit significand (52 stored +

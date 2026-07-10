@@ -715,6 +715,30 @@ pub(crate) fn expr_to_z3<'a>(
             }
         }
         Expr::ArrayAccess(name, index_expr) => {
+            if name == "result" {
+                if let Some(arity) = env
+                    .get(&tuple_result_arity_key(name))
+                    .and_then(|value| value.as_int())
+                    .and_then(|value| value.as_i64())
+                {
+                    let Expr::Number(index) = &**index_expr else {
+                        return Err(MumeiError::verification(
+                            "Unsupported tuple result indexing: index must be a non-negative integer constant",
+                        ));
+                    };
+                    if *index < 0 || *index >= arity {
+                        return Err(MumeiError::verification(
+                            "Unsupported tuple result indexing: index is out of range",
+                        ));
+                    }
+                    let key = tuple_result_component_key(name, *index as usize);
+                    return env.get(&key).cloned().ok_or_else(|| {
+                        MumeiError::verification(
+                            "Unsupported tuple result indexing: component is unavailable",
+                        )
+                    });
+                }
+            }
             let idx = expr_to_z3(vc, index_expr, env, solver_opt)?
                 .as_int()
                 .ok_or(MumeiError::type_error("Index must be integer"))?;

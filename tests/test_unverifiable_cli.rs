@@ -113,6 +113,56 @@ atom safe_add_with_bound(x: i64, y: i64) -> i64
 }
 
 #[test]
+fn verify_encodes_tuple_result_components_without_skipping() {
+    let bin = env!("CARGO_BIN_EXE_mumei");
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let dir = std::env::temp_dir().join(format!(
+        "mumei_tuple_result_indexing_{}",
+        std::process::id()
+    ));
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir).expect("clean stale tuple result fixture dir");
+    }
+    std::fs::create_dir_all(&dir).expect("create tuple result fixture dir");
+    let fixture = dir.join("main.mm");
+    std::fs::copy(
+        std::path::Path::new(manifest_dir).join("tests/test_tuple_result_indexing.mm"),
+        &fixture,
+    )
+    .expect("copy tuple result fixture");
+
+    let output = Command::new(bin)
+        .arg("verify")
+        .arg(&fixture)
+        .current_dir(manifest_dir)
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run mumei verify: {err}"));
+
+    assert!(
+        output.status.success(),
+        "tuple result fixture should verify\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        combined.contains("'SafeAdd': verified ✅") || combined.contains("'SafeAdd': trusted ✅"),
+        "expected tuple result atom to verify without skipping, got:\n{combined}"
+    );
+    assert!(
+        !combined.contains("Skipped unsupported Z3 clause")
+            && !combined.contains("satisfiable_with_skips")
+            && !combined.contains("unverifiable"),
+        "tuple result indexing must not be skipped, got:\n{combined}"
+    );
+    std::fs::remove_dir_all(dir).expect("remove tuple result fixture dir");
+}
+
+#[test]
 fn verify_treats_trivial_ensures_conjunct_as_noop() {
     let bin = env!("CARGO_BIN_EXE_mumei");
     let manifest_dir = env!("CARGO_MANIFEST_DIR");

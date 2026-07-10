@@ -48,6 +48,9 @@ impl TypeRef {
                 .collect();
             let return_type = self.type_args.last().unwrap().display_name();
             format!("atom_ref({}) -> {}", param_types.join(", "), return_type)
+        } else if self.name == "tuple" {
+            let args: Vec<String> = self.type_args.iter().map(|a| a.display_name()).collect();
+            format!("({})", args.join(", "))
         } else if self.type_args.is_empty() {
             self.name.clone()
         } else {
@@ -78,6 +81,15 @@ impl TypeRef {
     pub fn array_element_type(&self) -> Option<&TypeRef> {
         if self.name == "[]" && self.type_args.len() == 1 {
             self.type_args.first()
+        } else {
+            None
+        }
+    }
+
+    /// Tuple components, when this type is a tuple such as `(i64, bool)`.
+    pub fn tuple_element_types(&self) -> Option<&[TypeRef]> {
+        if self.name == "tuple" && !self.type_args.is_empty() {
+            Some(&self.type_args)
         } else {
             None
         }
