@@ -12,7 +12,7 @@ Mumei is a formal verification toolchain that can start from existing code (for 
 
 ## No-`.mm` front door and roadmap
 
-The first user-facing route is the no-`.mm` audit path: run `mumei-agent audit --code-file ... --auto-migrate --auto-heal`, or use MCP `scan_and_fix`, before asking users to author `.mm` files.
+The first user-facing route is the no-`.mm` audit path: run `uv run mumei-agent audit --code-file ... --auto-migrate --auto-heal`, or use MCP `scan_and_fix`, before asking users to author `.mm` files.
 
 For the detailed contract, canonical vocabulary, V1-A〜E order, Lean escalation rules, and PR evidence expectations, see [`docs/CROSS_PROJECT_ROADMAP.md`](docs/CROSS_PROJECT_ROADMAP.md), [`docs/ROADMAP.md`](docs/ROADMAP.md), and [`docs/ONBOARDING.md`](docs/ONBOARDING.md).
 
@@ -140,9 +140,9 @@ MCP agents can call spec-health or verification tools depending on whether the i
 Run the agent on existing code and specs first. No `.mm` source is required.
 
 ```bash
-mumei-agent audit --code-file src/payment.py --auto-migrate --auto-heal
-mumei-agent validate-code --input src/payment.py
-mumei-agent validate-spec-to-code --spec spec.txt --code src/payment.py
+uv run mumei-agent audit --code-file src/payment.py --auto-migrate --auto-heal
+uv run mumei-agent validate-code --input src/payment.py
+uv run mumei-agent validate-spec-to-code --spec spec.txt --code src/payment.py
 ```
 
 
@@ -194,7 +194,7 @@ mumei-agent (Module A / AV)
       ↓ generated .mm
 mumei (Module B / AR)
       ↓ Loss Vector JSON
-mumei-agent self-correct
+uv run mumei-agent self-correct
       ↓ repaired certificate
 mumei-lean Fidelity Checker
       ↓
@@ -209,7 +209,7 @@ mumei verify --emit loss-vector examples/nlae_integration_demo.mm
 
 The output includes `status`, `error_type`, `location`,
 `reconstruction_loss`, and `feedback_instruction`; agents can feed it into
-`mumei-agent self-correct` or the `run_nlae_pipeline` MCP tool.
+`uv run mumei-agent self-correct` or the `run_nlae_pipeline` MCP tool.
 
 ---
 
