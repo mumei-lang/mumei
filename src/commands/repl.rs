@@ -375,7 +375,11 @@ pub(crate) fn repl_infer_expr_type_name(
             | parser::Op::And
             | parser::Op::Or
             | parser::Op::Implies => Some("bool".to_string()),
-            parser::Op::Add | parser::Op::Sub | parser::Op::Mul | parser::Op::Div => {
+            parser::Op::Add
+            | parser::Op::Sub
+            | parser::Op::Mul
+            | parser::Op::Pow
+            | parser::Op::Div => {
                 if repl_infer_expr_type_name(ctx, left)
                     .is_some_and(|ty| ctx.module_env.resolve_base_type(&ty) == "f64")
                     || repl_infer_expr_type_name(ctx, right)

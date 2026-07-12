@@ -18,6 +18,7 @@ fn binding_power(tok: &Token) -> Option<(u8, u8)> {
         Token::Eq | Token::Neq | Token::Gt | Token::Lt | Token::Ge | Token::Le => Some((7, 8)),
         Token::Plus | Token::Minus => Some((9, 10)),
         Token::Star | Token::Slash => Some((11, 12)),
+        Token::StarStar => Some((13, 12)),
         Token::Dot | Token::ColonColon => Some((15, 16)),
         _ => None,
     }
@@ -28,6 +29,7 @@ fn token_to_op(tok: &Token) -> Option<Op> {
         Token::Plus => Some(Op::Add),
         Token::Minus => Some(Op::Sub),
         Token::Star => Some(Op::Mul),
+        Token::StarStar => Some(Op::Pow),
         Token::Slash => Some(Op::Div),
         Token::Eq => Some(Op::Eq),
         Token::Neq => Some(Op::Neq),
@@ -40,6 +42,125 @@ fn token_to_op(tok: &Token) -> Option<Op> {
         Token::FatArrow => Some(Op::Implies),
         _ => None,
     }
+}
+
+fn is_relational_op(op: &Op) -> bool {
+    matches!(op, Op::Eq | Op::Neq | Op::Gt | Op::Lt | Op::Ge | Op::Le)
+}
+
+fn collect_relational_chain(expr: &Expr, operands: &mut Vec<Expr>, ops: &mut Vec<Op>) {
+    if let Expr::BinaryOp(left, op, right) = expr {
+        if is_relational_op(op) {
+            collect_relational_chain(left, operands, ops);
+            ops.push(op.clone());
+            operands.push((**right).clone());
+            return;
+        }
+    }
+    operands.push(expr.clone());
+}
+
+fn normalize_expr(expr: Expr) -> Expr {
+    match expr {
+        Expr::BinaryOp(left, op, right) if is_relational_op(&op) => {
+            let raw = Expr::BinaryOp(left, op, right);
+            let mut operands = Vec::new();
+            let mut ops = Vec::new();
+            collect_relational_chain(&raw, &mut operands, &mut ops);
+            if ops.len() <= 1 {
+                let left = normalize_expr(operands.remove(0));
+                let right = normalize_expr(operands.remove(0));
+                return Expr::BinaryOp(Box::new(left), ops.remove(0), Box::new(right));
+            }
+            let mut comparisons = Vec::with_capacity(ops.len());
+            for i in 0..ops.len() {
+                comparisons.push(Expr::BinaryOp(
+                    Box::new(normalize_expr(operands[i].clone())),
+                    ops[i].clone(),
+                    Box::new(normalize_expr(operands[i + 1].clone())),
+                ));
+            }
+            let mut iter = comparisons.into_iter();
+            let mut combined = iter.next().unwrap();
+            for next in iter {
+                combined = Expr::BinaryOp(Box::new(combined), Op::And, Box::new(next));
+            }
+            combined
+        }
+        Expr::BinaryOp(left, op, right) => Expr::BinaryOp(
+            Box::new(normalize_expr(*left)),
+            op,
+            Box::new(normalize_expr(*right)),
+        ),
+        Expr::Call(name, args) => Expr::Call(name, args.into_iter().map(normalize_expr).collect()),
+        Expr::ArrayAccess(name, index) => Expr::ArrayAccess(name, Box::new(normalize_expr(*index))),
+        Expr::StructInit { type_name, fields } => Expr::StructInit {
+            type_name,
+            fields: fields
+                .into_iter()
+                .map(|(name, value)| (name, normalize_expr(value)))
+                .collect(),
+        },
+        Expr::FieldAccess(base, field) => Expr::FieldAccess(Box::new(normalize_expr(*base)), field),
+        Expr::Match { target, arms } => Expr::Match {
+            target: Box::new(normalize_expr(*target)),
+            arms: arms
+                .into_iter()
+                .map(|arm| MatchArm {
+                    pattern: arm.pattern,
+                    guard: arm.guard.map(|guard| Box::new(normalize_expr(*guard))),
+                    body: arm.body,
+                })
+                .collect(),
+        },
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => Expr::IfThenElse {
+            cond: Box::new(normalize_expr(*cond)),
+            then_branch,
+            else_branch,
+        },
+        Expr::CallRef { callee, args } => Expr::CallRef {
+            callee: Box::new(normalize_expr(*callee)),
+            args: args.into_iter().map(normalize_expr).collect(),
+        },
+        Expr::Perform {
+            effect,
+            operation,
+            args,
+        } => Expr::Perform {
+            effect,
+            operation,
+            args: args.into_iter().map(normalize_expr).collect(),
+        },
+        Expr::ChanSend { channel, value } => Expr::ChanSend {
+            channel: Box::new(normalize_expr(*channel)),
+            value: Box::new(normalize_expr(*value)),
+        },
+        Expr::ChanRecv { channel } => Expr::ChanRecv {
+            channel: Box::new(normalize_expr(*channel)),
+        },
+        Expr::Await { expr } => Expr::Await {
+            expr: Box::new(normalize_expr(*expr)),
+        },
+        Expr::Async { body } => Expr::Async { body },
+        Expr::Lambda {
+            params,
+            return_type,
+            body,
+        } => Expr::Lambda {
+            params,
+            return_type,
+            body,
+        },
+        other => other,
+    }
+}
+
+pub(crate) fn normalize_comparison_chains(expr: Expr) -> Expr {
+    normalize_expr(expr)
 }
 
 /// Parse an expression using Pratt parsing with minimum binding power.

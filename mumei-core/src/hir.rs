@@ -512,7 +512,7 @@ fn infer_hir_expr_type(
                 {
                     Some("Str".to_string())
                 }
-                Op::Add | Op::Sub | Op::Mul | Op::Div => {
+                Op::Add | Op::Sub | Op::Mul | Op::Pow | Op::Div => {
                     if left_ty.as_deref() == Some("f64") || right_ty.as_deref() == Some("f64") {
                         Some("f64".to_string())
                     } else {

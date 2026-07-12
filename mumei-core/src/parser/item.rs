@@ -49,6 +49,20 @@ fn parse_type_params_from_str(input: &str) -> (Vec<String>, usize) {
 pub fn parse_type_ref(input: &str) -> TypeRef {
     let input = input.trim();
 
+    if input.starts_with('(') && input.ends_with(')') {
+        let inner = &input[1..input.len() - 1];
+        let elements = split_type_args(inner);
+        if elements.len() > 1 {
+            return TypeRef::generic(
+                "tuple",
+                elements
+                    .iter()
+                    .map(|element| parse_type_ref(element))
+                    .collect(),
+            );
+        }
+    }
+
     if input.starts_with('[') && input.ends_with(']') {
         let inner = &input[1..input.len() - 1];
         return TypeRef::array(parse_type_ref(inner));
@@ -164,6 +178,34 @@ pub fn parse_type_ref_from_ctx(ctx: &mut super::ParseContext) -> TypeRef {
                 ctx.advance();
             }
         }
+    }
+    if ctx.peek() == &Token::LParen {
+        type_str.push('(');
+        ctx.advance();
+        let mut depth = 1;
+        while depth > 0 && ctx.peek() != &Token::Eof {
+            match ctx.peek().clone() {
+                Token::LParen => {
+                    depth += 1;
+                    type_str.push('(');
+                    ctx.advance();
+                }
+                Token::RParen => {
+                    depth -= 1;
+                    type_str.push(')');
+                    ctx.advance();
+                }
+                Token::Comma => {
+                    type_str.push_str(", ");
+                    ctx.advance();
+                }
+                ref tok => {
+                    type_str.push_str(&format!("{}", tok));
+                    ctx.advance();
+                }
+            }
+        }
+        return parse_type_ref(&type_str);
     }
     if ctx.peek() == &Token::Lt {
         type_str.push('<');

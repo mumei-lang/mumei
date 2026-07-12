@@ -455,5 +455,6 @@ fn op_to_source(op: &Op) -> &'static str {
         Op::And => "&&",
         Op::Or => "||",
         Op::Implies => "=>",
+        Op::Pow => "**",
     }
 }

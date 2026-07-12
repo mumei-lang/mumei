@@ -42,6 +42,7 @@ fn flip_binary_op(op: &Op) -> Op {
         Op::Sub => Op::Add,
         Op::Mul => Op::Div,
         Op::Div => Op::Mul,
+        Op::Pow => Op::Pow,
         Op::Lt => Op::Ge,
         Op::Le => Op::Gt,
         Op::Gt => Op::Le,

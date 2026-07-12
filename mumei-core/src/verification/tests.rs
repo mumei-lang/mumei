@@ -377,6 +377,47 @@ fn test_array_store_rejects_out_of_bounds_ffi_buffers() {
     assert!(err.to_string().contains("Potential Out-of-Bounds store"));
 }
 
+#[test]
+fn test_executor_marks_symbolic_exponent_ensures_unverifiable() {
+    let atom = test_atom(
+        "pow_unverifiable",
+        vec![test_param("x", Some("i64")), test_param("y", Some("i64"))],
+        "x >= 0",
+        "result == x**y && result == x",
+        "x",
+        Some("i64"),
+    );
+    let mut module_env = ModuleEnv::new();
+    register_builtin_traits(&mut module_env);
+    module_env.register_atom(&atom);
+    let hir = lower_atom_to_hir_with_env(&atom, Some(&module_env));
+
+    let output_dir = std::env::temp_dir().join(format!(
+        "mumei-unverifiable-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&output_dir).unwrap();
+
+    let err = verify(&hir, &output_dir, &module_env).unwrap_err();
+    assert!(err.to_string().contains("Unverifiable"));
+
+    let report = std::fs::read_to_string(output_dir.join("report.json")).unwrap();
+    let report_json: serde_json::Value = serde_json::from_str(&report).unwrap();
+    assert_eq!(report_json["status"], "unverifiable");
+    let diagnostics = report_json["diagnostics"].as_array().unwrap();
+    assert!(diagnostics.iter().any(|diag| {
+        diag.as_str()
+            .map(|diag| {
+                diag.starts_with("Skipped unsupported Z3 clause: ensures clause 'result == x")
+                    && diag.contains("Unsupported exponentiation")
+            })
+            .unwrap_or(false)
+    }));
+}
+
 // ---- constraint_to_natural_language tests ----
 
 #[test]
@@ -2628,6 +2669,260 @@ fn test_expr_to_z3_true_false_are_bool() {
     let composite_z3 = expr_to_z3(&vc, &composite, &mut env, Some(&solver))
         .expect("composite `>  && true` must parse when Variable(true) is Bool");
     assert!(composite_z3.as_bool().is_some());
+}
+
+#[test]
+fn test_expr_to_z3_pow_constant_folds_full_precision() {
+    use crate::parser::parse_expression;
+    use z3::{Config, Context, Solver};
+
+    let cfg = Config::new();
+    let ctx = Context::new(&cfg);
+    let solver = Solver::new(&ctx);
+    let module_env = ModuleEnv::new();
+    let linearity_ctx_cell = std::cell::RefCell::new(LinearityCtx::new());
+    let effect_ctx_cell = std::cell::RefCell::new(EffectCtx::new(std::collections::HashSet::new()));
+    let constraint_count_cell = std::cell::Cell::new(0usize);
+    let has_string_constraints_cell = std::cell::Cell::new(false);
+    let vc = VCtx {
+        ctx: &ctx,
+        module_env: &module_env,
+        current_atom: None,
+        linearity_ctx: Some(&linearity_ctx_cell),
+        effect_ctx: Some(&effect_ctx_cell),
+        constraint_count: Some(&constraint_count_cell),
+        constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
+        has_string_constraints: Some(&has_string_constraints_cell),
+        path_cond_stack: std::cell::RefCell::new(Vec::new()),
+        profiler: None,
+        ieee754_f64: false,
+    };
+    let mut env: Env = HashMap::new();
+
+    let folded_64 = expr_to_z3(
+        &vc,
+        &parse_expression("2 ** 64 - 1"),
+        &mut env,
+        Some(&solver),
+    )
+    .expect("2**64-1 should fold");
+    assert_eq!(folded_64.to_string(), "18446744073709551615");
+
+    let folded_256 = expr_to_z3(
+        &vc,
+        &parse_expression("2 ** 256 - 1"),
+        &mut env,
+        Some(&solver),
+    )
+    .expect("2**256-1 should fold");
+    assert_eq!(
+        folded_256.to_string(),
+        "115792089237316195423570985008687907853269984665640564039457584007913129639935"
+    );
+}
+
+#[test]
+fn test_tuple_result_indexing_uses_typed_components() {
+    use crate::parser::parse_expression;
+    use crate::verification::spec_validation::is_unsupported_clause_error;
+    use z3::{Config, Context, Solver};
+
+    let cfg = Config::new();
+    let ctx = Context::new(&cfg);
+    let solver = Solver::new(&ctx);
+    let module_env = ModuleEnv::new();
+    let linearity_ctx_cell = std::cell::RefCell::new(LinearityCtx::new());
+    let effect_ctx_cell = std::cell::RefCell::new(EffectCtx::new(std::collections::HashSet::new()));
+    let constraint_count_cell = std::cell::Cell::new(0usize);
+    let has_string_constraints_cell = std::cell::Cell::new(false);
+    let vc = VCtx {
+        ctx: &ctx,
+        module_env: &module_env,
+        current_atom: None,
+        linearity_ctx: Some(&linearity_ctx_cell),
+        effect_ctx: Some(&effect_ctx_cell),
+        constraint_count: Some(&constraint_count_cell),
+        constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
+        has_string_constraints: Some(&has_string_constraints_cell),
+        path_cond_stack: std::cell::RefCell::new(Vec::new()),
+        profiler: None,
+        ieee754_f64: false,
+    };
+    let mut env: Env = HashMap::new();
+    seed_tuple_result_components(
+        &ctx,
+        &mut env,
+        "result",
+        Some("(u64, bool)"),
+        &module_env,
+        false,
+    );
+
+    let bool_clause = expr_to_z3(
+        &vc,
+        &parse_expression("result[1] == false"),
+        &mut env,
+        Some(&solver),
+    )
+    .expect("bool tuple component should lower")
+    .as_bool()
+    .expect("tuple component comparison should be boolean");
+    solver.assert(&bool_clause);
+    assert_eq!(solver.check(), SatResult::Sat);
+
+    let first = expr_to_z3(
+        &vc,
+        &parse_expression("result[0] == 7"),
+        &mut env,
+        Some(&solver),
+    )
+    .expect("integer tuple component should lower")
+    .as_bool()
+    .expect("tuple component comparison should be boolean");
+    let conflicting = expr_to_z3(
+        &vc,
+        &parse_expression("result[0] == 8"),
+        &mut env,
+        Some(&solver),
+    )
+    .expect("integer tuple component should lower")
+    .as_bool()
+    .expect("tuple component comparison should be boolean");
+    solver.assert(&first);
+    solver.assert(&conflicting);
+    assert_eq!(solver.check(), SatResult::Unsat);
+
+    let out_of_range = expr_to_z3(&vc, &parse_expression("result[2] == 0"), &mut env, None)
+        .expect_err("out-of-range tuple index should be unsupported");
+    assert!(is_unsupported_clause_error(&out_of_range));
+
+    let symbolic = expr_to_z3(&vc, &parse_expression("result[x] == 0"), &mut env, None)
+        .expect_err("symbolic tuple index should be unsupported");
+    assert!(is_unsupported_clause_error(&symbolic));
+
+    let bare_result = expr_to_z3(&vc, &parse_expression("result == 0"), &mut env, None)
+        .expect_err("bare tuple result should be unsupported");
+    assert!(is_unsupported_clause_error(&bare_result));
+
+    let dot_bool_clause = expr_to_z3(
+        &vc,
+        &parse_expression("result._1 == false"),
+        &mut env,
+        Some(&solver),
+    )
+    .expect("bool tuple component dot access should lower")
+    .as_bool()
+    .expect("dot tuple component comparison should be boolean");
+    assert!(dot_bool_clause.to_string().contains("false"));
+
+    let dot_solver = Solver::new(&ctx);
+    let dot_first = expr_to_z3(
+        &vc,
+        &parse_expression("result._0 == 7"),
+        &mut env,
+        Some(&dot_solver),
+    )
+    .expect("integer tuple component dot access should lower")
+    .as_bool()
+    .expect("dot tuple component comparison should be boolean");
+    let dot_conflicting = expr_to_z3(
+        &vc,
+        &parse_expression("result._0 == 8"),
+        &mut env,
+        Some(&dot_solver),
+    )
+    .expect("integer tuple component dot access should lower")
+    .as_bool()
+    .expect("dot tuple component comparison should be boolean");
+    dot_solver.assert(&dot_first);
+    dot_solver.assert(&dot_conflicting);
+    assert_eq!(dot_solver.check(), SatResult::Unsat);
+
+    let dot_out_of_range = expr_to_z3(&vc, &parse_expression("result._9 == 0"), &mut env, None)
+        .expect_err("out-of-range tuple dot index should be unsupported");
+    assert!(is_unsupported_clause_error(&dot_out_of_range));
+
+    let mut plain_struct_env: Env = HashMap::new();
+    let struct_field = Int::new_const(&ctx, "__struct_result_field");
+    plain_struct_env.insert("__struct_result_field".to_string(), struct_field.into());
+    let plain_struct_access = expr_to_z3(
+        &vc,
+        &parse_expression("result.field == 7"),
+        &mut plain_struct_env,
+        None,
+    )
+    .expect("non-tuple struct field access should retain existing semantics")
+    .as_bool()
+    .expect("struct field comparison should be boolean");
+    assert!(plain_struct_access
+        .to_string()
+        .contains("__struct_result_field"));
+
+    let mut plain_env: Env = HashMap::new();
+    let plain_array_access = expr_to_z3(
+        &vc,
+        &parse_expression("result[0] == 7"),
+        &mut plain_env,
+        None,
+    )
+    .expect("non-tuple result indexing should retain array semantics")
+    .as_bool()
+    .expect("generic array comparison should be boolean");
+    assert!(plain_array_access.to_string().contains("result"));
+}
+
+#[test]
+fn test_chained_comparison_normalizes_before_lowering() {
+    use crate::parser::expr::normalize_comparison_chains;
+    use crate::parser::parse_expression;
+    use z3::{Config, Context, Solver};
+
+    let cfg = Config::new();
+    let ctx = Context::new(&cfg);
+    let solver = Solver::new(&ctx);
+    let module_env = ModuleEnv::new();
+    let linearity_ctx_cell = std::cell::RefCell::new(LinearityCtx::new());
+    let effect_ctx_cell = std::cell::RefCell::new(EffectCtx::new(std::collections::HashSet::new()));
+    let constraint_count_cell = std::cell::Cell::new(0usize);
+    let has_string_constraints_cell = std::cell::Cell::new(false);
+    let vc = VCtx {
+        ctx: &ctx,
+        module_env: &module_env,
+        current_atom: None,
+        linearity_ctx: Some(&linearity_ctx_cell),
+        effect_ctx: Some(&effect_ctx_cell),
+        constraint_count: Some(&constraint_count_cell),
+        constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
+        has_string_constraints: Some(&has_string_constraints_cell),
+        path_cond_stack: std::cell::RefCell::new(Vec::new()),
+        profiler: None,
+        ieee754_f64: false,
+    };
+    let mut env: Env = HashMap::new();
+
+    let sat = expr_to_z3(
+        &vc,
+        &normalize_comparison_chains(parse_expression("0 <= 3 <= 5")),
+        &mut env,
+        Some(&solver),
+    )
+    .expect("satisfiable chain should lower")
+    .as_bool()
+    .expect("chain should lower to bool");
+    solver.assert(&sat);
+    assert_eq!(solver.check(), SatResult::Sat);
+
+    let unsat = expr_to_z3(
+        &vc,
+        &normalize_comparison_chains(parse_expression("0 <= 6 <= 5")),
+        &mut env,
+        Some(&solver),
+    )
+    .expect("refutable chain should lower")
+    .as_bool()
+    .expect("chain should lower to bool");
+    solver.assert(&unsat);
+    assert_eq!(solver.check(), SatResult::Unsat);
 }
 
 // ---- forall-over-arr + E-matching pattern end-to-end ----

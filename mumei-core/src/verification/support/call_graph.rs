@@ -219,6 +219,7 @@ pub(crate) fn expr_to_source_string(expr: &Expr) -> String {
                 Op::And => "&&",
                 Op::Or => "||",
                 Op::Implies => "==>",
+                Op::Pow => "**",
             };
             format!(
                 "({} {} {})",

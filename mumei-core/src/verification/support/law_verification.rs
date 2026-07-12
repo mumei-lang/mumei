@@ -435,6 +435,7 @@ pub fn verify_impl_with_options(
                                 None,
                                 None,
                                 None,
+                                None,
                             );
                             if ce_parts.is_empty() {
                                 ("  (no concrete values available)".to_string(), ce_value)

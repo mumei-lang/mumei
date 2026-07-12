@@ -330,6 +330,50 @@ pub(crate) fn configure_array_quantifier_params(ctx: &Context, solver: &Solver) 
     solver.set_params(&params);
 }
 
+enum ClauseLoweringOutcome<'a> {
+    Trivial,
+    Skipped,
+    Lowered(Bool<'a>),
+}
+
+fn lower_clause_with_skip<'a>(
+    vc: &VCtx<'a>,
+    env: &mut Env<'a>,
+    atom: &HirAtom,
+    clause: &str,
+    label: &str,
+    diagnostics: &mut Vec<String>,
+) -> Result<ClauseLoweringOutcome<'a>, MumeiError> {
+    let trimmed = clause.trim();
+    if trimmed.is_empty() || trimmed == "true" {
+        return Ok(ClauseLoweringOutcome::Trivial);
+    }
+    let clause_ast = parse_expression(trimmed);
+    let clause_z3 = match expr_to_z3(vc, &clause_ast, env, None) {
+        Ok(value) => value,
+        Err(err) if is_unsupported_clause_error(&err) => {
+            push_skip_warning(
+                diagnostics,
+                unsupported_clause_warning(label, trimmed, &err),
+            );
+            return Ok(ClauseLoweringOutcome::Skipped);
+        }
+        Err(err) => {
+            return Err(MumeiError::verification_at(
+                format!("failed to lower {} clause '{}': {}", label, trimmed, err),
+                atom.atom.span.clone(),
+            ));
+        }
+    };
+    let Some(clause_bool) = clause_z3.as_bool() else {
+        return Err(MumeiError::verification_at(
+            format!("{} clause '{}' must lower to boolean", label, trimmed),
+            atom.atom.span.clone(),
+        ));
+    };
+    Ok(ClauseLoweringOutcome::Lowered(clause_bool))
+}
+
 pub(crate) fn verify_inner(
     hir_atom: &HirAtom,
     output_dir: &Path,
@@ -351,6 +395,7 @@ pub(crate) fn verify_inner(
 
     let mut metrics = VerificationMetrics::new(&atom.name);
     metrics.task_id = task_id;
+    let mut diagnostics = Vec::new();
 
     // ジェネリック atom は単相化後に検証される
     // 例: pipe<E: Effect> は検証スキップ、pipe<FileWrite> が検証対象
@@ -394,6 +439,7 @@ pub(crate) fn verify_inner(
                 None,
                 None,
                 None,
+                Some(&diagnostics),
             );
             return Ok(());
         }
@@ -421,6 +467,7 @@ pub(crate) fn verify_inner(
                     None,
                     None,
                     None,
+                    Some(&diagnostics),
                 );
                 return Ok(());
             }
@@ -1108,6 +1155,14 @@ pub(crate) fn verify_inner(
         );
         env.insert(param.name.clone(), var);
     }
+    seed_tuple_result_components(
+        &ctx,
+        &mut env,
+        "result",
+        atom.return_type.as_deref(),
+        module_env,
+        ieee754_f64,
+    );
 
     // Phase 1h (continued): ConflictingMerge Z3 infrastructure.
     // With Phase 4c Copy/Move type distinction integrated, move violations for
@@ -1294,7 +1349,9 @@ pub(crate) fn verify_inner(
                     if let Some(constraint_raw) = &field.constraint {
                         let mut local_env = env.clone();
                         local_env.insert("v".to_string(), field_z3);
-                        let constraint_ast = parse_expression(constraint_raw);
+                        let constraint_ast = crate::parser::expr::normalize_comparison_chains(
+                            parse_expression(constraint_raw),
+                        );
                         let constraint_z3 = expr_to_z3(&vc, &constraint_ast, &mut local_env, None)?;
                         if let Some(constraint_bool) = constraint_z3.as_bool() {
                             let track_label =
@@ -1410,12 +1467,26 @@ pub(crate) fn verify_inner(
     // NOTE: requires は エイリアシング検証より先に assert する必要がある。
     // requires: x != y; のような制約がエイリアシング検証で活用されるため。
     if atom.requires.trim() != "true" {
-        let req_ast = parse_expression(&atom.requires);
-        let req_z3 = expr_to_z3(&vc, &req_ast, &mut env, None)?;
-        if let Some(req_bool) = req_z3.as_bool() {
-            let track_requires = Bool::new_const(&ctx, "track_requires");
-            solver.assert_and_track(&req_bool, &track_requires);
-            profile_solver_assertion(&vc, "requires", Some(atom.span.to_string()));
+        for (req_idx, req_clause) in split_top_level_conjunctions(&atom.requires)
+            .into_iter()
+            .enumerate()
+        {
+            match lower_clause_with_skip(
+                &vc,
+                &mut env,
+                hir_atom,
+                &req_clause,
+                "requires",
+                &mut diagnostics,
+            )? {
+                ClauseLoweringOutcome::Trivial | ClauseLoweringOutcome::Skipped => {}
+                ClauseLoweringOutcome::Lowered(req_bool) => {
+                    let track_requires_name = format!("track_requires_{req_idx}");
+                    let track_requires = Bool::new_const(&ctx, track_requires_name.as_str());
+                    solver.assert_and_track(&req_bool, &track_requires);
+                    profile_solver_assertion(&vc, "requires", Some(atom.span.to_string()));
+                }
+            }
         }
     }
 
@@ -1550,6 +1621,7 @@ pub(crate) fn verify_inner(
                 Some(&constraint_mappings),
                 None,
                 None,
+                Some(&diagnostics),
             );
             return Err(e);
         }
@@ -1562,195 +1634,246 @@ pub(crate) fn verify_inner(
 
     // 5. 事後条件 (ensures)
     let phase_start = std::time::Instant::now();
+    let mut skipped_ensures = false;
     if atom.ensures.trim() != "true" {
-        env.insert("result".to_string(), body_result);
-        let ens_ast = parse_expression(&atom.ensures);
-        let ens_z3 = expr_to_z3(&vc, &ens_ast, &mut env, None)?;
-        if let Some(ens_bool) = ens_z3.as_bool() {
-            solver.push();
-            solver.assert(&ens_bool.not());
-            let ensures_check = solver.check();
-            if ensures_check == SatResult::Sat {
-                // Extract counterexample from Z3 model
-                let (ce_a, ce_b, ce_value, data_flow_trace, reconstruction_loss) = if let Some(
-                    model,
-                ) =
-                    solver.get_model()
-                {
-                    let mut ce_json = serde_json::Map::new();
-                    let mut model_map = HashMap::new();
-                    for param in &atom.params {
-                        if let Some(var_z3) = env.get(&param.name) {
-                            if let Some(val) = model.eval(var_z3, true) {
-                                let val_str = format!("{}", val);
-                                ce_json.insert(param.name.clone(), json!(val_str));
-                            }
-                        }
-                    }
-                    let mut reconstruction_variables = HashMap::new();
-                    let mut model_values: HashMap<String, CexValue> = HashMap::new();
-                    for (name, var_z3) in &env {
-                        reconstruction_variables.insert(name.clone(), var_z3.clone());
-                        if let Some(val) = model.eval(var_z3, true) {
-                            if let Some(int_value) = z3_dynamic_to_i64(&val) {
-                                model_map.insert(name.clone(), int_value);
-                            }
-                            if let Some(cex_value) = z3_dynamic_to_cex_value(&val) {
-                                model_values.insert(name.clone(), cex_value);
-                            }
-                        }
-                    }
-                    let a_str = ce_json
-                        .get(atom.params.first().map(|p| p.name.as_str()).unwrap_or(""))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("N/A")
-                        .to_string();
-                    let b_str = ce_json
-                        .get(atom.params.get(1).map(|p| p.name.as_str()).unwrap_or(""))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("N/A")
-                        .to_string();
-                    let ce_val = if ce_json.is_empty() {
-                        None
-                    } else {
-                        Some(serde_json::Value::Object(ce_json))
-                    };
-                    let data_flow_trace =
-                        build_data_flow_trace(atom, &model_map, module_env, hir_atom);
-                    let reconstruction_loss = Some(ReconstructionLoss::from_z3_model(
-                        atom.ensures.clone(),
-                        &model,
-                        &reconstruction_variables,
-                    ));
-                    if enable_spurious_detection {
-                        let validation = validate_counterexample(atom, &model_values, module_env);
-                        if validation.validation_status == "spurious_candidate" {
-                            solver.pop(1);
-                            let symbols = validation
-                                .symbol_provenance
-                                .iter()
-                                .map(|symbol| format!("{} ({})", symbol.symbol_name, symbol.source))
-                                .collect::<Vec<_>>()
-                                .join(", ");
-                            let help = if symbols.is_empty() {
-                                format!(
-                                    "Counterexample replay mismatch: {}. Consider escalating to Lean or checking the Z3 translation.",
-                                    validation.failed_constraints.join("; ")
-                                )
-                            } else {
-                                format!(
-                                    "Counterexample depends on uninterpreted symbols: {}. Consider escalating to Lean or expanding the symbol.",
-                                    symbols
-                                )
-                            };
-                            return Err(MumeiError::verification_at(
-                                format!(
-                                    "Spurious counterexample detected for atom '{}'. Spurious counterexample candidate for atom '{}'",
-                                    atom.name, atom.name
-                                ),
-                                atom.span.clone(),
-                            )
-                            .with_help(help)
-                            .with_counterexample(ce_val.clone()));
-                        }
-                    }
-                    (a_str, b_str, ce_val, data_flow_trace, reconstruction_loss)
-                } else {
-                    ("N/A".to_string(), "N/A".to_string(), None, None, None)
-                };
-                solver.pop(1);
-                let constraint_mappings = build_constraint_mappings_for_atom(atom, module_env);
-                let mut semantic_fb = build_semantic_feedback(
-                    &constraint_mappings,
-                    ce_value.as_ref(),
-                    atom,
-                    FAILURE_POSTCONDITION_VIOLATED,
-                    None,
-                );
-                if let (Some(feedback), Some(loss)) = (&mut semantic_fb, reconstruction_loss) {
-                    feedback["reconstruction_loss"] = json!(loss);
+        if tuple_component_types(atom.return_type.as_deref()).is_none() {
+            env.insert("result".to_string(), body_result);
+        }
+        for ens_clause in split_top_level_conjunctions(&atom.ensures) {
+            match lower_clause_with_skip(
+                &vc,
+                &mut env,
+                hir_atom,
+                &ens_clause,
+                "ensures",
+                &mut diagnostics,
+            )? {
+                ClauseLoweringOutcome::Trivial => {}
+                ClauseLoweringOutcome::Skipped => {
+                    skipped_ensures = true;
                 }
-                let loss_vector = if reconstruction_loss_output_enabled() {
-                    let candidate = build_loss_vector(
-                        atom,
-                        FAILURE_POSTCONDITION_VIOLATED,
-                        ce_value.as_ref(),
-                        &atom.span,
-                    );
-                    (!is_reconstruction_loss_empty(&candidate)).then_some(candidate)
-                } else {
-                    None
-                };
-                save_visualizer_report(
-                    output_dir,
-                    "failed",
-                    &atom.name,
-                    &ce_a,
-                    &ce_b,
-                    "Postcondition violated.",
-                    ce_value.as_ref(),
-                    FAILURE_POSTCONDITION_VIOLATED,
-                    semantic_fb.as_ref(),
-                    Some(&atom.span),
-                    Some(&constraint_mappings),
-                    data_flow_trace.as_ref(),
-                    loss_vector.as_ref(),
-                );
-                metrics.record_phase(
-                    "Phase 5: ensures verification (failed)",
-                    phase_start.elapsed(),
-                );
-                metrics.total_constraints = constraint_count_cell.get();
-                metrics.print_summary();
-                // Feature 3d: Add related spans for constraint definition locations
-                let mut err = MumeiError::verification_at(
-                    "Postcondition (ensures) is not satisfied.",
-                    atom.span.clone(),
-                )
-                .with_help("ensures の条件を確認してください。body の返り値が事後条件を満たすか検討してください")
-                .with_counterexample(ce_value.clone());
-                for mapping in &constraint_mappings {
-                    if mapping.span.line > 0 {
-                        let related_src_span = span_to_source_span("", &mapping.span);
-                        err = err.with_related(
-                            related_src_span,
-                            format!("constraint on '{}' defined here", mapping.param_name),
-                            miette::NamedSource::new(
-                                if mapping.span.file.is_empty() {
-                                    "<unknown>"
+                ClauseLoweringOutcome::Lowered(ens_bool) => {
+                    solver.push();
+                    solver.assert(&ens_bool.not());
+                    let ensures_check = solver.check();
+                    if ensures_check == SatResult::Sat {
+                        // Extract counterexample from Z3 model
+                        let (ce_a, ce_b, ce_value, data_flow_trace, reconstruction_loss) =
+                            if let Some(model) = solver.get_model() {
+                                let mut ce_json = serde_json::Map::new();
+                                let mut model_map = HashMap::new();
+                                for param in &atom.params {
+                                    if let Some(var_z3) = env.get(&param.name) {
+                                        if let Some(val) = model.eval(var_z3, true) {
+                                            let val_str = format!("{}", val);
+                                            ce_json.insert(param.name.clone(), json!(val_str));
+                                        }
+                                    }
+                                }
+                                let mut reconstruction_variables = HashMap::new();
+                                let mut model_values: HashMap<String, CexValue> = HashMap::new();
+                                for (name, var_z3) in &env {
+                                    reconstruction_variables.insert(name.clone(), var_z3.clone());
+                                    if let Some(val) = model.eval(var_z3, true) {
+                                        if let Some(int_value) = z3_dynamic_to_i64(&val) {
+                                            model_map.insert(name.clone(), int_value);
+                                        }
+                                        if let Some(cex_value) = z3_dynamic_to_cex_value(&val) {
+                                            model_values.insert(name.clone(), cex_value);
+                                        }
+                                    }
+                                }
+                                let a_str = ce_json
+                                    .get(atom.params.first().map(|p| p.name.as_str()).unwrap_or(""))
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("N/A")
+                                    .to_string();
+                                let b_str = ce_json
+                                    .get(atom.params.get(1).map(|p| p.name.as_str()).unwrap_or(""))
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("N/A")
+                                    .to_string();
+                                let ce_val = if ce_json.is_empty() {
+                                    None
                                 } else {
-                                    &mapping.span.file
-                                },
-                                String::new(),
-                            ),
-                            format!("type constraint: {}", mapping.predicate_raw),
-                            mapping.span.clone(),
+                                    Some(serde_json::Value::Object(ce_json))
+                                };
+                                let data_flow_trace =
+                                    build_data_flow_trace(atom, &model_map, module_env, hir_atom);
+                                let reconstruction_loss = Some(ReconstructionLoss::from_z3_model(
+                                    atom.ensures.clone(),
+                                    &model,
+                                    &reconstruction_variables,
+                                ));
+                                if enable_spurious_detection {
+                                    let validation =
+                                        validate_counterexample(atom, &model_values, module_env);
+                                    if validation.validation_status == "spurious_candidate" {
+                                        solver.pop(1);
+                                        let symbols = validation
+                                            .symbol_provenance
+                                            .iter()
+                                            .map(|symbol| {
+                                                format!(
+                                                    "{} ({})",
+                                                    symbol.symbol_name, symbol.source
+                                                )
+                                            })
+                                            .collect::<Vec<_>>()
+                                            .join(", ");
+                                        let help = if symbols.is_empty() {
+                                            format!(
+                                        "Counterexample replay mismatch: {}. Consider escalating to Lean or checking the Z3 translation.",
+                                        validation.failed_constraints.join("; ")
+                                    )
+                                        } else {
+                                            format!(
+                                        "Counterexample depends on uninterpreted symbols: {}. Consider escalating to Lean or expanding the symbol.",
+                                        symbols
+                                    )
+                                        };
+                                        return Err(MumeiError::verification_at(
+                                    format!(
+                                        "Spurious counterexample detected for atom '{}'. Spurious counterexample candidate for atom '{}'",
+                                        atom.name, atom.name
+                                    ),
+                                    atom.span.clone(),
+                                )
+                                .with_help(help)
+                                .with_counterexample(ce_val.clone()));
+                                    }
+                                }
+                                (a_str, b_str, ce_val, data_flow_trace, reconstruction_loss)
+                            } else {
+                                ("N/A".to_string(), "N/A".to_string(), None, None, None)
+                            };
+                        solver.pop(1);
+                        let constraint_mappings =
+                            build_constraint_mappings_for_atom(atom, module_env);
+                        let mut semantic_fb = build_semantic_feedback(
+                            &constraint_mappings,
+                            ce_value.as_ref(),
+                            atom,
+                            FAILURE_POSTCONDITION_VIOLATED,
+                            None,
                         );
+                        if let (Some(feedback), Some(loss)) =
+                            (&mut semantic_fb, reconstruction_loss)
+                        {
+                            feedback["reconstruction_loss"] = json!(loss);
+                        }
+                        let loss_vector = if reconstruction_loss_output_enabled() {
+                            let candidate = build_loss_vector(
+                                atom,
+                                FAILURE_POSTCONDITION_VIOLATED,
+                                ce_value.as_ref(),
+                                &atom.span,
+                            );
+                            (!is_reconstruction_loss_empty(&candidate)).then_some(candidate)
+                        } else {
+                            None
+                        };
+                        save_visualizer_report(
+                            output_dir,
+                            "failed",
+                            &atom.name,
+                            &ce_a,
+                            &ce_b,
+                            "Postcondition violated.",
+                            ce_value.as_ref(),
+                            FAILURE_POSTCONDITION_VIOLATED,
+                            semantic_fb.as_ref(),
+                            Some(&atom.span),
+                            Some(&constraint_mappings),
+                            data_flow_trace.as_ref(),
+                            loss_vector.as_ref(),
+                            Some(&diagnostics),
+                        );
+                        metrics.record_phase(
+                            "Phase 5: ensures verification (failed)",
+                            phase_start.elapsed(),
+                        );
+                        metrics.total_constraints = constraint_count_cell.get();
+                        metrics.print_summary();
+                        // Feature 3d: Add related spans for constraint definition locations
+                        let mut err = MumeiError::verification_at(
+                        "Postcondition (ensures) is not satisfied.",
+                        atom.span.clone(),
+                    )
+                    .with_help("ensures の条件を確認してください。body の返り値が事後条件を満たすか検討してください")
+                    .with_counterexample(ce_value.clone());
+                        for mapping in &constraint_mappings {
+                            if mapping.span.line > 0 {
+                                let related_src_span = span_to_source_span("", &mapping.span);
+                                err = err.with_related(
+                                    related_src_span,
+                                    format!("constraint on '{}' defined here", mapping.param_name),
+                                    miette::NamedSource::new(
+                                        if mapping.span.file.is_empty() {
+                                            "<unknown>"
+                                        } else {
+                                            &mapping.span.file
+                                        },
+                                        String::new(),
+                                    ),
+                                    format!("type constraint: {}", mapping.predicate_raw),
+                                    mapping.span.clone(),
+                                );
+                            }
+                        }
+                        return Err(err);
                     }
+                    if ensures_check == SatResult::Unknown {
+                        solver.pop(1);
+                        let property_based_help = property_based_config
+                            .map(|config| run_property_based_test(atom, module_env, config))
+                            .and_then(property_based_help);
+                        metrics.record_phase(
+                            "Phase 5: ensures verification (unknown)",
+                            phase_start.elapsed(),
+                        );
+                        metrics.total_constraints = constraint_count_cell.get();
+                        metrics.print_summary();
+                        let mut err = MumeiError::verification_at(
+                            "Z3 returned unknown while checking the postcondition.",
+                            atom.span.clone(),
+                        );
+                        if let Some(help) = property_based_help {
+                            err = err.with_help(help);
+                        }
+                        return Err(err);
+                    }
+                    solver.pop(1);
                 }
-                return Err(err);
             }
-            if ensures_check == SatResult::Unknown {
-                solver.pop(1);
-                let property_based_help = property_based_config
-                    .map(|config| run_property_based_test(atom, module_env, config))
-                    .and_then(property_based_help);
-                metrics.record_phase(
-                    "Phase 5: ensures verification (unknown)",
-                    phase_start.elapsed(),
-                );
-                metrics.total_constraints = constraint_count_cell.get();
-                metrics.print_summary();
-                let mut err = MumeiError::verification_at(
-                    "Z3 returned unknown while checking the postcondition.",
-                    atom.span.clone(),
-                );
-                if let Some(help) = property_based_help {
-                    err = err.with_help(help);
-                }
-                return Err(err);
-            }
-            solver.pop(1);
+        }
+        if skipped_ensures {
+            metrics.record_phase(
+                "Phase 5: ensures verification (unverifiable)",
+                phase_start.elapsed(),
+            );
+            metrics.total_constraints = constraint_count_cell.get();
+            metrics.print_summary();
+            save_visualizer_report(
+                output_dir,
+                "unverifiable",
+                &atom.name,
+                "N/A",
+                "N/A",
+                "Skipped unsupported Z3 clause(s) in ensures.",
+                None,
+                "unverifiable",
+                None,
+                Some(&atom.span),
+                None,
+                None,
+                None,
+                Some(&diagnostics),
+            );
+            return Err(
+                MumeiError::verification_at(UNVERIFIABLE_ERROR_PREFIX, atom.span.clone())
+                    .with_help(diagnostics.join("\n")),
+            );
         }
         env.remove("result");
     }
@@ -1794,6 +1917,7 @@ pub(crate) fn verify_inner(
                 None,
                 None,
                 None,
+                Some(&diagnostics),
             );
             return Err(MumeiError::verification_at(
                 format!(
@@ -1851,6 +1975,7 @@ pub(crate) fn verify_inner(
             None,
             None,
             None,
+            Some(&diagnostics),
         );
 
         let constraint_summary = if conflicting_constraints.is_empty() {
@@ -1931,6 +2056,7 @@ pub(crate) fn verify_inner(
         None,
         None,
         None,
+        Some(&diagnostics),
     );
     Ok(())
 }
@@ -1980,6 +2106,7 @@ pub(crate) fn save_visualizer_report(
     constraint_mappings: Option<&[ConstraintMapping]>,
     data_flow_trace: Option<&DataFlowTrace>,
     loss_vector: Option<&serde_json::Value>,
+    diagnostics: Option<&[String]>,
 ) {
     let mut report = json!({
         "status": status,
@@ -2004,6 +2131,9 @@ pub(crate) fn save_visualizer_report(
         if let Some(loss_vector) = loss_vector {
             report["loss_vector"] = loss_vector.clone();
         }
+    }
+    if let Some(diagnostics) = diagnostics {
+        report["diagnostics"] = json!(diagnostics);
     }
     if let Some(task_id) = orchestration_task_id_from_env() {
         report["task_id"] = json!(task_id);

@@ -348,6 +348,47 @@ Expected assertions:
 - Verify output includes 2 verified atoms or 2 skipped atoms if the verification cache is warm.
 - `verify-cert` exits zero and prints a valid/verified certificate message.
 
+### Multi-return Tuple Result Indexing
+
+Use this flow when changes touch tuple return types (`-> (T0, T1, ...)`), the
+`Expr::ArrayAccess` arm in `mumei-core/src/verification/translator/expr.rs`,
+tuple component seeding in `z3_types.rs` / `spec_validation.rs` / `executor.rs`,
+or `tuple_component_types` / `is_unsupported_clause_error`.
+
+The feature lets contracts on tuple-returning atoms index the result
+(`result[0]`, `result[1]`) with each component encoded as its own typed Z3
+value (heterogeneous types supported, e.g. `u64`→Int, `bool`→Bool).
+
+**IMPORTANT — clear the verification cache before every run.** A warm cache
+prints `'X': skipped (unchanged, cached)` and hides the real verdict, producing
+a false pass. Use a fresh temp dir per run, or `rm -rf .mumei .mumei_cache
+.mumei_build_cache` beside the source first.
+
+Best signal is a BEFORE/AFTER comparison (build one binary from `develop`, one
+from the branch). Fixture (`SafeAdd`, the #407 motivating example):
+```
+trusted atom SafeAdd(x: u64, y: u64) -> (u64, bool)
+requires: x + y <= 2**64 - 1;
+ensures: result[0] == x + y && result[1] == false;
+body: x + y;
+```
+Expected assertions:
+- BEFORE (feature absent): exit 1, output contains
+  `failed to lower ensures clause 'result[1] == false'` / `Expected bool for ==`
+  (heterogeneous bool component is un-encodable → `spec_lowering_failed`).
+- AFTER: exit 0, output contains `'SafeAdd': verified` and `1 item(s) verified`,
+  and does NOT contain `Skipped unsupported Z3 clause`, `satisfiable_with_skips`,
+  `unverifiable`, or `Expected bool`.
+
+Adversarial check that components are genuinely constrained (not vacuous). Use
+`ensures: result[0] == x + y && result[0] == x + y + 1;`:
+- AFTER: exit 1, output contains `ensures clauses are mutually inconsistent` /
+  `ensures_conflict`. If tuple indices were left unconstrained this would falsely
+  report `verified`.
+
+Note: `body:` tuple construction and call-result indexing (`foo(...)[0]`) are out
+of scope; `SafeAdd` must be a `trusted atom` (contract-only, body not checked).
+
 ### OpenTelemetry / TRACEPARENT Distributed Tracing
 
 Use this flow when changes touch `src/telemetry.rs`, `Cargo.toml` `otel` feature, `#[cfg(feature = "otel")]` span instrumentation in `verify.rs` or `executor.rs`, or the Python-side `current_traceparent()` / `_env_with_traceparent()` in `mumei-agent`.
@@ -398,6 +439,78 @@ OTEL_ENABLED=true TRACEPARENT="invalid-garbage-value" \
 OTEL_ENABLED=false uv run python3 -c "from agent import telemetry; assert telemetry.current_traceparent() is None"
 OTEL_ENABLED=false uv run python3 -c "from agent.mumei_client import MumeiClient; assert MumeiClient._env_with_traceparent() is None"
 ```
+
+### Exponent (`**`) and Chained-Comparison Lowering
+
+Use this flow when changes touch `**`/`Op::Pow` handling, `normalize_comparison_chains`
+in `parser/expr.rs`, `parse_expression` in `parser/mod.rs`, or Z3 clause lowering in
+`verification/translator/expr.rs` / `spec_validation.rs`.
+
+Best evidence is a **BEFORE/AFTER** comparison built via a git worktree:
+```bash
+cd /home/ubuntu/repos/mumei
+git worktree add -f /home/ubuntu/mumei-develop-base origin/develop   # or the PR base
+( cd /home/ubuntu/mumei-develop-base && LLVM_SYS_170_PREFIX=/usr/lib/llvm-17 \
+  LIBCLANG_PATH=/usr/lib/x86_64-linux-gnu cargo build )
+# ...run both target/debug/mumei binaries on the same fixture, clearing cache each time...
+git worktree remove --force /home/ubuntu/mumei-develop-base   # cleanup
+```
+
+Fixture (`tests/test_pow_chain.mm`) exercising the geth overflow idiom:
+```
+atom safe_add_with_bound(x: i64, y: i64) -> i64
+requires: x >= 0 && y >= 0 && x + y <= 2**64 - 1;
+ensures: 0 <= result <= 2**64 - 1 && result == x + y;
+body: x + y;
+```
+Expected assertions:
+- AFTER: `⚖  'safe_add_with_bound': verified ✅`, exit 0. BEFORE (no `**`/chain support):
+  hard-fails with `spec_lowering_failed` / `Expected int` on `0 <= result <= 2 * * 64 - 1`.
+- Full-precision fold is adversarial: `ensures: 2**64 - 1 > 9223372036854775807;` (RHS is
+  i64::MAX) must **verify**, and the flipped `<=` must **fail** (`ensures_unsat`). A verify
+  on the `<=` form would mean the fold truncated/overflowed i64 — the fold must use decimal
+  string math (`Int::from_str`), not i64.
+- Chained comparison `a <= b <= c` should lower to a conjunction; a `parse_expression`
+  unit test asserting this guards against regressions in un-normalized paths (vacuity,
+  spurious-detection, call-graph, refinement checks all route through `parse_expression`).
+- A symbolic/non-constant exponent (`x**y`) in an ensures clause is now surfaced as a clean
+  `unverifiable ⚠` verdict end-to-end (see the flow below); older builds instead hard-errored
+  with `Unsupported exponentiation` (exit 1). Both are sound; the verdict form is the current
+  behavior.
+
+### Executor `unverifiable` Verdict for Unencodable Clauses
+
+Use this flow when changes touch the executor proof path in `verification/executor.rs`
+(esp. `lower_clause_with_skip` / `ClauseLoweringOutcome`, the requires/ensures loops), the
+tri-state verdict plumbing in `commands/verify.rs`, or `split_top_level_conjunctions` /
+`strip_wrapping_parens` in `spec_validation.rs`. Clear caches (`rm -rf .mumei tests/.mumei
+cross_spec.json`) before every run — a warm cache masks verdict changes.
+
+Fixtures and expected verdicts (each distinguishes a broken build):
+- Symbolic exponent in ensures (`ensures: result == x**y && result == x;`) → `unverifiable ⚠`,
+  exit 1. Must NOT be `verified` and must NOT hard-error.
+- Encodable-but-false postcondition (`ensures: result > x + 1; body: x;`) → `refuted/failed`,
+  `0 unverifiable`, exit 1. Guards that a genuine counterexample is never downgraded to
+  unverifiable.
+- Trivially-true conjunct (`ensures: result == x && true; body: x;`) → `verified`, exit 0.
+  A broken build reports `unverifiable` (trivial `true`/empty conjunct misclassified as an
+  unsupported skip — `split_top_level_conjunctions` yields `["result == x", "true"]`, and
+  `lower_clause_with_skip` must return `Trivial`, not `Skipped`, for the `true` conjunct).
+- `(A && B) || (C && D)` ensures (e.g. `std/option.mm::option_unwrap_or`) → `verified`, no
+  `Spurious counterexample`. A broken `strip_wrapping_parens` mangles the disjunction.
+- Mixed multi-atom file (unverifiable atom then refuted atom) → summary
+  `0 passed, 1 failed, 1 unverifiable`; the refuted atom must stay `failed`, not read a stale
+  shared `report.json` status. Verdict detection is error-based, not stale-file-based.
+
+Machine-readable surfacing:
+- `--report-dir <dir>`: `report.json` has `status="unverifiable"`,
+  `reason="Skipped unsupported Z3 clause(s) in ensures."`, and a per-clause `diagnostics`
+  entry (`"Skipped unsupported Z3 clause: ensures clause '...': ... Unsupported exponentiation ..."`).
+  This is the artifact mumei-agent consumes; assert against it.
+- `--json` stdout: exposes `status="unverifiable"` + `reason`, but its `diagnostics` array may
+  be `[]` — `enrich_verify_json_payload` (`src/feedback.rs`) overwrites report diagnostics with
+  the CLI-level vector. This is pre-existing and also affects the #408 spec-skip path; prefer
+  `--report-dir`/`report.json` for diagnostic assertions rather than `--json` stdout.
 
 ## Notes
 

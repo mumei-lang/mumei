@@ -429,6 +429,12 @@ fn eval_binary(left: EvalValue, op: &Op, right: EvalValue) -> Result<EvalValue, 
                 Op::Add => Ok(EvalValue::Int(left + right)),
                 Op::Sub => Ok(EvalValue::Int(left - right)),
                 Op::Mul => Ok(EvalValue::Int(left * right)),
+                Op::Pow if right >= 0 => {
+                    Ok(EvalValue::Int(left.checked_pow(right as u32).ok_or_else(
+                        || "integer overflow during counterexample replay".to_string(),
+                    )?))
+                }
+                Op::Pow => Err("negative exponent during counterexample replay".to_string()),
                 Op::Div if right != 0 => Ok(EvalValue::Int(left / right)),
                 Op::Div => Err("division by zero during counterexample replay".to_string()),
                 Op::Eq => Ok(EvalValue::Bool(left == right)),
@@ -467,6 +473,7 @@ fn eval_binary(left: EvalValue, op: &Op, right: EvalValue) -> Result<EvalValue, 
                     Op::Add => Ok(EvalValue::Float(l + r)),
                     Op::Sub => Ok(EvalValue::Float(l - r)),
                     Op::Mul => Ok(EvalValue::Float(l * r)),
+                    Op::Pow => Ok(EvalValue::Float(l.powf(r))),
                     Op::Div => Ok(EvalValue::Float(l / r)),
                     Op::Eq => Ok(EvalValue::Bool(l == r)),
                     Op::Neq => Ok(EvalValue::Bool(l != r)),
