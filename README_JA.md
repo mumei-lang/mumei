@@ -16,20 +16,18 @@ Mumei は、既存の外部言語コード（たとえば Python、Rust、Go、T
 
 詳細な契約、固定語彙、V1-A〜E の順序、Lean 昇格条件、PR evidence ルールは [`docs/CROSS_PROJECT_ROADMAP.md`](docs/CROSS_PROJECT_ROADMAP.md)、[`docs/ROADMAP.md`](docs/ROADMAP.md)、[`docs/ONBOARDING.md`](docs/ONBOARDING.md) を参照してください。
 
-最新の標準ライブラリ同期ポイント: `std/crypto/primitives.mm` は forge 生成された
-Z3 決定可能な crypto predicate モジュールで、Lean 昇格は不要です。
-mumei-lean live generated theorem coverage は5つのパスを含みます —
-`abs_saturating`、`bounded_mul_with_overflow_check`、`constant_time_eq_flag`、
-`ff_zero_eq_zero`、および sort ascending-preservation パス
-(`verified_insertion_sort_ascending`) — `forall(i, 0, n-1, arr[i] <= arr[i+1])` を
-mathlib の `List.Sorted` へ `MumeiLean.Sort` ブリッジ経由で接続します。
+最新の標準ライブラリと mumei-lean の同期ポイントは
+[Standard Library Reference](docs/STDLIB.md#cross-project-sync-points) を参照してください。
 
 ---
 
 ## `.mm`を書かずに始める（mumei-agent）
 
-mumei-agent を使うと、既存コードや仕様をそのまま検証できます。
-`.mm` を書かない入口から段階的に `.mm` へ移行する手順は [Onboarding Guide](docs/ONBOARDING.md) を参照してください。
+mumei-agent は、重要な contract を `.mm` へ移行する前に既存コードや仕様を
+検証します。対応言語、option、MCP workflow、段階的な移行手順は
+[Onboarding Guide](docs/ONBOARDING.md) と mumei-agent の
+[Verification Workflow Guide](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/VERIFICATION_WORKFLOW_GUIDE.md)
+を参照してください。
 
 ### インストール
 
@@ -44,88 +42,21 @@ uv sync
 ### 3つのユースケース
 
 **1. 既存コードのバグ候補を見つける**
+
 ```bash
-# --language は任意: python|rust|typescript|go（省略時は拡張子から推定）
 uv run mumei-agent validate-code --input src/payment.py
 ```
 
 **2. 仕様↔コードのドリフトを検出する**
-```bash
-uv run mumei-agent validate-spec-to-code --spec docs/spec.txt --code src/payment.py \
-  --language python  # Optional: python|rust|typescript|go; omitted values are inferred from the extension
-```
-
-**3. 仕様単体の矛盾を見つける**
-```bash
-uv run mumei-agent validate-spec --input docs/spec.txt --format nl  # Optional; default: nl; other choices: human|json|markdown
-```
-
-`--domain financial` などのドメインヒントは任意です。`validate-code --input`、`validate-spec-to-code --code`、`validate-code-to-spec --code` は単一ソースファイルを指定します。ディレクトリ再帰は `audit --code-file` と `extract-spec --code-file` で利用できます。
-
-コード検証・整合性検証コマンド（層B: Z3 厳密検証）の対応言語は `python|rust|typescript|go` です。`extract-spec`（層A: spec 抽出）は拡張子から `rust`、`c`、`cpp`、`go`、`python`、`javascript`、`typescript`、`java` を自動検出します。
-
-詳細は [Verification Workflow Guide](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/VERIFICATION_WORKFLOW_GUIDE.md) を参照してください。
-
-## 自己修復ループ: `.mm`を書かずに始める
-
-自然言語仕様検証、外部コード検証、仕様↔コード整合性を含む完全な no-`.mm` ワークフローについては、mumei-agent の [Verification Workflow Guide](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/VERIFICATION_WORKFLOW_GUIDE.md) を参照してください。
-`mumei-agent` のソース checkout から作業する場合は、一度 `uv sync` を実行します。その後は同じコマンドを `uv run mumei-agent <subcommand>` として利用できます。
-
-### 1. 既存コード: バグ候補箇所を見つける
-
-既存のソースファイルを agent に渡し、contract の推論、検証、疑わしいパスの報告を依頼します。`--input` は必須で、単一のソースファイルを指します。`--language` は任意で、`python`、`rust`、`typescript`、`go` のいずれかを指定できます（省略時は拡張子から推定）。
-
-```bash
-# --language は任意: 拡張子から推定
-uv run mumei-agent validate-code --input src/payment.py
-```
-
-MCP agent は、`.mm` を合成または受け取った後、mumei の検証 backend を直接利用できます。
-
-```json
-{
-  "tool": "validate_logic",
-  "arguments": {
-    "source_code": "atom debit(balance: i64, amount: i64) requires: amount > 0; ensures: result >= 0; body: balance - amount;"
-  }
-}
-```
-
-### 2. 自然言語仕様 + 既存コード: 仕様↔コードのドリフトを検出する
-
-何かを `.mm` に移行する前に、要件と実装を比較して不一致を検出します。`--spec` と `--code` は必須です。`--code` は単一のソースファイルを指します。`--language` は任意で、`python`、`rust`、`typescript`、`go` を指定できます。
 
 ```bash
 uv run mumei-agent validate-spec-to-code --spec docs/spec.txt --code src/payment.py
 ```
 
-逆方向のドリフト検出:
+**3. 仕様単体の矛盾を見つける**
 
 ```bash
-uv run mumei-agent validate-code-to-spec \
-  --code src/payment.py \
-  --spec docs/spec.txt \
-  --language python  # Optional: python|rust|typescript|go
-```
-
-### 3. 仕様のみ: 矛盾と未規定の振る舞いを見つける
-
-文章の要件から開始し、直接的な矛盾、vacuity、曖昧さ、過剰制約を確認します。`--input` は必須です。ドメイン固有のヒントが必要な場合、`--domain` は任意で指定できます。
-
-```bash
-uv run mumei-agent validate-spec --input docs/spec.txt --domain payment  # --domain is optional
-```
-
-MCP agent は、入力が文章、抽出済み contract、`.mm` のどれであるかに応じて、spec-health tool または verification tool を呼び出せます。
-
-```json
-{
-  "tool": "forge_blade",
-  "arguments": {
-    "source_code": "atom safe_div(a: i64, b: i64) requires: b != 0; ensures: true; body: a / b;",
-    "output_name": "safe_div"
-  }
-}
+uv run mumei-agent validate-spec --input docs/spec.txt --format nl
 ```
 
 ---
@@ -174,10 +105,9 @@ mumei repl  # :verify-spec <path|inline>, :verify-code <path>, :verify <atom>
 
 ## P9 NLAE Integration
 
-Mumei は 4 リポジトリ NLAE pipeline の Module B (AR) として、Mumei contract を
-Z3 obligation に再構築し、復元誤差を Loss Vector JSON として出力します。この
-Loss Vector は mumei-agent の self-correction loop と mumei-lean の Fidelity
-Checker に渡されます。
+Mumei は 4 リポジトリ NLAE pipeline の Module B (AR) として contract を
+Z3 obligation に再構築し、self-correction と Lean fidelity check に渡す
+structured Loss Vector を出力します。
 
 ```text
 mumei-agent (Module A / AV)
@@ -191,15 +121,9 @@ mumei-lean Fidelity Checker
 mumei-demo Evaluation Loop
 ```
 
-検証失敗を P9-E structured feedback として確認する例:
-
-```bash
-mumei verify --emit loss-vector examples/nlae_integration_demo.mm
-```
-
-出力には `status`, `error_type`, `location`, `reconstruction_loss`,
-`feedback_instruction` が含まれ、agent は `uv run mumei-agent self-correct` または
-`run_nlae_pipeline` MCP tool に渡せます。
+phase status、artifact、structured feedback field、E2E workflow の詳細は
+[`docs/CROSS_PROJECT_ROADMAP.md` § P9](docs/CROSS_PROJECT_ROADMAP.md)
+を参照してください。
 
 ---
 
@@ -347,7 +271,14 @@ mumei/
 
 ## 分散トレーシング (OpenTelemetry)
 
-`cargo build --features otel` でビルドし `OTEL_ENABLED=true` で実行すると、`mumei verify` は OTLP 経由でスパンをエクスポートします。環境変数 `TRACEPARENT`（W3C Trace Context）が設定されている場合、Rust スパンは呼び出し元のトレースの子になり、`mumei-agent` から Z3 検証パイプラインまでのエンドツーエンド分散トレーシングが可能になります。
+`cargo build --features otel` でビルドし `OTEL_ENABLED=true` で実行すると、
+`mumei verify` は OTLP 経由でスパンをエクスポートします。これにより
+`mumei-agent` (Python) → `mumei verify` (Rust) → Z3 を1本の分散トレースとして
+可視化し、Jaeger や Grafana でボトルネックとなる検証 step / Z3 solve と、
+各 LLM call の token 消費量・latency を追跡できます。
+
+環境変数 `TRACEPARENT`（W3C Trace Context）が設定されている場合、Rust スパンは
+呼び出し元トレースの子になり、Python/Rust process 間の親子関係が維持されます。
 
 ```bash
 OTEL_ENABLED=true TRACEPARENT="00-..." mumei verify example.mm

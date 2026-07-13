@@ -25,6 +25,29 @@
 
 ---
 
+## Cross-project sync points
+
+`std/crypto/primitives.mm` is a forge-generated, Z3-decidable crypto predicate
+module that does not require Lean escalation. The mumei-lean bridge currently
+keeps five live generated theorem paths synchronized with this standard-library
+surface:
+
+- `abs_saturating`
+- `bounded_mul_with_overflow_check`
+- `constant_time_eq_flag`
+- `ff_zero_eq_zero`
+- `verified_insertion_sort_ascending`
+
+The ascending-sort path lowers
+`forall(i, 0, n-1, arr[i] <= arr[i+1])` to mathlib's `List.Sorted` through the
+`MumeiLean.Sort` bridge. See the
+[cross-project roadmap](CROSS_PROJECT_ROADMAP.md)
+and the
+[mumei-lean harness contract](https://github.com/mumei-lang/mumei-lean/blob/develop/docs/LEAN_HARNESS_CONTRACT.md)
+for bridge ownership and E2E evidence.
+
+---
+
 ## std/prelude.mm (Auto-imported)
 
 The prelude is automatically loaded by the compiler. No `import` statement needed.
