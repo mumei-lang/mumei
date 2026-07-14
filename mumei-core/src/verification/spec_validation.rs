@@ -517,6 +517,7 @@ fn assert_negated_clause<'a>(
     clause: &str,
     label: &str,
 ) -> Result<ClauseLoweringOutcome, SpecContradiction> {
+    let clause = normalize_foreign_boolean_literals(clause);
     let trimmed = clause.trim();
     if trimmed.is_empty() || trimmed == "true" {
         solver.assert(&Bool::from_bool(vc.ctx, false));
