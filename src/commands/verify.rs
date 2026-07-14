@@ -1568,29 +1568,13 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
     // Proposal B: --json outputs report.json content to stdout
     if json_output {
         let report_path = output_dir.join("report.json");
-        if report_path.exists() {
-            match std::fs::read_to_string(&report_path) {
-                Ok(content) => match serde_json::from_str::<serde_json::Value>(&content) {
-                    Ok(payload) => {
-                        let mut payload =
-                            enrich_verify_json_payload(payload, &diagnostics, &loop_suggestions);
-                        if let Some(ref metrics) = lean_escalation_metrics_json {
-                            payload["lean_escalation_metrics"] = metrics.clone();
-                        }
-                        match serde_json::to_string_pretty(&payload) {
-                            Ok(json) => println!("{json}"),
-                            Err(_) => println!("{}", content),
-                        }
-                    }
-                    Err(_) => println!("{}", content),
-                },
-                Err(e) => {
-                    eprintln!("Failed to read report.json: {}", e);
-                    return true;
-                }
-            }
-        } else {
-            // No report.json produced — emit minimal JSON status
+        // When the module contains a mix of passing and failing/unverifiable atoms,
+        // report.json only reflects the last atom. Emitting a per-atom report in that
+        // case would hide failures and report a spurious success. Fall back to the
+        // summary payload so the JSON status matches the exit code.
+        let mixed_results = (failed > 0 || unverifiable > 0) && (verified > 0 || skipped > 0);
+        if !report_path.exists() || mixed_results {
+            // No report.json produced, or the module has mixed results — emit a summary JSON status
             let status = if failed > 0 {
                 "failed"
             } else if unverifiable > 0 {
@@ -1620,6 +1604,27 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                     "{{\"status\":\"{}\",\"verified\":{},\"failed\":{},\"unverifiable\":{},\"skipped\":{},\"escalation_candidates\":{}}}",
                     status, verified, failed, unverifiable, skipped, escalated
                 ),
+            }
+        } else {
+            match std::fs::read_to_string(&report_path) {
+                Ok(content) => match serde_json::from_str::<serde_json::Value>(&content) {
+                    Ok(payload) => {
+                        let mut payload =
+                            enrich_verify_json_payload(payload, &diagnostics, &loop_suggestions);
+                        if let Some(ref metrics) = lean_escalation_metrics_json {
+                            payload["lean_escalation_metrics"] = metrics.clone();
+                        }
+                        match serde_json::to_string_pretty(&payload) {
+                            Ok(json) => println!("{json}"),
+                            Err(_) => println!("{}", content),
+                        }
+                    }
+                    Err(_) => println!("{}", content),
+                },
+                Err(e) => {
+                    eprintln!("Failed to read report.json: {}", e);
+                    return true;
+                }
             }
         }
         return failed > 0 || unverifiable > 0;
