@@ -115,6 +115,9 @@ pub fn build_contextual_suggestion(
     counterexample: Option<&serde_json::Value>,
     structured_unsat_core: Option<&serde_json::Value>,
 ) -> String {
+    if failure_type.is_empty() {
+        return "Verification passed; no fix is required.".to_string();
+    }
     let ce_map = counterexample.and_then(|ce| ce.as_object());
 
     // Try to extract a violated constraint description from unsat core
