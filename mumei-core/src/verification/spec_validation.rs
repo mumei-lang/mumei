@@ -9,6 +9,7 @@ use super::translator::{
 use super::types::Env;
 use super::SpecContradiction;
 use super::{parse_expression, Atom, Bool, Config, Dynamic, HashMap, Int, SatResult, Solver};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -455,6 +456,15 @@ fn assert_parameter_refinements<'a>(
     Ok(())
 }
 
+fn normalize_foreign_boolean_literals(clause: &str) -> String {
+    lazy_static::lazy_static! {
+        static ref TRUE_RE: Regex = Regex::new(r"\bTrue\b").unwrap();
+        static ref FALSE_RE: Regex = Regex::new(r"\bFalse\b").unwrap();
+    }
+    let normalized = TRUE_RE.replace_all(clause, "true");
+    FALSE_RE.replace_all(&normalized, "false").into_owned()
+}
+
 fn assert_clause<'a>(
     vc: &VCtx<'a>,
     solver: &Solver<'a>,
@@ -463,6 +473,7 @@ fn assert_clause<'a>(
     clause: &str,
     label: &str,
 ) -> Result<ClauseLoweringOutcome, SpecContradiction> {
+    let clause = normalize_foreign_boolean_literals(clause);
     let trimmed = clause.trim();
     if trimmed.is_empty() || trimmed == "true" {
         return Ok(ClauseLoweringOutcome::Applied);
