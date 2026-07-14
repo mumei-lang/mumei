@@ -5,7 +5,9 @@ use mumei_core::hir::lower_atom_to_hir_with_env;
 use mumei_core::parser::Item;
 use mumei_core::{
     cross_spec, manifest, mir, mir_analysis, parser, proof_cert,
-    reconstruction_loss::ReconstructionLoss, resolver, structured_feedback::StructuredFeedback,
+    reconstruction_loss::ReconstructionLoss,
+    resolver,
+    structured_feedback::{Location, StructuredFeedback},
     verification,
 };
 use std::path::{Path, PathBuf};
@@ -374,6 +376,32 @@ struct VerifyContext<'a> {
     escalated: &'a mut usize,
 }
 
+fn write_cached_success_report(output_dir: &Path, atom: &parser::Atom) {
+    let mut structured = StructuredFeedback::verification_passed();
+    structured.location = Location::from_span(&atom.span);
+    let report = serde_json::json!({
+        "status": "success",
+        "atom": &atom.name,
+        "input_a": "N/A",
+        "input_b": "N/A",
+        "reason": "Verified (cached, unchanged)",
+        "span": {
+            "file": &atom.span.file,
+            "line": atom.span.line,
+            "col": atom.span.col,
+            "len": atom.span.len,
+        },
+        "structured_feedback": structured,
+        "suggestion": structured.feedback_instruction,
+        "diagnostics": [],
+    });
+    let _ = std::fs::create_dir_all(output_dir);
+    let _ = std::fs::write(
+        output_dir.join("report.json"),
+        serde_json::to_string(&report).unwrap_or_else(|_| report.to_string()),
+    );
+}
+
 fn verify_single_atom(atom: &parser::Atom, name: &str, ctx: &mut VerifyContext<'_>) {
     let fragment_tags = verification::detect_logic_fragment_tags(atom, ctx.module_env);
     let has_finite_field_semantics = fragment_tags.iter().any(|tag| tag == "finite_field");
@@ -468,6 +496,7 @@ fn verify_single_atom(atom: &parser::Atom, name: &str, ctx: &mut VerifyContext<'
                 ctx.structured_feedbacks
                     .push(structured_feedback_for_passed_atom(atom));
             }
+            write_cached_success_report(ctx.output_dir, atom);
             *ctx.skipped += 1;
             return;
         }
