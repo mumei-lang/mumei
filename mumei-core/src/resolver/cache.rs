@@ -156,6 +156,8 @@ pub struct VerificationCacheEntry {
     pub dependencies: Vec<String>,
     pub type_deps: Vec<String>,
     pub timestamp: String,
+    #[serde(default)]
+    pub skipped_clauses: usize,
 }
 
 /// Compute a proof hash that includes transitive dependency signatures and type predicates.
@@ -474,6 +476,7 @@ pub fn migrate_old_cache(base_dir: &Path) {
                         dependencies: Vec::new(),
                         type_deps: Vec::new(),
                         timestamp: timestamp.clone(),
+                        skipped_clauses: 0,
                     },
                 );
             }
