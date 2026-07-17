@@ -1391,6 +1391,18 @@ mumei-agent 側で `OTEL_ENABLED=true` の場合、`MumeiClient.verify` 等の `
 
 ローカル検証用のリファレンス OTLP バックエンド（OTel Collector / Jaeger / Prometheus / Grafana）と運用手順は `mumei-lang/mumei-agent` 側に整備済み: [`docker-compose.otel.yml`](https://github.com/mumei-lang/mumei-agent/blob/develop/docker-compose.otel.yml) と [`docs/OBSERVABILITY.md`](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/OBSERVABILITY.md)。`--features otel` ビルドの `mumei verify` を `TRACEPARENT` 付きで呼ぶと、Rust 側 `mumei.verify.cli` → `mumei.z3.solve` span が Python 側 trace と同一 trace ID で Jaeger に現れることを、このスタックで疎通確認できる。
 
+### CI 回帰ゲート
+
+`.agents/skills/testing-mumei-cli/SKILL.md` の OTel/TRACEPARENT 検証フローを
+`.github/workflows/otel-tracing.yml` として CI ジョブ化済み（`src/telemetry.rs`
+/ `src/commands/verify.rs` / `executor.rs` / `Cargo.toml` に触れる PR で起動）:
+
+- **ゼロコスト検証**: `cargo tree --edges no-dev | grep -i opentelemetry` が空であること（feature 無効時に OTel 依存が入らないことを保証）。
+- **両ビルドターゲット**: `cargo build` と `cargo build --features otel` の双方が通ること。
+- **span 親子関係の end-to-end 検証**: `src/telemetry.rs` の `#[cfg(all(test, feature = "otel"))]` ユニットテストがインメモリ exporter を用いて、`attach_parent_context()` の `TRACEPARENT` 抽出（有効/不正/未設定）と、`mumei.verify.cli` → `mumei.z3.solve` span が抽出した remote 親 span の子として同一 trace ID を持つことを assert（OTLP コレクタ不要）。
+- **ランタイム挙動**: `OTEL_ENABLED=true` でコレクタ不在でも exit 0（graceful degradation）、有効/不正 `TRACEPARENT` の受理/無視、`TRACEPARENT` 有無で検証出力が一致すること。
+- **Python 側 no-op**: mumei-agent を checkout し、`OTEL_ENABLED=false` で `telemetry.current_traceparent()` / `MumeiClient._env_with_traceparent()` が `None` を返すこと。
+
 ---
 
 ## Related Documents

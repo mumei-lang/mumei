@@ -1333,6 +1333,7 @@ SI-5 Autonomous Proliferation が 9 フェーズ全て ✅ Implemented / Complet
 | P10-D mumei-side MCP tools | mumei | ✅ Complete | `mcp_server.py` に `measure_std_health()` / `get_proof_certificate(module_path)` / `generate_doc(source_code, format)` を実装済み。Claude Code 統合として `.mcp.json` と `.claude/CLAUDE.md` を配置し、`docs/CLAUDE_CODE_QUICKSTART.md` にセットアップ・動作確認手順を追加。 |
 | ベンチマーク評価スイート | mumei | ✅ Implemented | `benchmarks/run_benchmarks.py` で検証成功率・Z3 solver 時間・trusted atom 比率をカテゴリ別に集計し、`docs/BENCHMARK_RESULTS.md` に時系列で蓄積。stdlib 全体の metrics も統合出力。dafny_puzzles / svcomp_style カテゴリで 100% 成功率を達成 |
 | mumei-agent P15 OTel Phase 1 完了 | mumei-agent | ✅ Complete | 直接 `client.chat.completions.create` 呼び出し全 8 箇所の個別 span 計装、`complete_with_tools` 独立 span 化、ディスパッチ関数 `complete_text` / `complete_response` 計装完了。既存 JSON メトリクス形式への影響なし |
+| P15 OTel 分散トレース CI 回帰ゲート | mumei | ✅ Complete | `src/telemetry.rs::attach_parent_context` の `TRACEPARENT` 抽出と `mumei.verify.cli` → `mumei.z3.solve` span 親子関係を `#[cfg(all(test, feature = "otel"))]` ユニットテスト（インメモリ exporter）で end-to-end 検証。`.agents/skills/testing-mumei-cli/SKILL.md` の検証フロー（ゼロコスト検証・両ビルドターゲット・`TRACEPARENT` 受理/無視・graceful degradation・出力等価・Python 側 no-op）を `.github/workflows/otel-tracing.yml` として CI ジョブ化 |
 
 ### Deferred
 

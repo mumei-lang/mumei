@@ -1,0 +1,150 @@
+name: OTel / TRACEPARENT Tracing
+
+# P15 OpenTelemetry maturation — CI-jobify the OTel/TRACEPARENT verification
+# flow from `.agents/skills/testing-mumei-cli/SKILL.md`:
+#   1. Zero-cost check: `opentelemetry` must be absent from the default
+#      (no-otel) dependency tree.
+#   2. Both build targets compile (default + `--features otel`).
+#   3. `src/telemetry.rs::attach_parent_context` TRACEPARENT extraction and the
+#      verify-pipeline span parent/child relationship are asserted by the
+#      `telemetry::` unit tests (in-memory exporter, no collector required).
+#   4. Runtime behaviour of the `--features otel` binary: OTEL_ENABLED graceful
+#      degradation, valid TRACEPARENT accepted, invalid TRACEPARENT ignored,
+#      and output equivalence with/without a parent context.
+#   5. Python-side no-op in mumei-agent (best-effort cross-repo checkout).
+
+on:
+  pull_request:
+    paths:
+      - 'src/telemetry.rs'
+      - 'src/commands/verify.rs'
+      - 'src/main.rs'
+      - 'mumei-core/src/verification/executor.rs'
+      - 'Cargo.toml'
+      - 'mumei-core/Cargo.toml'
+      - '.agents/skills/testing-mumei-cli/SKILL.md'
+      - '.github/workflows/otel-tracing.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  otel-tracing:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libz3-dev z3 libzstd-dev
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
+          codename=$(lsb_release -cs)
+          echo "deb http://apt.llvm.org/${codename}/ llvm-toolchain-${codename}-17 main" \
+            | sudo tee /etc/apt/sources.list.d/llvm-17.list > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y llvm-17-dev libclang-17-dev libpolly-17-dev
+          echo "LLVM_SYS_170_PREFIX=/usr/lib/llvm-17" >> "$GITHUB_ENV"
+          echo "LIBCLANG_PATH=/usr/lib/llvm-17/lib" >> "$GITHUB_ENV"
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-otel-${{ hashFiles('Cargo.toml', '**/Cargo.toml') }}
+          restore-keys: |
+            cargo-otel-
+
+      - name: Zero-cost check (opentelemetry absent from default dep tree)
+        run: |
+          if cargo tree --edges no-dev | grep -i opentelemetry; then
+            echo "::error::opentelemetry present in the default (no-otel) dependency tree — OTel must be zero-cost when the feature is off"
+            exit 1
+          fi
+          echo "OK: opentelemetry absent from default build"
+
+      - name: Build default target
+        run: cargo build
+
+      - name: Build --features otel target
+        run: cargo build --features otel
+
+      - name: Telemetry unit tests (attach_parent_context + span parent/child)
+        run: |
+          cargo test --features otel --bin mumei telemetry:: -- --nocapture
+
+      - name: OTEL_ENABLED graceful degradation (no collector)
+        run: |
+          set -e
+          OTEL_ENABLED=true ./target/debug/mumei verify examples/import_test/lib/math_utils.mm
+          echo "OK: verify exited 0 with OTEL_ENABLED and no collector"
+
+      - name: Valid TRACEPARENT accepted
+        run: |
+          set -e
+          OTEL_ENABLED=true TRACEPARENT="00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01" \
+            ./target/debug/mumei verify examples/import_test/lib/math_utils.mm
+          echo "OK: valid TRACEPARENT accepted"
+
+      - name: Invalid TRACEPARENT ignored
+        run: |
+          set -e
+          OTEL_ENABLED=true TRACEPARENT="invalid-garbage-value" \
+            ./target/debug/mumei verify examples/import_test/lib/math_utils.mm
+          echo "OK: invalid TRACEPARENT ignored without panic"
+
+      - name: Output equivalence (with vs without TRACEPARENT)
+        run: |
+          set -e
+          clear_cache() {
+            rm -rf .mumei_cache .mumei_build_cache .mumei \
+              examples/import_test/lib/.mumei_cache \
+              examples/import_test/lib/.mumei_build_cache \
+              examples/import_test/lib/.mumei
+          }
+          clear_cache
+          OTEL_ENABLED=true ./target/debug/mumei verify examples/import_test/lib/math_utils.mm > /tmp/out-no-tp.txt 2>/dev/null
+          clear_cache
+          OTEL_ENABLED=true TRACEPARENT="00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01" \
+            ./target/debug/mumei verify examples/import_test/lib/math_utils.mm > /tmp/out-tp.txt 2>/dev/null
+          diff /tmp/out-no-tp.txt /tmp/out-tp.txt
+          echo "OK: verification output is identical with and without a parent context"
+
+  python-noop:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out mumei-agent
+        uses: actions/checkout@v4
+        with:
+          repository: mumei-lang/mumei-agent
+          ref: develop
+          path: mumei-agent
+          token: ${{ secrets.MUMEI_PAT || secrets.MUMEI_REPO_TOKEN || secrets.GITHUB_TOKEN }}
+        continue-on-error: true
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Python-side no-op when OTEL disabled
+        working-directory: mumei-agent
+        run: |
+          if [ ! -f pyproject.toml ]; then
+            echo "mumei-agent checkout unavailable; skipping Python-side no-op check"
+            exit 0
+          fi
+          uv sync --extra test --frozen
+          OTEL_ENABLED=false uv run python3 -c "from agent import telemetry; assert telemetry.current_traceparent() is None"
+          OTEL_ENABLED=false uv run python3 -c "from agent.mumei_client import MumeiClient; assert MumeiClient._env_with_traceparent() is None"
+          echo "OK: Python-side traceparent helpers are no-ops when OTEL_ENABLED=false"
