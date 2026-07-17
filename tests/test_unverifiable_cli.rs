@@ -376,6 +376,48 @@ atom identity_with_unsupported_requires(x: i64) -> i64
 }
 
 #[test]
+fn verify_json_aggregate_not_inflated_by_failing_atom() {
+    let bin = env!("CARGO_BIN_EXE_mumei");
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    // A success-with-skipped-requires atom followed by a postcondition-failing
+    // atom. All atoms share output_dir/report.json, so the module aggregate must
+    // reflect only the real skip (1), not double-count the prior atom's report.
+    let fixture = write_fixture(
+        "json_failing_no_inflation",
+        r#"
+atom identity_with_unsupported_requires(x: i64) -> i64
+  requires: is_hex_digit(x);
+  ensures: result == x;
+  body: { x };
+
+atom bad_postcondition(x: i64) -> i64
+  requires: x >= 0;
+  ensures: result == x + 1;
+  body: { x };
+"#,
+    );
+    let report_dir = fixture.parent().unwrap();
+
+    let output = Command::new(bin)
+        .arg("verify")
+        .arg("--json")
+        .arg("--report-dir")
+        .arg(report_dir)
+        .arg(&fixture)
+        .current_dir(manifest_dir)
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run failing-inflation verify: {err}"));
+
+    let payload: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("mixed output should be JSON");
+
+    assert_eq!(payload["status"], "failed", "payload:\n{payload}");
+    assert_eq!(payload["skipped_clauses"], 1, "payload:\n{payload}");
+
+    std::fs::remove_dir_all(report_dir).expect("remove failing-inflation fixture dir");
+}
+
+#[test]
 fn verify_json_surfaces_aggregate_for_all_success_module() {
     let bin = env!("CARGO_BIN_EXE_mumei");
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
