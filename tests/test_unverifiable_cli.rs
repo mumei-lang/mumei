@@ -332,3 +332,92 @@ atom identity_with_unsupported_requires(x: i64) -> i64
 
     std::fs::remove_dir_all(report_dir).expect("remove cached partial fixture dir");
 }
+
+#[test]
+fn verify_json_aggregate_counts_skips_from_unverifiable_atoms() {
+    let bin = env!("CARGO_BIN_EXE_mumei");
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let fixture = write_fixture(
+        "json_mixed_aggregate",
+        r#"
+atom symbolic_pow(x: i64, y: i64) -> i64
+  requires: x >= 0;
+  ensures: result == x**y && result == x;
+  body: { x };
+
+atom identity_with_unsupported_requires(x: i64) -> i64
+  requires: is_hex_digit(x);
+  ensures: result == x;
+  body: { x };
+"#,
+    );
+    let report_dir = fixture.parent().unwrap();
+
+    let output = Command::new(bin)
+        .arg("verify")
+        .arg("--json")
+        .arg("--report-dir")
+        .arg(report_dir)
+        .arg(&fixture)
+        .current_dir(manifest_dir)
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run mixed aggregate verify: {err}"));
+
+    let payload: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("mixed output should be JSON");
+
+    assert_eq!(payload["status"], "unverifiable", "payload:\n{payload}");
+    // The unverifiable atom's skipped clause must contribute to the module
+    // aggregate alongside the success-with-skipped-requires atom.
+    assert_eq!(payload["skipped_clauses"], 2, "payload:\n{payload}");
+
+    std::fs::remove_dir_all(report_dir).expect("remove mixed aggregate fixture dir");
+}
+
+#[test]
+fn verify_json_surfaces_aggregate_for_all_success_module() {
+    let bin = env!("CARGO_BIN_EXE_mumei");
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let fixture = write_fixture(
+        "json_all_success_aggregate",
+        r#"
+atom identity_with_unsupported_requires(x: i64) -> i64
+  requires: is_hex_digit(x);
+  ensures: result == x;
+  body: { x };
+
+atom clean_identity(x: i64) -> i64
+  requires: true;
+  ensures: result == x;
+  body: { x };
+"#,
+    );
+    let report_dir = fixture.parent().unwrap();
+
+    let output = Command::new(bin)
+        .arg("verify")
+        .arg("--json")
+        .arg("--report-dir")
+        .arg(report_dir)
+        .arg(&fixture)
+        .current_dir(manifest_dir)
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run all-success aggregate verify: {err}"));
+
+    assert!(
+        output.status.success(),
+        "all-success module should verify\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("all-success output should be JSON");
+
+    assert_eq!(payload["status"], "success", "payload:\n{payload}");
+    // Even though every atom passes, the module-level skipped-clause aggregate
+    // must be surfaced (not just the last atom's per-report value).
+    assert_eq!(payload["skipped_clauses"], 1, "payload:\n{payload}");
+    assert_eq!(payload["partial"], true, "payload:\n{payload}");
+
+    std::fs::remove_dir_all(report_dir).expect("remove all-success aggregate fixture dir");
+}
