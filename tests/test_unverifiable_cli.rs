@@ -370,6 +370,7 @@ atom identity_with_unsupported_requires(x: i64) -> i64
     // The unverifiable atom's skipped clause must contribute to the module
     // aggregate alongside the success-with-skipped-requires atom.
     assert_eq!(payload["skipped_clauses"], 2, "payload:\n{payload}");
+    assert_eq!(payload["partial"], true, "payload:\n{payload}");
 
     std::fs::remove_dir_all(report_dir).expect("remove mixed aggregate fixture dir");
 }

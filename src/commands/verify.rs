@@ -1616,6 +1616,9 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                 "diagnostics": &diagnostics,
                 "warnings": &diagnostics,
             });
+            if skipped_clauses > 0 {
+                payload["partial"] = serde_json::json!(true);
+            }
             if let Some(ref metrics) = lean_escalation_metrics_json {
                 payload["lean_escalation_metrics"] = metrics.clone();
             }
