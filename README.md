@@ -292,6 +292,15 @@ relationship across the Python and Rust processes.
 OTEL_ENABLED=true TRACEPARENT="00-..." mumei verify example.mm
 ```
 
+OTel is **zero-cost when the feature is off**: with the default build,
+`opentelemetry` is absent from the dependency tree. A malformed or absent
+`TRACEPARENT` is ignored (verification still succeeds and produces identical
+output), and `OTEL_ENABLED=true` degrades gracefully when no collector is
+running. These invariants — plus the `mumei.verify.cli` → `mumei.z3.solve` span
+parent/child relationship under an extracted `TRACEPARENT` — are enforced in CI
+by [`.github/workflows/otel-tracing.yml`](.github/workflows/otel-tracing.yml)
+and the `src/telemetry.rs` `otel` unit tests.
+
 See [`docs/ROADMAP.md` § P15](docs/ROADMAP.md#p15-opentelemetry-分散トレース連携実装済み) for details.
 
 ---
