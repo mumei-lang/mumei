@@ -169,6 +169,85 @@ class TestRenderMarkdownHistory:
         assert "_No history available._" in md
 
 
+class TestPublicWrappers:
+    """The contract-facing ``analyze_metrics`` / ``generate_markdown_report``.
+
+    These public wrappers exist so the extracted spec vocabulary maps onto real
+    implementations (dogfood audit cross_validation_gaps for ``analyze_metrics``
+    and ``generate_markdown_report``).
+    """
+
+    def test_analyze_metrics_collects_rows_from_std_dir(self, tmp_path: Path) -> None:
+        std = tmp_path / "std"
+        std.mkdir()
+        (std / "core.mm").write_text(
+            "atom identity(x: i64) -> i64 {\n"
+            "    // TODO: tighten contract\n"
+            "    trusted atom helper() -> i64 { 0 }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+
+        rows = gsm.analyze_metrics(std, mumei_bin=None)
+
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["path"] == "std/core.mm"
+        assert row["atoms"] >= 1
+        assert row["trusted"] == 1
+        assert row["todos"] == 1
+        # No mumei binary → verification skipped.
+        assert row["verified"] == "SKIP"
+
+    def test_analyze_metrics_matches_scan_std(self, tmp_path: Path) -> None:
+        std = tmp_path / "std"
+        std.mkdir()
+        (std / "opt.mm").write_text(
+            "atom some(x: i64) -> i64 { x }\n", encoding="utf-8"
+        )
+        assert gsm.analyze_metrics(std) == gsm._scan_std(std, None)
+
+    def test_analyze_metrics_empty_dir(self, tmp_path: Path) -> None:
+        std = tmp_path / "std"
+        std.mkdir()
+        assert gsm.analyze_metrics(std) == []
+
+    def test_generate_markdown_report_renders_summary(self) -> None:
+        rows = [_sample_row()]
+        md = gsm.generate_markdown_report(rows)
+        assert "# Mumei std/ Metrics" in md
+        assert "## Summary" in md
+        assert "## Per-module breakdown" in md
+        # Defaults to an empty history when none is supplied.
+        assert "_No history available._" in md
+
+    def test_generate_markdown_report_matches_render_markdown(self) -> None:
+        rows = [_sample_row()]
+        history = [
+            {
+                "date": "2026-04-22",
+                "modules": 21,
+                "atoms": 202,
+                "proven": 150,
+                "trusted": 52,
+                "todos": 4,
+                "health": 0.944,
+            }
+        ]
+        assert gsm.generate_markdown_report(rows, history) == gsm._render_markdown(
+            rows, history
+        )
+
+    def test_wrappers_compose_end_to_end(self, tmp_path: Path) -> None:
+        std = tmp_path / "std"
+        std.mkdir()
+        (std / "core.mm").write_text(
+            "atom identity(x: i64) -> i64 { x }\n", encoding="utf-8"
+        )
+        md = gsm.generate_markdown_report(gsm.analyze_metrics(std))
+        assert "`std/core.mm`" in md
+
+
 class TestCollectHistory:
     def test_walks_real_commit_history(self, tmp_path: Path) -> None:
         """End-to-end smoke: a temp git repo with two metrics commits."""
