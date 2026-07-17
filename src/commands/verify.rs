@@ -377,10 +377,10 @@ struct VerifyContext<'a> {
     escalated: &'a mut usize,
 }
 
-fn write_cached_success_report(output_dir: &Path, atom: &parser::Atom) {
+fn write_cached_success_report(output_dir: &Path, atom: &parser::Atom, skipped_clauses: usize) {
     let mut structured = StructuredFeedback::verification_passed();
     structured.location = Location::from_span(&atom.span);
-    let report = serde_json::json!({
+    let mut report = serde_json::json!({
         "status": "success",
         "atom": &atom.name,
         "input_a": "N/A",
@@ -395,7 +395,11 @@ fn write_cached_success_report(output_dir: &Path, atom: &parser::Atom) {
         "structured_feedback": structured,
         "suggestion": structured.feedback_instruction,
         "diagnostics": [],
+        "skipped_clauses": skipped_clauses,
     });
+    if skipped_clauses > 0 {
+        report["partial"] = serde_json::json!(true);
+    }
     let _ = std::fs::create_dir_all(output_dir);
     let _ = std::fs::write(
         output_dir.join("report.json"),
@@ -475,6 +479,7 @@ fn verify_single_atom(atom: &parser::Atom, name: &str, ctx: &mut VerifyContext<'
 
     if let Some(cached_entry) = ctx.verification_cache.get(name) {
         if cached_entry.proof_hash == proof_hash {
+            let skipped_clauses = cached_entry.skipped_clauses;
             if !ctx.quiet_output {
                 println!("  ⚖️  '{}': skipped (unchanged, cached) ⏩", name);
             }
@@ -497,7 +502,8 @@ fn verify_single_atom(atom: &parser::Atom, name: &str, ctx: &mut VerifyContext<'
                 ctx.structured_feedbacks
                     .push(structured_feedback_for_passed_atom(atom));
             }
-            write_cached_success_report(ctx.output_dir, atom);
+            write_cached_success_report(ctx.output_dir, atom, skipped_clauses);
+            *ctx.skipped_clauses += skipped_clauses;
             *ctx.skipped += 1;
             return;
         }
@@ -558,6 +564,13 @@ fn verify_single_atom(atom: &parser::Atom, name: &str, ctx: &mut VerifyContext<'
                 ctx.structured_feedbacks
                     .push(structured_feedback_for_passed_atom(atom));
             }
+            let skipped_clauses = std::fs::read_to_string(ctx.output_dir.join("report.json"))
+                .ok()
+                .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+                .and_then(|report| report["skipped_clauses"].as_u64())
+                .and_then(|count| usize::try_from(count).ok())
+                .unwrap_or(0);
+            *ctx.skipped_clauses += skipped_clauses;
             ctx.verification_cache.insert(
                 name.to_string(),
                 resolver::VerificationCacheEntry {
@@ -572,18 +585,10 @@ fn verify_single_atom(atom: &parser::Atom, name: &str, ctx: &mut VerifyContext<'
                             .unwrap_or_default()
                             .as_secs()
                     ),
+                    skipped_clauses,
                 },
             );
             *ctx.verified += 1;
-            if let Ok(content) = std::fs::read_to_string(ctx.output_dir.join("report.json")) {
-                if let Ok(report) = serde_json::from_str::<serde_json::Value>(&content) {
-                    *ctx.skipped_clauses += report["skipped_clauses"]
-                        .as_u64()
-                        .unwrap_or(0)
-                        .try_into()
-                        .unwrap_or(usize::MAX);
-                }
-            }
         }
         Err(e) => {
             let error_text = format!("{e}");

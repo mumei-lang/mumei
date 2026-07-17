@@ -273,3 +273,62 @@ atom symbolic_pow(x: i64, y: i64) -> i64
     std::fs::remove_dir_all(fixture.parent().unwrap())
         .expect("remove json unverifiable fixture dir");
 }
+
+#[test]
+fn verify_json_preserves_skipped_clause_visibility_on_cache_hit() {
+    let bin = env!("CARGO_BIN_EXE_mumei");
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let fixture = write_fixture(
+        "json_cached_partial",
+        r#"
+atom identity_with_unsupported_requires(x: i64) -> i64
+  requires: is_hex_digit(x);
+  ensures: result == x;
+  body: { x };
+"#,
+    );
+    let report_dir = fixture.parent().unwrap();
+
+    let run_verify = || {
+        Command::new(bin)
+            .arg("verify")
+            .arg("--json")
+            .arg("--report-dir")
+            .arg(report_dir)
+            .arg(&fixture)
+            .current_dir(manifest_dir)
+            .output()
+            .unwrap_or_else(|err| panic!("failed to run cached partial verify: {err}"))
+    };
+
+    let first = run_verify();
+    assert!(
+        first.status.success(),
+        "fresh partial verification should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let first_payload: serde_json::Value =
+        serde_json::from_slice(&first.stdout).expect("fresh output should be JSON");
+
+    let second = run_verify();
+    assert!(
+        second.status.success(),
+        "cached partial verification should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&second.stdout),
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let second_payload: serde_json::Value =
+        serde_json::from_slice(&second.stdout).expect("cached output should be JSON");
+
+    assert_eq!(first_payload["status"], "success");
+    assert_eq!(first_payload["skipped_clauses"], 1);
+    assert_eq!(first_payload["partial"], true);
+    assert_eq!(
+        second_payload["skipped_clauses"],
+        first_payload["skipped_clauses"]
+    );
+    assert_eq!(second_payload["partial"], true);
+
+    std::fs::remove_dir_all(report_dir).expect("remove cached partial fixture dir");
+}

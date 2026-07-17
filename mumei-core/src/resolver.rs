@@ -379,6 +379,7 @@ atom caller(n: i64) -> i64
                 dependencies: vec!["dep1".to_string()],
                 type_deps: vec!["Nat".to_string()],
                 timestamp: "1234567890s".to_string(),
+                skipped_clauses: 2,
             },
         );
 
@@ -392,6 +393,7 @@ atom caller(n: i64) -> i64
         assert_eq!(entry.result, "verified");
         assert_eq!(entry.dependencies, vec!["dep1"]);
         assert_eq!(entry.type_deps, vec!["Nat"]);
+        assert_eq!(entry.skipped_clauses, 2);
         let _ = std::fs::remove_dir_all(base_dir);
     }
 
@@ -419,6 +421,7 @@ atom caller(n: i64) -> i64
                     dependencies: vec![],
                     type_deps: vec![],
                     timestamp: "0s".to_string(),
+                    skipped_clauses: 0,
                 },
             );
         }
