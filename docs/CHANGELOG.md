@@ -2,6 +2,22 @@
 
 ---
 
+### 2026-07-17: M2 trusted-atom reduction docs-sync + sorted-map regression certificates
+
+- **Trusted-atom inventory sync**: `docs/TRUSTED_ATOMS.md` and
+  `std/container/README.md` still described `std/container/sorted_map.mm::sorted_map_insert`
+  as `trusted`, but its `trusted` body was already removed and the atom is now
+  fully Z3-verified (append-at-end array-store obligation lowered to an explicit
+  index range `0..map_len`, escalating to mumei-lean on `unknown`). Both docs now
+  report **0 trusted atoms** in `std/` and mark Priority 2 complete.
+- **Regression certificates**: added `tests/test_sorted_map_regression.mm`
+  pinning the append (`keys[map_len] = key` preserves sortedness), remove-tail,
+  and no-op removal proofs; wired into `build_and_run.sh` as a regression gate.
+- **STDLIB_METRICS regeneration**: regenerated `docs/STDLIB_METRICS.md` with the
+  mumei binary — 58 modules, 339 atoms (339 proven · 0 trusted), health 1.000.
+
+---
+
 ### 2026-07-06: Trusted atom reduction, benchmark suite, and CROSS_PROJECT_ROADMAP sync
 
 - **Trusted atom reduction**: removed `trusted` from `std/sorted_map.mm` atoms now that the Z3-decidable fragment covers their contracts; overall trusted-atom count reduced across the standard library.
