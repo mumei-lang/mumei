@@ -416,6 +416,41 @@ fn test_executor_marks_symbolic_exponent_ensures_unverifiable() {
             })
             .unwrap_or(false)
     }));
+    assert!(report_json["skipped_clauses"].as_u64().unwrap_or(0) >= 1);
+    assert_eq!(report_json["partial"], true);
+}
+
+#[test]
+fn test_executor_marks_success_with_skipped_requires_partial() {
+    let atom = test_atom(
+        "identity_with_unsupported_requires",
+        vec![test_param("x", Some("i64"))],
+        "is_hex_digit(x)",
+        "result == x",
+        "x",
+        Some("i64"),
+    );
+    let mut module_env = ModuleEnv::new();
+    register_builtin_traits(&mut module_env);
+    module_env.register_atom(&atom);
+    let hir = lower_atom_to_hir_with_env(&atom, Some(&module_env));
+
+    let output_dir = std::env::temp_dir().join(format!(
+        "mumei-success-skipped-requires-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&output_dir).unwrap();
+
+    verify(&hir, &output_dir, &module_env).unwrap();
+
+    let report = std::fs::read_to_string(output_dir.join("report.json")).unwrap();
+    let report_json: serde_json::Value = serde_json::from_str(&report).unwrap();
+    assert_eq!(report_json["status"], "success");
+    assert!(report_json["skipped_clauses"].as_u64().unwrap_or(0) >= 1);
+    assert_eq!(report_json["partial"], true);
 }
 
 // ---- constraint_to_natural_language tests ----

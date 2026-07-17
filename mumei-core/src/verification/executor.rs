@@ -2163,6 +2163,18 @@ pub(crate) fn save_visualizer_report(
     if let Some(diagnostics) = diagnostics {
         report["diagnostics"] = json!(diagnostics);
     }
+    let skipped_clauses = diagnostics
+        .map(|entries| {
+            entries
+                .iter()
+                .filter(|entry| entry.starts_with(super::spec_validation::SKIPPED_CLAUSE_PREFIX))
+                .count()
+        })
+        .unwrap_or(0);
+    report["skipped_clauses"] = json!(skipped_clauses);
+    if skipped_clauses > 0 {
+        report["partial"] = json!(true);
+    }
     if let Some(task_id) = orchestration_task_id_from_env() {
         report["task_id"] = json!(task_id);
     }

@@ -373,6 +373,7 @@ struct VerifyContext<'a> {
     failed: &'a mut usize,
     unverifiable: &'a mut usize,
     skipped: &'a mut usize,
+    skipped_clauses: &'a mut usize,
     escalated: &'a mut usize,
 }
 
@@ -574,6 +575,15 @@ fn verify_single_atom(atom: &parser::Atom, name: &str, ctx: &mut VerifyContext<'
                 },
             );
             *ctx.verified += 1;
+            if let Ok(content) = std::fs::read_to_string(ctx.output_dir.join("report.json")) {
+                if let Ok(report) = serde_json::from_str::<serde_json::Value>(&content) {
+                    *ctx.skipped_clauses += report["skipped_clauses"]
+                        .as_u64()
+                        .unwrap_or(0)
+                        .try_into()
+                        .unwrap_or(usize::MAX);
+                }
+            }
         }
         Err(e) => {
             let error_text = format!("{e}");
@@ -1046,6 +1056,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
     let mut failed = 0;
     let mut unverifiable = 0;
     let mut skipped = 0;
+    let mut skipped_clauses = 0;
     let mut escalated = 0;
     let mut loop_suggestions: Vec<serde_json::Value> = Vec::new();
     let mut reconstruction_losses: std::collections::HashMap<String, ReconstructionLoss> =
@@ -1207,6 +1218,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                     failed: &mut failed,
                     unverifiable: &mut unverifiable,
                     skipped: &mut skipped,
+                    skipped_clauses: &mut skipped_clauses,
                     escalated: &mut escalated,
                 };
                 verify_single_atom(atom, &atom.name, &mut ctx);
@@ -1239,6 +1251,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                         failed: &mut failed,
                         unverifiable: &mut unverifiable,
                         skipped: &mut skipped,
+                        skipped_clauses: &mut skipped_clauses,
                         escalated: &mut escalated,
                     };
                     verify_single_atom(&qualified_method, &qualified_name, &mut ctx);
@@ -1588,6 +1601,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                 "failed": failed,
                 "unverifiable": unverifiable,
                 "skipped": skipped,
+                "skipped_clauses": skipped_clauses,
                 "escalation_candidates": escalated,
                 "diagnostics": &diagnostics,
                 "warnings": &diagnostics,
@@ -1601,8 +1615,8 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
             match serde_json::to_string_pretty(&payload) {
                 Ok(json) => println!("{json}"),
                 Err(_) => println!(
-                    "{{\"status\":\"{}\",\"verified\":{},\"failed\":{},\"unverifiable\":{},\"skipped\":{},\"escalation_candidates\":{}}}",
-                    status, verified, failed, unverifiable, skipped, escalated
+                    "{{\"status\":\"{}\",\"verified\":{},\"failed\":{},\"unverifiable\":{},\"skipped\":{},\"skipped_clauses\":{},\"escalation_candidates\":{}}}",
+                    status, verified, failed, unverifiable, skipped, skipped_clauses, escalated
                 ),
             }
         } else {

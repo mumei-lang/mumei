@@ -394,19 +394,21 @@ enum ClauseLoweringOutcome {
     Skipped(String),
 }
 
+pub(crate) const SKIPPED_CLAUSE_PREFIX: &str = "Skipped unsupported Z3 clause:";
+
 pub(crate) fn unsupported_clause_warning(
     label: &str,
     clause: &str,
     err: &impl std::fmt::Display,
 ) -> String {
     format!(
-        "Skipped unsupported Z3 clause: {} clause '{}': {}",
+        "{SKIPPED_CLAUSE_PREFIX} {} clause '{}': {}",
         label, clause, err
     )
 }
 
 pub(crate) fn push_skip_warning(diagnostics: &mut Vec<String>, warning: String) {
-    if warning.starts_with("Skipped unsupported Z3 clause:") && diagnostics.contains(&warning) {
+    if warning.starts_with(SKIPPED_CLAUSE_PREFIX) && diagnostics.contains(&warning) {
         return;
     }
     diagnostics.push(warning);
