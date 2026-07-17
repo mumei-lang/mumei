@@ -377,6 +377,20 @@ struct VerifyContext<'a> {
     escalated: &'a mut usize,
 }
 
+fn read_report_skipped_clauses(output_dir: &Path, atom_name: &str) -> usize {
+    std::fs::read_to_string(output_dir.join("report.json"))
+        .ok()
+        .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+        // All atoms in a module share output_dir/report.json, and some failure
+        // paths return without writing a fresh report. Only count the report if
+        // it belongs to the current atom, otherwise we'd re-read a prior atom's
+        // count and inflate the aggregate.
+        .filter(|report| report["atom"].as_str() == Some(atom_name))
+        .and_then(|report| report["skipped_clauses"].as_u64())
+        .and_then(|count| usize::try_from(count).ok())
+        .unwrap_or(0)
+}
+
 fn write_cached_success_report(output_dir: &Path, atom: &parser::Atom, skipped_clauses: usize) {
     let mut structured = StructuredFeedback::verification_passed();
     structured.location = Location::from_span(&atom.span);
@@ -564,12 +578,7 @@ fn verify_single_atom(atom: &parser::Atom, name: &str, ctx: &mut VerifyContext<'
                 ctx.structured_feedbacks
                     .push(structured_feedback_for_passed_atom(atom));
             }
-            let skipped_clauses = std::fs::read_to_string(ctx.output_dir.join("report.json"))
-                .ok()
-                .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
-                .and_then(|report| report["skipped_clauses"].as_u64())
-                .and_then(|count| usize::try_from(count).ok())
-                .unwrap_or(0);
+            let skipped_clauses = read_report_skipped_clauses(ctx.output_dir, name);
             *ctx.skipped_clauses += skipped_clauses;
             ctx.verification_cache.insert(
                 name.to_string(),
@@ -696,6 +705,7 @@ fn verify_single_atom(atom: &parser::Atom, name: &str, ctx: &mut VerifyContext<'
                         Some(&error_text),
                     ));
             }
+            *ctx.skipped_clauses += read_report_skipped_clauses(ctx.output_dir, name);
             ctx.verification_cache.remove(name);
         }
     }
@@ -1611,6 +1621,9 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                 "diagnostics": &diagnostics,
                 "warnings": &diagnostics,
             });
+            if skipped_clauses > 0 {
+                payload["partial"] = serde_json::json!(true);
+            }
             if let Some(ref metrics) = lean_escalation_metrics_json {
                 payload["lean_escalation_metrics"] = metrics.clone();
             }
@@ -1630,6 +1643,10 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                     Ok(payload) => {
                         let mut payload =
                             enrich_verify_json_payload(payload, &diagnostics, &loop_suggestions);
+                        payload["skipped_clauses"] = serde_json::json!(skipped_clauses);
+                        if skipped_clauses > 0 {
+                            payload["partial"] = serde_json::json!(true);
+                        }
                         if let Some(ref metrics) = lean_escalation_metrics_json {
                             payload["lean_escalation_metrics"] = metrics.clone();
                         }
