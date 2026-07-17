@@ -7,15 +7,24 @@ proof backend implementation.
 
 ## Current inventory
 
-As of `develop` on 2026-06-09, the historical FFI trusted-atom block has been
-reduced from 48 to 0. `std/json.mm`, `std/http.mm`, `std/http_secure.mm`,
-`std/http_server.mm`, and `std/file.mm` now expose verified Mumei wrappers over
-their Rust FFI backends. Only the sorted-map quantified array invariant remains
-trusted in the standard library.
+As of `develop`, the standard library contains **0 trusted atoms**. The
+historical FFI trusted-atom block was reduced from 48 to 0 (`std/json.mm`,
+`std/http.mm`, `std/http_secure.mm`, `std/http_server.mm`, and `std/file.mm`
+now expose verified Mumei wrappers over their Rust FFI backends), and the last
+remaining trusted atom — the sorted-map quantified array invariant — has now
+also been eliminated (Priority 2, complete).
 
-| Module | Trusted atoms | Priority | Why trusted | Reduction path |
-|---|---:|---|---|---|
-| `std/container/sorted_map.mm` | 1 | Medium | `sorted_map_insert` relies on quantified array-store preservation (`keys[map_len] = key`) across a sortedness invariant. | Extend array-store tracking for append-at-end patterns and lower bounded `forall` into a Z3 decidable fragment with explicit index ranges. |
+`std/container/sorted_map.mm::sorted_map_insert` no longer carries a `trusted`
+body: its append-at-end array-store obligation is discharged directly by Z3.
+The bounded sortedness `forall` is lowered into an explicit index range
+(`0..map_len`), so `keys[map_len] = key` preserves
+`forall(i, 0, map_len, keys[i] <= keys[i + 1])` as a decidable fragment. When
+Z3 returns `unknown` the atom escalates to mumei-lean rather than being trusted.
+
+_No trusted atoms remain in `std/`._ Regression proofs for the append,
+remove-tail, and no-op removal cases live in
+`tests/test_sorted_map_regression.mm` and are exercised by `build_and_run.sh`;
+`docs/STDLIB_METRICS.md` reports `0 trusted` across all modules.
 
 ### FFI atoms with contract-test coverage
 
@@ -42,9 +51,10 @@ Trusted status means:
 3. Z3 verifies the Mumei-facing contract boundary and callers, not the delegated
    implementation internals.
 
-The remaining sorted-map atom combines quantified array invariants with
-mutation. It is better reduced by improving the verifier fragment rather than
-by hard-coding proof assumptions.
+No trusted atoms remain. The sorted-map atom that previously combined
+quantified array invariants with mutation was reduced by improving the verifier
+fragment (append-at-end array-store lowering into an explicit index range)
+rather than by hard-coding proof assumptions.
 
 ## Reduction roadmap
 
@@ -62,8 +72,11 @@ by hard-coding proof assumptions.
 - Generated contract tests remain runtime regression coverage for bind/listen,
   pending-client accept, and response boundary statuses (`100`, `599`).
 
-### Priority 2 — eliminate `std/container/sorted_map.mm::sorted_map_insert`
+### Priority 2 — complete: eliminate `std/container/sorted_map.mm::sorted_map_insert`
 
+- `sorted_map_insert` no longer carries a `trusted` body; Z3 discharges the
+  append-at-end array-store obligation directly (or escalates to mumei-lean on
+  `unknown`). Regression proofs live in `tests/test_sorted_map_regression.mm`.
 - Extend array-store tracking from scalar index facts to append-at-end updates:
   - pre: `forall(i, 0, map_len - 1, keys[i] <= keys[i + 1])`
   - write: `keys[map_len] = key`
