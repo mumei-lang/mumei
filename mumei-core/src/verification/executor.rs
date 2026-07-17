@@ -7,6 +7,7 @@ use super::types::*;
 use super::*;
 use crate::reconstruction_loss::ReconstructionLoss;
 use crate::structured_feedback::StructuredFeedback;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -336,6 +337,15 @@ enum ClauseLoweringOutcome<'a> {
     Lowered(Bool<'a>),
 }
 
+fn normalize_foreign_boolean_literals(clause: &str) -> String {
+    lazy_static::lazy_static! {
+        static ref TRUE_RE: Regex = Regex::new(r"\bTrue\b").unwrap();
+        static ref FALSE_RE: Regex = Regex::new(r"\bFalse\b").unwrap();
+    }
+    let normalized = TRUE_RE.replace_all(clause, "true");
+    FALSE_RE.replace_all(&normalized, "false").into_owned()
+}
+
 fn lower_clause_with_skip<'a>(
     vc: &VCtx<'a>,
     env: &mut Env<'a>,
@@ -344,6 +354,7 @@ fn lower_clause_with_skip<'a>(
     label: &str,
     diagnostics: &mut Vec<String>,
 ) -> Result<ClauseLoweringOutcome<'a>, MumeiError> {
+    let clause = normalize_foreign_boolean_literals(clause);
     let trimmed = clause.trim();
     if trimmed.is_empty() || trimmed == "true" {
         return Ok(ClauseLoweringOutcome::Trivial);
@@ -405,19 +416,36 @@ pub(crate) fn verify_inner(
 
     // Phase 0a: 仕様健全性チェック（proof attempt 前の requires/ensures/refinement SAT）
     let phase_start = std::time::Instant::now();
-    let _spec_validation_result =
-        check_spec_satisfiability_with_property_based(
-            atom,
-            module_env,
-            property_based_config,
-            ieee754_f64,
-        )
-        .map_err(|err| {
-                MumeiError::verification_at(err.to_string(), err.span.clone()).with_help(format!(
-                    "SpecValidation failed before proof attempt (kind: {}, constraints: {:?}). {} Suggested fix: {}",
-                    err.kind, err.constraints, err.natural_language_explanation, err.suggested_fix
-                ))
-            })?;
+    if let Err(err) = check_spec_satisfiability_with_property_based(
+        atom,
+        module_env,
+        property_based_config,
+        ieee754_f64,
+    ) {
+        let diagnostic = format!("{}: {}", err.kind, err.message);
+        save_visualizer_report(
+            output_dir,
+            "failed",
+            &atom.name,
+            "N/A",
+            "N/A",
+            &err.to_string(),
+            None,
+            &err.kind,
+            None,
+            Some(&err.span),
+            None,
+            None,
+            None,
+            Some(&[diagnostic]),
+        );
+        return Err(
+            MumeiError::verification_at(err.to_string(), err.span.clone()).with_help(format!(
+                "SpecValidation failed before proof attempt (kind: {}, constraints: {:?}). {} Suggested fix: {}",
+                err.kind, err.constraints, err.natural_language_explanation, err.suggested_fix
+            )),
+        );
+    }
     metrics.record_phase("Phase 0a: spec validation", phase_start.elapsed());
 
     // Phase 0: 信頼レベルチェック（Trust Boundary）
@@ -2134,6 +2162,18 @@ pub(crate) fn save_visualizer_report(
     }
     if let Some(diagnostics) = diagnostics {
         report["diagnostics"] = json!(diagnostics);
+    }
+    let skipped_clauses = diagnostics
+        .map(|entries| {
+            entries
+                .iter()
+                .filter(|entry| entry.starts_with(super::spec_validation::SKIPPED_CLAUSE_PREFIX))
+                .count()
+        })
+        .unwrap_or(0);
+    report["skipped_clauses"] = json!(skipped_clauses);
+    if skipped_clauses > 0 {
+        report["partial"] = json!(true);
     }
     if let Some(task_id) = orchestration_task_id_from_env() {
         report["task_id"] = json!(task_id);

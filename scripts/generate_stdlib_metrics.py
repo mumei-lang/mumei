@@ -297,6 +297,37 @@ def _render_markdown(rows: list[dict], history: list[dict] | None = None) -> str
     return "\n".join(lines)
 
 
+def analyze_metrics(
+    std_dir: Path,
+    mumei_bin: Path | None = None,
+) -> list[dict]:
+    """Collect per-module metrics for every ``*.mm`` file under ``std_dir``.
+
+    Public, contract-facing wrapper around :func:`_scan_std`. Its single
+    responsibility is *metrics collection*: for each ``std/`` module it returns a
+    row with ``path``, ``atoms``, ``trusted``, ``todos``, ``verified`` and
+    ``health`` (see the module docstring for the exact semantics). When
+    ``mumei_bin`` is ``None`` verification is skipped and ``verified`` is
+    ``"SKIP"``.
+    """
+    return _scan_std(std_dir, mumei_bin)
+
+
+def generate_markdown_report(
+    rows: list[dict],
+    history: list[dict] | None = None,
+) -> str:
+    """Render collected metric ``rows`` into the ``STDLIB_METRICS.md`` document.
+
+    Public, contract-facing wrapper around :func:`_render_markdown`. Its single
+    responsibility is *report generation*: it turns the rows produced by
+    :func:`analyze_metrics` (optionally augmented with a ``history`` of past
+    Summary snapshots) into the markdown string written to
+    ``docs/STDLIB_METRICS.md``.
+    """
+    return _render_markdown(rows, history)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
@@ -335,11 +366,11 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
         mumei_bin = None
 
-    rows = _scan_std(args.std_dir, mumei_bin)
+    rows = analyze_metrics(args.std_dir, mumei_bin)
     history: list[dict] = []
     if not args.stdout and not args.no_history:
         history = _collect_history(REPO_ROOT)
-    markdown = _render_markdown(rows, history)
+    markdown = generate_markdown_report(rows, history)
 
     if args.stdout:
         sys.stdout.write(markdown)

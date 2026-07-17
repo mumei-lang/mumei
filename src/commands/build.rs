@@ -350,6 +350,7 @@ pub(crate) fn cmd_build(
                                                     .unwrap_or_default()
                                                     .as_secs()
                                             ),
+                                            skipped_clauses: 0,
                                         },
                                     );
                                 }
@@ -538,6 +539,7 @@ pub(crate) fn cmd_build(
                                                 .unwrap_or_default()
                                                 .as_secs()
                                         ),
+                                        skipped_clauses: 0,
                                     },
                                 );
                             }

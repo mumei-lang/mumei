@@ -236,6 +236,16 @@ else
     EXAMPLES_FAILED=$((EXAMPLES_FAILED + 1))
 fi
 
+# 6m2. SortedMap M2 regression: append / remove-tail / no-op removal proofs
+echo -n "  test_sorted_map_regression.mm ... "
+if $MUMEI verify tests/test_sorted_map_regression.mm 2>/dev/null; then
+    echo "✅"
+    EXAMPLES_PASSED=$((EXAMPLES_PASSED + 1))
+else
+    echo "❌"
+    EXAMPLES_FAILED=$((EXAMPLES_FAILED + 1))
+fi
+
 # 6n. Negative test: sorted map invariant violation (should FAIL)
 echo -n "  negative/sorted_map_invariant_violation.mm (expect fail) ... "
 if $MUMEI verify tests/negative/sorted_map_invariant_violation.mm 2>/dev/null; then

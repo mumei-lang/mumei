@@ -228,13 +228,8 @@ pub(crate) fn parse_constraint_to_z3_string<'ctx>(
         let parts: Vec<&str> = trimmed.split("&&").collect();
         let mut bools: Vec<Bool<'ctx>> = Vec::new();
         for part in &parts {
-            if let Some(b) = parse_constraint_to_z3_string(ctx, part.trim(), param_z3) {
-                bools.push(b);
-            } else {
-                // Unrecognized sub-constraint — fail the entire compound to avoid
-                // silently weakening security constraints.
-                return None;
-            }
+            let b = parse_constraint_to_z3_string(ctx, part.trim(), param_z3)?;
+            bools.push(b);
         }
         if !bools.is_empty() {
             let refs: Vec<&Bool> = bools.iter().collect();
