@@ -29,7 +29,7 @@
 
 `std/crypto/primitives.mm` is a forge-generated, Z3-decidable crypto predicate
 module that does not require Lean escalation. The mumei-lean bridge currently
-keeps five live generated theorem paths synchronized with this standard-library
+keeps eight live generated theorem paths synchronized with this standard-library
 surface:
 
 - `abs_saturating`
@@ -37,6 +37,9 @@ surface:
 - `constant_time_eq_flag`
 - `ff_zero_eq_zero`
 - `verified_insertion_sort_ascending`
+- `poly_bound_monotone`
+- `exists_pivot_partition`
+- `sum_nonneg_inductive`
 
 The ascending-sort path lowers
 `forall(i, 0, n-1, arr[i] <= arr[i+1])` to mathlib's `List.Sorted` through the
