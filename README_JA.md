@@ -33,9 +33,21 @@ uv sync
 
 ### 3つのユースケース
 
+**1. 既存コードのバグ候補を見つける**
+
 ```bash
 uv run mumei-agent validate-code --input src/payment.py
+```
+
+**2. 仕様↔コードのドリフトを検出する**
+
+```bash
 uv run mumei-agent validate-spec-to-code --spec docs/spec.txt --code src/payment.py
+```
+
+**3. 仕様単体の矛盾を見つける**
+
+```bash
 uv run mumei-agent validate-spec --input docs/spec.txt --format nl
 ```
 
