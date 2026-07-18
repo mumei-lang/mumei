@@ -133,6 +133,36 @@ for phase status, artifacts, structured feedback fields, and the E2E workflow.
 
 ---
 
+## Distributed Tracing (OpenTelemetry)
+
+When built with `cargo build --features otel` and run with `OTEL_ENABLED=true`,
+`mumei verify` exports spans via OTLP. This makes the full
+`mumei-agent` (Python) → `mumei verify` (Rust) → Z3 path visible as one
+distributed trace, so Jaeger or Grafana can identify which verification step
+or Z3 solve is the bottleneck and show how much token usage and latency each
+LLM call contributes.
+
+If `TRACEPARENT` is set in the environment (W3C Trace Context), the Rust spans
+become children of the caller's trace, preserving the end-to-end parent/child
+relationship across the Python and Rust processes.
+
+```bash
+OTEL_ENABLED=true TRACEPARENT="00-..." mumei verify example.mm
+```
+
+OTel is **zero-cost when the feature is off**: with the default build,
+`opentelemetry` is absent from the dependency tree. A malformed or absent
+`TRACEPARENT` is ignored (verification still succeeds and produces identical
+output), and `OTEL_ENABLED=true` degrades gracefully when no collector is
+running. These invariants — plus the `mumei.verify.cli` → `mumei.z3.solve` span
+parent/child relationship under an extracted `TRACEPARENT` — are enforced in CI
+by [`.github/workflows/otel-tracing.yml`](.github/workflows/otel-tracing.yml)
+and the `src/telemetry.rs` `otel` unit tests.
+
+See [`docs/ROADMAP.md` § P15](docs/ROADMAP.md#p15-opentelemetry-分散トレース連携実装済み) for details.
+
+---
+
 ## Install
 
 ```bash
@@ -272,36 +302,6 @@ mumei/
 | [Structured Feedback Schema](docs/STRUCTURED_FEEDBACK_SCHEMA.md) | P9-E structured feedback JSON schema |
 | [Cross-Project Roadmap](docs/CROSS_PROJECT_ROADMAP.md) | mumei + mumei-agent ecosystem roadmap |
 | [Claude Code Quickstart](docs/CLAUDE_CODE_QUICKSTART.md) | Quickstart guide for Claude Code users |
-
----
-
-## Distributed Tracing (OpenTelemetry)
-
-When built with `cargo build --features otel` and run with `OTEL_ENABLED=true`,
-`mumei verify` exports spans via OTLP. This makes the full
-`mumei-agent` (Python) → `mumei verify` (Rust) → Z3 path visible as one
-distributed trace, so Jaeger or Grafana can identify which verification step
-or Z3 solve is the bottleneck and show how much token usage and latency each
-LLM call contributes.
-
-If `TRACEPARENT` is set in the environment (W3C Trace Context), the Rust spans
-become children of the caller's trace, preserving the end-to-end parent/child
-relationship across the Python and Rust processes.
-
-```bash
-OTEL_ENABLED=true TRACEPARENT="00-..." mumei verify example.mm
-```
-
-OTel is **zero-cost when the feature is off**: with the default build,
-`opentelemetry` is absent from the dependency tree. A malformed or absent
-`TRACEPARENT` is ignored (verification still succeeds and produces identical
-output), and `OTEL_ENABLED=true` degrades gracefully when no collector is
-running. These invariants — plus the `mumei.verify.cli` → `mumei.z3.solve` span
-parent/child relationship under an extracted `TRACEPARENT` — are enforced in CI
-by [`.github/workflows/otel-tracing.yml`](.github/workflows/otel-tracing.yml)
-and the `src/telemetry.rs` `otel` unit tests.
-
-See [`docs/ROADMAP.md` § P15](docs/ROADMAP.md#p15-opentelemetry-分散トレース連携実装済み) for details.
 
 ---
 
