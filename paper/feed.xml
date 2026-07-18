@@ -5,7 +5,7 @@
   <link href="https://mumei-lang.github.io/mumei/paper/feed.xml" rel="self" type="application/atom+xml" />
   <link href="https://mumei-lang.github.io/mumei/paper/" rel="alternate" type="text/html" />
   <id>https://mumei-lang.github.io/mumei/paper/feed.xml</id>
-  <updated>2026-07-12T02:23:11Z</updated>
+  <updated>2026-07-18T00:12:20Z</updated>
   <author>
     <name>mumei-lang</name>
   </author>
@@ -13,7 +13,7 @@
     <title>Mumei Language Technical Paper</title>
     <link href="https://mumei-lang.github.io/mumei/paper/" rel="alternate" type="text/html" />
     <id>https://mumei-lang.github.io/mumei/paper/</id>
-    <updated>2026-07-12T02:23:11Z</updated>
+    <updated>2026-07-18T00:12:20Z</updated>
     <summary>Technical paper for the Mumei mathematical proof-driven programming language.</summary>
   </entry>
 </feed>
