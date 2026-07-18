@@ -66,7 +66,7 @@ phase status、artifact、structured feedback field、E2E workflow は [`docs/CR
 ```bash
 curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash
 brew install mumei-lang/mumei/mumei
-curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash -s -- --version v0.6.12
+curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash -s -- --version v0.6.14
 ```
 
 過去のバージョンは [Releases](https://github.com/mumei-lang/mumei/releases) を参照してください。Rust toolchain は不要で、OS/arch は自動検出されます。
