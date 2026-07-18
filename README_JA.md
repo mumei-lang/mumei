@@ -4,7 +4,7 @@
 
 **`.mm`を書く前に、既存コードと仕様を形式手法で検証します。**
 
-Mumei は、既存の外部言語コード（たとえば Python、Rust、Go、TypeScript）、自然言語要件、または Mumei `.mm` モジュールから開始できる形式検証ツールチェーンです。Z3、proof certificate、AI-agent ワークフローを使ってバグ、仕様ドリフト、矛盾を見つけ、重要なロジックを数学的に検査された `.mm` コードへ段階的に移行する道筋を提供します。
+Mumei は、既存の外部言語コード、自然言語要件、または Mumei `.mm` モジュールから開始できる形式検証ツールチェーンです。Z3、proof certificate、AI-agent ワークフローでバグ、仕様ドリフト、矛盾を見つけ、重要なロジックを検査済みの `.mm` コードへ段階的に移行します。
 
 [Technical Paper](paper/) — proof-driven programming architecture、自律検証ループ、case study。
 
@@ -12,22 +12,14 @@ Mumei は、既存の外部言語コード（たとえば Python、Rust、Go、T
 
 ## no-`.mm` の最前面導線
 
-最初の入口は `.mm` を書かない監査パスです。CLI では `uv run mumei-agent audit --code-file ... --auto-migrate --auto-heal`、MCP では `scan_and_fix` を使い、`.mm` 作成を求める前に既存コードを監査します。
-
-詳細な契約、固定語彙、V1-A〜E の順序、Lean 昇格条件、PR evidence ルールは [`docs/CROSS_PROJECT_ROADMAP.md`](docs/CROSS_PROJECT_ROADMAP.md)、[`docs/ROADMAP.md`](docs/ROADMAP.md)、[`docs/ONBOARDING.md`](docs/ONBOARDING.md) を参照してください。
+CLI の `uv run mumei-agent audit --code-file ... --auto-migrate --auto-heal` または MCP の `scan_and_fix` を使い、`.mm` 作成を求める前に既存コードを監査します。契約、固定語彙、V1-A〜E、Lean 昇格、PR evidence は [`docs/CROSS_PROJECT_ROADMAP.md`](docs/CROSS_PROJECT_ROADMAP.md)、[`docs/ROADMAP.md`](docs/ROADMAP.md)、[`docs/ONBOARDING.md`](docs/ONBOARDING.md) を参照してください。
 
 最新の標準ライブラリと mumei-lean の同期ポイントは
 [Standard Library Reference](docs/STDLIB.md#cross-project-sync-points) を参照してください。
 
----
-
 ## `.mm`を書かずに始める（mumei-agent）
 
-mumei-agent は、重要な contract を `.mm` へ移行する前に既存コードや仕様を
-検証します。対応言語、option、MCP workflow、段階的な移行手順は
-[Onboarding Guide](docs/ONBOARDING.md) と mumei-agent の
-[Verification Workflow Guide](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/VERIFICATION_WORKFLOW_GUIDE.md)
-を参照してください。
+mumei-agent は、重要な contract を `.mm` へ移行する前に既存コードや仕様を検証します。詳細は [`docs/ONBOARDING.md`](docs/ONBOARDING.md) と mumei-agent の [Verification Workflow Guide](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/VERIFICATION_WORKFLOW_GUIDE.md) を参照してください。
 
 ### インストール
 
@@ -41,198 +33,60 @@ uv sync
 
 ### 3つのユースケース
 
-**1. 既存コードのバグ候補を見つける**
-
 ```bash
 uv run mumei-agent validate-code --input src/payment.py
-```
-
-**2. 仕様↔コードのドリフトを検出する**
-
-```bash
 uv run mumei-agent validate-spec-to-code --spec docs/spec.txt --code src/payment.py
-```
-
-**3. 仕様単体の矛盾を見つける**
-
-```bash
 uv run mumei-agent validate-spec --input docs/spec.txt --format nl
 ```
 
----
-
 ## 段階的な移行パス
 
-### Step 0: MCP または mumei-agent で既存資産を検証する
+1. **Step 0:** `.mm` なしで既存資産を監査する: `uv run mumei-agent audit --code-file src/payment.py --auto-migrate --auto-heal`
+2. **Step 1:** 重要な contract を書いて検証する: `mumei verify specs/payment.mm`
+3. **Step 2:** 新しい logic を `.mm` で実装する: `mumei build src/main.mm -o dist/output`
 
-まず既存コードと仕様に対して agent を実行します。`.mm` source は不要です。
-
-```bash
-uv run mumei-agent validate-code --input src/payment.py
-uv run mumei-agent validate-spec-to-code --spec spec.txt --code src/payment.py
-```
-
-得られた counter-example、drift report、提案 contract を移行 backlog として利用します。
-
-### Step 1: 重要な仕様面を `.mm` で書き始める
-
-最小の高リスク contract を `.mm` atom に変換し、CLI または MCP で検証します。
-
-```bash
-mumei verify specs/payment.mm
-```
-
-```json
-{
-  "tool": "validate_logic",
-  "arguments": {
-    "source_code": "atom transfer(balance: i64, amount: i64) requires: balance >= amount && amount > 0; ensures: result >= 0; body: balance - amount;"
-  }
-}
-```
-
-### Step 2: 新しい検証済みコードを `.mm` で書く
-
-core contract が安定したら、新しい logic を直接 `.mm` で実装し、実行可能 artifact を出力します。
-
-```bash
-mumei build src/main.mm -o dist/output
-mumei run src/main.mm
-mumei repl  # :verify-spec <path|inline>, :verify-code <path>, :verify <atom>
-```
-
----
+MCP の `scan_and_fix` も同じ audit → migrate-suggest → heal ルートを使います。cross-spec artifact vocabulary と移行ガイダンスは [`docs/CROSS_SPEC_GUIDE.md`](docs/CROSS_SPEC_GUIDE.md) を参照してください。
 
 ## P9 NLAE Integration
 
-Mumei は 4 リポジトリ NLAE pipeline の Module B (AR) として contract を
-Z3 obligation に再構築し、self-correction と Lean fidelity check に渡す
-structured Loss Vector を出力します。
+Mumei は 4 リポジトリ NLAE pipeline の Module B (AR) として contract を Z3 obligation に再構築し、self-correction と Lean fidelity check に渡す Loss Vector を出力します。
 
 ```text
-mumei-agent (Module A / AV)
-      ↓ generated .mm
-mumei (Module B / AR)
-      ↓ Loss Vector JSON
-uv run mumei-agent self-correct
-      ↓ repaired certificate
-mumei-lean Fidelity Checker
-      ↓
-mumei-demo Evaluation Loop
+mumei-agent → generated .mm → mumei → Loss Vector JSON → self-correct → mumei-lean → mumei-demo
 ```
 
-phase status、artifact、structured feedback field、E2E workflow の詳細は
-[`docs/CROSS_PROJECT_ROADMAP.md` § P9](docs/CROSS_PROJECT_ROADMAP.md)
-を参照してください。
+phase status、artifact、structured feedback field、E2E workflow は [`docs/CROSS_PROJECT_ROADMAP.md`](docs/CROSS_PROJECT_ROADMAP.md) § P9 を参照してください。
 
----
+## 分散トレーシング (OpenTelemetry)
+
+`cargo build --features otel` と `OTEL_ENABLED=true` により、`mumei verify` は OTLP span を出力し、`TRACEPARENT` を mumei-agent → Rust → Z3 間で伝播します。無効時は zero-cost で、collector がなくても graceful に動作します。詳細と CI coverage は [`docs/ROADMAP.md`](docs/ROADMAP.md) § P15 と [`.github/workflows/otel-tracing.yml`](.github/workflows/otel-tracing.yml) を参照してください。
 
 ## インストール
 
 ```bash
-# One-liner (macOS / Linux)
 curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash
-
-# Homebrew
 brew install mumei-lang/mumei/mumei
-
-# Specific version (latest is v0.6.12)
 curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash -s -- --version v0.6.12
 ```
 
-過去のバージョンと changelog については [Releases](https://github.com/mumei-lang/mumei/releases) を参照してください。
-
-Rust toolchain は不要です。OS/arch は自動検出されます。
+過去のバージョンは [Releases](https://github.com/mumei-lang/mumei/releases) を参照してください。Rust toolchain は不要で、OS/arch は自動検出されます。
 
 <details>
 <summary>ソースからビルド</summary>
 
 ```bash
-# macOS
-brew install llvm@17 z3
-# Linux
-sudo apt-get install -y libz3-dev llvm-17-dev libclang-17-dev
-
-cargo build --release   # -> target/release/mumei
-cargo install --path .  # -> ~/.cargo/bin/mumei
-
-# Or auto-install Z3/LLVM
+brew install llvm@17 z3                 # macOS
+sudo apt-get install -y libz3-dev llvm-17-dev libclang-17-dev  # Linux
+cargo build --release
+cargo install --path .
 mumei setup && source ~/.mumei/env
 ```
 
 </details>
 
----
-
 ## ツールリファレンス
 
-### CLI
-
-| コマンド | 説明 |
-|---------|------|
-| `mumei build <file> -o <out>` | 検証 + codegen（`--emit llvm-ir`（デフォルト）/ `c-header` / `verified-json` / `proof-book` / `decidable-metrics` / `proof-cert` / `escalation-bundle` / `binary` / `rust` / `python` / external plugin name） |
-| `mumei run <file>` | 検証 → codegen → link → `atom main()` を native binary として実行（`--emit binary` がデフォルト、`--emit llvm-ir` は link 前に IR を保持） |
-| `mumei verify <file>` | Z3 検証のみ（`--emit loss-vector` で P9-E structured feedback JSON を出力） |
-| `mumei check <file>` | parse + resolve（高速、Z3 なし） |
-| `mumei init <name>` | project template を生成 |
-| `mumei add <dep>` | dependency（path / git / registry）を追加 |
-| `mumei publish` | local registry に公開 |
-| `mumei list` | local registry の利用可能 package を一覧表示 |
-| `mumei setup` | Z3 + LLVM toolchain を download |
-| `mumei inspect` | development environment を表示 |
-| `mumei infer-effects <file>` | 必要な effect を推論（JSON output） |
-| `mumei infer-contracts <file>` | すべての atom の contract を推論（JSON output） |
-| `mumei repl` | ORC LLJIT バックドの interactive REPL — incremental atom compilation、cross-atom resolution、atom redefinition 対応。`:verify-spec <path|inline>` / `:verify-code <path>` で `mumei-agent` 経由の自然言語 spec・foreign code 検証も可能 |
-| `mumei doc <file> -o <dir>` | documentation を生成（`--format html`（デフォルト）/ `markdown` / `json`） |
-| `mumei lsp` | LSP server を起動。Z3 diagnostics、`/// spec:` 自然言語 spec health、`.py` / `.rs` / `.ts` / `.tsx` / `.go` contract diagnostics を `mumei-agent` 経由で inline 表示（agent 未接続時は graceful fallback） |
-| `mumei verify-cert <cert> <file>` | 現在の source に対して proof certificate を検証 |
-
-### MCP Tools
-
-| Tool | 説明 |
-|------|------|
-| `forge_blade` | 検証 + code generation を1ステップで実行 |
-| `validate_logic` | Z3 検証のみ。counter-example と semantic feedback data を返す |
-| `execute_mm` | 汎用 build / check 実行 |
-| `get_inferred_effects` | 事前 check: コードを書く前に必要な effect を推論 |
-| `get_allowed_effects` | session の現在の effect boundary を問い合わせる |
-| `set_allowed_effects` | effect boundary を動的に override |
-| `analyze_std_gaps` | std/ coverage の gap を特定 |
-| `list_std_catalog` | std/ catalog 内のすべての atom を一覧表示 |
-| `visualize_std_graph` | std/ dependency graph を描画（Mermaid または DOT） |
-| `measure_std_health` | std/ health metrics を測定 |
-| `get_proof_certificate` | module の proof certificate を取得 |
-| `generate_doc` | structured documentation を生成（`mumei doc --format json`） |
-| `analyze_contract_conflicts` | cross-atom contract conflict と circular dependency を解析（Meta-Architect） |
-| `propose_interface_refactoring` | architecture issue に対する interface-level refactoring を提案（Meta-Architect） |
-| `get_spec_guideline` / `get_spec_guidelines` | agent 向け spec-writing guideline を返す |
-| `verify_with_orchestration` | worker-pool orchestration、キャッシュ、タスク追跡による Z3 検証 |
-| `get_structured_feedback` | source code に対する P9-E structured feedback JSON を返す |
-
-### プロジェクト構成
-
-```text
-mumei/
-├── mumei-core/             # Core library: parser, HIR, verification, MIR, emitter trait
-├── mumei-emit-llvm/        # LLVM IR emitter (LlvmEmitter + codegen)
-├── mumei-emit-json/        # Verified JSON metadata emitter (VerifiedJsonEmitter)
-├── mumei-emit-proofbook/   # Markdown proof-certificate emitter
-├── mumei-emit-rust/        # Rust FFI binding emitter
-├── mumei-emit-python/      # Python FFI binding emitter
-├── mumei-ffi-tests/        # Generated Rust property tests for FFI contracts
-├── src/                    # CLI binary (main.rs, cli.rs, lsp.rs, setup.rs)
-├── std/                    # Standard library (.mm files)
-├── runtime/                # C runtime library (mumei_runtime.c)
-├── visualizer/             # std/ dependency graph generation scripts
-├── scripts/                # Install script, utility scripts (install.sh, etc.)
-├── benchmarks/             # Dafny-style and SV-COMP-style benchmarks
-├── paper/                  # Technical paper
-├── editors/vscode/         # VS Code extension (LSP client + counter-example decorations)
-├── examples/               # Example programs
-└── tests/                  # Integration tests (.mm files)
-```
-
----
+完全な CLI command table は [`docs/TOOLCHAIN.md`](docs/TOOLCHAIN.md)、MCP tools と setup は [`docs/MCP.md`](docs/MCP.md)、project structure は [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) を参照してください。
 
 ## ドキュメント
 
@@ -267,26 +121,6 @@ mumei/
 | [Cross-Project Roadmap](docs/CROSS_PROJECT_ROADMAP.md) | mumei + mumei-agent ecosystem roadmap |
 | [Claude Code Quickstart](docs/CLAUDE_CODE_QUICKSTART.md) | Claude Code users 向け quickstart guide |
 
----
-
-## 分散トレーシング (OpenTelemetry)
-
-`cargo build --features otel` でビルドし `OTEL_ENABLED=true` で実行すると、
-`mumei verify` は OTLP 経由でスパンをエクスポートします。これにより
-`mumei-agent` (Python) → `mumei verify` (Rust) → Z3 を1本の分散トレースとして
-可視化し、Jaeger や Grafana でボトルネックとなる検証 step / Z3 solve と、
-各 LLM call の token 消費量・latency を追跡できます。
-
-環境変数 `TRACEPARENT`（W3C Trace Context）が設定されている場合、Rust スパンは
-呼び出し元トレースの子になり、Python/Rust process 間の親子関係が維持されます。
-
-```bash
-OTEL_ENABLED=true TRACEPARENT="00-..." mumei verify example.mm
-```
-
-詳細は [`docs/ROADMAP.md` § P15](docs/ROADMAP.md#p15-opentelemetry-分散トレース連携実装済み) を参照してください。
-
----
 
 ## ライセンス
 

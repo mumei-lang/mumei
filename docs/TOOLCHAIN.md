@@ -26,6 +26,18 @@
 | `mumei repl` | ✅ | Interactive REPL; supports `:verify-spec <path|inline>` and `:verify-code <path>` via `mumei-agent` JSON output |
 | `mumei doc <file> -o <dir>` | ✅ | Generate documentation (`--format html` default, `markdown`, or `json`) |
 | `mumei lsp` | ✅ | Language Server Protocol (hover, Z3 diagnostics, `/// spec:` health checks, `.py` / `.rs` / `.ts` / `.tsx` / `.go` contract diagnostics via `mumei-agent`, graceful fallback without the agent) |
+| `mumei list` | ✅ | List available packages in the local registry |
+| `mumei verify <file> --emit loss-vector` | ✅ | Emit P9-E structured feedback JSON for agent self-correction |
+| `mumei verify <file> --emit proof-cert` | ✅ | Emit a Z3 proof certificate |
+| `mumei verify <file> --emit escalation-bundle` | ✅ | Emit an escalation bundle for Lean fallback |
+| `mumei verify <file> --emit decidable-metrics` | ✅ | Emit decidable-fragment metrics |
+| `mumei verify <file> --emit c-header` | ✅ | Emit a C header for FFI interop |
+| `mumei verify <file> --emit verified-json` | ✅ | Emit verified JSON metadata |
+| `mumei verify <file> --emit proof-book` | ✅ | Emit a Markdown proof book |
+| `mumei verify <file> --emit binary` | ✅ | Emit a native binary |
+| `mumei verify <file> --emit rust` | ✅ | Emit Rust FFI bindings |
+| `mumei verify <file> --emit python` | ✅ | Emit Python FFI bindings |
+
 
 ### Installation
 
