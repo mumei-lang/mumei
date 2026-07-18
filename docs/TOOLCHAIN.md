@@ -4,7 +4,7 @@
 
 | Command | Status | Description |
 |---|---|---|
-| `mumei build <file> -o <out>` | ✅ | Full pipeline: verify + codegen; supports `--emit llvm-ir` (default), `c-header`, `verified-json`, `proof-book`, `binary`, `rust`, `python`, or an external plugin name |
+| `mumei build <file> -o <out>` | ✅ | Full pipeline: verify + codegen; supports `--emit llvm-ir` (default), `c-header`, `verified-json`, `proof-book`, `decidable-metrics`, `proof-cert`, `escalation-bundle`, `binary`, `rust`, `python`, or an external plugin name |
 | `mumei run <file>` | ✅ | Verify → codegen → link → execute `atom main()` as a native binary; `--emit binary` is default and `--emit llvm-ir` keeps IR before linking |
 | `mumei verify <file>` | ✅ | Z3 verification only |
 | `mumei verify --json <file>` | ✅ | Structured JSON report to stdout |
@@ -26,6 +26,9 @@
 | `mumei repl` | ✅ | Interactive REPL; supports `:verify-spec <path|inline>` and `:verify-code <path>` via `mumei-agent` JSON output |
 | `mumei doc <file> -o <dir>` | ✅ | Generate documentation (`--format html` default, `markdown`, or `json`) |
 | `mumei lsp` | ✅ | Language Server Protocol (hover, Z3 diagnostics, `/// spec:` health checks, `.py` / `.rs` / `.ts` / `.tsx` / `.go` contract diagnostics via `mumei-agent`, graceful fallback without the agent) |
+| `mumei list` | ✅ | List available packages in the local registry |
+| `mumei verify <file> --emit loss-vector` | ✅ | Emit P9-E structured feedback JSON for agent self-correction |
+
 
 ### Installation
 

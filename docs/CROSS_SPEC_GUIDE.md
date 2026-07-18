@@ -2,6 +2,12 @@
 
 Cross-spec verification checks whether atom-level specifications remain consistent when they are viewed as one system. Standard `mumei verify` proves each atom against its own `requires` and `ensures`; cross-spec verification adds a whole-program pass that compares contracts, shared invariants, and dependency structure across atoms.
 
+When the compiler emits `cross_spec.json`, its artifact vocabulary is shared with
+the no-`.mm` mumei-agent workflow: `contract_consistency[]` maps to agent
+`missing_constraints[]`, `global_invariant_conflicts[]` maps to `divergences[]`,
+and `circular_dependencies[]` maps to `drift_issues[]`. Use the resulting
+counter-examples, drift reports, and suggested contracts as the migration backlog.
+
 This pass is enabled by default for new and existing projects. It makes system-level logical consistency the safe default while preserving an opt-out for projects that need a temporary performance escape hatch.
 
 ## What it verifies
