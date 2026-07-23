@@ -1,0 +1,39 @@
+name: Stdlib Trusted-Atom Guard
+
+# Phase 1 regression guard: the std/ library must stay at 0 trusted atoms.
+# This lightweight, Rust-free job scans std/ with the metrics counter and
+# cross-checks docs/STDLIB_METRICS.md + docs/TRUSTED_ATOMS.md on every PR that
+# touches std/, the metrics generator, or those docs — so a new module cannot
+# silently reintroduce a `trusted atom` declaration.
+
+on:
+  pull_request:
+    paths:
+      - 'std/**'
+      - 'scripts/generate_stdlib_metrics.py'
+      - 'docs/STDLIB_METRICS.md'
+      - 'docs/TRUSTED_ATOMS.md'
+      - 'tests/test_stdlib_trusted_guard.py'
+      - 'tests/test_generate_stdlib_metrics.py'
+      - '.github/workflows/stdlib-trusted-guard.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  stdlib-trusted-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Run trusted-atom guard and metrics tests
+        run: |
+          pip install --quiet pytest
+          python3 -m pytest tests/test_stdlib_trusted_guard.py \
+            tests/test_generate_stdlib_metrics.py -v

@@ -334,6 +334,85 @@ atom identity_with_unsupported_requires(x: i64) -> i64
 }
 
 #[test]
+fn verify_json_cache_hit_preserves_multi_atom_aggregate() {
+    let bin = env!("CARGO_BIN_EXE_mumei");
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    // A partial (skipped-requires) atom alongside a clean atom. The module
+    // aggregate must report the single real skip both on the fresh run and on
+    // the fully-cached re-run, exercising the cache-hit + aggregation join
+    // rather than only the single-atom cache path.
+    let fixture = write_fixture(
+        "json_cached_multi_aggregate",
+        r#"
+atom identity_with_unsupported_requires(x: i64) -> i64
+  requires: is_hex_digit(x);
+  ensures: result == x;
+  body: { x };
+
+atom clean_identity(x: i64) -> i64
+  requires: true;
+  ensures: result == x;
+  body: { x };
+"#,
+    );
+    let report_dir = fixture.parent().unwrap();
+
+    let run_verify = || {
+        Command::new(bin)
+            .arg("verify")
+            .arg("--json")
+            .arg("--report-dir")
+            .arg(report_dir)
+            .arg(&fixture)
+            .current_dir(manifest_dir)
+            .output()
+            .unwrap_or_else(|err| panic!("failed to run cached multi-atom verify: {err}"))
+    };
+
+    let first = run_verify();
+    assert!(
+        first.status.success(),
+        "fresh multi-atom partial verification should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let first_payload: serde_json::Value =
+        serde_json::from_slice(&first.stdout).expect("fresh output should be JSON");
+
+    let second = run_verify();
+    assert!(
+        second.status.success(),
+        "cached multi-atom partial verification should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&second.stdout),
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let second_payload: serde_json::Value =
+        serde_json::from_slice(&second.stdout).expect("cached output should be JSON");
+
+    assert_eq!(
+        first_payload["status"], "success",
+        "payload:\n{first_payload}"
+    );
+    assert_eq!(
+        first_payload["skipped_clauses"], 1,
+        "payload:\n{first_payload}"
+    );
+    assert_eq!(first_payload["partial"], true, "payload:\n{first_payload}");
+    // The cache-hit re-run must surface the same module aggregate, not 0 (the
+    // clean atom's per-report value) and not a doubled count.
+    assert_eq!(
+        second_payload["skipped_clauses"], first_payload["skipped_clauses"],
+        "payload:\n{second_payload}"
+    );
+    assert_eq!(
+        second_payload["partial"], true,
+        "payload:\n{second_payload}"
+    );
+
+    std::fs::remove_dir_all(report_dir).expect("remove cached multi-atom fixture dir");
+}
+
+#[test]
 fn verify_json_aggregate_counts_skips_from_unverifiable_atoms() {
     let bin = env!("CARGO_BIN_EXE_mumei");
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
