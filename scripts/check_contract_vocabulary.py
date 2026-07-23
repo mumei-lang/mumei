@@ -29,6 +29,7 @@ SYNC_DOCS = [
     REPO_ROOT / "docs" / "ROADMAP.md",
     REPO_ROOT / "docs" / "ONBOARDING.md",
     REPO_ROOT / "docs" / "PROOF_CERTIFICATE.md",
+    REPO_ROOT / "docs" / "TRUSTED_ATOMS.md",
     REPO_ROOT / "README.md",
     REPO_ROOT / "instruction.md",
 ]
@@ -163,6 +164,27 @@ def _check_forbidden_alias_keys(path: Path) -> list[Violation]:
                     )
                 )
                 break
+    return violations
+
+
+def _check_doc_contradiction_type_aliases(path: Path) -> list[Violation]:
+    """Detect `contradiction_type` alias drift inside a synced doc.
+
+    Mirrors the MCP/CLI ``contradiction_type`` guard for prose docs so a doc
+    cannot reintroduce ``contradiction_kind``/``_class``/``_category`` once it
+    is part of the docs-sync surface.
+    """
+    text = path.read_text(encoding="utf-8")
+    violations: list[Violation] = []
+    for alias in CONTRADICTION_TYPE_ALIASES:
+        if re.search(rf"\b{re.escape(alias)}\b", text):
+            violations.append(
+                Violation(
+                    path,
+                    f"doc contains contradiction_type alias: `{alias}`",
+                    _line_number(text, alias),
+                )
+            )
     return violations
 
 
@@ -367,6 +389,7 @@ def main() -> int:
             continue
         violations.extend(_check_forbidden_alias_keys(path))
         violations.extend(_check_meaning_contradictions(path))
+        violations.extend(_check_doc_contradiction_type_aliases(path))
     for path in NO_MM_LANGUAGE_DOCS:
         violations.extend(_check_no_mm_language_sync(path))
 
