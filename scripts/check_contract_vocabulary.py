@@ -290,6 +290,48 @@ def _count_mcp_tool_decorators(text: str) -> int:
     return len(re.findall(r"@mcp\.tool\(", text))
 
 
+def _extract_mcp_tool_names_ast(text: str) -> set[str]:
+    """Return the set of tool names exposed by @mcp.tool() decorators in *text*.
+
+    Uses the function name by default, but honors an explicit ``name=...``
+    keyword argument when present. A tool may be decorated with multiple
+    ``@mcp.tool()`` calls in the source; each name is collected.
+    """
+    tree = ast.parse(text)
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for decorator in node.decorator_list:
+            tool_name: str | None = None
+            if isinstance(decorator, ast.Call):
+                func = decorator.func
+                if isinstance(func, ast.Attribute) and func.attr == "tool":
+                    if (
+                        isinstance(func.value, ast.Attribute)
+                        and func.value.attr == "mcp"
+                    ) or (
+                        isinstance(func.value, ast.Name)
+                        and func.value.id == "mcp"
+                    ):
+                        tool_name = node.name
+                        for kw in decorator.keywords:
+                            if kw.arg == "name" and isinstance(
+                                kw.value, ast.Constant
+                            ) and isinstance(kw.value.value, str):
+                                tool_name = kw.value.value
+            elif isinstance(decorator, ast.Attribute):
+                if (
+                    decorator.attr == "tool"
+                    and isinstance(decorator.value, ast.Name)
+                    and decorator.value.id == "mcp"
+                ):
+                    tool_name = node.name
+            if tool_name:
+                names.add(tool_name)
+    return names
+
+
 def _check_mcp_forbidden_aliases(path: Path) -> list[Violation]:
     """Check MCP tool docstrings for forbidden aliases via AST extraction.
 
