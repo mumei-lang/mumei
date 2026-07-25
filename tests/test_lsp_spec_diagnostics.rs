@@ -1011,3 +1011,79 @@ fn lsp_clears_agent_diagnostics_on_did_change_for_code() {
         "clean change should clear mumei-agent diagnostics\nlast diagnostics:\n{changed:#?}"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn lsp_clears_agent_diagnostics_on_did_change_for_spec() {
+    let fixture_dir = unique_temp_dir("mumei-lsp-did-change-clear-spec-agent");
+    let _ = fs::remove_dir_all(&fixture_dir);
+    fs::create_dir_all(&fixture_dir).expect("create fake agent dir");
+    write_fake_mumei_agent(&fixture_dir);
+
+    let source_path = fixture_dir.join("review.mm");
+    let bad_source = r#"/// spec: contradiction
+atom ok(x: i64)
+    requires: x >= 0;
+    ensures: result == x;
+    body: { x }
+"#;
+    let clean_source = r#"/// spec: clean
+atom ok(x: i64)
+    requires: x >= 0;
+    ensures: result == x;
+    body: { x }
+"#;
+    fs::write(&source_path, bad_source).expect("write mumei source");
+    let uri = format!("file://{}", source_path.display());
+
+    let did_open = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": &uri,
+                "languageId": "mumei",
+                "version": 1,
+                "text": bad_source
+            }
+        }
+    });
+    let did_change = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didChange",
+        "params": {
+            "textDocument": {
+                "uri": &uri,
+                "version": 2
+            },
+            "contentChanges": [{"text": clean_source}]
+        }
+    });
+
+    let (success, messages, stderr) = run_lsp_session(&fixture_dir, &[did_open, did_change]);
+    let per_message_diagnostics = publish_diagnostics_for_uri(&messages, &uri);
+    let _ = fs::remove_dir_all(&fixture_dir);
+
+    assert!(success, "lsp should exit successfully\nstderr:\n{stderr}");
+    assert!(
+        per_message_diagnostics.len() >= 2,
+        "expected didOpen + didChange publishDiagnostics, got {} message(s)\nmessages:\n{messages:#?}",
+        per_message_diagnostics.len()
+    );
+    assert!(
+        per_message_diagnostics[0]
+            .iter()
+            .any(|d| d.get("source").and_then(Value::as_str) == Some("mumei-agent")),
+        "bad spec open should emit mumei-agent diagnostics\nfirst diagnostics:\n{:#?}",
+        per_message_diagnostics[0]
+    );
+    let changed = per_message_diagnostics
+        .last()
+        .expect("didChange diagnostics");
+    assert!(
+        !changed
+            .iter()
+            .any(|d| d.get("source").and_then(Value::as_str) == Some("mumei-agent")),
+        "clean spec change should clear mumei-agent diagnostics\nlast diagnostics:\n{changed:#?}"
+    );
+}
