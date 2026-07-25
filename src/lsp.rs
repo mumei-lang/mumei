@@ -460,8 +460,21 @@ fn append_agent_spec_diagnostics(
         Some(&spec_comments),
         diagnostics,
     );
+    let cross_diagnostics_before = diagnostics.len();
+    append_agent_issue_diagnostics(
+        uri,
+        &report.cross_validation_gaps,
+        "cross_validation_gaps",
+        &report.next_steps,
+        2,
+        Some(&spec_comments),
+        diagnostics,
+    );
 
-    if !report.success && diagnostics.len() == spec_diagnostics_before {
+    if !report.success
+        && diagnostics.len() == spec_diagnostics_before
+        && diagnostics.len() == cross_diagnostics_before
+    {
         diagnostics.push(serde_json::json!({
             "range": {
                 "start": { "line": 0, "character": 0 },

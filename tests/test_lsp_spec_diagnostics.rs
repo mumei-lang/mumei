@@ -29,12 +29,17 @@ case "$1" in
         case "$line" in
           *clean*) clean=1 ;;
           *silent*) silent=1 ;;
+          *cross*) cross=1 ;;
         esac
       done < "$input"
     fi
     if [ "$clean" = "1" ]; then
       printf '%s\n' '{"success":true,"spec_health_issues":[],"verification_violations":[],"cross_validation_gaps":[],"next_steps":[]}'
       exit 0
+    fi
+    if [ "$cross" = "1" ]; then
+      printf '%s\n' '{"success":false,"spec_health_issues":[],"verification_violations":[],"cross_validation_gaps":[{"kind":"missing_contract","severity":"warning","source_line":1,"message":"spec does not cover division by zero"}],"next_steps":[{"command":"mumei-agent validate-spec --input <spec> --format human"}]}'
+      exit 1
     fi
     if [ "$silent" = "1" ]; then
       printf '%s\n' '{"success":false,"spec_health_issues":[],"verification_violations":[],"cross_validation_gaps":[],"next_steps":[{"command":"mumei-agent validate-spec --input <spec> --format human"}]}'
@@ -284,6 +289,52 @@ atom ok(x: i64)
         .and_then(Value::as_str)
         .expect("diagnostic message");
     assert!(message.contains("spec validation failed"), "{message}");
+}
+
+#[cfg(unix)]
+#[test]
+fn lsp_reports_spec_cross_validation_gaps() {
+    let fixture_dir = unique_temp_dir("mumei-lsp-cross-gap-agent");
+    let _ = fs::remove_dir_all(&fixture_dir);
+    fs::create_dir_all(&fixture_dir).expect("create fake agent dir");
+    write_fake_mumei_agent(&fixture_dir);
+
+    let source_path = fixture_dir.join("cross_gap_spec.mm");
+    let source = r#"
+/// spec: cross gap: balance is non-negative
+atom ok(x: i64)
+    requires: x >= 0;
+    ensures: result == x;
+    body: { x }
+"#;
+    fs::write(&source_path, source).expect("write mumei source");
+    let uri = format!("file://{}", source_path.display());
+
+    let (success, messages, stderr) = run_lsp_did_open(&fixture_dir, &uri, source);
+    let diagnostics = diagnostics(&messages);
+    let _ = fs::remove_dir_all(&fixture_dir);
+
+    assert!(success, "lsp should exit successfully\nstderr:\n{stderr}");
+    let diagnostic = diagnostics
+        .iter()
+        .find(|d| d.get("source").and_then(Value::as_str) == Some("mumei-agent"))
+        .unwrap_or_else(|| {
+            panic!(
+                "expected mumei-agent diagnostic\nmessages:\n{messages:#?}\ndiagnostics:\n{diagnostics:#?}"
+            )
+        });
+    let message = diagnostic
+        .get("message")
+        .and_then(Value::as_str)
+        .expect("diagnostic message");
+    assert!(
+        message.contains("cross_validation_gaps"),
+        "expected cross_validation_gaps diagnostic, got: {message}"
+    );
+    assert!(
+        message.contains("spec does not cover division by zero"),
+        "{message}"
+    );
 }
 
 #[cfg(unix)]
