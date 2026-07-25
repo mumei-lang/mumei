@@ -50,18 +50,26 @@ case "$1" in
     ;;
   validate-code)
     input="$3"
-    case "$input" in
-      *good*|*clean*)
-        printf '%s\n' '{"success":true,"spec_health_issues":[],"verification_violations":[],"verification_status":"verified","cross_validation_gaps":[],"next_steps":[]}'
-        exit 0
-        ;;
-      *unverifiable*)
-        printf '%s\n' '{"success":false,"spec_health_issues":[],"verification_violations":[],"verification_status":"unverifiable","cross_validation_gaps":[],"next_steps":[{"command":"mumei-agent validate-code --input <path> --language python"}]}'
-        exit 1
-        ;;
-    esac
-    printf '%s\n' '{"success":false,"spec_health_issues":[],"verification_violations":[{"kind":"contract_violation","severity":"error","source_line":3,"message":"return value violates inferred contract"}],"verification_status":"refuted","cross_validation_gaps":[],"next_steps":[{"command":"mumei-agent validate-code --input <path> --language python"}]}'
-    exit 1
+    has_unverifiable=0
+    has_bug=0
+    if [ -n "$input" ] && [ -f "$input" ]; then
+      while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+          *unverifiable*|*z3*could*not*decide*) has_unverifiable=1 ;;
+          *bug*|*violation*|*error*) has_bug=1 ;;
+        esac
+      done < "$input"
+    fi
+    if [ "$has_unverifiable" = "1" ]; then
+      printf '%s\n' '{"success":false,"spec_health_issues":[],"verification_violations":[],"verification_status":"unverifiable","cross_validation_gaps":[],"next_steps":[{"command":"mumei-agent validate-code --input <path> --language python"}]}'
+      exit 1
+    fi
+    if [ "$has_bug" = "1" ]; then
+      printf '%s\n' '{"success":false,"spec_health_issues":[],"verification_violations":[{"kind":"contract_violation","severity":"error","source_line":3,"message":"return value violates inferred contract"}],"verification_status":"refuted","cross_validation_gaps":[],"next_steps":[{"command":"mumei-agent validate-code --input <path> --language python"}]}'
+      exit 1
+    fi
+    printf '%s\n' '{"success":true,"spec_health_issues":[],"verification_violations":[],"verification_status":"verified","cross_validation_gaps":[],"next_steps":[]}'
+    exit 0
     ;;
 esac
 exit 0
@@ -84,7 +92,7 @@ fn lsp_frame(value: Value) -> Vec<u8> {
     format!("Content-Length: {}\r\n\r\n{}", body.len(), body).into_bytes()
 }
 
-fn run_lsp_did_open(path_env: &Path, uri: &str, text: &str) -> (bool, Vec<Value>, String) {
+fn run_lsp_session(path_env: &Path, messages: &[Value]) -> (bool, Vec<Value>, String) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_mumei"))
         .arg("lsp")
         .current_dir(env!("CARGO_MANIFEST_DIR"))
@@ -95,6 +103,24 @@ fn run_lsp_did_open(path_env: &Path, uri: &str, text: &str) -> (bool, Vec<Value>
         .spawn()
         .expect("spawn mumei lsp");
 
+    let stdin = child.stdin.as_mut().expect("open lsp stdin");
+    for message in messages {
+        stdin
+            .write_all(&lsp_frame(message.clone()))
+            .expect("write lsp message");
+    }
+    drop(child.stdin.take());
+
+    let output = child.wait_with_output().expect("wait for lsp");
+    let messages = parse_lsp_messages(&output.stdout);
+    (
+        output.status.success(),
+        messages,
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+fn run_lsp_did_open(path_env: &Path, uri: &str, text: &str) -> (bool, Vec<Value>, String) {
     let did_open = serde_json::json!({
         "jsonrpc": "2.0",
         "method": "textDocument/didOpen",
@@ -107,21 +133,7 @@ fn run_lsp_did_open(path_env: &Path, uri: &str, text: &str) -> (bool, Vec<Value>
             }
         }
     });
-    child
-        .stdin
-        .as_mut()
-        .expect("open lsp stdin")
-        .write_all(&lsp_frame(did_open))
-        .expect("write didOpen");
-    drop(child.stdin.take());
-
-    let output = child.wait_with_output().expect("wait for lsp");
-    let messages = parse_lsp_messages(&output.stdout);
-    (
-        output.status.success(),
-        messages,
-        String::from_utf8_lossy(&output.stderr).into_owned(),
-    )
+    run_lsp_session(path_env, &[did_open])
 }
 
 fn parse_lsp_messages(output: &[u8]) -> Vec<Value> {
@@ -159,6 +171,26 @@ fn diagnostics(messages: &[Value]) -> Vec<Value> {
             message.get("method").and_then(Value::as_str) == Some("textDocument/publishDiagnostics")
         })
         .flat_map(|message| {
+            message
+                .pointer("/params/diagnostics")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
+fn publish_diagnostics_for_uri(messages: &[Value], uri: &str) -> Vec<Vec<Value>> {
+    messages
+        .iter()
+        .filter(|message| {
+            message.get("method").and_then(Value::as_str) == Some("textDocument/publishDiagnostics")
+                && message
+                    .pointer("/params/uri")
+                    .and_then(Value::as_str)
+                    .is_some_and(|u| u == uri)
+        })
+        .map(|message| {
             message
                 .pointer("/params/diagnostics")
                 .and_then(Value::as_array)
@@ -385,8 +417,7 @@ fn lsp_reports_code_verification_violations_for_other_languages() {
     write_fake_mumei_agent(&fixture_dir);
 
     let source_path = fixture_dir.join("service.py");
-    let source =
-        "def debit(balance, amount):\n    assert balance >= amount\n    return balance + amount\n";
+    let source = "def debit(balance, amount):\n    # bug\n    return balance + amount\n";
     fs::write(&source_path, source).expect("write python source");
     let uri = format!("file://{}", source_path.display());
 
@@ -447,7 +478,7 @@ fn lsp_reports_code_verification_violations_for_typescript() {
     write_fake_mumei_agent(&fixture_dir);
 
     let source_path = fixture_dir.join("service.ts");
-    let source = "function debit(balance: number, amount: number): number {\n  return balance + amount;\n}\n";
+    let source = "function debit(balance: number, amount: number): number {\n  // bug\n  return balance + amount;\n}\n";
     fs::write(&source_path, source).expect("write typescript source");
     let uri = format!("file://{}", source_path.display());
 
@@ -502,7 +533,7 @@ fn lsp_reports_code_verification_violations_for_tsx() {
     write_fake_mumei_agent(&fixture_dir);
 
     let source_path = fixture_dir.join("component.tsx");
-    let source = "const App = () => {\n  return <div>hello</div>;\n}\n";
+    let source = "const App = () => {\n  // bug\n  return <div>hello</div>;\n}\n";
     fs::write(&source_path, source).expect("write tsx source");
     let uri = format!("file://{}", source_path.display());
 
@@ -750,5 +781,81 @@ atom bad_postcondition(x: i64)
             |diagnostic| diagnostic.get("source").and_then(Value::as_str) != Some("mumei-agent")
         ),
         "missing agent should not emit mumei-agent diagnostics\nmessages:\n{messages:#?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn lsp_updates_diagnostics_on_did_change_for_code() {
+    let fixture_dir = unique_temp_dir("mumei-lsp-did-change-agent");
+    let _ = fs::remove_dir_all(&fixture_dir);
+    fs::create_dir_all(&fixture_dir).expect("create fake agent dir");
+    write_fake_mumei_agent(&fixture_dir);
+
+    let source_path = fixture_dir.join("service.py");
+    let clean_source = "def credit(balance, amount):\n    return balance + amount\n";
+    let bad_source = "def credit(balance, amount):\n    # bug\n    return balance\n";
+    fs::write(&source_path, clean_source).expect("write python source");
+    let uri = format!("file://{}", source_path.display());
+
+    let did_open = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": &uri,
+                "languageId": "python",
+                "version": 1,
+                "text": clean_source
+            }
+        }
+    });
+    let did_change = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didChange",
+        "params": {
+            "textDocument": {
+                "uri": &uri,
+                "version": 2
+            },
+            "contentChanges": [{"text": bad_source}]
+        }
+    });
+
+    let (success, messages, stderr) = run_lsp_session(&fixture_dir, &[did_open, did_change]);
+    let per_message_diagnostics = publish_diagnostics_for_uri(&messages, &uri);
+    let _ = fs::remove_dir_all(&fixture_dir);
+
+    assert!(success, "lsp should exit successfully\nstderr:\n{stderr}");
+    assert!(
+        per_message_diagnostics.len() >= 2,
+        "expected didOpen + didChange publishDiagnostics, got {} message(s)\nmessages:\n{messages:#?}",
+        per_message_diagnostics.len()
+    );
+    assert!(
+        !per_message_diagnostics[0]
+            .iter()
+            .any(|d| d.get("source").and_then(Value::as_str) == Some("mumei-agent")),
+        "clean open should not emit mumei-agent diagnostics\nfirst diagnostics:\n{:#?}",
+        per_message_diagnostics[0]
+    );
+    let changed = per_message_diagnostics
+        .last()
+        .expect("didChange diagnostics");
+    let diagnostic = changed
+        .iter()
+        .find(|d| d.get("source").and_then(Value::as_str) == Some("mumei-agent"))
+        .unwrap_or_else(|| {
+            panic!(
+                "expected mumei-agent diagnostic after didChange\nmessages:\n{messages:#?}\ndiagnostics:\n{changed:#?}"
+            )
+        });
+    let message = diagnostic
+        .get("message")
+        .and_then(Value::as_str)
+        .expect("diagnostic message");
+    assert!(
+        message.contains("verification_violations"),
+        "expected verification_violations diagnostic, got: {message}"
     );
 }

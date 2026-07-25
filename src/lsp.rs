@@ -270,7 +270,7 @@ fn diagnose(uri: &str, source: &str) -> Vec<serde_json::Value> {
     if let Some(path) = path.as_deref() {
         if let Ok(language) = agent::infer_code_language(path) {
             let mut diagnostics = Vec::new();
-            append_agent_code_diagnostics(uri, path, &language, &mut diagnostics);
+            append_agent_code_diagnostics(uri, source, path, &language, &mut diagnostics);
             return diagnostics;
         }
     }
@@ -382,11 +382,18 @@ struct SpecComment {
 
 fn append_agent_code_diagnostics(
     uri: &str,
+    source: &str,
     path: &Path,
     language: &str,
     diagnostics: &mut Vec<serde_json::Value>,
 ) {
-    let Ok(report) = agent::validate_code(path, language) else {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("tmp");
+    let Ok(input_path) = write_lsp_tempfile(source, ext) else {
+        return;
+    };
+    let report = agent::validate_code(&input_path, language);
+    let _ = std::fs::remove_file(&input_path);
+    let Ok(report) = report else {
         return;
     };
 
@@ -554,6 +561,22 @@ fn write_lsp_spec_tempfile(spec_comments: &[SpecComment]) -> Result<PathBuf, std
         .collect::<Vec<_>>()
         .join("\n");
     std::fs::write(&path, body)?;
+    Ok(path)
+}
+
+fn write_lsp_tempfile(source: &str, extension: &str) -> Result<PathBuf, std::io::Error> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let mut path = std::env::temp_dir();
+    path.push(format!(
+        "mumei-lsp-code-{}-{}.{}",
+        std::process::id(),
+        now,
+        extension
+    ));
+    std::fs::write(&path, source)?;
     Ok(path)
 }
 
