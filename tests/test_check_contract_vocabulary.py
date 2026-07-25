@@ -1,6 +1,7 @@
 """Tests for scripts/check_contract_vocabulary.py MCP docstring extraction."""
 from __future__ import annotations
 
+import re
 import sys
 import textwrap
 from pathlib import Path
@@ -12,6 +13,7 @@ from check_contract_vocabulary import (
     _check_doc_contradiction_type_aliases,
     _count_mcp_tool_decorators,
     _extract_mcp_docstrings_ast,
+    _extract_mcp_tool_names_ast,
     main,
 )
 
@@ -161,3 +163,44 @@ def test_non_mcp_tool_decorators_ignored():
     ''')
     blocks = _extract_mcp_docstrings_ast(src)
     assert blocks == ["Real MCP tool."]
+
+
+def test_mcp_doc_table_matches_registered_tools():
+    """docs/MCP.md tool table must list exactly the tools in mcp_server.py."""
+    repo_root = Path(__file__).resolve().parents[1]
+    mcp_doc = repo_root / "docs" / "MCP.md"
+    mcp_server = repo_root / "mcp_server.py"
+
+    text = mcp_doc.read_text(encoding="utf-8")
+    table_match = re.search(
+        r"## MCP Tools\n\n\| Tool \| Description \|\n\|[-—]+\|[-—]+\|\n(.*?)\n\n",
+        text,
+        re.DOTALL,
+    )
+    assert table_match, "Could not find MCP tools table in docs/MCP.md"
+    table_body = table_match.group(1)
+    doc_tool_names: set[str] = set()
+    for line in table_body.splitlines():
+        columns = [c.strip() for c in line.split("|")]
+        if not columns:
+            continue
+        tool_cell = columns[1] if len(columns) > 1 else columns[0]
+        for match in re.findall(r"`([^`]+)`", tool_cell):
+            for name in match.split("/"):
+                doc_tool_names.add(name.strip())
+
+    server_text = mcp_server.read_text(encoding="utf-8")
+    registered_names = _extract_mcp_tool_names_ast(server_text)
+
+    missing_in_docs = registered_names - doc_tool_names
+    missing_in_code = doc_tool_names - registered_names
+    failures = []
+    if missing_in_docs:
+        failures.append(
+            f"registered MCP tools missing from docs/MCP.md: {sorted(missing_in_docs)}"
+        )
+    if missing_in_code:
+        failures.append(
+            f"docs/MCP.md mentions tools not registered: {sorted(missing_in_code)}"
+        )
+    assert failures == [], "; ".join(failures)
