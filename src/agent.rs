@@ -70,7 +70,10 @@ fn agent_report(value: &Value, success_hint: bool, is_spec: bool) -> AgentReport
         && spec_health_issues.is_empty()
         && verification_violations.is_empty()
         && cross_validation_gaps.is_empty()
-        && (is_spec || verification_status.as_deref() == Some("verified"));
+        && (is_spec
+            || verification_status
+                .as_deref()
+                .is_none_or(|s| s == "verified"));
 
     AgentReport {
         success,

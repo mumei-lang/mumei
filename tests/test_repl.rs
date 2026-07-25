@@ -176,53 +176,79 @@ fn write_fake_mumei_agent(dir: &Path) {
         &script,
         r#"#!/bin/sh
 input=""
+cmd=""
 while [ "$#" -gt 0 ]; do
-  if [ "$1" = "--input" ] || [ "$1" = "--file" ]; then
-    shift
-    input="$1"
-  fi
+  case "$1" in
+    --input|--file) shift; input="$1" ;;
+    --language|--format) shift ;;
+    --*) ;;
+    *) cmd="$1" ;;
+  esac
   shift
 done
 
 bad=0
 case "$input" in
   *bad-spec*) bad=1 ;;
+  *bad-code*) bad=1 ;;
 esac
 if [ "$input" ]; then
   while IFS= read -r line; do
     case "$line" in
       *contradiction*|*Contradiction*|*矛盾*) bad=1 ;;
+      *bug*|*Bug*|*バグ*) bad=1 ;;
     esac
   done < "$input"
 fi
 
 if [ "$bad" = "1" ]; then
-  echo '{
-  "success": false,
-  "spec_health_issues": [
-    {
-      "kind": "contradiction",
-      "message": "contradiction detected"
-    }
-  ],
-  "verification_violations": [],
-  "cross_validation_gaps": [],
-  "next_steps": [
-    {
-      "command": "mumei-agent validate-spec --input <spec> --format human"
-    }
-  ]
-}'
+  if [ "$cmd" = "validate-code" ]; then
+    echo '{
+      "success": false,
+      "spec_health_issues": [],
+      "verification_violations": [
+        {"kind": "contract_violation", "message": "return value violates inferred contract"}
+      ],
+      "verification_status": "refuted",
+      "cross_validation_gaps": [],
+      "next_steps": [
+        {"command": "mumei-agent validate-code --input <path> --language python"}
+      ]
+    }'
+  else
+    echo '{
+      "success": false,
+      "spec_health_issues": [
+        {"kind": "contradiction", "message": "contradiction detected"}
+      ],
+      "verification_violations": [],
+      "cross_validation_gaps": [],
+      "next_steps": [
+        {"command": "mumei-agent validate-spec --input <spec> --format human"}
+      ]
+    }'
+  fi
   exit 1
 fi
 
-echo '{
-  "success": true,
-  "spec_health_issues": [],
-  "verification_violations": [],
-  "cross_validation_gaps": [],
-  "next_steps": []
-}'
+if [ "$cmd" = "validate-code" ]; then
+  echo '{
+    "success": true,
+    "spec_health_issues": [],
+    "verification_violations": [],
+    "verification_status": "verified",
+    "cross_validation_gaps": [],
+    "next_steps": []
+  }'
+else
+  echo '{
+    "success": true,
+    "spec_health_issues": [],
+    "verification_violations": [],
+    "cross_validation_gaps": [],
+    "next_steps": []
+  }'
+fi
 "#,
     )
     .expect("write fake mumei-agent");
@@ -292,6 +318,57 @@ fn repl_verify_spec_reports_agent_health_buckets() {
     );
     assert!(
         stdout.contains("next_steps"),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("Goodbye"),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn repl_verify_code_reports_verification_status() {
+    let fixture_dir = unique_temp_dir("mumei-repl-agent");
+    let _ = fs::remove_dir_all(&fixture_dir);
+    fs::create_dir_all(&fixture_dir).expect("create fake agent dir");
+    write_fake_mumei_agent(&fixture_dir);
+
+    let good_code = fixture_dir.join("good.py");
+    let bad_code = fixture_dir.join("bad-code.py");
+    fs::write(&good_code, "def f(x): return x + 1\n").expect("write good code");
+    fs::write(
+        &bad_code,
+        "# bug: return value violates inferred contract\n",
+    )
+    .expect("write bad code");
+
+    let input = format!(
+        ":verify-code {}\n:verify-code {}\n:quit\n",
+        good_code.display(),
+        bad_code.display()
+    );
+    let (success, stdout, stderr) = run_repl_session_with_path(&input, Some(&fixture_dir));
+    let _ = fs::remove_dir_all(&fixture_dir);
+
+    assert!(
+        success,
+        "repl should exit successfully\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("PASS"),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("FAIL"),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("verification_status: verified"),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("verification_status: refuted"),
         "stdout:\n{stdout}\nstderr:\n{stderr}"
     );
     assert!(
