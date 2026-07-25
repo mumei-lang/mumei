@@ -640,8 +640,8 @@ pub(crate) fn repl_help() {
     println!("  :load <file|dir> — Load atoms and extern declarations from .mm files");
     println!("  :type <expr>   — Infer a simple expression type");
     println!("  :verify <atom> — Verify and JIT-compile a registered atom");
-    println!("  :verify-spec <path|inline> — Validate a natural-language spec with mumei-agent");
-    println!("  :verify-code <path> — Validate foreign-language code with mumei-agent");
+    println!("  :verify-spec <path|inline> — Validate a natural-language spec and show spec_health_issues / verification_violations / cross_validation_gaps / next_steps");
+    println!("  :verify-code <path> — Validate foreign-language code and show the above plus verification_status");
     println!("  :eval <expr>   — JIT compile and execute an expression without verification");
     println!("  :check <expr>  — Parse and type-check an expression");
     println!("  :env           — Show registered atoms and types");
