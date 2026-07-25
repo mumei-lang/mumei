@@ -18,12 +18,27 @@ fn write_fake_mumei_agent(dir: &Path) {
     fs::write(
         &script,
         r#"#!/bin/sh
+input=""
 case "$1" in
   validate-spec)
+    input="$3"
+    case "$input" in
+      *good*|*clean*)
+        printf '%s\n' '{"success":true,"spec_health_issues":[],"verification_violations":[],"cross_validation_gaps":[],"next_steps":[]}'
+        exit 0
+        ;;
+    esac
     printf '%s\n' '{"success":false,"spec_health_issues":[{"kind":"contradiction","severity":"error","source_line":1,"message":"contradictory natural-language spec"}],"verification_violations":[],"cross_validation_gaps":[],"next_steps":[{"command":"mumei-agent validate-spec --input <spec> --format human"}]}'
     exit 1
     ;;
   validate-code)
+    input="$3"
+    case "$input" in
+      *good*|*clean*)
+        printf '%s\n' '{"success":true,"spec_health_issues":[],"verification_violations":[],"verification_status":"verified","cross_validation_gaps":[],"next_steps":[]}'
+        exit 0
+        ;;
+    esac
     printf '%s\n' '{"success":false,"spec_health_issues":[],"verification_violations":[{"kind":"contract_violation","severity":"error","source_line":3,"message":"return value violates inferred contract"}],"verification_status":"refuted","cross_validation_gaps":[],"next_steps":[{"command":"mumei-agent validate-code --input <path> --language python"}]}'
     exit 1
     ;;
@@ -310,6 +325,58 @@ fn lsp_reports_code_verification_violations_for_tsx() {
         .and_then(Value::as_str)
         .expect("diagnostic message");
     assert!(message.contains("verification_violations"), "{message}");
+}
+
+#[cfg(unix)]
+#[test]
+fn lsp_suppresses_agent_diagnostics_for_verified_python() {
+    let fixture_dir = unique_temp_dir("mumei-lsp-clean-py-agent");
+    let _ = fs::remove_dir_all(&fixture_dir);
+    fs::create_dir_all(&fixture_dir).expect("create fake agent dir");
+    write_fake_mumei_agent(&fixture_dir);
+
+    let source_path = fixture_dir.join("good_service.py");
+    let source = "def credit(balance, amount):\n    return balance + amount\n";
+    fs::write(&source_path, source).expect("write python source");
+    let uri = format!("file://{}", source_path.display());
+
+    let (success, messages, stderr) = run_lsp_did_open(&fixture_dir, &uri, source);
+    let diagnostics = diagnostics(&messages);
+    let _ = fs::remove_dir_all(&fixture_dir);
+
+    assert!(success, "lsp should exit successfully\nstderr:{stderr}");
+    assert!(
+        diagnostics
+            .iter()
+            .all(|d| d.get("source").and_then(Value::as_str) != Some("mumei-agent")),
+        "verified code should not emit mumei-agent diagnostics\nmessages:\n{messages:#?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn lsp_suppresses_agent_diagnostics_for_verified_typescript() {
+    let fixture_dir = unique_temp_dir("mumei-lsp-clean-ts-agent");
+    let _ = fs::remove_dir_all(&fixture_dir);
+    fs::create_dir_all(&fixture_dir).expect("create fake agent dir");
+    write_fake_mumei_agent(&fixture_dir);
+
+    let source_path = fixture_dir.join("good_service.ts");
+    let source = "function credit(balance: number, amount: number): number {\n  return balance + amount;\n}\n";
+    fs::write(&source_path, source).expect("write typescript source");
+    let uri = format!("file://{}", source_path.display());
+
+    let (success, messages, stderr) = run_lsp_did_open(&fixture_dir, &uri, source);
+    let diagnostics = diagnostics(&messages);
+    let _ = fs::remove_dir_all(&fixture_dir);
+
+    assert!(success, "lsp should exit successfully\nstderr:{stderr}");
+    assert!(
+        diagnostics
+            .iter()
+            .all(|d| d.get("source").and_then(Value::as_str) != Some("mumei-agent")),
+        "verified code should not emit mumei-agent diagnostics\nmessages:\n{messages:#?}"
+    );
 }
 
 #[test]
