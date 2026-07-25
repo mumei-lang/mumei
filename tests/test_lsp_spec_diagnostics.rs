@@ -288,6 +288,45 @@ atom ok(x: i64)
 
 #[cfg(unix)]
 #[test]
+fn lsp_reports_spec_validation_failure_alongside_other_diagnostics() {
+    let fixture_dir = unique_temp_dir("mumei-lsp-silent-spec-with-z3-agent");
+    let _ = fs::remove_dir_all(&fixture_dir);
+    fs::create_dir_all(&fixture_dir).expect("create fake agent dir");
+    write_fake_mumei_agent(&fixture_dir);
+
+    let source_path = fixture_dir.join("silent_spec.mm");
+    let source = r#"
+/// spec: silent failure: balance is non-negative
+atom bad_postcondition(x: i64)
+    requires: true;
+    ensures: result > 0;
+    body: { 0 }
+"#;
+    fs::write(&source_path, source).expect("write mumei source");
+    let uri = format!("file://{}", source_path.display());
+
+    let (success, messages, stderr) = run_lsp_did_open(&fixture_dir, &uri, source);
+    let diagnostics = diagnostics(&messages);
+    let _ = fs::remove_dir_all(&fixture_dir);
+
+    assert!(success, "lsp should exit successfully\nstderr:\n{stderr}");
+    let agent_diagnostic = diagnostics
+        .iter()
+        .find(|d| d.get("source").and_then(Value::as_str) == Some("mumei-agent"))
+        .unwrap_or_else(|| {
+            panic!(
+                "expected mumei-agent fallback diagnostic\nmessages:\n{messages:#?}\ndiagnostics:\n{diagnostics:#?}"
+            )
+        });
+    let message = agent_diagnostic
+        .get("message")
+        .and_then(Value::as_str)
+        .expect("diagnostic message");
+    assert!(message.contains("spec validation failed"), "{message}");
+}
+
+#[cfg(unix)]
+#[test]
 fn lsp_reports_code_verification_violations_for_other_languages() {
     let fixture_dir = unique_temp_dir("mumei-lsp-code-agent");
     let _ = fs::remove_dir_all(&fixture_dir);

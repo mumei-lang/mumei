@@ -450,6 +450,7 @@ fn append_agent_spec_diagnostics(
         return;
     };
 
+    let spec_diagnostics_before = diagnostics.len();
     append_agent_issue_diagnostics(
         uri,
         &report.spec_health_issues,
@@ -460,7 +461,7 @@ fn append_agent_spec_diagnostics(
         diagnostics,
     );
 
-    if !report.success && diagnostics.is_empty() {
+    if !report.success && diagnostics.len() == spec_diagnostics_before {
         diagnostics.push(serde_json::json!({
             "range": {
                 "start": { "line": 0, "character": 0 },
