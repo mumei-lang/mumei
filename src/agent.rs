@@ -6,6 +6,7 @@ pub(crate) struct AgentReport {
     pub(crate) success: bool,
     pub(crate) spec_health_issues: Vec<Value>,
     pub(crate) verification_violations: Vec<Value>,
+    pub(crate) verification_status: Option<String>,
     pub(crate) cross_validation_gaps: Vec<Value>,
     pub(crate) next_steps: Vec<Value>,
 }
@@ -57,18 +58,25 @@ fn agent_report(value: &Value, success_hint: bool, is_spec: bool) -> AgentReport
     }
 
     let next_steps = json_array(value, "next_steps");
+    let verification_status = value
+        .get("verification_status")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+
     let success = value
         .get("success")
         .and_then(Value::as_bool)
         .unwrap_or(success_hint)
         && spec_health_issues.is_empty()
         && verification_violations.is_empty()
-        && cross_validation_gaps.is_empty();
+        && cross_validation_gaps.is_empty()
+        && (is_spec || verification_status.as_deref() == Some("verified"));
 
     AgentReport {
         success,
         spec_health_issues,
         verification_violations,
+        verification_status,
         cross_validation_gaps,
         next_steps,
     }
