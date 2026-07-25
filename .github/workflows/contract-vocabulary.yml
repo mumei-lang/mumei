@@ -10,6 +10,7 @@ on:
       - 'src/cli.rs'
       - 'scripts/check_contract_vocabulary.py'
       - 'tests/test_check_contract_vocabulary.py'
+      - 'tests/test_ci_workflow_timeouts.py'
       - '.github/workflows/contract-vocabulary.yml'
   workflow_dispatch:
 
@@ -30,5 +31,5 @@ jobs:
 
       - name: Run extraction tests
         run: |
-          python3 -m pip install --quiet pytest
-          python3 -m pytest tests/test_check_contract_vocabulary.py -v
+          python3 -m pip install --quiet pytest pyyaml
+          python3 -m pytest tests/test_check_contract_vocabulary.py tests/test_ci_workflow_timeouts.py -v
