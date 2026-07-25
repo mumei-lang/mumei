@@ -11,7 +11,7 @@ _WORKFLOWS_DIR = Path(__file__).parent.parent / ".github" / "workflows"
 def _workflow_files() -> list[Path]:
     if not _WORKFLOWS_DIR.exists():
         return []
-    return sorted(_WORKFLOWS_DIR.glob("*.yml"))
+    return sorted({*_WORKFLOWS_DIR.glob("*.yml"), *_WORKFLOWS_DIR.glob("*.yaml")})
 
 
 @pytest.mark.parametrize(
