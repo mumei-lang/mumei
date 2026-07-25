@@ -89,7 +89,7 @@ attached as the human-review handoff rather than renamed into a separate recomme
 If `validate-spec` reports failure but neither bucket has entries, a fallback diagnostic is
 emitted so silent failures are still visible.
 
-For foreign code, opening a `.py`, `.rs`, `.ts`, `.tsx`, or `.go` document writes the current
+For foreign code, opening a `.py`, `.rs`, `.ts`, `.tsx`, `.go`, or `.sol` document writes the current
 editor buffer to a temporary file and runs `mumei-agent validate-code --input <tmpfile>`
 (`--language` is optional; inferred from extension). Returned `verification_violations`,
 `cross_validation_gaps`, and `verification_status` are shown inline using the source
@@ -114,5 +114,5 @@ The LSP client requests CodeLens for `.mm` files and refreshes lenses after docu
 2. Open a `.mm` file in an editor configured for the Mumei LSP.
 3. Confirm atom definitions show `Intent Drift` CodeLens entries.
 4. Confirm `requires:` and `ensures:` lines show `Spec-Code Mapping` entries.
-5. Confirm `/// spec:` comments or attached foreign-code files (`.py`, `.rs`, `.ts`, `.tsx`, `.go`) show `mumei-agent` diagnostics, and that editing the buffer triggers `textDocument/didChange` updates which re-run validation and clear stale diagnostics.
+5. Confirm `/// spec:` comments or attached foreign-code files (`.py`, `.rs`, `.ts`, `.tsx`, `.go`, `.sol`) show `mumei-agent` diagnostics, and that editing the buffer triggers `textDocument/didChange` updates which re-run validation and clear stale diagnostics.
 6. Click the lenses in an editor extension that implements the corresponding commands.

@@ -701,6 +701,32 @@ fn lsp_suppresses_agent_diagnostics_for_verified_go() {
 
 #[cfg(unix)]
 #[test]
+fn lsp_suppresses_agent_diagnostics_for_verified_solidity() {
+    let fixture_dir = unique_temp_dir("mumei-lsp-clean-sol-agent");
+    let _ = fs::remove_dir_all(&fixture_dir);
+    fs::create_dir_all(&fixture_dir).expect("create fake agent dir");
+    write_fake_mumei_agent(&fixture_dir);
+
+    let source_path = fixture_dir.join("GoodToken.sol");
+    let source = "// SPDX-License-Identifier: MIT\npragma solidity ^0.8.0;\n\ncontract GoodToken {\n    function credit(uint256 balance, uint256 amount) public pure returns (uint256) {\n        return balance + amount;\n    }\n}\n";
+    fs::write(&source_path, source).expect("write solidity source");
+    let uri = format!("file://{}", source_path.display());
+
+    let (success, messages, stderr) = run_lsp_did_open(&fixture_dir, &uri, source);
+    let diagnostics = diagnostics(&messages);
+    let _ = fs::remove_dir_all(&fixture_dir);
+
+    assert!(success, "lsp should exit successfully\nstderr:{stderr}");
+    assert!(
+        diagnostics
+            .iter()
+            .all(|d| d.get("source").and_then(Value::as_str) != Some("mumei-agent")),
+        "verified code should not emit mumei-agent diagnostics\nmessages:\n{messages:#?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn lsp_reports_unverifiable_code_diagnostic() {
     let fixture_dir = unique_temp_dir("mumei-lsp-unverifiable-py-agent");
     let _ = fs::remove_dir_all(&fixture_dir);
