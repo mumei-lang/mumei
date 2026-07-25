@@ -251,6 +251,17 @@ fn lsp_reports_code_verification_violations_for_other_languages() {
         message.contains("return value violates inferred contract"),
         "{message}"
     );
+    assert!(
+        diagnostics
+            .iter()
+            .filter(|d| d.get("source").and_then(Value::as_str) == Some("mumei-agent"))
+            .any(|d| {
+                d.get("message")
+                    .and_then(Value::as_str)
+                    .is_some_and(|m| m.contains("verification_status: refuted"))
+            }),
+        "expected verification_status: refuted diagnostic\nmessages:\n{messages:#?}\ndiagnostics:\n{diagnostics:#?}"
+    );
 }
 
 #[cfg(unix)]
@@ -295,6 +306,17 @@ fn lsp_reports_code_verification_violations_for_typescript() {
         message.contains("return value violates inferred contract"),
         "{message}"
     );
+    assert!(
+        diagnostics
+            .iter()
+            .filter(|d| d.get("source").and_then(Value::as_str) == Some("mumei-agent"))
+            .any(|d| {
+                d.get("message")
+                    .and_then(Value::as_str)
+                    .is_some_and(|m| m.contains("verification_status: refuted"))
+            }),
+        "expected verification_status: refuted diagnostic\nmessages:\n{messages:#?}\ndiagnostics:\n{diagnostics:#?}"
+    );
 }
 
 #[cfg(unix)]
@@ -329,6 +351,17 @@ fn lsp_reports_code_verification_violations_for_tsx() {
         .and_then(Value::as_str)
         .expect("diagnostic message");
     assert!(message.contains("verification_violations"), "{message}");
+    assert!(
+        diagnostics
+            .iter()
+            .filter(|d| d.get("source").and_then(Value::as_str) == Some("mumei-agent"))
+            .any(|d| {
+                d.get("message")
+                    .and_then(Value::as_str)
+                    .is_some_and(|m| m.contains("verification_status: refuted"))
+            }),
+        "expected verification_status: refuted diagnostic\nmessages:\n{messages:#?}\ndiagnostics:\n{diagnostics:#?}"
+    );
 }
 
 #[cfg(unix)]
