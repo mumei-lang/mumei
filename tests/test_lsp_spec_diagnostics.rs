@@ -50,18 +50,26 @@ case "$1" in
     ;;
   validate-code)
     input="$3"
-    case "$input" in
-      *good*|*clean*)
-        printf '%s\n' '{"success":true,"spec_health_issues":[],"verification_violations":[],"verification_status":"verified","cross_validation_gaps":[],"next_steps":[]}'
-        exit 0
-        ;;
-      *unverifiable*)
-        printf '%s\n' '{"success":false,"spec_health_issues":[],"verification_violations":[],"verification_status":"unverifiable","cross_validation_gaps":[],"next_steps":[{"command":"mumei-agent validate-code --input <path> --language python"}]}'
-        exit 1
-        ;;
-    esac
-    printf '%s\n' '{"success":false,"spec_health_issues":[],"verification_violations":[{"kind":"contract_violation","severity":"error","source_line":3,"message":"return value violates inferred contract"}],"verification_status":"refuted","cross_validation_gaps":[],"next_steps":[{"command":"mumei-agent validate-code --input <path> --language python"}]}'
-    exit 1
+    has_unverifiable=0
+    has_bug=0
+    if [ -n "$input" ] && [ -f "$input" ]; then
+      while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+          *unverifiable*|*z3*could*not*decide*) has_unverifiable=1 ;;
+          *bug*|*violation*|*error*) has_bug=1 ;;
+        esac
+      done < "$input"
+    fi
+    if [ "$has_unverifiable" = "1" ]; then
+      printf '%s\n' '{"success":false,"spec_health_issues":[],"verification_violations":[],"verification_status":"unverifiable","cross_validation_gaps":[],"next_steps":[{"command":"mumei-agent validate-code --input <path> --language python"}]}'
+      exit 1
+    fi
+    if [ "$has_bug" = "1" ]; then
+      printf '%s\n' '{"success":false,"spec_health_issues":[],"verification_violations":[{"kind":"contract_violation","severity":"error","source_line":3,"message":"return value violates inferred contract"}],"verification_status":"refuted","cross_validation_gaps":[],"next_steps":[{"command":"mumei-agent validate-code --input <path> --language python"}]}'
+      exit 1
+    fi
+    printf '%s\n' '{"success":true,"spec_health_issues":[],"verification_violations":[],"verification_status":"verified","cross_validation_gaps":[],"next_steps":[]}'
+    exit 0
     ;;
 esac
 exit 0
@@ -163,6 +171,26 @@ fn diagnostics(messages: &[Value]) -> Vec<Value> {
             message.get("method").and_then(Value::as_str) == Some("textDocument/publishDiagnostics")
         })
         .flat_map(|message| {
+            message
+                .pointer("/params/diagnostics")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
+fn publish_diagnostics_for_uri(messages: &[Value], uri: &str) -> Vec<Vec<Value>> {
+    messages
+        .iter()
+        .filter(|message| {
+            message.get("method").and_then(Value::as_str) == Some("textDocument/publishDiagnostics")
+                && message
+                    .pointer("/params/uri")
+                    .and_then(Value::as_str)
+                    .is_some_and(|u| u == uri)
+        })
+        .map(|message| {
             message
                 .pointer("/params/diagnostics")
                 .and_then(Value::as_array)
@@ -389,8 +417,7 @@ fn lsp_reports_code_verification_violations_for_other_languages() {
     write_fake_mumei_agent(&fixture_dir);
 
     let source_path = fixture_dir.join("service.py");
-    let source =
-        "def debit(balance, amount):\n    assert balance >= amount\n    return balance + amount\n";
+    let source = "def debit(balance, amount):\n    # bug\n    return balance + amount\n";
     fs::write(&source_path, source).expect("write python source");
     let uri = format!("file://{}", source_path.display());
 
@@ -451,7 +478,7 @@ fn lsp_reports_code_verification_violations_for_typescript() {
     write_fake_mumei_agent(&fixture_dir);
 
     let source_path = fixture_dir.join("service.ts");
-    let source = "function debit(balance: number, amount: number): number {\n  return balance + amount;\n}\n";
+    let source = "function debit(balance: number, amount: number): number {\n  // bug\n  return balance + amount;\n}\n";
     fs::write(&source_path, source).expect("write typescript source");
     let uri = format!("file://{}", source_path.display());
 
@@ -506,7 +533,7 @@ fn lsp_reports_code_verification_violations_for_tsx() {
     write_fake_mumei_agent(&fixture_dir);
 
     let source_path = fixture_dir.join("component.tsx");
-    let source = "const App = () => {\n  return <div>hello</div>;\n}\n";
+    let source = "const App = () => {\n  // bug\n  return <div>hello</div>;\n}\n";
     fs::write(&source_path, source).expect("write tsx source");
     let uri = format!("file://{}", source_path.display());
 
@@ -796,16 +823,31 @@ fn lsp_updates_diagnostics_on_did_change_for_code() {
     });
 
     let (success, messages, stderr) = run_lsp_session(&fixture_dir, &[did_open, did_change]);
-    let diagnostics = diagnostics(&messages);
+    let per_message_diagnostics = publish_diagnostics_for_uri(&messages, &uri);
     let _ = fs::remove_dir_all(&fixture_dir);
 
     assert!(success, "lsp should exit successfully\nstderr:\n{stderr}");
-    let diagnostic = diagnostics
+    assert!(
+        per_message_diagnostics.len() >= 2,
+        "expected didOpen + didChange publishDiagnostics, got {} message(s)\nmessages:\n{messages:#?}",
+        per_message_diagnostics.len()
+    );
+    assert!(
+        !per_message_diagnostics[0]
+            .iter()
+            .any(|d| d.get("source").and_then(Value::as_str) == Some("mumei-agent")),
+        "clean open should not emit mumei-agent diagnostics\nfirst diagnostics:\n{:#?}",
+        per_message_diagnostics[0]
+    );
+    let changed = per_message_diagnostics
+        .last()
+        .expect("didChange diagnostics");
+    let diagnostic = changed
         .iter()
         .find(|d| d.get("source").and_then(Value::as_str) == Some("mumei-agent"))
         .unwrap_or_else(|| {
             panic!(
-                "expected mumei-agent diagnostic after didChange\nmessages:\n{messages:#?}\ndiagnostics:\n{diagnostics:#?}"
+                "expected mumei-agent diagnostic after didChange\nmessages:\n{messages:#?}\ndiagnostics:\n{changed:#?}"
             )
         });
     let message = diagnostic
