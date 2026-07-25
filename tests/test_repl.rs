@@ -188,22 +188,26 @@ while [ "$#" -gt 0 ]; do
 done
 
 bad=0
+status=""
 case "$input" in
   *bad-spec*) bad=1 ;;
-  *bad-code*) bad=1 ;;
+  *bad-code*) bad=1 ; status="refuted" ;;
+  *unverifiable*) status="unverifiable" ;;
+  *verified*) status="verified" ;;
+  *plain*|*missing*) status="missing" ;;
 esac
 if [ "$input" ]; then
   while IFS= read -r line; do
     case "$line" in
       *contradiction*|*Contradiction*|*矛盾*) bad=1 ;;
-      *bug*|*Bug*|*バグ*) bad=1 ;;
+      *bug*|*Bug*|*バグ*) bad=1 ; status="refuted" ;;
     esac
   done < "$input"
 fi
 
 if [ "$bad" = "1" ]; then
   if [ "$cmd" = "validate-code" ]; then
-    echo '{
+    printf '%s\n' '{
       "success": false,
       "spec_health_issues": [],
       "verification_violations": [
@@ -216,7 +220,7 @@ if [ "$bad" = "1" ]; then
       ]
     }'
   else
-    echo '{
+    printf '%s\n' '{
       "success": false,
       "spec_health_issues": [
         {"kind": "contradiction", "message": "contradiction detected"}
@@ -232,16 +236,37 @@ if [ "$bad" = "1" ]; then
 fi
 
 if [ "$cmd" = "validate-code" ]; then
-  echo '{
-    "success": true,
-    "spec_health_issues": [],
-    "verification_violations": [],
-    "verification_status": "verified",
-    "cross_validation_gaps": [],
-    "next_steps": []
-  }'
+  if [ "$status" = "unverifiable" ]; then
+    printf '%s\n' '{
+      "success": false,
+      "spec_health_issues": [],
+      "verification_violations": [],
+      "verification_status": "unverifiable",
+      "cross_validation_gaps": [],
+      "next_steps": [
+        {"command": "mumei-agent validate-code --input <path> --language python"}
+      ]
+    }'
+  elif [ "$status" = "missing" ]; then
+    printf '%s\n' '{
+      "success": true,
+      "spec_health_issues": [],
+      "verification_violations": [],
+      "cross_validation_gaps": [],
+      "next_steps": []
+    }'
+  else
+    printf '%s\n' '{
+      "success": true,
+      "spec_health_issues": [],
+      "verification_violations": [],
+      "verification_status": "verified",
+      "cross_validation_gaps": [],
+      "next_steps": []
+    }'
+  fi
 else
-  echo '{
+  printf '%s\n' '{
     "success": true,
     "spec_health_issues": [],
     "verification_violations": [],
@@ -330,9 +355,13 @@ fn repl_verify_code_reports_verification_status() {
     fs::create_dir_all(&fixture_dir).expect("create fake agent dir");
     write_fake_mumei_agent(&fixture_dir);
 
-    let good_code = fixture_dir.join("good.py");
+    let verified_code = fixture_dir.join("verified.py");
+    let plain_code = fixture_dir.join("plain.py");
+    let unverifiable_code = fixture_dir.join("unverifiable.py");
     let bad_code = fixture_dir.join("bad-code.py");
-    fs::write(&good_code, "def f(x): return x + 1\n").expect("write good code");
+    fs::write(&verified_code, "def f(x): return x + 1\n").expect("write verified code");
+    fs::write(&plain_code, "def g(x): return x * 2\n").expect("write plain code");
+    fs::write(&unverifiable_code, "# unverifiable\n").expect("write unverifiable code");
     fs::write(
         &bad_code,
         "# bug: return value violates inferred contract\n",
@@ -340,8 +369,10 @@ fn repl_verify_code_reports_verification_status() {
     .expect("write bad code");
 
     let input = format!(
-        ":verify-code {}\n:verify-code {}\n:quit\n",
-        good_code.display(),
+        ":verify-code {}\n:verify-code {}\n:verify-code {}\n:verify-code {}\n:quit\n",
+        verified_code.display(),
+        plain_code.display(),
+        unverifiable_code.display(),
         bad_code.display()
     );
     let (success, stdout, stderr) = run_repl_session_with_path(&input, Some(&fixture_dir));
@@ -361,6 +392,14 @@ fn repl_verify_code_reports_verification_status() {
     );
     assert!(
         stdout.contains("verification_status: verified"),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("verification_status: <none>"),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("verification_status: unverifiable"),
         "stdout:\n{stdout}\nstderr:\n{stderr}"
     );
     assert!(
