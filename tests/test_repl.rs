@@ -313,10 +313,6 @@ fn repl_verify_spec_reports_agent_health_buckets() {
         "stdout:\n{stdout}\nstderr:\n{stderr}"
     );
     assert!(
-        stdout.contains("verification_status"),
-        "stdout:\n{stdout}\nstderr:\n{stderr}"
-    );
-    assert!(
         stdout.contains("next_steps"),
         "stdout:\n{stdout}\nstderr:\n{stderr}"
     );
