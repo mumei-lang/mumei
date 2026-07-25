@@ -71,7 +71,7 @@ mumei verify transfer.mm
 
 生成された `.mm` は、人間がレビューしながら小さく修正します。
 
-- LSP (`mumei lsp`) を使い、エディタ上で diagnostics、hover、補完、定義ジャンプを確認する。`.mm` 内の `/// spec:` は `mumei-agent` の `spec_health_issues` / `cross_validation_gaps` として該当コメント行に出し、検証失敗時は fallback diagnostic も表示する。`.py` / `.rs` / `.ts` / `.tsx` / `.go` では `verification_violations` / `cross_validation_gaps` と `verification_status` をインライン表示する。
+- LSP (`mumei lsp`) を使い、エディタ上で diagnostics、hover、補完、定義ジャンプを確認する。`.mm` 内の `/// spec:` は `mumei-agent` の `spec_health_issues` / `cross_validation_gaps` として該当コメント行に出し、検証失敗時は fallback diagnostic も表示する。`.py` / `.rs` / `.ts` / `.tsx` / `.go` では `verification_violations` / `cross_validation_gaps` と `verification_status` をインライン表示する。`textDocument/didChange` 時にはエディタの未保存バッファで再検証され、diagnostic が更新・クリアされる。
 - REPL (`mumei repl`) を使い、小さい式や atom をインタラクティブに検証する。自然言語仕様は `:verify-spec <path|inline>` で `spec_health_issues` / `verification_violations` / `cross_validation_gaps` / `next_steps`、他言語コードは `:verify-code <path>` で同項目に加えて `verification_status` を確認できる。
 - `uv run mumei-agent check-spec-health transfer.mm` で矛盾、到達不能な `requires`、過剰拘束、曖昧な postcondition を確認する。
 - verifier の counterexample を仕様レビューの単位にし、1 回の修正で 1 つの失敗原因だけを潰す。

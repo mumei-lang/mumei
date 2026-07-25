@@ -679,11 +679,11 @@ Unfreezes the LSP server and adds two major features: textDocument/completion an
 Extends `mumei lsp` diagnostics beyond `.mm` parse/Z3 feedback by reusing the same `mumei-agent` JSON contract as the REPL:
 
 - `.mm` comments matching `/// spec: ...` are extracted into a temporary spec input and checked with `mumei-agent validate-spec --input <tmpfile> --format json`; `spec_health_issues` appear on the original comment line.
-- `.py`, `.rs`, `.ts`, `.tsx`, and `.go` files are checked with `mumei-agent validate-code --input <path>` (`--language` is optional; inferred from extension); `verification_violations`, `cross_validation_gaps`, and `verification_status` appear as `source: "mumei-agent"` diagnostics.
-- `next_steps` remains the human-review entrypoint and is included in diagnostic messages / related information without renaming the fixed buckets.
+- `.py`, `.rs`, `.ts`, `.tsx`, and `.go` files are checked with `mumei-agent validate-code --input <tmpfile>` (`--language` is optional; inferred from extension); `verification_violations`, `cross_validation_gaps`, and `verification_status` appear as `source: "mumei-agent"` diagnostics. The current editor buffer is written to a temporary file so `textDocument/didChange` re-runs validation on the unsaved source.
+- `next_steps` remains the human-review entrypoint and is included in diagnostic messages and `relatedInformation` without renaming the fixed buckets.
 - Missing `mumei-agent` or malformed JSON silently degrades to existing `.mm` diagnostics, preserving Z3 `relatedInformation` and `data.counterexample`.
 
-**Regression test**: `LLVM_SYS_170_PREFIX=/usr/lib/llvm-17 LIBCLANG_PATH=/usr/lib/x86_64-linux-gnu cargo test --test test_lsp_spec_diagnostics` uses a fake `mumei-agent` on `PATH` to pin spec-comment diagnostics, foreign-code diagnostics, and graceful missing-agent behavior.
+**Regression test**: `LLVM_SYS_170_PREFIX=/usr/lib/llvm-17 LIBCLANG_PATH=/usr/lib/x86_64-linux-gnu cargo test --test test_lsp_spec_diagnostics` uses a fake `mumei-agent` on `PATH` to pin spec-comment diagnostics, foreign-code diagnostics, `textDocument/didChange` re-validation/diagnostic clearing, and graceful missing-agent behavior.
 
 ### P7: Runtime Completion (REPL JIT + Binary Execution)
 
