@@ -155,8 +155,9 @@ pub(crate) fn infer_code_language(path: &Path) -> Result<String, String> {
         Some("rs") => Ok("rust".to_string()),
         Some("go") => Ok("go".to_string()),
         Some("ts") | Some("tsx") => Ok("typescript".to_string()),
+        Some("sol") => Ok("solidity".to_string()),
         _ => Err(format!(
-            "unsupported code file extension for '{}'; expected .py, .rs, .ts, .tsx, or .go",
+            "unsupported code file extension for '{}'; expected .py, .rs, .ts, .tsx, .go, or .sol",
             path.display()
         )),
     }
@@ -199,9 +200,18 @@ mod tests {
     }
 
     #[test]
+    fn infer_code_language_solidity() {
+        assert_eq!(
+            infer_code_language(Path::new("Token.sol")).unwrap(),
+            "solidity"
+        );
+    }
+
+    #[test]
     fn infer_code_language_unsupported() {
         let err = infer_code_language(Path::new("data.json")).unwrap_err();
         assert!(err.contains("unsupported code file extension"));
         assert!(err.contains(".ts, .tsx"));
+        assert!(err.contains(".sol"));
     }
 }
