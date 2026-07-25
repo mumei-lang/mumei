@@ -18,12 +18,37 @@ fn write_fake_mumei_agent(dir: &Path) {
     fs::write(
         &script,
         r#"#!/bin/sh
+input=""
 case "$1" in
   validate-spec)
+    input="$3"
+    clean=0
+    if [ -n "$input" ]; then
+      while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+          *clean*) clean=1 ;;
+        esac
+      done < "$input"
+    fi
+    if [ "$clean" = "1" ]; then
+      printf '%s\n' '{"success":true,"spec_health_issues":[],"verification_violations":[],"cross_validation_gaps":[],"next_steps":[]}'
+      exit 0
+    fi
     printf '%s\n' '{"success":false,"spec_health_issues":[{"kind":"contradiction","severity":"error","source_line":1,"message":"contradictory natural-language spec"}],"verification_violations":[],"cross_validation_gaps":[],"next_steps":[{"command":"mumei-agent validate-spec --input <spec> --format human"}]}'
     exit 1
     ;;
   validate-code)
+    input="$3"
+    case "$input" in
+      *good*|*clean*)
+        printf '%s\n' '{"success":true,"spec_health_issues":[],"verification_violations":[],"verification_status":"verified","cross_validation_gaps":[],"next_steps":[]}'
+        exit 0
+        ;;
+      *unverifiable*)
+        printf '%s\n' '{"success":false,"spec_health_issues":[],"verification_violations":[],"verification_status":"unverifiable","cross_validation_gaps":[],"next_steps":[{"command":"mumei-agent validate-code --input <path> --language python"}]}'
+        exit 1
+        ;;
+    esac
     printf '%s\n' '{"success":false,"spec_health_issues":[],"verification_violations":[{"kind":"contract_violation","severity":"error","source_line":3,"message":"return value violates inferred contract"}],"verification_status":"refuted","cross_validation_gaps":[],"next_steps":[{"command":"mumei-agent validate-code --input <path> --language python"}]}'
     exit 1
     ;;
@@ -185,6 +210,38 @@ atom ok()
 
 #[cfg(unix)]
 #[test]
+fn lsp_suppresses_agent_diagnostics_for_clean_spec_comments() {
+    let fixture_dir = unique_temp_dir("mumei-lsp-clean-spec-agent");
+    let _ = fs::remove_dir_all(&fixture_dir);
+    fs::create_dir_all(&fixture_dir).expect("create fake agent dir");
+    write_fake_mumei_agent(&fixture_dir);
+
+    let source_path = fixture_dir.join("clean_spec.mm");
+    let source = r#"
+/// spec: clean balance is non-negative
+atom ok(x: i64)
+    requires: x >= 0;
+    ensures: result == x;
+    body: { x }
+"#;
+    fs::write(&source_path, source).expect("write mumei source");
+    let uri = format!("file://{}", source_path.display());
+
+    let (success, messages, stderr) = run_lsp_did_open(&fixture_dir, &uri, source);
+    let diagnostics = diagnostics(&messages);
+    let _ = fs::remove_dir_all(&fixture_dir);
+
+    assert!(success, "lsp should exit successfully\nstderr:\n{stderr}");
+    assert!(
+        diagnostics
+            .iter()
+            .all(|d| d.get("source").and_then(Value::as_str) != Some("mumei-agent")),
+        "clean spec should not emit mumei-agent diagnostics\nmessages:\n{messages:#?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn lsp_reports_code_verification_violations_for_other_languages() {
     let fixture_dir = unique_temp_dir("mumei-lsp-code-agent");
     let _ = fs::remove_dir_all(&fixture_dir);
@@ -232,6 +289,17 @@ fn lsp_reports_code_verification_violations_for_other_languages() {
         message.contains("return value violates inferred contract"),
         "{message}"
     );
+    assert!(
+        diagnostics
+            .iter()
+            .filter(|d| d.get("source").and_then(Value::as_str) == Some("mumei-agent"))
+            .any(|d| {
+                d.get("message")
+                    .and_then(Value::as_str)
+                    .is_some_and(|m| m.contains("verification_status: refuted"))
+            }),
+        "expected verification_status: refuted diagnostic\nmessages:\n{messages:#?}\ndiagnostics:\n{diagnostics:#?}"
+    );
 }
 
 #[cfg(unix)]
@@ -276,6 +344,17 @@ fn lsp_reports_code_verification_violations_for_typescript() {
         message.contains("return value violates inferred contract"),
         "{message}"
     );
+    assert!(
+        diagnostics
+            .iter()
+            .filter(|d| d.get("source").and_then(Value::as_str) == Some("mumei-agent"))
+            .any(|d| {
+                d.get("message")
+                    .and_then(Value::as_str)
+                    .is_some_and(|m| m.contains("verification_status: refuted"))
+            }),
+        "expected verification_status: refuted diagnostic\nmessages:\n{messages:#?}\ndiagnostics:\n{diagnostics:#?}"
+    );
 }
 
 #[cfg(unix)]
@@ -310,6 +389,118 @@ fn lsp_reports_code_verification_violations_for_tsx() {
         .and_then(Value::as_str)
         .expect("diagnostic message");
     assert!(message.contains("verification_violations"), "{message}");
+    assert!(
+        diagnostics
+            .iter()
+            .filter(|d| d.get("source").and_then(Value::as_str) == Some("mumei-agent"))
+            .any(|d| {
+                d.get("message")
+                    .and_then(Value::as_str)
+                    .is_some_and(|m| m.contains("verification_status: refuted"))
+            }),
+        "expected verification_status: refuted diagnostic\nmessages:\n{messages:#?}\ndiagnostics:\n{diagnostics:#?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn lsp_suppresses_agent_diagnostics_for_verified_python() {
+    let fixture_dir = unique_temp_dir("mumei-lsp-clean-py-agent");
+    let _ = fs::remove_dir_all(&fixture_dir);
+    fs::create_dir_all(&fixture_dir).expect("create fake agent dir");
+    write_fake_mumei_agent(&fixture_dir);
+
+    let source_path = fixture_dir.join("good_service.py");
+    let source = "def credit(balance, amount):\n    return balance + amount\n";
+    fs::write(&source_path, source).expect("write python source");
+    let uri = format!("file://{}", source_path.display());
+
+    let (success, messages, stderr) = run_lsp_did_open(&fixture_dir, &uri, source);
+    let diagnostics = diagnostics(&messages);
+    let _ = fs::remove_dir_all(&fixture_dir);
+
+    assert!(success, "lsp should exit successfully\nstderr:{stderr}");
+    assert!(
+        diagnostics
+            .iter()
+            .all(|d| d.get("source").and_then(Value::as_str) != Some("mumei-agent")),
+        "verified code should not emit mumei-agent diagnostics\nmessages:\n{messages:#?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn lsp_suppresses_agent_diagnostics_for_verified_typescript() {
+    let fixture_dir = unique_temp_dir("mumei-lsp-clean-ts-agent");
+    let _ = fs::remove_dir_all(&fixture_dir);
+    fs::create_dir_all(&fixture_dir).expect("create fake agent dir");
+    write_fake_mumei_agent(&fixture_dir);
+
+    let source_path = fixture_dir.join("good_service.ts");
+    let source = "function credit(balance: number, amount: number): number {\n  return balance + amount;\n}\n";
+    fs::write(&source_path, source).expect("write typescript source");
+    let uri = format!("file://{}", source_path.display());
+
+    let (success, messages, stderr) = run_lsp_did_open(&fixture_dir, &uri, source);
+    let diagnostics = diagnostics(&messages);
+    let _ = fs::remove_dir_all(&fixture_dir);
+
+    assert!(success, "lsp should exit successfully\nstderr:{stderr}");
+    assert!(
+        diagnostics
+            .iter()
+            .all(|d| d.get("source").and_then(Value::as_str) != Some("mumei-agent")),
+        "verified code should not emit mumei-agent diagnostics\nmessages:\n{messages:#?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn lsp_reports_unverifiable_code_diagnostic() {
+    let fixture_dir = unique_temp_dir("mumei-lsp-unverifiable-py-agent");
+    let _ = fs::remove_dir_all(&fixture_dir);
+    fs::create_dir_all(&fixture_dir).expect("create fake agent dir");
+    write_fake_mumei_agent(&fixture_dir);
+
+    let source_path = fixture_dir.join("unverifiable_service.py");
+    let source = "def complex(balance, amount):\n    # z3 could not decide\n    return balance\n";
+    fs::write(&source_path, source).expect("write python source");
+    let uri = format!("file://{}", source_path.display());
+
+    let (success, messages, stderr) = run_lsp_did_open(&fixture_dir, &uri, source);
+    let diagnostics = diagnostics(&messages);
+    let _ = fs::remove_dir_all(&fixture_dir);
+
+    assert!(success, "lsp should exit successfully\nstderr:{stderr}");
+    let diagnostic = diagnostics
+        .iter()
+        .find(|d| d.get("source").and_then(Value::as_str) == Some("mumei-agent"))
+        .unwrap_or_else(|| {
+            panic!(
+                "expected mumei-agent diagnostic\nmessages:\n{messages:#?}\ndiagnostics:\n{diagnostics:#?}"
+            )
+        });
+    let message = diagnostic
+        .get("message")
+        .and_then(Value::as_str)
+        .expect("diagnostic message");
+    assert!(
+        message.contains("verification_status: unverifiable"),
+        "{message}"
+    );
+    assert_eq!(diagnostic.get("severity").and_then(Value::as_u64), Some(2));
+    let related = diagnostic
+        .get("relatedInformation")
+        .and_then(Value::as_array)
+        .expect("relatedInformation");
+    assert!(
+        related.iter().any(|info| {
+            info.get("message")
+                .and_then(Value::as_str)
+                .is_some_and(|m| m.contains("mumei-agent validate-code"))
+        }),
+        "expected next_steps in relatedInformation: {related:?}"
+    );
 }
 
 #[test]
