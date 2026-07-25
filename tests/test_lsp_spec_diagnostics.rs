@@ -451,6 +451,18 @@ fn lsp_reports_unverifiable_code_diagnostic() {
         "{message}"
     );
     assert_eq!(diagnostic.get("severity").and_then(Value::as_u64), Some(2));
+    let related = diagnostic
+        .get("relatedInformation")
+        .and_then(Value::as_array)
+        .expect("relatedInformation");
+    assert!(
+        related.iter().any(|info| {
+            info.get("message")
+                .and_then(Value::as_str)
+                .is_some_and(|m| m.contains("mumei-agent validate-code"))
+        }),
+        "expected next_steps in relatedInformation: {related:?}"
+    );
 }
 
 #[test]

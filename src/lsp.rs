@@ -415,6 +415,8 @@ fn append_agent_code_diagnostics(
                 "refuted" => 1,
                 _ => 2,
             };
+            let related_info =
+                agent_next_step_related_information(uri, 0, 0, 0, &report.next_steps);
             diagnostics.push(serde_json::json!({
                 "range": {
                     "start": { "line": 0, "character": 0 },
@@ -422,7 +424,8 @@ fn append_agent_code_diagnostics(
                 },
                 "severity": severity,
                 "source": "mumei-agent",
-                "message": format!("verification_status: {}", status)
+                "message": format!("verification_status: {}", status),
+                "relatedInformation": related_info
             }));
         }
     }
