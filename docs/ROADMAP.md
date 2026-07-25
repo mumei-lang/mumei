@@ -1080,6 +1080,160 @@ Self-healing loop と Lean escalation は成功率を上げる一方で、無制
 
 ---
 
+### P10: Z3 Theory Coverage Extension（Z3 未利用理論の段階的取り込み）
+
+Mumei の検証層は現在、Z3 の Bool / Int / Real /（有界）Array / String 近似 /（有界）量化子という決定可能断片のみを利用している。
+一方 Z3 は Bit-Vector・正規表現・代数的データ型・非線形算術など多くの理論を備えており、Mumei はこれらのギャップを「スタブ実装」「手動オーバーフロー境界」「Int タグエンコード」「無条件 Lean エスカレーション」で回避している。
+P10 では、これらのギャップのうち投資対効果の高いものを Z3 側で直接扱えるようにし、真に難しい部分は引き続き Lean 4 へ委譲する二層構造を維持する。
+
+**P10-A: Bit-Vector Theory（`Z3_BV_SORT` / `theory_bv`）** — ★★★ 最優先
+
+現状のギャップ:
+
+- `std/bitwise.mm` は現行パーサが `&`, `|`, `^`, `<<`, `>>` を通常算術として扱わないため、`bit_and` などが実ビット意味論ではなく境界性質の witness（常に `0` を返す等）にとどまっている。
+- Z3 は数学的整数で検証するためオーバーフローが素通りし、`std/contracts.mm` の `safe_add` / `safe_multiply` や `std/math/fixed_point.mm` は `requires` に手動の範囲制約（±4×10^18 等）を書いて回避している。
+
+Lean 委譲境界: `mumei-core/src/verification/types.rs` の `integer_overflow_bridge`（Mumei は 2 の補数ラップ、Lean 4 `Int` は無限精度）ブリッジ補題ノートに従い、リング推論を要する深いオーバーフロー定理は引き続き Lean 4 へ委譲する。
+
+**Implementation Plan**:
+
+```
+1. BV sort 生成経路の追加
+   - z3_types.rs の param_z3_value の LoweredType 分岐（317 行目付近の Int::new_const フォールバック）に i64 用 BV(64) sort 生成を追加
+   - 2 の補数ラップ意味論で加減乗算をエンコードし、Int エンコードとの相互変換点を明示
+   - オプトイン（--bitvec-i64）で段階導入し、既定の Int エンコードとの後方互換を保つ
+
+2. ビット演算子のパースと lowering
+   - パーサで &, |, ^, <<, >> を式として扱えるようにし、HIR/MIR へ伝搬
+   - and / or / xor / shl / shr を BV 演算として翻訳し、shift 量の範囲条件を requires に反映
+   - std/bitwise.mm の atom を witness 実装から実ビット意味論の ensures へ書き換える
+
+3. オーバーフロー契約の自動化
+   - std/contracts.mm の safe_add / safe_multiply、std/math/fixed_point.mm の手動範囲制約を BV ラップ意味論由来の条件へ置き換える
+   - fragment.rs に bitvector_semantics タグを追加し、BV で閉じない義務のみ Lean escalation 候補にする
+   - docs/SPEC_GUIDE.md に BV モードで書ける仕様と書けない仕様を明記する
+```
+
+**Files to modify/create**:
+- `mumei-core/src/verification/translator/z3_types.rs` — i64 用 `BV(64)` sort 生成とビット演算エンコード
+- `mumei-core/src/parser/` — `&`, `|`, `^`, `<<`, `>>` のビット演算子パースと優先順位
+- `std/bitwise.mm` — 実ビット意味論の `ensures` へ書き換え
+- `std/contracts.mm` — `safe_add` / `safe_multiply` の手動範囲制約を BV 条件へ置換
+- `std/math/fixed_point.mm` — 手動オーバーフロー境界の削減
+- `mumei-core/src/verification/fragment.rs` — `bitvector_semantics` タグと Lean escalation 判定
+- `docs/SPEC_GUIDE.md` — BV モードの決定可能断片と `--bitvec-i64` 運用ガイド
+
+**Success Metrics**:
+- `std/bitwise.mm` の各 atom が実ビット意味論の `ensures` を Z3 検証で通す率: 100%
+- 手動オーバーフロー境界（`requires` の ±4×10^18 等）を必要とする atom 数: ≥ 80% 削減
+- `--bitvec-i64` 無効時の既存 proof certificate 回帰: 0 件
+
+**P10-B: Regular Expression Theory（`Z3_RE_SORT` / RegLan）** — ★★
+
+現状のギャップ: 正規表現制約は String Sort 上の `prefix_of` / `suffix_of` / `contains` 近似のみで表現され、`regex_semantics` タグが付いた義務は `docs/SPEC_GUIDE.md` の方針どおり Lean 4 へ回している。
+
+Lean 委譲境界: `mumei-core/src/verification/types.rs` の `string_regex_bridge` ノート（Z3 と Lean で String / regex 意味論が異なる）に従い、複雑な意味論を要する義務のみ Lean 4 に残す。
+
+**Implementation Plan**:
+
+```
+1. RE_SORT ベースの regex 変換
+   - mumei-core/src/verification.rs（および verification/ 配下の String 制約変換箇所）の regex 近似ロジックを Z3 ネイティブ正規表現理論へ拡張
+   - リテラル・連接・選択・繰り返し・文字クラスを RegLan 式へ写像し、str.in_re で判定する
+   - 近似で扱っていた prefix_of / suffix_of / contains を RE 式の特殊形として再定義する
+
+2. 有界・単純な regex の Z3 直接判定
+   - パス検証・入力バリデーション（Plan 23 の RegexSafeFileRead などの延長）を Z3 で直接決定する
+   - std/string/validator.mm と std/effects.mm の path / URL 制約を RE ベースの ensures へ移行
+   - 変換不能な構文（後方参照・先読み等）は regex_semantics タグを維持して Lean へ送る
+
+3. 仕様ガイドと回帰
+   - docs/SPEC_GUIDE.md に Z3 で決定可能な regex 断片と Lean 委譲対象を明記
+   - RE 変換の反例（受理/非受理文字列）を counterexample として報告する
+```
+
+**Files to modify/create**:
+- `mumei-core/src/verification.rs` — regex 近似から `Z3_RE_SORT` ベース変換への移行
+- `std/string/validator.mm` — 入力バリデーション契約の RE 化
+- `std/effects.mm` — path / URL 制約の RE 化
+- `docs/SPEC_GUIDE.md` — 決定可能な regex 断片と Lean 委譲境界
+
+**Success Metrics**:
+- 有界・単純な regex 契約の Z3 直接判定率: ≥ 90%
+- `regex_semantics` タグによる Lean escalation 件数: ≥ 60% 削減
+- RE 変換由来の反例（受理/非受理文字列）出力率: 100%
+
+**P10-C: Finite Non-recursive Algebraic Data Types（`Z3_DATATYPE_SORT` / `theory_datatype`）** — ★★
+
+現状のギャップ: enum は Int タグとして扱われ、`match` 網羅性は `mumei-core/src/verification/translator/expr.rs` で「tag を `0..n_variants` に制約 → 被覆の否定が UNSAT か」という Int エンコードで実現している。ペイロード付きタグ付き共用体のフィールド型安全性は Int タグでは表現しきれない。
+
+Lean 委譲境界: 再帰 ADT は `mumei-core/src/verification/fragment.rs` で `inductive_data_type` タグとして検出され Lean 4 へ回る設計を維持する（有限・非再帰は Z3、再帰 ADT の帰納証明は Lean）。
+
+**Implementation Plan**:
+
+```
+1. ネイティブ datatype sort 生成
+   - z3_types.rs に有限・非再帰 enum 用の Z3 datatype sort（コンストラクタ・セレクタ・判別子）生成経路を追加
+   - ペイロード付きバリアントのフィールド型を セレクタの sort として保持する
+   - Int タグ経路は後方互換のため残し、有限・非再帰と判定された型のみ datatype へ切り替える
+
+2. 網羅性チェックの datatype 化
+   - expr.rs の match 網羅性を tag 範囲制約から判別子ベースの被覆否定 UNSAT 判定へ拡張
+   - 未被覆バリアントを反例のコンストラクタ名で報告する
+   - セレクタ適用の well-formedness（判別子が一致する場合のみ）を制約として付与
+
+3. fragment 判定の整理
+   - fragment.rs で有限・非再帰 enum を datatype 経路、再帰 ADT を inductive_data_type タグとして分離
+   - docs/SPEC_GUIDE.md に enum / タグ付き共用体の決定可能断片を追記
+```
+
+**Files to modify/create**:
+- `mumei-core/src/verification/translator/z3_types.rs` — 有限・非再帰 enum の datatype sort 生成
+- `mumei-core/src/verification/translator/expr.rs` — datatype ベースの `match` 網羅性チェック
+- `mumei-core/src/verification/fragment.rs` — 有限・非再帰 / 再帰 ADT の分離判定
+- `docs/SPEC_GUIDE.md` — enum / タグ付き共用体の決定可能断片
+
+**Success Metrics**:
+- 有限・非再帰 enum の `match` 網羅性チェックの datatype 経路移行率: 100%
+- ペイロード付きバリアントのフィールド型安全性違反の検出率: 100%
+- 再帰 ADT の `inductive_data_type` タグ付け精度: 100%
+
+**P10-D: Bounded Low-degree Nonlinear Arithmetic（`nlsat` / `grobner`）** — ★
+
+現状のギャップ: `x * y` や記号的除算は `mumei-core/src/verification/fragment.rs` の `expr_has_nonlinear_arithmetic` により一律 `nonlinear_arithmetic` タグが付き、無条件で Lean escalation 候補になる。ただし `std/math/safe_mul.mm` のように明示境界があれば Z3 でも `result == a * b` を検証できている。
+
+Lean 委譲境界: 多項式不変量・リング等式など真のリング推論は引き続き Lean 4 が担当する。
+
+**Implementation Plan**:
+
+```
+1. 無条件エスカレーションの緩和
+   - fragment.rs の nonlinear_arithmetic タグを「Lean 確定」から「nlsat 先行試行」の分類へ変更
+   - 対象は有界変数・低次多項式（変数積の次数が閾値以下）に限定し、それ以外は従来どおり Lean 候補
+   - 境界情報は requires の範囲制約から抽出する
+
+2. solver 実行と結果分類
+   - executor.rs で nlsat（必要に応じて grobner）を有効化した solver 実行経路を追加
+   - unknown / timeout の場合のみ Lean escalation candidate へ降格し、理由を proof certificate に記録
+   - solver 時間上限を fragment ごとに設定し、既存の budget policy と整合させる
+
+3. 仕様ガイドと計測
+   - docs/SPEC_GUIDE.md に「Z3 で通る非線形仕様」の条件（明示境界・低次）を明記
+   - nlsat 成功率と Lean 降格率を fragment ごとに集計する
+```
+
+**Files to modify/create**:
+- `mumei-core/src/verification/fragment.rs` — 有界・低次非線形の先行判定と `nonlinear_arithmetic` タグの再定義
+- `mumei-core/src/verification/executor.rs` — `nlsat` solver 実行と unknown/timeout 分類
+- `docs/SPEC_GUIDE.md` — 明示境界付き非線形仕様の書き方
+
+**Success Metrics**:
+- 有界・低次非線形義務の Z3（nlsat）決定率: ≥ 70%
+- `nonlinear_arithmetic` タグによる無条件 Lean escalation 件数: ≥ 50% 削減
+- nlsat unknown/timeout の Lean 降格理由記録率: 100%
+
+---
+
 ### P9: NLAE Integration - Provable AI Runtime
 
 Anthropic の Natural Language Autoencoders (NLAE) 理論を mumei エコシステムに統合し、LLM の推論（内部状態）と形式検証（数学的真理）をシームレスに結合する証明可能な AI 実行基盤を構築する。
