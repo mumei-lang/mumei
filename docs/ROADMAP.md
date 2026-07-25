@@ -48,11 +48,12 @@ The current cross-repo execution order is fixed and should be reviewed with `doc
 
 The no-`.mm` front door remains `audit -> migrate-suggest -> heal`. `mumei-lean` is expanded only for Z3 `unknown` obligations, not `sat` / `unsat` / parser failure / audit findings, and now completes the V1 live generated theorem paths (eight in total: `abs_saturating`, `bounded_mul_with_overflow_check`, `constant_time_eq_flag`, `ff_zero_eq_zero`, `verified_insertion_sort_ascending`, `poly_bound_monotone`, `exists_pivot_partition`, `sum_nonneg_inductive`). The reference path `Generated.Std.Math.Abs.abs_saturating_correct` exports `lean_verified` with `known_witness_used = false` when `translator_version` and `bridge_lemma_hash` match; stale metadata is `stale_translator`, and `known_witness_used = true` remains fallback witness evidence only.
 
-Local docs were reviewed with the four-language no-`.mm` contract: Python, Rust,
-TypeScript, and Go all use the same eight audit keys, and language selection
+Local docs were reviewed with the five-language no-`.mm` contract: Python, Rust,
+TypeScript, Go, and Solidity all use the same eight audit keys, and language selection
 only swaps parser paths. Deterministic/no-LLM demos must keep Rust `a + b` i64
-overflow/bounds, TypeScript `name!.length` null/undefined, and Go `values[idx]`
-bounds / `user.Name` nil / `a + b` overflow in the Z3 counterexample `verification_violations` path, with
+overflow/bounds, TypeScript `name!.length` null/undefined, Go `values[idx]`
+bounds / `user.Name` nil / `a + b` overflow, and Solidity reentrancy/CEI/access-control
+findings in the Z3 counterexample `verification_violations` path, with
 `next_steps` as the only human-review entrypoint before migration/heal evidence.
 
 ## Overview

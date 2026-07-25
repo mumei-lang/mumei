@@ -19,7 +19,7 @@ Follow `docs/CROSS_PROJECT_ROADMAP.md` as the top-level contract. User-facing on
 ## First path: audit before `.mm`
 
 Use `mumei-agent audit --code-file ... --auto-migrate --auto-heal` or MCP `scan_and_fix` before asking a new user to author `.mm`. Both entrypoints must present the same gate order and the same names. The
-front door supports Python, Rust, TypeScript, and Go; language selection only
+front door supports Python, Rust, TypeScript, Go, and Solidity; language selection only
 changes the parser path, not the eight keys or their meanings:
 
 1. `audit` emits `spec_health_issues`, `verification_violations`, `verification_status`, `cross_validation_gaps`, and `next_steps`.

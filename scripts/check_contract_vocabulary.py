@@ -73,7 +73,7 @@ FORBIDDEN_ALIASES = [
     "human_review",
 ]
 REQUIRED_NO_MM_LANGUAGE_PHRASES = [
-    "Python, Rust, TypeScript, and Go",
+    "Python, Rust, TypeScript, Go, and Solidity",
     "parser path",
     "deterministic/no-LLM",
     "Rust `a + b` i64 overflow",
