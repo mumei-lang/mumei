@@ -9,7 +9,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from check_contract_vocabulary import (
+    FORBIDDEN_ALIASES,
     SYNC_DOCS,
+    _alias_key_patterns,
     _check_doc_contradiction_type_aliases,
     _count_mcp_tool_decorators,
     _extract_mcp_docstrings_ast,
@@ -163,6 +165,34 @@ def test_non_mcp_tool_decorators_ignored():
     ''')
     blocks = _extract_mcp_docstrings_ast(src)
     assert blocks == ["Real MCP tool."]
+
+
+def test_mcp_doc_table_descriptions_avoid_forbidden_aliases():
+    """docs/MCP.md tool table descriptions must not use forbidden contract aliases."""
+    mcp_doc = Path(__file__).resolve().parents[1] / "docs" / "MCP.md"
+    text = mcp_doc.read_text(encoding="utf-8")
+    table_match = re.search(
+        r"## MCP Tools\n\n\| Tool \| Description \|\n\|[-—]+\|[-—]+\|\n(.*?)(?:\n\n|\Z)",
+        text,
+        re.DOTALL,
+    )
+    assert table_match, "Could not find MCP tools table in docs/MCP.md"
+    table_body = table_match.group(1)
+
+    failures: list[str] = []
+    for line in table_body.splitlines():
+        cells = [c.strip() for c in line.split("|")]
+        if len(cells) < 3:
+            continue
+        tool_cell = cells[1].strip("`")
+        description = cells[2]
+        for alias in FORBIDDEN_ALIASES:
+            for pattern in _alias_key_patterns(alias):
+                match = pattern.search(description)
+                if match:
+                    failures.append(f"{tool_cell} description uses forbidden alias `{alias}`")
+                    break
+    assert failures == [], "; ".join(failures)
 
 
 def test_mcp_doc_table_matches_registered_tools():
