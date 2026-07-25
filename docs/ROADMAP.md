@@ -575,7 +575,7 @@ Detailed session plans for the next 8 implementation priorities are documented i
 | 17 | Plan 23: Regex Path Policies + URL Validation | ✅ RegexSafeFileRead, SecureHttpGet/Post, Z3 approximation improvements |
 | 18 | Plan 24: Modular Verification | ✅ effect_pre/effect_post contracts, cross-atom temporal state tracking |
 | 19 | Plan 25: LSP Completion & Definition | ✅ textDocument/completion, textDocument/definition, multi-editor docs |
-| 20 | V1-E-3: LSP Agent Diagnostics | ✅ `/// spec:` `spec_health_issues`, `.py`/`.rs`/`.ts`/`.tsx`/`.go` `verification_violations` / `cross_validation_gaps` / `verification_status`, graceful `mumei-agent` degrade |
+| 20 | V1-E-3: LSP Agent Diagnostics | ✅ `/// spec:` `spec_health_issues` / `cross_validation_gaps` + silent-failure fallback, `.py`/`.rs`/`.ts`/`.tsx`/`.go` `verification_violations` / `cross_validation_gaps` / `verification_status`, graceful `mumei-agent` degrade |
 
 ### Plan 22: PII Pipeline Example
 
