@@ -4,6 +4,11 @@
 !.env.example
 .cargo/
 
+# Python テスト実行生成物
+__pycache__/
+*.pyc
+.pytest_cache/
+
 # Rust ビルド成果物
 /target
 Cargo.lock
