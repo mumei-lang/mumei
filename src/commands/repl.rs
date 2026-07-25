@@ -138,6 +138,10 @@ fn repl_verify_agent_report(command: ReplAgentCommand, prompt_for_fixes: bool) {
             }
             repl_print_json_array("spec_health_issues", &report.spec_health_issues);
             repl_print_json_array("verification_violations", &report.verification_violations);
+            println!(
+                "  verification_status: {}",
+                report.verification_status.as_deref().unwrap_or("<none>")
+            );
             repl_print_json_array("cross_validation_gaps", &report.cross_validation_gaps);
             repl_print_json_array("next_steps", &report.next_steps);
             if prompt_for_fixes {
