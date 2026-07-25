@@ -470,6 +470,7 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     # Skip the GitHub Release upload on workflow_dispatch dry runs so the
     # Windows / musl build jobs can be validated without cutting a tag.
     if: github.event_name != 'workflow_dispatch' || inputs.dry_run != true
@@ -489,6 +490,7 @@ jobs:
   deploy-installer:
     needs: release
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     if: github.event_name != 'workflow_dispatch' || inputs.dry_run != true
     steps:
       - uses: actions/checkout@v4
@@ -677,6 +679,7 @@ jobs:
   update-homebrew:
     needs: release
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     if: github.event_name != 'workflow_dispatch' || inputs.dry_run != true
     steps:
       - name: Check HOMEBREW_TAP_TOKEN
