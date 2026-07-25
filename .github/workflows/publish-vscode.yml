@@ -42,6 +42,7 @@ permissions:
 jobs:
   package-and-publish:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: editors/vscode
