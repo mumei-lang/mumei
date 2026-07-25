@@ -456,7 +456,7 @@ fn append_agent_spec_diagnostics(
         &report.spec_health_issues,
         "spec_health_issues",
         &report.next_steps,
-        2,
+        1,
         Some(&spec_comments),
         diagnostics,
     );
