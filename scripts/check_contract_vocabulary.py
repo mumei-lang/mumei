@@ -56,6 +56,7 @@ HARNESS_KEYS = [
 NO_MM_KEYS = [
     "spec_health_issues",
     "verification_violations",
+    "verification_status",
     "cross_validation_gaps",
     "next_steps",
     "migration_hints",
