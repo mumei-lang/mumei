@@ -188,21 +188,39 @@ while [ "$#" -gt 0 ]; do
 done
 
 bad=0
+cross=0
 status=""
 case "$input" in
   *bad-spec*) bad=1 ;;
+  *cross-spec*) cross=1 ;;
   *bad-code*) bad=1 ; status="refuted" ;;
   *unverifiable*) status="unverifiable" ;;
   *verified*) status="verified" ;;
   *plain*|*missing*) status="missing" ;;
 esac
 if [ "$input" ]; then
-  while IFS= read -r line; do
+  while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
       *contradiction*|*Contradiction*|*矛盾*) bad=1 ;;
+      *cross*gap*|*Cross*Gap*) cross=1 ;;
       *bug*|*Bug*|*バグ*) bad=1 ; status="refuted" ;;
     esac
   done < "$input"
+fi
+
+if [ "$cross" = "1" ]; then
+  printf '%s\n' '{
+    "success": false,
+    "spec_health_issues": [],
+    "verification_violations": [],
+    "cross_validation_gaps": [
+      {"kind": "missing_contract", "message": "spec does not cover division by zero"}
+    ],
+    "next_steps": [
+      {"command": "mumei-agent validate-spec --input <spec> --format human"}
+    ]
+  }'
+  exit 1
 fi
 
 if [ "$bad" = "1" ]; then
@@ -339,6 +357,47 @@ fn repl_verify_spec_reports_agent_health_buckets() {
     );
     assert!(
         stdout.contains("next_steps"),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("Goodbye"),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn repl_verify_spec_reports_cross_validation_gaps() {
+    let fixture_dir = unique_temp_dir("mumei-repl-cross-gap-agent");
+    let _ = fs::remove_dir_all(&fixture_dir);
+    fs::create_dir_all(&fixture_dir).expect("create fake agent dir");
+    write_fake_mumei_agent(&fixture_dir);
+
+    let cross_spec = fixture_dir.join("cross-gap-spec.txt");
+    fs::write(
+        &cross_spec,
+        "cross gap: balance spec does not cover division by zero",
+    )
+    .expect("write cross gap spec");
+
+    let input = format!(":verify-spec {}\n:quit\n", cross_spec.display());
+    let (success, stdout, stderr) = run_repl_session_with_path(&input, Some(&fixture_dir));
+    let _ = fs::remove_dir_all(&fixture_dir);
+
+    assert!(
+        success,
+        "repl should exit successfully\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("FAIL"),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("cross_validation_gaps"),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("spec does not cover division by zero"),
         "stdout:\n{stdout}\nstderr:\n{stderr}"
     );
     assert!(
