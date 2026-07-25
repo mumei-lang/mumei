@@ -12,6 +12,18 @@ on:
       - 'tests/test_check_contract_vocabulary.py'
       - 'tests/test_ci_workflow_timeouts.py'
       - '.github/workflows/contract-vocabulary.yml'
+  push:
+    branches: [develop]
+    paths:
+      - 'docs/**'
+      - 'README.md'
+      - 'instruction.md'
+      - 'mcp_server.py'
+      - 'src/cli.rs'
+      - 'scripts/check_contract_vocabulary.py'
+      - 'tests/test_check_contract_vocabulary.py'
+      - 'tests/test_ci_workflow_timeouts.py'
+      - '.github/workflows/contract-vocabulary.yml'
   workflow_dispatch:
 
 jobs:
