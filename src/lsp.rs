@@ -450,15 +450,44 @@ fn append_agent_spec_diagnostics(
         return;
     };
 
+    let spec_diagnostics_before = diagnostics.len();
     append_agent_issue_diagnostics(
         uri,
         &report.spec_health_issues,
         "spec_health_issues",
         &report.next_steps,
+        1,
+        Some(&spec_comments),
+        diagnostics,
+    );
+    let cross_diagnostics_before = diagnostics.len();
+    append_agent_issue_diagnostics(
+        uri,
+        &report.cross_validation_gaps,
+        "cross_validation_gaps",
+        &report.next_steps,
         2,
         Some(&spec_comments),
         diagnostics,
     );
+
+    if !report.success
+        && diagnostics.len() == spec_diagnostics_before
+        && diagnostics.len() == cross_diagnostics_before
+    {
+        diagnostics.push(serde_json::json!({
+            "range": {
+                "start": { "line": 0, "character": 0 },
+                "end": { "line": 0, "character": 0 }
+            },
+            "severity": 1,
+            "source": "mumei-agent",
+            "message": "spec validation failed",
+            "relatedInformation": agent_next_step_related_information(
+                uri, 0, 0, 0, &report.next_steps
+            )
+        }));
+    }
 }
 
 fn append_agent_issue_diagnostics(
