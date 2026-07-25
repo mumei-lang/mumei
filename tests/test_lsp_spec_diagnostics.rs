@@ -84,7 +84,7 @@ fn lsp_frame(value: Value) -> Vec<u8> {
     format!("Content-Length: {}\r\n\r\n{}", body.len(), body).into_bytes()
 }
 
-fn run_lsp_did_open(path_env: &Path, uri: &str, text: &str) -> (bool, Vec<Value>, String) {
+fn run_lsp_session(path_env: &Path, messages: &[Value]) -> (bool, Vec<Value>, String) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_mumei"))
         .arg("lsp")
         .current_dir(env!("CARGO_MANIFEST_DIR"))
@@ -95,6 +95,24 @@ fn run_lsp_did_open(path_env: &Path, uri: &str, text: &str) -> (bool, Vec<Value>
         .spawn()
         .expect("spawn mumei lsp");
 
+    let stdin = child.stdin.as_mut().expect("open lsp stdin");
+    for message in messages {
+        stdin
+            .write_all(&lsp_frame(message.clone()))
+            .expect("write lsp message");
+    }
+    drop(child.stdin.take());
+
+    let output = child.wait_with_output().expect("wait for lsp");
+    let messages = parse_lsp_messages(&output.stdout);
+    (
+        output.status.success(),
+        messages,
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+fn run_lsp_did_open(path_env: &Path, uri: &str, text: &str) -> (bool, Vec<Value>, String) {
     let did_open = serde_json::json!({
         "jsonrpc": "2.0",
         "method": "textDocument/didOpen",
@@ -107,21 +125,7 @@ fn run_lsp_did_open(path_env: &Path, uri: &str, text: &str) -> (bool, Vec<Value>
             }
         }
     });
-    child
-        .stdin
-        .as_mut()
-        .expect("open lsp stdin")
-        .write_all(&lsp_frame(did_open))
-        .expect("write didOpen");
-    drop(child.stdin.take());
-
-    let output = child.wait_with_output().expect("wait for lsp");
-    let messages = parse_lsp_messages(&output.stdout);
-    (
-        output.status.success(),
-        messages,
-        String::from_utf8_lossy(&output.stderr).into_owned(),
-    )
+    run_lsp_session(path_env, &[did_open])
 }
 
 fn parse_lsp_messages(output: &[u8]) -> Vec<Value> {
@@ -750,5 +754,66 @@ atom bad_postcondition(x: i64)
             |diagnostic| diagnostic.get("source").and_then(Value::as_str) != Some("mumei-agent")
         ),
         "missing agent should not emit mumei-agent diagnostics\nmessages:\n{messages:#?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn lsp_updates_diagnostics_on_did_change_for_code() {
+    let fixture_dir = unique_temp_dir("mumei-lsp-did-change-agent");
+    let _ = fs::remove_dir_all(&fixture_dir);
+    fs::create_dir_all(&fixture_dir).expect("create fake agent dir");
+    write_fake_mumei_agent(&fixture_dir);
+
+    let source_path = fixture_dir.join("service.py");
+    let clean_source = "def credit(balance, amount):\n    return balance + amount\n";
+    let bad_source = "def credit(balance, amount):\n    # bug\n    return balance\n";
+    fs::write(&source_path, clean_source).expect("write python source");
+    let uri = format!("file://{}", source_path.display());
+
+    let did_open = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": &uri,
+                "languageId": "python",
+                "version": 1,
+                "text": clean_source
+            }
+        }
+    });
+    let did_change = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didChange",
+        "params": {
+            "textDocument": {
+                "uri": &uri,
+                "version": 2
+            },
+            "contentChanges": [{"text": bad_source}]
+        }
+    });
+
+    let (success, messages, stderr) = run_lsp_session(&fixture_dir, &[did_open, did_change]);
+    let diagnostics = diagnostics(&messages);
+    let _ = fs::remove_dir_all(&fixture_dir);
+
+    assert!(success, "lsp should exit successfully\nstderr:\n{stderr}");
+    let diagnostic = diagnostics
+        .iter()
+        .find(|d| d.get("source").and_then(Value::as_str) == Some("mumei-agent"))
+        .unwrap_or_else(|| {
+            panic!(
+                "expected mumei-agent diagnostic after didChange\nmessages:\n{messages:#?}\ndiagnostics:\n{diagnostics:#?}"
+            )
+        });
+    let message = diagnostic
+        .get("message")
+        .and_then(Value::as_str)
+        .expect("diagnostic message");
+    assert!(
+        message.contains("verification_violations"),
+        "expected verification_violations diagnostic, got: {message}"
     );
 }
