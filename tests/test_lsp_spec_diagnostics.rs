@@ -38,6 +38,10 @@ case "$1" in
         printf '%s\n' '{"success":true,"spec_health_issues":[],"verification_violations":[],"verification_status":"verified","cross_validation_gaps":[],"next_steps":[]}'
         exit 0
         ;;
+      *unverifiable*)
+        printf '%s\n' '{"success":false,"spec_health_issues":[],"verification_violations":[],"verification_status":"unverifiable","cross_validation_gaps":[],"next_steps":[{"command":"mumei-agent validate-code --input <path> --language python"}]}'
+        exit 1
+        ;;
     esac
     printf '%s\n' '{"success":false,"spec_health_issues":[],"verification_violations":[{"kind":"contract_violation","severity":"error","source_line":3,"message":"return value violates inferred contract"}],"verification_status":"refuted","cross_validation_gaps":[],"next_steps":[{"command":"mumei-agent validate-code --input <path> --language python"}]}'
     exit 1
@@ -377,6 +381,43 @@ fn lsp_suppresses_agent_diagnostics_for_verified_typescript() {
             .all(|d| d.get("source").and_then(Value::as_str) != Some("mumei-agent")),
         "verified code should not emit mumei-agent diagnostics\nmessages:\n{messages:#?}"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn lsp_reports_unverifiable_code_diagnostic() {
+    let fixture_dir = unique_temp_dir("mumei-lsp-unverifiable-py-agent");
+    let _ = fs::remove_dir_all(&fixture_dir);
+    fs::create_dir_all(&fixture_dir).expect("create fake agent dir");
+    write_fake_mumei_agent(&fixture_dir);
+
+    let source_path = fixture_dir.join("unverifiable_service.py");
+    let source = "def complex(balance, amount):\n    # z3 could not decide\n    return balance\n";
+    fs::write(&source_path, source).expect("write python source");
+    let uri = format!("file://{}", source_path.display());
+
+    let (success, messages, stderr) = run_lsp_did_open(&fixture_dir, &uri, source);
+    let diagnostics = diagnostics(&messages);
+    let _ = fs::remove_dir_all(&fixture_dir);
+
+    assert!(success, "lsp should exit successfully\nstderr:{stderr}");
+    let diagnostic = diagnostics
+        .iter()
+        .find(|d| d.get("source").and_then(Value::as_str) == Some("mumei-agent"))
+        .unwrap_or_else(|| {
+            panic!(
+                "expected mumei-agent diagnostic\nmessages:\n{messages:#?}\ndiagnostics:\n{diagnostics:#?}"
+            )
+        });
+    let message = diagnostic
+        .get("message")
+        .and_then(Value::as_str)
+        .expect("diagnostic message");
+    assert!(
+        message.contains("verification_status: unverifiable"),
+        "{message}"
+    );
+    assert_eq!(diagnostic.get("severity").and_then(Value::as_u64), Some(2));
 }
 
 #[test]
