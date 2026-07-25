@@ -459,6 +459,21 @@ fn append_agent_spec_diagnostics(
         Some(&spec_comments),
         diagnostics,
     );
+
+    if !report.success && diagnostics.is_empty() {
+        diagnostics.push(serde_json::json!({
+            "range": {
+                "start": { "line": 0, "character": 0 },
+                "end": { "line": 0, "character": 0 }
+            },
+            "severity": 1,
+            "source": "mumei-agent",
+            "message": "spec validation failed",
+            "relatedInformation": agent_next_step_related_information(
+                uri, 0, 0, 0, &report.next_steps
+            )
+        }));
+    }
 }
 
 fn append_agent_issue_diagnostics(
