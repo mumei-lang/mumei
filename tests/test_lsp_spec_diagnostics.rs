@@ -22,12 +22,18 @@ input=""
 case "$1" in
   validate-spec)
     input="$3"
-    case "$input" in
-      *good*|*clean*)
-        printf '%s\n' '{"success":true,"spec_health_issues":[],"verification_violations":[],"cross_validation_gaps":[],"next_steps":[]}'
-        exit 0
-        ;;
-    esac
+    clean=0
+    if [ -n "$input" ]; then
+      while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+          *clean*) clean=1 ;;
+        esac
+      done < "$input"
+    fi
+    if [ "$clean" = "1" ]; then
+      printf '%s\n' '{"success":true,"spec_health_issues":[],"verification_violations":[],"cross_validation_gaps":[],"next_steps":[]}'
+      exit 0
+    fi
     printf '%s\n' '{"success":false,"spec_health_issues":[{"kind":"contradiction","severity":"error","source_line":1,"message":"contradictory natural-language spec"}],"verification_violations":[],"cross_validation_gaps":[],"next_steps":[{"command":"mumei-agent validate-spec --input <spec> --format human"}]}'
     exit 1
     ;;
@@ -200,6 +206,38 @@ atom ok()
         "{message}"
     );
     assert!(message.contains("next_steps"), "{message}");
+}
+
+#[cfg(unix)]
+#[test]
+fn lsp_suppresses_agent_diagnostics_for_clean_spec_comments() {
+    let fixture_dir = unique_temp_dir("mumei-lsp-clean-spec-agent");
+    let _ = fs::remove_dir_all(&fixture_dir);
+    fs::create_dir_all(&fixture_dir).expect("create fake agent dir");
+    write_fake_mumei_agent(&fixture_dir);
+
+    let source_path = fixture_dir.join("clean_spec.mm");
+    let source = r#"
+/// spec: clean balance is non-negative
+atom ok(x: i64)
+    requires: x >= 0;
+    ensures: result == x;
+    body: { x }
+"#;
+    fs::write(&source_path, source).expect("write mumei source");
+    let uri = format!("file://{}", source_path.display());
+
+    let (success, messages, stderr) = run_lsp_did_open(&fixture_dir, &uri, source);
+    let diagnostics = diagnostics(&messages);
+    let _ = fs::remove_dir_all(&fixture_dir);
+
+    assert!(success, "lsp should exit successfully\nstderr:\n{stderr}");
+    assert!(
+        diagnostics
+            .iter()
+            .all(|d| d.get("source").and_then(Value::as_str) != Some("mumei-agent")),
+        "clean spec should not emit mumei-agent diagnostics\nmessages:\n{messages:#?}"
+    );
 }
 
 #[cfg(unix)]
