@@ -10,7 +10,7 @@
       },
       "body_expr": "{ if val >= min_val && val <= max_val { 1 } else { 0 } }",
       "body_summary": "{ if val >= min_val && val <= max_val { 1 } else { 0 } }",
-      "bridge_lemma_hash": "a8fd0b115fd29a6e87190bd041dbd5ab7a09ec89af6ac5b10ef152a1a0c0f643",
+      "bridge_lemma_hash": "ee8cd3ba96c3318b3f07445f4755619744d4e1f9a662af94f3cbce6d41ed4347",
       "content_hash": "99cb63daeb4b52b39c3d63fb66436ae52e44019d14de054ea2f79334c5fda839",
       "dependencies": [],
       "effects": [],
@@ -94,7 +94,7 @@
         "sort": "contract_obligation",
         "theorem_goal": "(min_val <= max_val) -> (result >= 0 && result <= 1)"
       },
-      "translator_version": "mumei-lean-translator-ir-v1",
+      "translator_version": "mumei-lean-translator-ir-v2",
       "z3_check_result": "unsat",
       "z3_result_class": "unsat"
     },
@@ -107,7 +107,7 @@
       },
       "body_expr": "{ if val < min_val { min_val } else { if val > max_val { max_val } else { val } } }",
       "body_summary": "{ if val < min_val { min_val } else { if val > max_val { max_val } else { val } } }",
-      "bridge_lemma_hash": "a8fd0b115fd29a6e87190bd041dbd5ab7a09ec89af6ac5b10ef152a1a0c0f643",
+      "bridge_lemma_hash": "ee8cd3ba96c3318b3f07445f4755619744d4e1f9a662af94f3cbce6d41ed4347",
       "content_hash": "31a4eb552a3f61dad072ecec50360be12198af4464ebfdfaf90351acb2027187",
       "dependencies": [],
       "effects": [],
@@ -191,7 +191,7 @@
         "sort": "contract_obligation",
         "theorem_goal": "(min_val <= max_val) -> (result >= min_val && result <= max_val)"
       },
-      "translator_version": "mumei-lean-translator-ir-v1",
+      "translator_version": "mumei-lean-translator-ir-v2",
       "z3_check_result": "unsat",
       "z3_result_class": "unsat"
     },
@@ -202,7 +202,7 @@
       },
       "body_expr": "{ if x >= 0 { x } else { 0 - x } }",
       "body_summary": "{ if x >= 0 { x } else { 0 - x } }",
-      "bridge_lemma_hash": "a8fd0b115fd29a6e87190bd041dbd5ab7a09ec89af6ac5b10ef152a1a0c0f643",
+      "bridge_lemma_hash": "ee8cd3ba96c3318b3f07445f4755619744d4e1f9a662af94f3cbce6d41ed4347",
       "content_hash": "624f48f0fb6d6313ff87fd60ace579c2664bdcd4daeabba50dcbf5f8b4b52f63",
       "dependencies": [],
       "effects": [],
@@ -272,7 +272,7 @@
         "sort": "contract_obligation",
         "theorem_goal": "(true) -> (result >= 0)"
       },
-      "translator_version": "mumei-lean-translator-ir-v1",
+      "translator_version": "mumei-lean-translator-ir-v2",
       "z3_check_result": "unsat",
       "z3_result_class": "unsat"
     }

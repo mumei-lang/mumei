@@ -66,6 +66,10 @@ def _category_result(name: str, **overrides) -> dict:
         "counterexample_catch_rate": 1.0,
         "lean_measured_files": 0,
         "avg_lean_solver_time_s": None,
+        "escalated_atoms": 0,
+        "lean_verified_atoms": 0,
+        "lean_discharge_rate": None,
+        "tactic_search_adopted": 0,
         "avg_solver_time_s": 0.5,
         "details": [],
     }
@@ -175,6 +179,52 @@ def test_escalation_candidate_count_parsing():
     assert module._escalation_candidate_count("") == 0
 
 
+def test_lean_verified_and_tactic_search_parsing():
+    module = _load_module()
+    output = (
+        "tactic search (build_failure) adopted `mumei_ff_mod` for atom "
+        "ff_mul_assoc_bench in 2.424s\n"
+        "tactic search (build_failure) exhausted 12 candidate(s) for atom other\n"
+        "  lean_verified: ff_zero_is_zero_bench\n"
+        "  lean_verified: ff_mul_assoc_bench\n"
+        "  lean_verified: ff_mul_assoc_bench\n"
+    )
+    assert module._lean_verified_count(output) == 2
+    assert module._tactic_search_adopted_count(output) == 1
+    assert module._lean_verified_count("") == 0
+    assert module._tactic_search_adopted_count("") == 0
+
+
+def test_lean_discharge_rate_and_signal():
+    module = _load_module()
+    partial = _category_result(
+        "arithmetic",
+        escalated_atoms=4,
+        lean_verified_atoms=3,
+        lean_discharge_rate=0.75,
+        tactic_search_adopted=2,
+        lean_measured_files=1,
+        avg_lean_solver_time_s=4.0,
+    )
+    assert "lean_escalation_undischarged" in module._category_signals(partial)
+    full = _category_result(
+        "arithmetic",
+        escalated_atoms=4,
+        lean_verified_atoms=4,
+        lean_discharge_rate=1.0,
+        tactic_search_adopted=2,
+        lean_measured_files=1,
+        avg_lean_solver_time_s=4.0,
+    )
+    assert "lean_escalation_undischarged" not in module._category_signals(full)
+    feedback = module.build_forge_feedback(
+        "2026-07-26 13:00 UTC", [full], {"trusted_ratio": 0.12}
+    )
+    [cat] = feedback["categories"]
+    assert cat["lean_discharge_rate"] == 1.0
+    assert cat["tactic_search_adopted"] == 2
+
+
 def test_lean_bridge_resolution_degrades_to_none(tmp_path, monkeypatch):
     module = _load_module()
     monkeypatch.setenv("MUMEI_LEAN_PATH", str(tmp_path))
@@ -215,6 +265,10 @@ def test_report_renders_counterexample_and_lean_columns():
         "counterexample_catch_rate": 1.0,
         "lean_measured_files": 0,
         "avg_lean_solver_time_s": None,
+        "escalated_atoms": 0,
+        "lean_verified_atoms": 0,
+        "lean_discharge_rate": None,
+        "tactic_search_adopted": 0,
         "avg_solver_time_s": 0.5,
         "details": [
             {
@@ -230,6 +284,8 @@ def test_report_renders_counterexample_and_lean_columns():
                 "escalation_candidates": 0,
                 "lean_solver_time_s": None,
                 "lean_status": "SKIP",
+                "lean_verified_atoms": 0,
+                "tactic_search_adopted": 0,
             },
             {
                 "file": "abs_min_int_fail.mm",
@@ -244,6 +300,8 @@ def test_report_renders_counterexample_and_lean_columns():
                 "escalation_candidates": 0,
                 "lean_solver_time_s": None,
                 "lean_status": "SKIP",
+                "lean_verified_atoms": 0,
+                "tactic_search_adopted": 0,
             },
         ],
     }
@@ -257,6 +315,8 @@ def test_report_renders_counterexample_and_lean_columns():
     report = module.format_report("2026-01-01 00:00 UTC", [category], stdlib)
     assert "Counterexample Catch" in report
     assert "Avg Lean Solver Time" in report
+    assert "Lean Discharge" in report
+    assert "Tactic Search" in report
     assert "100.00% (1/1)" in report
     assert "| FAIL | FAIL | yes |" in report.replace("  ", " ")
     assert "SKIP" in report
