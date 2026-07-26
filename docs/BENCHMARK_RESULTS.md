@@ -2,6 +2,15 @@
 
 Time-series benchmark results for the mumei verification pipeline.
 
+`python3 benchmarks/run_benchmarks.py --forge-feedback <path>` additionally emits
+a `mumei.benchmark_forge_feedback/v1` document that maps each category's weakness
+score (expected-outcome match rate, counterexample catch rate, trusted ratio,
+plus Z3 / Lean solver-time signals) to a negative priority delta over the stdlib
+domains in `CATEGORY_STD_DOMAINS`. Feed it to the vStd pipeline with
+`python -m agent forge --benchmark-feedback <path>` or
+`python -m agent proliferate --benchmark-feedback <path>`; it only reorders work
+the pipeline already planned.
+
 ## Benchmark Run — 2026-07-06 13:13 UTC
 
 ### Stdlib Health Summary
