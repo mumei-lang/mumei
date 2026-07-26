@@ -1572,10 +1572,14 @@ Lean solver times is planned" と future work 言及にとどまっていた。P
 成功例だけでなく「検証で捕捉されるべきバグを含む反例ケース」も体系的に収録して、実用性主張を定量的な
 エビデンスで裏付けた。Lean escalation を要する義務の solver 時間計測も収集対象に加えている。
 
-**達成状況（実測）**: 6 カテゴリ・37 ファイル・84 atom。反例ケースは 14 ファイルで、
+**達成状況（実測）**: 6 カテゴリ・39 ファイル・90 atom。反例ケースは 14 ファイルで、
 いずれも期待どおり検証で捕捉され（反例バグ捕捉率 100%）、expected どおりの結果になった率
-（一般化した `success_rate`）も全カテゴリ 100%。`--escalate-lean` を要する Z3 `unknown` atom は
-現時点で 0 件のため、Lean solver time はゼロコストで `SKIP` に縮退する。回帰ゲートは
+（一般化した `success_rate`）も全カテゴリ 100%。`benchmarks/arithmetic/finite_field_modular.mm`
+と `benchmarks/domain_compliance/modular_commitment.mm` の 6 atom は Z3 が実際に `unknown` を返し、
+mumei-lean bridge へ escalate されて 6/6 が `lean_verified`（うち 4 件は自動タクティク探索が採用、
+mumei-lean `docs/LEAN_TRANSLATOR_SPEC.md` §12）。したがって `lean_solver_time_s` は `SKIP` ではなく
+実測値を記録し、カテゴリ別 Lean discharge 率も `docs/BENCHMARK_RESULTS.md` に時系列蓄積される。
+mumei-lean bridge が無い環境では従来どおりゼロコストで `SKIP` に縮退する。回帰ゲートは
 `python3 -m pytest tests/test_benchmark_suite.py -q`。
 
 Cross-project 整合: この拡張は `docs/CROSS_PROJECT_ROADMAP.md` の canonical contract に従属する

@@ -325,6 +325,13 @@ pub struct EscalationCandidate {
     pub effects: Vec<String>,
     pub requires: String,
     pub ensures: String,
+    /// Atom body, needed by the mumei-lean bridge to relate `result` to the
+    /// computation: without it a generated theorem states an unprovable goal
+    /// over an unconstrained `result`.
+    #[serde(default)]
+    pub body_expr: String,
+    #[serde(default)]
+    pub body_summary: String,
     pub escalation_reason: EscalationReason,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logic_fragment_tag: Option<LogicFragment>,

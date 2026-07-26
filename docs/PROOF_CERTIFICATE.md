@@ -131,9 +131,9 @@ CLI values take precedence over environment values. `--intent-fidelity` accepts 
   "effects": ["Log"],
   "requires": "x >= 0",
   "ensures": "result >= x",
-  "translator_version": "mumei-lean-translator-ir-v1",
+  "translator_version": "mumei-lean-translator-ir-v2",
   "binder_mapping": { "x": "x", "result": "result" },
-  "bridge_lemma_hash": "a8fd0b115fd29a6e87190bd041dbd5ab7a09ec89af6ac5b10ef152a1a0c0f643",
+  "bridge_lemma_hash": "ee8cd3ba96c3318b3f07445f4755619744d4e1f9a662af94f3cbce6d41ed4347",
   "manual_lemma_reason": null,
   "retry_policy_fingerprint": "9bb6d4f2...",
   "attempt_summary": {
@@ -254,6 +254,8 @@ Mumei emits a typed escalation bundle for Z3 obligations that are outside the de
 ```
 escalation_bundle.json -> generated Lean source -> .olean/result certificate -> upgraded proof certificate
 ```
+
+Every candidate carries `body_expr` / `body_summary` alongside `requires` / `ensures`: the bridge lowers the body into the generated theorem so `result` is tied to the computation. Without the body a generated theorem states an unprovable goal over an unconstrained `result`, and body-semantics obligations (for example the finite-field paths) could never be discharged from a bundle.
 
 The Mumei compiler never accepts an upgraded `lean_verified` atom unless the atom source hash still matches and the translator contract metadata is current. A mismatched `translator_version` or `bridge_lemma_hash` is reported as `stale_translator`; missing Lean tooling is `lake_missing`; incomplete generated obligations are `partial_translation`. These names match the Lean bridge contract and are the only failure-class terms consumers should key on.
 

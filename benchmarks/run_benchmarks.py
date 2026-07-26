@@ -7,6 +7,9 @@ Collects:
 - Z3 solver time per atom
 - Lean escalation solver time for Z3 ``unknown`` obligations (P16-B); degrades to
   ``SKIP`` at zero cost when the mumei-lean bridge is unavailable
+- Lean discharge rate per category: how many escalated obligations the bridge
+  returned as ``lean_verified``, and how many of those an automatic tactic search
+  adopted a tactic for (mumei-lean ``docs/LEAN_TRANSLATOR_SPEC.md`` §12)
 - Trusted atom ratio across the stdlib
 - Time-series append to ``docs/BENCHMARK_RESULTS.md``
 
@@ -65,6 +68,13 @@ SLOW_LEAN_SOLVER_TIME_S = 60.0
 # its leading comment block declares ``expected: FAIL``.
 EXPECTED_FAIL_RE = re.compile(r"expected:\s*FAIL", re.IGNORECASE)
 ESCALATION_CANDIDATE_RE = re.compile(r"(\d+)\s+Lean escalation candidate")
+# `mumei verify --escalate-lean` prints one line per promoted obligation, and the
+# mumei-lean bridge prints one line per obligation whose proof came from the
+# automatic tactic search.
+LEAN_VERIFIED_RE = re.compile(r"(?m)^\s*lean_verified:\s+(\S+)")
+TACTIC_SEARCH_ADOPTED_RE = re.compile(
+    r"(?m)^tactic search \((\w+)\) adopted `([^`]+)` for atom (\S+)"
+)
 LEAN_VERIFY_TIMEOUT_S = 300
 
 
@@ -164,11 +174,15 @@ def _verify_file(
         "escalation_candidates": _escalation_candidate_count(stdout),
         "lean_solver_time_s": None,
         "lean_status": "SKIP",
+        "lean_verified_atoms": 0,
+        "tactic_search_adopted": 0,
     }
     if result["escalation_candidates"] and lean_bridge is not None:
         lean = _measure_lean_escalation(binary, path)
         result["lean_solver_time_s"] = lean["lean_solver_time_s"]
         result["lean_status"] = lean["lean_status"]
+        result["lean_verified_atoms"] = lean["lean_verified_atoms"]
+        result["tactic_search_adopted"] = lean["tactic_search_adopted"]
     return result
 
 
@@ -177,8 +191,21 @@ def _escalation_candidate_count(stdout: str) -> int:
     return int(match.group(1)) if match else 0
 
 
+def _lean_verified_count(output: str) -> int:
+    return len({m.group(1) for m in LEAN_VERIFIED_RE.finditer(output)})
+
+
+def _tactic_search_adopted_count(output: str) -> int:
+    return len({m.group(3) for m in TACTIC_SEARCH_ADOPTED_RE.finditer(output)})
+
+
 def _measure_lean_escalation(binary: str, path: Path) -> dict:
-    """Time the mumei-lean escalation of a file's Z3 ``unknown`` obligations."""
+    """Time the mumei-lean escalation of a file's Z3 ``unknown`` obligations.
+
+    Also counts how many escalated obligations came back as ``lean_verified``
+    and how many of those the mumei-lean automatic tactic search discharged, so
+    the report separates "Lean was invoked" from "Lean closed the goal".
+    """
     start = time.monotonic()
     try:
         proc = subprocess.run(
@@ -190,12 +217,27 @@ def _measure_lean_escalation(binary: str, path: Path) -> dict:
         )
         elapsed = time.monotonic() - start
         status = "MEASURED" if proc.returncode == 0 else "FAIL"
+        output = proc.stdout + proc.stderr
     except subprocess.TimeoutExpired:
-        elapsed = float(LEAN_VERIFY_TIMEOUT_S)
-        status = "TIMEOUT"
+        return {
+            "lean_solver_time_s": float(LEAN_VERIFY_TIMEOUT_S),
+            "lean_status": "TIMEOUT",
+            "lean_verified_atoms": 0,
+            "tactic_search_adopted": 0,
+        }
     except FileNotFoundError:
-        return {"lean_solver_time_s": None, "lean_status": "SKIP"}
-    return {"lean_solver_time_s": round(elapsed, 3), "lean_status": status}
+        return {
+            "lean_solver_time_s": None,
+            "lean_status": "SKIP",
+            "lean_verified_atoms": 0,
+            "tactic_search_adopted": 0,
+        }
+    return {
+        "lean_solver_time_s": round(elapsed, 3),
+        "lean_status": status,
+        "lean_verified_atoms": _lean_verified_count(output),
+        "tactic_search_adopted": _tactic_search_adopted_count(output),
+    }
 
 
 def run_category_benchmarks(
@@ -220,6 +262,8 @@ def run_category_benchmarks(
                 "escalation_candidates": 0,
                 "lean_solver_time_s": None,
                 "lean_status": "SKIP",
+                "lean_verified_atoms": 0,
+                "tactic_search_adopted": 0,
             }
         results.append({
             "file": mm_file.name,
@@ -234,6 +278,8 @@ def run_category_benchmarks(
             "escalation_candidates": verify["escalation_candidates"],
             "lean_solver_time_s": verify["lean_solver_time_s"],
             "lean_status": verify["lean_status"],
+            "lean_verified_atoms": verify["lean_verified_atoms"],
+            "tactic_search_adopted": verify["tactic_search_adopted"],
         })
     total_atoms = sum(r["atoms"] for r in results)
     total_trusted = sum(r["trusted"] for r in results)
@@ -244,6 +290,10 @@ def run_category_benchmarks(
     lean_times = [
         r["lean_solver_time_s"] for r in results if r["lean_solver_time_s"] is not None
     ]
+    escalated_atoms = sum(
+        r["escalation_candidates"] for r in results if r["lean_solver_time_s"] is not None
+    )
+    lean_verified_atoms = sum(r["lean_verified_atoms"] for r in results)
     return {
         "category": category,
         "files": len(results),
@@ -260,6 +310,11 @@ def run_category_benchmarks(
             counterexamples_caught / len(counterexamples), 4
         ) if counterexamples else None,
         "lean_measured_files": len(lean_times),
+        "escalated_atoms": escalated_atoms,
+        "lean_verified_atoms": lean_verified_atoms,
+        "lean_discharge_rate": round(lean_verified_atoms / escalated_atoms, 4)
+        if escalated_atoms else None,
+        "tactic_search_adopted": sum(r["tactic_search_adopted"] for r in results),
         "avg_lean_solver_time_s": round(sum(lean_times) / len(lean_times), 3)
         if lean_times else None,
         "avg_solver_time_s": round(
@@ -301,6 +356,9 @@ def _category_signals(cat: dict) -> list[str]:
     lean_time = cat["avg_lean_solver_time_s"]
     if lean_time is not None and lean_time > SLOW_LEAN_SOLVER_TIME_S:
         signals.append("lean_escalation_cost")
+    discharge_rate = cat["lean_discharge_rate"]
+    if discharge_rate is not None and discharge_rate < 1.0:
+        signals.append("lean_escalation_undischarged")
     return signals
 
 
@@ -344,6 +402,10 @@ def build_forge_feedback(
             "avg_solver_time_s": cat["avg_solver_time_s"],
             "avg_lean_solver_time_s": cat["avg_lean_solver_time_s"],
             "lean_measured_files": cat["lean_measured_files"],
+            "escalated_atoms": cat["escalated_atoms"],
+            "lean_verified_atoms": cat["lean_verified_atoms"],
+            "lean_discharge_rate": cat["lean_discharge_rate"],
+            "tactic_search_adopted": cat["tactic_search_adopted"],
             "weakness_score": score,
             "signals": _category_signals(cat),
             "std_domains": domains,
@@ -400,10 +462,13 @@ def format_report(
         "",
         "Success Rate is the share of files whose verification outcome matched the",
         "expected outcome (`expected: PASS` or `expected: FAIL`). Counterexample Catch",
-        "is the share of `expected: FAIL` files the verifier correctly rejected.",
+        "is the share of `expected: FAIL` files the verifier correctly rejected. Lean",
+        "Discharge is the share of escalated (Z3 `unknown`) obligations the mumei-lean",
+        "bridge returned as `lean_verified`; the parenthesised count is how many of them",
+        "the automatic tactic search discharged.",
         "",
-        "| Category | Files | Atoms | Trusted | Success Rate | Counterexample Catch | Avg Solver Time | Avg Lean Solver Time |",
-        "|----------|-------|-------|---------|--------------|----------------------|-----------------|----------------------|",
+        "| Category | Files | Atoms | Trusted | Success Rate | Counterexample Catch | Avg Solver Time | Avg Lean Solver Time | Lean Discharge | Tactic Search |",
+        "|----------|-------|-------|---------|--------------|----------------------|-----------------|----------------------|----------------|---------------|",
     ]
     for cat in category_results:
         lines.append(
@@ -412,7 +477,10 @@ def format_report(
             f"| {_fmt_rate(cat['counterexample_catch_rate'])} "
             f"({cat['counterexamples_caught']}/{cat['counterexample_files']}) "
             f"| {cat['avg_solver_time_s']:.3f}s "
-            f"| {_fmt_lean_time(cat['avg_lean_solver_time_s'])} |"
+            f"| {_fmt_lean_time(cat['avg_lean_solver_time_s'])} "
+            f"| {_fmt_rate(cat['lean_discharge_rate'])} "
+            f"({cat['lean_verified_atoms']}/{cat['escalated_atoms']}) "
+            f"| {cat['tactic_search_adopted']} |"
         )
     lines.append("")
     lines.append("<details><summary>Per-file details</summary>")
@@ -421,16 +489,18 @@ def format_report(
         lines.append(f"#### {cat['category']}")
         lines.append("")
         lines.append(
-            "| File | Atoms | Trusted | Expected | Actual | Match | Solver Time | Lean Solver Time |"
+            "| File | Atoms | Trusted | Expected | Actual | Match | Solver Time | Lean Solver Time | Escalated | lean_verified | Tactic Search |"
         )
         lines.append(
-            "|------|-------|---------|----------|--------|-------|-------------|------------------|"
+            "|------|-------|---------|----------|--------|-------|-------------|------------------|-----------|---------------|---------------|"
         )
         for d in cat["details"]:
             lines.append(
                 f"| {d['file']} | {d['atoms']} | {d['trusted']} "
                 f"| {d['expected']} | {d['actual']} | {'yes' if d['matched'] else 'no'} "
-                f"| {d['solver_time_s']:.3f}s | {_fmt_lean_time(d['lean_solver_time_s'])} |"
+                f"| {d['solver_time_s']:.3f}s | {_fmt_lean_time(d['lean_solver_time_s'])} "
+                f"| {d['escalation_candidates']} | {d['lean_verified_atoms']} "
+                f"| {d['tactic_search_adopted']} |"
             )
         lines.append("")
     lines.append("</details>")

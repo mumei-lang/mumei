@@ -23,6 +23,8 @@ pub fn generate_escalation_bundle(cert: &ProofCertificate) -> EscalationBundle {
                 effects: atom.effects.clone(),
                 requires: atom.requires.clone(),
                 ensures: atom.ensures.clone(),
+                body_expr: atom.body_expr.clone(),
+                body_summary: atom.body_summary.clone(),
                 escalation_reason,
                 logic_fragment_tag: atom.logic_fragment_tag,
                 logic_fragment_tags: atom.logic_fragment_tags.clone(),
