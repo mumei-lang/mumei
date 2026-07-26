@@ -881,12 +881,12 @@ Implemented components include:
 Known limitations and active areas include:
 
 - `std/http_server.mm` relies on extern FFI contracts that are trusted at the language boundary; `std/container/sorted_map.mm` trusted-atom remainder has been eliminated (sorted_map_insert is now Z3-verified or Lean-escalatable);
-- Lean escalation now has a typed translator v2 contract with obligation class taxonomy, CLI bundle/metrics output, and acceptance metrics; bridge lemmas cover quantifier, finite-field, group-theory, crypto, smart-contract, RTGS, and unknown obligation classes;
+- Lean escalation now has a typed translator v2 contract with obligation class taxonomy, CLI bundle/metrics output, and acceptance metrics; every one of the eight obligation classes (quantifier, finite-field, group-theory, crypto, arithmetic, smart-contract, RTGS, unknown) carries backing bridge lemmas, and `bridge_lemma_hash` is derived from that catalog so lemma-surface drift is detected mechanically. Nine live generated theorem paths reach `lean_verified`, and each escalation reports its `lake build` cost as `lean_solver_time_s`; obligations that still need a hand-written lemma remain marked rather than promoted;
 - proof-friendly specification guidance is integrated into the generation pipeline, but its P8-C metrics must be monitored over larger task populations;
 - P14 Cross-Validation Framework (V1-A through V1-E) is implemented across `mumei`, `mumei-agent`, and the `mumei-demo/scenarios/spec_code_verification_suite` fixture; ongoing work focuses on hardening its metrics over larger task populations;
 - the natural-language extraction pipeline must conservatively distinguish missing requirements from underspecified intent;
 - arXiv-ready presentation will require replacing Mermaid diagrams with TikZ or figures;
-- benchmark evaluation suite (`benchmarks/run_benchmarks.py`) now collects verification success rates, solver times, and trusted atom ratios across `dafny_puzzles` and `svcomp_style` categories, with time-series accumulation in `docs/BENCHMARK_RESULTS.md`; its expansion is now a tracked roadmap task (`docs/ROADMAP.md` P16) that adds arithmetic, state-machine, concurrency, and domain-compliance categories with counterexample (bug-catching) cases and Lean solver-time collection, targeting a growth from 6 atoms across 2 categories to at least 60 atoms across at least 6 categories.
+- benchmark evaluation suite (`benchmarks/run_benchmarks.py`) collects verification outcomes, solver times, and trusted atom ratios with time-series accumulation in `docs/BENCHMARK_RESULTS.md`. The `docs/ROADMAP.md` P16 expansion is implemented: `arithmetic`, `state_machine`, `concurrency`, and `domain_compliance` categories join `dafny_puzzles` and `svcomp_style`, growing the suite from 6 atoms across 2 categories to 84 atoms across 6 categories, and 14 counterexample (bug-catching) cases are all rejected by verification as expected (100% catch rate, with `success_rate` generalized to the expected-outcome match rate). Lean escalation solver time is collected per file as `lean_solver_time_s` and degrades to `SKIP` at zero cost when no Z3 `unknown` obligation arises or the `mumei-lean` bridge is absent; feeding these results back into the standard-library expansion pipeline remains future work.
 
 ## 9. Conclusion and Future Work
 
@@ -896,7 +896,7 @@ Mumei demonstrates a practical path for AI-generated software that is not merely
 
 Future work includes:
 
-1. expanding Lean theorem templates and bridge lemmas for more classes of `unknown` atoms;
+1. automatic tactic search for `unknown` atoms that the obligation-class bridge lemma templates cannot discharge (template selection itself is implemented for all eight classes);
 2. reducing trusted standard-library atoms through SI-5 forging and Lean proofs;
 3. improving proof-friendly specification guidance with P8-C data from larger generation cohorts;
 4. improving natural-language specification extraction with ambiguity reporting;
@@ -906,9 +906,8 @@ Future work includes:
 8. validating the approach on larger safety-critical and compliance-heavy systems;
 9. expanding NLAE capabilities for multi-agent verification workflows;
 10. completing P13 agent harness externalization with telemetry and ablation metrics;
-11. enhancing Lean theorem templates for additional obligation classes;
-12. integrating benchmark evaluation results into the standard library expansion pipeline;
-13. expanding the benchmark evaluation suite (`docs/ROADMAP.md` P16) with arithmetic, state-machine, concurrency, and domain-compliance categories that pair success cases with counterexample (bug-catching) cases, adding Lean escalation solver-time collection, and accumulating per-category success rates, solver times, and trusted ratios in `docs/BENCHMARK_RESULTS.md` as quantitative evidence for the practicality claim. The P14 Cross-Validation Framework (V1-A through V1-E) that earlier appeared here is now implemented across `mumei`, `mumei-agent`, and `mumei-demo`.
+11. integrating benchmark evaluation results into the standard library expansion pipeline;
+12. growing the benchmark evaluation suite beyond its current 84 atoms across 6 categories, and exercising the Lean escalation solver-time channel on obligations that actually reach Z3 `unknown`. The `docs/ROADMAP.md` P16 expansion itself (arithmetic, state-machine, concurrency, and domain-compliance categories pairing success cases with counterexample cases, plus `lean_solver_time_s` collection and per-category expected-outcome match rates, counterexample catch rates, solver times, and trusted ratios in `docs/BENCHMARK_RESULTS.md`) is now implemented, as is the P14 Cross-Validation Framework (V1-A through V1-E) across `mumei`, `mumei-agent`, and `mumei-demo`.
 
 The broader claim is that formal methods and AI generation are complementary. LLMs are good at proposing candidates; solvers and proof assistants are good at rejecting invalid ones. Mumei combines them into a single forging loop.
 
