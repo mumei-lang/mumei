@@ -1560,26 +1560,32 @@ mumei-agent 側で `OTEL_ENABLED=true` の場合、`MumeiClient.verify` 等の `
 
 ---
 
-## P16: Benchmark Evaluation Suite Expansion（ベンチマーク評価スイート拡張）
+## P16: Benchmark Evaluation Suite Expansion（ベンチマーク評価スイート拡張）✅ Implemented
 
-現状のベンチマークは `benchmarks/dafny_puzzles/`（`absolute_value.mm` / `max.mm` / `swap.mm`）と
+拡張前のベンチマークは `benchmarks/dafny_puzzles/`（`absolute_value.mm` / `max.mm` / `swap.mm`）と
 `benchmarks/svcomp_style/`（`array_bounds.mm` / `integer_overflow.mm` / `loop_invariant.mm`）の
 計 2 カテゴリ・6 ファイル・6 atom のみで、`benchmarks/run_benchmarks.py` が検証成功率・Z3 solver 時間・
-trusted 比率を収集し `docs/BENCHMARK_RESULTS.md` に時系列で蓄積している。この規模の小ささが Mumei の
+trusted 比率を収集し `docs/BENCHMARK_RESULTS.md` に時系列で蓄積していた。この規模の小ささが Mumei の
 実用性主張の最大の弱点であり、`paper/index.md` でも "further expansion to cover more categories and
 Lean solver times is planned" と future work 言及にとどまっていた。P16 では、Mumei が強みを主張する領域
 （算術・有限状態機械・並行性・ドメイン固有コンプライアンス）に対応するベンチマークカテゴリを追加し、
 成功例だけでなく「検証で捕捉されるべきバグを含む反例ケース」も体系的に収録して、実用性主張を定量的な
-エビデンスで裏付ける。Lean escalation を要する義務の solver 時間計測も収集対象に加える。
+エビデンスで裏付けた。Lean escalation を要する義務の solver 時間計測も収集対象に加えている。
+
+**達成状況（実測）**: 6 カテゴリ・37 ファイル・84 atom。反例ケースは 14 ファイルで、
+いずれも期待どおり検証で捕捉され（反例バグ捕捉率 100%）、expected どおりの結果になった率
+（一般化した `success_rate`）も全カテゴリ 100%。`--escalate-lean` を要する Z3 `unknown` atom は
+現時点で 0 件のため、Lean solver time はゼロコストで `SKIP` に縮退する。回帰ゲートは
+`python3 -m pytest tests/test_benchmark_suite.py -q`。
 
 Cross-project 整合: この拡張は `docs/CROSS_PROJECT_ROADMAP.md` の canonical contract に従属する
 mumei-local な実装チェックポイントであり、競合する優先順位を導入しない。ベンチマーク結果は
 mumei-agent の LLM 生成コード検証成功率測定と mumei-lean の escalation 成功率計測にも接続し、
 既存の `harness_contract` / `artifact_paths` / `lean_verified` 語彙を保持する。
 
-**P16-A: 新規ベンチマークカテゴリの追加**
+**P16-A: 新規ベンチマークカテゴリの追加** ✅
 
-追加する 4 カテゴリと、各カテゴリに収録する複数ファイル・複数 atom の方針:
+追加した 4 カテゴリと、各カテゴリに収録した複数ファイル・複数 atom:
 
 - `benchmarks/arithmetic/` — 有界加減乗算・オーバーフロー境界・飽和演算・不動小数点・非線形（低次多項式）。
   成功例に加え、オーバーフローを見落とす契約や境界外 index など**検証で捕捉されるべきバグを含む反例ケース**を収録。
@@ -1594,62 +1600,70 @@ mumei-agent の LLM 生成コード検証成功率測定と mumei-lean の escal
   各サブ領域で成功例と、規制違反・不変条件破壊を捕捉する反例ケースを対に収録。
 
 各カテゴリは複数ファイル・複数 atom を持ち、反例ケースは `run_benchmarks.py` が期待どおり
-`FAIL`（Z3 が counterexample を返す）と判定できることをもって「バグ捕捉」の証跡とする。
+`FAIL`（Z3 counterexample・temporal effect 違反・move 解析違反・網羅性欠如のいずれか）と判定できる
+ことをもって「バグ捕捉」の証跡とする。反例ケースはファイル名（`*_fail.mm`）と冒頭コメントの
+`expected: FAIL` の双方で明示する。
 
-**P16-B: Lean solver time 計測の収集対象化**
+**P16-B: Lean solver time 計測の収集対象化** ✅
 
 Z3 `unknown` により Lean escalation を要するケースについて、Lean 側の solver / build 時間を
-`run_benchmarks.py` の収集対象に含める。既存の `.proof-cert.json` / `.lean-cert.json` パイプライン
-（`mumei-lean` bridge）と連携し、`z3_check_result: "lean_verified"` へ昇格した atom の
-escalation 時間をカテゴリ別・atom 別に記録する。
+`run_benchmarks.py` の収集対象に含める。`mumei verify --proof-cert --escalate-lean` 経由で既存の
+`.proof-cert.json` / `.lean-cert.json` パイプライン（`mumei-lean` bridge）と連携し、escalation 時間を
+`details` の `lean_solver_time_s` としてカテゴリ別・ファイル別に記録する。`run_benchmarks.py` の
+`_resolve_lean_bridge` は `src/commands/verify.rs` の `resolve_mumei_lean_bridge` と同じ解決順
+（`MUMEI_LEAN_PATH` → `../mumei-lean/scripts/bridge.py`）を用い、bridge 不在時、または Lean
+escalation candidate が 0 件のときは追加プロセスを起動せず `SKIP` として縮退する（`--no-lean` で
+明示的に無効化も可能）。
 
-**Implementation Plan**:
+**Implementation Plan**（1〜4 は実装済み、5 のみ Planned）:
 
 ```
-1. カテゴリ・ベンチマークファイルの追加
+1. カテゴリ・ベンチマークファイルの追加 ✅
    - benchmarks/{arithmetic,state_machine,concurrency,domain_compliance}/ を新設
    - 各カテゴリに成功例 (.mm) と反例ケース (.mm) を複数配置
    - 反例ケースはファイル名または冒頭コメントで expected: FAIL を明示し、
      Z3 counterexample が返ることを期待値とする
 
-2. run_benchmarks.py のカテゴリ拡張と反例ハンドリング
+2. run_benchmarks.py のカテゴリ拡張と反例ハンドリング ✅
    - CATEGORIES 辞書に 4 カテゴリを追加
    - _verify_file を拡張し、expected 成否 (PASS/FAIL) と実測を突き合わせて
      「反例が正しく捕捉されたか」を集計軸に追加する
    - success_rate は「期待どおりの結果になった率」に一般化する
 
-3. Lean solver time 計測の統合 (P16-B)
+3. Lean solver time 計測の統合 (P16-B) ✅
    - z3_check_result == "unknown" の atom について mumei-lean bridge を呼び出し、
      Lean escalation の solver/build 時間を計測して details に lean_solver_time_s を追加
    - Lean 未使用/未セットアップ環境では SKIP としてゼロコストで縮退させる
    - カテゴリ別に avg_lean_solver_time_s を集計
 
-4. docs/BENCHMARK_RESULTS.md フォーマット拡張
+4. docs/BENCHMARK_RESULTS.md フォーマット拡張 ✅
    - Category Results テーブルに反例捕捉率と avg Lean solver time 列を追加
    - Per-file details に expected/actual と lean_solver_time_s を追加
    - 既存の時系列 append 構造 (--- 区切り) は維持
 
-5. 標準ライブラリ拡張パイプラインへの結果統合
+5. 標準ライブラリ拡張パイプラインへの結果統合 (Planned)
    - ベンチマーク結果を vStd forge / proliferate ループのフィードバックに接続
      (paper future work 項目 12 に対応)
 ```
 
-**Files to modify/create**:
-- `benchmarks/arithmetic/*.mm` — 算術カテゴリ（成功例＋反例ケース）
-- `benchmarks/state_machine/*.mm` — 有限状態機械カテゴリ（成功例＋反例ケース）
-- `benchmarks/concurrency/*.mm` — 並行性カテゴリ（成功例＋反例ケース）
-- `benchmarks/domain_compliance/*.mm` — ドメイン固有コンプライアンスカテゴリ（成功例＋反例ケース）
+**Files modified/created**:
+- `benchmarks/arithmetic/*.mm` — 算術カテゴリ（成功例 5 ファイル＋反例 3 ファイル）
+- `benchmarks/state_machine/*.mm` — 有限状態機械カテゴリ（成功例 3 ファイル＋反例 3 ファイル）
+- `benchmarks/concurrency/*.mm` — 並行性カテゴリ（成功例 4 ファイル＋反例 4 ファイル）
+- `benchmarks/domain_compliance/*.mm` — ドメイン固有コンプライアンスカテゴリ（成功例 5 ファイル＋反例 4 ファイル）
 - `benchmarks/run_benchmarks.py` — `CATEGORIES` 拡張、反例 expected/actual 突合、Lean solver time 収集
+- `tests/test_benchmark_suite.py` — カテゴリ登録・`expected` 分類・Lean 縮退の回帰ゲート
 - `docs/BENCHMARK_RESULTS.md` — 反例捕捉率・Lean solver time 列の追加（自動追記）
 - `paper/index.md` — Known limitations / Future Work の実装状態同期
 
-**Success Metrics**:
-- 総 atom 数: 現状 6 → **≥ 60**（各新規カテゴリで複数ファイル・複数 atom を収録）
-- ベンチマークカテゴリ数: 現状 2 → **≥ 6**（既存 2 + 新規 4）
-- 各カテゴリの検証成功率・平均 Z3 solver 時間・trusted 比率を `docs/BENCHMARK_RESULTS.md` に時系列蓄積: 100%
-- 反例ケースが期待どおり Z3 counterexample を返し `FAIL` と判定される率（バグ捕捉率）: 100%
-- Lean escalation を要する atom の平均 Lean solver 時間をカテゴリ別に記録: 100%（Lean 利用可能環境）
-- ベンチマーク結果を既存標準ライブラリ拡張パイプライン（vStd forge / proliferate）へ統合（paper future work 項目 12）
+**Success Metrics（実測）**:
+- 総 atom 数: 6 → **84**（目標 ≥ 60）✅
+- ベンチマークカテゴリ数: 2 → **6**（目標 ≥ 6）✅
+- 各カテゴリの検証成功率・平均 Z3 solver 時間・trusted 比率を `docs/BENCHMARK_RESULTS.md` に時系列蓄積: 100% ✅
+- 反例ケースが期待どおり `FAIL` と判定される率（バグ捕捉率）: **14/14 = 100%** ✅
+- Lean escalation を要する atom の平均 Lean solver 時間をカテゴリ別に記録: 収集経路を実装済み。現状は
+  Z3 `unknown` atom が 0 件のため全カテゴリ `SKIP`（Lean 利用可能環境でも candidate が出た時点で計測される）✅
+- ベンチマーク結果を既存標準ライブラリ拡張パイプライン（vStd forge / proliferate）へ統合（paper future work 項目 12）: Planned
 
 ---
 
