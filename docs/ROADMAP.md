@@ -1615,7 +1615,17 @@ Z3 `unknown` により Lean escalation を要するケースについて、Lean 
 escalation candidate が 0 件のときは追加プロセスを起動せず `SKIP` として縮退する（`--no-lean` で
 明示的に無効化も可能）。
 
-**Implementation Plan**（1〜4 は実装済み、5 のみ Planned）:
+**P16-C: vStd forge / proliferate へのフィードバック接続** ✅
+
+`run_benchmarks.py --forge-feedback <path>` が `mumei.benchmark_forge_feedback/v1` を出力する。
+カテゴリ毎の weakness score（`0.5 * (1 - success_rate) + 0.3 * (1 - counterexample_catch_rate)
++ 0.2 * trusted_ratio`、加えて Z3 / Lean solver time の signal）を `CATEGORY_STD_DOMAINS` の
+stdlib ドメインへの負の `priority_delta` に写す。mumei-agent 側は
+`python -m agent forge|proliferate --benchmark-feedback <path>` で読み込み、gap proposal と
+forge task spec の優先度のみを並べ替える（提案の追加・削除は行わない）。適用の provenance は
+proliferate の run summary JSON の `benchmark_feedback` に記録される。
+
+**Implementation Plan**（すべて実装済み）:
 
 ```
 1. カテゴリ・ベンチマークファイルの追加 ✅
@@ -1641,9 +1651,11 @@ escalation candidate が 0 件のときは追加プロセスを起動せず `SKI
    - Per-file details に expected/actual と lean_solver_time_s を追加
    - 既存の時系列 append 構造 (--- 区切り) は維持
 
-5. 標準ライブラリ拡張パイプラインへの結果統合 (Planned)
+5. 標準ライブラリ拡張パイプラインへの結果統合 (P16-C) ✅
    - ベンチマーク結果を vStd forge / proliferate ループのフィードバックに接続
      (paper future work 項目 12 に対応)
+   - run_benchmarks.py --forge-feedback が mumei.benchmark_forge_feedback/v1 を出力
+   - mumei-agent の agent/benchmark_feedback.py が weakness score を priority bias に写す
 ```
 
 **Files modified/created**:
@@ -1655,6 +1667,8 @@ escalation candidate が 0 件のときは追加プロセスを起動せず `SKI
 - `tests/test_benchmark_suite.py` — カテゴリ登録・`expected` 分類・Lean 縮退の回帰ゲート
 - `docs/BENCHMARK_RESULTS.md` — 反例捕捉率・Lean solver time 列の追加（自動追記）
 - `paper/index.md` — Known limitations / Future Work の実装状態同期
+- `benchmarks/run_benchmarks.py` — `--forge-feedback` / `build_forge_feedback` / `CATEGORY_STD_DOMAINS`（P16-C）
+- mumei-agent `agent/benchmark_feedback.py` / `agent/forge.py` / `agent/proliferate.py` — `--benchmark-feedback`（P16-C）
 
 **Success Metrics（実測）**:
 - 総 atom 数: 6 → **84**（目標 ≥ 60）✅
@@ -1663,7 +1677,8 @@ escalation candidate が 0 件のときは追加プロセスを起動せず `SKI
 - 反例ケースが期待どおり `FAIL` と判定される率（バグ捕捉率）: **14/14 = 100%** ✅
 - Lean escalation を要する atom の平均 Lean solver 時間をカテゴリ別に記録: 収集経路を実装済み。現状は
   Z3 `unknown` atom が 0 件のため全カテゴリ `SKIP`（Lean 利用可能環境でも candidate が出た時点で計測される）✅
-- ベンチマーク結果を既存標準ライブラリ拡張パイプライン（vStd forge / proliferate）へ統合（paper future work 項目 12）: Planned
+- ベンチマーク結果を既存標準ライブラリ拡張パイプライン（vStd forge / proliferate）へ統合（paper future work 項目 12）: **実装済み** ✅
+  （`--forge-feedback` → `--benchmark-feedback` の priority bias。提案生成そのものの導出は引き続き future work）
 
 ---
 

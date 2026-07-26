@@ -51,6 +51,91 @@ def test_total_atom_count_meets_target():
     assert total >= MIN_TOTAL_ATOMS
 
 
+def _category_result(name: str, **overrides) -> dict:
+    result = {
+        "category": name,
+        "files": 4,
+        "total_atoms": 10,
+        "total_trusted": 0,
+        "trusted_ratio": 0.0,
+        "verified_count": 4,
+        "matched_count": 4,
+        "success_rate": 1.0,
+        "counterexample_files": 1,
+        "counterexamples_caught": 1,
+        "counterexample_catch_rate": 1.0,
+        "lean_measured_files": 0,
+        "avg_lean_solver_time_s": None,
+        "avg_solver_time_s": 0.5,
+        "details": [],
+    }
+    result.update(overrides)
+    return result
+
+
+def test_forge_feedback_scores_weak_categories():
+    module = _load_module()
+    feedback = module.build_forge_feedback(
+        "2026-07-26 13:00 UTC",
+        [
+            _category_result("arithmetic", success_rate=0.5),
+            _category_result("concurrency"),
+        ],
+        {"trusted_ratio": 0.12},
+    )
+
+    assert feedback["schema"] == module.FORGE_FEEDBACK_SCHEMA
+    assert feedback["weak_categories"] == ["arithmetic"]
+    by_name = {c["category"]: c for c in feedback["categories"]}
+    assert by_name["arithmetic"]["weakness_score"] == 0.25
+    assert by_name["arithmetic"]["priority_delta"] == -12
+    assert "expected_outcome_mismatch" in by_name["arithmetic"]["signals"]
+    # A perfect category contributes no bias.
+    assert by_name["concurrency"]["weakness_score"] == 0.0
+    assert by_name["concurrency"]["priority_delta"] == 0
+    bias = {b["domain"]: b for b in feedback["domain_bias"]}
+    assert bias["std/math"]["priority_delta"] == -12
+    assert bias["std/math"]["driving_category"] == "arithmetic"
+    assert bias["std/concurrency"]["priority_delta"] == 0
+
+
+def test_forge_feedback_reports_solver_time_signals():
+    module = _load_module()
+    feedback = module.build_forge_feedback(
+        "2026-07-26 13:00 UTC",
+        [
+            _category_result(
+                "state_machine",
+                trusted_ratio=0.5,
+                counterexample_catch_rate=0.0,
+                avg_solver_time_s=module.SLOW_SOLVER_TIME_S + 1,
+                avg_lean_solver_time_s=module.SLOW_LEAN_SOLVER_TIME_S + 1,
+                lean_measured_files=1,
+            )
+        ],
+        {"trusted_ratio": 0.12},
+    )
+
+    [cat] = feedback["categories"]
+    assert set(cat["signals"]) == {
+        "counterexample_missed",
+        "trusted_atoms_present",
+        "z3_solver_time_pressure",
+        "lean_escalation_cost",
+    }
+    # 0.3 * missed catch + 0.2 * trusted ratio
+    assert cat["weakness_score"] == 0.4
+    assert [b["domain"] for b in feedback["domain_bias"]] == [
+        "std/contracts",
+        "std/settlement",
+    ]
+
+
+def test_every_category_maps_to_std_domains():
+    module = _load_module()
+    assert set(module.CATEGORY_STD_DOMAINS) == set(module.CATEGORIES)
+
+
 def test_counterexample_cases_declare_expected_fail():
     module = _load_module()
     counterexamples = 0

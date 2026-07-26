@@ -40,6 +40,27 @@ CATEGORIES = {
     "svcomp_style": BENCHMARKS_DIR / "svcomp_style",
 }
 
+# Benchmark category -> stdlib domains whose forge/proliferate targets the
+# category exercises. Used to turn category-level weakness into a priority bias
+# for the vStd forge pipeline (see docs/BENCHMARK_RESULTS.md).
+CATEGORY_STD_DOMAINS = {
+    "arithmetic": ["std/math", "std/algebra"],
+    "concurrency": ["std/concurrency"],
+    "dafny_puzzles": ["std/list", "std/container", "std/iter"],
+    "domain_compliance": ["std/compliance", "std/settlement"],
+    "state_machine": ["std/contracts", "std/settlement"],
+    "svcomp_style": ["std/core", "std/bitwise"],
+}
+
+FORGE_FEEDBACK_SCHEMA = "mumei.benchmark_forge_feedback/v1"
+# Weakness weights: outcome mismatches dominate, missed counterexamples next,
+# residual trusted atoms last.
+WEAKNESS_WEIGHTS = {"success": 0.5, "counterexample": 0.3, "trusted": 0.2}
+# Priority is "lower runs first" in the forge task queue, so the bias is negative.
+MAX_PRIORITY_BOOST = 50
+SLOW_SOLVER_TIME_S = 5.0
+SLOW_LEAN_SOLVER_TIME_S = 60.0
+
 # A benchmark file is a counterexample case when its name ends with ``_fail`` or
 # its leading comment block declares ``expected: FAIL``.
 EXPECTED_FAIL_RE = re.compile(r"expected:\s*FAIL", re.IGNORECASE)
@@ -266,6 +287,91 @@ def collect_stdlib_metrics() -> dict:
     }
 
 
+def _category_signals(cat: dict) -> list[str]:
+    signals = []
+    if cat["success_rate"] < 1.0:
+        signals.append("expected_outcome_mismatch")
+    catch_rate = cat["counterexample_catch_rate"]
+    if catch_rate is not None and catch_rate < 1.0:
+        signals.append("counterexample_missed")
+    if cat["trusted_ratio"] > 0.0:
+        signals.append("trusted_atoms_present")
+    if cat["avg_solver_time_s"] > SLOW_SOLVER_TIME_S:
+        signals.append("z3_solver_time_pressure")
+    lean_time = cat["avg_lean_solver_time_s"]
+    if lean_time is not None and lean_time > SLOW_LEAN_SOLVER_TIME_S:
+        signals.append("lean_escalation_cost")
+    return signals
+
+
+def _weakness_score(cat: dict) -> float:
+    catch_rate = cat["counterexample_catch_rate"]
+    catch_gap = 0.0 if catch_rate is None else 1.0 - catch_rate
+    score = (
+        WEAKNESS_WEIGHTS["success"] * (1.0 - cat["success_rate"])
+        + WEAKNESS_WEIGHTS["counterexample"] * catch_gap
+        + WEAKNESS_WEIGHTS["trusted"] * cat["trusted_ratio"]
+    )
+    return round(score, 4)
+
+
+def build_forge_feedback(
+    timestamp: str,
+    category_results: list[dict],
+    stdlib_metrics: dict,
+) -> dict:
+    """Project benchmark results into the vStd forge / proliferate input contract.
+
+    Each category contributes a ``weakness_score`` in ``[0, 1]`` derived from its
+    expected-outcome success rate, counterexample catch rate, and trusted ratio,
+    plus solver-time signals. The score is mapped to a negative
+    ``priority_delta`` (the forge queue runs lower priorities first) for the
+    stdlib domains the category exercises, so weak categories pull their
+    stdlib modules forward in the proliferation queue.
+    """
+    categories = []
+    domain_bias: dict[str, dict] = {}
+    for cat in category_results:
+        score = _weakness_score(cat)
+        priority_delta = -int(round(score * MAX_PRIORITY_BOOST))
+        domains = CATEGORY_STD_DOMAINS.get(cat["category"], [])
+        categories.append({
+            "category": cat["category"],
+            "files": cat["files"],
+            "success_rate": cat["success_rate"],
+            "counterexample_catch_rate": cat["counterexample_catch_rate"],
+            "trusted_ratio": cat["trusted_ratio"],
+            "avg_solver_time_s": cat["avg_solver_time_s"],
+            "avg_lean_solver_time_s": cat["avg_lean_solver_time_s"],
+            "lean_measured_files": cat["lean_measured_files"],
+            "weakness_score": score,
+            "signals": _category_signals(cat),
+            "std_domains": domains,
+            "priority_delta": priority_delta,
+        })
+        for domain in domains:
+            current = domain_bias.get(domain)
+            if current is None or priority_delta < current["priority_delta"]:
+                domain_bias[domain] = {
+                    "domain": domain,
+                    "priority_delta": priority_delta,
+                    "weakness_score": score,
+                    "driving_category": cat["category"],
+                }
+    weak = sorted(
+        (c for c in categories if c["weakness_score"] > 0.0),
+        key=lambda c: (-c["weakness_score"], c["category"]),
+    )
+    return {
+        "schema": FORGE_FEEDBACK_SCHEMA,
+        "timestamp": timestamp,
+        "stdlib_trusted_ratio": stdlib_metrics["trusted_ratio"],
+        "categories": categories,
+        "weak_categories": [c["category"] for c in weak],
+        "domain_bias": [domain_bias[k] for k in sorted(domain_bias)],
+    }
+
+
 def _fmt_rate(rate: float | None) -> str:
     return "n/a" if rate is None else f"{rate:.2%}"
 
@@ -347,6 +453,15 @@ def main() -> None:
         help="Also write results as JSON to the given path",
     )
     parser.add_argument(
+        "--forge-feedback",
+        type=str,
+        default=None,
+        help=(
+            "Write a " + FORGE_FEEDBACK_SCHEMA + " document to the given path for "
+            "the mumei-agent vStd forge / proliferate pipeline"
+        ),
+    )
+    parser.add_argument(
         "--no-lean",
         action="store_true",
         help="Never invoke the mumei-lean bridge; report Lean times as SKIP",
@@ -399,6 +514,12 @@ def main() -> None:
         json_path = Path(args.json)
         json_path.write_text(json.dumps(json_data, indent=2), encoding="utf-8")
         print(f"wrote {json_path}")
+
+    if args.forge_feedback:
+        feedback = build_forge_feedback(timestamp, category_results, stdlib_metrics)
+        feedback_path = Path(args.forge_feedback)
+        feedback_path.write_text(json.dumps(feedback, indent=2), encoding="utf-8")
+        print(f"wrote {feedback_path}")
 
 
 if __name__ == "__main__":
