@@ -123,7 +123,11 @@ pub fn check_spec_satisfiability_with_timeout(
     ieee754_f64: bool,
     timeout_ms: u64,
 ) -> Result<SpecValidationResult, SpecContradiction> {
-    let timeout_ms = timeout_ms.clamp(1, DEFAULT_SPEC_VALIDATION_TIMEOUT_MS);
+    let timeout_ms = if timeout_ms == 0 {
+        DEFAULT_SPEC_VALIDATION_TIMEOUT_MS
+    } else {
+        timeout_ms.min(DEFAULT_SPEC_VALIDATION_TIMEOUT_MS)
+    };
     let mut diagnostics = Vec::new();
     let checked_refinements = check_standalone_refinements(atom, module_env, timeout_ms)?;
 
