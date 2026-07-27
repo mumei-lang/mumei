@@ -110,6 +110,71 @@ fn lsp_reports_pending_lean_escalation_for_undecided_atoms() {
 }
 
 #[test]
+fn lean_verified_method_does_not_match_a_top_level_atom_with_the_same_short_name() {
+    let dir = unique_temp_dir("mumei-lsp-lean-qualified");
+    let source = concat!(
+        "struct Gauge { value: i64 }\n",
+        "\n",
+        "atom read(x: i64) -> i64\n",
+        "  requires: x >= 0;\n",
+        "  ensures: result >= 0;\n",
+        "  body: x;\n",
+        "\n",
+        "impl Gauge {\n",
+        "    atom read(self: Gauge) -> i64\n",
+        "        requires: self.value >= 0;\n",
+        "        ensures: result >= 0;\n",
+        "        body: self.value;\n",
+        "}\n",
+    );
+    let source_path = dir.join("qualified.mm");
+    let cert_path = dir.join("qualified.proof.json");
+    std::fs::write(&source_path, source).expect("write source");
+
+    let generated = Command::new(env!("CARGO_BIN_EXE_mumei"))
+        .arg("verify")
+        .arg("--proof-cert")
+        .arg("--output")
+        .arg(&cert_path)
+        .arg(&source_path)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("run mumei verify --proof-cert");
+    assert!(
+        generated.status.success(),
+        "certificate generation failed:\n{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+
+    let raw = std::fs::read_to_string(&cert_path).expect("read certificate");
+    let mut cert: Value = serde_json::from_str(&raw).expect("parse certificate");
+    let atoms = cert["atoms"].as_array_mut().expect("certificate atoms");
+    let method = atoms
+        .iter_mut()
+        .find(|atom| atom.get("name").and_then(Value::as_str) == Some("Gauge::read"))
+        .expect("qualified method entry in the certificate");
+    method["z3_check_result"] = Value::String("lean_verified".to_string());
+    method["z3_result_class"] = Value::String("unknown".to_string());
+    std::fs::write(&cert_path, cert.to_string()).expect("write patched certificate");
+
+    let diagnostics = did_open_diagnostics(&source_path, source);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let lean: Vec<&Value> = diagnostics
+        .iter()
+        .filter(|d| d.get("source").and_then(Value::as_str) == Some("mumei-lean"))
+        .collect();
+    assert_eq!(lean.len(), 1, "{diagnostics:#?}");
+    // The method lives on line 8 (0-based); the same-named top-level atom is on line 2.
+    assert_eq!(
+        lean[0].pointer("/range/start/line").and_then(Value::as_u64),
+        Some(8),
+        "{:#?}",
+        lean[0]
+    );
+}
+
+#[test]
 fn lsp_reports_lean_verified_atoms_from_a_sibling_certificate() {
     let dir = unique_temp_dir("mumei-lsp-lean-verified");
     let source =

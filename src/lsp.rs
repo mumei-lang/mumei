@@ -1329,11 +1329,18 @@ fn append_lean_verified_diagnostics(
         return;
     };
 
-    let mut atoms: Vec<&parser::Atom> = Vec::new();
+    // Certificates record impl methods qualified as `Struct::method`, so the
+    // lookup key is qualified the same way the verification path does it.
+    let mut atoms: Vec<(String, &parser::Atom)> = Vec::new();
     for item in items {
         match item {
-            parser::Item::Atom(atom) => atoms.push(atom),
-            parser::Item::ImplBlock(impl_block) => atoms.extend(impl_block.methods.iter()),
+            parser::Item::Atom(atom) => atoms.push((atom.name.clone(), atom)),
+            parser::Item::ImplBlock(impl_block) => atoms.extend(
+                impl_block
+                    .methods
+                    .iter()
+                    .map(|m| (format!("{}::{}", impl_block.struct_name, m.name), m)),
+            ),
             _ => {}
         }
     }
@@ -1342,14 +1349,7 @@ fn append_lean_verified_diagnostics(
         if atom_cert.z3_check_result != "lean_verified" {
             continue;
         }
-        let Some(atom) = atoms.iter().find(|atom| {
-            atom.name == atom_cert.name
-                || atom_cert
-                    .name
-                    .rsplit("::")
-                    .next()
-                    .is_some_and(|short| short == atom.name)
-        }) else {
+        let Some((_, atom)) = atoms.iter().find(|(name, _)| name == &atom_cert.name) else {
             continue;
         };
         diagnostics.push(serde_json::json!({
