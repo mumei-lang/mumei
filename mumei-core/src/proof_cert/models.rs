@@ -3,7 +3,9 @@ use crate::verification::{
     self, EscalationReason, LogicFragment, SymbolProvenance, TranslatorIRMetadata,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+// Certificate maps are ordered: `certificate_hash` is only re-derivable when
+// serialization is deterministic, and `HashMap` iteration order is not.
+use std::collections::{BTreeMap, HashMap};
 
 /// Top-level proof certificate for a Mumei source file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,7 +109,7 @@ pub struct AtomCertificate {
     pub translator_version: String,
     /// Mumei witness name to generated Lean binder name mapping.
     #[serde(default)]
-    pub binder_mapping: HashMap<String, String>,
+    pub binder_mapping: BTreeMap<String, String>,
     /// Hash of the bridge lemma set used by this translation contract.
     #[serde(default)]
     pub bridge_lemma_hash: String,
@@ -250,7 +252,7 @@ pub struct BudgetPolicy {
     pub max_tokens: u64,
     pub max_solver_time_ms: u64,
     pub max_semantic_delta: f64,
-    pub action_class_limits: HashMap<String, ActionClassLimit>,
+    pub action_class_limits: BTreeMap<String, ActionClassLimit>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -263,7 +265,7 @@ pub struct ActionClassLimit {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AttemptSummary {
     pub total_attempts: u32,
-    pub attempts_by_action_class: HashMap<String, u32>,
+    pub attempts_by_action_class: BTreeMap<String, u32>,
     pub final_action_class: String,
 }
 
@@ -371,7 +373,7 @@ pub struct EscalationCandidate {
     #[serde(default)]
     pub translator_version: String,
     #[serde(default)]
-    pub binder_mapping: HashMap<String, String>,
+    pub binder_mapping: BTreeMap<String, String>,
     #[serde(default)]
     pub bridge_lemma_hash: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -388,10 +390,10 @@ pub struct EscalationCandidate {
 pub struct EscalationBundleSummary {
     pub total_atoms: usize,
     pub candidate_count: usize,
-    pub by_reason: HashMap<String, usize>,
-    pub by_logic_fragment: HashMap<String, usize>,
+    pub by_reason: BTreeMap<String, usize>,
+    pub by_logic_fragment: BTreeMap<String, usize>,
     #[serde(default)]
-    pub by_z3_result_class: HashMap<String, usize>,
+    pub by_z3_result_class: BTreeMap<String, usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

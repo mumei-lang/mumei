@@ -110,6 +110,38 @@ pub(crate) fn cmd_verify_cert(cert_path: &str, input: &str, allow_lean_verified:
         cert_path, cert.timestamp, cert.mumei_version
     );
     println!("Certificate hash: {}", cert.certificate_hash);
+    // The stored hash is evidence only once it has been re-derived: without
+    // this a hand-edited certificate is echoed back unchallenged.
+    let mut tampered = false;
+    match proof_cert::check_certificate_hash(&cert) {
+        proof_cert::CertificateHashCheck::Match => {
+            println!("  ✅ certificate_hash recomputed: match");
+        }
+        proof_cert::CertificateHashCheck::Absent => {
+            println!("  ⚠️  certificate_hash absent: integrity cannot be checked");
+        }
+        proof_cert::CertificateHashCheck::Mismatch {
+            recomputed,
+            generator_version,
+            comparable,
+            ..
+        } => {
+            if comparable {
+                tampered = true;
+                eprintln!(
+                    "  ❌ certificate_hash mismatch: recomputed {}. The certificate was modified after generation.",
+                    recomputed
+                );
+            } else {
+                println!(
+                    "  ⚠️  certificate_hash mismatch: recomputed {} (certificate written by mumei v{}, this build is v{}). Serialization may differ across versions; re-run `mumei verify --proof-cert` to refresh.",
+                    recomputed,
+                    generator_version,
+                    env!("CARGO_PKG_VERSION")
+                );
+            }
+        }
+    }
     println!("All verified: {}", cert.all_verified);
     println!(
         "Results: {} proven, {} changed, {} unproven, {} missing",
@@ -120,7 +152,7 @@ pub(crate) fn cmd_verify_cert(cert_path: &str, input: &str, allow_lean_verified:
         println!();
         println!("⚠️  {} atom(s) have changed since certification. Re-run `mumei verify --proof-cert` to update.", changed);
     }
-    if unproven > 0 || missing > 0 {
+    if tampered || unproven > 0 || missing > 0 {
         std::process::exit(1);
     }
 }

@@ -6,13 +6,54 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
 pub(crate) fn compute_certificate_hash(cert: &ProofCertificate) -> String {
-    // Serialize with empty certificate_hash for deterministic hashing
+    // Serialize with empty certificate_hash for deterministic hashing.
+    // Hashing goes through `serde_json::Value`, whose object keys are sorted,
+    // so any `HashMap` reachable from the certificate (e.g. an atom's
+    // `spec_metadata`) hashes the same however its iteration order came out.
     let mut hashable = cert.clone();
     hashable.certificate_hash = String::new();
-    let json = serde_json::to_string(&hashable).unwrap_or_default();
+    let json = serde_json::to_value(&hashable)
+        .map(|value| value.to_string())
+        .unwrap_or_default();
     let mut hasher = Sha256::new();
     hasher.update(json.as_bytes());
     format!("{:x}", hasher.finalize())
+}
+
+/// Outcome of re-deriving `certificate_hash` from a loaded certificate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CertificateHashCheck {
+    /// The stored hash matches the recomputed one.
+    Match,
+    /// The certificate stores no hash (pre-P5-A certificates).
+    Absent,
+    /// The stored hash disagrees with the recomputed one. `comparable` is
+    /// false when the certificate was written by a different mumei version,
+    /// whose serialization may legitimately differ from this build's.
+    Mismatch {
+        stored: String,
+        recomputed: String,
+        generator_version: String,
+        comparable: bool,
+    },
+}
+
+/// Re-derives `certificate_hash` and compares it against the stored value, so
+/// that hand-edited certificates are detected instead of being echoed back.
+pub fn check_certificate_hash(cert: &ProofCertificate) -> CertificateHashCheck {
+    if cert.certificate_hash.is_empty() {
+        return CertificateHashCheck::Absent;
+    }
+    let recomputed = compute_certificate_hash(cert);
+    if recomputed == cert.certificate_hash {
+        return CertificateHashCheck::Match;
+    }
+    CertificateHashCheck::Mismatch {
+        stored: cert.certificate_hash.clone(),
+        recomputed,
+        generator_version: cert.mumei_version.clone(),
+        comparable: cert.mumei_version == env!("CARGO_PKG_VERSION"),
+    }
 }
 
 pub fn refresh_certificate_integrity(cert: &mut ProofCertificate) {
