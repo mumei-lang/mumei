@@ -309,3 +309,263 @@ body: {
 
     std::fs::remove_dir_all(fixture.parent().unwrap()).expect("remove concurrency fixture dir");
 }
+
+// ---------------------------------------------------------------------------
+// Structured concurrency ownership (Phase 1h-2)
+// ---------------------------------------------------------------------------
+// MIR move analysis flattens a `task_group` into a sequential chain of child
+// bodies, so it models neither concurrent interleaving nor `task_group:any`
+// cancellation. These fixtures pin the AST-level ownership pass that covers
+// the patterns beyond `task_group:any` winner cancellation.
+
+fn verify_fixture(name: &str, source: &str) -> std::process::Output {
+    let bin = env!("CARGO_BIN_EXE_mumei");
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let fixture = write_fixture(name, source);
+    let output = Command::new(bin)
+        .arg("verify")
+        .arg(&fixture)
+        .current_dir(manifest_dir)
+        .output()
+        .unwrap_or_else(|err| panic!("failed to verify fixture {name}: {err}"));
+    std::fs::remove_dir_all(fixture.parent().unwrap()).expect("remove concurrency fixture dir");
+    output
+}
+
+fn assert_rejected(output: &std::process::Output, expected_fragment: &str, context: &str) {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "{context}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let combined = format!("{stdout}{stderr}");
+    // Diagnostics are wrapped by miette, so match on a short fragment.
+    assert!(
+        combined.contains(expected_fragment),
+        "expected diagnostic containing {expected_fragment:?}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+}
+
+const CONSUMING_ATOM: &str = r#"
+atom take_buffer(buf: [i64])
+requires: len(buf) >= 0;
+consume buf;
+ensures: result >= 0;
+body: len(buf);
+"#;
+
+#[test]
+fn task_group_all_rejects_concurrent_double_move_of_capture() {
+    let source = format!(
+        "{CONSUMING_ATOM}
+atom move_buffer_into_two_tasks(buf: [i64])
+requires: len(buf) >= 1;
+ensures: result >= 0;
+body: {{
+    task_group:all {{
+        task {{ take_buffer(buf) }};
+        task {{ take_buffer(buf) }}
+    }}
+}};
+"
+    );
+    let output = verify_fixture("task_group_all_concurrent_double_move", &source);
+    assert_rejected(
+        &output,
+        "concurrent sibling tasks",
+        "the same buffer consumed by two concurrent children must be rejected",
+    );
+}
+
+#[test]
+fn task_group_all_rejects_move_while_sibling_still_reads_capture() {
+    let source = format!(
+        "{CONSUMING_ATOM}
+atom move_while_sibling_reads(buf: [i64])
+requires: len(buf) >= 1;
+ensures: result >= 0;
+body: {{
+    task_group:all {{
+        task {{ take_buffer(buf) }};
+        task {{ len(buf) }}
+    }}
+}};
+"
+    );
+    let output = verify_fixture("task_group_all_move_while_sibling_reads", &source);
+    assert_rejected(
+        &output,
+        "while concurrent sibling",
+        "moving a capture a sibling still reads must be rejected",
+    );
+}
+
+#[test]
+fn task_group_all_rejects_unsynchronised_shared_write() {
+    let output = verify_fixture(
+        "task_group_all_shared_write_race",
+        r#"
+atom race_on_shared_counter(n: i64)
+requires: n >= 0 && n <= 100;
+ensures: result >= 0;
+body: {
+    let counter = n;
+    task_group:all {
+        task {
+            counter = counter + 1;
+            counter
+        };
+        task {
+            counter = counter + 2;
+            counter
+        }
+    }
+};
+"#,
+    );
+    assert_rejected(
+        &output,
+        "data race",
+        "two siblings writing the same capture must be rejected",
+    );
+}
+
+#[test]
+fn task_group_rejects_parent_use_after_child_moved_capture() {
+    let source = format!(
+        "{CONSUMING_ATOM}
+atom read_buffer_after_task_moved_it(buf: [i64])
+requires: len(buf) >= 1;
+ensures: result >= 0;
+body: {{
+    task_group:all {{
+        task {{ take_buffer(buf) }};
+        task {{ 0 }}
+    }};
+    len(buf)
+}};
+"
+    );
+    let output = verify_fixture("task_group_use_after_concurrent_move", &source);
+    assert_rejected(
+        &output,
+        "moved into a child task",
+        "reading a value a child consumed must be rejected",
+    );
+}
+
+#[test]
+fn task_group_any_rejects_parent_read_of_cancellable_write() {
+    let output = verify_fixture(
+        "task_group_any_cancel_dependent_read",
+        r#"
+atom read_cancellable_write(n: i64)
+requires: n >= 0 && n <= 100;
+ensures: result >= 0;
+body: {
+    let total = n;
+    task_group:any {
+        task {
+            total = total + 1;
+            total
+        };
+        task { n }
+    };
+    total
+};
+"#,
+    );
+    assert_rejected(
+        &output,
+        "cancellation-dependent value",
+        "a value a cancelled child may never have written must be rejected",
+    );
+}
+
+#[test]
+fn task_group_accepts_shared_reads_local_writes_and_single_move() {
+    let source = format!(
+        "{CONSUMING_ATOM}
+atom read_shared_capture_in_siblings(a: i64, b: i64)
+requires: a >= 0 && b >= 0;
+ensures: result >= 0;
+body: {{
+    task_group:all {{
+        task {{ a + b }};
+        task {{ a + b }}
+    }}
+}};
+
+atom per_task_local_writes(n: i64)
+requires: n >= 0 && n <= 100;
+ensures: result >= 0;
+body: {{
+    task_group:all {{
+        task {{
+            let acc = n;
+            acc = acc + 1;
+            acc
+        }};
+        task {{
+            let acc = n;
+            acc = acc + 2;
+            acc
+        }}
+    }}
+}};
+
+atom move_buffer_into_single_task(buf: [i64])
+requires: len(buf) >= 1;
+ensures: result >= 0;
+body: {{
+    task_group:all {{
+        task {{ take_buffer(buf) }};
+        task {{ 0 }}
+    }}
+}};
+"
+    );
+    let output = verify_fixture("task_group_ownership_positive", &source);
+    assert!(
+        output.status.success(),
+        "safe concurrent captures must keep verifying\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn concurrency_ownership_violation_is_not_a_lean_escalation_candidate() {
+    // Ownership violations are decided syntactically: they must fail hard and
+    // never become a Z3 `unknown` that the Lean bridge could promote to
+    // `lean_verified`.
+    let source = format!(
+        "{CONSUMING_ATOM}
+atom move_buffer_into_two_tasks(buf: [i64])
+requires: len(buf) >= 1;
+ensures: result >= 0;
+body: {{
+    task_group:all {{
+        task {{ take_buffer(buf) }};
+        task {{ take_buffer(buf) }}
+    }}
+}};
+"
+    );
+    let output = verify_fixture("task_group_ownership_no_lean_escalation", &source);
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!output.status.success());
+    assert!(
+        combined.contains("0 Lean escalation candidate(s)"),
+        "ownership violations must not be escalated to Lean\n{combined}"
+    );
+    assert!(
+        !combined.contains("lean_verified"),
+        "ownership violations must never be promoted to lean_verified\n{combined}"
+    );
+}
