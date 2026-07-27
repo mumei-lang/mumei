@@ -274,7 +274,12 @@ without parsing stderr. `warnings` stays advisory-only.
 | `atom` | `string` | Atom the diagnostic belongs to |
 | `message` | `string` | First line of the rendered verification error |
 | `tags` | `array` | Status tag plus `z3_<result>` (e.g. `z3_sat`, `z3_unknown`) |
-| `escalation_reason` | `string` | Present only for Lean escalation candidates |
+| `escalation_reason` | `string` | Present only for entries with `code: "escalation_candidate"` |
+
+Every entry is an object with this field set; legacy string diagnostics coming
+from `report.json` are normalised to `code: "note"` / `severity: "warning"` with
+the original text as `message`. Entries are de-duplicated by (`atom`, `code`,
+`message`), so two atoms failing with the same message keep separate entries.
 
 ```json
 {

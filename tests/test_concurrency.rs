@@ -680,3 +680,61 @@ body: {{
         "failure diagnostic must carry the rejection reason: {payload:#}"
     );
 }
+
+#[test]
+fn json_diagnostics_keep_one_entry_per_failing_atom_with_identical_messages() {
+    // Regression: diagnostics were de-duplicated by message only, so two atoms
+    // failing with the same rendered first line collapsed into one entry.
+    let bin = env!("CARGO_BIN_EXE_mumei");
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let fixture = write_fixture(
+        "verify_json_duplicate_messages",
+        r#"
+atom f1(x: i64)
+requires: x >= 0;
+ensures: result > x;
+body: x;
+
+atom f2(x: i64)
+requires: x >= 0;
+ensures: result > x;
+body: x;
+"#,
+    );
+    let output = Command::new(bin)
+        .arg("verify")
+        .arg(&fixture)
+        .arg("--json")
+        .current_dir(manifest_dir)
+        .output()
+        .expect("failed to run verify --json");
+    std::fs::remove_dir_all(fixture.parent().unwrap()).expect("remove concurrency fixture dir");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json_start = stdout
+        .find('{')
+        .unwrap_or_else(|| panic!("no JSON in:\n{stdout}"));
+    let payload: serde_json::Value =
+        serde_json::from_str(&stdout[json_start..]).expect("verify --json emits valid JSON");
+    let diagnostics = payload["diagnostics"]
+        .as_array()
+        .expect("diagnostics array")
+        .clone();
+
+    for atom in ["f1", "f2"] {
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d["atom"] == atom && d["code"] == "failed"),
+            "missing failure diagnostic for `{atom}`: {payload:#}"
+        );
+    }
+    // Every entry is an object with the same field set, including legacy string
+    // diagnostics merged in from report.json.
+    for diagnostic in &diagnostics {
+        assert!(
+            diagnostic["message"].is_string() && diagnostic["code"].is_string(),
+            "diagnostics entries must be objects: {payload:#}"
+        );
+    }
+}

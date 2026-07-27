@@ -718,7 +718,11 @@ fn verify_single_atom(atom: &parser::Atom, name: &str, ctx: &mut VerifyContext<'
                 atom: name.to_string(),
                 message: first_error_line(&error_text),
                 tags: vec![status.to_string(), format!("z3_{z3_result}")],
-                escalation_reason,
+                escalation_reason: if status == "escalation_candidate" {
+                    escalation_reason
+                } else {
+                    None
+                },
             });
             ctx.cert_results
                 .insert(name.to_string(), (z3_result, status.to_string()));
