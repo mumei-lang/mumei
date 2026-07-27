@@ -87,6 +87,10 @@ pub fn calculate_traceability_hash(atom: &Atom) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+/// Default per-solver-call budget for spec validation when the caller does not
+/// supply one.
+pub const DEFAULT_SPEC_VALIDATION_TIMEOUT_MS: u64 = 5000;
+
 pub fn check_spec_satisfiability(
     atom: &Atom,
     module_env: &ModuleEnv,
@@ -100,11 +104,31 @@ pub fn check_spec_satisfiability_with_property_based(
     property_based_config: Option<&PropertyBasedTestConfig>,
     ieee754_f64: bool,
 ) -> Result<SpecValidationResult, SpecContradiction> {
+    check_spec_satisfiability_with_timeout(
+        atom,
+        module_env,
+        property_based_config,
+        ieee754_f64,
+        DEFAULT_SPEC_VALIDATION_TIMEOUT_MS,
+    )
+}
+
+/// Same as [`check_spec_satisfiability_with_property_based`], but bounds every
+/// solver call by `timeout_ms` so that `--solver-timeout` also applies to the
+/// spec-health phase instead of only to the proof phase.
+pub fn check_spec_satisfiability_with_timeout(
+    atom: &Atom,
+    module_env: &ModuleEnv,
+    property_based_config: Option<&PropertyBasedTestConfig>,
+    ieee754_f64: bool,
+    timeout_ms: u64,
+) -> Result<SpecValidationResult, SpecContradiction> {
+    let timeout_ms = timeout_ms.clamp(1, DEFAULT_SPEC_VALIDATION_TIMEOUT_MS);
     let mut diagnostics = Vec::new();
-    let checked_refinements = check_standalone_refinements(atom, module_env)?;
+    let checked_refinements = check_standalone_refinements(atom, module_env, timeout_ms)?;
 
     let mut cfg = Config::new();
-    cfg.set_timeout_msec(5000);
+    cfg.set_timeout_msec(timeout_ms);
     let ctx = super::Context::new(&cfg);
     let solver = Solver::new(&ctx);
     let vc = validation_ctx(&ctx, module_env, atom, ieee754_f64);
@@ -562,12 +586,13 @@ fn assert_negated_clause<'a>(
 fn check_standalone_refinements(
     atom: &Atom,
     module_env: &ModuleEnv,
+    timeout_ms: u64,
 ) -> Result<usize, SpecContradiction> {
     let mut checked = 0usize;
     for refined in module_env.types.values() {
         checked += 1;
         let mut cfg = Config::new();
-        cfg.set_timeout_msec(5000);
+        cfg.set_timeout_msec(timeout_ms);
         let ctx = super::Context::new(&cfg);
         let solver = Solver::new(&ctx);
         let vc = validation_ctx(&ctx, module_env, atom, false);

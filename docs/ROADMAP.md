@@ -1750,6 +1750,21 @@ python3 scripts/check_contract_vocabulary.py
 struct キャプチャは `struct Name { ... }` 宣言形で検証済み（`type Name = ...` は refinement type であり
 aggregate 宣言ではない）。
 
+**P17 follow-up（solver 堅牢性）** ✅
+
+E2E テストで判明した検証パスの穴を解消した:
+
+- ネストした量化子（`forall(i, .., exists(j, .., arr[i] * arr[j] ...))`）で、束縛変数を
+  含まないパターン候補（`arr[j]`）を Z3 quantifier pattern に渡すと null AST が返り
+  z3 crate が panic（exit 101・stdout 空）していた。`expr_mentions_var` で量化変数を
+  含む access のみを trigger / `len_` 境界に用いるよう絞り込み、JSON 出力が常に
+  parse 可能であることを回復（`tests/test_verify_json_diagnostics.rs`）。
+- `--solver-timeout` が Phase 0a（spec validation、5000ms 固定）と effect-state probe
+  （timeout 未設定）に適用されず、重い非線形ケースを打ち切れなかった。両者に設定値を
+  伝播（`check_spec_satisfiability_with_timeout`）。
+- `verify --json` の `code: "escalation_candidate"` 診断（`escalation_reason` / `z3_unknown`
+  タグ付き）を回帰テストで固定。
+
 **残課題**: 明示的な同期プリミティブで保護された共有可変状態の干渉推論、および
 task body 内の配列要素キャプチャ（codegen 側 follow-up、`mumei-emit-llvm/src/codegen/task_runtime.rs`）。
 

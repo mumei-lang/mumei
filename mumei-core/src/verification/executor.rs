@@ -416,11 +416,12 @@ pub(crate) fn verify_inner(
 
     // Phase 0a: 仕様健全性チェック（proof attempt 前の requires/ensures/refinement SAT）
     let phase_start = std::time::Instant::now();
-    if let Err(err) = check_spec_satisfiability_with_property_based(
+    if let Err(err) = check_spec_satisfiability_with_timeout(
         atom,
         module_env,
         property_based_config,
         ieee754_f64,
+        timeout_ms,
     ) {
         let diagnostic = format!("{}: {}", err.kind, err.message);
         save_visualizer_report(
@@ -821,7 +822,8 @@ pub(crate) fn verify_inner(
 
                                 if budget_ok {
                                     // Create a scoped Z3 context + solver for this probe.
-                                    let z3_cfg = Config::new();
+                                    let mut z3_cfg = Config::new();
+                                    z3_cfg.set_timeout_msec(timeout_ms);
                                     let z3_ctx = Context::new(&z3_cfg);
                                     let z3_solver = Solver::new(&z3_ctx);
 
@@ -1261,7 +1263,14 @@ pub(crate) fn verify_inner(
         // E-matching, and (2) expose a "length >= max_index + 1" assumption so
         // downstream ArrayAccess bounds-checks do not flag out-of-bounds on
         // indices that the user has already certified as valid via the forall.
-        let arr_accesses = collect_array_accesses(&expr_ast);
+        // Only accesses indexed by the quantified variable can serve as a
+        // trigger: Z3 rejects a pattern without the bound variable (e.g.
+        // `arr[j]` under `forall i`, where `j` is bound by an inner exists)
+        // and hands back a null AST.
+        let arr_accesses: Vec<(String, Expr)> = collect_array_accesses(&expr_ast)
+            .into_iter()
+            .filter(|(_, idx_expr)| expr_mentions_var(idx_expr, &q.var))
+            .collect();
 
         let body = range_cond.implies(&condition_z3);
         let body_exists = Bool::and(&ctx, &[&range_cond, &condition_z3]);

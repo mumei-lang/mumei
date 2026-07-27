@@ -208,7 +208,6 @@ pub(crate) fn expr_to_z3<'a>(
                         // access uses `__z3_arr_<name>` when present so that
                         // patterns refer to the post-store array state seen
                         // by the body of the forall.
-                        let arr_accesses = collect_array_accesses(&args[3]);
                         let mut pattern_asts: Vec<Dynamic> = Vec::new();
                         // Re-bind the quantified variable while we lower
                         // index expressions so that they see `var_name`.
@@ -216,6 +215,13 @@ pub(crate) fn expr_to_z3<'a>(
                             Expr::Variable(v) => v.clone(),
                             _ => String::new(),
                         };
+                        // A pattern must contain the bound variable; Z3 returns
+                        // a null AST otherwise (e.g. `arr[i]` under an inner
+                        // `forall j`), which the z3 crate turns into a panic.
+                        let arr_accesses: Vec<(String, Expr)> = collect_array_accesses(&args[3])
+                            .into_iter()
+                            .filter(|(_, idx_expr)| expr_mentions_var(idx_expr, &var_re))
+                            .collect();
                         let saved = if !var_re.is_empty() {
                             env.insert(var_re.clone(), bound_var.clone().into())
                         } else {
