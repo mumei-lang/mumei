@@ -39,9 +39,9 @@ pub use models::{
 pub use review::{generate_escalation_bundle, generate_human_review_queue};
 
 pub use validation::{
-    get_required_lowering_rules, refresh_certificate_integrity,
+    check_certificate_hash, get_required_lowering_rules, refresh_certificate_integrity,
     validate_certificate_translator_versions, validate_translator_version,
-    validate_translator_version_with_semantics, verify_certificate,
+    validate_translator_version_with_semantics, verify_certificate, CertificateHashCheck,
 };
 
 #[cfg(test)]
@@ -51,7 +51,7 @@ mod tests {
     use crate::verification;
     use crate::verification::ModuleEnv;
     use serde_json::Value;
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, HashMap};
     use std::path::PathBuf;
 
     fn solver_env_lock() -> &'static std::sync::Mutex<()> {
@@ -327,7 +327,7 @@ mod tests {
 
     #[test]
     fn test_retry_budget_schema_roundtrip() {
-        let mut limits = HashMap::new();
+        let mut limits = BTreeMap::new();
         limits.insert(
             "lean_escalation".to_string(),
             ActionClassLimit {
@@ -370,7 +370,7 @@ mod tests {
         let module_env = ModuleEnv::new();
         let mut cert =
             generate_certificate("test.mm", &atoms, &results, &module_env, None, None, None);
-        let mut attempts_by_action_class = HashMap::new();
+        let mut attempts_by_action_class = BTreeMap::new();
         attempts_by_action_class.insert("llm_fix".to_string(), 2);
         cert.atoms[0].retry_policy_fingerprint = Some("sha256:abc".to_string());
         cert.atoms[0].attempt_summary = Some(AttemptSummary {
@@ -570,6 +570,7 @@ mod tests {
             bridge_lemma_hash: verification::LEAN_BRIDGE_LEMMA_HASH.to_string(),
             proof_path: "Generated/Test.lean".to_string(),
             diagnostics: vec![],
+            ..Default::default()
         });
 
         // Opt-in: lean_verified is proven only with current Lean metadata.
@@ -594,6 +595,7 @@ mod tests {
             bridge_lemma_hash: "old-bridge-hash".to_string(),
             proof_path: "Generated/Test.lean".to_string(),
             diagnostics: vec![],
+            ..Default::default()
         });
         let status_stale_result_metadata = verify_certificate(&cert, &atoms, true);
         assert_eq!(
@@ -669,6 +671,7 @@ mod tests {
             bridge_lemma_hash: verification::LEAN_BRIDGE_LEMMA_HASH.to_string(),
             proof_path: "Generated/Test.lean".to_string(),
             diagnostics: vec![],
+            ..Default::default()
         });
 
         let err = validate_translator_version(
@@ -993,5 +996,64 @@ mod tests {
         assert_eq!(loaded.certificate_hash, cert.certificate_hash);
 
         let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn test_check_certificate_hash_detects_tampering() {
+        let atom = make_test_atom("foo", "true", "true", "42");
+        let atoms: Vec<&parser::Atom> = vec![&atom];
+        let mut results = HashMap::new();
+        results.insert(
+            "foo".to_string(),
+            ("unsat".to_string(), "verified".to_string()),
+        );
+        let module_env = ModuleEnv::new();
+        let cert = generate_certificate("test.mm", &atoms, &results, &module_env, None, None, None);
+
+        assert_eq!(check_certificate_hash(&cert), CertificateHashCheck::Match);
+
+        let mut tampered = cert.clone();
+        tampered.atoms[0].lean_result_metadata = Some(LeanResultMetadata {
+            status: "lean_verified".to_string(),
+            theorem_name: "foo_correct".to_string(),
+            ..Default::default()
+        });
+        match check_certificate_hash(&tampered) {
+            CertificateHashCheck::Mismatch {
+                stored, comparable, ..
+            } => {
+                assert_eq!(stored, cert.certificate_hash);
+                // Written by this build, so the mismatch is conclusive.
+                assert!(comparable);
+            }
+            other => panic!("expected a mismatch, got {other:?}"),
+        }
+
+        let mut unhashed = cert.clone();
+        unhashed.certificate_hash = String::new();
+        assert_eq!(
+            check_certificate_hash(&unhashed),
+            CertificateHashCheck::Absent
+        );
+    }
+
+    #[test]
+    fn test_check_certificate_hash_marks_foreign_version_inconclusive() {
+        let atom = make_test_atom("foo", "true", "true", "42");
+        let atoms: Vec<&parser::Atom> = vec![&atom];
+        let mut results = HashMap::new();
+        results.insert(
+            "foo".to_string(),
+            ("unsat".to_string(), "verified".to_string()),
+        );
+        let module_env = ModuleEnv::new();
+        let mut cert =
+            generate_certificate("test.mm", &atoms, &results, &module_env, None, None, None);
+        cert.mumei_version = "0.0.1-ancient".to_string();
+
+        match check_certificate_hash(&cert) {
+            CertificateHashCheck::Mismatch { comparable, .. } => assert!(!comparable),
+            other => panic!("expected an inconclusive mismatch, got {other:?}"),
+        }
     }
 }

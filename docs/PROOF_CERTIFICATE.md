@@ -25,6 +25,10 @@ The standard mumei-lean bridge path is live theorem generation for the current Z
 
 `lean_result_metadata` preserves the bridge's structured provenance alongside the gate fields: `known_witness_used`, `lean_solver_time_s` (Lean wall clock, including any automatic tactic search), and `tactic_search` (`stage`, `adopted_tactic`, `candidates_tried`, `search_time_s`, `exhausted`, `timed_out`, and `supersedes_manual_lemma_reason` once a promotion replaced a `manual_lemma_reason`). These fields are provenance only — promotion still depends solely on the four conditions above, so a stale `translator_version` is refused even when a tactic was adopted and the theorem built.
 
+Consumers must read `z3_check_result`, not `lean_result_metadata.status`. The bridge-supplied metadata is attached to an atom before the promotion gate runs, so a *refused* atom keeps the metadata it was offered: it can read `lean_result_metadata.status == "lean_verified"` with a full `tactic_search` block while its own `z3_check_result` stays `unknown` and `status` stays `escalation_candidate`. Only `z3_check_result == "lean_verified"` (with `--allow-lean-verified`) means the obligation was accepted.
+
+`certificate_hash` covers every field above, including the provenance. `mumei verify-cert` re-derives it and fails when a certificate written by this mumei version no longer hashes to its stored value; for a certificate written by a different version the mismatch is reported as a warning, since serialization may legitimately differ across versions.
+
 ## Roadmap authority and vocabulary
 
 `docs/CROSS_PROJECT_ROADMAP.md` is the single top-level roadmap for cross-repository harness work. This certificate spec is the mumei-side contract surface for that roadmap and uses these canonical fields without aliases: `harness_contract`, `intent_fidelity`, `artifact_paths`, `budget_policy_fingerprint`, and `lean_verified`. Cross-spec and no-`.mm` review artifacts use the same names as mumei-agent: `contract_consistency[]` maps to `missing_constraints[]`, `global_invariant_conflicts[]` maps to `divergences[]`, `circular_dependencies[]` maps to `drift_issues[]`, and Lean escalation remains limited to Z3 `unknown` / timeout / resource-limit obligations that cannot be closed automatically.
@@ -325,7 +329,7 @@ mumei build --emit proof-cert src/math.mm
 2. Run Z3 verification on all atoms
 3. Compute `content_hash` (source hash) and `proof_hash` (dependency-aware hash) for each atom
 4. Populate `dependencies`, `effects`, `requires`, `ensures` from `ModuleEnv`
-5. Compute `certificate_hash` as SHA-256 of the serialized JSON (excluding the hash field)
+5. Compute `certificate_hash` as SHA-256 of the serialized JSON (excluding the hash field). Map-valued fields (`binder_mapping`, `action_class_limits`, `attempts_by_action_class`, and the escalation-bundle `by_*` counters) are serialized in key order so the hash is reproducible from the certificate alone
 6. Write `.proof-cert.json` to output directory
 
 ### Certificate Verification

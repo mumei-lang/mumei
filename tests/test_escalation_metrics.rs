@@ -1,4 +1,4 @@
-use std::{collections::HashMap, process::Command};
+use std::{collections::BTreeMap, process::Command};
 
 use mumei_core::proof_cert::{
     AtomCertificate, EscalationCandidate, EscalationReason, LeanResultMetadata, LogicFragment,
@@ -30,7 +30,7 @@ fn candidate(
         logic_fragment_tag: Some(LogicFragment::NonlinearArithmetic),
         logic_fragment_tags: tags.iter().map(|tag| tag.to_string()).collect(),
         translator_version: "mumei-lean-translator-ir-v2".to_string(),
-        binder_mapping: HashMap::new(),
+        binder_mapping: BTreeMap::new(),
         bridge_lemma_hash: "bridge".to_string(),
         manual_lemma_reason: manual_lemma_reason.map(str::to_string),
         translator_ir: TranslatorIRMetadata::default(),
@@ -65,7 +65,7 @@ fn lean_verified_atom(
         logic_fragment_tag: Some(LogicFragment::NonlinearArithmetic),
         logic_fragment_tags: tags.iter().map(|tag| tag.to_string()).collect(),
         translator_version: "mumei-lean-translator-ir-v2".to_string(),
-        binder_mapping: HashMap::new(),
+        binder_mapping: BTreeMap::new(),
         bridge_lemma_hash: "bridge".to_string(),
         manual_lemma_reason: None,
         translator_ir: TranslatorIRMetadata::default(),

@@ -734,14 +734,11 @@ struct LeanBridgeApplyStats {
     lean_verified_atoms: Vec<String>,
 }
 
-fn format_count_map(map: &std::collections::HashMap<String, usize>) -> String {
+fn format_count_map(map: &std::collections::BTreeMap<String, usize>) -> String {
     if map.is_empty() {
         return String::new();
     }
-    let mut entries: Vec<_> = map.iter().collect();
-    entries.sort_by_key(|(key, _)| *key);
-    entries
-        .into_iter()
+    map.iter()
         .map(|(key, count)| format!("{key}: {count}"))
         .collect::<Vec<_>>()
         .join(", ")
