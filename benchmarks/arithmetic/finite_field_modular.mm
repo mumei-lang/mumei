@@ -1,8 +1,9 @@
 // Success case: modular (finite-field) arithmetic obligations that Z3 answers
 // `unknown` (nonlinear + modular), so every atom here is routed to the
 // mumei-lean bridge and contributes a measured `lean_solver_time_s`.
-// `ff_mul_add_distrib_bench` has no bridge lemma template and is discharged by
-// the automatic tactic search (mumei-lean docs/LEAN_TRANSLATOR_SPEC.md §12).
+// `ff_mul_assoc_bench` and `ff_mul_add_distrib_bench` are not closed by their
+// bridge lemma template and are discharged by the automatic tactic search
+// (mumei-lean docs/LEAN_TRANSLATOR_SPEC.md §12).
 // expected: PASS
 
 atom ff_zero_is_zero_bench(p: i64)

@@ -41,4 +41,7 @@ editors/vscode/*.vsix
 # テスト用一時ファイル
 sword_test.mm
 cross_spec.json
+# `mumei verify --proof-cert` / benchmarks/run_benchmarks.py write
+# `<source stem>.proof.json` into the working directory.
+/*.proof.json
 mumei-core/report.json

@@ -311,6 +311,38 @@ pub struct LeanResultMetadata {
     pub proof_path: String,
     #[serde(default)]
     pub diagnostics: Vec<String>,
+    /// `false` when the theorem was discharged by a live generated proof
+    /// rather than a pre-written witness.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub known_witness_used: Option<bool>,
+    /// Wall-clock Lean cost, including any automatic tactic search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lean_solver_time_s: Option<f64>,
+    /// Provenance of the automatic tactic search
+    /// (mumei-lean `docs/LEAN_TRANSLATOR_SPEC.md` §12).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tactic_search: Option<TacticSearchMetadata>,
+}
+
+/// Automatic tactic search provenance emitted by the mumei-lean bridge.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TacticSearchMetadata {
+    #[serde(default)]
+    pub stage: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adopted_tactic: Option<String>,
+    #[serde(default)]
+    pub candidates_tried: Vec<String>,
+    #[serde(default)]
+    pub search_time_s: f64,
+    #[serde(default)]
+    pub exhausted: bool,
+    #[serde(default)]
+    pub timed_out: bool,
+    /// The `manual_lemma_reason` the adopted tactic replaced, kept as
+    /// provenance after promotion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supersedes_manual_lemma_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
