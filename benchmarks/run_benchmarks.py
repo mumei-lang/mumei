@@ -56,6 +56,61 @@ CATEGORY_STD_DOMAINS = {
 }
 
 FORGE_FEEDBACK_SCHEMA = "mumei.benchmark_forge_feedback/v1"
+
+# Weakness signal -> the vStd atom the forge should add to close it. The
+# templates are fixed, so a given benchmark run always proposes the same atoms:
+# the *selection* is data-driven, the atom shapes are not. ``atom_suffix`` is
+# appended to the domain slug to name the atom, and the contract is the
+# strongest one that is checkable without knowing the failing benchmark file.
+WEAKNESS_ATOM_TEMPLATES = {
+    "expected_outcome_mismatch": {
+        "atom_suffix": "bounded_result_guard",
+        "description": (
+            "Benchmark category {category} did not reach its expected outcome "
+            "({success_rate}). Add a bounded-result guard atom for this domain "
+            "so the contract that the benchmark exercises is provable in std/."
+        ),
+        "inputs": [{"name": "value", "type": "i64"}, {"name": "bound", "type": "i64"}],
+        "requires": "bound >= 0",
+        "ensures": "result >= 0 && result <= bound",
+        "difficulty": "medium",
+    },
+    "counterexample_missed": {
+        "atom_suffix": "counterexample_guard",
+        "description": (
+            "Benchmark category {category} missed counterexamples "
+            "({counterexample_catch_rate} caught). Add a decision-guard atom "
+            "for this domain whose contract rejects the out-of-range input the "
+            "counterexample cases exercise."
+        ),
+        "inputs": [{"name": "value", "type": "i64"}, {"name": "limit", "type": "i64"}],
+        "requires": "limit >= 0",
+        "ensures": "result == 0 || result == 1",
+        "difficulty": "medium",
+    },
+    "trusted_atoms_present": {
+        "atom_suffix": "trusted_replacement",
+        "description": (
+            "Benchmark category {category} still relies on trusted atoms "
+            "(trusted ratio {trusted_ratio}). Add a proven replacement atom for "
+            "this domain so the trusted surface can shrink."
+        ),
+        "inputs": [{"name": "value", "type": "i64"}],
+        "requires": "value >= 0",
+        "ensures": "result >= value",
+        "difficulty": "high",
+    },
+}
+
+# Only the weakness signals above generate proposals; solver-time signals are a
+# cost report, not a coverage gap, so they keep biasing priority only.
+PROPOSAL_SIGNALS = tuple(WEAKNESS_ATOM_TEMPLATES)
+
+# A category has to be *meaningfully* weak before it generates new work.
+PROPOSAL_WEAKNESS_THRESHOLD = 0.1
+
+# Generated proposals depend on the prelude only: they are new leaf modules.
+PROPOSAL_DEPENDS_ON = ["std/prelude.mm"]
 # Weakness weights: outcome mismatches dominate, missed counterexamples next,
 # residual trusted atoms last.
 WEAKNESS_WEIGHTS = {"success": 0.5, "counterexample": 0.3, "trusted": 0.2}
@@ -373,6 +428,95 @@ def _weakness_score(cat: dict) -> float:
     return round(score, 4)
 
 
+def _domain_slug(domain: str) -> str:
+    return domain.removeprefix("std/").replace("/", "_")
+
+
+def _proposal_target_file(domain: str) -> str:
+    """Target module for a generated proposal in ``domain``.
+
+    Directory domains (``std/math``) get a new leaf module inside them; file
+    domains (``std/list`` -> ``std/list.mm``) get a sibling module, so a
+    generated proposal never proposes to overwrite an existing module.
+    """
+    if (STD_DIR.parent / domain).is_dir():
+        return f"{domain}/benchmark_gaps.mm"
+    return f"{domain}_benchmark_gaps.mm"
+
+
+def _generated_proposals(categories: list[dict]) -> list[dict]:
+    """Turn weak benchmark categories into new vStd atom proposals.
+
+    The priority bias reorders proposals gap analysis already found; this is the
+    complementary direction (paper Future Work #11): a category that the
+    benchmark suite is weak on also *generates* the atoms that would close the
+    gap, keyed by which weakness signal it raised. Proposals are deterministic
+    and derived only from the category results, and they target new leaf modules
+    so they never collide with an existing std module.
+    """
+    proposals: list[dict] = []
+    for cat in categories:
+        if cat["weakness_score"] < PROPOSAL_WEAKNESS_THRESHOLD:
+            continue
+        domains = cat["std_domains"]
+        if not domains:
+            continue
+        domain = domains[0]
+        signals = [s for s in cat["signals"] if s in PROPOSAL_SIGNALS]
+        if not signals:
+            continue
+        slug = _domain_slug(domain)
+        atoms = []
+        for signal in signals:
+            template = WEAKNESS_ATOM_TEMPLATES[signal]
+            atoms.append(
+                {
+                    "name": f"{slug}_{template['atom_suffix']}",
+                    "description": template["description"].format(
+                        category=cat["category"],
+                        success_rate=_fmt_rate(cat["success_rate"]),
+                        counterexample_catch_rate=_fmt_rate(
+                            cat["counterexample_catch_rate"]
+                        ),
+                        trusted_ratio=_fmt_rate(cat["trusted_ratio"]),
+                    ),
+                    "inputs": [dict(i) for i in template["inputs"]],
+                    "return_type": "i64",
+                    "requires": template["requires"],
+                    "ensures": template["ensures"],
+                    "signal": signal,
+                }
+            )
+        difficulty = (
+            "high"
+            if any(
+                WEAKNESS_ATOM_TEMPLATES[s]["difficulty"] == "high" for s in signals
+            )
+            else "medium"
+        )
+        proposals.append(
+            {
+                "name": _proposal_target_file(domain),
+                "reason": (
+                    f"Benchmark category {cat['category']} is weak "
+                    f"(weakness_score {cat['weakness_score']}, signals: "
+                    f"{', '.join(signals)}); propose atoms covering {domain}."
+                ),
+                "depends_on": list(PROPOSAL_DEPENDS_ON),
+                "difficulty": difficulty,
+                "atoms": atoms,
+                "source": "benchmark_forge_feedback",
+                "driving_category": cat["category"],
+                "domain": domain,
+                "weakness_score": cat["weakness_score"],
+                "priority_delta": cat["priority_delta"],
+                "signals": signals,
+            }
+        )
+    proposals.sort(key=lambda p: (-p["weakness_score"], p["name"]))
+    return proposals
+
+
 def build_forge_feedback(
     timestamp: str,
     category_results: list[dict],
@@ -431,6 +575,7 @@ def build_forge_feedback(
         "categories": categories,
         "weak_categories": [c["category"] for c in weak],
         "domain_bias": [domain_bias[k] for k in sorted(domain_bias)],
+        "generated_proposals": _generated_proposals(categories),
     }
 
 

@@ -1626,8 +1626,15 @@ escalation candidate が 0 件のときは追加プロセスを起動せず `SKI
 + 0.2 * trusted_ratio`、加えて Z3 / Lean solver time の signal）を `CATEGORY_STD_DOMAINS` の
 stdlib ドメインへの負の `priority_delta` に写す。mumei-agent 側は
 `python -m agent forge|proliferate --benchmark-feedback <path>` で読み込み、gap proposal と
-forge task spec の優先度のみを並べ替える（提案の追加・削除は行わない）。適用の provenance は
+forge task spec の優先度のみを並べ替える（priority bias は提案の追加・削除を行わない）。適用の provenance は
 proliferate の run summary JSON の `benchmark_feedback` に記録される。
+
+さらに、弱点カテゴリからの提案「生成」もこの channel 上で実装済みである。`build_forge_feedback` は
+weakness signal（expected-outcome 不一致 / 反例捕捉不足 / trusted 比率）が閾値を超えたカテゴリについて、
+固定テンプレートから決定的な新規 vStd 提案を組み立て、後方互換の optional フィールド
+`generated_proposals` として出力する（旧 document は当該フィールドなしでそのまま読める）。mumei-agent 側は
+gap analysis の提案と target が重複しないものだけを forge / proliferate のキューへ合流させ、provenance を
+`benchmark_generated` に保持する。既存提案の削除・上書きは行わない。
 
 **Implementation Plan**（すべて実装済み）:
 
@@ -1682,7 +1689,9 @@ proliferate の run summary JSON の `benchmark_feedback` に記録される。
 - Lean escalation を要する atom の平均 Lean solver 時間をカテゴリ別に記録: 収集経路を実装済み。現状は
   Z3 `unknown` atom が 0 件のため全カテゴリ `SKIP`（Lean 利用可能環境でも candidate が出た時点で計測される）✅
 - ベンチマーク結果を既存標準ライブラリ拡張パイプライン（vStd forge / proliferate）へ統合（paper future work 項目 12）: **実装済み** ✅
-  （`--forge-feedback` → `--benchmark-feedback` の priority bias。提案生成そのものの導出は引き続き future work）
+  （`--forge-feedback` → `--benchmark-feedback` の priority bias に加え、弱点カテゴリからの決定的な提案生成
+  `generated_proposals` も実装済み。回帰ゲートは `python3 -m pytest tests/test_benchmark_suite.py -q` と
+  mumei-agent `uv run pytest tests/test_benchmark_feedback.py tests/test_propose.py -q`）
 
 ---
 
