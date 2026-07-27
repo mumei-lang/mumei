@@ -99,3 +99,26 @@ body: a + b + c;
         "escalation candidate must be tagged with the z3 result: {payload:#}"
     );
 }
+
+/// The inner-quantifier lowering path in `translator/expr.rs` needs the same
+/// guard: here the inner `forall j` only sees `arr[i]`, which cannot trigger it.
+#[test]
+fn forall_nested_in_forall_does_not_crash() {
+    let fixture = write_fixture(
+        "nested_foralls",
+        r#"
+atom nested_forall(arr: [i64], n: i64)
+requires: n >= 0 && forall(i, 0, n, forall(j, 0, n, arr[i] >= 0));
+ensures: result >= 0;
+body: n;
+"#,
+    );
+    let (output, _payload) = verify_json(&fixture, &[]);
+    std::fs::remove_dir_all(fixture.parent().unwrap()).expect("remove fixture dir");
+    assert_ne!(
+        output.status.code(),
+        Some(101),
+        "nested foralls must not panic\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
