@@ -259,3 +259,42 @@ Example:
   }
 }
 ```
+
+## `verify --json` module summary
+
+`mumei verify --json` emits a module-level summary payload alongside the counts.
+`diagnostics` carries both advisory diagnostics (fragment / untyped-array
+warnings) and one entry per rejected atom, so the failure reason is available
+without parsing stderr. `warnings` stays advisory-only.
+
+| Field | Type | Description |
+|---|---|---|
+| `code` | `string` | `failed`, `unverifiable`, or `escalation_candidate` (advisory entries keep their own code, e.g. `untyped_array_access`) |
+| `severity` | `string` | `error` for `failed`, otherwise `warning` |
+| `atom` | `string` | Atom the diagnostic belongs to |
+| `message` | `string` | First line of the rendered verification error |
+| `tags` | `array` | Status tag plus `z3_<result>` (e.g. `z3_sat`, `z3_unknown`) |
+| `escalation_reason` | `string` | Present only for entries with `code: "escalation_candidate"` |
+
+Every entry is an object with this field set; legacy string diagnostics coming
+from `report.json` are normalised to `code: "note"` / `severity: "warning"` with
+the original text as `message`. Entries are de-duplicated by (`atom`, `code`,
+`message`), so two atoms failing with the same message keep separate entries.
+
+```json
+{
+  "status": "failed",
+  "failed": 1,
+  "escalation_candidates": 0,
+  "diagnostics": [
+    {
+      "atom": "move_buffer_into_two_tasks",
+      "code": "failed",
+      "severity": "error",
+      "message": "Verification Error: Structured concurrency ownership violation in atom 'move_buffer_into_two_tasks': captured value `buf` is moved by concurrent sibling tasks 0 and 1 of the same task_group (concurrent double move)",
+      "tags": ["failed", "z3_sat"]
+    }
+  ],
+  "warnings": []
+}
+```

@@ -32,6 +32,10 @@ permissions:
 jobs:
   otel-tracing:
     runs-on: ubuntu-latest
+    # Cap the job so a hung solver/build or a stuck runtime step surfaces as a
+    # timeout (flake diagnostic) instead of silently consuming the default
+    # 6-hour budget.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -119,6 +123,7 @@ jobs:
 
   python-noop:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Check out mumei-agent
         uses: actions/checkout@v4

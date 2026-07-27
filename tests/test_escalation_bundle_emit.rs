@@ -120,6 +120,17 @@ for candidate in payload.get("candidates", []):
         "bridge_lemma_hash": candidate.get("bridge_lemma_hash", ""),
         "proof_path": "generated/Generated/Foo.lean",
         "diagnostics": [],
+        "known_witness_used": False,
+        "lean_solver_time_s": 7.5,
+        "tactic_search": {
+            "stage": "build_failure",
+            "adopted_tactic": "mumei_ff_mod",
+            "candidates_tried": ["omega", "mumei_ff_mod"],
+            "search_time_s": 2.5,
+            "exhausted": False,
+            "timed_out": False,
+            "supersedes_manual_lemma_reason": "unknown_obligation_requires_manual_lemma",
+        },
     }
 payload["lean_cert_schema_version"] = "1.0-lean"
 Path(args.lean_cert_out).parent.mkdir(parents=True, exist_ok=True)
@@ -158,6 +169,19 @@ Path(args.lean_cert_out).write_text(json.dumps(payload))
     assert_eq!(atom["status"], "verified");
     assert_eq!(atom["lean_metadata"]["status"], "lean_verified");
     assert_eq!(atom["lean_result_metadata"]["status"], "lean_verified");
+    // Bridge provenance survives the round-trip through the escalation bundle.
+    assert_eq!(atom["lean_result_metadata"]["known_witness_used"], false);
+    assert_eq!(atom["lean_result_metadata"]["lean_solver_time_s"], 7.5);
+    let search = &atom["lean_result_metadata"]["tactic_search"];
+    assert_eq!(search["stage"], "build_failure");
+    assert_eq!(search["adopted_tactic"], "mumei_ff_mod");
+    assert_eq!(search["candidates_tried"][1], "mumei_ff_mod");
+    assert_eq!(search["search_time_s"], 2.5);
+    assert_eq!(search["timed_out"], false);
+    assert_eq!(
+        search["supersedes_manual_lemma_reason"],
+        "unknown_obligation_requires_manual_lemma"
+    );
     assert_eq!(cert["all_verified"], true);
 
     std::fs::remove_dir_all(dir).expect("remove temp dir");

@@ -4,6 +4,7 @@ mod dataflow_inference;
 mod effects;
 mod law_verification;
 mod resource_safety;
+mod task_ownership;
 
 pub(crate) use law_verification::{
     contains_method_call, replace_word, split_args, substitute_method_calls,
@@ -27,7 +28,12 @@ pub(crate) use call_graph::{
     check_taint_propagation, collect_array_accesses, collect_array_accesses_in_stmt,
     collect_array_accesses_inner, collect_callees_expr, collect_callees_stmt,
     collect_callees_with_args_expr, collect_callees_with_args_stmt, detect_call_cycle,
-    expr_to_source_string, verify_atom_invariant, verify_call_graph_cycles,
+    expr_mentions_var, expr_to_source_string, verify_atom_invariant, verify_call_graph_cycles,
+};
+
+pub(crate) use task_ownership::{
+    analyze_task_ownership, verify_task_ownership, TaskOwnershipViolation,
+    TaskOwnershipViolationKind,
 };
 
 pub use dataflow_inference::{

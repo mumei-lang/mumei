@@ -1052,6 +1052,7 @@ atom hard_lemma(x: i64) -> i64
             bridge_lemma_hash: crate::verification::LEAN_BRIDGE_LEMMA_HASH.to_string(),
             proof_path: "Generated/StdLeanPilot.lean".to_string(),
             diagnostics: vec![],
+            ..Default::default()
         });
         let mut modules = HashMap::new();
         modules.insert("std/lean_pilot".to_string(), cert);

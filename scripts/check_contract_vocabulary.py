@@ -29,6 +29,7 @@ SYNC_DOCS = [
     REPO_ROOT / "docs" / "ROADMAP.md",
     REPO_ROOT / "docs" / "ONBOARDING.md",
     REPO_ROOT / "docs" / "PROOF_CERTIFICATE.md",
+    REPO_ROOT / "docs" / "TRUSTED_ATOMS.md",
     REPO_ROOT / "README.md",
     REPO_ROOT / "instruction.md",
 ]
@@ -55,6 +56,7 @@ HARNESS_KEYS = [
 NO_MM_KEYS = [
     "spec_health_issues",
     "verification_violations",
+    "verification_status",
     "cross_validation_gaps",
     "next_steps",
     "migration_hints",
@@ -71,7 +73,7 @@ FORBIDDEN_ALIASES = [
     "human_review",
 ]
 REQUIRED_NO_MM_LANGUAGE_PHRASES = [
-    "Python, Rust, TypeScript, and Go",
+    "Python, Rust, TypeScript, Go, and Solidity",
     "parser path",
     "deterministic/no-LLM",
     "Rust `a + b` i64 overflow",
@@ -163,6 +165,27 @@ def _check_forbidden_alias_keys(path: Path) -> list[Violation]:
                     )
                 )
                 break
+    return violations
+
+
+def _check_doc_contradiction_type_aliases(path: Path) -> list[Violation]:
+    """Detect `contradiction_type` alias drift inside a synced doc.
+
+    Mirrors the MCP/CLI ``contradiction_type`` guard for prose docs so a doc
+    cannot reintroduce ``contradiction_kind``/``_class``/``_category`` once it
+    is part of the docs-sync surface.
+    """
+    text = path.read_text(encoding="utf-8")
+    violations: list[Violation] = []
+    for alias in CONTRADICTION_TYPE_ALIASES:
+        if re.search(rf"\b{re.escape(alias)}\b", text):
+            violations.append(
+                Violation(
+                    path,
+                    f"doc contains contradiction_type alias: `{alias}`",
+                    _line_number(text, alias),
+                )
+            )
     return violations
 
 
@@ -268,6 +291,48 @@ def _count_mcp_tool_decorators(text: str) -> int:
     return len(re.findall(r"@mcp\.tool\(", text))
 
 
+def _extract_mcp_tool_names_ast(text: str) -> set[str]:
+    """Return the set of tool names exposed by @mcp.tool() decorators in *text*.
+
+    Uses the function name by default, but honors an explicit ``name=...``
+    keyword argument when present. A tool may be decorated with multiple
+    ``@mcp.tool()`` calls in the source; each name is collected.
+    """
+    tree = ast.parse(text)
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for decorator in node.decorator_list:
+            tool_name: str | None = None
+            if isinstance(decorator, ast.Call):
+                func = decorator.func
+                if isinstance(func, ast.Attribute) and func.attr == "tool":
+                    if (
+                        isinstance(func.value, ast.Attribute)
+                        and func.value.attr == "mcp"
+                    ) or (
+                        isinstance(func.value, ast.Name)
+                        and func.value.id == "mcp"
+                    ):
+                        tool_name = node.name
+                        for kw in decorator.keywords:
+                            if kw.arg == "name" and isinstance(
+                                kw.value, ast.Constant
+                            ) and isinstance(kw.value.value, str):
+                                tool_name = kw.value.value
+            elif isinstance(decorator, ast.Attribute):
+                if (
+                    decorator.attr == "tool"
+                    and isinstance(decorator.value, ast.Name)
+                    and decorator.value.id == "mcp"
+                ):
+                    tool_name = node.name
+            if tool_name:
+                names.add(tool_name)
+    return names
+
+
 def _check_mcp_forbidden_aliases(path: Path) -> list[Violation]:
     """Check MCP tool docstrings for forbidden aliases via AST extraction.
 
@@ -367,6 +432,7 @@ def main() -> int:
             continue
         violations.extend(_check_forbidden_alias_keys(path))
         violations.extend(_check_meaning_contradictions(path))
+        violations.extend(_check_doc_contradiction_type_aliases(path))
     for path in NO_MM_LANGUAGE_DOCS:
         violations.extend(_check_no_mm_language_sync(path))
 

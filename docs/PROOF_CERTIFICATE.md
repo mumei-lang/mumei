@@ -23,6 +23,12 @@ If any value is missing or stale, certificate verification returns `stale_transl
 
 The standard mumei-lean bridge path is live theorem generation for the current Z3 `unknown` obligation. For the body-semantics fixture, `abs_saturating` is emitted as `Generated.Std.Math.Abs.abs_saturating_correct`, exported as `lean_verified`, and recorded with `known_witness_used = false`. Pre-registered known witnesses remain fallback evidence and are recorded with `known_witness_used = true`; they do not replace the live generated theorem path when that path builds successfully.
 
+`lean_result_metadata` preserves the bridge's structured provenance alongside the gate fields: `known_witness_used`, `lean_solver_time_s` (Lean wall clock, including any automatic tactic search), and `tactic_search` (`stage`, `adopted_tactic`, `candidates_tried`, `search_time_s`, `exhausted`, `timed_out`, and `supersedes_manual_lemma_reason` once a promotion replaced a `manual_lemma_reason`). These fields are provenance only — promotion still depends solely on the four conditions above, so a stale `translator_version` is refused even when a tactic was adopted and the theorem built.
+
+Consumers must read `z3_check_result`, not `lean_result_metadata.status`. The bridge-supplied metadata is attached to an atom before the promotion gate runs, so a *refused* atom keeps the metadata it was offered: it can read `lean_result_metadata.status == "lean_verified"` with a full `tactic_search` block while its own `z3_check_result` stays `unknown` and `status` stays `escalation_candidate`. Only `z3_check_result == "lean_verified"` (with `--allow-lean-verified`) means the obligation was accepted.
+
+`certificate_hash` covers every field above, including the provenance. `mumei verify-cert` re-derives it and fails when a certificate written by this mumei version no longer hashes to its stored value; for a certificate written by a different version the mismatch is reported as a warning, since serialization may legitimately differ across versions.
+
 ## Roadmap authority and vocabulary
 
 `docs/CROSS_PROJECT_ROADMAP.md` is the single top-level roadmap for cross-repository harness work. This certificate spec is the mumei-side contract surface for that roadmap and uses these canonical fields without aliases: `harness_contract`, `intent_fidelity`, `artifact_paths`, `budget_policy_fingerprint`, and `lean_verified`. Cross-spec and no-`.mm` review artifacts use the same names as mumei-agent: `contract_consistency[]` maps to `missing_constraints[]`, `global_invariant_conflicts[]` maps to `divergences[]`, `circular_dependencies[]` maps to `drift_issues[]`, and Lean escalation remains limited to Z3 `unknown` / timeout / resource-limit obligations that cannot be closed automatically.
@@ -131,9 +137,9 @@ CLI values take precedence over environment values. `--intent-fidelity` accepts 
   "effects": ["Log"],
   "requires": "x >= 0",
   "ensures": "result >= x",
-  "translator_version": "mumei-lean-translator-ir-v1",
+  "translator_version": "mumei-lean-translator-ir-v2",
   "binder_mapping": { "x": "x", "result": "result" },
-  "bridge_lemma_hash": "a8fd0b115fd29a6e87190bd041dbd5ab7a09ec89af6ac5b10ef152a1a0c0f643",
+  "bridge_lemma_hash": "ee8cd3ba96c3318b3f07445f4755619744d4e1f9a662af94f3cbce6d41ed4347",
   "manual_lemma_reason": null,
   "retry_policy_fingerprint": "9bb6d4f2...",
   "attempt_summary": {
@@ -255,6 +261,8 @@ Mumei emits a typed escalation bundle for Z3 obligations that are outside the de
 escalation_bundle.json -> generated Lean source -> .olean/result certificate -> upgraded proof certificate
 ```
 
+Every candidate carries `body_expr` / `body_summary` alongside `requires` / `ensures`: the bridge lowers the body into the generated theorem so `result` is tied to the computation. Without the body a generated theorem states an unprovable goal over an unconstrained `result`, and body-semantics obligations (for example the finite-field paths) could never be discharged from a bundle.
+
 The Mumei compiler never accepts an upgraded `lean_verified` atom unless the atom source hash still matches and the translator contract metadata is current. A mismatched `translator_version` or `bridge_lemma_hash` is reported as `stale_translator`; missing Lean tooling is `lake_missing`; incomplete generated obligations are `partial_translation`. These names match the Lean bridge contract and are the only failure-class terms consumers should key on.
 
 ### Type system mapping
@@ -321,7 +329,7 @@ mumei build --emit proof-cert src/math.mm
 2. Run Z3 verification on all atoms
 3. Compute `content_hash` (source hash) and `proof_hash` (dependency-aware hash) for each atom
 4. Populate `dependencies`, `effects`, `requires`, `ensures` from `ModuleEnv`
-5. Compute `certificate_hash` as SHA-256 of the serialized JSON (excluding the hash field)
+5. Compute `certificate_hash` as SHA-256 of the serialized JSON with all object keys sorted (excluding the hash field), so the hash is reproducible from the certificate alone regardless of how unordered map fields happened to serialize
 6. Write `.proof-cert.json` to output directory
 
 ### Certificate Verification

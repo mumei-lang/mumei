@@ -12,17 +12,17 @@ Mumei can start from existing code or natural-language requirements, then gradua
 
 ## Canonical vocabulary
 
-Follow `docs/CROSS_PROJECT_ROADMAP.md` as the top-level contract. User-facing onboarding uses only `harness_contract`, `intent_fidelity`, `artifact_paths`, `budget_policy_fingerprint`, and `lean_verified` for mumei-side evidence. The no-`.mm` path keeps the mumei-agent names `spec_health_issues`, `verification_violations`, `cross_validation_gaps`, `next_steps`, `migration_hints`, `healed_files`, and `heal_errors`; do not rename them when handing users from `audit` / `scan_and_fix` into generated `.mm` verification.
+Follow `docs/CROSS_PROJECT_ROADMAP.md` as the top-level contract. User-facing onboarding uses only `harness_contract`, `intent_fidelity`, `artifact_paths`, `budget_policy_fingerprint`, and `lean_verified` for mumei-side evidence. The no-`.mm` path keeps the mumei-agent names `spec_health_issues`, `verification_violations`, `verification_status`, `cross_validation_gaps`, `next_steps`, `migration_hints`, `healed_files`, and `heal_errors`; do not rename them when handing users from `audit` / `scan_and_fix` into generated `.mm` verification.
 
 `lean_verified` is not a generic success label. Z3 `unknown` atoms may escalate to mumei-lean, but Mumei accepts the result as proven only when callers opt in with `--allow-lean-verified` and the atom certificate plus Lean metadata both carry the current `translator_version` and `bridge_lemma_hash`; otherwise CLI, MCP consumers, and certificate verification must treat the atom as stale/unproven. The current no-`.mm` handoff emits `abs_saturating` through the live generated theorem `Generated.Std.Math.Abs.abs_saturating_correct` with `known_witness_used = false`; `known_witness_used = true` remains fallback witness evidence.
 
 ## First path: audit before `.mm`
 
 Use `mumei-agent audit --code-file ... --auto-migrate --auto-heal` or MCP `scan_and_fix` before asking a new user to author `.mm`. Both entrypoints must present the same gate order and the same names. The
-front door supports Python, Rust, TypeScript, and Go; language selection only
-changes the parser path, not the seven keys or their meanings:
+front door supports Python, Rust, TypeScript, Go, and Solidity; language selection only
+changes the parser path, not the eight keys or their meanings:
 
-1. `audit` emits `spec_health_issues`, `verification_violations`, `cross_validation_gaps`, and `next_steps`.
+1. `audit` emits `spec_health_issues`, `verification_violations`, `verification_status`, `cross_validation_gaps`, and `next_steps`.
 2. `migrate-suggest` / `--auto-migrate` emits `migration_hints` and generated `.mm` skeleton paths.
 3. `heal` / `--auto-heal` emits `healed_files` and `heal_errors`.
 
@@ -48,7 +48,7 @@ printf '%s\n' "残高不足の場合はエラーを返す" > spec.txt
 uv run mumei-agent validate-spec-to-code --spec spec.txt --code payment.py --language python
 ```
 
-`audit --auto-migrate --auto-heal` and MCP `scan_and_fix` are the canonical no-`.mm` route. Read their artifacts as `spec_health_issues`, `verification_violations`, `cross_validation_gaps`, `next_steps`, `migration_hints`, `healed_files`, and `heal_errors`. `cross_spec.json.contract_consistency[]` maps to agent `missing_constraints[]`; `global_invariant_conflicts[]` maps to `divergences[]`; `circular_dependencies[]` maps to `drift_issues[]`.
+`audit --auto-migrate --auto-heal` and MCP `scan_and_fix` are the canonical no-`.mm` route. Read their artifacts as `spec_health_issues`, `verification_violations`, `verification_status`, `cross_validation_gaps`, `next_steps`, `migration_hints`, `healed_files`, and `heal_errors`. `cross_spec.json.contract_consistency[]` maps to agent `missing_constraints[]`; `global_invariant_conflicts[]` maps to `divergences[]`; `circular_dependencies[]` maps to `drift_issues[]`.
 
 この段階では `.mm` ファイルは不要です。出力された counterexample、仕様とコードの不一致、足りない事前条件を移行バックログとして扱います。
 `audit` の出力に `verification_violations` や `cross_validation_gaps` が含まれる場合は、`next_steps:` フィールドも確認してください。各項目は、次に実行すべき確認コマンド、仕様・コードの修正候補、または `.mm` 移行前に解消すべきギャップを示します。
@@ -71,8 +71,8 @@ mumei verify transfer.mm
 
 生成された `.mm` は、人間がレビューしながら小さく修正します。
 
-- LSP (`mumei lsp`) を使い、エディタ上で diagnostics、hover、補完、定義ジャンプを確認する。`.mm` 内の `/// spec:` は `mumei-agent` の `spec_health_issues` として該当コメント行に出し、`.py` / `.rs` / `.ts` / `.tsx` / `.go` では `verification_violations` / `cross_validation_gaps` をインライン表示する。
-- REPL (`mumei repl`) を使い、小さい式や atom をインタラクティブに検証する。自然言語仕様は `:verify-spec <path|inline>`、他言語コードは `:verify-code <path>` で `mumei-agent` の `spec_health_issues` / `verification_violations` / `cross_validation_gaps` / `next_steps` を確認できる。
+- LSP (`mumei lsp`) を使い、エディタ上で diagnostics、hover、補完、定義ジャンプを確認する。`.mm` 内の `/// spec:` は `mumei-agent` の `spec_health_issues` / `cross_validation_gaps` として該当コメント行に出し、検証失敗時は fallback diagnostic も表示する。`.py` / `.rs` / `.ts` / `.tsx` / `.go` / `.sol` では `verification_violations` / `cross_validation_gaps` と `verification_status` をインライン表示する。`textDocument/didChange` 時にはエディタの未保存バッファで再検証され、diagnostic が更新・クリアされる。
+- REPL (`mumei repl`) を使い、小さい式や atom をインタラクティブに検証する。自然言語仕様は `:verify-spec <path|inline>` で `spec_health_issues` / `verification_violations` / `cross_validation_gaps` / `next_steps`、他言語コードは `:verify-code <path>` で同項目に加えて `verification_status` を確認できる。
 - `uv run mumei-agent check-spec-health transfer.mm` で矛盾、到達不能な `requires`、過剰拘束、曖昧な postcondition を確認する。
 - verifier の counterexample を仕様レビューの単位にし、1 回の修正で 1 つの失敗原因だけを潰す。
 

@@ -161,7 +161,7 @@ Register the `.mm` extension by placing a language configuration in your Zed ext
 
 After configuring your editor, open a `.mm` file and verify:
 
-1. **Diagnostics**: Introduce a syntax error (e.g., remove a semicolon) and confirm that the editor shows a red squiggly or error marker.
+1. **Diagnostics**: Introduce a syntax error (e.g., remove a semicolon) and confirm that the editor shows a red squiggly or error marker. Also confirm that `/// spec:` comments and foreign code files (`.py`, `.rs`, `.ts`, `.tsx`, `.go`, `.sol`) surface `mumei-agent` diagnostics, and that editing the buffer updates or clears them via `textDocument/didChange`.
 2. **Completion**: Type `ato` and trigger completion — you should see `atom` and `atom_ref` in the completion list.
 3. **Hover**: Hover over an `atom` definition to see its `requires` and `ensures` contracts.
 4. **Go to Definition**: Place the cursor on an atom name and use your editor's "Go to Definition" command to jump to its definition.

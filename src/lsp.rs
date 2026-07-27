@@ -14,6 +14,7 @@
 //! - `shutdown` / `exit`
 use crate::agent;
 use mumei_core::parser;
+use mumei_core::proof_cert;
 use mumei_core::verification;
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
@@ -270,7 +271,7 @@ fn diagnose(uri: &str, source: &str) -> Vec<serde_json::Value> {
     if let Some(path) = path.as_deref() {
         if let Ok(language) = agent::infer_code_language(path) {
             let mut diagnostics = Vec::new();
-            append_agent_code_diagnostics(uri, path, &language, &mut diagnostics);
+            append_agent_code_diagnostics(uri, source, path, &language, &mut diagnostics);
             return diagnostics;
         }
     }
@@ -296,7 +297,12 @@ fn diagnose(uri: &str, source: &str) -> Vec<serde_json::Value> {
 
     // Phase 2: Z3 検証 diagnostics（file:// URI の場合のみ実行）
     if let Some(path) = path.as_deref() {
-        if let Err(e) = verify_source_for_lsp(path, source) {
+        if let Err(failure) = verify_source_for_lsp(path, source) {
+            let LspVerifyFailure {
+                error: e,
+                atom: failed_atom,
+                escalation,
+            } = failure;
             let detail = e.to_detail();
             // ErrorDetail の Span から直接位置を取得（substring マッチ不要）
             let (line, col) = if detail.span.line > 0 {
@@ -321,6 +327,30 @@ fn diagnose(uri: &str, source: &str) -> Vec<serde_json::Value> {
                 _ => None,
             };
             let mut message = format!("{}", detail);
+            // The editor previously reported the Z3 verdict without saying
+            // whether the atom is routed to mumei-lean. Escalation state is
+            // what tells the reader if a red squiggle is terminal or waiting
+            // on the Lean fidelity check.
+            let escalation_data = escalation.as_ref().map(|classification| {
+                let reason = classification
+                    .escalation_reason
+                    .as_ref()
+                    .map(|reason| reason.as_str().to_string());
+                message.push_str(&format!(
+                    "\n\nLean escalation: pending (z3 {}{})",
+                    classification.z3_result_class,
+                    reason
+                        .as_deref()
+                        .map(|r| format!(", reason {}", r))
+                        .unwrap_or_default()
+                ));
+                serde_json::json!({
+                    "status": "pending",
+                    "atom": failed_atom,
+                    "z3_result_class": classification.z3_result_class,
+                    "escalation_reason": reason,
+                })
+            });
             if let Some(ce) = &counterexample {
                 if let Some(obj) = ce.as_object() {
                     let ce_parts: Vec<String> = obj
@@ -356,11 +386,19 @@ fn diagnose(uri: &str, source: &str) -> Vec<serde_json::Value> {
             if !related_info.is_empty() {
                 diag["relatedInformation"] = serde_json::json!(related_info);
             }
-            if let Some(ce) = counterexample {
-                diag["data"] = serde_json::json!({ "counterexample": ce });
+            if counterexample.is_some() || escalation_data.is_some() {
+                let mut data = serde_json::Map::new();
+                if let Some(ce) = counterexample {
+                    data.insert("counterexample".to_string(), ce);
+                }
+                if let Some(lean) = escalation_data {
+                    data.insert("lean_escalation".to_string(), lean);
+                }
+                diag["data"] = serde_json::Value::Object(data);
             }
             diagnostics.push(diag);
         }
+        append_lean_verified_diagnostics(path, source, &items, &mut diagnostics);
     }
 
     append_intent_drift_diagnostics(source, &items, &mut diagnostics);
@@ -382,11 +420,18 @@ struct SpecComment {
 
 fn append_agent_code_diagnostics(
     uri: &str,
+    source: &str,
     path: &Path,
     language: &str,
     diagnostics: &mut Vec<serde_json::Value>,
 ) {
-    let Ok(report) = agent::validate_code(path, language) else {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("tmp");
+    let Ok(input_path) = write_lsp_tempfile(source, ext) else {
+        return;
+    };
+    let report = agent::validate_code(&input_path, language);
+    let _ = std::fs::remove_file(&input_path);
+    let Ok(report) = report else {
         return;
     };
 
@@ -408,6 +453,27 @@ fn append_agent_code_diagnostics(
         None,
         diagnostics,
     );
+
+    if let Some(status) = report.verification_status.as_deref() {
+        if status != "verified" {
+            let severity = match status {
+                "refuted" => 1,
+                _ => 2,
+            };
+            let related_info =
+                agent_next_step_related_information(uri, 0, 0, 0, &report.next_steps);
+            diagnostics.push(serde_json::json!({
+                "range": {
+                    "start": { "line": 0, "character": 0 },
+                    "end": { "line": 0, "character": 0 }
+                },
+                "severity": severity,
+                "source": "mumei-agent",
+                "message": format!("verification_status: {}", status),
+                "relatedInformation": related_info
+            }));
+        }
+    }
 }
 
 fn append_agent_spec_diagnostics(
@@ -429,15 +495,44 @@ fn append_agent_spec_diagnostics(
         return;
     };
 
+    let spec_diagnostics_before = diagnostics.len();
     append_agent_issue_diagnostics(
         uri,
         &report.spec_health_issues,
         "spec_health_issues",
         &report.next_steps,
+        1,
+        Some(&spec_comments),
+        diagnostics,
+    );
+    let cross_diagnostics_before = diagnostics.len();
+    append_agent_issue_diagnostics(
+        uri,
+        &report.cross_validation_gaps,
+        "cross_validation_gaps",
+        &report.next_steps,
         2,
         Some(&spec_comments),
         diagnostics,
     );
+
+    if !report.success
+        && diagnostics.len() == spec_diagnostics_before
+        && diagnostics.len() == cross_diagnostics_before
+    {
+        diagnostics.push(serde_json::json!({
+            "range": {
+                "start": { "line": 0, "character": 0 },
+                "end": { "line": 0, "character": 0 }
+            },
+            "severity": 1,
+            "source": "mumei-agent",
+            "message": "spec validation failed",
+            "relatedInformation": agent_next_step_related_information(
+                uri, 0, 0, 0, &report.next_steps
+            )
+        }));
+    }
 }
 
 fn append_agent_issue_diagnostics(
@@ -504,6 +599,22 @@ fn write_lsp_spec_tempfile(spec_comments: &[SpecComment]) -> Result<PathBuf, std
         .collect::<Vec<_>>()
         .join("\n");
     std::fs::write(&path, body)?;
+    Ok(path)
+}
+
+fn write_lsp_tempfile(source: &str, extension: &str) -> Result<PathBuf, std::io::Error> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let mut path = std::env::temp_dir();
+    path.push(format!(
+        "mumei-lsp-code-{}-{}.{}",
+        std::process::id(),
+        now,
+        extension
+    ));
+    std::fs::write(&path, source)?;
     Ok(path)
 }
 
@@ -753,12 +864,45 @@ fn uri_to_path(uri: &str) -> Option<std::path::PathBuf> {
     uri.strip_prefix("file://").map(std::path::PathBuf::from)
 }
 
+/// A failed LSP verification, together with the Lean escalation routing that
+/// `mumei verify` would apply to the same atom.
+struct LspVerifyFailure {
+    error: verification::MumeiError,
+    atom: Option<String>,
+    escalation: Option<verification::LeanEscalationClassification>,
+}
+
+fn classify_lsp_failure(
+    atom: &parser::Atom,
+    module_env: &verification::ModuleEnv,
+    error: verification::MumeiError,
+) -> LspVerifyFailure {
+    let error_text = error.to_detail().message;
+    let is_unverifiable = verification::is_unverifiable_error_message(&error_text);
+    let z3_result = if is_unverifiable {
+        "skipped".to_string()
+    } else {
+        verification::z3_result_from_error_message(&error_text)
+            .unwrap_or("sat")
+            .to_string()
+    };
+    let status = if is_unverifiable {
+        "unverifiable"
+    } else {
+        "failed"
+    };
+    let classification =
+        verification::classify_atom_for_lean_escalation(atom, module_env, &z3_result, status);
+    LspVerifyFailure {
+        error,
+        atom: Some(atom.name.clone()),
+        escalation: classification.should_escalate.then_some(classification),
+    }
+}
+
 /// ソースコードを in-process でパース → Z3 検証し、最初のエラーを返す。
 /// mumei.toml を上方探索してプロジェクトルートを決定し、依存パッケージも解決する。
-fn verify_source_for_lsp(
-    path: &std::path::Path,
-    source: &str,
-) -> Result<(), verification::MumeiError> {
+fn verify_source_for_lsp(path: &std::path::Path, source: &str) -> Result<(), LspVerifyFailure> {
     let items = parser::parse_module(source);
     if items.is_empty() {
         return Ok(());
@@ -813,7 +957,11 @@ fn verify_source_for_lsp(
                     continue;
                 }
                 let hir_atom = mumei_core::hir::lower_atom_to_hir(atom);
-                verification::verify_with_config(&hir_atom, output_dir, &module_env, 5000, 3)?;
+                if let Err(e) =
+                    verification::verify_with_config(&hir_atom, output_dir, &module_env, 5000, 3)
+                {
+                    return Err(classify_lsp_failure(atom, &module_env, e));
+                }
                 module_env.mark_verified(&atom.name);
             }
             parser::Item::ImplBlock(ib) => {
@@ -825,7 +973,15 @@ fn verify_source_for_lsp(
                     let mut qualified_method = method.clone();
                     qualified_method.name = qualified_name.clone();
                     let hir_atom = mumei_core::hir::lower_atom_to_hir(&qualified_method);
-                    verification::verify_with_config(&hir_atom, output_dir, &module_env, 5000, 3)?;
+                    if let Err(e) = verification::verify_with_config(
+                        &hir_atom,
+                        output_dir,
+                        &module_env,
+                        5000,
+                        3,
+                    ) {
+                        return Err(classify_lsp_failure(&qualified_method, &module_env, e));
+                    }
                     module_env.mark_verified(&qualified_name);
                 }
             }
@@ -1153,6 +1309,67 @@ fn is_item_start(line: &str) -> bool {
         || trimmed.starts_with("resource ")
         || trimmed.starts_with("extern ")
         || trimmed.starts_with("import ")
+}
+
+/// Report atoms that a sibling proof certificate records as discharged by
+/// mumei-lean. Without this the editor shows nothing for an atom Z3 returned
+/// `unknown` for, so a reader cannot tell a still-open escalation from one the
+/// Lean bridge already closed.
+fn append_lean_verified_diagnostics(
+    path: &Path,
+    source: &str,
+    items: &[parser::Item],
+    diagnostics: &mut Vec<serde_json::Value>,
+) {
+    let cert_path = path.with_extension("proof.json");
+    if !cert_path.exists() {
+        return;
+    }
+    let Ok(cert) = proof_cert::load_certificate(&cert_path) else {
+        return;
+    };
+
+    // Certificates record impl methods qualified as `Struct::method`, so the
+    // lookup key is qualified the same way the verification path does it.
+    let mut atoms: Vec<(String, &parser::Atom)> = Vec::new();
+    for item in items {
+        match item {
+            parser::Item::Atom(atom) => atoms.push((atom.name.clone(), atom)),
+            parser::Item::ImplBlock(impl_block) => atoms.extend(
+                impl_block
+                    .methods
+                    .iter()
+                    .map(|m| (format!("{}::{}", impl_block.struct_name, m.name), m)),
+            ),
+            _ => {}
+        }
+    }
+
+    for atom_cert in &cert.atoms {
+        if atom_cert.z3_check_result != "lean_verified" {
+            continue;
+        }
+        let Some((_, atom)) = atoms.iter().find(|(name, _)| name == &atom_cert.name) else {
+            continue;
+        };
+        diagnostics.push(serde_json::json!({
+            "range": atom_name_range(source, atom),
+            "severity": 3,
+            "source": "mumei-lean",
+            "message": format!(
+                "Lean escalation: lean_verified by mumei-lean (certificate {})",
+                cert_path.display()
+            ),
+            "data": {
+                "lean_escalation": {
+                    "status": "lean_verified",
+                    "atom": atom_cert.name,
+                    "z3_result_class": atom_cert.z3_result_class,
+                    "certificate": cert_path.to_string_lossy(),
+                }
+            }
+        }));
+    }
 }
 
 fn append_intent_drift_diagnostics(

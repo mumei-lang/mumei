@@ -43,16 +43,17 @@ The current cross-repo execution order is fixed and should be reviewed with `doc
 | Order | Workstream | Local meaning |
 | --- | --- | --- |
 | 1 | `V1-A` and `V1-B` in parallel | `V1-A` validates natural-language spec health; `V1-B` audits existing code through `mumei-agent audit --code-file ... --auto-migrate --auto-heal` and MCP `scan_and_fix`. |
-| 2 | `V1-C` and `V1-D` | Compare spec→code and code→spec only after V1-A/V1-B artifacts use the stable names `spec_health_issues`, `verification_violations`, `cross_validation_gaps`, `next_steps`, `migration_hints`, `healed_files`, and `heal_errors`. |
+| 2 | `V1-C` and `V1-D` | Compare spec→code and code→spec only after V1-A/V1-B artifacts use the stable names `spec_health_issues`, `verification_violations`, `verification_status`, `cross_validation_gaps`, `next_steps`, `migration_hints`, `healed_files`, and `heal_errors`. |
 | 3 | `V1-E` | Human review enters through `next_steps` and the traceability metadata, not through renamed issue fields. The Phase 7 `mumei-demo/scenarios/spec_code_verification_suite` scenario now demonstrates V1-A〜V1-D in one fixture-safe flow before migration or Lean escalation. |
 
-The no-`.mm` front door remains `audit -> migrate-suggest -> heal`. `mumei-lean` is expanded only for Z3 `unknown` obligations, not `sat` / `unsat` / parser failure / audit findings, and now completes the V1 live generated theorem paths (eight in total: `abs_saturating`, `bounded_mul_with_overflow_check`, `constant_time_eq_flag`, `ff_zero_eq_zero`, `verified_insertion_sort_ascending`, `poly_bound_monotone`, `exists_pivot_partition`, `sum_nonneg_inductive`). The reference path `Generated.Std.Math.Abs.abs_saturating_correct` exports `lean_verified` with `known_witness_used = false` when `translator_version` and `bridge_lemma_hash` match; stale metadata is `stale_translator`, and `known_witness_used = true` remains fallback witness evidence only.
+The no-`.mm` front door remains `audit -> migrate-suggest -> heal`. `mumei-lean` is expanded only for Z3 `unknown` obligations, not `sat` / `unsat` / parser failure / audit findings, and now completes the V1 live generated theorem paths (ten in total: `abs_saturating`, `bounded_mul_with_overflow_check`, `constant_time_eq_flag`, `ff_zero_eq_zero`, `verified_insertion_sort_ascending`, `poly_bound_monotone`, `exists_pivot_partition`, `sum_nonneg_inductive`, `rtgs_transfer_conservation`, `ff_mul_commutative`). The reference path `Generated.Std.Math.Abs.abs_saturating_correct` exports `lean_verified` with `known_witness_used = false` when `translator_version` and `bridge_lemma_hash` match; stale metadata is `stale_translator`, and `known_witness_used = true` remains fallback witness evidence only.
 
-Local docs were reviewed with the four-language no-`.mm` contract: Python, Rust,
-TypeScript, and Go all use the same seven audit keys, and language selection
+Local docs were reviewed with the five-language no-`.mm` contract: Python, Rust,
+TypeScript, Go, and Solidity all use the same eight audit keys, and language selection
 only swaps parser paths. Deterministic/no-LLM demos must keep Rust `a + b` i64
-overflow/bounds, TypeScript `name!.length` null/undefined, and Go `values[idx]`
-bounds / `user.Name` nil / `a + b` overflow in the Z3 counterexample `verification_violations` path, with
+overflow/bounds, TypeScript `name!.length` null/undefined, Go `values[idx]`
+bounds / `user.Name` nil / `a + b` overflow, and Solidity reentrancy/CEI/access-control
+findings in the Z3 counterexample `verification_violations` path, with
 `next_steps` as the only human-review entrypoint before migration/heal evidence.
 
 ## Overview
@@ -345,7 +346,7 @@ mumei> :quit
    - :type <expr> (display type inference result)
    - :verify <atom> (.mm atom verification path)
    - :verify-spec <path|inline> (mumei-agent validate-spec JSON; displays spec_health_issues / verification_violations / cross_validation_gaps / next_steps)
-   - :verify-code <path> (mumei-agent validate-code --input <path> JSON; --language is optional, inferred from extension; displays spec_health_issues / verification_violations / cross_validation_gaps / next_steps)
+   - :verify-code <path> (mumei-agent validate-code --input <path> JSON; --language is optional, inferred from extension; displays spec_health_issues / verification_violations / verification_status / cross_validation_gaps / next_steps)
 
 4. HTTP/JSON integration (after P1 completion)
    - Execute http.get() directly from REPL
@@ -575,7 +576,7 @@ Detailed session plans for the next 8 implementation priorities are documented i
 | 17 | Plan 23: Regex Path Policies + URL Validation | ✅ RegexSafeFileRead, SecureHttpGet/Post, Z3 approximation improvements |
 | 18 | Plan 24: Modular Verification | ✅ effect_pre/effect_post contracts, cross-atom temporal state tracking |
 | 19 | Plan 25: LSP Completion & Definition | ✅ textDocument/completion, textDocument/definition, multi-editor docs |
-| 20 | V1-E-3: LSP Agent Diagnostics | ✅ `/// spec:` `spec_health_issues`, `.py`/`.rs`/`.ts`/`.tsx`/`.go` `verification_violations` / `cross_validation_gaps`, graceful `mumei-agent` degrade |
+| 20 | V1-E-3: LSP Agent Diagnostics | ✅ `/// spec:` `spec_health_issues` / `cross_validation_gaps` + silent-failure fallback, `.py`/`.rs`/`.ts`/`.tsx`/`.go`/`.sol` `verification_violations` / `cross_validation_gaps` / `verification_status`, graceful `mumei-agent` degrade |
 
 ### Plan 22: PII Pipeline Example
 
@@ -679,11 +680,11 @@ Unfreezes the LSP server and adds two major features: textDocument/completion an
 Extends `mumei lsp` diagnostics beyond `.mm` parse/Z3 feedback by reusing the same `mumei-agent` JSON contract as the REPL:
 
 - `.mm` comments matching `/// spec: ...` are extracted into a temporary spec input and checked with `mumei-agent validate-spec --input <tmpfile> --format json`; `spec_health_issues` appear on the original comment line.
-- `.py`, `.rs`, `.ts`, `.tsx`, and `.go` files are checked with `mumei-agent validate-code --input <path>` (`--language` is optional; inferred from extension); `verification_violations` and `cross_validation_gaps` appear as `source: "mumei-agent"` diagnostics.
-- `next_steps` remains the human-review entrypoint and is included in diagnostic messages / related information without renaming the fixed buckets.
+- `.py`, `.rs`, `.ts`, `.tsx`, `.go`, and `.sol` files are checked with `mumei-agent validate-code --input <tmpfile>` (`--language` is optional; inferred from extension); `verification_violations`, `cross_validation_gaps`, and `verification_status` appear as `source: "mumei-agent"` diagnostics. The current editor buffer is written to a temporary file so `textDocument/didChange` re-runs validation on the unsaved source.
+- `next_steps` remains the human-review entrypoint and is included in diagnostic messages and `relatedInformation` without renaming the fixed buckets.
 - Missing `mumei-agent` or malformed JSON silently degrades to existing `.mm` diagnostics, preserving Z3 `relatedInformation` and `data.counterexample`.
 
-**Regression test**: `LLVM_SYS_170_PREFIX=/usr/lib/llvm-17 LIBCLANG_PATH=/usr/lib/x86_64-linux-gnu cargo test --test test_lsp_spec_diagnostics` uses a fake `mumei-agent` on `PATH` to pin spec-comment diagnostics, foreign-code diagnostics, and graceful missing-agent behavior.
+**Regression test**: `LLVM_SYS_170_PREFIX=/usr/lib/llvm-17 LIBCLANG_PATH=/usr/lib/x86_64-linux-gnu cargo test --test test_lsp_spec_diagnostics` uses a fake `mumei-agent` on `PATH` to pin spec-comment diagnostics, foreign-code diagnostics, `textDocument/didChange` re-validation/diagnostic clearing, and graceful missing-agent behavior.
 
 ### P7: Runtime Completion (REPL JIT + Binary Execution)
 
@@ -1080,6 +1081,160 @@ Self-healing loop と Lean escalation は成功率を上げる一方で、無制
 
 ---
 
+### P10: Z3 Theory Coverage Extension（Z3 未利用理論の段階的取り込み）
+
+Mumei の検証層は現在、Z3 の Bool / Int / Real /（有界）Array / String 近似 /（有界）量化子という決定可能断片のみを利用している。
+一方 Z3 は Bit-Vector・正規表現・代数的データ型・非線形算術など多くの理論を備えており、Mumei はこれらのギャップを「スタブ実装」「手動オーバーフロー境界」「Int タグエンコード」「無条件 Lean エスカレーション」で回避している。
+P10 では、これらのギャップのうち投資対効果の高いものを Z3 側で直接扱えるようにし、真に難しい部分は引き続き Lean 4 へ委譲する二層構造を維持する。
+
+**P10-A: Bit-Vector Theory（`Z3_BV_SORT` / `theory_bv`）** — ★★★ 最優先
+
+現状のギャップ:
+
+- `std/bitwise.mm` は現行パーサが `&`, `|`, `^`, `<<`, `>>` を通常算術として扱わないため、`bit_and` などが実ビット意味論ではなく境界性質の witness（常に `0` を返す等）にとどまっている。
+- Z3 は数学的整数で検証するためオーバーフローが素通りし、`std/contracts.mm` の `safe_add` / `safe_multiply` や `std/math/fixed_point.mm` は `requires` に手動の範囲制約（±4×10^18 等）を書いて回避している。
+
+Lean 委譲境界: `mumei-core/src/verification/types.rs` の `integer_overflow_bridge`（Mumei は 2 の補数ラップ、Lean 4 `Int` は無限精度）ブリッジ補題ノートに従い、リング推論を要する深いオーバーフロー定理は引き続き Lean 4 へ委譲する。
+
+**Implementation Plan**:
+
+```
+1. BV sort 生成経路の追加
+   - z3_types.rs の param_z3_value の LoweredType 分岐（317 行目付近の Int::new_const フォールバック）に i64 用 BV(64) sort 生成を追加
+   - 2 の補数ラップ意味論で加減乗算をエンコードし、Int エンコードとの相互変換点を明示
+   - オプトイン（--bitvec-i64）で段階導入し、既定の Int エンコードとの後方互換を保つ
+
+2. ビット演算子のパースと lowering
+   - パーサで &, |, ^, <<, >> を式として扱えるようにし、HIR/MIR へ伝搬
+   - and / or / xor / shl / shr を BV 演算として翻訳し、shift 量の範囲条件を requires に反映
+   - std/bitwise.mm の atom を witness 実装から実ビット意味論の ensures へ書き換える
+
+3. オーバーフロー契約の自動化
+   - std/contracts.mm の safe_add / safe_multiply、std/math/fixed_point.mm の手動範囲制約を BV ラップ意味論由来の条件へ置き換える
+   - fragment.rs に bitvector_semantics タグを追加し、BV で閉じない義務のみ Lean escalation 候補にする
+   - docs/SPEC_GUIDE.md に BV モードで書ける仕様と書けない仕様を明記する
+```
+
+**Files to modify/create**:
+- `mumei-core/src/verification/translator/z3_types.rs` — i64 用 `BV(64)` sort 生成とビット演算エンコード
+- `mumei-core/src/parser/` — `&`, `|`, `^`, `<<`, `>>` のビット演算子パースと優先順位
+- `std/bitwise.mm` — 実ビット意味論の `ensures` へ書き換え
+- `std/contracts.mm` — `safe_add` / `safe_multiply` の手動範囲制約を BV 条件へ置換
+- `std/math/fixed_point.mm` — 手動オーバーフロー境界の削減
+- `mumei-core/src/verification/fragment.rs` — `bitvector_semantics` タグと Lean escalation 判定
+- `docs/SPEC_GUIDE.md` — BV モードの決定可能断片と `--bitvec-i64` 運用ガイド
+
+**Success Metrics**:
+- `std/bitwise.mm` の各 atom が実ビット意味論の `ensures` を Z3 検証で通す率: 100%
+- 手動オーバーフロー境界（`requires` の ±4×10^18 等）を必要とする atom 数: ≥ 80% 削減
+- `--bitvec-i64` 無効時の既存 proof certificate 回帰: 0 件
+
+**P10-B: Regular Expression Theory（`Z3_RE_SORT` / RegLan）** — ★★
+
+現状のギャップ: 正規表現制約は String Sort 上の `prefix_of` / `suffix_of` / `contains` 近似のみで表現され、`regex_semantics` タグが付いた義務は `docs/SPEC_GUIDE.md` の方針どおり Lean 4 へ回している。
+
+Lean 委譲境界: `mumei-core/src/verification/types.rs` の `string_regex_bridge` ノート（Z3 と Lean で String / regex 意味論が異なる）に従い、複雑な意味論を要する義務のみ Lean 4 に残す。
+
+**Implementation Plan**:
+
+```
+1. RE_SORT ベースの regex 変換
+   - mumei-core/src/verification.rs（および verification/ 配下の String 制約変換箇所）の regex 近似ロジックを Z3 ネイティブ正規表現理論へ拡張
+   - リテラル・連接・選択・繰り返し・文字クラスを RegLan 式へ写像し、str.in_re で判定する
+   - 近似で扱っていた prefix_of / suffix_of / contains を RE 式の特殊形として再定義する
+
+2. 有界・単純な regex の Z3 直接判定
+   - パス検証・入力バリデーション（Plan 23 の RegexSafeFileRead などの延長）を Z3 で直接決定する
+   - std/string/validator.mm と std/effects.mm の path / URL 制約を RE ベースの ensures へ移行
+   - 変換不能な構文（後方参照・先読み等）は regex_semantics タグを維持して Lean へ送る
+
+3. 仕様ガイドと回帰
+   - docs/SPEC_GUIDE.md に Z3 で決定可能な regex 断片と Lean 委譲対象を明記
+   - RE 変換の反例（受理/非受理文字列）を counterexample として報告する
+```
+
+**Files to modify/create**:
+- `mumei-core/src/verification.rs` — regex 近似から `Z3_RE_SORT` ベース変換への移行
+- `std/string/validator.mm` — 入力バリデーション契約の RE 化
+- `std/effects.mm` — path / URL 制約の RE 化
+- `docs/SPEC_GUIDE.md` — 決定可能な regex 断片と Lean 委譲境界
+
+**Success Metrics**:
+- 有界・単純な regex 契約の Z3 直接判定率: ≥ 90%
+- `regex_semantics` タグによる Lean escalation 件数: ≥ 60% 削減
+- RE 変換由来の反例（受理/非受理文字列）出力率: 100%
+
+**P10-C: Finite Non-recursive Algebraic Data Types（`Z3_DATATYPE_SORT` / `theory_datatype`）** — ★★
+
+現状のギャップ: enum は Int タグとして扱われ、`match` 網羅性は `mumei-core/src/verification/translator/expr.rs` で「tag を `0..n_variants` に制約 → 被覆の否定が UNSAT か」という Int エンコードで実現している。ペイロード付きタグ付き共用体のフィールド型安全性は Int タグでは表現しきれない。
+
+Lean 委譲境界: 再帰 ADT は `mumei-core/src/verification/fragment.rs` で `inductive_data_type` タグとして検出され Lean 4 へ回る設計を維持する（有限・非再帰は Z3、再帰 ADT の帰納証明は Lean）。
+
+**Implementation Plan**:
+
+```
+1. ネイティブ datatype sort 生成
+   - z3_types.rs に有限・非再帰 enum 用の Z3 datatype sort（コンストラクタ・セレクタ・判別子）生成経路を追加
+   - ペイロード付きバリアントのフィールド型を セレクタの sort として保持する
+   - Int タグ経路は後方互換のため残し、有限・非再帰と判定された型のみ datatype へ切り替える
+
+2. 網羅性チェックの datatype 化
+   - expr.rs の match 網羅性を tag 範囲制約から判別子ベースの被覆否定 UNSAT 判定へ拡張
+   - 未被覆バリアントを反例のコンストラクタ名で報告する
+   - セレクタ適用の well-formedness（判別子が一致する場合のみ）を制約として付与
+
+3. fragment 判定の整理
+   - fragment.rs で有限・非再帰 enum を datatype 経路、再帰 ADT を inductive_data_type タグとして分離
+   - docs/SPEC_GUIDE.md に enum / タグ付き共用体の決定可能断片を追記
+```
+
+**Files to modify/create**:
+- `mumei-core/src/verification/translator/z3_types.rs` — 有限・非再帰 enum の datatype sort 生成
+- `mumei-core/src/verification/translator/expr.rs` — datatype ベースの `match` 網羅性チェック
+- `mumei-core/src/verification/fragment.rs` — 有限・非再帰 / 再帰 ADT の分離判定
+- `docs/SPEC_GUIDE.md` — enum / タグ付き共用体の決定可能断片
+
+**Success Metrics**:
+- 有限・非再帰 enum の `match` 網羅性チェックの datatype 経路移行率: 100%
+- ペイロード付きバリアントのフィールド型安全性違反の検出率: 100%
+- 再帰 ADT の `inductive_data_type` タグ付け精度: 100%
+
+**P10-D: Bounded Low-degree Nonlinear Arithmetic（`nlsat` / `grobner`）** — ★
+
+現状のギャップ: `x * y` や記号的除算は `mumei-core/src/verification/fragment.rs` の `expr_has_nonlinear_arithmetic` により一律 `nonlinear_arithmetic` タグが付き、無条件で Lean escalation 候補になる。ただし `std/math/safe_mul.mm` のように明示境界があれば Z3 でも `result == a * b` を検証できている。
+
+Lean 委譲境界: 多項式不変量・リング等式など真のリング推論は引き続き Lean 4 が担当する。
+
+**Implementation Plan**:
+
+```
+1. 無条件エスカレーションの緩和
+   - fragment.rs の nonlinear_arithmetic タグを「Lean 確定」から「nlsat 先行試行」の分類へ変更
+   - 対象は有界変数・低次多項式（変数積の次数が閾値以下）に限定し、それ以外は従来どおり Lean 候補
+   - 境界情報は requires の範囲制約から抽出する
+
+2. solver 実行と結果分類
+   - executor.rs で nlsat（必要に応じて grobner）を有効化した solver 実行経路を追加
+   - unknown / timeout の場合のみ Lean escalation candidate へ降格し、理由を proof certificate に記録
+   - solver 時間上限を fragment ごとに設定し、既存の budget policy と整合させる
+
+3. 仕様ガイドと計測
+   - docs/SPEC_GUIDE.md に「Z3 で通る非線形仕様」の条件（明示境界・低次）を明記
+   - nlsat 成功率と Lean 降格率を fragment ごとに集計する
+```
+
+**Files to modify/create**:
+- `mumei-core/src/verification/fragment.rs` — 有界・低次非線形の先行判定と `nonlinear_arithmetic` タグの再定義
+- `mumei-core/src/verification/executor.rs` — `nlsat` solver 実行と unknown/timeout 分類
+- `docs/SPEC_GUIDE.md` — 明示境界付き非線形仕様の書き方
+
+**Success Metrics**:
+- 有界・低次非線形義務の Z3（nlsat）決定率: ≥ 70%
+- `nonlinear_arithmetic` タグによる無条件 Lean escalation 件数: ≥ 50% 削減
+- nlsat unknown/timeout の Lean 降格理由記録率: 100%
+
+---
+
 ### P9: NLAE Integration - Provable AI Runtime
 
 Anthropic の Natural Language Autoencoders (NLAE) 理論を mumei エコシステムに統合し、LLM の推論（内部状態）と形式検証（数学的真理）をシームレスに結合する証明可能な AI 実行基盤を構築する。
@@ -1402,6 +1557,267 @@ mumei-agent 側で `OTEL_ENABLED=true` の場合、`MumeiClient.verify` 等の `
 - **span 親子関係の end-to-end 検証**: `src/telemetry.rs` の `#[cfg(all(test, feature = "otel"))]` ユニットテストがインメモリ exporter を用いて、`attach_parent_context()` の `TRACEPARENT` 抽出（有効/不正/未設定）と、`mumei.verify.cli` → `mumei.z3.solve` span が抽出した remote 親 span の子として同一 trace ID を持つことを assert（OTLP コレクタ不要）。
 - **ランタイム挙動**: `OTEL_ENABLED=true` でコレクタ不在でも exit 0（graceful degradation）、有効/不正 `TRACEPARENT` の受理/無視、`TRACEPARENT` 有無で検証出力が一致すること。
 - **Python 側 no-op**: mumei-agent を checkout し、`OTEL_ENABLED=false` で `telemetry.current_traceparent()` / `MumeiClient._env_with_traceparent()` が `None` を返すこと。
+
+---
+
+## P16: Benchmark Evaluation Suite Expansion（ベンチマーク評価スイート拡張）✅ Implemented
+
+拡張前のベンチマークは `benchmarks/dafny_puzzles/`（`absolute_value.mm` / `max.mm` / `swap.mm`）と
+`benchmarks/svcomp_style/`（`array_bounds.mm` / `integer_overflow.mm` / `loop_invariant.mm`）の
+計 2 カテゴリ・6 ファイル・6 atom のみで、`benchmarks/run_benchmarks.py` が検証成功率・Z3 solver 時間・
+trusted 比率を収集し `docs/BENCHMARK_RESULTS.md` に時系列で蓄積していた。この規模の小ささが Mumei の
+実用性主張の最大の弱点であり、`paper/index.md` でも "further expansion to cover more categories and
+Lean solver times is planned" と future work 言及にとどまっていた。P16 では、Mumei が強みを主張する領域
+（算術・有限状態機械・並行性・ドメイン固有コンプライアンス）に対応するベンチマークカテゴリを追加し、
+成功例だけでなく「検証で捕捉されるべきバグを含む反例ケース」も体系的に収録して、実用性主張を定量的な
+エビデンスで裏付けた。Lean escalation を要する義務の solver 時間計測も収集対象に加えている。
+
+**達成状況（実測）**: 6 カテゴリ・39 ファイル・90 atom。反例ケースは 14 ファイルで、
+いずれも期待どおり検証で捕捉され（反例バグ捕捉率 100%）、expected どおりの結果になった率
+（一般化した `success_rate`）も全カテゴリ 100%。`benchmarks/arithmetic/finite_field_modular.mm`
+と `benchmarks/domain_compliance/modular_commitment.mm` の 6 atom は Z3 が実際に `unknown` を返し、
+mumei-lean bridge へ escalate されて 6/6 が `lean_verified`（うち 4 件は自動タクティク探索が採用、
+mumei-lean `docs/LEAN_TRANSLATOR_SPEC.md` §12）。したがって `lean_solver_time_s` は `SKIP` ではなく
+実測値を記録し、カテゴリ別 Lean discharge 率も `docs/BENCHMARK_RESULTS.md` に時系列蓄積される。
+mumei-lean bridge が無い環境では従来どおりゼロコストで `SKIP` に縮退する。回帰ゲートは
+`python3 -m pytest tests/test_benchmark_suite.py -q`。
+
+Cross-project 整合: この拡張は `docs/CROSS_PROJECT_ROADMAP.md` の canonical contract に従属する
+mumei-local な実装チェックポイントであり、競合する優先順位を導入しない。ベンチマーク結果は
+mumei-agent の LLM 生成コード検証成功率測定と mumei-lean の escalation 成功率計測にも接続し、
+既存の `harness_contract` / `artifact_paths` / `lean_verified` 語彙を保持する。
+
+**P16-A: 新規ベンチマークカテゴリの追加** ✅
+
+追加した 4 カテゴリと、各カテゴリに収録した複数ファイル・複数 atom:
+
+- `benchmarks/arithmetic/` — 有界加減乗算・オーバーフロー境界・飽和演算・不動小数点・非線形（低次多項式）。
+  成功例に加え、オーバーフローを見落とす契約や境界外 index など**検証で捕捉されるべきバグを含む反例ケース**を収録。
+- `benchmarks/state_machine/` — 有限状態機械の遷移不変条件（temporal effect による状態遷移）。
+  正当な遷移列の検証成功例と、許可されない遷移（例: accept を経ない transfer）を捕捉する反例ケースを収録。
+- `benchmarks/concurrency/` — `task_group` / linearity / ownership に基づく並行性安全性
+  （use-after-move 検出、リソース順序、`task_group:any` winner cancellation、
+  および P17 の構造化並行性所有権解析）。
+  データ競合・二重解放・不正な所有権遷移を捕捉する反例ケースを収録。
+- `benchmarks/domain_compliance/` — ドメイン固有コンプライアンス:
+  金融 RTGS 残高保存、RegTech（規制網羅性・exhaustiveness）、所有権遷移プロトコル、DeFi 不変条件
+  （reentrancy guard・checks-effects-interactions・bounded-integer overflow）、医療機器の投薬量制御。
+  各サブ領域で成功例と、規制違反・不変条件破壊を捕捉する反例ケースを対に収録。
+
+各カテゴリは複数ファイル・複数 atom を持ち、反例ケースは `run_benchmarks.py` が期待どおり
+`FAIL`（Z3 counterexample・temporal effect 違反・move 解析違反・網羅性欠如のいずれか）と判定できる
+ことをもって「バグ捕捉」の証跡とする。反例ケースはファイル名（`*_fail.mm`）と冒頭コメントの
+`expected: FAIL` の双方で明示する。
+
+**P16-B: Lean solver time 計測の収集対象化** ✅
+
+Z3 `unknown` により Lean escalation を要するケースについて、Lean 側の solver / build 時間を
+`run_benchmarks.py` の収集対象に含める。`mumei verify --proof-cert --escalate-lean` 経由で既存の
+`.proof-cert.json` / `.lean-cert.json` パイプライン（`mumei-lean` bridge）と連携し、escalation 時間を
+`details` の `lean_solver_time_s` としてカテゴリ別・ファイル別に記録する。`run_benchmarks.py` の
+`_resolve_lean_bridge` は `src/commands/verify.rs` の `resolve_mumei_lean_bridge` と同じ解決順
+（`MUMEI_LEAN_PATH` → `../mumei-lean/scripts/bridge.py`）を用い、bridge 不在時、または Lean
+escalation candidate が 0 件のときは追加プロセスを起動せず `SKIP` として縮退する（`--no-lean` で
+明示的に無効化も可能）。
+
+**P16-C: vStd forge / proliferate へのフィードバック接続** ✅
+
+`run_benchmarks.py --forge-feedback <path>` が `mumei.benchmark_forge_feedback/v1` を出力する。
+カテゴリ毎の weakness score（`0.5 * (1 - success_rate) + 0.3 * (1 - counterexample_catch_rate)
++ 0.2 * trusted_ratio`、加えて Z3 / Lean solver time の signal）を `CATEGORY_STD_DOMAINS` の
+stdlib ドメインへの負の `priority_delta` に写す。mumei-agent 側は
+`python -m agent forge|proliferate --benchmark-feedback <path>` で読み込み、gap proposal と
+forge task spec の優先度のみを並べ替える（priority bias は提案の追加・削除を行わない）。適用の provenance は
+proliferate の run summary JSON の `benchmark_feedback` に記録される。
+
+さらに、弱点カテゴリからの提案「生成」もこの channel 上で実装済みである。`build_forge_feedback` は
+weakness signal（expected-outcome 不一致 / 反例捕捉不足 / trusted 比率）が閾値を超えたカテゴリについて、
+固定テンプレートから決定的な新規 vStd 提案を組み立て、後方互換の optional フィールド
+`generated_proposals` として出力する（旧 document は当該フィールドなしでそのまま読める）。mumei-agent 側は
+gap analysis の提案と target が重複しないものだけを forge / proliferate のキューへ合流させ、provenance を
+`benchmark_generated` に保持する。既存提案の削除・上書きは行わない。
+
+**Implementation Plan**（すべて実装済み）:
+
+```
+1. カテゴリ・ベンチマークファイルの追加 ✅
+   - benchmarks/{arithmetic,state_machine,concurrency,domain_compliance}/ を新設
+   - 各カテゴリに成功例 (.mm) と反例ケース (.mm) を複数配置
+   - 反例ケースはファイル名または冒頭コメントで expected: FAIL を明示し、
+     Z3 counterexample が返ることを期待値とする
+
+2. run_benchmarks.py のカテゴリ拡張と反例ハンドリング ✅
+   - CATEGORIES 辞書に 4 カテゴリを追加
+   - _verify_file を拡張し、expected 成否 (PASS/FAIL) と実測を突き合わせて
+     「反例が正しく捕捉されたか」を集計軸に追加する
+   - success_rate は「期待どおりの結果になった率」に一般化する
+
+3. Lean solver time 計測の統合 (P16-B) ✅
+   - z3_check_result == "unknown" の atom について mumei-lean bridge を呼び出し、
+     Lean escalation の solver/build 時間を計測して details に lean_solver_time_s を追加
+   - Lean 未使用/未セットアップ環境では SKIP としてゼロコストで縮退させる
+   - カテゴリ別に avg_lean_solver_time_s を集計
+
+4. docs/BENCHMARK_RESULTS.md フォーマット拡張 ✅
+   - Category Results テーブルに反例捕捉率と avg Lean solver time 列を追加
+   - Per-file details に expected/actual と lean_solver_time_s を追加
+   - 既存の時系列 append 構造 (--- 区切り) は維持
+
+5. 標準ライブラリ拡張パイプラインへの結果統合 (P16-C) ✅
+   - ベンチマーク結果を vStd forge / proliferate ループのフィードバックに接続
+     (paper future work 項目 12 に対応)
+   - run_benchmarks.py --forge-feedback が mumei.benchmark_forge_feedback/v1 を出力
+   - mumei-agent の agent/benchmark_feedback.py が weakness score を priority bias に写す
+```
+
+**Files modified/created**:
+- `benchmarks/arithmetic/*.mm` — 算術カテゴリ（成功例 5 ファイル＋反例 3 ファイル）
+- `benchmarks/state_machine/*.mm` — 有限状態機械カテゴリ（成功例 3 ファイル＋反例 3 ファイル）
+- `benchmarks/concurrency/*.mm` — 並行性カテゴリ（成功例 5 ファイル＋反例 9 ファイル）
+- `benchmarks/domain_compliance/*.mm` — ドメイン固有コンプライアンスカテゴリ（成功例 5 ファイル＋反例 4 ファイル）
+- `benchmarks/run_benchmarks.py` — `CATEGORIES` 拡張、反例 expected/actual 突合、Lean solver time 収集
+- `tests/test_benchmark_suite.py` — カテゴリ登録・`expected` 分類・Lean 縮退の回帰ゲート
+- `docs/BENCHMARK_RESULTS.md` — 反例捕捉率・Lean solver time 列の追加（自動追記）
+- `paper/index.md` — Known limitations / Future Work の実装状態同期
+- `benchmarks/run_benchmarks.py` — `--forge-feedback` / `build_forge_feedback` / `CATEGORY_STD_DOMAINS`（P16-C）
+- mumei-agent `agent/benchmark_feedback.py` / `agent/forge.py` / `agent/proliferate.py` — `--benchmark-feedback`（P16-C）
+
+**Success Metrics（実測）**:
+- 総 atom 数: 6 → **105**（目標 ≥ 60）✅
+- ベンチマークカテゴリ数: 2 → **6**（目標 ≥ 6）✅
+- 各カテゴリの検証成功率・平均 Z3 solver 時間・trusted 比率を `docs/BENCHMARK_RESULTS.md` に時系列蓄積: 100% ✅
+- 反例ケースが期待どおり `FAIL` と判定される率（バグ捕捉率）: **20/20 = 100%** ✅
+- Lean escalation を要する atom の平均 Lean solver 時間をカテゴリ別に記録: 収集経路を実装済み。現状は
+  Z3 `unknown` atom が 0 件のため全カテゴリ `SKIP`（Lean 利用可能環境でも candidate が出た時点で計測される）✅
+- ベンチマーク結果を既存標準ライブラリ拡張パイプライン（vStd forge / proliferate）へ統合（paper future work 項目 12）: **実装済み** ✅
+  （`--forge-feedback` → `--benchmark-feedback` の priority bias に加え、弱点カテゴリからの決定的な提案生成
+  `generated_proposals` も実装済み。回帰ゲートは `python3 -m pytest tests/test_benchmark_suite.py -q` と
+  mumei-agent `uv run pytest tests/test_benchmark_feedback.py tests/test_propose.py -q`）
+
+---
+
+## P17: 構造化並行性の所有権・データ競合検証（paper Future Work #5）✅ Implemented
+
+MIR lowering は `task_group` の子タスクを逐次チェーンへ平坦化するため、MIR move 解析
+（Phase 1h）は並行実行の interleaving も `task_group:any` のキャンセルもモデル化できない。
+このギャップを AST レベルの検証フェーズ **Phase 1h-2**
+（`mumei-core/src/verification/support/task_ownership.rs`）で埋め、`task_group:any`
+winner cancellation を超えるカバレッジを追加した。
+
+検出する違反:
+
+| Kind | パターン |
+|---|---|
+| `ConcurrentDoubleMove` | 同一キャプチャを 2 つの兄弟タスクが consume（並行二重 move / double free） |
+| `MoveWhileSiblingUses` | 片方の子が consume する値を、並行する兄弟がまだ参照 |
+| `ConcurrentDataRace` | キャプチャへの書き込みと兄弟からの読み書きが同期なしに競合 |
+| `UseAfterConcurrentMove` | 子タスクが consume した値を group 後に親が使用 |
+| `CancelDependentRead` | `task_group:any` の子が書いた値を親が group 後に読む（cancel された子は書いていない可能性） |
+
+非 i64 キャプチャ（配列 / struct / `f64` / pointer）も宣言型から movability を導出するため
+対象に含まれる。共有 *読み取り* と task-local 変数への書き込みは従来どおり合法。
+
+Z3 側の構造化並行性エンコードも強化した: 子が `acquire` したリソースについて
+`parent_done ⇒ resource_released` を、`JoinSemantics::All` では追加で
+`parent_done ⇒ ¬cancelled_i` を assert する。
+
+これらの義務は構文的に決定されるため常に hard error となり、Z3 `unknown` を経由しない。
+したがって Lean escalation（`lean_solver_time_s` / mumei-lean `MumeiLean/Ownership.lean`）へは
+流れず、`lean_verified` へ誤って昇格することはない。
+
+**Files modified/created**:
+- `mumei-core/src/verification/support/task_ownership.rs` — Phase 1h-2 解析（unit test 7 件）
+- `mumei-core/src/verification/executor.rs` — Phase 1h-2 のパイプライン接続と phase metrics
+- `mumei-core/src/verification/translator/stmt.rs` — cancellation / resource release 制約
+- `benchmarks/concurrency/task_ownership.mm` ほか反例 6 ファイル（struct キャプチャ反例を含む）（`expected: FAIL`）
+- `tests/test_concurrency.rs` — 回帰テスト（既存 `task_group:any` テストは緑を維持）。struct キャプチャの
+  正例・反例、および `verify --json` の失敗診断を含む
+- `src/commands/verify.rs` / `src/feedback.rs` — `verify --json` の `diagnostics` に atom 毎の失敗理由
+  （`code` / `severity` / `message` / `tags`）を出力。`warnings` は従来どおり advisory のみ
+- `docs/CONCURRENCY.md` / `paper/index.md` / `docs/CROSS_PROJECT_ROADMAP.md` — 実装状態同期
+
+**回帰ゲート**:
+
+```
+cargo test --test test_concurrency
+cargo test -p mumei-core task_ownership
+python3 -m pytest tests/test_benchmark_suite.py -q
+python3 scripts/check_contract_vocabulary.py
+(cd ../mumei-agent && uv run pytest tests/test_contract_vocabulary.py -q)
+(cd ../mumei-lean && PYTHONPATH=scripts MUMEI_LEAN_SKIP_LIVE=1 python -m pytest tests/test_contract_vocabulary.py -q)
+```
+
+struct キャプチャは `struct Name { ... }` 宣言形で検証済み（`type Name = ...` は refinement type であり
+aggregate 宣言ではない）。
+
+**P17 follow-up（solver 堅牢性）** ✅
+
+E2E テストで判明した検証パスの穴を解消した:
+
+- ネストした量化子（`forall(i, .., exists(j, .., arr[i] * arr[j] ...))`）で、束縛変数を
+  含まないパターン候補（`arr[j]`）を Z3 quantifier pattern に渡すと null AST が返り
+  z3 crate が panic（exit 101・stdout 空）していた。`expr_mentions_var` で量化変数を
+  含む access のみを trigger / `len_` 境界に用いるよう絞り込み、JSON 出力が常に
+  parse 可能であることを回復（`tests/test_verify_json_diagnostics.rs`）。
+- `--solver-timeout` が Phase 0a（spec validation、5000ms 固定）と effect-state probe
+  （timeout 未設定）に適用されず、重い非線形ケースを打ち切れなかった。両者に設定値を
+  伝播（`check_spec_satisfiability_with_timeout`）。
+- `verify --json` の `code: "escalation_candidate"` 診断（`escalation_reason` / `z3_unknown`
+  タグ付き）を回帰テストで固定。
+
+**残課題**: 明示的な同期プリミティブで保護された共有可変状態の干渉推論、および
+task body 内の配列要素キャプチャ（codegen 側 follow-up、`mumei-emit-llvm/src/codegen/task_runtime.rs`）。
+
+---
+
+## P18: proof artifact CI ゲートとエディタ Lean escalation 状態（paper Future Work #7 残ギャップ）✅ Implemented
+
+paper Future Work #7 で切り出していた残ギャップ 2 件を実装した。
+
+**P18-A: `mumei verify-cert --strict` と std certificate CI ゲート**
+
+- `verify-cert` に `--strict` を追加。`changed` atom が 1 件以上、または `certificate_hash` が
+  不在で再導出できない場合に非ゼロ終了する。非 strict の既存挙動（warning のみ）は互換のまま。
+  `--allow-lean-verified` との併用も従来どおり。
+- `.github/workflows/generate-std-certs.yml` が artifact upload の前に、生成済み全
+  `std/certs/**/*.proof.json` を対応する `std/**/*.mm` に対して `--strict` 検証する。
+  certificate が 0 件、source が消失、strict 失敗のいずれかでジョブを落とすため、
+  無効化された証明書が bundle 配布経路へ流れない。
+
+**P18-B: LSP / VS Code の Lean escalation 状態表示**
+
+- `src/lsp.rs` は Z3 が判定できなかった atom について、`mumei verify` と同じ
+  `classify_atom_for_lean_escalation` で escalation 判定し、診断に
+  `data.lean_escalation = { status: "pending", atom, z3_result_class, escalation_reason }`
+  を付与する（メッセージにも `Lean escalation: pending (...)` を 1 行追記）。
+- sibling の `*.proof.json` に `z3_check_result == "lean_verified"` の atom があれば、
+  その atom 名の位置に `source: "mumei-lean"` / severity 3 の診断を出し、
+  `data.lean_escalation.status = "lean_verified"` を付与する。
+- `editors/vscode/src/extension.ts` が `data.lean_escalation` をインライン ghost text
+  （`⚖ Lean escalation pending (...)` / `🔗 lean_verified by mumei-lean`）として描画する。
+- canonical 語彙（`lean_verified` / `escalation_reason` / `z3_result_class`）をそのまま反射し、
+  新規 verdict 分類や別名 alias は追加しない。
+
+**Files modified/created**:
+- `src/cli.rs` / `src/main.rs` / `src/commands/verify_cert.rs` — `--strict`
+- `.github/workflows/generate-std-certs.yml` — strict 検証ゲート
+- `src/lsp.rs` — escalation 状態の診断
+- `editors/vscode/src/extension.ts` — ghost text 描画
+- `tests/test_verify_cert_strict.rs` / `tests/test_lsp_lean_escalation.rs` — 回帰テスト
+- `paper/index.md` / `docs/CROSS_PROJECT_ROADMAP.md` — 実装状態同期
+
+**回帰ゲート**:
+
+```
+cargo test --test test_verify_cert_strict
+cargo test --test test_lsp_lean_escalation
+cargo test --test test_lsp_spec_diagnostics
+python3 scripts/check_contract_vocabulary.py
+(cd editors/vscode && npm run compile)
+```
+
+**残課題**: エディタは 1 ファイルにつき最初の未決 atom のみ pending 表示する
+（`lean_verified` は certificate 記載分すべて表示）。全 atom 分の pending 表示は follow-up。
 
 ---
 

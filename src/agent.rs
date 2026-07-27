@@ -6,6 +6,7 @@ pub(crate) struct AgentReport {
     pub(crate) success: bool,
     pub(crate) spec_health_issues: Vec<Value>,
     pub(crate) verification_violations: Vec<Value>,
+    pub(crate) verification_status: Option<String>,
     pub(crate) cross_validation_gaps: Vec<Value>,
     pub(crate) next_steps: Vec<Value>,
 }
@@ -57,18 +58,28 @@ fn agent_report(value: &Value, success_hint: bool, is_spec: bool) -> AgentReport
     }
 
     let next_steps = json_array(value, "next_steps");
+    let verification_status = value
+        .get("verification_status")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+
     let success = value
         .get("success")
         .and_then(Value::as_bool)
         .unwrap_or(success_hint)
         && spec_health_issues.is_empty()
         && verification_violations.is_empty()
-        && cross_validation_gaps.is_empty();
+        && cross_validation_gaps.is_empty()
+        && (is_spec
+            || verification_status
+                .as_deref()
+                .is_none_or(|s| s == "verified"));
 
     AgentReport {
         success,
         spec_health_issues,
         verification_violations,
+        verification_status,
         cross_validation_gaps,
         next_steps,
     }
@@ -144,8 +155,9 @@ pub(crate) fn infer_code_language(path: &Path) -> Result<String, String> {
         Some("rs") => Ok("rust".to_string()),
         Some("go") => Ok("go".to_string()),
         Some("ts") | Some("tsx") => Ok("typescript".to_string()),
+        Some("sol") => Ok("solidity".to_string()),
         _ => Err(format!(
-            "unsupported code file extension for '{}'; expected .py, .rs, .ts, .tsx, or .go",
+            "unsupported code file extension for '{}'; expected .py, .rs, .ts, .tsx, .go, or .sol",
             path.display()
         )),
     }
@@ -188,9 +200,18 @@ mod tests {
     }
 
     #[test]
+    fn infer_code_language_solidity() {
+        assert_eq!(
+            infer_code_language(Path::new("Token.sol")).unwrap(),
+            "solidity"
+        );
+    }
+
+    #[test]
     fn infer_code_language_unsupported() {
         let err = infer_code_language(Path::new("data.json")).unwrap_err();
         assert!(err.contains("unsupported code file extension"));
         assert!(err.contains(".ts, .tsx"));
+        assert!(err.contains(".sol"));
     }
 }

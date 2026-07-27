@@ -6,7 +6,7 @@ The Mumei language server (`mumei lsp`) provides editor-level visibility into ve
 
 During `initialize`, the server advertises:
 
-- `textDocumentSync` for full-document updates
+- `textDocumentSync` for full-document updates, including `textDocument/didChange` re-validation
 - `hoverProvider` for atom contract summaries
 - `completionProvider` for keywords and parsed item names
 - `definitionProvider` for source jumps
@@ -83,14 +83,17 @@ The diagnostic `data` field includes:
 ```
 
 For `.mm` files, comments beginning with `/// spec:` are sent to
-`mumei-agent validate-spec --format json`. Returned `spec_health_issues` become
-diagnostics on the original comment lines, with `next_steps` attached as the
-human-review handoff rather than renamed into a separate recommendation bucket.
+`mumei-agent validate-spec --input <tmpfile> --format json`. Returned `spec_health_issues`
+and `cross_validation_gaps` become diagnostics on the original comment lines, with `next_steps`
+attached as the human-review handoff rather than renamed into a separate recommendation bucket.
+If `validate-spec` reports failure but neither bucket has entries, a fallback diagnostic is
+emitted so silent failures are still visible.
 
-For foreign code, opening a `.py`, `.rs`, `.ts`, `.tsx`, or `.go` document runs
-`mumei-agent validate-code --input <path>` when available (`--language` is optional; inferred from extension).
-Returned `verification_violations` and `cross_validation_gaps` are shown inline
-using the source line/column metadata from the JSON payload.
+For foreign code, opening a `.py`, `.rs`, `.ts`, `.tsx`, `.go`, or `.sol` document writes the current
+editor buffer to a temporary file and runs `mumei-agent validate-code --input <tmpfile>`
+(`--language` is optional; inferred from extension). Returned `verification_violations`,
+`cross_validation_gaps`, and `verification_status` are shown inline using the source
+line/column metadata from the JSON payload, with `next_steps` surfaced as `relatedInformation`.
 
 If `mumei-agent` is not installed or returns malformed JSON, the server
 gracefully degrades: `.mm` documents still receive the existing parse/Z3
@@ -111,4 +114,5 @@ The LSP client requests CodeLens for `.mm` files and refreshes lenses after docu
 2. Open a `.mm` file in an editor configured for the Mumei LSP.
 3. Confirm atom definitions show `Intent Drift` CodeLens entries.
 4. Confirm `requires:` and `ensures:` lines show `Spec-Code Mapping` entries.
-5. Click the lenses in an editor extension that implements the corresponding commands.
+5. Confirm `/// spec:` comments or attached foreign-code files (`.py`, `.rs`, `.ts`, `.tsx`, `.go`, `.sol`) show `mumei-agent` diagnostics, and that editing the buffer triggers `textDocument/didChange` updates which re-run validation and clear stale diagnostics.
+6. Click the lenses in an editor extension that implements the corresponding commands.

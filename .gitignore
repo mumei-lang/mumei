@@ -4,6 +4,11 @@
 !.env.example
 .cargo/
 
+# Python テスト実行生成物
+__pycache__/
+*.pyc
+.pytest_cache/
+
 # Rust ビルド成果物
 /target
 Cargo.lock
@@ -36,4 +41,7 @@ editors/vscode/*.vsix
 # テスト用一時ファイル
 sword_test.mm
 cross_spec.json
+# `mumei verify --proof-cert` / benchmarks/run_benchmarks.py write
+# `<source stem>.proof.json` into whichever directory they are run from.
+*.proof.json
 mumei-core/report.json

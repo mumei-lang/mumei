@@ -43,10 +43,18 @@ mumei/
 ├── mumei-ffi-tests/        # Generated Rust property tests for FFI contracts
 ├── src/                    # CLI binary (main.rs, lsp.rs, setup.rs)
 ├── std/                    # Standard library (.mm files)
+├── runtime/                # C runtime library (mumei_runtime.c)
+├── visualizer/             # std/ dependency graph generation scripts
+├── scripts/                # Install script, utility scripts (install.sh, etc.)
+├── benchmarks/             # Dafny-style and SV-COMP-style benchmarks
+├── paper/                  # Technical paper
 ├── editors/vscode/         # VS Code extension (LSP client + counter-example decorations)
 ├── examples/               # Example programs
 └── tests/                  # Integration tests (.mm files)
 ```
+
+The complete top-level layout also includes `runtime/`, `visualizer/`,
+`scripts/`, `benchmarks/`, and `paper/`.
 
 ## Source Files
 

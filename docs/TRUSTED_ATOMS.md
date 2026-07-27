@@ -107,3 +107,11 @@ HTTP server response status boundaries in addition to proptest strategies.
 `docs/STDLIB_METRICS.md` explicitly lists total trusted atoms, trusted modules,
 per-module trusted counts, and historical trusted counts. This makes the
 remaining budget visible even when the weighted health score is high.
+
+The `Stdlib Trusted-Atom Guard` CI workflow
+(`.github/workflows/stdlib-trusted-guard.yml`, backed by
+`tests/test_stdlib_trusted_guard.py`) scans `std/` on every PR and fails if any
+module reintroduces a `trusted atom` declaration, cross-checking the count
+against this document and `docs/STDLIB_METRICS.md`. A new module that needs
+trust must instead strengthen its contract or escalate to mumei-lean on Z3
+`unknown`.

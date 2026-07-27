@@ -151,9 +151,10 @@ pub(crate) fn emit_decidable_fragment_warning(
     let _ = collect_decidable_fragment_diagnostic(atom, module_env, suppress_output);
 }
 
-pub(crate) fn enrich_verify_json_payload(
+pub(crate) fn enrich_verify_json_payload<D: serde::Serialize>(
     mut payload: serde_json::Value,
-    diagnostics: &[verification::Diagnostic],
+    diagnostics: &[D],
+    warnings: &[verification::Diagnostic],
     loop_suggestions: &[serde_json::Value],
 ) -> serde_json::Value {
     fn merge_json_arrays(
@@ -164,14 +165,36 @@ pub(crate) fn enrich_verify_json_payload(
             if let Some(message) = value.as_str() {
                 return message.to_string();
             }
-            if let Some(message) = value
-                .as_object()
-                .and_then(|object| object.get("message"))
-                .and_then(serde_json::Value::as_str)
-            {
-                return message.to_string();
+            if let Some(object) = value.as_object() {
+                if let Some(message) = object.get("message").and_then(serde_json::Value::as_str) {
+                    // Two atoms can fail with the same rendered first line, so the
+                    // message alone does not identify a diagnostic.
+                    let field = |key: &str| {
+                        object
+                            .get(key)
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or_default()
+                            .to_string()
+                    };
+                    return format!("{}\u{1}{}\u{1}{message}", field("atom"), field("code"));
+                }
             }
             serde_json::to_string(value).unwrap_or_else(|_| value.to_string())
+        }
+
+        // report.json carries legacy string diagnostics; normalise them so every
+        // entry of the emitted array is an object with the same field set.
+        fn normalize(value: &serde_json::Value) -> serde_json::Value {
+            match value.as_str() {
+                Some(message) => serde_json::json!({
+                    "code": "note",
+                    "severity": "warning",
+                    "atom": "",
+                    "message": message,
+                    "tags": [],
+                }),
+                None => value.clone(),
+            }
         }
 
         let mut merged = Vec::new();
@@ -180,7 +203,7 @@ pub(crate) fn enrich_verify_json_payload(
         let mut push_unique = |value: &serde_json::Value| {
             let key = merge_key(value);
             if seen.insert(key) {
-                merged.push(value.clone());
+                merged.push(normalize(value));
             }
         };
 
@@ -200,7 +223,9 @@ pub(crate) fn enrich_verify_json_payload(
         let diagnostics_json = serde_json::json!(diagnostics);
         let diagnostics_items = diagnostics_json.as_array().cloned().unwrap_or_default();
         let merged_diagnostics = merge_json_arrays(object.get("diagnostics"), &diagnostics_items);
-        let merged_warnings = merge_json_arrays(object.get("warnings"), &diagnostics_items);
+        let warnings_json = serde_json::json!(warnings);
+        let warnings_items = warnings_json.as_array().cloned().unwrap_or_default();
+        let merged_warnings = merge_json_arrays(object.get("warnings"), &warnings_items);
         object.insert("diagnostics".to_string(), merged_diagnostics);
         object.insert("warnings".to_string(), merged_warnings);
         if !loop_suggestions.is_empty() {

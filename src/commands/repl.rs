@@ -129,6 +129,7 @@ fn repl_inline_spec_path(input: &str) -> Result<PathBuf, String> {
 }
 
 fn repl_verify_agent_report(command: ReplAgentCommand, prompt_for_fixes: bool) {
+    let is_spec = matches!(&command, ReplAgentCommand::ValidateSpec { .. });
     match repl_run_agent(command) {
         Ok(report) => {
             if report.success {
@@ -138,6 +139,12 @@ fn repl_verify_agent_report(command: ReplAgentCommand, prompt_for_fixes: bool) {
             }
             repl_print_json_array("spec_health_issues", &report.spec_health_issues);
             repl_print_json_array("verification_violations", &report.verification_violations);
+            if !is_spec {
+                println!(
+                    "  verification_status: {}",
+                    report.verification_status.as_deref().unwrap_or("<none>")
+                );
+            }
             repl_print_json_array("cross_validation_gaps", &report.cross_validation_gaps);
             repl_print_json_array("next_steps", &report.next_steps);
             if prompt_for_fixes {
@@ -633,8 +640,8 @@ pub(crate) fn repl_help() {
     println!("  :load <file|dir> — Load atoms and extern declarations from .mm files");
     println!("  :type <expr>   — Infer a simple expression type");
     println!("  :verify <atom> — Verify and JIT-compile a registered atom");
-    println!("  :verify-spec <path|inline> — Validate a natural-language spec with mumei-agent");
-    println!("  :verify-code <path> — Validate foreign-language code with mumei-agent");
+    println!("  :verify-spec <path|inline> — Validate a natural-language spec and show spec_health_issues / verification_violations / cross_validation_gaps / next_steps");
+    println!("  :verify-code <path> — Validate foreign-language code and show the above plus verification_status");
     println!("  :eval <expr>   — JIT compile and execute an expression without verification");
     println!("  :check <expr>  — Parse and type-check an expression");
     println!("  :env           — Show registered atoms and types");
