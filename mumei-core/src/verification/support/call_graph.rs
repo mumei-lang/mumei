@@ -661,3 +661,21 @@ pub(crate) fn check_taint_propagation(
         );
     }
 }
+
+/// Whether `expr` mentions the identifier `var`.
+///
+/// Z3 rejects a quantifier pattern that does not contain the bound variable and
+/// returns a null AST for it, so pattern candidates must be filtered by the
+/// variable they are meant to trigger on.
+pub(crate) fn expr_mentions_var(expr: &Expr, var: &str) -> bool {
+    match expr {
+        Expr::Variable(name) => name == var,
+        Expr::ArrayAccess(name, idx) => name == var || expr_mentions_var(idx, var),
+        Expr::BinaryOp(l, _, r) => expr_mentions_var(l, var) || expr_mentions_var(r, var),
+        Expr::FieldAccess(e, _) => expr_mentions_var(e, var),
+        Expr::Call(_, args) | Expr::Perform { args, .. } => {
+            args.iter().any(|a| expr_mentions_var(a, var))
+        }
+        _ => false,
+    }
+}
