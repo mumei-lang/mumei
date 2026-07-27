@@ -1683,10 +1683,10 @@ gap analysis の提案と target が重複しないものだけを forge / proli
 - mumei-agent `agent/benchmark_feedback.py` / `agent/forge.py` / `agent/proliferate.py` — `--benchmark-feedback`（P16-C）
 
 **Success Metrics（実測）**:
-- 総 atom 数: 6 → **102**（目標 ≥ 60）✅
+- 総 atom 数: 6 → **105**（目標 ≥ 60）✅
 - ベンチマークカテゴリ数: 2 → **6**（目標 ≥ 6）✅
 - 各カテゴリの検証成功率・平均 Z3 solver 時間・trusted 比率を `docs/BENCHMARK_RESULTS.md` に時系列蓄積: 100% ✅
-- 反例ケースが期待どおり `FAIL` と判定される率（バグ捕捉率）: **19/19 = 100%** ✅
+- 反例ケースが期待どおり `FAIL` と判定される率（バグ捕捉率）: **20/20 = 100%** ✅
 - Lean escalation を要する atom の平均 Lean solver 時間をカテゴリ別に記録: 収集経路を実装済み。現状は
   Z3 `unknown` atom が 0 件のため全カテゴリ `SKIP`（Lean 利用可能環境でも candidate が出た時点で計測される）✅
 - ベンチマーク結果を既存標準ライブラリ拡張パイプライン（vStd forge / proliferate）へ統合（paper future work 項目 12）: **実装済み** ✅
@@ -1729,8 +1729,11 @@ Z3 側の構造化並行性エンコードも強化した: 子が `acquire` し�
 - `mumei-core/src/verification/support/task_ownership.rs` — Phase 1h-2 解析（unit test 7 件）
 - `mumei-core/src/verification/executor.rs` — Phase 1h-2 のパイプライン接続と phase metrics
 - `mumei-core/src/verification/translator/stmt.rs` — cancellation / resource release 制約
-- `benchmarks/concurrency/task_ownership.mm` ほか反例 5 ファイル（`expected: FAIL`）
-- `tests/test_concurrency.rs` — 7 件の回帰テスト（既存 `task_group:any` テストは緑を維持）
+- `benchmarks/concurrency/task_ownership.mm` ほか反例 6 ファイル（struct キャプチャ反例を含む）（`expected: FAIL`）
+- `tests/test_concurrency.rs` — 回帰テスト（既存 `task_group:any` テストは緑を維持）。struct キャプチャの
+  正例・反例、および `verify --json` の失敗診断を含む
+- `src/commands/verify.rs` / `src/feedback.rs` — `verify --json` の `diagnostics` に atom 毎の失敗理由
+  （`code` / `severity` / `message` / `tags`）を出力。`warnings` は従来どおり advisory のみ
 - `docs/CONCURRENCY.md` / `paper/index.md` / `docs/CROSS_PROJECT_ROADMAP.md` — 実装状態同期
 
 **回帰ゲート**:
@@ -1743,6 +1746,9 @@ python3 scripts/check_contract_vocabulary.py
 (cd ../mumei-agent && uv run pytest tests/test_contract_vocabulary.py -q)
 (cd ../mumei-lean && PYTHONPATH=scripts MUMEI_LEAN_SKIP_LIVE=1 python -m pytest tests/test_contract_vocabulary.py -q)
 ```
+
+struct キャプチャは `struct Name { ... }` 宣言形で検証済み（`type Name = ...` は refinement type であり
+aggregate 宣言ではない）。
 
 **残課題**: 明示的な同期プリミティブで保護された共有可変状態の干渉推論、および
 task body 内の配列要素キャプチャ（codegen 側 follow-up、`mumei-emit-llvm/src/codegen/task_runtime.rs`）。

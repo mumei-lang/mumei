@@ -52,3 +52,18 @@ body: {
         task { b }
     }
 };
+
+struct Point {
+    x: i64,
+    y: i64
+}
+
+atom read_struct_capture_in_siblings(p: Point)
+requires: p.x >= 0 && p.y >= 0;
+ensures: result >= 0;
+body: {
+    task_group:all {
+        task { p.x };
+        task { p.y }
+    }
+};

@@ -151,9 +151,10 @@ pub(crate) fn emit_decidable_fragment_warning(
     let _ = collect_decidable_fragment_diagnostic(atom, module_env, suppress_output);
 }
 
-pub(crate) fn enrich_verify_json_payload(
+pub(crate) fn enrich_verify_json_payload<D: serde::Serialize>(
     mut payload: serde_json::Value,
-    diagnostics: &[verification::Diagnostic],
+    diagnostics: &[D],
+    warnings: &[verification::Diagnostic],
     loop_suggestions: &[serde_json::Value],
 ) -> serde_json::Value {
     fn merge_json_arrays(
@@ -200,7 +201,9 @@ pub(crate) fn enrich_verify_json_payload(
         let diagnostics_json = serde_json::json!(diagnostics);
         let diagnostics_items = diagnostics_json.as_array().cloned().unwrap_or_default();
         let merged_diagnostics = merge_json_arrays(object.get("diagnostics"), &diagnostics_items);
-        let merged_warnings = merge_json_arrays(object.get("warnings"), &diagnostics_items);
+        let warnings_json = serde_json::json!(warnings);
+        let warnings_items = warnings_json.as_array().cloned().unwrap_or_default();
+        let merged_warnings = merge_json_arrays(object.get("warnings"), &warnings_items);
         object.insert("diagnostics".to_string(), merged_diagnostics);
         object.insert("warnings".to_string(), merged_warnings);
         if !loop_suggestions.is_empty() {

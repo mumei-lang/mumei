@@ -152,7 +152,13 @@ movability is derived from the declared type via `mir::movability_from_type`
 rather than from the i64 marshalling path in codegen. Shared *reads* across
 siblings and writes to task-local bindings remain legal. (Codegen-side array
 element capture in task bodies is still a follow-up; the ownership obligation is
-checked regardless of whether codegen can lower the capture.)
+checked regardless of whether codegen can lower the capture.) Struct captures use
+the `struct Name { field: T }` declaration form — `type Name = ...` declares a
+refinement type over a base type, not an aggregate.
+
+Rejections are also machine-readable: `mumei verify --json` lists one
+`diagnostics` entry per rejected atom (`code: "failed"`, `severity: "error"`,
+plus the rejection message). See [REPORT_SCHEMA.md](REPORT_SCHEMA.md).
 
 These obligations are decided syntactically: they always produce a hard
 verification error and never a Z3 `unknown`, so they never enter the Lean
