@@ -569,3 +569,172 @@ body: {{
         "ownership violations must never be promoted to lean_verified\n{combined}"
     );
 }
+
+const CONSUMING_STRUCT_ATOM: &str = r#"
+struct Point { x: i64, y: i64 }
+
+atom take_point(p: Point)
+requires: p.x >= 0;
+consume p;
+ensures: result >= 0;
+body: p.x;
+"#;
+
+#[test]
+fn task_group_rejects_concurrent_double_move_of_struct_capture() {
+    let source = format!(
+        "{CONSUMING_STRUCT_ATOM}
+atom move_point_into_two_tasks(p: Point)
+requires: p.x >= 0;
+ensures: result >= 0;
+body: {{
+    task_group:all {{
+        task {{ take_point(p) }};
+        task {{ take_point(p) }}
+    }}
+}};
+"
+    );
+    let output = verify_fixture("task_group_struct_double_move", &source);
+    assert_rejected(
+        &output,
+        "concurrent double move",
+        "a struct capture consumed by two sibling tasks must be rejected",
+    );
+}
+
+#[test]
+fn task_group_accepts_shared_reads_of_struct_capture() {
+    let source = format!(
+        "{CONSUMING_STRUCT_ATOM}
+atom read_point_in_siblings(p: Point)
+requires: p.x >= 0 && p.y >= 0;
+ensures: result >= 0;
+body: {{
+    task_group:all {{
+        task {{ p.x }};
+        task {{ p.y }}
+    }}
+}};
+"
+    );
+    let output = verify_fixture("task_group_struct_shared_reads", &source);
+    assert!(
+        output.status.success(),
+        "read-only struct captures must keep verifying\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn json_output_reports_ownership_failure_reason_in_diagnostics() {
+    let bin = env!("CARGO_BIN_EXE_mumei");
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let source = format!(
+        "{CONSUMING_ATOM}
+atom move_buffer_into_two_tasks(buf: [i64])
+requires: len(buf) >= 1;
+ensures: result >= 0;
+body: {{
+    task_group:all {{
+        task {{ take_buffer(buf) }};
+        task {{ take_buffer(buf) }}
+    }}
+}};
+"
+    );
+    let fixture = write_fixture("task_group_ownership_json", &source);
+    let output = Command::new(bin)
+        .arg("verify")
+        .arg(&fixture)
+        .arg("--json")
+        .current_dir(manifest_dir)
+        .output()
+        .expect("failed to run verify --json");
+    std::fs::remove_dir_all(fixture.parent().unwrap()).expect("remove concurrency fixture dir");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json_start = stdout
+        .find('{')
+        .unwrap_or_else(|| panic!("no JSON in:\n{stdout}"));
+    let payload: serde_json::Value =
+        serde_json::from_str(&stdout[json_start..]).expect("verify --json emits valid JSON");
+
+    assert_eq!(payload["status"], "failed");
+    let diagnostics = payload["diagnostics"]
+        .as_array()
+        .expect("diagnostics array")
+        .clone();
+    let failure = diagnostics
+        .iter()
+        .find(|d| d["atom"] == "move_buffer_into_two_tasks")
+        .unwrap_or_else(|| panic!("no failure diagnostic in:\n{payload:#}"));
+    assert_eq!(failure["severity"], "error");
+    assert_eq!(failure["code"], "failed");
+    assert!(
+        failure["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("concurrent double move"),
+        "failure diagnostic must carry the rejection reason: {payload:#}"
+    );
+}
+
+#[test]
+fn json_diagnostics_keep_one_entry_per_failing_atom_with_identical_messages() {
+    // Regression: diagnostics were de-duplicated by message only, so two atoms
+    // failing with the same rendered first line collapsed into one entry.
+    let bin = env!("CARGO_BIN_EXE_mumei");
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let fixture = write_fixture(
+        "verify_json_duplicate_messages",
+        r#"
+atom f1(x: i64)
+requires: x >= 0;
+ensures: result > x;
+body: x;
+
+atom f2(x: i64)
+requires: x >= 0;
+ensures: result > x;
+body: x;
+"#,
+    );
+    let output = Command::new(bin)
+        .arg("verify")
+        .arg(&fixture)
+        .arg("--json")
+        .current_dir(manifest_dir)
+        .output()
+        .expect("failed to run verify --json");
+    std::fs::remove_dir_all(fixture.parent().unwrap()).expect("remove concurrency fixture dir");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json_start = stdout
+        .find('{')
+        .unwrap_or_else(|| panic!("no JSON in:\n{stdout}"));
+    let payload: serde_json::Value =
+        serde_json::from_str(&stdout[json_start..]).expect("verify --json emits valid JSON");
+    let diagnostics = payload["diagnostics"]
+        .as_array()
+        .expect("diagnostics array")
+        .clone();
+
+    for atom in ["f1", "f2"] {
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d["atom"] == atom && d["code"] == "failed"),
+            "missing failure diagnostic for `{atom}`: {payload:#}"
+        );
+    }
+    // Every entry is an object with the same field set, including legacy string
+    // diagnostics merged in from report.json.
+    for diagnostic in &diagnostics {
+        assert!(
+            diagnostic["message"].is_string() && diagnostic["code"].is_string(),
+            "diagnostics entries must be objects: {payload:#}"
+        );
+    }
+}

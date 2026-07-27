@@ -365,6 +365,7 @@ struct VerifyContext<'a> {
     warn_untyped_arrays: bool,
     strict_array_types: bool,
     diagnostics: &'a mut Vec<verification::Diagnostic>,
+    failure_diagnostics: &'a mut Vec<verification::Diagnostic>,
     loss_vectors: &'a mut Vec<serde_json::Value>,
     structured_feedbacks: &'a mut Vec<StructuredFeedback>,
     reconstruction_losses: &'a mut std::collections::HashMap<String, ReconstructionLoss>,
@@ -375,6 +376,16 @@ struct VerifyContext<'a> {
     skipped: &'a mut usize,
     skipped_clauses: &'a mut usize,
     escalated: &'a mut usize,
+}
+
+/// Condense a rendered verification error into a single-line diagnostic message.
+fn first_error_line(error_text: &str) -> String {
+    error_text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("verification failed")
+        .to_string()
 }
 
 fn read_report_skipped_clauses(output_dir: &Path, atom_name: &str) -> usize {
@@ -635,6 +646,10 @@ fn verify_single_atom(atom: &parser::Atom, name: &str, ctx: &mut VerifyContext<'
                     "failed"
                 },
             );
+            let escalation_reason = classification
+                .escalation_reason
+                .as_ref()
+                .map(|reason| reason.as_str().to_string());
             let status = if is_unverifiable {
                 *ctx.unverifiable += 1;
                 if !ctx.quiet_output {
@@ -652,10 +667,7 @@ fn verify_single_atom(atom: &parser::Atom, name: &str, ctx: &mut VerifyContext<'
                         println!(
                             "  [lean] '{}': marked for escalation ({})",
                             name,
-                            classification
-                                .escalation_reason
-                                .map(|reason| reason.as_str())
-                                .unwrap_or("lean_escalation")
+                            escalation_reason.as_deref().unwrap_or("lean_escalation")
                         );
                     }
                 }
@@ -695,6 +707,23 @@ fn verify_single_atom(atom: &parser::Atom, name: &str, ctx: &mut VerifyContext<'
                     ctx.loss_vectors.push(loss_vector);
                 }
             }
+            ctx.failure_diagnostics.push(verification::Diagnostic {
+                code: status.to_string(),
+                severity: if status == "failed" {
+                    "error"
+                } else {
+                    "warning"
+                }
+                .to_string(),
+                atom: name.to_string(),
+                message: first_error_line(&error_text),
+                tags: vec![status.to_string(), format!("z3_{z3_result}")],
+                escalation_reason: if status == "escalation_candidate" {
+                    escalation_reason
+                } else {
+                    None
+                },
+            });
             ctx.cert_results
                 .insert(name.to_string(), (z3_result, status.to_string()));
             if ctx.emit_structured_feedback {
@@ -1076,6 +1105,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
     let mut loss_vectors: Vec<serde_json::Value> = Vec::new();
     let mut structured_feedbacks: Vec<StructuredFeedback> = Vec::new();
     let mut diagnostics: Vec<verification::Diagnostic> = Vec::new();
+    let mut failure_diagnostics: Vec<verification::Diagnostic> = Vec::new();
     let emit_lean_artifacts = escalate_lean || emit_escalation_bundle || emit_escalation_metrics;
 
     // Plan 11B: Track per-atom verification results for proof certificates
@@ -1222,6 +1252,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                     warn_untyped_arrays,
                     strict_array_types,
                     diagnostics: &mut diagnostics,
+                    failure_diagnostics: &mut failure_diagnostics,
                     loss_vectors: &mut loss_vectors,
                     structured_feedbacks: &mut structured_feedbacks,
                     reconstruction_losses: &mut reconstruction_losses,
@@ -1255,6 +1286,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                         warn_untyped_arrays,
                         strict_array_types,
                         diagnostics: &mut diagnostics,
+                        failure_diagnostics: &mut failure_diagnostics,
                         loss_vectors: &mut loss_vectors,
                         structured_feedbacks: &mut structured_feedbacks,
                         reconstruction_losses: &mut reconstruction_losses,
@@ -1598,6 +1630,13 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
         // case would hide failures and report a spurious success. Fall back to the
         // summary payload so the JSON status matches the exit code.
         let mixed_results = (failed > 0 || unverifiable > 0) && (verified > 0 || skipped > 0);
+        // `diagnostics` carries advisory warnings; failure diagnostics carry the
+        // reason each atom was rejected. Both surface under `diagnostics`, while
+        // `warnings` stays advisory-only.
+        let merged_diagnostics: Vec<&verification::Diagnostic> = diagnostics
+            .iter()
+            .chain(failure_diagnostics.iter())
+            .collect();
         if !report_path.exists() || mixed_results {
             // No report.json produced, or the module has mixed results — emit a summary JSON status
             let status = if failed > 0 {
@@ -1615,7 +1654,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                 "skipped": skipped,
                 "skipped_clauses": skipped_clauses,
                 "escalation_candidates": escalated,
-                "diagnostics": &diagnostics,
+                "diagnostics": &merged_diagnostics,
                 "warnings": &diagnostics,
             });
             if skipped_clauses > 0 {
@@ -1638,8 +1677,12 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
             match std::fs::read_to_string(&report_path) {
                 Ok(content) => match serde_json::from_str::<serde_json::Value>(&content) {
                     Ok(payload) => {
-                        let mut payload =
-                            enrich_verify_json_payload(payload, &diagnostics, &loop_suggestions);
+                        let mut payload = enrich_verify_json_payload(
+                            payload,
+                            &merged_diagnostics,
+                            &diagnostics,
+                            &loop_suggestions,
+                        );
                         payload["skipped_clauses"] = serde_json::json!(skipped_clauses);
                         if skipped_clauses > 0 {
                             payload["partial"] = serde_json::json!(true);
