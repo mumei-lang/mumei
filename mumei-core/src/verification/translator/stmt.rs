@@ -216,6 +216,7 @@ pub(crate) fn stmt_to_z3<'a>(
             let mut child_results = Vec::new();
             let mut child_done_vars = Vec::new();
             let mut child_cancelled_vars = Vec::new();
+            let mut child_resource_released_vars = Vec::new();
             for (i, child) in children.iter().enumerate() {
                 let child_id = format!("__task_group_child_{}", i);
                 let child_alive = Bool::new_const(ctx, format!("{}_alive", child_id).as_str());
@@ -244,15 +245,30 @@ pub(crate) fn stmt_to_z3<'a>(
                             released_var.clone().into(),
                         );
                         solver.assert(&cancelled_var.implies(&released_var));
+                        child_resource_released_vars.push(released_var);
                     }
                 }
             }
             let parent_done = Bool::new_const(ctx, "__task_group_parent_done");
+            if let Some(solver) = solver_opt {
+                // Structured concurrency: the group only completes once every
+                // child released the resources it acquired — whether the child
+                // finished normally or was cancelled by a winning sibling.
+                for released_var in &child_resource_released_vars {
+                    solver.assert(&parent_done.implies(released_var));
+                }
+            }
             match join_semantics {
                 JoinSemantics::All => {
                     if let Some(solver) = solver_opt {
                         for done_var in &child_done_vars {
                             solver.assert(&parent_done.implies(done_var));
+                        }
+                        // `all` never cancels a child: every child runs to
+                        // completion, so its resources are released along the
+                        // normal exit path rather than the cancellation path.
+                        for cancelled_var in &child_cancelled_vars {
+                            solver.assert(&parent_done.implies(&cancelled_var.not()));
                         }
                     }
                     if let Some(last) = child_results.last() {

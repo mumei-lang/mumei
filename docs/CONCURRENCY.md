@@ -131,6 +131,42 @@ await inside acquire block → deadlock risk → error
 
 Verifies that consumed variables before `await` are not accessed after `await`.
 
+#### 4. Structured Concurrency Ownership (Phase 1h-2)
+
+MIR lowering flattens a `task_group` into a *sequential* chain of child bodies,
+so MIR move analysis models neither concurrent interleaving of siblings nor the
+cancellation of losing children in `task_group:any`. An AST-level pass
+(`mumei-core/src/verification/support/task_ownership.rs`, run as verification
+phase `Phase 1h-2`) closes that gap and rejects:
+
+| Violation | Pattern |
+|---|---|
+| `ConcurrentDoubleMove` | the same captured value is consumed by two sibling tasks |
+| `MoveWhileSiblingUses` | one sibling consumes a capture a concurrent sibling still reads |
+| `ConcurrentDataRace` | a capture is written by one sibling and read/written by another |
+| `UseAfterConcurrentMove` | the parent uses a value a child task consumed |
+| `CancelDependentRead` | the parent reads a value written by a `task_group:any` child, whose write a cancelled child may never have performed |
+
+Captures of any type are covered (arrays, structs, pointers, `f64`), because
+movability is derived from the declared type via `mir::movability_from_type`
+rather than from the i64 marshalling path in codegen. Shared *reads* across
+siblings and writes to task-local bindings remain legal. (Codegen-side array
+element capture in task bodies is still a follow-up; the ownership obligation is
+checked regardless of whether codegen can lower the capture.)
+
+These obligations are decided syntactically: they always produce a hard
+verification error and never a Z3 `unknown`, so they never enter the Lean
+escalation path (`lean_solver_time_s`, `MumeiLean/Ownership.lean`) and can
+never be promoted to `lean_verified`.
+
+#### 5. Cancellation Resource Release
+
+For both join semantics, the group only completes once every child released the
+resources it acquired: `parent_done ⇒ resource_released` for each `acquire` in a
+child, alongside the existing `cancelled ⇒ resource_released`. Under
+`JoinSemantics::All` no child is cancelled, which is asserted as
+`parent_done ⇒ ¬cancelled_i`.
+
 ### Verification Flow
 
 ```
@@ -156,6 +192,8 @@ Verifies that consumed variables before `await` are not accessed after `await`.
 | Unique ID (Task) | ✅ Implemented (TASK_COUNTER prevents env key collision) |
 | Runtime scheduler | ✅ Implemented (Plan 21: pthread-backed; one OS thread per `task`; channel rendezvous via single-slot mutex/condvar in `mumei_runtime.c`) |
 | Task cancellation | ✅ Implemented (`task_group:any` winners atomically cancel remaining children; blocked channels are woken via runtime broadcasts) |
+| Concurrent capture ownership (`task_group:all` / `:any`) | ✅ Implemented (Phase 1h-2: concurrent double move, move racing a sibling read, unsynchronised shared writes, parent use after a child's move, and cancellation-dependent reads are hard errors) |
+| Non-i64 captures in ownership checks | ✅ Implemented (Phase 1h-2 derives movability from the declared type, so array / struct / `f64` / pointer captures are checked; codegen still marshals only scalar and aggregate-by-value captures — array *element storage* capture in task bodies remains a codegen follow-up in `mumei-emit-llvm/src/codegen/task_runtime.rs`) |
 | Channel types | ✅ Implemented (Plan 21: i64 handles + runtime mutex/condvar; full polymorphic `chan<T>` payload-marshalling is a follow-up) |
 | `task_group:any` (atomic completion flag) | ✅ Implemented (first child to complete wins via `__mumei_task_group_complete`; remaining children are cancelled, woken, and joined for cleanup) |
 
@@ -168,6 +206,9 @@ Verifies that consumed variables before `await` are not accessed after `await`.
 | Async recursion depth | BMC unroll limit check | ✅ Implemented |
 | Parent task termination constraint | Z3 verification of TaskGroup join semantics | ✅ Implemented |
 | Task cancellation safety | Atomic `task_group:any` completion, cooperative cancellation checks, channel wakeup broadcasts, and final `pthread_join` cleanup | ✅ Implemented |
+| Data-race freedom on captured variables | AST-level sibling read/write analysis over `task_group` children (Phase 1h-2) | ✅ Implemented |
+| Concurrent ownership (double move / move racing a sibling use) | AST-level move analysis over `task_group` children, movability from declared types | ✅ Implemented |
+| Ownership consistency under cancellation | Parent reads of `task_group:any` child writes rejected; Z3 `parent_done ⇒ resource_released` for every child `acquire` | ✅ Implemented |
 
 ## Future Extensions
 
@@ -192,7 +233,7 @@ task_group:all {
 
 1. **Runtime scheduler**: Preemptive task scheduling
 2. **Channel types**: Type-safe channels for inter-task communication (`chan<T>`)
-3. **Task cancellation refinements**: timeout/deadline policies and richer cancellation diagnostics
+3. **Task cancellation refinements**: timeout/deadline policies and richer cancellation diagnostics (ownership consistency under cancellation is implemented; see Safety Guarantees)
 4. **Timeouts**: Timeout specification for task groups
 5. **LLVM codegen**: LLVM coroutine transformation for task scheduling code
 6. **TaskGroup unique ID**: Prevent Z3 variable name collision across multiple TaskGroups (TASK_GROUP_COUNTER)
@@ -202,6 +243,9 @@ task_group:all {
 ## Related Files
 
 - `mumei-core/src/parser/` — `Task`, `TaskGroup`, `JoinSemantics` definitions + parsing + tests
-- `mumei-core/src/verification.rs` — Z3 structured concurrency verification (symbolic Bool, join constraints)
+- `mumei-core/src/verification/translator/stmt.rs` — Z3 structured concurrency verification (symbolic Bool, join constraints, cancellation/resource-release constraints)
+- `mumei-core/src/verification/support/task_ownership.rs` — Phase 1h-2 structured concurrency ownership / data-race analysis
+- `mumei-core/src/mir_analysis/move_analysis.rs` — sequential MIR move analysis (Phase 1h)
+- `tests/test_concurrency.rs`, `benchmarks/concurrency/task_*.mm` — regression fixtures (success cases and `expected: FAIL` counterexamples)
 - `mumei-core/src/ast.rs` — `collect_from_expr` traverses generics within Task/TaskGroup
 - `mumei-emit-llvm/src/codegen.rs` — Task/TaskGroup LLVM IR generation (synchronous compilation)

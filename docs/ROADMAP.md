@@ -1596,7 +1596,8 @@ mumei-agent の LLM 生成コード検証成功率測定と mumei-lean の escal
 - `benchmarks/state_machine/` — 有限状態機械の遷移不変条件（temporal effect による状態遷移）。
   正当な遷移列の検証成功例と、許可されない遷移（例: accept を経ない transfer）を捕捉する反例ケースを収録。
 - `benchmarks/concurrency/` — `task_group` / linearity / ownership に基づく並行性安全性
-  （use-after-move 検出、リソース順序、`task_group:any` winner cancellation）。
+  （use-after-move 検出、リソース順序、`task_group:any` winner cancellation、
+  および P17 の構造化並行性所有権解析）。
   データ競合・二重解放・不正な所有権遷移を捕捉する反例ケースを収録。
 - `benchmarks/domain_compliance/` — ドメイン固有コンプライアンス:
   金融 RTGS 残高保存、RegTech（規制網羅性・exhaustiveness）、所有権遷移プロトコル、DeFi 不変条件
@@ -1672,7 +1673,7 @@ gap analysis の提案と target が重複しないものだけを forge / proli
 **Files modified/created**:
 - `benchmarks/arithmetic/*.mm` — 算術カテゴリ（成功例 5 ファイル＋反例 3 ファイル）
 - `benchmarks/state_machine/*.mm` — 有限状態機械カテゴリ（成功例 3 ファイル＋反例 3 ファイル）
-- `benchmarks/concurrency/*.mm` — 並行性カテゴリ（成功例 4 ファイル＋反例 4 ファイル）
+- `benchmarks/concurrency/*.mm` — 並行性カテゴリ（成功例 5 ファイル＋反例 9 ファイル）
 - `benchmarks/domain_compliance/*.mm` — ドメイン固有コンプライアンスカテゴリ（成功例 5 ファイル＋反例 4 ファイル）
 - `benchmarks/run_benchmarks.py` — `CATEGORIES` 拡張、反例 expected/actual 突合、Lean solver time 収集
 - `tests/test_benchmark_suite.py` — カテゴリ登録・`expected` 分類・Lean 縮退の回帰ゲート
@@ -1682,16 +1683,69 @@ gap analysis の提案と target が重複しないものだけを forge / proli
 - mumei-agent `agent/benchmark_feedback.py` / `agent/forge.py` / `agent/proliferate.py` — `--benchmark-feedback`（P16-C）
 
 **Success Metrics（実測）**:
-- 総 atom 数: 6 → **84**（目標 ≥ 60）✅
+- 総 atom 数: 6 → **102**（目標 ≥ 60）✅
 - ベンチマークカテゴリ数: 2 → **6**（目標 ≥ 6）✅
 - 各カテゴリの検証成功率・平均 Z3 solver 時間・trusted 比率を `docs/BENCHMARK_RESULTS.md` に時系列蓄積: 100% ✅
-- 反例ケースが期待どおり `FAIL` と判定される率（バグ捕捉率）: **14/14 = 100%** ✅
+- 反例ケースが期待どおり `FAIL` と判定される率（バグ捕捉率）: **19/19 = 100%** ✅
 - Lean escalation を要する atom の平均 Lean solver 時間をカテゴリ別に記録: 収集経路を実装済み。現状は
   Z3 `unknown` atom が 0 件のため全カテゴリ `SKIP`（Lean 利用可能環境でも candidate が出た時点で計測される）✅
 - ベンチマーク結果を既存標準ライブラリ拡張パイプライン（vStd forge / proliferate）へ統合（paper future work 項目 12）: **実装済み** ✅
   （`--forge-feedback` → `--benchmark-feedback` の priority bias に加え、弱点カテゴリからの決定的な提案生成
   `generated_proposals` も実装済み。回帰ゲートは `python3 -m pytest tests/test_benchmark_suite.py -q` と
   mumei-agent `uv run pytest tests/test_benchmark_feedback.py tests/test_propose.py -q`）
+
+---
+
+## P17: 構造化並行性の所有権・データ競合検証（paper Future Work #5）✅ Implemented
+
+MIR lowering は `task_group` の子タスクを逐次チェーンへ平坦化するため、MIR move 解析
+（Phase 1h）は並行実行の interleaving も `task_group:any` のキャンセルもモデル化できない。
+このギャップを AST レベルの検証フェーズ **Phase 1h-2**
+（`mumei-core/src/verification/support/task_ownership.rs`）で埋め、`task_group:any`
+winner cancellation を超えるカバレッジを追加した。
+
+検出する違反:
+
+| Kind | パターン |
+|---|---|
+| `ConcurrentDoubleMove` | 同一キャプチャを 2 つの兄弟タスクが consume（並行二重 move / double free） |
+| `MoveWhileSiblingUses` | 片方の子が consume する値を、並行する兄弟がまだ参照 |
+| `ConcurrentDataRace` | キャプチャへの書き込みと兄弟からの読み書きが同期なしに競合 |
+| `UseAfterConcurrentMove` | 子タスクが consume した値を group 後に親が使用 |
+| `CancelDependentRead` | `task_group:any` の子が書いた値を親が group 後に読む（cancel された子は書いていない可能性） |
+
+非 i64 キャプチャ（配列 / struct / `f64` / pointer）も宣言型から movability を導出するため
+対象に含まれる。共有 *読み取り* と task-local 変数への書き込みは従来どおり合法。
+
+Z3 側の構造化並行性エンコードも強化した: 子が `acquire` したリソースについて
+`parent_done ⇒ resource_released` を、`JoinSemantics::All` では追加で
+`parent_done ⇒ ¬cancelled_i` を assert する。
+
+これらの義務は構文的に決定されるため常に hard error となり、Z3 `unknown` を経由しない。
+したがって Lean escalation（`lean_solver_time_s` / mumei-lean `MumeiLean/Ownership.lean`）へは
+流れず、`lean_verified` へ誤って昇格することはない。
+
+**Files modified/created**:
+- `mumei-core/src/verification/support/task_ownership.rs` — Phase 1h-2 解析（unit test 7 件）
+- `mumei-core/src/verification/executor.rs` — Phase 1h-2 のパイプライン接続と phase metrics
+- `mumei-core/src/verification/translator/stmt.rs` — cancellation / resource release 制約
+- `benchmarks/concurrency/task_ownership.mm` ほか反例 5 ファイル（`expected: FAIL`）
+- `tests/test_concurrency.rs` — 7 件の回帰テスト（既存 `task_group:any` テストは緑を維持）
+- `docs/CONCURRENCY.md` / `paper/index.md` / `docs/CROSS_PROJECT_ROADMAP.md` — 実装状態同期
+
+**回帰ゲート**:
+
+```
+cargo test --test test_concurrency
+cargo test -p mumei-core task_ownership
+python3 -m pytest tests/test_benchmark_suite.py -q
+python3 scripts/check_contract_vocabulary.py
+(cd ../mumei-agent && uv run pytest tests/test_contract_vocabulary.py -q)
+(cd ../mumei-lean && PYTHONPATH=scripts MUMEI_LEAN_SKIP_LIVE=1 python -m pytest tests/test_contract_vocabulary.py -q)
+```
+
+**残課題**: 明示的な同期プリミティブで保護された共有可変状態の干渉推論、および
+task body 内の配列要素キャプチャ（codegen 側 follow-up、`mumei-emit-llvm/src/codegen/task_runtime.rs`）。
 
 ---
 
