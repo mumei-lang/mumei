@@ -58,6 +58,42 @@ jobs:
             ./target/release/mumei verify --proof-cert --output "$out" "$f" \
               || echo "::warning::verify failed for $f (continuing)"
           done
+      - name: Gate on certificate validity (mumei verify-cert --strict)
+        run: |
+          set -u
+          # Every certificate that was produced above must still validate
+          # against its source. --strict also fails on drifted (`changed`)
+          # atoms and on certificates without a re-derivable
+          # certificate_hash, so an invalidated certificate cannot reach the
+          # uploaded artifact or the homebrew bundle.
+          rm -f /tmp/cert-gate-failures
+          touch /tmp/cert-gate-failures
+          find std/certs -type f -name '*.proof.json' -print0 \
+            | while IFS= read -r -d '' cert; do
+              rel="${cert#std/certs/}"       # e.g. container/safe_queue.proof.json
+              src="std/${rel%.proof.json}.mm"
+              if [ ! -f "$src" ]; then
+                echo "::error::no source found for $cert (expected $src)"
+                echo "fail" >> /tmp/cert-gate-failures
+                continue
+              fi
+              echo "Verifying $cert against $src"
+              if ! ./target/release/mumei verify-cert "$cert" "$src" --strict; then
+                echo "::error::certificate gate failed for $src ($cert)"
+                echo "fail" >> /tmp/cert-gate-failures
+              fi
+            done
+          checked=$(find std/certs -type f -name '*.proof.json' | wc -l)
+          if [ "$checked" -eq 0 ]; then
+            echo "::error::no certificates were generated; nothing to distribute"
+            exit 1
+          fi
+          if [ -s /tmp/cert-gate-failures ]; then
+            failed=$(wc -l < /tmp/cert-gate-failures)
+            echo "::error::$failed certificate(s) failed verify-cert --strict"
+            exit 1
+          fi
+          echo "verify-cert --strict passed for $checked certificate(s)"
       - name: Upload certificates artifact
         uses: actions/upload-artifact@v4
         with:

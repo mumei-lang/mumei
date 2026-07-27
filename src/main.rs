@@ -58,7 +58,8 @@ fn main() {
             cert,
             input,
             allow_lean_verified,
-        }) => commands::verify_cert::cmd_verify_cert(&cert, &input, allow_lean_verified),
+            strict,
+        }) => commands::verify_cert::cmd_verify_cert(&cert, &input, allow_lean_verified, strict),
         Some(Command::Run {
             input,
             emit,

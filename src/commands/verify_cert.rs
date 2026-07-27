@@ -3,7 +3,12 @@ use mumei_core::parser::Item;
 use mumei_core::{parser, proof_cert};
 use std::path::Path;
 
-pub(crate) fn cmd_verify_cert(cert_path: &str, input: &str, allow_lean_verified: bool) {
+pub(crate) fn cmd_verify_cert(
+    cert_path: &str,
+    input: &str,
+    allow_lean_verified: bool,
+    strict: bool,
+) {
     println!(
         "🔍 Mumei verify-cert: checking '{}' against '{}'...",
         cert_path, input
@@ -113,11 +118,13 @@ pub(crate) fn cmd_verify_cert(cert_path: &str, input: &str, allow_lean_verified:
     // The stored hash is evidence only once it has been re-derived: without
     // this a hand-edited certificate is echoed back unchallenged.
     let mut tampered = false;
+    let mut unhashed = false;
     match proof_cert::check_certificate_hash(&cert) {
         proof_cert::CertificateHashCheck::Match => {
             println!("  ✅ certificate_hash recomputed: match");
         }
         proof_cert::CertificateHashCheck::Absent => {
+            unhashed = true;
             println!("  ⚠️  certificate_hash absent: integrity cannot be checked");
         }
         proof_cert::CertificateHashCheck::Mismatch {
@@ -152,7 +159,18 @@ pub(crate) fn cmd_verify_cert(cert_path: &str, input: &str, allow_lean_verified:
         println!();
         println!("⚠️  {} atom(s) have changed since certification. Re-run `mumei verify --proof-cert` to update.", changed);
     }
-    if tampered || unproven > 0 || missing > 0 {
+    let strict_failure = strict && (changed > 0 || unhashed);
+    if strict_failure {
+        println!();
+        eprintln!(
+            "❌ --strict: certificate '{}' no longer matches '{}' ({} changed atom(s), certificate_hash {}).",
+            cert_path,
+            input,
+            changed,
+            if unhashed { "absent" } else { "present" }
+        );
+    }
+    if tampered || strict_failure || unproven > 0 || missing > 0 {
         std::process::exit(1);
     }
 }
