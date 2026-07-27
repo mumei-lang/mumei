@@ -389,6 +389,44 @@ fn check_group(
     merged
 }
 
+/// Usage of `tracked` variables by the statements following a `task_group`,
+/// stopping at the point where a variable is *revived* — reassigned to a fresh
+/// value that does not read the old one. This mirrors the MIR move analysis,
+/// where an assignment to a place makes it live again.
+fn usage_until_revived(
+    rest: &[Stmt],
+    tracked: &HashSet<String>,
+    module_env: &ModuleEnv,
+    types: &TypeEnv,
+) -> ChildUsage {
+    let mut live: HashSet<String> = tracked.clone();
+    let mut acc = ChildUsage::default();
+    for stmt in rest {
+        if live.is_empty() {
+            break;
+        }
+        let usage = collect_usage(stmt, module_env, types);
+        for var in &live {
+            if usage.reads.contains(var) {
+                acc.reads.insert(var.clone());
+            }
+            if usage.moves.contains(var) {
+                acc.moves.insert(var.clone());
+            }
+            if usage.writes.contains(var) {
+                acc.writes.insert(var.clone());
+            }
+        }
+        // A pure reassignment (`x = <expr not reading x>`) revives `x`.
+        if let Stmt::Assign { var, .. } = stmt {
+            if usage.writes.contains(var) && !usage.reads.contains(var) {
+                live.remove(var);
+            }
+        }
+    }
+    acc
+}
+
 /// Walk a statement, checking every `task_group` it contains and the parent's
 /// use of values the group consumed.
 fn check_stmt(
@@ -408,10 +446,10 @@ fn check_stmt(
                 {
                     let group =
                         check_group(children, join_semantics, module_env, types, violations);
-                    let rest = Stmt::Block(stmts[idx + 1..].to_vec(), Span::default());
-                    let after = collect_usage(&rest, module_env, types);
+                    let rest = &stmts[idx + 1..];
+                    let after = usage_until_revived(rest, &group.moves, module_env, types);
                     for var in &group.moves {
-                        if after.touches(var) {
+                        if after.reads.contains(var) || after.moves.contains(var) {
                             violations.push(TaskOwnershipViolation {
                                 kind: TaskOwnershipViolationKind::UseAfterConcurrentMove,
                                 variable: var.clone(),
@@ -424,8 +462,10 @@ fn check_stmt(
                         }
                     }
                     if *join_semantics == JoinSemantics::Any {
+                        let after_writes =
+                            usage_until_revived(rest, &group.writes, module_env, types);
                         for var in &group.writes {
-                            if after.reads.contains(var) || after.writes.contains(var) {
+                            if after_writes.reads.contains(var) {
                                 violations.push(TaskOwnershipViolation {
                                     kind: TaskOwnershipViolationKind::CancelDependentRead,
                                     variable: var.clone(),
@@ -708,6 +748,52 @@ body: {
         task { let m = n; m };
         task { n }
     }
+};
+"#,
+        );
+        assert!(violations.is_empty(), "{violations:?}");
+    }
+
+    #[test]
+    fn reassigning_a_moved_value_after_the_group_revives_it() {
+        let violations = analyze(&format!(
+            "{CONSUMER}
+atom make_buffer(n: i64) -> [i64]
+requires: n >= 0;
+ensures: len(result) >= 0;
+body: [n];
+
+atom revive_after_move(buf: [i64], n: i64)
+requires: len(buf) >= 1 && n >= 0;
+ensures: result >= 0;
+body: {{
+    task_group:all {{
+        task {{ take_buffer(buf) }};
+        task {{ 0 }}
+    }};
+    buf = make_buffer(n);
+    len(buf)
+}};
+"
+        ));
+        assert!(violations.is_empty(), "{violations:?}");
+    }
+
+    #[test]
+    fn overwriting_a_cancellable_write_after_the_group_is_allowed() {
+        let violations = analyze(
+            r#"
+atom overwrite_after_any(n: i64)
+requires: n >= 0;
+ensures: result >= 0;
+body: {
+    let total = n;
+    task_group:any {
+        task { total = total + 1; total };
+        task { n }
+    };
+    total = n;
+    total
 };
 "#,
         );
