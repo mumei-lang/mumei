@@ -33,7 +33,7 @@ pub use models::{
     EscalationBundleSummary, EscalationCandidate, HarnessCertificateMetadata, HumanReviewEntry,
     HumanReviewPriority, HumanReviewQueue, IntentFidelity, IntentFidelityMetadata,
     LeanResultMetadata, ProofBundle, ProofCertificate, SelfCorrectionMetadata,
-    SelfCorrectionSummary, SolverProcessMetadata, UnusedHypothesisMetadata,
+    SelfCorrectionSummary, SolverProcessMetadata, TacticSearchMetadata, UnusedHypothesisMetadata,
 };
 
 pub use review::{generate_escalation_bundle, generate_human_review_queue};
