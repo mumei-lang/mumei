@@ -6,10 +6,15 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
 pub(crate) fn compute_certificate_hash(cert: &ProofCertificate) -> String {
-    // Serialize with empty certificate_hash for deterministic hashing
+    // Serialize with empty certificate_hash for deterministic hashing.
+    // Hashing goes through `serde_json::Value`, whose object keys are sorted,
+    // so any `HashMap` reachable from the certificate (e.g. an atom's
+    // `spec_metadata`) hashes the same however its iteration order came out.
     let mut hashable = cert.clone();
     hashable.certificate_hash = String::new();
-    let json = serde_json::to_string(&hashable).unwrap_or_default();
+    let json = serde_json::to_value(&hashable)
+        .map(|value| value.to_string())
+        .unwrap_or_default();
     let mut hasher = Sha256::new();
     hasher.update(json.as_bytes());
     format!("{:x}", hasher.finalize())

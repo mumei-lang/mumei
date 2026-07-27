@@ -1037,6 +1037,37 @@ mod tests {
         );
     }
 
+    /// `spec_metadata` is a `HashMap`, so its iteration order differs between
+    /// the process that wrote a certificate and the one re-deriving the hash.
+    #[test]
+    fn test_certificate_hash_survives_unordered_map_round_trip() {
+        let atom = make_test_atom("mapped", "true", "true", "0");
+        let atoms: Vec<&parser::Atom> = vec![&atom];
+        let mut results = HashMap::new();
+        results.insert(
+            "mapped".to_string(),
+            ("unsat".to_string(), "verified".to_string()),
+        );
+        let module_env = ModuleEnv::new();
+        let mut cert =
+            generate_certificate("test.mm", &atoms, &results, &module_env, None, None, None);
+        if let Some(validation) = cert.atoms[0].spec_validation_result.as_mut() {
+            for key in ["alpha", "beta", "gamma", "delta", "epsilon", "zeta"] {
+                validation
+                    .spec_metadata
+                    .insert(key.to_string(), format!("{key}-value"));
+            }
+        }
+        refresh_certificate_integrity(&mut cert);
+
+        let json = serde_json::to_string(&cert).unwrap();
+        let reloaded: ProofCertificate = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            check_certificate_hash(&reloaded),
+            CertificateHashCheck::Match
+        );
+    }
+
     #[test]
     fn test_check_certificate_hash_marks_foreign_version_inconclusive() {
         let atom = make_test_atom("foo", "true", "true", "42");

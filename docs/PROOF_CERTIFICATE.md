@@ -329,7 +329,7 @@ mumei build --emit proof-cert src/math.mm
 2. Run Z3 verification on all atoms
 3. Compute `content_hash` (source hash) and `proof_hash` (dependency-aware hash) for each atom
 4. Populate `dependencies`, `effects`, `requires`, `ensures` from `ModuleEnv`
-5. Compute `certificate_hash` as SHA-256 of the serialized JSON (excluding the hash field). Map-valued fields (`binder_mapping`, `action_class_limits`, `attempts_by_action_class`, and the escalation-bundle `by_*` counters) are serialized in key order so the hash is reproducible from the certificate alone
+5. Compute `certificate_hash` as SHA-256 of the serialized JSON with all object keys sorted (excluding the hash field), so the hash is reproducible from the certificate alone regardless of how unordered map fields happened to serialize
 6. Write `.proof-cert.json` to output directory
 
 ### Certificate Verification
