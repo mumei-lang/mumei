@@ -135,6 +135,66 @@ def test_forge_feedback_reports_solver_time_signals():
     ]
 
 
+def test_forge_feedback_generates_proposals_for_weak_categories():
+    module = _load_module()
+    feedback = module.build_forge_feedback(
+        "2026-07-26 13:00 UTC",
+        [
+            _category_result(
+                "arithmetic", success_rate=0.5, counterexample_catch_rate=0.0
+            ),
+            _category_result("concurrency"),
+        ],
+        {"trusted_ratio": 0.12},
+    )
+
+    # A healthy category never generates work.
+    assert [p["driving_category"] for p in feedback["generated_proposals"]] == [
+        "arithmetic"
+    ]
+    [proposal] = feedback["generated_proposals"]
+    assert proposal["name"] == "std/math/benchmark_gaps.mm"
+    assert proposal["source"] == "benchmark_forge_feedback"
+    assert proposal["domain"] == "std/math"
+    assert proposal["depends_on"] == ["std/prelude.mm"]
+    assert proposal["signals"] == [
+        "expected_outcome_mismatch",
+        "counterexample_missed",
+    ]
+    assert [atom["name"] for atom in proposal["atoms"]] == [
+        "math_bounded_result_guard",
+        "math_counterexample_guard",
+    ]
+    for atom in proposal["atoms"]:
+        assert atom["requires"] and atom["ensures"] and atom["return_type"] == "i64"
+
+
+def test_generated_proposals_are_deterministic_and_signal_gated():
+    module = _load_module()
+    categories = [
+        # Solver-time pressure alone is a cost report, not a coverage gap.
+        _category_result(
+            "svcomp_style", avg_solver_time_s=module.SLOW_SOLVER_TIME_S + 1
+        ),
+        # Below the weakness threshold: too weak a signal to generate work.
+        _category_result("concurrency", trusted_ratio=0.01),
+        _category_result("state_machine", trusted_ratio=0.9),
+        _category_result("arithmetic", success_rate=0.0),
+    ]
+    args = ("2026-07-26 13:00 UTC", categories, {"trusted_ratio": 0.12})
+    generated = module.build_forge_feedback(*args)["generated_proposals"]
+
+    assert generated == module.build_forge_feedback(*args)["generated_proposals"]
+    # Ordered by descending weakness, so the weakest domain is forged first.
+    assert [p["driving_category"] for p in generated] == [
+        "arithmetic",
+        "state_machine",
+    ]
+    [trusted_atom] = generated[1]["atoms"]
+    assert trusted_atom["name"] == "contracts_trusted_replacement"
+    assert generated[1]["difficulty"] == "high"
+
+
 def test_every_category_maps_to_std_domains():
     module = _load_module()
     assert set(module.CATEGORY_STD_DOMAINS) == set(module.CATEGORIES)
