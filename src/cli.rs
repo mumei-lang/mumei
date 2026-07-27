@@ -239,6 +239,12 @@ pub(crate) enum Command {
         /// only Z3-discharged (`unsat`) atoms are accepted.
         #[arg(long)]
         allow_lean_verified: bool,
+        /// Treat drifted certificates as failures: exit non-zero when an atom
+        /// is reported `changed` or when the certificate carries no
+        /// `certificate_hash` to re-derive. Intended for CI gates that
+        /// distribute certificates alongside sources.
+        #[arg(long)]
+        strict: bool,
     },
     /// P7-B: Build and run a mumei program as a native binary
     Run {

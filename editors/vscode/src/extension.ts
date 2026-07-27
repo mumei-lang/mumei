@@ -3,6 +3,7 @@ import { LanguageClient, LanguageClientOptions, ServerOptions } from 'vscode-lan
 
 let client: LanguageClient | undefined;
 let ceDecorationType: vscode.TextEditorDecorationType | undefined;
+let leanDecorationType: vscode.TextEditorDecorationType | undefined;
 
 export function activate(context: vscode.ExtensionContext) {
     const config = vscode.workspace.getConfiguration('mumei');
@@ -55,10 +56,24 @@ export function activate(context: vscode.ExtensionContext) {
     });
     context.subscriptions.push(ceDecorationType);
 
+    // Lean escalation status ghost text. The LSP marks an atom `pending` while
+    // it is routed to mumei-lean and `lean_verified` once a sibling proof
+    // certificate records the Lean bridge as having discharged it.
+    leanDecorationType = vscode.window.createTextEditorDecorationType({
+        after: {
+            color: '#4f9dde',
+            fontStyle: 'italic',
+            margin: '0 0 0 1em',
+        },
+        isWholeLine: false,
+    });
+    context.subscriptions.push(leanDecorationType);
+
     const refreshAllVisible = () => {
         for (const editor of vscode.window.visibleTextEditors) {
             if (editor.document.languageId === 'mumei') {
                 updateCounterexampleDecorations(editor);
+                updateLeanEscalationDecorations(editor);
             }
         }
     };
@@ -71,6 +86,7 @@ export function activate(context: vscode.ExtensionContext) {
                 );
                 if (editor) {
                     updateCounterexampleDecorations(editor);
+                    updateLeanEscalationDecorations(editor);
                 }
             }
         })
@@ -80,6 +96,7 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.window.onDidChangeActiveTextEditor((editor) => {
             if (editor && editor.document.languageId === 'mumei') {
                 updateCounterexampleDecorations(editor);
+                updateLeanEscalationDecorations(editor);
             }
         })
     );
@@ -219,6 +236,49 @@ function updateCounterexampleDecorations(editor: vscode.TextEditor) {
     }
 
     editor.setDecorations(ceDecorationType, decorations);
+}
+
+function updateLeanEscalationDecorations(editor: vscode.TextEditor) {
+    if (!leanDecorationType) {
+        return;
+    }
+    const decorations: vscode.DecorationOptions[] = [];
+
+    for (const diag of vscode.languages.getDiagnostics(editor.document.uri)) {
+        const label = extractLeanEscalationText(diag);
+        if (label) {
+            decorations.push({
+                range: diag.range,
+                renderOptions: { after: { contentText: `  // ${label}` } },
+            });
+        }
+    }
+
+    editor.setDecorations(leanDecorationType, decorations);
+}
+
+function extractLeanEscalationText(diag: vscode.Diagnostic): string | undefined {
+    const data: unknown = (diag as unknown as { data?: unknown }).data;
+    if (!data || typeof data !== 'object') {
+        return undefined;
+    }
+    const escalation = (data as { lean_escalation?: unknown }).lean_escalation;
+    if (!escalation || typeof escalation !== 'object') {
+        return undefined;
+    }
+    const { status, escalation_reason: reason } = escalation as {
+        status?: unknown;
+        escalation_reason?: unknown;
+    };
+    if (status === 'lean_verified') {
+        return '\u{1F517} lean_verified by mumei-lean';
+    }
+    if (status === 'pending') {
+        return typeof reason === 'string' && reason.length > 0
+            ? `\u{2696} Lean escalation pending (${reason})`
+            : '\u{2696} Lean escalation pending';
+    }
+    return undefined;
 }
 
 function extractCounterexampleText(diag: vscode.Diagnostic): string | undefined {

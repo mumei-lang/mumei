@@ -1770,6 +1770,57 @@ task body 内の配列要素キャプチャ（codegen 側 follow-up、`mumei-emi
 
 ---
 
+## P18: proof artifact CI ゲートとエディタ Lean escalation 状態（paper Future Work #7 残ギャップ）✅ Implemented
+
+paper Future Work #7 で切り出していた残ギャップ 2 件を実装した。
+
+**P18-A: `mumei verify-cert --strict` と std certificate CI ゲート**
+
+- `verify-cert` に `--strict` を追加。`changed` atom が 1 件以上、または `certificate_hash` が
+  不在で再導出できない場合に非ゼロ終了する。非 strict の既存挙動（warning のみ）は互換のまま。
+  `--allow-lean-verified` との併用も従来どおり。
+- `.github/workflows/generate-std-certs.yml` が artifact upload の前に、生成済み全
+  `std/certs/**/*.proof.json` を対応する `std/**/*.mm` に対して `--strict` 検証する。
+  certificate が 0 件、source が消失、strict 失敗のいずれかでジョブを落とすため、
+  無効化された証明書が bundle 配布経路へ流れない。
+
+**P18-B: LSP / VS Code の Lean escalation 状態表示**
+
+- `src/lsp.rs` は Z3 が判定できなかった atom について、`mumei verify` と同じ
+  `classify_atom_for_lean_escalation` で escalation 判定し、診断に
+  `data.lean_escalation = { status: "pending", atom, z3_result_class, escalation_reason }`
+  を付与する（メッセージにも `Lean escalation: pending (...)` を 1 行追記）。
+- sibling の `*.proof.json` に `z3_check_result == "lean_verified"` の atom があれば、
+  その atom 名の位置に `source: "mumei-lean"` / severity 3 の診断を出し、
+  `data.lean_escalation.status = "lean_verified"` を付与する。
+- `editors/vscode/src/extension.ts` が `data.lean_escalation` をインライン ghost text
+  （`⚖ Lean escalation pending (...)` / `🔗 lean_verified by mumei-lean`）として描画する。
+- canonical 語彙（`lean_verified` / `escalation_reason` / `z3_result_class`）をそのまま反射し、
+  新規 verdict 分類や別名 alias は追加しない。
+
+**Files modified/created**:
+- `src/cli.rs` / `src/main.rs` / `src/commands/verify_cert.rs` — `--strict`
+- `.github/workflows/generate-std-certs.yml` — strict 検証ゲート
+- `src/lsp.rs` — escalation 状態の診断
+- `editors/vscode/src/extension.ts` — ghost text 描画
+- `tests/test_verify_cert_strict.rs` / `tests/test_lsp_lean_escalation.rs` — 回帰テスト
+- `paper/index.md` / `docs/CROSS_PROJECT_ROADMAP.md` — 実装状態同期
+
+**回帰ゲート**:
+
+```
+cargo test --test test_verify_cert_strict
+cargo test --test test_lsp_lean_escalation
+cargo test --test test_lsp_spec_diagnostics
+python3 scripts/check_contract_vocabulary.py
+(cd editors/vscode && npm run compile)
+```
+
+**残課題**: エディタは 1 ファイルにつき最初の未決 atom のみ pending 表示する
+（`lean_verified` は certificate 記載分すべて表示）。全 atom 分の pending 表示は follow-up。
+
+---
+
 ## Related Documents
 
 - [`docs/FFI.md`](FFI.md) — FFI extern block design (Phase A foundation)
