@@ -202,6 +202,7 @@ The current approach is sufficient for the primary use cases:
 2. ~~Add `matches()` regex constraint function~~ (Done: Plan 10)
 3. Monitor user feedback for capability delegation needs
 4. Explore full Z3 regex API (`str.in_re`) when z3 crate exposes it
+5. Non-breaking design study for the object-based capability model of Section 3 — scope the need for new AST nodes (`capability` declarations, `grant`, narrowing), type-system extensions (first-class capability values vs. subtyping and `LinearityCtx` move tracking as a revocation mechanism), the Z3 encoding of capability-valued constraints, and whether capability objects need a runtime representation at all. The study must show that existing `.mm` sources keep their current semantics before any implementation phase starts. This direction is now tracked as a future roadmap item: [`docs/CROSS_PROJECT_ROADMAP.md`](CROSS_PROJECT_ROADMAP.md) "Priority 15: Capability Model 拡張の評価と段階的導入", with the local checkpoint in [`docs/ROADMAP.md`](ROADMAP.md) as an extension of Phase 6 (Capability Security).
 
 ## 5. Test Results
 
