@@ -363,8 +363,17 @@ pub fn load_external_emitter(name: &str) -> MumeiResult<BoxedEmitter> {
         )));
     }
 
+    load_external_emitter_from_path(name, &lib_path)
+}
+
+/// Same plugin contract as [`load_external_emitter`], but against an explicit
+/// library path instead of the installed location.
+///
+/// Installers use this to validate a staged candidate before it replaces a
+/// working plugin.
+pub fn load_external_emitter_from_path(name: &str, lib_path: &Path) -> MumeiResult<BoxedEmitter> {
     unsafe {
-        let lib = libloading::Library::new(&lib_path).map_err(|e| {
+        let lib = libloading::Library::new(lib_path).map_err(|e| {
             MumeiError::verification(format!(
                 "Failed to load external emitter '{name}' from {}: {e}",
                 lib_path.display()

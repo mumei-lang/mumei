@@ -77,21 +77,24 @@ pub(crate) fn cmd_add_emitter(name: &str, path: Option<&str>, force: bool) {
         std::process::exit(1);
     }
 
-    let previous = if dest.exists() {
-        fs::read(&dest).ok()
-    } else {
-        None
-    };
-
     fs::create_dir_all(&dest_dir).unwrap_or_else(|e| {
         eprintln!("❌ Error: cannot create {}: {}", dest_dir.display(), e);
         std::process::exit(1);
     });
-    fs::copy(&source, &dest).unwrap_or_else(|e| {
+
+    // Stage the candidate beside its final name so validation never touches an
+    // existing install: the rename below is the only mutation of `dest`, and it
+    // stays within one directory, hence one filesystem.
+    let staged = dest_dir.join(format!(
+        ".{}.incoming",
+        emitter::external_emitter_library_filename(name)
+    ));
+    let _ = fs::remove_file(&staged);
+    fs::copy(&source, &staged).unwrap_or_else(|e| {
         eprintln!(
             "❌ Error: cannot copy {} to {}: {}",
             source.display(),
-            dest.display(),
+            staged.display(),
             e
         );
         std::process::exit(1);
@@ -102,8 +105,17 @@ pub(crate) fn cmd_add_emitter(name: &str, path: Option<&str>, force: bool) {
 
     // Reuse the build-time loader: it checks `EMITTER_ABI_VERSION`, the
     // `mumei_create_emitter` handle, and wraps the plugin in `PanicSafeEmitter`.
-    match emitter::load_external_emitter(name) {
+    match emitter::load_external_emitter_from_path(name, &staged) {
         Ok(_) => {
+            if let Err(e) = fs::rename(&staged, &dest) {
+                let _ = fs::remove_file(&staged);
+                eprintln!(
+                    "❌ Error: cannot install validated plugin at {}: {}",
+                    dest.display(),
+                    e
+                );
+                std::process::exit(1);
+            }
             println!(
                 "   ✅ ABI version {} verified",
                 emitter::EMITTER_ABI_VERSION
@@ -111,20 +123,23 @@ pub(crate) fn cmd_add_emitter(name: &str, path: Option<&str>, force: bool) {
             println!("✅ Installed emitter '{name}'. Use it with `mumei build --emit {name} <input.mm>`.");
         }
         Err(e) => {
-            // Leave the emitter directory as it was: a plugin that fails the
-            // ABI/handle contract must not shadow a working install.
-            match previous {
-                Some(bytes) => {
-                    let _ = fs::write(&dest, bytes);
-                }
-                None => {
-                    let _ = fs::remove_file(&dest);
-                }
-            }
             eprintln!("❌ Error: emitter '{}' failed validation: {}", name, e);
             eprintln!(
                 "   The plugin must export `mumei_emitter_abi_version` and `mumei_create_emitter`."
             );
+            if let Err(remove_err) = fs::remove_file(&staged) {
+                eprintln!(
+                    "   ⚠️  Could not remove the staged candidate at {}: {}",
+                    staged.display(),
+                    remove_err
+                );
+            }
+            if dest.exists() {
+                eprintln!(
+                    "   The previous install at {} is unchanged.",
+                    dest.display()
+                );
+            }
             std::process::exit(1);
         }
     }

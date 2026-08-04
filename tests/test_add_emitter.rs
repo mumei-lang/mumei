@@ -129,6 +129,44 @@ fn rejects_abi_version_mismatch() {
     assert!(!installed_path(&home, "stale").exists());
 }
 
+/// `--force` stages the candidate next to the installed library and only
+/// renames it into place after validation, so a rejected reinstall leaves the
+/// previous bytes byte-for-byte intact and drops the staged file.
+#[test]
+fn failed_force_reinstall_keeps_the_previous_install() {
+    let home = fixture_home("force_rollback");
+    let installed = installed_path(&home, "keep");
+    std::fs::create_dir_all(installed.parent().expect("emitter dir")).expect("create emitter dir");
+    std::fs::write(&installed, b"PREVIOUS-PLUGIN").expect("seed previous install");
+
+    let source = home.join(plugin_filename("keep"));
+    std::fs::write(&source, b"not a shared object").expect("write bogus plugin");
+
+    let output = add_emitter(
+        &home,
+        &[
+            "--emitter",
+            "keep",
+            "--path",
+            &source.to_string_lossy(),
+            "--force",
+        ],
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(!output.status.success(), "stderr: {stderr}");
+    assert_eq!(
+        std::fs::read(&installed).expect("previous install still readable"),
+        b"PREVIOUS-PLUGIN",
+        "a rejected --force reinstall must not touch the previous install"
+    );
+    let staged = installed
+        .parent()
+        .expect("emitter dir")
+        .join(format!(".{}.incoming", plugin_filename("keep")));
+    assert!(!staged.exists(), "staged candidate must be cleaned up");
+}
+
 #[test]
 fn emitter_flag_conflicts_with_dependency_argument() {
     let home = fixture_home("conflict");
