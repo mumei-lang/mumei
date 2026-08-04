@@ -184,13 +184,25 @@ pub(crate) enum Command {
         #[arg(long)]
         force: bool,
     },
-    /// Add a dependency to mumei.toml
+    /// Add a dependency to mumei.toml, or install an emitter plugin
     Add {
         /// Dependency specifier: local path (./path/to/lib) or package name
-        dep: String,
+        #[arg(required_unless_present = "emitter", conflicts_with = "emitter")]
+        dep: Option<String>,
         /// P5-B: Specify version for registry dependency
-        #[arg(long)]
+        #[arg(long, conflicts_with = "emitter")]
         version: Option<String>,
+        /// Emitter Plugin Phase 3: install an external emitter plugin as
+        /// `<name>`, making `mumei build --emit <name>` resolve it
+        #[arg(long, value_name = "NAME")]
+        emitter: Option<String>,
+        /// Compiled cdylib to install, or a directory/cargo project
+        /// containing it (default: the current directory)
+        #[arg(long, value_name = "PATH", requires = "emitter")]
+        path: Option<String>,
+        /// Overwrite an already installed plugin with the same name
+        #[arg(long, requires = "emitter")]
+        force: bool,
     },
     /// Publish package to local registry (~/.mumei/packages/)
     Publish {

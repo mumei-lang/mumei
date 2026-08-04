@@ -17,7 +17,7 @@ use crate::parser::ExternBlock;
 use crate::verification::{ModuleEnv, MumeiError, MumeiResult};
 use std::borrow::Cow;
 use std::ffi::c_void;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 // =============================================================================
 // Artifact abstraction (Roadmap #5 Phase 1)
@@ -293,6 +293,33 @@ impl Emitter for PanicSafeEmitter {
     }
 }
 
+/// Platform-specific dynamic library file name for an external emitter.
+///
+/// Rust's `cdylib` output on Windows produces `<crate>.dll` *without* a
+/// `lib` prefix, while Linux/macOS keep the `lib` prefix. Match that
+/// convention so plugin authors can drop their compiled artefact in place
+/// without renaming.
+pub fn external_emitter_library_filename(name: &str) -> String {
+    let (prefix, ext) = if cfg!(target_os = "windows") {
+        ("", ".dll")
+    } else if cfg!(target_os = "macos") {
+        ("lib", ".dylib")
+    } else {
+        ("lib", ".so")
+    };
+    format!("{prefix}mumei_emit_{name}{ext}")
+}
+
+/// Directory holding the installed plugin for `name`.
+pub fn external_emitter_dir(name: &str) -> PathBuf {
+    crate::manifest::mumei_home().join("emitters").join(name)
+}
+
+/// Full path [`load_external_emitter`] resolves for `name`.
+pub fn external_emitter_library_path(name: &str) -> PathBuf {
+    external_emitter_dir(name).join(external_emitter_library_filename(name))
+}
+
 /// Locate and load an external emitter plugin by name.
 ///
 /// # Resolution
@@ -322,22 +349,8 @@ impl Emitter for PanicSafeEmitter {
 /// pub extern "C" fn mumei_create_emitter() -> mumei_core::emitter::EmitterPluginHandle;
 /// ```
 pub fn load_external_emitter(name: &str) -> MumeiResult<BoxedEmitter> {
-    // Rust's `cdylib` output on Windows produces `<crate>.dll` *without*
-    // a `lib` prefix, while Linux/macOS keep the `lib` prefix. Match that
-    // convention so plugin authors can drop their compiled artefact in
-    // place without renaming.
-    let (prefix, ext) = if cfg!(target_os = "windows") {
-        ("", ".dll")
-    } else if cfg!(target_os = "macos") {
-        ("lib", ".dylib")
-    } else {
-        ("lib", ".so")
-    };
-    let lib_filename = format!("{}mumei_emit_{}{}", prefix, name, ext);
-    let lib_path = crate::manifest::mumei_home()
-        .join("emitters")
-        .join(name)
-        .join(&lib_filename);
+    let lib_filename = external_emitter_library_filename(name);
+    let lib_path = external_emitter_library_path(name);
 
     if !lib_path.exists() {
         return Err(MumeiError::verification(format!(
@@ -857,6 +870,19 @@ mod tests {
     #[test]
     fn test_emitter_abi_version_constant() {
         assert_eq!(EMITTER_ABI_VERSION, 1);
+    }
+
+    /// Phase 3: `mumei add --emitter` installs into exactly the location the
+    /// loader resolves, so both go through the same helpers.
+    #[test]
+    fn test_external_emitter_path_helpers_agree() {
+        let filename = external_emitter_library_filename("wasm");
+        assert!(filename.contains("mumei_emit_wasm"));
+        assert_eq!(
+            external_emitter_library_path("wasm"),
+            external_emitter_dir("wasm").join(&filename)
+        );
+        assert!(external_emitter_dir("wasm").ends_with("emitters/wasm"));
     }
 
     #[test]

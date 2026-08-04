@@ -223,7 +223,7 @@ mumei のコード生成バックエンドをプラグイン化し、LLVM IR 以
   - `src/main.rs` の `--emit` 文字列マッチを拡張し、未知ターゲット文字列は `EmitTarget::External(other.to_string())` として保持する。`cmd_build` は外部 emitter を build ごとに1回だけロードし、`dispatch_emit` の `External(name)` 分岐へ再利用して渡す。
   - 単体テスト: `test_artifact_kind_metadata_distinct`、`test_emit_target_external_carries_name`、`test_load_external_emitter_missing_plugin_errors`、`test_emitter_abi_version_constant`、`test_panic_safe_emitter_catches_panic`。
 - ✅ 動的ローダー本体 (`libloading` 経由の dlopen + ABI バージョニング + panic-safety wrapper) を実装。
-- ⏸ `mumei add --emitter wasm` スタイルの CLI で外部エミッターをインストール
+- ✅ `mumei add --emitter <name> [--path <path>] [--force]` で外部エミッターを `~/.mumei/emitters/<name>/` にインストールする CLI 導線を実装（`src/cli.rs` の `Command::Add`、`src/commands/add.rs` の `cmd_add_emitter`）。`--path` は cdylib 本体・ディレクトリ・cargo プロジェクト（`target/release` → `target/debug`）のいずれでもよく、既定は現在ディレクトリ。インストール先は `mumei-core::emitter::external_emitter_library_path()` でローダーと同一に解決し、コピー後に `load_external_emitter()` を通して `EMITTER_ABI_VERSION` 検証・`mumei_create_emitter` handle 検証・`PanicSafeEmitter` ラップという既存機構をそのまま install gate として再利用する。検証に失敗した場合はコピーをロールバックし、既存の正常なプラグインを上書きしない。回帰: `tests/test_add_emitter.rs`（invalid name / 期待ファイル名 / 非ライブラリの rollback / ABI mismatch / `--emitter` と依存引数の排他）と `mumei-core` の `test_external_emitter_path_helpers_agree`
 - ⏸ Wasm ターゲット（現在保留中）を外部プラグインとして core に触れずに追加可能
 
 ### Design Decisions

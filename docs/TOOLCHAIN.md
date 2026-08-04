@@ -17,6 +17,7 @@
 | `mumei check <file>` | ✅ | Parse + resolve + monomorphize (no Z3) |
 | `mumei init <name>` | ✅ | Project scaffolding with `mumei.toml` + example atoms |
 | `mumei add <dep>` | ✅ | Add dependency (local path / git URL / registry name) |
+| `mumei add --emitter <name> [--path <path>] [--force]` | ✅ | Install an external emitter plugin into `~/.mumei/emitters/<name>/` (ABI-version checked at install time) |
 | `mumei publish` | ✅ | Publish to local registry (`~/.mumei/packages/`) |
 | `mumei setup` | ✅ | Download & configure Z3 + LLVM into `~/.mumei/toolchains/` |
 | `mumei inspect` | ✅ | Inspect development environment (Z3, LLVM, std library, toolchains) |
@@ -127,6 +128,20 @@ mumei add ./libs/math                          # local path
 mumei add https://github.com/user/math-mm      # git URL
 mumei add math_utils                           # registry (after `mumei publish`)
 ```
+
+### Installing Emitter Plugins
+
+```bash
+mumei add --emitter wasm --path ./mumei-emit-wasm   # cargo project, cdylib dir, or the library itself
+mumei build --emit wasm program.mm                  # resolves ~/.mumei/emitters/wasm/
+```
+
+The install copies the platform `cdylib` (`libmumei_emit_<name>.so` / `.dylib`,
+`mumei_emit_<name>.dll`) into `~/.mumei/emitters/<name>/` and then loads it
+through the same path `mumei build` uses, so a plugin whose
+`mumei_emitter_abi_version()` does not match `EMITTER_ABI_VERSION`, or which does
+not export `mumei_create_emitter`, is rejected and rolled back instead of being
+left installed. Use `--force` to replace an existing plugin of the same name.
 
 ---
 

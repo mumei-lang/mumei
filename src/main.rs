@@ -39,7 +39,20 @@ fn main() {
             }
         }
         Some(Command::Setup { force }) => setup::run(force),
-        Some(Command::Add { dep, version }) => commands::add::cmd_add(&dep, version.as_deref()),
+        Some(Command::Add {
+            dep,
+            version,
+            emitter,
+            path,
+            force,
+        }) => match (emitter, dep) {
+            (Some(name), _) => commands::add::cmd_add_emitter(&name, path.as_deref(), force),
+            (None, Some(dep)) => commands::add::cmd_add(&dep, version.as_deref()),
+            (None, None) => {
+                eprintln!("Usage: mumei add <dep> | mumei add --emitter <name> [--path <path>]");
+                std::process::exit(1);
+            }
+        },
         Some(Command::Publish {
             proof_only,
             allow_lean_verified,
@@ -78,7 +91,7 @@ fn main() {
                 eprintln!("  run     Build and run a mumei program as a native binary");
                 eprintln!("  init    Generate a new project template");
                 eprintln!("  setup   Download & configure Z3 + LLVM toolchain");
-                eprintln!("  add     Add a dependency to mumei.toml");
+                eprintln!("  add     Add a dependency to mumei.toml, or install an emitter plugin (--emitter)");
                 eprintln!("  lsp     Start Language Server Protocol server");
                 eprintln!("  repl    Interactive REPL (Read-Eval-Print Loop)");
                 eprintln!("  doc     Generate documentation from source comments");
