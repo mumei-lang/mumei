@@ -47,7 +47,18 @@ fn main() {
             force,
         }) => match (emitter, dep) {
             (Some(name), _) => commands::add::cmd_add_emitter(&name, path.as_deref(), force),
-            (None, Some(dep)) => commands::add::cmd_add(&dep, version.as_deref()),
+            (None, Some(dep)) => {
+                // clap's `requires = "emitter"` does not fire once the
+                // positional dependency is present, so reject the emitter-only
+                // flags here instead of dropping them silently.
+                if path.is_some() || force {
+                    eprintln!(
+                        "❌ Error: --path and --force apply to `mumei add --emitter <name>` only."
+                    );
+                    std::process::exit(1);
+                }
+                commands::add::cmd_add(&dep, version.as_deref())
+            }
             (None, None) => {
                 eprintln!("Usage: mumei add <dep> | mumei add --emitter <name> [--path <path>]");
                 std::process::exit(1);

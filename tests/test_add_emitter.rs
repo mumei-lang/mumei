@@ -167,6 +167,19 @@ fn failed_force_reinstall_keeps_the_previous_install() {
     assert!(!staged.exists(), "staged candidate must be cleaned up");
 }
 
+/// `--path` / `--force` are emitter-only, and clap's `requires` does not fire
+/// once the positional dependency is present, so the dispatcher rejects them
+/// rather than dropping them silently.
+#[test]
+fn dependency_mode_rejects_emitter_only_flags() {
+    let home = fixture_home("dep_flags");
+    let output = add_emitter(&home, &["some_dep", "--path", "/tmp", "--force"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(!output.status.success(), "stderr: {stderr}");
+    assert!(stderr.contains("--path and --force"), "stderr: {stderr}");
+}
+
 #[test]
 fn emitter_flag_conflicts_with_dependency_argument() {
     let home = fixture_home("conflict");

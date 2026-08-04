@@ -101,7 +101,12 @@ pub(crate) fn cmd_add_emitter(name: &str, path: Option<&str>, force: bool) {
     });
 
     println!("🔌 Installing emitter plugin '{}'", name);
-    println!("   {} → {}", source.display(), dest.display());
+    println!(
+        "   {} → {} (staged at {} until validation passes)",
+        source.display(),
+        dest.display(),
+        staged.display()
+    );
 
     // Reuse the build-time loader: it checks `EMITTER_ABI_VERSION`, the
     // `mumei_create_emitter` handle, and wraps the plugin in `PanicSafeEmitter`.
