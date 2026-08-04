@@ -1679,6 +1679,91 @@ graph LR
 
 ---
 
+## Priority 15: Capability Model 拡張の評価と段階的導入 — 🔭 Planned (future)
+
+**Repository**: `mumei-lang/mumei`（設計調査の本体） / `mumei-lang/mumei-agent`（生成側の追従は調査結果が出てから）
+
+**目的**: AI エージェントに対して権限を**動的に委譲・narrowing・revoke** できる object-based capability model を、既存の parameterized effect system（Option A: effects + Z3）と互換を保ったまま段階導入できるかを評価する。`docs/CAPABILITY_SECURITY.md` は現状の制約として「動的な capability 委譲不可 / 失効不可 / 第一級 capability オブジェクト非対応」を挙げ、代替案を "Section 3. Object-Based Capability Model (Alternative)" として記述したうえで、Recommendation は Option A 継続、object-based は capability 委譲ニーズの観測待ちとして保留している。本 Priority はその保留状態を「評価タスク」としてロードマップ化するものであり、**今すぐ着手する実装ではない**。
+
+**具体タスク**:
+
+1. **非破壊な設計調査（先行・必須）** — 実装に入る前に、以下4点の要否と影響範囲を文書化する。
+   - 新 AST ノード（`capability` 型宣言、`grant` 式、narrowing 構文）の必要性と、既存 `effect` 宣言との共存方法
+   - 型システム拡張（capability を第一級の値として扱う際の subtyping / linearity との相互作用。`LinearityCtx` による move 追跡は revocation の自然な実装候補になり得る）
+   - Z3 エンコーディング（capability 値の制約を現行の `check_constant_constraint()` / Z3 String Sort 上でどう表現するか。effect containment 証明 `UsedEffects(body) ⊆ AllowedEffects(signature)` を壊さないこと）
+   - capability オブジェクトのランタイム表現の要否（compile-time 消去できるなら zero runtime overhead を維持できるか）
+2. **互換性判定** — 既存 `.mm` を一切書き換えずに新モデルを opt-in できるか（`grant` 未使用コードは現行セマンティクスのまま）を判定基準として明記する。破壊的変更が不可避と判明した場合は Option A 継続の再確認で打ち切る。
+3. **AI エージェント側の需要検証** — mumei-agent が生成・修復するコードで「呼び出し先に狭めた権限を渡したい」ケースを収集し、現行の `requires` による暗黙的 narrowing で足りているかを測る。
+4. **段階導入計画** — 1〜3 の結果が肯定的な場合にのみ、`grant` / narrowing / revocation の順に最小サブセットから導入するフェーズ分割案を作成する。
+
+**契約への影響**: なし。本 Priority は `harness_contract` / `intent_fidelity` / `artifact_paths` / `budget_policy_fingerprint` / `lean_verified` と no-`.mm` の8キーいずれも変更しない。capability 由来の検証結果は既存の effect 検証と同じ経路（`verification_violations` / `next_steps`）で報告する。
+
+**関連ファイル**:
+- `docs/CAPABILITY_SECURITY.md` — 現状評価と Section 3 の代替案、Next Steps の設計調査項目
+- `docs/ROADMAP.md` — local checkpoint（Phase 6 Capability Security の延長）
+- `mumei-core/src/verification.rs` — `check_constant_constraint()`, `verify_effect_params`, `verify_effect_consistency`
+- `mumei-core/src/ast.rs` / `mumei-core/src/hir.rs` — effect 宣言と AST/HIR 表現
+- `examples/capability_demo.mm` / `tests/test_capability_evaluation.mm` — 既存 capability デモと評価テスト
+
+---
+
+## Priority 16: 大規模・安全性クリティカル領域での atom-local proof obligation 合成性検証 — 🔭 Planned (future)
+
+**Repository**: `mumei-lang/mumei`（std / certificate 側） / `mumei-lang/mumei-demo`（`main`、シナリオ拡張） / `mumei-lang/mumei-agent`（監査・自己修復の実行側）
+
+**目的**: 「証明義務を atom ローカルに閉じる」という mumei の中核仮説が、**実運用規模**でも composable であることを実証する。現状の case study ドメイン（医療機器制御・RTGS 決済・RegTech・DeFi 等）は概念実証規模に留まっており、atom 数・依存深さ・effect 状態機械の組み合わせが増えたときに、局所的な `requires`/`ensures` の合成だけで全体の安全性が導けるか（あるいはどこで破綻するか）が未測定である。
+
+**具体タスク**:
+
+1. **大規模ケースの構築** — 既存ドメインを実運用規模へ拡張する。医療機器制御（多段の temporal effect 状態機械）、RTGS 決済（決済ファイナリティと残高不変条件の連鎖）、RegTech（コンプライアンス規則の組合せ爆発）、DeFi（再入・所有権移転）の各シナリオで、atom 数と依存グラフ深さを一桁上げたケースを用意する。
+2. **合成性の測定** — atom ローカルな証明義務のみで全体不変条件が導けた割合、逆に「隣接 atom の契約を強めないと閉じない」箇所（合成の破れ）を分類して記録する。破れのパターンは compiler 側の modular verification（`effect_pre` / `effect_post`, Plan 24）の改善入力とする。
+3. **スケール時のメトリクス維持** — 大規模ケースでも以下を維持・再生成できることを評価指標に含める。
+   - proof certificate（`.proof-cert.json`）が全 atom 分生成でき、`mumei verify-cert --strict` を通ること
+   - `std/` の trusted atom 数を **0 のまま**維持すること（大規模化のために証明を諦めて trusted に落とさない）
+   - trust surface の測定（アプリ側 trusted atom 数・FFI 境界数・Z3 unknown から Lean escalation に回った atom 数）を各ケースで記録し、規模に対する増え方を追跡すること
+   - Z3 solver 時間と Lean escalation 件数のスケール特性（`budget_policy_fingerprint` 付きで記録）
+4. **デモへの反映** — 拡張候補として `mumei-demo`（`mumei-lang/mumei-demo`、ブランチ `main`）の scenario 群を大規模ケースへ拡張する。既存の fixture モード（決定的 CI 実行）を壊さず、大規模ケースは別 target として追加する。
+
+**契約への影響**: なし。報告経路は既存の `verification_status` / `verification_violations` / `next_steps` と proof certificate をそのまま使う。新しい verdict 分類や別名は追加しない。
+
+**関連ファイル**:
+- `mumei-core/src/proof_cert.rs` — proof certificate スキーマと `BudgetPolicy`
+- `scripts/generate_stdlib_metrics.py` / `docs/TRUSTED_ATOMS.md` — trusted atom 数と trust surface のメトリクス
+- `.github/workflows/generate-std-certs.yml` — certificate 再生成と `--strict` ゲート
+- `mumei-demo/scenarios/medical_device`, `rtgs_settlement`, `regtech_compliance`, `defi_invariant`, `ownership_transfer` — 既存シナリオ（大規模拡張の起点）
+- `docs/CROSS_PROJECT_ROADMAP.md` の「統合デモ戦略 (mumei-demo)」節 — 既存デモ方針との整合
+
+---
+
+## Priority 17: AI エージェントネイティブ統合の標準化（MCP / CI / エディタ）— 🔭 Planned (future)
+
+**Repository**: `mumei-lang/mumei` / `mumei-lang/mumei-agent`
+
+**既存の統合土台**（本 Priority はこれらを置き換えず、標準化・常時化する）:
+- `mumei-agent` の `.mcp.json` に登録された `mumei-forge`（mumei コンパイラ側 MCP サーバ、`mcp_server.py`）と `mumei-agent` MCP サーバ（`agent/mcp_server.py`）
+- contract-vocabulary の CI ゲート（`mumei/scripts/check_contract_vocabulary.py` と `mumei-agent/.github/workflows/contract-vocabulary.yml`）
+- LSP の Z3 / エージェント診断（`mumei/src/lsp.rs`、V1-E-3 LSP Agent Diagnostics と P18-B の Lean escalation 状態表示）
+
+**目的**: AI エージェントが「どのエディタ・どの CI・どの MCP クライアントからでも同じ証明成果物と同じ語彙を受け取れる」状態を標準として固定する。
+
+**具体タスク**:
+
+1. **proof artifact のパッケージ配布同梱** — proof certificate と proof bundle（certificate + 依存 atom + `bridge_lemma_hash` / `translator_version`）を、Homebrew / release アーティファクト等の配布物に同梱する。利用側は配布物だけで `mumei verify-cert --strict` を再実行でき、`lean_verified` atom の来歴を検証できることを条件とする。
+2. **CI での常時化** — 標準ライブラリメトリクス（trusted atom 数・proof density）と proof bundle の再生成を、リリース時のみでなく通常 CI で常時実行する。再生成結果が既存 certificate と乖離した場合は失敗させ、`artifact_paths` に成果物パスを載せる既存契約をそのまま使う。
+3. **エディタ横断の Z3 診断標準化** — 現在 VS Code 拡張が描画している Z3 counter-example / Lean escalation 状態を、LSP の `data` フィールド仕様として文書化し、他エディタ（Neovim / Emacs / JetBrains 等）が同じ描画を実装できる形に固定する。診断の語彙は `lean_verified` / `escalation_reason` / `z3_result_class` を反射するのみとし、新規別名を作らない。
+4. **MCP ツール群の標準化** — `mumei-forge` と `mumei-agent` の両 MCP サーバが公開するツール名・引数・戻り値キーを 1 つの表として固定し、docstring と CI ゲートで乖離を検出する。
+
+**契約への影響**: なし（維持が要件）。no-`.mm` の8キー（`spec_health_issues` / `verification_violations` / `verification_status` / `cross_validation_gaps` / `next_steps` / `migration_hints` / `healed_files` / `heal_errors`）と harness 系キー（`harness_contract` / `intent_fidelity` / `artifact_paths` / `budget_policy_fingerprint` / `lean_verified`）はそのまま。`scan_and_fix` = `audit --auto-migrate --auto-heal` の契約と別名禁止ルールも維持する。
+
+**関連ファイル**:
+- `mcp_server.py`（mumei 側 MCP）/ `mumei-agent/agent/mcp_server.py`（agent 側 MCP）/ `mumei-agent/.mcp.json`
+- `scripts/check_contract_vocabulary.py` / `mumei-agent/.github/workflows/contract-vocabulary.yml`
+- `src/lsp.rs` / `editors/vscode/src/extension.ts`
+- `.github/workflows/generate-std-certs.yml` / `scripts/generate_stdlib_metrics.py` / `scripts/bundle_std_certs.py`
+- `scripts/homebrew/` / `scripts/mumei.rb` — 配布物への proof artifact 同梱
+
+---
+
 ## Related Documents
 
 - [`docs/ROADMAP.md`](ROADMAP.md) — mumei compiler strategic roadmap (P1-P3, Plans 1-24)

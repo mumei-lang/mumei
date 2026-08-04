@@ -1821,6 +1821,71 @@ python3 scripts/check_contract_vocabulary.py
 
 ---
 
+## P19: Object-Based Capability Model 設計調査（Phase 6 Capability Security の延長）— 🔭 Planned (future)
+
+canonical 上位ロードマップは `docs/CROSS_PROJECT_ROADMAP.md` の
+"Priority 15: Capability Model 拡張の評価と段階的導入"。本節はその local checkpoint であり、
+Phase 6（Capability Security evaluation、`docs/CAPABILITY_SECURITY.md` で Option A 継続を推奨）の延長として、
+object-based capability model の**非破壊な設計調査**のみを対象とする。実装フェーズは調査結果が肯定的な場合にのみ開く。
+
+**Plan（調査項目）**:
+
+1. 新 AST ノードの要否 — `capability` 型宣言 / `grant` 式 / narrowing 構文を導入する場合の
+   `mumei-core/src/ast.rs` / `hir.rs` への影響と、既存 `effect` 宣言との共存方法。
+2. 型システム拡張 — capability を第一級の値として扱う場合の subtyping と linearity の相互作用。
+   `LinearityCtx` の move 追跡は「渡した capability は呼び出し元で使えない」という revocation の実装候補。
+3. Z3 エンコーディング — capability 値に載る制約を現行の `check_constant_constraint()` /
+   Z3 String Sort 表現でどう表すか。effect containment 証明（`UsedEffects(body) ⊆ AllowedEffects(signature)`）
+   と effect propagation checking を壊さないことが必須条件。
+4. ランタイム表現の要否 — capability オブジェクトを compile-time に消去できるか。
+   消去できるなら現行の zero runtime overhead を維持できる。
+
+**判定基準**: `grant` を使わない既存 `.mm` が現行セマンティクスのまま通ること（opt-in であること）。
+破壊的変更が不可避と判明した場合は Option A（parameterized effects + Z3）継続の再確認をもって調査を閉じる。
+
+**契約への影響**: なし。capability 由来の検証結果は既存 effect 検証と同じ経路で報告し、
+新しい verdict 分類や別名 alias は追加しない。
+
+**関連ファイル**: `docs/CAPABILITY_SECURITY.md`（Section 3 と Next Steps 5）、
+`mumei-core/src/verification.rs`、`mumei-core/src/ast.rs` / `hir.rs`、
+`examples/capability_demo.mm`、`tests/test_capability_evaluation.mm`
+
+---
+
+## P20: 大規模ケースにおける proof certificate / trust surface メトリクス維持 — 🔭 Planned (future)
+
+canonical 上位ロードマップは `docs/CROSS_PROJECT_ROADMAP.md` の
+"Priority 16: 大規模・安全性クリティカル領域での atom-local proof obligation 合成性検証"。
+本節はその compiler 側 local checkpoint。
+
+- 大規模ケース（医療機器制御 / RTGS 決済 / RegTech / DeFi を実運用規模へ拡張したもの）でも
+  全 atom 分の proof certificate（`.proof-cert.json`）を生成でき、`mumei verify-cert --strict` が通ること。
+- `std/` の trusted atom 数を 0 のまま維持すること。規模拡大のために証明を諦めて trusted に落とさない。
+- trust surface（アプリ側 trusted atom 数・FFI 境界数・Lean escalation に回った atom 数）を
+  `scripts/generate_stdlib_metrics.py` の測定対象として大規模ケースにも適用し、規模に対する増え方を追跡する。
+- atom ローカルな証明義務だけで閉じない箇所は、modular verification（Plan 24 の `effect_pre` / `effect_post`）
+  の改善入力として分類・記録する。
+
+---
+
+## P21: proof artifact 配布同梱とエディタ横断 Z3 診断の標準化 — 🔭 Planned (future)
+
+canonical 上位ロードマップは `docs/CROSS_PROJECT_ROADMAP.md` の
+"Priority 17: AI エージェントネイティブ統合の標準化（MCP / CI / エディタ）"。本節はその compiler 側 local checkpoint。
+
+- **配布**: proof certificate / proof bundle（certificate + 依存 atom + `translator_version` と `bridge_lemma_hash`）を
+  Homebrew / release アーティファクトに同梱し、配布物のみで `mumei verify-cert --strict` を再実行できるようにする
+  （`scripts/bundle_std_certs.py`、`scripts/homebrew/`、`scripts/mumei.rb`）。
+- **CI 常時化**: 標準ライブラリメトリクスと proof bundle の再生成をリリース時限定でなく通常 CI で走らせ、
+  既存 certificate との乖離で失敗させる（`.github/workflows/generate-std-certs.yml`、`scripts/generate_stdlib_metrics.py`）。
+- **エディタ横断**: P18-B / V1-E-3 で `src/lsp.rs` が返している診断 `data`（Z3 counter-example と
+  `lean_escalation` の `status` / `z3_result_class` / `escalation_reason`）を LSP 拡張仕様として文書化し、
+  VS Code 以外のエディタでも同じ描画を実装できる形に固定する。canonical 語彙（`lean_verified` /
+  `escalation_reason` / `z3_result_class`）をそのまま反射し、新規別名 alias は追加しない。
+- **回帰ゲート（着手時）**: `python3 scripts/check_contract_vocabulary.py`
+
+---
+
 ## Related Documents
 
 - [`docs/FFI.md`](FFI.md) — FFI extern block design (Phase A foundation)
