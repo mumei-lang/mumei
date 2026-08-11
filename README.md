@@ -8,6 +8,8 @@ Mumei is a formal verification toolchain that starts from existing code, natural
 
 [Technical Paper](paper/) — proof-driven programming architecture, autonomous verification loop, and case studies.
 
+[Verified Local Agents: When AI Code Generation Meets Formal Proof](https://medium.com/@a_t_mosphere/verified-local-agents-when-ai-code-generation-meets-formal-proof-c317f16a7242) — a high-level overview of the Mumei Forge, Z3/Lean pipeline, and case studies (Medium).
+
 > existing code / natural language spec → MCP or mumei-agent → Z3-backed diagnostics → optional `.mm` migration → LLVM / proof artifacts
 
 ## No-`.mm` front door and roadmap

@@ -20,6 +20,7 @@
 - [MCP Integration](https://mumei-lang.github.io/mumei/docs/MCP)
 - [Roadmap](https://mumei-lang.github.io/mumei/docs/ROADMAP)
 - [Technical Paper](https://github.com/mumei-lang/mumei/tree/develop/paper)
+- [Medium article – Verified Local Agents: When AI Code Generation Meets Formal Proof](https://medium.com/@a_t_mosphere/verified-local-agents-when-ai-code-generation-meets-formal-proof-c317f16a7242)
 - [Mumei Agent](https://github.com/mumei-lang/mumei-agent)
 
 ## Install
