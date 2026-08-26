@@ -88,7 +88,7 @@ def extract_documented_tools(text: str) -> dict[str, str]:
             arguments = remainder[1:end]
         else:
             arguments = remainder.split(" | ", 1)[0]
-        tools[name] = arguments.strip().replace('"', "'")
+        tools[name] = arguments.strip().replace("\\|", "|").replace('"', "'")
     return tools
 
 

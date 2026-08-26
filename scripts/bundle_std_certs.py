@@ -83,22 +83,29 @@ def _summarize(modules: dict) -> dict:
     trusted_atoms = 0
 
     for cert in modules.values():
-        results = cert.get("atoms", cert.get("results", []))
-        module_atoms = len(results)
+        atoms = cert.get("atoms", [])
+        module_atoms = len(atoms)
         module_proven = sum(
-            1 for r in results if r.get("status") == "unsat"
+            1
+            for atom in atoms
+            if atom.get("z3_check_result") in {"unsat", "lean_verified"}
         )
         lean_verified_atoms += sum(
-            1 for atom in cert.get("atoms", [])
+            1 for atom in atoms
             if atom.get("z3_check_result") == "lean_verified"
         )
-        trusted_atoms += sum(1 for r in results if r.get("status") == "trusted")
+        trusted_atoms += sum(1 for atom in atoms if atom.get("status") == "trusted")
         total_atoms += module_atoms
         proven_atoms += module_proven
-        if module_atoms == 0:
-            # No atoms recorded — treat as fully verified (e.g. effect-only).
-            all_verified += 1
-        elif module_proven == module_atoms:
+        if "all_verified" in cert:
+            module_all_verified = bool(cert["all_verified"])
+        else:
+            module_all_verified = all(
+                atom.get("status") == "trusted"
+                or atom.get("z3_check_result") in {"unsat", "lean_verified"}
+                for atom in atoms
+            )
+        if module_all_verified:
             all_verified += 1
         else:
             partial_verified += 1

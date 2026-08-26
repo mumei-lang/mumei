@@ -105,9 +105,8 @@ class Mumei < Formula
     cert = Dir["#{share}/mumei/std/certs/**/*.proof.json"].first
     if cert
       relative = cert.sub("#{share}/mumei/std/certs/", "").sub(/\.proof\.json\z/, ".mm")
-      assert system(
-        "#{bin}/mumei verify-cert #{cert} #{share}/mumei/std/#{relative} --strict"
-      )
+      source = share/"mumei/std"/relative
+      system bin/"mumei", "verify-cert", cert, source, "--strict"
     end
   end
 end

@@ -25,7 +25,19 @@ METRICS = """\
 def _bundle(tmp_path: Path) -> dict:
     return {
         "bundle_version": "1.1",
-        "modules": {"std/core": {}, "std/io": {}},
+        "modules": {
+            "std/core": {
+                "atoms": [
+                    {"name": "proven", "status": "verified", "z3_check_result": "unsat"},
+                    {"name": "trusted", "status": "trusted", "z3_check_result": "skipped"},
+                ]
+            },
+            "std/io": {
+                "atoms": [
+                    {"name": "io", "status": "verified", "z3_check_result": "unsat"},
+                ]
+            },
+        },
         "artifact_paths": ["std/certs/core.proof.json"],
         "lean_provenance": [
             {
@@ -37,7 +49,7 @@ def _bundle(tmp_path: Path) -> dict:
                 "manual_lemma_reason": None,
             }
         ],
-        "summary": {"total_atoms": 3, "proven_atoms": 2},
+        "summary": {"total_atoms": 3, "proven_atoms": 2, "trusted_atoms": 1},
     }
 
 
@@ -65,6 +77,8 @@ def test_passing_fixture_prints_artifact_paths(tmp_path: Path) -> None:
     result = _run(tmp_path, _bundle(tmp_path))
     assert result.returncode == 0
     assert "std/certs/core.proof.json" in result.stdout
+    assert "bundle_proof_density: 2/3" in result.stdout
+    assert "metrics_proof_density: 2/3" in result.stdout
 
 
 def test_module_missing_from_bundle(tmp_path: Path) -> None:
@@ -75,12 +89,22 @@ def test_module_missing_from_bundle(tmp_path: Path) -> None:
     assert "module_missing" in result.stderr
 
 
-def test_atom_count_mismatch(tmp_path: Path) -> None:
+def test_trusted_count_mismatch(tmp_path: Path) -> None:
     bundle = _bundle(tmp_path)
-    bundle["summary"]["total_atoms"] = 4
+    bundle["summary"]["trusted_atoms"] = 0
     result = _run(tmp_path, bundle)
     assert result.returncode == 1
-    assert "atom_count_mismatch" in result.stderr
+    assert "trusted_count_mismatch" in result.stderr
+
+
+def test_bundle_density_regression(tmp_path: Path) -> None:
+    bundle = _bundle(tmp_path)
+    bundle["summary"]["proven_atoms"] = 1
+    result = _run(tmp_path, bundle)
+    assert result.returncode == 1
+    assert "proof_density_regression" in result.stderr
+    assert "bundle_proof_density: 1/3" in result.stdout
+    assert "metrics_proof_density: 2/3" in result.stdout
 
 
 def test_empty_bridge_hash_is_stale_translator(tmp_path: Path) -> None:

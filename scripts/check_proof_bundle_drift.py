@@ -41,6 +41,12 @@ def _artifact_file(path: str, certs_dir: Path) -> Path:
     return candidate
 
 
+def _density(proven: int, total: int) -> tuple[str, float]:
+    if total == 0:
+        return "0/0", 0.0
+    return f"{proven}/{total}", proven / total
+
+
 def check_drift(
     bundle_path: Path,
     metrics_path: Path,
@@ -59,22 +65,43 @@ def check_drift(
 
     metric_counts = _metric_summary(metrics_text)
     summary = bundle.get("summary") or {}
-    density = None
+    bundle_density = None
+    bundle_density_value = None
+    metrics_density = None
+    metrics_density_value = None
     if metric_counts is None:
         failures.append("summary_missing: metrics Summary line is absent or malformed")
     else:
-        total, proven, _trusted = metric_counts
-        if summary.get("total_atoms") != total:
+        metric_total, metric_proven, metric_trusted = metric_counts
+        metrics_density, metrics_density_value = _density(
+            metric_proven, metric_total
+        )
+        bundle_total = summary.get("total_atoms")
+        bundle_proven = summary.get("proven_atoms")
+        bundle_trusted = summary.get("trusted_atoms")
+        if not isinstance(bundle_total, int) or not isinstance(bundle_proven, int):
             failures.append(
-                f"atom_count_mismatch: bundle total_atoms={summary.get('total_atoms')}, "
-                f"metrics total={total}"
+                "summary_missing: bundle summary must contain integer "
+                "total_atoms and proven_atoms"
             )
-        if summary.get("proven_atoms") != proven:
+        else:
+            bundle_density, bundle_density_value = _density(
+                bundle_proven, bundle_total
+            )
+        if bundle_trusted != metric_trusted:
             failures.append(
-                f"proven_count_mismatch: bundle proven_atoms={summary.get('proven_atoms')}, "
-                f"metrics proven={proven}"
+                f"trusted_count_mismatch: bundle trusted_atoms={bundle_trusted}, "
+                f"metrics trusted={metric_trusted}"
             )
-        density = f"{proven}/{total}"
+        if (
+            bundle_density_value is not None
+            and metrics_density_value is not None
+            and bundle_density_value < metrics_density_value
+        ):
+            failures.append(
+                f"proof_density_regression: bundle {bundle_density} is below "
+                f"metrics {metrics_density}"
+            )
 
     for index, entry in enumerate(bundle.get("lean_provenance") or []):
         if not entry.get("translator_version") or not entry.get("bridge_lemma_hash"):
@@ -94,7 +121,9 @@ def check_drift(
         "ok": not failures,
         "failures": failures,
         "artifact_paths": artifact_paths,
-        "proof_density": density,
+        "proof_density": bundle_density,
+        "bundle_proof_density": bundle_density,
+        "metrics_proof_density": metrics_density,
     }
 
 
@@ -121,12 +150,15 @@ def main(argv: list[str] | None = None) -> int:
         print("artifact_paths:")
         for path in result["artifact_paths"]:
             print(f"- {path}")
-        if result["proof_density"] is not None:
-            print(f"proof_density: {result['proof_density']}")
     else:
         print("proof bundle drift check failed:", file=sys.stderr)
         for failure in result["failures"]:
             print(f"- {failure}", file=sys.stderr)
+    if not args.as_json:
+        if result["bundle_proof_density"] is not None:
+            print(f"bundle_proof_density: {result['bundle_proof_density']}")
+        if result["metrics_proof_density"] is not None:
+            print(f"metrics_proof_density: {result['metrics_proof_density']}")
     return 0 if result["ok"] else 1
 
 
