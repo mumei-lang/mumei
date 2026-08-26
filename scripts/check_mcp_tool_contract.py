@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check the canonical mumei-forge MCP tool table against mcp_server.py."""
+"""Check canonical MCP tool tables against their server implementations."""
 from __future__ import annotations
 
 import ast
@@ -10,6 +10,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MCP_SERVER = REPO_ROOT / "mcp_server.py"
 CONTRACT_DOC = REPO_ROOT / "docs" / "MCP_TOOL_CONTRACT.md"
+SIBLING_AGENT_SERVER = REPO_ROOT.parent / "mumei-agent" / "agent" / "mcp_server.py"
 
 
 def _is_tool_decorator(node: ast.expr) -> bool:
@@ -69,9 +70,14 @@ def extract_tools(source: str) -> dict[str, str]:
     return tools
 
 
-def extract_documented_tools(text: str) -> dict[str, str]:
-    section = text.split("## `mumei-agent`", 1)[0]
-    section = section.split("## `mumei-forge`", 1)[1]
+def extract_documented_tools(
+    text: str,
+    section_name: str = "mumei-forge",
+) -> dict[str, str]:
+    section = text.split(f"## `{section_name}`", 1)[1]
+    next_heading = section.find("\n## ")
+    if next_heading >= 0:
+        section = section[:next_heading]
     tools = {}
     for line in section.splitlines():
         match = re.match(r"^\|\s*`([^`]+)`\s*\|\s*(.*)\s*\|$", line)
@@ -92,6 +98,26 @@ def extract_documented_tools(text: str) -> dict[str, str]:
     return tools
 
 
+def _check_tools(
+    actual: dict[str, str],
+    documented: dict[str, str],
+    label: str,
+) -> list[str]:
+    expected = {name: signature.replace('"', "'") for name, signature in actual.items()}
+    failures = []
+    for name in sorted(set(expected) - set(documented)):
+        failures.append(f"{label}: missing tool in contract: {name}")
+    for name in sorted(set(documented) - set(expected)):
+        failures.append(f"{label}: extra tool in contract: {name}")
+    for name in sorted(set(expected) & set(documented)):
+        if expected[name] != documented[name]:
+            failures.append(
+                f"{label}: signature mismatch for {name}: expected "
+                f"{expected[name]!r}, documented {documented[name]!r}"
+            )
+    return failures
+
+
 def main() -> int:
     try:
         actual = extract_tools(MCP_SERVER.read_text(encoding="utf-8"))
@@ -99,24 +125,29 @@ def main() -> int:
     except (OSError, SyntaxError, ValueError) as exc:
         print(f"MCP tool contract check failed: {exc}", file=sys.stderr)
         return 1
-    expected = {name: signature.replace('"', "'") for name, signature in actual.items()}
-    failures = []
-    for name in sorted(set(expected) - set(documented)):
-        failures.append(f"missing tool in contract: {name}")
-    for name in sorted(set(documented) - set(expected)):
-        failures.append(f"extra tool in contract: {name}")
-    for name in sorted(set(expected) & set(documented)):
-        if expected[name] != documented[name]:
-            failures.append(
-                f"signature mismatch for {name}: expected {expected[name]!r}, "
-                f"documented {documented[name]!r}"
+    failures = _check_tools(actual, documented, "mumei-forge")
+    if SIBLING_AGENT_SERVER.exists():
+        try:
+            agent_actual = extract_tools(SIBLING_AGENT_SERVER.read_text(encoding="utf-8"))
+            agent_documented = extract_documented_tools(
+                CONTRACT_DOC.read_text(encoding="utf-8"),
+                "mumei-agent",
             )
+        except (OSError, SyntaxError, ValueError) as exc:
+            print(f"MCP tool contract check failed: {exc}", file=sys.stderr)
+            return 1
+        failures.extend(_check_tools(agent_actual, agent_documented, "mumei-agent"))
+    else:
+        print(
+            "MCP tool contract check skipped mumei-agent validation "
+            "(sibling repository unavailable)"
+        )
     if failures:
         print("MCP tool contract check failed:", file=sys.stderr)
         for failure in failures:
             print(f"- {failure}", file=sys.stderr)
         return 1
-    print(f"MCP tool contract check passed ({len(expected)} mumei-forge tools)")
+    print(f"MCP tool contract check passed ({len(actual)} mumei-forge tools)")
     return 0
 
 
