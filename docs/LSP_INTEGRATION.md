@@ -1,5 +1,8 @@
 # LSP Integration
 
+For the cross-editor diagnostic and CodeLens `data` contract, see
+[LSP Diagnostic Data](LSP_DIAGNOSTIC_DATA.md).
+
 The Mumei language server (`mumei lsp`) provides editor-level visibility into verification feedback, contracts, and intent/spec alignment for `.mm` files.
 
 ## Capabilities

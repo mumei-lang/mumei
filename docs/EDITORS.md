@@ -1,5 +1,8 @@
 # Editor Configuration for Mumei LSP
 
+For the shared cross-editor diagnostic and CodeLens `data` contract, see
+[LSP Diagnostic Data](LSP_DIAGNOSTIC_DATA.md).
+
 The Mumei language server (`mumei lsp`) communicates via JSON-RPC over stdio and provides:
 
 - **Diagnostics** — parse errors and Z3 verification errors

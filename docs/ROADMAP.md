@@ -11,7 +11,7 @@ keywords: "mumei roadmap, formal verification roadmap, Z3, Lean4, LLVM, proof-dr
 
 ## Cross-project source of truth
 
-`docs/CROSS_PROJECT_ROADMAP.md` is the only top-level roadmap for cross-repository priority order. This file keeps mumei-local implementation checkpoints and must use the same contract vocabulary: `harness_contract`, `intent_fidelity`, `artifact_paths`, `budget_policy_fingerprint`, and `lean_verified`. Future work is prioritized toward docs-sync and harness-contract regression prevention before reopening deferred portability projects. The `scripts/check_contract_vocabulary.py` gate now covers docs, CLI help (`src/cli.rs`), and MCP tool docstrings (`mcp_server.py`) for forbidden-alias and `contradiction_type` drift detection.
+`docs/CROSS_PROJECT_ROADMAP.md` is the only top-level roadmap for cross-repository priority order. This file keeps mumei-local implementation checkpoints and must use the same contract vocabulary: `harness_contract`, `intent_fidelity`, `artifact_paths`, `budget_policy_fingerprint`, and `lean_verified`. Future work is prioritized toward docs-sync and harness-contract regression prevention before reopening deferred portability projects. Priority 17 is implemented in the canonical roadmap; its local surfaces are `stdlib-proof-gate.yml`, `check_proof_bundle_drift.py`, `LSP_DIAGNOSTIC_DATA.md`, and `MCP_TOOL_CONTRACT.md`. The `scripts/check_contract_vocabulary.py` gate now covers docs, CLI help (`src/cli.rs`), and MCP tool docstrings (`mcp_server.py`) for forbidden-alias and `contradiction_type` drift detection.
 
 ### Contract regression gate
 
@@ -1868,7 +1868,7 @@ canonical 上位ロードマップは `docs/CROSS_PROJECT_ROADMAP.md` の
 
 ---
 
-## P21: proof artifact 配布同梱とエディタ横断 Z3 診断の標準化 — 🔭 Planned (future)
+## P21: proof artifact 配布同梱とエディタ横断 Z3 診断の標準化 — ✅ Implemented
 
 canonical 上位ロードマップは `docs/CROSS_PROJECT_ROADMAP.md` の
 "Priority 17: AI エージェントネイティブ統合の標準化（MCP / CI / エディタ）"。本節はその compiler 側 local checkpoint。
@@ -1882,7 +1882,10 @@ canonical 上位ロードマップは `docs/CROSS_PROJECT_ROADMAP.md` の
   `lean_escalation` の `status` / `z3_result_class` / `escalation_reason`）を LSP 拡張仕様として文書化し、
   VS Code 以外のエディタでも同じ描画を実装できる形に固定する。canonical 語彙（`lean_verified` /
   `escalation_reason` / `z3_result_class`）をそのまま反射し、新規別名 alias は追加しない。
-- **回帰ゲート（着手時）**: `python3 scripts/check_contract_vocabulary.py`
+- **実装済みゲート**: `python3 scripts/check_contract_vocabulary.py`、
+  `python3 scripts/check_mcp_tool_contract.py`、`python3 scripts/check_proof_bundle_drift.py`
+  および `tests/test_lsp_diagnostic_data_doc.py`。canonical の優先順位と契約は
+  `docs/CROSS_PROJECT_ROADMAP.md` に従属し、この local checkpoint は競合する順序を導入しない。
 
 ---
 

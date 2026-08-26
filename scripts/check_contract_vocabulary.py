@@ -30,6 +30,8 @@ SYNC_DOCS = [
     REPO_ROOT / "docs" / "ONBOARDING.md",
     REPO_ROOT / "docs" / "PROOF_CERTIFICATE.md",
     REPO_ROOT / "docs" / "TRUSTED_ATOMS.md",
+    REPO_ROOT / "docs" / "MCP_TOOL_CONTRACT.md",
+    REPO_ROOT / "docs" / "LSP_DIAGNOSTIC_DATA.md",
     REPO_ROOT / "README.md",
     REPO_ROOT / "instruction.md",
 ]

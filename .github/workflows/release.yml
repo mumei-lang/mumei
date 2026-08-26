@@ -413,10 +413,9 @@ jobs:
         run: |
           mkdir -p release-pkg/std
           cp target/${{ matrix.target }}/release/mumei release-pkg/
-          # Copy std/ but exclude certs/ — raw per-module .proof.json files
-          # are intermediate artefacts; the aggregated std-proof-bundle.json
-          # (copied below) is the only certificate consumers need.
-          rsync -a --exclude='certs' std/ release-pkg/std/
+          # Copy std/ including per-module proof certificates.  Keeping each
+          # certificate next to its source makes the distribution self-contained.
+          rsync -a std/ release-pkg/std/
           # SI-5 Phase 3-C: include the proof bundle in every Unix tarball
           # (when present — musl & Alpine targets don't run the cert step).
           if [ -f std-proof-bundle.json ]; then
@@ -424,6 +423,38 @@ jobs:
           fi
           cd release-pkg
           tar czf ../${{ matrix.name }}.tar.gz .
+      - name: Re-verify packaged std/ certificates (Unix, non-musl)
+        if: runner.os != 'Windows' && !contains(matrix.target, 'musl')
+        run: |
+          set -u
+          unpacked="$(mktemp -d)"
+          tar xzf "${{ matrix.name }}.tar.gz" -C "$unpacked"
+          failures=0
+          checked=0
+          while IFS= read -r -d '' cert; do
+            rel="${cert#"$unpacked/std/certs/"}"
+            src="$unpacked/std/${rel%.proof.json}.mm"
+            if [ ! -f "$src" ]; then
+              echo "::error::no source found for packaged certificate $cert (expected $src)"
+              failures=$((failures + 1))
+              continue
+            fi
+            checked=$((checked + 1))
+            echo "Verifying packaged $rel against ${src#"$unpacked/"}"
+            if ! "$unpacked/mumei" verify-cert "$cert" "$src" --strict; then
+              echo "::error::packaged certificate gate failed for $src"
+              failures=$((failures + 1))
+            fi
+          done < <(find "$unpacked/std/certs" -type f -name '*.proof.json' -print0 2>/dev/null)
+          if [ "$checked" -eq 0 ]; then
+            echo "::error::no packaged certificates were checked"
+            exit 1
+          fi
+          if [ "$failures" -ne 0 ]; then
+            echo "::error::$failures packaged certificate(s) failed verify-cert --strict"
+            exit 1
+          fi
+          echo "verify-cert --strict passed for $checked packaged certificate(s)"
       # Plan 7: Windows packaging uses .zip instead of .tar.gz
       - name: Package binary + std library (Windows)
         if: runner.os == 'Windows'
@@ -431,11 +462,10 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path release-pkg/std
           Copy-Item "target/${{ matrix.target }}/release/mumei.exe" "release-pkg/"
-          # Copy std/ but exclude certs/ (intermediate proof artefacts) to
-          # match Unix packaging which uses rsync --exclude='certs'.
+          # Copy std/ including per-module proof certificates when present.
           Copy-Item -Recurse "std/*" "release-pkg/std/"
-          if (Test-Path "release-pkg/std/certs") {
-            Remove-Item -Recurse -Force "release-pkg/std/certs"
+          if (Test-Path "std-proof-bundle.json") {
+            Copy-Item "std-proof-bundle.json" "release-pkg/"
           }
           # Include required runtime DLLs so the binary can start outside CI
           $llvmCDll = "$env:LLVM_SYS_170_PREFIX\bin\LLVM-C.dll"

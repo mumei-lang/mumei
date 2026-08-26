@@ -1,0 +1,110 @@
+name: Stdlib Proof Bundle Gate
+
+on:
+  pull_request:
+    paths:
+      - 'std/**'
+      - 'mumei-core/**'
+      - 'src/**'
+      - 'scripts/generate_stdlib_metrics.py'
+      - 'scripts/bundle_std_certs.py'
+      - 'scripts/check_proof_bundle_drift.py'
+      - 'docs/STDLIB_METRICS.md'
+      - 'tests/test_check_proof_bundle_drift.py'
+      - '.github/workflows/stdlib-proof-gate.yml'
+  push:
+    branches: [develop]
+    paths:
+      - 'std/**'
+      - 'mumei-core/**'
+      - 'src/**'
+      - 'scripts/generate_stdlib_metrics.py'
+      - 'scripts/bundle_std_certs.py'
+      - 'scripts/check_proof_bundle_drift.py'
+      - 'docs/STDLIB_METRICS.md'
+      - 'tests/test_check_proof_bundle_drift.py'
+      - '.github/workflows/stdlib-proof-gate.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  stdlib-proof-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install system deps (LLVM 17, Z3)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libz3-dev pkg-config libssl-dev libzstd-dev z3
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
+            | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
+          codename=$(lsb_release -cs)
+          echo "deb http://apt.llvm.org/${codename}/ llvm-toolchain-${codename}-17 main" \
+            | sudo tee /etc/apt/sources.list.d/llvm-17.list > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y llvm-17-dev libclang-17-dev libpolly-17-dev
+          echo "LLVM_SYS_170_PREFIX=/usr/lib/llvm-17" >> "$GITHUB_ENV"
+          echo "LIBCLANG_PATH=/usr/lib/llvm-17/lib" >> "$GITHUB_ENV"
+      - name: Install Python dependencies
+        run: python3 -m pip install --quiet pytest pyyaml
+      - name: Build mumei (release)
+        run: cargo build --release
+      - name: Generate per-module certificates
+        run: |
+          set -u
+          mkdir -p std/certs
+          find std -type f -name '*.mm' -print0 | while IFS= read -r -d '' f; do
+            rel="${f#std/}"
+            stem="${rel%.mm}"
+            outdir="std/certs/$(dirname "$stem")"
+            mkdir -p "$outdir"
+            out="std/certs/${stem}.proof.json"
+            echo "Generating cert for $f -> $out"
+            ./target/release/mumei verify --proof-cert --output "$out" "$f" \
+              || echo "::warning::verify failed for $f (continuing)"
+          done
+      - name: Gate on certificate validity (mumei verify-cert --strict)
+        run: |
+          set -u
+          failures=0
+          checked=0
+          while IFS= read -r -d '' cert; do
+            rel="${cert#std/certs/}"
+            src="std/${rel%.proof.json}.mm"
+            if [ ! -f "$src" ]; then
+              echo "::error::no source found for $cert (expected $src)"
+              failures=$((failures + 1))
+              continue
+            fi
+            checked=$((checked + 1))
+            if ! ./target/release/mumei verify-cert "$cert" "$src" --strict; then
+              echo "::error::certificate gate failed for $src ($cert)"
+              failures=$((failures + 1))
+            fi
+          done < <(find std/certs -type f -name '*.proof.json' -print0)
+          if [ "$checked" -eq 0 ]; then
+            echo "::error::no certificates were generated"
+            exit 1
+          fi
+          if [ "$failures" -ne 0 ]; then
+            echo "::error::$failures certificate(s) failed verify-cert --strict"
+            exit 1
+          fi
+      - name: Bundle std/ proof certificates
+        run: python3 scripts/bundle_std_certs.py --certs-dir std/certs --output std-proof-bundle.json
+      - name: Check committed stdlib metrics
+        run: python3 scripts/generate_stdlib_metrics.py --check --mumei-bin ./target/release/mumei
+      - name: Check proof bundle drift
+        run: python3 scripts/check_proof_bundle_drift.py --bundle std-proof-bundle.json --metrics docs/STDLIB_METRICS.md --certs-dir std/certs
+      - name: Upload proof artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: std-proof-gate
+          path: |
+            std/certs/
+            std-proof-bundle.json

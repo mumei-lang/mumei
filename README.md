@@ -12,6 +12,10 @@ Mumei is a formal verification toolchain that starts from existing code, natural
 
 > existing code / natural language spec → MCP or mumei-agent → Z3-backed diagnostics → optional `.mm` migration → LLVM / proof artifacts
 
+Release and Homebrew artifacts include per-module proof certificates and the
+aggregate proof bundle. Consumers can re-verify packaged sources with
+`mumei verify-cert <certificate> <source.mm> --strict`.
+
 ## No-`.mm` front door and roadmap
 
 Run `uv run mumei-agent audit --code-file ... --auto-migrate --auto-heal`, or MCP `scan_and_fix`, before asking users to author `.mm` files. See [`docs/CROSS_PROJECT_ROADMAP.md`](docs/CROSS_PROJECT_ROADMAP.md), [`docs/ROADMAP.md`](docs/ROADMAP.md), and [`docs/ONBOARDING.md`](docs/ONBOARDING.md) for the contract, vocabulary, V1-A〜E order, Lean escalation, and PR evidence.
@@ -121,6 +125,8 @@ The complete CLI command table is in [`docs/TOOLCHAIN.md`](docs/TOOLCHAIN.md), M
 | [Toolchain](docs/TOOLCHAIN.md) | CLI commands, package management, CI/release |
 | [Onboarding Guide](docs/ONBOARDING.md) | Gradual path from existing code and natural language to `.mm` |
 | [LSP Integration](docs/LSP_INTEGRATION.md) | Editor CodeLens, intent drift, spec-code mapping, and `mumei-agent` spec/code diagnostics |
+| [LSP Diagnostic Data](docs/LSP_DIAGNOSTIC_DATA.md) | Cross-editor diagnostic and CodeLens data contract |
+| [MCP Tool Contract](docs/MCP_TOOL_CONTRACT.md) | Canonical mumei-forge and mumei-agent tool signatures |
 | [Roadmap](docs/ROADMAP.md) | Strategic roadmap |
 | [Capability Security](docs/CAPABILITY_SECURITY.md) | Effect-based capability security evaluation |
 | [Changelog](docs/CHANGELOG.md) | Release history |
