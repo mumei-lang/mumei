@@ -426,35 +426,11 @@ jobs:
       - name: Re-verify packaged std/ certificates (Unix, non-musl)
         if: runner.os != 'Windows' && !contains(matrix.target, 'musl')
         run: |
-          set -u
           unpacked="$(mktemp -d)"
           tar xzf "${{ matrix.name }}.tar.gz" -C "$unpacked"
-          failures=0
-          checked=0
-          while IFS= read -r -d '' cert; do
-            rel="${cert#"$unpacked/std/certs/"}"
-            src="$unpacked/std/${rel%.proof.json}.mm"
-            if [ ! -f "$src" ]; then
-              echo "::error::no source found for packaged certificate $cert (expected $src)"
-              failures=$((failures + 1))
-              continue
-            fi
-            checked=$((checked + 1))
-            echo "Verifying packaged $rel against ${src#"$unpacked/"}"
-            if ! "$unpacked/mumei" verify-cert "$cert" "$src" --strict; then
-              echo "::error::packaged certificate gate failed for $src"
-              failures=$((failures + 1))
-            fi
-          done < <(find "$unpacked/std/certs" -type f -name '*.proof.json' -print0 2>/dev/null)
-          if [ "$checked" -eq 0 ]; then
-            echo "::error::no packaged certificates were checked"
-            exit 1
-          fi
-          if [ "$failures" -ne 0 ]; then
-            echo "::error::$failures packaged certificate(s) failed verify-cert --strict"
-            exit 1
-          fi
-          echo "verify-cert --strict passed for $checked packaged certificate(s)"
+          python3 scripts/verify_packaged_certs.py "$unpacked" \
+            --mumei-bin "$unpacked/mumei" \
+            --baseline scripts/std_proof_baseline.json
       # Plan 7: Windows packaging uses .zip instead of .tar.gz
       - name: Package binary + std library (Windows)
         if: runner.os == 'Windows'

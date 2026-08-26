@@ -9,8 +9,11 @@ on:
       - 'scripts/generate_stdlib_metrics.py'
       - 'scripts/bundle_std_certs.py'
       - 'scripts/check_proof_bundle_drift.py'
+      - 'scripts/verify_packaged_certs.py'
+      - 'scripts/std_proof_baseline.json'
       - 'docs/STDLIB_METRICS.md'
       - 'tests/test_check_proof_bundle_drift.py'
+      - 'tests/test_verify_packaged_certs.py'
       - '.github/workflows/stdlib-proof-gate.yml'
   push:
     branches: [develop]
@@ -21,8 +24,11 @@ on:
       - 'scripts/generate_stdlib_metrics.py'
       - 'scripts/bundle_std_certs.py'
       - 'scripts/check_proof_bundle_drift.py'
+      - 'scripts/verify_packaged_certs.py'
+      - 'scripts/std_proof_baseline.json'
       - 'docs/STDLIB_METRICS.md'
       - 'tests/test_check_proof_bundle_drift.py'
+      - 'tests/test_verify_packaged_certs.py'
       - '.github/workflows/stdlib-proof-gate.yml'
   workflow_dispatch:
 
@@ -69,38 +75,13 @@ jobs:
               || echo "::warning::verify failed for $f (continuing)"
           done
       - name: Gate on certificate validity (mumei verify-cert --strict)
-        run: |
-          set -u
-          failures=0
-          checked=0
-          while IFS= read -r -d '' cert; do
-            rel="${cert#std/certs/}"
-            src="std/${rel%.proof.json}.mm"
-            if [ ! -f "$src" ]; then
-              echo "::error::no source found for $cert (expected $src)"
-              failures=$((failures + 1))
-              continue
-            fi
-            checked=$((checked + 1))
-            if ! ./target/release/mumei verify-cert "$cert" "$src" --strict; then
-              echo "::error::certificate gate failed for $src ($cert)"
-              failures=$((failures + 1))
-            fi
-          done < <(find std/certs -type f -name '*.proof.json' -print0)
-          if [ "$checked" -eq 0 ]; then
-            echo "::error::no certificates were generated"
-            exit 1
-          fi
-          if [ "$failures" -ne 0 ]; then
-            echo "::error::$failures certificate(s) failed verify-cert --strict"
-            exit 1
-          fi
+        run: python3 scripts/verify_packaged_certs.py . --mumei-bin ./target/release/mumei --baseline scripts/std_proof_baseline.json
       - name: Bundle std/ proof certificates
         run: python3 scripts/bundle_std_certs.py --certs-dir std/certs --output std-proof-bundle.json
       - name: Check committed stdlib metrics
         run: python3 scripts/generate_stdlib_metrics.py --check --mumei-bin ./target/release/mumei
       - name: Check proof bundle drift
-        run: python3 scripts/check_proof_bundle_drift.py --bundle std-proof-bundle.json --metrics docs/STDLIB_METRICS.md --certs-dir std/certs
+        run: python3 scripts/check_proof_bundle_drift.py --bundle std-proof-bundle.json --metrics docs/STDLIB_METRICS.md --baseline scripts/std_proof_baseline.json --certs-dir std/certs
       - name: Upload proof artifacts
         uses: actions/upload-artifact@v4
         with:

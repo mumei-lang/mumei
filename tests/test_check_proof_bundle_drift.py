@@ -49,15 +49,35 @@ def _bundle(tmp_path: Path) -> dict:
                 "manual_lemma_reason": None,
             }
         ],
-        "summary": {"total_atoms": 3, "proven_atoms": 2, "trusted_atoms": 1},
+        "summary": {
+            "total_modules": 2,
+            "total_atoms": 3,
+            "proven_atoms": 2,
+            "lean_verified_atoms": 0,
+            "trusted_atoms": 1,
+        },
     }
 
 
 def _run(tmp_path: Path, bundle: dict, metrics: str = METRICS) -> subprocess.CompletedProcess[str]:
     bundle_path = tmp_path / "bundle.json"
     metrics_path = tmp_path / "metrics.md"
+    baseline_path = tmp_path / "baseline.json"
     bundle_path.write_text(json.dumps(bundle), encoding="utf-8")
     metrics_path.write_text(metrics, encoding="utf-8")
+    baseline_path.write_text(
+        json.dumps(
+            {
+                "total_modules": 2,
+                "total_atoms": 3,
+                "proven_atoms": 2,
+                "lean_verified_atoms": 0,
+                "trusted_atoms": 1,
+                "modules": {},
+            }
+        ),
+        encoding="utf-8",
+    )
     return subprocess.run(
         [
             sys.executable,
@@ -66,6 +86,8 @@ def _run(tmp_path: Path, bundle: dict, metrics: str = METRICS) -> subprocess.Com
             str(bundle_path),
             "--metrics",
             str(metrics_path),
+            "--baseline",
+            str(baseline_path),
         ],
         capture_output=True,
         text=True,
@@ -77,8 +99,6 @@ def test_passing_fixture_prints_artifact_paths(tmp_path: Path) -> None:
     result = _run(tmp_path, _bundle(tmp_path))
     assert result.returncode == 0
     assert "std/certs/core.proof.json" in result.stdout
-    assert "bundle_proof_density: 2/3" in result.stdout
-    assert "metrics_proof_density: 2/3" in result.stdout
 
 
 def test_module_missing_from_bundle(tmp_path: Path) -> None:
@@ -97,14 +117,55 @@ def test_trusted_count_mismatch(tmp_path: Path) -> None:
     assert "trusted_count_mismatch" in result.stderr
 
 
-def test_bundle_density_regression(tmp_path: Path) -> None:
+def test_atom_count_mismatch(tmp_path: Path) -> None:
     bundle = _bundle(tmp_path)
-    bundle["summary"]["proven_atoms"] = 1
+    bundle["summary"]["total_atoms"] = 4
     result = _run(tmp_path, bundle)
     assert result.returncode == 1
-    assert "proof_density_regression" in result.stderr
-    assert "bundle_proof_density: 1/3" in result.stdout
-    assert "metrics_proof_density: 2/3" in result.stdout
+    assert "atom_count_mismatch" in result.stderr
+
+
+def test_baseline_improvement_requires_update(tmp_path: Path) -> None:
+    bundle = _bundle(tmp_path)
+    bundle["summary"]["proven_atoms"] = 3
+    bundle["modules"]["std/core"]["atoms"][1]["z3_check_result"] = "unsat"
+    baseline_path = tmp_path / "baseline.json"
+    baseline_path.write_text(
+        json.dumps(
+            {
+                "total_modules": 2,
+                "total_atoms": 3,
+                "proven_atoms": 2,
+                "lean_verified_atoms": 0,
+                "trusted_atoms": 1,
+                "modules": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    bundle_path = tmp_path / "bundle.json"
+    metrics_path = tmp_path / "metrics.md"
+    bundle_path.write_text(json.dumps(bundle), encoding="utf-8")
+    metrics_path.write_text(METRICS, encoding="utf-8")
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(CHECKER),
+            "--bundle",
+            str(bundle_path),
+            "--metrics",
+            str(metrics_path),
+            "--baseline",
+            str(baseline_path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 1
+    assert "baseline_mismatch" in result.stderr
+    assert "update scripts/std_proof_baseline.json" in result.stderr
+    assert '"proven_atoms": 3' in result.stderr
 
 
 def test_empty_bridge_hash_is_stale_translator(tmp_path: Path) -> None:
@@ -131,6 +192,8 @@ def test_missing_artifact_path(tmp_path: Path) -> None:
             str(bundle_path),
             "--metrics",
             str(metrics_path),
+            "--baseline",
+            str(tmp_path / "baseline.json"),
             "--certs-dir",
             str(tmp_path / "certs"),
         ],
