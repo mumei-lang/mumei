@@ -1,5 +1,8 @@
 # Diagnostics Design Document
 
+The source and `data` vocabulary shared by all editors is documented in
+[LSP Diagnostic Data](LSP_DIAGNOSTIC_DATA.md).
+
 > Diagnostics infrastructure design for the Mumei compiler.
 
 ## Overview

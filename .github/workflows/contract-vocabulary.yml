@@ -11,6 +11,12 @@ on:
       - 'scripts/check_contract_vocabulary.py'
       - 'tests/test_check_contract_vocabulary.py'
       - 'tests/test_ci_workflow_timeouts.py'
+      - 'tests/test_check_mcp_tool_contract.py'
+      - 'tests/test_check_proof_bundle_drift.py'
+      - 'tests/test_lsp_diagnostic_data_doc.py'
+      - 'docs/MCP_TOOL_CONTRACT.md'
+      - 'docs/LSP_DIAGNOSTIC_DATA.md'
+      - 'scripts/check_mcp_tool_contract.py'
       - '.github/workflows/contract-vocabulary.yml'
   push:
     branches: [develop]
@@ -23,6 +29,12 @@ on:
       - 'scripts/check_contract_vocabulary.py'
       - 'tests/test_check_contract_vocabulary.py'
       - 'tests/test_ci_workflow_timeouts.py'
+      - 'tests/test_check_mcp_tool_contract.py'
+      - 'tests/test_check_proof_bundle_drift.py'
+      - 'tests/test_lsp_diagnostic_data_doc.py'
+      - 'docs/MCP_TOOL_CONTRACT.md'
+      - 'docs/LSP_DIAGNOSTIC_DATA.md'
+      - 'scripts/check_mcp_tool_contract.py'
       - '.github/workflows/contract-vocabulary.yml'
   workflow_dispatch:
 
@@ -41,7 +53,10 @@ jobs:
       - name: Check docs contract vocabulary
         run: python3 scripts/check_contract_vocabulary.py
 
+      - name: Check canonical mumei-forge MCP tool contract
+        run: python3 scripts/check_mcp_tool_contract.py
+
       - name: Run extraction tests
         run: |
           python3 -m pip install --quiet pytest pyyaml
-          python3 -m pytest tests/test_check_contract_vocabulary.py tests/test_ci_workflow_timeouts.py -v
+          python3 -m pytest tests/test_check_contract_vocabulary.py tests/test_ci_workflow_timeouts.py tests/test_check_mcp_tool_contract.py tests/test_check_proof_bundle_drift.py tests/test_lsp_diagnostic_data_doc.py -v

@@ -1,25 +1,42 @@
-name: Generate std/ Proof Certificates
+name: Stdlib Proof Bundle Gate
 
-# SI-5 Phase 3-C: Generate a per-module proof certificate (.proof.json) for
-# every file under std/ and upload them as a CI artifact. These certificates
-# are later fanned-in to a single std-proof-bundle.json by
-# scripts/bundle_std_certs.py and distributed via homebrew-mumei.
-#
-# std/certs/ is in .gitignore — raw per-module certs are intermediate
-# artefacts and are NOT committed to the repo. This workflow uploads both
-# the per-module certificates and the aggregate bundle.
 on:
+  pull_request:
+    paths:
+      - 'std/**'
+      - 'mumei-core/**'
+      - 'src/**'
+      - 'scripts/generate_stdlib_metrics.py'
+      - 'scripts/bundle_std_certs.py'
+      - 'scripts/check_proof_bundle_drift.py'
+      - 'scripts/verify_packaged_certs.py'
+      - 'scripts/std_proof_baseline.json'
+      - 'docs/STDLIB_METRICS.md'
+      - 'tests/test_check_proof_bundle_drift.py'
+      - 'tests/test_verify_packaged_certs.py'
+      - '.github/workflows/stdlib-proof-gate.yml'
   push:
     branches: [develop]
     paths:
       - 'std/**'
+      - 'mumei-core/**'
+      - 'src/**'
+      - 'scripts/generate_stdlib_metrics.py'
+      - 'scripts/bundle_std_certs.py'
+      - 'scripts/check_proof_bundle_drift.py'
+      - 'scripts/verify_packaged_certs.py'
+      - 'scripts/std_proof_baseline.json'
+      - 'docs/STDLIB_METRICS.md'
+      - 'tests/test_check_proof_bundle_drift.py'
+      - 'tests/test_verify_packaged_certs.py'
+      - '.github/workflows/stdlib-proof-gate.yml'
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  generate-certs:
+  stdlib-proof-gate:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
@@ -39,18 +56,17 @@ jobs:
           sudo apt-get install -y llvm-17-dev libclang-17-dev libpolly-17-dev
           echo "LLVM_SYS_170_PREFIX=/usr/lib/llvm-17" >> "$GITHUB_ENV"
           echo "LIBCLANG_PATH=/usr/lib/llvm-17/lib" >> "$GITHUB_ENV"
+      - name: Install Python dependencies
+        run: python3 -m pip install --quiet pytest pyyaml
       - name: Build mumei (release)
         run: cargo build --release
       - name: Generate per-module certificates
         run: |
           set -u
           mkdir -p std/certs
-          # Iterate every .mm file under std/, including nested subdirectories.
-          # Failures are tolerated per-file so one broken module doesn't block
-          # certificate generation for the rest.
           find std -type f -name '*.mm' -print0 | while IFS= read -r -d '' f; do
-            rel="${f#std/}"            # e.g. container/safe_queue.mm
-            stem="${rel%.mm}"          # e.g. container/safe_queue
+            rel="${f#std/}"
+            stem="${rel%.mm}"
             outdir="std/certs/$(dirname "$stem")"
             mkdir -p "$outdir"
             out="std/certs/${stem}.proof.json"
@@ -61,15 +77,15 @@ jobs:
       - name: Gate on certificate validity (mumei verify-cert --strict)
         run: python3 scripts/verify_packaged_certs.py . --mumei-bin ./target/release/mumei --baseline scripts/std_proof_baseline.json
       - name: Bundle std/ proof certificates
-        run: |
-          python3 scripts/bundle_std_certs.py \
-            --certs-dir std/certs \
-            --output std-proof-bundle.json \
-            --mumei-version "${GITHUB_REF_NAME#v}"
-      - name: Upload certificates artifact
+        run: python3 scripts/bundle_std_certs.py --certs-dir std/certs --output std-proof-bundle.json
+      - name: Check committed stdlib metrics
+        run: python3 scripts/generate_stdlib_metrics.py --check --mumei-bin ./target/release/mumei
+      - name: Check proof bundle drift
+        run: python3 scripts/check_proof_bundle_drift.py --bundle std-proof-bundle.json --metrics docs/STDLIB_METRICS.md --baseline scripts/std_proof_baseline.json --certs-dir std/certs
+      - name: Upload proof artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: std-proof-certs
+          name: std-proof-gate
           path: |
             std/certs/
             std-proof-bundle.json
