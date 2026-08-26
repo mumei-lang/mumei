@@ -126,6 +126,7 @@ def main() -> int:
         print(f"MCP tool contract check failed: {exc}", file=sys.stderr)
         return 1
     failures = _check_tools(actual, documented, "mumei-forge")
+    agent_count: int | None = None
     if SIBLING_AGENT_SERVER.exists():
         try:
             agent_actual = extract_tools(SIBLING_AGENT_SERVER.read_text(encoding="utf-8"))
@@ -137,6 +138,7 @@ def main() -> int:
             print(f"MCP tool contract check failed: {exc}", file=sys.stderr)
             return 1
         failures.extend(_check_tools(agent_actual, agent_documented, "mumei-agent"))
+        agent_count = len(agent_actual)
     else:
         print(
             "MCP tool contract check skipped mumei-agent validation "
@@ -147,7 +149,10 @@ def main() -> int:
         for failure in failures:
             print(f"- {failure}", file=sys.stderr)
         return 1
-    print(f"MCP tool contract check passed ({len(actual)} mumei-forge tools)")
+    summary = f"{len(actual)} mumei-forge tools"
+    if agent_count is not None:
+        summary += f", {agent_count} mumei-agent tools"
+    print(f"MCP tool contract check passed ({summary})")
     return 0
 
 
