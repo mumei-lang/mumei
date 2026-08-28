@@ -1361,6 +1361,17 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                         cross_spec_result.summary.global_invariant_conflict_count
                     );
                 }
+                // Session protocol violations are syntactically decided from
+                // effect_pre/effect_post contracts, so they are hard errors.
+                for violation in &cross_spec_result.session_protocol_violations {
+                    if !quiet_output {
+                        eprintln!(
+                            "  ❌ Session protocol violation ({}): {}\n     Suggested fix: {}",
+                            violation.kind, violation.message, violation.suggested_fix
+                        );
+                    }
+                    failed += 1;
+                }
             }
             Err(e) => {
                 if !quiet_output {

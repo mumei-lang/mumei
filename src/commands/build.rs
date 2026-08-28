@@ -821,6 +821,15 @@ pub(crate) fn cmd_build(
                         cross_spec_result.summary.global_invariant_conflict_count
                     );
                 }
+                if !cross_spec_result.session_protocol_violations.is_empty() {
+                    for violation in &cross_spec_result.session_protocol_violations {
+                        eprintln!(
+                            "  ❌ Session protocol violation ({}): {}\n     Suggested fix: {}",
+                            violation.kind, violation.message, violation.suggested_fix
+                        );
+                    }
+                    std::process::exit(1);
+                }
             }
             Err(e) => {
                 eprintln!("  ⚠️  Failed to write cross-spec report: {}", e);

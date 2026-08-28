@@ -4,10 +4,13 @@
 //! invariants, and detects dependency cycles.
 
 pub mod drift_detector;
+pub mod session_types;
+
 use crate::parser::Atom;
 use crate::verification::ModuleEnv;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use session_types::SessionProtocolViolation;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Dependency graph node representing an atom and its dependencies.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -67,6 +70,9 @@ pub struct CrossSpecResult {
     pub global_invariants: Vec<GlobalInvariant>,
     pub global_invariant_conflicts: Vec<GlobalInvariantConflict>,
     pub circular_dependencies: Vec<Vec<String>>,
+    /// Session-type protocol violations between atoms of a stateful effect
+    /// that is shared across specification files.
+    pub session_protocol_violations: Vec<SessionProtocolViolation>,
     pub dependency_graph: Vec<DependencyNode>,
     pub agent_artifact_mapping: Vec<AgentArtifactMapping>,
     pub summary: CrossSpecSummary,
@@ -81,6 +87,7 @@ pub struct CrossSpecSummary {
     pub circular_dependency_count: usize,
     pub global_invariant_count: usize,
     pub global_invariant_conflict_count: usize,
+    pub session_protocol_violation_count: usize,
 }
 
 /// Verifier for cross-specification consistency.
@@ -452,6 +459,26 @@ impl<'env> CrossSpecVerifier<'env> {
         rec_stack.remove(current);
     }
 
+    /// Detect session-type protocol violations across specification files.
+    ///
+    /// See [`session_types`] for the duality / reachability / progress rules.
+    pub fn detect_session_protocol_violations(&self) -> Vec<SessionProtocolViolation> {
+        let atoms: BTreeMap<String, &Atom> = self
+            .module_env
+            .atoms
+            .iter()
+            .map(|(name, atom)| (name.clone(), atom))
+            .collect();
+        let effect_defs: BTreeMap<String, &crate::parser::EffectDef> = self
+            .module_env
+            .effect_defs
+            .iter()
+            .chain(self.module_env.effects.iter())
+            .map(|(name, def)| (name.clone(), def))
+            .collect();
+        session_types::detect_session_protocol_violations(&atoms, &effect_defs)
+    }
+
     /// Run all cross-specification verifications.
     pub fn verify_all(&self) -> CrossSpecResult {
         let contract_consistency = self.verify_contract_consistency();
@@ -459,6 +486,7 @@ impl<'env> CrossSpecVerifier<'env> {
         let global_invariant_conflicts = self.detect_global_invariant_conflicts();
         let dependency_graph = self.build_dependency_graph();
         let circular_dependencies = self.detect_circular_dependencies();
+        let session_protocol_violations = self.detect_session_protocol_violations();
 
         let consistent_calls = contract_consistency
             .iter()
@@ -473,6 +501,7 @@ impl<'env> CrossSpecVerifier<'env> {
             circular_dependency_count: circular_dependencies.len(),
             global_invariant_count: global_invariants.len(),
             global_invariant_conflict_count: global_invariant_conflicts.len(),
+            session_protocol_violation_count: session_protocol_violations.len(),
         };
 
         CrossSpecResult {
@@ -480,6 +509,7 @@ impl<'env> CrossSpecVerifier<'env> {
             global_invariants,
             global_invariant_conflicts,
             circular_dependencies,
+            session_protocol_violations,
             dependency_graph,
             agent_artifact_mapping: agent_artifact_mapping(),
             summary,
@@ -518,6 +548,12 @@ fn agent_artifact_mapping() -> Vec<AgentArtifactMapping> {
             agent_field: "divergences[]".to_string(),
             contradiction_type: "spec_internal".to_string(),
             description: "Conflicting global invariants correspond to spec-level divergences before migration or repair.".to_string(),
+        },
+        AgentArtifactMapping {
+            cross_spec_field: "session_protocol_violations[]".to_string(),
+            agent_field: "missing_constraints[]".to_string(),
+            contradiction_type: "spec_vs_code".to_string(),
+            description: "Session protocol violations correspond to communication ordering constraints that the participating specifications do not enforce.".to_string(),
         },
         AgentArtifactMapping {
             cross_spec_field: "circular_dependencies[]".to_string(),
