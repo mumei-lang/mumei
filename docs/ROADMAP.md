@@ -1852,19 +1852,32 @@ object-based capability model の**非破壊な設計調査**のみを対象と�
 
 ---
 
-## P20: 大規模ケースにおける proof certificate / trust surface メトリクス維持 — 🔭 Planned (future)
+## P20: 大規模ケースにおける proof certificate / trust surface メトリクス維持 — ✅ Implemented
 
 canonical 上位ロードマップは `docs/CROSS_PROJECT_ROADMAP.md` の
 "Priority 16: 大規模・安全性クリティカル領域での atom-local proof obligation 合成性検証"。
-本節はその compiler 側 local checkpoint。
+本節はその compiler 側 local checkpoint。測定は 2026-08-28、
+`budget_policy_fingerprint: sha256:scale-default`。
 
-- 大規模ケース（医療機器制御 / RTGS 決済 / RegTech / DeFi を実運用規模へ拡張したもの）でも
-  全 atom 分の proof certificate（`.proof-cert.json`）を生成でき、`mumei verify-cert --strict` が通ること。
-- `std/` の trusted atom 数を 0 のまま維持すること。規模拡大のために証明を諦めて trusted に落とさない。
-- trust surface（アプリ側 trusted atom 数・FFI 境界数・Lean escalation に回った atom 数）を
-  `scripts/generate_stdlib_metrics.py` の測定対象として大規模ケースにも適用し、規模に対する増え方を追跡する。
-- atom ローカルな証明義務だけで閉じない箇所は、modular verification（Plan 24 の `effect_pre` / `effect_post`）
-  の改善入力として分類・記録する。
+- ✅ 大規模ケース（`mumei-demo/scenarios/*_scale`、5 ドメイン合計 172 atoms、依存深さ 5–7）でも
+  全 atom 分の proof certificate（`.proof-cert.json`）が生成でき、`mumei verify-cert --strict` が
+  5 ケース 5/5（0 changed / 0 unproven / 0 missing）通過する。
+- ✅ `std/` の trusted atom 数は 344 atom 中 0 のまま。スケール側でもアプリ trusted atom 0 /
+  FFI 境界 0 / Z3 unknown → Lean escalation 0 で、証明を諦めて trusted に落とした箇所はない。
+- ✅ trust surface とスケール特性は `scripts/scale_trust_surface.py` が
+  `benchmarks/composability/scale_trust_surface.json` に記録する
+  （`std/` trusted atom 数の判定は `scripts/generate_stdlib_metrics.py` の計数を再利用）。
+  Z3 solver 時間は 5 ケース合計 9.77s、最大が 34 atom の `medical_device_scale` で 2.39s。
+- ✅ atom ローカルな証明義務だけで閉じない箇所は `scripts/measure_composability.py` の
+  clause ablation（1014 clause probe）で分類・記録する:
+  `benchmarks/composability/scale_composability.json` に atom-local 271 本 /
+  合成の破れ 277 本（`atom_local_closure_ratio` 0.4945）/ slack 466 本、
+  破れの内訳は `call_site_precondition` 86、`counterexample_replay_mismatch` 86、
+  `effect_state_obligation` 58（Plan 24 の `effect_pre` / `effect_post` 連鎖）、
+  `neighbor_ensures_strengthening` 47。whole-system 不変条件 16 本はすべて宣言済み
+  atom 契約のみで閉じ、うち 9 本は隣接 atom の契約を弱めると閉じなくなる。
+- ✅ 契約語彙は不変: 測定 artifact は audit / verdict 語彙を導入せず、報告は既存の
+  `verification_status` / `verification_violations` / `next_steps` と proof certificate のみを使う。
 
 ---
 

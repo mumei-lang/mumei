@@ -65,7 +65,7 @@ fn decode_hex_exact<const N: usize>(input: &str) -> Option<[u8; N]> {
     }
 
     let mut out = [0u8; N];
-    for (idx, chunk) in input.as_bytes().chunks_exact(2).enumerate() {
+    for (idx, chunk) in input.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         let high = hex_nibble(chunk[0])?;
         let low = hex_nibble(chunk[1])?;
         out[idx] = (high << 4) | low;

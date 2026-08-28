@@ -1,0 +1,130 @@
+{
+  "budget_policy_fingerprint": "sha256:scale-default",
+  "cases": [
+    {
+      "all_atoms_certified": true,
+      "atom_count": 34,
+      "budget_policy_fingerprint": "sha256:scale-default",
+      "case": "medical_device_scale",
+      "certified_atoms": 34,
+      "lean_verified": false,
+      "proof_certificate": "medical_device_scale.proof-cert.json",
+      "source": "medical_device_scale/correct_code.mm",
+      "trust_surface": {
+        "application_trusted_atoms": 0,
+        "ffi_boundary_declarations": 0,
+        "ffi_extern_blocks": 0,
+        "lean_escalation_candidates": 0,
+        "z3_unknown_to_lean_escalation_atoms": 0
+      },
+      "verified_items": 0,
+      "verify_cert_strict": true,
+      "verify_cert_strict_exit_code": 0,
+      "verify_exit_code": 0,
+      "z3_solver_seconds": 2.391
+    },
+    {
+      "all_atoms_certified": true,
+      "atom_count": 30,
+      "budget_policy_fingerprint": "sha256:scale-default",
+      "case": "rtgs_settlement_scale",
+      "certified_atoms": 30,
+      "lean_verified": false,
+      "proof_certificate": "rtgs_settlement_scale.proof-cert.json",
+      "source": "rtgs_settlement_scale/correct_code.mm",
+      "trust_surface": {
+        "application_trusted_atoms": 0,
+        "ffi_boundary_declarations": 0,
+        "ffi_extern_blocks": 0,
+        "lean_escalation_candidates": 0,
+        "z3_unknown_to_lean_escalation_atoms": 0
+      },
+      "verified_items": 0,
+      "verify_cert_strict": true,
+      "verify_cert_strict_exit_code": 0,
+      "verify_exit_code": 0,
+      "z3_solver_seconds": 1.317
+    },
+    {
+      "all_atoms_certified": true,
+      "atom_count": 41,
+      "budget_policy_fingerprint": "sha256:scale-default",
+      "case": "regtech_compliance_scale",
+      "certified_atoms": 41,
+      "lean_verified": false,
+      "proof_certificate": "regtech_compliance_scale.proof-cert.json",
+      "source": "regtech_compliance_scale/correct_code.mm",
+      "trust_surface": {
+        "application_trusted_atoms": 0,
+        "ffi_boundary_declarations": 0,
+        "ffi_extern_blocks": 0,
+        "lean_escalation_candidates": 0,
+        "z3_unknown_to_lean_escalation_atoms": 0
+      },
+      "verified_items": 0,
+      "verify_cert_strict": true,
+      "verify_cert_strict_exit_code": 0,
+      "verify_exit_code": 0,
+      "z3_solver_seconds": 2.105
+    },
+    {
+      "all_atoms_certified": true,
+      "atom_count": 32,
+      "budget_policy_fingerprint": "sha256:scale-default",
+      "case": "defi_invariant_scale",
+      "certified_atoms": 32,
+      "lean_verified": false,
+      "proof_certificate": "defi_invariant_scale.proof-cert.json",
+      "source": "defi_invariant_scale/correct_code.mm",
+      "trust_surface": {
+        "application_trusted_atoms": 0,
+        "ffi_boundary_declarations": 0,
+        "ffi_extern_blocks": 0,
+        "lean_escalation_candidates": 0,
+        "z3_unknown_to_lean_escalation_atoms": 0
+      },
+      "verified_items": 0,
+      "verify_cert_strict": true,
+      "verify_cert_strict_exit_code": 0,
+      "verify_exit_code": 0,
+      "z3_solver_seconds": 1.987
+    },
+    {
+      "all_atoms_certified": true,
+      "atom_count": 35,
+      "budget_policy_fingerprint": "sha256:scale-default",
+      "case": "ownership_transfer_scale",
+      "certified_atoms": 35,
+      "lean_verified": false,
+      "proof_certificate": "ownership_transfer_scale.proof-cert.json",
+      "source": "ownership_transfer_scale/correct_code.mm",
+      "trust_surface": {
+        "application_trusted_atoms": 0,
+        "ffi_boundary_declarations": 0,
+        "ffi_extern_blocks": 0,
+        "lean_escalation_candidates": 0,
+        "z3_unknown_to_lean_escalation_atoms": 0
+      },
+      "verified_items": 0,
+      "verify_cert_strict": true,
+      "verify_cert_strict_exit_code": 0,
+      "verify_exit_code": 0,
+      "z3_solver_seconds": 1.97
+    }
+  ],
+  "mumei_binary": "mumei",
+  "schema": "mumei.scale_trust_surface/v1",
+  "std_trust_surface": {
+    "std_atoms": 344,
+    "std_trusted_atoms": 0
+  },
+  "totals": {
+    "application_trusted_atoms": 0,
+    "atom_count": 172,
+    "certified_atoms": 172,
+    "ffi_boundary_declarations": 0,
+    "verify_cert_strict_passed": 5,
+    "z3_solver_seconds": 9.77,
+    "z3_unknown_to_lean_escalation_atoms": 0
+  }
+}

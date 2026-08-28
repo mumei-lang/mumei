@@ -1,0 +1,3293 @@
+{
+  "budget_policy_fingerprint": "sha256:scale-default",
+  "cases": [
+    {
+      "atom_count": 34,
+      "atom_local_closure_ratio": 0.5,
+      "atom_local_obligations": 62,
+      "breaks": [
+        {
+          "affected_atoms": [
+            "stage_validate_sensors"
+          ],
+          "atom": "all_of_three",
+          "clause_kind": "ensures",
+          "clause_line": 130,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Spurious counterexample detected for atom 'stage_validate_sensors'. Spurious counterexample candidate for atom 'stage_validate_sensors'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "all_of_three",
+            "stage_self_test"
+          ],
+          "atom": "all_of_two",
+          "clause_kind": "ensures",
+          "clause_line": 122,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Call to 'all_of_two': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "stage_self_test"
+          ],
+          "atom": "battery_sufficient",
+          "clause_kind": "ensures",
+          "clause_line": 99,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Call to 'all_of_two': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "planned_dose"
+          ],
+          "atom": "binding_capacity",
+          "clause_kind": "ensures",
+          "clause_line": 194,
+          "clause_text": "ensures: result >= 0;",
+          "diagnostic": "Call to 'smaller_of': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "planned_dose"
+          ],
+          "atom": "binding_capacity",
+          "clause_kind": "ensures",
+          "clause_line": 195,
+          "clause_text": "ensures: result <= max_dose_per_hour;",
+          "diagnostic": "Spurious counterexample detected for atom 'planned_dose'. Spurious counterexample candidate for atom 'planned_dose'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "planned_dose"
+          ],
+          "atom": "binding_capacity",
+          "clause_kind": "ensures",
+          "clause_line": 196,
+          "clause_text": "ensures: result <= max_dose_per_day;",
+          "diagnostic": "Spurious counterexample detected for atom 'planned_dose'. Spurious counterexample candidate for atom 'planned_dose'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "stage_validate_sensors"
+          ],
+          "atom": "calibration_fresh",
+          "clause_kind": "ensures",
+          "clause_line": 92,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Call to 'all_of_three': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "clamp_to_window"
+          ],
+          "atom": "cap_at",
+          "clause_kind": "ensures",
+          "clause_line": 47,
+          "clause_text": "ensures: result >= 0;",
+          "diagnostic": "Spurious counterexample detected for atom 'clamp_to_window'. Spurious counterexample candidate for atom 'clamp_to_window'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "clamp_to_window"
+          ],
+          "atom": "cap_at",
+          "clause_kind": "ensures",
+          "clause_line": 48,
+          "clause_text": "ensures: result <= ceiling;",
+          "diagnostic": "Spurious counterexample detected for atom 'clamp_to_window'. Spurious counterexample candidate for atom 'clamp_to_window'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "raw_bolus_request"
+          ],
+          "atom": "carbohydrate_component",
+          "clause_kind": "ensures",
+          "clause_line": 150,
+          "clause_text": "ensures: result >= 0;",
+          "diagnostic": "Spurious counterexample detected for atom 'raw_bolus_request'. Spurious counterexample candidate for atom 'raw_bolus_request'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "raw_bolus_request"
+          ],
+          "atom": "carbohydrate_component",
+          "clause_kind": "ensures",
+          "clause_line": 151,
+          "clause_text": "ensures: result <= 200;",
+          "diagnostic": "Spurious counterexample detected for atom 'raw_bolus_request'. Spurious counterexample candidate for atom 'raw_bolus_request'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "raw_bolus_request"
+          ],
+          "atom": "correction_component",
+          "clause_kind": "ensures",
+          "clause_line": 142,
+          "clause_text": "ensures: result >= 0;",
+          "diagnostic": "Spurious counterexample detected for atom 'raw_bolus_request'. Spurious counterexample candidate for atom 'raw_bolus_request'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "raw_bolus_request"
+          ],
+          "atom": "correction_component",
+          "clause_kind": "ensures",
+          "clause_line": 143,
+          "clause_text": "ensures: result <= 320;",
+          "diagnostic": "Spurious counterexample detected for atom 'raw_bolus_request'. Spurious counterexample candidate for atom 'raw_bolus_request'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "binding_capacity"
+          ],
+          "atom": "day_capacity",
+          "clause_kind": "ensures",
+          "clause_line": 178,
+          "clause_text": "ensures: result >= 0;",
+          "diagnostic": "Call to 'smaller_of': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "binding_capacity"
+          ],
+          "atom": "day_capacity",
+          "clause_kind": "ensures",
+          "clause_line": 179,
+          "clause_text": "ensures: result <= max_dose_per_day;",
+          "diagnostic": "Call to 'smaller_of': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "clamp_to_window",
+            "correction_component",
+            "day_capacity",
+            "hour_capacity"
+          ],
+          "atom": "floor_at_zero",
+          "clause_kind": "ensures",
+          "clause_line": 38,
+          "clause_text": "ensures: result >= 0;",
+          "diagnostic": "Call to 'cap_at': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "correction_component",
+            "day_capacity",
+            "hour_capacity"
+          ],
+          "atom": "floor_at_zero",
+          "clause_kind": "ensures",
+          "clause_line": 40,
+          "clause_text": "ensures: result <= value || result == 0;",
+          "diagnostic": "Spurious counterexample detected for atom 'correction_component'. Spurious counterexample candidate for atom 'correction_component'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "binding_capacity",
+            "stage_check_limits",
+            "stage_deliver"
+          ],
+          "atom": "hour_capacity",
+          "clause_kind": "ensures",
+          "clause_line": 168,
+          "clause_text": "ensures: result >= 0;",
+          "diagnostic": "Call to 'smaller_of': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "binding_capacity",
+            "stage_check_limits",
+            "stage_deliver"
+          ],
+          "atom": "hour_capacity",
+          "clause_kind": "ensures",
+          "clause_line": 169,
+          "clause_text": "ensures: result <= max_dose_per_hour;",
+          "diagnostic": "Call to 'smaller_of': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "stage_self_test"
+          ],
+          "atom": "occlusion_clear",
+          "clause_kind": "ensures",
+          "clause_line": 106,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Call to 'all_of_two': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "therapy_cycle"
+          ],
+          "atom": "phase_close",
+          "clause_kind": "effect_post",
+          "clause_line": 469,
+          "clause_text": "effect_post: { InsulinPump: Idle };",
+          "diagnostic": "Temporal effect violation: effect 'InsulinPump' has final state 'Delivered' but effect_post declares 'Idle' (block 0)",
+          "pattern": "effect_state_obligation"
+        },
+        {
+          "affected_atoms": [
+            "therapy_cycle"
+          ],
+          "atom": "phase_close",
+          "clause_kind": "ensures",
+          "clause_line": 471,
+          "clause_text": "ensures: result >= 0;",
+          "diagnostic": "Postcondition (ensures) is not satisfied.",
+          "pattern": "neighbor_ensures_strengthening"
+        },
+        {
+          "affected_atoms": [
+            "therapy_cycle"
+          ],
+          "atom": "phase_close",
+          "clause_kind": "ensures",
+          "clause_line": 472,
+          "clause_text": "ensures: result <= delivered_units;",
+          "diagnostic": "Postcondition (ensures) is not satisfied.",
+          "pattern": "neighbor_ensures_strengthening"
+        },
+        {
+          "affected_atoms": [
+            "therapy_cycle"
+          ],
+          "atom": "phase_commit",
+          "clause_kind": "effect_post",
+          "clause_line": 453,
+          "clause_text": "effect_post: { InsulinPump: Delivered };",
+          "diagnostic": "Temporal effect violation (InvalidPreState): 'InsulinPump' operation 'call phase_close' requires state 'Delivered' but current state is 'LimitsChecked' (block 0)",
+          "pattern": "effect_state_obligation"
+        },
+        {
+          "affected_atoms": [
+            "therapy_cycle"
+          ],
+          "atom": "phase_commit",
+          "clause_kind": "ensures",
+          "clause_line": 458,
+          "clause_text": "ensures: result >= 0;",
+          "diagnostic": "Call to 'phase_close': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "therapy_cycle"
+          ],
+          "atom": "phase_plan",
+          "clause_kind": "effect_post",
+          "clause_line": 423,
+          "clause_text": "effect_post: { InsulinPump: LimitsChecked };",
+          "diagnostic": "Temporal effect violation (InvalidPreState): 'InsulinPump' operation 'call phase_commit' requires state 'LimitsChecked' but current state is 'ProfileLoaded' (block 0)",
+          "pattern": "effect_state_obligation"
+        },
+        {
+          "affected_atoms": [
+            "therapy_cycle"
+          ],
+          "atom": "phase_plan",
+          "clause_kind": "ensures",
+          "clause_line": 430,
+          "clause_text": "ensures: result >= 0;",
+          "diagnostic": "Call to 'phase_commit': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "therapy_cycle"
+          ],
+          "atom": "phase_plan",
+          "clause_kind": "ensures",
+          "clause_line": 431,
+          "clause_text": "ensures: result <= max_dose_per_hour;",
+          "diagnostic": "Call to 'phase_commit': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "therapy_cycle"
+          ],
+          "atom": "phase_prepare",
+          "clause_kind": "effect_post",
+          "clause_line": 396,
+          "clause_text": "effect_post: { InsulinPump: ProfileLoaded };",
+          "diagnostic": "Temporal effect violation (InvalidPreState): 'InsulinPump' operation 'call phase_plan' requires state 'ProfileLoaded' but current state is 'Idle' (block 0)",
+          "pattern": "effect_state_obligation"
+        },
+        {
+          "affected_atoms": [
+            "stage_compute_dose"
+          ],
+          "atom": "planned_dose",
+          "clause_kind": "ensures",
+          "clause_line": 219,
+          "clause_text": "ensures: result >= 0;",
+          "diagnostic": "Spurious counterexample detected for atom 'stage_compute_dose'. Spurious counterexample candidate for atom 'stage_compute_dose'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "stage_compute_dose"
+          ],
+          "atom": "planned_dose",
+          "clause_kind": "ensures",
+          "clause_line": 220,
+          "clause_text": "ensures: result <= max_dose_per_hour;",
+          "diagnostic": "Spurious counterexample detected for atom 'stage_compute_dose'. Spurious counterexample candidate for atom 'stage_compute_dose'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "stage_compute_dose"
+          ],
+          "atom": "planned_dose",
+          "clause_kind": "ensures",
+          "clause_line": 221,
+          "clause_text": "ensures: result <= max_dose_per_day;",
+          "diagnostic": "Spurious counterexample detected for atom 'stage_compute_dose'. Spurious counterexample candidate for atom 'stage_compute_dose'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "planned_dose"
+          ],
+          "atom": "raw_bolus_request",
+          "clause_kind": "ensures",
+          "clause_line": 159,
+          "clause_text": "ensures: result >= 0;",
+          "diagnostic": "Call to 'smaller_of': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "planned_dose"
+          ],
+          "atom": "raw_bolus_request",
+          "clause_kind": "ensures",
+          "clause_line": 160,
+          "clause_text": "ensures: result <= 520;",
+          "diagnostic": "Call to 'smaller_of': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "binding_capacity",
+            "planned_dose",
+            "stage_arm_interlock",
+            "stage_check_limits",
+            "stage_deliver",
+            "stage_load_profile"
+          ],
+          "atom": "smaller_of",
+          "clause_kind": "ensures",
+          "clause_line": 64,
+          "clause_text": "ensures: result >= 0;",
+          "diagnostic": "Spurious counterexample detected for atom 'binding_capacity'. Spurious counterexample candidate for atom 'binding_capacity'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "binding_capacity",
+            "stage_arm_interlock",
+            "stage_check_limits",
+            "stage_deliver"
+          ],
+          "atom": "smaller_of",
+          "clause_kind": "ensures",
+          "clause_line": 65,
+          "clause_text": "ensures: result <= left;",
+          "diagnostic": "Spurious counterexample detected for atom 'binding_capacity'. Spurious counterexample candidate for atom 'binding_capacity'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "binding_capacity",
+            "planned_dose",
+            "stage_arm_interlock",
+            "stage_check_limits",
+            "stage_deliver",
+            "stage_load_profile"
+          ],
+          "atom": "smaller_of",
+          "clause_kind": "ensures",
+          "clause_line": 66,
+          "clause_text": "ensures: result <= right;",
+          "diagnostic": "Spurious counterexample detected for atom 'binding_capacity'. Spurious counterexample candidate for atom 'binding_capacity'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "phase_commit"
+          ],
+          "atom": "stage_arm_interlock",
+          "clause_kind": "effect_post",
+          "clause_line": 331,
+          "clause_text": "effect_post: { InsulinPump: InterlockArmed };",
+          "diagnostic": "Temporal effect violation (InvalidPreState): 'InsulinPump' operation 'call stage_deliver' requires state 'InterlockArmed' but current state is 'LimitsChecked' (block 0)",
+          "pattern": "effect_state_obligation"
+        },
+        {
+          "affected_atoms": [
+            "phase_commit"
+          ],
+          "atom": "stage_arm_interlock",
+          "clause_kind": "ensures",
+          "clause_line": 334,
+          "clause_text": "ensures: result >= 0;",
+          "diagnostic": "Call to 'stage_deliver': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "phase_commit"
+          ],
+          "atom": "stage_arm_interlock",
+          "clause_kind": "ensures",
+          "clause_line": 335,
+          "clause_text": "ensures: result <= approved_units;",
+          "diagnostic": "Postcondition (ensures) is not satisfied.",
+          "pattern": "neighbor_ensures_strengthening"
+        },
+        {
+          "affected_atoms": [
+            "phase_plan"
+          ],
+          "atom": "stage_check_limits",
+          "clause_kind": "effect_post",
+          "clause_line": 316,
+          "clause_text": "effect_post: { InsulinPump: LimitsChecked };",
+          "diagnostic": "Temporal effect violation: effect 'InsulinPump' has final state 'DoseComputed' but effect_post declares 'LimitsChecked' (block 0)",
+          "pattern": "effect_state_obligation"
+        },
+        {
+          "affected_atoms": [
+            "phase_plan"
+          ],
+          "atom": "stage_check_limits",
+          "clause_kind": "ensures",
+          "clause_line": 320,
+          "clause_text": "ensures: result >= 0;",
+          "diagnostic": "Postcondition (ensures) is not satisfied.",
+          "pattern": "neighbor_ensures_strengthening"
+        },
+        {
+          "affected_atoms": [
+            "phase_plan"
+          ],
+          "atom": "stage_compute_dose",
+          "clause_kind": "effect_post",
+          "clause_line": 290,
+          "clause_text": "effect_post: { InsulinPump: DoseComputed };",
+          "diagnostic": "Temporal effect violation (InvalidPreState): 'InsulinPump' operation 'call stage_check_limits' requires state 'DoseComputed' but current state is 'ProfileLoaded' (block 0)",
+          "pattern": "effect_state_obligation"
+        },
+        {
+          "affected_atoms": [
+            "phase_plan"
+          ],
+          "atom": "stage_compute_dose",
+          "clause_kind": "ensures",
+          "clause_line": 297,
+          "clause_text": "ensures: result >= 0;",
+          "diagnostic": "Call to 'stage_check_limits': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "phase_plan"
+          ],
+          "atom": "stage_compute_dose",
+          "clause_kind": "ensures",
+          "clause_line": 298,
+          "clause_text": "ensures: result <= max_dose_per_hour;",
+          "diagnostic": "Call to 'stage_check_limits': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "phase_commit"
+          ],
+          "atom": "stage_deliver",
+          "clause_kind": "effect_post",
+          "clause_line": 345,
+          "clause_text": "effect_post: { InsulinPump: Delivered };",
+          "diagnostic": "Temporal effect violation: effect 'InsulinPump' has final state 'InterlockArmed' but effect_post declares 'Delivered' (block 0)",
+          "pattern": "effect_state_obligation"
+        },
+        {
+          "affected_atoms": [
+            "phase_commit"
+          ],
+          "atom": "stage_deliver",
+          "clause_kind": "ensures",
+          "clause_line": 349,
+          "clause_text": "ensures: result >= 0;",
+          "diagnostic": "Postcondition (ensures) is not satisfied.",
+          "pattern": "neighbor_ensures_strengthening"
+        },
+        {
+          "affected_atoms": [
+            "phase_commit"
+          ],
+          "atom": "stage_deliver",
+          "clause_kind": "ensures",
+          "clause_line": 350,
+          "clause_text": "ensures: result <= armed_units;",
+          "diagnostic": "Postcondition (ensures) is not satisfied.",
+          "pattern": "neighbor_ensures_strengthening"
+        },
+        {
+          "affected_atoms": [
+            "phase_commit"
+          ],
+          "atom": "stage_deliver",
+          "clause_kind": "ensures",
+          "clause_line": 351,
+          "clause_text": "ensures: result <= max_dose_per_hour;",
+          "diagnostic": "Postcondition (ensures) is not satisfied.",
+          "pattern": "neighbor_ensures_strengthening"
+        },
+        {
+          "affected_atoms": [
+            "phase_close"
+          ],
+          "atom": "stage_journal",
+          "clause_kind": "ensures",
+          "clause_line": 362,
+          "clause_text": "ensures: result >= 0;",
+          "diagnostic": "Call to 'stage_reset': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "phase_close"
+          ],
+          "atom": "stage_journal",
+          "clause_kind": "ensures",
+          "clause_line": 363,
+          "clause_text": "ensures: result <= delivered_units;",
+          "diagnostic": "Call to 'stage_reset': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "phase_prepare"
+          ],
+          "atom": "stage_load_profile",
+          "clause_kind": "effect_post",
+          "clause_line": 269,
+          "clause_text": "effect_post: { InsulinPump: ProfileLoaded };",
+          "diagnostic": "Temporal effect violation: effect 'InsulinPump' has final state 'SensorsValidated' but effect_post declares 'ProfileLoaded' (block 0)",
+          "pattern": "effect_state_obligation"
+        },
+        {
+          "affected_atoms": [
+            "phase_prepare"
+          ],
+          "atom": "stage_load_profile",
+          "clause_kind": "ensures",
+          "clause_line": 272,
+          "clause_text": "ensures: result >= 0;",
+          "diagnostic": "Postcondition (ensures) is not satisfied.",
+          "pattern": "neighbor_ensures_strengthening"
+        },
+        {
+          "affected_atoms": [
+            "phase_prepare"
+          ],
+          "atom": "stage_load_profile",
+          "clause_kind": "ensures",
+          "clause_line": 273,
+          "clause_text": "ensures: result <= max_dose_per_hour;",
+          "diagnostic": "Postcondition (ensures) is not satisfied.",
+          "pattern": "neighbor_ensures_strengthening"
+        },
+        {
+          "affected_atoms": [
+            "phase_close"
+          ],
+          "atom": "stage_reset",
+          "clause_kind": "effect_post",
+          "clause_line": 372,
+          "clause_text": "effect_post: { InsulinPump: Idle };",
+          "diagnostic": "Temporal effect violation: effect 'InsulinPump' has final state 'Delivered' but effect_post declares 'Idle' (block 0)",
+          "pattern": "effect_state_obligation"
+        },
+        {
+          "affected_atoms": [
+            "phase_close"
+          ],
+          "atom": "stage_reset",
+          "clause_kind": "ensures",
+          "clause_line": 374,
+          "clause_text": "ensures: result >= 0;",
+          "diagnostic": "Postcondition (ensures) is not satisfied.",
+          "pattern": "neighbor_ensures_strengthening"
+        },
+        {
+          "affected_atoms": [
+            "phase_close"
+          ],
+          "atom": "stage_reset",
+          "clause_kind": "ensures",
+          "clause_line": 375,
+          "clause_text": "ensures: result <= journaled_units;",
+          "diagnostic": "Postcondition (ensures) is not satisfied.",
+          "pattern": "neighbor_ensures_strengthening"
+        },
+        {
+          "affected_atoms": [
+            "phase_prepare"
+          ],
+          "atom": "stage_self_test",
+          "clause_kind": "effect_post",
+          "clause_line": 236,
+          "clause_text": "effect_post: { InsulinPump: SelfTested };",
+          "diagnostic": "Temporal effect violation (InvalidPreState): 'InsulinPump' operation 'call stage_validate_sensors' requires state 'SelfTested' but current state is 'Idle' (block 0)",
+          "pattern": "effect_state_obligation"
+        },
+        {
+          "affected_atoms": [
+            "phase_prepare"
+          ],
+          "atom": "stage_validate_sensors",
+          "clause_kind": "effect_post",
+          "clause_line": 252,
+          "clause_text": "effect_post: { InsulinPump: SensorsValidated };",
+          "diagnostic": "Temporal effect violation (InvalidPreState): 'InsulinPump' operation 'call stage_load_profile' requires state 'SensorsValidated' but current state is 'SelfTested' (block 0)",
+          "pattern": "effect_state_obligation"
+        },
+        {
+          "affected_atoms": [
+            "two_therapy_cycles"
+          ],
+          "atom": "therapy_cycle",
+          "clause_kind": "ensures",
+          "clause_line": 510,
+          "clause_text": "ensures: result >= 0;",
+          "diagnostic": "Postcondition (ensures) is not satisfied.",
+          "pattern": "neighbor_ensures_strengthening"
+        },
+        {
+          "affected_atoms": [
+            "two_therapy_cycles"
+          ],
+          "atom": "therapy_cycle",
+          "clause_kind": "ensures",
+          "clause_line": 511,
+          "clause_text": "ensures: result <= max_dose_per_hour;",
+          "diagnostic": "Postcondition (ensures) is not satisfied.",
+          "pattern": "neighbor_ensures_strengthening"
+        },
+        {
+          "affected_atoms": [
+            "stage_validate_sensors"
+          ],
+          "atom": "trend_bounded",
+          "clause_kind": "ensures",
+          "clause_line": 85,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Call to 'all_of_three': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        }
+      ],
+      "case": "medical_device_scale",
+      "composition_breaks": 62,
+      "max_dependency_depth": 7,
+      "probed_clauses": 196,
+      "source": "medical_device_scale/correct_code.mm",
+      "top_level_atoms": [
+        "clamp_to_window",
+        "reservoir_sufficient",
+        "two_therapy_cycles"
+      ],
+      "unconstrained_clauses": 72,
+      "wall_clock_seconds": 191.95,
+      "whole_system_invariants_closed": 3,
+      "whole_system_invariants_neighbor_dependent": 2
+    },
+    {
+      "atom_count": 30,
+      "atom_local_closure_ratio": 0.4835,
+      "atom_local_obligations": 44,
+      "breaks": [
+        {
+          "affected_atoms": [
+            "stage_validate"
+          ],
+          "atom": "all_four_hold",
+          "clause_kind": "ensures",
+          "clause_line": 137,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Spurious counterexample detected for atom 'stage_validate'. Spurious counterexample candidate for atom 'stage_validate'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "stage_submit"
+          ],
+          "atom": "amount_in_scheme_limit",
+          "clause_kind": "ensures",
+          "clause_line": 93,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Spurious counterexample detected for atom 'stage_submit'. Spurious counterexample candidate for atom 'stage_submit'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "stage_net"
+          ],
+          "atom": "bilateral_net",
+          "clause_kind": "ensures",
+          "clause_line": 153,
+          "clause_text": "ensures: result >= 0;",
+          "diagnostic": "Spurious counterexample detected for atom 'stage_net'. Spurious counterexample candidate for atom 'stage_net'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "stage_net"
+          ],
+          "atom": "bilateral_net",
+          "clause_kind": "ensures",
+          "clause_line": 155,
+          "clause_text": "ensures: result <= outgoing;",
+          "diagnostic": "Spurious counterexample detected for atom 'stage_net'. Spurious counterexample candidate for atom 'stage_net'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "all_four_hold"
+          ],
+          "atom": "both_hold",
+          "clause_kind": "ensures",
+          "clause_line": 127,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Call to 'both_hold': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "all_four_hold"
+          ],
+          "atom": "both_hold",
+          "clause_kind": "ensures",
+          "clause_line": 128,
+          "clause_text": "ensures: result == 0 || first == 1;",
+          "diagnostic": "Spurious counterexample detected for atom 'all_four_hold'. Spurious counterexample candidate for atom 'all_four_hold'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "all_four_hold"
+          ],
+          "atom": "both_hold",
+          "clause_kind": "ensures",
+          "clause_line": 129,
+          "clause_text": "ensures: result == 0 || second == 1;",
+          "diagnostic": "Spurious counterexample detected for atom 'all_four_hold'. Spurious counterexample candidate for atom 'all_four_hold'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "stage_reconcile"
+          ],
+          "atom": "conserved_total",
+          "clause_kind": "ensures",
+          "clause_line": 81,
+          "clause_text": "ensures: result == sender_after + receiver_after;",
+          "diagnostic": "Spurious counterexample detected for atom 'stage_reconcile'. Spurious counterexample candidate for atom 'stage_reconcile'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "stage_finalize"
+          ],
+          "atom": "credit_balance",
+          "clause_kind": "ensures",
+          "clause_line": 72,
+          "clause_text": "ensures: result == balance + amount;",
+          "diagnostic": "Spurious counterexample detected for atom 'stage_finalize'. Spurious counterexample candidate for atom 'stage_finalize'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "stage_validate"
+          ],
+          "atom": "cutoff_not_passed",
+          "clause_kind": "ensures",
+          "clause_line": 118,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Call to 'all_four_hold': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "settlement_cycle",
+            "stage_post"
+          ],
+          "atom": "debit_balance",
+          "clause_kind": "ensures",
+          "clause_line": 62,
+          "clause_text": "ensures: result == balance - amount;",
+          "diagnostic": "Spurious counterexample detected for atom 'stage_post'. Spurious counterexample candidate for atom 'stage_post'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "finality_amount",
+            "reserved_liquidity",
+            "settleable_amount"
+          ],
+          "atom": "min_amount",
+          "clause_kind": "ensures",
+          "clause_line": 49,
+          "clause_text": "ensures: result >= 0;",
+          "diagnostic": "Call to 'min_amount': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "finality_amount",
+            "reserved_liquidity",
+            "settleable_amount"
+          ],
+          "atom": "min_amount",
+          "clause_kind": "ensures",
+          "clause_line": 50,
+          "clause_text": "ensures: result <= left;",
+          "diagnostic": "Spurious counterexample detected for atom 'settleable_amount'. Spurious counterexample candidate for atom 'settleable_amount'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "finality_amount",
+            "reserved_liquidity",
+            "settleable_amount"
+          ],
+          "atom": "min_amount",
+          "clause_kind": "ensures",
+          "clause_line": 51,
+          "clause_text": "ensures: result <= right;",
+          "diagnostic": "Spurious counterexample detected for atom 'settleable_amount'. Spurious counterexample candidate for atom 'settleable_amount'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "bilateral_net",
+            "reserved_liquidity"
+          ],
+          "atom": "non_negative",
+          "clause_kind": "ensures",
+          "clause_line": 39,
+          "clause_text": "ensures: result >= 0;",
+          "diagnostic": "Spurious counterexample detected for atom 'bilateral_net'. Spurious counterexample candidate for atom 'bilateral_net'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "bilateral_net",
+            "reserved_liquidity"
+          ],
+          "atom": "non_negative",
+          "clause_kind": "ensures",
+          "clause_line": 41,
+          "clause_text": "ensures: result <= value || result == 0;",
+          "diagnostic": "Spurious counterexample detected for atom 'bilateral_net'. Spurious counterexample candidate for atom 'bilateral_net'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "stage_validate"
+          ],
+          "atom": "participant_active",
+          "clause_kind": "ensures",
+          "clause_line": 110,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Call to 'all_four_hold': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "settlement_cycle"
+          ],
+          "atom": "phase_admit",
+          "clause_kind": "effect_post",
+          "clause_line": 331,
+          "clause_text": "effect_post: { Settlement: Validated };",
+          "diagnostic": "Temporal effect violation (InvalidPreState): 'Settlement' operation 'call phase_reserve_and_net' requires state 'Validated' but current state is 'Idle' (block 0)",
+          "pattern": "effect_state_obligation"
+        },
+        {
+          "affected_atoms": [
+            "settlement_cycle"
+          ],
+          "atom": "phase_reserve_and_net",
+          "clause_kind": "effect_post",
+          "clause_line": 351,
+          "clause_text": "effect_post: { Settlement: Netted };",
+          "diagnostic": "Temporal effect violation (InvalidPreState): 'Settlement' operation 'call phase_settle' requires state 'Netted' but current state is 'Validated' (block 0)",
+          "pattern": "effect_state_obligation"
+        },
+        {
+          "affected_atoms": [
+            "settlement_cycle"
+          ],
+          "atom": "phase_reserve_and_net",
+          "clause_kind": "ensures",
+          "clause_line": 356,
+          "clause_text": "ensures: result >= 0;",
+          "diagnostic": "Call to 'phase_settle': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "settlement_cycle"
+          ],
+          "atom": "phase_reserve_and_net",
+          "clause_kind": "ensures",
+          "clause_line": 358,
+          "clause_text": "ensures: result <= sender_balance;",
+          "diagnostic": "Call to 'phase_settle': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "settlement_cycle"
+          ],
+          "atom": "phase_settle",
+          "clause_kind": "effect_post",
+          "clause_line": 367,
+          "clause_text": "effect_post: { Settlement: Finalized };",
+          "diagnostic": "Temporal effect violation (InvalidPreState): 'Settlement' operation 'call phase_wrap_up' requires state 'Finalized' but current state is 'Netted' (block 0)",
+          "pattern": "effect_state_obligation"
+        },
+        {
+          "affected_atoms": [
+            "settlement_cycle"
+          ],
+          "atom": "phase_settle",
+          "clause_kind": "ensures",
+          "clause_line": 374,
+          "clause_text": "ensures: result == receiver_balance + settled;",
+          "diagnostic": "Postcondition (ensures) is not satisfied.",
+          "pattern": "neighbor_ensures_strengthening"
+        },
+        {
+          "affected_atoms": [
+            "settlement_cycle"
+          ],
+          "atom": "phase_wrap_up",
+          "clause_kind": "effect_post",
+          "clause_line": 383,
+          "clause_text": "effect_post: { Settlement: Idle };",
+          "diagnostic": "Temporal effect violation: effect 'Settlement' has final state 'Finalized' but effect_post declares 'Idle' (block 0)",
+          "pattern": "effect_state_obligation"
+        },
+        {
+          "affected_atoms": [
+            "settlement_cycle"
+          ],
+          "atom": "phase_wrap_up",
+          "clause_kind": "ensures",
+          "clause_line": 387,
+          "clause_text": "ensures: result == sender_after + receiver_after;",
+          "diagnostic": "Postcondition (ensures) is not satisfied.",
+          "pattern": "neighbor_ensures_strengthening"
+        },
+        {
+          "affected_atoms": [
+            "stage_reserve"
+          ],
+          "atom": "reserved_liquidity",
+          "clause_kind": "ensures",
+          "clause_line": 177,
+          "clause_text": "ensures: result >= 0;",
+          "diagnostic": "Spurious counterexample detected for atom 'stage_reserve'. Spurious counterexample candidate for atom 'stage_reserve'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "stage_reserve"
+          ],
+          "atom": "reserved_liquidity",
+          "clause_kind": "ensures",
+          "clause_line": 178,
+          "clause_text": "ensures: result <= planned;",
+          "diagnostic": "Spurious counterexample detected for atom 'stage_reserve'. Spurious counterexample candidate for atom 'stage_reserve'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "stage_reserve"
+          ],
+          "atom": "reserved_liquidity",
+          "clause_kind": "ensures",
+          "clause_line": 179,
+          "clause_text": "ensures: result <= balance;",
+          "diagnostic": "Spurious counterexample detected for atom 'stage_reserve'. Spurious counterexample candidate for atom 'stage_reserve'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "two_settlement_cycles"
+          ],
+          "atom": "settlement_cycle",
+          "clause_kind": "ensures",
+          "clause_line": 422,
+          "clause_text": "ensures: result == sender_balance + receiver_balance;",
+          "diagnostic": "Postcondition (ensures) is not satisfied.",
+          "pattern": "neighbor_ensures_strengthening"
+        },
+        {
+          "affected_atoms": [
+            "phase_wrap_up"
+          ],
+          "atom": "stage_close",
+          "clause_kind": "effect_post",
+          "clause_line": 309,
+          "clause_text": "effect_post: { Settlement: Idle };",
+          "diagnostic": "Temporal effect violation: effect 'Settlement' has final state 'Reconciled' but effect_post declares 'Idle' (block 0)",
+          "pattern": "effect_state_obligation"
+        },
+        {
+          "affected_atoms": [
+            "phase_wrap_up"
+          ],
+          "atom": "stage_close",
+          "clause_kind": "ensures",
+          "clause_line": 312,
+          "clause_text": "ensures: result == total_after;",
+          "diagnostic": "Postcondition (ensures) is not satisfied.",
+          "pattern": "neighbor_ensures_strengthening"
+        },
+        {
+          "affected_atoms": [
+            "phase_settle"
+          ],
+          "atom": "stage_finalize",
+          "clause_kind": "effect_post",
+          "clause_line": 282,
+          "clause_text": "effect_post: { Settlement: Finalized };",
+          "diagnostic": "Temporal effect violation: effect 'Settlement' has final state 'Posted' but effect_post declares 'Finalized' (block 0)",
+          "pattern": "effect_state_obligation"
+        },
+        {
+          "affected_atoms": [
+            "phase_settle"
+          ],
+          "atom": "stage_finalize",
+          "clause_kind": "ensures",
+          "clause_line": 287,
+          "clause_text": "ensures: result == receiver_balance + settled;",
+          "diagnostic": "Postcondition (ensures) is not satisfied.",
+          "pattern": "neighbor_ensures_strengthening"
+        },
+        {
+          "affected_atoms": [
+            "phase_reserve_and_net"
+          ],
+          "atom": "stage_net",
+          "clause_kind": "effect_post",
+          "clause_line": 254,
+          "clause_text": "effect_post: { Settlement: Netted };",
+          "diagnostic": "Temporal effect violation: effect 'Settlement' has final state 'Reserved' but effect_post declares 'Netted' (block 0)",
+          "pattern": "effect_state_obligation"
+        },
+        {
+          "affected_atoms": [
+            "phase_reserve_and_net"
+          ],
+          "atom": "stage_net",
+          "clause_kind": "ensures",
+          "clause_line": 257,
+          "clause_text": "ensures: result >= 0;",
+          "diagnostic": "Postcondition (ensures) is not satisfied.",
+          "pattern": "neighbor_ensures_strengthening"
+        },
+        {
+          "affected_atoms": [
+            "phase_reserve_and_net"
+          ],
+          "atom": "stage_net",
+          "clause_kind": "ensures",
+          "clause_line": 258,
+          "clause_text": "ensures: result <= reserved;",
+          "diagnostic": "Postcondition (ensures) is not satisfied.",
+          "pattern": "neighbor_ensures_strengthening"
+        },
+        {
+          "affected_atoms": [
+            "phase_settle"
+          ],
+          "atom": "stage_post",
+          "clause_kind": "effect_post",
+          "clause_line": 267,
+          "clause_text": "effect_post: { Settlement: Posted };",
+          "diagnostic": "Temporal effect violation (InvalidPreState): 'Settlement' operation 'call stage_finalize' requires state 'Posted' but current state is 'Netted' (block 0)",
+          "pattern": "effect_state_obligation"
+        },
+        {
+          "affected_atoms": [
+            "phase_wrap_up"
+          ],
+          "atom": "stage_reconcile",
+          "clause_kind": "effect_post",
+          "clause_line": 296,
+          "clause_text": "effect_post: { Settlement: Reconciled };",
+          "diagnostic": "Temporal effect violation (InvalidPreState): 'Settlement' operation 'call stage_close' requires state 'Reconciled' but current state is 'Finalized' (block 0)",
+          "pattern": "effect_state_obligation"
+        },
+        {
+          "affected_atoms": [
+            "phase_wrap_up"
+          ],
+          "atom": "stage_reconcile",
+          "clause_kind": "ensures",
+          "clause_line": 300,
+          "clause_text": "ensures: result == sender_after + receiver_after;",
+          "diagnostic": "Call to 'stage_close': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "phase_reserve_and_net"
+          ],
+          "atom": "stage_reserve",
+          "clause_kind": "effect_post",
+          "clause_line": 239,
+          "clause_text": "effect_post: { Settlement: Reserved };",
+          "diagnostic": "Temporal effect violation (InvalidPreState): 'Settlement' operation 'call stage_net' requires state 'Reserved' but current state is 'Validated' (block 0)",
+          "pattern": "effect_state_obligation"
+        },
+        {
+          "affected_atoms": [
+            "phase_reserve_and_net"
+          ],
+          "atom": "stage_reserve",
+          "clause_kind": "ensures",
+          "clause_line": 243,
+          "clause_text": "ensures: result >= 0;",
+          "diagnostic": "Call to 'stage_net': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "phase_reserve_and_net"
+          ],
+          "atom": "stage_reserve",
+          "clause_kind": "ensures",
+          "clause_line": 244,
+          "clause_text": "ensures: result <= requested;",
+          "diagnostic": "Postcondition (ensures) is not satisfied.",
+          "pattern": "neighbor_ensures_strengthening"
+        },
+        {
+          "affected_atoms": [
+            "phase_reserve_and_net"
+          ],
+          "atom": "stage_reserve",
+          "clause_kind": "ensures",
+          "clause_line": 245,
+          "clause_text": "ensures: result <= sender_balance;",
+          "diagnostic": "Postcondition (ensures) is not satisfied.",
+          "pattern": "neighbor_ensures_strengthening"
+        },
+        {
+          "affected_atoms": [
+            "phase_admit"
+          ],
+          "atom": "stage_submit",
+          "clause_kind": "effect_post",
+          "clause_line": 203,
+          "clause_text": "effect_post: { Settlement: Submitted };",
+          "diagnostic": "Temporal effect violation (InvalidPreState): 'Settlement' operation 'call stage_validate' requires state 'Submitted' but current state is 'Idle' (block 0)",
+          "pattern": "effect_state_obligation"
+        },
+        {
+          "affected_atoms": [
+            "phase_admit"
+          ],
+          "atom": "stage_submit",
+          "clause_kind": "ensures",
+          "clause_line": 206,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Call to 'stage_validate': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "phase_admit"
+          ],
+          "atom": "stage_validate",
+          "clause_kind": "effect_post",
+          "clause_line": 220,
+          "clause_text": "effect_post: { Settlement: Validated };",
+          "diagnostic": "Temporal effect violation: effect 'Settlement' has final state 'Submitted' but effect_post declares 'Validated' (block 0)",
+          "pattern": "effect_state_obligation"
+        },
+        {
+          "affected_atoms": [
+            "phase_admit"
+          ],
+          "atom": "stage_validate",
+          "clause_kind": "ensures",
+          "clause_line": 225,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Postcondition (ensures) is not satisfied.",
+          "pattern": "neighbor_ensures_strengthening"
+        }
+      ],
+      "case": "rtgs_settlement_scale",
+      "composition_breaks": 47,
+      "max_dependency_depth": 5,
+      "probed_clauses": 187,
+      "source": "rtgs_settlement_scale/correct_code.mm",
+      "top_level_atoms": [
+        "finality_amount",
+        "liquidity_available",
+        "settleable_amount",
+        "two_settlement_cycles"
+      ],
+      "unconstrained_clauses": 96,
+      "wall_clock_seconds": 150.33,
+      "whole_system_invariants_closed": 4,
+      "whole_system_invariants_neighbor_dependent": 3
+    },
+    {
+      "atom_count": 41,
+      "atom_local_closure_ratio": 0.4923,
+      "atom_local_obligations": 64,
+      "breaks": [
+        {
+          "affected_atoms": [
+            "group_aml"
+          ],
+          "atom": "adverse_media_cleared",
+          "clause_kind": "ensures",
+          "clause_line": 145,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Call to 'rule_and3': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "group_data_governance"
+          ],
+          "atom": "audit_trail_complete",
+          "clause_kind": "ensures",
+          "clause_line": 194,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Call to 'rule_and': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "group_data_governance"
+          ],
+          "atom": "audit_trail_complete",
+          "clause_kind": "ensures",
+          "clause_line": 195,
+          "clause_text": "ensures: result == 0 || missing_events == 0;",
+          "diagnostic": "Spurious counterexample detected for atom 'group_data_governance'. Spurious counterexample candidate for atom 'group_data_governance'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "group_kyc"
+          ],
+          "atom": "beneficial_owner_disclosed",
+          "clause_kind": "ensures",
+          "clause_line": 120,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Call to 'rule_and3': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "control_offset",
+            "inherent_risk"
+          ],
+          "atom": "clamp_score",
+          "clause_kind": "ensures",
+          "clause_line": 278,
+          "clause_text": "ensures: result >= 0 && result <= 100;",
+          "diagnostic": "Spurious counterexample detected for atom 'inherent_risk'. Spurious counterexample candidate for atom 'inherent_risk'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "two_compliance_cycles"
+          ],
+          "atom": "compliance_cycle",
+          "clause_kind": "ensures",
+          "clause_line": 558,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Postcondition (ensures) is not satisfied.",
+          "pattern": "neighbor_ensures_strengthening"
+        },
+        {
+          "affected_atoms": [
+            "stage_score"
+          ],
+          "atom": "control_offset",
+          "clause_kind": "ensures",
+          "clause_line": 295,
+          "clause_text": "ensures: result >= 0 && result <= 100;",
+          "diagnostic": "Call to 'residual_risk': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "group_data_governance"
+          ],
+          "atom": "data_processing_consented",
+          "clause_kind": "ensures",
+          "clause_line": 186,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Call to 'rule_and': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "group_data_governance"
+          ],
+          "atom": "data_processing_consented",
+          "clause_kind": "ensures",
+          "clause_line": 187,
+          "clause_text": "ensures: result == 0 || consent_state == 1;",
+          "diagnostic": "Spurious counterexample detected for atom 'group_data_governance'. Spurious counterexample candidate for atom 'group_data_governance'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "compliance_cycle",
+            "stage_screen"
+          ],
+          "atom": "group_aml",
+          "clause_kind": "ensures",
+          "clause_line": 223,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Spurious counterexample detected for atom 'stage_screen'. Spurious counterexample candidate for atom 'stage_screen'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "compliance_cycle"
+          ],
+          "atom": "group_data_governance",
+          "clause_kind": "ensures",
+          "clause_line": 262,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Call to 'phase_assessment': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "compliance_cycle",
+            "stage_intake"
+          ],
+          "atom": "group_kyc",
+          "clause_kind": "ensures",
+          "clause_line": 209,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Spurious counterexample detected for atom 'stage_intake'. Spurious counterexample candidate for atom 'stage_intake'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "compliance_cycle"
+          ],
+          "atom": "group_market_access",
+          "clause_kind": "ensures",
+          "clause_line": 236,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Call to 'phase_assessment': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "compliance_cycle"
+          ],
+          "atom": "group_reporting",
+          "clause_kind": "ensures",
+          "clause_line": 250,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Call to 'phase_assessment': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "group_kyc"
+          ],
+          "atom": "identity_reverified_recently",
+          "clause_kind": "ensures",
+          "clause_line": 111,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Call to 'rule_and3': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "stage_score"
+          ],
+          "atom": "inherent_risk",
+          "clause_kind": "ensures",
+          "clause_line": 287,
+          "clause_text": "ensures: result >= 0 && result <= 100;",
+          "diagnostic": "Call to 'residual_risk': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "group_market_access"
+          ],
+          "atom": "jurisdiction_permitted",
+          "clause_kind": "ensures",
+          "clause_line": 153,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Call to 'rule_and': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "group_market_access"
+          ],
+          "atom": "jurisdiction_permitted",
+          "clause_kind": "ensures",
+          "clause_line": 154,
+          "clause_text": "ensures: result == 0 || jurisdiction_tier <= 2;",
+          "diagnostic": "Spurious counterexample detected for atom 'group_market_access'. Spurious counterexample candidate for atom 'group_market_access'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "group_kyc"
+          ],
+          "atom": "kyc_documents_verified",
+          "clause_kind": "ensures",
+          "clause_line": 103,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Call to 'rule_and3': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "group_kyc"
+          ],
+          "atom": "kyc_documents_verified",
+          "clause_kind": "ensures",
+          "clause_line": 104,
+          "clause_text": "ensures: result == 0 || document_state == 2;",
+          "diagnostic": "Spurious counterexample detected for atom 'group_kyc'. Spurious counterexample candidate for atom 'group_kyc'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "group_market_access"
+          ],
+          "atom": "license_in_force",
+          "clause_kind": "ensures",
+          "clause_line": 161,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Call to 'rule_and': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "group_market_access"
+          ],
+          "atom": "license_in_force",
+          "clause_kind": "ensures",
+          "clause_line": 162,
+          "clause_text": "ensures: result == 0 || license_state == 1;",
+          "diagnostic": "Spurious counterexample detected for atom 'group_market_access'. Spurious counterexample candidate for atom 'group_market_access'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "group_aml"
+          ],
+          "atom": "pep_exposure_reviewed",
+          "clause_kind": "ensures",
+          "clause_line": 137,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Call to 'rule_and3': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "compliance_cycle"
+          ],
+          "atom": "phase_assessment",
+          "clause_kind": "effect_post",
+          "clause_line": 488,
+          "clause_text": "effect_post: { ComplianceReview: Decided };",
+          "diagnostic": "Temporal effect violation (InvalidPreState): 'ComplianceReview' operation 'call phase_disposition' requires state 'Decided' but current state is 'Screened' (block 0)",
+          "pattern": "effect_state_obligation"
+        },
+        {
+          "affected_atoms": [
+            "compliance_cycle"
+          ],
+          "atom": "phase_assessment",
+          "clause_kind": "ensures",
+          "clause_line": 495,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Call to 'phase_disposition': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "compliance_cycle"
+          ],
+          "atom": "phase_disposition",
+          "clause_kind": "effect_post",
+          "clause_line": 506,
+          "clause_text": "effect_post: { ComplianceReview: Idle };",
+          "diagnostic": "Temporal effect violation: effect 'ComplianceReview' has final state 'Decided' but effect_post declares 'Idle' (block 0)",
+          "pattern": "effect_state_obligation"
+        },
+        {
+          "affected_atoms": [
+            "compliance_cycle"
+          ],
+          "atom": "phase_disposition",
+          "clause_kind": "ensures",
+          "clause_line": 511,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Postcondition (ensures) is not satisfied.",
+          "pattern": "neighbor_ensures_strengthening"
+        },
+        {
+          "affected_atoms": [
+            "compliance_cycle"
+          ],
+          "atom": "phase_onboarding",
+          "clause_kind": "effect_post",
+          "clause_line": 462,
+          "clause_text": "effect_post: { ComplianceReview: Screened };",
+          "diagnostic": "Temporal effect violation (InvalidPreState): 'ComplianceReview' operation 'call phase_assessment' requires state 'Screened' but current state is 'Idle' (block 0)",
+          "pattern": "effect_state_obligation"
+        },
+        {
+          "affected_atoms": [
+            "stage_score"
+          ],
+          "atom": "residual_risk",
+          "clause_kind": "ensures",
+          "clause_line": 303,
+          "clause_text": "ensures: result >= 0 && result <= 100;",
+          "diagnostic": "Spurious counterexample detected for atom 'stage_score'. Spurious counterexample candidate for atom 'stage_score'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "group_reporting",
+            "stage_archive"
+          ],
+          "atom": "retention_period_satisfied",
+          "clause_kind": "ensures",
+          "clause_line": 178,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Call to 'rule_and': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "group_reporting"
+          ],
+          "atom": "retention_period_satisfied",
+          "clause_kind": "ensures",
+          "clause_line": 179,
+          "clause_text": "ensures: result == 0 || retention_years >= 5;",
+          "diagnostic": "Spurious counterexample detected for atom 'group_reporting'. Spurious counterexample candidate for atom 'group_reporting'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "stage_decide"
+          ],
+          "atom": "risk_within_appetite",
+          "clause_kind": "ensures",
+          "clause_line": 312,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Call to 'rule_and': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "group_data_governance",
+            "group_market_access",
+            "group_reporting",
+            "rule_and3",
+            "rule_and4",
+            "rule_and5",
+            "stage_archive",
+            "stage_decide",
+            "stage_report"
+          ],
+          "atom": "rule_and",
+          "clause_kind": "ensures",
+          "clause_line": 39,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Call to 'rule_and': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "group_data_governance",
+            "group_market_access",
+            "rule_and3",
+            "rule_and4",
+            "rule_and5",
+            "stage_archive",
+            "stage_decide",
+            "stage_report"
+          ],
+          "atom": "rule_and",
+          "clause_kind": "ensures",
+          "clause_line": 40,
+          "clause_text": "ensures: result == 0 || left == 1;",
+          "diagnostic": "Spurious counterexample detected for atom 'rule_and3'. Spurious counterexample candidate for atom 'rule_and3'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "group_data_governance",
+            "group_market_access",
+            "group_reporting",
+            "rule_and3",
+            "rule_and4",
+            "rule_and5"
+          ],
+          "atom": "rule_and",
+          "clause_kind": "ensures",
+          "clause_line": 41,
+          "clause_text": "ensures: result == 0 || right == 1;",
+          "diagnostic": "Spurious counterexample detected for atom 'rule_and3'. Spurious counterexample candidate for atom 'rule_and3'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "group_aml",
+            "group_kyc",
+            "rule_and4"
+          ],
+          "atom": "rule_and3",
+          "clause_kind": "ensures",
+          "clause_line": 69,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Call to 'rule_and': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "group_aml",
+            "group_kyc",
+            "rule_and4"
+          ],
+          "atom": "rule_and3",
+          "clause_kind": "ensures",
+          "clause_line": 70,
+          "clause_text": "ensures: result == 0 || first == 1;",
+          "diagnostic": "Spurious counterexample detected for atom 'rule_and4'. Spurious counterexample candidate for atom 'rule_and4'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "rule_and5"
+          ],
+          "atom": "rule_and4",
+          "clause_kind": "ensures",
+          "clause_line": 79,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Call to 'rule_and': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "rule_and5"
+          ],
+          "atom": "rule_and4",
+          "clause_kind": "ensures",
+          "clause_line": 80,
+          "clause_text": "ensures: result == 0 || first == 1;",
+          "diagnostic": "Spurious counterexample detected for atom 'rule_and5'. Spurious counterexample candidate for atom 'rule_and5'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "stage_apply_rules"
+          ],
+          "atom": "rule_and5",
+          "clause_kind": "ensures",
+          "clause_line": 90,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Spurious counterexample detected for atom 'stage_apply_rules'. Spurious counterexample candidate for atom 'stage_apply_rules'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "stage_apply_rules"
+          ],
+          "atom": "rule_and5",
+          "clause_kind": "ensures",
+          "clause_line": 91,
+          "clause_text": "ensures: result == 0 || first == 1;",
+          "diagnostic": "Spurious counterexample detected for atom 'stage_apply_rules'. Spurious counterexample candidate for atom 'stage_apply_rules'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "stage_apply_rules"
+          ],
+          "atom": "rule_and5",
+          "clause_kind": "ensures",
+          "clause_line": 92,
+          "clause_text": "ensures: result == 0 || fifth == 1;",
+          "diagnostic": "Spurious counterexample detected for atom 'stage_apply_rules'. Spurious counterexample candidate for atom 'stage_apply_rules'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "pep_exposure_reviewed"
+          ],
+          "atom": "rule_implies",
+          "clause_kind": "ensures",
+          "clause_line": 59,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Spurious counterexample detected for atom 'pep_exposure_reviewed'. Spurious counterexample candidate for atom 'pep_exposure_reviewed'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "pep_exposure_reviewed"
+          ],
+          "atom": "rule_implies",
+          "clause_kind": "ensures",
+          "clause_line": 60,
+          "clause_text": "ensures: result == 1 || premise == 1;",
+          "diagnostic": "Spurious counterexample detected for atom 'pep_exposure_reviewed'. Spurious counterexample candidate for atom 'pep_exposure_reviewed'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "group_aml"
+          ],
+          "atom": "sanctions_screening_clear",
+          "clause_kind": "ensures",
+          "clause_line": 128,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Call to 'rule_and3': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "group_aml"
+          ],
+          "atom": "sanctions_screening_clear",
+          "clause_kind": "ensures",
+          "clause_line": 129,
+          "clause_text": "ensures: result == 0 || hit_count == 0;",
+          "diagnostic": "Spurious counterexample detected for atom 'group_aml'. Spurious counterexample candidate for atom 'group_aml'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "phase_assessment"
+          ],
+          "atom": "stage_apply_rules",
+          "clause_kind": "effect_post",
+          "clause_line": 381,
+          "clause_text": "effect_post: { ComplianceReview: RulesApplied };",
+          "diagnostic": "Temporal effect violation (InvalidPreState): 'ComplianceReview' operation 'call stage_decide' requires state 'RulesApplied' but current state is 'Scored' (block 0)",
+          "pattern": "effect_state_obligation"
+        },
+        {
+          "affected_atoms": [
+            "phase_assessment"
+          ],
+          "atom": "stage_apply_rules",
+          "clause_kind": "ensures",
+          "clause_line": 385,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Call to 'stage_decide': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "phase_assessment"
+          ],
+          "atom": "stage_apply_rules",
+          "clause_kind": "ensures",
+          "clause_line": 386,
+          "clause_text": "ensures: result == 0 || kyc_ok == 1;",
+          "diagnostic": "Postcondition (ensures) is not satisfied.",
+          "pattern": "neighbor_ensures_strengthening"
+        },
+        {
+          "affected_atoms": [
+            "phase_disposition"
+          ],
+          "atom": "stage_archive",
+          "clause_kind": "effect_post",
+          "clause_line": 424,
+          "clause_text": "effect_post: { ComplianceReview: Archived };",
+          "diagnostic": "Temporal effect violation (InvalidPreState): 'ComplianceReview' operation 'call stage_reset' requires state 'Archived' but current state is 'Reported' (block 0)",
+          "pattern": "effect_state_obligation"
+        },
+        {
+          "affected_atoms": [
+            "phase_disposition"
+          ],
+          "atom": "stage_archive",
+          "clause_kind": "ensures",
+          "clause_line": 427,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Call to 'stage_reset': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "phase_disposition"
+          ],
+          "atom": "stage_archive",
+          "clause_kind": "ensures",
+          "clause_line": 428,
+          "clause_text": "ensures: result == 0 || outcome == 1;",
+          "diagnostic": "Postcondition (ensures) is not satisfied.",
+          "pattern": "neighbor_ensures_strengthening"
+        },
+        {
+          "affected_atoms": [
+            "phase_assessment"
+          ],
+          "atom": "stage_decide",
+          "clause_kind": "effect_post",
+          "clause_line": 396,
+          "clause_text": "effect_post: { ComplianceReview: Decided };",
+          "diagnostic": "Temporal effect violation: effect 'ComplianceReview' has final state 'RulesApplied' but effect_post declares 'Decided' (block 0)",
+          "pattern": "effect_state_obligation"
+        },
+        {
+          "affected_atoms": [
+            "phase_assessment"
+          ],
+          "atom": "stage_decide",
+          "clause_kind": "ensures",
+          "clause_line": 400,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Postcondition (ensures) is not satisfied.",
+          "pattern": "neighbor_ensures_strengthening"
+        },
+        {
+          "affected_atoms": [
+            "phase_assessment"
+          ],
+          "atom": "stage_decide",
+          "clause_kind": "ensures",
+          "clause_line": 401,
+          "clause_text": "ensures: result == 0 || rules_ok == 1;",
+          "diagnostic": "Postcondition (ensures) is not satisfied.",
+          "pattern": "neighbor_ensures_strengthening"
+        },
+        {
+          "affected_atoms": [
+            "phase_onboarding"
+          ],
+          "atom": "stage_intake",
+          "clause_kind": "effect_post",
+          "clause_line": 325,
+          "clause_text": "effect_post: { ComplianceReview: Intake };",
+          "diagnostic": "Temporal effect violation (InvalidPreState): 'ComplianceReview' operation 'call stage_screen' requires state 'Intake' but current state is 'Idle' (block 0)",
+          "pattern": "effect_state_obligation"
+        },
+        {
+          "affected_atoms": [
+            "phase_disposition"
+          ],
+          "atom": "stage_report",
+          "clause_kind": "effect_post",
+          "clause_line": 410,
+          "clause_text": "effect_post: { ComplianceReview: Reported };",
+          "diagnostic": "Temporal effect violation (InvalidPreState): 'ComplianceReview' operation 'call stage_archive' requires state 'Reported' but current state is 'Decided' (block 0)",
+          "pattern": "effect_state_obligation"
+        },
+        {
+          "affected_atoms": [
+            "phase_disposition"
+          ],
+          "atom": "stage_report",
+          "clause_kind": "ensures",
+          "clause_line": 414,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Call to 'stage_archive': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "phase_disposition"
+          ],
+          "atom": "stage_report",
+          "clause_kind": "ensures",
+          "clause_line": 415,
+          "clause_text": "ensures: result == 0 || decision == 1;",
+          "diagnostic": "Postcondition (ensures) is not satisfied.",
+          "pattern": "neighbor_ensures_strengthening"
+        },
+        {
+          "affected_atoms": [
+            "phase_disposition"
+          ],
+          "atom": "stage_reset",
+          "clause_kind": "effect_post",
+          "clause_line": 437,
+          "clause_text": "effect_post: { ComplianceReview: Idle };",
+          "diagnostic": "Temporal effect violation: effect 'ComplianceReview' has final state 'Archived' but effect_post declares 'Idle' (block 0)",
+          "pattern": "effect_state_obligation"
+        },
+        {
+          "affected_atoms": [
+            "phase_disposition"
+          ],
+          "atom": "stage_reset",
+          "clause_kind": "ensures",
+          "clause_line": 440,
+          "clause_text": "ensures: result == outcome;",
+          "diagnostic": "Postcondition (ensures) is not satisfied.",
+          "pattern": "neighbor_ensures_strengthening"
+        },
+        {
+          "affected_atoms": [
+            "phase_assessment"
+          ],
+          "atom": "stage_score",
+          "clause_kind": "effect_post",
+          "clause_line": 359,
+          "clause_text": "effect_post: { ComplianceReview: Scored };",
+          "diagnostic": "Temporal effect violation (InvalidPreState): 'ComplianceReview' operation 'call stage_apply_rules' requires state 'Scored' but current state is 'Screened' (block 0)",
+          "pattern": "effect_state_obligation"
+        },
+        {
+          "affected_atoms": [
+            "phase_assessment"
+          ],
+          "atom": "stage_score",
+          "clause_kind": "ensures",
+          "clause_line": 364,
+          "clause_text": "ensures: result >= 0 && result <= 100;",
+          "diagnostic": "Call to 'stage_decide': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "phase_onboarding"
+          ],
+          "atom": "stage_screen",
+          "clause_kind": "effect_post",
+          "clause_line": 339,
+          "clause_text": "effect_post: { ComplianceReview: Screened };",
+          "diagnostic": "Temporal effect violation: effect 'ComplianceReview' has final state 'Intake' but effect_post declares 'Screened' (block 0)",
+          "pattern": "effect_state_obligation"
+        },
+        {
+          "affected_atoms": [
+            "phase_onboarding"
+          ],
+          "atom": "stage_screen",
+          "clause_kind": "ensures",
+          "clause_line": 343,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Postcondition (ensures) is not satisfied.",
+          "pattern": "neighbor_ensures_strengthening"
+        },
+        {
+          "affected_atoms": [
+            "group_reporting",
+            "stage_report"
+          ],
+          "atom": "threshold_report_filed",
+          "clause_kind": "ensures",
+          "clause_line": 170,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Call to 'rule_and': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        }
+      ],
+      "case": "regtech_compliance_scale",
+      "composition_breaks": 66,
+      "max_dependency_depth": 7,
+      "probed_clauses": 227,
+      "source": "regtech_compliance_scale/correct_code.mm",
+      "top_level_atoms": [
+        "rule_or",
+        "two_compliance_cycles"
+      ],
+      "unconstrained_clauses": 97,
+      "wall_clock_seconds": 251.09,
+      "whole_system_invariants_closed": 2,
+      "whole_system_invariants_neighbor_dependent": 1
+    },
+    {
+      "atom_count": 32,
+      "atom_local_closure_ratio": 0.4545,
+      "atom_local_obligations": 40,
+      "breaks": [
+        {
+          "affected_atoms": [
+            "stage_check"
+          ],
+          "atom": "all_five_ok",
+          "clause_kind": "ensures",
+          "clause_line": 164,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Spurious counterexample detected for atom 'stage_check'. Spurious counterexample candidate for atom 'stage_check'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "stage_check"
+          ],
+          "atom": "all_five_ok",
+          "clause_kind": "ensures",
+          "clause_line": 165,
+          "clause_text": "ensures: result == 0 || first == 1;",
+          "diagnostic": "Spurious counterexample detected for atom 'stage_check'. Spurious counterexample candidate for atom 'stage_check'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "stage_check"
+          ],
+          "atom": "allowance_sufficient",
+          "clause_kind": "ensures",
+          "clause_line": 118,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Call to 'all_five_ok': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "all_five_ok"
+          ],
+          "atom": "both_ok",
+          "clause_kind": "ensures",
+          "clause_line": 153,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Call to 'both_ok': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "all_five_ok"
+          ],
+          "atom": "both_ok",
+          "clause_kind": "ensures",
+          "clause_line": 154,
+          "clause_text": "ensures: result == 0 || left == 1;",
+          "diagnostic": "Spurious counterexample detected for atom 'all_five_ok'. Spurious counterexample candidate for atom 'all_five_ok'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "all_five_ok"
+          ],
+          "atom": "both_ok",
+          "clause_kind": "ensures",
+          "clause_line": 155,
+          "clause_text": "ensures: result == 0 || right == 1;",
+          "diagnostic": "Spurious counterexample detected for atom 'all_five_ok'. Spurious counterexample candidate for atom 'all_five_ok'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "stage_check"
+          ],
+          "atom": "caller_is_owner",
+          "clause_kind": "ensures",
+          "clause_line": 109,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Call to 'all_five_ok': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "stage_credit"
+          ],
+          "atom": "checked_add",
+          "clause_kind": "ensures",
+          "clause_line": 70,
+          "clause_text": "ensures: result == balance + amount;",
+          "diagnostic": "Spurious counterexample detected for atom 'stage_credit'. Spurious counterexample candidate for atom 'stage_credit'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "reserve_after_payout",
+            "supply_after_burn"
+          ],
+          "atom": "checked_sub",
+          "clause_kind": "ensures",
+          "clause_line": 61,
+          "clause_text": "ensures: result == balance - amount;",
+          "diagnostic": "Spurious counterexample detected for atom 'reserve_after_payout'. Spurious counterexample candidate for atom 'reserve_after_payout'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "stage_check"
+          ],
+          "atom": "deadline_not_expired",
+          "clause_kind": "ensures",
+          "clause_line": 135,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Call to 'all_five_ok': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "stage_enter"
+          ],
+          "atom": "guard_free",
+          "clause_kind": "ensures",
+          "clause_line": 100,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Spurious counterexample detected for atom 'stage_enter'. Spurious counterexample candidate for atom 'stage_enter'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "stage_enter"
+          ],
+          "atom": "guard_free",
+          "clause_kind": "ensures",
+          "clause_line": 101,
+          "clause_text": "ensures: result == 0 || guard_state == 0;",
+          "diagnostic": "Spurious counterexample detected for atom 'stage_enter'. Spurious counterexample candidate for atom 'stage_enter'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "shares_to_burn",
+            "withdrawable_amount"
+          ],
+          "atom": "min_token",
+          "clause_kind": "ensures",
+          "clause_line": 48,
+          "clause_text": "ensures: result >= 0;",
+          "diagnostic": "Call to 'min_token': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "shares_to_burn",
+            "withdrawable_amount"
+          ],
+          "atom": "min_token",
+          "clause_kind": "ensures",
+          "clause_line": 49,
+          "clause_text": "ensures: result <= left;",
+          "diagnostic": "Spurious counterexample detected for atom 'withdrawable_amount'. Spurious counterexample candidate for atom 'withdrawable_amount'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "shares_to_burn",
+            "withdrawable_amount"
+          ],
+          "atom": "min_token",
+          "clause_kind": "ensures",
+          "clause_line": 50,
+          "clause_text": "ensures: result <= right;",
+          "diagnostic": "Spurious counterexample detected for atom 'withdrawable_amount'. Spurious counterexample candidate for atom 'withdrawable_amount'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "withdrawal_cycle"
+          ],
+          "atom": "payout_after_fee",
+          "clause_kind": "ensures",
+          "clause_line": 190,
+          "clause_text": "ensures: result >= 0;",
+          "diagnostic": "Call to 'phase_move_funds': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "withdrawal_cycle"
+          ],
+          "atom": "payout_after_fee",
+          "clause_kind": "ensures",
+          "clause_line": 191,
+          "clause_text": "ensures: result <= gross;",
+          "diagnostic": "Call to 'phase_move_funds': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "withdrawal_cycle"
+          ],
+          "atom": "phase_admit",
+          "clause_kind": "effect_post",
+          "clause_line": 371,
+          "clause_text": "effect_post: { Vault: Checked };",
+          "diagnostic": "Temporal effect violation (InvalidPreState): 'Vault' operation 'call phase_move_funds' requires state 'Checked' but current state is 'Idle' (block 0)",
+          "pattern": "effect_state_obligation"
+        },
+        {
+          "affected_atoms": [
+            "withdrawal_cycle"
+          ],
+          "atom": "phase_close_position",
+          "clause_kind": "effect_post",
+          "clause_line": 415,
+          "clause_text": "effect_post: { Vault: Idle };",
+          "diagnostic": "Temporal effect violation: effect 'Vault' has final state 'Credited' but effect_post declares 'Idle' (block 0)",
+          "pattern": "effect_state_obligation"
+        },
+        {
+          "affected_atoms": [
+            "withdrawal_cycle"
+          ],
+          "atom": "phase_close_position",
+          "clause_kind": "ensures",
+          "clause_line": 421,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Postcondition (ensures) is not satisfied.",
+          "pattern": "neighbor_ensures_strengthening"
+        },
+        {
+          "affected_atoms": [
+            "withdrawal_cycle"
+          ],
+          "atom": "phase_move_funds",
+          "clause_kind": "effect_post",
+          "clause_line": 395,
+          "clause_text": "effect_post: { Vault: Credited };",
+          "diagnostic": "Temporal effect violation (InvalidPreState): 'Vault' operation 'call phase_close_position' requires state 'Credited' but current state is 'Checked' (block 0)",
+          "pattern": "effect_state_obligation"
+        },
+        {
+          "affected_atoms": [
+            "stage_settle"
+          ],
+          "atom": "pool_solvent",
+          "clause_kind": "ensures",
+          "clause_line": 144,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Spurious counterexample detected for atom 'stage_settle'. Spurious counterexample candidate for atom 'stage_settle'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "stage_settle"
+          ],
+          "atom": "pool_solvent",
+          "clause_kind": "ensures",
+          "clause_line": 145,
+          "clause_text": "ensures: result == 0 || reserve >= outflow;",
+          "diagnostic": "Spurious counterexample detected for atom 'stage_settle'. Spurious counterexample candidate for atom 'stage_settle'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "payout_after_fee"
+          ],
+          "atom": "protocol_fee",
+          "clause_kind": "ensures",
+          "clause_line": 77,
+          "clause_text": "ensures: result >= 0;",
+          "diagnostic": "Call to 'net_of_fee': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "payout_after_fee"
+          ],
+          "atom": "protocol_fee",
+          "clause_kind": "ensures",
+          "clause_line": 78,
+          "clause_text": "ensures: result <= amount;",
+          "diagnostic": "Call to 'net_of_fee': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "stage_debit"
+          ],
+          "atom": "reserve_after_payout",
+          "clause_kind": "ensures",
+          "clause_line": 202,
+          "clause_text": "ensures: result == reserve - payout;",
+          "diagnostic": "Spurious counterexample detected for atom 'stage_debit'. Spurious counterexample candidate for atom 'stage_debit'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "withdrawal_cycle"
+          ],
+          "atom": "shares_to_burn",
+          "clause_kind": "ensures",
+          "clause_line": 210,
+          "clause_text": "ensures: result >= 0;",
+          "diagnostic": "Call to 'phase_close_position': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "withdrawal_cycle"
+          ],
+          "atom": "shares_to_burn",
+          "clause_kind": "ensures",
+          "clause_line": 211,
+          "clause_text": "ensures: result <= shares_held;",
+          "diagnostic": "Call to 'phase_close_position': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "stage_check"
+          ],
+          "atom": "slippage_within_bound",
+          "clause_kind": "ensures",
+          "clause_line": 127,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Call to 'all_five_ok': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "phase_admit"
+          ],
+          "atom": "stage_check",
+          "clause_kind": "effect_post",
+          "clause_line": 256,
+          "clause_text": "effect_post: { Vault: Checked };",
+          "diagnostic": "Temporal effect violation: effect 'Vault' has final state 'Entered' but effect_post declares 'Checked' (block 0)",
+          "pattern": "effect_state_obligation"
+        },
+        {
+          "affected_atoms": [
+            "phase_admit"
+          ],
+          "atom": "stage_check",
+          "clause_kind": "ensures",
+          "clause_line": 262,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Postcondition (ensures) is not satisfied.",
+          "pattern": "neighbor_ensures_strengthening"
+        },
+        {
+          "affected_atoms": [
+            "phase_move_funds"
+          ],
+          "atom": "stage_credit",
+          "clause_kind": "effect_post",
+          "clause_line": 293,
+          "clause_text": "effect_post: { Vault: Credited };",
+          "diagnostic": "Temporal effect violation: effect 'Vault' has final state 'Debited' but effect_post declares 'Credited' (block 0)",
+          "pattern": "effect_state_obligation"
+        },
+        {
+          "affected_atoms": [
+            "phase_move_funds"
+          ],
+          "atom": "stage_credit",
+          "clause_kind": "ensures",
+          "clause_line": 297,
+          "clause_text": "ensures: result == user_balance + payout;",
+          "diagnostic": "Postcondition (ensures) is not satisfied.",
+          "pattern": "neighbor_ensures_strengthening"
+        },
+        {
+          "affected_atoms": [
+            "phase_move_funds"
+          ],
+          "atom": "stage_debit",
+          "clause_kind": "effect_post",
+          "clause_line": 278,
+          "clause_text": "effect_post: { Vault: Debited };",
+          "diagnostic": "Temporal effect violation (InvalidPreState): 'Vault' operation 'call stage_credit' requires state 'Debited' but current state is 'Checked' (block 0)",
+          "pattern": "effect_state_obligation"
+        },
+        {
+          "affected_atoms": [
+            "phase_admit"
+          ],
+          "atom": "stage_enter",
+          "clause_kind": "effect_post",
+          "clause_line": 235,
+          "clause_text": "effect_post: { Vault: Entered };",
+          "diagnostic": "Temporal effect violation (InvalidPreState): 'Vault' operation 'call stage_check' requires state 'Entered' but current state is 'Idle' (block 0)",
+          "pattern": "effect_state_obligation"
+        },
+        {
+          "affected_atoms": [
+            "phase_admit"
+          ],
+          "atom": "stage_enter",
+          "clause_kind": "ensures",
+          "clause_line": 237,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Call to 'stage_check': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "phase_close_position"
+          ],
+          "atom": "stage_exit",
+          "clause_kind": "effect_post",
+          "clause_line": 334,
+          "clause_text": "effect_post: { Vault: Exited };",
+          "diagnostic": "Temporal effect violation (InvalidPreState): 'Vault' operation 'call stage_release' requires state 'Exited' but current state is 'Settled' (block 0)",
+          "pattern": "effect_state_obligation"
+        },
+        {
+          "affected_atoms": [
+            "phase_close_position"
+          ],
+          "atom": "stage_exit",
+          "clause_kind": "ensures",
+          "clause_line": 337,
+          "clause_text": "ensures: result == settled;",
+          "diagnostic": "Postcondition (ensures) is not satisfied.",
+          "pattern": "neighbor_ensures_strengthening"
+        },
+        {
+          "affected_atoms": [
+            "phase_close_position"
+          ],
+          "atom": "stage_mint",
+          "clause_kind": "effect_post",
+          "clause_line": 306,
+          "clause_text": "effect_post: { Vault: Minted };",
+          "diagnostic": "Temporal effect violation (InvalidPreState): 'Vault' operation 'call stage_settle' requires state 'Minted' but current state is 'Credited' (block 0)",
+          "pattern": "effect_state_obligation"
+        },
+        {
+          "affected_atoms": [
+            "phase_close_position"
+          ],
+          "atom": "stage_release",
+          "clause_kind": "effect_post",
+          "clause_line": 346,
+          "clause_text": "effect_post: { Vault: Idle };",
+          "diagnostic": "Temporal effect violation: effect 'Vault' has final state 'Exited' but effect_post declares 'Idle' (block 0)",
+          "pattern": "effect_state_obligation"
+        },
+        {
+          "affected_atoms": [
+            "phase_close_position"
+          ],
+          "atom": "stage_release",
+          "clause_kind": "ensures",
+          "clause_line": 349,
+          "clause_text": "ensures: result == settled;",
+          "diagnostic": "Postcondition (ensures) is not satisfied.",
+          "pattern": "neighbor_ensures_strengthening"
+        },
+        {
+          "affected_atoms": [
+            "phase_close_position"
+          ],
+          "atom": "stage_settle",
+          "clause_kind": "effect_post",
+          "clause_line": 321,
+          "clause_text": "effect_post: { Vault: Settled };",
+          "diagnostic": "Temporal effect violation (InvalidPreState): 'Vault' operation 'call stage_exit' requires state 'Settled' but current state is 'Minted' (block 0)",
+          "pattern": "effect_state_obligation"
+        },
+        {
+          "affected_atoms": [
+            "phase_close_position"
+          ],
+          "atom": "stage_settle",
+          "clause_kind": "ensures",
+          "clause_line": 324,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Call to 'stage_exit': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "phase_close_position"
+          ],
+          "atom": "stage_settle",
+          "clause_kind": "ensures",
+          "clause_line": 325,
+          "clause_text": "ensures: result == 0 || reserve_after >= outflow;",
+          "diagnostic": "Postcondition (ensures) is not satisfied.",
+          "pattern": "neighbor_ensures_strengthening"
+        },
+        {
+          "affected_atoms": [
+            "stage_mint"
+          ],
+          "atom": "supply_after_burn",
+          "clause_kind": "ensures",
+          "clause_line": 223,
+          "clause_text": "ensures: result == total_supply - burned;",
+          "diagnostic": "Spurious counterexample detected for atom 'stage_mint'. Spurious counterexample candidate for atom 'stage_mint'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "withdrawal_cycle"
+          ],
+          "atom": "withdrawable_amount",
+          "clause_kind": "ensures",
+          "clause_line": 180,
+          "clause_text": "ensures: result >= 0;",
+          "diagnostic": "Call to 'payout_after_fee': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "withdrawal_cycle"
+          ],
+          "atom": "withdrawable_amount",
+          "clause_kind": "ensures",
+          "clause_line": 182,
+          "clause_text": "ensures: result <= reserve;",
+          "diagnostic": "Call to 'phase_move_funds': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "two_withdrawal_cycles"
+          ],
+          "atom": "withdrawal_cycle",
+          "clause_kind": "ensures",
+          "clause_line": 461,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Postcondition (ensures) is not satisfied.",
+          "pattern": "neighbor_ensures_strengthening"
+        }
+      ],
+      "case": "defi_invariant_scale",
+      "composition_breaks": 48,
+      "max_dependency_depth": 5,
+      "probed_clauses": 190,
+      "source": "defi_invariant_scale/correct_code.mm",
+      "top_level_atoms": [
+        "clamp_non_negative",
+        "two_withdrawal_cycles"
+      ],
+      "unconstrained_clauses": 102,
+      "wall_clock_seconds": 167.05,
+      "whole_system_invariants_closed": 2,
+      "whole_system_invariants_neighbor_dependent": 1
+    },
+    {
+      "atom_count": 35,
+      "atom_local_closure_ratio": 0.5304,
+      "atom_local_obligations": 61,
+      "breaks": [
+        {
+          "affected_atoms": [
+            "conjunction_of_four",
+            "proposal_authorised",
+            "stage_acknowledge"
+          ],
+          "atom": "conjunction",
+          "clause_kind": "ensures",
+          "clause_line": 159,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Call to 'conjunction': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "conjunction_of_four",
+            "proposal_authorised",
+            "stage_acknowledge"
+          ],
+          "atom": "conjunction",
+          "clause_kind": "ensures",
+          "clause_line": 160,
+          "clause_text": "ensures: result == 0 || left == 1;",
+          "diagnostic": "Spurious counterexample detected for atom 'conjunction_of_four'. Spurious counterexample candidate for atom 'conjunction_of_four'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "conjunction_of_four",
+            "stage_acknowledge"
+          ],
+          "atom": "conjunction",
+          "clause_kind": "ensures",
+          "clause_line": 161,
+          "clause_text": "ensures: result == 0 || right == 1;",
+          "diagnostic": "Spurious counterexample detected for atom 'conjunction_of_four'. Spurious counterexample candidate for atom 'conjunction_of_four'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "handover_authorised"
+          ],
+          "atom": "conjunction_of_four",
+          "clause_kind": "ensures",
+          "clause_line": 169,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Spurious counterexample detected for atom 'handover_authorised'. Spurious counterexample candidate for atom 'handover_authorised'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "handover_authorised"
+          ],
+          "atom": "conjunction_of_four",
+          "clause_kind": "ensures",
+          "clause_line": 170,
+          "clause_text": "ensures: result == 0 || first == 1;",
+          "diagnostic": "Spurious counterexample detected for atom 'handover_authorised'. Spurious counterexample candidate for atom 'handover_authorised'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "handover_authorised"
+          ],
+          "atom": "conjunction_of_four",
+          "clause_kind": "ensures",
+          "clause_line": 172,
+          "clause_text": "ensures: result == 0 || third == 1;",
+          "diagnostic": "Spurious counterexample detected for atom 'handover_authorised'. Spurious counterexample candidate for atom 'handover_authorised'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "stage_escrow"
+          ],
+          "atom": "escrow_credit",
+          "clause_kind": "ensures",
+          "clause_line": 70,
+          "clause_text": "ensures: result == balance + amount;",
+          "diagnostic": "Spurious counterexample detected for atom 'stage_escrow'. Spurious counterexample candidate for atom 'stage_escrow'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "stage_record"
+          ],
+          "atom": "escrow_debit",
+          "clause_kind": "ensures",
+          "clause_line": 61,
+          "clause_text": "ensures: result == balance - amount;",
+          "diagnostic": "Spurious counterexample detected for atom 'stage_record'. Spurious counterexample candidate for atom 'stage_record'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "handover_authorised"
+          ],
+          "atom": "escrow_funded",
+          "clause_kind": "ensures",
+          "clause_line": 150,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Call to 'conjunction_of_four': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "stage_approve"
+          ],
+          "atom": "handover_authorised",
+          "clause_kind": "ensures",
+          "clause_line": 213,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Spurious counterexample detected for atom 'stage_approve'. Spurious counterexample candidate for atom 'stage_approve'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "stage_approve"
+          ],
+          "atom": "handover_authorised",
+          "clause_kind": "ensures",
+          "clause_line": 214,
+          "clause_text": "ensures: result == 0 || approvals >= required;",
+          "diagnostic": "Spurious counterexample detected for atom 'stage_approve'. Spurious counterexample candidate for atom 'stage_approve'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "two_handover_cycles"
+          ],
+          "atom": "handover_cycle",
+          "clause_kind": "ensures",
+          "clause_line": 531,
+          "clause_text": "ensures: result >= 0 && result <= 1000000;",
+          "diagnostic": "Postcondition (ensures) is not satisfied.",
+          "pattern": "neighbor_ensures_strengthening"
+        },
+        {
+          "affected_atoms": [
+            "proposal_authorised"
+          ],
+          "atom": "is_current_owner",
+          "clause_kind": "ensures",
+          "clause_line": 90,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Call to 'conjunction': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "proposal_authorised"
+          ],
+          "atom": "is_current_owner",
+          "clause_kind": "ensures",
+          "clause_line": 91,
+          "clause_text": "ensures: result == 0 || caller == owner;",
+          "diagnostic": "Spurious counterexample detected for atom 'proposal_authorised'. Spurious counterexample candidate for atom 'proposal_authorised'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "settled_deposit"
+          ],
+          "atom": "min_deposit",
+          "clause_kind": "ensures",
+          "clause_line": 48,
+          "clause_text": "ensures: result >= 0;",
+          "diagnostic": "Spurious counterexample detected for atom 'settled_deposit'. Spurious counterexample candidate for atom 'settled_deposit'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "settled_deposit"
+          ],
+          "atom": "min_deposit",
+          "clause_kind": "ensures",
+          "clause_line": 49,
+          "clause_text": "ensures: result <= left;",
+          "diagnostic": "Spurious counterexample detected for atom 'settled_deposit'. Spurious counterexample candidate for atom 'settled_deposit'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "settled_deposit"
+          ],
+          "atom": "min_deposit",
+          "clause_kind": "ensures",
+          "clause_line": 50,
+          "clause_text": "ensures: result <= right;",
+          "diagnostic": "Spurious counterexample detected for atom 'settled_deposit'. Spurious counterexample candidate for atom 'settled_deposit'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "handover_authorised"
+          ],
+          "atom": "no_open_dispute",
+          "clause_kind": "ensures",
+          "clause_line": 141,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Call to 'conjunction_of_four': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "handover_authorised"
+          ],
+          "atom": "no_open_dispute",
+          "clause_kind": "ensures",
+          "clause_line": 142,
+          "clause_text": "ensures: result == 0 || open_disputes == 0;",
+          "diagnostic": "Spurious counterexample detected for atom 'handover_authorised'. Spurious counterexample candidate for atom 'handover_authorised'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "proposal_authorised"
+          ],
+          "atom": "not_blacklisted",
+          "clause_kind": "ensures",
+          "clause_line": 115,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Call to 'conjunction': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "stage_transfer"
+          ],
+          "atom": "owner_after_transfer",
+          "clause_kind": "ensures",
+          "clause_line": 240,
+          "clause_text": "ensures: result == owner || result == recipient;",
+          "diagnostic": "Spurious counterexample detected for atom 'stage_transfer'. Spurious counterexample candidate for atom 'stage_transfer'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "stage_transfer"
+          ],
+          "atom": "owner_after_transfer",
+          "clause_kind": "ensures",
+          "clause_line": 241,
+          "clause_text": "ensures: authorised == 1 || result == owner;",
+          "diagnostic": "Spurious counterexample detected for atom 'stage_transfer'. Spurious counterexample candidate for atom 'stage_transfer'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "handover_cycle"
+          ],
+          "atom": "phase_hand_over",
+          "clause_kind": "effect_post",
+          "clause_line": 472,
+          "clause_text": "effect_post: { Ownership: Idle };",
+          "diagnostic": "Temporal effect violation: effect 'Ownership' has final state 'Approved' but effect_post declares 'Idle' (block 0)",
+          "pattern": "effect_state_obligation"
+        },
+        {
+          "affected_atoms": [
+            "handover_cycle"
+          ],
+          "atom": "phase_hand_over",
+          "clause_kind": "ensures",
+          "clause_line": 477,
+          "clause_text": "ensures: result >= 0 && result <= 1000000;",
+          "diagnostic": "Postcondition (ensures) is not satisfied.",
+          "pattern": "neighbor_ensures_strengthening"
+        },
+        {
+          "affected_atoms": [
+            "handover_cycle"
+          ],
+          "atom": "phase_initiate",
+          "clause_kind": "effect_post",
+          "clause_line": 416,
+          "clause_text": "effect_post: { Ownership: Acknowledged };",
+          "diagnostic": "Temporal effect violation (InvalidPreState): 'Ownership' operation 'call phase_secure' requires state 'Acknowledged' but current state is 'Idle' (block 0)",
+          "pattern": "effect_state_obligation"
+        },
+        {
+          "affected_atoms": [
+            "handover_cycle"
+          ],
+          "atom": "phase_secure",
+          "clause_kind": "effect_post",
+          "clause_line": 440,
+          "clause_text": "effect_post: { Ownership: Approved };",
+          "diagnostic": "Temporal effect violation (InvalidPreState): 'Ownership' operation 'call phase_hand_over' requires state 'Approved' but current state is 'Acknowledged' (block 0)",
+          "pattern": "effect_state_obligation"
+        },
+        {
+          "affected_atoms": [
+            "handover_cycle"
+          ],
+          "atom": "phase_secure",
+          "clause_kind": "ensures",
+          "clause_line": 448,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Call to 'phase_hand_over': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "stage_propose"
+          ],
+          "atom": "proposal_authorised",
+          "clause_kind": "ensures",
+          "clause_line": 186,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Spurious counterexample detected for atom 'stage_propose'. Spurious counterexample candidate for atom 'stage_propose'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "stage_propose"
+          ],
+          "atom": "proposal_authorised",
+          "clause_kind": "ensures",
+          "clause_line": 187,
+          "clause_text": "ensures: result == 0 || caller == owner;",
+          "diagnostic": "Spurious counterexample detected for atom 'stage_propose'. Spurious counterexample candidate for atom 'stage_propose'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "handover_authorised"
+          ],
+          "atom": "quorum_reached",
+          "clause_kind": "ensures",
+          "clause_line": 124,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Call to 'conjunction_of_four': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "handover_authorised"
+          ],
+          "atom": "quorum_reached",
+          "clause_kind": "ensures",
+          "clause_line": 125,
+          "clause_text": "ensures: result == 0 || approvals >= required;",
+          "diagnostic": "Spurious counterexample detected for atom 'handover_authorised'. Spurious counterexample candidate for atom 'handover_authorised'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "proposal_authorised"
+          ],
+          "atom": "recipient_distinct",
+          "clause_kind": "ensures",
+          "clause_line": 99,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Call to 'conjunction': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "stage_acknowledge"
+          ],
+          "atom": "recipient_eligible",
+          "clause_kind": "ensures",
+          "clause_line": 107,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Call to 'conjunction': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "stage_acknowledge"
+          ],
+          "atom": "recipient_eligible",
+          "clause_kind": "ensures",
+          "clause_line": 108,
+          "clause_text": "ensures: result == 0 || recipient_state == 1;",
+          "diagnostic": "Spurious counterexample detected for atom 'stage_acknowledge'. Spurious counterexample candidate for atom 'stage_acknowledge'",
+          "pattern": "counterexample_replay_mismatch"
+        },
+        {
+          "affected_atoms": [
+            "phase_hand_over"
+          ],
+          "atom": "settled_deposit",
+          "clause_kind": "ensures",
+          "clause_line": 228,
+          "clause_text": "ensures: result >= 0;",
+          "diagnostic": "Call to 'stage_record': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "phase_hand_over"
+          ],
+          "atom": "settled_deposit",
+          "clause_kind": "ensures",
+          "clause_line": 229,
+          "clause_text": "ensures: result <= escrow_balance;",
+          "diagnostic": "Call to 'stage_record': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "phase_initiate"
+          ],
+          "atom": "stage_acknowledge",
+          "clause_kind": "effect_post",
+          "clause_line": 267,
+          "clause_text": "effect_post: { Ownership: Acknowledged };",
+          "diagnostic": "Temporal effect violation: effect 'Ownership' has final state 'Proposed' but effect_post declares 'Acknowledged' (block 0)",
+          "pattern": "effect_state_obligation"
+        },
+        {
+          "affected_atoms": [
+            "phase_initiate"
+          ],
+          "atom": "stage_acknowledge",
+          "clause_kind": "ensures",
+          "clause_line": 270,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Postcondition (ensures) is not satisfied.",
+          "pattern": "neighbor_ensures_strengthening"
+        },
+        {
+          "affected_atoms": [
+            "phase_initiate"
+          ],
+          "atom": "stage_acknowledge",
+          "clause_kind": "ensures",
+          "clause_line": 272,
+          "clause_text": "ensures: result == 0 || recipient_state == 1;",
+          "diagnostic": "Postcondition (ensures) is not satisfied.",
+          "pattern": "neighbor_ensures_strengthening"
+        },
+        {
+          "affected_atoms": [
+            "phase_secure"
+          ],
+          "atom": "stage_approve",
+          "clause_kind": "effect_post",
+          "clause_line": 302,
+          "clause_text": "effect_post: { Ownership: Approved };",
+          "diagnostic": "Temporal effect violation: effect 'Ownership' has final state 'Escrowed' but effect_post declares 'Approved' (block 0)",
+          "pattern": "effect_state_obligation"
+        },
+        {
+          "affected_atoms": [
+            "phase_secure"
+          ],
+          "atom": "stage_approve",
+          "clause_kind": "ensures",
+          "clause_line": 309,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Postcondition (ensures) is not satisfied.",
+          "pattern": "neighbor_ensures_strengthening"
+        },
+        {
+          "affected_atoms": [
+            "phase_secure"
+          ],
+          "atom": "stage_approve",
+          "clause_kind": "ensures",
+          "clause_line": 310,
+          "clause_text": "ensures: result == 0 || approvals >= required;",
+          "diagnostic": "Postcondition (ensures) is not satisfied.",
+          "pattern": "neighbor_ensures_strengthening"
+        },
+        {
+          "affected_atoms": [
+            "phase_hand_over"
+          ],
+          "atom": "stage_close",
+          "clause_kind": "effect_post",
+          "clause_line": 358,
+          "clause_text": "effect_post: { Ownership: Idle };",
+          "diagnostic": "Temporal effect violation: effect 'Ownership' has final state 'Recorded' but effect_post declares 'Idle' (block 0)",
+          "pattern": "effect_state_obligation"
+        },
+        {
+          "affected_atoms": [
+            "phase_hand_over"
+          ],
+          "atom": "stage_close",
+          "clause_kind": "ensures",
+          "clause_line": 361,
+          "clause_text": "ensures: result == remaining_escrow;",
+          "diagnostic": "Postcondition (ensures) is not satisfied.",
+          "pattern": "neighbor_ensures_strengthening"
+        },
+        {
+          "affected_atoms": [
+            "phase_dispute_and_resolve"
+          ],
+          "atom": "stage_dispute",
+          "clause_kind": "effect_post",
+          "clause_line": 382,
+          "clause_text": "effect_post: { Ownership: Disputed };",
+          "diagnostic": "Temporal effect violation (InvalidPreState): 'Ownership' operation 'call stage_resolve' requires state 'Disputed' but current state is 'Escrowed' (block 0)",
+          "pattern": "effect_state_obligation"
+        },
+        {
+          "affected_atoms": [
+            "phase_dispute_and_resolve"
+          ],
+          "atom": "stage_dispute",
+          "clause_kind": "ensures",
+          "clause_line": 385,
+          "clause_text": "ensures: result == open_disputes + 1;",
+          "diagnostic": "Call to 'stage_resolve': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "phase_secure"
+          ],
+          "atom": "stage_escrow",
+          "clause_kind": "effect_post",
+          "clause_line": 281,
+          "clause_text": "effect_post: { Ownership: Escrowed };",
+          "diagnostic": "Temporal effect violation (InvalidPreState): 'Ownership' operation 'call stage_approve' requires state 'Escrowed' but current state is 'Acknowledged' (block 0)",
+          "pattern": "effect_state_obligation"
+        },
+        {
+          "affected_atoms": [
+            "phase_initiate"
+          ],
+          "atom": "stage_propose",
+          "clause_kind": "effect_post",
+          "clause_line": 253,
+          "clause_text": "effect_post: { Ownership: Proposed };",
+          "diagnostic": "Temporal effect violation (InvalidPreState): 'Ownership' operation 'call stage_acknowledge' requires state 'Proposed' but current state is 'Idle' (block 0)",
+          "pattern": "effect_state_obligation"
+        },
+        {
+          "affected_atoms": [
+            "phase_initiate"
+          ],
+          "atom": "stage_propose",
+          "clause_kind": "ensures",
+          "clause_line": 257,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Call to 'stage_acknowledge': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        },
+        {
+          "affected_atoms": [
+            "phase_hand_over"
+          ],
+          "atom": "stage_record",
+          "clause_kind": "effect_post",
+          "clause_line": 342,
+          "clause_text": "effect_post: { Ownership: Recorded };",
+          "diagnostic": "Temporal effect violation (InvalidPreState): 'Ownership' operation 'call stage_close' requires state 'Recorded' but current state is 'Transferred' (block 0)",
+          "pattern": "effect_state_obligation"
+        },
+        {
+          "affected_atoms": [
+            "phase_dispute_and_resolve"
+          ],
+          "atom": "stage_resolve",
+          "clause_kind": "effect_post",
+          "clause_line": 394,
+          "clause_text": "effect_post: { Ownership: Idle };",
+          "diagnostic": "Temporal effect violation: effect 'Ownership' has final state 'Disputed' but effect_post declares 'Idle' (block 0)",
+          "pattern": "effect_state_obligation"
+        },
+        {
+          "affected_atoms": [
+            "phase_dispute_and_resolve"
+          ],
+          "atom": "stage_resolve",
+          "clause_kind": "ensures",
+          "clause_line": 397,
+          "clause_text": "ensures: result == open_disputes - 1;",
+          "diagnostic": "Postcondition (ensures) is not satisfied.",
+          "pattern": "neighbor_ensures_strengthening"
+        },
+        {
+          "affected_atoms": [
+            "phase_hand_over"
+          ],
+          "atom": "stage_transfer",
+          "clause_kind": "effect_post",
+          "clause_line": 327,
+          "clause_text": "effect_post: { Ownership: Transferred };",
+          "diagnostic": "Temporal effect violation (InvalidPreState): 'Ownership' operation 'call stage_record' requires state 'Transferred' but current state is 'Approved' (block 0)",
+          "pattern": "effect_state_obligation"
+        },
+        {
+          "affected_atoms": [
+            "handover_authorised"
+          ],
+          "atom": "timelock_elapsed",
+          "clause_kind": "ensures",
+          "clause_line": 133,
+          "clause_text": "ensures: result >= 0 && result <= 1;",
+          "diagnostic": "Call to 'conjunction_of_four': precondition (requires) not satisfied at call site",
+          "pattern": "call_site_precondition"
+        }
+      ],
+      "case": "ownership_transfer_scale",
+      "composition_breaks": 54,
+      "max_dependency_depth": 6,
+      "probed_clauses": 214,
+      "source": "ownership_transfer_scale/correct_code.mm",
+      "top_level_atoms": [
+        "floor_zero",
+        "phase_dispute_and_resolve",
+        "stage_cancel",
+        "transfer_fee",
+        "two_handover_cycles"
+      ],
+      "unconstrained_clauses": 99,
+      "wall_clock_seconds": 226.79,
+      "whole_system_invariants_closed": 5,
+      "whole_system_invariants_neighbor_dependent": 2
+    }
+  ],
+  "clause_kinds": [
+    "effect_post",
+    "effect_pre",
+    "ensures",
+    "requires"
+  ],
+  "generated_by": "scripts/measure_composability.py",
+  "modular_verification_inputs": {
+    "call_site_precondition": {
+      "compiler_surface": "call-site `requires` propagation",
+      "count": 86,
+      "examples": [
+        "medical_device_scale:all_of_two:ensures@122",
+        "medical_device_scale:battery_sufficient:ensures@99",
+        "medical_device_scale:binding_capacity:ensures@194",
+        "medical_device_scale:calibration_fresh:ensures@92",
+        "medical_device_scale:day_capacity:ensures@178"
+      ]
+    },
+    "counterexample_replay_mismatch": {
+      "compiler_surface": "Z3 translation / Lean escalation path",
+      "count": 86,
+      "examples": [
+        "medical_device_scale:all_of_three:ensures@130",
+        "medical_device_scale:binding_capacity:ensures@195",
+        "medical_device_scale:binding_capacity:ensures@196",
+        "medical_device_scale:cap_at:ensures@47",
+        "medical_device_scale:cap_at:ensures@48"
+      ]
+    },
+    "effect_state_obligation": {
+      "compiler_surface": "`effect_pre` / `effect_post` state chaining (Plan 24)",
+      "count": 58,
+      "examples": [
+        "medical_device_scale:phase_close:effect_post@469",
+        "medical_device_scale:phase_commit:effect_post@453",
+        "medical_device_scale:phase_plan:effect_post@423",
+        "medical_device_scale:phase_prepare:effect_post@396",
+        "medical_device_scale:stage_arm_interlock:effect_post@331"
+      ]
+    },
+    "neighbor_ensures_strengthening": {
+      "compiler_surface": "value contracts (`ensures`) of called atoms",
+      "count": 47,
+      "examples": [
+        "medical_device_scale:phase_close:ensures@471",
+        "medical_device_scale:phase_close:ensures@472",
+        "medical_device_scale:stage_arm_interlock:ensures@335",
+        "medical_device_scale:stage_check_limits:ensures@320",
+        "medical_device_scale:stage_deliver:ensures@349"
+      ]
+    }
+  },
+  "schema": "mumei.composability.v1",
+  "totals": {
+    "atom_count": 172,
+    "atom_local_closure_ratio": 0.4945,
+    "atom_local_obligations": 271,
+    "composition_breaks": 277,
+    "probed_clauses": 1014,
+    "unconstrained_clauses": 466,
+    "whole_system_invariants": 16,
+    "whole_system_invariants_closed": 16,
+    "whole_system_invariants_neighbor_dependent": 9
+  }
+}
