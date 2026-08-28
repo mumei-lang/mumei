@@ -1430,13 +1430,13 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
             Token::Requires => {
                 ctx.advance();
                 ctx.expect(Token::Colon);
-                requires_raw = collect_until_semicolon(ctx);
+                requires_raw = conjoin_clause(&requires_raw, &collect_until_semicolon(ctx));
                 ctx.expect(Token::Semicolon);
             }
             Token::Ensures => {
                 ctx.advance();
                 ctx.expect(Token::Colon);
-                ensures = collect_until_semicolon(ctx);
+                ensures = conjoin_clause(&ensures, &collect_until_semicolon(ctx));
                 ctx.expect(Token::Semicolon);
             }
             Token::Body => {
@@ -1625,6 +1625,28 @@ fn parse_effect_state_map(ctx: &mut ParseContext) -> std::collections::HashMap<S
 // =============================================================================
 // String-based helpers for trait/law/contract parsing
 // =============================================================================
+
+/// Conjoin repeated `requires:` / `ensures:` clauses of one atom.
+///
+/// A clause list such as
+/// ```text
+/// requires: a >= 0;
+/// requires: a <= 10;
+/// ```
+/// denotes the conjunction of every clause; the trailing clause alone is not
+/// the contract. The default `"true"` seed is absorbed instead of being
+/// conjoined so single-clause atoms keep their verbatim contract text.
+fn conjoin_clause(existing: &str, addition: &str) -> String {
+    let existing = existing.trim();
+    let addition = addition.trim();
+    if addition.is_empty() || addition == "true" {
+        return existing.to_string();
+    }
+    if existing.is_empty() || existing == "true" {
+        return addition.to_string();
+    }
+    format!("({existing}) && ({addition})")
+}
 
 fn parse_contract_clauses(clauses: &str) -> (Option<String>, Option<String>) {
     let mut fn_req: Option<String> = None;

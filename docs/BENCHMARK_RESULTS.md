@@ -590,3 +590,52 @@ the automatic tactic search discharged.
 | loop_invariant.mm | 1 | 0 | PASS | PASS | yes | 0.067s | SKIP | 0 | 0 | 0 |
 
 </details>
+
+## Scale Composability Run — 2026-08-28 (Priority 16)
+
+Measured outside the benchmark harness by `scripts/measure_composability.py`
+and `scripts/scale_trust_surface.py` over the five `*_scale` scenarios in
+`mumei-lang/mumei-demo` (`make demo-scale`). Artifacts:
+`benchmarks/composability/scale_composability.json` and
+`benchmarks/composability/scale_trust_surface.json`.
+`budget_policy_fingerprint`: `sha256:scale-default`.
+
+### Scale and Trust Surface
+
+| Case | Atoms | Depth | Certified | `verify-cert --strict` | App trusted | FFI | Z3 unknown → Lean | Z3 solver (s) |
+|------|------:|------:|----------:|:----------------------:|------------:|----:|------------------:|--------------:|
+| medical_device_scale | 34 | 7 | 34 | PASS | 0 | 0 | 0 | 2.391 |
+| rtgs_settlement_scale | 30 | 5 | 30 | PASS | 0 | 0 | 0 | 1.317 |
+| regtech_compliance_scale | 41 | 7 | 41 | PASS | 0 | 0 | 0 | 2.105 |
+| defi_invariant_scale | 32 | 5 | 32 | PASS | 0 | 0 | 0 | 1.987 |
+| ownership_transfer_scale | 35 | 6 | 35 | PASS | 0 | 0 | 0 | 1.970 |
+| **total** | 172 | — | 172 | 5/5 | 0 | 0 | 0 | 9.77 |
+
+`std/` trusted atoms remain 0 of 344.
+
+### Atom-Local Composability (clause ablation)
+
+Each `requires` / `ensures` / `effect_pre` / `effect_post` clause is removed in
+turn and the case re-verified. A clause is *atom-local* when only its owning
+atom fails, a *composition break* when a neighbouring atom fails too.
+
+| Case | Probed clauses | Atom-local | Composition breaks | Slack | Closure ratio | Whole-system invariants | Neighbour-dependent |
+|------|---------------:|-----------:|-------------------:|------:|--------------:|------------------------:|--------------------:|
+| medical_device_scale | 196 | 62 | 62 | 72 | 0.5000 | 3 | 2 |
+| rtgs_settlement_scale | 187 | 44 | 47 | 96 | 0.4835 | 4 | 3 |
+| regtech_compliance_scale | 227 | 64 | 66 | 97 | 0.4923 | 2 | 1 |
+| defi_invariant_scale | 190 | 40 | 48 | 102 | 0.4545 | 2 | 1 |
+| ownership_transfer_scale | 214 | 61 | 54 | 99 | 0.5304 | 5 | 2 |
+| **total** | 1014 | 271 | 277 | 466 | **0.4945** | 16 | 9 |
+
+All 16 whole-system invariants close from declared atom contracts alone; 9 of
+them stop closing if a neighbouring atom's contract is weakened.
+
+### Composition-Break Patterns (modular verification inputs)
+
+| Pattern | Count | Compiler surface |
+|---------|------:|------------------|
+| `call_site_precondition` | 86 | call-site `requires` propagation |
+| `counterexample_replay_mismatch` | 86 | Z3 translation / Lean escalation path |
+| `effect_state_obligation` | 58 | `effect_pre` / `effect_post` state chaining (Plan 24) |
+| `neighbor_ensures_strengthening` | 47 | value contracts (`ensures`) of called atoms |

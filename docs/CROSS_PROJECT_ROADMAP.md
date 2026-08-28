@@ -917,6 +917,7 @@ audit / migration / self-healing / MCP の 1 コマンド導線を提供する�
 | ✅ | vStd crypto primitives forge | mumei + mumei-agent | Complete (`std/crypto/primitives.mm`; Z3 decidable fragment; Lean escalation 不要) |
 | ✅ | vStd core guards forge | mumei + mumei-agent | Complete (`std/core_guards.mm`; deterministic bodies; Z3 decidable fragment; Lean escalation 不要) |
 | ✅ | 多言語 no-`.mm` 監査の回帰固定 | mumei-agent | Implemented (Rust/TypeScript/Go Z3 counterexamples normalize to `verification_violations`) |
+| ✅ | Priority 16: 大規模ケースでの atom-local proof obligation 合成性検証 | mumei + mumei-demo + mumei-agent | Implemented (5 scale シナリオ / 172 atoms / 依存深さ 5–7、1014 clause の ablation で `atom_local_closure_ratio` 0.4945、合成の破れ 277 本を `call_site_precondition` 86 / `counterexample_replay_mismatch` 86 / `effect_state_obligation` 58 / `neighbor_ensures_strengthening` 47 に分類。全 172 atom の certificate が `verify-cert --strict` 5/5 通過、`std/` trusted atom は 0 のまま、アプリ trusted atom 0 / FFI 境界 0 / Lean escalation 0、Z3 solver 9.77s、`budget_policy_fingerprint: sha256:scale-default`。報告は既存の `verification_status` / `verification_violations` / `next_steps` のみ) |
 | ⏸️ | SI-4: no_std Ecosystem | mumei | Deferred |
 
 ## vStd: Verified Standard Library Expansion
@@ -1707,7 +1708,7 @@ graph LR
 
 ---
 
-## Priority 16: 大規模・安全性クリティカル領域での atom-local proof obligation 合成性検証 — 🔭 Planned (future)
+## Priority 16: 大規模・安全性クリティカル領域での atom-local proof obligation 合成性検証 — ✅ Implemented
 
 **Repository**: `mumei-lang/mumei`（std / certificate 側） / `mumei-lang/mumei-demo`（`main`、シナリオ拡張） / `mumei-lang/mumei-agent`（監査・自己修復の実行側）
 
@@ -1724,9 +1725,20 @@ graph LR
    - Z3 solver 時間と Lean escalation 件数のスケール特性（`budget_policy_fingerprint` 付きで記録）
 4. **デモへの反映** — 拡張候補として `mumei-demo`（`mumei-lang/mumei-demo`、ブランチ `main`）の scenario 群を大規模ケースへ拡張する。既存の fixture モード（決定的 CI 実行）を壊さず、大規模ケースは別 target として追加する。
 
+**実装結果**（2026-08-28、`budget_policy_fingerprint: sha256:scale-default`）:
+
+1. ✅ **大規模ケース** — `mumei-demo/scenarios/` に 5 つの scale シナリオを追加（合計 172 atoms、依存グラフ深さ 5–7、各ケース 8 状態の effect 状態機械）。既存シナリオ比で概ね一桁増: `medical_device_scale` 34 atoms / depth 7（`InsulinPump`: Idle → SelfTested → SensorsValidated → ProfileLoaded → DoseComputed → LimitsChecked → InterlockArmed → Delivered）、`rtgs_settlement_scale` 30 / 5（`Settlement`、予約→ネッティング→ポスティング→ファイナリティ→照合の残高保存連鎖）、`regtech_compliance_scale` 41 / 7（`ComplianceReview`、12 規則 × 5 規則群の組合せ）、`defi_invariant_scale` 32 / 5（`Vault`、再入ガードと share/reserve 所有権移転）、`ownership_transfer_scale` 35 / 6（`Ownership`、quorum / timelock / escrow / dispute）。すべて Z3 で全 atom 検証済み。
+2. ✅ **合成性の測定** — `scripts/measure_composability.py` が clause ablation（`requires` / `ensures` / `effect_pre` / `effect_post` を 1 本ずつ落として再検証）で 1014 clause を probe し、`benchmarks/composability/scale_composability.json` に記録した。所有 atom だけが落ちる=atom-local 271 本、他 atom が落ちる=合成の破れ 277 本（`atom_local_closure_ratio` 0.4945）、どこも落ちない slack 466 本。top-level（whole-system）不変条件は 16 本すべてが宣言済み atom 契約のみで閉じ、そのうち 9 本は隣接 atom の契約を弱めると閉じなくなる。破れは `modular_verification_inputs` として compiler surface 別に分類: `call_site_precondition` 86、`counterexample_replay_mismatch` 86（隣接契約を弱めたとき Z3 model と body replay が食い違う=翻訳 / Lean escalation 側の面）、`effect_state_obligation` 58（Plan 24 の `effect_pre` / `effect_post` 連鎖）、`neighbor_ensures_strengthening` 47。
+3. ✅ **スケール時のメトリクス** — `scripts/scale_trust_surface.py` が `benchmarks/composability/scale_trust_surface.json` を生成: 172 atom すべてに proof certificate が出て `mumei verify-cert --strict` が 5/5 通過（0 changed / 0 unproven / 0 missing）、`std/` trusted atom は 344 atom 中 **0 のまま**、アプリ側 trusted atom 0、FFI 境界 0、Z3 unknown → Lean escalation 0、Z3 solver 時間は 5 ケース合計 9.77s（最大は 34 atom の `medical_device_scale` で 2.39s）。詳細は `docs/TRUSTED_ATOMS.md` / `docs/STDLIB_METRICS.md` / `docs/BENCHMARK_RESULTS.md`。
+4. ✅ **デモへの反映** — `mumei-demo` の Makefile に `SCALE_SCENARIOS` と `make demo-scale` / `make demo-{medical,settlement,regtech,defi,ownership}-scale` を**別 target**として追加。既存 `SCENARIOS` は不変で、決定的 fixture モード（`make demo-ci`）の対象は変わらない。
+5. ✅ **mumei-agent 追従** — `python -m agent scale-report` が composability / trust-surface artifact を読み、合成の破れを既存の `verification_violations` に、compiler surface 別の改善入力を既存の `next_steps` に載せて報告する。verdict は既存の `verified` / `refuted` / `unverifiable` のみで、certificate strict 失敗と `std/` trusted atom 回帰だけが `refuted` を立てる。
+
 **契約への影響**: なし。報告経路は既存の `verification_status` / `verification_violations` / `next_steps` と proof certificate をそのまま使う。新しい verdict 分類や別名は追加しない。
 
 **関連ファイル**:
+- `scripts/measure_composability.py` / `scripts/scale_trust_surface.py` — 合成性 ablation と scale trust surface の測定
+- `benchmarks/composability/scale_composability.json` / `benchmarks/composability/scale_trust_surface.json` — 測定 artifact
+- `mumei-agent/agent/scale_report.py` — 既存 8 固定キーでの報告
 - `mumei-core/src/proof_cert.rs` — proof certificate スキーマと `BudgetPolicy`
 - `scripts/generate_stdlib_metrics.py` / `docs/TRUSTED_ATOMS.md` — trusted atom 数と trust surface のメトリクス
 - `.github/workflows/generate-std-certs.yml` — certificate 再生成と `--strict` ゲート
