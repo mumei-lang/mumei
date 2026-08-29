@@ -70,13 +70,10 @@ pub fn classify_trust_boundaries(
         kinds.push(TrustBoundaryKind::TrustedAtom);
     }
 
-    let bare_name = atom.name.rsplit("::").next().unwrap_or(&atom.name);
-    let is_extern = extern_blocks.iter().any(|block| {
-        block
-            .functions
-            .iter()
-            .any(|f| f.name == atom.name || f.name == bare_name)
-    });
+    let is_extern = extern_blocks
+        .iter()
+        .flat_map(|block| block.functions.iter())
+        .any(|f| f.name == atom.name || is_alias_of_extern(atom, f));
     if is_extern {
         kinds.push(TrustBoundaryKind::ExternBoundary);
     }
@@ -86,6 +83,25 @@ pub fn classify_trust_boundaries(
     }
 
     kinds
+}
+
+/// Whether a namespaced atom is the alias registration of `ext_fn`.
+///
+/// Importing an `extern` block under an alias registers the atom a second time
+/// as `alias::name` (see `resolver::imports`), so the alias must be recognised
+/// as the same FFI boundary. A verified method that merely ends in the same
+/// segment (`Device::read` next to `extern fn read`) must not: it is matched
+/// against the shape [`extern_fn_as_trusted_atom`] produces — assumed contract,
+/// no body, identical signature.
+fn is_alias_of_extern(atom: &Atom, ext_fn: &ExternFn) -> bool {
+    let Some(prefix) = atom.name.strip_suffix(ext_fn.name.as_str()) else {
+        return false;
+    };
+    prefix.ends_with("::")
+        && atom.trust_level == TrustLevel::Trusted
+        && atom.body_expr.trim().is_empty()
+        && atom.params.len() == ext_fn.param_types.len()
+        && atom.return_type.as_deref() == Some(ext_fn.return_type.as_str())
 }
 
 /// Whether an atom needs a runtime monitor at all.
@@ -217,6 +233,28 @@ mod tests {
             classify_trust_boundaries(&atom("native_hash"), &blocks),
             vec![TrustBoundaryKind::ExternBoundary]
         );
+    }
+
+    #[test]
+    fn an_alias_of_an_extern_atom_is_a_boundary() {
+        let blocks = vec![extern_block("native_hash")];
+        let mut a = atom("ffi::native_hash");
+        a.trust_level = TrustLevel::Trusted;
+        a.body_expr = String::new();
+        a.return_type = Some("i64".to_string());
+        assert_eq!(
+            classify_trust_boundaries(&a, &blocks),
+            vec![
+                TrustBoundaryKind::TrustedAtom,
+                TrustBoundaryKind::ExternBoundary
+            ]
+        );
+    }
+
+    #[test]
+    fn a_verified_method_sharing_an_extern_name_is_not_a_boundary() {
+        let blocks = vec![extern_block("read")];
+        assert!(classify_trust_boundaries(&atom("Device::read"), &blocks).is_empty());
     }
 
     #[test]

@@ -230,6 +230,76 @@ fn main() {{
     );
 }
 
+/// The effect-state probe is host code too: a panicking probe must be contained
+/// like a panicking hook, leaving the `effect_pre` state unobservable.
+#[test]
+fn a_panicking_effect_state_probe_does_not_escape_the_monitor() {
+    let (dir, log) = build_monitor(
+        "probe_panic",
+        "tests/fixtures/runtime_monitor/effect_pre_boundary.mm",
+    );
+    let files = monitor_files(&dir);
+    assert_eq!(files.len(), 1, "expected one monitor artifact\n{log}");
+    let monitor = std::fs::read_to_string(&files[0]).expect("read monitor");
+
+    let host = format!(
+        r#"{monitor}
+
+mod host_impl {{
+    #[no_mangle]
+    pub extern "C" fn sensor_begin(channel: i64) -> i64 {{
+        channel
+    }}
+}}
+
+fn panicking_probe(_effect: &str) -> Option<String> {{
+    panic!("probe is broken");
+}}
+
+fn main() {{
+    mumei_monitor::set_effect_state_probe(panicking_probe).expect("install probe");
+    let result = sensor_begin_monitored(1);
+    println!("survived={{result}}");
+}}
+"#
+    );
+    let host_path = dir.join("probe_panic_host.rs");
+    std::fs::write(&host_path, host).expect("write host program");
+
+    let bin_path = dir.join("probe_panic_host");
+    let compile = Command::new("rustc")
+        .arg("--edition")
+        .arg("2021")
+        .arg("--crate-name")
+        .arg("probe_panic_host")
+        .arg(&host_path)
+        .arg("-o")
+        .arg(&bin_path)
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run rustc: {err}"));
+    assert!(
+        compile.status.success(),
+        "generated monitor did not compile\n{}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+
+    let run = Command::new(&bin_path)
+        .env("OTEL_ENABLED", "1")
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run host program: {err}"));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        run.status.success(),
+        "probe panic escaped the monitor\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(stdout.contains("survived=1"), "stdout:\n{stdout}");
+    assert!(
+        stderr.contains("mumei.monitor.probe_panicked effect=SensorChannel"),
+        "stderr:\n{stderr}"
+    );
+}
+
 #[test]
 fn proven_pure_atom_is_zero_cost() {
     let (dir, log) = build_monitor("pure", "tests/fixtures/runtime_monitor/pure_proven.mm");

@@ -69,8 +69,19 @@ pub mod mumei_monitor {
     }
 
     /// The host's current state for `effect`, or `None` when untracked.
+    ///
+    /// A faulty probe must not unwind through monitored code, so a panicking
+    /// probe is treated as "state unobservable".
     pub fn observed_effect_state(effect: &str) -> Option<String> {
-        PROBE.get().and_then(|probe| probe(effect))
+        PROBE.get().and_then(|probe| {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| probe(effect))) {
+                Ok(state) => state,
+                Err(_) => {
+                    eprintln!("mumei.monitor.probe_panicked effect={}", effect);
+                    None
+                }
+            }
+        })
     }
 
     /// `true` when `OTEL_ENABLED` is truthy; otherwise monitors are no-ops.

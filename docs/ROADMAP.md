@@ -1977,12 +1977,12 @@ jq '.session_analysis_skips' ./report/cross_spec.json
 
 - **信頼境界の分類**（`mumei-core/src/trust_boundary.rs`、新規）: 既存の判定基準を再利用して 3 種類に分類する。
   - `trusted_atom`: `trust_level: trusted`（`mcp_server.py` の `visualize_std_graph` が黄色ノードとして描く判定と同一）。契約は証明ではなく仮定。
-  - `extern_ffi`: `extern` 宣言に裏打ちされ、検証器が本体を見ていない。
+  - `extern_ffi`: `extern` 宣言に裏打ちされ、検証器が本体を見ていない。名前空間付き atom は「末尾セグメントが一致する」だけでは境界とみなさず、`extern_fn_as_trusted_atom` が生成する形（契約が仮定・本体なし・同一シグネチャ）に一致する alias 登録のみを同一境界として扱う（`extern fn read` と検証済み `Device::read` を混同しない）。
   - `effect_pre_override`: `effect_pre` で effect state machine の初期状態を上書きしており、呼び出し側の状態を仮定している。
   - いずれにも該当しない atom（完全に証明された純粋 atom）は **成果物を 1 バイトも生成しない**。
   - `extern` 宣言は本体を持たないため atom としてのコンパイル対象にならないが、`--emit runtime-monitor` では `trust_boundary::extern_fn_as_trusted_atom`（resolver と共用）で trusted atom に変換して 1 関数に 1 モニタを生成する（同名の通常 atom がある場合や alias 経由の重複は 1 件に集約）。
 - **`mumei-emit-monitor`**（新規クレート、`--emit runtime-monitor`）: 信頼境界 atom に対してのみ `<出力名>_<atom>.monitor.rs` を生成する。生成コードは `requires` / `ensures` を実行時に評価し、違反時に **panic せず** OTel イベントとして記録する。実行時条件として生成するのは識別子・整数リテラル・比較 / 算術 / 論理演算子・括弧からなる式に限り（`forall` などの mumei 固有構文やブロック・文・パスを含む契約は生成対象外としてコメントを残す）、契約テキストが生成 Rust にそのまま流れ込まないようにする。生成対象外の契約はコメントを残すだけでなく、`contract: "requires_unchecked"` / `"ensures_unchecked"` として報告し、**監視されていない境界契約がテレメトリ上で可視化される**ようにする（契約テキスト自体は生成物に含めない）。生成対象の式でも除算ゼロや debug ビルドの整数オーバーフローで fault し得るため、評価は `mumei_monitor::check` の panic 境界内で行い、失敗した評価は `observed = "evaluation panicked"` として報告する（monitored 呼び出しを巻き戻さない）。
-- **`effect_pre` の実行時観測**: effect 状態はコンパイラから観測できないため、ホストが `mumei_monitor::set_effect_state_probe(...)` で「現在の effect 状態を返す probe」を登録した場合にのみ、宣言された `effect_pre` 状態と実測値を比較し、不一致を `contract: "effect_pre"` として報告する（`observed` に実測状態を添付）。probe 未登録時は状態が観測不能なため何も報告しない。
+- **`effect_pre` の実行時観測**: effect 状態はコンパイラから観測できないため、ホストが `mumei_monitor::set_effect_state_probe(...)` で「現在の effect 状態を返す probe」を登録した場合にのみ、宣言された `effect_pre` 状態と実測値を比較し、不一致を `contract: "effect_pre"` として報告する（`observed` に実測状態を添付）。probe 未登録時は状態が観測不能なため何も報告しない。probe もホストコードであるため panic は `catch_unwind` で封じ込め、状態観測不能として扱う（`mumei.monitor.probe_panicked` を stderr に記録）。
 - **ゼロコスト維持**: 生成コード自体が依存クレートを持たない（`std` のみ）。報告は `mumei_monitor::set_violation_hook` でホストアプリの OTel SDK に接続する形で、`OTEL_ENABLED` が truthy でない限り評価も報告も行わない NoOp。hook 未設定時は `OTEL_EXPORTER_OTLP_ENDPOINT`（既定 `http://localhost:4318`）を明示した stderr フォールバック。 ホストの hook が panic した場合も `catch_unwind` で封じ込め、監視対象コードを巻き戻さない（`mumei.monitor.hook_panicked` を stderr に記録）。コンパイラ本体は `otel` feature 無効時に OTel 依存を一切引き込まない（P15 のゼロコスト回帰ゲートを踏襲）。
 
 ### 対象ファイル
