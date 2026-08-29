@@ -643,3 +643,105 @@ Machine-readable surfacing:
 - No browser recording is useful for shell-only CLI flows; collect command output and generated JSON instead.
 - Mumei verification commands may emit `cross_spec.json` in the current working directory; delete temporary copies before final `git status`.
 - When comparing verify output between two binaries, always clear `.mumei_cache` / `.mumei_build_cache` / `.mumei` directories before each run — the verification cache causes "skipped (unchanged, cached)" lines that create false diffs.
+
+## Session-type protocol checks (`--cross-spec-files`)
+
+The flows in this section and the two that follow need the P22/P23 Session
+Types and Proof-Aware Observability work (mumei-lang/mumei#499); on a branch
+without it there is no `session_protocol_violations`, no
+`session_analysis_skips`, and no `runtime-monitor` emit target.
+
+Cross-file session protocol violations (`duality_mismatch`,
+`unreachable_receive`, `deadlock_no_progress`) are produced by `mumei verify`
+when the peer files are passed explicitly. `verify` always writes
+`cross_spec.json` — into the current working directory by default, or into
+`--report-dir` when given, which is what keeps runs from clobbering each other:
+
+```bash
+rm -rf .mumei .mumei_cache .mumei_build_cache   # warm caches print "skipped (unchanged, cached)"
+mumei verify --report-dir /tmp/rd \
+  --cross-spec-files protocol.mm,server.mm client.mm
+```
+
+`--cross-spec-files` accepts **comma-separated** paths or repeated flags only.
+Space-separated extra paths become positionals and fail with
+`error: unexpected argument`. The primary file goes last.
+
+Each violation counts as a failure, so `verify` exits nonzero. Three conditions
+silently yield "no violations" and are easy to mistake for a pass: states > 32,
+fewer than 2 roles, or fewer than 2 distinct source files. Single-file protocols
+are intentionally not reported (that is the Temporal Effect Verifier's job), and
+so is a protocol whose peer roles are different atoms in the same file — that is
+what a verified library owning both ends looks like (`std/ownership.mm`).
+
+## Bounded session analysis: skips are reported, not silent
+
+When an effect exceeds a bound the analysis skips it and says so, rather than
+failing open silently. `cross_spec.json` gains `session_analysis_skips[]`
+(`effect`, `reason`, `state_count`, `role_count`, `limit`, `message`) plus
+`summary.session_analysis_skipped_count`, and the CLI prints
+`Warning: session protocol not checked: ...` once per skipped effect.
+
+- `state_limit_exceeded` — `states > MAX_PROTOCOL_NODES` (32); `role_count` is
+  `null` because roles are never collected.
+- `role_limit_exceeded` — `roles > MAX_PROTOCOL_ROLES` (64); `role_count` is
+  populated. To build one, keep states small (e.g. 3) and generate >64 atoms
+  declaring `effect_pre`/`effect_post` for the same effect across two files.
+
+Skips are warnings, never failures: exit stays 0. Genuine violations remain hard
+errors. Skips are deduplicated by **unqualified** effect name, so an effect
+visible both as `Channel` and `protocol::Channel` warns once — but two
+differently-named effects each warn, so don't assume "one warning" in general.
+Two files that both declare `effect Channel` also collapse to one entry in the
+module environment (`effect_defs` is keyed by name), upstream of this dedup.
+
+## Session violations through `mumei build`
+
+`mumei build` has **no** `--report-dir`, `--cross-spec-files`, or
+`--cross-spec-verify` flags — cross-spec verification is manifest-driven
+(`ProofConfig::cross_spec_verify`, default on) and it sees peer files only
+through `import`. `cross_spec.json` lands in the resolved output directory (the
+parent of `--output`), falling back to the working directory, so a build run
+with `--output /tmp/out/out` leaves it at `/tmp/out/cross_spec.json` — don't
+search the repo root for it.
+
+Role collection drops any atom without `source_file` attribution
+(`session_types.rs::collect_roles`). `pipeline.rs::annotate_source_file` covers
+only the primary input, so imported atoms rely on
+`resolver/imports.rs` attributing them to the resolved import path; a fixture
+whose entry file merely `import`s both roles is therefore the way to exercise
+build-path enforcement, and it must exit 1 with
+`❌ Session protocol violation (...)` on stderr. If a build-path run comes back
+"clean", cross-check the same files through `verify --cross-spec-files` before
+believing it — a silently unattributed role looks exactly like a pass.
+
+## Proof-aware runtime monitors (`--emit runtime-monitor`)
+
+```bash
+mumei build fixture.mm --emit runtime-monitor --output /tmp/out/out
+```
+
+Monitors are emitted only for trust-boundary atoms (`trusted` atoms, extern/FFI
+atoms, atoms with `effect_pre`) as `<base>_<atom>.monitor.rs`; proven pure atoms
+must produce no file at all. Note that "not every atom emits a monitor" is a bad
+assertion for files like `std/ownership.mm` where every atom carries
+`effect_pre` — assert the exact expected set instead.
+
+To compile a generated monitor standalone you must pass `--crate-name`, because
+the `<base>_<atom>.monitor.rs` filename contains dots and rustc cannot infer a
+crate name from it:
+
+```bash
+rustc --edition 2021 --crate-type lib -D warnings \
+  --crate-name mon_probe -o /tmp/mon.rlib /tmp/out/out_read_sensor.monitor.rs
+```
+
+To exercise a monitor at runtime, `include!` it inside a `mod` wrapper and
+provide the extern symbol it wraps, otherwise the stub collides with the
+generated function. Behaviour depends on env vars: with `OTEL_ENABLED` unset the
+monitor is a true no-op (zero bytes on stderr); with `OTEL_ENABLED=true`
+violations are reported via hook/stderr and it never panics.
+`OTEL_EXPORTER_OTLP_ENDPOINT` defaults to `http://localhost:4318`. `effect_pre`
+violations are only observable after installing
+`mumei_monitor::set_effect_state_probe(...)`; without a probe the state is
+unobservable and nothing is reported.
