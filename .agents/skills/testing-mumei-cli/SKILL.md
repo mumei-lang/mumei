@@ -211,8 +211,11 @@ LLVM_SYS_170_PREFIX=/usr/lib/llvm-17 LIBCLANG_PATH=/usr/lib/x86_64-linux-gnu \
   tests/fixtures/session_types/order_client.mm
 ```
 
-- Extra `.mm` files go **after** `--cross-spec-files` (comma- or space-separated);
-  the **primary** file must come **last** as the positional argument.
+- Extra `.mm` files go **after** `--cross-spec-files`, **comma-separated only**
+  (`--cross-spec-files a.mm,b.mm`, or one `--cross-spec-files` per file). Space
+  separation does not work: the second path is parsed as a positional argument
+  and `mumei verify` fails with `error: unexpected argument`.
+- The **primary** file must come **last** as the positional argument.
 - `--report-dir` is what makes `cross_spec.json` appear. Without it there is no
   machine-checkable output.
 - Results live in `cross_spec.json` under `session_protocol_violations` and
@@ -230,9 +233,13 @@ Violation kinds and the conditions that trigger them (useful for writing fixture
 Gotchas that silently produce "no violations" (verify these before calling a
 detector broken, and before calling a clean run a real pass):
 - The effect is skipped entirely when it has more than `MAX_PROTOCOL_NODES` (32)
-  states, fewer than 2 roles, or roles spanning fewer than 2 files. A >32-state
-  protocol gets **no** session checking at all — expected-by-design, but it means
-  genuine violations in large protocols are suppressed.
+  states, more than `MAX_PROTOCOL_ROLES` (64) roles, fewer than 2 roles, or roles
+  spanning fewer than 2 files. A >32-state protocol gets **no** session checking
+  at all — expected-by-design, but it means genuine violations in large protocols
+  are suppressed. Limit-based skips are visible: check
+  `session_analysis_skips[]` / `summary.session_analysis_skipped_count` in
+  `cross_spec.json` and the `Warning: session protocol not checked: ...` CLI
+  line (role/file-count skips are not reported).
 - Roles whose atom has no source-file attribution are skipped.
 - Single-file protocols are intentionally never reported here; temporal behavior
   inside one file is the Temporal Effect Verifier's job.
