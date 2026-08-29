@@ -483,7 +483,12 @@ pub(crate) fn resolve_imports_recursive(
             resolve_imports_recursive(&imported_items, import_base_dir, ctx, cache, module_env)?;
             // インポートされたモジュールの定義を ModuleEnv に登録
             let alias_prefix = import_decl.alias.as_deref();
-            register_imported_items(&imported_items, alias_prefix, module_env);
+            register_imported_items_with_source(
+                &imported_items,
+                alias_prefix,
+                module_env,
+                resolved_path.to_str(),
+            );
 
             // P5-C: Check for proof certificate before marking atoms as verified
             let cert_results = verify_import_certificate(
@@ -620,6 +625,23 @@ pub(crate) fn resolve_imports_recursive(
     }
     Ok(())
 }
+/// Attribute an atom to the module file it was loaded from, unless it already
+/// carries an attribution (a re-exported atom keeps its defining file).
+fn with_source_file(atom: &parser::Atom, file: &str) -> parser::Atom {
+    let mut attributed = atom.clone();
+
+    if attributed.span.file.is_empty() {
+        attributed.span.file = file.to_string();
+    }
+
+    attributed
+        .spec_metadata
+        .entry("source_file".to_string())
+        .or_insert_with(|| file.to_string());
+
+    attributed
+}
+
 /// インポートされたモジュールの Item を ModuleEnv に登録する。
 /// alias が指定されている場合、FQN（alias::name）でも登録する。
 pub(crate) fn register_imported_items(
@@ -627,6 +649,25 @@ pub(crate) fn register_imported_items(
     alias: Option<&str>,
     module_env: &mut ModuleEnv,
 ) {
+    register_imported_items_with_source(items, alias, module_env, None);
+}
+
+/// `register_imported_items` variant that attributes the registered atoms to the
+/// module file they were loaded from. Cross-file analyses (Session Types) rely on
+/// `spec_metadata["source_file"]` to tell communicating roles apart.
+pub(crate) fn register_imported_items_with_source(
+    items: &[Item],
+    alias: Option<&str>,
+    module_env: &mut ModuleEnv,
+    source_file: Option<&str>,
+) {
+    let register_atom = |module_env: &mut ModuleEnv, atom: &parser::Atom| {
+        match source_file {
+            Some(file) => module_env.register_atom(&with_source_file(atom, file)),
+            None => module_env.register_atom(atom),
+        };
+    };
+
     for item in items {
         match item {
             Item::TypeDef(refined_type) => {
@@ -646,11 +687,11 @@ pub(crate) fn register_imported_items(
                 }
             }
             Item::Atom(atom) => {
-                module_env.register_atom(atom);
+                register_atom(module_env, atom);
                 if let Some(prefix) = alias {
                     let mut fqn_atom = atom.clone();
                     fqn_atom.name = format!("{}::{}", prefix, atom.name);
-                    module_env.register_atom(&fqn_atom);
+                    register_atom(module_env, &fqn_atom);
                 }
             }
             Item::EnumDef(enum_def) => {
@@ -736,11 +777,11 @@ pub(crate) fn register_imported_items(
                         effect_pre: std::collections::HashMap::new(),
                         effect_post: std::collections::HashMap::new(),
                     };
-                    module_env.register_atom(&atom);
+                    register_atom(module_env, &atom);
                     if let Some(prefix) = alias {
                         let mut fqn_atom = atom.clone();
                         fqn_atom.name = format!("{}::{}", prefix, ext_fn.name);
-                        module_env.register_atom(&fqn_atom);
+                        register_atom(module_env, &fqn_atom);
                     }
                 }
             }
@@ -748,12 +789,12 @@ pub(crate) fn register_imported_items(
                 for method in &impl_block.methods {
                     let mut qualified = method.clone();
                     qualified.name = format!("{}::{}", impl_block.struct_name, method.name);
-                    module_env.register_atom(&qualified);
+                    register_atom(module_env, &qualified);
                     if let Some(prefix) = alias {
                         let mut fqn_atom = method.clone();
                         fqn_atom.name =
                             format!("{}::{}::{}", prefix, impl_block.struct_name, method.name);
-                        module_env.register_atom(&fqn_atom);
+                        register_atom(module_env, &fqn_atom);
                     }
                 }
             }

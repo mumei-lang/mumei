@@ -1915,12 +1915,13 @@ canonical 上位ロードマップは `docs/CROSS_PROJECT_ROADMAP.md` の
 ### 構成
 
 - **`mumei-core/src/cross_spec/session_types.rs`**（新規）: `effect_pre` / `effect_post` を持つ atom を「通信ロール」として抽出し、対象を **2 ファイル以上に分散した stateful effect** に限定した上で 3 種類の違反を検出する。
-  - `duality_mismatch`: 送信側 atom の `effect_post` 状態を `effect_pre` として受ける受信側 atom が**別ファイルに**存在しない（送信に対する受信の欠落）。同一ファイル内の後続 atom はローカルな継続であり、リモートの対向ロールとしては数えない。
+  - `duality_mismatch`: 送信側 atom の `effect_post` 状態を `effect_pre` として受ける受信側 atom が存在しない（送信に対する受信の欠落）。受信側は「送信側とは別の atom」であればよく、同一ファイル内の対向ロールも双対として数える（`std/ownership.mm` のように 1 モジュールがプロトコルの両端を持つ検証済みライブラリを誤検知しないため）。import alias で二重登録された同一 atom は 1 ロールに集約する。
   - `unreachable_receive`: 受信側 atom の `effect_pre` 状態が、initial state からロールグラフを辿って到達可能な状態集合に含まれない（到達不能状態）。互いの状態だけを生成し合う孤立したロール群（島）も到達不能として報告する。
   - `deadlock_no_progress`: 到達可能な状態がすべて他ロールへ制御を渡し、終端（後続遷移を持たない）状態に到達しない（循環待ちによる progress 欠如）。
 - **爆発防止**: `MAX_EFFECT_STATES = 8`（Temporal Effect Verifier）と同じ思想で、`MAX_PROTOCOL_NODES = 32` / `MAX_PROTOCOL_ROLES = 64` / `MAX_PROTOCOL_ITERATIONS = 512` の上限を設ける。上限を超えるプロトコルグラフは解析対象外（違反を報告しない）。ただしこの fail-open な打ち切りは黙って PASS にせず、`session_analysis_skips[]` として明示的に報告する（`reason` は `state_limit_exceeded` / `role_limit_exceeded`、`state_count` / `role_count` / `limit` 付き。import alias 経由で同じ effect が二重に見える場合は 1 件に集約）。判定は Rust 側の抽象解釈（有界 BFS）のみで行い、Z3 は呼ばない。
 - **`mumei-core/src/cross_spec/mod.rs`**: `CrossSpecResult` に `session_protocol_violations: Vec<SessionProtocolViolation>`、`CrossSpecSummary` に `session_protocol_violation_count` を追加。さらに解析を打ち切った effect を `session_analysis_skips: Vec<SessionAnalysisSkip>` / `summary.session_analysis_skipped_count` として出力する（違反ではないため exit code には影響せず、CLI では `Warning: session protocol not checked: ...` として表示）。違反は既存の `contract_consistency[]` と同じ粒度で `caller_atom` / `caller_file` / `callee_atom` / `callee_file` / `protocol_state` / `protocol_path` / 自然言語の `message` / `suggested_fix` を持つ。
 - **hard error 化**: `src/commands/verify.rs` は違反 1 件につき失敗 1 件を計上して非ゼロ終了、`src/commands/build.rs` は cross-spec 検証時に違反があれば exit 1。
+- **import 経由のロール帰属**: ロール抽出は atom の `spec_metadata["source_file"]` でファイルを判定するため、`mumei-core/src/resolver/imports.rs` が import で読み込んだ atom を解決済みパスに帰属させる。これにより `--cross-spec-files` で明示的にファイルを渡す場合だけでなく、`import` で対向ロールに届く通常の `mumei build` / `--cross-spec-verify` 経路でもファイル間検査が働く。
 
 ### 対象ファイル
 
@@ -1932,6 +1933,8 @@ canonical 上位ロードマップは `docs/CROSS_PROJECT_ROADMAP.md` の
 | `tests/fixtures/session_types/order_{protocol,client,server}.mm` | 正常系（双対が成立する分割プロトコル） |
 | `tests/fixtures/session_types/payment_{protocol,client,server}.mm` | 異常系（`ServerWait ⇄ ClientWait` の循環待ち） |
 | `tests/fixtures/session_types/bulk_{protocol,client,server}.mm` | 上限超過系（33 状態 → 解析スキップの報告） |
+| `tests/fixtures/session_types/payment_app.mm` | build 経路（`import` 経由で両ロールに到達する異常系） |
+| `mumei-core/src/resolver/imports.rs` | import した atom への `source_file` 帰属 |
 | `tests/test_session_types.rs` | 正常系 PASS / 異常系 hard error + `cross_spec.json` の assert |
 
 ### 使い方
@@ -1957,8 +1960,10 @@ jq '.session_analysis_skips' ./report/cross_spec.json
 ### CI 回帰ゲート
 
 - `cargo test --test test_session_types`: 正常系が exit 0、異常系が exit 1 かつ `session_protocol_violations[0].kind == "deadlock_no_progress"`、`summary.session_protocol_violation_count` が違反数と一致すること。
+- `cargo test --test test_session_types`: `import` で対向ロールに届く `payment_app.mm` の `mumei build` が exit 1 かつ `cross_spec.json` に `deadlock_no_progress` が出力され、`caller_file` / `callee_file` が import 元の各ファイルに帰属すること。
 - `cargo test --test test_session_types`: 上限超過系が exit 0 かつ `session_analysis_skips[0].reason == "state_limit_exceeded"`、`summary.session_analysis_skipped_count == 1`、CLI に警告が出ること。
 - `cargo test -p mumei-core session_types`: duality / 到達性 / progress / 単一ファイル除外 / 上限超過スキップとその報告・alias 集約のユニットテスト。
+- `cargo test --test ownership_cli`: `std/ownership.mm` を import する `tests/test_ownership.mm` が session 違反ゼロで PASS すること（1 ファイル内に両端を持つプロトコルの誤検知防止）。
 - 既存の cross-spec 回帰（`tests/test_cross_spec.rs`）が壊れないこと（単一ファイル内で閉じた state machine は従来どおり Temporal Effect Verifier の担当で、session 違反を報告しない）。
 
 ---

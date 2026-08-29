@@ -103,6 +103,70 @@ fn oversized_protocol_is_reported_as_skipped() {
 }
 
 #[test]
+fn deadlocking_imported_protocol_fails_the_build() {
+    let bin = env!("CARGO_BIN_EXE_mumei");
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let dir = report_dir("build_deadlock");
+    std::fs::create_dir_all(&dir).expect("create output dir");
+
+    let output = Command::new(bin)
+        .arg("build")
+        .arg("tests/fixtures/session_types/payment_app.mm")
+        .arg("--emit")
+        .arg("rust-wrapper")
+        .arg("--output")
+        .arg(dir.join("out"))
+        .current_dir(manifest_dir)
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run mumei build: {err}"));
+
+    let combined = format!(
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(
+        !output.status.success(),
+        "imported deadlocking protocol must fail the build\n{combined}"
+    );
+    assert!(
+        combined.contains("Session protocol violation (deadlock_no_progress)"),
+        "build must report the session violation\n{combined}"
+    );
+
+    let report_path = dir.join("cross_spec.json");
+    let report = std::fs::read_to_string(&report_path).unwrap_or_else(|err| {
+        panic!(
+            "failed to read {}: {err}\n{combined}",
+            report_path.display()
+        )
+    });
+    let report: Value = serde_json::from_str(&report).expect("valid cross_spec.json");
+
+    let violations = report["session_protocol_violations"]
+        .as_array()
+        .expect("session violation array");
+    assert_eq!(violations.len(), 1, "expected one violation in {report:#}");
+    assert_eq!(violations[0]["kind"], "deadlock_no_progress");
+    assert_eq!(violations[0]["effect"], "PaymentChannel");
+
+    for side in ["caller_file", "callee_file"] {
+        assert!(
+            violations[0][side]
+                .as_str()
+                .expect(side)
+                .ends_with("payment_client.mm")
+                || violations[0][side]
+                    .as_str()
+                    .expect(side)
+                    .ends_with("payment_server.mm"),
+            "imported roles must be attributed to their own file: {report:#}"
+        );
+    }
+}
+
+#[test]
 fn deadlocking_split_file_protocol_is_a_hard_error() {
     let (success, log, report) = run_cross_spec(
         "deadlock",

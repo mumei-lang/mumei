@@ -241,6 +241,17 @@ fn collect_roles(
             post_state,
         });
     }
+    roles.sort_by(|left, right| {
+        // Import aliases register the same atom twice (`x` and `alias::x`); keep
+        // the unqualified name so a role is named the way it is declared.
+        let left_key = (left.atom_name.matches("::").count(), &left.atom_name);
+        let right_key = (right.atom_name.matches("::").count(), &right.atom_name);
+        left_key.cmp(&right_key)
+    });
+
+    let mut seen: BTreeSet<(String, String)> = BTreeSet::new();
+    roles.retain(|role| seen.insert((unqualified(&role.atom_name).to_string(), role.file.clone())));
+
     roles.sort_by(|left, right| left.atom_name.cmp(&right.atom_name));
     roles
 }
@@ -254,13 +265,15 @@ fn check_duality(
     let mut reported: BTreeSet<(&str, &str)> = BTreeSet::new();
 
     for role in roles.iter().filter(|role| role.is_send()) {
-        // The dual receiver has to live in another file: a continuation inside
-        // the sender's own file is local sequencing, not a remote peer, so it
-        // must not hide a missing receiver.
-        let has_remote_receiver = roles
-            .iter()
-            .any(|peer| peer.pre_state == role.post_state && peer.file != role.file);
-        if has_remote_receiver {
+        // The dual receiver has to be a different atom: an atom whose own
+        // 'effect_pre' happens to match its 'effect_post' would otherwise
+        // receive its own message. Peers in the sender's file do count — a
+        // module may host both ends of a protocol it also exposes to others.
+        let has_receiver = roles.iter().any(|peer| {
+            peer.pre_state == role.post_state
+                && unqualified(&peer.atom_name) != unqualified(&role.atom_name)
+        });
+        if has_receiver {
             continue;
         }
         if !has_outgoing_transition(effect_def, &role.post_state) {
@@ -286,9 +299,8 @@ fn check_duality(
             protocol_state: role.post_state.clone(),
             protocol_path: vec![role.pre_state.clone(), role.post_state.clone()],
             message: format!(
-                "Atom '{}' in {} leaves effect '{}' in state '{}', but no atom in another file \
-                 declares 'effect_pre: {{ {}: {} }}': the protocol has no dual receiver for that \
-                 message.",
+                "Atom '{}' in {} leaves effect '{}' in state '{}', but no other atom declares \
+                 'effect_pre: {{ {}: {} }}': the protocol has no dual receiver for that message.",
                 role.atom_name,
                 role.file,
                 effect_name,
@@ -297,9 +309,8 @@ fn check_duality(
                 role.post_state
             ),
             suggested_fix: format!(
-                "Add a receiving atom in the peer file with 'effect_pre: {{ {}: {} }}' \
-                 (performing one of: {}), or make '{}' end the protocol in a state without \
-                 outgoing transitions.",
+                "Add a receiving atom with 'effect_pre: {{ {}: {} }}' (performing one of: {}), \
+                 or make '{}' end the protocol in a state without outgoing transitions.",
                 effect_name,
                 role.post_state,
                 expected.join(", "),
@@ -651,7 +662,7 @@ mod tests {
     }
 
     #[test]
-    fn local_continuation_does_not_satisfy_duality() {
+    fn a_peer_in_the_senders_own_file_satisfies_duality() {
         let effect_def = effect(
             &["Idle", "Sent", "Answered", "Done"],
             &[
@@ -660,19 +671,40 @@ mod tests {
                 ("close", "Answered", "Done"),
             ],
         );
-        // 'client_answer' continues in the sender's own file, so the remote peer
-        // is still missing even though some role consumes 'Sent'.
+        // 'client_answer' consumes 'Sent' from the sender's own file, which is
+        // how a verified library hosting both ends of a protocol looks.
         let atoms = vec![
             role_atom("client_send", "client.mm", Some("Idle"), Some("Sent")),
             role_atom("client_answer", "client.mm", Some("Sent"), Some("Answered")),
             role_atom("server_close", "server.mm", Some("Answered"), Some("Done")),
         ];
-        let violation = run(&effect_def, &atoms)
+        assert!(run(&effect_def, &atoms).is_empty());
+    }
+
+    #[test]
+    fn import_aliases_of_the_same_atom_collapse_into_one_role() {
+        let effect_def = effect(
+            &["Idle", "Sent", "Answered"],
+            &[("send", "Idle", "Sent"), ("answer", "Sent", "Answered")],
+        );
+        // 'dep::client_send' is the same atom registered under an import alias,
+        // so it must neither double-count nor stand in for the missing receiver.
+        let atoms = vec![
+            role_atom("client_send", "client.mm", Some("Idle"), Some("Sent")),
+            role_atom("dep::client_send", "client.mm", Some("Idle"), Some("Sent")),
+            role_atom("server_idle", "server.mm", Some("Idle"), None),
+        ];
+        let violations: Vec<SessionProtocolViolation> = run(&effect_def, &atoms)
             .into_iter()
-            .find(|violation| violation.kind == KIND_DUALITY_MISMATCH)
-            .expect("duality mismatch reported");
-        assert_eq!(violation.caller_atom, "client_send");
-        assert_eq!(violation.protocol_state, "Sent");
+            .filter(|violation| violation.kind == KIND_DUALITY_MISMATCH)
+            .collect();
+        assert_eq!(
+            violations.len(),
+            1,
+            "expected one mismatch in {violations:#?}"
+        );
+        assert_eq!(violations[0].caller_atom, "client_send");
+        assert_eq!(violations[0].protocol_state, "Sent");
     }
 
     #[test]
