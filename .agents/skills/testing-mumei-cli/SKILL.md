@@ -521,10 +521,16 @@ Machine-readable surfacing:
 
 ## Session-type protocol checks (`--cross-spec-files`)
 
+The flows in this section and the two that follow need the P22/P23 Session
+Types and Proof-Aware Observability work (mumei-lang/mumei#499); on a branch
+without it there is no `session_protocol_violations`, no
+`session_analysis_skips`, and no `runtime-monitor` emit target.
+
 Cross-file session protocol violations (`duality_mismatch`,
-`unreachable_receive`, `deadlock_no_progress`) are only produced by
-`mumei verify` when peer files are passed explicitly, and only land in
-`cross_spec.json` when `--report-dir` is given:
+`unreachable_receive`, `deadlock_no_progress`) are produced by `mumei verify`
+when the peer files are passed explicitly. `verify` always writes
+`cross_spec.json` — into the current working directory by default, or into
+`--report-dir` when given, which is what keeps runs from clobbering each other:
 
 ```bash
 rm -rf .mumei .mumei_cache .mumei_build_cache   # warm caches print "skipped (unchanged, cached)"
@@ -536,11 +542,12 @@ mumei verify --report-dir /tmp/rd \
 Space-separated extra paths become positionals and fail with
 `error: unexpected argument`. The primary file goes last.
 
-Each violation counts as a failure, so `verify` exits nonzero. Four conditions
-silently yield "no violations" and are easy to mistake for a pass:
-states > 32, fewer than 2 roles, fewer than 2 distinct source files, or roles
-whose atom lacks `source_file` attribution. Single-file protocols are
-intentionally not reported (that is the Temporal Effect Verifier's job).
+Each violation counts as a failure, so `verify` exits nonzero. Three conditions
+silently yield "no violations" and are easy to mistake for a pass: states > 32,
+fewer than 2 roles, or fewer than 2 distinct source files. Single-file protocols
+are intentionally not reported (that is the Temporal Effect Verifier's job), and
+so is a protocol whose peer roles are different atoms in the same file — that is
+what a verified library owning both ends looks like (`std/ownership.mm`).
 
 ## Bounded session analysis: skips are reported, not silent
 
@@ -563,22 +570,25 @@ differently-named effects each warn, so don't assume "one warning" in general.
 Two files that both declare `effect Channel` also collapse to one entry in the
 module environment (`effect_defs` is keyed by name), upstream of this dedup.
 
-## Session violations may not surface through `mumei build`
+## Session violations through `mumei build`
 
 `mumei build` has **no** `--report-dir`, `--cross-spec-files`, or
 `--cross-spec-verify` flags — cross-spec verification is manifest-driven
-(`ProofConfig::cross_spec_verify`, default on) and writes `cross_spec.json` into
-the working directory. It sees peer files only through `import`.
+(`ProofConfig::cross_spec_verify`, default on) and it sees peer files only
+through `import`. `cross_spec.json` lands in the resolved output directory (the
+parent of `--output`), falling back to the working directory, so a build run
+with `--output /tmp/out/out` leaves it at `/tmp/out/cross_spec.json` — don't
+search the repo root for it.
 
-Watch out: role collection drops any atom without `source_file` attribution
-(`session_types.rs::collect_roles`), and `annotate_source_file` runs only on the
-primary input (`pipeline.rs`). Imported atoms may therefore carry no
-attribution, leaving <2 attributed files and silently disabling the cross-file
-checks. In practice `build` can print skip warnings but may never report a
-`duality_mismatch`/`unreachable_receive`/`deadlock_no_progress`, even on a
-fixture where `verify --cross-spec-files` exits 1 on the very same files. Always
-cross-check a build-path "clean" result against `verify --cross-spec-files` on
-identical files.
+Role collection drops any atom without `source_file` attribution
+(`session_types.rs::collect_roles`). `pipeline.rs::annotate_source_file` covers
+only the primary input, so imported atoms rely on
+`resolver/imports.rs` attributing them to the resolved import path; a fixture
+whose entry file merely `import`s both roles is therefore the way to exercise
+build-path enforcement, and it must exit 1 with
+`❌ Session protocol violation (...)` on stderr. If a build-path run comes back
+"clean", cross-check the same files through `verify --cross-spec-files` before
+believing it — a silently unattributed role looks exactly like a pass.
 
 ## Proof-aware runtime monitors (`--emit runtime-monitor`)
 
