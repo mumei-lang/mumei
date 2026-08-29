@@ -135,9 +135,15 @@ fn collect_roles(
             // validation; re-reporting them here would duplicate diagnostics.
             continue;
         }
+        // Without file attribution the role cannot be placed on either side of
+        // a cross-file protocol, and duality would be judged against unknown
+        // peers.
+        let Some(file) = source_file(atom) else {
+            continue;
+        };
         roles.push(ProtocolRole {
             atom_name: atom_name.clone(),
-            file: source_file(atom),
+            file,
             pre_state,
             post_state,
         });
@@ -151,12 +157,17 @@ fn check_duality(
     effect_def: &EffectDef,
     roles: &[ProtocolRole],
 ) -> Vec<SessionProtocolViolation> {
-    let consumed: BTreeSet<&str> = roles.iter().map(|role| role.pre_state.as_str()).collect();
     let mut violations = Vec::new();
     let mut reported: BTreeSet<(&str, &str)> = BTreeSet::new();
 
     for role in roles.iter().filter(|role| role.is_send()) {
-        if consumed.contains(role.post_state.as_str()) {
+        // The dual receiver has to live in another file: a continuation inside
+        // the sender's own file is local sequencing, not a remote peer, so it
+        // must not hide a missing receiver.
+        let has_remote_receiver = roles
+            .iter()
+            .any(|peer| peer.pre_state == role.post_state && peer.file != role.file);
+        if has_remote_receiver {
             continue;
         }
         if !has_outgoing_transition(effect_def, &role.post_state) {
@@ -182,8 +193,9 @@ fn check_duality(
             protocol_state: role.post_state.clone(),
             protocol_path: vec![role.pre_state.clone(), role.post_state.clone()],
             message: format!(
-                "Atom '{}' in {} leaves effect '{}' in state '{}', but no atom declares \
-                 'effect_pre: {{ {}: {} }}': the protocol has no dual receiver for that message.",
+                "Atom '{}' in {} leaves effect '{}' in state '{}', but no atom in another file \
+                 declares 'effect_pre: {{ {}: {} }}': the protocol has no dual receiver for that \
+                 message.",
                 role.atom_name,
                 role.file,
                 effect_name,
@@ -192,8 +204,9 @@ fn check_duality(
                 role.post_state
             ),
             suggested_fix: format!(
-                "Add a receiving atom with 'effect_pre: {{ {}: {} }}' (performing one of: {}), \
-                 or make '{}' end the protocol in a state without outgoing transitions.",
+                "Add a receiving atom in the peer file with 'effect_pre: {{ {}: {} }}' \
+                 (performing one of: {}), or make '{}' end the protocol in a state without \
+                 outgoing transitions.",
                 effect_name,
                 role.post_state,
                 expected.join(", "),
@@ -211,15 +224,14 @@ fn check_reachable_receives(
     roles: &[ProtocolRole],
 ) -> Vec<SessionProtocolViolation> {
     let initial = initial_state(effect_def);
-    let produced: BTreeSet<&str> = roles
-        .iter()
-        .filter(|role| role.is_send())
-        .map(|role| role.post_state.as_str())
-        .collect();
+    // Reachability is decided from the initial state, not from "any role
+    // produces this state": roles that only produce each other's pre-states
+    // form an island the protocol never enters.
+    let reachable = reachable_states(&initial, roles);
     let mut violations = Vec::new();
 
     for role in roles {
-        if role.pre_state == initial || produced.contains(role.pre_state.as_str()) {
+        if reachable.contains(&role.pre_state) {
             continue;
         }
         let producers: Vec<String> = effect_def
@@ -268,30 +280,29 @@ fn check_reachable_receives(
     violations
 }
 
-/// Progress: from the initial state the protocol must be able to reach a state
-/// with no outgoing role edge. If every reachable state keeps handing control
-/// to another role, the participants wait on each other forever.
-fn check_progress(
-    effect_name: &str,
-    effect_def: &EffectDef,
-    roles: &[ProtocolRole],
-) -> Vec<SessionProtocolViolation> {
-    let initial = initial_state(effect_def);
+/// Role edges of one protocol, keyed by the state the role consumes.
+fn role_edges(roles: &[ProtocolRole]) -> BTreeMap<&str, Vec<&ProtocolRole>> {
     let mut edges: BTreeMap<&str, Vec<&ProtocolRole>> = BTreeMap::new();
     for role in roles.iter().filter(|role| role.is_send()) {
         edges.entry(role.pre_state.as_str()).or_default().push(role);
     }
+    edges
+}
 
-    let mut visited: BTreeSet<&str> = BTreeSet::new();
+/// Breadth-first visit order of the role graph starting at the initial state.
+/// `None` when the traversal exceeds [`MAX_PROTOCOL_ITERATIONS`].
+fn reachable_order<'a>(
+    initial: &'a str,
+    edges: &BTreeMap<&'a str, Vec<&'a ProtocolRole>>,
+) -> Option<Vec<&'a str>> {
+    let mut visited: BTreeSet<&str> = BTreeSet::from([initial]);
     let mut order: Vec<&str> = Vec::new();
-    let mut queue: VecDeque<&str> = VecDeque::new();
-    queue.push_back(initial.as_str());
-    visited.insert(initial.as_str());
+    let mut queue: VecDeque<&str> = VecDeque::from([initial]);
     let mut steps = 0usize;
     while let Some(state) = queue.pop_front() {
         steps += 1;
         if steps > MAX_PROTOCOL_ITERATIONS {
-            return Vec::new();
+            return None;
         }
         order.push(state);
         if let Some(outgoing) = edges.get(state) {
@@ -302,6 +313,40 @@ fn check_progress(
             }
         }
     }
+    Some(order)
+}
+
+/// States the protocol can actually enter by following the declared roles from
+/// the initial state.
+fn reachable_states(initial: &str, roles: &[ProtocolRole]) -> BTreeSet<String> {
+    let edges = role_edges(roles);
+    reachable_order(initial, &edges)
+        .unwrap_or_else(|| {
+            // Budget exhausted: fall back to every declared state so the
+            // bounded analysis stays conservative and reports nothing.
+            roles
+                .iter()
+                .flat_map(|role| [role.pre_state.as_str(), role.post_state.as_str()])
+                .collect()
+        })
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+}
+
+/// Progress: from the initial state the protocol must be able to reach a state
+/// with no outgoing role edge. If every reachable state keeps handing control
+/// to another role, the participants wait on each other forever.
+fn check_progress(
+    effect_name: &str,
+    effect_def: &EffectDef,
+    roles: &[ProtocolRole],
+) -> Vec<SessionProtocolViolation> {
+    let initial = initial_state(effect_def);
+    let edges = role_edges(roles);
+    let Some(order) = reachable_order(initial.as_str(), &edges) else {
+        return Vec::new();
+    };
 
     let quiescent = order.iter().any(|state| !edges.contains_key(state));
     if quiescent || order.len() < 2 {
@@ -378,13 +423,12 @@ fn terminal_states(effect_def: &EffectDef) -> Vec<String> {
     }
 }
 
-fn source_file(atom: &Atom) -> String {
+fn source_file(atom: &Atom) -> Option<String> {
     atom.spec_metadata
         .get("source_file")
         .filter(|value| !value.is_empty())
         .cloned()
         .or_else(|| (!atom.span.file.is_empty()).then(|| atom.span.file.clone()))
-        .unwrap_or_else(|| "<unknown>".to_string())
 }
 
 #[cfg(test)]
@@ -495,6 +539,46 @@ mod tests {
     }
 
     #[test]
+    fn roles_without_file_attribution_are_ignored() {
+        let effect_def = effect(
+            &["Idle", "Sent", "Answered"],
+            &[("send", "Idle", "Sent"), ("answer", "Sent", "Answered")],
+        );
+        let mut unattributed = role_atom("client_send", "client.mm", Some("Idle"), Some("Sent"));
+        unattributed.spec_metadata.clear();
+        let atoms = vec![
+            unattributed,
+            role_atom("server_answer", "server.mm", Some("Sent"), Some("Answered")),
+        ];
+        assert!(run(&effect_def, &atoms).is_empty());
+    }
+
+    #[test]
+    fn local_continuation_does_not_satisfy_duality() {
+        let effect_def = effect(
+            &["Idle", "Sent", "Answered", "Done"],
+            &[
+                ("send", "Idle", "Sent"),
+                ("answer", "Sent", "Answered"),
+                ("close", "Answered", "Done"),
+            ],
+        );
+        // 'client_answer' continues in the sender's own file, so the remote peer
+        // is still missing even though some role consumes 'Sent'.
+        let atoms = vec![
+            role_atom("client_send", "client.mm", Some("Idle"), Some("Sent")),
+            role_atom("client_answer", "client.mm", Some("Sent"), Some("Answered")),
+            role_atom("server_close", "server.mm", Some("Answered"), Some("Done")),
+        ];
+        let violation = run(&effect_def, &atoms)
+            .into_iter()
+            .find(|violation| violation.kind == KIND_DUALITY_MISMATCH)
+            .expect("duality mismatch reported");
+        assert_eq!(violation.caller_atom, "client_send");
+        assert_eq!(violation.protocol_state, "Sent");
+    }
+
+    #[test]
     fn receive_on_a_never_produced_state_is_unreachable() {
         let effect_def = effect(
             &["Idle", "Sent", "Answered"],
@@ -510,6 +594,28 @@ mod tests {
             .expect("unreachable receive reported");
         assert_eq!(violation.caller_atom, "server_read");
         assert_eq!(violation.protocol_state, "Answered");
+    }
+
+    #[test]
+    fn roles_that_only_produce_each_other_are_unreachable() {
+        let effect_def = effect(
+            &["Idle", "Sent", "Island", "Peer"],
+            &[
+                ("send", "Idle", "Sent"),
+                ("hop", "Island", "Peer"),
+                ("back", "Peer", "Island"),
+            ],
+        );
+        let atoms = vec![
+            role_atom("client_hop", "client.mm", Some("Island"), Some("Peer")),
+            role_atom("server_back", "server.mm", Some("Peer"), Some("Island")),
+        ];
+        let states: Vec<String> = run(&effect_def, &atoms)
+            .into_iter()
+            .filter(|violation| violation.kind == KIND_UNREACHABLE_RECEIVE)
+            .map(|violation| violation.protocol_state)
+            .collect();
+        assert_eq!(states, vec!["Island".to_string(), "Peer".to_string()]);
     }
 
     #[test]

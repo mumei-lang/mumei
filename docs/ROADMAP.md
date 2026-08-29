@@ -1915,8 +1915,8 @@ canonical 上位ロードマップは `docs/CROSS_PROJECT_ROADMAP.md` の
 ### 構成
 
 - **`mumei-core/src/cross_spec/session_types.rs`**（新規）: `effect_pre` / `effect_post` を持つ atom を「通信ロール」として抽出し、対象を **2 ファイル以上に分散した stateful effect** に限定した上で 3 種類の違反を検出する。
-  - `duality_mismatch`: 送信側 atom の `effect_post` 状態を `effect_pre` として受ける受信側 atom が存在しない（送信に対する受信の欠落）。
-  - `unreachable_receive`: 受信側 atom の `effect_pre` 状態に到達する送信側 atom が存在しない（到達不能状態）。
+  - `duality_mismatch`: 送信側 atom の `effect_post` 状態を `effect_pre` として受ける受信側 atom が**別ファイルに**存在しない（送信に対する受信の欠落）。同一ファイル内の後続 atom はローカルな継続であり、リモートの対向ロールとしては数えない。
+  - `unreachable_receive`: 受信側 atom の `effect_pre` 状態が、initial state からロールグラフを辿って到達可能な状態集合に含まれない（到達不能状態）。互いの状態だけを生成し合う孤立したロール群（島）も到達不能として報告する。
   - `deadlock_no_progress`: 到達可能な状態がすべて他ロールへ制御を渡し、終端（後続遷移を持たない）状態に到達しない（循環待ちによる progress 欠如）。
 - **爆発防止**: `MAX_EFFECT_STATES = 8`（Temporal Effect Verifier）と同じ思想で、`MAX_PROTOCOL_NODES = 32` / `MAX_PROTOCOL_ROLES = 64` / `MAX_PROTOCOL_ITERATIONS = 512` の上限を設ける。上限を超えるプロトコルグラフは解析対象外（違反を報告しない）。判定は Rust 側の抽象解釈（有界 BFS）のみで行い、Z3 は呼ばない。
 - **`mumei-core/src/cross_spec/mod.rs`**: `CrossSpecResult` に `session_protocol_violations: Vec<SessionProtocolViolation>`、`CrossSpecSummary` に `session_protocol_violation_count` を追加。違反は既存の `contract_consistency[]` と同じ粒度で `caller_atom` / `caller_file` / `callee_atom` / `callee_file` / `protocol_state` / `protocol_path` / 自然言語の `message` / `suggested_fix` を持つ。
@@ -1970,6 +1970,7 @@ jq '.session_protocol_violations' ./report/cross_spec.json
   - `effect_pre_override`: `effect_pre` で effect state machine の初期状態を上書きしており、呼び出し側の状態を仮定している。
   - いずれにも該当しない atom（完全に証明された純粋 atom）は **成果物を 1 バイトも生成しない**。
 - **`mumei-emit-monitor`**（新規クレート、`--emit runtime-monitor`）: 信頼境界 atom に対してのみ `<出力名>_<atom>.monitor.rs` を生成する。生成コードは `requires` / `ensures` を実行時に評価し、違反時に **panic せず** OTel イベントとして記録する。
+- **`effect_pre` の実行時観測**: effect 状態はコンパイラから観測できないため、ホストが `mumei_monitor::set_effect_state_probe(...)` で「現在の effect 状態を返す probe」を登録した場合にのみ、宣言された `effect_pre` 状態と実測値を比較し、不一致を `contract: "effect_pre"` として報告する（`observed` に実測状態を添付）。probe 未登録時は状態が観測不能なため何も報告しない。
 - **ゼロコスト維持**: 生成コード自体が依存クレートを持たない（`std` のみ）。報告は `mumei_monitor::set_violation_hook` でホストアプリの OTel SDK に接続する形で、`OTEL_ENABLED` が truthy でない限り評価も報告も行わない NoOp。hook 未設定時は `OTEL_EXPORTER_OTLP_ENDPOINT`（既定 `http://localhost:4318`）を明示した stderr フォールバック。コンパイラ本体は `otel` feature 無効時に OTel 依存を一切引き込まない（P15 のゼロコスト回帰ゲートを踏襲）。
 
 ### 対象ファイル
@@ -2004,7 +2005,7 @@ OTEL_ENABLED=true OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 ./your-app
 ### CI 回帰ゲート
 
 - `cargo test --test test_runtime_monitor`: `trusted` atom には `*_monitored` 関数と `boundary: "trusted_atom"` を含むモニタが生成され、純粋 atom には成果物が 1 件も生成されないこと。生成コードに `panic!` / `assert!` が含まれないこと、`OTEL_ENABLED` / `OTEL_EXPORTER_OTLP_ENDPOINT` の両方を参照していること。
-- `cargo test -p mumei-core trust_boundary` / `cargo test -p mumei-emit-monitor`: 分類ロジックと生成内容のユニットテスト。
+- `cargo test -p mumei-core trust_boundary` / `cargo test -p mumei-emit-monitor`: 分類ロジックと生成内容のユニットテスト（`effect_pre` 境界では `observed_effect_state` による状態比較が生成されること）。
 - **ゼロコスト検証（P15 と同一）**: `cargo tree --edges no-dev | grep -i opentelemetry` が空であること。`runtime-monitor` の追加によって OTel 依存が既定ビルドへ入らないことを保証する。
 
 ---

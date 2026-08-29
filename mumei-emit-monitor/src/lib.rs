@@ -42,17 +42,35 @@ pub mod mumei_monitor {
         pub boundary: &'static str,
         pub contract: &'static str,
         pub expression: &'static str,
+        /// Effect state the host reported, for `effect_pre` violations.
+        pub observed: Option<String>,
     }
 
     type Hook = fn(&Violation);
+    /// Reports the effect state the host currently observes, if it tracks one.
+    type EffectStateProbe = fn(&str) -> Option<String>;
 
     static HOOK: OnceLock<Hook> = OnceLock::new();
+    static PROBE: OnceLock<EffectStateProbe> = OnceLock::new();
     static ENABLED: OnceLock<bool> = OnceLock::new();
     static WARNED: AtomicBool = AtomicBool::new(false);
 
     /// Install the OTel reporting hook. Call once during startup.
     pub fn set_violation_hook(hook: Hook) -> Result<(), &'static str> {
         HOOK.set(hook).map_err(|_| "violation hook already installed")
+    }
+
+    /// Install the effect-state probe. Without it the runtime effect state is
+    /// unobservable, so `effect_pre` assumptions are left unchecked.
+    pub fn set_effect_state_probe(probe: EffectStateProbe) -> Result<(), &'static str> {
+        PROBE
+            .set(probe)
+            .map_err(|_| "effect state probe already installed")
+    }
+
+    /// The host's current state for `effect`, or `None` when untracked.
+    pub fn observed_effect_state(effect: &str) -> Option<String> {
+        PROBE.get().and_then(|probe| probe(effect))
     }
 
     /// `true` when `OTEL_ENABLED` is truthy; otherwise monitors are no-ops.
@@ -82,8 +100,12 @@ pub mod mumei_monitor {
             );
         }
         eprintln!(
-            "mumei.monitor.contract_violation atom={} boundary={} contract={} expression={}",
-            violation.atom, violation.boundary, violation.contract, violation.expression
+            "mumei.monitor.contract_violation atom={} boundary={} contract={} expression={} observed={}",
+            violation.atom,
+            violation.boundary,
+            violation.contract,
+            violation.expression,
+            violation.observed.as_deref().unwrap_or("-")
         );
     }
 
@@ -188,13 +210,28 @@ pub fn generate_monitor(
 
     let record = |contract_kind: &str, contract: &str| {
         format!(
-            "        mumei_monitor::record(mumei_monitor::Violation {{\n            atom: \"{atom}\",\n            boundary: \"{boundary}\",\n            contract: \"{kind}\",\n            expression: \"{expr}\",\n        }});\n",
+            "        mumei_monitor::record(mumei_monitor::Violation {{\n            atom: \"{atom}\",\n            boundary: \"{boundary}\",\n            contract: \"{kind}\",\n            expression: \"{expr}\",\n            observed: None,\n        }});\n",
             atom = escape(&atom.name),
             boundary = escape(&boundary_tag),
             kind = contract_kind,
             expr = escape(contract),
         )
     };
+
+    // `effect_pre` is an assumption the proof makes about the caller's state.
+    // It is only checkable when the host installs an effect-state probe; with
+    // no probe the state is unobservable and nothing is reported.
+    let mut effect_pre: Vec<(&String, &String)> = atom.effect_pre.iter().collect();
+    effect_pre.sort();
+    for (effect, state) in effect_pre {
+        rs.push_str(&format!(
+            "    if mumei_monitor::enabled() {{\n        if let Some(observed) = mumei_monitor::observed_effect_state(\"{effect}\") {{\n            if observed != \"{state}\" {{\n                mumei_monitor::record(mumei_monitor::Violation {{\n                    atom: \"{atom}\",\n                    boundary: \"{boundary}\",\n                    contract: \"effect_pre\",\n                    expression: \"{effect}: {state}\",\n                    observed: Some(observed),\n                }});\n            }}\n        }}\n    }}\n",
+            effect = escape(effect),
+            state = escape(state),
+            atom = escape(&atom.name),
+            boundary = escape(&boundary_tag),
+        ));
+    }
 
     if atom.requires != "true" && !atom.requires.is_empty() {
         rs.push_str(&format!(
@@ -349,6 +386,9 @@ mod tests {
         let artifacts = emit(atom);
         let source = String::from_utf8(artifacts[0].data.clone()).expect("utf8");
         assert!(source.contains("boundary: \"effect_pre_override\""));
+        assert!(source.contains("mumei_monitor::observed_effect_state(\"OrderChannel\")"));
+        assert!(source.contains("if observed != \"Idle\""));
+        assert!(source.contains("contract: \"effect_pre\""));
     }
 
     #[test]
