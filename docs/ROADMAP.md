@@ -1915,7 +1915,7 @@ canonical 上位ロードマップは `docs/CROSS_PROJECT_ROADMAP.md` の
 ### 構成
 
 - **`mumei-core/src/cross_spec/session_types.rs`**（新規）: `effect_pre` / `effect_post` を持つ atom を「通信ロール」として抽出し、対象を **2 ファイル以上に分散した stateful effect** に限定した上で 3 種類の違反を検出する。
-  - `duality_mismatch`: 送信側 atom の `effect_post` 状態を `effect_pre` として受ける受信側 atom が存在しない（送信に対する受信の欠落）。受信側は「送信側とは別の atom」であればよく、同一ファイル内の対向ロールも双対として数える（`std/ownership.mm` のように 1 モジュールがプロトコルの両端を持つ検証済みライブラリを誤検知しないため）。import alias で二重登録された同一 atom（`x` と `alias::x`）は 1 ロールに集約するが、`Wallet::step` と `Vault::step` のように所有型が異なる同名メソッドは別ロールとして扱う。
+  - `duality_mismatch`: 送信側 atom の `effect_post` 状態を `effect_pre` として受ける受信側 atom が存在しない（送信に対する受信の欠落）。受信側は「送信側とは別の atom」であればよく、同一ファイル内の対向ロールも双対として数える（`std/ownership.mm` のように 1 モジュールがプロトコルの両端を持つ検証済みライブラリを誤検知しないため）。import alias で二重登録された同一 atom（`x` と `alias::x`）は 1 ロールに集約するが、`Wallet::step` と `Vault::step` のように所有型が異なる同名メソッドは別ロールとして扱う。`effect_pre` を宣言せず `effect_post` のみを持つ atom は、Modular Verification（`mir_analysis/temporal_effects.rs`）が事前状態を検査しないのと同じ意味論で **前提状態なし（任意の有効状態を受理できる）** ロールとして扱い、初期状態を仮定しない。
   - `unreachable_receive`: 受信側 atom の `effect_pre` 状態が、initial state からロールグラフを辿って到達可能な状態集合に含まれない（到達不能状態）。互いの状態だけを生成し合う孤立したロール群（島）も到達不能として報告する。
   - `deadlock_no_progress`: 到達可能な状態がすべて他ロールへ制御を渡し、終端（後続遷移を持たない）状態に到達しない（循環待ちによる progress 欠如）。
 - **爆発防止**: `MAX_EFFECT_STATES = 8`（Temporal Effect Verifier）と同じ思想で、`MAX_PROTOCOL_NODES = 32` / `MAX_PROTOCOL_ROLES = 64` / `MAX_PROTOCOL_ITERATIONS = 512` の上限を設ける。上限を超えるプロトコルグラフは解析対象外（違反を報告しない）。ただしこの fail-open な打ち切りは黙って PASS にせず、`session_analysis_skips[]` として明示的に報告する（打ち切りの判定は「2 ファイル以上に 2 ロール以上」という解析対象条件を満たした effect に限る。単一ファイルで閉じた effect や未使用の effect は P22 の対象外であり、状態数が上限を超えていてもスキップとして報告しない）（`reason` は `state_limit_exceeded` / `role_limit_exceeded`、`state_count` / `role_count` / `limit` 付き。import alias 経由で同じ effect が二重に見える場合は 1 件に集約）。判定は Rust 側の抽象解釈（有界 BFS）のみで行い、Z3 は呼ばない。
@@ -1980,7 +1980,8 @@ jq '.session_analysis_skips' ./report/cross_spec.json
   - `extern_ffi`: `extern` 宣言に裏打ちされ、検証器が本体を見ていない。
   - `effect_pre_override`: `effect_pre` で effect state machine の初期状態を上書きしており、呼び出し側の状態を仮定している。
   - いずれにも該当しない atom（完全に証明された純粋 atom）は **成果物を 1 バイトも生成しない**。
-- **`mumei-emit-monitor`**（新規クレート、`--emit runtime-monitor`）: 信頼境界 atom に対してのみ `<出力名>_<atom>.monitor.rs` を生成する。生成コードは `requires` / `ensures` を実行時に評価し、違反時に **panic せず** OTel イベントとして記録する。実行時条件として生成するのは識別子・整数リテラル・比較 / 算術 / 論理演算子・括弧からなる式に限り（`forall` などの mumei 固有構文やブロック・文・パスを含む契約は生成対象外としてコメントを残す）、契約テキストが生成 Rust にそのまま流れ込まないようにする。
+  - `extern` 宣言は本体を持たないため atom としてのコンパイル対象にならないが、`--emit runtime-monitor` では `trust_boundary::extern_fn_as_trusted_atom`（resolver と共用）で trusted atom に変換して 1 関数に 1 モニタを生成する（同名の通常 atom がある場合や alias 経由の重複は 1 件に集約）。
+- **`mumei-emit-monitor`**（新規クレート、`--emit runtime-monitor`）: 信頼境界 atom に対してのみ `<出力名>_<atom>.monitor.rs` を生成する。生成コードは `requires` / `ensures` を実行時に評価し、違反時に **panic せず** OTel イベントとして記録する。実行時条件として生成するのは識別子・整数リテラル・比較 / 算術 / 論理演算子・括弧からなる式に限り（`forall` などの mumei 固有構文やブロック・文・パスを含む契約は生成対象外としてコメントを残す）、契約テキストが生成 Rust にそのまま流れ込まないようにする。生成対象外の契約はコメントを残すだけでなく、`contract: "requires_unchecked"` / `"ensures_unchecked"` として報告し、**監視されていない境界契約がテレメトリ上で可視化される**ようにする（契約テキスト自体は生成物に含めない）。生成対象の式でも除算ゼロや debug ビルドの整数オーバーフローで fault し得るため、評価は `mumei_monitor::check` の panic 境界内で行い、失敗した評価は `observed = "evaluation panicked"` として報告する（monitored 呼び出しを巻き戻さない）。
 - **`effect_pre` の実行時観測**: effect 状態はコンパイラから観測できないため、ホストが `mumei_monitor::set_effect_state_probe(...)` で「現在の effect 状態を返す probe」を登録した場合にのみ、宣言された `effect_pre` 状態と実測値を比較し、不一致を `contract: "effect_pre"` として報告する（`observed` に実測状態を添付）。probe 未登録時は状態が観測不能なため何も報告しない。
 - **ゼロコスト維持**: 生成コード自体が依存クレートを持たない（`std` のみ）。報告は `mumei_monitor::set_violation_hook` でホストアプリの OTel SDK に接続する形で、`OTEL_ENABLED` が truthy でない限り評価も報告も行わない NoOp。hook 未設定時は `OTEL_EXPORTER_OTLP_ENDPOINT`（既定 `http://localhost:4318`）を明示した stderr フォールバック。 ホストの hook が panic した場合も `catch_unwind` で封じ込め、監視対象コードを巻き戻さない（`mumei.monitor.hook_panicked` を stderr に記録）。コンパイラ本体は `otel` feature 無効時に OTel 依存を一切引き込まない（P15 のゼロコスト回帰ゲートを踏襲）。
 
@@ -1994,6 +1995,8 @@ jq '.session_analysis_skips' ./report/cross_spec.json
 | `src/codegen.rs` / `src/cli.rs` | emit dispatch と `--emit` ヘルプ |
 | `tests/fixtures/runtime_monitor/trusted_boundary.mm` | 信頼境界（`trusted` atom）の入力 |
 | `tests/fixtures/runtime_monitor/pure_proven.mm` | 証明済み純粋 atom の入力 |
+| `tests/fixtures/runtime_monitor/extern_only.mm` | `extern` 宣言のみの入力（FFI 境界） |
+| `tests/fixtures/runtime_monitor/panicking_contract.mm` | 実行時に fault し得る契約（除算ゼロ） |
 | `tests/test_runtime_monitor.rs` | ゴールデンテスト（生成あり / 生成なし） |
 
 ### 使い方
@@ -2016,6 +2019,7 @@ OTEL_ENABLED=true OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 ./your-app
 ### CI 回帰ゲート
 
 - `cargo test --test test_runtime_monitor`: 生成モニタが `rustc` で単体コンパイルでき、panic する hook を登録しても monitored 呼び出しが巻き戻らないこと。
+- `cargo test --test test_runtime_monitor`: `extern` 宣言のみの入力でも `requires` / `ensures` を含むモニタが 1 件生成されること。除算ゼロを含む `requires` / `ensures` の両方が `observed=evaluation panicked` として報告され、monitored 呼び出しが正常に後進すること。
 - `cargo test --test test_runtime_monitor`: `trusted` atom には `*_monitored` 関数と `boundary: "trusted_atom"` を含むモニタが生成され、純粋 atom には成果物が 1 件も生成されないこと。生成コードに `panic!` / `assert!` が含まれないこと、`OTEL_ENABLED` / `OTEL_EXPORTER_OTLP_ENDPOINT` の両方を参照していること。
 - `cargo test -p mumei-core trust_boundary` / `cargo test -p mumei-emit-monitor`: 分類ロジックと生成内容のユニットテスト（`effect_pre` 境界では `observed_effect_state` による状態比較が生成されること）。
 - **ゼロコスト検証（P15 と同一）**: `cargo tree --edges no-dev | grep -i opentelemetry` が空であること。`runtime-monitor` の追加によって OTel 依存が既定ビルドへ入らないことを保証する。

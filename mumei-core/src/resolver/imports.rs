@@ -736,51 +736,7 @@ pub(crate) fn register_imported_items_with_source(
                 module_env.register_extern_block(extern_block);
                 // ExternBlock 内の関数を trusted atom として ModuleEnv に登録
                 for ext_fn in &extern_block.functions {
-                    let params: Vec<crate::parser::Param> = ext_fn
-                        .param_types
-                        .iter()
-                        .enumerate()
-                        .map(|(i, ty)| crate::parser::Param {
-                            name: ext_fn
-                                .param_names
-                                .get(i)
-                                .cloned()
-                                .unwrap_or_else(|| format!("arg{}", i)),
-                            type_name: Some(ty.clone()),
-                            type_ref: Some(crate::parser::parse_type_ref(ty)),
-                            is_ref: false,
-                            is_ref_mut: false,
-                            fn_contract_requires: None,
-                            fn_contract_ensures: None,
-                        })
-                        .collect();
-
-                    let atom = crate::parser::Atom {
-                        name: ext_fn.name.clone(),
-                        type_params: vec![],
-                        where_bounds: vec![],
-                        params,
-                        trace_id: None,
-                        spec_metadata: std::collections::HashMap::new(),
-                        requires: ext_fn
-                            .requires
-                            .clone()
-                            .unwrap_or_else(|| "true".to_string()),
-                        forall_constraints: vec![],
-                        ensures: ext_fn.ensures.clone().unwrap_or_else(|| "true".to_string()),
-                        body_expr: String::new(),
-                        consumed_params: vec![],
-                        resources: vec![],
-                        is_async: false,
-                        trust_level: crate::parser::TrustLevel::Trusted,
-                        max_unroll: None,
-                        invariant: None,
-                        effects: vec![],
-                        return_type: Some(ext_fn.return_type.clone()),
-                        span: ext_fn.span.clone(),
-                        effect_pre: std::collections::HashMap::new(),
-                        effect_post: std::collections::HashMap::new(),
-                    };
+                    let atom = crate::trust_boundary::extern_fn_as_trusted_atom(ext_fn);
                     register_atom(module_env, &atom);
                     if let Some(prefix) = alias {
                         let mut fqn_atom = atom.clone();

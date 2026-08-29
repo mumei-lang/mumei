@@ -68,8 +68,95 @@ fn trust_boundary_atom_gets_a_monitor() {
     // NoOp fallback plus OTLP endpoint wiring.
     assert!(source.contains("OTEL_ENABLED"));
     assert!(source.contains("OTEL_EXPORTER_OTLP_ENDPOINT"));
-    assert!(source.contains("if mumei_monitor::enabled() && !(channel >= 0)"));
-    assert!(source.contains("if mumei_monitor::enabled() && !(result >= 0)"));
+    assert!(source.contains("mumei_monitor::check("));
+    assert!(source.contains("|| channel >= 0)"));
+    assert!(source.contains("|| result >= 0)"));
+}
+
+/// An `extern` declaration is a trust boundary in its own right: a file that
+/// contains nothing else must still produce one monitor carrying its contracts.
+#[test]
+fn extern_declaration_gets_a_monitor() {
+    let (dir, log) = build_monitor("extern", "tests/fixtures/runtime_monitor/extern_only.mm");
+    let files = monitor_files(&dir);
+    assert_eq!(files.len(), 1, "expected one monitor artifact\n{log}");
+
+    let source = std::fs::read_to_string(&files[0]).expect("read monitor");
+    assert!(source.contains("pub fn read_channel_monitored("));
+    assert!(source.contains("boundary: \"trusted_atom+extern_ffi\""));
+    assert!(source.contains("contract: \"requires\""));
+    assert!(source.contains("contract: \"ensures\""));
+    assert!(source.contains("|| channel >= 0)"));
+    assert!(source.contains("|| result >= 0)"));
+}
+
+/// A contract inside the supported expression subset can still fault (division
+/// by zero, debug overflow). The monitor observes: the faulting evaluation is
+/// reported and the monitored call returns normally.
+#[test]
+fn a_faulting_contract_is_reported_instead_of_unwinding() {
+    let (dir, _log) = build_monitor(
+        "contract_panic",
+        "tests/fixtures/runtime_monitor/panicking_contract.mm",
+    );
+    let files = monitor_files(&dir);
+    assert_eq!(files.len(), 1, "expected one monitor artifact");
+    let monitor = std::fs::read_to_string(&files[0]).expect("read monitor");
+
+    let host = format!(
+        r#"{monitor}
+
+mod host_impl {{
+    #[no_mangle]
+    pub extern "C" fn risky_ratio(divisor: i64) -> i64 {{
+        divisor
+    }}
+}}
+
+fn main() {{
+    // Both 'requires: 100 / divisor > 0' and 'ensures: 100 / result > 0'
+    // divide by zero here.
+    let result = risky_ratio_monitored(0);
+    println!("survived={{result}}");
+}}
+"#
+    );
+    let host_path = dir.join("contract_panic_host.rs");
+    std::fs::write(&host_path, host).expect("write host program");
+
+    let bin_path = dir.join("contract_panic_host");
+    let compile = Command::new("rustc")
+        .arg("--edition")
+        .arg("2021")
+        .arg("--crate-name")
+        .arg("contract_panic_host")
+        .arg(&host_path)
+        .arg("-o")
+        .arg(&bin_path)
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run rustc: {err}"));
+    assert!(
+        compile.status.success(),
+        "generated monitor did not compile\n{}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+
+    let run = Command::new(&bin_path)
+        .env("OTEL_ENABLED", "1")
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run host program: {err}"));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        run.status.success(),
+        "contract evaluation escaped the monitor\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(stdout.contains("survived=0"), "stdout:\n{stdout}");
+    assert_eq!(
+        stderr.matches("observed=evaluation panicked").count(),
+        2,
+        "both requires and ensures must be reported\nstderr:\n{stderr}"
+    );
 }
 
 /// A generated monitor observes contract violations: a host hook that panics

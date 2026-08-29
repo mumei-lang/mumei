@@ -100,7 +100,10 @@ pub struct SessionAnalysis {
 struct ProtocolRole {
     atom_name: String,
     file: String,
-    pre_state: String,
+    /// State the role consumes, or `None` when the atom declares no
+    /// `effect_pre`: modular verification performs no pre-state check in that
+    /// case (`mir_analysis::temporal_effects`), so the role consumes any state.
+    pre_state: Option<String>,
     post_state: String,
 }
 
@@ -108,7 +111,15 @@ impl ProtocolRole {
     /// A role that advances the protocol is a sender; a role that only
     /// observes its pre-state is a receiver-side guard.
     fn is_send(&self) -> bool {
-        self.pre_state != self.post_state
+        self.pre_state.as_deref() != Some(self.post_state.as_str())
+    }
+
+    /// Whether the role can run with the effect in `state`.
+    fn accepts(&self, state: &str) -> bool {
+        match &self.pre_state {
+            Some(pre) => pre == state,
+            None => true,
+        }
     }
 }
 
@@ -216,18 +227,21 @@ fn collect_roles(
     effect_def: &EffectDef,
     atoms: &BTreeMap<String, &Atom>,
 ) -> Vec<ProtocolRole> {
-    let initial = initial_state(effect_def);
     let mut roles = Vec::new();
     for (atom_name, atom) in atoms {
         let declared_pre = atom.effect_pre.get(effect_name);
         let declared_post = atom.effect_post.get(effect_name);
         let (pre_state, post_state) = match (declared_pre, declared_post) {
-            (Some(pre), Some(post)) => (pre.clone(), post.clone()),
-            (Some(pre), None) => (pre.clone(), pre.clone()),
-            (None, Some(post)) => (initial.clone(), post.clone()),
+            (Some(pre), Some(post)) => (Some(pre.clone()), post.clone()),
+            (Some(pre), None) => (Some(pre.clone()), pre.clone()),
+            (None, Some(post)) => (None, post.clone()),
             (None, None) => continue,
         };
-        if !effect_def.states.contains(&pre_state) || !effect_def.states.contains(&post_state) {
+        if pre_state
+            .as_ref()
+            .is_some_and(|pre| !effect_def.states.contains(pre))
+            || !effect_def.states.contains(&post_state)
+        {
             // Undeclared states are already reported by effect declaration
             // validation; re-reporting them here would duplicate diagnostics.
             continue;
@@ -298,7 +312,7 @@ fn check_duality(
         // module may host both ends of a protocol it also exposes to others.
         let has_receiver = roles
             .iter()
-            .any(|peer| peer.pre_state == role.post_state && peer.atom_name != role.atom_name);
+            .any(|peer| peer.atom_name != role.atom_name && peer.accepts(&role.post_state));
         if has_receiver {
             continue;
         }
@@ -323,7 +337,12 @@ fn check_duality(
             callee_atom: None,
             callee_file: None,
             protocol_state: role.post_state.clone(),
-            protocol_path: vec![role.pre_state.clone(), role.post_state.clone()],
+            protocol_path: role
+                .pre_state
+                .iter()
+                .cloned()
+                .chain([role.post_state.clone()])
+                .collect(),
             message: format!(
                 "Atom '{}' in {} leaves effect '{}' in state '{}', but no other atom declares \
                  'effect_pre: {{ {}: {} }}': the protocol has no dual receiver for that message.",
@@ -361,13 +380,18 @@ fn check_reachable_receives(
     let mut violations = Vec::new();
 
     for role in roles {
-        if reachable.contains(&role.pre_state) {
+        // A role without 'effect_pre' requires no particular state, so there is
+        // nothing that could be unreachable.
+        let Some(pre_state) = role.pre_state.clone() else {
+            continue;
+        };
+        if reachable.contains(&pre_state) {
             continue;
         }
         let producers: Vec<String> = effect_def
             .transitions
             .iter()
-            .filter(|transition| transition.to_state == role.pre_state)
+            .filter(|transition| transition.to_state == pre_state)
             .map(|transition| transition.operation.clone())
             .collect();
         violations.push(SessionProtocolViolation {
@@ -377,29 +401,29 @@ fn check_reachable_receives(
             caller_file: role.file.clone(),
             callee_atom: None,
             callee_file: None,
-            protocol_state: role.pre_state.clone(),
-            protocol_path: vec![initial.clone(), role.pre_state.clone()],
+            protocol_state: pre_state.clone(),
+            protocol_path: vec![initial.clone(), pre_state.clone()],
             message: format!(
                 "Atom '{}' in {} requires effect '{}' in state '{}', but no atom drives '{}' into \
                  that state: '{}' can never run.",
                 role.atom_name,
                 role.file,
                 effect_name,
-                role.pre_state,
+                pre_state,
                 effect_name,
                 role.atom_name
             ),
             suggested_fix: if producers.is_empty() {
                 format!(
                     "Declare a transition into '{}' for effect '{}', or relax the 'effect_pre' of '{}'.",
-                    role.pre_state, effect_name, role.atom_name
+                    pre_state, effect_name, role.atom_name
                 )
             } else {
                 format!(
                     "Add a sending atom with 'effect_post: {{ {}: {} }}' (performing one of: {}), \
                      or relax the 'effect_pre' of '{}' to a state the protocol reaches.",
                     effect_name,
-                    role.pre_state,
+                    pre_state,
                     producers.join(", "),
                     role.atom_name
                 )
@@ -410,21 +434,50 @@ fn check_reachable_receives(
     violations
 }
 
-/// Role edges of one protocol, keyed by the state the role consumes.
-fn role_edges(roles: &[ProtocolRole]) -> BTreeMap<&str, Vec<&ProtocolRole>> {
-    let mut edges: BTreeMap<&str, Vec<&ProtocolRole>> = BTreeMap::new();
-    for role in roles.iter().filter(|role| role.is_send()) {
-        edges.entry(role.pre_state.as_str()).or_default().push(role);
+/// Role edges of one protocol.
+struct RoleGraph<'a> {
+    /// Senders keyed by the state their `effect_pre` consumes.
+    edges: BTreeMap<&'a str, Vec<&'a ProtocolRole>>,
+    /// Senders without `effect_pre`, which can run in any state.
+    unrestricted: Vec<&'a ProtocolRole>,
+}
+
+impl<'a> RoleGraph<'a> {
+    fn new(roles: &'a [ProtocolRole]) -> Self {
+        let mut edges: BTreeMap<&str, Vec<&ProtocolRole>> = BTreeMap::new();
+        let mut unrestricted = Vec::new();
+        for role in roles.iter().filter(|role| role.is_send()) {
+            match &role.pre_state {
+                Some(pre) => edges.entry(pre.as_str()).or_default().push(role),
+                None => unrestricted.push(role),
+            }
+        }
+        Self {
+            edges,
+            unrestricted,
+        }
     }
-    edges
+
+    /// Roles that can run with the effect in `state`.
+    fn outgoing(&self, state: &str) -> impl Iterator<Item = &&'a ProtocolRole> {
+        self.edges
+            .get(state)
+            .into_iter()
+            .flatten()
+            .chain(self.unrestricted.iter())
+    }
+
+    /// A state is quiescent when no role *requires* it: an unrestricted role
+    /// imposes no protocol obligation on any particular state, so it does not
+    /// keep the protocol from completing here.
+    fn is_quiescent(&self, state: &str) -> bool {
+        !self.edges.contains_key(state)
+    }
 }
 
 /// Breadth-first visit order of the role graph starting at the initial state.
 /// `None` when the traversal exceeds [`MAX_PROTOCOL_ITERATIONS`].
-fn reachable_order<'a>(
-    initial: &'a str,
-    edges: &BTreeMap<&'a str, Vec<&'a ProtocolRole>>,
-) -> Option<Vec<&'a str>> {
+fn reachable_order<'a>(initial: &'a str, graph: &RoleGraph<'a>) -> Option<Vec<&'a str>> {
     let mut visited: BTreeSet<&str> = BTreeSet::from([initial]);
     let mut order: Vec<&str> = Vec::new();
     let mut queue: VecDeque<&str> = VecDeque::from([initial]);
@@ -435,11 +488,9 @@ fn reachable_order<'a>(
             return None;
         }
         order.push(state);
-        if let Some(outgoing) = edges.get(state) {
-            for role in outgoing {
-                if visited.insert(role.post_state.as_str()) {
-                    queue.push_back(role.post_state.as_str());
-                }
+        for role in graph.outgoing(state) {
+            if visited.insert(role.post_state.as_str()) {
+                queue.push_back(role.post_state.as_str());
             }
         }
     }
@@ -449,14 +500,19 @@ fn reachable_order<'a>(
 /// States the protocol can actually enter by following the declared roles from
 /// the initial state.
 fn reachable_states(initial: &str, roles: &[ProtocolRole]) -> BTreeSet<String> {
-    let edges = role_edges(roles);
-    reachable_order(initial, &edges)
+    let graph = RoleGraph::new(roles);
+    reachable_order(initial, &graph)
         .unwrap_or_else(|| {
             // Budget exhausted: fall back to every declared state so the
             // bounded analysis stays conservative and reports nothing.
             roles
                 .iter()
-                .flat_map(|role| [role.pre_state.as_str(), role.post_state.as_str()])
+                .flat_map(|role| {
+                    role.pre_state
+                        .as_deref()
+                        .into_iter()
+                        .chain([role.post_state.as_str()])
+                })
                 .collect()
         })
         .into_iter()
@@ -473,12 +529,12 @@ fn check_progress(
     roles: &[ProtocolRole],
 ) -> Vec<SessionProtocolViolation> {
     let initial = initial_state(effect_def);
-    let edges = role_edges(roles);
-    let Some(order) = reachable_order(initial.as_str(), &edges) else {
+    let graph = RoleGraph::new(roles);
+    let Some(order) = reachable_order(initial.as_str(), &graph) else {
         return Vec::new();
     };
 
-    let quiescent = order.iter().any(|state| !edges.contains_key(state));
+    let quiescent = order.iter().any(|state| graph.is_quiescent(state));
     if quiescent || order.len() < 2 {
         return Vec::new();
     }
@@ -488,7 +544,13 @@ fn check_progress(
     // other first, in deterministic order.
     let waiting: Vec<&ProtocolRole> = order
         .iter()
-        .filter_map(|state| edges.get(state).and_then(|roles| roles.first()).copied())
+        .filter_map(|state| {
+            graph
+                .edges
+                .get(state)
+                .and_then(|roles| roles.first())
+                .copied()
+        })
         .collect();
     let Some(first) = waiting.first() else {
         return Vec::new();
@@ -703,6 +765,41 @@ mod tests {
             role_atom("client_send", "client.mm", Some("Idle"), Some("Sent")),
             role_atom("client_answer", "client.mm", Some("Sent"), Some("Answered")),
             role_atom("server_close", "server.mm", Some("Answered"), Some("Done")),
+        ];
+        assert!(run(&effect_def, &atoms).is_empty());
+    }
+
+    #[test]
+    fn a_role_without_effect_pre_receives_any_sender_state() {
+        let effect_def = effect(
+            &["Idle", "Sent", "Done"],
+            &[("send", "Idle", "Sent"), ("close", "Sent", "Done")],
+        );
+        // 'server_close' declares no 'effect_pre', so modular verification checks
+        // no pre-state and it consumes the non-initial 'Sent' just as well.
+        let atoms = vec![
+            role_atom("client_send", "client.mm", Some("Idle"), Some("Sent")),
+            role_atom("server_close", "server.mm", None, Some("Done")),
+        ];
+        assert!(run(&effect_def, &atoms).is_empty());
+    }
+
+    #[test]
+    fn a_role_without_effect_pre_is_never_unreachable() {
+        let effect_def = effect(
+            &["Idle", "Sent", "Answered", "Done"],
+            &[
+                ("send", "Idle", "Sent"),
+                ("answer", "Sent", "Answered"),
+                ("close", "Answered", "Done"),
+            ],
+        );
+        // 'server_finish' jumps straight to 'Done' from wherever the caller is:
+        // it requires no state, so nothing about it can be unreachable.
+        let atoms = vec![
+            role_atom("client_send", "client.mm", Some("Idle"), Some("Sent")),
+            role_atom("client_answer", "client.mm", Some("Sent"), Some("Answered")),
+            role_atom("server_finish", "server.mm", None, Some("Done")),
         ];
         assert!(run(&effect_def, &atoms).is_empty());
     }

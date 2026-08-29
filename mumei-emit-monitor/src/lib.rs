@@ -129,6 +129,25 @@ pub mod mumei_monitor {
             );
         }
     }
+
+    /// Evaluate a contract without letting it unwind into the monitored call.
+    ///
+    /// A contract may divide by zero or overflow in a debug build, which would
+    /// abort the very call the monitor only observes. Such an evaluation is
+    /// reported as `observed = "evaluation panicked"` instead.
+    pub fn check(violation: Violation, condition: impl FnOnce() -> bool) {
+        if !enabled() {
+            return;
+        }
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(condition)) {
+            Ok(true) => {}
+            Ok(false) => record(violation),
+            Err(_) => record(Violation {
+                observed: Some("evaluation panicked".to_string()),
+                ..violation
+            }),
+        }
+    }
 }
 "#;
 
@@ -274,13 +293,33 @@ pub fn generate_monitor(
         return_type
     ));
 
-    let record = |contract_kind: &str, contract: &str| {
+    let violation = |contract_kind: &str, contract: &str| {
         format!(
-            "        mumei_monitor::record(mumei_monitor::Violation {{\n            atom: \"{atom}\",\n            boundary: \"{boundary}\",\n            contract: \"{kind}\",\n            expression: \"{expr}\",\n            observed: None,\n        }});\n",
+            "mumei_monitor::Violation {{\n            atom: \"{atom}\",\n            boundary: \"{boundary}\",\n            contract: \"{kind}\",\n            expression: \"{expr}\",\n            observed: None,\n        }}",
             atom = escape(&atom.name),
             boundary = escape(&boundary_tag),
             kind = contract_kind,
             expr = escape(contract),
+        )
+    };
+    // Contract evaluation goes through `check`, so an arithmetic panic inside a
+    // contract is reported rather than propagated into the monitored call.
+    let check = |contract_kind: &str, condition: &str| {
+        format!(
+            "    mumei_monitor::check({}, || {});\n",
+            violation(contract_kind, condition),
+            condition
+        )
+    };
+    // An unsupported contract is left to verification, but the gap is reported
+    // rather than only commented, so telemetry shows what is unchecked.
+    let unchecked = |contract_kind: &str| {
+        format!(
+            "    // {contract_kind}: not expressible as a runtime condition, left to verification.\n    mumei_monitor::record({});\n",
+            violation(
+                &format!("{contract_kind}_unchecked"),
+                "not a runtime-checkable expression"
+            ),
         )
     };
 
@@ -300,15 +339,9 @@ pub fn generate_monitor(
     }
 
     match monitor_condition(&atom.requires) {
-        Some(condition) => rs.push_str(&format!(
-            "    if mumei_monitor::enabled() && !({}) {{\n{}    }}\n",
-            condition,
-            record("requires", condition)
-        )),
+        Some(condition) => rs.push_str(&check("requires", condition)),
         None if atom.requires.trim().is_empty() || atom.requires.trim() == "true" => {}
-        None => rs.push_str(
-            "    // requires: not expressible as a runtime condition, left to verification.\n",
-        ),
+        None => rs.push_str(&unchecked("requires")),
     }
 
     rs.push_str(&format!(
@@ -322,15 +355,9 @@ pub fn generate_monitor(
     ));
 
     match monitor_condition(&atom.ensures) {
-        Some(condition) => rs.push_str(&format!(
-            "    if mumei_monitor::enabled() && !({}) {{\n{}    }}\n",
-            condition,
-            record("ensures", condition)
-        )),
+        Some(condition) => rs.push_str(&check("ensures", condition)),
         None if atom.ensures.trim().is_empty() || atom.ensures.trim() == "true" => {}
-        None => rs.push_str(
-            "    // ensures: not expressible as a runtime condition, left to verification.\n",
-        ),
+        None => rs.push_str(&unchecked("ensures")),
     }
 
     rs.push_str("    result\n}\n");
@@ -496,10 +523,9 @@ mod tests {
         atom.trust_level = TrustLevel::Trusted;
         let artifacts = emit(atom);
         let source = String::from_utf8(artifacts[0].data.clone()).expect("utf8");
-        // Every contract check is guarded by the OTEL_ENABLED gate.
-        assert_eq!(
-            source.matches("if mumei_monitor::enabled() && !(").count(),
-            2
-        );
+        // Contracts are evaluated inside `check`, which returns before touching
+        // the condition unless OTEL_ENABLED is truthy.
+        assert_eq!(source.matches("mumei_monitor::check(").count(), 2);
+        assert!(source.contains("pub fn check(violation: Violation, condition: impl FnOnce() -> bool) {\n        if !enabled() {\n            return;"));
     }
 }

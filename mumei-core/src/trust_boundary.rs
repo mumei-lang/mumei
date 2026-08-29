@@ -15,7 +15,9 @@
 //! - `effect_pre` — the atom overrides the effect state machine's initial
 //!   state, so the proof assumes a caller-provided protocol state.
 
-use crate::parser::{Atom, ExternBlock, TrustLevel};
+use crate::parser::ast::ExternFn;
+use crate::parser::{Atom, ExternBlock, Param, TrustLevel};
+use std::collections::HashMap;
 
 /// Why an atom sits on a trust boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,6 +91,59 @@ pub fn classify_trust_boundaries(
 /// Whether an atom needs a runtime monitor at all.
 pub fn is_trust_boundary(atom: &Atom, extern_blocks: &[ExternBlock]) -> bool {
     !classify_trust_boundaries(atom, extern_blocks).is_empty()
+}
+
+/// The trusted atom an `extern` declaration stands for.
+///
+/// An FFI function has no body to verify, so its `requires`/`ensures` are
+/// assumptions: the atom carries them with `trust_level: trusted`, which is
+/// what both the resolver and the runtime monitor emitter consume.
+pub fn extern_fn_as_trusted_atom(ext_fn: &ExternFn) -> Atom {
+    let params = ext_fn
+        .param_types
+        .iter()
+        .enumerate()
+        .map(|(i, ty)| Param {
+            name: ext_fn
+                .param_names
+                .get(i)
+                .cloned()
+                .unwrap_or_else(|| format!("arg{}", i)),
+            type_name: Some(ty.clone()),
+            type_ref: Some(crate::parser::parse_type_ref(ty)),
+            is_ref: false,
+            is_ref_mut: false,
+            fn_contract_requires: None,
+            fn_contract_ensures: None,
+        })
+        .collect();
+
+    Atom {
+        name: ext_fn.name.clone(),
+        type_params: vec![],
+        where_bounds: vec![],
+        params,
+        trace_id: None,
+        spec_metadata: HashMap::new(),
+        requires: ext_fn
+            .requires
+            .clone()
+            .unwrap_or_else(|| "true".to_string()),
+        forall_constraints: vec![],
+        ensures: ext_fn.ensures.clone().unwrap_or_else(|| "true".to_string()),
+        body_expr: String::new(),
+        consumed_params: vec![],
+        resources: vec![],
+        is_async: false,
+        trust_level: TrustLevel::Trusted,
+        max_unroll: None,
+        invariant: None,
+        effects: vec![],
+        return_type: Some(ext_fn.return_type.clone()),
+        span: ext_fn.span.clone(),
+        effect_pre: HashMap::new(),
+        effect_post: HashMap::new(),
+    }
 }
 
 #[cfg(test)]
