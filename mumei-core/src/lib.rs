@@ -20,4 +20,5 @@ pub mod reconstruction_loss;
 pub mod registry;
 pub mod resolver;
 pub mod structured_feedback;
+pub mod trust_boundary;
 pub mod verification;

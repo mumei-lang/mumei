@@ -30,7 +30,7 @@ pub(crate) enum Command {
         /// Output base name
         #[arg(short, long, default_value = "katana")]
         output: String,
-        /// Emit target: llvm-ir (default), c-header, verified-json, decidable-metrics, proof-book, proof-cert, escalation-bundle
+        /// Emit target: llvm-ir (default), c-header, verified-json, decidable-metrics, proof-book, proof-cert, escalation-bundle, rust-wrapper, python-wrapper, runtime-monitor
         #[arg(long, default_value = "llvm-ir")]
         emit: String,
         /// P5-C: Strict import mode — missing/invalid certificates cause hard errors

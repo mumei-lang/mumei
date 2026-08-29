@@ -1908,6 +1908,124 @@ canonical 上位ロードマップは `docs/CROSS_PROJECT_ROADMAP.md` の
 
 ---
 
+## P22: Session Types（分散プロトコル検証）
+
+**ステータス: 設計中 / MVP 実装中** — 複数の `.mm` に分かれた送信側 / 受信側 atom の effect 契約を双対として突き合わせ、通信プロトコルの順序不整合とデッドロックをコンパイル時に検出する。Temporal Effect Verifier（`EffectStateMachine`）が単一ファイル内の effect 状態遷移を検査するのに対し、P22 は **ファイルをまたいだロール間の整合性**を cross-spec 検証の一部として扱う。
+
+### 構成
+
+- **`mumei-core/src/cross_spec/session_types.rs`**（新規）: `effect_pre` / `effect_post` を持つ atom を「通信ロール」として抽出し、対象を **2 ファイル以上に分散した stateful effect** に限定した上で 3 種類の違反を検出する。
+  - `duality_mismatch`: 送信側 atom の `effect_post` 状態を `effect_pre` として受ける受信側 atom が存在しない（送信に対する受信の欠落）。受信側は「送信側とは別の atom」であればよく、同一ファイル内の対向ロールも双対として数える（`std/ownership.mm` のように 1 モジュールがプロトコルの両端を持つ検証済みライブラリを誤検知しないため）。import alias で二重登録された同一 atom（`x` と `alias::x`）は 1 ロールに集約するが、`Wallet::step` と `Vault::step` のように所有型が異なる同名メソッドは別ロールとして扱う。`effect_pre` を宣言せず `effect_post` のみを持つ atom は、Modular Verification（`mir_analysis/temporal_effects.rs`）が事前状態を検査しないのと同じ意味論で **前提状態なし（任意の有効状態を受理できる）** ロールとして扱い、初期状態を仮定しない。
+  - `unreachable_receive`: 受信側 atom の `effect_pre` 状態が、initial state からロールグラフを辿って到達可能な状態集合に含まれない（到達不能状態）。互いの状態だけを生成し合う孤立したロール群（島）も到達不能として報告する。
+  - `deadlock_no_progress`: 到達可能な状態がすべて他ロールへ制御を渡し、終端（後続遷移を持たない）状態に到達しない（循環待ちによる progress 欠如）。
+- **爆発防止**: `MAX_EFFECT_STATES = 8`（Temporal Effect Verifier）と同じ思想で、`MAX_PROTOCOL_NODES = 32` / `MAX_PROTOCOL_ROLES = 64` / `MAX_PROTOCOL_ITERATIONS = 512` の上限を設ける。上限を超えるプロトコルグラフは解析対象外（違反を報告しない）。ただしこの fail-open な打ち切りは黙って PASS にせず、`session_analysis_skips[]` として明示的に報告する（打ち切りの判定は「2 ファイル以上に 2 ロール以上」という解析対象条件を満たした effect に限る。単一ファイルで閉じた effect や未使用の effect は P22 の対象外であり、状態数が上限を超えていてもスキップとして報告しない）（`reason` は `state_limit_exceeded` / `role_limit_exceeded`、`state_count` / `role_count` / `limit` 付き。import alias 経由で同じ effect が二重に見える場合は 1 件に集約）。判定は Rust 側の抽象解釈（有界 BFS）のみで行い、Z3 は呼ばない。
+- **`mumei-core/src/cross_spec/mod.rs`**: `CrossSpecResult` に `session_protocol_violations: Vec<SessionProtocolViolation>`、`CrossSpecSummary` に `session_protocol_violation_count` を追加。さらに解析を打ち切った effect を `session_analysis_skips: Vec<SessionAnalysisSkip>` / `summary.session_analysis_skipped_count` として出力する（違反ではないため exit code には影響せず、CLI では `Warning: session protocol not checked: ...` として表示）。違反は既存の `contract_consistency[]` と同じ粒度で `caller_atom` / `caller_file` / `callee_atom` / `callee_file` / `protocol_state` / `protocol_path` / 自然言語の `message` / `suggested_fix` を持つ。
+- **hard error 化**: `src/commands/verify.rs` は違反 1 件につき失敗 1 件を計上して非ゼロ終了、`src/commands/build.rs` は cross-spec 検証時に違反があれば exit 1。
+- **import 経由のロール帰属**: ロール抽出は atom の `spec_metadata["source_file"]` でファイルを判定するため、`mumei-core/src/resolver/imports.rs` が import で読み込んだ atom を解決済みパスに帰属させる。これにより `--cross-spec-files` で明示的にファイルを渡す場合だけでなく、`import` で対向ロールに届く通常の `mumei build` / `--cross-spec-verify` 経路でもファイル間検査が働く。 `mumei.toml` の `[dependencies]`（path / git / registry）と prelude も同様に、解決済みのエントリファイルへ帰属させる（`mumei-core/src/resolver/dependencies.rs`）。
+
+### 対象ファイル
+
+| ファイル | 役割 |
+|---|---|
+| `mumei-core/src/cross_spec/session_types.rs` | ロール抽出・duality / 到達性 / progress 判定（新規） |
+| `mumei-core/src/cross_spec/mod.rs` | `CrossSpecResult` / `CrossSpecSummary` への配線と `cross_spec.json` 出力 |
+| `src/commands/verify.rs` / `src/commands/build.rs` | 違反の hard error 化 |
+| `tests/fixtures/session_types/order_{protocol,client,server}.mm` | 正常系（双対が成立する分割プロトコル） |
+| `tests/fixtures/session_types/payment_{protocol,client,server}.mm` | 異常系（`ServerWait ⇄ ClientWait` の循環待ち） |
+| `tests/fixtures/session_types/bulk_{protocol,client,server}.mm` | 上限超過系（33 状態 → 解析スキップの報告） |
+| `tests/fixtures/session_types/payment_app.mm` | build 経路（`import` 経由で両ロールに到達する異常系） |
+| `mumei-core/src/resolver/imports.rs` | import した atom への `source_file` 帰属 |
+| `tests/test_session_types.rs` | 正常系 PASS / 異常系 hard error + `cross_spec.json` の assert |
+
+### 使い方
+
+```bash
+# 正常系: 分割された client / server ロールが双対をなす
+mumei verify --report-dir ./report \
+  --cross-spec-files tests/fixtures/session_types/order_server.mm \
+  tests/fixtures/session_types/order_client.mm
+
+# 異常系: 循環待ちで終端に到達しない → hard error（exit 1）
+mumei verify --report-dir ./report \
+  --cross-spec-files tests/fixtures/session_types/payment_server.mm \
+  tests/fixtures/session_types/payment_client.mm
+
+# 違反の詳細は cross_spec.json に出力される
+jq '.session_protocol_violations' ./report/cross_spec.json
+
+# 上限超過で解析を打ち切った effect（fail-open の可視化）
+jq '.session_analysis_skips' ./report/cross_spec.json
+```
+
+### CI 回帰ゲート
+
+- `cargo test --test test_session_types`: 正常系が exit 0、異常系が exit 1 かつ `session_protocol_violations[0].kind == "deadlock_no_progress"`、`summary.session_protocol_violation_count` が違反数と一致すること。
+- `cargo test --test test_session_types`: `import` で対向ロールに届く `payment_app.mm` の `mumei build` が exit 1 かつ `cross_spec.json` に `deadlock_no_progress` が出力され、`caller_file` / `callee_file` が import 元の各ファイルに帰属すること。
+- `cargo test --test test_session_types`: 上限超過系が exit 0 かつ `session_analysis_skips[0].reason == "state_limit_exceeded"`、`summary.session_analysis_skipped_count == 1`、CLI に警告が出ること。
+- `cargo test -p mumei-core session_types`: duality / 到達性 / progress / 単一ファイル除外 / 上限超過スキップとその報告・alias 集約のユニットテスト。
+- `cargo test -p mumei-core resolver::`: path 依存パッケージのエントリ atom が `source_file` に帰属すること（依存パッケージのロールが検査から漏れないこと）。
+- `cargo test --test ownership_cli`: `std/ownership.mm` を import する `tests/test_ownership.mm` が session 違反ゼロで PASS すること（1 ファイル内に両端を持つプロトコルの誤検知防止）。
+- 既存の cross-spec 回帰（`tests/test_cross_spec.rs`）が壊れないこと（単一ファイル内で閉じた state machine は従来どおり Temporal Effect Verifier の担当で、session 違反を報告しない）。
+
+---
+
+## P23: Proof-Aware Observability（実行時モニタリング）
+
+**ステータス: 設計中 / MVP 実装中** — 「証明が前提として信頼している境界」だけに実行時モニタ / テレメトリを注入し、証明済み領域はゼロコスト（無計装）に保つ。P15 の OTel 分散トレース基盤（`OTEL_ENABLED` / `OTEL_EXPORTER_OTLP_ENDPOINT`）と同じ運用に乗せる。
+
+### 構成
+
+- **信頼境界の分類**（`mumei-core/src/trust_boundary.rs`、新規）: 既存の判定基準を再利用して 3 種類に分類する。
+  - `trusted_atom`: `trust_level: trusted`（`mcp_server.py` の `visualize_std_graph` が黄色ノードとして描く判定と同一）。契約は証明ではなく仮定。
+  - `extern_ffi`: `extern` 宣言に裏打ちされ、検証器が本体を見ていない。名前空間付き atom は「末尾セグメントが一致する」だけでは境界とみなさず、`extern_fn_as_trusted_atom` が生成する形（契約が仮定・本体なし・同一シグネチャ）に一致する alias 登録のみを同一境界として扱う（`extern fn read` と検証済み `Device::read` を混同しない）。
+  - `effect_pre_override`: `effect_pre` で effect state machine の初期状態を上書きしており、呼び出し側の状態を仮定している。
+  - いずれにも該当しない atom（完全に証明された純粋 atom）は **成果物を 1 バイトも生成しない**。
+  - `extern` 宣言は本体を持たないため atom としてのコンパイル対象にならないが、`--emit runtime-monitor` では `trust_boundary::extern_fn_as_trusted_atom`（resolver と共用）で trusted atom に変換して 1 関数に 1 モニタを生成する（同名の通常 atom がある場合や alias 経由の重複は 1 件に集約）。
+- **`mumei-emit-monitor`**（新規クレート、`--emit runtime-monitor`）: 信頼境界 atom に対してのみ `<出力名>_<atom>.monitor.rs` を生成する。生成コードは `requires` / `ensures` を実行時に評価し、違反時に **panic せず** OTel イベントとして記録する。実行時条件として生成するのは識別子・整数リテラル・比較 / 算術 / 論理演算子・括弧からなる式に限り（`forall` などの mumei 固有構文やブロック・文・パスを含む契約は生成対象外としてコメントを残す）、契約テキストが生成 Rust にそのまま流れ込まないようにする。生成対象外の契約はコメントを残すだけでなく、`contract: "requires_unchecked"` / `"ensures_unchecked"` として報告し、**監視されていない境界契約がテレメトリ上で可視化される**ようにする（契約テキスト自体は生成物に含めない）。生成対象の式でも除算ゼロや debug ビルドの整数オーバーフローで fault し得るため、評価は `mumei_monitor::check` の panic 境界内で行い、失敗した評価は `observed = "evaluation panicked"` として報告する（monitored 呼び出しを巻き戻さない）。
+- **`effect_pre` の実行時観測**: effect 状態はコンパイラから観測できないため、ホストが `mumei_monitor::set_effect_state_probe(...)` で「現在の effect 状態を返す probe」を登録した場合にのみ、宣言された `effect_pre` 状態と実測値を比較し、不一致を `contract: "effect_pre"` として報告する（`observed` に実測状態を添付）。probe 未登録時は状態が観測不能なため何も報告しない。probe もホストコードであるため panic は `catch_unwind` で封じ込め、状態観測不能として扱う（`mumei.monitor.probe_panicked` を stderr に記録）。
+- **ゼロコスト維持**: 生成コード自体が依存クレートを持たない（`std` のみ）。報告は `mumei_monitor::set_violation_hook` でホストアプリの OTel SDK に接続する形で、`OTEL_ENABLED` が truthy でない限り評価も報告も行わない NoOp。hook 未設定時は `OTEL_EXPORTER_OTLP_ENDPOINT`（既定 `http://localhost:4318`）を明示した stderr フォールバック。 ホストの hook が panic した場合も `catch_unwind` で封じ込め、監視対象コードを巻き戻さない（`mumei.monitor.hook_panicked` を stderr に記録）。コンパイラ本体は `otel` feature 無効時に OTel 依存を一切引き込まない（P15 のゼロコスト回帰ゲートを踏襲）。
+
+### 対象ファイル
+
+| ファイル | 役割 |
+|---|---|
+| `mumei-core/src/trust_boundary.rs` | 信頼境界の分類（新規） |
+| `mumei-emit-monitor/src/lib.rs` | モニタコード生成（新規クレート） |
+| `mumei-core/src/emitter.rs` | `EmitTarget::RuntimeMonitor` と `runtime-monitor` CLI 名の登録 |
+| `src/codegen.rs` / `src/cli.rs` | emit dispatch と `--emit` ヘルプ |
+| `tests/fixtures/runtime_monitor/trusted_boundary.mm` | 信頼境界（`trusted` atom）の入力 |
+| `tests/fixtures/runtime_monitor/pure_proven.mm` | 証明済み純粋 atom の入力 |
+| `tests/fixtures/runtime_monitor/extern_only.mm` | `extern` 宣言のみの入力（FFI 境界） |
+| `tests/fixtures/runtime_monitor/panicking_contract.mm` | 実行時に fault し得る契約（除算ゼロ） |
+| `tests/test_runtime_monitor.rs` | ゴールデンテスト（生成あり / 生成なし） |
+
+### 使い方
+
+```bash
+# 信頼境界 atom → out_read_sensor.monitor.rs が生成される
+mumei build tests/fixtures/runtime_monitor/trusted_boundary.mm \
+  --emit runtime-monitor --output ./out
+
+# 証明済み純粋 atom → モニタコードは一切生成されない（ゼロコスト）
+mumei build tests/fixtures/runtime_monitor/pure_proven.mm \
+  --emit runtime-monitor --output ./out
+
+# 実行時: OTEL_ENABLED を立てたときのみ違反が報告される
+OTEL_ENABLED=true OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 ./your-app
+```
+
+生成された `mumei_monitor::set_violation_hook(...)` にホスト側の OTel エクスポータを接続すると、契約違反が metric / span として P15 と同じ OTLP エンドポイントへ送られる。
+
+### CI 回帰ゲート
+
+- `cargo test --test test_runtime_monitor`: 生成モニタが `rustc` で単体コンパイルでき、panic する hook を登録しても monitored 呼び出しが巻き戻らないこと。
+- `cargo test --test test_runtime_monitor`: `extern` 宣言のみの入力でも `requires` / `ensures` を含むモニタが 1 件生成されること。除算ゼロを含む `requires` / `ensures` の両方が `observed=evaluation panicked` として報告され、monitored 呼び出しが正常に後進すること。
+- `cargo test --test test_runtime_monitor`: `trusted` atom には `*_monitored` 関数と `boundary: "trusted_atom"` を含むモニタが生成され、純粋 atom には成果物が 1 件も生成されないこと。生成コードに `panic!` / `assert!` が含まれないこと、`OTEL_ENABLED` / `OTEL_EXPORTER_OTLP_ENDPOINT` の両方を参照していること。
+- `cargo test -p mumei-core trust_boundary` / `cargo test -p mumei-emit-monitor`: 分類ロジックと生成内容のユニットテスト（`effect_pre` 境界では `observed_effect_state` による状態比較が生成されること）。
+- **ゼロコスト検証（P15 と同一）**: `cargo tree --edges no-dev | grep -i opentelemetry` が空であること。`runtime-monitor` の追加によって OTel 依存が既定ビルドへ入らないことを保証する。
+
+---
+
 ## Related Documents
 
 - [`docs/FFI.md`](FFI.md) — FFI extern block design (Phase A foundation)

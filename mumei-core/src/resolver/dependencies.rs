@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 
 use super::cache::{load_cache, save_cache};
 use super::imports::{
-    mark_dependency_atoms_with_cert, register_imported_items, resolve_imports_recursive,
-    verify_import_certificate, ResolverContext,
+    mark_dependency_atoms_with_cert, register_imported_items_with_source,
+    resolve_imports_recursive, verify_import_certificate, ResolverContext,
 };
 
 /// mumei.toml の [dependencies] セクションを処理し、
@@ -84,7 +84,12 @@ pub fn resolve_manifest_dependencies_with_full_options(
                 ctx.strict_imports = strict_imports;
                 resolve_imports_recursive(&items, dep_base_dir, &mut ctx, &mut cache, module_env)?;
                 save_cache(&cache_path, &cache);
-                register_imported_items(&items, Some(dep_name), module_env);
+                register_imported_items_with_source(
+                    &items,
+                    Some(dep_name),
+                    module_env,
+                    entry_path.to_str(),
+                );
                 // P5-C: Check for proof certificate before marking atoms as verified
                 let cert_results =
                     verify_import_certificate(&abs_path, entry_path, &items, allow_lean_verified);
@@ -193,7 +198,12 @@ pub fn resolve_manifest_dependencies_with_full_options(
                 ctx.strict_imports = strict_imports;
                 resolve_imports_recursive(&items, dep_base_dir, &mut ctx, &mut cache, module_env)?;
                 save_cache(&cache_path, &cache);
-                register_imported_items(&items, Some(dep_name), module_env);
+                register_imported_items_with_source(
+                    &items,
+                    Some(dep_name),
+                    module_env,
+                    entry_path.to_str(),
+                );
                 // P5-C: Check for proof certificate before marking atoms as verified
                 // Use clone_dir (package root) instead of dep_base_dir (entry file parent)
                 // because cmd_publish saves certificates to the package root.
@@ -247,7 +257,12 @@ pub fn resolve_manifest_dependencies_with_full_options(
                         module_env,
                     )?;
                     save_cache(&cache_path, &cache);
-                    register_imported_items(&items, Some(dep_name), module_env);
+                    register_imported_items_with_source(
+                        &items,
+                        Some(dep_name),
+                        module_env,
+                        entry_path.to_str(),
+                    );
                     // P5-C: Check for proof certificate before marking atoms as verified
                     // Use pkg_dir (package root) instead of dep_base_dir (entry file parent)
                     // because cmd_publish saves certificates to the package root.

@@ -918,6 +918,8 @@ audit / migration / self-healing / MCP の 1 コマンド導線を提供する�
 | ✅ | vStd core guards forge | mumei + mumei-agent | Complete (`std/core_guards.mm`; deterministic bodies; Z3 decidable fragment; Lean escalation 不要) |
 | ✅ | 多言語 no-`.mm` 監査の回帰固定 | mumei-agent | Implemented (Rust/TypeScript/Go Z3 counterexamples normalize to `verification_violations`) |
 | ✅ | Priority 16: 大規模ケースでの atom-local proof obligation 合成性検証 | mumei + mumei-demo + mumei-agent | Implemented (5 scale シナリオ / 172 atoms / 依存深さ 5–7、1014 clause の ablation で `atom_local_closure_ratio` 0.4945、合成の破れ 277 本を `call_site_precondition` 86 / `counterexample_replay_mismatch` 86 / `effect_state_obligation` 58 / `neighbor_ensures_strengthening` 47 に分類。全 172 atom の certificate が `verify-cert --strict` 5/5 通過、`std/` trusted atom は 0 のまま、アプリ trusted atom 0 / FFI 境界 0 / Lean escalation 0、Z3 solver 9.77s、`budget_policy_fingerprint: sha256:scale-default`。報告は既存の `verification_status` / `verification_violations` / `next_steps` のみ) |
+| 高 | Priority 18 / P22: Session Types（分散プロトコル検証） | mumei | 🚧 In Progress |
+| 高 | Priority 19 / P23: Proof-Aware Observability（実行時モニタリング） | mumei + mumei-agent | 🚧 In Progress |
 | ⏸️ | SI-4: no_std Ecosystem | mumei | Deferred |
 
 ## vStd: Verified Standard Library Expansion
@@ -1780,6 +1782,53 @@ graph LR
 - `.github/workflows/generate-std-certs.yml` / `.github/workflows/stdlib-proof-gate.yml` / `scripts/generate_stdlib_metrics.py` / `scripts/bundle_std_certs.py` / `scripts/check_proof_bundle_drift.py` / `scripts/verify_packaged_certs.py` / `scripts/std_proof_baseline.json`
 - `tests/test_check_mcp_tool_contract.py` / `tests/test_check_proof_bundle_drift.py` / `tests/test_verify_packaged_certs.py` / `docs/MCP_TOOL_CONTRACT.md`
 - `scripts/homebrew/mumei.rb` / `scripts/generate_formula.py` / `.github/workflows/release.yml` — 配布物への proof artifact 同梱
+
+---
+
+## Priority 18: Session Types（分散プロトコル検証）— 🚧 In Progress
+
+**Repository**: `mumei-lang/mumei`（`docs/ROADMAP.md` の P22 に対応）
+
+**既存の土台**（本 Priority はこれらを置き換えず、ファイル横断に拡張する）:
+- `mumei-core/src/mir_analysis/temporal_effects.rs` の `EffectStateMachine`（`MAX_EFFECT_STATES = 8` の有界解析）
+- `mumei-core/src/parser/ast.rs` の `EffectDef` / `EffectTransition` と atom の `effect_pre` / `effect_post` 契約
+- `mumei-core/src/cross_spec/`（`CrossSpecVerifier` / `cross_spec.json`）
+
+**目的**: 送信側 atom の `effect_post` と受信側 atom の `effect_pre` を双対として突き合わせ、複数 `.mm` に分割された通信プロトコルの順序不整合・到達不能状態・循環待ちデッドロックをコンパイル時に検出する。
+
+**MVP の範囲**:
+- `mumei-core/src/cross_spec/session_types.rs` が `duality_mismatch` / `unreachable_receive` / `deadlock_no_progress` を有界抽象解釈（`MAX_PROTOCOL_NODES = 32` / `MAX_PROTOCOL_ROLES = 64` / `MAX_PROTOCOL_ITERATIONS = 512`）で判定する。Z3 は使わない。
+- `CrossSpecResult.session_protocol_violations[]` として `cross_spec.json` に出力し、既存 `contract_consistency[]` と同じ粒度（`caller_file` / `callee_file` / `message` / `suggested_fix`）で報告する。新規 verdict 語彙や別名 alias は追加しない。
+- 上限超過で解析を打ち切った effect は `CrossSpecResult.session_analysis_skips[]` / `summary.session_analysis_skipped_count` として明示し、fail-open な打ち切りが黙って PASS に見えないようにする（違反ではないため exit code には影響しない）。
+- `mumei verify --cross-spec-files` / `mumei build` で違反を hard error にする。
+
+**関連ファイル**:
+- `mumei-core/src/cross_spec/session_types.rs` / `mumei-core/src/cross_spec/mod.rs`
+- `src/commands/verify.rs` / `src/commands/build.rs`
+- `tests/fixtures/session_types/` / `tests/test_session_types.rs`
+
+---
+
+## Priority 19: Proof-Aware Observability（実行時モニタリング）— 🚧 In Progress
+
+**Repository**: `mumei-lang/mumei` + `mumei-lang/mumei-agent`（`docs/ROADMAP.md` の P23 に対応）
+
+**既存の土台**:
+- P15 OpenTelemetry 分散トレース連携（`src/telemetry.rs`、`OTEL_ENABLED` / `OTEL_EXPORTER_OTLP_ENDPOINT`、mumei-agent `docs/OBSERVABILITY.md` のリファレンススタック）
+- `mumei-emit-rust` / `mumei-emit-python` の契約チェック生成（`requires` → `assert!`、`ensures` → `debug_assert!`）
+- `trust_level: trusted` の既存判定（`mcp_server.py` の `visualize_std_graph` が黄色ノードとして描く基準）と `docs/TRUSTED_ATOMS.md` の trust surface メトリクス
+
+**目的**: 証明が前提として信頼している境界（trusted atom / `extern` FFI / `effect_pre` による初期状態の仮定）だけに実行時モニタを注入し、証明済み純粋 atom はゼロコスト（無計装）に保つ。証明で閉じている領域を計装しないこと自体が trust surface の可視化になる。
+
+**MVP の範囲**:
+- `mumei-core/src/trust_boundary.rs` が信頼境界を `trusted_atom` / `extern_ffi` / `effect_pre_override` に分類する。
+- `--emit runtime-monitor`（`mumei-emit-monitor`）が信頼境界 atom にのみモニタを生成し、契約違反時に panic ではなく OTel イベントとして報告する。純粋 atom には成果物を生成しない。
+- `OTEL_ENABLED` 未設定時は NoOp、報告先は P15 と同じ `OTEL_EXPORTER_OTLP_ENDPOINT`。`otel` feature 無効時に OTel 依存が入らないゼロコスト回帰ゲートを維持する。
+
+**関連ファイル**:
+- `mumei-core/src/trust_boundary.rs` / `mumei-emit-monitor/src/lib.rs` / `mumei-core/src/emitter.rs` / `src/codegen.rs`
+- `tests/fixtures/runtime_monitor/` / `tests/test_runtime_monitor.rs`
+- `src/telemetry.rs` / `mumei-agent` `docs/OBSERVABILITY.md`
 
 ---
 

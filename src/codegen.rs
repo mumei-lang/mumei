@@ -52,6 +52,12 @@ pub(crate) fn dispatch_emit(
             module_env,
             extern_blocks,
         ),
+        emitter::EmitTarget::RuntimeMonitor => mumei_emit_monitor::RuntimeMonitorEmitter.emit(
+            hir_atom,
+            output_path,
+            module_env,
+            extern_blocks,
+        ),
         emitter::EmitTarget::PythonWrapper => mumei_emit_python::PythonWrapperEmitter.emit(
             hir_atom,
             output_path,

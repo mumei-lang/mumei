@@ -1,5 +1,5 @@
 [workspace]
-members = ["mumei-core", "mumei-emit-llvm", "mumei-emit-json", "mumei-emit-proofbook", "mumei-emit-rust", "mumei-emit-python", "mumei-ffi-tests"]
+members = ["mumei-core", "mumei-emit-llvm", "mumei-emit-json", "mumei-emit-proofbook", "mumei-emit-rust", "mumei-emit-python", "mumei-emit-monitor", "mumei-ffi-tests"]
 
 [package]
 name = "mumei"
@@ -25,6 +25,7 @@ mumei-emit-json = { path = "mumei-emit-json" }
 mumei-emit-proofbook = { path = "mumei-emit-proofbook" }
 mumei-emit-rust = { path = "mumei-emit-rust" }
 mumei-emit-python = { path = "mumei-emit-python" }
+mumei-emit-monitor = { path = "mumei-emit-monitor" }
 clap = { version = "4.4", features = ["derive"] }
 encoding_rs = "0.8"
 toml = "0.8"

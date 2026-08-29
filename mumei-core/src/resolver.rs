@@ -508,6 +508,71 @@ atom caller(n: i64) -> i64
         assert!(!check_cert_for_atom(&results, "nonexistent"));
     }
 
+    /// Package dependencies must attribute their entry-file atoms, otherwise
+    /// cross-file analyses (Session Types) drop every dependency role.
+    #[test]
+    fn path_dependency_atoms_are_attributed_to_their_entry_file() {
+        let root = std::env::temp_dir().join(format!(
+            "mumei_dep_attribution_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let dep_src = root.join("dep").join("src");
+        fs::create_dir_all(&dep_src).expect("create dependency dir");
+        let entry = dep_src.join("main.mm");
+        fs::write(
+            &entry,
+            r#"
+effect DepChannel
+    states: [Idle, Sent];
+    initial: Idle;
+    transition send: Idle -> Sent;
+
+atom dep_send(x: i64)
+    effects: [DepChannel];
+    effect_pre: { DepChannel: Idle };
+    effect_post: { DepChannel: Sent };
+    requires: x > 0;
+    ensures: result == x;
+    body: {
+        perform DepChannel.send;
+        x
+    }
+"#,
+        )
+        .expect("write dependency entry");
+
+        let manifest: crate::manifest::Manifest = toml::from_str(
+            r#"
+[package]
+name = "app"
+version = "0.1.0"
+
+[dependencies]
+dep = { path = "./dep" }
+"#,
+        )
+        .expect("parse manifest");
+
+        let mut module_env = ModuleEnv::new();
+        resolve_manifest_dependencies(&manifest, &root, &mut module_env)
+            .expect("resolve dependencies");
+
+        let expected = entry.canonicalize().unwrap_or(entry.clone());
+        for name in ["dep_send", "dep::dep_send"] {
+            let atom = module_env
+                .get_atom(name)
+                .unwrap_or_else(|| panic!("{name} registered"));
+            let source = atom
+                .spec_metadata
+                .get("source_file")
+                .unwrap_or_else(|| panic!("{name} attributed to a source file"));
+            assert_eq!(Path::new(source), expected.as_path());
+        }
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
     /// P5-C: mark_dependency_atoms_with_cert verifies atoms with proven cert
     #[test]
     fn test_mark_dependency_atoms_with_cert_verified() {

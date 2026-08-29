@@ -78,6 +78,9 @@ pub enum EmitTarget {
     RustWrapper,
     /// FFI glue code for Python (NOT a transpiler — generates ctypes-based wrappers)
     PythonWrapper,
+    /// Proof-aware runtime monitors for trust-boundary atoms only
+    /// (proven pure atoms stay zero-cost and emit nothing)
+    RuntimeMonitor,
     /// Phase 3: an emitter loaded from an external dynamic library at
     /// `~/.mumei/emitters/<name>/libmumei_emit_<name>.{so,dll,dylib}`.
     /// Resolution is delegated to [`load_external_emitter`]. Used when
@@ -132,6 +135,10 @@ fn make_python_wrapper() -> EmitTarget {
     EmitTarget::PythonWrapper
 }
 
+fn make_runtime_monitor() -> EmitTarget {
+    EmitTarget::RuntimeMonitor
+}
+
 const BUILTIN_EMIT_TARGETS: &[BuiltinEmitTargetMeta] = &[
     BuiltinEmitTargetMeta {
         cli_name: "llvm-ir",
@@ -182,6 +189,11 @@ const BUILTIN_EMIT_TARGETS: &[BuiltinEmitTargetMeta] = &[
         cli_name: "python-wrapper",
         label: "Python wrapper",
         ctor: make_python_wrapper,
+    },
+    BuiltinEmitTargetMeta {
+        cli_name: "runtime-monitor",
+        label: "Proof-aware runtime monitor",
+        ctor: make_runtime_monitor,
     },
 ];
 
@@ -866,7 +878,7 @@ mod tests {
     fn test_builtin_cli_names_exact_join() {
         assert_eq!(
             EmitTarget::builtin_cli_names().collect::<Vec<_>>().join(", "),
-            "llvm-ir, c-header, verified-json, decidable-metrics, proof-book, proof-cert, escalation-bundle, binary, rust-wrapper, python-wrapper"
+            "llvm-ir, c-header, verified-json, decidable-metrics, proof-book, proof-cert, escalation-bundle, binary, rust-wrapper, python-wrapper, runtime-monitor"
         );
     }
 
