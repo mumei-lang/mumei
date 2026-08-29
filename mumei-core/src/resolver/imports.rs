@@ -114,7 +114,7 @@ pub fn resolve_prelude(base_dir: &Path, module_env: &mut ModuleEnv) -> MumeiResu
     save_cache(&cache_path, &cache);
 
     // prelude の定義を ModuleEnv に登録（alias なし = グローバルスコープ）
-    register_imported_items(&prelude_items, None, module_env);
+    register_imported_items_with_source(&prelude_items, None, module_env, prelude_path.to_str());
 
     // prelude の atom を検証済みとしてマーク
     for item in &prelude_items {
@@ -644,6 +644,10 @@ fn with_source_file(atom: &parser::Atom, file: &str) -> parser::Atom {
 
 /// インポートされたモジュールの Item を ModuleEnv に登録する。
 /// alias が指定されている場合、FQN（alias::name）でも登録する。
+///
+/// 本番経路は `register_imported_items_with_source` を使い、登録元ファイルを
+/// 帰属させる（cross-file 解析が `source_file` を必要とするため）。
+#[cfg(test)]
 pub(crate) fn register_imported_items(
     items: &[Item],
     alias: Option<&str>,

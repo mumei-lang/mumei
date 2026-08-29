@@ -72,6 +72,77 @@ fn trust_boundary_atom_gets_a_monitor() {
     assert!(source.contains("if mumei_monitor::enabled() && !(result >= 0)"));
 }
 
+/// A generated monitor observes contract violations: a host hook that panics
+/// must be contained by the runtime instead of unwinding through the monitored
+/// call.
+#[test]
+fn a_panicking_host_hook_does_not_escape_the_monitor() {
+    let (dir, log) = build_monitor(
+        "hook_panic",
+        "tests/fixtures/runtime_monitor/trusted_boundary.mm",
+    );
+    let files = monitor_files(&dir);
+    assert_eq!(files.len(), 1, "expected one monitor artifact\n{log}");
+    let monitor = std::fs::read_to_string(&files[0]).expect("read monitor");
+
+    let host = format!(
+        r#"{monitor}
+
+mod host_impl {{
+    #[no_mangle]
+    pub extern "C" fn read_sensor(channel: i64) -> i64 {{
+        channel
+    }}
+}}
+
+fn panicking_hook(_violation: &mumei_monitor::Violation) {{
+    panic!("hook is broken");
+}}
+
+fn main() {{
+    mumei_monitor::set_violation_hook(panicking_hook).expect("install hook");
+    let result = read_sensor_monitored(-1);
+    println!("survived={{result}}");
+}}
+"#
+    );
+    let host_path = dir.join("hook_panic_host.rs");
+    std::fs::write(&host_path, host).expect("write host program");
+
+    let bin_path = dir.join("hook_panic_host");
+    let compile = Command::new("rustc")
+        .arg("--edition")
+        .arg("2021")
+        .arg("--crate-name")
+        .arg("hook_panic_host")
+        .arg(&host_path)
+        .arg("-o")
+        .arg(&bin_path)
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run rustc: {err}"));
+    assert!(
+        compile.status.success(),
+        "generated monitor did not compile\n{}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+
+    let run = Command::new(&bin_path)
+        .env("OTEL_ENABLED", "1")
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run host program: {err}"));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        run.status.success(),
+        "hook panic escaped the monitor\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(stdout.contains("survived=-1"), "stdout:\n{stdout}");
+    assert!(
+        stderr.contains("mumei.monitor.hook_panicked"),
+        "stderr:\n{stderr}"
+    );
+}
+
 #[test]
 fn proven_pure_atom_is_zero_cost() {
     let (dir, log) = build_monitor("pure", "tests/fixtures/runtime_monitor/pure_proven.mm");

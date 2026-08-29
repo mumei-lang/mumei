@@ -115,9 +115,18 @@ pub mod mumei_monitor {
         if !enabled() {
             return;
         }
-        match HOOK.get() {
-            Some(hook) => hook(&violation),
-            None => default_hook(&violation),
+        let reported = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            match HOOK.get() {
+                Some(hook) => hook(&violation),
+                None => default_hook(&violation),
+            }
+        }));
+        if reported.is_err() {
+            // A faulty host hook must not unwind through monitored code.
+            eprintln!(
+                "mumei.monitor.hook_panicked atom={} boundary={} contract={}",
+                violation.atom, violation.boundary, violation.contract
+            );
         }
     }
 }
@@ -145,6 +154,63 @@ fn rust_type(type_name: &str, module_env: &ModuleEnv) -> String {
 
 fn escape(contract: &str) -> String {
     contract.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// Rust keywords that would turn an interpolated contract into a statement or
+/// item rather than a boolean expression.
+const REJECTED_CONTRACT_WORDS: &[&str] = &[
+    "unsafe", "fn", "let", "return", "static", "const", "mod", "impl", "use", "loop", "while",
+    "for", "match", "extern", "macro", "crate", "super", "std", "move", "async", "await", "if",
+    "else", "break", "continue", "struct", "enum", "trait", "type", "where", "dyn", "ref", "box",
+];
+
+/// A contract is interpolated into the generated `if` condition, so only a
+/// closed subset of expressions may be emitted: identifiers, integer literals,
+/// comparison/arithmetic/boolean operators and parentheses. Anything else
+/// (blocks, statements, macros, paths, string literals, comments, mumei-only
+/// syntax such as `forall`) is not lowered, so a contract can never contribute
+/// arbitrary Rust to the monitor.
+fn monitor_condition(contract: &str) -> Option<&str> {
+    let contract = contract.trim();
+    if contract.is_empty() || contract == "true" {
+        return None;
+    }
+    let allowed = |c: char| {
+        c.is_ascii_alphanumeric()
+            || c == '_'
+            || c.is_ascii_whitespace()
+            || matches!(
+                c,
+                '+' | '-' | '*' | '/' | '%' | '(' | ')' | '<' | '>' | '=' | '!' | '&' | '|' | ','
+            )
+    };
+    if !contract.chars().all(allowed) {
+        return None;
+    }
+    if contract.contains("//") || contract.contains("/*") || contract.contains("->") {
+        return None;
+    }
+    let mut depth: i32 = 0;
+    for c in contract.chars() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            _ => {}
+        }
+        if depth < 0 {
+            return None;
+        }
+    }
+    if depth != 0 {
+        return None;
+    }
+    if contract
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .any(|word| REJECTED_CONTRACT_WORDS.contains(&word))
+    {
+        return None;
+    }
+    Some(contract)
 }
 
 /// Generate the monitor module for a trust-boundary atom.
@@ -233,12 +299,16 @@ pub fn generate_monitor(
         ));
     }
 
-    if atom.requires != "true" && !atom.requires.is_empty() {
-        rs.push_str(&format!(
+    match monitor_condition(&atom.requires) {
+        Some(condition) => rs.push_str(&format!(
             "    if mumei_monitor::enabled() && !({}) {{\n{}    }}\n",
-            atom.requires,
-            record("requires", &atom.requires)
-        ));
+            condition,
+            record("requires", condition)
+        )),
+        None if atom.requires.trim().is_empty() || atom.requires.trim() == "true" => {}
+        None => rs.push_str(
+            "    // requires: not expressible as a runtime condition, left to verification.\n",
+        ),
     }
 
     rs.push_str(&format!(
@@ -251,12 +321,16 @@ pub fn generate_monitor(
             .join(", ")
     ));
 
-    if atom.ensures != "true" && !atom.ensures.is_empty() {
-        rs.push_str(&format!(
+    match monitor_condition(&atom.ensures) {
+        Some(condition) => rs.push_str(&format!(
             "    if mumei_monitor::enabled() && !({}) {{\n{}    }}\n",
-            atom.ensures,
-            record("ensures", &atom.ensures)
-        ));
+            condition,
+            record("ensures", condition)
+        )),
+        None if atom.ensures.trim().is_empty() || atom.ensures.trim() == "true" => {}
+        None => rs.push_str(
+            "    // ensures: not expressible as a runtime condition, left to verification.\n",
+        ),
     }
 
     rs.push_str("    result\n}\n");
@@ -376,6 +450,31 @@ mod tests {
         );
         assert!(source.contains("OTEL_ENABLED"));
         assert!(source.contains("OTEL_EXPORTER_OTLP_ENDPOINT"));
+    }
+
+    #[test]
+    fn contracts_outside_the_expression_subset_are_not_lowered() {
+        let mut atom = make_atom("read_clock");
+        atom.trust_level = TrustLevel::Trusted;
+        atom.requires = "x > 0) { std::process::exit(1); } if (true".to_string();
+        atom.ensures = "forall i: i64. i > 0".to_string();
+        let artifacts = emit(atom);
+        let source = String::from_utf8(artifacts[0].data.clone()).expect("utf8");
+        assert!(!source.contains("std::process::exit"));
+        assert!(!source.contains("forall"));
+        assert!(!source.contains("contract: \"requires\""));
+        assert!(!source.contains("contract: \"ensures\""));
+        assert!(source.contains("not expressible as a runtime condition"));
+    }
+
+    #[test]
+    fn generated_runtime_contains_a_panic_boundary_for_host_hooks() {
+        let mut atom = make_atom("read_clock");
+        atom.trust_level = TrustLevel::Trusted;
+        let artifacts = emit(atom);
+        let source = String::from_utf8(artifacts[0].data.clone()).expect("utf8");
+        assert!(source.contains("catch_unwind"));
+        assert!(source.contains("mumei.monitor.hook_panicked"));
     }
 
     #[test]

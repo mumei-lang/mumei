@@ -140,6 +140,15 @@ pub fn analyze_session_protocols(
         if effect_def.states.is_empty() {
             continue;
         }
+        // Eligibility is decided before the bounds so that an effect outside
+        // session analysis (single-file or unused) is never reported as skipped:
+        // role collection is linear in the atom count, only the graph traversals
+        // below need bounding.
+        let roles = collect_roles(effect_name, effect_def, atoms);
+        let files: BTreeSet<&str> = roles.iter().map(|role| role.file.as_str()).collect();
+        if roles.len() < 2 || files.len() < 2 {
+            continue;
+        }
         if effect_def.states.len() > MAX_PROTOCOL_NODES {
             if !skipped_effects.insert(unqualified(effect_name)) {
                 continue;
@@ -160,7 +169,6 @@ pub fn analyze_session_protocols(
             });
             continue;
         }
-        let roles = collect_roles(effect_name, effect_def, atoms);
         if roles.len() > MAX_PROTOCOL_ROLES {
             if !skipped_effects.insert(unqualified(effect_name)) {
                 continue;
@@ -180,10 +188,6 @@ pub fn analyze_session_protocols(
                     MAX_PROTOCOL_ROLES
                 ),
             });
-            continue;
-        }
-        let files: BTreeSet<&str> = roles.iter().map(|role| role.file.as_str()).collect();
-        if roles.len() < 2 || files.len() < 2 {
             continue;
         }
         violations.extend(check_duality(effect_name, effect_def, &roles));
@@ -242,18 +246,41 @@ fn collect_roles(
         });
     }
     roles.sort_by(|left, right| {
-        // Import aliases register the same atom twice (`x` and `alias::x`); keep
-        // the unqualified name so a role is named the way it is declared.
+        // Least-qualified first, so the alias-free registration of an atom is the
+        // one kept below and a role is named the way it is declared.
         let left_key = (left.atom_name.matches("::").count(), &left.atom_name);
         let right_key = (right.atom_name.matches("::").count(), &right.atom_name);
         left_key.cmp(&right_key)
     });
-
-    let mut seen: BTreeSet<(String, String)> = BTreeSet::new();
-    roles.retain(|role| seen.insert((unqualified(&role.atom_name).to_string(), role.file.clone())));
+    dedup_alias_registrations(&mut roles);
 
     roles.sort_by(|left, right| left.atom_name.cmp(&right.atom_name));
     roles
+}
+
+/// Drop the alias registrations of an already-collected atom.
+///
+/// An import alias registers `x` a second time as `alias::x`, so the duplicate
+/// is recognised by its name being a `::`-suffix of the retained one — which
+/// keeps `Wallet::send` and `Vault::send` apart, where dropping every namespace
+/// prefix would collapse them into a single role.
+fn dedup_alias_registrations(roles: &mut Vec<ProtocolRole>) {
+    let mut kept: Vec<ProtocolRole> = Vec::with_capacity(roles.len());
+    for role in roles.drain(..) {
+        let is_alias_of_kept = kept.iter().any(|other| {
+            other.file == role.file
+                && other.pre_state == role.pre_state
+                && other.post_state == role.post_state
+                && role
+                    .atom_name
+                    .strip_suffix(other.atom_name.as_str())
+                    .is_some_and(|prefix| prefix.ends_with("::"))
+        });
+        if !is_alias_of_kept {
+            kept.push(role);
+        }
+    }
+    *roles = kept;
 }
 
 fn check_duality(
@@ -269,10 +296,9 @@ fn check_duality(
         // 'effect_pre' happens to match its 'effect_post' would otherwise
         // receive its own message. Peers in the sender's file do count — a
         // module may host both ends of a protocol it also exposes to others.
-        let has_receiver = roles.iter().any(|peer| {
-            peer.pre_state == role.post_state
-                && unqualified(&peer.atom_name) != unqualified(&role.atom_name)
-        });
+        let has_receiver = roles
+            .iter()
+            .any(|peer| peer.pre_state == role.post_state && peer.atom_name != role.atom_name);
         if has_receiver {
             continue;
         }
@@ -841,9 +867,14 @@ mod tests {
         let effect_def = effect(&["Idle", "Sent"], &[("send", "Idle", "Sent")]);
         let mut atoms = Vec::new();
         for index in 0..=MAX_PROTOCOL_ROLES {
+            let file = if index % 2 == 0 {
+                "client.mm"
+            } else {
+                "server.mm"
+            };
             atoms.push(role_atom(
                 &format!("sender_{index}"),
-                "client.mm",
+                file,
                 Some("Idle"),
                 Some("Sent"),
             ));
@@ -869,10 +900,82 @@ mod tests {
             ("Channel".to_string(), &effect_def),
             ("protocol::Channel".to_string(), &effect_def),
         ]);
+        let atoms = [
+            role_atom("client_send", "client.mm", Some("S0"), Some("S1")),
+            role_atom("server_wait", "server.mm", Some("S5"), None),
+        ];
+        let atom_map: BTreeMap<String, &Atom> =
+            atoms.iter().map(|atom| (atom.name.clone(), atom)).collect();
 
-        let analysis = analyze_session_protocols(&BTreeMap::new(), &effect_map);
+        let analysis = analyze_session_protocols(&atom_map, &effect_map);
         assert_eq!(analysis.skipped.len(), 1);
         assert_eq!(analysis.skipped[0].effect, "Channel");
+    }
+
+    #[test]
+    fn oversized_single_file_effects_are_not_reported_as_skipped() {
+        let states: Vec<String> = (0..=MAX_PROTOCOL_NODES)
+            .map(|index| format!("S{index}"))
+            .collect();
+        let state_refs: Vec<&str> = states.iter().map(String::as_str).collect();
+        let effect_def = effect(&state_refs, &[("step", "S0", "S1")]);
+        // Both ends live in one file, so Temporal Effect verification owns this
+        // protocol and session analysis has nothing to skip.
+        let atoms = vec![
+            role_atom("client_send", "client.mm", Some("S0"), Some("S1")),
+            role_atom("client_recv", "client.mm", Some("S1"), None),
+        ];
+
+        assert!(analyze(&effect_def, &atoms).skipped.is_empty());
+    }
+
+    #[test]
+    fn oversized_effects_without_roles_are_not_reported_as_skipped() {
+        let states: Vec<String> = (0..=MAX_PROTOCOL_NODES)
+            .map(|index| format!("S{index}"))
+            .collect();
+        let state_refs: Vec<&str> = states.iter().map(String::as_str).collect();
+        let effect_def = effect(&state_refs, &[("step", "S0", "S1")]);
+
+        assert!(analyze(&effect_def, &[]).skipped.is_empty());
+    }
+
+    #[test]
+    fn same_named_methods_on_different_types_stay_distinct_roles() {
+        let effect_def = effect(
+            &["Idle", "Sent", "Answered"],
+            &[("send", "Idle", "Sent"), ("answer", "Sent", "Answered")],
+        );
+        // 'Wallet::step' and 'Vault::step' are different atoms that happen to
+        // share a method name; only 'Vault::step' receives 'Sent'.
+        let atoms = vec![
+            role_atom("Wallet::step", "client.mm", Some("Idle"), Some("Sent")),
+            role_atom("Vault::step", "server.mm", Some("Sent"), Some("Answered")),
+        ];
+
+        let violations = run(&effect_def, &atoms);
+        assert!(
+            violations
+                .iter()
+                .all(|violation| violation.kind != KIND_DUALITY_MISMATCH),
+            "distinct methods must satisfy duality: {violations:#?}"
+        );
+    }
+
+    #[test]
+    fn same_named_methods_in_one_file_do_not_collapse() {
+        let effect_def = effect(&["Idle", "Sent"], &[("send", "Idle", "Sent")]);
+        let atoms = [
+            role_atom("Wallet::step", "client.mm", Some("Idle"), Some("Sent")),
+            role_atom("Vault::step", "client.mm", Some("Idle"), Some("Sent")),
+            role_atom("server_recv", "server.mm", Some("Sent"), None),
+        ];
+        let atom_map: BTreeMap<String, &Atom> =
+            atoms.iter().map(|atom| (atom.name.clone(), atom)).collect();
+
+        let roles = collect_roles("Channel", &effect_def, &atom_map);
+        let names: Vec<&str> = roles.iter().map(|role| role.atom_name.as_str()).collect();
+        assert_eq!(names, vec!["Vault::step", "Wallet::step", "server_recv"]);
     }
 
     #[test]
