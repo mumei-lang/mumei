@@ -821,6 +821,9 @@ pub(crate) fn cmd_build(
                         cross_spec_result.summary.global_invariant_conflict_count
                     );
                 }
+                for skip in &cross_spec_result.session_analysis_skips {
+                    eprintln!("Warning: session protocol not checked: {}", skip.message);
+                }
                 if !cross_spec_result.session_protocol_violations.is_empty() {
                     for violation in &cross_spec_result.session_protocol_violations {
                         eprintln!(

@@ -1799,6 +1799,7 @@ graph LR
 **MVP の範囲**:
 - `mumei-core/src/cross_spec/session_types.rs` が `duality_mismatch` / `unreachable_receive` / `deadlock_no_progress` を有界抽象解釈（`MAX_PROTOCOL_NODES = 32` / `MAX_PROTOCOL_ROLES = 64` / `MAX_PROTOCOL_ITERATIONS = 512`）で判定する。Z3 は使わない。
 - `CrossSpecResult.session_protocol_violations[]` として `cross_spec.json` に出力し、既存 `contract_consistency[]` と同じ粒度（`caller_file` / `callee_file` / `message` / `suggested_fix`）で報告する。新規 verdict 語彙や別名 alias は追加しない。
+- 上限超過で解析を打ち切った effect は `CrossSpecResult.session_analysis_skips[]` / `summary.session_analysis_skipped_count` として明示し、fail-open な打ち切りが黙って PASS に見えないようにする（違反ではないため exit code には影響しない）。
 - `mumei verify --cross-spec-files` / `mumei build` で違反を hard error にする。
 
 **関連ファイル**:

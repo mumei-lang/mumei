@@ -9,7 +9,7 @@ pub mod session_types;
 use crate::parser::Atom;
 use crate::verification::ModuleEnv;
 use serde::{Deserialize, Serialize};
-use session_types::SessionProtocolViolation;
+use session_types::{SessionAnalysis, SessionAnalysisSkip, SessionProtocolViolation};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Dependency graph node representing an atom and its dependencies.
@@ -73,6 +73,9 @@ pub struct CrossSpecResult {
     /// Session-type protocol violations between atoms of a stateful effect
     /// that is shared across specification files.
     pub session_protocol_violations: Vec<SessionProtocolViolation>,
+    /// Effects whose protocol exceeded an analysis bound and was therefore
+    /// not checked (fail-open, reported explicitly).
+    pub session_analysis_skips: Vec<SessionAnalysisSkip>,
     pub dependency_graph: Vec<DependencyNode>,
     pub agent_artifact_mapping: Vec<AgentArtifactMapping>,
     pub summary: CrossSpecSummary,
@@ -88,6 +91,7 @@ pub struct CrossSpecSummary {
     pub global_invariant_count: usize,
     pub global_invariant_conflict_count: usize,
     pub session_protocol_violation_count: usize,
+    pub session_analysis_skipped_count: usize,
 }
 
 /// Verifier for cross-specification consistency.
@@ -463,6 +467,12 @@ impl<'env> CrossSpecVerifier<'env> {
     ///
     /// See [`session_types`] for the duality / reachability / progress rules.
     pub fn detect_session_protocol_violations(&self) -> Vec<SessionProtocolViolation> {
+        self.analyze_session_protocols().violations
+    }
+
+    /// Like [`Self::detect_session_protocol_violations`], but also reports the
+    /// effects the bounded analysis skipped.
+    pub fn analyze_session_protocols(&self) -> SessionAnalysis {
         let atoms: BTreeMap<String, &Atom> = self
             .module_env
             .atoms
@@ -476,7 +486,7 @@ impl<'env> CrossSpecVerifier<'env> {
             .chain(self.module_env.effects.iter())
             .map(|(name, def)| (name.clone(), def))
             .collect();
-        session_types::detect_session_protocol_violations(&atoms, &effect_defs)
+        session_types::analyze_session_protocols(&atoms, &effect_defs)
     }
 
     /// Run all cross-specification verifications.
@@ -486,7 +496,7 @@ impl<'env> CrossSpecVerifier<'env> {
         let global_invariant_conflicts = self.detect_global_invariant_conflicts();
         let dependency_graph = self.build_dependency_graph();
         let circular_dependencies = self.detect_circular_dependencies();
-        let session_protocol_violations = self.detect_session_protocol_violations();
+        let session_analysis = self.analyze_session_protocols();
 
         let consistent_calls = contract_consistency
             .iter()
@@ -501,7 +511,8 @@ impl<'env> CrossSpecVerifier<'env> {
             circular_dependency_count: circular_dependencies.len(),
             global_invariant_count: global_invariants.len(),
             global_invariant_conflict_count: global_invariant_conflicts.len(),
-            session_protocol_violation_count: session_protocol_violations.len(),
+            session_protocol_violation_count: session_analysis.violations.len(),
+            session_analysis_skipped_count: session_analysis.skipped.len(),
         };
 
         CrossSpecResult {
@@ -509,7 +520,8 @@ impl<'env> CrossSpecVerifier<'env> {
             global_invariants,
             global_invariant_conflicts,
             circular_dependencies,
-            session_protocol_violations,
+            session_protocol_violations: session_analysis.violations,
+            session_analysis_skips: session_analysis.skipped,
             dependency_graph,
             agent_artifact_mapping: agent_artifact_mapping(),
             summary,

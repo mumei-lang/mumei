@@ -66,6 +66,43 @@ fn dual_split_file_protocol_verifies() {
 }
 
 #[test]
+fn oversized_protocol_is_reported_as_skipped() {
+    let (success, log, report) = run_cross_spec(
+        "skip",
+        &[
+            "tests/fixtures/session_types/bulk_client.mm",
+            "tests/fixtures/session_types/bulk_server.mm",
+        ],
+    );
+
+    assert!(
+        success,
+        "skipped protocol must not fail verification\n{log}"
+    );
+    assert_eq!(report["summary"]["session_protocol_violation_count"], 0);
+
+    let skips = report["session_analysis_skips"]
+        .as_array()
+        .expect("session skip array");
+    assert_eq!(skips.len(), 1, "expected one skip in {report:#}");
+    assert_eq!(report["summary"]["session_analysis_skipped_count"], 1);
+
+    let skip = &skips[0];
+    assert_eq!(skip["effect"], "BulkChannel");
+    assert_eq!(skip["reason"], "state_limit_exceeded");
+    assert_eq!(skip["state_count"], 33);
+    assert_eq!(skip["limit"], 32);
+    assert!(skip["message"]
+        .as_str()
+        .expect("message")
+        .contains("BulkChannel"));
+    assert!(
+        log.contains("session protocol not checked"),
+        "skip must be surfaced on the CLI\n{log}"
+    );
+}
+
+#[test]
 fn deadlocking_split_file_protocol_is_a_hard_error() {
     let (success, log, report) = run_cross_spec(
         "deadlock",

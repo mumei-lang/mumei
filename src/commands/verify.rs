@@ -1361,6 +1361,13 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                         cross_spec_result.summary.global_invariant_conflict_count
                     );
                 }
+                // Skipped effects are fail-open, so they are surfaced as
+                // warnings instead of silently passing.
+                if !quiet_output {
+                    for skip in &cross_spec_result.session_analysis_skips {
+                        eprintln!("Warning: session protocol not checked: {}", skip.message);
+                    }
+                }
                 // Session protocol violations are syntactically decided from
                 // effect_pre/effect_post contracts, so they are hard errors.
                 for violation in &cross_spec_result.session_protocol_violations {

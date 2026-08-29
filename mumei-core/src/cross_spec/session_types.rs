@@ -63,6 +63,38 @@ pub struct SessionProtocolViolation {
     pub suggested_fix: String,
 }
 
+/// The effect declares more states than [`MAX_PROTOCOL_NODES`].
+pub const SKIP_STATE_LIMIT: &str = "state_limit_exceeded";
+/// The effect has more participating atoms than [`MAX_PROTOCOL_ROLES`].
+pub const SKIP_ROLE_LIMIT: &str = "role_limit_exceeded";
+
+/// An effect whose protocol was left unanalysed by the bounded analysis.
+///
+/// Skipping is fail-open, so it is reported explicitly: silence in
+/// `session_protocol_violations[]` alone would be ambiguous.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionAnalysisSkip {
+    /// Stateful effect that was not analysed.
+    pub effect: String,
+    /// One of [`SKIP_STATE_LIMIT`], [`SKIP_ROLE_LIMIT`].
+    pub reason: String,
+    /// States declared by the effect.
+    pub state_count: usize,
+    /// Atoms declaring a contract for the effect, when they were collected.
+    pub role_count: Option<usize>,
+    /// Bound that was exceeded.
+    pub limit: usize,
+    pub message: String,
+}
+
+/// Outcome of the bounded session protocol analysis.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionAnalysis {
+    pub violations: Vec<SessionProtocolViolation>,
+    /// Effects that exceeded an analysis bound and were therefore not checked.
+    pub skipped: Vec<SessionAnalysisSkip>,
+}
+
 /// One atom's role in the protocol of a single stateful effect.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ProtocolRole {
@@ -89,14 +121,65 @@ pub fn detect_session_protocol_violations(
     atoms: &BTreeMap<String, &Atom>,
     effect_defs: &BTreeMap<String, &EffectDef>,
 ) -> Vec<SessionProtocolViolation> {
+    analyze_session_protocols(atoms, effect_defs).violations
+}
+
+/// Like [`detect_session_protocol_violations`], but also reports the effects
+/// the bounded analysis skipped, so fail-open silence is never ambiguous.
+pub fn analyze_session_protocols(
+    atoms: &BTreeMap<String, &Atom>,
+    effect_defs: &BTreeMap<String, &EffectDef>,
+) -> SessionAnalysis {
     let mut violations = Vec::new();
+    let mut skipped: Vec<SessionAnalysisSkip> = Vec::new();
+    // The same effect is visible both unqualified and under its import alias,
+    // so skips are reported once per declaration.
+    let mut skipped_effects: BTreeSet<&str> = BTreeSet::new();
 
     for (effect_name, effect_def) in effect_defs {
-        if effect_def.states.is_empty() || effect_def.states.len() > MAX_PROTOCOL_NODES {
+        if effect_def.states.is_empty() {
+            continue;
+        }
+        if effect_def.states.len() > MAX_PROTOCOL_NODES {
+            if !skipped_effects.insert(unqualified(effect_name)) {
+                continue;
+            }
+            skipped.push(SessionAnalysisSkip {
+                effect: effect_name.clone(),
+                reason: SKIP_STATE_LIMIT.to_string(),
+                state_count: effect_def.states.len(),
+                role_count: None,
+                limit: MAX_PROTOCOL_NODES,
+                message: format!(
+                    "Effect '{}' declares {} states (limit {}), so its cross-file protocol was \
+                     not checked: session protocol violations in this effect are not reported.",
+                    effect_name,
+                    effect_def.states.len(),
+                    MAX_PROTOCOL_NODES
+                ),
+            });
             continue;
         }
         let roles = collect_roles(effect_name, effect_def, atoms);
         if roles.len() > MAX_PROTOCOL_ROLES {
+            if !skipped_effects.insert(unqualified(effect_name)) {
+                continue;
+            }
+            skipped.push(SessionAnalysisSkip {
+                effect: effect_name.clone(),
+                reason: SKIP_ROLE_LIMIT.to_string(),
+                state_count: effect_def.states.len(),
+                role_count: Some(roles.len()),
+                limit: MAX_PROTOCOL_ROLES,
+                message: format!(
+                    "Effect '{}' has {} participating atoms (limit {}), so its cross-file \
+                     protocol was not checked: session protocol violations in this effect are \
+                     not reported.",
+                    effect_name,
+                    roles.len(),
+                    MAX_PROTOCOL_ROLES
+                ),
+            });
             continue;
         }
         let files: BTreeSet<&str> = roles.iter().map(|role| role.file.as_str()).collect();
@@ -111,7 +194,17 @@ pub fn detect_session_protocol_violations(
     violations.sort_by(|left, right| {
         (&left.effect, &left.kind, &left.message).cmp(&(&right.effect, &right.kind, &right.message))
     });
-    violations
+    skipped
+        .sort_by(|left, right| (&left.effect, &left.reason).cmp(&(&right.effect, &right.reason)));
+    SessionAnalysis {
+        violations,
+        skipped,
+    }
+}
+
+/// Strip an import alias prefix (`protocol::Channel` -> `Channel`).
+fn unqualified(effect_name: &str) -> &str {
+    effect_name.rsplit("::").next().unwrap_or(effect_name)
 }
 
 fn collect_roles(
@@ -492,10 +585,14 @@ mod tests {
     }
 
     fn run(effect_def: &EffectDef, atoms: &[Atom]) -> Vec<SessionProtocolViolation> {
+        analyze(effect_def, atoms).violations
+    }
+
+    fn analyze(effect_def: &EffectDef, atoms: &[Atom]) -> SessionAnalysis {
         let atom_map: BTreeMap<String, &Atom> =
             atoms.iter().map(|atom| (atom.name.clone(), atom)).collect();
         let effect_map = BTreeMap::from([("Channel".to_string(), effect_def)]);
-        detect_session_protocol_violations(&atom_map, &effect_map)
+        analyze_session_protocols(&atom_map, &effect_map)
     }
 
     #[test]
@@ -681,5 +778,78 @@ mod tests {
             role_atom("server_wait", "server.mm", Some("S5"), None),
         ];
         assert!(run(&effect_def, &atoms).is_empty());
+    }
+
+    #[test]
+    fn skipped_oversized_protocols_are_reported() {
+        let states: Vec<String> = (0..=MAX_PROTOCOL_NODES)
+            .map(|index| format!("S{index}"))
+            .collect();
+        let state_refs: Vec<&str> = states.iter().map(String::as_str).collect();
+        let effect_def = effect(&state_refs, &[("step", "S0", "S1")]);
+        let atoms = vec![
+            role_atom("client_send", "client.mm", Some("S0"), Some("S1")),
+            role_atom("server_wait", "server.mm", Some("S5"), None),
+        ];
+
+        let analysis = analyze(&effect_def, &atoms);
+        assert!(analysis.violations.is_empty());
+        assert_eq!(analysis.skipped.len(), 1);
+        let skip = &analysis.skipped[0];
+        assert_eq!(skip.effect, "Channel");
+        assert_eq!(skip.reason, SKIP_STATE_LIMIT);
+        assert_eq!(skip.state_count, MAX_PROTOCOL_NODES + 1);
+        assert_eq!(skip.role_count, None);
+        assert_eq!(skip.limit, MAX_PROTOCOL_NODES);
+        assert!(skip.message.contains("Channel"));
+    }
+
+    #[test]
+    fn skipped_role_heavy_protocols_are_reported() {
+        let effect_def = effect(&["Idle", "Sent"], &[("send", "Idle", "Sent")]);
+        let mut atoms = Vec::new();
+        for index in 0..=MAX_PROTOCOL_ROLES {
+            atoms.push(role_atom(
+                &format!("sender_{index}"),
+                "client.mm",
+                Some("Idle"),
+                Some("Sent"),
+            ));
+        }
+
+        let analysis = analyze(&effect_def, &atoms);
+        assert!(analysis.violations.is_empty());
+        assert_eq!(analysis.skipped.len(), 1);
+        let skip = &analysis.skipped[0];
+        assert_eq!(skip.reason, SKIP_ROLE_LIMIT);
+        assert_eq!(skip.role_count, Some(MAX_PROTOCOL_ROLES + 1));
+        assert_eq!(skip.limit, MAX_PROTOCOL_ROLES);
+    }
+
+    #[test]
+    fn aliased_effect_declarations_are_reported_once() {
+        let states: Vec<String> = (0..=MAX_PROTOCOL_NODES)
+            .map(|index| format!("S{index}"))
+            .collect();
+        let state_refs: Vec<&str> = states.iter().map(String::as_str).collect();
+        let effect_def = effect(&state_refs, &[("step", "S0", "S1")]);
+        let effect_map = BTreeMap::from([
+            ("Channel".to_string(), &effect_def),
+            ("protocol::Channel".to_string(), &effect_def),
+        ]);
+
+        let analysis = analyze_session_protocols(&BTreeMap::new(), &effect_map);
+        assert_eq!(analysis.skipped.len(), 1);
+        assert_eq!(analysis.skipped[0].effect, "Channel");
+    }
+
+    #[test]
+    fn analysed_protocols_report_no_skips() {
+        let effect_def = effect(&["Idle", "Sent"], &[("send", "Idle", "Sent")]);
+        let atoms = vec![
+            role_atom("client_send", "client.mm", Some("Idle"), Some("Sent")),
+            role_atom("server_recv", "server.mm", Some("Sent"), None),
+        ];
+        assert!(analyze(&effect_def, &atoms).skipped.is_empty());
     }
 }
