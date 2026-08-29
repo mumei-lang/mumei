@@ -1908,9 +1908,9 @@ canonical 上位ロードマップは `docs/CROSS_PROJECT_ROADMAP.md` の
 
 ---
 
-## P22: Session Types（分散プロトコル検証）
+## P22: Session Types（分散プロトコル検証） — ✅ Implemented
 
-**ステータス: 設計中 / MVP 実装中** — 複数の `.mm` に分かれた送信側 / 受信側 atom の effect 契約を双対として突き合わせ、通信プロトコルの順序不整合とデッドロックをコンパイル時に検出する。Temporal Effect Verifier（`EffectStateMachine`）が単一ファイル内の effect 状態遷移を検査するのに対し、P22 は **ファイルをまたいだロール間の整合性**を cross-spec 検証の一部として扱う。
+**ステータス: ✅ Implemented**（測定 2026-08-29、`cargo test --test test_session_types` 4/4 passed、`cargo test -p mumei-core session_types` 20/20 passed）— 複数の `.mm` に分かれた送信側 / 受信側 atom の effect 契約を双対として突き合わせ、通信プロトコルの順序不整合とデッドロックをコンパイル時に検出する。Temporal Effect Verifier（`EffectStateMachine`）が単一ファイル内の effect 状態遷移を検査するのに対し、P22 は **ファイルをまたいだロール間の整合性**を cross-spec 検証の一部として扱う。
 
 ### 構成
 
@@ -1921,6 +1921,7 @@ canonical 上位ロードマップは `docs/CROSS_PROJECT_ROADMAP.md` の
 - **爆発防止**: `MAX_EFFECT_STATES = 8`（Temporal Effect Verifier）と同じ思想で、`MAX_PROTOCOL_NODES = 32` / `MAX_PROTOCOL_ROLES = 64` / `MAX_PROTOCOL_ITERATIONS = 512` の上限を設ける。上限を超えるプロトコルグラフは解析対象外（違反を報告しない）。ただしこの fail-open な打ち切りは黙って PASS にせず、`session_analysis_skips[]` として明示的に報告する（打ち切りの判定は「2 ファイル以上に 2 ロール以上」という解析対象条件を満たした effect に限る。単一ファイルで閉じた effect や未使用の effect は P22 の対象外であり、状態数が上限を超えていてもスキップとして報告しない）（`reason` は `state_limit_exceeded` / `role_limit_exceeded`、`state_count` / `role_count` / `limit` 付き。import alias 経由で同じ effect が二重に見える場合は 1 件に集約）。判定は Rust 側の抽象解釈（有界 BFS）のみで行い、Z3 は呼ばない。
 - **`mumei-core/src/cross_spec/mod.rs`**: `CrossSpecResult` に `session_protocol_violations: Vec<SessionProtocolViolation>`、`CrossSpecSummary` に `session_protocol_violation_count` を追加。さらに解析を打ち切った effect を `session_analysis_skips: Vec<SessionAnalysisSkip>` / `summary.session_analysis_skipped_count` として出力する（違反ではないため exit code には影響せず、CLI では `Warning: session protocol not checked: ...` として表示）。違反は既存の `contract_consistency[]` と同じ粒度で `caller_atom` / `caller_file` / `callee_atom` / `callee_file` / `protocol_state` / `protocol_path` / 自然言語の `message` / `suggested_fix` を持つ。
 - **hard error 化**: `src/commands/verify.rs` は違反 1 件につき失敗 1 件を計上して非ゼロ終了、`src/commands/build.rs` は cross-spec 検証時に違反があれば exit 1。
+- **agent 側の消費**: `agent_artifact_mapping[]` が宣言するとおり、mumei-agent は `session_protocol_violations[]` を `missing_constraints[]`（`contradiction_type: spec_vs_code`）として取り込む（Meta-Architect の `enforce_session_protocol` 提案と MCP `check_cross_spec_consistency`）。新規の audit / verdict 語彙は導入しない。
 - **import 経由のロール帰属**: ロール抽出は atom の `spec_metadata["source_file"]` でファイルを判定するため、`mumei-core/src/resolver/imports.rs` が import で読み込んだ atom を解決済みパスに帰属させる。これにより `--cross-spec-files` で明示的にファイルを渡す場合だけでなく、`import` で対向ロールに届く通常の `mumei build` / `--cross-spec-verify` 経路でもファイル間検査が働く。 `mumei.toml` の `[dependencies]`（path / git / registry）と prelude も同様に、解決済みのエントリファイルへ帰属させる（`mumei-core/src/resolver/dependencies.rs`）。
 
 ### 対象ファイル
@@ -1969,9 +1970,9 @@ jq '.session_analysis_skips' ./report/cross_spec.json
 
 ---
 
-## P23: Proof-Aware Observability（実行時モニタリング）
+## P23: Proof-Aware Observability（実行時モニタリング） — ✅ Implemented
 
-**ステータス: 設計中 / MVP 実装中** — 「証明が前提として信頼している境界」だけに実行時モニタ / テレメトリを注入し、証明済み領域はゼロコスト（無計装）に保つ。P15 の OTel 分散トレース基盤（`OTEL_ENABLED` / `OTEL_EXPORTER_OTLP_ENDPOINT`）と同じ運用に乗せる。
+**ステータス: ✅ Implemented**（測定 2026-08-29、`cargo test --test test_runtime_monitor` 6/6 passed、`cargo test -p mumei-core trust_boundary` 6/6 passed、`cargo test -p mumei-emit-monitor` 6/6 passed、`cargo tree --edges no-dev | grep -i opentelemetry` は空 = 既定ビルドに OTel 依存なし）— 「証明が前提として信頼している境界」だけに実行時モニタ / テレメトリを注入し、証明済み領域はゼロコスト（無計装）に保つ。P15 の OTel 分散トレース基盤（`OTEL_ENABLED` / `OTEL_EXPORTER_OTLP_ENDPOINT`）と同じ運用に乗せる。
 
 ### 構成
 
@@ -2014,7 +2015,7 @@ mumei build tests/fixtures/runtime_monitor/pure_proven.mm \
 OTEL_ENABLED=true OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 ./your-app
 ```
 
-生成された `mumei_monitor::set_violation_hook(...)` にホスト側の OTel エクスポータを接続すると、契約違反が metric / span として P15 と同じ OTLP エンドポイントへ送られる。
+生成された `mumei_monitor::set_violation_hook(...)` にホスト側の OTel エクスポータを接続すると、契約違反が metric / span として P15 と同じ OTLP エンドポイントへ送られる。この運用フロー（`Violation` の `atom` / `boundary` / `contract` / `expression` / `observed` と P15 リファレンススタックへの接続）は mumei-agent 側の `docs/OBSERVABILITY.md` § (f) に記載されている。
 
 ### CI 回帰ゲート
 

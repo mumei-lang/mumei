@@ -918,8 +918,8 @@ audit / migration / self-healing / MCP の 1 コマンド導線を提供する�
 | ✅ | vStd core guards forge | mumei + mumei-agent | Complete (`std/core_guards.mm`; deterministic bodies; Z3 decidable fragment; Lean escalation 不要) |
 | ✅ | 多言語 no-`.mm` 監査の回帰固定 | mumei-agent | Implemented (Rust/TypeScript/Go Z3 counterexamples normalize to `verification_violations`) |
 | ✅ | Priority 16: 大規模ケースでの atom-local proof obligation 合成性検証 | mumei + mumei-demo + mumei-agent | Implemented (5 scale シナリオ / 172 atoms / 依存深さ 5–7、1014 clause の ablation で `atom_local_closure_ratio` 0.4945、合成の破れ 277 本を `call_site_precondition` 86 / `counterexample_replay_mismatch` 86 / `effect_state_obligation` 58 / `neighbor_ensures_strengthening` 47 に分類。全 172 atom の certificate が `verify-cert --strict` 5/5 通過、`std/` trusted atom は 0 のまま、アプリ trusted atom 0 / FFI 境界 0 / Lean escalation 0、Z3 solver 9.77s、`budget_policy_fingerprint: sha256:scale-default`。報告は既存の `verification_status` / `verification_violations` / `next_steps` のみ) |
-| 高 | Priority 18 / P22: Session Types（分散プロトコル検証） | mumei | 🚧 In Progress |
-| 高 | Priority 19 / P23: Proof-Aware Observability（実行時モニタリング） | mumei + mumei-agent | 🚧 In Progress |
+| ✅ | Priority 18 / P22: Session Types（分散プロトコル検証） | mumei + mumei-agent | Implemented (測定 2026-08-29。`cargo test --test test_session_types` 4/4 / `cargo test -p mumei-core session_types` 20/20 passed。`duality_mismatch` / `unreachable_receive` / `deadlock_no_progress` を有界抽象解釈のみで判定し、打ち切りは `session_analysis_skips[]` で可視化。agent 側は `agent_artifact_mapping[]` の宣言どおり `session_protocol_violations[]` を `missing_constraints[]`（`spec_vs_code`）として消費し、新規 verdict 語彙は追加しない) |
+| ✅ | Priority 19 / P23: Proof-Aware Observability（実行時モニタリング） | mumei + mumei-agent | Implemented (測定 2026-08-29。`cargo test --test test_runtime_monitor` 6/6 / `cargo test -p mumei-core trust_boundary` 6/6 / `cargo test -p mumei-emit-monitor` 6/6 passed。信頼境界のみ計装し証明済み純粋 atom は成果物 0、ゼロコスト検証 `cargo tree --edges no-dev` に opentelemetry は現れない。運用フローは mumei-agent `docs/OBSERVABILITY.md` § (f)) |
 | ⏸️ | SI-4: no_std Ecosystem | mumei | Deferred |
 
 ## vStd: Verified Standard Library Expansion
@@ -1785,9 +1785,9 @@ graph LR
 
 ---
 
-## Priority 18: Session Types（分散プロトコル検証）— 🚧 In Progress
+## Priority 18: Session Types（分散プロトコル検証）— ✅ Implemented
 
-**Repository**: `mumei-lang/mumei`（`docs/ROADMAP.md` の P22 に対応）
+**Repository**: `mumei-lang/mumei` + `mumei-lang/mumei-agent`（`docs/ROADMAP.md` の P22 に対応）
 
 **既存の土台**（本 Priority はこれらを置き換えず、ファイル横断に拡張する）:
 - `mumei-core/src/mir_analysis/temporal_effects.rs` の `EffectStateMachine`（`MAX_EFFECT_STATES = 8` の有界解析）
@@ -1802,14 +1802,20 @@ graph LR
 - 上限超過で解析を打ち切った effect は `CrossSpecResult.session_analysis_skips[]` / `summary.session_analysis_skipped_count` として明示し、fail-open な打ち切りが黙って PASS に見えないようにする（違反ではないため exit code には影響しない）。
 - `mumei verify --cross-spec-files` / `mumei build` で違反を hard error にする。
 
+**実装エビデンス**（測定 2026-08-29）:
+- ✅ **判定**: `cargo test -p mumei-core session_types` 20/20 passed — duality / 到達性 / progress / 単一ファイル除外 / 上限超過スキップと alias 集約を固定する。Z3 は呼ばない。
+- ✅ **CLI 経路**: `cargo test --test test_session_types` 4/4 passed — 正常系 exit 0、循環待ち異常系と `import` 経由の `mumei build` が exit 1 で `deadlock_no_progress` を `cross_spec.json` に出力、上限超過系は exit 0 で `session_analysis_skips[0].reason == state_limit_exceeded`。
+- ✅ **agent 側消費**: mumei-agent の Meta-Architect が `session_protocol_violations[]` を `missing_constraints[]` と `enforce_session_protocol` 提案に変換し、MCP `check_cross_spec_consistency` が同じマッピングで返す（`agent/cross_spec_artifacts.py`、`tests/fixtures/cross_spec_session_violation.json`、mumei-agent `uv run pytest` 1981 passed / 64 skipped）。新規 verdict 語彙・別名 alias は追加していない。
+
 **関連ファイル**:
 - `mumei-core/src/cross_spec/session_types.rs` / `mumei-core/src/cross_spec/mod.rs`
 - `src/commands/verify.rs` / `src/commands/build.rs`
 - `tests/fixtures/session_types/` / `tests/test_session_types.rs`
+- mumei-agent `agent/cross_spec_artifacts.py` / `agent/meta_architect.py` / `agent/mcp_server.py` / `docs/VERIFICATION_WORKFLOW_GUIDE.md`
 
 ---
 
-## Priority 19: Proof-Aware Observability（実行時モニタリング）— 🚧 In Progress
+## Priority 19: Proof-Aware Observability（実行時モニタリング）— ✅ Implemented
 
 **Repository**: `mumei-lang/mumei` + `mumei-lang/mumei-agent`（`docs/ROADMAP.md` の P23 に対応）
 
@@ -1824,6 +1830,12 @@ graph LR
 - `mumei-core/src/trust_boundary.rs` が信頼境界を `trusted_atom` / `extern_ffi` / `effect_pre_override` に分類する。
 - `--emit runtime-monitor`（`mumei-emit-monitor`）が信頼境界 atom にのみモニタを生成し、契約違反時に panic ではなく OTel イベントとして報告する。純粋 atom には成果物を生成しない。
 - `OTEL_ENABLED` 未設定時は NoOp、報告先は P15 と同じ `OTEL_EXPORTER_OTLP_ENDPOINT`。`otel` feature 無効時に OTel 依存が入らないゼロコスト回帰ゲートを維持する。
+
+**実装エビデンス**（測定 2026-08-29）:
+- ✅ **境界分類と生成**: `cargo test -p mumei-core trust_boundary` 6/6 passed、`cargo test -p mumei-emit-monitor` 6/6 passed — `trusted_atom` / `extern_ffi` / `effect_pre_override` のみ計装し、証明済み純粋 atom は成果物を 1 件も生成しない。
+- ✅ **生成物のゴールデンテスト**: `cargo test --test test_runtime_monitor` 6/6 passed — 生成モニタが `rustc` 単体でコンパイルでき、`panic!` / `assert!` を含まず、hook / probe / 契約評価の panic を monitored 呼び出しへ伝播させない。
+- ✅ **ゼロコスト**: `cargo tree --edges no-dev` の出力に opentelemetry は現れない（既定ビルドに OTel 依存なし、P15 と同一のゲート）。
+- ✅ **運用導線**: mumei-agent `docs/OBSERVABILITY.md` § (f) が `mumei_monitor::Violation` の `atom` / `boundary` / `contract` / `expression` / `observed`、hook / probe の登録、P15 リファレンススタック（OTLP/HTTP `:4318`、Jaeger）への接続と agent 側の集計方法を記載する。
 
 **関連ファイル**:
 - `mumei-core/src/trust_boundary.rs` / `mumei-emit-monitor/src/lib.rs` / `mumei-core/src/emitter.rs` / `src/codegen.rs`
