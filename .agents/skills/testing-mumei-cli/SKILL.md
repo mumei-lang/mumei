@@ -193,6 +193,124 @@ assert any(inv['invariant'] == 'result >= 0' for inv in report['global_invariant
 PY
 ```
 
+### Session-Type Protocol Checks (multi-file, `--cross-spec-files`)
+
+Use this flow when changes touch `mumei-core/src/cross_spec/session_types.rs`,
+`CrossSpecVerifier::verify_all()`, or `src/pipeline.rs` (`load_cross_spec_files`,
+`annotate_atom_source_file`).
+
+Argument order is non-obvious and easy to get wrong:
+
+```bash
+cd /home/ubuntu/repos/mumei
+rm -rf /tmp/sess && mkdir -p /tmp/sess
+LLVM_SYS_170_PREFIX=/usr/lib/llvm-17 LIBCLANG_PATH=/usr/lib/x86_64-linux-gnu \
+  ./target/debug/mumei verify \
+  --report-dir /tmp/sess \
+  --cross-spec-files tests/fixtures/session_types/order_server.mm \
+  tests/fixtures/session_types/order_client.mm
+```
+
+- Extra `.mm` files go **after** `--cross-spec-files` (comma- or space-separated);
+  the **primary** file must come **last** as the positional argument.
+- `--report-dir` is what makes `cross_spec.json` appear. Without it there is no
+  machine-checkable output.
+- Results live in `cross_spec.json` under `session_protocol_violations` and
+  `summary.session_protocol_violation_count`. Each violation makes
+  `mumei verify` exit nonzero; in `mumei build` cross-spec verification it exits 1.
+
+Violation kinds and the conditions that trigger them (useful for writing fixtures):
+
+| kind | trigger |
+| --- | --- |
+| `duality_mismatch` | a send's post-state has no receiving atom **in a different file** (a continuation in the sender's own file does NOT satisfy duality) |
+| `unreachable_receive` | a role's pre-state is not reachable by BFS from the effect's `initial` state (this catches disconnected role "islands" that only feed each other) |
+| `deadlock_no_progress` | no reachable state is quiescent |
+
+Gotchas that silently produce "no violations" (verify these before calling a
+detector broken, and before calling a clean run a real pass):
+- The effect is skipped entirely when it has more than `MAX_PROTOCOL_NODES` (32)
+  states, fewer than 2 roles, or roles spanning fewer than 2 files. A >32-state
+  protocol gets **no** session checking at all — expected-by-design, but it means
+  genuine violations in large protocols are suppressed.
+- Roles whose atom has no source-file attribution are skipped.
+- Single-file protocols are intentionally never reported here; temporal behavior
+  inside one file is the Temporal Effect Verifier's job.
+- **Clear caches before every run** (`rm -rf .mumei .mumei_cache .mumei_build_cache`
+  beside every source file involved) or you get `skipped (unchanged, cached)` and a
+  false pass.
+
+To prove a reachability/duality change actually altered behavior, diff the same
+fixtures across two binaries using a git worktree of the base commit:
+
+```bash
+git worktree add -f /tmp/base <base-commit>
+(cd /tmp/base && LLVM_SYS_170_PREFIX=/usr/lib/llvm-17 \
+   LIBCLANG_PATH=/usr/lib/x86_64-linux-gnu cargo build)   # ~1 min incremental
+# run identical commands with /tmp/base/target/debug/mumei vs ./target/debug/mumei
+git worktree remove --force /tmp/base                      # keeps repo clean
+```
+
+### Proof-Aware Runtime Monitors (`--emit runtime-monitor`)
+
+Use this flow when changes touch `mumei-emit-monitor/`,
+`mumei-core/src/trust_boundary.rs`, or emitter dispatch in `src/codegen.rs`.
+
+```bash
+mkdir -p /tmp/mon
+LLVM_SYS_170_PREFIX=/usr/lib/llvm-17 LIBCLANG_PATH=/usr/lib/x86_64-linux-gnu \
+  ./target/debug/mumei build tests/fixtures/runtime_monitor/trusted_boundary.mm \
+  --emit runtime-monitor --output /tmp/mon/out
+```
+
+- Files are written as `<output-base>_<atom>.monitor.rs`. Monitors are emitted
+  **only** for trust-boundary atoms; a proven pure atom must produce **zero**
+  files (zero-cost). The `boundary:` tag is a `+`-joined combination, e.g.
+  `trusted_atom`, `trusted_atom+extern_ffi`, `effect_pre_override`.
+- The three boundary kinds to cover with fixtures: a `trusted atom`, an atom
+  backed by an `extern "Rust" { ... }` declaration of the same name, and an atom
+  with a non-empty `effect_pre`.
+- Strongest selectivity test: put a `trusted atom` and a pure atom in **one**
+  file and assert exactly one monitor is produced.
+
+Compiling a generated monitor standalone — note the filename contains dots, so
+rustc cannot infer a crate name and you must pass `--crate-name`:
+
+```bash
+rustc --edition 2021 --crate-type lib -D warnings \
+  --crate-name mon_check -o /tmp/mon.rlib /tmp/mon/out_read_sensor.monitor.rs
+```
+
+Generated code must contain no `panic!`/`assert!` and must read `OTEL_ENABLED`
+(NoOp when unset/false) and `OTEL_EXPORTER_OTLP_ENDPOINT`
+(default `http://localhost:4318`).
+
+To exercise a monitor at **runtime** (much stronger than grepping the source),
+`include!` the unmodified generated file inside its own module in a small driver
+and link a stub for the wrapped atom. The module wrapper is required: the
+generated `extern "C" { fn <atom>(..) }` declaration otherwise collides with your
+stub definition at name resolution instead of resolving at link time.
+
+```rust
+mod monitor { include!("/tmp/mon/out_mon_send.monitor.rs"); }
+use monitor::{mon_send_monitored, mumei_monitor};
+#[no_mangle] pub extern "C" fn mon_send(x: i64) -> i64 { x }
+fn main() {
+    mumei_monitor::set_effect_state_probe(|e| (e == "MonChannel").then(|| "Sent".to_string())).ok();
+    mon_send_monitored(-5); // violations go to the hook, or stderr by default
+}
+```
+
+Then assert: with `OTEL_ENABLED` unset stderr is empty; with `OTEL_ENABLED=true`
+violations print as `mumei.monitor.contract_violation atom=... contract=... observed=...`;
+`effect_pre` violations are only reported when an effect-state probe is installed
+(without a probe the state is unobservable and nothing is reported).
+
+Zero-cost dependency gate — must print nothing:
+```bash
+cargo tree --edges no-dev | grep -i opentelemetry
+```
+
 ### Contradiction Report / Unsat Core Diagnostics
 
 Use this flow when changes touch contradiction handling, Z3 unsat-core tracking labels, semantic feedback, `report.json`, or self-healing diagnostics.
