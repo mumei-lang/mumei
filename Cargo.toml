@@ -5,6 +5,7 @@ members = ["mumei-core", "mumei-emit-llvm", "mumei-emit-json", "mumei-emit-proof
 name = "mumei"
 version = "0.6.12"
 edition = "2021"
+rust-version = "1.89"
 description = "Mathematical Proof-Driven Programming Language — formally verified with Z3, compiled to LLVM IR"
 license = "Apache-2.0"
 repository = "https://github.com/mumei-lang/mumei"

@@ -73,38 +73,42 @@ pub fn save(registry: &Registry) -> Result<(), String> {
 
 /// Advisory cross-process lock around a registry read-modify-write, so parallel
 /// `mumei` invocations cannot drop each other's entries.
+///
+/// The lock is an OS advisory file lock (`flock` / `LockFileEx`), so the kernel
+/// releases it when the holder exits — a crashed `mumei` cannot wedge later
+/// invocations, and a slow holder is never evicted while it is still writing.
+///
+/// The lock file is `registry.flock`, not the `registry.lock` used by mumei
+/// <= 0.6.12: an older binary treats that path's existence as ownership and
+/// deletes it once it looks stale, which would make two newer processes lock
+/// two different inodes and write concurrently.
 struct RegistryLock {
-    path: PathBuf,
+    file: fs::File,
 }
 
 impl RegistryLock {
-    const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
     const WAIT_FOR: std::time::Duration = std::time::Duration::from_secs(10);
 
     fn acquire() -> Result<Self, String> {
-        let path = registry_path().with_extension("lock");
+        Self::acquire_at(&registry_path().with_extension("flock"), Self::WAIT_FOR)
+    }
+
+    fn acquire_at(path: &Path, wait_for: std::time::Duration) -> Result<Self, String> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
                 .map_err(|e| format!("Failed to create {}: {}", parent.display(), e))?;
         }
-        let deadline = std::time::Instant::now() + Self::WAIT_FOR;
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)
+            .map_err(|e| format!("Failed to open {}: {}", path.display(), e))?;
+        let deadline = std::time::Instant::now() + wait_for;
         loop {
-            match fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)
-            {
-                Ok(_) => return Ok(Self { path }),
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    let stale = fs::metadata(&path)
-                        .and_then(|m| m.modified())
-                        .ok()
-                        .and_then(|m| m.elapsed().ok())
-                        .is_some_and(|age| age > Self::STALE_AFTER);
-                    if stale {
-                        let _ = fs::remove_file(&path);
-                        continue;
-                    }
+            match file.try_lock() {
+                Ok(()) => return Ok(Self { file }),
+                Err(fs::TryLockError::WouldBlock) => {
                     if std::time::Instant::now() >= deadline {
                         return Err(format!(
                             "Timed out waiting for the registry lock {}",
@@ -113,7 +117,9 @@ impl RegistryLock {
                     }
                     std::thread::sleep(std::time::Duration::from_millis(20));
                 }
-                Err(e) => return Err(format!("Failed to lock {}: {}", path.display(), e)),
+                Err(fs::TryLockError::Error(e)) => {
+                    return Err(format!("Failed to lock {}: {}", path.display(), e))
+                }
             }
         }
     }
@@ -121,7 +127,9 @@ impl RegistryLock {
 
 impl Drop for RegistryLock {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        // The lock file itself is left in place: removing it would let another
+        // process lock a path that is already unlinked and write concurrently.
+        let _ = self.file.unlock();
     }
 }
 /// パッケージ名とバージョン（省略時は latest）でパスを解決する。
@@ -352,6 +360,32 @@ fn chrono_lite_now() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The advisory lock keeps a second holder out and is released on drop,
+    /// without the lock file itself being unlinked.
+    #[test]
+    fn registry_lock_is_exclusive_and_released_on_drop() {
+        let dir = std::env::temp_dir().join(format!("mumei_lock_{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("create lock dir");
+        let path = dir.join("registry.flock");
+        let brief = std::time::Duration::from_millis(200);
+
+        let held = RegistryLock::acquire_at(&path, brief).expect("first holder");
+        let err = RegistryLock::acquire_at(&path, brief)
+            .err()
+            .expect("second holder must wait");
+        assert!(
+            err.contains("Timed out waiting for the registry lock"),
+            "{}",
+            err
+        );
+
+        drop(held);
+        assert!(path.exists(), "the lock file outlives the lock");
+        RegistryLock::acquire_at(&path, brief).expect("lock is free again");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     /// P5-B: VersionEntry serialization with cert_path and cert_hash
     #[test]
