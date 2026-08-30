@@ -249,7 +249,12 @@ pub(crate) fn cmd_add(dep: &str, version: Option<&str>) {
                     reg = registry::load();
                 }
                 Ok(None) => {}
-                Err(e) => eprintln!("  ⚠️  {}", e),
+                Err(e) => {
+                    // A configured registry that fails is an error: silently
+                    // recording `name = "*"` would hide a typo'd URL.
+                    eprintln!("❌ Error: {}", e);
+                    std::process::exit(1);
+                }
             }
         }
         if let Some(pkg_entry) = reg.packages.get(dep) {

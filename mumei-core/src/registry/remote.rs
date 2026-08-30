@@ -268,6 +268,12 @@ fn fetch_into_staging(
     let Some(remote_version) = index.versions.get(&resolved_version) else {
         return Ok(None);
     };
+    if !is_valid_version(&resolved_version) {
+        return Err(format!(
+            "remote registry: package '{}' advertises invalid version '{}'",
+            name, resolved_version
+        ));
+    }
     if remote_version.files.len() > MAX_PACKAGE_FILES {
         return Err(format!(
             "remote registry: package '{}' v{} lists {} files (limit {})",
@@ -495,9 +501,12 @@ fn fetch_text(client: &reqwest::blocking::Client, url: &str) -> Result<Option<St
 /// loopback registries (local fixtures, mirrors under test) are allowed unless
 /// `MUMEI_REGISTRY_ALLOW_PLAINTEXT=1` is set explicitly.
 fn check_transport(base: &str) -> Result<(), String> {
-    let Some(rest) = base.strip_prefix("http://") else {
+    // URL schemes are case-insensitive, so `HTTP://` is plaintext too.
+    let scheme_end = base.find("//").map(|i| i + 2).unwrap_or(0);
+    if !base[..scheme_end].eq_ignore_ascii_case("http://") {
         return Ok(());
-    };
+    }
+    let rest = &base[scheme_end..];
     let host = rest
         .split('/')
         .next()
@@ -528,6 +537,17 @@ fn is_valid_package_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
+/// A version from the remote index becomes a cache directory name and a URL
+/// segment, so anything that could traverse out of the cache is rejected.
+fn is_valid_version(version: &str) -> bool {
+    !version.is_empty()
+        && version != "."
+        && version != ".."
+        && version
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '+'))
+}
+
 /// index.json が列挙するファイルはそのままファイルシステムに落ちるため、
 /// パッケージディレクトリの外へ出る相対パスを拒否する。
 fn sanitize_relative_path(rel: &str) -> Result<PathBuf, String> {
@@ -547,7 +567,7 @@ fn sanitize_relative_path(rel: &str) -> Result<PathBuf, String> {
     // would truncate or re-target the request.
     if let Some(c) = rel
         .chars()
-        .find(|c| matches!(c, '#' | '?' | '%' | ':' | '@') || c.is_ascii_control())
+        .find(|c| matches!(c, '#' | '?' | '%' | ':' | '@') || c.is_whitespace() || c.is_control())
     {
         return reject(&format!("URL-reserved character '{}'", c.escape_debug()));
     }
@@ -580,6 +600,19 @@ mod tests {
         assert!(check_transport("http://localhost:8123").is_ok());
         let err = check_transport("http://registry.example.com").expect_err("plaintext rejected");
         assert!(err.contains("plaintext HTTP"), "{}", err);
+        assert!(check_transport("HTTP://registry.example.com").is_err());
+        assert!(check_transport("HtTp://registry.example.com").is_err());
+        assert!(check_transport("HTTPS://registry.example.com").is_ok());
+    }
+
+    #[test]
+    fn version_names_that_escape_the_cache_are_rejected() {
+        assert!(is_valid_version("1.2.0"));
+        assert!(is_valid_version("1.0.0-rc.1+build2"));
+        assert!(!is_valid_version(".."));
+        assert!(!is_valid_version("../../etc"));
+        assert!(!is_valid_version("/etc"));
+        assert!(!is_valid_version(""));
     }
 
     #[test]
@@ -603,7 +636,13 @@ mod tests {
 
     #[test]
     fn sanitize_rejects_url_reserved_characters() {
-        for rel in ["src/a#b.mm", "src/a?b.mm", "src/a%2e.mm", "src/a:b.mm"] {
+        for rel in [
+            "src/a#b.mm",
+            "src/a?b.mm",
+            "src/a%2e.mm",
+            "src/a:b.mm",
+            "src/a b.mm",
+        ] {
             let err = sanitize_relative_path(rel).expect_err("must be rejected");
             assert!(err.contains("URL-reserved character"), "{}", err);
         }

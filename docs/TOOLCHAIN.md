@@ -149,7 +149,11 @@ Fetch behaviour:
   replace the package and its certificate together. Redirects are held to the same
   rule, so an HTTPS registry cannot redirect a download to plaintext.
 - Paths listed in `index.json` are rejected if they are absolute, escape the package
-  directory, or contain URL-reserved characters (`#`, `?`, `%`, `:`, `@`).
+  directory, or contain URL-reserved characters (`#`, `?`, `%`, `:`, `@`), whitespace
+  or control characters. Versions advertised by `index.json` are restricted to
+  `[A-Za-z0-9._+-]` so they cannot escape the cache directory.
+- `mumei add <name>` exits non-zero when a configured registry fails, instead of
+  recording `name = "*"`.
 - Atom-level verdicts are unchanged — they are still produced by
   `verify_import_certificate` on the cached package.
 
