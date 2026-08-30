@@ -34,6 +34,7 @@ Source: `mcp_server.py` in the mumei repository.
 | `set_allowed_effects` | `allowed: "list[str] \| None" = None, denied: "list[str] \| None" = None` |  |
 | `list_std_catalog` |  |  |
 | `visualize_std_graph` | `format: str = "mermaid"` |  |
+| `visualize_proof_graph` | `source_code: str, format: str = "json"` |  |
 | `analyze_std_gaps` |  | `dependency_graph`, `trusted_atoms`, `todo_comments`, `usage_frequency`, `proposals` |
 | `measure_std_health` |  | `total_files`, `verified_files`, `failed_files`, `total_atoms`, `verified_atoms`, `trusted_atoms`, `health_score`, `todo_count`, `details` |
 | `get_proof_certificate` | `module_path: str` | `certificate`, `error` |

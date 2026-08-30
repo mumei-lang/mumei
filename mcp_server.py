@@ -33,6 +33,14 @@ from std_graph_lib import (  # noqa: F401 (re-exported for back-compat)
     _trusted_by_file_counts,
 )
 
+# P26: proof-graph conversion is shared with the Streamlit view in
+# visualizer/app.py, so it lives in a Streamlit-free pure module.
+from visualizer.proof_graph_lib import (  # noqa: E402
+    PROOF_GRAPH_FILENAME,
+    load_proof_graph,
+    render_proof_graph_dot,
+)
+
 mcp = FastMCP("Mumei-Forge")
 REPO_ROOT = Path(__file__).parent.absolute()
 
@@ -2241,6 +2249,85 @@ def visualize_std_graph(format: str = "mermaid") -> str:
         atoms_by_file,
         failed_files,
     )
+
+
+@mcp.tool()
+def visualize_proof_graph(source_code: str, format: str = "json") -> str:
+    """Export the interactive proof graph for Mumei source code (P26).
+
+    Runs `mumei verify --emit proof-graph` over `source_code` and returns the
+    resulting `proof_graph.json`: the atom dependency graph, each atom's
+    `requires`/`ensures`, its P23 trust boundaries (`trusted_atom` /
+    `extern_ffi` / `effect_pre_override`), the contract-consistency verdict of
+    every call, and the session protocol violations each atom participates in.
+
+    Args:
+        source_code: Mumei source to analyze.
+        format: "json" (default) for the raw document, or "dot" for Graphviz
+            source using the same green/yellow/red health colours as
+            `visualize_std_graph`.
+
+    Node health reuses the existing verification vocabulary: green = proven
+    with no trust boundary, yellow = trusted/proof-hole boundary,
+    red = failed or unverifiable. The same document backs the interactive
+    Streamlit view (`streamlit run visualizer/app.py`).
+    """
+    fmt = (format or "json").lower().strip()
+    if fmt not in {"json", "dot"}:
+        return json.dumps(
+            {"error": f"unsupported format '{format}'. Use 'json' or 'dot'."},
+        )
+
+    with _temp_source_input(source_code) as (tmp_path, source_path):
+        result = subprocess.run(
+            [
+                "cargo",
+                "run",
+                "--",
+                "verify",
+                "--emit",
+                "proof-graph",
+                "--report-dir",
+                str(tmp_path),
+                str(source_path),
+            ],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            env=os.environ.copy(),
+        )
+
+        graph_path = tmp_path / PROOF_GRAPH_FILENAME
+        if not graph_path.exists():
+            return json.dumps(
+                {
+                    "nodes": [],
+                    "edges": [],
+                    "success": False,
+                    "error": result.stderr.strip() or result.stdout.strip(),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+
+        try:
+            graph = load_proof_graph(graph_path)
+        except (json.JSONDecodeError, ValueError) as exc:
+            return json.dumps(
+                {
+                    "nodes": [],
+                    "edges": [],
+                    "success": False,
+                    "error": f"invalid {PROOF_GRAPH_FILENAME}: {exc}",
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+
+        if fmt == "dot":
+            return render_proof_graph_dot(graph)
+        graph["success"] = result.returncode == 0
+        return json.dumps(graph, ensure_ascii=False, indent=2)
 
 
 @mcp.tool()

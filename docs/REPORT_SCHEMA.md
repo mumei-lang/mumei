@@ -260,6 +260,95 @@ Example:
 }
 ```
 
+## proof_graph.json Schema
+
+`mumei verify --emit proof-graph` writes `proof_graph.json` in the report
+directory (and implies cross-spec verification, so `cross_spec.json` is written
+too). The document folds the cross-spec dependency graph, each atom's contract,
+its trust-boundary classification and the session protocol violations into the
+single artifact the interactive visualizer (`streamlit run visualizer/app.py`)
+consumes; the `visualize_proof_graph` MCP tool returns the same document.
+
+No new verdict vocabulary is introduced: `verification_status` carries the
+existing per-atom status (`verified` / `failed` / `unverifiable` /
+`escalation_candidate` / `unknown`) and `health` is the existing green/yellow/red
+verification health used by `visualize_std_graph`.
+
+| Field | Type | Description |
+|---|---|---|
+| `version` | `string` | Proof graph schema version (currently `"1.0"`) |
+| `nodes` | `array` | One entry per atom in `cross_spec.json`'s `dependency_graph[]` |
+| `nodes[].atom_name` | `string` | Atom name |
+| `nodes[].source_file` | `string` | File the atom was parsed from, or `"<unknown>"` |
+| `nodes[].requires` | `string` | Atom precondition |
+| `nodes[].ensures` | `string` | Atom postcondition |
+| `nodes[].effects` | `array[string]` | Declared effect names |
+| `nodes[].dependencies` | `array[string]` | Atoms this atom calls |
+| `nodes[].dependents` | `array[string]` | Atoms that call this atom |
+| `nodes[].trust_boundaries` | `array` | P23 trust boundaries the atom crosses |
+| `nodes[].trust_boundaries[].kind` | `string` | `trusted_atom`, `extern_ffi` or `effect_pre_override` |
+| `nodes[].trust_boundaries[].rationale` | `string` | Why the boundary exists |
+| `nodes[].verification_status` | `string \| null` | Per-atom status from this run, `null` when the atom was not verified here |
+| `nodes[].health` | `string` | `green` (proven, no boundary), `yellow` (trust boundary), `red` (failed / unverifiable) |
+| `nodes[].session_protocol_violations` | `array[number]` | Indices into the top-level `session_protocol_violations[]` |
+| `edges` | `array` | One entry per `dependency_graph[].dependencies` pair |
+| `edges[].from` | `string` | Caller atom |
+| `edges[].to` | `string` | Callee atom |
+| `edges[].is_consistent` | `boolean` | Contract-consistency verdict for the pair (`true` when the pair was not checked) |
+| `edges[].violations` | `array[string]` | Contract violations for the pair |
+| `edges[].warnings` | `array[string]` | Non-fatal consistency warnings for the pair |
+| `session_protocol_violations` | `array` | Same objects as `cross_spec.json`, stored once and referenced by index |
+| `circular_dependencies` | `array[array[string]]` | Detected atom dependency cycles |
+| `summary` | `object` | `node_count`, `edge_count`, `green_count`, `yellow_count`, `red_count`, `trust_boundary_count`, `session_protocol_violation_count`, `circular_dependency_count` |
+
+Example:
+
+```json
+{
+  "version": "1.0",
+  "nodes": [
+    {
+      "atom_name": "payment_client_request",
+      "source_file": "tests/fixtures/session_types/payment_client.mm",
+      "requires": "payment_id > 0",
+      "ensures": "result == payment_id",
+      "effects": ["PaymentChannel"],
+      "dependencies": [],
+      "dependents": [],
+      "trust_boundaries": [
+        {
+          "kind": "effect_pre_override",
+          "rationale": "atom overrides the effect state machine's initial state via `effect_pre`"
+        }
+      ],
+      "verification_status": "verified",
+      "health": "yellow",
+      "session_protocol_violations": [0]
+    }
+  ],
+  "edges": [],
+  "session_protocol_violations": [
+    {
+      "kind": "deadlock_no_progress",
+      "effect": "PaymentChannel",
+      "caller_atom": "payment_client_request",
+      "callee_atom": "payment_server_respond"
+    }
+  ],
+  "circular_dependencies": [],
+  "summary": {
+    "node_count": 1,
+    "edge_count": 0,
+    "green_count": 0,
+    "yellow_count": 1,
+    "red_count": 0,
+    "trust_boundary_count": 1,
+    "session_protocol_violation_count": 1,
+    "circular_dependency_count": 0
+  }
+}
+```
+
 ## `verify --json` module summary
 
 `mumei verify --json` emits a module-level summary payload alongside the counts.

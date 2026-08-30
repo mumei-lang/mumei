@@ -4,7 +4,7 @@ use crate::pipeline::*;
 use mumei_core::hir::lower_atom_to_hir_with_env;
 use mumei_core::parser::Item;
 use mumei_core::{
-    cross_spec, manifest, mir, mir_analysis, parser, proof_cert,
+    cross_spec, manifest, mir, mir_analysis, parser, proof_cert, proof_graph,
     reconstruction_loss::ReconstructionLoss,
     resolver,
     structured_feedback::{Location, StructuredFeedback},
@@ -78,6 +78,7 @@ pub(crate) fn cmd_verify_command(command: Command) {
     let emit_loss_vector = matches!(emit.as_deref(), Some("loss-vector"));
     let emit_structured_feedback = matches!(emit.as_deref(), Some("structured-feedback"));
     let emit_human_review_queue = matches!(emit.as_deref(), Some("human-review-queue"));
+    let emit_proof_graph = matches!(emit.as_deref(), Some("proof-graph"));
     if let Some(other) = emit.as_deref() {
         if !emit_escalation_bundle
             && !matches!(other, "escalation-metrics")
@@ -86,9 +87,10 @@ pub(crate) fn cmd_verify_command(command: Command) {
             && !emit_loss_vector
             && !emit_structured_feedback
             && !emit_human_review_queue
+            && !emit_proof_graph
         {
             eprintln!(
-                    "Unsupported verify --emit target '{}'. Supported values: escalation-bundle, escalation-metrics, decidable-metrics, reconstruction-loss, loss-vector, structured-feedback, human-review-queue",
+                    "Unsupported verify --emit target '{}'. Supported values: escalation-bundle, escalation-metrics, decidable-metrics, reconstruction-loss, loss-vector, structured-feedback, human-review-queue, proof-graph",
                     other
                 );
             std::process::exit(1);
@@ -98,7 +100,9 @@ pub(crate) fn cmd_verify_command(command: Command) {
     let intent_fidelity = resolve_intent_fidelity(intent_fidelity);
     let artifact_paths = resolve_artifact_paths(artifact_paths);
     let budget_policy_fingerprint = resolve_budget_policy_fingerprint(budget_policy_fingerprint);
-    let enable_cross_spec = cross_spec_verify || !cross_spec_files.is_empty();
+    // The proof graph is a projection of the cross-spec analysis, so asking for
+    // it implies running that analysis.
+    let enable_cross_spec = cross_spec_verify || !cross_spec_files.is_empty() || emit_proof_graph;
     let enable_spurious = enable_spurious_detection || !disable_spurious_detection;
 
     #[cfg(feature = "otel")]
@@ -144,6 +148,7 @@ pub(crate) fn cmd_verify_command(command: Command) {
                     emit_loss_vector,
                     emit_structured_feedback,
                     emit_human_review_queue,
+                    emit_proof_graph,
                     cert_output: output.as_deref(),
                     report_dir: report_dir.as_deref(),
                     json_output: json,
@@ -204,6 +209,7 @@ pub(crate) fn cmd_verify_command(command: Command) {
             emit_loss_vector,
             emit_structured_feedback,
             emit_human_review_queue,
+            emit_proof_graph,
             cert_output: output.as_deref(),
             report_dir: report_dir.as_deref(),
             json_output: json,
@@ -324,6 +330,7 @@ pub(crate) struct VerifyOptions<'a> {
     pub(crate) emit_loss_vector: bool,
     pub(crate) emit_structured_feedback: bool,
     pub(crate) emit_human_review_queue: bool,
+    pub(crate) emit_proof_graph: bool,
     pub(crate) cert_output: Option<&'a str>,
     pub(crate) report_dir: Option<&'a str>,
     pub(crate) json_output: bool,
@@ -978,6 +985,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
         emit_loss_vector,
         emit_structured_feedback,
         emit_human_review_queue,
+        emit_proof_graph,
         cert_output,
         report_dir,
         json_output,
@@ -1343,6 +1351,22 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
     if enable_cross_spec_verification {
         match save_cross_spec_report(&module_env, output_dir, !quiet_output) {
             Ok(cross_spec_result) => {
+                if emit_proof_graph {
+                    let statuses: std::collections::BTreeMap<String, String> = cert_results
+                        .iter()
+                        .map(|(name, (_z3, status))| (name.clone(), status.clone()))
+                        .collect();
+                    if let Err(err) = save_proof_graph_report(
+                        &module_env,
+                        &cross_spec_result,
+                        &statuses,
+                        output_dir,
+                        !quiet_output,
+                    ) {
+                        eprintln!("  ⚠️  Failed to write proof graph: {}", err);
+                        failed += 1;
+                    }
+                }
                 if cross_spec_result.summary.inconsistent_calls > 0 && !quiet_output {
                     eprintln!(
                         "Warning: {} inconsistent contract calls detected",
@@ -1863,6 +1887,34 @@ pub(crate) fn save_reconstruction_losses(
         );
     }
     Ok(())
+}
+
+/// Fold the cross-spec graph, atom contracts, trust boundaries and session
+/// violations into `proof_graph.json` for the interactive viewer (P26).
+pub(crate) fn save_proof_graph_report(
+    module_env: &verification::ModuleEnv,
+    cross_spec: &cross_spec::CrossSpecResult,
+    verification_status: &std::collections::BTreeMap<String, String>,
+    output_dir: &Path,
+    print_path: bool,
+) -> Result<proof_graph::ProofGraph, String> {
+    let graph = proof_graph::build_proof_graph(module_env, cross_spec, verification_status);
+    std::fs::create_dir_all(output_dir)
+        .map_err(|err| format!("failed to create report directory: {err}"))?;
+    let path = output_dir.join("proof_graph.json");
+    let payload = serde_json::to_string_pretty(&graph)
+        .map_err(|err| format!("failed to serialize proof graph: {err}"))?;
+    std::fs::write(&path, payload)
+        .map_err(|err| format!("failed to write {}: {err}", path.display()))?;
+    if print_path {
+        println!(
+            "  🕸️  Proof graph written to: {} ({} node(s), {} edge(s))",
+            path.display(),
+            graph.summary.node_count,
+            graph.summary.edge_count
+        );
+    }
+    Ok(graph)
 }
 
 pub(crate) fn save_cross_spec_report(

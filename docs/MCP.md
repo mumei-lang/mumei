@@ -24,6 +24,7 @@ For end-to-end workflows that start from natural-language specifications or fore
 | `analyze_std_gaps` | Identify gaps in std/ coverage |
 | `list_std_catalog` | List all atoms in the std/ catalog |
 | `visualize_std_graph` | Render std/ dependency graph (Mermaid or DOT) |
+| `visualize_proof_graph` | Export the atom proof graph — contracts, dependencies, trust boundaries, session violations (JSON or DOT) |
 | `measure_std_health` | Measure std/ health metrics |
 | `get_proof_certificate` | Retrieve proof certificate for a module |
 | `generate_doc` | Generate structured documentation (`mumei doc --format json`) |

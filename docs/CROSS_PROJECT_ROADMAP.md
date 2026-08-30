@@ -922,6 +922,7 @@ audit / migration / self-healing / MCP の 1 コマンド導線を提供する�
 | ✅ | Priority 19 / P23: Proof-Aware Observability（実行時モニタリング） | mumei + mumei-agent | Implemented (測定 2026-08-29。`cargo test --test test_runtime_monitor` 6/6 / `cargo test -p mumei-core trust_boundary` 6/6 / `cargo test -p mumei-emit-monitor` 6/6 passed。信頼境界のみ計装し証明済み純粋 atom は成果物 0、ゼロコスト検証 `cargo tree --edges no-dev` に opentelemetry は現れない。運用フローは mumei-agent `docs/OBSERVABILITY.md` § (f)) |
 | ✅ | Priority 20 / P24: Remote Package Registry（証明書付きパッケージのネットワーク配布） | mumei | Implemented (測定 2026-08-29。`cargo test --test test_remote_registry` 14/14 / `cargo test -p mumei-core registry` 12/12 passed。`mumei.toml` の `[registry] url` か `MUMEI_REGISTRY_URL` を設定したときだけ name 依存が HTTP レジストリへフォールバックし、`.proof-cert.json` のハッシュ・パッケージ帰属を既存 P5-B の検証で確認してから `~/.mumei/packages/<name>/<version>/` にキャッシュして既存のローカル解決経路へ合流する。`--strict-imports` は証明書なし / ハッシュ不一致 / パース不能をハードエラーにし、新規 verdict 語彙は追加しない。未設定時は従来どおりローカル / path / git のみ) |
 | ✅ | Priority 21 / P25: concurrency codegen follow-up（polymorphic `chan<T>` payload / task body の配列要素キャプチャ） | mumei | Implemented (測定 2026-08-30。`cargo test --test test_concurrency` 25/25 passed。`send` / `recv` は payload を既存 `bitpreserve_cast` で runtime の `int64_t` スロットへビット保存変換 / 復元し（`f64` は `bitcast`、`Str` / ポインタは `ptrtoint` / `inttoptr`）、runtime helper のシグネチャは i64 固定のまま。task wrapper は capture した配列の fat pointer `(len, data)` を pthread args struct 経由で受け取り、task body が親の要素ストレージを bounds check 付きで参照する。併せて追加検証で見つかった 2 件の codegen 不具合を修正: struct パラメータが i64 に潰れて `p.x` が codegen 失敗していた点と、オブジェクトを非 PIC で出力していたため文字列リテラルが PIE リンクに失敗していた点。値渡し aggregate と非 i64 join 結果は既存挙動のまま残課題) |
+| ✅ | Priority 22 / P26: Interactive Proof Graph（依存・証明関係のインタラクティブ可視化） | mumei | Implemented (測定 2026-08-30。`cargo test -p mumei-core proof_graph` 8/8 / `cargo test --test test_proof_graph_export` 3/3 / `PYTHONPATH=. pytest tests/` 151/151 passed（`tests/test_proof_graph_lib.py` 10 件を新規追加）。`mumei verify --emit proof-graph` が cross-spec の `dependency_graph[]`・各 atom の requires/ensures・P23 trust boundary 分類・session protocol 違反を単一の `proof_graph.json` に畳み込み、既存 Streamlit 基盤に追加した Proof Graph ビュー（`visualizer/app.py` + 純粋変換層 `visualizer/proof_graph_lib.py`）が atom 選択で契約・依存元 / 依存先・trust boundary・session 違反を表示する。色分けは `std_graph_lib` と同じ緑 / 黄 / 赤で、新規 verdict 語彙・新規 Web フレームワーク・追加 Python 依存はなし。`cargo tree --edges no-dev` に opentelemetry は現れない) |
 | ⏸️ | SI-4: no_std Ecosystem | mumei | Deferred |
 
 ## vStd: Verified Standard Library Expansion
@@ -1904,6 +1905,39 @@ graph LR
 - `mumei-emit-llvm/src/codegen/expr_emit.rs` / `task_runtime.rs` / `driver.rs` / `stmt_emit.rs`
 - `mumei-core/src/lowering.rs` / `mumei-core/src/mir.rs`
 - `tests/test_concurrency.rs` / `tests/test_concurrency_runtime.mm` / `docs/CONCURRENCY.md`
+
+---
+
+## Priority 22: Interactive Proof Graph（依存・証明関係のインタラクティブ可視化）— ✅ Implemented
+
+**Repository**: `mumei-lang/mumei`（`docs/ROADMAP.md` の P26 に対応）
+
+**既存の土台**:
+- P14-D の cross-spec 解析（`mumei-core/src/cross_spec/mod.rs` の `build_dependency_graph()` / `verify_all()` と `cross_spec.json`）
+- P22 の session protocol 解析（`session_protocol_violations[]`）
+- P23 の trust boundary 分類（`mumei-core/src/trust_boundary.rs`）
+- 静的グラフの健全度色分け（`std_graph_lib` / `visualizer/generate_graph.py` / `visualize_std_graph`）
+- 既存 Streamlit ダッシュボード構成（mumei-agent `visualizer/app.py`）
+
+**目的**: 複数ファイル / atom 間の依存・証明関係の可視化が静的な Mermaid / DOT 生成に留まっていた点を解消し、「どの atom のどの契約が、どの制約に依存して安全性を担保しているか」を選択して辿れるようにする。新規 Web 基盤は導入しない。
+
+**MVP の範囲**:
+- `mumei verify --emit proof-graph` による単一 JSON（`proof_graph.json`）エクスポート（cross-spec 解析を自動有効化、`cross_spec.json` は無変更）。
+- Streamlit の Proof Graph ビュー（atom 選択 → requires/ensures・依存元 / 依存先・trust boundary・session 違反）。
+- MCP ツール `visualize_proof_graph`（`analyze_contract_conflicts` と同じ subprocess パターン）。
+
+**実装エビデンス**（測定 2026-08-30）:
+- ✅ **複数ファイル project**: `tests/test_cross_spec_multi_file*.mm` でノード / エッジ / 契約 / trust boundary / summary を出力し、契約不一致ペアがエッジに違反文つきで現れる。
+- ✅ **session 違反の紐付け**: `payment_client.mm` + `payment_server.mm` の deadlock 違反が caller / callee 双方のノードから index 参照できる。
+- ✅ **色分けの一貫性**: `failed` / `unverifiable` = 赤 > trust boundary = 黄 > それ以外 = 緑。fill / shape は `std_graph_lib.render_std_graph_dot` と同一。
+- ✅ **回帰なし**: `visualize_std_graph` / `visualizer/generate_graph.py` / `analyze_contract_conflicts` は無変更、`PYTHONPATH=. pytest tests/` 151/151 passed。`cargo tree --edges no-dev` に opentelemetry は現れない。
+
+**残課題**: `st.graphviz_chart` はクリックイベントを返さないため、ノード選択はサイドバーのセレクタと依存元 / 依存先ボタンで行う。import 済み / prelude atom の `verification_status` は `null`（健全度は trust boundary のみで決まる）。
+
+**関連ファイル**:
+- `mumei-core/src/proof_graph.rs` / `src/cli.rs` / `src/commands/verify.rs`
+- `visualizer/proof_graph_lib.py` / `visualizer/app.py` / `visualizer/README.md` / `mcp_server.py`
+- `tests/test_proof_graph_export.rs` / `tests/test_proof_graph_lib.py` / `docs/REPORT_SCHEMA.md`
 
 ---
 

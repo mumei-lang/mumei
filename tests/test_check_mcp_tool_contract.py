@@ -38,7 +38,7 @@ def test_sibling_agent_contract_is_validated(monkeypatch, tmp_path, capsys) -> N
     monkeypatch.setattr(check_mcp_tool_contract, "CONTRACT_DOC", contract)
     assert check_mcp_tool_contract.main() == 0
     output = capsys.readouterr().out
-    assert "18 mumei-forge tools" in output
+    assert "19 mumei-forge tools" in output
 
 
 def test_sibling_agent_contract_absence_is_a_clean_skip(monkeypatch, tmp_path, capsys) -> None:
