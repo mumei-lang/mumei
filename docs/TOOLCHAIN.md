@@ -146,7 +146,10 @@ Fetch behaviour:
   recorded as provenance.
 - A plaintext `http://` registry is rejected unless it is loopback (local fixtures)
   or `MUMEI_REGISTRY_ALLOW_PLAINTEXT=1` is set: over plaintext an attacker can
-  replace the package and its certificate together.
+  replace the package and its certificate together. Redirects are held to the same
+  rule, so an HTTPS registry cannot redirect a download to plaintext.
+- Paths listed in `index.json` are rejected if they are absolute, escape the package
+  directory, or contain URL-reserved characters (`#`, `?`, `%`, `:`, `@`).
 - Atom-level verdicts are unchanged — they are still produced by
   `verify_import_certificate` on the cached package.
 

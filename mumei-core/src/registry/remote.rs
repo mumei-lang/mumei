@@ -164,10 +164,22 @@ impl StagingDir {
         &self.path
     }
 
-    /// Replace `dest` with the staged content.
+    /// Replace `dest` with the staged content, keeping the previously cached
+    /// package if the move fails.
     fn publish(&self, dest: &Path) -> Result<(), String> {
-        if dest.exists() {
-            fs::remove_dir_all(dest).map_err(|e| {
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent).map_err(|e| {
+                format!("remote registry: cannot create {}: {}", parent.display(), e)
+            })?;
+        }
+        let backup = dest.exists().then(|| {
+            let mut backup = dest.as_os_str().to_os_string();
+            backup.push(format!(".replaced-{}", std::process::id()));
+            PathBuf::from(backup)
+        });
+        if let Some(backup) = &backup {
+            let _ = fs::remove_dir_all(backup);
+            fs::rename(dest, backup).map_err(|e| {
                 format!(
                     "remote registry: cannot replace cached {}: {}",
                     dest.display(),
@@ -175,19 +187,25 @@ impl StagingDir {
                 )
             })?;
         }
-        if let Some(parent) = dest.parent() {
-            fs::create_dir_all(parent).map_err(|e| {
-                format!("remote registry: cannot create {}: {}", parent.display(), e)
-            })?;
+        match fs::rename(&self.path, dest) {
+            Ok(()) => {
+                if let Some(backup) = &backup {
+                    let _ = fs::remove_dir_all(backup);
+                }
+                Ok(())
+            }
+            Err(e) => {
+                if let Some(backup) = &backup {
+                    let _ = fs::rename(backup, dest);
+                }
+                Err(format!(
+                    "remote registry: cannot move {} to {}: {}",
+                    self.path.display(),
+                    dest.display(),
+                    e
+                ))
+            }
         }
-        fs::rename(&self.path, dest).map_err(|e| {
-            format!(
-                "remote registry: cannot move {} to {}: {}",
-                self.path.display(),
-                dest.display(),
-                e
-            )
-        })
     }
 }
 
@@ -217,6 +235,17 @@ fn fetch_into_staging(
 ) -> Result<Option<FetchedPackage>, String> {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_millis(timeout_ms))
+        // A redirect must not downgrade the transport: otherwise an HTTPS
+        // registry could send the package and its certificate over plaintext.
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if check_transport(attempt.url().as_str()).is_err() {
+                attempt.stop()
+            } else if attempt.previous().len() > 5 {
+                attempt.error("too many redirects")
+            } else {
+                attempt.follow()
+            }
+        }))
         .build()
         .map_err(|e| format!("remote registry: cannot build HTTP client: {}", e))?;
 
@@ -514,6 +543,14 @@ fn sanitize_relative_path(rel: &str) -> Result<PathBuf, String> {
     if rel.contains('\\') {
         return reject("backslash separator");
     }
+    // The path is interpolated into the download URL, where these characters
+    // would truncate or re-target the request.
+    if let Some(c) = rel
+        .chars()
+        .find(|c| matches!(c, '#' | '?' | '%' | ':' | '@') || c.is_ascii_control())
+    {
+        return reject(&format!("URL-reserved character '{}'", c.escape_debug()));
+    }
     let path = Path::new(rel);
     if path.is_absolute() {
         return reject("absolute path");
@@ -543,6 +580,33 @@ mod tests {
         assert!(check_transport("http://localhost:8123").is_ok());
         let err = check_transport("http://registry.example.com").expect_err("plaintext rejected");
         assert!(err.contains("plaintext HTTP"), "{}", err);
+    }
+
+    #[test]
+    fn a_failed_publish_keeps_the_previously_cached_package() {
+        let root = std::env::temp_dir().join(format!("mumei_publish_{}", std::process::id()));
+        let dest = root.join("pkg").join("1.0.0");
+        fs::create_dir_all(&dest).expect("create cached package");
+        fs::write(dest.join("src.mm"), "cached").expect("write cached file");
+
+        let staging = StagingDir::new(&root, "pkg").expect("create staging");
+        // Injected failure: the staged directory disappears before publication.
+        fs::remove_dir_all(staging.path()).expect("drop staging");
+        assert!(staging.publish(&dest).is_err());
+        assert_eq!(
+            fs::read_to_string(dest.join("src.mm")).expect("cached file survived"),
+            "cached"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn sanitize_rejects_url_reserved_characters() {
+        for rel in ["src/a#b.mm", "src/a?b.mm", "src/a%2e.mm", "src/a:b.mm"] {
+            let err = sanitize_relative_path(rel).expect_err("must be rejected");
+            assert!(err.contains("URL-reserved character"), "{}", err);
+        }
     }
 
     #[test]
