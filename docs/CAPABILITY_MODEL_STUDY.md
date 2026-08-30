@@ -465,14 +465,15 @@ zero runtime overhead と Z3 の決定可能断片の両方を失うため、そ
 Option A（parameterized effects + Z3）継続が正しい判断となる。
 
 なお本調査が答えたのは Priority 15 のタスク 1（非破壊な設計調査）とタスク 2（互換性判定）であり、
-本調査の「肯定的」は**技術的に着手可能である**という判定であって、着手すべきという需要判断ではない。
+本調査の「肯定的」は **技術的に着手可能である**という判定であって、着手すべきという需要判断ではない。
 
 タスク 3（AI エージェント側で capability delegation の需要が実在するかの検証）は
-2026-08-30 に完了し、**結論は否定**であった（成果物: `mumei-lang/mumei-agent` の
-[`docs/CAPABILITY_DEMAND_STUDY.md`](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/CAPABILITY_DEMAND_STUDY.md)）。
-したがって Stage 1 までを実装済みとして維持し、**Stage 2（`grant`）以降は §6.1 のトリガが
-観測されるまで保留する**。技術的な可否（本調査の肯定）と着手の是非（タスク 3 の否定）は独立であり、
-本 §7 の肯定判定は撤回しない。
+✅ **調査完了・結論は否定**である。`mumei-lang/mumei-agent` の
+[`docs/CAPABILITY_DEMAND_STUDY.md`](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/CAPABILITY_DEMAND_STUDY.md)
+（PR [mumei-agent#567](https://github.com/mumei-lang/mumei-agent/pull/567)、マージ済み）が、
+エージェント側に Stage 2 以降を要求する実需要は観測されないと結論した。したがって
+Stage 2〜4 は §6.1 のトリガ（T1〜T4）が観測されるまで保留し、着手しない。既に実装済みの Stage 1
+（`docs/ROADMAP.md` P29）はタスク 3 の結果に依存しない非破壊な範囲であり、撤回せず維持する。
 
-したがって `docs/CAPABILITY_SECURITY.md` §4 の Recommendation は現時点で撤回しない。
-Option A は既定パスのままとし、Stage 1〜4 が opt-in 拡張として上積みされる、という位置づけとする。
+したがって `docs/CAPABILITY_SECURITY.md` §4 の Recommendation は撤回しない。
+Option A を既定パスとして継続し、Stage 1 のみが opt-in 拡張として上積みされている、という位置づけとする。

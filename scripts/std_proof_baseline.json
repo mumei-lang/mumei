@@ -1,6 +1,6 @@
 {
   "total_modules": 59,
-  "total_atoms": 344,
+  "total_atoms": 345,
   "proven_atoms": 339,
   "lean_verified_atoms": 0,
   "trusted_atoms": 0,
@@ -8,6 +8,10 @@
     "std/algebra/finite_field": [
       {
         "name": "ff_mul_add_distributive",
+        "z3_check_result": "unknown"
+      },
+      {
+        "name": "ff_pow_square_expands",
         "z3_check_result": "unknown"
       },
       {

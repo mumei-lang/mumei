@@ -745,3 +745,52 @@ violations are reported via hook/stderr and it never panics.
 violations are only observable after installing
 `mumei_monitor::set_effect_state_probe(...)`; without a probe the state is
 unobservable and nothing is reported.
+
+## Capability declarations (`type X = capability E(..) where C;`)
+
+Use this flow when changes touch `parse_capability_def` / `resolve_capability_params`
+in `mumei-core/src/parser/item.rs`, `TypeRef::carries_effects()` in `ast.rs`, the
+capability-constraint branch of `verification/translator/expr.rs`, or the
+`Item::CapabilityDef` arms in `src/pipeline.rs` / `commands/check.rs` /
+`commands/build.rs`.
+
+Fixtures: `tests/test_capability_stage1.mm` (3 atoms, all must verify) and
+`tests/test_capability_stage1_missing_effect.mm` (must exit 1 with
+`Effect polymorphism violation: ... accepts capability parameter 'cap' with effect
+[SafeFileRead]`, `report.json` `failure_type == "effect_not_allowed"`).
+
+- `mumei check` / `mumei build` print `🔑 Capability: '<Name>' (effect: <Effect>)`.
+  That line is the cheapest proof the declaration parsed as a capability rather
+  than a refined type.
+- BEFORE/AFTER discriminator: on a build without the feature the same file fails
+  with `failed to lower refinement type 'FileCap': Unknown function: <Effect>`
+  (the `type X = ...` is parsed as a refinement), so a base-binary run via
+  `git worktree add -f /home/ubuntu/mumei-base origin/develop` is a strong check.
+- To prove the capability `where` constraint is really threaded into Z3, declare
+  the underlying effect **without** a constraint and put the constraint only on
+  the capability:
+  `effect LooseFileRead(path: Str);` +
+  `type StrictCap = capability LooseFileRead(path: Str) where starts_with(path, "/tmp/");`
+  A body with `let path = "/etc/passwd"; perform cap.read(path);` must fail with
+  `Verification Error: Contradiction found.`, while `"/tmp/ok.log"` verifies.
+  Without the constraint plumbing both cases verify identically.
+- Known limitation (pre-existing for plain effect constraints too, reproducible on
+  `origin/develop` with a constrained `effect`): a fully symbolic, unconstrained
+  argument (`perform cap.read(user_path)` where `user_path: Str` has no `requires`)
+  **verifies** — constant/derived paths are checked, free symbolic ones are not.
+  Do not report this as a capability regression; compare against the equivalent
+  `perform <Effect>.op(sym)` form first.
+- String-literal safety of the `perform cap.op` textual rewrite is best proven
+  through emitted IR, not stdout: build with `--emit llvm-ir` and grep the `.ll`
+  for the literal, e.g. `grep -o 'c"[^"]*"' out_<atom>.ll` must still contain
+  `c"perform cap.read(/tmp/x)\00"` (never `perform <Effect>.read`).
+- Two capability types over the **same** effect with different constraints are
+  conjoined, so such an atom fails with `Contradiction found` even when only one
+  capability is performed. This is a documented Stage 1 over-restriction.
+- `capability` is contextual: only a keyword directly after `type X =`. Regression
+  fixture worth keeping: an atom with params literally named `capability` and
+  `grant`, plus `type capability_alias = i64 where v >= 0;` — must verify.
+- `mumei build --output <dir>/<base>` fails with
+  `Codegen Error: No such file or directory` when `<dir>` does not exist **and**
+  verification was served from cache (`Verification: Skipped (unchanged, cached)`).
+  Pre-existing on `origin/develop`; `mkdir -p` the output dir before building.

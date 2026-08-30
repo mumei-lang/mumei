@@ -46,7 +46,7 @@ The current cross-repo execution order is fixed and should be reviewed with `doc
 | 2 | `V1-C` and `V1-D` | Compare spec→code and code→spec only after V1-A/V1-B artifacts use the stable names `spec_health_issues`, `verification_violations`, `verification_status`, `cross_validation_gaps`, `next_steps`, `migration_hints`, `healed_files`, and `heal_errors`. |
 | 3 | `V1-E` | Human review enters through `next_steps` and the traceability metadata, not through renamed issue fields. The Phase 7 `mumei-demo/scenarios/spec_code_verification_suite` scenario now demonstrates V1-A〜V1-D in one fixture-safe flow before migration or Lean escalation. |
 
-The no-`.mm` front door remains `audit -> migrate-suggest -> heal`. `mumei-lean` is expanded only for Z3 `unknown` obligations, not `sat` / `unsat` / parser failure / audit findings, and now completes the V1 live generated theorem paths (thirteen in total: `abs_saturating`, `bounded_mul_with_overflow_check`, `constant_time_eq_flag`, `ff_zero_eq_zero`, `verified_insertion_sort_ascending`, `poly_bound_monotone`, `exists_pivot_partition`, `sum_nonneg_inductive`, `rtgs_transfer_conservation`, `ff_mul_commutative`, `ff_mul_associative`, `ff_mul_add_distributive`, `predicate_guard_collapse`). The reference path `Generated.Std.Math.Abs.abs_saturating_correct` exports `lean_verified` with `known_witness_used = false` when `translator_version` and `bridge_lemma_hash` match; stale metadata is `stale_translator`, and `known_witness_used = true` remains fallback witness evidence only.
+The no-`.mm` front door remains `audit -> migrate-suggest -> heal`. `mumei-lean` is expanded only for Z3 `unknown` obligations, not `sat` / `unsat` / parser failure / audit findings, and now completes the V1 live generated theorem paths (fourteen in total: `abs_saturating`, `bounded_mul_with_overflow_check`, `constant_time_eq_flag`, `ff_zero_eq_zero`, `verified_insertion_sort_ascending`, `poly_bound_monotone`, `exists_pivot_partition`, `sum_nonneg_inductive`, `rtgs_transfer_conservation`, `ff_mul_commutative`, `ff_mul_associative`, `ff_mul_add_distributive`, `predicate_guard_collapse`, `ff_pow_square_expands`). The reference path `Generated.Std.Math.Abs.abs_saturating_correct` exports `lean_verified` with `known_witness_used = false` when `translator_version` and `bridge_lemma_hash` match; stale metadata is `stale_translator`, and `known_witness_used = true` remains fallback witness evidence only.
 
 Local docs were reviewed with the five-language no-`.mm` contract: Python, Rust,
 TypeScript, Go, and Solidity all use the same eight audit keys, and language selection
@@ -1885,8 +1885,8 @@ object-based capability model の**非破壊な設計調査**のみを対象と�
 Stage 4: move ベース revocation）と非対象範囲は `docs/CAPABILITY_MODEL_STUDY.md` §6 を参照。
 `docs/CAPABILITY_SECURITY.md` §4 の Recommendation は撤回せず、Option A を既定パスとしたうえで
 上記 Stage が opt-in 拡張として上積みされる位置づけとする。なお本調査の「肯定的」は
-**技術的に着手可能**という判定であり、実装フェーズを実際に開くかどうかは Priority 15 のタスク 3
-（AI エージェント側の需要検証、下記）で判断する。
+**技術的に着手可能**という判定であり、実装フェーズを実際に開くかどうかは
+Priority 15 のタスク 3（AI エージェント側の需要検証）の結果に従う（下記のとおり結論は否定）。
 
 **実装フェーズ**（2026-08-30）: Stage 1（capability 型宣言 + capability 型パラメータ、`grant` なし）は
 タスク 3 の結果に依存しない非破壊な範囲であるため P29 として着手・実装済み。
@@ -1895,7 +1895,7 @@ Stage 4: move ベース revocation）と非対象範囲は `docs/CAPABILITY_MODE
 **需要検証（タスク 3）の結論**（2026-08-30、調査完了 / **結論: 否定**）:
 成果物は `mumei-lang/mumei-agent` の
 [`docs/CAPABILITY_DEMAND_STUDY.md`](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/CAPABILITY_DEMAND_STUDY.md)
-（コード変更なしの需要検証 PR）。self-healing / generate / forge / audit / MCP の各ワークフローを
+（PR [mumei-agent#567](https://github.com/mumei-lang/mumei-agent/pull/567)、コード変更なしの需要検証 PR、マージ済み）。self-healing / generate / forge / audit / MCP の各ワークフローを
 洗い出し、呼び出しごとの権限委譲・narrowing・失効が本質的に必要なユースケースは現時点で存在しないと判定した:
 mumei-agent は third-party `.mm` を消費せず（registry / `mumei add` の利用箇所ゼロ）、
 生成 `.mm` を実行せず（`verify` / `check` / `infer-*` / `build` のみ）、最小権限化の価値がある権限は
@@ -1906,7 +1906,11 @@ effect 違反の記録は 0 件で、`docs/CAPABILITY_SECURITY.md` Next Steps 3 
 
 **したがって Option A（parameterized effects + Z3）を既定として継続し、Stage 2（`grant`）以降は
 需要が観測されるまで保留する**（保留解除トリガ T1〜T4 は `docs/CAPABILITY_MODEL_STUDY.md` §6.1）。
-Stage 1 は非破壊なので実装済みのまま維持する。本節の設計調査の肯定判定（技術的に着手可能）は撤回しない。
+Stage 2（`grant`）／Stage 3（narrowing）／Stage 4（move ベース revocation）は着手しない。
+実装済みの Stage 1（capability 型宣言 + capability 型パラメータ、
+[P29](#p29-capability-model-stage-1capability-型宣言--capability-型パラメータ--implemented)）は
+非破壊かつタスク 3 の結果に依存しない範囲であり、**撤回せずそのまま維持**する。
+本節の設計調査の肯定判定（技術的に着手可能）は撤回しない。
 
 **契約への影響**: なし。capability 由来の検証結果は既存 effect 検証と同じ経路で報告し、
 新しい verdict 分類や別名 alias は追加しない。
@@ -2393,7 +2397,44 @@ capability 宣言は新しいエフェクトを定義せず、既存 `EffectDef`
 - `.mm` 回帰ゼロ: `std/` + `examples/` + `tests/` の全 `.mm` を `mumei verify` に通し、verdict 集合が `develop` と一致することを確認（既存の失敗は意図された負例で、件数・対象ファイルとも変化なし）。
 - **ゼロコスト検証（P15 / P23〜P27 と同一）**: `cargo tree --edges no-dev | grep -i opentelemetry` が空であること。
 
-**残課題**: `perform cap.op(x)` はパーサが裏側のエフェクト名へ解決するため、perform サイトから capability レシーバの同一性が失われる。したがって 1 つの atom が同一エフェクトに対する複数の capability パラメータを取る場合、それぞれの constraint が全 perform に連言で適用される（権限が広がることはないが、正当なプログラムを過剰に棄却しうる）。同じ atom 内の直接 `perform Effect.op(x)` も同様に capability constraint を継承する。レシーバを構文木に保持した per-receiver 解決は Stage 2 で行う。 capability constraint の検査範囲は既存 effect 制約と同一で、`requires` で束縛されていない完全に記号的な引数は既存 effect と同様に受理される（`develop` の effect 版と verdict 一致を CLI で確認）。capability 宣言はそれを宣言したモジュール内のパラメータにのみ適用される（import 越しの capability 型パラメータ、および REPL で capability 宣言と atom を別入力で投入した場合は Stage 2 以降で resolver に載せる。`ModuleEnv` への登録自体は本 PR で入っている）。`grant` 式・narrowing・move ベース revocation と codegen の ABI 消去パスは Stage 2〜4 のまま未着手。Priority 15 タスク 3（AI エージェント側の需要検証）は 2026-08-30 に**結論: 否定**で完了したため（成果物: `mumei-lang/mumei-agent` [`docs/CAPABILITY_DEMAND_STUDY.md`](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/CAPABILITY_DEMAND_STUDY.md)）、Stage 2 以降は需要が観測されるまで保留する（トリガ T1〜T4 は `docs/CAPABILITY_MODEL_STUDY.md` §6.1）。Stage 1 は非破壊なので実装済みのまま維持する。
+**残課題**: `perform cap.op(x)` はパーサが裏側のエフェクト名へ解決するため、perform サイトから capability レシーバの同一性が失われる。したがって 1 つの atom が同一エフェクトに対する複数の capability パラメータを取る場合、それぞれの constraint が全 perform に連言で適用される（権限が広がることはないが、正当なプログラムを過剰に棄却しうる）。同じ atom 内の直接 `perform Effect.op(x)` も同様に capability constraint を継承する。レシーバを構文木に保持した per-receiver 解決は Stage 2 で行う。 capability constraint の検査範囲は既存 effect 制約と同一で、`requires` で束縛されていない完全に記号的な引数は既存 effect と同様に受理される（`develop` の effect 版と verdict 一致を CLI で確認）。capability 宣言はそれを宣言したモジュール内のパラメータにのみ適用される（import 越しの capability 型パラメータ、および REPL で capability 宣言と atom を別入力で投入した場合は Stage 2 以降で resolver に載せる。`ModuleEnv` への登録自体は本 PR で入っている）。`grant` 式・narrowing・move ベース revocation と codegen の ABI 消去パスは Stage 2〜4 のまま未着手であり、Priority 15 タスク 3（AI エージェント側の需要検証、`mumei-agent/docs/CAPABILITY_DEMAND_STUDY.md` / PR #567）の結論が**否定**であるため、将来のトリガ（T1〜T4、`docs/CAPABILITY_MODEL_STUDY.md` §6.1）が観測されるまで**保留（着手しない）**とする。本 P29（Stage 1）は非破壊かつタスク 3 の結果に依存しない範囲であり、**撤回せず実装済みのまま維持する**。
+
+---
+
+## P30: Lean escalation 翻訳カバレッジ拡張（modular exponentiation、候補 C 第 1 弾）— ✅ Implemented
+
+**ステータス: ✅ Implemented**（測定 2026-08-30、mumei-lean `PYTHONPATH=scripts MUMEI_LEAN_SKIP_LIVE=1 pytest -q` 308 passed / 10 skipped（うち `tests/test_lean_bridge_e2e.py` に 14 番目の live path テスト 1 件を新規追加）、集中テスト（contract vocabulary / expr translator / cert roundtrip / lean bridge e2e / tactic search / tactic history）183 passed、mumei-lean `lake build` 成功（`sorry` なし）、mumei `PYTHONPATH=. pytest tests/` 185 passed、`scripts/check_contract_vocabulary.py` / `scripts/generate_stdlib_metrics.py --check` / `scripts/check_proof_bundle_drift.py` いずれも pass、live generated theorem path は 13 → **14**、tactic ladder は 16 → **17 候補**）— paper §8 Known limitation #2（Lean escalation still depends on translation coverage）を縮小する拡張の第 1 弾。`docs/CROSS_PROJECT_ROADMAP.md` Priority 23 に対応する。
+
+### 分類した未カバー goal 形状
+
+実 std / benchmark の proof certificate を走査し、`manual_lemma_reason` を保持したまま残る obligation（ladder exhausted）を分類したところ、**modular exponentiation**の展開が未カバーであった:
+
+```mumei
+atom ff_pow_square_expands(a: i64, p: i64)
+    requires: p > 0;
+    ensures: ff_eq(result, ff_mul(a, a, p), p);
+    body: { ff_pow(a, 2, p) };
+```
+
+既存の modular 正規化段 `mumei_ff_mod` は、指数の `Int.toNat` リテラル還元と `(a % p) ^ n % p` の還元のどちらも rewrite 集合に持たないため、この目標で 16 候補すべてが exhausted になった。
+
+### 拡張内容（tactic ladder 末尾追記のみ）
+
+- `MumeiLean/Algebra.lean` に支持補題 `emod_pow_emod : (a % p) ^ n % p = a ^ n % p`（`n` についての帰納、`sorry` なし）を追加。
+- `MumeiLean/Tactics.lean` に `mumei_ff_pow` を定義し、`scripts/tactic_search.py` の ladder **末尾**に 17 番目の候補として追記（interleave しないので既存 16 候補の採用結果は不変、学習は引き続き permutation のみ）。
+- 14 番目の live generated theorem path として `std/algebra/finite_field.mm::ff_pow_square_expands` を追加し、実 proof-cert fixture から `Generated.Std.Algebra.Finite_field.ff_pow_square_expands_correct` が `known_witness_used = false` / `manual_lemma_reason = null` で `lean_verified` になることを実 `lake build` で確認。
+
+### 契約定数
+
+bridge lemma catalog（`docs/LEAN_TRANSLATOR_SPEC.md` §10）には一切追加していない（`emod_pow_emod` は tactic が使う支持補題であって obligation class の bridge lemma ではない）ため、`bridge_lemma_hash` = `ee8cd3ba…4347` と `translator_version` = `mumei-lean-translator-ir-v2` は**不変**であり、pinned doc / `scripts/export_cert.py` / mumei-agent 定数の lockstep 更新は不要。
+
+### 回帰ゲート
+
+- 既存 13 live path・8 obligation class・既存 16 候補の宣言順（ladder の prefix）が不変。
+- `benchmarks/run_benchmarks.py` の `lean_solver_time_s` チャネルは回帰なし（arithmetic 平均 8.848s / domain_compliance 平均 8.839s、SKIP 挙動は不変、`benchmarks/arithmetic/finite_field_modular.mm` は 4 escalated / 4 lean_verified / tactic search 2）。
+- stdlib atom 数は 344 → 345（`std/algebra/finite_field.mm` が 2 → 3）で、`docs/STDLIB_METRICS.md` と `scripts/std_proof_baseline.json` を同一 diff で更新済み。
+
+**残課題**: benchmark 側に残る `unknown_obligation`（body semantics 依存の非算術 obligation）は未カバーのまま。次弾で bridge lemma 追加が必要な形状に着手する場合は、`bridge_lemma_hash` の lockstep 更新（pinned doc 4 本 + `scripts/export_cert.py` + mumei-agent `_SOLIDITY_GUARD_TRACE_BRIDGE_LEMMA_HASH`）が必須。
 
 ---
 
