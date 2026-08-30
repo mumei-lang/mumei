@@ -688,7 +688,7 @@ fn bound_contains(bound: &NumericBound, value: i64, _inclusive: bool) -> bool {
     }
 }
 
-fn atom_source_file(atom: &Atom) -> String {
+pub(crate) fn atom_source_file(atom: &Atom) -> String {
     atom.spec_metadata
         .get("source_file")
         .filter(|value| !value.is_empty())

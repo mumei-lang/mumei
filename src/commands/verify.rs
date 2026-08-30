@@ -4,7 +4,7 @@ use crate::pipeline::*;
 use mumei_core::hir::lower_atom_to_hir_with_env;
 use mumei_core::parser::Item;
 use mumei_core::{
-    cross_spec, manifest, mir, mir_analysis, parser, proof_cert,
+    cross_spec, manifest, mir, mir_analysis, parser, proof_cert, proof_graph,
     reconstruction_loss::ReconstructionLoss,
     resolver,
     structured_feedback::{Location, StructuredFeedback},
@@ -78,6 +78,7 @@ pub(crate) fn cmd_verify_command(command: Command) {
     let emit_loss_vector = matches!(emit.as_deref(), Some("loss-vector"));
     let emit_structured_feedback = matches!(emit.as_deref(), Some("structured-feedback"));
     let emit_human_review_queue = matches!(emit.as_deref(), Some("human-review-queue"));
+    let emit_proof_graph = matches!(emit.as_deref(), Some("proof-graph"));
     if let Some(other) = emit.as_deref() {
         if !emit_escalation_bundle
             && !matches!(other, "escalation-metrics")
@@ -86,9 +87,10 @@ pub(crate) fn cmd_verify_command(command: Command) {
             && !emit_loss_vector
             && !emit_structured_feedback
             && !emit_human_review_queue
+            && !emit_proof_graph
         {
             eprintln!(
-                    "Unsupported verify --emit target '{}'. Supported values: escalation-bundle, escalation-metrics, decidable-metrics, reconstruction-loss, loss-vector, structured-feedback, human-review-queue",
+                    "Unsupported verify --emit target '{}'. Supported values: escalation-bundle, escalation-metrics, decidable-metrics, reconstruction-loss, loss-vector, structured-feedback, human-review-queue, proof-graph",
                     other
                 );
             std::process::exit(1);
@@ -98,7 +100,9 @@ pub(crate) fn cmd_verify_command(command: Command) {
     let intent_fidelity = resolve_intent_fidelity(intent_fidelity);
     let artifact_paths = resolve_artifact_paths(artifact_paths);
     let budget_policy_fingerprint = resolve_budget_policy_fingerprint(budget_policy_fingerprint);
-    let enable_cross_spec = cross_spec_verify || !cross_spec_files.is_empty();
+    // The proof graph is a projection of the cross-spec analysis, so asking for
+    // it implies running that analysis.
+    let enable_cross_spec = cross_spec_verify || !cross_spec_files.is_empty() || emit_proof_graph;
     let enable_spurious = enable_spurious_detection || !disable_spurious_detection;
 
     #[cfg(feature = "otel")]
@@ -127,8 +131,21 @@ pub(crate) fn cmd_verify_command(command: Command) {
         );
         let mut total_ok = 0usize;
         let mut total_fail = 0usize;
-        for file in &files {
+        for (position, file) in files.iter().enumerate() {
             let file_str = file.to_string_lossy().to_string();
+            // One graph describes the whole directory, so it is written once,
+            // on the last file, with the other files supplied as cross-spec
+            // inputs. Writing it per file would leave only the last file's atoms.
+            let emit_proof_graph_here = emit_proof_graph && position + 1 == files.len();
+            let mut per_file_cross_spec_files = cross_spec_files.clone();
+            if emit_proof_graph_here {
+                per_file_cross_spec_files.extend(
+                    files
+                        .iter()
+                        .filter(|other| *other != file)
+                        .map(|other| other.to_string_lossy().to_string()),
+                );
+            }
             let has_failure = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 cmd_verify(VerifyOptions {
                     input: &file_str,
@@ -144,13 +161,14 @@ pub(crate) fn cmd_verify_command(command: Command) {
                     emit_loss_vector,
                     emit_structured_feedback,
                     emit_human_review_queue,
+                    emit_proof_graph: emit_proof_graph_here,
                     cert_output: output.as_deref(),
                     report_dir: report_dir.as_deref(),
                     json_output: json,
                     strict_imports,
                     allow_lean_verified,
                     enable_cross_spec_verification: enable_cross_spec,
-                    cross_spec_files: &cross_spec_files,
+                    cross_spec_files: &per_file_cross_spec_files,
                     enable_spurious_detection: enable_spurious,
                     property_based_test,
                     warn_fragment,
@@ -204,6 +222,7 @@ pub(crate) fn cmd_verify_command(command: Command) {
             emit_loss_vector,
             emit_structured_feedback,
             emit_human_review_queue,
+            emit_proof_graph,
             cert_output: output.as_deref(),
             report_dir: report_dir.as_deref(),
             json_output: json,
@@ -324,6 +343,7 @@ pub(crate) struct VerifyOptions<'a> {
     pub(crate) emit_loss_vector: bool,
     pub(crate) emit_structured_feedback: bool,
     pub(crate) emit_human_review_queue: bool,
+    pub(crate) emit_proof_graph: bool,
     pub(crate) cert_output: Option<&'a str>,
     pub(crate) report_dir: Option<&'a str>,
     pub(crate) json_output: bool,
@@ -978,6 +998,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
         emit_loss_vector,
         emit_structured_feedback,
         emit_human_review_queue,
+        emit_proof_graph,
         cert_output,
         report_dir,
         json_output,
@@ -1112,6 +1133,8 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
     let mut cert_results: std::collections::HashMap<String, (String, String)> =
         std::collections::HashMap::new();
     let mut lean_escalation_metrics_json: Option<serde_json::Value> = None;
+    let mut proof_graph_cross_spec: Option<cross_spec::CrossSpecResult> = None;
+    let mut lean_verified_atoms: Vec<String> = Vec::new();
 
     if emit_contract_manifest {
         let manifest = verification::generate_contract_manifest(&module_env);
@@ -1343,6 +1366,11 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
     if enable_cross_spec_verification {
         match save_cross_spec_report(&module_env, output_dir, !quiet_output) {
             Ok(cross_spec_result) => {
+                if emit_proof_graph {
+                    // The graph is written after Lean escalation, so atoms the
+                    // bridge discharges are not reported as unresolved.
+                    proof_graph_cross_spec = Some(cross_spec_result.clone());
+                }
                 if cross_spec_result.summary.inconsistent_calls > 0 && !quiet_output {
                     eprintln!(
                         "Warning: {} inconsistent contract calls detected",
@@ -1484,6 +1512,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                                 apply_lean_cert_to_proof_certificate(&mut cert, &lean_bundle);
                             verified += stats.newly_proven;
                             escalated = escalated.saturating_sub(stats.lean_verified);
+                            lean_verified_atoms.extend(stats.lean_verified_atoms.iter().cloned());
                             if !quiet_output {
                                 for atom_name in &stats.lean_verified_atoms {
                                     println!("  lean_verified: {atom_name}");
@@ -1585,6 +1614,25 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                     unknown_count
                 );
             }
+        }
+    }
+
+    if let Some(cross_spec_result) = proof_graph_cross_spec {
+        let statuses = proof_graph_statuses(
+            &cert_results,
+            &diagnostics,
+            &failure_diagnostics,
+            &lean_verified_atoms,
+        );
+        if let Err(err) = save_proof_graph_report(
+            &module_env,
+            &cross_spec_result,
+            &statuses,
+            output_dir,
+            !quiet_output,
+        ) {
+            eprintln!("  ⚠️  Failed to write proof graph: {}", err);
+            failed += 1;
         }
     }
 
@@ -1863,6 +1911,62 @@ pub(crate) fn save_reconstruction_losses(
         );
     }
     Ok(())
+}
+
+/// Per-atom statuses for the proof graph.
+///
+/// `cert_results` only holds atoms that reached the solver, so an atom rejected
+/// earlier (an untyped array access under `--strict-array-types`, say) would
+/// otherwise carry no status and be painted as proven. Every error diagnostic
+/// therefore contributes a `failed` status, and atoms the Lean bridge discharged
+/// are promoted to `verified`.
+fn proof_graph_statuses(
+    cert_results: &std::collections::HashMap<String, (String, String)>,
+    diagnostics: &[verification::Diagnostic],
+    failure_diagnostics: &[verification::Diagnostic],
+    lean_verified_atoms: &[String],
+) -> std::collections::BTreeMap<String, String> {
+    let mut statuses: std::collections::BTreeMap<String, String> = cert_results
+        .iter()
+        .map(|(name, (_z3, status))| (name.clone(), status.clone()))
+        .collect();
+    for diagnostic in diagnostics.iter().chain(failure_diagnostics.iter()) {
+        if diagnostic.severity == "error" && !diagnostic.atom.is_empty() {
+            statuses.insert(diagnostic.atom.clone(), "failed".to_string());
+        }
+    }
+    for atom_name in lean_verified_atoms {
+        statuses.insert(atom_name.clone(), "verified".to_string());
+    }
+    statuses
+}
+
+/// Fold the cross-spec graph, atom contracts, trust boundaries and session
+/// violations into `proof_graph.json` for the interactive viewer (P26).
+pub(crate) fn save_proof_graph_report(
+    module_env: &verification::ModuleEnv,
+    cross_spec: &cross_spec::CrossSpecResult,
+    verification_status: &std::collections::BTreeMap<String, String>,
+    output_dir: &Path,
+    print_path: bool,
+) -> Result<proof_graph::ProofGraph, String> {
+    let graph = proof_graph::build_proof_graph(module_env, cross_spec, verification_status);
+    std::fs::create_dir_all(output_dir)
+        .map_err(|err| format!("failed to create report directory: {err}"))?;
+    let path = output_dir.join("proof_graph.json");
+    let payload = serde_json::to_string_pretty(&graph)
+        .map_err(|err| format!("failed to serialize proof graph: {err}"))?;
+    std::fs::write(&path, payload)
+        .map_err(|err| format!("failed to write {}: {err}", path.display()))?;
+    if print_path {
+        println!(
+            "  🕸️  Proof graph written to: {} ({} node(s), {} edge(s))",
+            path.display(),
+            graph.summary.node_count,
+            graph.summary.edge_count
+        );
+    }
+    Ok(graph)
 }
 
 pub(crate) fn save_cross_spec_report(
