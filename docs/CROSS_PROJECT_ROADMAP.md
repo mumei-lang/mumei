@@ -1687,7 +1687,7 @@ graph LR
 
 ---
 
-## Priority 15: Capability Model 拡張の評価と段階的導入 — ✅ 調査完了 / 🚧 Stage 1 実装済み（Stage 2 以降はタスク 3 待ち）
+## Priority 15: Capability Model 拡張の評価と段階的導入 — ✅ 調査完了（タスク 1〜4）/ 🚧 Stage 1 実装済み / ⏸️ Stage 2 以降は保留（タスク 3 結論: 否定）
 
 **Repository**: `mumei-lang/mumei`（設計調査の本体） / `mumei-lang/mumei-agent`（生成側の追従は調査結果が出てから）
 
@@ -1726,7 +1726,7 @@ data structure に載せない、という最小サブセットに限れば実�
   LLVM 側はパラメータを 1 対 1 で具現化するため、capability パラメータと実引数を除去する ABI 消去パスが Stage 2 に入る。
 - タスク 4（段階導入計画）は Stage 1（capability 型宣言）→ Stage 2（`grant`）→ Stage 3（narrowing）→
   Stage 4（move ベース revocation）として `docs/CAPABILITY_MODEL_STUDY.md` §6 に記載した。
-- タスク 3（AI エージェント側の需要検証）は未着手。本調査の肯定判定は「技術的に着手可能」である。
+- 本調査の肯定判定は「技術的に着手可能」であり、実装フェーズを開くかはタスク 3 で判断する（下記）。
 
 **Stage 1 実装**（2026-08-30、`mumei-lang/mumei` `docs/ROADMAP.md` P29）:
 Stage 1（capability 型宣言 + capability 型パラメータ、`grant` なし）は `grant` を含まず
@@ -1735,8 +1735,24 @@ Stage 1（capability 型宣言 + capability 型パラメータ、`grant` なし�
 `TypeRef.effect_set` 付きパラメータとして既存の effect containment 規則 3（`carries_effects()` ゲート 3 箇所）に
 乗せた。capability 版と等価な effect パラメータ版が同一 verdict を出すことをテストで固め、
 `std/` + `examples/` + `tests/` の既存 `.mm` 132 ファイルで `develop` と verdict が完全一致（回帰ゼロ）。
-**Stage 2（`grant`）以降は引き続きタスク 3 の肯定を前提とする**ため、Stage 1 では `grant` 関連を一切実装していない。
+**Stage 2（`grant`）以降はタスク 3 の結論を前提とする**ため、Stage 1 では `grant` 関連を一切実装していない。
 未着手の制限: import 越しの capability 型パラメータ（resolver への搭載は Stage 2 以降）。
+
+**タスク 3（AI エージェント側の需要検証）**（2026-08-30、調査完了 / **結論: 否定**）:
+成果物は `mumei-lang/mumei-agent` の
+[`docs/CAPABILITY_DEMAND_STUDY.md`](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/CAPABILITY_DEMAND_STUDY.md)
+（コード変更なしの需要検証 PR）。self-healing / generate / forge / audit / MCP の各ワークフローを洗い出し、
+呼び出しごとの権限委譲・narrowing・失効が本質的に必要なユースケースは現時点で存在しないと判定した:
+mumei-agent は third-party `.mm` を消費せず（委譲の相手が存在しない）、生成 `.mm` を実行せず
+（`verify` / `check` / `infer-*` / `build` のみ = 失効させる実行時主体が存在しない）、最小権限化の価値がある権限は
+harness の Python プロセス側（LLM / Lean bridge / git / MCP）にあり `.mm` の `grant` では届かない。
+現行の `requires` による暗黙的 narrowing と静的 effect 宣言で全ユースケースを表現できている。
+最も需要に近い「self-healing が effect 違反を effect 宣言の拡大で修復できる」点も、対策は修復器側の
+静的 allowlist ゲート（mumei-agent 側のフォローアップ候補）であり Stage 2 では閉じない。
+
+**したがって Option A（parameterized effects + Z3）を既定として継続し、Stage 2 以降（PR-A2 / A3 / A4）は
+需要が観測されるまで保留する**。保留解除トリガ T1〜T4 は `docs/CAPABILITY_MODEL_STUDY.md` §6.1 に記載。
+Stage 1 は非破壊なので実装済みのまま維持する。
 
 `docs/CAPABILITY_SECURITY.md` §4 の Recommendation（Option A 継続）は撤回しない。Option A を既定パスとしたうえで、
 capability model は opt-in 拡張として上積みされる位置づけとなる。
@@ -1744,7 +1760,8 @@ capability model は opt-in 拡張として上積みされる位置づけとな�
 **関連ファイル**:
 - `docs/CAPABILITY_MODEL_STUDY.md` — 調査成果物（4 項目の分析、opt-in 判定、段階分割案）
 - `docs/CAPABILITY_SECURITY.md` — 現状評価と Section 3 の代替案、Next Steps の設計調査項目
-- `docs/ROADMAP.md` — local checkpoint（P19、Phase 6 Capability Security の延長）
+- `docs/ROADMAP.md` — local checkpoint（P19 設計調査 / P29 Stage 1 実装）
+- `mumei-lang/mumei-agent` `docs/CAPABILITY_DEMAND_STUDY.md` — タスク 3 の需要検証成果物（結論: 否定）
 - `mumei-core/src/verification/support/effects.rs` — `check_constant_constraint()`, `parse_constraint_to_z3_string()`, `verify_effect_params`, `verify_effect_containment`, `verify_effect_consistency`
 - `mumei-core/src/ast.rs` / `mumei-core/src/hir.rs` / `mumei-core/src/mir.rs` — effect 宣言と AST/HIR/MIR 表現、`Movability`
 - `mumei-core/src/mir_analysis/move_analysis.rs` — move 解析（revocation の実装候補）
