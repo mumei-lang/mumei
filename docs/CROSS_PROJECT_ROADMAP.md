@@ -1685,7 +1685,7 @@ graph LR
 
 ---
 
-## Priority 15: Capability Model 拡張の評価と段階的導入 — 🔭 Planned (future)
+## Priority 15: Capability Model 拡張の評価と段階的導入 — ✅ 調査完了（実装可否: 肯定的、最小サブセット限定）
 
 **Repository**: `mumei-lang/mumei`（設計調査の本体） / `mumei-lang/mumei-agent`（生成側の追従は調査結果が出てから）
 
@@ -1704,11 +1704,33 @@ graph LR
 
 **契約への影響**: なし。本 Priority は `harness_contract` / `intent_fidelity` / `artifact_paths` / `budget_policy_fingerprint` / `lean_verified` と no-`.mm` の8キーいずれも変更しない。capability 由来の検証結果は既存の effect 検証と同じ経路（`verification_violations` / `next_steps`）で報告する。
 
+**調査結果**（2026-08-30、タスク 1（非破壊な設計調査）とタスク 2（互換性判定）の完了）:
+成果物は `mumei-lang/mumei` の `docs/CAPABILITY_MODEL_STUDY.md`（コンパイラのコード変更なしの調査 PR）。
+4 項目すべてで判定基準「`grant` を使わない既存 `.mm` が現行セマンティクスのまま通る」を充足し、
+**結論は肯定的**：静的に解決できる capability・コンパイル時に閉じた constraint・capability を
+data structure に載せない、という最小サブセットに限れば実装フェーズに進める。
+
+- 新 AST ノードはすべて新バリアントの追加で、capability 型自体は既存 `TypeRef.effect_set` で表現できる。
+  `grant` / `capability` はコンテキスト依存キーワードとして導入する（無条件なキーワード化は外部ソースに破壊的）。
+- subtyping は constraint の含意 `C1 ⟹ C2` と既存 effect 階層で閉じ、revocation は MIR move 解析
+  （`movability_from_type()` が未知の型名を `Move` に分類）にほぼ無改造で載る。動的 revocation は非対象。
+- capability の制約は既存の文字列制約断片と同一で、effect containment 証明
+  （`UsedEffects(body) ⊆ AllowedEffects(signature)`）と effect propagation checking は不等式を変えずに維持される。
+- 静的に effect 名が決まる範囲では capability 値は compile-time に完全に消去でき、zero runtime overhead を維持できる。
+- タスク 4（段階導入計画）は Stage 1（capability 型宣言）→ Stage 2（`grant`）→ Stage 3（narrowing）→
+  Stage 4（move ベース revocation）として `docs/CAPABILITY_MODEL_STUDY.md` §6 に記載した。
+- タスク 3（AI エージェント側の需要検証）は未着手。mumei-agent 側の追従は実装フェーズを開く判断の後でよい。
+
+`docs/CAPABILITY_SECURITY.md` §4 の Recommendation（Option A 継続）は撤回しない。Option A を既定パスとしたうえで、
+capability model は opt-in 拡張として上積みされる位置づけとなる。
+
 **関連ファイル**:
+- `docs/CAPABILITY_MODEL_STUDY.md` — 調査成果物（4 項目の分析、opt-in 判定、段階分割案）
 - `docs/CAPABILITY_SECURITY.md` — 現状評価と Section 3 の代替案、Next Steps の設計調査項目
-- `docs/ROADMAP.md` — local checkpoint（Phase 6 Capability Security の延長）
-- `mumei-core/src/verification.rs` — `check_constant_constraint()`, `verify_effect_params`, `verify_effect_consistency`
-- `mumei-core/src/ast.rs` / `mumei-core/src/hir.rs` — effect 宣言と AST/HIR 表現
+- `docs/ROADMAP.md` — local checkpoint（P19、Phase 6 Capability Security の延長）
+- `mumei-core/src/verification/support/effects.rs` — `check_constant_constraint()`, `parse_constraint_to_z3_string()`, `verify_effect_params`, `verify_effect_containment`, `verify_effect_consistency`
+- `mumei-core/src/ast.rs` / `mumei-core/src/hir.rs` / `mumei-core/src/mir.rs` — effect 宣言と AST/HIR/MIR 表現、`Movability`
+- `mumei-core/src/mir_analysis/move_analysis.rs` — move 解析（revocation の実装候補）
 - `examples/capability_demo.mm` / `tests/test_capability_evaluation.mm` — 既存 capability デモと評価テスト
 
 ---

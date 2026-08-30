@@ -1821,8 +1821,9 @@ python3 scripts/check_contract_vocabulary.py
 
 ---
 
-## P19: Object-Based Capability Model 設計調査（Phase 6 Capability Security の延長）— 🔭 Planned (future)
+## P19: Object-Based Capability Model 設計調査（Phase 6 Capability Security の延長）— ✅ 調査完了（実装可否: 肯定的 = 最小サブセットに限り実装フェーズ着手可）
 
+**ステータス: ✅ 調査完了**（調査日 2026-08-30、成果物 `docs/CAPABILITY_MODEL_STUDY.md`、コード変更なし）。
 canonical 上位ロードマップは `docs/CROSS_PROJECT_ROADMAP.md` の
 "Priority 15: Capability Model 拡張の評価と段階的導入"。本節はその local checkpoint であり、
 Phase 6（Capability Security evaluation、`docs/CAPABILITY_SECURITY.md` で Option A 継続を推奨）の延長として、
@@ -1843,11 +1844,43 @@ object-based capability model の**非破壊な設計調査**のみを対象と�
 **判定基準**: `grant` を使わない既存 `.mm` が現行セマンティクスのまま通ること（opt-in であること）。
 破壊的変更が不可避と判明した場合は Option A（parameterized effects + Z3）継続の再確認をもって調査を閉じる。
 
+**調査結果**（2026-08-30、`docs/CAPABILITY_MODEL_STUDY.md`）: 4 調査項目すべてで判定基準を充足し、
+破壊的変更が不可避である証拠は見つからなかった。**結論は肯定的**で、以下の最小サブセット
+（静的に解決できる capability・コンパイル時に閉じた constraint・capability を struct フィールド /
+配列要素 / 戻り値に載せない）に限れば実装フェーズに進める。
+
+1. **新 AST ノード**: `Item::CapabilityDef` / `Expr::Grant` / `HirExpr::Grant` / `Rvalue::Grant` の
+   追加はすべて新バリアントで、既存ノードの意味論は不変（`Expr::Perform` を扱う 17 ファイルと同規模の
+   機械的なアーム追加のみ）。capability 型自体は既存 `TypeRef.effect_set` で表現でき新しい型ノードは不要。
+   唯一の破壊リスクは `parser/lexer.rs` の無条件キーワード表で、`grant` / `capability` は
+   コンテキスト依存キーワードとして導入する必要がある。→ opt-in 充足 ✅
+2. **型システム拡張**: subtyping は constraint の含意 `C1 ⟹ C2` + 既存 `is_subeffect()` で閉じる。
+   revocation は `mir.rs` の `movability_from_type()` が未知の型名を `Move` に分類するため、
+   MIR move 解析（use-after-move / double-move / 分岐 join の `MergeConflict`）にほぼ無改造で載る。
+   `LinearityCtx` は Z3 レベルの borrow 追跡として二次的に再利用する。動的 revocation は非対象。
+   → opt-in 充足 ✅
+3. **Z3 エンコーディング**: capability の constraint は既存の文字列制約断片
+   （`check_constant_constraint()` / `parse_constraint_to_z3_string()`）と同一で、新しい sort も
+   制約言語も不要。capability パラメータは `TypeRef.effect_set` 付きパラメータとして
+   `verify_effect_containment()` の既存規則 3 に乗るため、effect containment
+   （`UsedEffects(body) ⊆ AllowedEffects(signature)`）と effect propagation checking は
+   **不等式を書き換えずに**維持される。value-dependent constraint は非対象。→ opt-in 充足 ✅
+4. **ランタイム表現**: `perform` は `__effect_{E}_{op}` への直接呼び出しに落ちており、
+   エフェクト多相はすでに単相化で消去されている。静的に effect 名が決まる範囲では
+   capability 値は codegen で完全に消え、zero runtime overhead を維持できる。→ opt-in 充足 ✅
+
+段階分割案（Stage 1: capability 型宣言 → Stage 2: `grant` → Stage 3: narrowing →
+Stage 4: move ベース revocation）と非対象範囲は `docs/CAPABILITY_MODEL_STUDY.md` §6 を参照。
+`docs/CAPABILITY_SECURITY.md` §4 の Recommendation は撤回せず、Option A を既定パスとしたうえで
+上記 Stage が opt-in 拡張として上積みされる位置づけとする。
+
 **契約への影響**: なし。capability 由来の検証結果は既存 effect 検証と同じ経路で報告し、
 新しい verdict 分類や別名 alias は追加しない。
 
-**関連ファイル**: `docs/CAPABILITY_SECURITY.md`（Section 3 と Next Steps 5）、
-`mumei-core/src/verification.rs`、`mumei-core/src/ast.rs` / `hir.rs`、
+**関連ファイル**: `docs/CAPABILITY_MODEL_STUDY.md`（調査成果物）、
+`docs/CAPABILITY_SECURITY.md`（Section 3 と Next Steps 5）、
+`mumei-core/src/verification/support/effects.rs`、`mumei-core/src/ast.rs` / `hir.rs` / `mir.rs`、
+`mumei-core/src/mir_analysis/move_analysis.rs`、`mumei-emit-llvm/src/codegen/expr_emit.rs`、
 `examples/capability_demo.mm`、`tests/test_capability_evaluation.mm`
 
 ---
