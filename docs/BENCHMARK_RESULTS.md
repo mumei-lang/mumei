@@ -639,3 +639,113 @@ them stop closing if a neighbouring atom's contract is weakened.
 | `counterexample_replay_mismatch` | 86 | Z3 translation / Lean escalation path |
 | `effect_state_obligation` | 58 | `effect_pre` / `effect_post` state chaining (Plan 24) |
 | `neighbor_ensures_strengthening` | 47 | value contracts (`ensures`) of called atoms |
+
+---
+
+## Benchmark Run — 2026-08-30 06:19 UTC
+
+### Stdlib Health Summary
+
+| Modules | Atoms | Proven | Trusted | Trusted Ratio |
+|---------|-------|--------|---------|---------------|
+| 59 | 344 | 344 | 0 | 0.0000 |
+
+### Category Results
+
+Success Rate is the share of files whose verification outcome matched the
+expected outcome (`expected: PASS` or `expected: FAIL`). Counterexample Catch
+is the share of `expected: FAIL` files the verifier correctly rejected; a run
+that never reached a verdict (timeout, unreadable input, crash) is reported under
+No Verdict and never counted as a catch. Lean
+Discharge is the share of escalated (Z3 `unknown`) obligations the mumei-lean
+bridge returned as `lean_verified`; the parenthesised count is how many of them
+the automatic tactic search discharged.
+
+| Category | Files | Atoms | Trusted | Success Rate | Counterexample Catch | No Verdict | Avg Solver Time | Avg Lean Solver Time | Lean Discharge | Tactic Search |
+|----------|-------|-------|---------|--------------|----------------------|------------|-----------------|----------------------|----------------|---------------|
+| arithmetic | 9 | 27 | 0 | 100.00% | 100.00% (3/3) | 0 | 0.022s | SKIP | n/a (0/0) | 0 |
+| concurrency | 15 | 33 | 0 | 100.00% | 100.00% (10/10) | 0 | 0.029s | SKIP | n/a (0/0) | 0 |
+| dafny_puzzles | 3 | 3 | 0 | 100.00% | n/a (0/0) | 0 | 0.007s | SKIP | n/a (0/0) | 0 |
+| domain_compliance | 10 | 25 | 0 | 100.00% | 100.00% (4/4) | 0 | 0.025s | SKIP | n/a (0/0) | 0 |
+| state_machine | 6 | 14 | 0 | 100.00% | 100.00% (3/3) | 0 | 0.019s | SKIP | n/a (0/0) | 0 |
+| svcomp_style | 3 | 3 | 0 | 100.00% | n/a (0/0) | 0 | 0.007s | SKIP | n/a (0/0) | 0 |
+
+<details><summary>Per-file details</summary>
+
+#### arithmetic
+
+| File | Atoms | Trusted | Expected | Actual | Match | Verify Status | Solver Time | Lean Solver Time | Escalated | lean_verified | Tactic Search |
+|------|-------|---------|----------|--------|-------|---------------|-------------|------------------|-----------|---------------|---------------|
+| abs_min_int_fail.mm | 1 | 0 | FAIL | FAIL | yes | MEASURED | 0.044s | SKIP | 0 | 0 | 0 |
+| bounded_arithmetic.mm | 4 | 0 | PASS | PASS | yes | MEASURED | 0.009s | SKIP | 0 | 0 | 0 |
+| finite_field_modular.mm | 4 | 0 | PASS | PASS | yes | MEASURED | 0.008s | SKIP | 4 | 0 | 0 |
+| fixed_point_scaling.mm | 5 | 0 | PASS | PASS | yes | MEASURED | 0.008s | SKIP | 0 | 0 | 0 |
+| nonlinear_polynomial.mm | 4 | 0 | PASS | PASS | yes | MEASURED | 0.008s | SKIP | 0 | 0 | 0 |
+| off_by_one_index_fail.mm | 1 | 0 | FAIL | FAIL | yes | MEASURED | 0.051s | SKIP | 0 | 0 | 0 |
+| overflow_boundary.mm | 4 | 0 | PASS | PASS | yes | MEASURED | 0.009s | SKIP | 0 | 0 | 0 |
+| saturating.mm | 3 | 0 | PASS | PASS | yes | MEASURED | 0.008s | SKIP | 0 | 0 | 0 |
+| unbounded_add_overflow_fail.mm | 1 | 0 | FAIL | FAIL | yes | MEASURED | 0.054s | SKIP | 0 | 0 | 0 |
+
+#### concurrency
+
+| File | Atoms | Trusted | Expected | Actual | Match | Verify Status | Solver Time | Lean Solver Time | Escalated | lean_verified | Tactic Search |
+|------|-------|---------|----------|--------|-------|---------------|-------------|------------------|-----------|---------------|---------------|
+| double_move_fail.mm | 1 | 0 | FAIL | FAIL | yes | MEASURED | 0.033s | SKIP | 0 | 0 | 0 |
+| exclusive_resource_reuse_fail.mm | 1 | 0 | FAIL | FAIL | yes | MEASURED | 0.040s | SKIP | 0 | 0 | 0 |
+| linear_ownership.mm | 4 | 0 | PASS | PASS | yes | MEASURED | 0.009s | SKIP | 0 | 0 | 0 |
+| lock_order_inversion_fail.mm | 1 | 0 | FAIL | FAIL | yes | MEASURED | 0.040s | SKIP | 0 | 0 | 0 |
+| resource_ordering.mm | 3 | 0 | PASS | PASS | yes | MEASURED | 0.009s | SKIP | 0 | 0 | 0 |
+| task_cancel_dependent_read_fail.mm | 1 | 0 | FAIL | FAIL | yes | MEASURED | 0.042s | SKIP | 0 | 0 | 0 |
+| task_concurrent_double_move_fail.mm | 2 | 0 | FAIL | FAIL | yes | MEASURED | 0.062s | SKIP | 0 | 0 | 0 |
+| task_group_all.mm | 4 | 0 | PASS | PASS | yes | MEASURED | 0.009s | SKIP | 0 | 0 | 0 |
+| task_group_any_winner.mm | 3 | 0 | PASS | PASS | yes | MEASURED | 0.008s | SKIP | 0 | 0 | 0 |
+| task_move_while_sibling_reads_fail.mm | 2 | 0 | FAIL | FAIL | yes | MEASURED | 0.032s | SKIP | 0 | 0 | 0 |
+| task_ownership.mm | 5 | 0 | PASS | PASS | yes | MEASURED | 0.008s | SKIP | 0 | 0 | 0 |
+| task_shared_write_race_fail.mm | 1 | 0 | FAIL | FAIL | yes | MEASURED | 0.042s | SKIP | 0 | 0 | 0 |
+| task_struct_capture_double_move_fail.mm | 2 | 0 | FAIL | FAIL | yes | MEASURED | 0.034s | SKIP | 0 | 0 | 0 |
+| task_use_after_concurrent_move_fail.mm | 2 | 0 | FAIL | FAIL | yes | MEASURED | 0.040s | SKIP | 0 | 0 | 0 |
+| use_after_move_fail.mm | 1 | 0 | FAIL | FAIL | yes | MEASURED | 0.032s | SKIP | 0 | 0 | 0 |
+
+#### dafny_puzzles
+
+| File | Atoms | Trusted | Expected | Actual | Match | Verify Status | Solver Time | Lean Solver Time | Escalated | lean_verified | Tactic Search |
+|------|-------|---------|----------|--------|-------|---------------|-------------|------------------|-----------|---------------|---------------|
+| absolute_value.mm | 1 | 0 | PASS | PASS | yes | MEASURED | 0.008s | SKIP | 0 | 0 | 0 |
+| max.mm | 1 | 0 | PASS | PASS | yes | MEASURED | 0.007s | SKIP | 0 | 0 | 0 |
+| swap.mm | 1 | 0 | PASS | PASS | yes | MEASURED | 0.007s | SKIP | 0 | 0 | 0 |
+
+#### domain_compliance
+
+| File | Atoms | Trusted | Expected | Actual | Match | Verify Status | Solver Time | Lean Solver Time | Escalated | lean_verified | Tactic Search |
+|------|-------|---------|----------|--------|-------|---------------|-------------|------------------|-----------|---------------|---------------|
+| defi_invariants.mm | 4 | 0 | PASS | PASS | yes | MEASURED | 0.009s | SKIP | 0 | 0 | 0 |
+| defi_reentrancy_fail.mm | 1 | 0 | FAIL | FAIL | yes | MEASURED | 0.034s | SKIP | 0 | 0 | 0 |
+| medical_dosage.mm | 4 | 0 | PASS | PASS | yes | MEASURED | 0.009s | SKIP | 0 | 0 | 0 |
+| medical_overdose_fail.mm | 1 | 0 | FAIL | FAIL | yes | MEASURED | 0.064s | SKIP | 0 | 0 | 0 |
+| modular_commitment.mm | 2 | 0 | PASS | PASS | yes | MEASURED | 0.008s | SKIP | 2 | 0 | 0 |
+| ownership_protocol.mm | 3 | 0 | PASS | PASS | yes | MEASURED | 0.008s | SKIP | 0 | 0 | 0 |
+| regtech_exhaustiveness.mm | 4 | 0 | PASS | PASS | yes | MEASURED | 0.008s | SKIP | 0 | 0 | 0 |
+| regtech_missing_pep_arm_fail.mm | 1 | 0 | FAIL | FAIL | yes | MEASURED | 0.056s | SKIP | 0 | 0 | 0 |
+| rtgs_balance_break_fail.mm | 1 | 0 | FAIL | FAIL | yes | MEASURED | 0.044s | SKIP | 0 | 0 | 0 |
+| rtgs_balance_conservation.mm | 4 | 0 | PASS | PASS | yes | MEASURED | 0.009s | SKIP | 0 | 0 | 0 |
+
+#### state_machine
+
+| File | Atoms | Trusted | Expected | Actual | Match | Verify Status | Solver Time | Lean Solver Time | Escalated | lean_verified | Tactic Search |
+|------|-------|---------|----------|--------|-------|---------------|-------------|------------------|-----------|---------------|---------------|
+| escrow_transfer.mm | 3 | 0 | PASS | PASS | yes | MEASURED | 0.008s | SKIP | 0 | 0 | 0 |
+| order_lifecycle.mm | 4 | 0 | PASS | PASS | yes | MEASURED | 0.008s | SKIP | 0 | 0 | 0 |
+| session_auth.mm | 4 | 0 | PASS | PASS | yes | MEASURED | 0.008s | SKIP | 0 | 0 | 0 |
+| skip_ship_fail.mm | 1 | 0 | FAIL | FAIL | yes | MEASURED | 0.031s | SKIP | 0 | 0 | 0 |
+| transfer_without_accept_fail.mm | 1 | 0 | FAIL | FAIL | yes | MEASURED | 0.030s | SKIP | 0 | 0 | 0 |
+| unauthenticated_read_fail.mm | 1 | 0 | FAIL | FAIL | yes | MEASURED | 0.031s | SKIP | 0 | 0 | 0 |
+
+#### svcomp_style
+
+| File | Atoms | Trusted | Expected | Actual | Match | Verify Status | Solver Time | Lean Solver Time | Escalated | lean_verified | Tactic Search |
+|------|-------|---------|----------|--------|-------|---------------|-------------|------------------|-----------|---------------|---------------|
+| array_bounds.mm | 1 | 0 | PASS | PASS | yes | MEASURED | 0.007s | SKIP | 0 | 0 | 0 |
+| integer_overflow.mm | 1 | 0 | PASS | PASS | yes | MEASURED | 0.007s | SKIP | 0 | 0 | 0 |
+| loop_invariant.mm | 1 | 0 | PASS | PASS | yes | MEASURED | 0.007s | SKIP | 0 | 0 | 0 |
+
+</details>
