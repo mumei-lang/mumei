@@ -1,6 +1,6 @@
 [package]
 name = "mumei-emit-proofbook"
-version = "0.6.12"
+version = "0.6.16"
 edition = "2021"
 description = "Proof-Book Markdown emitter for the Mumei compiler"
 license = "Apache-2.0"
