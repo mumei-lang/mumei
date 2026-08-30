@@ -2376,7 +2376,7 @@ capability 宣言は新しいエフェクトを定義せず、既存 `EffectDef`
 - `.mm` 回帰ゼロ: `std/` + `examples/` + `tests/` の全 `.mm` を `mumei verify` に通し、verdict 集合が `develop` と一致することを確認（既存の失敗は意図された負例で、件数・対象ファイルとも変化なし）。
 - **ゼロコスト検証（P15 / P23〜P27 と同一）**: `cargo tree --edges no-dev | grep -i opentelemetry` が空であること。
 
-**残課題**: `perform cap.op(x)` はパーサが裏側のエフェクト名へ解決するため、perform サイトから capability レシーバの同一性が失われる。したがって 1 つの atom が同一エフェクトに対する複数の capability パラメータを取る場合、それぞれの constraint が全 perform に連言で適用される（権限が広がることはないが、正当なプログラムを過剰に棄却しうる）。同じ atom 内の直接 `perform Effect.op(x)` も同様に capability constraint を継承する。レシーバを構文木に保持した per-receiver 解決は Stage 2 で行う。capability 宣言はそれを宣言したモジュール内のパラメータにのみ適用される（import 越しの capability 型パラメータは Stage 2 以降で resolver に載せる。`ModuleEnv` への登録自体は本 PR で入っている）。`grant` 式・narrowing・move ベース revocation と codegen の ABI 消去パスは Stage 2〜4 のまま未着手で、Stage 2 以降は Priority 15 タスク 3（AI エージェント側の需要検証）の肯定を前提とする。
+**残課題**: `perform cap.op(x)` はパーサが裏側のエフェクト名へ解決するため、perform サイトから capability レシーバの同一性が失われる。したがって 1 つの atom が同一エフェクトに対する複数の capability パラメータを取る場合、それぞれの constraint が全 perform に連言で適用される（権限が広がることはないが、正当なプログラムを過剰に棄却しうる）。同じ atom 内の直接 `perform Effect.op(x)` も同様に capability constraint を継承する。レシーバを構文木に保持した per-receiver 解決は Stage 2 で行う。 capability constraint の検査範囲は既存 effect 制約と同一で、`requires` で束縛されていない完全に記号的な引数は既存 effect と同様に受理される（`develop` の effect 版と verdict 一致を CLI で確認）。capability 宣言はそれを宣言したモジュール内のパラメータにのみ適用される（import 越しの capability 型パラメータ、および REPL で capability 宣言と atom を別入力で投入した場合は Stage 2 以降で resolver に載せる。`ModuleEnv` への登録自体は本 PR で入っている）。`grant` 式・narrowing・move ベース revocation と codegen の ABI 消去パスは Stage 2〜4 のまま未着手で、Stage 2 以降は Priority 15 タスク 3（AI エージェント側の需要検証）の肯定を前提とする。
 
 ---
 
