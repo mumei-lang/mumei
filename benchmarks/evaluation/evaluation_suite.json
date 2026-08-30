@@ -1,0 +1,1776 @@
+{
+  "axes": [
+    "proof_success_rate",
+    "repair_convergence",
+    "counterexample_quality",
+    "trust_surface",
+    "user_burden",
+    "runtime_artifact_utility"
+  ],
+  "budget_policy_fingerprint": "sha256:evaluation-suite-default",
+  "categories": [
+    {
+      "axes": {
+        "counterexample_quality": {
+          "counterexample_catch_rate": 1.0,
+          "counterexample_files": 3,
+          "counterexamples_caught": 3,
+          "status": "MEASURED"
+        },
+        "proof_success_rate": {
+          "avg_solver_time_s": 0.021,
+          "files": 9,
+          "lean_discharge_rate": null,
+          "matched_files": 9,
+          "status": "MEASURED",
+          "success_rate": 1.0
+        },
+        "repair_convergence": {
+          "files_with_repair_data": 0,
+          "status": "SKIP"
+        },
+        "runtime_artifact_utility": {
+          "attempted_emissions": 24,
+          "emission_success_rate": 0.875,
+          "files": [
+            {
+              "emitted_targets": 4,
+              "file": "bounded_arithmetic.mm",
+              "targets": {
+                "c-header": {
+                  "artifacts": 4,
+                  "emitted": true
+                },
+                "llvm-ir": {
+                  "artifacts": 4,
+                  "emitted": true
+                },
+                "proof-cert": {
+                  "artifacts": 1,
+                  "emitted": true
+                },
+                "verified-json": {
+                  "artifacts": 4,
+                  "emitted": true
+                }
+              }
+            },
+            {
+              "emitted_targets": 1,
+              "file": "finite_field_modular.mm",
+              "targets": {
+                "c-header": {
+                  "artifacts": 0,
+                  "emitted": false
+                },
+                "llvm-ir": {
+                  "artifacts": 0,
+                  "emitted": false
+                },
+                "proof-cert": {
+                  "artifacts": 1,
+                  "emitted": true
+                },
+                "verified-json": {
+                  "artifacts": 0,
+                  "emitted": false
+                }
+              }
+            },
+            {
+              "emitted_targets": 4,
+              "file": "fixed_point_scaling.mm",
+              "targets": {
+                "c-header": {
+                  "artifacts": 5,
+                  "emitted": true
+                },
+                "llvm-ir": {
+                  "artifacts": 5,
+                  "emitted": true
+                },
+                "proof-cert": {
+                  "artifacts": 1,
+                  "emitted": true
+                },
+                "verified-json": {
+                  "artifacts": 5,
+                  "emitted": true
+                }
+              }
+            },
+            {
+              "emitted_targets": 4,
+              "file": "nonlinear_polynomial.mm",
+              "targets": {
+                "c-header": {
+                  "artifacts": 4,
+                  "emitted": true
+                },
+                "llvm-ir": {
+                  "artifacts": 4,
+                  "emitted": true
+                },
+                "proof-cert": {
+                  "artifacts": 1,
+                  "emitted": true
+                },
+                "verified-json": {
+                  "artifacts": 4,
+                  "emitted": true
+                }
+              }
+            },
+            {
+              "emitted_targets": 4,
+              "file": "overflow_boundary.mm",
+              "targets": {
+                "c-header": {
+                  "artifacts": 4,
+                  "emitted": true
+                },
+                "llvm-ir": {
+                  "artifacts": 4,
+                  "emitted": true
+                },
+                "proof-cert": {
+                  "artifacts": 1,
+                  "emitted": true
+                },
+                "verified-json": {
+                  "artifacts": 4,
+                  "emitted": true
+                }
+              }
+            },
+            {
+              "emitted_targets": 4,
+              "file": "saturating.mm",
+              "targets": {
+                "c-header": {
+                  "artifacts": 3,
+                  "emitted": true
+                },
+                "llvm-ir": {
+                  "artifacts": 3,
+                  "emitted": true
+                },
+                "proof-cert": {
+                  "artifacts": 1,
+                  "emitted": true
+                },
+                "verified-json": {
+                  "artifacts": 3,
+                  "emitted": true
+                }
+              }
+            }
+          ],
+          "measured_files": 6,
+          "per_target_success": {
+            "c-header": 5,
+            "llvm-ir": 5,
+            "proof-cert": 6,
+            "verified-json": 5
+          },
+          "status": "MEASURED",
+          "successful_emissions": 21
+        },
+        "trust_surface": {
+          "application_trusted_atoms": 0,
+          "atoms": 27,
+          "ffi_boundary_declarations": 0,
+          "ffi_extern_blocks": 0,
+          "lean_escalation_candidates": 4,
+          "lean_verified_atoms": 0,
+          "status": "MEASURED",
+          "trusted_ratio": 0.0
+        },
+        "user_burden": {
+          "atoms": 27,
+          "files": [
+            {
+              "atoms": 1,
+              "file": "abs_min_int_fail.mm",
+              "impl_tokens": 16,
+              "spec_clause_kinds": {
+                "effect_post": 0,
+                "effect_pre": 0,
+                "ensures": 1,
+                "invariant": 0,
+                "requires": 1
+              },
+              "spec_clauses": 2,
+              "spec_clauses_per_atom": 2.0,
+              "spec_to_impl_token_ratio": 0.375,
+              "spec_tokens": 6
+            },
+            {
+              "atoms": 4,
+              "file": "bounded_arithmetic.mm",
+              "impl_tokens": 15,
+              "spec_clause_kinds": {
+                "effect_post": 0,
+                "effect_pre": 0,
+                "ensures": 4,
+                "invariant": 0,
+                "requires": 4
+              },
+              "spec_clauses": 8,
+              "spec_clauses_per_atom": 2.0,
+              "spec_to_impl_token_ratio": 10.4667,
+              "spec_tokens": 157
+            },
+            {
+              "atoms": 4,
+              "file": "finite_field_modular.mm",
+              "impl_tokens": 54,
+              "spec_clause_kinds": {
+                "effect_post": 0,
+                "effect_pre": 0,
+                "ensures": 4,
+                "invariant": 0,
+                "requires": 4
+              },
+              "spec_clauses": 8,
+              "spec_clauses_per_atom": 2.0,
+              "spec_to_impl_token_ratio": 1.7407,
+              "spec_tokens": 94
+            },
+            {
+              "atoms": 5,
+              "file": "fixed_point_scaling.mm",
+              "impl_tokens": 32,
+              "spec_clause_kinds": {
+                "effect_post": 0,
+                "effect_pre": 0,
+                "ensures": 5,
+                "invariant": 0,
+                "requires": 5
+              },
+              "spec_clauses": 10,
+              "spec_clauses_per_atom": 2.0,
+              "spec_to_impl_token_ratio": 4.4688,
+              "spec_tokens": 143
+            },
+            {
+              "atoms": 4,
+              "file": "nonlinear_polynomial.mm",
+              "impl_tokens": 26,
+              "spec_clause_kinds": {
+                "effect_post": 0,
+                "effect_pre": 0,
+                "ensures": 4,
+                "invariant": 0,
+                "requires": 4
+              },
+              "spec_clauses": 8,
+              "spec_clauses_per_atom": 2.0,
+              "spec_to_impl_token_ratio": 3.9615,
+              "spec_tokens": 103
+            },
+            {
+              "atoms": 1,
+              "file": "off_by_one_index_fail.mm",
+              "impl_tokens": 5,
+              "spec_clause_kinds": {
+                "effect_post": 0,
+                "effect_pre": 0,
+                "ensures": 1,
+                "invariant": 0,
+                "requires": 1
+              },
+              "spec_clauses": 2,
+              "spec_clauses_per_atom": 2.0,
+              "spec_to_impl_token_ratio": 6.8,
+              "spec_tokens": 34
+            },
+            {
+              "atoms": 4,
+              "file": "overflow_boundary.mm",
+              "impl_tokens": 16,
+              "spec_clause_kinds": {
+                "effect_post": 0,
+                "effect_pre": 0,
+                "ensures": 4,
+                "invariant": 0,
+                "requires": 4
+              },
+              "spec_clauses": 8,
+              "spec_clauses_per_atom": 2.0,
+              "spec_to_impl_token_ratio": 7.0625,
+              "spec_tokens": 113
+            },
+            {
+              "atoms": 3,
+              "file": "saturating.mm",
+              "impl_tokens": 58,
+              "spec_clause_kinds": {
+                "effect_post": 0,
+                "effect_pre": 0,
+                "ensures": 3,
+                "invariant": 0,
+                "requires": 3
+              },
+              "spec_clauses": 6,
+              "spec_clauses_per_atom": 2.0,
+              "spec_to_impl_token_ratio": 2.3448,
+              "spec_tokens": 136
+            },
+            {
+              "atoms": 1,
+              "file": "unbounded_add_overflow_fail.mm",
+              "impl_tokens": 4,
+              "spec_clause_kinds": {
+                "effect_post": 0,
+                "effect_pre": 0,
+                "ensures": 1,
+                "invariant": 0,
+                "requires": 1
+              },
+              "spec_clauses": 2,
+              "spec_clauses_per_atom": 2.0,
+              "spec_to_impl_token_ratio": 3.25,
+              "spec_tokens": 13
+            }
+          ],
+          "impl_tokens": 226,
+          "spec_clause_kinds": {
+            "effect_post": 0,
+            "effect_pre": 0,
+            "ensures": 27,
+            "invariant": 0,
+            "requires": 27
+          },
+          "spec_clauses": 54,
+          "spec_clauses_per_atom": 2.0,
+          "spec_to_impl_token_ratio": 3.5354,
+          "spec_tokens": 799,
+          "status": "MEASURED"
+        }
+      },
+      "category": "arithmetic",
+      "files": 9
+    },
+    {
+      "axes": {
+        "counterexample_quality": {
+          "counterexample_catch_rate": 1.0,
+          "counterexample_files": 10,
+          "counterexamples_caught": 10,
+          "status": "MEASURED"
+        },
+        "proof_success_rate": {
+          "avg_solver_time_s": 0.03,
+          "files": 15,
+          "lean_discharge_rate": null,
+          "matched_files": 15,
+          "status": "MEASURED",
+          "success_rate": 1.0
+        },
+        "repair_convergence": {
+          "files_with_repair_data": 0,
+          "status": "SKIP"
+        },
+        "runtime_artifact_utility": {
+          "attempted_emissions": 20,
+          "emission_success_rate": 1.0,
+          "files": [
+            {
+              "emitted_targets": 4,
+              "file": "linear_ownership.mm",
+              "targets": {
+                "c-header": {
+                  "artifacts": 4,
+                  "emitted": true
+                },
+                "llvm-ir": {
+                  "artifacts": 4,
+                  "emitted": true
+                },
+                "proof-cert": {
+                  "artifacts": 1,
+                  "emitted": true
+                },
+                "verified-json": {
+                  "artifacts": 4,
+                  "emitted": true
+                }
+              }
+            },
+            {
+              "emitted_targets": 4,
+              "file": "resource_ordering.mm",
+              "targets": {
+                "c-header": {
+                  "artifacts": 3,
+                  "emitted": true
+                },
+                "llvm-ir": {
+                  "artifacts": 3,
+                  "emitted": true
+                },
+                "proof-cert": {
+                  "artifacts": 1,
+                  "emitted": true
+                },
+                "verified-json": {
+                  "artifacts": 3,
+                  "emitted": true
+                }
+              }
+            },
+            {
+              "emitted_targets": 4,
+              "file": "task_group_all.mm",
+              "targets": {
+                "c-header": {
+                  "artifacts": 4,
+                  "emitted": true
+                },
+                "llvm-ir": {
+                  "artifacts": 4,
+                  "emitted": true
+                },
+                "proof-cert": {
+                  "artifacts": 1,
+                  "emitted": true
+                },
+                "verified-json": {
+                  "artifacts": 4,
+                  "emitted": true
+                }
+              }
+            },
+            {
+              "emitted_targets": 4,
+              "file": "task_group_any_winner.mm",
+              "targets": {
+                "c-header": {
+                  "artifacts": 3,
+                  "emitted": true
+                },
+                "llvm-ir": {
+                  "artifacts": 3,
+                  "emitted": true
+                },
+                "proof-cert": {
+                  "artifacts": 1,
+                  "emitted": true
+                },
+                "verified-json": {
+                  "artifacts": 3,
+                  "emitted": true
+                }
+              }
+            },
+            {
+              "emitted_targets": 4,
+              "file": "task_ownership.mm",
+              "targets": {
+                "c-header": {
+                  "artifacts": 5,
+                  "emitted": true
+                },
+                "llvm-ir": {
+                  "artifacts": 5,
+                  "emitted": true
+                },
+                "proof-cert": {
+                  "artifacts": 1,
+                  "emitted": true
+                },
+                "verified-json": {
+                  "artifacts": 5,
+                  "emitted": true
+                }
+              }
+            }
+          ],
+          "measured_files": 5,
+          "per_target_success": {
+            "c-header": 5,
+            "llvm-ir": 5,
+            "proof-cert": 5,
+            "verified-json": 5
+          },
+          "status": "MEASURED",
+          "successful_emissions": 20
+        },
+        "trust_surface": {
+          "application_trusted_atoms": 0,
+          "atoms": 33,
+          "ffi_boundary_declarations": 0,
+          "ffi_extern_blocks": 0,
+          "lean_escalation_candidates": 0,
+          "lean_verified_atoms": 0,
+          "status": "MEASURED",
+          "trusted_ratio": 0.0
+        },
+        "user_burden": {
+          "atoms": 33,
+          "files": [
+            {
+              "atoms": 1,
+              "file": "double_move_fail.mm",
+              "impl_tokens": 17,
+              "spec_clause_kinds": {
+                "effect_post": 0,
+                "effect_pre": 0,
+                "ensures": 1,
+                "invariant": 0,
+                "requires": 1
+              },
+              "spec_clauses": 2,
+              "spec_clauses_per_atom": 2.0,
+              "spec_to_impl_token_ratio": 0.7647,
+              "spec_tokens": 13
+            },
+            {
+              "atoms": 1,
+              "file": "exclusive_resource_reuse_fail.mm",
+              "impl_tokens": 8,
+              "spec_clause_kinds": {
+                "effect_post": 0,
+                "effect_pre": 0,
+                "ensures": 1,
+                "invariant": 0,
+                "requires": 1
+              },
+              "spec_clauses": 2,
+              "spec_clauses_per_atom": 2.0,
+              "spec_to_impl_token_ratio": 1.25,
+              "spec_tokens": 10
+            },
+            {
+              "atoms": 4,
+              "file": "linear_ownership.mm",
+              "impl_tokens": 39,
+              "spec_clause_kinds": {
+                "effect_post": 0,
+                "effect_pre": 0,
+                "ensures": 4,
+                "invariant": 0,
+                "requires": 4
+              },
+              "spec_clauses": 8,
+              "spec_clauses_per_atom": 2.0,
+              "spec_to_impl_token_ratio": 1.3333,
+              "spec_tokens": 52
+            },
+            {
+              "atoms": 1,
+              "file": "lock_order_inversion_fail.mm",
+              "impl_tokens": 12,
+              "spec_clause_kinds": {
+                "effect_post": 0,
+                "effect_pre": 0,
+                "ensures": 1,
+                "invariant": 0,
+                "requires": 1
+              },
+              "spec_clauses": 2,
+              "spec_clauses_per_atom": 2.0,
+              "spec_to_impl_token_ratio": 0.8333,
+              "spec_tokens": 10
+            },
+            {
+              "atoms": 3,
+              "file": "resource_ordering.mm",
+              "impl_tokens": 36,
+              "spec_clause_kinds": {
+                "effect_post": 0,
+                "effect_pre": 0,
+                "ensures": 3,
+                "invariant": 0,
+                "requires": 3
+              },
+              "spec_clauses": 6,
+              "spec_clauses_per_atom": 2.0,
+              "spec_to_impl_token_ratio": 0.8333,
+              "spec_tokens": 30
+            },
+            {
+              "atoms": 1,
+              "file": "task_cancel_dependent_read_fail.mm",
+              "impl_tokens": 30,
+              "spec_clause_kinds": {
+                "effect_post": 0,
+                "effect_pre": 0,
+                "ensures": 1,
+                "invariant": 0,
+                "requires": 1
+              },
+              "spec_clauses": 2,
+              "spec_clauses_per_atom": 2.0,
+              "spec_to_impl_token_ratio": 0.5333,
+              "spec_tokens": 16
+            },
+            {
+              "atoms": 2,
+              "file": "task_concurrent_double_move_fail.mm",
+              "impl_tokens": 28,
+              "spec_clause_kinds": {
+                "effect_post": 0,
+                "effect_pre": 0,
+                "ensures": 2,
+                "invariant": 0,
+                "requires": 2
+              },
+              "spec_clauses": 4,
+              "spec_clauses_per_atom": 2.0,
+              "spec_to_impl_token_ratio": 0.9286,
+              "spec_tokens": 26
+            },
+            {
+              "atoms": 4,
+              "file": "task_group_all.mm",
+              "impl_tokens": 71,
+              "spec_clause_kinds": {
+                "effect_post": 0,
+                "effect_pre": 0,
+                "ensures": 4,
+                "invariant": 0,
+                "requires": 4
+              },
+              "spec_clauses": 8,
+              "spec_clauses_per_atom": 2.0,
+              "spec_to_impl_token_ratio": 0.9859,
+              "spec_tokens": 70
+            },
+            {
+              "atoms": 3,
+              "file": "task_group_any_winner.mm",
+              "impl_tokens": 56,
+              "spec_clause_kinds": {
+                "effect_post": 0,
+                "effect_pre": 0,
+                "ensures": 3,
+                "invariant": 0,
+                "requires": 3
+              },
+              "spec_clauses": 6,
+              "spec_clauses_per_atom": 2.0,
+              "spec_to_impl_token_ratio": 1.5,
+              "spec_tokens": 84
+            },
+            {
+              "atoms": 2,
+              "file": "task_move_while_sibling_reads_fail.mm",
+              "impl_tokens": 28,
+              "spec_clause_kinds": {
+                "effect_post": 0,
+                "effect_pre": 0,
+                "ensures": 2,
+                "invariant": 0,
+                "requires": 2
+              },
+              "spec_clauses": 4,
+              "spec_clauses_per_atom": 2.0,
+              "spec_to_impl_token_ratio": 0.9286,
+              "spec_tokens": 26
+            },
+            {
+              "atoms": 5,
+              "file": "task_ownership.mm",
+              "impl_tokens": 123,
+              "spec_clause_kinds": {
+                "effect_post": 0,
+                "effect_pre": 0,
+                "ensures": 5,
+                "invariant": 0,
+                "requires": 5
+              },
+              "spec_clauses": 10,
+              "spec_clauses_per_atom": 2.0,
+              "spec_to_impl_token_ratio": 0.6585,
+              "spec_tokens": 81
+            },
+            {
+              "atoms": 1,
+              "file": "task_shared_write_race_fail.mm",
+              "impl_tokens": 34,
+              "spec_clause_kinds": {
+                "effect_post": 0,
+                "effect_pre": 0,
+                "ensures": 1,
+                "invariant": 0,
+                "requires": 1
+              },
+              "spec_clauses": 2,
+              "spec_clauses_per_atom": 2.0,
+              "spec_to_impl_token_ratio": 0.4706,
+              "spec_tokens": 16
+            },
+            {
+              "atoms": 2,
+              "file": "task_struct_capture_double_move_fail.mm",
+              "impl_tokens": 27,
+              "spec_clause_kinds": {
+                "effect_post": 0,
+                "effect_pre": 0,
+                "ensures": 2,
+                "invariant": 0,
+                "requires": 2
+              },
+              "spec_clauses": 4,
+              "spec_clauses_per_atom": 2.0,
+              "spec_to_impl_token_ratio": 0.8889,
+              "spec_tokens": 24
+            },
+            {
+              "atoms": 2,
+              "file": "task_use_after_concurrent_move_fail.mm",
+              "impl_tokens": 30,
+              "spec_clause_kinds": {
+                "effect_post": 0,
+                "effect_pre": 0,
+                "ensures": 2,
+                "invariant": 0,
+                "requires": 2
+              },
+              "spec_clauses": 4,
+              "spec_clauses_per_atom": 2.0,
+              "spec_to_impl_token_ratio": 0.8667,
+              "spec_tokens": 26
+            },
+            {
+              "atoms": 1,
+              "file": "use_after_move_fail.mm",
+              "impl_tokens": 17,
+              "spec_clause_kinds": {
+                "effect_post": 0,
+                "effect_pre": 0,
+                "ensures": 1,
+                "invariant": 0,
+                "requires": 1
+              },
+              "spec_clauses": 2,
+              "spec_clauses_per_atom": 2.0,
+              "spec_to_impl_token_ratio": 0.7647,
+              "spec_tokens": 13
+            }
+          ],
+          "impl_tokens": 556,
+          "spec_clause_kinds": {
+            "effect_post": 0,
+            "effect_pre": 0,
+            "ensures": 33,
+            "invariant": 0,
+            "requires": 33
+          },
+          "spec_clauses": 66,
+          "spec_clauses_per_atom": 2.0,
+          "spec_to_impl_token_ratio": 0.8939,
+          "spec_tokens": 497,
+          "status": "MEASURED"
+        }
+      },
+      "category": "concurrency",
+      "files": 15
+    },
+    {
+      "axes": {
+        "counterexample_quality": {
+          "counterexample_catch_rate": null,
+          "counterexample_files": 0,
+          "counterexamples_caught": 0,
+          "status": "SKIP"
+        },
+        "proof_success_rate": {
+          "avg_solver_time_s": 0.008,
+          "files": 3,
+          "lean_discharge_rate": null,
+          "matched_files": 3,
+          "status": "MEASURED",
+          "success_rate": 1.0
+        },
+        "repair_convergence": {
+          "files_with_repair_data": 0,
+          "status": "SKIP"
+        },
+        "runtime_artifact_utility": {
+          "attempted_emissions": 12,
+          "emission_success_rate": 1.0,
+          "files": [
+            {
+              "emitted_targets": 4,
+              "file": "absolute_value.mm",
+              "targets": {
+                "c-header": {
+                  "artifacts": 1,
+                  "emitted": true
+                },
+                "llvm-ir": {
+                  "artifacts": 1,
+                  "emitted": true
+                },
+                "proof-cert": {
+                  "artifacts": 1,
+                  "emitted": true
+                },
+                "verified-json": {
+                  "artifacts": 1,
+                  "emitted": true
+                }
+              }
+            },
+            {
+              "emitted_targets": 4,
+              "file": "max.mm",
+              "targets": {
+                "c-header": {
+                  "artifacts": 1,
+                  "emitted": true
+                },
+                "llvm-ir": {
+                  "artifacts": 1,
+                  "emitted": true
+                },
+                "proof-cert": {
+                  "artifacts": 1,
+                  "emitted": true
+                },
+                "verified-json": {
+                  "artifacts": 1,
+                  "emitted": true
+                }
+              }
+            },
+            {
+              "emitted_targets": 4,
+              "file": "swap.mm",
+              "targets": {
+                "c-header": {
+                  "artifacts": 1,
+                  "emitted": true
+                },
+                "llvm-ir": {
+                  "artifacts": 1,
+                  "emitted": true
+                },
+                "proof-cert": {
+                  "artifacts": 1,
+                  "emitted": true
+                },
+                "verified-json": {
+                  "artifacts": 1,
+                  "emitted": true
+                }
+              }
+            }
+          ],
+          "measured_files": 3,
+          "per_target_success": {
+            "c-header": 3,
+            "llvm-ir": 3,
+            "proof-cert": 3,
+            "verified-json": 3
+          },
+          "status": "MEASURED",
+          "successful_emissions": 12
+        },
+        "trust_surface": {
+          "application_trusted_atoms": 0,
+          "atoms": 3,
+          "ffi_boundary_declarations": 0,
+          "ffi_extern_blocks": 0,
+          "lean_escalation_candidates": 0,
+          "lean_verified_atoms": 0,
+          "status": "MEASURED",
+          "trusted_ratio": 0.0
+        },
+        "user_burden": {
+          "atoms": 3,
+          "files": [
+            {
+              "atoms": 1,
+              "file": "absolute_value.mm",
+              "impl_tokens": 16,
+              "spec_clause_kinds": {
+                "effect_post": 0,
+                "effect_pre": 0,
+                "ensures": 1,
+                "invariant": 0,
+                "requires": 1
+              },
+              "spec_clauses": 2,
+              "spec_clauses_per_atom": 2.0,
+              "spec_to_impl_token_ratio": 1.375,
+              "spec_tokens": 22
+            },
+            {
+              "atoms": 1,
+              "file": "max.mm",
+              "impl_tokens": 15,
+              "spec_clause_kinds": {
+                "effect_post": 0,
+                "effect_pre": 0,
+                "ensures": 1,
+                "invariant": 0,
+                "requires": 1
+              },
+              "spec_clauses": 2,
+              "spec_clauses_per_atom": 2.0,
+              "spec_to_impl_token_ratio": 1.8,
+              "spec_tokens": 27
+            },
+            {
+              "atoms": 1,
+              "file": "swap.mm",
+              "impl_tokens": 2,
+              "spec_clause_kinds": {
+                "effect_post": 0,
+                "effect_pre": 0,
+                "ensures": 1,
+                "invariant": 0,
+                "requires": 1
+              },
+              "spec_clauses": 2,
+              "spec_clauses_per_atom": 2.0,
+              "spec_to_impl_token_ratio": 3.5,
+              "spec_tokens": 7
+            }
+          ],
+          "impl_tokens": 33,
+          "spec_clause_kinds": {
+            "effect_post": 0,
+            "effect_pre": 0,
+            "ensures": 3,
+            "invariant": 0,
+            "requires": 3
+          },
+          "spec_clauses": 6,
+          "spec_clauses_per_atom": 2.0,
+          "spec_to_impl_token_ratio": 1.697,
+          "spec_tokens": 56,
+          "status": "MEASURED"
+        }
+      },
+      "category": "dafny_puzzles",
+      "files": 3
+    },
+    {
+      "axes": {
+        "counterexample_quality": {
+          "counterexample_catch_rate": 1.0,
+          "counterexample_files": 4,
+          "counterexamples_caught": 4,
+          "status": "MEASURED"
+        },
+        "proof_success_rate": {
+          "avg_solver_time_s": 0.024,
+          "files": 10,
+          "lean_discharge_rate": null,
+          "matched_files": 10,
+          "status": "MEASURED",
+          "success_rate": 1.0
+        },
+        "repair_convergence": {
+          "files_with_repair_data": 0,
+          "status": "SKIP"
+        },
+        "runtime_artifact_utility": {
+          "attempted_emissions": 24,
+          "emission_success_rate": 0.8333,
+          "files": [
+            {
+              "emitted_targets": 4,
+              "file": "defi_invariants.mm",
+              "targets": {
+                "c-header": {
+                  "artifacts": 4,
+                  "emitted": true
+                },
+                "llvm-ir": {
+                  "artifacts": 4,
+                  "emitted": true
+                },
+                "proof-cert": {
+                  "artifacts": 1,
+                  "emitted": true
+                },
+                "verified-json": {
+                  "artifacts": 4,
+                  "emitted": true
+                }
+              }
+            },
+            {
+              "emitted_targets": 4,
+              "file": "medical_dosage.mm",
+              "targets": {
+                "c-header": {
+                  "artifacts": 4,
+                  "emitted": true
+                },
+                "llvm-ir": {
+                  "artifacts": 4,
+                  "emitted": true
+                },
+                "proof-cert": {
+                  "artifacts": 1,
+                  "emitted": true
+                },
+                "verified-json": {
+                  "artifacts": 4,
+                  "emitted": true
+                }
+              }
+            },
+            {
+              "emitted_targets": 1,
+              "file": "modular_commitment.mm",
+              "targets": {
+                "c-header": {
+                  "artifacts": 0,
+                  "emitted": false
+                },
+                "llvm-ir": {
+                  "artifacts": 0,
+                  "emitted": false
+                },
+                "proof-cert": {
+                  "artifacts": 1,
+                  "emitted": true
+                },
+                "verified-json": {
+                  "artifacts": 0,
+                  "emitted": false
+                }
+              }
+            },
+            {
+              "emitted_targets": 4,
+              "file": "ownership_protocol.mm",
+              "targets": {
+                "c-header": {
+                  "artifacts": 3,
+                  "emitted": true
+                },
+                "llvm-ir": {
+                  "artifacts": 3,
+                  "emitted": true
+                },
+                "proof-cert": {
+                  "artifacts": 1,
+                  "emitted": true
+                },
+                "verified-json": {
+                  "artifacts": 3,
+                  "emitted": true
+                }
+              }
+            },
+            {
+              "emitted_targets": 3,
+              "file": "regtech_exhaustiveness.mm",
+              "targets": {
+                "c-header": {
+                  "artifacts": 4,
+                  "emitted": true
+                },
+                "llvm-ir": {
+                  "artifacts": 0,
+                  "emitted": false
+                },
+                "proof-cert": {
+                  "artifacts": 1,
+                  "emitted": true
+                },
+                "verified-json": {
+                  "artifacts": 4,
+                  "emitted": true
+                }
+              }
+            },
+            {
+              "emitted_targets": 4,
+              "file": "rtgs_balance_conservation.mm",
+              "targets": {
+                "c-header": {
+                  "artifacts": 4,
+                  "emitted": true
+                },
+                "llvm-ir": {
+                  "artifacts": 4,
+                  "emitted": true
+                },
+                "proof-cert": {
+                  "artifacts": 1,
+                  "emitted": true
+                },
+                "verified-json": {
+                  "artifacts": 4,
+                  "emitted": true
+                }
+              }
+            }
+          ],
+          "measured_files": 6,
+          "per_target_success": {
+            "c-header": 5,
+            "llvm-ir": 4,
+            "proof-cert": 6,
+            "verified-json": 5
+          },
+          "status": "MEASURED",
+          "successful_emissions": 20
+        },
+        "trust_surface": {
+          "application_trusted_atoms": 0,
+          "atoms": 25,
+          "ffi_boundary_declarations": 0,
+          "ffi_extern_blocks": 0,
+          "lean_escalation_candidates": 2,
+          "lean_verified_atoms": 0,
+          "status": "MEASURED",
+          "trusted_ratio": 0.0
+        },
+        "user_burden": {
+          "atoms": 25,
+          "files": [
+            {
+              "atoms": 4,
+              "file": "defi_invariants.mm",
+              "impl_tokens": 38,
+              "spec_clause_kinds": {
+                "effect_post": 2,
+                "effect_pre": 2,
+                "ensures": 4,
+                "invariant": 0,
+                "requires": 4
+              },
+              "spec_clauses": 12,
+              "spec_clauses_per_atom": 3.0,
+              "spec_to_impl_token_ratio": 4.2632,
+              "spec_tokens": 162
+            },
+            {
+              "atoms": 1,
+              "file": "defi_reentrancy_fail.mm",
+              "impl_tokens": 15,
+              "spec_clause_kinds": {
+                "effect_post": 1,
+                "effect_pre": 1,
+                "ensures": 1,
+                "invariant": 0,
+                "requires": 1
+              },
+              "spec_clauses": 4,
+              "spec_clauses_per_atom": 4.0,
+              "spec_to_impl_token_ratio": 2.7333,
+              "spec_tokens": 41
+            },
+            {
+              "atoms": 4,
+              "file": "medical_dosage.mm",
+              "impl_tokens": 28,
+              "spec_clause_kinds": {
+                "effect_post": 0,
+                "effect_pre": 0,
+                "ensures": 4,
+                "invariant": 0,
+                "requires": 4
+              },
+              "spec_clauses": 8,
+              "spec_clauses_per_atom": 2.0,
+              "spec_to_impl_token_ratio": 4.7143,
+              "spec_tokens": 132
+            },
+            {
+              "atoms": 1,
+              "file": "medical_overdose_fail.mm",
+              "impl_tokens": 4,
+              "spec_clause_kinds": {
+                "effect_post": 0,
+                "effect_pre": 0,
+                "ensures": 1,
+                "invariant": 0,
+                "requires": 1
+              },
+              "spec_clauses": 2,
+              "spec_clauses_per_atom": 2.0,
+              "spec_to_impl_token_ratio": 8.5,
+              "spec_tokens": 34
+            },
+            {
+              "atoms": 2,
+              "file": "modular_commitment.mm",
+              "impl_tokens": 43,
+              "spec_clause_kinds": {
+                "effect_post": 0,
+                "effect_pre": 0,
+                "ensures": 2,
+                "invariant": 0,
+                "requires": 2
+              },
+              "spec_clauses": 4,
+              "spec_clauses_per_atom": 2.0,
+              "spec_to_impl_token_ratio": 1.5814,
+              "spec_tokens": 68
+            },
+            {
+              "atoms": 3,
+              "file": "ownership_protocol.mm",
+              "impl_tokens": 34,
+              "spec_clause_kinds": {
+                "effect_post": 3,
+                "effect_pre": 3,
+                "ensures": 3,
+                "invariant": 0,
+                "requires": 3
+              },
+              "spec_clauses": 12,
+              "spec_clauses_per_atom": 4.0,
+              "spec_to_impl_token_ratio": 2.2941,
+              "spec_tokens": 78
+            },
+            {
+              "atoms": 4,
+              "file": "regtech_exhaustiveness.mm",
+              "impl_tokens": 112,
+              "spec_clause_kinds": {
+                "effect_post": 0,
+                "effect_pre": 0,
+                "ensures": 4,
+                "invariant": 0,
+                "requires": 4
+              },
+              "spec_clauses": 8,
+              "spec_clauses_per_atom": 2.0,
+              "spec_to_impl_token_ratio": 1.0,
+              "spec_tokens": 112
+            },
+            {
+              "atoms": 1,
+              "file": "regtech_missing_pep_arm_fail.mm",
+              "impl_tokens": 20,
+              "spec_clause_kinds": {
+                "effect_post": 0,
+                "effect_pre": 0,
+                "ensures": 1,
+                "invariant": 0,
+                "requires": 1
+              },
+              "spec_clauses": 2,
+              "spec_clauses_per_atom": 2.0,
+              "spec_to_impl_token_ratio": 0.65,
+              "spec_tokens": 13
+            },
+            {
+              "atoms": 1,
+              "file": "rtgs_balance_break_fail.mm",
+              "impl_tokens": 12,
+              "spec_clause_kinds": {
+                "effect_post": 0,
+                "effect_pre": 0,
+                "ensures": 1,
+                "invariant": 0,
+                "requires": 1
+              },
+              "spec_clauses": 2,
+              "spec_clauses_per_atom": 2.0,
+              "spec_to_impl_token_ratio": 3.4167,
+              "spec_tokens": 41
+            },
+            {
+              "atoms": 4,
+              "file": "rtgs_balance_conservation.mm",
+              "impl_tokens": 100,
+              "spec_clause_kinds": {
+                "effect_post": 3,
+                "effect_pre": 3,
+                "ensures": 4,
+                "invariant": 0,
+                "requires": 4
+              },
+              "spec_clauses": 14,
+              "spec_clauses_per_atom": 3.5,
+              "spec_to_impl_token_ratio": 1.69,
+              "spec_tokens": 169
+            }
+          ],
+          "impl_tokens": 406,
+          "spec_clause_kinds": {
+            "effect_post": 9,
+            "effect_pre": 9,
+            "ensures": 25,
+            "invariant": 0,
+            "requires": 25
+          },
+          "spec_clauses": 68,
+          "spec_clauses_per_atom": 2.72,
+          "spec_to_impl_token_ratio": 2.0936,
+          "spec_tokens": 850,
+          "status": "MEASURED"
+        }
+      },
+      "category": "domain_compliance",
+      "files": 10
+    },
+    {
+      "axes": {
+        "counterexample_quality": {
+          "counterexample_catch_rate": 1.0,
+          "counterexample_files": 3,
+          "counterexamples_caught": 3,
+          "status": "MEASURED"
+        },
+        "proof_success_rate": {
+          "avg_solver_time_s": 0.019,
+          "files": 6,
+          "lean_discharge_rate": null,
+          "matched_files": 6,
+          "status": "MEASURED",
+          "success_rate": 1.0
+        },
+        "repair_convergence": {
+          "files_with_repair_data": 0,
+          "status": "SKIP"
+        },
+        "runtime_artifact_utility": {
+          "attempted_emissions": 12,
+          "emission_success_rate": 1.0,
+          "files": [
+            {
+              "emitted_targets": 4,
+              "file": "escrow_transfer.mm",
+              "targets": {
+                "c-header": {
+                  "artifacts": 3,
+                  "emitted": true
+                },
+                "llvm-ir": {
+                  "artifacts": 3,
+                  "emitted": true
+                },
+                "proof-cert": {
+                  "artifacts": 1,
+                  "emitted": true
+                },
+                "verified-json": {
+                  "artifacts": 3,
+                  "emitted": true
+                }
+              }
+            },
+            {
+              "emitted_targets": 4,
+              "file": "order_lifecycle.mm",
+              "targets": {
+                "c-header": {
+                  "artifacts": 4,
+                  "emitted": true
+                },
+                "llvm-ir": {
+                  "artifacts": 4,
+                  "emitted": true
+                },
+                "proof-cert": {
+                  "artifacts": 1,
+                  "emitted": true
+                },
+                "verified-json": {
+                  "artifacts": 4,
+                  "emitted": true
+                }
+              }
+            },
+            {
+              "emitted_targets": 4,
+              "file": "session_auth.mm",
+              "targets": {
+                "c-header": {
+                  "artifacts": 4,
+                  "emitted": true
+                },
+                "llvm-ir": {
+                  "artifacts": 4,
+                  "emitted": true
+                },
+                "proof-cert": {
+                  "artifacts": 1,
+                  "emitted": true
+                },
+                "verified-json": {
+                  "artifacts": 4,
+                  "emitted": true
+                }
+              }
+            }
+          ],
+          "measured_files": 3,
+          "per_target_success": {
+            "c-header": 3,
+            "llvm-ir": 3,
+            "proof-cert": 3,
+            "verified-json": 3
+          },
+          "status": "MEASURED",
+          "successful_emissions": 12
+        },
+        "trust_surface": {
+          "application_trusted_atoms": 0,
+          "atoms": 14,
+          "ffi_boundary_declarations": 0,
+          "ffi_extern_blocks": 0,
+          "lean_escalation_candidates": 0,
+          "lean_verified_atoms": 0,
+          "status": "MEASURED",
+          "trusted_ratio": 0.0
+        },
+        "user_burden": {
+          "atoms": 14,
+          "files": [
+            {
+              "atoms": 3,
+              "file": "escrow_transfer.mm",
+              "impl_tokens": 34,
+              "spec_clause_kinds": {
+                "effect_post": 3,
+                "effect_pre": 3,
+                "ensures": 3,
+                "invariant": 0,
+                "requires": 3
+              },
+              "spec_clauses": 12,
+              "spec_clauses_per_atom": 4.0,
+              "spec_to_impl_token_ratio": 1.9412,
+              "spec_tokens": 66
+            },
+            {
+              "atoms": 4,
+              "file": "order_lifecycle.mm",
+              "impl_tokens": 52,
+              "spec_clause_kinds": {
+                "effect_post": 4,
+                "effect_pre": 4,
+                "ensures": 4,
+                "invariant": 0,
+                "requires": 4
+              },
+              "spec_clauses": 16,
+              "spec_clauses_per_atom": 4.0,
+              "spec_to_impl_token_ratio": 1.6154,
+              "spec_tokens": 84
+            },
+            {
+              "atoms": 4,
+              "file": "session_auth.mm",
+              "impl_tokens": 52,
+              "spec_clause_kinds": {
+                "effect_post": 4,
+                "effect_pre": 4,
+                "ensures": 4,
+                "invariant": 0,
+                "requires": 4
+              },
+              "spec_clauses": 16,
+              "spec_clauses_per_atom": 4.0,
+              "spec_to_impl_token_ratio": 1.6154,
+              "spec_tokens": 84
+            },
+            {
+              "atoms": 1,
+              "file": "skip_ship_fail.mm",
+              "impl_tokens": 13,
+              "spec_clause_kinds": {
+                "effect_post": 1,
+                "effect_pre": 1,
+                "ensures": 1,
+                "invariant": 0,
+                "requires": 1
+              },
+              "spec_clauses": 4,
+              "spec_clauses_per_atom": 4.0,
+              "spec_to_impl_token_ratio": 1.6154,
+              "spec_tokens": 21
+            },
+            {
+              "atoms": 1,
+              "file": "transfer_without_accept_fail.mm",
+              "impl_tokens": 8,
+              "spec_clause_kinds": {
+                "effect_post": 1,
+                "effect_pre": 1,
+                "ensures": 1,
+                "invariant": 0,
+                "requires": 1
+              },
+              "spec_clauses": 4,
+              "spec_clauses_per_atom": 4.0,
+              "spec_to_impl_token_ratio": 2.75,
+              "spec_tokens": 22
+            },
+            {
+              "atoms": 1,
+              "file": "unauthenticated_read_fail.mm",
+              "impl_tokens": 8,
+              "spec_clause_kinds": {
+                "effect_post": 1,
+                "effect_pre": 1,
+                "ensures": 1,
+                "invariant": 0,
+                "requires": 1
+              },
+              "spec_clauses": 4,
+              "spec_clauses_per_atom": 4.0,
+              "spec_to_impl_token_ratio": 2.625,
+              "spec_tokens": 21
+            }
+          ],
+          "impl_tokens": 167,
+          "spec_clause_kinds": {
+            "effect_post": 14,
+            "effect_pre": 14,
+            "ensures": 14,
+            "invariant": 0,
+            "requires": 14
+          },
+          "spec_clauses": 56,
+          "spec_clauses_per_atom": 4.0,
+          "spec_to_impl_token_ratio": 1.7844,
+          "spec_tokens": 298,
+          "status": "MEASURED"
+        }
+      },
+      "category": "state_machine",
+      "files": 6
+    },
+    {
+      "axes": {
+        "counterexample_quality": {
+          "counterexample_catch_rate": null,
+          "counterexample_files": 0,
+          "counterexamples_caught": 0,
+          "status": "SKIP"
+        },
+        "proof_success_rate": {
+          "avg_solver_time_s": 0.008,
+          "files": 3,
+          "lean_discharge_rate": null,
+          "matched_files": 3,
+          "status": "MEASURED",
+          "success_rate": 1.0
+        },
+        "repair_convergence": {
+          "files_with_repair_data": 0,
+          "status": "SKIP"
+        },
+        "runtime_artifact_utility": {
+          "attempted_emissions": 12,
+          "emission_success_rate": 1.0,
+          "files": [
+            {
+              "emitted_targets": 4,
+              "file": "array_bounds.mm",
+              "targets": {
+                "c-header": {
+                  "artifacts": 1,
+                  "emitted": true
+                },
+                "llvm-ir": {
+                  "artifacts": 1,
+                  "emitted": true
+                },
+                "proof-cert": {
+                  "artifacts": 1,
+                  "emitted": true
+                },
+                "verified-json": {
+                  "artifacts": 1,
+                  "emitted": true
+                }
+              }
+            },
+            {
+              "emitted_targets": 4,
+              "file": "integer_overflow.mm",
+              "targets": {
+                "c-header": {
+                  "artifacts": 1,
+                  "emitted": true
+                },
+                "llvm-ir": {
+                  "artifacts": 1,
+                  "emitted": true
+                },
+                "proof-cert": {
+                  "artifacts": 1,
+                  "emitted": true
+                },
+                "verified-json": {
+                  "artifacts": 1,
+                  "emitted": true
+                }
+              }
+            },
+            {
+              "emitted_targets": 4,
+              "file": "loop_invariant.mm",
+              "targets": {
+                "c-header": {
+                  "artifacts": 1,
+                  "emitted": true
+                },
+                "llvm-ir": {
+                  "artifacts": 1,
+                  "emitted": true
+                },
+                "proof-cert": {
+                  "artifacts": 1,
+                  "emitted": true
+                },
+                "verified-json": {
+                  "artifacts": 1,
+                  "emitted": true
+                }
+              }
+            }
+          ],
+          "measured_files": 3,
+          "per_target_success": {
+            "c-header": 3,
+            "llvm-ir": 3,
+            "proof-cert": 3,
+            "verified-json": 3
+          },
+          "status": "MEASURED",
+          "successful_emissions": 12
+        },
+        "trust_surface": {
+          "application_trusted_atoms": 0,
+          "atoms": 3,
+          "ffi_boundary_declarations": 0,
+          "ffi_extern_blocks": 0,
+          "lean_escalation_candidates": 0,
+          "lean_verified_atoms": 0,
+          "status": "MEASURED",
+          "trusted_ratio": 0.0
+        },
+        "user_burden": {
+          "atoms": 3,
+          "files": [
+            {
+              "atoms": 1,
+              "file": "array_bounds.mm",
+              "impl_tokens": 5,
+              "spec_clause_kinds": {
+                "effect_post": 0,
+                "effect_pre": 0,
+                "ensures": 1,
+                "invariant": 0,
+                "requires": 1
+              },
+              "spec_clauses": 2,
+              "spec_clauses_per_atom": 2.0,
+              "spec_to_impl_token_ratio": 6.6,
+              "spec_tokens": 33
+            },
+            {
+              "atoms": 1,
+              "file": "integer_overflow.mm",
+              "impl_tokens": 4,
+              "spec_clause_kinds": {
+                "effect_post": 0,
+                "effect_pre": 0,
+                "ensures": 1,
+                "invariant": 0,
+                "requires": 1
+              },
+              "spec_clauses": 2,
+              "spec_clauses_per_atom": 2.0,
+              "spec_to_impl_token_ratio": 8.0,
+              "spec_tokens": 32
+            },
+            {
+              "atoms": 1,
+              "file": "loop_invariant.mm",
+              "impl_tokens": 59,
+              "spec_clause_kinds": {
+                "effect_post": 0,
+                "effect_pre": 0,
+                "ensures": 1,
+                "invariant": 0,
+                "requires": 1
+              },
+              "spec_clauses": 2,
+              "spec_clauses_per_atom": 2.0,
+              "spec_to_impl_token_ratio": 0.6271,
+              "spec_tokens": 37
+            }
+          ],
+          "impl_tokens": 68,
+          "spec_clause_kinds": {
+            "effect_post": 0,
+            "effect_pre": 0,
+            "ensures": 3,
+            "invariant": 0,
+            "requires": 3
+          },
+          "spec_clauses": 6,
+          "spec_clauses_per_atom": 2.0,
+          "spec_to_impl_token_ratio": 1.5,
+          "spec_tokens": 102,
+          "status": "MEASURED"
+        }
+      },
+      "category": "svcomp_style",
+      "files": 3
+    }
+  ],
+  "schema": "mumei.evaluation_suite/v1",
+  "stdlib": {
+    "modules": 59,
+    "proven": 344,
+    "total_atoms": 344,
+    "total_trusted": 0,
+    "trusted_ratio": 0.0
+  },
+  "timestamp": "2026-08-30 05:18 UTC",
+  "totals": {
+    "counterexample_quality": {
+      "counterexample_catch_rate": 1.0,
+      "counterexample_files": 20,
+      "counterexamples_caught": 20,
+      "status": "MEASURED"
+    },
+    "proof_success_rate": {
+      "files": 46,
+      "matched_files": 46,
+      "status": "MEASURED",
+      "success_rate": 1.0
+    },
+    "repair_convergence": {
+      "average_repair_attempts": null,
+      "converged_atoms": 0,
+      "convergence_rate": null,
+      "status": "SKIP",
+      "total_atoms": 0,
+      "total_token_cost": 0
+    },
+    "runtime_artifact_utility": {
+      "attempted_emissions": 104,
+      "emission_success_rate": 0.9327,
+      "status": "MEASURED",
+      "successful_emissions": 97
+    },
+    "trust_surface": {
+      "application_trusted_atoms": 0,
+      "atoms": 105,
+      "ffi_boundary_declarations": 0,
+      "lean_escalation_candidates": 6,
+      "status": "MEASURED"
+    },
+    "user_burden": {
+      "atoms": 105,
+      "impl_tokens": 1456,
+      "spec_clauses": 256,
+      "spec_clauses_per_atom": 2.4381,
+      "spec_to_impl_token_ratio": 1.7871,
+      "spec_tokens": 2602,
+      "status": "MEASURED"
+    }
+  }
+}
