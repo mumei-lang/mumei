@@ -64,6 +64,8 @@ def _category_result(name: str, **overrides) -> dict:
         "counterexample_files": 1,
         "counterexamples_caught": 1,
         "counterexample_catch_rate": 1.0,
+        "no_verdict_files": 0,
+        "no_verdict_statuses": [],
         "lean_measured_files": 0,
         "avg_lean_solver_time_s": None,
         "escalated_atoms": 0,
@@ -307,6 +309,10 @@ def test_category_aggregation_without_binary_is_zero_cost():
     assert all(d["lean_status"] == "SKIP" for d in result["details"])
     assert all(d["lean_solver_time_s"] is None for d in result["details"])
     assert result["avg_lean_solver_time_s"] is None
+    # No binary means no verdict was attempted, which is not an infrastructure
+    # failure to report.
+    assert all(d["verify_status"] == "SKIP" for d in result["details"])
+    assert result["no_verdict_files"] == 0
 
 
 def test_report_renders_counterexample_and_lean_columns():
@@ -323,6 +329,8 @@ def test_report_renders_counterexample_and_lean_columns():
         "counterexample_files": 1,
         "counterexamples_caught": 1,
         "counterexample_catch_rate": 1.0,
+        "no_verdict_files": 0,
+        "no_verdict_statuses": [],
         "lean_measured_files": 0,
         "avg_lean_solver_time_s": None,
         "escalated_atoms": 0,
@@ -340,6 +348,7 @@ def test_report_renders_counterexample_and_lean_columns():
                 "expected": "PASS",
                 "actual": "PASS",
                 "matched": True,
+                "verify_status": "MEASURED",
                 "solver_time_s": 0.5,
                 "escalation_candidates": 0,
                 "lean_solver_time_s": None,
@@ -356,6 +365,7 @@ def test_report_renders_counterexample_and_lean_columns():
                 "expected": "FAIL",
                 "actual": "FAIL",
                 "matched": True,
+                "verify_status": "MEASURED",
                 "solver_time_s": 0.5,
                 "escalation_candidates": 0,
                 "lean_solver_time_s": None,
@@ -378,5 +388,124 @@ def test_report_renders_counterexample_and_lean_columns():
     assert "Lean Discharge" in report
     assert "Tactic Search" in report
     assert "100.00% (1/1)" in report
-    assert "| FAIL | FAIL | yes |" in report.replace("  ", " ")
+    assert "No Verdict" in report
+    assert "| FAIL | FAIL | yes | MEASURED |" in report.replace("  ", " ")
     assert "SKIP" in report
+
+
+def test_report_names_the_statuses_behind_a_no_verdict_count():
+    module = _load_module()
+    category = _category_result(
+        "arithmetic", no_verdict_files=2, no_verdict_statuses=["FAIL", "TIMEOUT"]
+    )
+    report = module.format_report(
+        "2026-01-01 00:00 UTC",
+        [category],
+        {
+            "modules": 1,
+            "total_atoms": 4,
+            "total_trusted": 0,
+            "trusted_ratio": 0.0,
+            "proven": 4,
+        },
+    )
+    assert "2 (FAIL, TIMEOUT)" in report
+
+
+def _verify_output(returncode: int, stdout: str = "", stderr: str = ""):
+    class _Proc:
+        def __init__(self) -> None:
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    return _Proc()
+
+
+def test_a_rejected_program_is_a_verdict_but_a_crashed_run_is_not(monkeypatch, tmp_path):
+    module = _load_module()
+    source = tmp_path / "x_fail.mm"
+    source.write_text("atom a { ensures: true; }", encoding="utf-8")
+
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda *a, **k: _verify_output(
+            1, "❌ Verification: 0 passed, 1 failed, 0 unverifiable, 0 skipped (cached)\n"
+        ),
+    )
+    rejected = module._verify_file("mumei", source, "FAIL")
+    assert rejected["verify_status"] == "MEASURED"
+    assert rejected["actual"] == "FAIL"
+    assert rejected["matched"] is True
+
+    # Same exit code, no verdict printed: the verifier never judged the program,
+    # so an `expected: FAIL` task must not be credited with catching its bug.
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda *a, **k: _verify_output(1, "", "❌ Could not read 'x_fail.mm'\n"),
+    )
+    crashed = module._verify_file("mumei", source, "FAIL")
+    assert crashed["verify_status"] == "FAIL"
+    assert crashed["actual"] == "SKIP"
+    assert crashed["matched"] is False
+    assert crashed["ok"] is None
+
+
+def test_a_timed_out_verify_is_not_a_counterexample_catch(monkeypatch, tmp_path):
+    module = _load_module()
+    source = tmp_path / "slow_fail.mm"
+    source.write_text("atom a { ensures: true; }", encoding="utf-8")
+
+    def _timeout(*args, **kwargs):
+        raise module.subprocess.TimeoutExpired(cmd="mumei", timeout=kwargs["timeout"])
+
+    monkeypatch.setattr(module.subprocess, "run", _timeout)
+    result = module._verify_file("mumei", source, "FAIL", timeout=7)
+    assert result["verify_status"] == "TIMEOUT"
+    assert result["actual"] == "SKIP"
+    assert result["matched"] is False
+    assert result["elapsed_s"] == 7.0
+
+
+def test_no_verdict_files_are_excluded_from_the_catch_rate(monkeypatch):
+    module = _load_module()
+    outcomes = {
+        "a_fail.mm": ("FAIL", "MEASURED"),
+        "b_fail.mm": ("SKIP", "TIMEOUT"),
+    }
+
+    def _fake_verify(binary, path, expected, timeout=120, lean_bridge=None):
+        actual, status = outcomes[path.name]
+        return {
+            "ok": False if status == "MEASURED" else None,
+            "elapsed_s": 0.1,
+            "actual": actual,
+            "expected": expected,
+            "matched": actual == expected,
+            "verify_status": status,
+            "escalation_candidates": 0,
+            "lean_solver_time_s": None,
+            "lean_status": "SKIP",
+            "lean_verified_atoms": 0,
+            "tactic_search_adopted": 0,
+        }
+
+    monkeypatch.setattr(module, "_verify_file", _fake_verify)
+    dir_path = module.CATEGORIES["arithmetic"]
+    monkeypatch.setattr(
+        module.Path, "glob", lambda self, pattern: [dir_path / n for n in outcomes]
+    )
+    monkeypatch.setattr(module, "_count_atoms", lambda path: {
+        "total": 1,
+        "trusted": 0,
+        "proven": 1,
+    })
+
+    result = module.run_category_benchmarks("mumei", "arithmetic", dir_path)
+    assert result["counterexample_files"] == 2
+    assert result["counterexamples_caught"] == 1
+    assert result["counterexample_catch_rate"] == 0.5
+    assert result["no_verdict_files"] == 1
+    assert result["no_verdict_statuses"] == ["TIMEOUT"]

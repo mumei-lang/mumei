@@ -132,6 +132,15 @@ TACTIC_SEARCH_ADOPTED_RE = re.compile(
 )
 LEAN_VERIFY_TIMEOUT_S = 300
 
+# `mumei verify` exits non-zero both when it rejects a program and when it never
+# reached a verdict (unreadable input, rejected flag, crash), so a non-zero exit
+# alone cannot be read as "the verifier rejected this program". Only a run that
+# printed one of the two verdict summaries produced a verdict.
+VERDICT_SUMMARY_RE = re.compile(
+    r"(?m)^\s*(?:\u2705 Verification passed|\u274c Verification:|"
+    r"\U0001f5e1\ufe0f\s+Directory verify summary:)"
+)
+
 
 def _find_mumei_binary() -> str | None:
     for candidate in [
@@ -201,6 +210,7 @@ def _verify_file(
     """
     start = time.monotonic()
     stdout = ""
+    verify_status = "MEASURED"
     try:
         proc = subprocess.run(
             [binary, "verify", str(path)],
@@ -212,20 +222,28 @@ def _verify_file(
         elapsed = time.monotonic() - start
         ok = proc.returncode == 0
         stdout = proc.stdout
+        if not VERDICT_SUMMARY_RE.search(proc.stdout + proc.stderr):
+            verify_status = "FAIL"
     except subprocess.TimeoutExpired:
         elapsed = float(timeout)
         ok = False
+        verify_status = "TIMEOUT"
     except FileNotFoundError:
         elapsed = 0.0
         ok = False
+        verify_status = "SKIP"
 
-    actual = "PASS" if ok else "FAIL"
+    # A run that produced no verdict says nothing about the program, so it is
+    # reported as ``SKIP`` rather than being folded into the FAIL bucket where it
+    # would be indistinguishable from a genuine rejection.
+    actual = "SKIP" if verify_status != "MEASURED" else ("PASS" if ok else "FAIL")
     result = {
-        "ok": ok,
+        "ok": ok if verify_status == "MEASURED" else None,
         "elapsed_s": round(elapsed, 3),
         "actual": actual,
         "expected": expected,
         "matched": actual == expected,
+        "verify_status": verify_status,
         "escalation_candidates": _escalation_candidate_count(stdout),
         "lean_solver_time_s": None,
         "lean_status": "SKIP",
@@ -314,6 +332,7 @@ def run_category_benchmarks(
                 "actual": "SKIP",
                 "expected": expected,
                 "matched": False,
+                "verify_status": "SKIP",
                 "escalation_candidates": 0,
                 "lean_solver_time_s": None,
                 "lean_status": "SKIP",
@@ -329,6 +348,7 @@ def run_category_benchmarks(
             "expected": verify["expected"],
             "actual": verify["actual"],
             "matched": verify["matched"],
+            "verify_status": verify["verify_status"],
             "solver_time_s": verify["elapsed_s"],
             "escalation_candidates": verify["escalation_candidates"],
             "lean_solver_time_s": verify["lean_solver_time_s"],
@@ -342,6 +362,11 @@ def run_category_benchmarks(
     matched_count = sum(1 for r in results if r["matched"])
     counterexamples = [r for r in results if r["expected"] == "FAIL"]
     counterexamples_caught = sum(1 for r in counterexamples if r["matched"])
+    # Files whose verify run never reached a verdict. They are excluded from
+    # ``counterexamples_caught`` by construction (their ``actual`` is ``SKIP``),
+    # and reported so a timing-out or crashing run is visible rather than
+    # looking like a category that simply verifies worse.
+    no_verdict = [r for r in results if r["verify_status"] not in ("MEASURED", "SKIP")]
     lean_times = [
         r["lean_solver_time_s"] for r in results if r["lean_solver_time_s"] is not None
     ]
@@ -364,6 +389,8 @@ def run_category_benchmarks(
         "counterexample_catch_rate": round(
             counterexamples_caught / len(counterexamples), 4
         ) if counterexamples else None,
+        "no_verdict_files": len(no_verdict),
+        "no_verdict_statuses": sorted({r["verify_status"] for r in no_verdict}),
         "lean_measured_files": len(lean_times),
         "escalated_atoms": escalated_atoms,
         "lean_verified_atoms": lean_verified_atoms,
@@ -542,6 +569,7 @@ def build_forge_feedback(
             "files": cat["files"],
             "success_rate": cat["success_rate"],
             "counterexample_catch_rate": cat["counterexample_catch_rate"],
+            "no_verdict_files": cat["no_verdict_files"],
             "trusted_ratio": cat["trusted_ratio"],
             "avg_solver_time_s": cat["avg_solver_time_s"],
             "avg_lean_solver_time_s": cat["avg_lean_solver_time_s"],
@@ -587,6 +615,13 @@ def _fmt_lean_time(seconds: float | None) -> str:
     return "SKIP" if seconds is None else f"{seconds:.3f}s"
 
 
+def _fmt_no_verdict(cat: dict) -> str:
+    count = cat["no_verdict_files"]
+    if not count:
+        return "0"
+    return f"{count} ({', '.join(cat['no_verdict_statuses'])})"
+
+
 def format_report(
     timestamp: str,
     category_results: list[dict],
@@ -607,13 +642,15 @@ def format_report(
         "",
         "Success Rate is the share of files whose verification outcome matched the",
         "expected outcome (`expected: PASS` or `expected: FAIL`). Counterexample Catch",
-        "is the share of `expected: FAIL` files the verifier correctly rejected. Lean",
+        "is the share of `expected: FAIL` files the verifier correctly rejected; a run",
+        "that never reached a verdict (timeout, unreadable input, crash) is reported under",
+        "No Verdict and never counted as a catch. Lean",
         "Discharge is the share of escalated (Z3 `unknown`) obligations the mumei-lean",
         "bridge returned as `lean_verified`; the parenthesised count is how many of them",
         "the automatic tactic search discharged.",
         "",
-        "| Category | Files | Atoms | Trusted | Success Rate | Counterexample Catch | Avg Solver Time | Avg Lean Solver Time | Lean Discharge | Tactic Search |",
-        "|----------|-------|-------|---------|--------------|----------------------|-----------------|----------------------|----------------|---------------|",
+        "| Category | Files | Atoms | Trusted | Success Rate | Counterexample Catch | No Verdict | Avg Solver Time | Avg Lean Solver Time | Lean Discharge | Tactic Search |",
+        "|----------|-------|-------|---------|--------------|----------------------|------------|-----------------|----------------------|----------------|---------------|",
     ]
     for cat in category_results:
         lines.append(
@@ -621,6 +658,7 @@ def format_report(
             f"| {cat['total_trusted']} | {cat['success_rate']:.2%} "
             f"| {_fmt_rate(cat['counterexample_catch_rate'])} "
             f"({cat['counterexamples_caught']}/{cat['counterexample_files']}) "
+            f"| {_fmt_no_verdict(cat)} "
             f"| {cat['avg_solver_time_s']:.3f}s "
             f"| {_fmt_lean_time(cat['avg_lean_solver_time_s'])} "
             f"| {_fmt_rate(cat['lean_discharge_rate'])} "
@@ -634,15 +672,16 @@ def format_report(
         lines.append(f"#### {cat['category']}")
         lines.append("")
         lines.append(
-            "| File | Atoms | Trusted | Expected | Actual | Match | Solver Time | Lean Solver Time | Escalated | lean_verified | Tactic Search |"
+            "| File | Atoms | Trusted | Expected | Actual | Match | Verify Status | Solver Time | Lean Solver Time | Escalated | lean_verified | Tactic Search |"
         )
         lines.append(
-            "|------|-------|---------|----------|--------|-------|-------------|------------------|-----------|---------------|---------------|"
+            "|------|-------|---------|----------|--------|-------|---------------|-------------|------------------|-----------|---------------|---------------|"
         )
         for d in cat["details"]:
             lines.append(
                 f"| {d['file']} | {d['atoms']} | {d['trusted']} "
                 f"| {d['expected']} | {d['actual']} | {'yes' if d['matched'] else 'no'} "
+                f"| {d['verify_status']} "
                 f"| {d['solver_time_s']:.3f}s | {_fmt_lean_time(d['lean_solver_time_s'])} "
                 f"| {d['escalation_candidates']} | {d['lean_verified_atoms']} "
                 f"| {d['tactic_search_adopted']} |"

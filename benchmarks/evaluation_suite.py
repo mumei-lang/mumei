@@ -483,6 +483,7 @@ def evaluate_category(
         "status": STATUS_MEASURED if binary else STATUS_SKIP,
         "files": result["files"],
         "matched_files": result["matched_count"],
+        "no_verdict_files": result["no_verdict_files"],
         "success_rate": result["success_rate"] if binary else None,
         "avg_solver_time_s": result["avg_solver_time_s"] if binary else None,
         "lean_discharge_rate": result["lean_discharge_rate"],
@@ -493,6 +494,7 @@ def evaluate_category(
         else STATUS_SKIP,
         "counterexample_files": result["counterexample_files"],
         "counterexamples_caught": result["counterexamples_caught"],
+        "no_verdict_files": result["no_verdict_files"],
         "counterexample_catch_rate": result["counterexample_catch_rate"]
         if binary
         else None,
@@ -578,6 +580,7 @@ def _axis_totals(categories: list[dict]) -> dict:
             "status": STATUS_MEASURED if proof else STATUS_SKIP,
             "files": total_files,
             "matched_files": matched,
+            "no_verdict_files": sum(a["no_verdict_files"] for a in proof),
             "success_rate": rate(matched, total_files),
         },
         "repair_convergence": {
@@ -594,6 +597,7 @@ def _axis_totals(categories: list[dict]) -> dict:
             "status": STATUS_MEASURED if counterexample else STATUS_SKIP,
             "counterexample_files": counterexample_files,
             "counterexamples_caught": caught,
+            "no_verdict_files": sum(a["no_verdict_files"] for a in counterexample),
             "counterexample_catch_rate": rate(caught, counterexample_files),
         },
         "trust_surface": {

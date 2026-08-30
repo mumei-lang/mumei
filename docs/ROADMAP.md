@@ -2300,6 +2300,33 @@ python benchmarks/evaluation_suite.py --repair-cert-dir ../mumei-agent/artifacts
 
 ---
 
+## P28: ベンチマーク verdict とインフラ失敗の分離（`no_verdict` 計上） — ✅ Implemented
+
+**ステータス: ✅ Implemented**（測定 2026-08-30、`PYTHONPATH=. pytest tests/` 181/181 passed（`tests/test_benchmark_suite.py` に 4 件新規追加して 20 件）、`cargo tree --edges no-dev | grep -i opentelemetry` は空 = 既定ビルドに OTel 依存なし）— `mumei verify` は「プログラムを棄却した」場合と「判定に到達しなかった」場合（timeout・入力が読めない・フラグ拒否・crash）の両方で終了コード 1 を返すため、`benchmarks/run_benchmarks.py` が非ゼロ終了を一律 `FAIL` と読むと、タイムアウトやプロセス異常が `expected: FAIL` タスクの反例検出として数えられ、counterexample catch rate が実態より良く出る。判定の有無を出力から見分けて分離する。
+
+### 構成
+
+- **verdict 判定**（`VERDICT_SUMMARY_RE`）: `✅ Verification passed` / `❌ Verification:` / ディレクトリ verify のサマリ行のいずれかを出力した run のみが判定に到達したものとみなす。終了コードは判定の有無を区別しないため、単独では使わない。
+- **`verify_status`**（ファイル単位、既存語彙のみ）: 判定に到達した run は `MEASURED`、timeout は `TIMEOUT`、判定を出さずに終わった run は `FAIL`、バイナリ不在で試行しなかった run は `SKIP`。
+- **`actual` の縮退**: `MEASURED` 以外の run は `actual` を `SKIP` とし `ok` を `None` にする。`matched` は `actual == expected` のままなので、インフラ失敗が反例検出として数えられる経路が構造的に消える。
+- **集計と描画**: カテゴリ結果に `no_verdict_files` / `no_verdict_statuses` を追加し、markdown の Category Results に `No Verdict` 列（件数と内訳ステータス）、per-file 表に `Verify Status` 列を追加する。forge feedback の各カテゴリと `benchmarks/evaluation/evaluation_suite.json` の proof / counterexample 軸にも `no_verdict_files` を通す。
+
+### 測定結果（2026-08-30、`target/debug/mumei`、`--no-lean`）
+
+6 カテゴリ 46 ファイルすべてが `verify_status: MEASURED`、`no_verdict_files` は全カテゴリ 0。したがって P27 の測定値（proof success 100.00%、counterexample 100.00%、artifact utility 93.27%）は変化せず、既存の測定はインフラ失敗を混入していなかったことが確認できた。
+
+### 対象ファイル
+
+| ファイル | 役割 |
+|---|---|
+| `benchmarks/run_benchmarks.py` | verdict 判定・`verify_status`・`no_verdict_*` の集計と描画 |
+| `benchmarks/evaluation_suite.py` | proof / counterexample 軸への `no_verdict_files` の通し |
+| `tests/test_benchmark_suite.py` | 回帰ゲート（棄却と crash の分離、timeout が catch にならないこと、catch rate からの除外、`No Verdict` 描画） |
+
+**残課題**: 判定の有無は CLI 出力の照合で見分けている。`mumei verify` が棄却とインフラ失敗に別々の終了コードを返すようになれば、出力照合は不要になる。
+
+---
+
 ## Related Documents
 
 - [`docs/FFI.md`](FFI.md) — FFI extern block design (Phase A foundation)
