@@ -1739,11 +1739,22 @@ Stage 1（capability 型宣言 + capability 型パラメータ、`grant` なし�
 Stage 1 では `grant` 関連を一切実装していない。
 未着手の制限: import 越しの capability 型パラメータ（resolver への搭載は Stage 2 以降）。
 
-**クローズ状態**（2026-08-30）: タスク 3 の結論が否定であるため、**Stage 2（`grant`）/ Stage 3（narrowing）/
-Stage 4（revocation）は将来のトリガ観測まで保留し、着手しない**。実装済みの Stage 1（P29）は
-タスク 3 の結果に依存しない非破壊な範囲であり、**撤回せずそのまま維持する**。再開のトリガは
-mumei-agent 側で `requires` による暗黙的 narrowing で表現できない委譲ケースが実際に観測されたときとする
-（`mumei-agent/docs/CAPABILITY_DEMAND_STUDY.md`）。
+**タスク 3（AI エージェント側の需要検証）**（2026-08-30、調査完了 / **結論: 否定**）:
+成果物は `mumei-lang/mumei-agent` の
+[`docs/CAPABILITY_DEMAND_STUDY.md`](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/CAPABILITY_DEMAND_STUDY.md)
+（PR [mumei-agent#567](https://github.com/mumei-lang/mumei-agent/pull/567)、コード変更なしの需要検証 PR、マージ済み）。
+self-healing / generate / forge / audit / MCP の各ワークフローを洗い出し、
+呼び出しごとの権限委譲・narrowing・失効が本質的に必要なユースケースは現時点で存在しないと判定した:
+mumei-agent は third-party `.mm` を消費せず（委譲の相手が存在しない）、生成 `.mm` を実行せず
+（`verify` / `check` / `infer-*` / `build` のみ = 失効させる実行時主体が存在しない）、最小権限化の価値がある権限は
+harness の Python プロセス側（LLM / Lean bridge / git / MCP）にあり `.mm` の `grant` では届かない。
+現行の `requires` による暗黙的 narrowing と静的 effect 宣言で全ユースケースを表現できている。
+最も需要に近い「self-healing が effect 違反を effect 宣言の拡大で修復できる」点も、対策は修復器側の
+静的 allowlist ゲート（mumei-agent 側のフォローアップ候補）であり Stage 2 では閉じない。
+
+**したがって Option A（parameterized effects + Z3）を既定として継続し、Stage 2 以降（PR-A2 / A3 / A4）は
+需要が観測されるまで保留する**。保留解除トリガ T1〜T4 は `docs/CAPABILITY_MODEL_STUDY.md` §6.1 に記載。
+Stage 1 は非破壊なので実装済みのまま維持する。
 
 `docs/CAPABILITY_SECURITY.md` §4 の Recommendation（Option A 継続）は撤回しない。Option A を既定パスとして継続し、
 capability model は Stage 1 のみが opt-in 拡張として上積みされている位置づけとなる。
@@ -1751,7 +1762,7 @@ capability model は Stage 1 のみが opt-in 拡張として上積みされて�
 **関連ファイル**:
 - `docs/CAPABILITY_MODEL_STUDY.md` — 調査成果物（4 項目の分析、opt-in 判定、段階分割案）
 - `docs/CAPABILITY_SECURITY.md` — 現状評価と Section 3 の代替案、Next Steps の設計調査項目
-- `docs/ROADMAP.md` — local checkpoint（P19、Phase 6 Capability Security の延長）
+- `docs/ROADMAP.md` — local checkpoint（P19 設計調査 / P29 Stage 1 実装）
 - `mumei-core/src/verification/support/effects.rs` — `check_constant_constraint()`, `parse_constraint_to_z3_string()`, `verify_effect_params`, `verify_effect_containment`, `verify_effect_consistency`
 - `mumei-core/src/ast.rs` / `mumei-core/src/hir.rs` / `mumei-core/src/mir.rs` — effect 宣言と AST/HIR/MIR 表現、`Movability`
 - `mumei-core/src/mir_analysis/move_analysis.rs` — move 解析（revocation の実装候補）

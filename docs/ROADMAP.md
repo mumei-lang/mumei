@@ -1821,7 +1821,7 @@ python3 scripts/check_contract_vocabulary.py
 
 ---
 
-## P19: Object-Based Capability Model 設計調査（Phase 6 Capability Security の延長）— ✅ 調査完了（実装可否: 肯定的 = 最小サブセットに限り実装フェーズ着手可）
+## P19: Object-Based Capability Model 設計調査（Phase 6 Capability Security の延長）— ✅ 調査完了（実装可否: 肯定的）/ ⏸️ Stage 2 以降は保留（需要検証 = 否定）
 
 **ステータス: ✅ 調査完了**（調査日 2026-08-30、成果物 `docs/CAPABILITY_MODEL_STUDY.md`、コード変更なし）。
 canonical 上位ロードマップは `docs/CROSS_PROJECT_ROADMAP.md` の
@@ -1889,23 +1889,34 @@ Stage 4: move ベース revocation）と非対象範囲は `docs/CAPABILITY_MODE
 Priority 15 のタスク 3（AI エージェント側の需要検証）の結果に従う（下記のとおり結論は否定）。
 
 **実装フェーズ**（2026-08-30）: Stage 1（capability 型宣言 + capability 型パラメータ、`grant` なし）は
-タスク 3 の結果に依存しない非破壊な範囲であるため P29 として着手・実装済み。Stage 2（`grant`）以降は
-引き続きタスク 3（AI エージェント側の需要検証）の肯定を前提とする。→ [P29](#p29-capability-model-stage-1capability-型宣言--capability-型パラメータ--implemented)
+タスク 3 の結果に依存しない非破壊な範囲であるため P29 として着手・実装済み。
+→ [P29](#p29-capability-model-stage-1capability-型宣言--capability-型パラメータ--implemented)
 
-**タスク 3（AI エージェント側の需要検証）**: ✅ 調査完了（結論: 否定）。`mumei-lang/mumei-agent` の
+**需要検証（タスク 3）の結論**（2026-08-30、調査完了 / **結論: 否定**）:
+成果物は `mumei-lang/mumei-agent` の
 [`docs/CAPABILITY_DEMAND_STUDY.md`](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/CAPABILITY_DEMAND_STUDY.md)
-（PR [mumei-agent#567](https://github.com/mumei-lang/mumei-agent/pull/567)、マージ済み）が、
-エージェント側に capability model Stage 2 以降を要求する実需要は観測されないと結論した。
-したがって **Option A（`docs/CAPABILITY_SECURITY.md` §4）を既定パスとして継続**し、
-Stage 2（`grant`）／Stage 3（narrowing）／Stage 4（move ベース revocation）は
-将来のトリガ観測まで保留する（着手しない）。実装済みの Stage 1（capability 型宣言 +
-capability 型パラメータ、[P29](#p29-capability-model-stage-1capability-型宣言--capability-型パラメータ--implemented)）は
+（PR [mumei-agent#567](https://github.com/mumei-lang/mumei-agent/pull/567)、コード変更なしの需要検証 PR、マージ済み）。self-healing / generate / forge / audit / MCP の各ワークフローを
+洗い出し、呼び出しごとの権限委譲・narrowing・失効が本質的に必要なユースケースは現時点で存在しないと判定した:
+mumei-agent は third-party `.mm` を消費せず（registry / `mumei add` の利用箇所ゼロ）、
+生成 `.mm` を実行せず（`verify` / `check` / `infer-*` / `build` のみ）、最小権限化の価値がある権限は
+harness の Python プロセス側（LLM / Lean bridge / git / MCP）にあり `.mm` の `grant` では届かない。
+最も需要に近い「self-healing が effect 違反を effect 宣言の拡大で修復できる」点も、対策は
+修復器側の静的 allowlist ゲートであり Stage 2 では閉じない。dogfood レポート群にも
+effect 違反の記録は 0 件で、`docs/CAPABILITY_SECURITY.md` Next Steps 3 の利用者要求も未観測。
+
+**したがって Option A（parameterized effects + Z3）を既定として継続し、Stage 2（`grant`）以降は
+需要が観測されるまで保留する**（保留解除トリガ T1〜T4 は `docs/CAPABILITY_MODEL_STUDY.md` §6.1）。
+Stage 2（`grant`）／Stage 3（narrowing）／Stage 4（move ベース revocation）は着手しない。
+実装済みの Stage 1（capability 型宣言 + capability 型パラメータ、
+[P29](#p29-capability-model-stage-1capability-型宣言--capability-型パラメータ--implemented)）は
 非破壊かつタスク 3 の結果に依存しない範囲であり、**撤回せずそのまま維持**する。
+本節の設計調査の肯定判定（技術的に着手可能）は撤回しない。
 
 **契約への影響**: なし。capability 由来の検証結果は既存 effect 検証と同じ経路で報告し、
 新しい verdict 分類や別名 alias は追加しない。
 
-**関連ファイル**: `docs/CAPABILITY_MODEL_STUDY.md`（調査成果物）、
+**関連ファイル**: `docs/CAPABILITY_MODEL_STUDY.md`（調査成果物、Stage 分割と保留トリガ §6.1）、
+`mumei-lang/mumei-agent` `docs/CAPABILITY_DEMAND_STUDY.md`（タスク 3 の需要検証成果物）、
 `docs/CAPABILITY_SECURITY.md`（Section 3 と Next Steps 5）、
 `mumei-core/src/verification/support/effects.rs`、`mumei-core/src/ast.rs` / `hir.rs` / `mir.rs`、
 `mumei-core/src/mir_analysis/move_analysis.rs`、`mumei-emit-llvm/src/codegen/expr_emit.rs`、
@@ -2386,7 +2397,7 @@ capability 宣言は新しいエフェクトを定義せず、既存 `EffectDef`
 - `.mm` 回帰ゼロ: `std/` + `examples/` + `tests/` の全 `.mm` を `mumei verify` に通し、verdict 集合が `develop` と一致することを確認（既存の失敗は意図された負例で、件数・対象ファイルとも変化なし）。
 - **ゼロコスト検証（P15 / P23〜P27 と同一）**: `cargo tree --edges no-dev | grep -i opentelemetry` が空であること。
 
-**残課題**: `perform cap.op(x)` はパーサが裏側のエフェクト名へ解決するため、perform サイトから capability レシーバの同一性が失われる。したがって 1 つの atom が同一エフェクトに対する複数の capability パラメータを取る場合、それぞれの constraint が全 perform に連言で適用される（権限が広がることはないが、正当なプログラムを過剰に棄却しうる）。同じ atom 内の直接 `perform Effect.op(x)` も同様に capability constraint を継承する。レシーバを構文木に保持した per-receiver 解決は Stage 2 で行う。 capability constraint の検査範囲は既存 effect 制約と同一で、`requires` で束縛されていない完全に記号的な引数は既存 effect と同様に受理される（`develop` の effect 版と verdict 一致を CLI で確認）。capability 宣言はそれを宣言したモジュール内のパラメータにのみ適用される（import 越しの capability 型パラメータ、および REPL で capability 宣言と atom を別入力で投入した場合は Stage 2 以降で resolver に載せる。`ModuleEnv` への登録自体は本 PR で入っている）。`grant` 式・narrowing・move ベース revocation と codegen の ABI 消去パスは Stage 2〜4 のまま未着手であり、Priority 15 タスク 3（AI エージェント側の需要検証、`mumei-agent/docs/CAPABILITY_DEMAND_STUDY.md` / PR #567）の結論が**否定**であるため、将来のトリガ観測まで**保留（着手しない）**とする。本 P29（Stage 1）は非破壊かつタスク 3 の結果に依存しない範囲であり、**撤回せず実装済みのまま維持する**。
+**残課題**: `perform cap.op(x)` はパーサが裏側のエフェクト名へ解決するため、perform サイトから capability レシーバの同一性が失われる。したがって 1 つの atom が同一エフェクトに対する複数の capability パラメータを取る場合、それぞれの constraint が全 perform に連言で適用される（権限が広がることはないが、正当なプログラムを過剰に棄却しうる）。同じ atom 内の直接 `perform Effect.op(x)` も同様に capability constraint を継承する。レシーバを構文木に保持した per-receiver 解決は Stage 2 で行う。 capability constraint の検査範囲は既存 effect 制約と同一で、`requires` で束縛されていない完全に記号的な引数は既存 effect と同様に受理される（`develop` の effect 版と verdict 一致を CLI で確認）。capability 宣言はそれを宣言したモジュール内のパラメータにのみ適用される（import 越しの capability 型パラメータ、および REPL で capability 宣言と atom を別入力で投入した場合は Stage 2 以降で resolver に載せる。`ModuleEnv` への登録自体は本 PR で入っている）。`grant` 式・narrowing・move ベース revocation と codegen の ABI 消去パスは Stage 2〜4 のまま未着手であり、Priority 15 タスク 3（AI エージェント側の需要検証、`mumei-agent/docs/CAPABILITY_DEMAND_STUDY.md` / PR #567）の結論が**否定**であるため、将来のトリガ（T1〜T4、`docs/CAPABILITY_MODEL_STUDY.md` §6.1）が観測されるまで**保留（着手しない）**とする。本 P29（Stage 1）は非破壊かつタスク 3 の結果に依存しない範囲であり、**撤回せず実装済みのまま維持する**。
 
 ---
 

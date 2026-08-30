@@ -22,6 +22,10 @@ effect containment 証明（`UsedEffects(body) ⊆ AllowedEffects(signature)`）
 **規則そのものを変えずに**（capability 型パラメータを effect 名の新しい供給源として扱うだけで）維持できる。
 Option A は最小サブセットが入るまでの既定パスとして残り、`grant` を使わないコードでは恒久的に既定のままとなる。
 
+**着手判断（2026-08-30 追記）**: 需要検証（Priority 15 タスク 3）の結論は**否定**であり、
+Stage 1 までを実装済みとして維持したうえで Stage 2（`grant`）以降は保留とする（§6.1）。
+本 §0 の「肯定的」は技術的可否の判定であり、着手の是非とは独立である。
+
 調査の根拠となる現行実装は以下:
 
 | 参照先 | 内容 |
@@ -357,9 +361,31 @@ codegen 経路（`__effect_*` 直接呼び出し）も生成物も現状と同�
 | Stage | 内容 | 完了条件 | 状態 |
 |---|---|---|---|
 | Stage 1 | `capability` 型宣言（コンテキスト依存キーワード）+ capability 型パラメータのみ。`grant` なし。`is_fn_type()` ゲート 3 箇所（`effects.rs` / `executor.rs` / `dataflow_inference.rs`）の拡張を含む | 既存 effect と等価な検証結果になること。`.mm` 回帰ゼロ | ✅ 実装済み（2026-08-30、`docs/ROADMAP.md` P29） |
-| Stage 2 | `grant E where C` 式と静的 capability 束縛。codegen は消去のみ（§4.2 の ABI 消去パス: 定義・宣言・直接呼び出しから capability パラメータと実引数を除去）を含む | `grant` を含む新規テストが通り、消去後の LLVM IR が capability 抜き版と一致し、既存 codegen 出力が不変 | 保留（タスク 3 の結論が否定のため着手しない。将来のトリガ観測待ち） |
-| Stage 3 | narrowing（`grant cap where C'`）と `C1 ⟹ C2` の Z3 判定 | narrowing の受理 / 拒否が Z3 で判定でき、`Unknown` 時の安全側動作が定義されている | 保留（同上） |
-| Stage 4 | move ベースの revocation（アフィン capability）。`Rvalue::Call` の引数に対する所有権移動を新規実装（§2.2） | 委譲後の再使用 / 重複引数 / 分岐 join に対して use-after-move / double-move / `MergeConflict` が報告される | 保留（同上） |
+| Stage 2 | `grant E where C` 式と静的 capability 束縛。codegen は消去のみ（§4.2 の ABI 消去パス: 定義・宣言・直接呼び出しから capability パラメータと実引数を除去）を含む | `grant` を含む新規テストが通り、消去後の LLVM IR が capability 抜き版と一致し、既存 codegen 出力が不変 | ⏸️ 保留（タスク 3 の結論が否定。§6.1 のトリガ待ち） |
+| Stage 3 | narrowing（`grant cap where C'`）と `C1 ⟹ C2` の Z3 判定 | narrowing の受理 / 拒否が Z3 で判定でき、`Unknown` 時の安全側動作が定義されている | ⏸️ 保留（同上） |
+| Stage 4 | move ベースの revocation（アフィン capability）。`Rvalue::Call` の引数に対する所有権移動を新規実装（§2.2） | 委譲後の再使用 / 重複引数 / 分岐 join に対して use-after-move / double-move / `MergeConflict` が報告される | ⏸️ 保留（同上） |
+
+### 6.1 Stage 2 以降の保留とトリガ（タスク 3 の結果、2026-08-30）
+
+タスク 3（AI エージェント側の需要検証）の結論は **否定**である。成果物は `mumei-lang/mumei-agent` の
+[`docs/CAPABILITY_DEMAND_STUDY.md`](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/CAPABILITY_DEMAND_STUDY.md)。
+self-healing / generate / forge / audit / MCP の各ワークフローを洗い出した結果、
+呼び出しごとの権限委譲・narrowing・revocation が本質的に必要なユースケースは現時点で存在しなかった:
+mumei-agent は third-party `.mm` を消費せず（委譲の相手が存在しない）、生成 `.mm` を実行せず
+（失効させる実行時主体が存在しない）、実際に最小権限化の価値がある権限は harness の Python
+プロセス側（LLM / Lean bridge / git / MCP）にあり `.mm` の `grant` では届かない。最も需要に近いのは
+「self-healing が effect 違反を effect 宣言の拡大で修復できる」点だが、その対策は修復器側の
+静的 allowlist ゲートであり Stage 2 では閉じない。
+
+**したがって Option A（parameterized effects + Z3）を既定として継続し、Stage 2 以降は
+以下のトリガが観測されるまで保留する。** Stage 1 は非破壊であり実装済みのまま維持する（P29）。
+
+| トリガ | 内容 | 対応 Stage |
+|---|---|---|
+| T1 | third-party / 他エージェント製の `.mm` パッケージを消費し始め、粗い effect を呼び出し側で狭める必要が出る | Stage 2 → Stage 3 |
+| T2 | 生成 `.mm` を untrusted / multi-tenant な文脈で実行する | Stage 4 + 実行時強制の再調査（§4.3 は非対象としている） |
+| T3 | 1 atom が同一 effect に対して異なる制約の権限を複数受け取る `.mm` が必要になる（Stage 1 の per-receiver 制限） | Stage 2（per-receiver 解決） |
+| T4 | dogfood / 実運用レポートに effect 違反と権限拡大修復の事例が現れる | 再評価 |
 
 ### Stage 1 の実装結果（2026-08-30）
 
@@ -446,7 +472,7 @@ Option A（parameterized effects + Z3）継続が正しい判断となる。
 [`docs/CAPABILITY_DEMAND_STUDY.md`](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/CAPABILITY_DEMAND_STUDY.md)
 （PR [mumei-agent#567](https://github.com/mumei-lang/mumei-agent/pull/567)、マージ済み）が、
 エージェント側に Stage 2 以降を要求する実需要は観測されないと結論した。したがって
-Stage 2〜4 は将来のトリガ観測まで保留し、着手しない。既に実装済みの Stage 1
+Stage 2〜4 は §6.1 のトリガ（T1〜T4）が観測されるまで保留し、着手しない。既に実装済みの Stage 1
 （`docs/ROADMAP.md` P29）はタスク 3 の結果に依存しない非破壊な範囲であり、撤回せず維持する。
 
 したがって `docs/CAPABILITY_SECURITY.md` §4 の Recommendation は撤回しない。
