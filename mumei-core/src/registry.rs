@@ -2,6 +2,8 @@
 //!
 //! ローカルパッケージレジストリ (`~/.mumei/registry.json`) の管理。
 //! `mumei publish` で公開されたパッケージを名前＋バージョンで検索可能にする。
+pub mod remote;
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -69,20 +71,11 @@ pub fn save(registry: &Registry) -> Result<(), String> {
 pub fn resolve(name: &str, version: Option<&str>) -> Option<PathBuf> {
     let registry = load();
     let entry = registry.packages.get(name)?;
-    let resolved_version = match version {
-        None | Some("*") => entry.latest.clone(),
-        Some(v) if v.starts_with('^') => {
-            // Semver-compatible: ^x.y.z respects left-most non-zero digit
-            let base = v.trim_start_matches('^');
-            find_compatible_version(entry, base)?
-        }
-        Some(v) if v.starts_with('~') => {
-            // Tilde: ~x.y.z matches any version with same major.minor
-            let base = v.trim_start_matches('~');
-            find_tilde_compatible_version(entry, base)?
-        }
-        Some(v) => v.to_string(),
-    };
+    let resolved_version = select_version(
+        entry.versions.keys().map(String::as_str),
+        &entry.latest,
+        version,
+    )?;
     let ver_entry = entry.versions.get(&resolved_version)?;
     let p = PathBuf::from(&ver_entry.path);
     if p.exists() {
@@ -133,6 +126,28 @@ pub fn register_with_cert(
     pkg.latest = version.to_string();
     save(&registry)
 }
+/// Select a version out of `available` for the requirement `version`.
+/// `None` / `"*"` selects `latest`, `^x.y.z` / `~x.y.z` apply the range rules
+/// below, and any other string is taken literally.
+///
+/// Shared by local (`registry.json`) and remote (`remote::resolve`) resolution
+/// so both honour the same range semantics.
+pub(crate) fn select_version<'a>(
+    available: impl Iterator<Item = &'a str>,
+    latest: &str,
+    version: Option<&str>,
+) -> Option<String> {
+    match version {
+        None | Some("*") => Some(latest.to_string()),
+        Some(v) if v.starts_with('^') => {
+            find_compatible_version(available, v.trim_start_matches('^'))
+        }
+        Some(v) if v.starts_with('~') => {
+            find_tilde_compatible_version(available, v.trim_start_matches('~'))
+        }
+        Some(v) => Some(v.to_string()),
+    }
+}
 /// Parse a version string "x.y.z" into (major, minor, patch).
 fn parse_semver(v: &str) -> Option<(u64, u64, u64)> {
     let parts: Vec<&str> = v.split('.').collect();
@@ -152,10 +167,13 @@ fn parse_semver(v: &str) -> Option<(u64, u64, u64)> {
 ///   ^X.Y.Z (X>0): same major, >= base  (i.e. >=X.Y.Z, <(X+1).0.0)
 ///   ^0.Y.Z (Y>0): same major.minor, >= base  (i.e. >=0.Y.Z, <0.(Y+1).0)
 ///   ^0.0.Z:       exact patch  (i.e. ==0.0.Z)
-fn find_compatible_version(entry: &PackageEntry, base: &str) -> Option<String> {
+fn find_compatible_version<'a>(
+    available: impl Iterator<Item = &'a str>,
+    base: &str,
+) -> Option<String> {
     let (base_major, base_minor, base_patch) = parse_semver(base)?;
     let mut best: Option<(u64, u64, u64, String)> = None;
-    for ver_str in entry.versions.keys() {
+    for ver_str in available {
         if let Some((major, minor, patch)) = parse_semver(ver_str) {
             let compatible = if base_major != 0 {
                 // ^X.Y.Z (X>0): same major, >= base
@@ -169,24 +187,27 @@ fn find_compatible_version(entry: &PackageEntry, base: &str) -> Option<String> {
                 major == 0 && minor == 0 && patch == base_patch
             };
             if compatible && best.as_ref().is_none_or(|b| (minor, patch) > (b.1, b.2)) {
-                best = Some((major, minor, patch, ver_str.clone()));
+                best = Some((major, minor, patch, ver_str.to_string()));
             }
         }
     }
     best.map(|b| b.3)
 }
 /// Find the highest version compatible with ~base (same major.minor, >= base).
-fn find_tilde_compatible_version(entry: &PackageEntry, base: &str) -> Option<String> {
+fn find_tilde_compatible_version<'a>(
+    available: impl Iterator<Item = &'a str>,
+    base: &str,
+) -> Option<String> {
     let (base_major, base_minor, base_patch) = parse_semver(base)?;
     let mut best: Option<(u64, u64, u64, String)> = None;
-    for ver_str in entry.versions.keys() {
+    for ver_str in available {
         if let Some((major, minor, patch)) = parse_semver(ver_str) {
             if major == base_major
                 && minor == base_minor
                 && patch >= base_patch
                 && best.as_ref().is_none_or(|b| patch > b.2)
             {
-                best = Some((major, minor, patch, ver_str.clone()));
+                best = Some((major, minor, patch, ver_str.to_string()));
             }
         }
     }

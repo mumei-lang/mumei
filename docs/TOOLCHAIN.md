@@ -93,8 +93,53 @@ mumei verify --task-id ci-shard-17 --solver-timeout 30000 --cache-scope module s
 ```
 1. path dependency  → local directory (direct load)
 2. name dependency  → ~/.mumei/registry.json → ~/.mumei/packages/<name>/<version>/
+                    → (fallback, opt-in) remote registry over HTTP → same package cache
 3. git dependency   → git clone to ~/.mumei/packages/<name>/
 ```
+
+Only name dependencies use the remote fallback, and only when it is configured;
+path and git dependencies are unchanged.
+
+### Remote Registry (P24)
+
+Name dependencies that are missing from the local `registry.json` can be fetched
+from an HTTP registry. This is **opt-in**: with no registry configured, resolution
+stays entirely local/path/git as before.
+
+```toml
+# mumei.toml
+[registry]
+url = "https://registry.example.com"
+timeout_ms = 30000            # optional, default 30000
+```
+
+```bash
+# Environment variable wins over mumei.toml
+MUMEI_REGISTRY_URL=https://registry.example.com mumei add my_lib
+```
+
+Expected server layout:
+
+```
+{base}/packages/{name}/index.json                  ← {"latest": "1.2.0", "versions": {"1.2.0": {"files": [...], "cert_hash": "..."}}}
+{base}/packages/{name}/{version}/{file}            ← every path listed in files[]
+{base}/packages/{name}/{version}/.proof-cert.json  ← P5-B proof certificate
+```
+
+Fetch behaviour:
+
+- Version selection matches local resolution (`*`/omitted → `latest`, `^`, `~`, exact).
+- The certificate body is hashed with the existing P5-A SHA-256 and compared against
+  `cert_hash` from `index.json`; the certificate must also declare the same
+  `package_name` / `package_version`.
+- Files are written to `~/.mumei/packages/<name>/<version>/` and registered in
+  `registry.json` (including `cert_path` / `cert_hash`), so all later resolution
+  goes through the existing local path.
+- `--strict-imports`: a missing certificate, a hash mismatch, or an unparseable
+  certificate is a hard error. Without strict imports the package is still cached,
+  but the unverifiable certificate is discarded so it is not recorded as provenance.
+- Atom-level verdicts are unchanged — they are still produced by
+  `verify_import_certificate` on the cached package.
 
 ### Publishing
 
@@ -288,7 +333,7 @@ Inspects all tools with multi-path std library search (cwd → exe dir → `MUME
 
 ### Deferred: Tooling
 
-- [ ] Remote package registry (central server for `mumei add <name>`)
+- [x] Remote package registry (central server for `mumei add <name>`) — **P24 implemented**
 - [x] VS Code Marketplace publishing
 - [x] LSP completion + definition jump
 - [x] Counter-example highlighting in editors

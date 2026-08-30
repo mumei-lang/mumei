@@ -920,6 +920,7 @@ audit / migration / self-healing / MCP の 1 コマンド導線を提供する�
 | ✅ | Priority 16: 大規模ケースでの atom-local proof obligation 合成性検証 | mumei + mumei-demo + mumei-agent | Implemented (5 scale シナリオ / 172 atoms / 依存深さ 5–7、1014 clause の ablation で `atom_local_closure_ratio` 0.4945、合成の破れ 277 本を `call_site_precondition` 86 / `counterexample_replay_mismatch` 86 / `effect_state_obligation` 58 / `neighbor_ensures_strengthening` 47 に分類。全 172 atom の certificate が `verify-cert --strict` 5/5 通過、`std/` trusted atom は 0 のまま、アプリ trusted atom 0 / FFI 境界 0 / Lean escalation 0、Z3 solver 9.77s、`budget_policy_fingerprint: sha256:scale-default`。報告は既存の `verification_status` / `verification_violations` / `next_steps` のみ) |
 | ✅ | Priority 18 / P22: Session Types（分散プロトコル検証） | mumei + mumei-agent | Implemented (測定 2026-08-29。`cargo test --test test_session_types` 4/4 / `cargo test -p mumei-core session_types` 20/20 passed。`duality_mismatch` / `unreachable_receive` / `deadlock_no_progress` を有界抽象解釈のみで判定し、打ち切りは `session_analysis_skips[]` で可視化。agent 側は `agent_artifact_mapping[]` の宣言どおり `session_protocol_violations[]` を `missing_constraints[]`（`spec_vs_code`）として消費し、新規 verdict 語彙は追加しない) |
 | ✅ | Priority 19 / P23: Proof-Aware Observability（実行時モニタリング） | mumei + mumei-agent | Implemented (測定 2026-08-29。`cargo test --test test_runtime_monitor` 6/6 / `cargo test -p mumei-core trust_boundary` 6/6 / `cargo test -p mumei-emit-monitor` 6/6 passed。信頼境界のみ計装し証明済み純粋 atom は成果物 0、ゼロコスト検証 `cargo tree --edges no-dev` に opentelemetry は現れない。運用フローは mumei-agent `docs/OBSERVABILITY.md` § (f)) |
+| ✅ | Priority 20 / P24: Remote Package Registry（証明書付きパッケージのネットワーク配布） | mumei | Implemented (測定 2026-08-29。`cargo test --test test_remote_registry` 10/10 / `cargo test -p mumei-core registry` 7/7 passed。`mumei.toml` の `[registry] url` か `MUMEI_REGISTRY_URL` を設定したときだけ name 依存が HTTP レジストリへフォールバックし、`.proof-cert.json` のハッシュ・パッケージ帰属を既存 P5-B の検証で確認してから `~/.mumei/packages/<name>/<version>/` にキャッシュして既存のローカル解決経路へ合流する。`--strict-imports` は証明書なし / ハッシュ不一致 / パース不能をハードエラーにし、新規 verdict 語彙は追加しない。未設定時は従来どおりローカル / path / git のみ) |
 | ⏸️ | SI-4: no_std Ecosystem | mumei | Deferred |
 
 ## vStd: Verified Standard Library Expansion
@@ -1841,6 +1842,36 @@ graph LR
 - `mumei-core/src/trust_boundary.rs` / `mumei-emit-monitor/src/lib.rs` / `mumei-core/src/emitter.rs` / `src/codegen.rs`
 - `tests/fixtures/runtime_monitor/` / `tests/test_runtime_monitor.rs`
 - `src/telemetry.rs` / `mumei-agent` `docs/OBSERVABILITY.md`
+
+---
+
+## Priority 20: Remote Package Registry（証明書付きパッケージのネットワーク配布）— ✅ Implemented
+
+**Repository**: `mumei-lang/mumei`（`docs/ROADMAP.md` の P24 に対応）
+
+**既存の土台**:
+- ローカルレジストリ `~/.mumei/registry.json`（`mumei-core/src/registry.rs` の `resolve()` / `register_with_cert()`、`VersionEntry.cert_path` / `cert_hash`）
+- P5-B / P5-C の証明書付きインポート（`resolver/imports.rs` の `verify_import_certificate`、`--strict-imports`）
+- `docs/TOOLCHAIN.md` の Deferred: Tooling「Remote package registry (central server for `mumei add <name>`)」
+
+**目的**: 証明書付きパッケージを実ネットワークで配布し、取得時に既存の証明書検証を通してからローカルキャッシュへ受け入れる。opt-in であり、未設定のプロジェクトは従来どおり完全にローカル / path / git のみで動作する。
+
+**MVP の範囲**:
+- `mumei.toml` の `[registry] url` / `timeout_ms` と環境変数 `MUMEI_REGISTRY_URL`（環境変数が優先）。
+- name 依存の解決でローカル `registry.json` に無い場合のみ HTTP レジストリへフォールバックし、`index.json` → パッケージファイル → `.proof-cert.json` を取得する。
+- 証明書のハッシュ（既存 SHA-256）とパッケージ帰属を確認してから `~/.mumei/packages/<name>/<version>/` にキャッシュし、`register_with_cert()` でローカル登録して既存の解決経路に合流する。
+- `--strict-imports` 時は証明書なし / ハッシュ不一致 / パース不能をハードエラーにする。新規 verdict 語彙は追加しない。
+
+**実装エビデンス**（測定 2026-08-29）:
+- ✅ **リモート解決**: `cargo test --test test_remote_registry` 10/10 passed（ローカル HTTP fixture サーバ）— 証明書付き取得とキャッシュ、`^` / `~` / 完全一致 / `*` のバージョン選択がローカル解決と一致、未知パッケージ / 未知バージョンは「解決なし」。
+- ✅ **証明書検証**: ハッシュ不一致・証明書欠如が `--strict-imports` でハードエラー、非 strict では検証できない証明書を破棄して provenance に残さない。他パッケージ名を宣言する証明書、および `index.json` 経由のパストラバーサルを拒否。
+- ✅ **`mumei add <name>`**: リモートから取得して `~/.mumei/packages/<name>/<version>/` にキャッシュし、`registry.json` に `cert_path` / `cert_hash` を登録、`mumei.toml` に解決済みバージョンを書き戻すところまで CLI テストで固定。
+- ✅ **回帰なし**: `cargo test -p mumei-core registry` 7/7 passed（`registry.json` スキーマの後方互換とバージョン選択）。`cargo tree --edges no-dev` の出力に opentelemetry は現れない。
+
+**関連ファイル**:
+- `mumei-core/src/registry/remote.rs` / `mumei-core/src/registry.rs` / `mumei-core/src/manifest.rs`
+- `mumei-core/src/resolver/dependencies.rs` / `src/commands/add.rs`
+- `tests/test_remote_registry.rs` / `docs/TOOLCHAIN.md`
 
 ---
 

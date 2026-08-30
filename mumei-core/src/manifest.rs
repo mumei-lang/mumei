@@ -8,6 +8,7 @@
 //! - `[build]`: ビルド設定（verify, max_unroll）
 //! - `[proof]`: 検証設定（cache, timeout_ms, cross_spec_verify）
 //! - `[effects]`: エフェクト境界設定（allowed, denied）
+//! - `[registry]`: リモートパッケージレジストリ設定（url, timeout_ms）
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs;
@@ -27,6 +28,8 @@ pub struct Manifest {
     pub proof: ProofConfig,
     #[serde(default)]
     pub effects: EffectsConfig,
+    #[serde(default)]
+    pub registry: RegistryConfig,
 }
 /// [package] セクション
 #[derive(Debug, Clone, Deserialize)]
@@ -111,6 +114,44 @@ pub struct EffectsConfig {
     #[serde(default)]
     pub denied: Vec<String>,
 }
+/// [registry] セクション — P24 リモートパッケージレジストリ
+///
+/// `url` が未設定（かつ環境変数 `MUMEI_REGISTRY_URL` も未設定）の場合、
+/// name 依存の解決はローカル `~/.mumei/registry.json` のみで行われる。
+#[derive(Debug, Clone, Deserialize)]
+pub struct RegistryConfig {
+    /// リモートレジストリのベース URL（例: `https://registry.mumei-lang.org`）
+    #[serde(default)]
+    pub url: Option<String>,
+    /// HTTP リクエストのタイムアウト（ミリ秒、デフォルト: 30000）
+    #[serde(default = "default_registry_timeout")]
+    pub timeout_ms: u64,
+}
+impl Default for RegistryConfig {
+    fn default() -> Self {
+        Self {
+            url: None,
+            timeout_ms: default_registry_timeout(),
+        }
+    }
+}
+impl RegistryConfig {
+    /// 実効レジストリ URL。環境変数 `MUMEI_REGISTRY_URL` が非空ならそれを優先する。
+    /// どちらも未設定なら `None`（リモート解決は行わない = opt-in）。
+    pub fn effective_url(&self) -> Option<String> {
+        if let Ok(env_url) = std::env::var("MUMEI_REGISTRY_URL") {
+            let trimmed = env_url.trim().to_string();
+            if !trimmed.is_empty() {
+                return Some(trimmed);
+            }
+        }
+        self.url
+            .as_deref()
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+            .map(str::to_string)
+    }
+}
 // =============================================================================
 // デフォルト値ヘルパー
 // =============================================================================
@@ -122,6 +163,9 @@ fn default_max_unroll() -> usize {
 }
 fn default_timeout() -> u64 {
     10000
+}
+fn default_registry_timeout() -> u64 {
+    30000
 }
 // =============================================================================
 // マニフェスト読み込み
