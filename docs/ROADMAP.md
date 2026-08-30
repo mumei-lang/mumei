@@ -1765,8 +1765,8 @@ E2E テストで判明した検証パスの穴を解消した:
 - `verify --json` の `code: "escalation_candidate"` 診断（`escalation_reason` / `z3_unknown`
   タグ付き）を回帰テストで固定。
 
-**残課題**: 明示的な同期プリミティブで保護された共有可変状態の干渉推論、および
-task body 内の配列要素キャプチャ（codegen 側 follow-up、`mumei-emit-llvm/src/codegen/task_runtime.rs`）。
+**残課題**: 明示的な同期プリミティブで保護された共有可変状態の干渉推論。
+task body 内の配列要素キャプチャは P25 で解消済み。
 
 ---
 
@@ -2071,6 +2071,63 @@ MUMEI_REGISTRY_URL=https://registry.example.com mumei add my_lib
 - `cargo test --test test_remote_registry`（14 件）: 証明書付き取得とキャッシュ、`^` / `~` / 完全一致 / `*` のバージョン選択がローカル解決と一致すること、未知パッケージ / 未知バージョンがエラーではなく「解決なし」になること、ハッシュ不一致と証明書欠如が `--strict-imports` でハードエラーになり非 strict では provenance を残さないこと、他パッケージ名の証明書が拒否されること、`index.json` 経由のパストラバーサルが拒否されること、`mumei add <name>` が実際に HTTP から取得してキャッシュ・登録・`mumei.toml` 更新まで行うこと、帰属を宣言しない証明書が `--strict-imports` で拒否されること、証明書が消えた再取得でキャッシュ済み証明書も消えること、失敗した取得が部分的なキャッシュを残さないこと、古いバージョンの追加で `latest` が後退しないこと。
 - `cargo test -p mumei-core registry`（12 件）: `select_version` の semver 意味論と `registry.json` スキーマ（`cert_path` / `cert_hash` の後方互換）、レジストリ URL 未設定時にリモート解決が起きないこと。
 - **ゼロコスト検証（P15 / P23 と同一）**: `cargo tree --edges no-dev | grep -i opentelemetry` が空であること。
+
+---
+
+## P25: concurrency codegen follow-up（polymorphic `chan<T>` payload / task body の配列要素キャプチャ） — ✅ Implemented
+
+**ステータス: ✅ Implemented**（測定 2026-08-30、`cargo test --test test_concurrency` 25/25 passed、`cargo test --test test_run` 8/8 passed、`cargo test -p mumei-core lowering` 通過、`cargo tree --edges no-dev | grep -i opentelemetry` は空 = 既定ビルドに OTel 依存なし）— `docs/CONCURRENCY.md` Implementation Status 表に残っていた codegen follow-up 2 件（polymorphic `chan<T>` payload marshalling、task body 内の配列要素ストレージ capture）を解消する。構文 / 型 / Z3 検証 / 基本 codegen は Plan 8 / Plan 21 のままで、runtime（`runtime/mumei_runtime.c`）は無変更。
+
+### 構成
+
+- **`chan<T>` payload marshalling**（`mumei-emit-llvm/src/codegen/expr_emit.rs`）: `send` は payload を既存の `bitpreserve_cast` で runtime の `int64_t` スロットへビット保存変換する（`f64` は `bitcast`、`Str` / ポインタ backed 値は `ptrtoint`）。従来は非 int 値を `i64 0` に潰していた。`recv` は宣言型 `T` へ復元する（`bitcast` / `inttoptr`）。payload の型が宣言型 `T` と違う場合（`send(ch, 3)` on `chan<f64>`）は、ビット保存の前に演算子と同じ規則で `T` へ数値変換する（ビットパターンの誤解釈を防ぐ）。
+- **チャネル要素型の伝播**（`mumei-core/src/lowering.rs`、`codegen/driver.rs`、`codegen/stmt_emit.rs`、`mumei-core/src/mir.rs`）: `chan_payload_type()` が `chan<T>` から `T` を取り出し、チャネル引数と `chan` ハンドルの別名束縛について `var_types` に記録する。`recv(ch)` の型推論も payload 型を返すため、`-> f64` / `-> Str` を返す atom のシグネチャが正しく決まる。
+- **配列要素ストレージ capture**（`mumei-emit-llvm/src/codegen/task_runtime.rs`）: `emit_task_spawn_only` が空の array map を渡していた箇所を、親の `array_ptrs` から free variable に該当する配列の fat pointer `(len, data)` を pthread args struct へ格納 → wrapper で load して task body に渡す形に拡張した。task wrapper は親の return 前に join されるため、capture したポインタは task 実行中つねに有効。
+- **struct パラメータのフィールドアクセス**（`mumei-emit-llvm/src/codegen/lowering.rs`、`codegen/driver.rs`）: `resolve_param_type()` がユーザー定義 struct を i64 に潰していたため、`atom get_x(p: Point) -> i64 { p.x }` が `Field 'x' not found on 'p'` で codegen 失敗していた。struct は `StructInit` と同じ宣言順レイアウトの LLVM struct 型で受け取り、fat pointer 配列パラメータの分解は宣言型が配列のときだけ行う。task body から struct capture のフィールドを読む経路もこれで通る。同じ理由で `resolve_return_type()` も struct を i64 に潰しており、`-> Point` の atom が `ret { i64, i64 }` を `i64` 関数から返す不正な IR になっていたのでこれも揃え、呼び出し側で `let p = make_point(); p.x` が解決できるよう `infer_struct_type_name()` に Call の宣言戻り型を追加した。
+- **文字列リテラルのネイティブリンク**（`mumei-emit-llvm/src/codegen/driver.rs` の `compile_llvm_ir_to_object`）: `RelocMode::Default` で出力していたため、`cc` が既定で PIE を作る環境では `.rodata.str1.1` への `R_X86_64_32` 絶対再配置がリンクエラーになり、文字列リテラルを含むプログラムは `mumei run` できなかった。オブジェクトを PIC で出力する。
+- **runtime 無変更**: チャネルスロットは `int64_t value` のまま、`__mumei_chan_send` / `__mumei_chan_recv` のシグネチャも i64 固定を維持する（型情報は front-end 側に閉じ込める）。
+
+### 対象ファイル
+
+| ファイル | 役割 |
+|---|---|
+| `mumei-emit-llvm/src/codegen/expr_emit.rs` | `ChanSend` / `ChanRecv` の payload ビット保存変換と復元 |
+| `mumei-emit-llvm/src/codegen/task_runtime.rs` | 配列 fat pointer の capture marshalling |
+| `mumei-emit-llvm/src/codegen/driver.rs` / `stmt_emit.rs` | チャネル引数 / 別名束縛の payload 型記録、パラメータ束縛、オブジェクトの PIC 出力 |
+| `mumei-core/src/lowering.rs` | `chan_payload_type()`（`chan<T>` → `T`） |
+| `mumei-core/src/mir.rs` | `recv(ch)` の戻り型推論 |
+| `mumei-emit-llvm/src/codegen/lowering.rs` | struct パラメータ / 戻り値の LLVM 型（`struct_llvm_type()`） |
+| `tests/test_concurrency.rs` | P25 回帰テスト（6 件追加） |
+| `tests/test_run.rs` | struct パラメータ / struct 戻り値 / 文字列リテラルの PIE リンク E2E |
+| `tests/test_concurrency_runtime.mm` | `chan<f64>` / `chan<Str>` / 配列 capture の codegen fixture |
+
+### 使い方
+
+```mumei
+trusted atom relay(ch: chan<f64>, x: f64) -> f64
+requires: true;
+ensures: true;
+body: {
+    send(ch, x);   // bitcast double → i64 スロット
+    recv(ch)       // i64 スロット → bitcast double
+};
+
+trusted atom sum_head(arr: [i64]) -> i64
+requires: true;
+ensures: true;
+body: {
+    task { arr[0] + arr[1] }   // 親の要素ストレージを capture
+};
+```
+
+### CI 回帰ゲート
+
+- `cargo test --test test_run`（8 件、うち P25 で 3 件追加）: struct パラメータのフィールドを読む atom が `mumei run` で期待どおりの終了コードを返すこと、struct を返す atom の結果から呼び出し側がフィールドを読めること、文字列リテラルを含むプログラムが PIE としてリンクできること。
+- `cargo test --test test_concurrency`（24 件、うち P25 で 6 件追加）: `chan<f64>` の send/recv が実行時に payload を保持すること（`mumei run` の終了コードで確認）、`chan<f64>` へ i64 payload を send しても同じ数値として届くこと、`chan<f64>` の `.ll` に `bitcast` 対が現れ `i64 0` 定数に潰れていないこと、`chan<Str>` の `.ll` に `ptrtoint` / `inttoptr` 対が現れ atom が `ptr` を返すこと、task wrapper が capture した配列の `(len, data)` を args struct 経由で load して親の要素ストレージを GEP すること。既存の struct capture / `task_group:all` / `:any` / Phase 1h-2 所有権検証は無変更で通過する。
+- `cargo test -p mumei-core lowering`: `chan_payload_type()` の解析（`chan<f64>` / `chan <Str>` / `chan<[i64]>` / 不正形）。
+- **ゼロコスト検証（P15 / P23 / P24 と同一）**: `cargo tree --edges no-dev | grep -i opentelemetry` が空であること。
+
+**残課題**: 値渡し aggregate（struct を値で送る場合）はビット保存できる i64 表現を持たないため送信できず、ゼロを黙って搬送する代わりに codegen 診断で拒否する。task body の結果が i64 以外の場合の join 経路も既存の i64 coerce のまま（`docs/CONCURRENCY.md` に明記）。
 
 ---
 

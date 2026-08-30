@@ -1,3 +1,4 @@
+use crate::codegen::expr_emit::chan_payload_key;
 use crate::codegen::lowering::{declare_extern_functions, resolve_param_type, resolve_return_type};
 use crate::codegen::stmt_emit::compile_hir_stmt;
 use inkwell::context::Context;
@@ -61,9 +62,21 @@ pub fn compile_atom_into_module<'ctx>(
             if module_env.get_struct(&base).is_some() {
                 var_types.insert(param.name.clone(), base);
             }
+            // P25: remember a channel parameter's declared payload type so
+            // `recv` can restore it from the runtime's i64 slot.
+            if let Some(payload) = mumei_core::lowering::chan_payload_type(type_name) {
+                var_types.insert(chan_payload_key(&param.name), payload);
+            }
         }
-        // Fat Pointer 配列パラメータの場合、len と data_ptr を分解して保持
-        if val.is_struct_value() {
+        // Fat Pointer 配列パラメータの場合、len と data_ptr を分解して保持。
+        // ユーザー定義 struct も LLVM では struct 値なので、宣言型で区別する
+        // （struct はそのまま束縛してフィールドアクセスを可能にする）。
+        let declares_struct = param
+            .type_name
+            .as_deref()
+            .map(|name| module_env.resolve_base_type(name))
+            .is_some_and(|base| module_env.get_struct(&base).is_some());
+        if val.is_struct_value() && !declares_struct {
             let struct_val = val.into_struct_value();
             let len_val =
                 llvm!(builder.build_extract_value(struct_val, 0, &format!("{}_len", param.name)));
@@ -140,7 +153,10 @@ pub fn compile_llvm_ir_to_object(ir_path: &Path, object_path: &Path) -> MumeiRes
             "generic",
             "",
             OptimizationLevel::Default,
-            RelocMode::Default,
+            // The linker driver (`cc` / `gcc`) produces a PIE by default, so an
+            // absolute relocation — e.g. `R_X86_64_32` against a string literal
+            // in `.rodata.str1.1` — fails to link. Emit PIC objects.
+            RelocMode::PIC,
             CodeModel::Default,
         )
         .ok_or_else(|| MumeiError::codegen("Failed to create LLVM target machine".to_string()))?;

@@ -12,7 +12,7 @@ use crate::codegen::task_runtime::{
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Module;
-use inkwell::types::{BasicMetadataTypeEnum, BasicType};
+use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
 use inkwell::values::{AnyValue, BasicMetadataValueEnum, BasicValueEnum, FunctionValue};
 use inkwell::AddressSpace;
 use inkwell::{FloatPredicate, IntPredicate};
@@ -20,6 +20,47 @@ use mumei_core::hir::{HirExpr, HirStmt};
 use mumei_core::parser::{JoinSemantics, Op};
 use mumei_core::verification::{ModuleEnv, MumeiError, MumeiResult};
 use std::collections::HashMap;
+
+/// P25 — key under which a `chan<T>` binding records its declared payload
+/// type inside `var_types`. `<` can never appear in a Mumei identifier, so
+/// these entries never collide with a variable's struct type entry.
+pub(crate) fn chan_payload_key(var: &str) -> String {
+    format!("<chan>{}", var)
+}
+
+/// Numerically convert `val` to a channel's declared payload type before it is
+/// bit-preserved into the runtime's i64 slot, so `send(ch, 1)` on a
+/// `chan<f64>` transports `1.0` rather than the integer's bit pattern (which
+/// `recv` would then reinterpret as a double). Int / float promotion follows
+/// the same rule as mixed arithmetic; every other type pairing is left to
+/// `bitpreserve_cast`.
+fn coerce_to_chan_payload<'a>(
+    builder: &Builder<'a>,
+    val: BasicValueEnum<'a>,
+    payload_ty: BasicTypeEnum<'a>,
+) -> MumeiResult<BasicValueEnum<'a>> {
+    match (payload_ty, val) {
+        (BasicTypeEnum::FloatType(ty), BasicValueEnum::IntValue(v)) => {
+            Ok(llvm!(builder.build_signed_int_to_float(v, ty, "payload_int_to_float")).into())
+        }
+        (BasicTypeEnum::IntType(ty), BasicValueEnum::FloatValue(v)) => {
+            Ok(llvm!(builder.build_float_to_signed_int(v, ty, "payload_float_to_int")).into())
+        }
+        _ => Ok(val),
+    }
+}
+
+/// Declared payload type of the channel `expr` denotes, when the channel is a
+/// binding introduced with a `chan<T>` type.
+pub(crate) fn chan_payload_type_name(
+    expr: &HirExpr,
+    var_types: &HashMap<String, String>,
+) -> Option<String> {
+    match expr {
+        HirExpr::Variable(name) => var_types.get(&chan_payload_key(name)).cloned(),
+        _ => None,
+    }
+}
 
 pub(crate) fn infer_struct_type_name(
     expr: &HirExpr,
@@ -30,6 +71,15 @@ pub(crate) fn infer_struct_type_name(
         HirExpr::Variable(name) => var_types.get(name).cloned(),
         HirExpr::StructInit { type_name, .. } => {
             let base = module_env.resolve_base_type(type_name);
+            if module_env.get_struct(&base).is_some() {
+                Some(base)
+            } else {
+                None
+            }
+        }
+        HirExpr::Call { name, .. } => {
+            let ret_type = module_env.get_atom(name)?.return_type.as_ref()?;
+            let base = module_env.resolve_base_type(ret_type);
             if module_env.get_struct(&base).is_some() {
                 Some(base)
             } else {
@@ -689,7 +739,7 @@ pub(crate) fn compile_hir_expr<'a>(
         // pthread, join it, and return the joined i64 result. See
         // `compile_task_spawn` for layout / capture details.
         HirExpr::Task { body, .. } => compile_task_spawn(
-            context, builder, module, function, body, variables, var_types, module_env,
+            context, builder, module, function, body, variables, var_types, array_ptrs, module_env,
         ),
         HirExpr::TaskGroup {
             children,
@@ -741,7 +791,7 @@ pub(crate) fn compile_hir_expr<'a>(
                 };
                 pending.push(emit_task_spawn_only(
                     context, builder, module, function, task_body, variables, var_types,
-                    module_env, any_ctx,
+                    array_ptrs, module_env, any_ctx,
                 )?);
             }
             if let Some(any_ctx) = any_ctx {
@@ -976,11 +1026,27 @@ pub(crate) fn compile_hir_expr<'a>(
             } else {
                 context.i64_type().const_int(0, false)
             };
-            let val_i64 = if val.is_int_value() {
-                val.into_int_value()
-            } else {
-                context.i64_type().const_int(0, false)
+            // P25 — marshal the payload into the runtime's i64 slot without
+            // losing bits: f64 is bitcast, Str / struct pointers go through
+            // `ptrtoint`. Aggregates passed by value have no bit-preserving
+            // i64 encoding, so they are rejected rather than transported as a
+            // zero placeholder that reads back as plausible data.
+            let payload = match chan_payload_type_name(channel, var_types)
+                .map(|name| resolve_param_type(context, Some(name.as_str()), module_env))
+            {
+                Some(payload_ty) => coerce_to_chan_payload(builder, val, payload_ty)?,
+                None => val,
             };
+            let val_i64 = bitpreserve_cast(builder, payload, context.i64_type().into())
+                .map_err(|_| {
+                    mumei_core::verification::MumeiError::codegen(format!(
+                        "channel payload of type {} cannot be sent: the runtime carries payloads \
+                         in a single i64 slot, which has no bit-preserving encoding for \
+                         by-value aggregates",
+                        payload.get_type()
+                    ))
+                })?
+                .into_int_value();
             let send_fn = module.get_function("__mumei_chan_send").unwrap_or_else(|| {
                 let i64_type = context.i64_type();
                 let fn_type = context
@@ -1024,10 +1090,22 @@ pub(crate) fn compile_hir_expr<'a>(
                 )
             });
             let call = llvm!(builder.build_call(recv_fn, &[chan_i64.into()], "chan_recv_call"));
-            Ok(call
+            let raw = call
                 .try_as_basic_value()
                 .left()
-                .unwrap_or(context.i64_type().const_int(0, false).into()))
+                .unwrap_or(context.i64_type().const_int(0, false).into());
+            // P25 — restore the payload's declared type from the runtime's i64
+            // slot (`chan<f64>` bitcasts back to double, `chan<Str>` goes
+            // through `inttoptr`). Channels whose payload type is unknown, or
+            // whose payload has no bit-preserving i64 encoding, keep the raw
+            // i64 the runtime returned.
+            let payload_ty = chan_payload_type_name(channel, var_types)
+                .map(|name| resolve_param_type(context, Some(name.as_str()), module_env))
+                .filter(|ty| *ty != context.i64_type().into());
+            match payload_ty {
+                Some(ty) => Ok(bitpreserve_cast(builder, raw, ty).unwrap_or(raw)),
+                None => Ok(raw),
+            }
         }
 
         // Plan 14: Enum variant construction — build tagged union struct

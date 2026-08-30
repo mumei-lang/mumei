@@ -401,6 +401,13 @@ impl LowerCtx {
                     .and_then(|e| self.infer_hir_ty(e))
                     .or_else(|| tail_expr(else_branch).and_then(|e| self.infer_hir_ty(e)))
             }
+            // P25: `recv(ch)` yields the channel's declared payload type.
+            HirExpr::ChanRecv { channel } => match channel.as_ref() {
+                HirExpr::Variable(name) => self
+                    .lookup_var_ty(name)
+                    .and_then(|ty| crate::lowering::chan_payload_type(&ty)),
+                _ => None,
+            },
             _ => None,
         }
     }

@@ -738,3 +738,272 @@ body: x;
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// P25 — polymorphic `chan<T>` payload marshalling and array element storage
+// capture in task bodies.
+//
+// The runtime channel slot stays `int64_t`, so a non-i64 payload has to be
+// bit-preserved into it by codegen. Before P25, `send` collapsed every
+// non-integer value to `i64 0` and `recv` always produced a raw i64, and a
+// task body was compiled with an empty array map so `arr[i]` inside a task had
+// no backing storage.
+
+/// Emit LLVM IR for `source` and return the module of atom `atom`.
+fn emit_atom_ir(name: &str, source: &str, atom: &str) -> String {
+    let bin = env!("CARGO_BIN_EXE_mumei");
+    let fixture = write_fixture(name, source);
+    let dir = fixture.parent().unwrap().to_path_buf();
+    let output = Command::new(bin)
+        .arg("build")
+        .arg(&fixture)
+        .arg("--emit")
+        .arg("llvm-ir")
+        .current_dir(&dir)
+        .output()
+        .unwrap_or_else(|err| panic!("failed to build fixture {name}: {err}"));
+    assert!(
+        output.status.success(),
+        "build of {name} failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let ir = std::fs::read_to_string(dir.join(format!("katana_{atom}.ll")))
+        .unwrap_or_else(|err| panic!("no emitted IR for atom {atom}: {err}"));
+    std::fs::remove_dir_all(&dir).expect("remove concurrency fixture dir");
+    ir
+}
+
+#[test]
+fn chan_f64_payload_round_trips_through_the_runtime_i64_slot() {
+    let bin = env!("CARGO_BIN_EXE_mumei");
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let fixture = write_fixture(
+        "chan_f64_round_trip",
+        r#"
+trusted atom relay(ch: chan<f64>, x: f64) -> f64
+requires: true;
+ensures: true;
+body: {
+    send(ch, x);
+    recv(ch)
+};
+
+trusted atom main()
+requires: true;
+ensures: true;
+body: {
+    let got = relay(0, 2.5);
+    if got == 2.5 { 7 } else { 0 }
+};
+"#,
+    );
+    let output = Command::new(bin)
+        .arg("run")
+        .arg(&fixture)
+        .current_dir(manifest_dir)
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run chan<f64> fixture: {err}"));
+    std::fs::remove_dir_all(fixture.parent().unwrap()).expect("remove concurrency fixture dir");
+
+    assert_eq!(
+        output.status.code(),
+        Some(7),
+        "an f64 payload must survive the channel's i64 slot\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn chan_f64_send_and_recv_bitcast_the_payload() {
+    let ir = emit_atom_ir(
+        "chan_f64_ir",
+        r#"
+trusted atom relay(ch: chan<f64>, x: f64) -> f64
+requires: true;
+ensures: true;
+body: {
+    send(ch, x);
+    recv(ch)
+};
+"#,
+        "relay",
+    );
+    assert!(
+        ir.contains("bitcast double") && ir.contains("void @__mumei_chan_send"),
+        "`send` must bitcast the f64 payload into the i64 slot\n{ir}"
+    );
+    assert!(
+        ir.contains("call i64 @__mumei_chan_recv") && ir.contains("bitcast i64"),
+        "`recv` must bitcast the i64 slot back to double\n{ir}"
+    );
+    assert!(
+        !ir.contains("@__mumei_chan_send(i64 %0, i64 0)"),
+        "the payload must not be collapsed to a zero constant\n{ir}"
+    );
+}
+
+#[test]
+fn chan_str_send_and_recv_marshal_the_payload_pointer() {
+    let ir = emit_atom_ir(
+        "chan_str_ir",
+        r#"
+trusted atom relay(ch: chan<Str>, s: Str) -> Str
+requires: true;
+ensures: true;
+body: {
+    send(ch, s);
+    recv(ch)
+};
+"#,
+        "relay",
+    );
+    assert!(
+        ir.contains("ptrtoint ptr") && ir.contains("void @__mumei_chan_send"),
+        "`send` must carry a Str payload through `ptrtoint`\n{ir}"
+    );
+    assert!(
+        ir.contains("call i64 @__mumei_chan_recv") && ir.contains("inttoptr i64"),
+        "`recv` must restore a Str payload through `inttoptr`\n{ir}"
+    );
+    assert!(
+        ir.contains("define ptr @relay"),
+        "`recv` on a `chan<Str>` must be typed as the declared payload\n{ir}"
+    );
+}
+
+#[test]
+fn task_body_reads_captured_parent_array_element_storage() {
+    let ir = emit_atom_ir(
+        "task_array_capture_ir",
+        r#"
+trusted atom sum_head(arr: [i64]) -> i64
+requires: true;
+ensures: true;
+body: {
+    task { arr[0] + arr[1] }
+};
+"#,
+        "sum_head",
+    );
+    // Parent stores both halves of the fat pointer into the pthread args struct.
+    assert!(
+        ir.contains("task_arg_arr_len_ptr") && ir.contains("task_arg_arr_data_ptr"),
+        "the array's (len, data) pair must be marshalled into the task args struct\n{ir}"
+    );
+    // The wrapper reloads them and indexes the parent's element storage.
+    assert!(
+        ir.contains("task_capture_arr_len") && ir.contains("task_capture_arr_data"),
+        "the task wrapper must reload the captured array fat pointer\n{ir}"
+    );
+    assert!(
+        ir.contains("getelementptr i64, ptr %task_capture_arr_data"),
+        "the task body must index the captured parent element storage\n{ir}"
+    );
+}
+
+#[test]
+fn task_body_reads_a_field_of_a_captured_struct_parameter() {
+    let ir = emit_atom_ir(
+        "task_struct_field_capture_ir",
+        r#"
+struct Point { x: i64, y: i64 }
+
+trusted atom read_x(p: Point) -> i64
+requires: true;
+ensures: true;
+body: {
+    task { p.x }
+};
+"#,
+        "read_x",
+    );
+    assert!(
+        ir.contains("define i64 @read_x({ i64, i64 }"),
+        "a struct parameter must keep its struct layout instead of collapsing to i64\n{ir}"
+    );
+    assert!(
+        ir.contains("extractvalue { i64, i64 }"),
+        "the task body must extract the captured struct's field\n{ir}"
+    );
+}
+
+#[test]
+fn chan_f64_send_converts_an_integer_payload_to_the_declared_type() {
+    // A payload whose type differs from the channel's declared `T` must be
+    // converted to `T` before it is bit-preserved into the runtime slot —
+    // otherwise `recv` reinterprets the integer's bit pattern as a double.
+    let bin = env!("CARGO_BIN_EXE_mumei");
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let fixture = write_fixture(
+        "chan_f64_int_payload",
+        r#"
+trusted atom relay(ch: chan<f64>, x: i64) -> f64
+requires: true;
+ensures: true;
+body: {
+    send(ch, x);
+    recv(ch)
+};
+
+trusted atom main()
+requires: true;
+ensures: true;
+body: {
+    let got = relay(0, 3);
+    if got == 3.0 { 7 } else { 0 }
+};
+"#,
+    );
+    let output = Command::new(bin)
+        .arg("run")
+        .arg(&fixture)
+        .current_dir(manifest_dir)
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run chan<f64> int-payload fixture: {err}"));
+    std::fs::remove_dir_all(fixture.parent().unwrap()).expect("remove concurrency fixture dir");
+
+    assert_eq!(
+        output.status.code(),
+        Some(7),
+        "an integer payload on a `chan<f64>` must arrive as the same number, not as reinterpreted bits\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn chan_send_rejects_a_by_value_aggregate_payload() {
+    let bin = env!("CARGO_BIN_EXE_mumei");
+    let fixture = write_fixture(
+        "chan_aggregate_payload",
+        r#"
+struct Point { x: i64, y: i64 }
+
+trusted atom relay(ch: chan<Point>, p: Point) -> i64
+requires: true;
+ensures: true;
+body: {
+    send(ch, p);
+    0
+};
+"#,
+    );
+    let dir = fixture.parent().unwrap().to_path_buf();
+    let output = Command::new(bin)
+        .arg("build")
+        .arg(&fixture)
+        .arg("--emit")
+        .arg("llvm-ir")
+        .current_dir(&dir)
+        .output()
+        .expect("failed to build the aggregate payload fixture");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("cannot be sent") || stderr.contains("cannot be sent"),
+        "an aggregate payload must be reported rather than silently sent as zero\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    std::fs::remove_dir_all(&dir).expect("remove concurrency fixture dir");
+}
