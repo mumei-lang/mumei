@@ -1686,7 +1686,7 @@ graph LR
 
 ---
 
-## Priority 15: Capability Model 拡張の評価と段階的導入 — ✅ 調査完了（実装可否: 肯定的、最小サブセット限定）
+## Priority 15: Capability Model 拡張の評価と段階的導入 — ✅ 調査完了 / 🚧 Stage 1 実装済み（Stage 2 以降はタスク 3 待ち）
 
 **Repository**: `mumei-lang/mumei`（設計調査の本体） / `mumei-lang/mumei-agent`（生成側の追従は調査結果が出てから）
 
@@ -1725,8 +1725,17 @@ data structure に載せない、という最小サブセットに限れば実�
   LLVM 側はパラメータを 1 対 1 で具現化するため、capability パラメータと実引数を除去する ABI 消去パスが Stage 2 に入る。
 - タスク 4（段階導入計画）は Stage 1（capability 型宣言）→ Stage 2（`grant`）→ Stage 3（narrowing）→
   Stage 4（move ベース revocation）として `docs/CAPABILITY_MODEL_STUDY.md` §6 に記載した。
-- タスク 3（AI エージェント側の需要検証）は未着手。本調査の肯定判定は「技術的に着手可能」であり、
-  実装フェーズを開く条件（タスク 1、3 の両方が肯定）は未充足のままで、Stage 1 着手の前にタスク 3 を実施する。
+- タスク 3（AI エージェント側の需要検証）は未着手。本調査の肯定判定は「技術的に着手可能」である。
+
+**Stage 1 実装**（2026-08-30、`mumei-lang/mumei` `docs/ROADMAP.md` P28）:
+Stage 1（capability 型宣言 + capability 型パラメータ、`grant` なし）は `grant` を含まず
+完全に非破壊なため、タスク 3 の結果に依存せず実装済み。`type X = capability E(..) where C;` を
+コンテキスト依存キーワード（study §1.4 案 1）で導入し、capability パラメータを
+`TypeRef.effect_set` 付きパラメータとして既存の effect containment 規則 3（`carries_effects()` ゲート 3 箇所）に
+乗せた。capability 版と等価な effect パラメータ版が同一 verdict を出すことをテストで固め、
+`std/` + `examples/` + `tests/` の既存 `.mm` 132 ファイルで `develop` と verdict が完全一致（回帰ゼロ）。
+**Stage 2（`grant`）以降は引き続きタスク 3 の肯定を前提とする**ため、Stage 1 では `grant` 関連を一切実装していない。
+未着手の制限: import 越しの capability 型パラメータ（resolver への搭載は Stage 2 以降）。
 
 `docs/CAPABILITY_SECURITY.md` §4 の Recommendation（Option A 継続）は撤回しない。Option A を既定パスとしたうえで、
 capability model は opt-in 拡張として上積みされる位置づけとなる。

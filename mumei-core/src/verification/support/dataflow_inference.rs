@@ -425,10 +425,10 @@ pub(crate) fn infer_effects(atom: &Atom, body_stmt: &Stmt, module_env: &ModuleEn
         }
     }
 
-    // atom_ref パラメータの effect_set からもエフェクトを推論
+    // atom_ref / capability パラメータの effect_set からもエフェクトを推論
     for param in &atom.params {
         if let Some(ref type_ref) = param.type_ref {
-            if type_ref.is_fn_type() {
+            if type_ref.carries_effects() {
                 if let Some(ref effect_set) = type_ref.effect_set {
                     for eff_name in effect_set {
                         if seen_names.insert(eff_name.clone()) {

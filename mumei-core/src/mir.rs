@@ -18,6 +18,7 @@
 // See also: docs/ROADMAP.md "Multi-Stage IR Roadmap" section.
 // =============================================================================
 
+use crate::ast::CapabilityType;
 use crate::hir::{HirAtom, HirExpr, HirStmt};
 use crate::parser::Op;
 use serde::{Deserialize, Serialize};
@@ -238,6 +239,8 @@ pub struct LocalDecl {
     pub ty: Option<String>,
     /// Whether this local is Copy or Move. Defaults to Move for unknown types.
     pub movability: Movability,
+    /// capability 型ローカルの静的情報（capability 型以外は `None`）。
+    pub capability: Option<CapabilityType>,
 }
 
 // =============================================================================
@@ -270,6 +273,16 @@ impl LowerCtx {
 
     /// Allocate a new local (named or temporary).
     fn alloc_local(&mut self, name: Option<String>, ty: Option<String>) -> Local {
+        self.alloc_local_with_capability(name, ty, None)
+    }
+
+    /// Allocate a new local carrying capability type information.
+    fn alloc_local_with_capability(
+        &mut self,
+        name: Option<String>,
+        ty: Option<String>,
+        capability: Option<CapabilityType>,
+    ) -> Local {
         let local = Local(self.next_local);
         self.next_local += 1;
         let movability = movability_from_type(&ty);
@@ -278,6 +291,7 @@ impl LowerCtx {
             name: name.clone(),
             ty,
             movability,
+            capability,
         });
         if let Some(n) = name {
             self.var_map.insert(n, local.clone());
@@ -420,7 +434,12 @@ pub fn lower_hir_to_mir(hir_atom: &HirAtom) -> MirBody {
 
     // Allocate locals for atom parameters.
     for param in &hir_atom.atom.params {
-        let local = ctx.alloc_local(Some(param.name.clone()), param.type_name.clone());
+        let capability = param.type_ref.as_ref().and_then(|ty| ty.capability.clone());
+        let local = ctx.alloc_local_with_capability(
+            Some(param.name.clone()),
+            param.type_name.clone(),
+            capability,
+        );
         ctx.emit(MirStatement::StorageLive(local));
     }
 
@@ -1212,6 +1231,7 @@ mod tests {
                 name: Some(format!("v{}", i)),
                 ty: Some("Int".to_string()),
                 movability: Movability::Copy,
+                capability: None,
             });
         }
         let mut blocks = Vec::new();

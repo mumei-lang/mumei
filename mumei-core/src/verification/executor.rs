@@ -567,10 +567,11 @@ pub(crate) fn verify_inner(
                 &missing_all,
             );
         } else {
-            // callee ループでは見つからなかった場合、atom_ref パラメータの effect_set 違反を確認する
+            // callee ループでは見つからなかった場合、atom_ref / capability パラメータの
+            // effect_set 違反を確認する
             for param in &atom.params {
                 if let Some(ref type_ref) = param.type_ref {
-                    if type_ref.is_fn_type() {
+                    if type_ref.carries_effects() {
                         if let Some(ref effect_set) = type_ref.effect_set {
                             let param_leaves = module_env.resolve_leaf_effects(effect_set);
                             let missing: Vec<String> = param_leaves

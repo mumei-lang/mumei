@@ -1,6 +1,16 @@
 // src/ast.rs
 // Generics 基盤: 型参照（型引数付き）の共通表現
 
+/// capability 型の静的情報（`type FileCap = capability SafeFileRead(path: Str) where C;`）。
+/// 新しいエフェクトは定義せず、既存 `EffectDef` に別名と constraint を与える view。
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CapabilityType {
+    /// 権限の裏側にある既存エフェクト名（例: "SafeFileRead"）
+    pub effect: String,
+    /// capability 宣言の `where` 制約（例: `starts_with(path, "/tmp/")`）
+    pub constraint: Option<String>,
+}
+
 /// 型参照: `i64`, `Stack<i64>`, `Map<String, List<i64>>` などを表現する。
 /// パーサー・検証器・コード生成の全レイヤーで共通に使用する。
 #[derive(Debug, Clone, PartialEq)]
@@ -10,11 +20,14 @@ pub struct TypeRef {
     /// 型引数リスト（例: Stack<i64> → [TypeRef("i64")]）。
     /// 非ジェネリック型の場合は空。
     pub type_args: Vec<TypeRef>,
-    /// エフェクトセット（関数型に付与されるエフェクト情報）
+    /// エフェクトセット（関数型・capability 型に付与されるエフェクト情報）
     /// 例: atom_ref(i64) -> i64 with [FileWrite] → Some(vec!["FileWrite"])
     /// 例: atom_ref(i64) -> i64 with E → Some(vec!["E"])
+    /// 例: cap: FileCap → Some(vec!["SafeFileRead"])
     /// 非関数型や with なしの場合は None
     pub effect_set: Option<Vec<String>>,
+    /// capability 型の場合の静的情報。それ以外は None（既存の意味は不変）。
+    pub capability: Option<CapabilityType>,
 }
 
 impl TypeRef {
@@ -24,6 +37,7 @@ impl TypeRef {
             name: name.to_string(),
             type_args: vec![],
             effect_set: None,
+            capability: None,
         }
     }
 
@@ -33,6 +47,7 @@ impl TypeRef {
             name: name.to_string(),
             type_args: args,
             effect_set: None,
+            capability: None,
         }
     }
 
@@ -74,6 +89,7 @@ impl TypeRef {
             name: "[]".to_string(),
             type_args: vec![element_type],
             effect_set: None,
+            capability: None,
         }
     }
 
@@ -130,12 +146,25 @@ impl TypeRef {
             name: "atom_ref".to_string(),
             type_args,
             effect_set: None,
+            capability: None,
         }
     }
 
     /// 関数型かどうかを判定する
     pub fn is_fn_type(&self) -> bool {
         self.name == "atom_ref" && !self.type_args.is_empty()
+    }
+
+    /// capability 型かどうかを判定する
+    pub fn is_capability_type(&self) -> bool {
+        self.capability.is_some()
+    }
+
+    /// `effect_set` がエフェクト要求として意味を持つパラメータ型か。
+    /// 関数型（`atom_ref(..) with E`）と capability 型（`cap: FileCap`）が該当し、
+    /// effect containment / propagation の 3 箇所のゲートで共通に使う。
+    pub fn carries_effects(&self) -> bool {
+        self.is_fn_type() || self.is_capability_type()
     }
 
     /// 関数型のパラメータ型を返す（最後の要素＝戻り値型を除く）
@@ -203,6 +232,7 @@ impl TypeRef {
                     .map(|a| a.substitute(type_map))
                     .collect(),
                 effect_set: None,
+                capability: self.capability.clone(),
             };
             // エフェクトセットの置換
             result.effect_set = self.effect_set.as_ref().map(|effects| {
