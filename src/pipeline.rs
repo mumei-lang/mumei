@@ -155,6 +155,7 @@ pub(crate) fn try_load_and_prepare_with_full_options(
             Item::TraitDef(trait_def) => module_env.register_trait(trait_def),
             Item::ImplDef(impl_def) => module_env.register_impl(impl_def),
             Item::EffectDef(effect_def) => module_env.register_effect(effect_def),
+            Item::CapabilityDef(capability_def) => module_env.register_capability(capability_def),
             _ => {}
         }
     }
@@ -185,6 +186,7 @@ pub(crate) fn try_load_and_prepare_with_full_options(
             Item::ImplDef(_) => {}
             Item::ResourceDef(resource_def) => module_env.register_resource(resource_def),
             Item::EffectDef(_) => {}
+            Item::CapabilityDef(_) => {}
             Item::ImplBlock(impl_block) => {
                 for method in &impl_block.methods {
                     let mut qualified = method.clone();
@@ -272,6 +274,7 @@ pub(crate) fn annotate_source_file(items: &mut [Item], input: &str) {
                 }
             }
             Item::EffectDef(effect_def) => effect_def.span.file = input.to_string(),
+            Item::CapabilityDef(capability_def) => capability_def.span.file = input.to_string(),
             Item::ImplBlock(impl_block) => {
                 impl_block.span.file = input.to_string();
                 for method in &mut impl_block.methods {
@@ -327,6 +330,7 @@ pub(crate) fn merge_module_env(
     target.resources.extend(source.resources);
     target.effects.extend(source.effects);
     target.effect_defs.extend(source.effect_defs);
+    target.capability_defs.extend(source.capability_defs);
     target.path_id_map.extend(source.path_id_map);
     target.next_path_id = target.next_path_id.max(source.next_path_id);
     target.prefix_ranges.extend(source.prefix_ranges);

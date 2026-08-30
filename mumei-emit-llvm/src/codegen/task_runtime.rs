@@ -264,6 +264,11 @@ pub(crate) struct TaskGroupAnyContext<'a> {
 /// always joined before the parent returns, pointer captures remain
 /// valid for the lifetime of the spawned thread.
 ///
+/// P25: free variables that name an array in the parent's `array_ptrs`
+/// are captured as the array's fat pointer — a `{ i64 len, T* data }`
+/// field pair — instead of a scalar, so the body can read and write the
+/// parent's *element storage* through the same allocation.
+///
 /// Allocations (args struct, `pthread_t` slot) live in the parent's
 /// *entry* block so subsequent basic blocks dominate them — this also
 /// means a `task` inside an `if`/`while` doesn't hide the alloca from
@@ -277,6 +282,7 @@ pub(crate) fn emit_task_spawn_only<'a>(
     body: &HirStmt,
     variables: &HashMap<String, BasicValueEnum<'a>>,
     var_types: &HashMap<String, String>,
+    array_ptrs: &HashMap<String, (BasicValueEnum<'a>, BasicValueEnum<'a>)>,
     module_env: &ModuleEnv,
     task_group_any: Option<TaskGroupAnyContext<'a>>,
 ) -> MumeiResult<PendingTask<'a>> {
@@ -286,20 +292,35 @@ pub(crate) fn emit_task_spawn_only<'a>(
     // 1. Determine captures: free vars from `body` that are bound in `variables`.
     //    Every captured value is marshalled through the args struct using its
     //    own LLVM type, so f64 / pointer / Str / struct captures survive.
+    //    Arrays are captured separately as fat pointers (len + data) so the
+    //    body shares the parent's element storage.
     let free_vars = collect_free_variables_stmt(body);
     let mut captures: Vec<(String, BasicValueEnum<'a>)> = Vec::new();
+    let mut array_captures: Vec<(String, BasicValueEnum<'a>, BasicValueEnum<'a>)> = Vec::new();
     for name in &free_vars {
-        if let Some(v) = variables.get(name.as_str()) {
+        if let Some((len, data)) = array_ptrs.get(name.as_str()) {
+            array_captures.push((name.clone(), *len, *data));
+        } else if let Some(v) = variables.get(name.as_str()) {
             captures.push((name.clone(), *v));
         }
     }
     captures.sort_by(|a, b| a.0.cmp(&b.0));
+    array_captures.sort_by(|a, b| a.0.cmp(&b.0));
 
-    // 2. Build args struct type: { <capture types…>, [i64 group, i64* group_result], i64 result }.
+    // 2. Build args struct type: { <capture types…>, <array len/data pairs…>,
+    //    [i64 group, i64* group_result], i64 result }.
     let mut field_types = captures
         .iter()
         .map(|(_, v)| v.get_type())
         .collect::<Vec<inkwell::types::BasicTypeEnum>>();
+    let mut array_fields: Vec<(String, u32, u32)> = Vec::new();
+    for (name, len, data) in &array_captures {
+        let len_idx = field_types.len() as u32;
+        field_types.push(len.get_type());
+        let data_idx = field_types.len() as u32;
+        field_types.push(data.get_type());
+        array_fields.push((name.clone(), len_idx, data_idx));
+    }
     let group_fields = if task_group_any.is_some() {
         let group_id_idx = field_types.len() as u32;
         field_types.push(i64_type.into());
@@ -349,6 +370,39 @@ pub(crate) fn emit_task_spawn_only<'a>(
             &format!("task_capture_{}", name),
         ));
         inner_vars.insert(name.clone(), loaded);
+    }
+
+    // Rebuild the array fat pointers the body needs from the args struct, so
+    // element reads / stores hit the parent's allocation.
+    let mut inner_array_ptrs: HashMap<String, (BasicValueEnum<'a>, BasicValueEnum<'a>)> =
+        HashMap::new();
+    for ((name, len_val, data_val), (_, len_idx, data_idx)) in
+        array_captures.iter().zip(array_fields.iter())
+    {
+        let len_field_ptr = llvm!(builder.build_struct_gep(
+            args_struct_type,
+            arg_ptr,
+            *len_idx,
+            &format!("task_capture_{}_len_ptr", name),
+        ));
+        let len_loaded = llvm!(builder.build_load(
+            len_val.get_type(),
+            len_field_ptr,
+            &format!("task_capture_{}_len", name),
+        ));
+        let data_field_ptr = llvm!(builder.build_struct_gep(
+            args_struct_type,
+            arg_ptr,
+            *data_idx,
+            &format!("task_capture_{}_data_ptr", name),
+        ));
+        let data_loaded = llvm!(builder.build_load(
+            data_val.get_type(),
+            data_field_ptr,
+            &format!("task_capture_{}_data", name),
+        ));
+        inner_array_ptrs.insert(name.clone(), (len_loaded, data_loaded));
+        inner_vars.insert(name.clone(), len_loaded);
     }
 
     let task_group_runtime = if let Some((group_id_idx, group_result_idx)) = group_fields {
@@ -418,10 +472,8 @@ pub(crate) fn emit_task_spawn_only<'a>(
         None
     };
 
-    // Compile the task body inside the wrapper. Note: `array_ptrs` is empty —
-    // arrays in task bodies are not yet captured (follow-up work).
-    let empty_array_ptrs: HashMap<String, (BasicValueEnum<'_>, BasicValueEnum<'_>)> =
-        HashMap::new();
+    // Compile the task body inside the wrapper, with the captured arrays
+    // visible as fat pointers into the parent's element storage.
     let body_result = compile_hir_stmt(
         context,
         builder,
@@ -430,7 +482,7 @@ pub(crate) fn emit_task_spawn_only<'a>(
         body,
         &mut inner_vars,
         &mut inner_var_types,
-        &empty_array_ptrs,
+        &inner_array_ptrs,
         module_env,
     )?;
 
@@ -520,6 +572,26 @@ pub(crate) fn emit_task_spawn_only<'a>(
         ));
         llvm!(builder.build_store(field_ptr, *val));
     }
+    // Store the captured arrays' fat pointers (len + data) so the wrapper reads
+    // the same allocation the parent holds.
+    for ((name, len_val, data_val), (_, len_idx, data_idx)) in
+        array_captures.iter().zip(array_fields.iter())
+    {
+        let len_field_ptr = llvm!(builder.build_struct_gep(
+            args_struct_type,
+            args_ptr,
+            *len_idx,
+            &format!("task_arg_{}_len_ptr", name),
+        ));
+        llvm!(builder.build_store(len_field_ptr, *len_val));
+        let data_field_ptr = llvm!(builder.build_struct_gep(
+            args_struct_type,
+            args_ptr,
+            *data_idx,
+            &format!("task_arg_{}_data_ptr", name),
+        ));
+        llvm!(builder.build_store(data_field_ptr, *data_val));
+    }
     if let (Some(any_ctx), Some((group_id_idx, group_result_idx))) = (task_group_any, group_fields)
     {
         let group_id_ptr = llvm!(builder.build_struct_gep(
@@ -606,6 +678,7 @@ pub(crate) fn compile_task_spawn<'a>(
     body: &HirStmt,
     variables: &HashMap<String, BasicValueEnum<'a>>,
     var_types: &HashMap<String, String>,
+    array_ptrs: &HashMap<String, (BasicValueEnum<'a>, BasicValueEnum<'a>)>,
     module_env: &ModuleEnv,
 ) -> MumeiResult<BasicValueEnum<'a>> {
     let pending = emit_task_spawn_only(
@@ -616,6 +689,7 @@ pub(crate) fn compile_task_spawn<'a>(
         body,
         variables,
         var_types,
+        array_ptrs,
         module_env,
         None,
     )?;

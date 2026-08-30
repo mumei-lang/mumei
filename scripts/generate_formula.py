@@ -60,6 +60,9 @@ class Mumei < Formula
     end
 
     env_script = "export MUMEI_STD_PATH=\\"#{{share}}/mumei/std\\"\\n"
+    if Dir.exist?("std/certs")
+      env_script += "export MUMEI_PROOF_CERTS=\\"#{{share}}/mumei/std/certs\\"\\n"
+    end
     if has_proof_bundle
       env_script += "export MUMEI_PROOF_BUNDLE=\\"#{{share}}/mumei/std-proof-bundle.json\\"\\n"
     end
@@ -77,6 +80,11 @@ class Mumei < Formula
       s += <<~EOS
         The std/ proof-certificate bundle (SI-5 Phase 3-C) is at:
           #{{share}}/mumei/std-proof-bundle.json
+
+        Per-module proof certificates are at:
+          #{{share}}/mumei/std/certs
+        Re-verify a module with:
+          mumei verify-cert "$MUMEI_PROOF_CERTS/<module>.proof.json" "$MUMEI_STD_PATH/<module>.mm" --strict
 
       EOS
     end
@@ -97,6 +105,17 @@ class Mumei < Formula
 
   test do
     assert_match version.to_s, shell_output("#{{bin}}/mumei --version")
+    # Modules with `unknown` / `skipped` atoms exit non-zero by design, so the
+    # packaged set is sound as long as one certificate re-verifies strictly.
+    certs = Dir["#{{share}}/mumei/std/certs/**/*.proof.json"]
+    unless certs.empty?
+      verified = certs.any? do |cert|
+        relative = cert.sub("#{{share}}/mumei/std/certs/", "").sub(/\\.proof\\.json\\z/, ".mm")
+        source = share/"mumei/std"/relative
+        source.exist? && quiet_system(bin/"mumei", "verify-cert", cert, source, "--strict")
+      end
+      assert verified, "no packaged proof certificate passed verify-cert --strict"
+    end
   end
 end
 '''

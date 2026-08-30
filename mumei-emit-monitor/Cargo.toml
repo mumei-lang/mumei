@@ -1,0 +1,10 @@
+[package]
+name = "mumei-emit-monitor"
+version = "0.6.12"
+edition = "2021"
+description = "Proof-aware runtime monitor generator — emits OTel-reporting contract guards for trust-boundary atoms only"
+license = "Apache-2.0"
+repository = "https://github.com/mumei-lang/mumei"
+
+[dependencies]
+mumei-core = { path = "../mumei-core" }

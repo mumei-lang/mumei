@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 
 use super::cache::{load_cache, save_cache};
 use super::imports::{
-    mark_dependency_atoms_with_cert, register_imported_items, resolve_imports_recursive,
-    verify_import_certificate, ResolverContext,
+    mark_dependency_atoms_with_cert, register_imported_items_with_source,
+    resolve_imports_recursive, verify_import_certificate, ResolverContext,
 };
 
 /// mumei.toml の [dependencies] セクションを処理し、
@@ -84,7 +84,12 @@ pub fn resolve_manifest_dependencies_with_full_options(
                 ctx.strict_imports = strict_imports;
                 resolve_imports_recursive(&items, dep_base_dir, &mut ctx, &mut cache, module_env)?;
                 save_cache(&cache_path, &cache);
-                register_imported_items(&items, Some(dep_name), module_env);
+                register_imported_items_with_source(
+                    &items,
+                    Some(dep_name),
+                    module_env,
+                    entry_path.to_str(),
+                );
                 // P5-C: Check for proof certificate before marking atoms as verified
                 let cert_results =
                     verify_import_certificate(&abs_path, entry_path, &items, allow_lean_verified);
@@ -193,7 +198,12 @@ pub fn resolve_manifest_dependencies_with_full_options(
                 ctx.strict_imports = strict_imports;
                 resolve_imports_recursive(&items, dep_base_dir, &mut ctx, &mut cache, module_env)?;
                 save_cache(&cache_path, &cache);
-                register_imported_items(&items, Some(dep_name), module_env);
+                register_imported_items_with_source(
+                    &items,
+                    Some(dep_name),
+                    module_env,
+                    entry_path.to_str(),
+                );
                 // P5-C: Check for proof certificate before marking atoms as verified
                 // Use clone_dir (package root) instead of dep_base_dir (entry file parent)
                 // because cmd_publish saves certificates to the package root.
@@ -217,7 +227,22 @@ pub fn resolve_manifest_dependencies_with_full_options(
         else if dep.version().is_some() || matches!(dep, crate::manifest::Dependency::Version(_))
         {
             let version = dep.version();
-            if let Some(pkg_dir) = crate::registry::resolve(dep_name, version) {
+            let local = crate::registry::resolve(dep_name, version);
+            let resolved = match local {
+                Some(dir) => Some(dir),
+                // P24: fall back to the configured remote registry. Opt-in —
+                // without `[registry] url` / `MUMEI_REGISTRY_URL` this is a no-op.
+                None => crate::registry::remote::resolve(
+                    &manifest.registry,
+                    dep_name,
+                    version,
+                    strict_imports,
+                )
+                .map_err(|e| {
+                    MumeiError::verification(format!("Dependency '{}': {}", dep_name, e))
+                })?,
+            };
+            if let Some(pkg_dir) = resolved {
                 let entry_candidates: Vec<PathBuf> = vec![
                     pkg_dir.join("src/main.mm"),
                     pkg_dir.join("main.mm"),
@@ -247,7 +272,12 @@ pub fn resolve_manifest_dependencies_with_full_options(
                         module_env,
                     )?;
                     save_cache(&cache_path, &cache);
-                    register_imported_items(&items, Some(dep_name), module_env);
+                    register_imported_items_with_source(
+                        &items,
+                        Some(dep_name),
+                        module_env,
+                        entry_path.to_str(),
+                    );
                     // P5-C: Check for proof certificate before marking atoms as verified
                     // Use pkg_dir (package root) instead of dep_base_dir (entry file parent)
                     // because cmd_publish saves certificates to the package root.
@@ -277,7 +307,11 @@ pub fn resolve_manifest_dependencies_with_full_options(
                     );
                 }
             } else {
-                eprintln!("  ⚠️  Dependency '{}': not found in local registry. Run `mumei publish` in the dependency project first.", dep_name);
+                if manifest.registry.effective_url().is_some() {
+                    eprintln!("  ⚠️  Dependency '{}': not found in the local registry or the configured remote registry.", dep_name);
+                } else {
+                    eprintln!("  ⚠️  Dependency '{}': not found in local registry. Run `mumei publish` in the dependency project first.", dep_name);
+                }
             }
         }
     }

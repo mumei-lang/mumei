@@ -537,11 +537,11 @@ pub(crate) fn verify_effect_containment(
         }
     }
 
-    // atom_ref パラメータの effect_set ⊆ caller のエフェクト
+    // atom_ref / capability パラメータの effect_set ⊆ caller のエフェクト
     // 複合エフェクト（IO, FullAccess 等）を正しく扱うため、両側をリーフに解決して比較する
     for param in &atom.params {
         if let Some(ref type_ref) = param.type_ref {
-            if type_ref.is_fn_type() {
+            if type_ref.carries_effects() {
                 if let Some(ref effect_set) = type_ref.effect_set {
                     let param_leaves = module_env.resolve_leaf_effects(effect_set);
                     let missing: Vec<String> = param_leaves
@@ -557,11 +557,13 @@ pub(crate) fn verify_effect_containment(
                     if !missing.is_empty() {
                         return Err(MumeiError::verification_at(
                             format!(
-                                "Effect polymorphism violation: atom '{}' accepts function parameter '{}' \
+                                "Effect polymorphism violation: atom '{}' accepts {} parameter '{}' \
                                  with effect [{}], but '{}' only declares effects: {:?}. \
-                                 The function parameter's effect must be a subset of the atom's declared effects. \
+                                 The parameter's effect must be a subset of the atom's declared effects. \
                                  Missing leaf effects: {:?}.",
-                                atom.name, param.name, effect_set.join(", "), atom.name,
+                                atom.name,
+                                if type_ref.is_capability_type() { "capability" } else { "function" },
+                                param.name, effect_set.join(", "), atom.name,
                                 atom.effects.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
                                 missing
                             ),
@@ -684,6 +686,7 @@ pub(crate) fn save_effect_propagation_report(
 pub(crate) fn save_effect_polymorphism_report(
     output_dir: &Path,
     atom_name: &str,
+    param_kind: &str,
     param_name: &str,
     param_effect_set: &[String],
     declared_effects: &[String],
@@ -738,9 +741,15 @@ pub(crate) fn save_effect_polymorphism_report(
             ]
         },
         "reason": format!(
-            "Effect polymorphism violation: atom '{}' accepts function parameter '{}' with effect {:?}, \
+            "Effect polymorphism violation: atom '{}' accepts {} parameter '{}' with effect {:?}, \
              but '{}' only declares effects {:?}. Missing leaf effects: {:?}.",
-            atom_name, param_name, param_effect_set, atom_name, declared_effects, missing_effects
+            atom_name,
+            param_kind,
+            param_name,
+            param_effect_set,
+            atom_name,
+            declared_effects,
+            missing_effects
         )
     });
     report["structured_feedback"] = json!(

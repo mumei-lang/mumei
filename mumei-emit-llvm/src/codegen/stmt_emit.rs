@@ -1,4 +1,6 @@
-use crate::codegen::expr_emit::{compile_hir_expr, infer_struct_type_name};
+use crate::codegen::expr_emit::{
+    chan_payload_key, chan_payload_type_name, compile_hir_expr, infer_struct_type_name,
+};
 use crate::codegen::task_runtime::declare_task_group_should_cancel_current_extern;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
@@ -9,6 +11,23 @@ use inkwell::IntPredicate;
 use mumei_core::hir::HirStmt;
 use mumei_core::verification::{ModuleEnv, MumeiError, MumeiResult};
 use std::collections::HashMap;
+
+/// P25: a binding that aliases a `chan<T>` handle inherits the channel's
+/// declared payload type; any other binding drops a stale one.
+fn rebind_chan_payload(
+    var: &str,
+    value: &mumei_core::hir::HirExpr,
+    var_types: &mut HashMap<String, String>,
+) {
+    match chan_payload_type_name(value, var_types) {
+        Some(payload) => {
+            var_types.insert(chan_payload_key(var), payload);
+        }
+        None => {
+            var_types.remove(&chan_payload_key(var));
+        }
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn compile_hir_stmt<'a>(
@@ -41,6 +60,7 @@ pub(crate) fn compile_hir_stmt<'a>(
                 // later field access cannot resolve against the wrong struct.
                 var_types.remove(var);
             }
+            rebind_chan_payload(var, value, var_types);
             Ok(val)
         }
         HirStmt::Assign { var, value } => {
@@ -56,6 +76,7 @@ pub(crate) fn compile_hir_stmt<'a>(
                 // leave a stale mapping from the previous binding.
                 var_types.remove(var);
             }
+            rebind_chan_payload(var, value, var_types);
             Ok(val)
         }
         HirStmt::ArrayStore {

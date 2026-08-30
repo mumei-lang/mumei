@@ -10,7 +10,7 @@ trusted, mumei-versioned certificate set.
 Bundle schema::
 
     {
-      "bundle_version": "1.0",
+      "bundle_version": "1.1",
       "generated_at": "2026-04-18T...",
       "mumei_version": "<string>",
       "modules": {
@@ -18,12 +18,28 @@ Bundle schema::
           "std/prelude": { ...ProofCertificate... },
           ...
       },
+      "artifact_paths": [
+          "std/certs/core.proof.json",
+          ...
+      ],
+      "lean_provenance": [
+          {
+              "module": "std/core",
+              "atom": "complex_atom",
+              "z3_check_result": "lean_verified",
+              "translator_version": "...",
+              "bridge_lemma_hash": "...",
+              "manual_lemma_reason": null
+          }
+      ],
       "summary": {
           "total_modules": 17,
           "all_verified": 15,
           "partial_verified": 2,
           "total_atoms": 150,
-          "proven_atoms": 140
+          "proven_atoms": 140,
+          "lean_verified_atoms": 2,
+          "trusted_atoms": 0
       }
     }
 
@@ -42,7 +58,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-BUNDLE_VERSION = "1.0"
+BUNDLE_VERSION = "1.1"
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CERTS_DIR = REPO_ROOT / "std" / "certs"
 DEFAULT_OUTPUT = REPO_ROOT / "std-proof-bundle.json"
@@ -63,19 +79,33 @@ def _summarize(modules: dict) -> dict:
     partial_verified = 0
     total_atoms = 0
     proven_atoms = 0
+    lean_verified_atoms = 0
+    trusted_atoms = 0
 
     for cert in modules.values():
-        results = cert.get("results", [])
-        module_atoms = len(results)
+        atoms = cert.get("atoms", [])
+        module_atoms = len(atoms)
         module_proven = sum(
-            1 for r in results if r.get("status") == "unsat"
+            1
+            for atom in atoms
+            if atom.get("z3_check_result") in {"unsat", "lean_verified"}
         )
+        lean_verified_atoms += sum(
+            1 for atom in atoms
+            if atom.get("z3_check_result") == "lean_verified"
+        )
+        trusted_atoms += sum(1 for atom in atoms if atom.get("status") == "trusted")
         total_atoms += module_atoms
         proven_atoms += module_proven
-        if module_atoms == 0:
-            # No atoms recorded — treat as fully verified (e.g. effect-only).
-            all_verified += 1
-        elif module_proven == module_atoms:
+        if "all_verified" in cert:
+            module_all_verified = bool(cert["all_verified"])
+        else:
+            module_all_verified = all(
+                atom.get("status") == "trusted"
+                or atom.get("z3_check_result") in {"unsat", "lean_verified"}
+                for atom in atoms
+            )
+        if module_all_verified:
             all_verified += 1
         else:
             partial_verified += 1
@@ -86,7 +116,40 @@ def _summarize(modules: dict) -> dict:
         "partial_verified": partial_verified,
         "total_atoms": total_atoms,
         "proven_atoms": proven_atoms,
+        "lean_verified_atoms": lean_verified_atoms,
+        "trusted_atoms": trusted_atoms,
     }
+
+
+def _artifact_path(cert_path: Path, certs_dir: Path) -> str:
+    """Return a deterministic repo-relative certificate path when possible."""
+    try:
+        return cert_path.resolve().relative_to(REPO_ROOT).as_posix()
+    except ValueError:
+        return (
+            Path("std/certs")
+            .joinpath(cert_path.resolve().relative_to(certs_dir.resolve()))
+            .as_posix()
+        )
+
+
+def _lean_provenance(modules: dict) -> list[dict]:
+    provenance: list[dict] = []
+    for module, cert in modules.items():
+        for atom in cert.get("atoms", []):
+            if atom.get("z3_check_result") != "lean_verified":
+                continue
+            provenance.append(
+                {
+                    "module": module,
+                    "atom": atom.get("name", ""),
+                    "z3_check_result": "lean_verified",
+                    "translator_version": atom.get("translator_version", ""),
+                    "bridge_lemma_hash": atom.get("bridge_lemma_hash", ""),
+                    "manual_lemma_reason": atom.get("manual_lemma_reason"),
+                }
+            )
+    return provenance
 
 
 def build_bundle(certs_dir: Path, mumei_version: str) -> dict:
@@ -95,6 +158,7 @@ def build_bundle(certs_dir: Path, mumei_version: str) -> dict:
         raise FileNotFoundError(f"certs dir not found: {certs_dir}")
 
     modules: dict = {}
+    artifact_paths: list[str] = []
     for cert_path in sorted(certs_dir.rglob("*.proof.json")):
         try:
             cert = json.loads(cert_path.read_text(encoding="utf-8"))
@@ -106,7 +170,7 @@ def build_bundle(certs_dir: Path, mumei_version: str) -> dict:
             continue
         key = _module_key(cert_path, certs_dir)
         modules[key] = cert
-
+        artifact_paths.append(_artifact_path(cert_path, certs_dir))
     return {
         "bundle_version": BUNDLE_VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(
@@ -114,6 +178,8 @@ def build_bundle(certs_dir: Path, mumei_version: str) -> dict:
         ),
         "mumei_version": mumei_version,
         "modules": modules,
+        "artifact_paths": artifact_paths,
+        "lean_provenance": _lean_provenance(modules),
         "summary": _summarize(modules),
     }
 

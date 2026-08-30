@@ -1,6 +1,154 @@
+use mumei_core::emitter;
 use mumei_core::{manifest, proof_cert, registry};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+// =============================================================================
+// mumei add --emitter — Emitter Plugin Architecture Phase 3 install path
+// =============================================================================
+
+/// Plugin names become directory and library file names, so keep them to a
+/// conservative character set instead of letting arbitrary input reach the
+/// filesystem.
+fn is_valid_emitter_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// Resolve the compiled cdylib to install for `name` from a user-supplied
+/// `--path`, which may be the library itself, a directory containing it, or a
+/// cargo project whose `target/{release,debug}` holds it.
+fn resolve_plugin_source(name: &str, path: &Path) -> Result<PathBuf, String> {
+    let lib_filename = emitter::external_emitter_library_filename(name);
+    if path.is_file() {
+        return Ok(path.to_path_buf());
+    }
+    if !path.is_dir() {
+        return Err(format!("path '{}' does not exist", path.display()));
+    }
+    let candidates = [
+        path.join(&lib_filename),
+        path.join("target").join("release").join(&lib_filename),
+        path.join("target").join("debug").join(&lib_filename),
+    ];
+    candidates
+        .iter()
+        .find(|candidate| candidate.is_file())
+        .cloned()
+        .ok_or_else(|| {
+            format!(
+                "no `{}` found under '{}' (looked in ./, target/release/, target/debug/).\n   \
+                 Build the plugin with `cargo build --release` first, or pass the library directly with --path.",
+                lib_filename,
+                path.display()
+            )
+        })
+}
+
+/// Install an external emitter plugin into `~/.mumei/emitters/<name>/` and
+/// validate it through the existing loader so the ABI-version check and the
+/// panic-safety wrapper gate the install just like a build would.
+pub(crate) fn cmd_add_emitter(name: &str, path: Option<&str>, force: bool) {
+    if !is_valid_emitter_name(name) {
+        eprintln!(
+            "❌ Error: invalid emitter name '{}'. Use ASCII letters, digits, '_' or '-'.",
+            name
+        );
+        std::process::exit(1);
+    }
+
+    let source_root = PathBuf::from(path.unwrap_or("."));
+    let source = resolve_plugin_source(name, &source_root).unwrap_or_else(|e| {
+        eprintln!("❌ Error: {}", e);
+        std::process::exit(1);
+    });
+
+    let dest = emitter::external_emitter_library_path(name);
+    let dest_dir = emitter::external_emitter_dir(name);
+    if dest.exists() && !force {
+        eprintln!(
+            "❌ Error: emitter '{}' is already installed at {}.",
+            name,
+            dest.display()
+        );
+        eprintln!("   Re-run with --force to overwrite it.");
+        std::process::exit(1);
+    }
+
+    fs::create_dir_all(&dest_dir).unwrap_or_else(|e| {
+        eprintln!("❌ Error: cannot create {}: {}", dest_dir.display(), e);
+        std::process::exit(1);
+    });
+
+    // Stage the candidate beside its final name so validation never touches an
+    // existing install: the rename below is the only mutation of `dest`, and it
+    // stays within one directory, hence one filesystem.
+    let staged = dest_dir.join(format!(
+        ".{}.incoming",
+        emitter::external_emitter_library_filename(name)
+    ));
+    let _ = fs::remove_file(&staged);
+    fs::copy(&source, &staged).unwrap_or_else(|e| {
+        eprintln!(
+            "❌ Error: cannot copy {} to {}: {}",
+            source.display(),
+            staged.display(),
+            e
+        );
+        std::process::exit(1);
+    });
+
+    println!("🔌 Installing emitter plugin '{}'", name);
+    println!(
+        "   {} → {} (staged at {} until validation passes)",
+        source.display(),
+        dest.display(),
+        staged.display()
+    );
+
+    // Reuse the build-time loader: it checks `EMITTER_ABI_VERSION`, the
+    // `mumei_create_emitter` handle, and wraps the plugin in `PanicSafeEmitter`.
+    match emitter::load_external_emitter_from_path(name, &staged) {
+        Ok(_) => {
+            if let Err(e) = fs::rename(&staged, &dest) {
+                let _ = fs::remove_file(&staged);
+                eprintln!(
+                    "❌ Error: cannot install validated plugin at {}: {}",
+                    dest.display(),
+                    e
+                );
+                std::process::exit(1);
+            }
+            println!(
+                "   ✅ ABI version {} verified",
+                emitter::EMITTER_ABI_VERSION
+            );
+            println!("✅ Installed emitter '{name}'. Use it with `mumei build --emit {name} <input.mm>`.");
+        }
+        Err(e) => {
+            eprintln!("❌ Error: emitter '{}' failed validation: {}", name, e);
+            eprintln!(
+                "   The plugin must export `mumei_emitter_abi_version` and `mumei_create_emitter`."
+            );
+            if let Err(remove_err) = fs::remove_file(&staged) {
+                eprintln!(
+                    "   ⚠️  Could not remove the staged candidate at {}: {}",
+                    staged.display(),
+                    remove_err
+                );
+            }
+            if dest.exists() {
+                eprintln!(
+                    "   The previous install at {} is unchanged.",
+                    dest.display()
+                );
+            }
+            std::process::exit(1);
+        }
+    }
+}
 
 pub(crate) fn cmd_add(dep: &str, version: Option<&str>) {
     // mumei.toml を探す
@@ -18,10 +166,10 @@ pub(crate) fn cmd_add(dep: &str, version: Option<&str>) {
     });
 
     // パース確認
-    if let Err(e) = manifest::load(manifest_path) {
+    let project_manifest = manifest::load(manifest_path).unwrap_or_else(|e| {
         eprintln!("❌ Error: mumei.toml parse error: {}", e);
         std::process::exit(1);
-    }
+    });
 
     // 依存の種類を判定
     let dep_entry = if dep.starts_with("./") || dep.starts_with("../") || dep.starts_with('/') {
@@ -77,24 +225,53 @@ pub(crate) fn cmd_add(dep: &str, version: Option<&str>) {
         (pkg_name, toml_line)
     } else {
         // パッケージ名のみ（レジストリ依存）
-        // ~/.mumei/registry.json から検索
-        let reg = registry::load();
+        // ~/.mumei/registry.json から検索し、無ければ P24 のリモートレジストリへ
+        let mut reg = registry::load();
+        let local_version = |entry: &registry::PackageEntry| {
+            registry::select_version(
+                entry.versions.keys().map(String::as_str),
+                &entry.latest,
+                version,
+            )
+            .filter(|v| entry.versions.contains_key(v))
+        };
+        let missing_locally = match reg.packages.get(dep) {
+            None => true,
+            Some(entry) => local_version(entry).is_none(),
+        };
+        if missing_locally {
+            match registry::remote::resolve(&project_manifest.registry, dep, version, false) {
+                Ok(Some(pkg_dir)) => {
+                    println!(
+                        "   ⬇️  Fetched from remote registry → {}",
+                        pkg_dir.display()
+                    );
+                    reg = registry::load();
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    // A configured registry that fails is an error: silently
+                    // recording `name = "*"` would hide a typo'd URL.
+                    eprintln!("❌ Error: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
         if let Some(pkg_entry) = reg.packages.get(dep) {
             // P5-B: Use --version if specified, otherwise use latest
-            let resolved_version = match version {
-                Some(v) => {
-                    // Verify the specified version exists
-                    if !pkg_entry.versions.contains_key(v) {
-                        let available: Vec<&String> = pkg_entry.versions.keys().collect();
-                        eprintln!(
-                            "❌ Error: Version '{}' not found for package '{}'. Available versions: {:?}",
-                            v, dep, available
-                        );
-                        std::process::exit(1);
-                    }
-                    v.to_string()
+            // P24: a range such as `^1.0.0` records the concrete version it selects.
+            let resolved_version = match local_version(pkg_entry) {
+                Some(v) => v,
+                None => {
+                    let available: Vec<&String> = pkg_entry.versions.keys().collect();
+                    eprintln!(
+                        "❌ Error: Version '{}' not found for package '{}'. Available versions: {:?}",
+                        version.unwrap_or("*"),
+                        dep,
+                        available
+                    );
+                    std::process::exit(1);
                 }
-                None => pkg_entry.latest.clone(),
             };
             let toml_line = format!("{} = \"{}\"", dep, resolved_version);
             println!(
@@ -164,6 +341,9 @@ pub(crate) fn cmd_add(dep: &str, version: Option<&str>) {
             );
             eprintln!("   The dependency will be added with version \"*\".");
             eprintln!("   To publish a package: cd <package-dir> && mumei publish");
+            eprintln!(
+                "   To resolve it remotely: set [registry] url in mumei.toml or MUMEI_REGISTRY_URL"
+            );
             (dep.to_string(), toml_line)
         }
     };

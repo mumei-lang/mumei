@@ -1,0 +1,38 @@
+name: Evaluation Suite Gate
+
+# P27 regression gate: the six-axis evaluation suite of PAPER_DRAFT.md §7 must
+# keep measuring every axis over the controlled benchmark task set and must keep
+# degrading to SKIP — never to a substituted value — when an input is absent.
+# Rust-free: the suite's static axes are measured without the mumei binary.
+
+on:
+  pull_request:
+    paths:
+      - 'benchmarks/**'
+      - 'scripts/scale_trust_surface.py'
+      - 'docs/EVALUATION_SUITE.md'
+      - 'tests/test_evaluation_suite.py'
+      - 'tests/test_benchmark_suite.py'
+      - '.github/workflows/evaluation-suite.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  evaluation-suite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Run evaluation suite and benchmark harness tests
+        run: |
+          pip install --quiet pytest
+          python3 -m pytest tests/test_evaluation_suite.py \
+            tests/test_benchmark_suite.py -v

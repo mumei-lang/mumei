@@ -115,3 +115,29 @@ module reintroduces a `trusted atom` declaration, cross-checking the count
 against this document and `docs/STDLIB_METRICS.md`. A new module that needs
 trust must instead strengthen its contract or escalate to mumei-lean on Z3
 `unknown`.
+
+## Trust surface at scale (Priority 16)
+
+Scaling a case study must not buy verification with trust. The five `*_scale`
+scenarios in `mumei-lang/mumei-demo` (172 atoms, dependency depth 5–7) are
+measured by `scripts/scale_trust_surface.py`
+(`benchmarks/composability/scale_trust_surface.json`,
+`budget_policy_fingerprint: sha256:scale-default`):
+
+| Case | Atoms | Certified | `verify-cert --strict` | App trusted atoms | FFI boundaries | Z3 unknown → Lean | Z3 solver (s) |
+|------|------:|----------:|:----------------------:|------------------:|---------------:|------------------:|--------------:|
+| `medical_device_scale` | 34 | 34 | PASS | 0 | 0 | 0 | 2.391 |
+| `rtgs_settlement_scale` | 30 | 30 | PASS | 0 | 0 | 0 | 1.317 |
+| `regtech_compliance_scale` | 41 | 41 | PASS | 0 | 0 | 0 | 2.105 |
+| `defi_invariant_scale` | 32 | 32 | PASS | 0 | 0 | 0 | 1.987 |
+| `ownership_transfer_scale` | 35 | 35 | PASS | 0 | 0 | 0 | 1.970 |
+| **total** | 172 | 172 | 5/5 | 0 | 0 | 0 | 9.77 |
+
+`std/` stays at **0 trusted atoms of 344** while these run, and the application
+side introduces none either: no `trusted atom`, no `extern` boundary, and no Z3
+`unknown` that had to escalate to mumei-lean. The trust surface therefore stays
+flat as atom count grows an order of magnitude, while Z3 solver time grows
+roughly linearly in atoms (~0.06 s/atom). The scale run reuses the same counting
+routine as `scripts/generate_stdlib_metrics.py`, so a regression that trades a
+proof for a trusted atom fails the scale run as well as the
+`Stdlib Trusted-Atom Guard` workflow.

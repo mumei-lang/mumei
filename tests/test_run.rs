@@ -210,3 +210,130 @@ body: { json::from_bool(1) };
 
     std::fs::remove_dir_all(fixture.parent().unwrap()).expect("remove run fixture dir");
 }
+
+#[test]
+fn run_command_reads_a_struct_parameter_field() {
+    let bin = env!("CARGO_BIN_EXE_mumei");
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let fixture = write_fixture(
+        "struct_field",
+        r#"
+struct Point { x: i64, y: i64 }
+
+trusted atom get_x(p: Point) -> i64
+requires: true;
+ensures: true;
+body: { p.x };
+
+trusted atom main()
+requires: true;
+ensures: true;
+body: {
+    let p = Point { x: 7, y: 1 };
+    get_x(p)
+};
+"#,
+    );
+
+    let output = Command::new(bin)
+        .arg("run")
+        .arg(&fixture)
+        .current_dir(manifest_dir)
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run mumei run with a struct parameter: {err}"));
+
+    assert_eq!(
+        output.status.code(),
+        Some(7),
+        "a struct parameter should keep its fields addressable\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    std::fs::remove_dir_all(fixture.parent().unwrap()).expect("remove run fixture dir");
+}
+
+#[test]
+fn run_command_links_a_string_literal_into_a_pie() {
+    let bin = env!("CARGO_BIN_EXE_mumei");
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let fixture = write_fixture(
+        "string_literal_pie",
+        r#"
+trusted atom relay(ch: chan<Str>, s: Str) -> Str
+requires: true;
+ensures: true;
+body: {
+    send(ch, s);
+    recv(ch)
+};
+
+trusted atom main()
+requires: true;
+ensures: true;
+body: {
+    let got = relay(0, "hello");
+    7
+};
+"#,
+    );
+
+    let output = Command::new(bin)
+        .arg("run")
+        .arg(&fixture)
+        .current_dir(manifest_dir)
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run mumei run with a string literal: {err}"));
+
+    assert_eq!(
+        output.status.code(),
+        Some(7),
+        "a string literal must not emit an absolute relocation that a PIE link rejects\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    std::fs::remove_dir_all(fixture.parent().unwrap()).expect("remove run fixture dir");
+}
+
+#[test]
+fn run_command_returns_a_struct_value_across_atoms() {
+    let bin = env!("CARGO_BIN_EXE_mumei");
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let fixture = write_fixture(
+        "struct_return",
+        r#"
+struct Point { x: i64, y: i64 }
+
+trusted atom make_point() -> Point
+requires: true;
+ensures: true;
+body: { Point { x: 7, y: 1 } };
+
+trusted atom main()
+requires: true;
+ensures: true;
+body: {
+    let p = make_point();
+    p.x
+};
+"#,
+    );
+
+    let output = Command::new(bin)
+        .arg("run")
+        .arg(&fixture)
+        .current_dir(manifest_dir)
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run mumei run with a struct return: {err}"));
+
+    assert_eq!(
+        output.status.code(),
+        Some(7),
+        "an atom declared `-> Point` must return the struct itself, not an i64\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    std::fs::remove_dir_all(fixture.parent().unwrap()).expect("remove run fixture dir");
+}

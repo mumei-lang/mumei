@@ -144,6 +144,16 @@ pub(crate) fn cmd_build(
         std::collections::HashMap::new();
 
     let mut atom_count = 0;
+    // Extern functions are emitted as trusted atoms by the runtime monitor; an
+    // atom declared in the file already covers that name, and the same extern
+    // block may be reachable more than once.
+    let mut monitored_extern_fns: std::collections::HashSet<String> = items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Atom(atom) => Some(atom.name.clone()),
+            _ => None,
+        })
+        .collect();
 
     for item in &items {
         match item {
@@ -245,11 +255,66 @@ pub(crate) fn cmd_build(
                     eb.language,
                     eb.functions.len()
                 );
+                // An extern declaration has no body to compile, but it is a
+                // trust boundary: the runtime monitor is the one target that
+                // has something to emit for it.
+                if matches!(emit_target, emitter::EmitTarget::RuntimeMonitor) {
+                    let extern_blocks = collect_extern_blocks(&module_env);
+                    for ext_fn in &eb.functions {
+                        if !monitored_extern_fns.insert(ext_fn.name.clone()) {
+                            continue;
+                        }
+                        let atom = mumei_core::trust_boundary::extern_fn_as_trusted_atom(ext_fn);
+                        let hir_atom = lower_atom_to_hir_with_env(&atom, Some(&module_env));
+                        let atom_output_path =
+                            output_dir.join(format!("{}_{}", file_stem, atom.name));
+                        match dispatch_emit(
+                            emit_target,
+                            external_emitter.as_deref(),
+                            &hir_atom,
+                            &atom_output_path,
+                            &module_env,
+                            &extern_blocks,
+                        ) {
+                            Ok(artifacts) => {
+                                for artifact in &artifacts {
+                                    if let Err(e) = std::fs::write(&artifact.name, &artifact.data) {
+                                        eprintln!(
+                                            "Failed to write artifact '{}': {}",
+                                            artifact.name.display(),
+                                            e
+                                        );
+                                        std::process::exit(1);
+                                    }
+                                }
+                                println!(
+                                    "  ⚙️  Tempering: Done. Compiled extern '{}' to {}.",
+                                    atom.name,
+                                    emit_target.label()
+                                );
+                            }
+                            Err(e) => {
+                                let resolved = resolve_source_for_span(&source, &ext_fn.span);
+                                let e = e.with_source(&resolved, &ext_fn.span);
+                                eprintln!("{:?}", miette::Report::new(e));
+                                std::process::exit(1);
+                            }
+                        }
+                    }
+                }
             }
 
             // --- エフェクト定義 ---
             Item::EffectDef(effect_def) => {
                 println!("  ⚡ Effect: '{}'", effect_def.name);
+            }
+
+            // --- capability 宣言 ---
+            Item::CapabilityDef(capability_def) => {
+                println!(
+                    "  🔑 Capability: '{}' (effect: {})",
+                    capability_def.name, capability_def.effect_name
+                );
             }
 
             // --- impl ブロック (struct method) ---
@@ -820,6 +885,18 @@ pub(crate) fn cmd_build(
                         "Warning: {} global invariant conflicts detected",
                         cross_spec_result.summary.global_invariant_conflict_count
                     );
+                }
+                for skip in &cross_spec_result.session_analysis_skips {
+                    eprintln!("Warning: session protocol not checked: {}", skip.message);
+                }
+                if !cross_spec_result.session_protocol_violations.is_empty() {
+                    for violation in &cross_spec_result.session_protocol_violations {
+                        eprintln!(
+                            "  ❌ Session protocol violation ({}): {}\n     Suggested fix: {}",
+                            violation.kind, violation.message, violation.suggested_fix
+                        );
+                    }
+                    std::process::exit(1);
                 }
             }
             Err(e) => {

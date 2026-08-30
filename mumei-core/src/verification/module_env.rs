@@ -1,5 +1,5 @@
 use super::*;
-use crate::parser::ExternBlock;
+use crate::parser::{CapabilityDef, ExternBlock};
 
 /// - release_borrow: 借用を解放。
 ///
@@ -168,6 +168,9 @@ pub struct ModuleEnv {
     /// エフェクト定義レジストリ（階層構造対応）
     /// Step 2a: EffectDef のパラメータ・制約・親を含む完全な定義
     pub effect_defs: HashMap<String, EffectDef>,
+    /// capability 宣言（capability 型名 → 定義）。新しいエフェクトは定義せず、
+    /// 既存エフェクトへの別名と constraint を保持する view。
+    pub capability_defs: HashMap<String, CapabilityDef>,
     /// Symbolic String ID: パス文字列 → 整数ID のマッピング（ハイブリッド・アプローチ）
     // NOTE: path_id_map/next_path_id/prefix_ranges are infrastructure for Z3 String Sort migration (see ROADMAP.md P4)
     #[allow(dead_code)]
@@ -372,6 +375,17 @@ impl ModuleEnv {
     #[allow(dead_code)]
     pub fn get_effect(&self, name: &str) -> Option<&EffectDef> {
         self.effects.get(name)
+    }
+
+    /// capability 宣言を登録する
+    pub fn register_capability(&mut self, capability_def: &CapabilityDef) {
+        self.capability_defs
+            .insert(capability_def.name.clone(), capability_def.clone());
+    }
+
+    /// capability 宣言を取得する
+    pub fn get_capability(&self, name: &str) -> Option<&CapabilityDef> {
+        self.capability_defs.get(name)
     }
 
     /// エフェクト名のリストを展開し、includes を再帰的に解決して

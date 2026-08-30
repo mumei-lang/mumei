@@ -230,6 +230,45 @@ extern "Rust" {
         assert!(callees.contains("foo"), "should find foo");
     }
 
+    /// A capability declaration lives outside the atom, so changing its constraint
+    /// must still change the atom hash (otherwise a stale proof is reused).
+    #[test]
+    fn test_atom_hash_tracks_capability_constraint() {
+        let source = |constraint: &str| {
+            format!(
+                "effect FileRead(path: Str);\n\
+                 type FileCap = capability FileRead(path: Str) where {constraint};\n\
+                 atom read_it(cap: FileCap)\n\
+                 effects: [FileRead(path)]\n\
+                 requires: true;\n\
+                 ensures: result >= 0;\n\
+                 body: {{ perform cap.read(\"/tmp/a.log\"); 1 }}"
+            )
+        };
+        let atom_of = |src: &str| {
+            parser::parse_module(src)
+                .into_iter()
+                .find_map(|item| match item {
+                    parser::Item::Atom(atom) if atom.name == "read_it" => Some(atom),
+                    _ => None,
+                })
+                .expect("atom read_it")
+        };
+        let tmp = atom_of(&source("starts_with(path, \"/tmp/\")"));
+        let var = atom_of(&source("starts_with(path, \"/var/\")"));
+        assert_ne!(
+            compute_atom_hash(&tmp),
+            compute_atom_hash(&var),
+            "capability constraint change must invalidate the atom hash"
+        );
+        let module_env = ModuleEnv::new();
+        assert_ne!(
+            compute_proof_hash(&tmp, &module_env),
+            compute_proof_hash(&var, &module_env),
+            "capability constraint change must invalidate the proof hash"
+        );
+    }
+
     /// Test compute_proof_hash is deterministic
     #[test]
     fn test_compute_proof_hash_deterministic() {
@@ -506,6 +545,71 @@ atom caller(n: i64) -> i64
     fn test_check_cert_for_atom_missing() {
         let results = HashMap::new();
         assert!(!check_cert_for_atom(&results, "nonexistent"));
+    }
+
+    /// Package dependencies must attribute their entry-file atoms, otherwise
+    /// cross-file analyses (Session Types) drop every dependency role.
+    #[test]
+    fn path_dependency_atoms_are_attributed_to_their_entry_file() {
+        let root = std::env::temp_dir().join(format!(
+            "mumei_dep_attribution_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let dep_src = root.join("dep").join("src");
+        fs::create_dir_all(&dep_src).expect("create dependency dir");
+        let entry = dep_src.join("main.mm");
+        fs::write(
+            &entry,
+            r#"
+effect DepChannel
+    states: [Idle, Sent];
+    initial: Idle;
+    transition send: Idle -> Sent;
+
+atom dep_send(x: i64)
+    effects: [DepChannel];
+    effect_pre: { DepChannel: Idle };
+    effect_post: { DepChannel: Sent };
+    requires: x > 0;
+    ensures: result == x;
+    body: {
+        perform DepChannel.send;
+        x
+    }
+"#,
+        )
+        .expect("write dependency entry");
+
+        let manifest: crate::manifest::Manifest = toml::from_str(
+            r#"
+[package]
+name = "app"
+version = "0.1.0"
+
+[dependencies]
+dep = { path = "./dep" }
+"#,
+        )
+        .expect("parse manifest");
+
+        let mut module_env = ModuleEnv::new();
+        resolve_manifest_dependencies(&manifest, &root, &mut module_env)
+            .expect("resolve dependencies");
+
+        let expected = entry.canonicalize().unwrap_or(entry.clone());
+        for name in ["dep_send", "dep::dep_send"] {
+            let atom = module_env
+                .get_atom(name)
+                .unwrap_or_else(|| panic!("{name} registered"));
+            let source = atom
+                .spec_metadata
+                .get("source_file")
+                .unwrap_or_else(|| panic!("{name} attributed to a source file"));
+            assert_eq!(Path::new(source), expected.as_path());
+        }
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     /// P5-C: mark_dependency_atoms_with_cert verifies atoms with proven cert

@@ -113,6 +113,9 @@ pub(crate) fn cmd_check_print_items(_input: &str, items: &[Item]) {
             Item::EffectDef(e) => {
                 println!("  ⚡ Effect: '{}'", e.name);
             }
+            Item::CapabilityDef(c) => {
+                println!("  🔑 Capability: '{}' (effect: {})", c.name, c.effect_name);
+            }
             Item::ImplBlock(ib) => {
                 atom_count += ib.methods.len();
                 println!(

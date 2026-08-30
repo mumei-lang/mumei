@@ -1271,8 +1271,35 @@ pub(crate) fn expr_to_z3<'a>(
                 .get(effect.as_str())
                 .or_else(|| vc.module_env.effects.get(effect.as_str()))
                 .cloned();
+            // capability 型パラメータの静的型から constraint を引く。
+            // `perform cap.op(x)` はパーサで裏側のエフェクトに解決されているので、
+            // 同じエフェクトを指す capability 宣言の制約をエフェクト制約と並べて検証する。
+            let capability_constraints: Vec<String> = vc
+                .current_atom
+                .map(|current| {
+                    current
+                        .params
+                        .iter()
+                        .filter_map(|param| {
+                            param
+                                .type_ref
+                                .as_ref()
+                                .and_then(|ty| ty.capability.as_ref())
+                        })
+                        .filter(|capability| capability.effect == *effect)
+                        .filter_map(|capability| capability.constraint.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
+
             if let Some(def) = effect_def {
-                if let Some(ref constraint) = def.constraint {
+                let constraints: Vec<&str> = def
+                    .constraint
+                    .as_deref()
+                    .into_iter()
+                    .chain(capability_constraints.iter().map(String::as_str))
+                    .collect();
+                for constraint in constraints {
                     // For each argument, check if it's a symbolic (non-constant) value
                     // that needs Z3 String constraint verification.
                     // NOTE: Currently def.constraint is a single string (e.g., "starts_with(path, \"/tmp/\")")

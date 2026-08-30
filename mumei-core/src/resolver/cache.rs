@@ -85,6 +85,18 @@ pub fn compute_atom_hash(atom: &crate::parser::Atom) -> String {
             hasher.update(b"=");
             hasher.update(ens.as_bytes());
         }
+        // capability パラメータの静的型も含める。capability 宣言は atom の外にあるため、
+        // 宣言側の constraint 変更をハッシュに反映しないと古い証明が再利用される。
+        if let Some(capability) = p.type_ref.as_ref().and_then(|ty| ty.capability.as_ref()) {
+            hasher.update(b"|capability:");
+            hasher.update(p.name.as_bytes());
+            hasher.update(b"=");
+            hasher.update(capability.effect.as_bytes());
+            if let Some(ref constraint) = capability.constraint {
+                hasher.update(b" where ");
+                hasher.update(constraint.as_bytes());
+            }
+        }
     }
     // resources も含める（リソース制約の変更を検出）
     for r in &atom.resources {
@@ -206,6 +218,18 @@ pub fn compute_proof_hash_with_flags(
             hasher.update(p.name.as_bytes());
             hasher.update(b"=");
             hasher.update(ens.as_bytes());
+        }
+        // capability パラメータの静的型も含める。capability 宣言は atom の外にあるため、
+        // 宣言側の constraint 変更をハッシュに反映しないと古い証明が再利用される。
+        if let Some(capability) = p.type_ref.as_ref().and_then(|ty| ty.capability.as_ref()) {
+            hasher.update(b"|capability:");
+            hasher.update(p.name.as_bytes());
+            hasher.update(b"=");
+            hasher.update(capability.effect.as_bytes());
+            if let Some(ref constraint) = capability.constraint {
+                hasher.update(b" where ");
+                hasher.update(constraint.as_bytes());
+            }
         }
     }
     for r in &atom.resources {
