@@ -902,3 +902,47 @@ body: {
         "the task body must index the captured parent element storage\n{ir}"
     );
 }
+
+#[test]
+fn chan_f64_send_converts_an_integer_payload_to_the_declared_type() {
+    // A payload whose type differs from the channel's declared `T` must be
+    // converted to `T` before it is bit-preserved into the runtime slot —
+    // otherwise `recv` reinterprets the integer's bit pattern as a double.
+    let bin = env!("CARGO_BIN_EXE_mumei");
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let fixture = write_fixture(
+        "chan_f64_int_payload",
+        r#"
+trusted atom relay(ch: chan<f64>, x: i64) -> f64
+requires: true;
+ensures: true;
+body: {
+    send(ch, x);
+    recv(ch)
+};
+
+trusted atom main()
+requires: true;
+ensures: true;
+body: {
+    let got = relay(0, 3);
+    if got == 3.0 { 7 } else { 0 }
+};
+"#,
+    );
+    let output = Command::new(bin)
+        .arg("run")
+        .arg(&fixture)
+        .current_dir(manifest_dir)
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run chan<f64> int-payload fixture: {err}"));
+    std::fs::remove_dir_all(fixture.parent().unwrap()).expect("remove concurrency fixture dir");
+
+    assert_eq!(
+        output.status.code(),
+        Some(7),
+        "an integer payload on a `chan<f64>` must arrive as the same number, not as reinterpreted bits\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

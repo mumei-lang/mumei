@@ -921,7 +921,7 @@ audit / migration / self-healing / MCP の 1 コマンド導線を提供する�
 | ✅ | Priority 18 / P22: Session Types（分散プロトコル検証） | mumei + mumei-agent | Implemented (測定 2026-08-29。`cargo test --test test_session_types` 4/4 / `cargo test -p mumei-core session_types` 20/20 passed。`duality_mismatch` / `unreachable_receive` / `deadlock_no_progress` を有界抽象解釈のみで判定し、打ち切りは `session_analysis_skips[]` で可視化。agent 側は `agent_artifact_mapping[]` の宣言どおり `session_protocol_violations[]` を `missing_constraints[]`（`spec_vs_code`）として消費し、新規 verdict 語彙は追加しない) |
 | ✅ | Priority 19 / P23: Proof-Aware Observability（実行時モニタリング） | mumei + mumei-agent | Implemented (測定 2026-08-29。`cargo test --test test_runtime_monitor` 6/6 / `cargo test -p mumei-core trust_boundary` 6/6 / `cargo test -p mumei-emit-monitor` 6/6 passed。信頼境界のみ計装し証明済み純粋 atom は成果物 0、ゼロコスト検証 `cargo tree --edges no-dev` に opentelemetry は現れない。運用フローは mumei-agent `docs/OBSERVABILITY.md` § (f)) |
 | ✅ | Priority 20 / P24: Remote Package Registry（証明書付きパッケージのネットワーク配布） | mumei | Implemented (測定 2026-08-29。`cargo test --test test_remote_registry` 14/14 / `cargo test -p mumei-core registry` 12/12 passed。`mumei.toml` の `[registry] url` か `MUMEI_REGISTRY_URL` を設定したときだけ name 依存が HTTP レジストリへフォールバックし、`.proof-cert.json` のハッシュ・パッケージ帰属を既存 P5-B の検証で確認してから `~/.mumei/packages/<name>/<version>/` にキャッシュして既存のローカル解決経路へ合流する。`--strict-imports` は証明書なし / ハッシュ不一致 / パース不能をハードエラーにし、新規 verdict 語彙は追加しない。未設定時は従来どおりローカル / path / git のみ) |
-| ✅ | Priority 21 / P25: concurrency codegen follow-up（polymorphic `chan<T>` payload / task body の配列要素キャプチャ） | mumei | Implemented (測定 2026-08-30。`cargo test --test test_concurrency` 22/22 passed。`send` / `recv` は payload を既存 `bitpreserve_cast` で runtime の `int64_t` スロットへビット保存変換 / 復元し（`f64` は `bitcast`、`Str` / ポインタは `ptrtoint` / `inttoptr`）、runtime helper のシグネチャは i64 固定のまま。task wrapper は capture した配列の fat pointer `(len, data)` を pthread args struct 経由で受け取り、task body が親の要素ストレージを bounds check 付きで参照する。値渡し aggregate と非 i64 join 結果は既存挙動のまま残課題) |
+| ✅ | Priority 21 / P25: concurrency codegen follow-up（polymorphic `chan<T>` payload / task body の配列要素キャプチャ） | mumei | Implemented (測定 2026-08-30。`cargo test --test test_concurrency` 23/23 passed。`send` / `recv` は payload を既存 `bitpreserve_cast` で runtime の `int64_t` スロットへビット保存変換 / 復元し（`f64` は `bitcast`、`Str` / ポインタは `ptrtoint` / `inttoptr`）、runtime helper のシグネチャは i64 固定のまま。task wrapper は capture した配列の fat pointer `(len, data)` を pthread args struct 経由で受け取り、task body が親の要素ストレージを bounds check 付きで参照する。値渡し aggregate と非 i64 join 結果は既存挙動のまま残課題) |
 | ⏸️ | SI-4: no_std Ecosystem | mumei | Deferred |
 
 ## vStd: Verified Standard Library Expansion
@@ -1896,7 +1896,7 @@ graph LR
 - ✅ **`chan<f64>` の実行時往復**: `mumei run` の終了コードで payload 保持を確認（従来は非 int payload が `i64 0` に潰れていた）。
 - ✅ **`chan<Str>`**: 生成 `.ll` に `ptrtoint` / `inttoptr` 対が現れ、`recv` を返す atom が `ptr` を返す。
 - ✅ **配列要素 capture**: task wrapper が args struct から `(len, data)` を load し、task body が親の要素ストレージを GEP する。
-- ✅ **回帰なし**: `cargo test --test test_concurrency` 22/22 passed（既存の struct capture / `task_group:all` / `:any` / Phase 1h-2 所有権検証を含む）。`cargo tree --edges no-dev` に opentelemetry は現れない。
+- ✅ **回帰なし**: `cargo test --test test_concurrency` 23/23 passed（既存の struct capture / `task_group:all` / `:any` / Phase 1h-2 所有権検証を含む）。`cargo tree --edges no-dev` に opentelemetry は現れない。
 
 **残課題**: 値渡し aggregate の payload（ビット保存できる i64 表現がない）と、非 i64 の task join 結果（既存の i64 coerce）。
 

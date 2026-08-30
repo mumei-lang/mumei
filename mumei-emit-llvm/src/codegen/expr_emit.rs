@@ -12,7 +12,7 @@ use crate::codegen::task_runtime::{
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Module;
-use inkwell::types::{BasicMetadataTypeEnum, BasicType};
+use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
 use inkwell::values::{AnyValue, BasicMetadataValueEnum, BasicValueEnum, FunctionValue};
 use inkwell::AddressSpace;
 use inkwell::{FloatPredicate, IntPredicate};
@@ -26,6 +26,28 @@ use std::collections::HashMap;
 /// these entries never collide with a variable's struct type entry.
 pub(crate) fn chan_payload_key(var: &str) -> String {
     format!("<chan>{}", var)
+}
+
+/// Numerically convert `val` to a channel's declared payload type before it is
+/// bit-preserved into the runtime's i64 slot, so `send(ch, 1)` on a
+/// `chan<f64>` transports `1.0` rather than the integer's bit pattern (which
+/// `recv` would then reinterpret as a double). Int / float promotion follows
+/// the same rule as mixed arithmetic; every other type pairing is left to
+/// `bitpreserve_cast`.
+fn coerce_to_chan_payload<'a>(
+    builder: &Builder<'a>,
+    val: BasicValueEnum<'a>,
+    payload_ty: BasicTypeEnum<'a>,
+) -> MumeiResult<BasicValueEnum<'a>> {
+    match (payload_ty, val) {
+        (BasicTypeEnum::FloatType(ty), BasicValueEnum::IntValue(v)) => {
+            Ok(llvm!(builder.build_signed_int_to_float(v, ty, "payload_int_to_float")).into())
+        }
+        (BasicTypeEnum::IntType(ty), BasicValueEnum::FloatValue(v)) => {
+            Ok(llvm!(builder.build_float_to_signed_int(v, ty, "payload_float_to_int")).into())
+        }
+        _ => Ok(val),
+    }
 }
 
 /// Declared payload type of the channel `expr` denotes, when the channel is a
@@ -999,7 +1021,13 @@ pub(crate) fn compile_hir_expr<'a>(
             // losing bits: f64 is bitcast, Str / struct pointers go through
             // `ptrtoint`. Aggregates passed by value have no bit-preserving
             // i64 encoding and keep the pre-P25 zero placeholder.
-            let val_i64 = match bitpreserve_cast(builder, val, context.i64_type().into()) {
+            let payload = match chan_payload_type_name(channel, var_types)
+                .map(|name| resolve_param_type(context, Some(name.as_str()), module_env))
+            {
+                Some(payload_ty) => coerce_to_chan_payload(builder, val, payload_ty)?,
+                None => val,
+            };
+            let val_i64 = match bitpreserve_cast(builder, payload, context.i64_type().into()) {
                 Ok(cast) => cast.into_int_value(),
                 Err(_) => context.i64_type().const_int(0, false),
             };
