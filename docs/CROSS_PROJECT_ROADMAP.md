@@ -908,9 +908,10 @@ audit / migration / self-healing / MCP の 1 コマンド導線を提供する�
 | ✅ | P14-D: 人間向けUX強化（Human-in-the-Loop） | mumei + mumei-agent + mumei-demo | Implemented |
 | ✅ | 自然言語仕様抽出の曖昧性レポート（欠落要件 vs underspecified 意図） | mumei-agent | Implemented (`agent/spec_ambiguity.py`: 抽出された contract clause が trivial かつ prose が対象に一切言及しない場合のみ `missing_requirement` として `cross_validation_gaps` に出し `verified` verdict を止める。言及はあるが確定していない場合・語彙的に曖昧な prose は `underspecified_intent` として `next_steps` の人手確認へ回し、clause を推測で補完しない。8 固定キー契約（`AUDIT_SCHEMA_KEYS`）はそのままで、新規 verdict 分類や別名 alias は追加しない。回帰ゲートは mumei-agent `tests/test_spec_ambiguity.py` / `tests/test_audit.py`) |
 | ✅ | SI-6: Lean 4 Executable Code Generation | mumei-lean | Completed |
-| ✅ | SI-6 / Lean fallback unknown-obligation bridge | mumei + mumei-lean | Implemented (13 live generated paths: `abs_saturating`, `bounded_mul_with_overflow_check`, `constant_time_eq_flag`, `ff_zero_eq_zero`, `verified_insertion_sort_ascending`, `poly_bound_monotone`, `exists_pivot_partition`, `sum_nonneg_inductive`, `rtgs_transfer_conservation`, `ff_mul_commutative`, `ff_mul_associative`, `ff_mul_add_distributive`, `predicate_guard_collapse`)。escalation bundle は `body_expr` / `body_summary` を搬送するため、`mumei verify --escalate-lean` 経路でも body semantics 依存 obligation が `lean_verified` へ昇格する |
-| ✅ | 生成定理の自動タクティク探索 | mumei-lean | Implemented (`scripts/tactic_search.py`: 決定的 16 候補 ladder、per-obligation timeout `--tactic-search-timeout`（既定 300s）、`residual` / `build_failure` の 2 stage。採用タクティクは生成 proof として emit され、再生成した定理が実際に `lake build` を通った場合のみ `lean_verified`。失敗時は `manual_lemma_reason` を保持し誤昇格しない。探索時間は既存 `lean_solver_time_s` に加算。12 番目の live path `ff_mul_add_distributive` を `mumei_ff_mod` で discharge; `docs/LEAN_TRANSLATOR_SPEC.md` §12) |
+| ✅ | SI-6 / Lean fallback unknown-obligation bridge | mumei + mumei-lean | Implemented (14 live generated paths: `abs_saturating`, `bounded_mul_with_overflow_check`, `constant_time_eq_flag`, `ff_zero_eq_zero`, `verified_insertion_sort_ascending`, `poly_bound_monotone`, `exists_pivot_partition`, `sum_nonneg_inductive`, `rtgs_transfer_conservation`, `ff_mul_commutative`, `ff_mul_associative`, `ff_mul_add_distributive`, `predicate_guard_collapse`, `ff_pow_square_expands`)。escalation bundle は `body_expr` / `body_summary` を搬送するため、`mumei verify --escalate-lean` 経路でも body semantics 依存 obligation が `lean_verified` へ昇格する |
+| ✅ | 生成定理の自動タクティク探索 | mumei-lean | Implemented (`scripts/tactic_search.py`: 決定的 17 候補 ladder、per-obligation timeout `--tactic-search-timeout`（既定 300s）、`residual` / `build_failure` の 2 stage。採用タクティクは生成 proof として emit され、再生成した定理が実際に `lake build` を通った場合のみ `lean_verified`。失敗時は `manual_lemma_reason` を保持し誤昇格しない。探索時間は既存 `lean_solver_time_s` に加算。12 番目の live path `ff_mul_add_distributive` を `mumei_ff_mod` で discharge; `docs/LEAN_TRANSLATOR_SPEC.md` §12) |
 | ✅ | タクティク ladder の非算術拡張と候補順序の学習 | mumei-lean | Implemented (arithmetic / modular / field 以外の命題論理・リスト・順序・帰納目標をカバーする `tauto` / `mumei_list` / `mumei_order` / `mumei_induct` を追加して ladder を 16 候補へ拡張。候補順序の学習は pinned artifact `data/tactic_search_history.json`（`mumei-lean.tactic_search_history/v1`）に基づく決定的な並べ替えのみで、候補の追加・削除は行わず ladder の permutation を超えない（tie は宣言順、未知候補・壊れた artifact は無視）。記録は実際に `lake build` を通った採用のみ。13 番目の live path `predicate_guard_collapse` を `tauto` で discharge。`translator_version` / `bridge_lemma_hash` は不変; `docs/LEAN_TRANSLATOR_SPEC.md` §12.2/§12.5) |
+| ✅ | タクティク ladder の剰余べき乗拡張（候補 C）| mumei-lean | Implemented (`mumei_ff_pow` を ladder 末尾に追記して 17 候補へ拡張。`Int.toNat` リテラル還元と指数の下の剰余還元（`MumeiLean.Algebra.emod_pow_emod`）を含むため、`mumei_ff_mod` では届かない modular exponentiation 目標を discharge できる。14 番目の live path `std/algebra/finite_field.mm::ff_pow_square_expands`。bridge lemma catalog は無変のため `bridge_lemma_hash` / `translator_version` は不変。既存 16 候補の順序は prefix として不変; `docs/LEAN_TRANSLATOR_SPEC.md` §12.2) |
 | ✅ | 契約式トランスレータ / `mumei_arith` の有限体・群論拡張 | mumei-lean | Implemented (`finite_field_commutativity_lowering` + `MumeiLean.Algebra.ff_{add,mul}_comm_eq`; `mumei_field` cascade と `mumei_arith` の `ring1` / `field_simp`; 10 番目の live path `ff_mul_commutative` と 11 番目の `ff_mul_associative`（`finite_field_associativity` bridge pattern + `MumeiLean.Algebra.ff_{add,mul}_assoc_mod` / `ff_eq_refl`、既存 catalog 補題のみのため hash 不変）; `bridge_lemma_hash` = `ee8cd3ba…4347`, `docs/LEAN_TRANSLATOR_SPEC.md` §5.6/§5.14/§5.15/§8/§10) |
 | ✅ | CertParser.lean / CertWriter.lean ネイティブ実装 | mumei-lean | Implemented (`Lean.Data.Json` ベースの parse/write が Python bridge と round-trip 一致。`z3_result_class` / `escalation_reason` / `logic_fragment_tags` を書き換えず保持し、`tests/test_cert_roundtrip.py` で固定) |
 | ✅ | Obligation class bridge lemma catalog + escalation timing | mumei-lean + mumei | Implemented (`docs/LEAN_TRANSLATOR_SPEC.md` §10/§11; `bridge_lemma_hash` derived from the catalog and bumped to `ee8cd3ba…4347` across all pinned docs/fixtures; `lean_solver_time_s` reported per atom and in the bridge summary, consumed by `benchmarks/run_benchmarks.py`) |
@@ -1653,7 +1654,7 @@ V1-E-3 の LSP diagnostics 拡張により、V1-E 系は V1-E-1〜V1-E-4 まで�
 | V1-C: 仕様→コード整合 | mumei-agent P16 | V1-A + V1-B |
 | V1-D: コード→仕様整合 | mumei-agent P17 | V1-B + intent_tracker ✅ |
 | V1-E: 人向けUX | mumei P10 / mumei-agent P18 | V1-A〜D |
-| mumei-lean連携 | ✅ 実装済み（math / crypto / algebra / sort / nonlinear-monic / quantifier-alternation / induction / RTGS / finite-field-commutativity / finite-field-associativity / finite-field-distributivity / predicate-guard-collapse の13 live generated theorem paths が `known_witness_used = false` で `lean_verified` を E2E export） | V1-A〜D（Z3 unknown時）✅ |
+| mumei-lean連携 | ✅ 実装済み（math / crypto / algebra / sort / nonlinear-monic / quantifier-alternation / induction / RTGS / finite-field-commutativity / finite-field-associativity / finite-field-distributivity / predicate-guard-collapse / finite-field-exponentiation の14 live generated theorem paths が `known_witness_used = false` で `lean_verified` を E2E export） | V1-A〜D（Z3 unknown時）✅ |
 
 ---
 
@@ -1669,7 +1670,7 @@ graph LR
     E --> Demo["Phase 7 Demo\nspec_code_verification_suite\n(mumei-demo)"]
 ```
 
-**V1 系はすべて実装済み**。`mumei-lean連携` は Z3 `unknown` 専用の補完経路として math / crypto / algebra / sort / nonlinear-monic / quantifier-alternation / induction / RTGS / finite-field-commutativity / finite-field-associativity / finite-field-distributivity / predicate-guard-collapse の13 live generated theorem paths を通し、いずれも `known_witness_used = false` のまま `lean_verified` を E2E export することを確認済みです。sort ascending-preservation 経路は `tests/fixtures/sort_ascending.mm::verified_insertion_sort_ascending` の `forall(i, 0, n-1, arr[i] <= arr[i+1])` ensures を `MumeiLean.Sort.insertion_sort_ascending_bridge` で mathlib の `List.Sorted` に接続します。追加3経路は `std/math/patterns.mm::poly_bound_monotone`（非 conjunction 非線形算術を `mumei_arith_deep` で）、`std/list.mm::exists_pivot_partition`（∀∃ 交代を `MumeiLean.Quantifiers.forall_exists_swap_of_finite` で）、`std/math/patterns.mm::sum_nonneg_inductive`（自然数帰納を `MumeiLean.AdvancedPatterns.int_nonnegative_induction_pattern` で）discharge し、いずれも既存 backing lemma を再利用するため `bridge_lemma_hash` は不変です。10 番目の `std/algebra/finite_field.mm::ff_mul_commutative` は swapped operand の `ff_eq` を `MumeiLean.Algebra.ff_mul_comm_eq` で discharge し、この 2 補題が catalog に加わるため `bridge_lemma_hash` は `ee8cd3ba…4347` に更新されています。11 番目の `ff_mul_associative` は `MumeiLean.Algebra.ff_mul_assoc_mod` + `ff_eq_refl` で discharge し、12 番目の `ff_mul_add_distributive` と 13 番目の `std/core_predicates.mm::predicate_guard_collapse` は bridge lemma template を持たないため、決定的な tactic 探索（`mumei-lean/scripts/tactic_search.py` の 16 候補 ladder）がそれぞれ `mumei_ff_mod` / `tauto` を採用します。いずれも既存補題または tactic のみを使うため `bridge_lemma_hash` は不変です。`Phase 7 Demo` は `mumei-demo/scenarios/spec_code_verification_suite` として実体化済みで、推奨順序を壊さずに4モードを1本の CI fixture シナリオで確認できます。
+**V1 系はすべて実装済み**。`mumei-lean連携` は Z3 `unknown` 専用の補完経路として math / crypto / algebra / sort / nonlinear-monic / quantifier-alternation / induction / RTGS / finite-field-commutativity / finite-field-associativity / finite-field-distributivity / predicate-guard-collapse / finite-field-exponentiation の14 live generated theorem paths を通し、いずれも `known_witness_used = false` のまま `lean_verified` を E2E export することを確認済みです。sort ascending-preservation 経路は `tests/fixtures/sort_ascending.mm::verified_insertion_sort_ascending` の `forall(i, 0, n-1, arr[i] <= arr[i+1])` ensures を `MumeiLean.Sort.insertion_sort_ascending_bridge` で mathlib の `List.Sorted` に接続します。追加3経路は `std/math/patterns.mm::poly_bound_monotone`（非 conjunction 非線形算術を `mumei_arith_deep` で）、`std/list.mm::exists_pivot_partition`（∀∃ 交代を `MumeiLean.Quantifiers.forall_exists_swap_of_finite` で）、`std/math/patterns.mm::sum_nonneg_inductive`（自然数帰納を `MumeiLean.AdvancedPatterns.int_nonnegative_induction_pattern` で）discharge し、いずれも既存 backing lemma を再利用するため `bridge_lemma_hash` は不変です。10 番目の `std/algebra/finite_field.mm::ff_mul_commutative` は swapped operand の `ff_eq` を `MumeiLean.Algebra.ff_mul_comm_eq` で discharge し、この 2 補題が catalog に加わるため `bridge_lemma_hash` は `ee8cd3ba…4347` に更新されています。11 番目の `ff_mul_associative` は `MumeiLean.Algebra.ff_mul_assoc_mod` + `ff_eq_refl` で discharge し、12 番目の `ff_mul_add_distributive` と 13 番目の `std/core_predicates.mm::predicate_guard_collapse` は bridge lemma template を持たないため、決定的な tactic 探索（`mumei-lean/scripts/tactic_search.py` の 17 候補 ladder）がそれぞれ `mumei_ff_mod` / `tauto` を採用します。14 番目の `std/algebra/finite_field.mm::ff_pow_square_expands`（modular exponentiation の展開）は ladder 末尾に追記した `mumei_ff_pow` が採用され、bridge lemma catalog は変更しないため `bridge_lemma_hash` は不変のままです。いずれも既存補題または tactic のみを使うため `bridge_lemma_hash` は不変です。`Phase 7 Demo` は `mumei-demo/scenarios/spec_code_verification_suite` として実体化済みで、推奨順序を壊さずに4モードを1本の CI fixture シナリオで確認できます。
 
 ---
 
@@ -1687,7 +1688,7 @@ graph LR
 
 ---
 
-## Priority 15: Capability Model 拡張の評価と段階的導入 — ✅ 調査完了 / 🚧 Stage 1 実装済み（Stage 2 以降はタスク 3 待ち）
+## Priority 15: Capability Model 拡張の評価と段階的導入 — ✅ 調査完了（タスク 1〜4）/ ✅ Stage 1 実装済み / ⏸ Stage 2 以降は保留（タスク 3 結論: 否定）
 
 **Repository**: `mumei-lang/mumei`（設計調査の本体） / `mumei-lang/mumei-agent`（生成側の追従は調査結果が出てから）
 
@@ -1701,7 +1702,7 @@ graph LR
    - Z3 エンコーディング（capability 値の制約を現行の `check_constant_constraint()` / Z3 String Sort 上でどう表現するか。effect containment 証明 `UsedEffects(body) ⊆ AllowedEffects(signature)` を壊さないこと）
    - capability オブジェクトのランタイム表現の要否（compile-time 消去できるなら zero runtime overhead を維持できるか）
 2. **互換性判定** — 既存 `.mm` を一切書き換えずに新モデルを opt-in できるか（`grant` 未使用コードは現行セマンティクスのまま）を判定基準として明記する。破壊的変更が不可避と判明した場合は Option A 継続の再確認で打ち切る。
-3. **AI エージェント側の需要検証** — mumei-agent が生成・修復するコードで「呼び出し先に狭めた権限を渡したい」ケースを収集し、現行の `requires` による暗黙的 narrowing で足りているかを測る。
+3. **AI エージェント側の需要検証** — ✅ **調査完了（結論: 否定）**。mumei-agent が生成・修復するコードで「呼び出し先に狭めた権限を渡したい」ケースを収集した結果、現行の `requires` による暗黙的 narrowing で足りており、Stage 2 以降を要求する実需要は観測されなかった。成果物: `mumei-lang/mumei-agent` [`docs/CAPABILITY_DEMAND_STUDY.md`](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/CAPABILITY_DEMAND_STUDY.md)（PR [mumei-agent#567](https://github.com/mumei-lang/mumei-agent/pull/567)、マージ済み）。
 4. **段階導入計画** — 1〜3 の結果が肯定的な場合にのみ、`grant` / narrowing / revocation の順に最小サブセットから導入するフェーズ分割案を作成する。
 
 **契約への影響**: なし。本 Priority は `harness_contract` / `intent_fidelity` / `artifact_paths` / `budget_policy_fingerprint` / `lean_verified` と no-`.mm` の8キーいずれも変更しない。capability 由来の検証結果は既存の effect 検証と同じ経路（`verification_violations` / `next_steps`）で報告する。
@@ -1726,7 +1727,7 @@ data structure に載せない、という最小サブセットに限れば実�
   LLVM 側はパラメータを 1 対 1 で具現化するため、capability パラメータと実引数を除去する ABI 消去パスが Stage 2 に入る。
 - タスク 4（段階導入計画）は Stage 1（capability 型宣言）→ Stage 2（`grant`）→ Stage 3（narrowing）→
   Stage 4（move ベース revocation）として `docs/CAPABILITY_MODEL_STUDY.md` §6 に記載した。
-- タスク 3（AI エージェント側の需要検証）は未着手。本調査の肯定判定は「技術的に着手可能」である。
+- タスク 3（AI エージェント側の需要検証）は別途完了し、**結論は否定**。本調査の肯定判定は「技術的に着手可能」であり、需要判断ではない。
 
 **Stage 1 実装**（2026-08-30、`mumei-lang/mumei` `docs/ROADMAP.md` P29）:
 Stage 1（capability 型宣言 + capability 型パラメータ、`grant` なし）は `grant` を含まず
@@ -1735,11 +1736,17 @@ Stage 1（capability 型宣言 + capability 型パラメータ、`grant` なし�
 `TypeRef.effect_set` 付きパラメータとして既存の effect containment 規則 3（`carries_effects()` ゲート 3 箇所）に
 乗せた。capability 版と等価な effect パラメータ版が同一 verdict を出すことをテストで固め、
 `std/` + `examples/` + `tests/` の既存 `.mm` 132 ファイルで `develop` と verdict が完全一致（回帰ゼロ）。
-**Stage 2（`grant`）以降は引き続きタスク 3 の肯定を前提とする**ため、Stage 1 では `grant` 関連を一切実装していない。
+Stage 1 では `grant` 関連を一切実装していない。
 未着手の制限: import 越しの capability 型パラメータ（resolver への搭載は Stage 2 以降）。
 
-`docs/CAPABILITY_SECURITY.md` §4 の Recommendation（Option A 継続）は撤回しない。Option A を既定パスとしたうえで、
-capability model は opt-in 拡張として上積みされる位置づけとなる。
+**クローズ状態**（2026-08-30）: タスク 3 の結論が否定であるため、**Stage 2（`grant`）/ Stage 3（narrowing）/
+Stage 4（revocation）は将来のトリガ観測まで保留し、着手しない**。実装済みの Stage 1（P29）は
+タスク 3 の結果に依存しない非破壊な範囲であり、**撤回せずそのまま維持する**。再開のトリガは
+mumei-agent 側で `requires` による暗黙的 narrowing で表現できない委譲ケースが実際に観測されたときとする
+（`mumei-agent/docs/CAPABILITY_DEMAND_STUDY.md`）。
+
+`docs/CAPABILITY_SECURITY.md` §4 の Recommendation（Option A 継続）は撤回しない。Option A を既定パスとして継続し、
+capability model は Stage 1 のみが opt-in 拡張として上積みされている位置づけとなる。
 
 **関連ファイル**:
 - `docs/CAPABILITY_MODEL_STUDY.md` — 調査成果物（4 項目の分析、opt-in 判定、段階分割案）
@@ -1749,6 +1756,7 @@ capability model は opt-in 拡張として上積みされる位置づけとな�
 - `mumei-core/src/ast.rs` / `mumei-core/src/hir.rs` / `mumei-core/src/mir.rs` — effect 宣言と AST/HIR/MIR 表現、`Movability`
 - `mumei-core/src/mir_analysis/move_analysis.rs` — move 解析（revocation の実装候補）
 - `examples/capability_demo.mm` / `tests/test_capability_evaluation.mm` — 既存 capability デモと評価テスト
+- `mumei-lang/mumei-agent` `docs/CAPABILITY_DEMAND_STUDY.md`（PR #567）— タスク 3 の成果物（結論: 否定）
 
 ---
 
@@ -1977,6 +1985,35 @@ capability model は opt-in 拡張として上積みされる位置づけとな�
 - `mumei-core/src/proof_graph.rs` / `src/cli.rs` / `src/commands/verify.rs`
 - `visualizer/proof_graph_lib.py` / `visualizer/app.py` / `visualizer/README.md` / `mcp_server.py`
 - `tests/test_proof_graph_export.rs` / `tests/test_proof_graph_lib.py` / `docs/REPORT_SCHEMA.md`
+
+---
+
+## Priority 23: Lean escalation 翻訳カバレッジ拡張（paper Known limitation #2 対応）— ✅ Implemented（第 1 弾: modular exponentiation）
+
+**Repository**: `mumei-lang/mumei-lean`（tactic ladder / bridge lemma catalog の本体） / `mumei-lang/mumei`（std atom・ロードマップ同期） / `mumei-lang/papers`（`PAPER_DRAFT.md` §8 Known limitations）
+
+**目的**: paper §8 の Known limitation #2「Lean escalation still depends on translation coverage」を縮小する。Z3 `unknown` atom が**手書き bridge lemma を要さずに** `lean_verified` へ昇格する割合を上げ、`manual_lemma_reason` を保持したまま残る obligation を減らす。
+
+**方針**: 拡張は次の 2 系統のいずれか最小のものに限る。
+1. 新規 bridge lemma を `MumeiLean/*.lean` に追加し catalog（`docs/LEAN_TRANSLATOR_SPEC.md` §10）へ登録する。この場合 `compute_bridge_lemma_hash()` が変わるため、pinned doc 4 本 / `scripts/export_cert.py` / mumei-agent `_SOLIDITY_GUARD_TRACE_BRIDGE_LEMMA_HASH` を**同一 diff で lockstep 更新**する。
+2. tactic ladder（§12.2）へ新候補を**末尾追記**する（既存の採用結果を変えないため interleave しない）。bridge lemma catalog が不変なら `bridge_lemma_hash` も不変。
+
+**第 1 弾の実装**（2026-08-30、方針 2）:
+- 残余 goal 形状の分類で、**modular exponentiation**（`ff_pow(a, e, p)` を反復剰余乗算へ展開する ensures）が既存 ladder では exhausted になることを確認した。`mumei_ff_mod` は `Int.toNat` リテラルにも指数の下の剰余にも届かない。
+- `MumeiLean/Tactics.lean` に 17 番目の候補 `mumei_ff_pow` を**末尾追記**。支持補題 `MumeiLean.Algebra.emod_pow_emod`（`(a % p) ^ n % p = a ^ n % p`、`sorry` なし）を追加したが、これは obligation class catalog の bridge lemma ではないため **`bridge_lemma_hash` は `ee8cd3ba…4347` のまま不変**、`translator_version` も `mumei-lean-translator-ir-v2` のまま。
+- 14 番目の live generated theorem path として `std/algebra/finite_field.mm::ff_pow_square_expands` を追加し、実 proof-cert fixture から `Generated.Std.Algebra.Finite_field.ff_pow_square_expands_correct` が `known_witness_used = false` / `manual_lemma_reason = null` で `lean_verified` になることを実 `lake build` で確認した。
+- 既存 16 候補の宣言順は ladder の prefix として不変、8 obligation class の分類も不変、既存 13 live path は回帰なし。
+
+**契約への影響**: なし（`bridge_lemma_hash` / `translator_version` 不変、新しい verdict 分類・別名 alias なし）。
+
+**回帰ゲート**: mumei-lean `PYTHONPATH=scripts MUMEI_LEAN_SKIP_LIVE=1 python -m pytest -q`（308 passed / 10 skipped）、`tests/test_contract_vocabulary.py`、`tests/test_expr_translator.py::test_bridge_lemma_hash_matches_catalog`、`tests/test_cert_roundtrip.py`、`tests/test_lean_bridge_e2e.py`、`lake build`（`sorry` なし）、mumei `benchmarks/run_benchmarks.py` の `lean_solver_time_s` チャネル。
+
+**次弾候補**: benchmark 側で残る `unknown_obligation`（body semantics に依存する非算術 obligation）と、bridge lemma 追加が必要な形状。後者に着手する場合は hash lockstep 更新が必須。
+
+**関連ファイル**:
+- mumei-lean: `scripts/tactic_search.py` / `MumeiLean/Tactics.lean` / `MumeiLean/Algebra.lean` / `tests/fixtures/tactic_ladder_driver.lean` / `tests/fixtures/std_algebra_finite_field_ff_pow_square_expands.proof-cert.json` / `docs/LEAN_TRANSLATOR_SPEC.md` §12.2 / `docs/LEAN_HARNESS_CONTRACT.md` / `docs/ROADMAP.md`
+- mumei: `std/algebra/finite_field.mm` / `docs/ROADMAP.md` P30 / `docs/STDLIB.md`
+- papers: `PAPER_DRAFT.md` §8 Known limitations #2
 
 ---
 

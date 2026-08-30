@@ -357,9 +357,9 @@ codegen 経路（`__effect_*` 直接呼び出し）も生成物も現状と同�
 | Stage | 内容 | 完了条件 | 状態 |
 |---|---|---|---|
 | Stage 1 | `capability` 型宣言（コンテキスト依存キーワード）+ capability 型パラメータのみ。`grant` なし。`is_fn_type()` ゲート 3 箇所（`effects.rs` / `executor.rs` / `dataflow_inference.rs`）の拡張を含む | 既存 effect と等価な検証結果になること。`.mm` 回帰ゼロ | ✅ 実装済み（2026-08-30、`docs/ROADMAP.md` P29） |
-| Stage 2 | `grant E where C` 式と静的 capability 束縛。codegen は消去のみ（§4.2 の ABI 消去パス: 定義・宣言・直接呼び出しから capability パラメータと実引数を除去）を含む | `grant` を含む新規テストが通り、消去後の LLVM IR が capability 抜き版と一致し、既存 codegen 出力が不変 | 未着手（タスク 3 の肯定が前提） |
-| Stage 3 | narrowing（`grant cap where C'`）と `C1 ⟹ C2` の Z3 判定 | narrowing の受理 / 拒否が Z3 で判定でき、`Unknown` 時の安全側動作が定義されている | 未着手 |
-| Stage 4 | move ベースの revocation（アフィン capability）。`Rvalue::Call` の引数に対する所有権移動を新規実装（§2.2） | 委譲後の再使用 / 重複引数 / 分岐 join に対して use-after-move / double-move / `MergeConflict` が報告される | 未着手 |
+| Stage 2 | `grant E where C` 式と静的 capability 束縛。codegen は消去のみ（§4.2 の ABI 消去パス: 定義・宣言・直接呼び出しから capability パラメータと実引数を除去）を含む | `grant` を含む新規テストが通り、消去後の LLVM IR が capability 抜き版と一致し、既存 codegen 出力が不変 | 保留（タスク 3 の結論が否定のため着手しない。将来のトリガ観測待ち） |
+| Stage 3 | narrowing（`grant cap where C'`）と `C1 ⟹ C2` の Z3 判定 | narrowing の受理 / 拒否が Z3 で判定でき、`Unknown` 時の安全側動作が定義されている | 保留（同上） |
+| Stage 4 | move ベースの revocation（アフィン capability）。`Rvalue::Call` の引数に対する所有権移動を新規実装（§2.2） | 委譲後の再使用 / 重複引数 / 分岐 join に対して use-after-move / double-move / `MergeConflict` が報告される | 保留（同上） |
 
 ### Stage 1 の実装結果（2026-08-30）
 
@@ -439,9 +439,15 @@ zero runtime overhead と Z3 の決定可能断片の両方を失うため、そ
 Option A（parameterized effects + Z3）継続が正しい判断となる。
 
 なお本調査が答えたのは Priority 15 のタスク 1（非破壊な設計調査）とタスク 2（互換性判定）であり、
-タスク 3（AI エージェント側で capability delegation の需要が実在するかの検証）は未着手である。
-実装フェーズを実際に開くかどうかはタスク 3 の結果を待って判断する。本調査の「肯定的」は
-**技術的に着手可能である**という判定であって、着手すべきという需要判断ではない。
+本調査の「肯定的」は **技術的に着手可能である**という判定であって、着手すべきという需要判断ではない。
 
-したがって `docs/CAPABILITY_SECURITY.md` §4 の Recommendation は現時点で撤回しない。
-Option A は既定パスのままとし、Stage 1〜4 が opt-in 拡張として上積みされる、という位置づけとする。
+タスク 3（AI エージェント側で capability delegation の需要が実在するかの検証）は
+✅ **調査完了・結論は否定**である。`mumei-lang/mumei-agent` の
+[`docs/CAPABILITY_DEMAND_STUDY.md`](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/CAPABILITY_DEMAND_STUDY.md)
+（PR [mumei-agent#567](https://github.com/mumei-lang/mumei-agent/pull/567)、マージ済み）が、
+エージェント側に Stage 2 以降を要求する実需要は観測されないと結論した。したがって
+Stage 2〜4 は将来のトリガ観測まで保留し、着手しない。既に実装済みの Stage 1
+（`docs/ROADMAP.md` P29）はタスク 3 の結果に依存しない非破壊な範囲であり、撤回せず維持する。
+
+したがって `docs/CAPABILITY_SECURITY.md` §4 の Recommendation は撤回しない。
+Option A を既定パスとして継続し、Stage 1 のみが opt-in 拡張として上積みされている、という位置づけとする。
