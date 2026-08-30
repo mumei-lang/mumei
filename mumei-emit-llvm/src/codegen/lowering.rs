@@ -304,6 +304,9 @@ pub(crate) fn resolve_return_type<'a>(
                 if let Some(enum_def) = module_env.get_enum(&base) {
                     return enum_llvm_type(context, enum_def, Some(module_env)).into();
                 }
+                if let Some(struct_def) = module_env.get_struct(&base) {
+                    return struct_llvm_type(context, struct_def, module_env).into();
+                }
                 context.i64_type().into()
             }
         }

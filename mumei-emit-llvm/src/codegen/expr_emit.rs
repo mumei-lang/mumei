@@ -77,6 +77,15 @@ pub(crate) fn infer_struct_type_name(
                 None
             }
         }
+        HirExpr::Call { name, .. } => {
+            let ret_type = module_env.get_atom(name)?.return_type.as_ref()?;
+            let base = module_env.resolve_base_type(ret_type);
+            if module_env.get_struct(&base).is_some() {
+                Some(base)
+            } else {
+                None
+            }
+        }
         HirExpr::FieldAccess(inner, field) => {
             let inner_ty = infer_struct_type_name(inner, var_types, module_env)?;
             let sdef = module_env.get_struct(&inner_ty)?;
