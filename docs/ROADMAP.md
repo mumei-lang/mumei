@@ -2302,14 +2302,14 @@ python benchmarks/evaluation_suite.py --repair-cert-dir ../mumei-agent/artifacts
 
 ## P28: ベンチマーク verdict とインフラ失敗の分離（`no_verdict` 計上） — ✅ Implemented
 
-**ステータス: ✅ Implemented**（測定 2026-08-30、`PYTHONPATH=. pytest tests/` 181/181 passed（`tests/test_benchmark_suite.py` に 4 件新規追加して 20 件）、`cargo tree --edges no-dev | grep -i opentelemetry` は空 = 既定ビルドに OTel 依存なし）— `mumei verify` は「プログラムを棄却した」場合と「判定に到達しなかった」場合（timeout・入力が読めない・フラグ拒否・crash）の両方で終了コード 1 を返すため、`benchmarks/run_benchmarks.py` が非ゼロ終了を一律 `FAIL` と読むと、タイムアウトやプロセス異常が `expected: FAIL` タスクの反例検出として数えられ、counterexample catch rate が実態より良く出る。判定の有無を出力から見分けて分離する。
+**ステータス: ✅ Implemented**（測定 2026-08-30、`PYTHONPATH=. pytest tests/` 184/184 passed（`tests/test_benchmark_suite.py` に 5 件・`tests/test_evaluation_suite.py` に 2 件を新規追加）、`cargo tree --edges no-dev | grep -i opentelemetry` は空 = 既定ビルドに OTel 依存なし）— `mumei verify` は「プログラムを棄却した」場合と「判定に到達しなかった」場合（timeout・入力が読めない・フラグ拒否・crash）の両方で終了コード 1 を返すため、`benchmarks/run_benchmarks.py` が非ゼロ終了を一律 `FAIL` と読むと、タイムアウトやプロセス異常が `expected: FAIL` タスクの反例検出として数えられ、counterexample catch rate が実態より良く出る。判定の有無を出力から見分けて分離する。
 
 ### 構成
 
-- **verdict 判定**（`VERDICT_SUMMARY_RE`）: `✅ Verification passed` / `❌ Verification:` / ディレクトリ verify のサマリ行のいずれかを出力した run のみが判定に到達したものとみなす。終了コードは判定の有無を区別しないため、単独では使わない。
+- **verdict 判定**（`VERDICT_SUMMARY_RE`）: `✅ Verification passed` / `❌ Verification:` / `⚠️ Verification:`（unverifiable）/ ディレクトリ verify のサマリ行のいずれかを出力した run のみが判定に到達したものとみなす。`unverifiable` は obligation についての判定であり判定未到達ではない。終了コードは判定の有無を区別しないため、単独では使わない。
 - **`verify_status`**（ファイル単位、既存語彙のみ）: 判定に到達した run は `MEASURED`、timeout は `TIMEOUT`、判定を出さずに終わった run は `FAIL`、バイナリ不在で試行しなかった run は `SKIP`。
 - **`actual` の縮退**: `MEASURED` 以外の run は `actual` を `SKIP` とし `ok` を `None` にする。`matched` は `actual == expected` のままなので、インフラ失敗が反例検出として数えられる経路が構造的に消える。
-- **集計と描画**: カテゴリ結果に `no_verdict_files` / `no_verdict_statuses` を追加し、markdown の Category Results に `No Verdict` 列（件数と内訳ステータス）、per-file 表に `Verify Status` 列を追加する。forge feedback の各カテゴリと `benchmarks/evaluation/evaluation_suite.json` の proof / counterexample 軸にも `no_verdict_files` を通す。
+- **集計と描画**: カテゴリ結果に `no_verdict_files` / `no_verdict_statuses` を追加し、markdown の Category Results に `No Verdict` 列（件数と内訳ステータス）、per-file 表に `Verify Status` 列を追加する。forge feedback の各カテゴリと `benchmarks/evaluation/evaluation_suite.json` の proof / counterexample 軸にも `no_verdict_files` を通し、`docs/EVALUATION_SUITE.md` の Axis Summary にも描画する。counterexample 軸の件数は `expected: FAIL` タスクのみを数えるため、`expected: PASS` 側の異常が反例測定の解釈を汚さない。
 
 ### 測定結果（2026-08-30、`target/debug/mumei`、`--no-lean`）
 

@@ -135,9 +135,11 @@ LEAN_VERIFY_TIMEOUT_S = 300
 # `mumei verify` exits non-zero both when it rejects a program and when it never
 # reached a verdict (unreadable input, rejected flag, crash), so a non-zero exit
 # alone cannot be read as "the verifier rejected this program". Only a run that
-# printed one of the two verdict summaries produced a verdict.
+# printed one of the verdict summaries produced a verdict; an ``unverifiable``
+# summary is a verdict about the obligations, not a failure to reach one.
 VERDICT_SUMMARY_RE = re.compile(
     r"(?m)^\s*(?:\u2705 Verification passed|\u274c Verification:|"
+    r"\u26a0\ufe0f?\s+Verification:|"
     r"\U0001f5e1\ufe0f\s+Directory verify summary:)"
 )
 

@@ -469,6 +469,45 @@ def test_report_renders_skip_instead_of_substituted_values(suite):
     assert suite.format_report(evaluation) == report
 
 
+def test_counterexample_axis_counts_only_counterexample_tasks_as_no_verdict(
+    suite, monkeypatch
+):
+    harness = suite.load_run_benchmarks()
+    dir_path = harness.CATEGORIES["arithmetic"]
+    result = harness.run_category_benchmarks(None, "arithmetic", dir_path)
+    passing = next(d for d in result["details"] if d["expected"] == "PASS")
+    passing["verify_status"] = "TIMEOUT"
+    result["no_verdict_files"] = 1
+    result["no_verdict_statuses"] = ["TIMEOUT"]
+    monkeypatch.setattr(
+        harness, "run_category_benchmarks", lambda *a, **k: result
+    )
+
+    axes = suite.evaluate_category(
+        harness,
+        "arithmetic",
+        dir_path,
+        binary=None,
+        lean_bridge=None,
+        repair_summaries={},
+        measure_artifacts=False,
+    )["axes"]
+    assert axes["proof_success_rate"]["no_verdict_files"] == 1
+    # the outage hit an `expected: PASS` task, so it says nothing about the
+    # counterexample tasks and must not appear in that axis
+    assert axes["counterexample_quality"]["no_verdict_files"] == 0
+
+
+def test_report_names_no_verdict_counts_for_both_verdict_axes(suite):
+    payload = json.loads(
+        (REPO_ROOT / "benchmarks" / "evaluation" / "evaluation_suite.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    report = suite.format_report(payload)
+    assert report.count("without a verdict") == 2
+
+
 def test_markdown_output_accumulates_time_series(suite, tmp_path):
     output = tmp_path / "EVALUATION_SUITE.md"
     suite.append_report(output, "## Evaluation Suite Run — 1\n")

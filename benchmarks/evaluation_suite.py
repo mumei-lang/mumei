@@ -494,7 +494,12 @@ def evaluate_category(
         else STATUS_SKIP,
         "counterexample_files": result["counterexample_files"],
         "counterexamples_caught": result["counterexamples_caught"],
-        "no_verdict_files": result["no_verdict_files"],
+        "no_verdict_files": sum(
+            1
+            for detail in result["details"]
+            if detail["expected"] == "FAIL"
+            and detail["verify_status"] not in (STATUS_MEASURED, STATUS_SKIP)
+        ),
         "counterexample_catch_rate": result["counterexample_catch_rate"]
         if binary
         else None,
@@ -686,7 +691,8 @@ def format_report(evaluation: dict) -> str:
             "proof_success_rate",
             f"{_fmt_rate(totals['proof_success_rate']['success_rate'])} "
             f"({totals['proof_success_rate']['matched_files']}"
-            f"/{totals['proof_success_rate']['files']} files)",
+            f"/{totals['proof_success_rate']['files']} files, "
+            f"{totals['proof_success_rate']['no_verdict_files']} without a verdict)",
         )
         + " |",
         f"| repair convergence | {totals['repair_convergence']['status']} | "
@@ -704,7 +710,8 @@ def format_report(evaluation: dict) -> str:
             "counterexample_quality",
             f"{_fmt_rate(totals['counterexample_quality']['counterexample_catch_rate'])} "
             f"({totals['counterexample_quality']['counterexamples_caught']}"
-            f"/{totals['counterexample_quality']['counterexample_files']} caught)",
+            f"/{totals['counterexample_quality']['counterexample_files']} caught, "
+            f"{totals['counterexample_quality']['no_verdict_files']} without a verdict)",
         )
         + " |",
         f"| trust surface | {totals['trust_surface']['status']} | "

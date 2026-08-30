@@ -453,6 +453,25 @@ def test_a_rejected_program_is_a_verdict_but_a_crashed_run_is_not(monkeypatch, t
     assert crashed["ok"] is None
 
 
+def test_an_unverifiable_summary_is_a_verdict(monkeypatch, tmp_path):
+    module = _load_module()
+    source = tmp_path / "x.mm"
+    source.write_text("atom a { ensures: true; }", encoding="utf-8")
+
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda *a, **k: _verify_output(
+            1,
+            "⚠️  Verification: 0 passed, 1 unverifiable, 0 skipped (cached), "
+            "0 Lean escalation candidate(s)\n",
+        ),
+    )
+    result = module._verify_file("mumei", source, "PASS")
+    assert result["verify_status"] == "MEASURED"
+    assert result["actual"] == "FAIL"
+
+
 def test_a_timed_out_verify_is_not_a_counterexample_catch(monkeypatch, tmp_path):
     module = _load_module()
     source = tmp_path / "slow_fail.mm"

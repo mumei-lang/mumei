@@ -19,7 +19,7 @@
           "status": "MEASURED"
         },
         "proof_success_rate": {
-          "avg_solver_time_s": 0.02,
+          "avg_solver_time_s": 0.023,
           "files": 9,
           "lean_discharge_rate": null,
           "matched_files": 9,
@@ -364,7 +364,7 @@
           "status": "MEASURED"
         },
         "proof_success_rate": {
-          "avg_solver_time_s": 0.029,
+          "avg_solver_time_s": 0.031,
           "files": 15,
           "lean_discharge_rate": null,
           "matched_files": 15,
@@ -966,7 +966,7 @@
           "status": "MEASURED"
         },
         "proof_success_rate": {
-          "avg_solver_time_s": 0.025,
+          "avg_solver_time_s": 0.024,
           "files": 10,
           "lean_discharge_rate": null,
           "matched_files": 10,
@@ -1327,7 +1327,7 @@
           "status": "MEASURED"
         },
         "proof_success_rate": {
-          "avg_solver_time_s": 0.02,
+          "avg_solver_time_s": 0.021,
           "files": 6,
           "lean_discharge_rate": null,
           "matched_files": 6,
@@ -1558,7 +1558,7 @@
           "status": "SKIP"
         },
         "proof_success_rate": {
-          "avg_solver_time_s": 0.012,
+          "avg_solver_time_s": 0.008,
           "files": 3,
           "lean_discharge_rate": null,
           "matched_files": 3,
@@ -1740,7 +1740,7 @@
     "total_trusted": 0,
     "trusted_ratio": 0.0
   },
-  "timestamp": "2026-08-30 06:18 UTC",
+  "timestamp": "2026-08-30 06:27 UTC",
   "totals": {
     "counterexample_quality": {
       "counterexample_catch_rate": 1.0,
