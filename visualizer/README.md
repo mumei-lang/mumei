@@ -53,6 +53,19 @@ drawn as red dashed edges; the selected atom gets a bold border.
 The JSON-to-graph conversion lives in `visualizer/proof_graph_lib.py` and is
 Streamlit-free, so it is unit tested directly (`tests/test_proof_graph_lib.py`).
 
+### What it looks like
+
+A walkthrough of the dashboard: multi-file graph, atom selection, dependency
+navigation, and the trust-boundary / session-violation detail pane.
+
+![Proof Graph dashboard walkthrough](../docs/assets/p26/proof_graph_dashboard.webp)
+
+| | |
+|---|---|
+| Multi-file graph with health metrics<br>![](../docs/assets/p26/t2_overview.png) | Inconsistent call as a red dashed edge<br>![](../docs/assets/p26/t5_edge_fullscreen.png) |
+| Session protocol violation on an `effect_pre` boundary<br>![](../docs/assets/p26/t6_payment.png) | Failed proofs in red<br>![](../docs/assets/p26/t7_red.png) |
+| `escalation_candidate` is yellow, not green<br>![](../docs/assets/p26/escalation_yellow.png) | One project-wide graph from a directory input<br>![](../docs/assets/p26/dir_mode.png) |
+
 ## std/ dependency graph
 
 ```bash

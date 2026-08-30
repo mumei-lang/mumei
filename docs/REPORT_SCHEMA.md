@@ -294,7 +294,7 @@ verification health used by `visualize_std_graph`.
 | `edges` | `array` | One entry per `dependency_graph[].dependencies` pair |
 | `edges[].from` | `string` | Caller atom |
 | `edges[].to` | `string` | Callee atom |
-| `edges[].is_consistent` | `boolean` | Contract-consistency verdict for the pair (`true` when the pair was not checked) |
+| `edges[].is_consistent` | `boolean` | "No contract mismatch detected" — `true` also covers a pair cross-spec analysis never checked, so it is not evidence the call was examined |
 | `edges[].violations` | `array[string]` | Contract violations for the pair |
 | `edges[].warnings` | `array[string]` | Non-fatal consistency warnings for the pair |
 | `session_protocol_violations` | `array` | Same objects as `cross_spec.json`, stored once and referenced by index |

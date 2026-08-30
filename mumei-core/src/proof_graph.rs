@@ -72,6 +72,9 @@ pub struct ProofGraphEdge {
     pub from: String,
     /// Callee atom (the dependency).
     pub to: String,
+    /// "No contract mismatch was detected" rather than "the pair was checked":
+    /// a call `contract_consistency[]` never examined is also reported as
+    /// consistent.
     pub is_consistent: bool,
     pub violations: Vec<String>,
     pub warnings: Vec<String>,

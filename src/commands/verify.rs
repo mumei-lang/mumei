@@ -1133,6 +1133,8 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
     let mut cert_results: std::collections::HashMap<String, (String, String)> =
         std::collections::HashMap::new();
     let mut lean_escalation_metrics_json: Option<serde_json::Value> = None;
+    let mut proof_graph_cross_spec: Option<cross_spec::CrossSpecResult> = None;
+    let mut lean_verified_atoms: Vec<String> = Vec::new();
 
     if emit_contract_manifest {
         let manifest = verification::generate_contract_manifest(&module_env);
@@ -1365,20 +1367,9 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
         match save_cross_spec_report(&module_env, output_dir, !quiet_output) {
             Ok(cross_spec_result) => {
                 if emit_proof_graph {
-                    let statuses: std::collections::BTreeMap<String, String> = cert_results
-                        .iter()
-                        .map(|(name, (_z3, status))| (name.clone(), status.clone()))
-                        .collect();
-                    if let Err(err) = save_proof_graph_report(
-                        &module_env,
-                        &cross_spec_result,
-                        &statuses,
-                        output_dir,
-                        !quiet_output,
-                    ) {
-                        eprintln!("  ⚠️  Failed to write proof graph: {}", err);
-                        failed += 1;
-                    }
+                    // The graph is written after Lean escalation, so atoms the
+                    // bridge discharges are not reported as unresolved.
+                    proof_graph_cross_spec = Some(cross_spec_result.clone());
                 }
                 if cross_spec_result.summary.inconsistent_calls > 0 && !quiet_output {
                     eprintln!(
@@ -1521,6 +1512,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                                 apply_lean_cert_to_proof_certificate(&mut cert, &lean_bundle);
                             verified += stats.newly_proven;
                             escalated = escalated.saturating_sub(stats.lean_verified);
+                            lean_verified_atoms.extend(stats.lean_verified_atoms.iter().cloned());
                             if !quiet_output {
                                 for atom_name in &stats.lean_verified_atoms {
                                     println!("  lean_verified: {atom_name}");
@@ -1622,6 +1614,25 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                     unknown_count
                 );
             }
+        }
+    }
+
+    if let Some(cross_spec_result) = proof_graph_cross_spec {
+        let statuses = proof_graph_statuses(
+            &cert_results,
+            &diagnostics,
+            &failure_diagnostics,
+            &lean_verified_atoms,
+        );
+        if let Err(err) = save_proof_graph_report(
+            &module_env,
+            &cross_spec_result,
+            &statuses,
+            output_dir,
+            !quiet_output,
+        ) {
+            eprintln!("  ⚠️  Failed to write proof graph: {}", err);
+            failed += 1;
         }
     }
 
@@ -1900,6 +1911,34 @@ pub(crate) fn save_reconstruction_losses(
         );
     }
     Ok(())
+}
+
+/// Per-atom statuses for the proof graph.
+///
+/// `cert_results` only holds atoms that reached the solver, so an atom rejected
+/// earlier (an untyped array access under `--strict-array-types`, say) would
+/// otherwise carry no status and be painted as proven. Every error diagnostic
+/// therefore contributes a `failed` status, and atoms the Lean bridge discharged
+/// are promoted to `verified`.
+fn proof_graph_statuses(
+    cert_results: &std::collections::HashMap<String, (String, String)>,
+    diagnostics: &[verification::Diagnostic],
+    failure_diagnostics: &[verification::Diagnostic],
+    lean_verified_atoms: &[String],
+) -> std::collections::BTreeMap<String, String> {
+    let mut statuses: std::collections::BTreeMap<String, String> = cert_results
+        .iter()
+        .map(|(name, (_z3, status))| (name.clone(), status.clone()))
+        .collect();
+    for diagnostic in diagnostics.iter().chain(failure_diagnostics.iter()) {
+        if diagnostic.severity == "error" && !diagnostic.atom.is_empty() {
+            statuses.insert(diagnostic.atom.clone(), "failed".to_string());
+        }
+    }
+    for atom_name in lean_verified_atoms {
+        statuses.insert(atom_name.clone(), "verified".to_string());
+    }
+    statuses
 }
 
 /// Fold the cross-spec graph, atom contracts, trust boundaries and session

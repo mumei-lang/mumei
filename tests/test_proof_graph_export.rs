@@ -262,6 +262,44 @@ fn a_directory_input_yields_one_graph_covering_every_file() {
     );
 }
 
+/// An atom rejected before it ever reaches the solver records no certificate
+/// result, so the graph has to take the rejection diagnostic into account or the
+/// atom would be painted as proven.
+#[test]
+fn an_atom_rejected_before_verification_is_red() {
+    let bin = env!("CARGO_BIN_EXE_mumei");
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let dir = report_dir("strict_array");
+
+    let output = Command::new(bin)
+        .arg("verify")
+        .arg("--report-dir")
+        .arg(&dir)
+        .arg("--emit")
+        .arg("proof-graph")
+        .arg("--strict-array-types")
+        .arg("tests/test_untyped_array_access.mm")
+        .current_dir(manifest_dir)
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run mumei verify: {err}"));
+
+    let log = format!(
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let graph: Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.join("proof_graph.json"))
+            .unwrap_or_else(|err| panic!("failed to read proof graph: {err}\n{log}")),
+    )
+    .expect("valid proof_graph.json");
+
+    let rejected = node(&graph, "uses_untyped_array");
+    assert_eq!(rejected["health"], "red", "in {graph:#}");
+    assert_eq!(rejected["verification_status"], "failed");
+    assert_eq!(node(&graph, "uses_typed_i64_array")["health"], "green");
+}
+
 #[test]
 fn proof_graph_is_not_emitted_without_the_emit_target() {
     let bin = env!("CARGO_BIN_EXE_mumei");

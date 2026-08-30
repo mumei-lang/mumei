@@ -2133,12 +2133,13 @@ body: {
 
 ## P26: Interactive Proof Graph（依存・証明関係のインタラクティブ可視化） — ✅ Implemented
 
-**ステータス: ✅ Implemented**（測定 2026-08-30、`cargo test -p mumei-core proof_graph` 8/8 passed、`cargo test --test test_proof_graph_export` 3/3 passed、`PYTHONPATH=. pytest tests/` 151/151 passed（うち `tests/test_proof_graph_lib.py` 10 件を新規追加）、`cargo tree --edges no-dev | grep -i opentelemetry` は空 = 既定ビルドに OTel 依存なし）— 複数ファイル / atom 間の依存・証明関係の可視化が静的な Mermaid / DOT 生成に留まっていた点を解消する。ノードを選択して「どの atom のどの契約（requires/ensures）が、どの制約に依存して安全性を担保しているか」を辿れるようにする。新規 Web フレームワークは導入せず、既存の Streamlit 基盤（`mumei-agent/visualizer/app.py` の構成）と既存の verification health 色分け（緑 / 黄 / 赤）を再利用する。
+**ステータス: ✅ Implemented**（測定 2026-08-30、`cargo test -p mumei-core --lib proof_graph` 9/9 passed、`cargo test --test test_proof_graph_export` 5/5 passed、`PYTHONPATH=. pytest tests/` 153/153 passed（うち `tests/test_proof_graph_lib.py` 12 件を新規追加）、`cargo tree --edges no-dev | grep -i opentelemetry` は空 = 既定ビルドに OTel 依存なし）— 複数ファイル / atom 間の依存・証明関係の可視化が静的な Mermaid / DOT 生成に留まっていた点を解消する。ノードを選択して「どの atom のどの契約（requires/ensures）が、どの制約に依存して安全性を担保しているか」を辿れるようにする。新規 Web フレームワークは導入せず、既存の Streamlit 基盤（`mumei-agent/visualizer/app.py` の構成）と既存の verification health 色分け（緑 / 黄 / 赤）を再利用する。
 
 ### 構成
 
 - **エクスポータ**（`mumei-core/src/proof_graph.rs`）: `build_proof_graph()` が cross-spec の `dependency_graph[]` をトポロジの唯一の出典として使い、各 atom の requires/ensures・effects、P23 の trust boundary 分類（`trusted_atom` / `extern_ffi` / `effect_pre_override`）、当該 run の per-atom 検証ステータス、session protocol 違反を 1 つの `proof_graph.json` に畳み込む。既存の `cross_spec.json` は無変更（後方互換）。
-- **健全度の優先順位**: `classify_health()` は `failed` / `unverifiable` を赤、trust boundary ありを黄、それ以外を緑とする。新規 verdict 語彙は導入せず、`verification_status` に既存ステータス（`verified` / `failed` / `unverifiable` / `escalation_candidate` / `unknown`）をそのまま載せる。
+- **健全度の優先順位**: `classify_health()` は `failed` / `unverifiable` を赤、未解決（`unknown` / `escalation_candidate` / Lean 待ち）または trust boundary ありを黄、証明が通って boundary の無いものだけを緑とする。新規 verdict 語彙は導入せず、`verification_status` に既存ステータス（`verified` / `failed` / `unverifiable` / `escalation_candidate` / `unknown`）をそのまま載せる。
+- **ステータスの収集**（`proof_graph_statuses()`）: `cert_results` は solver に到達した atom しか持たないため、`--strict-array-types` の untyped array 拒否のように検証前に落ちた atom は error 診断から `failed` を補う（無ければ緑に見えてしまう）。`--escalate-lean` では Lean bridge の完了後にグラフを書き出し、`lean_verified` の atom を `verified` に昇格させる。
 - **CLI 経路**（`src/cli.rs`、`src/commands/verify.rs`）: `mumei verify --emit proof-graph` を追加した。proof graph は cross-spec 解析の射影なので、この emit target は cross-spec 解析を自動で有効化し、`save_proof_graph_report()` が report ディレクトリへ `proof_graph.json` を書き出す。emit target を指定しない限り出力されない（opt-in）。
 - **session 違反の参照方式**: 違反本体はドキュメント直下に 1 回だけ格納し、ノードは index で参照する。caller / callee 双方のノードから同じ違反が辿れる。
 - **純粋変換層**（`visualizer/proof_graph_lib.py`）: JSON → ノード / エッジ変換、DOT 描画、選択ノードの詳細取得、集計を Streamlit 非依存の純関数として提供する。色は `std_graph_lib.render_std_graph_dot` と同じ fill / shape（緑 = 角丸、黄 = 六角形、赤 = 太枠）。両端点が `nodes[]` に無いエッジは描画対象から落とす。
@@ -2149,13 +2150,14 @@ body: {
 
 | ファイル | 役割 |
 |---|---|
-| `mumei-core/src/proof_graph.rs` | proof graph スキーマと `build_proof_graph()` / `classify_health()`（ユニットテスト 8 件） |
+| `mumei-core/src/proof_graph.rs` | proof graph スキーマと `build_proof_graph()` / `classify_health()`（ユニットテスト 9 件） |
 | `src/cli.rs` / `src/commands/verify.rs` | `--emit proof-graph` の受理と `save_proof_graph_report()` |
 | `visualizer/proof_graph_lib.py` | JSON → ノード / エッジ / DOT / ノード詳細の純粋変換 |
 | `visualizer/app.py` | Streamlit ダッシュボード（Proof Graph ビュー） |
 | `mcp_server.py` | `visualize_proof_graph` MCP ツール |
-| `tests/test_proof_graph_export.rs` | 複数ファイル `.mm` プロジェクトに対する CLI エクスポート回帰（3 件） |
-| `tests/test_proof_graph_lib.py` | UI 変換関数の単体テスト（10 件、Streamlit 実行なし） |
+| `tests/test_proof_graph_export.rs` | 複数ファイル `.mm` プロジェクトに対する CLI エクスポート回帰（5 件） |
+| `tests/test_proof_graph_lib.py` | UI 変換関数の単体テスト（12 件、Streamlit 実行なし） |
+| `docs/assets/p26/` | ダッシュボード操作の録画（アニメーション webp）とスクリーンショット |
 | `docs/REPORT_SCHEMA.md` | `proof_graph.json Schema` 節 |
 
 ### 使い方
@@ -2170,14 +2172,26 @@ mumei verify --emit proof-graph --report-dir reports \
 streamlit run visualizer/app.py -- --report-dir reports
 ```
 
+### 動作（録画・スクリーンショット）
+
+ダッシュボードの実操作（複数ファイルグラフ → atom 選択 → 依存の辿り → trust boundary / session 違反の詳細）:
+
+![Proof Graph ダッシュボードの操作](assets/p26/proof_graph_dashboard.webp)
+
+| | |
+|---|---|
+| 複数ファイルグラフと健全度メトリクス<br>![](assets/p26/t2_overview.png) | 契約不一致の呼び出し（赤破線）<br>![](assets/p26/t5_edge_fullscreen.png) |
+| `effect_pre` boundary 上の session protocol 違反<br>![](assets/p26/t6_payment.png) | 証明失敗（赤）<br>![](assets/p26/t7_red.png) |
+| `escalation_candidate` は緑ではなく黄<br>![](assets/p26/escalation_yellow.png) | ディレクトリ入力からプロジェクト全体の 1 グラフ<br>![](assets/p26/dir_mode.png) |
+
 ### CI 回帰ゲート
 
-- `cargo test -p mumei-core proof_graph`（8 件）: 契約 / source file の転記、`dependency_graph[]` に一致するエッジ、契約不一致ペアのエッジ表示、trusted atom = 黄、`failed` = 赤（trust boundary より失敗を優先）、`effect_pre` = 黄、session 違反の caller / callee 双方への index 付与、JSON の round-trip。
-- `cargo test --test test_proof_graph_export`（3 件）: 複数ファイル fixture（`tests/test_cross_spec_multi_file*.mm`）でノード / エッジ / 契約 / trust boundary / summary が出力されること、session fixture（`tests/fixtures/session_types/payment_client.mm` + `payment_server.mm`）で deadlock 違反が該当 atom から index 参照できること、emit target 未指定時は `proof_graph.json` を書かないこと。
-- `PYTHONPATH=. pytest tests/`（151 件、うち `tests/test_proof_graph_lib.py` 10 件を P26 で追加）: JSON → ノード / エッジ変換、両端点欠落エッジの除去、未知 health のグレーアウト、DOT の選択強調と不一致エッジ、ノード詳細（契約 / 依存 / 違反解決）、範囲外 index の無視、集計、`proof_graph.json` 以外のドキュメントの拒否。`visualize_std_graph` / `analyze_contract_conflicts` の既存テストは無変更で通過する。
+- `cargo test -p mumei-core --lib proof_graph`（9 件）: 契約 / source file の転記、`dependency_graph[]` に一致するエッジ、契約不一致ペアのエッジ表示、trusted atom = 黄、`failed` = 赤（trust boundary より失敗を優先）、`effect_pre` = 黄、session 違反の caller / callee 双方への index 付与、JSON の round-trip。
+- `cargo test --test test_proof_graph_export`（5 件）: 複数ファイル fixture（`tests/test_cross_spec_multi_file*.mm`）でノード / エッジ / 契約 / trust boundary / summary が出力されること、session fixture（`tests/fixtures/session_types/payment_client.mm` + `payment_server.mm`）で deadlock 違反が該当 atom から index 参照できること、ディレクトリ入力でプロジェクト全体を覆う 1 つのグラフが書かれること、`--strict-array-types` で検証前に拒否された atom が赤になること、emit target 未指定時は `proof_graph.json` を書かないこと。
+- `PYTHONPATH=. pytest tests/`（153 件、うち `tests/test_proof_graph_lib.py` 12 件を P26 で追加）: JSON → ノード / エッジ変換、両端点欠落エッジの除去、未知 health のグレーアウト、DOT の選択強調と不一致エッジ、ノード詳細（契約 / 依存 / 違反解決）、範囲外 index の無視、集計、`proof_graph.json` 以外のドキュメントの拒否。`visualize_std_graph` / `analyze_contract_conflicts` の既存テストは無変更で通過する。
 - **ゼロコスト検証（P15 / P23 / P24 / P25 と同一）**: `cargo tree --edges no-dev | grep -i opentelemetry` が空であること。proof graph は検証後の成果物変換のみで、証明済み pure atom の実行時経路には触れない。
 
-**残課題**: `st.graphviz_chart` はノードのクリックイベントを返さないため、選択はサイドバーの atom セレクタと依存先 / 依存元ボタンで行う（クリック相当の遷移は可能だがグラフ上の直接クリックではない）。`verification_status` は当該 run で検証された atom のみに付き、import 済み / prelude atom は `null`（黄 / 緑判定は trust boundary のみに基づく）。
+**残課題**: `st.graphviz_chart` はノードのクリックイベントを返さないため、選択はサイドバーの atom セレクタと依存先 / 依存元ボタンで行う（クリック相当の遷移は可能だがグラフ上の直接クリックではない）。`verification_status` は当該 run で検証された atom のみに付き、import 済み / prelude atom は `null`（黄 / 緑判定は trust boundary のみに基づく）。`--escalate-lean` による `lean_verified` 昇格は mumei-lean bridge の実行環境を要するため、回帰テストは `proof_graph_statuses()` の単体経路のみで、bridge を含む end-to-end テストは未追加。`edges[].is_consistent` は「不一致が検出されていない」の意味で、cross-spec が検査しなかったペアも `true` になる（検査済みの証明ではない）。
 
 ---
 
