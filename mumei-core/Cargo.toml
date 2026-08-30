@@ -1,6 +1,6 @@
 [package]
 name = "mumei-core"
-version = "0.6.12"
+version = "0.6.16"
 edition = "2021"
 # std's advisory file locks (File::try_lock) are stable since 1.89.
 rust-version = "1.89"

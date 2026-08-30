@@ -2,6 +2,21 @@
 
 ---
 
+### 2026-08-30: v0.6.16 release version bump
+
+- **Workspace and member crate versions**: bumped versions from `0.6.12` to
+  `0.6.16` so `mumei --version`, `mumei inspect`, and proof-certificate
+  `mumei_version` match the release tag.
+- **Release-tag consistency**: v0.6.13–v0.6.15 shipped while the manifests
+  still said `0.6.12`, leaving `std-proof-bundle.json`'s tag-derived
+  `mumei_version` inconsistent with the certificates inside it.
+- **Install examples**: unified the README and README_JA pinned install
+  examples on `v0.6.16`.
+- **Release templates**: synced the Homebrew formula template and
+  `install.sh` help examples.
+
+---
+
 ### 2026-07-17: M2 trusted-atom reduction docs-sync + sorted-map regression certificates
 
 - **Trusted-atom inventory sync**: `docs/TRUSTED_ATOMS.md` and

@@ -1,6 +1,6 @@
 [package]
 name = "mumei-emit-monitor"
-version = "0.6.12"
+version = "0.6.16"
 edition = "2021"
 description = "Proof-aware runtime monitor generator — emits OTel-reporting contract guards for trust-boundary atoms only"
 license = "Apache-2.0"

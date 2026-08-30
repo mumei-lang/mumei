@@ -22,7 +22,7 @@ class Mumei < Formula
   desc "Mathematical Proof-Driven Programming Language — formally verified with Z3"
   homepage "https://github.com/mumei-lang/mumei"
   license "Apache-2.0"
-  version "0.6.12"
+  version "0.6.16"
 
   on_macos do
     if Hardware::CPU.arm?
