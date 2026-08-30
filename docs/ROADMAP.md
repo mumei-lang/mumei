@@ -1857,7 +1857,9 @@ object-based capability model の**非破壊な設計調査**のみを対象と�
    追加し HIR / MIR まで伝播させる必要がある（既存 `.mm` では常に `None`）。
    唯一の破壊リスクは `parser/lexer.rs` の無条件キーワード表で、`grant` / `capability` は
    コンテキスト依存キーワードとして導入する必要がある。→ opt-in 充足 ✅
-2. **型システム拡張**: subtyping は constraint の含意 `C1 ⟹ C2` + 既存 `is_subeffect()` で閉じる。
+2. **型システム拡張**: subtyping は constraint の含意 `C1 ⟹ C2` だけで閉じる。effect は不変とし、
+   capability 値の subtyping に `is_subeffect()` を使わない（子 effect の capability を親 effect の
+   パラメータに代入できると権限拡大になるため）。
    revocation は `mir.rs` の `movability_from_type()` が未知の型名を `Move` に分類するため、
    MIR move 解析（use-after-move / double-move / 分岐 join の `MergeConflict`）の骨格にそのまま載る。
    ただし `move_analysis.rs` が消費として扱うのは `Rvalue::Use` だけで、`Rvalue::Call` の引数は
@@ -1866,8 +1868,10 @@ object-based capability model の**非破壊な設計調査**のみを対象と�
    → opt-in 充足 ✅
 3. **Z3 エンコーディング**: capability の constraint は既存の文字列制約断片
    （`check_constant_constraint()` / `parse_constraint_to_z3_string()`）と同一で、新しい sort も
-   制約言語も不要。capability パラメータは `TypeRef.effect_set` 付きパラメータとして
-   `verify_effect_containment()` の既存規則 3 に乗るため、effect containment
+   制約言語も不要（ただし近似になる `matches(...)` は権限を広げ得るため capability constraint では非対象、
+   `Unknown` は narrowing 拒否）。capability パラメータは `TypeRef.effect_set` 付きパラメータとして
+   `verify_effect_containment()` の既存規則 3 に乗るため（同じ `is_fn_type()` ゲートを持つ
+   `executor.rs` / `dataflow_inference.rs` も含め 3 箇所を広げる）、effect containment
    （`UsedEffects(body) ⊆ AllowedEffects(signature)`）と effect propagation checking は
    **不等式を書き換えずに**維持される。value-dependent constraint は非対象。→ opt-in 充足 ✅
 4. **ランタイム表現**: `perform` は `__effect_{E}_{op}` への直接呼び出しに落ちており、

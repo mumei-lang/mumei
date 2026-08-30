@@ -126,8 +126,12 @@ capability 型は `TypeRef` に**そのままは載らない**。`TypeRef` は�
 `grant` / `capability` は識別子として使われておらず（出現はコメントのみ）、in-tree の回帰は起きないが、
 外部ソースは保証できない。したがって導入時は次のいずれかを取る:
 
-1. **コンテキスト依存キーワード（推奨）**: `grant` は `let x = ` の直後、`capability` は
-   `type X = ` の直後でのみキーワードとして解釈し、それ以外の位置では `Token::Ident` のままにする。
+1. **コンテキスト依存キーワード（推奨）**: `grant` は**式が来るべき位置（prefix 位置）で、
+   直後に識別子が続く場合に限って**キーワードとして解釈する。`let` の右辺だけに限定すると
+   `Expr::Grant` を一般の式として扱う設計（§1.1）と矛盾し、引数位置や戻り値位置の narrowing
+   （`f(grant cap where C')`）がパースできなくなるためである。変数参照位置の `grant`（`grant + 1`、
+   `grant(x)` など後続が識別子でない場合）は `Token::Ident` のままとする。`capability` は
+   `type X = ` の直後でのみキーワードとする。
 2. 既存トークンの再利用: `capability` を導入せず `type FileCap = effect SafeFileRead where ...;`
    と綴る（`Token::Effect` / `Token::Where` は既存）。`grant` のみが新語彙になる。
 
@@ -146,13 +150,21 @@ capability 値の型を `cap<E, C>`（`E` = effect 名、`C` = constraint 式）
 自然な subtyping は**制約の含意**である:
 
 ```
-C1 ⟹ C2                        E1 = E2 または is_subeffect(E1, E2)
+C1 ⟹ C2                                     E1 = E2
 ------------------------------------------------------------------
                   cap<E1, C1>  <:  cap<E2, C2>
 ```
 
-- 右側（effect 階層）は既存 `ModuleEnv::is_subeffect()` をそのまま使える。新しい階層は増えない。
-- 左側（constraint の含意）は「狭い capability を広い capability の位置に渡せる」という
+**effect については不変（`E1 = E2`）に限定する**ことが安全上必須である。`is_subeffect(E1, E2)` を
+許すと、子 effect（`FileRead`）の capability を親 effect（`IO`）の capability パラメータに渡せてしまい、
+受け取った側は `perform cap.write(...)` のように元の grant にない権限を行使できてしまう
+（消去後は `__effect_FileWrite_*` への直接呼び出しになるため、実行時に止める手段もない）。
+capability は「行使できる権限」を表すので、effect の向きは共変ではなく反変側に働く。
+最小サブセットでは effect 不変とし、effect の広げ・狭めは将来の拡張として別途設計する。
+（`is_subeffect()` は引き続き `verify_effect_containment()` 内で使う。ここで禁じるのは
+**capability 値の subtyping に effect 階層を使うこと**だけである。）
+
+- constraint の含意は「狭い capability を広い capability の位置に渡せる」という
   narrowing の本体で、`starts_with(path, "/tmp/config/") ⟹ starts_with(path, "/tmp/")` のような判定になる。
   これは §3 のとおり既存の Z3 String Sort 断片で表現でき、`Solver::check()` 1 回で判定できる
   （`¬(C1 ⟹ C2)` が unsat なら subtype）。
@@ -219,8 +231,17 @@ capability の constraint はこの**まったく同じ文字列断片**であ�
 subtyping の判定（§2.1）も同じ断片で閉じる: `C1 ⟹ C2` は、
 `parse_constraint_to_z3_string()` で得た 2 つの `Bool` について `Bool::and(&[C1, ¬C2])` を assert し、
 `SatResult::Unsat` を確認すればよい。`Unknown`（タイムアウト）は既存 `verify_effect_params()` と同じく
-警告扱いにするか、より安全側に倒して narrowing を拒否する。近似できない複雑な regex では
-`parse_constraint_to_z3_string()` が `None` を返すため、その場合は「定数引数のみ許可」に落とすのが妥当である。
+**`Unknown`（タイムアウト）は narrowing 拒否とする**（権限判断では警告扱いにできない）。
+
+**regex の近似は権限判断に使ってはならない**。`parse_constraint_to_z3_string()` の `matches` 処理は
+`^p.*` / `.*s$` / `.*sub.*` などを prefix / suffix / contains へ**近似**するもので、元の正規表現より
+広い集合を認めうる。この近似を `C1 ⟹ C2` の判定に使うと、実際の constraint が拒否するアクセスを
+Z3 が許可してしまう（unsound な権限拡大）。したがって最小サブセットでは:
+
+- capability の constraint に `matches(...)` を許さない。許可するのは厳密にエンコードできる
+  `starts_with` / `ends_with` / `contains` / `not_contains` とその `&&` 連結のみとする。
+- 近似経路に落ちる入力（`matches` や `None` を返す制約）はエラーとして拒否する。既存の effect 検証における
+  `matches` の扱い（近似 + 警告）は変更しない。制限は capability の constraint にのみ適用する。
 
 ### 3.2 effect containment / propagation を壊さないこと
 
@@ -235,6 +256,12 @@ capability パラメータはこの 3 番目の規則の既存形にそのまま
 `TypeRef.effect_set = Some(["SafeFileRead"])` を持つパラメータであり、既存コードが
 `type_ref.is_fn_type()` で絞っている条件を「関数型 **または** capability 型」に広げるだけで、
 比較式（`param_leaves ⊆ allowed_leaves`、`is_subeffect` によるフォールバック）は一字も変えずに済む。
+
+ただしこの `is_fn_type()` ゲートは `verify_effect_containment()` だけではなく
+`verification/executor.rs:573` と `verification/support/dataflow_inference.rs:431`（パラメータの
+`effect_set` からのエフェクト推論）にも存在する。capability パラメータの effect を見落とさないためには
+**3 箇所を同じ規則で拡張する必要がある**（共通のヘルパを導入し 3 箇所から呼ぶのが望ましい）。
+この拡張は Stage 1 の作業項目であり、いずれも条件の拡大のみで既存の関数型パラメータの扱いは変わらない。
 
 - `read_config(cap: FileCap, ...)` は `effects:` に `SafeFileRead` を書かなくても、
   capability 型から effect を要求していることが署名に現れる。呼び出し元 `main` は
@@ -329,14 +356,16 @@ codegen 経路（`__effect_*` 直接呼び出し）も生成物も現状と同�
 
 | Stage | 内容 | 完了条件 |
 |---|---|---|
-| Stage 1 | `capability` 型宣言（コンテキスト依存キーワード）+ capability 型パラメータのみ。`grant` なし | 既存 effect と等価な検証結果になること。`.mm` 回帰ゼロ |
+| Stage 1 | `capability` 型宣言（コンテキスト依存キーワード）+ capability 型パラメータのみ。`grant` なし。`is_fn_type()` ゲート 3 箇所（`effects.rs` / `executor.rs` / `dataflow_inference.rs`）の拡張を含む | 既存 effect と等価な検証結果になること。`.mm` 回帰ゼロ |
 | Stage 2 | `grant E where C` 式と静的 capability 束縛。codegen は消去のみ（§4.2 の ABI 消去パス: 定義・宣言・直接呼び出しから capability パラメータと実引数を除去）を含む | `grant` を含む新規テストが通り、消去後の LLVM IR が capability 抜き版と一致し、既存 codegen 出力が不変 |
 | Stage 3 | narrowing（`grant cap where C'`）と `C1 ⟹ C2` の Z3 判定 | narrowing の受理 / 拒否が Z3 で判定でき、`Unknown` 時の安全側動作が定義されている |
 | Stage 4 | move ベースの revocation（アフィン capability）。`Rvalue::Call` の引数に対する所有権移動を新規実装（§2.2） | 委譲後の再使用 / 重複引数 / 分岐 join に対して use-after-move / double-move / `MergeConflict` が報告される |
 
 非対象（本調査の前提を壊すため、必要になった時点で改めて調査する）:
 value-dependent constraint、capability の data structure への格納、
-分岐による capability の動的選択、動的 revocation。
+分岐による capability の動的選択、動的 revocation、
+capability constraint での `matches(...)`（近似が権限を広げるため、§3.1）、
+capability subtyping における effect 階層の利用（親 effect への代入は権限拡大、§2.1）。
 
 ---
 

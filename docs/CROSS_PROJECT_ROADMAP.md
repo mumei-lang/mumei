@@ -1713,7 +1713,9 @@ data structure に載せない、という最小サブセットに限れば実�
 - 新 AST ノードはすべて新バリアントの追加。effect 部分は既存 `TypeRef.effect_set` で表現できるが、
   constraint は `effect_set` に載らないため capability 専用の型フィールドを追加し HIR / MIR まで伝播させる。
   `grant` / `capability` はコンテキスト依存キーワードとして導入する（無条件なキーワード化は外部ソースに破壊的）。
-- subtyping は constraint の含意 `C1 ⟹ C2` と既存 effect 階層で閉じ、revocation は MIR move 解析
+- subtyping は constraint の含意 `C1 ⟹ C2` だけで閉じる（effect は不変。子 effect の capability を
+  親 effect のパラメータに代入できると権限拡大になるため、capability の subtyping に effect 階層は使わない）。
+  revocation は MIR move 解析
   （`movability_from_type()` が未知の型名を `Move` に分類）の骨格にそのまま載る。ただし `Rvalue::Call` の
   引数は現状消費されないため、呼び出し地点の所有権移動は Stage 4 で新規実装する。動的 revocation は非対象。
 - capability の制約は既存の文字列制約断片と同一で、effect containment 証明
