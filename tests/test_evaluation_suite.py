@@ -109,6 +109,56 @@ def test_user_burden_counts_clause_kinds_and_tokens(suite, tmp_path):
     )
 
 
+NESTED_INVARIANT_SOURCE = """
+atom sum_array(arr: [i64], n: i64)
+requires: n >= 0;
+ensures: result >= 0;
+body: {
+    let sum = 0;
+    let i = 0;
+    while i < n
+    invariant: i >= 0 && i <= n && sum >= 0
+    decreases: n - i
+    {
+        sum = sum + arr[i];
+        i = i + 1;
+    };
+    sum
+};
+"""
+
+
+def test_user_burden_counts_invariant_clauses_inside_a_body(suite, tmp_path):
+    source = tmp_path / "loop.mm"
+    source.write_text(NESTED_INVARIANT_SOURCE, encoding="utf-8")
+
+    burden = suite.measure_user_burden(source)
+
+    assert burden["spec_clause_kinds"]["invariant"] == 1
+    assert burden["spec_clauses"] == 3
+
+    stripped = tmp_path / "loop_without_invariant.mm"
+    stripped.write_text(
+        "\n".join(
+            line
+            for line in NESTED_INVARIANT_SOURCE.splitlines()
+            if "invariant:" not in line
+        ),
+        encoding="utf-8",
+    )
+    baseline = suite.measure_user_burden(stripped)
+    invariant_tokens = len(suite.TOKEN_RE.findall(" i >= 0 && i <= n && sum >= 0"))
+    # the clause counts as specification and leaves the implementation untouched
+    assert burden["spec_tokens"] == baseline["spec_tokens"] + invariant_tokens
+    assert burden["impl_tokens"] == baseline["impl_tokens"]
+
+
+def test_committed_benchmarks_report_their_loop_invariants(suite):
+    harness = suite.load_run_benchmarks()
+    source = harness.CATEGORIES["svcomp_style"] / "loop_invariant.mm"
+    assert suite.measure_user_burden(source)["spec_clause_kinds"]["invariant"] == 1
+
+
 def test_user_burden_is_deterministic(suite, tmp_path):
     source = tmp_path / "sample.mm"
     source.write_text(SAMPLE_SOURCE, encoding="utf-8")
@@ -184,9 +234,16 @@ def test_repair_convergence_aggregates_self_correction_summary(suite, tmp_path):
     )
 
     summaries = suite.load_self_correction_summaries(cert_dir)
-    assert set(summaries) == {"a.mm", "b.mm"}
+    assert set(summaries) == {
+        "a.mm",
+        "b.mm",
+        "arithmetic/a.mm",
+        "arithmetic/b.mm",
+    }
 
-    repair = suite.aggregate_repair_convergence(["a.mm", "b.mm"], summaries)
+    repair = suite.aggregate_repair_convergence(
+        ["arithmetic/a.mm", "arithmetic/b.mm"], summaries
+    )
     assert repair["status"] == "MEASURED"
     assert repair["total_atoms"] == 5
     assert repair["converged_atoms"] == 4
@@ -194,6 +251,38 @@ def test_repair_convergence_aggregates_self_correction_summary(suite, tmp_path):
     # atom-weighted, matching SelfCorrectionSummary::from_atom_metadata
     assert repair["average_repair_attempts"] == 3.0
     assert repair["total_token_cost"] == 500
+
+
+def test_repair_convergence_distinguishes_same_name_across_categories(suite, tmp_path):
+    cert_dir = tmp_path / "certs"
+    cert_dir.mkdir()
+    for category, atoms in (("arithmetic", 4), ("concurrency", 1)):
+        (cert_dir / f"{category}.json").write_text(
+            json.dumps({
+                "file": f"benchmarks/{category}/shared.mm",
+                "self_correction_summary": {
+                    "total_atoms": atoms,
+                    "converged_atoms": atoms,
+                    "convergence_rate": 1.0,
+                    "average_repair_attempts": 1.0,
+                    "total_token_cost": 10 * atoms,
+                },
+            }),
+            encoding="utf-8",
+        )
+
+    summaries = suite.load_self_correction_summaries(cert_dir)
+    # the ambiguous bare name is dropped; only qualified lookups resolve
+    assert "shared.mm" not in summaries
+    assert suite.aggregate_repair_convergence(["shared.mm"], summaries)[
+        "status"
+    ] == "SKIP"
+    assert (
+        suite.aggregate_repair_convergence(["concurrency/shared.mm"], summaries)[
+            "total_atoms"
+        ]
+        == 1
+    )
 
 
 def test_repair_convergence_skips_without_data(suite, tmp_path):
@@ -306,6 +395,9 @@ def test_category_evaluation_without_binary_skips_solver_axes(suite):
     assert axes["user_burden"]["status"] == "MEASURED"
     assert axes["trust_surface"]["status"] == "MEASURED"
     assert axes["trust_surface"]["atoms"] > 0
+    # escalation counts come from verifier output, so they are unavailable here
+    assert axes["trust_surface"]["lean_escalation_candidates"] is None
+    assert axes["trust_surface"]["lean_verified_atoms"] is None
 
 
 def test_build_evaluation_reports_every_axis_and_is_deterministic(suite):
@@ -372,6 +464,7 @@ def test_report_renders_skip_instead_of_substituted_values(suite):
     assert "| repair convergence | SKIP | SKIP |" in report
     assert "| runtime artifact utility | SKIP | SKIP |" in report
     assert "| user burden | MEASURED |" in report
+    assert "SKIP Lean escalation candidates" in report
     assert "`budget_policy_fingerprint`: `SKIP`" in report
     assert suite.format_report(evaluation) == report
 
@@ -401,4 +494,39 @@ def test_committed_artifacts_match_the_schema():
     assert [c["category"] for c in payload["categories"]] == sorted(
         c["category"] for c in payload["categories"]
     )
+
+
+def test_committed_artifact_static_axes_are_not_stale():
+    """The static axes are re-derivable, so the artifact must still match them.
+
+    Guards against a benchmark or measurement change leaving obsolete numbers in
+    the committed JSON while the shape checks keep passing.
+    """
+    suite_module = load_suite()
+    harness = suite_module.load_run_benchmarks()
+    payload = json.loads(
+        (REPO_ROOT / "benchmarks" / "evaluation" / "evaluation_suite.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    committed = {c["category"]: c for c in payload["categories"]}
+    assert set(committed) == set(harness.CATEGORIES)
+
+    for name, dir_path in sorted(harness.CATEGORIES.items()):
+        sources = sorted(dir_path.glob("*.mm"))
+        measured = suite_module.aggregate_user_burden(
+            [suite_module.measure_user_burden(p) for p in sources]
+        )
+        recorded = committed[name]["axes"]["user_burden"]
+        assert committed[name]["files"] == len(sources)
+        for field in (
+            "atoms",
+            "spec_clauses",
+            "spec_clause_kinds",
+            "spec_clauses_per_atom",
+            "spec_tokens",
+            "impl_tokens",
+            "spec_to_impl_token_ratio",
+        ):
+            assert recorded[field] == measured[field], f"{name}.{field} is stale"
     assert (REPO_ROOT / "docs" / "EVALUATION_SUITE.md").is_file()

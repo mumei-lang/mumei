@@ -2244,15 +2244,15 @@ streamlit run visualizer/app.py -- --report-dir reports
 
 ## P27: 6 軸定量評価スイート（paper §7 の評価軸を制御タスク群で測定） — ✅ Implemented
 
-**ステータス: ✅ Implemented**（測定 2026-08-30、`PYTHONPATH=. pytest tests/` 173/173 passed（うち `tests/test_evaluation_suite.py` 19 件を新規追加）、`pytest tests/test_benchmark_suite.py` 16/16 passed（無変更で通過）、`cargo tree --edges no-dev | grep -i opentelemetry` は空 = 既定ビルドに OTel 依存なし）— `PAPER_DRAFT.md` §7 が挙げる 6 評価軸のうち、これまで測定されていたのはデモと `std/` 健全度メトリクス、および `run_benchmarks.py` の 3 軸だけだった点を解消する。6 軸すべてを同一の制御タスク群に対して 1 回の run で決定論的に測定・集計し、JSON + markdown の再現可能な artifact として書き出す。Rust 側は無変更で、新規 verdict 語彙・新規 audit 語彙・新規ベンチマークカテゴリは追加しない。
+**ステータス: ✅ Implemented**（測定 2026-08-30、`PYTHONPATH=. pytest tests/` 177/177 passed（うち `tests/test_evaluation_suite.py` 23 件を新規追加）、`pytest tests/test_benchmark_suite.py` 16/16 passed（無変更で通過）、`cargo tree --edges no-dev | grep -i opentelemetry` は空 = 既定ビルドに OTel 依存なし）— `PAPER_DRAFT.md` §7 が挙げる 6 評価軸のうち、これまで測定されていたのはデモと `std/` 健全度メトリクス、および `run_benchmarks.py` の 3 軸だけだった点を解消する。6 軸すべてを同一の制御タスク群に対して 1 回の run で決定論的に測定・集計し、JSON + markdown の再現可能な artifact として書き出す。Rust 側は無変更で、新規 verdict 語彙・新規 audit 語彙・新規ベンチマークカテゴリは追加しない。
 
 ### 構成
 
 - **統合スイート**（`benchmarks/evaluation_suite.py`）: 既存 `benchmarks/run_benchmarks.py` を module として読み込み、その測定（proof success rate / counterexample quality / atom・trusted atom 数 / solver 時間）をそのまま消費する。二重定義を作らないため、trust surface の FFI 境界は `scripts/scale_trust_surface.py::source_counts` を、repair convergence の集計は `mumei-core/src/proof_cert/models.rs` の `SelfCorrectionSummary::from_atom_metadata` と同じ atom 重み付けを再利用する。
-- **repair convergence**（新規軸）: `--repair-cert-dir` に渡された proof certificate の `self_correction_summary`（`convergence_rate` / `average_repair_attempts` / `total_token_cost`）をベンチマークファイル名で突き合わせて集計する。`average_repair_attempts` はファイル平均ではなく atom 数で重み付けして再計算する。mumei-agent の自己修復ループを経ていない certificate には当該ブロックが無いため、ローカル `mumei verify` だけの run では決定論的に `SKIP` へ縮退する（solver 時間の `SKIP` と同じ方針）。
-- **user burden**（新規軸）: 各 `.mm` から `requires` / `ensures` / `invariant` / `effect_pre` / `effect_post` の節数と、仕様トークン数 対 実装（`body:`）トークン数の比を静的に数える。solver も wall-clock も介さないので値は完全に決定論的。body を持たない `trusted atom` だけのファイルは比を `SKIP`（`null`）として報告し、0 除算を代入値で埋めない。
+- **repair convergence**（新規軸）: `--repair-cert-dir` に渡された proof certificate の `self_correction_summary`（`convergence_rate` / `average_repair_attempts` / `total_token_cost`）を `<カテゴリ>/<ファイル名>` で突き合わせて集計する（カテゴリ跨ぎで同名ファイルがあっても取り違えない）。`average_repair_attempts` はファイル平均ではなく atom 数で重み付けして再計算する。mumei-agent の自己修復ループを経ていない certificate には当該ブロックが無いため、ローカル `mumei verify` だけの run では決定論的に `SKIP` へ縮退する（solver 時間の `SKIP` と同じ方針）。
+- **user burden**（新規軸）: 各 `.mm` から `requires` / `ensures` / `invariant` / `effect_pre` / `effect_post` の節数と、仕様トークン数 対 実装（`body:`）トークン数の比を静的に数える。loop `invariant` は `body:` の内側に現れるため body は行単位で走査し、節のトークンは仕様側に数えて実装側には数えない。solver も wall-clock も介さないので値は完全に決定論的。body を持たない `trusted atom` だけのファイルは比を `SKIP`（`null`）として報告し、0 除算を代入値で埋めない。
 - **runtime artifact utility**（新規軸）: 各タスクに対し `mumei build --emit llvm-ir` / `--emit c-header` / `--emit verified-json` と `mumei verify --proof-cert` を実行し、成果物が実際に生成されたかを判定する。対象は `expected: PASS` のタスクのみ（counterexample タスクは検証に落ちるのが期待挙動であり、emitter の欠落ではない）。生成できなかった組み合わせは markdown の「Artifact Emission Gaps」表に file / target 単位で残す。
-- **欠測の扱い**: 6 軸すべてが、入力が無いときに代入値ではなく `MEASURED` / `SKIP` の既存語彙で状態を明示する。`mumei` バイナリが無い run でも静的 2 軸（user burden / trust surface）は測定され、完全な形の文書が出る。
+- **欠測の扱い**: 6 軸すべてが、入力が無いときに代入値ではなく `MEASURED` / `SKIP` の既存語彙で状態を明示する。`mumei` バイナリが無い run でも静的 2 軸（user burden / trust surface）は測定され、完全な形の文書が出る。ただし trust surface のうち Lean escalation 候補数と `lean_verified` atom 数は verifier 出力由来のため、バイナリが無い run では 0 ではなく `SKIP`（`null`）として報告する。
 - **artifact**: `benchmarks/evaluation/evaluation_suite.json`（`schema: mumei.evaluation_suite/v1`、`budget_policy_fingerprint` 付き）と `docs/EVALUATION_SUITE.md`（`docs/BENCHMARK_RESULTS.md` と同じ時系列蓄積形式で `---` 区切りに追記）。
 
 ### 測定結果（2026-08-30、`target/debug/mumei`、`--no-lean`）
@@ -2263,7 +2263,7 @@ streamlit run visualizer/app.py -- --report-dir reports
 | repair convergence | SKIP | agent 修復データ未投入 |
 | counterexample quality | MEASURED | 100.00%（20/20 検出） |
 | trust surface | MEASURED | アプリ trusted atom 0 / 105 atom、FFI 境界宣言 0、Lean escalation 候補 6 |
-| user burden | MEASURED | 2.4381 clauses/atom、spec/impl token 比 1.7871 |
+| user burden | MEASURED | 2.4667 clauses/atom（うち loop `invariant` 3 件）、spec/impl token 比 1.8902 |
 | runtime artifact utility | MEASURED | 93.27%（97/104 emission） |
 
 未達の 7 emission は、Z3 が obligation を落とし切れず build が検証段階で止まる `arithmetic/finite_field_modular.mm` と `domain_compliance/modular_commitment.mm`（各 3 target）、および codegen が通らない `domain_compliance/regtech_exhaustiveness.mm` の `llvm-ir` である（いずれも `mumei verify` 単体は通るため proof-cert は生成される）。
@@ -2275,7 +2275,7 @@ streamlit run visualizer/app.py -- --report-dir reports
 | `benchmarks/evaluation_suite.py` | 6 軸統合スイート（既存ハーネスの消費 + 新規 3 軸の測定・集計・出力） |
 | `benchmarks/evaluation/evaluation_suite.json` | `mumei.evaluation_suite/v1` 測定 artifact |
 | `docs/EVALUATION_SUITE.md` | 時系列 markdown サマリ |
-| `tests/test_evaluation_suite.py` | CI 回帰ゲート（19 件、`mumei` バイナリ非依存） |
+| `tests/test_evaluation_suite.py` | CI 回帰ゲート（23 件、`mumei` バイナリ非依存） |
 | `.github/workflows/evaluation-suite.yml` | 上記テストと既存 `tests/test_benchmark_suite.py` を PR で実行 |
 
 ### 使い方
@@ -2292,8 +2292,8 @@ python benchmarks/evaluation_suite.py --repair-cert-dir ../mumei-agent/artifacts
 
 ### CI 回帰ゲート
 
-- `pytest tests/test_evaluation_suite.py`（19 件）: 6 軸レジストリが paper §7 と一致すること、`MEASURED` / `SKIP` / `mumei.evaluation_suite/v1` の語彙が既存のままであること、制御タスク群が既存 6 カテゴリであること、節種別ごとの user burden 計数と決定性・body 無しファイルの比 `None`、`self_correction_summary` の atom 重み付き集計（4/5 atom → 0.8、平均修復回数 3.0）と summary 無し / 壊れた certificate の無視、target 別 emission 集計、バイナリ無し run での solver 依存軸の `SKIP` と静的軸の `MEASURED`、JSON の決定性、markdown が代入値ではなく `SKIP` を描画すること、時系列追記、コミット済み artifact の schema 整合。
-- `PYTHONPATH=. pytest tests/`（173 件）: 既存 172 件は無変更で通過する（`tests/test_benchmark_suite.py` 16 件を含む）。
+- `pytest tests/test_evaluation_suite.py`（23 件）: 6 軸レジストリが paper §7 と一致すること、`MEASURED` / `SKIP` / `mumei.evaluation_suite/v1` の語彙が既存のままであること、制御タスク群が既存 6 カテゴリであること、節種別ごとの user burden 計数と決定性・body 無しファイルの比 `None`、`self_correction_summary` の atom 重み付き集計（4/5 atom → 0.8、平均修復回数 3.0）と summary 無し / 壊れた certificate の無視、target 別 emission 集計、バイナリ無し run での solver 依存軸の `SKIP` と静的軸の `MEASURED`、JSON の決定性、markdown が代入値ではなく `SKIP` を描画すること、時系列追記、コミット済み artifact の schema 整合と静的軸の非陳腐化（コミット済み JSON の user burden を再測定値と突き合わせる）。
+- `PYTHONPATH=. pytest tests/`（177 件）: 既存 154 件は無変更で通過する（`tests/test_benchmark_suite.py` 16 件を含む）。
 - **ゼロコスト検証（P15 / P23〜P26 と同一）**: `cargo tree --edges no-dev | grep -i opentelemetry` が空であること。本スイートは Rust を触らない測定層のみ。
 
 **残課題**: repair convergence は mumei-agent 側の自己修復 run が生成した certificate を渡したときにのみ `MEASURED` になる（本リポジトリにコミット済みの測定は `SKIP`）。runtime artifact utility は `expected: PASS` タスクのみを対象とするため、counterexample タスクの emitter 挙動は測定範囲外。paper §9 Future Work #1 前半の TikZ 図差し替えは本スイートのスコープ外で未着手のまま。

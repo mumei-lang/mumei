@@ -116,6 +116,20 @@ def _tokens(text: str) -> int:
     return len(TOKEN_RE.findall(text))
 
 
+def _body_end(lines: list[str], start: int) -> int:
+    """Index of the last line of the ``body:`` block opening at ``start``."""
+    end = start
+    depth = lines[start].count("{") - lines[start].count("}")
+    while end < len(lines) and (
+        depth > 0 or not lines[end].rstrip().endswith((";", "}"))
+    ):
+        end += 1
+        if end >= len(lines):
+            break
+        depth += lines[end].count("{") - lines[end].count("}")
+    return min(end, len(lines) - 1)
+
+
 def measure_user_burden(path: Path) -> dict:
     """Count the formal syntax a task demands from its author.
 
@@ -128,6 +142,10 @@ def measure_user_burden(path: Path) -> dict:
       token, i.e. how much formal text buys one token of executable code. A
       body-less (`trusted`) atom contributes specification tokens only, so the
       ratio is reported as ``None`` when a file has no implementation tokens.
+
+    Loop `invariant` clauses live inside a `body:` block, so body contents are
+    scanned clause by clause: their tokens count as specification, not as
+    implementation.
     """
     lines = path.read_text(encoding="utf-8").splitlines()
     clause_counts = {kind: 0 for kind in SPEC_CLAUSE_KINDS}
@@ -153,18 +171,16 @@ def measure_user_burden(path: Path) -> dict:
             index = end + 1
             continue
         if BODY_START_RE.match(line):
-            end = index
-            depth = lines[index].count("{") - lines[index].count("}")
-            while end < len(lines) and (
-                depth > 0 or not lines[end].rstrip().endswith((";", "}"))
-            ):
-                end += 1
-                if end >= len(lines):
-                    break
-                depth += lines[end].count("{") - lines[end].count("}")
-            end = min(end, len(lines) - 1)
-            body_text = "\n".join(lines[index : end + 1]).split(":", 1)[1]
-            impl_tokens += _tokens(body_text)
+            end = _body_end(lines, index)
+            body_lines = lines[index : end + 1]
+            body_lines[0] = body_lines[0].split(":", 1)[1]
+            for body_line in body_lines:
+                nested = SPEC_CLAUSE_RE.match(body_line)
+                if nested:
+                    clause_counts[nested.group(1)] += 1
+                    spec_tokens += _tokens(body_line.split(":", 1)[1])
+                    continue
+                impl_tokens += _tokens(body_line)
             index = end + 1
             continue
         index += 1
@@ -217,7 +233,12 @@ def aggregate_user_burden(files: list[dict]) -> dict:
 
 
 def load_self_correction_summaries(cert_dir: Path | None) -> dict[str, dict]:
-    """Index ``self_correction_summary`` blocks by benchmark file name.
+    """Index ``self_correction_summary`` blocks by benchmark source.
+
+    Each summary is indexed both by ``<category>/<file>.mm`` and by the bare
+    file name. Two certificates for the same bare name in different categories
+    drop the ambiguous bare key, so only the category-qualified lookup — the
+    one ``evaluate_category`` uses — can resolve them.
 
     Proof certificates carry the summary only when the mumei-agent
     self-correction loop produced the atoms, so a plain local `mumei verify`
@@ -226,6 +247,7 @@ def load_self_correction_summaries(cert_dir: Path | None) -> dict[str, dict]:
     if cert_dir is None or not cert_dir.is_dir():
         return {}
     summaries: dict[str, dict] = {}
+    ambiguous: set[str] = set()
     for cert_path in sorted(cert_dir.rglob("*.json")):
         try:
             cert = json.loads(cert_path.read_text(encoding="utf-8"))
@@ -237,8 +259,22 @@ def load_self_correction_summaries(cert_dir: Path | None) -> dict[str, dict]:
         source = cert.get("file")
         if not isinstance(summary, dict) or not isinstance(source, str):
             continue
-        summaries[Path(source).name] = summary
+        path = Path(source)
+        if path.parent.name:
+            summaries[f"{path.parent.name}/{path.name}"] = summary
+        if path.name in summaries and summaries[path.name] != summary:
+            ambiguous.add(path.name)
+        summaries.setdefault(path.name, summary)
+    for name in ambiguous:
+        summaries.pop(name, None)
     return summaries
+
+
+def _lookup_repair_summary(key: str, summaries: dict[str, dict]) -> dict | None:
+    """Resolve a ``<category>/<file>`` key, falling back to the bare name."""
+    if key in summaries:
+        return summaries[key]
+    return summaries.get(key.rsplit("/", 1)[-1])
 
 
 def aggregate_repair_convergence(
@@ -252,7 +288,13 @@ def aggregate_repair_convergence(
     ``SelfCorrectionSummary::from_atom_metadata`` in
     ``mumei-core/src/proof_cert/models.rs``.
     """
-    matched = [(name, summaries[name]) for name in file_names if name in summaries]
+    matched = [
+        (name, summary)
+        for name, summary in (
+            (name, _lookup_repair_summary(name, summaries)) for name in file_names
+        )
+        if summary is not None
+    ]
     if not matched:
         return {"status": STATUS_SKIP, "files_with_repair_data": 0}
     total_atoms = sum(int(s.get("total_atoms", 0)) for _, s in matched)
@@ -373,12 +415,21 @@ def aggregate_runtime_artifacts(files: list[dict]) -> dict:
 # --------------------------------------------------------------------------
 
 
-def aggregate_trust_surface(category_result: dict, sources: list[Path]) -> dict:
+def aggregate_trust_surface(
+    category_result: dict,
+    sources: list[Path],
+    *,
+    binary_available: bool = True,
+) -> dict:
     """Trust surface of a category: trusted atoms, FFI boundary, Lean escalation.
 
     Atom and trusted-atom counts come from the benchmark harness; the FFI
     boundary is counted with ``scripts/scale_trust_surface.py`` so the two
     artifacts report the same trust surface for the same source.
+
+    Escalation and Lean-discharge counts are read out of verifier output, so
+    without the `mumei` binary they are reported as unavailable rather than as
+    zero; the static components stay measured either way.
     """
     sys.path.insert(0, str(REPO_ROOT / "scripts"))
     from scale_trust_surface import source_counts  # noqa: PLC0415
@@ -398,8 +449,12 @@ def aggregate_trust_surface(category_result: dict, sources: list[Path]) -> dict:
         "ffi_boundary_declarations": boundary_declarations,
         "lean_escalation_candidates": sum(
             d["escalation_candidates"] for d in category_result["details"]
-        ),
-        "lean_verified_atoms": category_result["lean_verified_atoms"],
+        )
+        if binary_available
+        else None,
+        "lean_verified_atoms": category_result["lean_verified_atoms"]
+        if binary_available
+        else None,
     }
 
 
@@ -444,8 +499,12 @@ def evaluate_category(
     }
 
     burden = aggregate_user_burden([measure_user_burden(p) for p in sources])
-    repair = aggregate_repair_convergence([p.name for p in sources], repair_summaries)
-    trust = aggregate_trust_surface(result, sources)
+    repair = aggregate_repair_convergence(
+        [f"{category}/{p.name}" for p in sources], repair_summaries
+    )
+    trust = aggregate_trust_surface(
+        result, sources, binary_available=bool(binary)
+    )
 
     if binary and measure_artifacts:
         pass_sources = [p for p in sources if harness._expected_outcome(p) == "PASS"]
@@ -471,6 +530,14 @@ def evaluate_category(
             "runtime_artifact_utility": artifacts,
         },
     }
+
+
+def _optional_sum(values) -> int | None:
+    """Sum counts, propagating unavailability instead of substituting zero."""
+    collected = list(values)
+    if any(value is None for value in collected):
+        return None
+    return sum(collected)
 
 
 def _axis_totals(categories: list[dict]) -> dict:
@@ -538,7 +605,7 @@ def _axis_totals(categories: list[dict]) -> dict:
             "ffi_boundary_declarations": sum(
                 a["ffi_boundary_declarations"] for a in trust
             ),
-            "lean_escalation_candidates": sum(
+            "lean_escalation_candidates": _optional_sum(
                 a["lean_escalation_candidates"] for a in trust
             ),
         },
@@ -585,6 +652,10 @@ def _fmt_rate(rate: float | None) -> str:
 
 def _fmt_number(value: float | None) -> str:
     return STATUS_SKIP if value is None else f"{value:.4f}"
+
+
+def _fmt_count(value: int | None) -> str:
+    return STATUS_SKIP if value is None else str(value)
 
 
 def format_report(evaluation: dict) -> str:
@@ -638,8 +709,8 @@ def format_report(evaluation: dict) -> str:
             f"{totals['trust_surface']['application_trusted_atoms']} trusted "
             f"/ {totals['trust_surface']['atoms']} atoms, "
             f"{totals['trust_surface']['ffi_boundary_declarations']} FFI declarations, "
-            f"{totals['trust_surface']['lean_escalation_candidates']} Lean escalation "
-            "candidates",
+            f"{_fmt_count(totals['trust_surface']['lean_escalation_candidates'])} "
+            "Lean escalation candidates",
         )
         + " |",
         f"| user burden | {totals['user_burden']['status']} | "

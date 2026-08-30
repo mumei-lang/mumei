@@ -18,7 +18,7 @@
           "status": "MEASURED"
         },
         "proof_success_rate": {
-          "avg_solver_time_s": 0.021,
+          "avg_solver_time_s": 0.027,
           "files": 9,
           "lean_discharge_rate": null,
           "matched_files": 9,
@@ -361,7 +361,7 @@
           "status": "MEASURED"
         },
         "proof_success_rate": {
-          "avg_solver_time_s": 0.03,
+          "avg_solver_time_s": 0.029,
           "files": 15,
           "lean_discharge_rate": null,
           "matched_files": 15,
@@ -959,7 +959,7 @@
           "status": "MEASURED"
         },
         "proof_success_rate": {
-          "avg_solver_time_s": 0.024,
+          "avg_solver_time_s": 0.025,
           "files": 10,
           "lean_discharge_rate": null,
           "matched_files": 10,
@@ -1229,18 +1229,18 @@
             {
               "atoms": 4,
               "file": "regtech_exhaustiveness.mm",
-              "impl_tokens": 112,
+              "impl_tokens": 94,
               "spec_clause_kinds": {
                 "effect_post": 0,
                 "effect_pre": 0,
                 "ensures": 4,
-                "invariant": 0,
+                "invariant": 1,
                 "requires": 4
               },
-              "spec_clauses": 8,
-              "spec_clauses_per_atom": 2.0,
-              "spec_to_impl_token_ratio": 1.0,
-              "spec_tokens": 112
+              "spec_clauses": 9,
+              "spec_clauses_per_atom": 2.25,
+              "spec_to_impl_token_ratio": 1.3617,
+              "spec_tokens": 128
             },
             {
               "atoms": 1,
@@ -1277,32 +1277,32 @@
             {
               "atoms": 4,
               "file": "rtgs_balance_conservation.mm",
-              "impl_tokens": 100,
+              "impl_tokens": 82,
               "spec_clause_kinds": {
                 "effect_post": 3,
                 "effect_pre": 3,
                 "ensures": 4,
-                "invariant": 0,
+                "invariant": 1,
                 "requires": 4
               },
-              "spec_clauses": 14,
-              "spec_clauses_per_atom": 3.5,
-              "spec_to_impl_token_ratio": 1.69,
-              "spec_tokens": 169
+              "spec_clauses": 15,
+              "spec_clauses_per_atom": 3.75,
+              "spec_to_impl_token_ratio": 2.2561,
+              "spec_tokens": 185
             }
           ],
-          "impl_tokens": 406,
+          "impl_tokens": 370,
           "spec_clause_kinds": {
             "effect_post": 9,
             "effect_pre": 9,
             "ensures": 25,
-            "invariant": 0,
+            "invariant": 2,
             "requires": 25
           },
-          "spec_clauses": 68,
-          "spec_clauses_per_atom": 2.72,
-          "spec_to_impl_token_ratio": 2.0936,
-          "spec_tokens": 850,
+          "spec_clauses": 70,
+          "spec_clauses_per_atom": 2.8,
+          "spec_to_impl_token_ratio": 2.3838,
+          "spec_tokens": 882,
           "status": "MEASURED"
         }
       },
@@ -1687,32 +1687,32 @@
             {
               "atoms": 1,
               "file": "loop_invariant.mm",
-              "impl_tokens": 59,
+              "impl_tokens": 41,
               "spec_clause_kinds": {
                 "effect_post": 0,
                 "effect_pre": 0,
                 "ensures": 1,
-                "invariant": 0,
+                "invariant": 1,
                 "requires": 1
               },
-              "spec_clauses": 2,
-              "spec_clauses_per_atom": 2.0,
-              "spec_to_impl_token_ratio": 0.6271,
-              "spec_tokens": 37
+              "spec_clauses": 3,
+              "spec_clauses_per_atom": 3.0,
+              "spec_to_impl_token_ratio": 1.2927,
+              "spec_tokens": 53
             }
           ],
-          "impl_tokens": 68,
+          "impl_tokens": 50,
           "spec_clause_kinds": {
             "effect_post": 0,
             "effect_pre": 0,
             "ensures": 3,
-            "invariant": 0,
+            "invariant": 1,
             "requires": 3
           },
-          "spec_clauses": 6,
-          "spec_clauses_per_atom": 2.0,
-          "spec_to_impl_token_ratio": 1.5,
-          "spec_tokens": 102,
+          "spec_clauses": 7,
+          "spec_clauses_per_atom": 2.3333,
+          "spec_to_impl_token_ratio": 2.36,
+          "spec_tokens": 118,
           "status": "MEASURED"
         }
       },
@@ -1728,7 +1728,7 @@
     "total_trusted": 0,
     "trusted_ratio": 0.0
   },
-  "timestamp": "2026-08-30 05:18 UTC",
+  "timestamp": "2026-08-30 06:08 UTC",
   "totals": {
     "counterexample_quality": {
       "counterexample_catch_rate": 1.0,
@@ -1765,11 +1765,11 @@
     },
     "user_burden": {
       "atoms": 105,
-      "impl_tokens": 1456,
-      "spec_clauses": 256,
-      "spec_clauses_per_atom": 2.4381,
-      "spec_to_impl_token_ratio": 1.7871,
-      "spec_tokens": 2602,
+      "impl_tokens": 1402,
+      "spec_clauses": 259,
+      "spec_clauses_per_atom": 2.4667,
+      "spec_to_impl_token_ratio": 1.8902,
+      "spec_tokens": 2650,
       "status": "MEASURED"
     }
   }
