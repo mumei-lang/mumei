@@ -2,6 +2,8 @@
 name = "mumei-core"
 version = "0.6.12"
 edition = "2021"
+# std's advisory file locks (File::try_lock) are stable since 1.89.
+rust-version = "1.89"
 description = "Core library for the Mumei proof-driven programming language"
 license = "Apache-2.0"
 repository = "https://github.com/mumei-lang/mumei"
