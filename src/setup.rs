@@ -25,8 +25,41 @@ use std::process::Command as Cmd;
 // =============================================================================
 // バージョン定数
 // =============================================================================
-const Z3_VERSION: &str = "4.13.4";
 const LLVM_VERSION: &str = "18.1.8";
+
+/// Upstream Z3 prebuilt archives are named after the image they were built on
+/// (`z3-{version}-{arch}-{osx-<ver>|glibc-<ver>}`), and the suffix changes
+/// between releases, so every field is pinned per release.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Z3Build {
+    version: &'static str,
+    macos_suffix: &'static str,
+    linux_x64_suffix: &'static str,
+    linux_x64_min_glibc: (u32, u32),
+    linux_arm64_suffix: &'static str,
+    linux_arm64_min_glibc: (u32, u32),
+}
+
+/// Z3 5.1.0: monadic regex solver, string/quantified-array soundness fixes.
+const Z3_BUILD: Z3Build = Z3Build {
+    version: "5.1.0",
+    macos_suffix: "osx-13.3",
+    linux_x64_suffix: "glibc-2.39",
+    linux_x64_min_glibc: (2, 39),
+    linux_arm64_suffix: "glibc-2.38",
+    linux_arm64_min_glibc: (2, 38),
+};
+
+/// Last release with prebuilt archives for glibc 2.34/2.35 hosts
+/// (Ubuntu 22.04, RHEL 9, Debian 12).
+const Z3_LEGACY_BUILD: Z3Build = Z3Build {
+    version: "4.14.1",
+    macos_suffix: "osx-13.7.4",
+    linux_x64_suffix: "glibc-2.35",
+    linux_x64_min_glibc: (2, 35),
+    linux_arm64_suffix: "glibc-2.34",
+    linux_arm64_min_glibc: (2, 34),
+};
 
 // =============================================================================
 // エラー型
@@ -92,20 +125,29 @@ impl Platform {
         };
         Ok(Platform { os, arch })
     }
-    fn z3_archive_name(&self) -> String {
-        match (self.os, self.arch) {
-            (Os::MacOS, Arch::Aarch64) => format!("z3-{}-arm64-osx-13.7.1", Z3_VERSION),
-            (Os::MacOS, Arch::X86_64) => format!("z3-{}-x64-osx-13.7.1", Z3_VERSION),
-            (Os::Linux, Arch::X86_64) => format!("z3-{}-x64-glibc-2.35", Z3_VERSION),
-            (Os::Linux, Arch::Aarch64) => format!("z3-{}-arm64-glibc-2.35", Z3_VERSION),
-        }
+    fn z3_archive_name(&self, build: &Z3Build) -> String {
+        let (arch, suffix) = match (self.os, self.arch) {
+            (Os::MacOS, Arch::Aarch64) => ("arm64", build.macos_suffix),
+            (Os::MacOS, Arch::X86_64) => ("x64", build.macos_suffix),
+            (Os::Linux, Arch::X86_64) => ("x64", build.linux_x64_suffix),
+            (Os::Linux, Arch::Aarch64) => ("arm64", build.linux_arm64_suffix),
+        };
+        format!("z3-{}-{}-{}", build.version, arch, suffix)
     }
-    fn z3_download_url(&self) -> String {
-        let archive = self.z3_archive_name();
+    fn z3_download_url(&self, build: &Z3Build) -> String {
         format!(
             "https://github.com/Z3Prover/z3/releases/download/z3-{}/{}.zip",
-            Z3_VERSION, archive
+            build.version,
+            self.z3_archive_name(build)
         )
+    }
+    /// Minimum glibc the prebuilt Linux archive of `build` was linked against.
+    fn required_glibc(&self, build: &Z3Build) -> Option<(u32, u32)> {
+        match (self.os, self.arch) {
+            (Os::MacOS, _) => None,
+            (Os::Linux, Arch::X86_64) => Some(build.linux_x64_min_glibc),
+            (Os::Linux, Arch::Aarch64) => Some(build.linux_arm64_min_glibc),
+        }
     }
     fn llvm_archive_name(&self) -> String {
         match (self.os, self.arch) {
@@ -165,8 +207,9 @@ pub fn run(force: bool) {
     }
 
     // --- Z3 ---
-    let z3_dir = toolchains_dir.join(format!("z3-{}", Z3_VERSION));
-    if let Err(e) = install_z3(&platform, &toolchains_dir, &z3_dir, force) {
+    let z3_build = select_z3_build(&platform, detect_host_glibc());
+    let z3_dir = toolchains_dir.join(format!("z3-{}", z3_build.version));
+    if let Err(e) = install_z3(&platform, &z3_build, &toolchains_dir, &z3_dir, force) {
         eprintln!("  ❌ Z3 install failed: {}", e);
         eprintln!("     Fallback: install from system package manager (e.g. brew/apt) and re-run.");
     }
@@ -191,28 +234,71 @@ pub fn run(force: bool) {
     println!("   Run: source ~/.mumei/env");
 }
 
+/// Read the host glibc version from `ldd --version`.
+fn detect_host_glibc() -> Option<(u32, u32)> {
+    if std::env::consts::OS != "linux" {
+        return None;
+    }
+    let out = Cmd::new("ldd").arg("--version").output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    parse_glibc_version(&text)
+}
+
+fn parse_glibc_version(ldd_output: &str) -> Option<(u32, u32)> {
+    let first = ldd_output.lines().next()?;
+    let version = first.split_whitespace().last()?;
+    let (major, minor) = version.split_once('.')?;
+    let minor = minor
+        .split(|c: char| !c.is_ascii_digit())
+        .next()
+        .unwrap_or(minor);
+    Some((major.parse().ok()?, minor.parse().ok()?))
+}
+
+/// Prefer the pinned Z3 release, falling back to the legacy build when the
+/// host glibc predates the prebuilt archive's build image.
+fn select_z3_build(platform: &Platform, host_glibc: Option<(u32, u32)>) -> Z3Build {
+    let (Some(required), Some(host)) = (platform.required_glibc(&Z3_BUILD), host_glibc) else {
+        return Z3_BUILD;
+    };
+    if host >= required {
+        return Z3_BUILD;
+    }
+    println!(
+        "  ⚠️  Z3 {} prebuilt binaries require glibc {}.{}, host has {}.{}",
+        Z3_BUILD.version, required.0, required.1, host.0, host.1
+    );
+    println!(
+        "     Falling back to Z3 {}. Build Z3 {} from source for the newer solver.",
+        Z3_LEGACY_BUILD.version, Z3_BUILD.version
+    );
+    Z3_LEGACY_BUILD
+}
+
 fn install_z3(
     platform: &Platform,
+    build: &Z3Build,
     toolchains_dir: &Path,
     z3_dir: &Path,
     force: bool,
 ) -> Result<(), SetupError> {
     if z3_dir.exists() {
         if !force {
-            println!("  ✅ Z3 {}: already installed", Z3_VERSION);
+            println!("  ✅ Z3 {}: already installed", build.version);
             return Ok(());
         }
         fs::remove_dir_all(z3_dir)
             .map_err(|e| SetupError::Io(format!("Failed to remove {}: {}", z3_dir.display(), e)))?;
     }
 
-    println!("  📦 Downloading Z3 {}...", Z3_VERSION);
-    println!("     URL: {}", platform.z3_download_url());
+    println!("  📦 Downloading Z3 {}...", build.version);
+    println!("     URL: {}", platform.z3_download_url(build));
 
-    let archive_path = download_with_curl(&platform.z3_download_url(), toolchains_dir, "z3.zip")?;
+    let archive_path =
+        download_with_curl(&platform.z3_download_url(build), toolchains_dir, "z3.zip")?;
     extract_zip(&archive_path, toolchains_dir)?;
 
-    let extracted = toolchains_dir.join(platform.z3_archive_name());
+    let extracted = toolchains_dir.join(platform.z3_archive_name(build));
     if !extracted.exists() {
         return Err(SetupError::Io(format!(
             "Expected extracted directory not found: {}",
@@ -230,7 +316,11 @@ fn install_z3(
     })?;
 
     let _ = fs::remove_file(&archive_path);
-    println!("  ✅ Z3 {}: installed to {}", Z3_VERSION, z3_dir.display());
+    println!(
+        "  ✅ Z3 {}: installed to {}",
+        build.version,
+        z3_dir.display()
+    );
     Ok(())
 }
 
@@ -421,4 +511,77 @@ fn extract_tar_xz(archive: &Path, dest_dir: &Path) -> Result<(), SetupError> {
         )));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const LINUX_X64: Platform = Platform {
+        os: Os::Linux,
+        arch: Arch::X86_64,
+    };
+    const LINUX_ARM64: Platform = Platform {
+        os: Os::Linux,
+        arch: Arch::Aarch64,
+    };
+    const MACOS_ARM64: Platform = Platform {
+        os: Os::MacOS,
+        arch: Arch::Aarch64,
+    };
+
+    #[test]
+    fn archive_names_match_upstream_release_assets() {
+        assert_eq!(
+            LINUX_X64.z3_archive_name(&Z3_BUILD),
+            "z3-5.1.0-x64-glibc-2.39"
+        );
+        assert_eq!(
+            LINUX_ARM64.z3_archive_name(&Z3_BUILD),
+            "z3-5.1.0-arm64-glibc-2.38"
+        );
+        assert_eq!(
+            MACOS_ARM64.z3_archive_name(&Z3_BUILD),
+            "z3-5.1.0-arm64-osx-13.3"
+        );
+        assert_eq!(
+            LINUX_X64.z3_archive_name(&Z3_LEGACY_BUILD),
+            "z3-4.14.1-x64-glibc-2.35"
+        );
+        assert_eq!(
+            LINUX_ARM64.z3_archive_name(&Z3_LEGACY_BUILD),
+            "z3-4.14.1-arm64-glibc-2.34"
+        );
+    }
+
+    #[test]
+    fn download_url_points_at_the_release_tag() {
+        assert_eq!(
+            LINUX_X64.z3_download_url(&Z3_BUILD),
+            "https://github.com/Z3Prover/z3/releases/download/z3-5.1.0/z3-5.1.0-x64-glibc-2.39.zip"
+        );
+    }
+
+    #[test]
+    fn glibc_version_is_parsed_from_ldd_output() {
+        assert_eq!(
+            parse_glibc_version("ldd (Ubuntu GLIBC 2.35-0ubuntu3.8) 2.35\nCopyright\n"),
+            Some((2, 35))
+        );
+        assert_eq!(parse_glibc_version("ldd (GNU libc) 2.39\n"), Some((2, 39)));
+        assert_eq!(parse_glibc_version("musl libc (x86_64)\n"), None);
+    }
+
+    #[test]
+    fn old_glibc_hosts_fall_back_to_the_legacy_build() {
+        assert_eq!(select_z3_build(&LINUX_X64, Some((2, 35))), Z3_LEGACY_BUILD);
+        assert_eq!(
+            select_z3_build(&LINUX_ARM64, Some((2, 34))),
+            Z3_LEGACY_BUILD
+        );
+        assert_eq!(select_z3_build(&LINUX_X64, Some((2, 39))), Z3_BUILD);
+        assert_eq!(select_z3_build(&LINUX_ARM64, Some((2, 38))), Z3_BUILD);
+        assert_eq!(select_z3_build(&LINUX_X64, None), Z3_BUILD);
+        assert_eq!(select_z3_build(&MACOS_ARM64, Some((2, 17))), Z3_BUILD);
+    }
 }

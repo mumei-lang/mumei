@@ -2,6 +2,28 @@
 
 ---
 
+### 2026-08-30: Z3 toolchain 4.13.4 → 5.1.0
+
+- **Z3 5.1.0**: `mumei setup` and the Windows release job now install Z3 5.1.0,
+  which brings the rewritten monadic regex solver plus soundness fixes in
+  strings, quantified arrays, and bit-vectors — including cases that previously
+  returned a spurious `unknown`.
+- **Release-specific archive names**: upstream names each prebuilt archive after
+  its build image and changes the suffix every release, so `src/setup.rs` no
+  longer hard-codes `osx-13.7.1` / `glibc-2.35`; the OS, glibc suffixes, and
+  minimum glibc are pinned per release in `Z3Build`. This also fixes the Linux
+  aarch64 URL, which pointed at a `glibc-2.35` archive that upstream never
+  published for 4.13.4 (`arm64` builds ship as `glibc-2.34`).
+- **glibc fallback**: the 5.1.0 Linux archives require glibc 2.39 (x86_64) /
+  2.38 (aarch64), so `mumei setup` detects the host glibc and installs Z3 4.14.1
+  on older distros instead of downloading an unusable binary.
+- **Bindings unchanged**: `z3` 0.12 / `z3-sys` 0.8 build and pass the full
+  `mumei-core` suite against libz3 5.1.0; the only C API removal in 5.x is
+  unused by Mumei, so no crate upgrade (and no `Context` API migration) is
+  needed.
+
+---
+
 ### 2026-08-30: v0.6.16 release version bump
 
 - **Workspace and member crate versions**: bumped versions from `0.6.12` to

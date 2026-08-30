@@ -178,7 +178,7 @@ Published package structure:
 │           └── .mumei/cache/verification_cache.json  ← proof artifact
 ├── registry.json                     ← package index
 └── toolchains/
-    ├── z3-4.13.4/
+    ├── z3-5.1.0/
     └── llvm-17.1.8/
 ```
 
@@ -260,6 +260,14 @@ mumei setup --force    # re-download even if installed
 source ~/.mumei/env    # apply environment variables
 ```
 
+Z3 target version is **5.1.0**. Upstream names each prebuilt archive after the
+image it was built on (`z3-5.1.0-x64-glibc-2.39`, `z3-5.1.0-arm64-osx-13.3`),
+and those Linux archives need glibc 2.39 (x86_64) / 2.38 (aarch64). On older
+hosts (Ubuntu 22.04, RHEL 9, Debian 12) `mumei setup` reports the mismatch and
+installs Z3 4.14.1 instead, which ships glibc 2.35 / 2.34 archives. To run 5.1.0
+there, build Z3 from source and point `Z3_SYS_Z3_HEADER` / `Z3_SYS_Z3_LIB_DIR`
+at it; the `z3` 0.12 / `z3-sys` 0.8 bindings work unchanged against both.
+
 ---
 
 ## MCP parallel verification and cache isolation (P8-F)
@@ -307,12 +315,12 @@ Inspects all tools with multi-path std library search (cwd → exe dir → `MUME
 ```
 🔍 Mumei Inspect: checking development environment...
   Mumei compiler: v0.2.0
-  ✅ Z3: Z3 version 4.13.4
+  ✅ Z3: Z3 version 5.1.0
   ✅ LLVM: LLVM version 18.1.8
   ✅ Rust: rustc 1.82.0
   ✅ std library: 7/7 modules found (std)
   ✅ mumei.toml: my_project v0.1.0
-  ✅ ~/.mumei/toolchains: llvm-17.1.8, z3-4.13.4
+  ✅ ~/.mumei/toolchains: llvm-17.1.8, z3-5.1.0
 ✅ Inspect: 7 ok — all tools available
 ```
 
