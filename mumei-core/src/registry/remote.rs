@@ -17,6 +17,7 @@
 //! ```
 use serde::Deserialize;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::manifest::RegistryConfig;
@@ -87,7 +88,7 @@ pub fn resolve(
         return Ok(None);
     };
 
-    super::register_with_cert(
+    super::register_cached_with_cert(
         name,
         &fetched.version,
         &fetched.dir,
@@ -118,12 +119,109 @@ pub fn fetch_package(
             name
         ));
     }
+    let staging = StagingDir::new(cache_root, name)?;
+    let result = fetch_into_staging(
+        base_url,
+        name,
+        version,
+        cache_root,
+        timeout_ms,
+        strict_imports,
+        staging.path(),
+    );
+    match result {
+        Ok(Some(fetched)) => {
+            staging.publish(&fetched.dir)?;
+            Ok(Some(rebase_paths(fetched)))
+        }
+        other => other,
+    }
+}
+
+/// Download destination that is discarded unless the whole fetch succeeds, so a
+/// failed or certificate-less fetch can never leave partial files — or a stale
+/// certificate from an earlier fetch — in the published cache directory.
+struct StagingDir {
+    path: PathBuf,
+}
+
+impl StagingDir {
+    fn new(cache_root: &Path, name: &str) -> Result<Self, String> {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let path = cache_root
+            .join(name)
+            .join(format!(".staging-{}-{}", std::process::id(), nonce));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path)
+            .map_err(|e| format!("remote registry: cannot create {}: {}", path.display(), e))?;
+        Ok(Self { path })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Replace `dest` with the staged content.
+    fn publish(&self, dest: &Path) -> Result<(), String> {
+        if dest.exists() {
+            fs::remove_dir_all(dest).map_err(|e| {
+                format!(
+                    "remote registry: cannot replace cached {}: {}",
+                    dest.display(),
+                    e
+                )
+            })?;
+        }
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent).map_err(|e| {
+                format!("remote registry: cannot create {}: {}", parent.display(), e)
+            })?;
+        }
+        fs::rename(&self.path, dest).map_err(|e| {
+            format!(
+                "remote registry: cannot move {} to {}: {}",
+                self.path.display(),
+                dest.display(),
+                e
+            )
+        })
+    }
+}
+
+impl Drop for StagingDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+/// Rewrite staging paths recorded during the fetch to the published cache dir.
+fn rebase_paths(mut fetched: FetchedPackage) -> FetchedPackage {
+    if fetched.cert_path.is_some() {
+        fetched.cert_path = Some(fetched.dir.join(CERT_FILE));
+    }
+    fetched
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fetch_into_staging(
+    base_url: &str,
+    name: &str,
+    version: Option<&str>,
+    cache_root: &Path,
+    timeout_ms: u64,
+    strict_imports: bool,
+    staging: &Path,
+) -> Result<Option<FetchedPackage>, String> {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_millis(timeout_ms))
         .build()
         .map_err(|e| format!("remote registry: cannot build HTTP client: {}", e))?;
 
     let base = base_url.trim_end_matches('/');
+    warn_if_insecure(base);
     let index_url = format!("{}/packages/{}/index.json", base, name);
     let Some(index_body) = fetch_text(&client, &index_url)? else {
         return Ok(None);
@@ -153,17 +251,10 @@ pub fn fetch_package(
 
     let pkg_dir = cache_root.join(name).join(&resolved_version);
     let version_url = format!("{}/packages/{}/{}", base, name, resolved_version);
-    fs::create_dir_all(&pkg_dir).map_err(|e| {
-        format!(
-            "remote registry: cannot create {}: {}",
-            pkg_dir.display(),
-            e
-        )
-    })?;
 
     for rel in &remote_version.files {
         let rel_path = sanitize_relative_path(rel)?;
-        let dest = pkg_dir.join(&rel_path);
+        let dest = staging.join(&rel_path);
         let file_url = format!("{}/{}", version_url, rel_path.to_string_lossy());
         let Some(body) = fetch_text(&client, &file_url)? else {
             return Err(format!(
@@ -182,7 +273,7 @@ pub fn fetch_package(
 
     let cert_url = format!("{}/{}", version_url, CERT_FILE);
     let cert_body = fetch_text(&client, &cert_url)?;
-    let cert_dest = pkg_dir.join(CERT_FILE);
+    let cert_dest = staging.join(CERT_FILE);
     let mut fetched = FetchedPackage {
         version: resolved_version.clone(),
         dir: pkg_dir.clone(),
@@ -207,6 +298,7 @@ pub fn fetch_package(
                 name,
                 &resolved_version,
                 remote_version.cert_hash.as_deref(),
+                strict_imports,
             ) {
                 Ok(summary) => {
                     fetched.cert_path = Some(cert_dest);
@@ -258,6 +350,7 @@ fn verify_fetched_certificate(
     name: &str,
     version: &str,
     expected_hash: Option<&str>,
+    strict_imports: bool,
 ) -> Result<CertificateSummary, String> {
     let actual_hash = proof_cert::compute_sha256(cert_body);
     if let Some(expected) = expected_hash {
@@ -287,21 +380,37 @@ fn verify_fetched_certificate(
             false
         }
     };
-    if let Some(cert_name) = cert.package_name.as_deref() {
-        if cert_name != name {
+    match cert.package_name.as_deref() {
+        Some(cert_name) if cert_name != name => {
             return Err(format!(
                 "remote registry: certificate for '{}' v{} declares package '{}'",
                 name, version, cert_name
             ));
         }
+        // Without an identity claim the certificate cannot be bound to what was
+        // downloaded, so strict imports refuse it instead of trusting the index.
+        None if strict_imports => {
+            return Err(format!(
+                "Strict imports: remote certificate for '{}' v{} does not declare a package name.",
+                name, version
+            ));
+        }
+        _ => {}
     }
-    if let Some(cert_version) = cert.package_version.as_deref() {
-        if cert_version != version {
+    match cert.package_version.as_deref() {
+        Some(cert_version) if cert_version != version => {
             return Err(format!(
                 "remote registry: certificate for '{}' v{} declares version '{}'",
                 name, version, cert_version
             ));
         }
+        None if strict_imports => {
+            return Err(format!(
+                "Strict imports: remote certificate for '{}' v{} does not declare a package version.",
+                name, version
+            ));
+        }
+        _ => {}
     }
     Ok(CertificateSummary {
         cert_hash: actual_hash,
@@ -326,18 +435,55 @@ fn fetch_text(client: &reqwest::blocking::Client, url: &str) -> Result<Option<St
             response.status()
         ));
     }
-    let body = response
-        .text()
-        .map_err(|e| format!("remote registry: cannot read body of {}: {}", url, e))?;
-    if body.len() > MAX_FILE_BYTES {
-        return Err(format!(
+    let too_large = |size: String| {
+        Err(format!(
             "remote registry: {} is {} bytes (limit {})",
-            url,
-            body.len(),
-            MAX_FILE_BYTES
-        ));
+            url, size, MAX_FILE_BYTES
+        ))
+    };
+    if let Some(len) = response.content_length() {
+        if len > MAX_FILE_BYTES as u64 {
+            return too_large(len.to_string());
+        }
     }
-    Ok(Some(body))
+    // Read through a capped reader so a server that lies about (or omits)
+    // Content-Length cannot make the client buffer an unbounded body.
+    let mut buf = Vec::new();
+    response
+        .take(MAX_FILE_BYTES as u64 + 1)
+        .read_to_end(&mut buf)
+        .map_err(|e| format!("remote registry: cannot read body of {}: {}", url, e))?;
+    if buf.len() > MAX_FILE_BYTES {
+        return too_large(format!("more than {}", MAX_FILE_BYTES));
+    }
+    String::from_utf8(buf)
+        .map(Some)
+        .map_err(|_| format!("remote registry: {} is not valid UTF-8", url))
+}
+
+/// Over plaintext HTTP the index, package and certificate can all be replaced
+/// together, so the certificate chain proves nothing about the origin.
+fn warn_if_insecure(base: &str) {
+    let Some(rest) = base.strip_prefix("http://") else {
+        return;
+    };
+    let host = rest
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .rsplit('@')
+        .next()
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("");
+    let loopback = host == "localhost" || host == "127.0.0.1" || host == "[::1]" || host == "::1";
+    if !loopback {
+        eprintln!(
+            "  ⚠️  Registry {} uses plaintext HTTP: a network attacker can replace the package and its certificate together. Use https://.",
+            base
+        );
+    }
 }
 
 fn is_valid_package_name(name: &str) -> bool {

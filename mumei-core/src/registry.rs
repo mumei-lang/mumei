@@ -61,8 +61,68 @@ pub fn save(registry: &Registry) -> Result<(), String> {
     }
     let json = serde_json::to_string_pretty(registry)
         .map_err(|e| format!("Failed to serialize registry: {}", e))?;
-    fs::write(&path, json).map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
-    Ok(())
+    // Write through a temporary file so a crash or a concurrent reader never
+    // observes a half-written registry.
+    let tmp = path.with_extension(format!("json.tmp-{}", std::process::id()));
+    fs::write(&tmp, json).map_err(|e| format!("Failed to write {}: {}", tmp.display(), e))?;
+    fs::rename(&tmp, &path).map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        format!("Failed to write {}: {}", path.display(), e)
+    })
+}
+
+/// Advisory cross-process lock around a registry read-modify-write, so parallel
+/// `mumei` invocations cannot drop each other's entries.
+struct RegistryLock {
+    path: PathBuf,
+}
+
+impl RegistryLock {
+    const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
+    const WAIT_FOR: std::time::Duration = std::time::Duration::from_secs(10);
+
+    fn acquire() -> Result<Self, String> {
+        let path = registry_path().with_extension("lock");
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create {}: {}", parent.display(), e))?;
+        }
+        let deadline = std::time::Instant::now() + Self::WAIT_FOR;
+        loop {
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(_) => return Ok(Self { path }),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let stale = fs::metadata(&path)
+                        .and_then(|m| m.modified())
+                        .ok()
+                        .and_then(|m| m.elapsed().ok())
+                        .is_some_and(|age| age > Self::STALE_AFTER);
+                    if stale {
+                        let _ = fs::remove_file(&path);
+                        continue;
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        return Err(format!(
+                            "Timed out waiting for the registry lock {}",
+                            path.display()
+                        ));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(e) => return Err(format!("Failed to lock {}: {}", path.display(), e)),
+            }
+        }
+    }
+}
+
+impl Drop for RegistryLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
 }
 /// パッケージ名とバージョン（省略時は latest）でパスを解決する。
 /// バージョンが "*" の場合は latest を使用する。
@@ -105,6 +165,42 @@ pub fn register_with_cert(
     cert_path: Option<String>,
     cert_hash: Option<String>,
 ) -> Result<(), String> {
+    register_inner(
+        name, version, pkg_path, atom_count, verified, cert_path, cert_hash, true,
+    )
+}
+
+/// Register a package fetched from a remote registry.
+///
+/// Unlike [`register_with_cert`], caching an older release does not move the
+/// `latest` pointer backwards: `latest` becomes the highest semver among the
+/// cached versions, so a later `*` dependency still resolves to the newest one.
+pub(crate) fn register_cached_with_cert(
+    name: &str,
+    version: &str,
+    pkg_path: &Path,
+    atom_count: usize,
+    verified: bool,
+    cert_path: Option<String>,
+    cert_hash: Option<String>,
+) -> Result<(), String> {
+    register_inner(
+        name, version, pkg_path, atom_count, verified, cert_path, cert_hash, false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn register_inner(
+    name: &str,
+    version: &str,
+    pkg_path: &Path,
+    atom_count: usize,
+    verified: bool,
+    cert_path: Option<String>,
+    cert_hash: Option<String>,
+    force_latest: bool,
+) -> Result<(), String> {
+    let _lock = RegistryLock::acquire()?;
     let mut registry = load();
     let now = chrono_lite_now();
     let ver_entry = VersionEntry {
@@ -123,8 +219,32 @@ pub fn register_with_cert(
             latest: version.to_string(),
         });
     pkg.versions.insert(version.to_string(), ver_entry);
-    pkg.latest = version.to_string();
+    let next_latest = if force_latest {
+        version.to_string()
+    } else {
+        highest_semver(
+            pkg.versions
+                .keys()
+                .map(String::as_str)
+                .chain([pkg.latest.as_str()]),
+            version,
+        )
+    };
+    pkg.latest = next_latest;
     save(&registry)
+}
+
+/// Highest parseable semver among `versions`, or `fallback` when none parses.
+fn highest_semver<'a>(versions: impl Iterator<Item = &'a str>, fallback: &str) -> String {
+    let mut best: Option<((u64, u64, u64), String)> = None;
+    for v in versions {
+        if let Some(parsed) = parse_semver(v) {
+            if best.as_ref().is_none_or(|b| parsed > b.0) {
+                best = Some((parsed, v.to_string()));
+            }
+        }
+    }
+    best.map(|b| b.1).unwrap_or_else(|| fallback.to_string())
 }
 /// Select a version out of `available` for the requirement `version`.
 /// `None` / `"*"` selects `latest`, `^x.y.z` / `~x.y.z` apply the range rules
@@ -132,7 +252,7 @@ pub fn register_with_cert(
 ///
 /// Shared by local (`registry.json`) and remote (`remote::resolve`) resolution
 /// so both honour the same range semantics.
-pub(crate) fn select_version<'a>(
+pub fn select_version<'a>(
     available: impl Iterator<Item = &'a str>,
     latest: &str,
     version: Option<&str>,
@@ -286,6 +406,21 @@ mod tests {
         assert_eq!(ver_entry.cert_hash.as_deref(), Some("deadbeef"));
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// P24: caching an older remote release keeps the newest cached version as latest
+    #[test]
+    fn test_highest_semver_prefers_the_newest_cached_version() {
+        assert_eq!(
+            highest_semver(["1.0.0", "1.2.0"].into_iter(), "1.0.0"),
+            "1.2.0"
+        );
+        assert_eq!(highest_semver(["0.9.0"].into_iter(), "0.9.0"), "0.9.0");
+        // Non-semver version strings fall back to the version being registered.
+        assert_eq!(
+            highest_semver(["nightly"].into_iter(), "nightly"),
+            "nightly"
+        );
     }
 
     /// P5-B: cert_path and cert_hash are omitted from JSON when None

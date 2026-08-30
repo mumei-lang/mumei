@@ -137,6 +137,32 @@ fn certificate_json_with_translator(package: &str, version: &str, translator: &s
     )
 }
 
+/// Certificate without `package_name` / `package_version` claims.
+fn certificate_json_without_identity() -> String {
+    let translator = LEAN_TRANSLATOR_VERSION;
+    let bridge = LEAN_BRIDGE_LEMMA_HASH;
+    format!(
+        r#"{{
+  "version": "1.0",
+  "timestamp": "2026-08-29T00:00:00Z",
+  "mumei_version": "0.6.12",
+  "z3_version": "4.13.0",
+  "file": "src/main.mm",
+  "all_verified": true,
+  "atoms": [
+    {{
+      "name": "add_one",
+      "z3_check_result": "unsat",
+      "content_hash": "aaaa",
+      "status": "verified",
+      "translator_version": "{translator}",
+      "bridge_lemma_hash": "{bridge}"
+    }}
+  ]
+}}"#
+    )
+}
+
 const SOURCE: &str = "atom add_one(x: i64) -> i64 { x + 1 }\n";
 
 /// Routes for `remote_pkg` with versions 1.0.0 / 1.1.0 / 1.2.0.
@@ -434,6 +460,172 @@ fn mumei_add_fetches_and_caches_from_the_remote_registry() {
         manifest.contains("remote_pkg = \"1.2.0\""),
         "manifest: {manifest}"
     );
+}
+
+#[test]
+fn certificate_without_package_identity_is_rejected_under_strict_imports() {
+    let cert = certificate_json_without_identity();
+    let hash = compute_sha256(&cert);
+    let mut routes = package_routes(Some(&hash), false);
+    routes.insert(
+        "/packages/remote_pkg/1.2.0/.proof-cert.json".to_string(),
+        cert,
+    );
+    let server = FixtureServer::start(routes);
+
+    let err = remote::fetch_package(
+        &server.base_url,
+        "remote_pkg",
+        None,
+        &temp_cache("anon_cert_strict"),
+        TIMEOUT_MS,
+        true,
+    )
+    .expect_err("an unattributed certificate must fail under strict imports");
+    assert!(err.contains("does not declare a package name"), "{}", err);
+
+    let fetched = remote::fetch_package(
+        &server.base_url,
+        "remote_pkg",
+        None,
+        &temp_cache("anon_cert_lenient"),
+        TIMEOUT_MS,
+        false,
+    )
+    .expect("non-strict fetch succeeds")
+    .expect("package exists remotely");
+    // Non-strict resolution keeps the certificate: the existing import path
+    // still decides per-atom status from it.
+    assert!(fetched.cert_path.is_some());
+}
+
+/// A version that stops publishing its certificate must not keep the
+/// certificate an earlier fetch cached, or the import path would still treat
+/// the package as certified.
+#[test]
+fn refetching_without_a_certificate_drops_the_cached_one() {
+    let cache = temp_cache("cert_disappears");
+    let cert = certificate_json("remote_pkg", "1.2.0");
+    let hash = compute_sha256(&cert);
+
+    let with_cert = FixtureServer::start(package_routes(Some(&hash), true));
+    let first = remote::fetch_package(
+        &with_cert.base_url,
+        "remote_pkg",
+        None,
+        &cache,
+        TIMEOUT_MS,
+        false,
+    )
+    .expect("first fetch succeeds")
+    .expect("package exists remotely");
+    assert!(first.dir.join(".proof-cert.json").exists());
+    drop(with_cert);
+
+    let without_cert = FixtureServer::start(package_routes(None, false));
+    let second = remote::fetch_package(
+        &without_cert.base_url,
+        "remote_pkg",
+        None,
+        &cache,
+        TIMEOUT_MS,
+        false,
+    )
+    .expect("second fetch succeeds")
+    .expect("package exists remotely");
+    assert_eq!(second.cert_path, None);
+    assert!(!second.dir.join(".proof-cert.json").exists());
+}
+
+#[test]
+fn a_failed_fetch_leaves_no_partial_cache() {
+    let mut routes = HashMap::new();
+    routes.insert(
+        "/packages/remote_pkg/index.json".to_string(),
+        r#"{"latest":"1.0.0","versions":{"1.0.0":{"files":["src/main.mm","src/missing.mm"]}}}"#
+            .to_string(),
+    );
+    routes.insert(
+        "/packages/remote_pkg/1.0.0/src/main.mm".to_string(),
+        SOURCE.to_string(),
+    );
+    let server = FixtureServer::start(routes);
+    let cache = temp_cache("partial");
+
+    let err = remote::fetch_package(
+        &server.base_url,
+        "remote_pkg",
+        None,
+        &cache,
+        TIMEOUT_MS,
+        false,
+    )
+    .expect_err("a missing listed file fails the fetch");
+    assert!(err.contains("returned 404"), "{}", err);
+    assert!(!cache.join("remote_pkg/1.0.0").exists());
+    // Only the (already removed) staging directory may have existed.
+    let leftovers: Vec<_> = std::fs::read_dir(cache.join("remote_pkg"))
+        .map(|entries| entries.filter_map(Result::ok).map(|e| e.path()).collect())
+        .unwrap_or_default();
+    assert!(leftovers.is_empty(), "leftovers: {:?}", leftovers);
+}
+
+/// Caching an older release must not move the local `latest` pointer backwards.
+#[test]
+fn caching_an_older_version_does_not_demote_latest() {
+    let cert = certificate_json("remote_pkg", "1.2.0");
+    let hash = compute_sha256(&cert);
+    let server = FixtureServer::start(package_routes(Some(&hash), true));
+
+    let home = temp_cache("latest_home");
+    let new_project = |tag: &str| {
+        let project = temp_cache(tag);
+        std::fs::write(
+            project.join("mumei.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\n",
+        )
+        .expect("write project manifest");
+        project
+    };
+
+    let mumei_add = |project: &PathBuf, args: &[&str]| {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_mumei"))
+            .args(args)
+            .current_dir(project)
+            .env("HOME", &home)
+            .env("MUMEI_REGISTRY_URL", &server.base_url)
+            .output()
+            .expect("run mumei add");
+        assert!(
+            output.status.success(),
+            "{:?} failed: {}{}",
+            args,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    mumei_add(&new_project("latest_project_a"), &["add", "remote_pkg"]);
+    mumei_add(
+        &new_project("latest_project_b"),
+        &["add", "remote_pkg", "--version", "1.0.0"],
+    );
+
+    // A range fetches remotely and records the concrete version it selected.
+    let ranged = new_project("range_project");
+    mumei_add(&ranged, &["add", "remote_pkg", "--version", "^1.1.0"]);
+    let manifest = std::fs::read_to_string(ranged.join("mumei.toml")).expect("manifest readable");
+    assert!(
+        manifest.contains("remote_pkg = \"1.2.0\""),
+        "manifest: {manifest}"
+    );
+
+    let registry: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(home.join(".mumei/registry.json")).expect("registry.json written"),
+    )
+    .expect("registry.json parses");
+    let pkg = &registry["packages"]["remote_pkg"];
+    assert_eq!(pkg["latest"], "1.2.0", "registry: {}", registry);
+    assert!(pkg["versions"]["1.0.0"].is_object(), "registry: {registry}");
 }
 
 #[test]

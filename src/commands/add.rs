@@ -227,9 +227,17 @@ pub(crate) fn cmd_add(dep: &str, version: Option<&str>) {
         // パッケージ名のみ（レジストリ依存）
         // ~/.mumei/registry.json から検索し、無ければ P24 のリモートレジストリへ
         let mut reg = registry::load();
+        let local_version = |entry: &registry::PackageEntry| {
+            registry::select_version(
+                entry.versions.keys().map(String::as_str),
+                &entry.latest,
+                version,
+            )
+            .filter(|v| entry.versions.contains_key(v))
+        };
         let missing_locally = match reg.packages.get(dep) {
             None => true,
-            Some(entry) => version.is_some_and(|v| !entry.versions.contains_key(v)),
+            Some(entry) => local_version(entry).is_none(),
         };
         if missing_locally {
             match registry::remote::resolve(&project_manifest.registry, dep, version, false) {
@@ -246,20 +254,19 @@ pub(crate) fn cmd_add(dep: &str, version: Option<&str>) {
         }
         if let Some(pkg_entry) = reg.packages.get(dep) {
             // P5-B: Use --version if specified, otherwise use latest
-            let resolved_version = match version {
-                Some(v) => {
-                    // Verify the specified version exists
-                    if !pkg_entry.versions.contains_key(v) {
-                        let available: Vec<&String> = pkg_entry.versions.keys().collect();
-                        eprintln!(
-                            "❌ Error: Version '{}' not found for package '{}'. Available versions: {:?}",
-                            v, dep, available
-                        );
-                        std::process::exit(1);
-                    }
-                    v.to_string()
+            // P24: a range such as `^1.0.0` records the concrete version it selects.
+            let resolved_version = match local_version(pkg_entry) {
+                Some(v) => v,
+                None => {
+                    let available: Vec<&String> = pkg_entry.versions.keys().collect();
+                    eprintln!(
+                        "❌ Error: Version '{}' not found for package '{}'. Available versions: {:?}",
+                        version.unwrap_or("*"),
+                        dep,
+                        available
+                    );
+                    std::process::exit(1);
                 }
-                None => pkg_entry.latest.clone(),
             };
             let toml_line = format!("{} = \"{}\"", dep, resolved_version);
             println!(

@@ -132,12 +132,20 @@ Fetch behaviour:
 - The certificate body is hashed with the existing P5-A SHA-256 and compared against
   `cert_hash` from `index.json`; the certificate must also declare the same
   `package_name` / `package_version`.
-- Files are written to `~/.mumei/packages/<name>/<version>/` and registered in
+- Files are downloaded into a staging directory and only replace
+  `~/.mumei/packages/<name>/<version>/` once the whole fetch succeeds, so a failed
+  fetch leaves no partial files and a version that stops publishing a certificate
+  cannot keep the one an earlier fetch cached. The package is then registered in
   `registry.json` (including `cert_path` / `cert_hash`), so all later resolution
-  goes through the existing local path.
-- `--strict-imports`: a missing certificate, a hash mismatch, or an unparseable
-  certificate is a hard error. Without strict imports the package is still cached,
-  but the unverifiable certificate is discarded so it is not recorded as provenance.
+  goes through the existing local path. Caching an older release does not move
+  `latest` backwards.
+- `--strict-imports`: a missing certificate, a hash mismatch, an unparseable
+  certificate, or a certificate that does not declare its `package_name` /
+  `package_version` is a hard error. Without strict imports the package is still
+  cached, but a certificate that fails verification is discarded so it is not
+  recorded as provenance.
+- A plaintext `http://` registry (other than loopback) is warned about: it lets a
+  network attacker replace the package and its certificate together.
 - Atom-level verdicts are unchanged — they are still produced by
   `verify_import_certificate` on the cached package.
 
