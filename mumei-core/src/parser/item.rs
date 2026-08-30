@@ -1471,46 +1471,84 @@ fn annotate_capability_params(
 }
 
 /// Rewrite `perform <cap>.op(..)` into `perform <Effect>.op(..)` for capability
-/// bindings of the enclosing atom.
+/// bindings of the enclosing atom. String literals and line comments are copied
+/// verbatim, so text such as `"perform cap.read(p)"` keeps its original value.
 fn rewrite_capability_performs(body: &str, bindings: &[(String, String)]) -> String {
     let mut result = String::with_capacity(body.len());
     let mut rest = body;
-    while let Some(idx) = rest.find("perform") {
-        let (before, after) = rest.split_at(idx);
-        result.push_str(before);
-        result.push_str("perform");
-        let after = &after["perform".len()..];
-
-        let ws_end = after.len() - after.trim_start().len();
-        let (ws, tail) = after.split_at(ws_end);
-        let ident_len = tail
-            .find(|c: char| !(c.is_alphanumeric() || c == '_'))
-            .unwrap_or(tail.len());
-        let ident = &tail[..ident_len];
-        let keyword_boundary = before
-            .chars()
-            .last()
+    let mut prev: Option<char> = None;
+    while let Some(ch) = rest.chars().next() {
+        if ch == '"' {
+            let len = string_literal_len(rest);
+            result.push_str(&rest[..len]);
+            rest = &rest[len..];
+            prev = Some('"');
+            continue;
+        }
+        if rest.starts_with("//") {
+            let end = rest.find('\n').unwrap_or(rest.len());
+            result.push_str(&rest[..end]);
+            rest = &rest[end..];
+            prev = Some('\n');
+            continue;
+        }
+        let keyword_boundary = prev
             .map(|c| !(c.is_alphanumeric() || c == '_'))
             .unwrap_or(true);
-        let is_capability_use = keyword_boundary
-            && !ws.is_empty()
-            && tail[ident_len..].starts_with('.')
-            && bindings.iter().any(|(name, _)| name == ident);
-        if is_capability_use {
-            let effect = bindings
-                .iter()
-                .find(|(name, _)| name == ident)
-                .map(|(_, effect)| effect.as_str())
-                .unwrap_or(ident);
-            result.push_str(ws);
-            result.push_str(effect);
-            rest = &tail[ident_len..];
-        } else {
-            rest = after;
+        if keyword_boundary && rest.starts_with("perform") {
+            let after = &rest["perform".len()..];
+            let ws_end = after.len() - after.trim_start().len();
+            let (ws, tail) = after.split_at(ws_end);
+            let ident_len = tail
+                .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .unwrap_or(tail.len());
+            let ident = &tail[..ident_len];
+            let effect = if ws.is_empty() || !tail[ident_len..].starts_with('.') {
+                None
+            } else {
+                bindings
+                    .iter()
+                    .find(|(name, _)| name == ident)
+                    .map(|(_, effect)| effect.as_str())
+            };
+            result.push_str("perform");
+            match effect {
+                Some(effect) => {
+                    result.push_str(ws);
+                    result.push_str(effect);
+                    rest = &tail[ident_len..];
+                    prev = effect.chars().last();
+                }
+                None => {
+                    rest = after;
+                    prev = Some('m');
+                }
+            }
+            continue;
+        }
+        result.push(ch);
+        rest = &rest[ch.len_utf8()..];
+        prev = Some(ch);
+    }
+    result
+}
+
+/// Length in bytes of the string literal starting at `rest` (including quotes).
+fn string_literal_len(rest: &str) -> usize {
+    let mut idx = '"'.len_utf8();
+    while let Some(ch) = rest[idx..].chars().next() {
+        idx += ch.len_utf8();
+        match ch {
+            '\\' => {
+                if let Some(escaped) = rest[idx..].chars().next() {
+                    idx += escaped.len_utf8();
+                }
+            }
+            '"' => break,
+            _ => {}
         }
     }
-    result.push_str(rest);
-    result
+    idx
 }
 
 // =============================================================================

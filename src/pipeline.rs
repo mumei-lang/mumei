@@ -330,6 +330,7 @@ pub(crate) fn merge_module_env(
     target.resources.extend(source.resources);
     target.effects.extend(source.effects);
     target.effect_defs.extend(source.effect_defs);
+    target.capability_defs.extend(source.capability_defs);
     target.path_id_map.extend(source.path_id_map);
     target.next_path_id = target.next_path_id.max(source.next_path_id);
     target.prefix_ranges.extend(source.prefix_ranges);

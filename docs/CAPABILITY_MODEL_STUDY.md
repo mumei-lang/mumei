@@ -393,6 +393,11 @@ atom read_log(cap: FileCap, user_id: Str)
   effect polymorphism violation、constraint 違反は既存の effect 制約と同じ経路）。
 - Stage 1 の制限: capability 宣言はそれを宣言したモジュール内のパラメータにのみ適用される
   （import 越しの capability 型パラメータは Stage 2 以降で resolver に載せる）。
+- Stage 1 の制限: perform サイトから capability レシーバの同一性が失われるため、1 つの atom が
+  同一エフェクトに対する複数の capability パラメータを取ると、各 constraint が全 perform に
+  連言で適用される（権限は広がらないが正当なプログラムを過剰に棄却しうる）。同じ atom 内の直接
+  `perform Effect.op(x)` も capability constraint を継承する。レシーバを構文木に保持した
+  per-receiver 解決は Stage 2 で行う。
   capability の消去 ABI パスも Stage 2 のまま（`grant` がないため runtime 表現は生じない）。
 
 非対象（本調査の前提を壊すため、必要になった時点で改めて調査する）:
