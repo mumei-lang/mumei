@@ -227,7 +227,22 @@ pub fn resolve_manifest_dependencies_with_full_options(
         else if dep.version().is_some() || matches!(dep, crate::manifest::Dependency::Version(_))
         {
             let version = dep.version();
-            if let Some(pkg_dir) = crate::registry::resolve(dep_name, version) {
+            let local = crate::registry::resolve(dep_name, version);
+            let resolved = match local {
+                Some(dir) => Some(dir),
+                // P24: fall back to the configured remote registry. Opt-in —
+                // without `[registry] url` / `MUMEI_REGISTRY_URL` this is a no-op.
+                None => crate::registry::remote::resolve(
+                    &manifest.registry,
+                    dep_name,
+                    version,
+                    strict_imports,
+                )
+                .map_err(|e| {
+                    MumeiError::verification(format!("Dependency '{}': {}", dep_name, e))
+                })?,
+            };
+            if let Some(pkg_dir) = resolved {
                 let entry_candidates: Vec<PathBuf> = vec![
                     pkg_dir.join("src/main.mm"),
                     pkg_dir.join("main.mm"),
@@ -292,7 +307,11 @@ pub fn resolve_manifest_dependencies_with_full_options(
                     );
                 }
             } else {
-                eprintln!("  ⚠️  Dependency '{}': not found in local registry. Run `mumei publish` in the dependency project first.", dep_name);
+                if manifest.registry.effective_url().is_some() {
+                    eprintln!("  ⚠️  Dependency '{}': not found in the local registry or the configured remote registry.", dep_name);
+                } else {
+                    eprintln!("  ⚠️  Dependency '{}': not found in local registry. Run `mumei publish` in the dependency project first.", dep_name);
+                }
             }
         }
     }

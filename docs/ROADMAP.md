@@ -2027,6 +2027,53 @@ OTEL_ENABLED=true OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 ./your-app
 
 ---
 
+## P24: Remote Package Registry（証明書付きパッケージのネットワーク配布） — ✅ Implemented
+
+**ステータス: ✅ Implemented**（測定 2026-08-29、`cargo test --test test_remote_registry` 14/14 passed、`cargo test -p mumei-core registry` 12/12 passed、`cargo tree --edges no-dev | grep -i opentelemetry` は空 = 既定ビルドに OTel 依存なし）— これまで `~/.mumei/registry.json` にしか無かった name 依存の解決に、**opt-in の HTTP リモートレジストリフォールバック**を追加する。取得したパッケージは P5-B の `.proof-cert.json` を検証してから `~/.mumei/packages/<name>/<version>/` にキャッシュし、以降は既存のローカル解決経路に合流する。`docs/TOOLCHAIN.md` の Deferred 項目「Remote package registry」を実装済みにする。
+
+### 構成
+
+- **設定（opt-in）**（`mumei-core/src/manifest.rs`）: `mumei.toml` の `[registry] url` / `timeout_ms`（既定 30000ms）と環境変数 `MUMEI_REGISTRY_URL`（`mumei.toml` より優先）。未設定時は URL が解決されず、リモートアクセスは一切発生しない（従来どおりローカル / path / git のみ）。
+- **バージョン選択の共有**（`mumei-core/src/registry.rs`）: `select_version()` を抽出し、ローカル `registry.json` とリモート `index.json` が同一の semver 意味論（省略 / `*` → `latest`、`^`、`~`、完全一致）で解決するようにした。`find_compatible_version` / `find_tilde_compatible_version` はバージョン列のイテレータを取る形に変更（外部シグネチャは非公開のまま）。
+- **リモート取得**（`mumei-core/src/registry/remote.rs`、新規）: `{base}/packages/{name}/index.json` → `{base}/packages/{name}/{version}/{file}` → `{base}/packages/{name}/{version}/.proof-cert.json` を `reqwest::blocking`（既存依存、`rustls-tls`）で取得する。ファイル数 512 / 1 ファイル 8MiB の上限、パッケージ名の文字種検証、`index.json` が列挙するパスの正規化（`..` / 絶対パス / バックスラッシュを拒否）でキャッシュディレクトリ外への書き出しを防ぐ。
+- **証明書検証（新しい verdict 語彙を導入しない）**: 証明書本文の SHA-256 を既存の `proof_cert::compute_sha256` で計算して `index.json` の `cert_hash` と照合し、証明書の `package_name` / `package_version` の帰属を確認する。`--strict-imports` 時は **証明書なし / ハッシュ不一致 / パース不能** をハードエラーにする。非 strict 時はパッケージをキャッシュしつつ検証できなかった証明書を破棄し、provenance として登録しない。Lean translator メタデータが古い場合は既存 import 経路（`verify_import_certificate`）が `unproven` に落とす挙動に合わせ、取得時は警告に留めて `verified = false` で登録する。atom 単位の判定は従来どおりキャッシュ後の `verify_import_certificate` が行う。
+- **既存経路への合流**（`mumei-core/src/resolver/dependencies.rs` / `src/commands/add.rs`）: name 依存はまずローカル `registry.json` を引き、見つからない場合にのみリモートへフォールバックする。取得後は `cert_path` / `cert_hash` 付きでローカル登録するため、2 回目以降はネットワークアクセスなしで解決される。古いバージョンをキャッシュしても `latest` は後退しない（キャッシュ済みの最大 semver を維持）。path / git 依存の解決経路は変更していない。
+- **取得の原子性と応答上限**: ダウンロードは `~/.mumei/packages/<name>/.staging-*` に書き出し、全ファイルと証明書の取得・検証が成功したときだけ最終ディレクトリへ差し替える。途中で失敗しても部分的なキャッシュは残らず、証明書の配信が止まったバージョンで古い証明書が生き残ることもない。HTTP 応答は `Content-Length` と読み出し量の両方で 8MiB 上限を課す。loopback 以外の平文 `http://` レジストリは（パッケージと証明書を同時に差し替えられるため）`MUMEI_REGISTRY_ALLOW_PLAINTEXT=1` を明示しない限り拒否する（リダイレクト先にも同じ判定を適用し、HTTPS から平文への降格を防ぐ）。`index.json` が列挙するパスは URL 予約文字（`#` / `?` / `%` / `:` / `@`）・空白・制御文字も拒否し、`index.json` が広告するバージョン文字列も `[A-Za-z0-9._+-]` に限定してキャッシュ外への書き出しを防ぐ。リモート解決に失敗した場合 `mumei add` は `name = "*"` を書かずに非ゼロ終了する。キャッシュ差し替えは旧ディレクトリを退避してから移動するため失敗時も既存キャッシュが残る。`registry.json` の更新はロックファイルと temp+rename で行い、並行実行でエントリが消えないようにした。
+
+### 対象ファイル
+
+| ファイル | 役割 |
+|---|---|
+| `mumei-core/src/registry/remote.rs` | リモート取得・証明書検証・キャッシュ（新規） |
+| `mumei-core/src/registry.rs` | `select_version()` 抽出とローカル解決の共通化 |
+| `mumei-core/src/manifest.rs` | `[registry]` セクションと `MUMEI_REGISTRY_URL` |
+| `mumei-core/src/resolver/dependencies.rs` | name 依存解決のリモートフォールバック |
+| `src/commands/add.rs` | `mumei add <name>` のリモート取得 |
+| `tests/test_remote_registry.rs` | ローカル HTTP fixture サーバによる回帰テスト（新規） |
+
+### 使い方
+
+```toml
+# mumei.toml
+[registry]
+url = "https://registry.example.com"
+```
+
+```bash
+# 環境変数は mumei.toml より優先される
+MUMEI_REGISTRY_URL=https://registry.example.com mumei add my_lib
+# → 証明書を検証して ~/.mumei/packages/my_lib/<version>/ にキャッシュし、
+#   registry.json に cert_path / cert_hash 付きで登録する
+```
+
+### CI 回帰ゲート
+
+- `cargo test --test test_remote_registry`（14 件）: 証明書付き取得とキャッシュ、`^` / `~` / 完全一致 / `*` のバージョン選択がローカル解決と一致すること、未知パッケージ / 未知バージョンがエラーではなく「解決なし」になること、ハッシュ不一致と証明書欠如が `--strict-imports` でハードエラーになり非 strict では provenance を残さないこと、他パッケージ名の証明書が拒否されること、`index.json` 経由のパストラバーサルが拒否されること、`mumei add <name>` が実際に HTTP から取得してキャッシュ・登録・`mumei.toml` 更新まで行うこと、帰属を宣言しない証明書が `--strict-imports` で拒否されること、証明書が消えた再取得でキャッシュ済み証明書も消えること、失敗した取得が部分的なキャッシュを残さないこと、古いバージョンの追加で `latest` が後退しないこと。
+- `cargo test -p mumei-core registry`（12 件）: `select_version` の semver 意味論と `registry.json` スキーマ（`cert_path` / `cert_hash` の後方互換）、レジストリ URL 未設定時にリモート解決が起きないこと。
+- **ゼロコスト検証（P15 / P23 と同一）**: `cargo tree --edges no-dev | grep -i opentelemetry` が空であること。
+
+---
+
 ## Related Documents
 
 - [`docs/FFI.md`](FFI.md) — FFI extern block design (Phase A foundation)

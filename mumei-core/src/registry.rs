@@ -2,6 +2,8 @@
 //!
 //! ローカルパッケージレジストリ (`~/.mumei/registry.json`) の管理。
 //! `mumei publish` で公開されたパッケージを名前＋バージョンで検索可能にする。
+pub mod remote;
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -59,8 +61,68 @@ pub fn save(registry: &Registry) -> Result<(), String> {
     }
     let json = serde_json::to_string_pretty(registry)
         .map_err(|e| format!("Failed to serialize registry: {}", e))?;
-    fs::write(&path, json).map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
-    Ok(())
+    // Write through a temporary file so a crash or a concurrent reader never
+    // observes a half-written registry.
+    let tmp = path.with_extension(format!("json.tmp-{}", std::process::id()));
+    fs::write(&tmp, json).map_err(|e| format!("Failed to write {}: {}", tmp.display(), e))?;
+    fs::rename(&tmp, &path).map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        format!("Failed to write {}: {}", path.display(), e)
+    })
+}
+
+/// Advisory cross-process lock around a registry read-modify-write, so parallel
+/// `mumei` invocations cannot drop each other's entries.
+struct RegistryLock {
+    path: PathBuf,
+}
+
+impl RegistryLock {
+    const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
+    const WAIT_FOR: std::time::Duration = std::time::Duration::from_secs(10);
+
+    fn acquire() -> Result<Self, String> {
+        let path = registry_path().with_extension("lock");
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create {}: {}", parent.display(), e))?;
+        }
+        let deadline = std::time::Instant::now() + Self::WAIT_FOR;
+        loop {
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(_) => return Ok(Self { path }),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let stale = fs::metadata(&path)
+                        .and_then(|m| m.modified())
+                        .ok()
+                        .and_then(|m| m.elapsed().ok())
+                        .is_some_and(|age| age > Self::STALE_AFTER);
+                    if stale {
+                        let _ = fs::remove_file(&path);
+                        continue;
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        return Err(format!(
+                            "Timed out waiting for the registry lock {}",
+                            path.display()
+                        ));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(e) => return Err(format!("Failed to lock {}: {}", path.display(), e)),
+            }
+        }
+    }
+}
+
+impl Drop for RegistryLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
 }
 /// パッケージ名とバージョン（省略時は latest）でパスを解決する。
 /// バージョンが "*" の場合は latest を使用する。
@@ -69,20 +131,11 @@ pub fn save(registry: &Registry) -> Result<(), String> {
 pub fn resolve(name: &str, version: Option<&str>) -> Option<PathBuf> {
     let registry = load();
     let entry = registry.packages.get(name)?;
-    let resolved_version = match version {
-        None | Some("*") => entry.latest.clone(),
-        Some(v) if v.starts_with('^') => {
-            // Semver-compatible: ^x.y.z respects left-most non-zero digit
-            let base = v.trim_start_matches('^');
-            find_compatible_version(entry, base)?
-        }
-        Some(v) if v.starts_with('~') => {
-            // Tilde: ~x.y.z matches any version with same major.minor
-            let base = v.trim_start_matches('~');
-            find_tilde_compatible_version(entry, base)?
-        }
-        Some(v) => v.to_string(),
-    };
+    let resolved_version = select_version(
+        entry.versions.keys().map(String::as_str),
+        &entry.latest,
+        version,
+    )?;
     let ver_entry = entry.versions.get(&resolved_version)?;
     let p = PathBuf::from(&ver_entry.path);
     if p.exists() {
@@ -112,6 +165,42 @@ pub fn register_with_cert(
     cert_path: Option<String>,
     cert_hash: Option<String>,
 ) -> Result<(), String> {
+    register_inner(
+        name, version, pkg_path, atom_count, verified, cert_path, cert_hash, true,
+    )
+}
+
+/// Register a package fetched from a remote registry.
+///
+/// Unlike [`register_with_cert`], caching an older release does not move the
+/// `latest` pointer backwards: `latest` becomes the highest semver among the
+/// cached versions, so a later `*` dependency still resolves to the newest one.
+pub(crate) fn register_cached_with_cert(
+    name: &str,
+    version: &str,
+    pkg_path: &Path,
+    atom_count: usize,
+    verified: bool,
+    cert_path: Option<String>,
+    cert_hash: Option<String>,
+) -> Result<(), String> {
+    register_inner(
+        name, version, pkg_path, atom_count, verified, cert_path, cert_hash, false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn register_inner(
+    name: &str,
+    version: &str,
+    pkg_path: &Path,
+    atom_count: usize,
+    verified: bool,
+    cert_path: Option<String>,
+    cert_hash: Option<String>,
+    force_latest: bool,
+) -> Result<(), String> {
+    let _lock = RegistryLock::acquire()?;
     let mut registry = load();
     let now = chrono_lite_now();
     let ver_entry = VersionEntry {
@@ -130,8 +219,54 @@ pub fn register_with_cert(
             latest: version.to_string(),
         });
     pkg.versions.insert(version.to_string(), ver_entry);
-    pkg.latest = version.to_string();
+    let next_latest = if force_latest {
+        version.to_string()
+    } else {
+        highest_semver(
+            pkg.versions
+                .keys()
+                .map(String::as_str)
+                .chain([pkg.latest.as_str()]),
+            version,
+        )
+    };
+    pkg.latest = next_latest;
     save(&registry)
+}
+
+/// Highest parseable semver among `versions`, or `fallback` when none parses.
+fn highest_semver<'a>(versions: impl Iterator<Item = &'a str>, fallback: &str) -> String {
+    let mut best: Option<((u64, u64, u64), String)> = None;
+    for v in versions {
+        if let Some(parsed) = parse_semver(v) {
+            if best.as_ref().is_none_or(|b| parsed > b.0) {
+                best = Some((parsed, v.to_string()));
+            }
+        }
+    }
+    best.map(|b| b.1).unwrap_or_else(|| fallback.to_string())
+}
+/// Select a version out of `available` for the requirement `version`.
+/// `None` / `"*"` selects `latest`, `^x.y.z` / `~x.y.z` apply the range rules
+/// below, and any other string is taken literally.
+///
+/// Shared by local (`registry.json`) and remote (`remote::resolve`) resolution
+/// so both honour the same range semantics.
+pub fn select_version<'a>(
+    available: impl Iterator<Item = &'a str>,
+    latest: &str,
+    version: Option<&str>,
+) -> Option<String> {
+    match version {
+        None | Some("*") => Some(latest.to_string()),
+        Some(v) if v.starts_with('^') => {
+            find_compatible_version(available, v.trim_start_matches('^'))
+        }
+        Some(v) if v.starts_with('~') => {
+            find_tilde_compatible_version(available, v.trim_start_matches('~'))
+        }
+        Some(v) => Some(v.to_string()),
+    }
 }
 /// Parse a version string "x.y.z" into (major, minor, patch).
 fn parse_semver(v: &str) -> Option<(u64, u64, u64)> {
@@ -152,10 +287,13 @@ fn parse_semver(v: &str) -> Option<(u64, u64, u64)> {
 ///   ^X.Y.Z (X>0): same major, >= base  (i.e. >=X.Y.Z, <(X+1).0.0)
 ///   ^0.Y.Z (Y>0): same major.minor, >= base  (i.e. >=0.Y.Z, <0.(Y+1).0)
 ///   ^0.0.Z:       exact patch  (i.e. ==0.0.Z)
-fn find_compatible_version(entry: &PackageEntry, base: &str) -> Option<String> {
+fn find_compatible_version<'a>(
+    available: impl Iterator<Item = &'a str>,
+    base: &str,
+) -> Option<String> {
     let (base_major, base_minor, base_patch) = parse_semver(base)?;
     let mut best: Option<(u64, u64, u64, String)> = None;
-    for ver_str in entry.versions.keys() {
+    for ver_str in available {
         if let Some((major, minor, patch)) = parse_semver(ver_str) {
             let compatible = if base_major != 0 {
                 // ^X.Y.Z (X>0): same major, >= base
@@ -169,24 +307,27 @@ fn find_compatible_version(entry: &PackageEntry, base: &str) -> Option<String> {
                 major == 0 && minor == 0 && patch == base_patch
             };
             if compatible && best.as_ref().is_none_or(|b| (minor, patch) > (b.1, b.2)) {
-                best = Some((major, minor, patch, ver_str.clone()));
+                best = Some((major, minor, patch, ver_str.to_string()));
             }
         }
     }
     best.map(|b| b.3)
 }
 /// Find the highest version compatible with ~base (same major.minor, >= base).
-fn find_tilde_compatible_version(entry: &PackageEntry, base: &str) -> Option<String> {
+fn find_tilde_compatible_version<'a>(
+    available: impl Iterator<Item = &'a str>,
+    base: &str,
+) -> Option<String> {
     let (base_major, base_minor, base_patch) = parse_semver(base)?;
     let mut best: Option<(u64, u64, u64, String)> = None;
-    for ver_str in entry.versions.keys() {
+    for ver_str in available {
         if let Some((major, minor, patch)) = parse_semver(ver_str) {
             if major == base_major
                 && minor == base_minor
                 && patch >= base_patch
                 && best.as_ref().is_none_or(|b| patch > b.2)
             {
-                best = Some((major, minor, patch, ver_str.clone()));
+                best = Some((major, minor, patch, ver_str.to_string()));
             }
         }
     }
@@ -265,6 +406,21 @@ mod tests {
         assert_eq!(ver_entry.cert_hash.as_deref(), Some("deadbeef"));
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// P24: caching an older remote release keeps the newest cached version as latest
+    #[test]
+    fn test_highest_semver_prefers_the_newest_cached_version() {
+        assert_eq!(
+            highest_semver(["1.0.0", "1.2.0"].into_iter(), "1.0.0"),
+            "1.2.0"
+        );
+        assert_eq!(highest_semver(["0.9.0"].into_iter(), "0.9.0"), "0.9.0");
+        // Non-semver version strings fall back to the version being registered.
+        assert_eq!(
+            highest_semver(["nightly"].into_iter(), "nightly"),
+            "nightly"
+        );
     }
 
     /// P5-B: cert_path and cert_hash are omitted from JSON when None

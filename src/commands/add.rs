@@ -166,10 +166,10 @@ pub(crate) fn cmd_add(dep: &str, version: Option<&str>) {
     });
 
     // パース確認
-    if let Err(e) = manifest::load(manifest_path) {
+    let project_manifest = manifest::load(manifest_path).unwrap_or_else(|e| {
         eprintln!("❌ Error: mumei.toml parse error: {}", e);
         std::process::exit(1);
-    }
+    });
 
     // 依存の種類を判定
     let dep_entry = if dep.starts_with("./") || dep.starts_with("../") || dep.starts_with('/') {
@@ -225,24 +225,53 @@ pub(crate) fn cmd_add(dep: &str, version: Option<&str>) {
         (pkg_name, toml_line)
     } else {
         // パッケージ名のみ（レジストリ依存）
-        // ~/.mumei/registry.json から検索
-        let reg = registry::load();
+        // ~/.mumei/registry.json から検索し、無ければ P24 のリモートレジストリへ
+        let mut reg = registry::load();
+        let local_version = |entry: &registry::PackageEntry| {
+            registry::select_version(
+                entry.versions.keys().map(String::as_str),
+                &entry.latest,
+                version,
+            )
+            .filter(|v| entry.versions.contains_key(v))
+        };
+        let missing_locally = match reg.packages.get(dep) {
+            None => true,
+            Some(entry) => local_version(entry).is_none(),
+        };
+        if missing_locally {
+            match registry::remote::resolve(&project_manifest.registry, dep, version, false) {
+                Ok(Some(pkg_dir)) => {
+                    println!(
+                        "   ⬇️  Fetched from remote registry → {}",
+                        pkg_dir.display()
+                    );
+                    reg = registry::load();
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    // A configured registry that fails is an error: silently
+                    // recording `name = "*"` would hide a typo'd URL.
+                    eprintln!("❌ Error: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
         if let Some(pkg_entry) = reg.packages.get(dep) {
             // P5-B: Use --version if specified, otherwise use latest
-            let resolved_version = match version {
-                Some(v) => {
-                    // Verify the specified version exists
-                    if !pkg_entry.versions.contains_key(v) {
-                        let available: Vec<&String> = pkg_entry.versions.keys().collect();
-                        eprintln!(
-                            "❌ Error: Version '{}' not found for package '{}'. Available versions: {:?}",
-                            v, dep, available
-                        );
-                        std::process::exit(1);
-                    }
-                    v.to_string()
+            // P24: a range such as `^1.0.0` records the concrete version it selects.
+            let resolved_version = match local_version(pkg_entry) {
+                Some(v) => v,
+                None => {
+                    let available: Vec<&String> = pkg_entry.versions.keys().collect();
+                    eprintln!(
+                        "❌ Error: Version '{}' not found for package '{}'. Available versions: {:?}",
+                        version.unwrap_or("*"),
+                        dep,
+                        available
+                    );
+                    std::process::exit(1);
                 }
-                None => pkg_entry.latest.clone(),
             };
             let toml_line = format!("{} = \"{}\"", dep, resolved_version);
             println!(
@@ -312,6 +341,9 @@ pub(crate) fn cmd_add(dep: &str, version: Option<&str>) {
             );
             eprintln!("   The dependency will be added with version \"*\".");
             eprintln!("   To publish a package: cd <package-dir> && mumei publish");
+            eprintln!(
+                "   To resolve it remotely: set [registry] url in mumei.toml or MUMEI_REGISTRY_URL"
+            );
             (dep.to_string(), toml_line)
         }
     };
