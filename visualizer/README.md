@@ -15,14 +15,19 @@ unverifiable.
 
 ### 1. Export `proof_graph.json`
 
-`--emit proof-graph` implies cross-spec verification, so pass every file of the
-project (entry point last, the rest via `--cross-spec-files`):
+`--emit proof-graph` implies cross-spec verification, so the graph must see every
+file of the project. Point it at a directory, or name the entry file and pass the
+rest as a comma-separated `--cross-spec-files` list:
 
 ```bash
+mumei verify --emit proof-graph --report-dir reports tests/fixtures/session_types/
+
 mumei verify --emit proof-graph --report-dir reports \
     --cross-spec-files tests/fixtures/session_types/payment_server.mm \
     tests/fixtures/session_types/payment_client.mm
 ```
+
+For a directory the graph is written once and covers every `.mm` file in it.
 
 This writes `reports/proof_graph.json` next to the existing
 `reports/cross_spec.json`. The document folds together the atom dependency

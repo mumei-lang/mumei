@@ -131,8 +131,21 @@ pub(crate) fn cmd_verify_command(command: Command) {
         );
         let mut total_ok = 0usize;
         let mut total_fail = 0usize;
-        for file in &files {
+        for (position, file) in files.iter().enumerate() {
             let file_str = file.to_string_lossy().to_string();
+            // One graph describes the whole directory, so it is written once,
+            // on the last file, with the other files supplied as cross-spec
+            // inputs. Writing it per file would leave only the last file's atoms.
+            let emit_proof_graph_here = emit_proof_graph && position + 1 == files.len();
+            let mut per_file_cross_spec_files = cross_spec_files.clone();
+            if emit_proof_graph_here {
+                per_file_cross_spec_files.extend(
+                    files
+                        .iter()
+                        .filter(|other| *other != file)
+                        .map(|other| other.to_string_lossy().to_string()),
+                );
+            }
             let has_failure = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 cmd_verify(VerifyOptions {
                     input: &file_str,
@@ -148,14 +161,14 @@ pub(crate) fn cmd_verify_command(command: Command) {
                     emit_loss_vector,
                     emit_structured_feedback,
                     emit_human_review_queue,
-                    emit_proof_graph,
+                    emit_proof_graph: emit_proof_graph_here,
                     cert_output: output.as_deref(),
                     report_dir: report_dir.as_deref(),
                     json_output: json,
                     strict_imports,
                     allow_lean_verified,
                     enable_cross_spec_verification: enable_cross_spec,
-                    cross_spec_files: &cross_spec_files,
+                    cross_spec_files: &per_file_cross_spec_files,
                     enable_spurious_detection: enable_spurious,
                     property_based_test,
                     warn_fragment,

@@ -195,6 +195,74 @@ fn proof_graph_export_attaches_session_protocol_violations_to_atoms() {
 }
 
 #[test]
+fn a_directory_input_yields_one_graph_covering_every_file() {
+    let bin = env!("CARGO_BIN_EXE_mumei");
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let report = report_dir("directory_report");
+    let project = report_dir("directory_project");
+    std::fs::create_dir_all(&project).expect("create project dir");
+    for name in [
+        "test_cross_spec_multi_file.mm",
+        "test_cross_spec_multi_file_dep.mm",
+    ] {
+        std::fs::copy(
+            PathBuf::from(manifest_dir).join("tests").join(name),
+            project.join(name),
+        )
+        .unwrap_or_else(|err| panic!("failed to stage {name}: {err}"));
+    }
+
+    let output = Command::new(bin)
+        .arg("verify")
+        .arg("--report-dir")
+        .arg(&report)
+        .arg("--emit")
+        .arg("proof-graph")
+        .arg(&project)
+        .current_dir(manifest_dir)
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run mumei verify: {err}"));
+    let log = format!(
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.status.success(), "directory verify failed\n{log}");
+
+    let graph: Value = serde_json::from_str(
+        &std::fs::read_to_string(report.join("proof_graph.json"))
+            .unwrap_or_else(|err| panic!("failed to read directory proof graph: {err}\n{log}")),
+    )
+    .expect("valid proof_graph.json");
+
+    // Both files land in the single graph, together with the cross-file edge
+    // they form; a per-file graph would have kept only the last file's atoms.
+    for name in [
+        "cross_file_caller",
+        "cross_file_callee",
+        "high_global_result",
+        "low_global_result",
+    ] {
+        node(&graph, name);
+    }
+    assert_eq!(
+        node(&graph, "cross_file_caller")["dependencies"]
+            .as_array()
+            .expect("dependencies")
+            .as_slice(),
+        [Value::from("cross_file_callee")]
+    );
+    assert!(
+        graph["edges"]
+            .as_array()
+            .expect("edges")
+            .iter()
+            .any(|edge| edge["from"] == "cross_file_caller" && edge["to"] == "cross_file_callee"),
+        "the cross-file call must appear as an edge in {graph:#}"
+    );
+}
+
+#[test]
 fn proof_graph_is_not_emitted_without_the_emit_target() {
     let bin = env!("CARGO_BIN_EXE_mumei");
     let manifest_dir = env!("CARGO_MANIFEST_DIR");

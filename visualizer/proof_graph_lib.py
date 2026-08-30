@@ -56,8 +56,23 @@ _UNKNOWN_HEALTH_STYLE = {
 
 
 def sanitize_node_id(atom_name: str) -> str:
-    """Return a DOT-safe identifier for an atom name (``Foo::bar`` included)."""
-    return "atom_" + re.sub(r"[^A-Za-z0-9_]", "_", atom_name)
+    """Return a DOT-safe identifier for an atom name (``Foo::bar`` included).
+
+    A literal ``_`` becomes ``__`` and every other character outside
+    ``[A-Za-z0-9]`` becomes ``_x<hex>_``, which keeps the mapping injective:
+    ``Wallet::transfer`` and ``Wallet__transfer`` stay distinct nodes instead of
+    merging with each other's edges.
+    """
+    return "atom_" + re.sub(
+        r"[^A-Za-z0-9]",
+        lambda match: "__" if match.group() == "_" else f"_x{ord(match.group()):02x}_",
+        atom_name,
+    )
+
+
+def _quote(value: str) -> str:
+    """Escape *value* for a double-quoted DOT attribute."""
+    return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
 def load_proof_graph(path) -> dict:
@@ -154,7 +169,7 @@ def render_proof_graph_dot(graph: dict, selected_atom: str = "") -> str:
     for node in elements["nodes"]:
         style = node["style"]
         attrs = [
-            f'label="{node["label"]}"',
+            f"label={_quote(node['label'])}",
             f'shape={style["shape"]}',
             f'style="{style["style"]}"',
             f'fillcolor="{style["fill"]}"',

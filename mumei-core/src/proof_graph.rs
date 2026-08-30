@@ -105,18 +105,18 @@ pub struct ProofGraph {
 /// Classify a node the same way `visualize_std_graph` classifies a std file.
 ///
 /// A failed proof outranks a trust boundary: an atom whose proof did not go
-/// through is red even when its contract is also assumed somewhere.
+/// through is red even when its contract is also assumed somewhere. An
+/// outcome that is neither a proof nor a refutation (`unknown`, an atom awaiting
+/// the Lean bridge) is a proof hole, so it is yellow rather than green; only an
+/// atom whose proof went through with no boundary is green.
 pub fn classify_health(
     verification_status: Option<&str>,
     trust_boundaries: &[TrustBoundaryKind],
 ) -> &'static str {
-    if matches!(verification_status, Some("failed") | Some("unverifiable")) {
-        return HEALTH_RED;
-    }
-    if trust_boundaries.is_empty() {
-        HEALTH_GREEN
-    } else {
-        HEALTH_YELLOW
+    match verification_status {
+        Some("failed") | Some("unverifiable") => HEALTH_RED,
+        Some("verified") | None if trust_boundaries.is_empty() => HEALTH_GREEN,
+        _ => HEALTH_YELLOW,
     }
 }
 
@@ -442,6 +442,33 @@ mod tests {
 
         assert_eq!(node(&graph, "read_clock").health, HEALTH_RED);
         assert_eq!(graph.summary.red_count, 1);
+    }
+
+    #[test]
+    fn an_unresolved_proof_is_yellow_rather_than_green() {
+        let env = module_env_with(vec![
+            atom("field_mul", "true", "true", "crypto.mm"),
+            atom("outside_fragment", "true", "true", "crypto.mm"),
+            atom("proved", "true", "true", "crypto.mm"),
+        ]);
+        let graph = build_proof_graph(
+            &env,
+            &cross_spec_of(&env),
+            &status(&[
+                ("field_mul", "unknown"),
+                ("outside_fragment", "escalation_candidate"),
+                ("proved", "verified"),
+            ]),
+        );
+
+        assert_eq!(node(&graph, "field_mul").health, HEALTH_YELLOW);
+        assert_eq!(node(&graph, "outside_fragment").health, HEALTH_YELLOW);
+        assert_eq!(node(&graph, "proved").health, HEALTH_GREEN);
+        assert_eq!(graph.summary.yellow_count, 2);
+        assert_eq!(graph.summary.green_count, 1);
+        // Neither atom crosses a trust boundary; the proof state alone is why
+        // they are not green.
+        assert!(node(&graph, "field_mul").trust_boundaries.is_empty());
     }
 
     #[test]

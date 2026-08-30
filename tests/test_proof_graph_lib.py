@@ -6,6 +6,7 @@ These run without Streamlit: the view layer only formats what
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -108,8 +109,31 @@ def _graph() -> dict:
 
 
 def test_sanitize_node_id_is_dot_safe() -> None:
-    assert sanitize_node_id("Wallet::transfer") == "atom_Wallet__transfer"
-    assert sanitize_node_id("plain_atom") == "atom_plain_atom"
+    assert sanitize_node_id("Wallet::transfer") == "atom_Wallet_x3a__x3a_transfer"
+    assert sanitize_node_id("plain_atom") == "atom_plain__atom"
+
+
+def test_sanitize_node_id_keeps_similar_atom_names_distinct() -> None:
+    names = [
+        "Wallet::transfer",
+        "Wallet__transfer",
+        "Wallet_transfer",
+        "Wallet.transfer",
+    ]
+    identifiers = [sanitize_node_id(name) for name in names]
+    assert len(set(identifiers)) == len(names)
+    for identifier in identifiers:
+        assert re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", identifier)
+
+
+def test_render_proof_graph_dot_escapes_atom_names() -> None:
+    hostile = 'evil" ];  malicious [label="pwned'
+    graph = {"nodes": [{"atom_name": hostile, "health": "green"}], "edges": []}
+    dot = render_proof_graph_dot(graph)
+
+    assert '\\" ];  malicious [label=\\"pwned' in dot
+    # The graph attribute line plus one node statement: nothing was injected.
+    assert len([line for line in dot.splitlines() if line.strip().endswith("];")]) == 2
 
 
 def test_build_graph_elements_maps_nodes_and_drops_dangling_edges() -> None:
@@ -131,8 +155,8 @@ def test_build_graph_elements_maps_nodes_and_drops_dangling_edges() -> None:
         ("client_send", "validate_order")
     ]
     edge = elements["edges"][0]
-    assert edge["source"] == "atom_client_send"
-    assert edge["target"] == "atom_validate_order"
+    assert edge["source"] == "atom_client__send"
+    assert edge["target"] == "atom_validate__order"
     assert edge["is_consistent"] is False
     assert edge["violations"] == ["caller does not guarantee callee requires"]
 
@@ -148,12 +172,12 @@ def test_render_proof_graph_dot_highlights_selection_and_mismatches() -> None:
     dot = render_proof_graph_dot(_graph(), selected_atom="client_send")
 
     assert dot.startswith("digraph proof_graph {")
-    assert 'atom_client_send [label="client_send"' in dot
+    assert 'atom_client__send [label="client_send"' in dot
     assert "penwidth=4" in dot
-    assert 'atom_validate_order [label="validate_order", shape=box' in dot
+    assert 'atom_validate__order [label="validate_order", shape=box' in dot
     assert 'fillcolor="#fff3cd"' in dot  # yellow trust-boundary node
     assert 'fillcolor="#f8d7da"' in dot  # red failed node
-    assert 'atom_client_send -> atom_validate_order [color="#dc3545", style=dashed];' in dot
+    assert 'atom_client__send -> atom_validate__order [color="#dc3545", style=dashed];' in dot
     assert "missing_atom" not in dot
 
     # Nothing is highlighted when no atom is selected.
