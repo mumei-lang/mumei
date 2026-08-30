@@ -77,6 +77,11 @@ pub fn save(registry: &Registry) -> Result<(), String> {
 /// The lock is an OS advisory file lock (`flock` / `LockFileEx`), so the kernel
 /// releases it when the holder exits — a crashed `mumei` cannot wedge later
 /// invocations, and a slow holder is never evicted while it is still writing.
+///
+/// The lock file is `registry.flock`, not the `registry.lock` used by mumei
+/// <= 0.6.12: an older binary treats that path's existence as ownership and
+/// deletes it once it looks stale, which would make two newer processes lock
+/// two different inodes and write concurrently.
 struct RegistryLock {
     file: fs::File,
 }
@@ -85,7 +90,7 @@ impl RegistryLock {
     const WAIT_FOR: std::time::Duration = std::time::Duration::from_secs(10);
 
     fn acquire() -> Result<Self, String> {
-        Self::acquire_at(&registry_path().with_extension("lock"), Self::WAIT_FOR)
+        Self::acquire_at(&registry_path().with_extension("flock"), Self::WAIT_FOR)
     }
 
     fn acquire_at(path: &Path, wait_for: std::time::Duration) -> Result<Self, String> {
@@ -362,7 +367,7 @@ mod tests {
     fn registry_lock_is_exclusive_and_released_on_drop() {
         let dir = std::env::temp_dir().join(format!("mumei_lock_{}", std::process::id()));
         fs::create_dir_all(&dir).expect("create lock dir");
-        let path = dir.join("registry.lock");
+        let path = dir.join("registry.flock");
         let brief = std::time::Duration::from_millis(200);
 
         let held = RegistryLock::acquire_at(&path, brief).expect("first holder");
