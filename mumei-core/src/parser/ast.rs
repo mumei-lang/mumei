@@ -126,6 +126,21 @@ pub struct EffectDef {
     pub initial_state: Option<String>,
 }
 
+/// capability 宣言: `type FileCap = capability SafeFileRead(path: Str) where C;`
+///
+/// 新しいエフェクトを定義せず、既存 `EffectDef` (`effect_name`) に別名と
+/// constraint を与える view として扱う。
+#[derive(Debug, Clone)]
+pub struct CapabilityDef {
+    /// capability 型名（例: "FileCap"）
+    pub name: String,
+    /// 裏側の既存エフェクト名（例: "SafeFileRead"）
+    pub effect_name: String,
+    pub params: Vec<EffectDefParam>,
+    pub constraint: Option<String>,
+    pub span: Span,
+}
+
 /// A state transition rule for a stateful effect.
 /// Represents: `transition operation: FromState -> ToState;`
 #[derive(Debug, Clone)]
@@ -500,6 +515,8 @@ pub enum Item {
     ResourceDef(ResourceDef),
     ExternBlock(ExternBlock),
     EffectDef(EffectDef),
+    /// `type FileCap = capability SafeFileRead(path: Str) where C;`
+    CapabilityDef(CapabilityDef),
     /// `impl StructName { atom method(...) ... }` block
     ImplBlock(ImplBlock),
 }

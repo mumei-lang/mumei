@@ -4,10 +4,10 @@
 
 use crate::ast::TypeRef;
 use crate::parser::{
-    Atom, Effect, EffectDef, EffectDefParam, EffectParam, EnumDef, EnumVariant, ExternBlock,
-    ExternFn, ImplBlock, ImplDef, ImportDecl, Item, Param, Quantifier, QuantifierType, RefinedType,
-    ResourceDef, ResourceMode, Span, StructDef, StructField, TraitDef, TraitMethod, TrustLevel,
-    TypeParamBound,
+    Atom, CapabilityDef, Effect, EffectDef, EffectDefParam, EffectParam, EnumDef, EnumVariant,
+    ExternBlock, ExternFn, ImplBlock, ImplDef, ImportDecl, Item, Param, Quantifier, QuantifierType,
+    RefinedType, ResourceDef, ResourceMode, Span, StructDef, StructField, TraitDef, TraitMethod,
+    TrustLevel, TypeParamBound,
 };
 
 use super::token::{SpannedToken, Token};
@@ -815,6 +815,19 @@ pub fn parse_module_from_tokens(ctx: &mut ParseContext) -> Vec<Item> {
                 let start_tok = ctx.advance().clone();
                 let name = ctx.expect_ident();
                 ctx.expect(Token::Assign);
+
+                // Contextual keyword: `capability` is only a keyword directly after
+                // `type X = `. Anywhere else it stays a plain `Token::Ident`.
+                if matches!(ctx.peek(), Token::Ident(kw) if kw == "capability") {
+                    ctx.advance();
+                    items.push(Item::CapabilityDef(parse_capability_def(
+                        ctx,
+                        name,
+                        span_from_token(&start_tok),
+                    )));
+                    continue;
+                }
+
                 let base_type = ctx.expect_ident();
                 ctx.expect(Token::Where);
                 let predicate_raw = collect_until_semicolon(ctx);
@@ -1342,7 +1355,200 @@ pub fn parse_module_from_tokens(ctx: &mut ParseContext) -> Vec<Item> {
         }
     }
 
+    resolve_capability_params(&mut items);
     items
+}
+
+/// Parse the body of `type X = capability E(params) where C;` (the `capability`
+/// keyword has already been consumed). Mirrors the `Token::Effect` branch for
+/// parameters and the optional `where` refinement.
+fn parse_capability_def(ctx: &mut ParseContext, name: String, span: Span) -> CapabilityDef {
+    let effect_name = ctx.expect_ident();
+
+    let params: Vec<EffectDefParam> = if ctx.peek() == &Token::LParen {
+        ctx.advance();
+        let mut ps = Vec::new();
+        while ctx.peek() != &Token::RParen && ctx.peek() != &Token::Eof {
+            let pname = ctx.expect_ident();
+            let ptype = if ctx.peek() == &Token::Colon {
+                ctx.advance();
+                ctx.expect_ident()
+            } else {
+                "Str".to_string()
+            };
+            ps.push(EffectDefParam {
+                name: pname,
+                type_name: ptype,
+            });
+            if ctx.peek() == &Token::Comma {
+                ctx.advance();
+            }
+        }
+        ctx.expect(Token::RParen);
+        ps
+    } else {
+        vec![]
+    };
+
+    let constraint = if ctx.peek() == &Token::Where {
+        ctx.advance();
+        Some(collect_until_semicolon(ctx))
+    } else {
+        None
+    };
+    ctx.expect(Token::Semicolon);
+
+    CapabilityDef {
+        name,
+        effect_name,
+        params,
+        constraint,
+        span,
+    }
+}
+
+/// Annotate parameters typed with a capability declared in this module.
+///
+/// A `cap: FileCap` parameter becomes a parameter whose `TypeRef` carries
+/// `effect_set = Some(["SafeFileRead"])` plus the capability metadata, so the
+/// existing effect containment / propagation rules apply unchanged. Inside such
+/// an atom, `perform cap.op(x)` denotes the underlying effect and is rewritten
+/// to `perform SafeFileRead.op(x)`.
+fn resolve_capability_params(items: &mut [Item]) {
+    let capabilities: std::collections::HashMap<String, crate::ast::CapabilityType> = items
+        .iter()
+        .filter_map(|item| match item {
+            Item::CapabilityDef(def) => Some((
+                def.name.clone(),
+                crate::ast::CapabilityType {
+                    effect: def.effect_name.clone(),
+                    constraint: def.constraint.clone(),
+                },
+            )),
+            _ => None,
+        })
+        .collect();
+    if capabilities.is_empty() {
+        return;
+    }
+
+    for item in items.iter_mut() {
+        match item {
+            Item::Atom(atom) => annotate_capability_params(atom, &capabilities),
+            Item::ImplBlock(impl_block) => {
+                for method in impl_block.methods.iter_mut() {
+                    annotate_capability_params(method, &capabilities);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn annotate_capability_params(
+    atom: &mut Atom,
+    capabilities: &std::collections::HashMap<String, crate::ast::CapabilityType>,
+) {
+    let mut bindings: Vec<(String, String)> = Vec::new();
+    for param in atom.params.iter_mut() {
+        let type_name = match param.type_name.as_deref() {
+            Some(name) => name.trim().to_string(),
+            None => continue,
+        };
+        let Some(capability) = capabilities.get(&type_name) else {
+            continue;
+        };
+        let type_ref = param
+            .type_ref
+            .get_or_insert_with(|| TypeRef::simple(&type_name));
+        type_ref.effect_set = Some(vec![capability.effect.clone()]);
+        type_ref.capability = Some(capability.clone());
+        bindings.push((param.name.clone(), capability.effect.clone()));
+    }
+    if !bindings.is_empty() {
+        atom.body_expr = rewrite_capability_performs(&atom.body_expr, &bindings);
+    }
+}
+
+/// Rewrite `perform <cap>.op(..)` into `perform <Effect>.op(..)` for capability
+/// bindings of the enclosing atom. String literals and line comments are copied
+/// verbatim, so text such as `"perform cap.read(p)"` keeps its original value.
+fn rewrite_capability_performs(body: &str, bindings: &[(String, String)]) -> String {
+    let mut result = String::with_capacity(body.len());
+    let mut rest = body;
+    let mut prev: Option<char> = None;
+    while let Some(ch) = rest.chars().next() {
+        if ch == '"' {
+            let len = string_literal_len(rest);
+            result.push_str(&rest[..len]);
+            rest = &rest[len..];
+            prev = Some('"');
+            continue;
+        }
+        if rest.starts_with("//") {
+            let end = rest.find('\n').unwrap_or(rest.len());
+            result.push_str(&rest[..end]);
+            rest = &rest[end..];
+            prev = Some('\n');
+            continue;
+        }
+        let keyword_boundary = prev
+            .map(|c| !(c.is_alphanumeric() || c == '_'))
+            .unwrap_or(true);
+        if keyword_boundary && rest.starts_with("perform") {
+            let after = &rest["perform".len()..];
+            let ws_end = after.len() - after.trim_start().len();
+            let (ws, tail) = after.split_at(ws_end);
+            let ident_len = tail
+                .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .unwrap_or(tail.len());
+            let ident = &tail[..ident_len];
+            let effect = if ws.is_empty() || !tail[ident_len..].starts_with('.') {
+                None
+            } else {
+                bindings
+                    .iter()
+                    .find(|(name, _)| name == ident)
+                    .map(|(_, effect)| effect.as_str())
+            };
+            result.push_str("perform");
+            match effect {
+                Some(effect) => {
+                    result.push_str(ws);
+                    result.push_str(effect);
+                    rest = &tail[ident_len..];
+                    prev = effect.chars().last();
+                }
+                None => {
+                    rest = after;
+                    prev = Some('m');
+                }
+            }
+            continue;
+        }
+        result.push(ch);
+        rest = &rest[ch.len_utf8()..];
+        prev = Some(ch);
+    }
+    result
+}
+
+/// Length in bytes of the string literal starting at `rest` (including quotes).
+fn string_literal_len(rest: &str) -> usize {
+    let mut idx = '"'.len_utf8();
+    while let Some(ch) = rest[idx..].chars().next() {
+        idx += ch.len_utf8();
+        match ch {
+            '\\' => {
+                if let Some(escaped) = rest[idx..].chars().next() {
+                    idx += escaped.len_utf8();
+                }
+            }
+            '"' => break,
+            _ => {}
+        }
+    }
+    idx
 }
 
 // =============================================================================

@@ -939,6 +939,7 @@ fn verify_source_for_lsp(path: &std::path::Path, source: &str) -> Result<(), Lsp
             parser::Item::Import(_) => {}
             parser::Item::ExternBlock(_) => {}
             parser::Item::EffectDef(e) => module_env.register_effect(e),
+            parser::Item::CapabilityDef(c) => module_env.register_capability(c),
             parser::Item::ImplBlock(ib) => {
                 for method in &ib.methods {
                     let mut qualified = method.clone();

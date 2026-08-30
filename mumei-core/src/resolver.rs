@@ -230,6 +230,45 @@ extern "Rust" {
         assert!(callees.contains("foo"), "should find foo");
     }
 
+    /// A capability declaration lives outside the atom, so changing its constraint
+    /// must still change the atom hash (otherwise a stale proof is reused).
+    #[test]
+    fn test_atom_hash_tracks_capability_constraint() {
+        let source = |constraint: &str| {
+            format!(
+                "effect FileRead(path: Str);\n\
+                 type FileCap = capability FileRead(path: Str) where {constraint};\n\
+                 atom read_it(cap: FileCap)\n\
+                 effects: [FileRead(path)]\n\
+                 requires: true;\n\
+                 ensures: result >= 0;\n\
+                 body: {{ perform cap.read(\"/tmp/a.log\"); 1 }}"
+            )
+        };
+        let atom_of = |src: &str| {
+            parser::parse_module(src)
+                .into_iter()
+                .find_map(|item| match item {
+                    parser::Item::Atom(atom) if atom.name == "read_it" => Some(atom),
+                    _ => None,
+                })
+                .expect("atom read_it")
+        };
+        let tmp = atom_of(&source("starts_with(path, \"/tmp/\")"));
+        let var = atom_of(&source("starts_with(path, \"/var/\")"));
+        assert_ne!(
+            compute_atom_hash(&tmp),
+            compute_atom_hash(&var),
+            "capability constraint change must invalidate the atom hash"
+        );
+        let module_env = ModuleEnv::new();
+        assert_ne!(
+            compute_proof_hash(&tmp, &module_env),
+            compute_proof_hash(&var, &module_env),
+            "capability constraint change must invalidate the proof hash"
+        );
+    }
+
     /// Test compute_proof_hash is deterministic
     #[test]
     fn test_compute_proof_hash_deterministic() {

@@ -336,12 +336,14 @@ mod tests {
                     name: Some("x".to_string()),
                     ty: Some("Int".to_string()),
                     movability: Movability::Copy,
+                    capability: None,
                 },
                 LocalDecl {
                     local: Local(1),
                     name: Some("tmp".to_string()),
                     ty: Some("Int".to_string()),
                     movability: Movability::Copy,
+                    capability: None,
                 },
             ],
             blocks: vec![
@@ -424,12 +426,14 @@ mod tests {
                     name: Some("x".to_string()),
                     ty: Some("MyStruct".to_string()),
                     movability: Movability::Move,
+                    capability: None,
                 },
                 LocalDecl {
                     local: Local(1),
                     name: Some("y".to_string()),
                     ty: Some("MyStruct".to_string()),
                     movability: Movability::Move,
+                    capability: None,
                 },
             ],
             blocks: vec![BasicBlock {
@@ -473,18 +477,21 @@ mod tests {
                     name: Some("x".to_string()),
                     ty: Some("MyStruct".to_string()),
                     movability: Movability::Move,
+                    capability: None,
                 },
                 LocalDecl {
                     local: Local(1),
                     name: Some("y".to_string()),
                     ty: Some("MyStruct".to_string()),
                     movability: Movability::Move,
+                    capability: None,
                 },
                 LocalDecl {
                     local: Local(2),
                     name: Some("z".to_string()),
                     ty: Some("MyStruct".to_string()),
                     movability: Movability::Move,
+                    capability: None,
                 },
             ],
             blocks: vec![BasicBlock {
@@ -533,18 +540,21 @@ mod tests {
                     name: Some("cond".to_string()),
                     ty: Some("Int".to_string()),
                     movability: Movability::Copy,
+                    capability: None,
                 },
                 LocalDecl {
                     local: Local(1),
                     name: Some("x".to_string()),
                     ty: Some("MyStruct".to_string()),
                     movability: Movability::Move,
+                    capability: None,
                 },
                 LocalDecl {
                     local: Local(2),
                     name: Some("y".to_string()),
                     ty: Some("MyStruct".to_string()),
                     movability: Movability::Move,
+                    capability: None,
                 },
             ],
             blocks: vec![
@@ -616,18 +626,21 @@ mod tests {
                     name: Some("cond".to_string()),
                     ty: Some("Int".to_string()),
                     movability: Movability::Copy,
+                    capability: None,
                 },
                 LocalDecl {
                     local: Local(1),
                     name: Some("x".to_string()),
                     ty: Some("MyStruct".to_string()),
                     movability: Movability::Move,
+                    capability: None,
                 },
                 LocalDecl {
                     local: Local(2),
                     name: Some("y".to_string()),
                     ty: Some("MyStruct".to_string()),
                     movability: Movability::Move,
+                    capability: None,
                 },
             ],
             blocks: vec![
@@ -696,12 +709,14 @@ mod tests {
                     name: Some("x".to_string()),
                     ty: Some("Int".to_string()),
                     movability: Movability::Copy,
+                    capability: None,
                 },
                 LocalDecl {
                     local: Local(1),
                     name: Some("result".to_string()),
                     ty: Some("Int".to_string()),
                     movability: Movability::Copy,
+                    capability: None,
                 },
             ],
             blocks: vec![BasicBlock {
@@ -751,18 +766,21 @@ mod tests {
                     name: Some("x".to_string()),
                     ty: Some("Int".to_string()),
                     movability: Movability::Copy,
+                    capability: None,
                 },
                 LocalDecl {
                     local: Local(1),
                     name: Some("y".to_string()),
                     ty: Some("Int".to_string()),
                     movability: Movability::Copy,
+                    capability: None,
                 },
                 LocalDecl {
                     local: Local(2),
                     name: Some("z".to_string()),
                     ty: Some("Int".to_string()),
                     movability: Movability::Copy,
+                    capability: None,
                 },
             ],
             blocks: vec![BasicBlock {
@@ -808,12 +826,14 @@ mod tests {
                     name: Some("x".to_string()),
                     ty: Some("MyStruct".to_string()),
                     movability: Movability::Move,
+                    capability: None,
                 },
                 LocalDecl {
                     local: Local(1),
                     name: Some("y".to_string()),
                     ty: Some("MyStruct".to_string()),
                     movability: Movability::Move,
+                    capability: None,
                 },
             ],
             blocks: vec![BasicBlock {
@@ -847,12 +867,14 @@ mod tests {
                 name: Some("a".to_string()),
                 ty: None,
                 movability: Movability::Move,
+                capability: None,
             },
             LocalDecl {
                 local: Local(1),
                 name: Some("b".to_string()),
                 ty: None,
                 movability: Movability::Move,
+                capability: None,
             },
         ];
 
@@ -1065,6 +1087,7 @@ mod tests {
                 name: Some("_ret".to_string()),
                 ty: None,
                 movability: Movability::Move,
+                capability: None,
             }],
             blocks: vec![
                 BasicBlock {
@@ -1132,6 +1155,7 @@ mod tests {
                 name: Some("_ret".to_string()),
                 ty: None,
                 movability: Movability::Move,
+                capability: None,
             }],
             blocks: vec![BasicBlock {
                 id: 0,
@@ -1178,6 +1202,7 @@ mod tests {
                 name: Some("_ret".to_string()),
                 ty: None,
                 movability: Movability::Move,
+                capability: None,
             }],
             blocks: vec![BasicBlock {
                 id: 0,
@@ -1235,12 +1260,14 @@ mod tests {
                     name: Some("_ret".to_string()),
                     ty: None,
                     movability: Movability::Move,
+                    capability: None,
                 },
                 LocalDecl {
                     local: Local(1),
                     name: Some("cond".to_string()),
                     ty: None,
                     movability: Movability::Move,
+                    capability: None,
                 },
             ],
             blocks: vec![
@@ -1321,12 +1348,14 @@ mod tests {
                     name: Some("_ret".to_string()),
                     ty: None,
                     movability: Movability::Move,
+                    capability: None,
                 },
                 LocalDecl {
                     local: Local(1),
                     name: Some("cond".to_string()),
                     ty: None,
                     movability: Movability::Move,
+                    capability: None,
                 },
             ],
             blocks: vec![
@@ -1417,12 +1446,14 @@ mod tests {
                     name: Some("_ret".to_string()),
                     ty: None,
                     movability: Movability::Move,
+                    capability: None,
                 },
                 LocalDecl {
                     local: Local(1),
                     name: Some("cond".to_string()),
                     ty: None,
                     movability: Movability::Move,
+                    capability: None,
                 },
             ],
             blocks: vec![
@@ -1541,6 +1572,7 @@ mod tests {
                 name: Some("_ret".to_string()),
                 ty: None,
                 movability: Movability::Move,
+                capability: None,
             }],
             blocks: vec![BasicBlock {
                 id: 0,
@@ -1598,6 +1630,7 @@ mod tests {
                 name: Some("_ret".to_string()),
                 ty: None,
                 movability: Movability::Move,
+                capability: None,
             }],
             blocks: vec![BasicBlock {
                 id: 0,
@@ -1662,12 +1695,14 @@ mod tests {
                     name: Some("_ret".to_string()),
                     ty: None,
                     movability: Movability::Move,
+                    capability: None,
                 },
                 LocalDecl {
                     local: Local(1),
                     name: Some("cond".to_string()),
                     ty: None,
                     movability: Movability::Move,
+                    capability: None,
                 },
             ],
             blocks: vec![
@@ -1769,6 +1804,7 @@ mod tests {
                 name: Some("_ret".to_string()),
                 ty: None,
                 movability: Movability::Move,
+                capability: None,
             }],
             blocks: vec![BasicBlock {
                 id: 0,
@@ -1812,6 +1848,7 @@ mod tests {
                 name: Some("_ret".to_string()),
                 ty: None,
                 movability: Movability::Move,
+                capability: None,
             }],
             blocks: vec![BasicBlock {
                 id: 0,
@@ -1859,6 +1896,7 @@ mod tests {
                 name: Some("_ret".to_string()),
                 ty: None,
                 movability: Movability::Move,
+                capability: None,
             }],
             blocks: vec![BasicBlock {
                 id: 0,
@@ -2023,6 +2061,7 @@ mod tests {
                 name: Some("_ret".to_string()),
                 ty: None,
                 movability: Movability::Move,
+                capability: None,
             }],
             blocks: vec![BasicBlock {
                 id: 0,
@@ -2074,6 +2113,7 @@ mod tests {
                 name: Some("_ret".to_string()),
                 ty: None,
                 movability: Movability::Move,
+                capability: None,
             }],
             blocks: vec![BasicBlock {
                 id: 0,
@@ -2126,6 +2166,7 @@ mod tests {
                 name: Some("_ret".to_string()),
                 ty: None,
                 movability: Movability::Move,
+                capability: None,
             }],
             blocks: vec![BasicBlock {
                 id: 0,
@@ -2188,6 +2229,7 @@ mod tests {
                 name: Some("_ret".to_string()),
                 ty: None,
                 movability: Movability::Move,
+                capability: None,
             }],
             blocks: vec![BasicBlock {
                 id: 0,
@@ -2246,6 +2288,7 @@ mod tests {
                 name: Some("_ret".to_string()),
                 ty: None,
                 movability: Movability::Move,
+                capability: None,
             }],
             blocks: vec![BasicBlock {
                 id: 0,
@@ -2294,6 +2337,7 @@ mod tests {
                 name: Some("_ret".to_string()),
                 ty: None,
                 movability: Movability::Move,
+                capability: None,
             }],
             blocks: vec![BasicBlock {
                 id: 0,
@@ -2336,6 +2380,7 @@ mod tests {
                 name: Some("_ret".to_string()),
                 ty: None,
                 movability: Movability::Move,
+                capability: None,
             }],
             blocks: vec![BasicBlock {
                 id: 0,

@@ -354,12 +354,57 @@ codegen 経路（`__effect_*` 直接呼び出し）も生成物も現状と同�
 
 調査結果が肯定的であることを受けた提案であり、着手判断は別途行う。
 
-| Stage | 内容 | 完了条件 |
-|---|---|---|
-| Stage 1 | `capability` 型宣言（コンテキスト依存キーワード）+ capability 型パラメータのみ。`grant` なし。`is_fn_type()` ゲート 3 箇所（`effects.rs` / `executor.rs` / `dataflow_inference.rs`）の拡張を含む | 既存 effect と等価な検証結果になること。`.mm` 回帰ゼロ |
-| Stage 2 | `grant E where C` 式と静的 capability 束縛。codegen は消去のみ（§4.2 の ABI 消去パス: 定義・宣言・直接呼び出しから capability パラメータと実引数を除去）を含む | `grant` を含む新規テストが通り、消去後の LLVM IR が capability 抜き版と一致し、既存 codegen 出力が不変 |
-| Stage 3 | narrowing（`grant cap where C'`）と `C1 ⟹ C2` の Z3 判定 | narrowing の受理 / 拒否が Z3 で判定でき、`Unknown` 時の安全側動作が定義されている |
-| Stage 4 | move ベースの revocation（アフィン capability）。`Rvalue::Call` の引数に対する所有権移動を新規実装（§2.2） | 委譲後の再使用 / 重複引数 / 分岐 join に対して use-after-move / double-move / `MergeConflict` が報告される |
+| Stage | 内容 | 完了条件 | 状態 |
+|---|---|---|---|
+| Stage 1 | `capability` 型宣言（コンテキスト依存キーワード）+ capability 型パラメータのみ。`grant` なし。`is_fn_type()` ゲート 3 箇所（`effects.rs` / `executor.rs` / `dataflow_inference.rs`）の拡張を含む | 既存 effect と等価な検証結果になること。`.mm` 回帰ゼロ | ✅ 実装済み（2026-08-30、`docs/ROADMAP.md` P29） |
+| Stage 2 | `grant E where C` 式と静的 capability 束縛。codegen は消去のみ（§4.2 の ABI 消去パス: 定義・宣言・直接呼び出しから capability パラメータと実引数を除去）を含む | `grant` を含む新規テストが通り、消去後の LLVM IR が capability 抜き版と一致し、既存 codegen 出力が不変 | 未着手（タスク 3 の肯定が前提） |
+| Stage 3 | narrowing（`grant cap where C'`）と `C1 ⟹ C2` の Z3 判定 | narrowing の受理 / 拒否が Z3 で判定でき、`Unknown` 時の安全側動作が定義されている | 未着手 |
+| Stage 4 | move ベースの revocation（アフィン capability）。`Rvalue::Call` の引数に対する所有権移動を新規実装（§2.2） | 委譲後の再使用 / 重複引数 / 分岐 join に対して use-after-move / double-move / `MergeConflict` が報告される | 未着手 |
+
+### Stage 1 の実装結果（2026-08-30）
+
+構文は §1.4 案 1（コンテキスト依存キーワード）を採用した:
+
+```mumei
+effect SafeFileRead(path: Str) where starts_with(path, "/tmp/");
+type FileCap = capability SafeFileRead(path: Str) where starts_with(path, "/tmp/");
+
+atom read_log(cap: FileCap, user_id: Str)
+    effects: [SafeFileRead(path)]
+    requires: not_contains(user_id, "..") && not_contains(user_id, "/");
+    ensures: result >= 0;
+    body: { let path = "/tmp/" + user_id + ".log"; perform cap.read(path); 1 }
+```
+
+`capability` は `type X = ` の直後だけキーワードとして解釈し、それ以外では `Token::Ident`
+のままにした（`grant` はトークン化を一切変更していない）。したがって `capability` /
+`grant` を変数名・パラメータ名に使う既存ソースは壊れない。
+
+- capability パラメータは `TypeRef.effect_set = Some(["SafeFileRead"])` と
+  `TypeRef.capability = Some(CapabilityType { effect, constraint })` を持つ。
+  effect containment / propagation / エフェクト推論の 3 箇所のゲートは `is_fn_type()` から
+  共通ヘルパ `TypeRef::carries_effects()`（関数型 **または** capability 型）に置き換えただけで、
+  比較式 `param_leaves ⊆ allowed_leaves` は不変。
+- `perform cap.op(x)` はパーサが裏側のエフェクト（`perform SafeFileRead.op(x)`）へ解決するため、
+  MIR / codegen / proof certificate の経路は capability を意識しない。capability 宣言の constraint は
+  同一エフェクトを指す capability パラメータから引き、既存の `check_constant_constraint()` /
+  `parse_constraint_to_z3_string()` にエフェクト制約と並べて渡す（新しい制約言語・Z3 sort なし）。
+- 失敗はすべて既存分類で報告される（呼び出し元がエフェクトを宣言していない場合は
+  effect polymorphism violation、constraint 違反は既存の effect 制約と同じ経路）。
+- Stage 1 の制限: capability 宣言はそれを宣言したモジュール内のパラメータにのみ適用される
+  （import 越しの capability 型パラメータ、および REPL で capability 宣言と atom を別入力で
+  投入した場合は Stage 2 以降で resolver に載せる）。
+- Stage 1 の制限: perform サイトから capability レシーバの同一性が失われるため、1 つの atom が
+  同一エフェクトに対する複数の capability パラメータを取ると、各 constraint が全 perform に
+  連言で適用される（権限は広がらないが正当なプログラムを過剰に棄却しうる）。同じ atom 内の直接
+  `perform Effect.op(x)` も capability constraint を継承する。レシーバを構文木に保持した
+  per-receiver 解決は Stage 2 で行う。
+- Stage 1 の制限: capability constraint の検証範囲は既存 effect 制約と同一である。定数および
+  定数から導出される引数は Z3 で検査されるが、`requires` で束縛されていない完全に記号的な引数
+  （例: `perform cap.read(user_path)` で `user_path: Str` に制約がない）は既存 effect でも受理される
+  ため、capability でも受理される（`origin/develop` の同等な effect 版でも同じ verdict であることを
+  CLI で確認済み）。capability という名称に反して権限の実行時強制は行わない。
+  capability の消去 ABI パスも Stage 2 のまま（`grant` がないため runtime 表現は生じない）。
 
 非対象（本調査の前提を壊すため、必要になった時点で改めて調査する）:
 value-dependent constraint、capability の data structure への格納、

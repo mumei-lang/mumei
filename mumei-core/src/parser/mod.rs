@@ -152,6 +152,39 @@ pub fn tokenize(input: &str) -> Vec<String> {
 mod tests {
     use super::*;
 
+    fn capability_atom(body: &str) -> Atom {
+        let source = format!(
+            "effect SafeFileRead(path: Str) where starts_with(path, \"/tmp/\");\n\
+             type FileCap = capability SafeFileRead(path: Str) where starts_with(path, \"/tmp/\");\n\
+             atom use_cap(cap: FileCap, p: Str)\n\
+             effects: [SafeFileRead(path)]\n\
+             requires: true;\n\
+             ensures: result >= 0;\n\
+             body: {{ {body} }}"
+        );
+        parse_module(&source)
+            .into_iter()
+            .find_map(|item| match item {
+                Item::Atom(atom) if atom.name == "use_cap" => Some(atom),
+                _ => None,
+            })
+            .expect("atom use_cap")
+    }
+
+    #[test]
+    fn test_capability_perform_is_resolved_to_underlying_effect() {
+        let atom = capability_atom("perform cap.read(p); 1");
+        assert!(atom.body_expr.contains("perform SafeFileRead.read(p)"));
+        assert!(!atom.body_expr.contains("perform cap.read"));
+    }
+
+    #[test]
+    fn test_capability_rewrite_preserves_string_literals() {
+        let atom = capability_atom("let msg = \"perform cap.read(p)\"; perform cap.read(p); 1");
+        assert!(atom.body_expr.contains("\"perform cap.read(p)\""));
+        assert!(atom.body_expr.contains("perform SafeFileRead.read(p)"));
+    }
+
     #[test]
     fn test_parse_type_ref_simple() {
         let tr = parse_type_ref("i64");

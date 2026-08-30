@@ -1888,6 +1888,10 @@ Stage 4: move ベース revocation）と非対象範囲は `docs/CAPABILITY_MODE
 **技術的に着手可能**という判定であり、Priority 15 のタスク 3（AI エージェント側の需要検証）は未着手のため、
 実装フェーズを実際に開くかどうかはタスク 3 の結果を待って判断する。
 
+**実装フェーズ**（2026-08-30）: Stage 1（capability 型宣言 + capability 型パラメータ、`grant` なし）は
+タスク 3 の結果に依存しない非破壊な範囲であるため P29 として着手・実装済み。Stage 2（`grant`）以降は
+引き続きタスク 3（AI エージェント側の需要検証）の肯定を前提とする。→ [P29](#p29-capability-model-stage-1capability-型宣言--capability-型パラメータ--implemented)
+
 **契約への影響**: なし。capability 由来の検証結果は既存 effect 検証と同じ経路で報告し、
 新しい verdict 分類や別名 alias は追加しない。
 
@@ -2324,6 +2328,55 @@ python benchmarks/evaluation_suite.py --repair-cert-dir ../mumei-agent/artifacts
 | `tests/test_benchmark_suite.py` | 回帰ゲート（棄却と crash の分離、timeout が catch にならないこと、catch rate からの除外、`No Verdict` 描画） |
 
 **残課題**: 判定の有無は CLI 出力の照合で見分けている。`mumei verify` が棄却とインフラ失敗に別々の終了コードを返すようになれば、出力照合は不要になる。
+
+---
+
+## P29: Capability Model Stage 1（capability 型宣言 + capability 型パラメータ）— ✅ Implemented
+
+**ステータス: ✅ Implemented**（測定 2026-08-30、`cargo build` / `cargo clippy --all-targets` 警告 0、`cargo test` 250/250 passed（うち `tests/test_capability_stage1.rs` 4 件を新規追加）、`cargo test -p mumei-core` 461/461 passed（うち parser の capability rewrite 単体テスト 2 件を新規追加）、`.mm` 回帰ゼロ = `std/` + `examples/` + `tests/` の既存 132 ファイル（pass 98 / 意図された負例 fail 34）で verdict が `develop` と完全一致、`cargo tree --edges no-dev | grep -i opentelemetry` は空 = 既定ビルドに OTel 依存なし）— P19 / `docs/CROSS_PROJECT_ROADMAP.md` Priority 15 の設計調査（`docs/CAPABILITY_MODEL_STUDY.md`）で肯定判定となった object-based capability model のうち、`grant` を含まない Stage 1 のみを実装する。`grant` 式・narrowing・revocation（Stage 2〜4）は未実装のまま。
+
+### 構文（study §1.4 案 1: コンテキスト依存キーワード）
+
+```mumei
+effect SafeFileRead(path: Str) where starts_with(path, "/tmp/");
+type FileCap = capability SafeFileRead(path: Str) where starts_with(path, "/tmp/");
+
+atom read_log(cap: FileCap, user_id: Str)
+    effects: [SafeFileRead(path)]
+    requires: not_contains(user_id, "..") && not_contains(user_id, "/");
+    ensures: result >= 0;
+    body: { let path = "/tmp/" + user_id + ".log"; perform cap.read(path); 1 }
+```
+
+capability 宣言は新しいエフェクトを定義せず、既存 `EffectDef` に別名と constraint を与える view である。`capability` は `type X = ` の直後だけキーワードとして解釈され、それ以外は `Token::Ident` のまま（`grant` のトークン化は無変更）なので、`capability` / `grant` を識別子に使う既存ソースは壊れない。
+
+### 実装
+
+- **型表現**: `TypeRef` に `capability: Option<CapabilityType>`（`effect` / `constraint`）を追加。既存の全構築箇所は `None` のままで意味は不変。capability パラメータは `effect_set = Some(["SafeFileRead"])` と capability メタデータの両方を持ち、MIR `LocalDecl` にも伝播する（HIR は `HirAtom` が保持する `Atom` のパラメータ型としてそのまま持つ）。
+- **effect containment / propagation**: 3 箇所（`verification/support/effects.rs` の規則 3、`verification/executor.rs`、`verification/support/dataflow_inference.rs`）の `is_fn_type()` ゲートを共通ヘルパ `TypeRef::carries_effects()`（関数型 **または** capability 型）へ置き換えた。比較式 `param_leaves ⊆ allowed_leaves` と `is_subeffect()` によるフォールバックは不変。
+- **constraint 検証**: `perform cap.op(x)` はパーサが裏側のエフェクト（`perform SafeFileRead.op(x)`）へ解決するため、MIR / codegen / proof certificate の経路は capability を意識しない。capability 宣言の constraint は同一エフェクトを指す capability パラメータの静的型から引き、既存 `check_constant_constraint()` / `parse_constraint_to_z3_string()` にエフェクト制約と並べて渡す。新しい制約言語・Z3 sort・verdict 分類・別名 alias は追加していない（`matches(...)` は capability constraint で非対象、study §3.1）。
+- **語彙**: capability 由来の失敗は既存分類のまま報告される（呼び出し元がエフェクトを未宣言なら effect polymorphism violation、constraint 違反は既存の effect 制約と同一経路）。
+
+### 対象ファイル
+
+| ファイル | 役割 |
+|---|---|
+| `mumei-core/src/parser/ast.rs` / `parser/item.rs` | `Item::CapabilityDef` とコンテキスト依存 `capability` パース、capability パラメータの注釈 |
+| `mumei-core/src/ast.rs` | `CapabilityType`、`TypeRef.capability`、`carries_effects()` |
+| `mumei-core/src/mir.rs` | `LocalDecl.capability` の伝播 |
+| `mumei-core/src/verification/module_env.rs` | `capability_defs` の登録 / 参照 |
+| `mumei-core/src/verification/support/effects.rs` / `executor.rs` / `support/dataflow_inference.rs` | effect containment / propagation / エフェクト推論のゲート拡張 |
+| `mumei-core/src/verification/translator/expr.rs` | `perform` 時の capability constraint 検証 |
+| `tests/test_capability_stage1.mm` / `tests/test_capability_stage1_missing_effect.mm` | 正常系（capability 版と effect 版）/ 異常系（呼び出し元が effect 未宣言） |
+| `tests/test_capability_stage1.rs` | 回帰ゲート 4 件（正常系・異常系・capability 版と effect 版の verdict 一致・識別子 `capability` / `grant`） |
+
+### 回帰ゲート
+
+- `cargo test --test test_capability_stage1`（4 件）: capability 型パラメータの検証が通ること、effect 未宣言時に effect polymorphism violation で弾かれること、capability 型パラメータ版と等価な effect パラメータ版が pass / fail いずれのケースでも同一 verdict を出すこと（study §6 Stage 1 完了条件）、`capability` / `grant` が識別子として使えること。
+- `.mm` 回帰ゼロ: `std/` + `examples/` + `tests/` の全 `.mm` を `mumei verify` に通し、verdict 集合が `develop` と一致することを確認（既存の失敗は意図された負例で、件数・対象ファイルとも変化なし）。
+- **ゼロコスト検証（P15 / P23〜P27 と同一）**: `cargo tree --edges no-dev | grep -i opentelemetry` が空であること。
+
+**残課題**: `perform cap.op(x)` はパーサが裏側のエフェクト名へ解決するため、perform サイトから capability レシーバの同一性が失われる。したがって 1 つの atom が同一エフェクトに対する複数の capability パラメータを取る場合、それぞれの constraint が全 perform に連言で適用される（権限が広がることはないが、正当なプログラムを過剰に棄却しうる）。同じ atom 内の直接 `perform Effect.op(x)` も同様に capability constraint を継承する。レシーバを構文木に保持した per-receiver 解決は Stage 2 で行う。 capability constraint の検査範囲は既存 effect 制約と同一で、`requires` で束縛されていない完全に記号的な引数は既存 effect と同様に受理される（`develop` の effect 版と verdict 一致を CLI で確認）。capability 宣言はそれを宣言したモジュール内のパラメータにのみ適用される（import 越しの capability 型パラメータ、および REPL で capability 宣言と atom を別入力で投入した場合は Stage 2 以降で resolver に載せる。`ModuleEnv` への登録自体は本 PR で入っている）。`grant` 式・narrowing・move ベース revocation と codegen の ABI 消去パスは Stage 2〜4 のまま未着手で、Stage 2 以降は Priority 15 タスク 3（AI エージェント側の需要検証）の肯定を前提とする。
 
 ---
 

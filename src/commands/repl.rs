@@ -310,6 +310,10 @@ pub(crate) fn repl_register_item(
             ctx.module_env.register_effect(e);
             1
         }
+        parser::Item::CapabilityDef(c) => {
+            ctx.module_env.register_capability(c);
+            1
+        }
         parser::Item::ExternBlock(eb) => {
             ctx.extern_blocks.push(eb.clone());
             for ext_fn in &eb.functions {

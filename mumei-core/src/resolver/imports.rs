@@ -559,6 +559,7 @@ pub(crate) fn resolve_imports_recursive(
                     Item::Import(_) => {}
                     Item::ExternBlock(_) => {}
                     Item::EffectDef(_) => {}
+                    Item::CapabilityDef(_) => {}
                     Item::ImplBlock(ib) => {
                         for method in &ib.methods {
                             let qualified_name = format!("{}::{}", ib.struct_name, method.name);
@@ -730,6 +731,14 @@ pub(crate) fn register_imported_items_with_source(
                     let mut fqn_effect = effect_def.clone();
                     fqn_effect.name = format!("{}::{}", prefix, effect_def.name);
                     module_env.register_effect(&fqn_effect);
+                }
+            }
+            Item::CapabilityDef(capability_def) => {
+                module_env.register_capability(capability_def);
+                if let Some(prefix) = alias {
+                    let mut fqn_capability = capability_def.clone();
+                    fqn_capability.name = format!("{}::{}", prefix, capability_def.name);
+                    module_env.register_capability(&fqn_capability);
                 }
             }
             Item::ExternBlock(extern_block) => {

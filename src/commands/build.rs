@@ -309,6 +309,14 @@ pub(crate) fn cmd_build(
                 println!("  ⚡ Effect: '{}'", effect_def.name);
             }
 
+            // --- capability 宣言 ---
+            Item::CapabilityDef(capability_def) => {
+                println!(
+                    "  🔑 Capability: '{}' (effect: {})",
+                    capability_def.name, capability_def.effect_name
+                );
+            }
+
             // --- impl ブロック (struct method) ---
             Item::ImplBlock(ib) => {
                 println!(
