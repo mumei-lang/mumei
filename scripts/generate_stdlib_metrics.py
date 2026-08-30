@@ -245,9 +245,12 @@ def _render_scale_trust_surface(surface: dict) -> list[str]:
             f"{totals.get('z3_unknown_to_lean_escalation_atoms', 0)} | "
             f"{totals.get('z3_solver_seconds', 0.0):.2f} |",
             "",
-            f"> `std/` trusted atoms stay at {std.get('std_trusted_atoms', 0)} of "
-            f"{std.get('std_atoms', 0)} atoms while the scale cases run: no proof was "
-            "downgraded to a trusted contract to make the larger cases close.",
+            f"> `std/` trusted atoms stay at {std.get('std_trusted_atoms', 0)} of the "
+            f"{std.get('std_atoms', 0)} atoms present in the pinned scale run while the "
+            "scale cases run: no proof was downgraded to a trusted contract to make the "
+            "larger cases close. The atom count is the one recorded in "
+            "`benchmarks/composability/scale_trust_surface.json` and is only refreshed "
+            "when that artifact is regenerated, so it may lag the Summary total above.",
             "",
         ]
     )
