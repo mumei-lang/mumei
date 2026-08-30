@@ -103,12 +103,9 @@ def _render_proof_graph_view(report_dir: Path) -> None:
     atom_names = [node["atom_name"] for node in elements["nodes"]]
     if st.session_state.get("selected_atom") not in atom_names:
         st.session_state["selected_atom"] = atom_names[0]
-    selected = st.sidebar.selectbox(
-        "Atom",
-        atom_names,
-        index=atom_names.index(st.session_state["selected_atom"]),
-        key="selected_atom",
-    )
+    # The selection lives in session state so the navigation buttons can move
+    # it; passing `index=` as well makes Streamlit warn on every rerun.
+    selected = st.sidebar.selectbox("Atom", atom_names, key="selected_atom")
     st.sidebar.markdown("\n".join(f"- {label}" for label in HEALTH_LEGEND.values()))
 
     graph_column, detail_column = st.columns([3, 2])
@@ -161,8 +158,10 @@ def _render_proof_graph_view(report_dir: Path) -> None:
         if detail["trust_boundaries"]:
             for boundary in detail["trust_boundaries"]:
                 st.warning(f"`{boundary.get('kind', '')}` — {boundary.get('rationale', '')}")
-        else:
+        elif detail["health"] == "green":
             st.caption("— none (fully proven, zero-cost)")
+        else:
+            st.caption("— none")
 
         inconsistent = [
             edge
