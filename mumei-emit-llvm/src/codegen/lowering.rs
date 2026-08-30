@@ -192,6 +192,22 @@ pub(crate) fn bitpreserve_cast<'a>(
     }
 }
 
+/// LLVM struct type for a user-defined struct, laid out in declaration order.
+/// Matches the layout `HirExpr::StructInit` builds, so a struct value crosses a
+/// function boundary unchanged.
+pub(crate) fn struct_llvm_type<'a>(
+    context: &'a Context,
+    struct_def: &mumei_core::parser::StructDef,
+    module_env: &ModuleEnv,
+) -> inkwell::types::StructType<'a> {
+    let field_types: Vec<BasicTypeEnum> = struct_def
+        .fields
+        .iter()
+        .map(|f| resolve_param_type(context, Some(f.type_name.as_str()), module_env))
+        .collect();
+    context.struct_type(&field_types, false)
+}
+
 /// パラメータの LLVM 型を解決する
 pub(crate) fn resolve_param_type<'a>(
     context: &'a Context,
@@ -220,6 +236,9 @@ pub(crate) fn resolve_param_type<'a>(
                     // Plan 14: Check if type is an enum
                     if let Some(enum_def) = module_env.get_enum(name) {
                         return enum_llvm_type(context, enum_def, Some(module_env)).into();
+                    }
+                    if let Some(struct_def) = module_env.get_struct(&base) {
+                        return struct_llvm_type(context, struct_def, module_env).into();
                     }
                     context.i64_type().into()
                 }

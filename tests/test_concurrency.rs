@@ -904,6 +904,32 @@ body: {
 }
 
 #[test]
+fn task_body_reads_a_field_of_a_captured_struct_parameter() {
+    let ir = emit_atom_ir(
+        "task_struct_field_capture_ir",
+        r#"
+struct Point { x: i64, y: i64 }
+
+trusted atom read_x(p: Point) -> i64
+requires: true;
+ensures: true;
+body: {
+    task { p.x }
+};
+"#,
+        "read_x",
+    );
+    assert!(
+        ir.contains("define i64 @read_x({ i64, i64 }"),
+        "a struct parameter must keep its struct layout instead of collapsing to i64\n{ir}"
+    );
+    assert!(
+        ir.contains("extractvalue { i64, i64 }"),
+        "the task body must extract the captured struct's field\n{ir}"
+    );
+}
+
+#[test]
 fn chan_f64_send_converts_an_integer_payload_to_the_declared_type() {
     // A payload whose type differs from the channel's declared `T` must be
     // converted to `T` before it is bit-preserved into the runtime slot —
