@@ -141,6 +141,92 @@ Expected assertions:
 - stderr includes `FFI Bridge: registered 1 extern function(s) from "Rust" block`.
 - stderr does not include `undefined reference`, `Rust FFI runtime build failed`, or `Linking failed`.
 
+## Channel Payload Round-Trip Flow (`chan<T>`)
+
+Use this when changes touch `HirExpr::ChanSend`/`ChanRecv`, payload marshalling, or
+`chan_payload_type` tracking. The runtime slot is a plain `int64_t`, and channel handles are
+plain integers, so a literal handle works: `relay(0, 2.5)` gives a real runtime round trip
+(channel `0` is lazily created by `runtime/mumei_runtime.c`). Make `atom main()` return `7`
+only when the received value equals the expected one — the process exit code then *is* the
+assertion, and a zeroed / bit-reinterpreted payload shows up as a different exit code.
+
+```bash
+cat > /tmp/f64run.mm <<'MM'
+trusted atom relay(ch: chan<f64>, x: f64) -> f64
+requires: true; ensures: true;
+body: { send(ch, x); recv(ch) };
+
+trusted atom main()
+requires: true; ensures: true;
+body: { let got = relay(0, 2.5); if got == 2.5 { 7 } else { 0 } };
+MM
+LLVM_SYS_170_PREFIX=/usr/lib/llvm-17 LIBCLANG_PATH=/usr/lib/x86_64-linux-gnu \
+  target/debug/mumei run /tmp/f64run.mm; echo "exit=$?"   # expect 7
+```
+
+Adversarial variants worth covering (each as its own atom so one fixture exercises many cases):
+- payload type matching the channel (`chan<f64>` + `f64`, `chan<i64>` + `i64`) — the IR must
+  contain *no* numeric conversion for the int case and only `bitcast double .. to i64` /
+  `bitcast i64 .. to double` for the f64 case;
+- payload type mismatching the channel (`send(ch, 3)` / `send(ch, n)` on `chan<f64>`, `send(ch, 2.9)`
+  on `chan<i64>`, negative values) — these must convert *numerically* (`sitofp`/`fptosi`), never
+  bit-preserve, otherwise `recv` reinterprets integer bits as a double;
+- alias handles (`let c2 = ch; send(c2, x); recv(c2)`) — payload typing must survive rebinding;
+- `chan<Str>`/pointer payloads — IR must show `ptrtoint` before `__mumei_chan_send` and `inttoptr`
+  after `__mumei_chan_recv`, with the atom typed `ptr`.
+
+Inspect the IR with `mumei build fixture.mm --emit llvm-ir`, which writes `katana_<atom>.ll` into
+the current directory (keep the fixture outside the repo so these files do not dirty it), then
+`grep -cE "bitcast|sitofp|fptosi|ptrtoint|inttoptr"` per atom for an exact-count assertion.
+
+Known pre-existing limitation: a fixture containing a **string literal** may fail to link via
+`mumei run` with `relocation R_X86_64_32 against '.rodata.str1.1' can not be used when making a
+PIE object`. That is unrelated to channel work; use the manual PIC link below to still prove
+runtime behavior, and report it as pre-existing rather than a regression.
+
+## Manual PIC Link Flow (arrays via C driver, PIE workaround)
+
+Use this when a value cannot be constructed in Mumei source (there is no array-literal codegen —
+`let a = [3,4]` lowers to `i64 0`, so arrays only arrive as atom parameters), or when
+`mumei run` cannot link. Arrays use a fat-pointer ABI, so a C driver can supply real storage and
+observe what the compiled atom (including code inside `task { ... }`) reads and writes:
+
+```c
+/* driver.c */
+#include <stdint.h>
+typedef struct { int64_t len; int64_t *data; } mm_arr;  /* fat pointer ABI */
+int64_t mix_scalar(mm_arr a, int64_t k);
+int main(void) {
+    int64_t buf[3] = {11, 31, 5};
+    mm_arr a = { 3, buf };
+    return mix_scalar(a, 100) == 142 ? 0 : 1;   /* also check buf[] after writes */
+}
+```
+
+```bash
+cd /home/ubuntu/mumei-p25-artifacts/arrdir   # fixtures outside the repo
+target/debug/mumei build arrcap.mm --emit llvm-ir
+/usr/lib/llvm-17/bin/llvm-link -S -o linked.ll katana_*.ll
+/usr/lib/llvm-17/bin/llc -filetype=obj -relocation-model=pic -o linked.o linked.ll
+gcc -O0 -o arrtest driver.c linked.o /home/ubuntu/repos/mumei/runtime/mumei_runtime.c -lpthread
+./arrtest; echo "exit=$?"
+```
+
+Notes and gotchas:
+- This box has **no `clang`**; `src/linker.rs` falls back to `cc`/`gcc`, and manual IR linking must
+  go through `llc` first. `-relocation-model=pic` is what dodges the PIE relocation failure.
+- If linking reports an undefined symbol from the string/std helpers (e.g. `mumei_str_eq`), add a
+  tiny C shim in the driver TU rather than pulling in more of the runtime.
+- For array capture inside tasks, assert on the IR names as well:
+  `task_arg_<name>_len_ptr` / `task_arg_<name>_data_ptr` (stores in the parent),
+  `task_capture_<name>_len` / `task_capture_<name>_data` (loads in the pthread wrapper), and a
+  `getelementptr i64, ptr %task_capture_<name>_data` for element access.
+- Have the fixture *write* an element (`task { arr[0] = 777; arr[1] } `) and check the driver's own
+  buffer afterwards — that is the strongest proof the task touched the parent's storage.
+- Struct field access inside a task body (`p.x`) may fail with
+  `Codegen Error: Field 'a' not found on 'p'`; if so, that scenario is not testable through the CLI
+  yet — fall back to a struct-by-value build check and report it as untested.
+
 ## Cleanup
 
 Keep generated fixtures and binaries outside the repo, preferably under `/tmp` or `/home/ubuntu/mumei-*-artifacts`. Before finishing, run:
