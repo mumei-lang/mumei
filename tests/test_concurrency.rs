@@ -972,3 +972,38 @@ body: {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn chan_send_rejects_a_by_value_aggregate_payload() {
+    let bin = env!("CARGO_BIN_EXE_mumei");
+    let fixture = write_fixture(
+        "chan_aggregate_payload",
+        r#"
+struct Point { x: i64, y: i64 }
+
+trusted atom relay(ch: chan<Point>, p: Point) -> i64
+requires: true;
+ensures: true;
+body: {
+    send(ch, p);
+    0
+};
+"#,
+    );
+    let dir = fixture.parent().unwrap().to_path_buf();
+    let output = Command::new(bin)
+        .arg("build")
+        .arg(&fixture)
+        .arg("--emit")
+        .arg("llvm-ir")
+        .current_dir(&dir)
+        .output()
+        .expect("failed to build the aggregate payload fixture");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("cannot be sent") || stderr.contains("cannot be sent"),
+        "an aggregate payload must be reported rather than silently sent as zero\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    std::fs::remove_dir_all(&dir).expect("remove concurrency fixture dir");
+}

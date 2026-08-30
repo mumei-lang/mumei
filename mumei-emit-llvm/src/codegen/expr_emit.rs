@@ -1029,17 +1029,24 @@ pub(crate) fn compile_hir_expr<'a>(
             // P25 — marshal the payload into the runtime's i64 slot without
             // losing bits: f64 is bitcast, Str / struct pointers go through
             // `ptrtoint`. Aggregates passed by value have no bit-preserving
-            // i64 encoding and keep the pre-P25 zero placeholder.
+            // i64 encoding, so they are rejected rather than transported as a
+            // zero placeholder that reads back as plausible data.
             let payload = match chan_payload_type_name(channel, var_types)
                 .map(|name| resolve_param_type(context, Some(name.as_str()), module_env))
             {
                 Some(payload_ty) => coerce_to_chan_payload(builder, val, payload_ty)?,
                 None => val,
             };
-            let val_i64 = match bitpreserve_cast(builder, payload, context.i64_type().into()) {
-                Ok(cast) => cast.into_int_value(),
-                Err(_) => context.i64_type().const_int(0, false),
-            };
+            let val_i64 = bitpreserve_cast(builder, payload, context.i64_type().into())
+                .map_err(|_| {
+                    mumei_core::verification::MumeiError::codegen(format!(
+                        "channel payload of type {} cannot be sent: the runtime carries payloads \
+                         in a single i64 slot, which has no bit-preserving encoding for \
+                         by-value aggregates",
+                        payload.get_type()
+                    ))
+                })?
+                .into_int_value();
             let send_fn = module.get_function("__mumei_chan_send").unwrap_or_else(|| {
                 let i64_type = context.i64_type();
                 let fn_type = context

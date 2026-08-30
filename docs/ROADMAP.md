@@ -2076,7 +2076,7 @@ MUMEI_REGISTRY_URL=https://registry.example.com mumei add my_lib
 
 ## P25: concurrency codegen follow-up（polymorphic `chan<T>` payload / task body の配列要素キャプチャ） — ✅ Implemented
 
-**ステータス: ✅ Implemented**（測定 2026-08-30、`cargo test --test test_concurrency` 24/24 passed、`cargo test --test test_run` 8/8 passed、`cargo test -p mumei-core lowering` 通過、`cargo tree --edges no-dev | grep -i opentelemetry` は空 = 既定ビルドに OTel 依存なし）— `docs/CONCURRENCY.md` Implementation Status 表に残っていた codegen follow-up 2 件（polymorphic `chan<T>` payload marshalling、task body 内の配列要素ストレージ capture）を解消する。構文 / 型 / Z3 検証 / 基本 codegen は Plan 8 / Plan 21 のままで、runtime（`runtime/mumei_runtime.c`）は無変更。
+**ステータス: ✅ Implemented**（測定 2026-08-30、`cargo test --test test_concurrency` 25/25 passed、`cargo test --test test_run` 8/8 passed、`cargo test -p mumei-core lowering` 通過、`cargo tree --edges no-dev | grep -i opentelemetry` は空 = 既定ビルドに OTel 依存なし）— `docs/CONCURRENCY.md` Implementation Status 表に残っていた codegen follow-up 2 件（polymorphic `chan<T>` payload marshalling、task body 内の配列要素ストレージ capture）を解消する。構文 / 型 / Z3 検証 / 基本 codegen は Plan 8 / Plan 21 のままで、runtime（`runtime/mumei_runtime.c`）は無変更。
 
 ### 構成
 
@@ -2127,7 +2127,7 @@ body: {
 - `cargo test -p mumei-core lowering`: `chan_payload_type()` の解析（`chan<f64>` / `chan <Str>` / `chan<[i64]>` / 不正形）。
 - **ゼロコスト検証（P15 / P23 / P24 と同一）**: `cargo tree --edges no-dev | grep -i opentelemetry` が空であること。
 
-**残課題**: 値渡し aggregate（struct を値で送る場合）はビット保存できる i64 表現を持たないため従来どおりゼロ placeholder のまま。task body の結果が i64 以外の場合の join 経路も既存の i64 coerce のまま（`docs/CONCURRENCY.md` に明記）。
+**残課題**: 値渡し aggregate（struct を値で送る場合）はビット保存できる i64 表現を持たないため送信できず、ゼロを黙って搬送する代わりに codegen 診断で拒否する。task body の結果が i64 以外の場合の join 経路も既存の i64 coerce のまま（`docs/CONCURRENCY.md` に明記）。
 
 ---
 
