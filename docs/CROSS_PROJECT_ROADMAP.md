@@ -1710,16 +1710,20 @@ graph LR
 **結論は肯定的**：静的に解決できる capability・コンパイル時に閉じた constraint・capability を
 data structure に載せない、という最小サブセットに限れば実装フェーズに進める。
 
-- 新 AST ノードはすべて新バリアントの追加で、capability 型自体は既存 `TypeRef.effect_set` で表現できる。
+- 新 AST ノードはすべて新バリアントの追加。effect 部分は既存 `TypeRef.effect_set` で表現できるが、
+  constraint は `effect_set` に載らないため capability 専用の型フィールドを追加し HIR / MIR まで伝播させる。
   `grant` / `capability` はコンテキスト依存キーワードとして導入する（無条件なキーワード化は外部ソースに破壊的）。
 - subtyping は constraint の含意 `C1 ⟹ C2` と既存 effect 階層で閉じ、revocation は MIR move 解析
-  （`movability_from_type()` が未知の型名を `Move` に分類）にほぼ無改造で載る。動的 revocation は非対象。
+  （`movability_from_type()` が未知の型名を `Move` に分類）の骨格にそのまま載る。ただし `Rvalue::Call` の
+  引数は現状消費されないため、呼び出し地点の所有権移動は Stage 4 で新規実装する。動的 revocation は非対象。
 - capability の制約は既存の文字列制約断片と同一で、effect containment 証明
   （`UsedEffects(body) ⊆ AllowedEffects(signature)`）と effect propagation checking は不等式を変えずに維持される。
 - 静的に effect 名が決まる範囲では capability 値は compile-time に完全に消去でき、zero runtime overhead を維持できる。
+  LLVM 側はパラメータを 1 対 1 で具現化するため、capability パラメータと実引数を除去する ABI 消去パスが Stage 2 に入る。
 - タスク 4（段階導入計画）は Stage 1（capability 型宣言）→ Stage 2（`grant`）→ Stage 3（narrowing）→
   Stage 4（move ベース revocation）として `docs/CAPABILITY_MODEL_STUDY.md` §6 に記載した。
-- タスク 3（AI エージェント側の需要検証）は未着手。mumei-agent 側の追従は実装フェーズを開く判断の後でよい。
+- タスク 3（AI エージェント側の需要検証）は未着手。本調査の肯定判定は「技術的に着手可能」であり、
+  実装フェーズを開く条件（タスク 1、3 の両方が肯定）は未充足のままで、Stage 1 着手の前にタスク 3 を実施する。
 
 `docs/CAPABILITY_SECURITY.md` §4 の Recommendation（Option A 継続）は撤回しない。Option A を既定パスとしたうえで、
 capability model は opt-in 拡張として上積みされる位置づけとなる。

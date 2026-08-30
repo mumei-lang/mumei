@@ -1851,12 +1851,17 @@ object-based capability model の**非破壊な設計調査**のみを対象と�
 
 1. **新 AST ノード**: `Item::CapabilityDef` / `Expr::Grant` / `HirExpr::Grant` / `Rvalue::Grant` の
    追加はすべて新バリアントで、既存ノードの意味論は不変（`Expr::Perform` を扱う 17 ファイルと同規模の
-   機械的なアーム追加のみ）。capability 型自体は既存 `TypeRef.effect_set` で表現でき新しい型ノードは不要。
+   機械的なアーム追加のみ）。capability の effect 部分は既存 `TypeRef.effect_set` で表現できるが、
+   `effect_set` は effect 名の列でしかなく constraint を保持できないため（無名の `grant` と narrowing 後の
+   capability で constraint が失われる）、constraint を持つ capability 専用の型フィールドを `TypeRef` に
+   追加し HIR / MIR まで伝播させる必要がある（既存 `.mm` では常に `None`）。
    唯一の破壊リスクは `parser/lexer.rs` の無条件キーワード表で、`grant` / `capability` は
    コンテキスト依存キーワードとして導入する必要がある。→ opt-in 充足 ✅
 2. **型システム拡張**: subtyping は constraint の含意 `C1 ⟹ C2` + 既存 `is_subeffect()` で閉じる。
    revocation は `mir.rs` の `movability_from_type()` が未知の型名を `Move` に分類するため、
-   MIR move 解析（use-after-move / double-move / 分岐 join の `MergeConflict`）にほぼ無改造で載る。
+   MIR move 解析（use-after-move / double-move / 分岐 join の `MergeConflict`）の骨格にそのまま載る。
+   ただし `move_analysis.rs` が消費として扱うのは `Rvalue::Use` だけで、`Rvalue::Call` の引数は
+   生存確認のみだから、委譲を失効にするには呼び出し地点の所有権移動を Stage 4 で新規実装する。
    `LinearityCtx` は Z3 レベルの borrow 追跡として二次的に再利用する。動的 revocation は非対象。
    → opt-in 充足 ✅
 3. **Z3 エンコーディング**: capability の constraint は既存の文字列制約断片
@@ -1867,12 +1872,17 @@ object-based capability model の**非破壊な設計調査**のみを対象と�
    **不等式を書き換えずに**維持される。value-dependent constraint は非対象。→ opt-in 充足 ✅
 4. **ランタイム表現**: `perform` は `__effect_{E}_{op}` への直接呼び出しに落ちており、
    エフェクト多相はすでに単相化で消去されている。静的に effect 名が決まる範囲では
-   capability 値は codegen で完全に消え、zero runtime overhead を維持できる。→ opt-in 充足 ✅
+   capability 値は codegen で完全に消え、zero runtime overhead を維持できる。ただし
+   `mumei-emit-llvm/src/codegen/driver.rs` は `atom.params` を 1 対 1 で LLVM パラメータに写像するため、
+   定義・宣言・直接呼び出しから capability パラメータと実引数を除去する ABI 消去パスを Stage 2 に含める。
+   → opt-in 充足 ✅
 
 段階分割案（Stage 1: capability 型宣言 → Stage 2: `grant` → Stage 3: narrowing →
 Stage 4: move ベース revocation）と非対象範囲は `docs/CAPABILITY_MODEL_STUDY.md` §6 を参照。
 `docs/CAPABILITY_SECURITY.md` §4 の Recommendation は撤回せず、Option A を既定パスとしたうえで
-上記 Stage が opt-in 拡張として上積みされる位置づけとする。
+上記 Stage が opt-in 拡張として上積みされる位置づけとする。なお本調査の「肯定的」は
+**技術的に着手可能**という判定であり、Priority 15 のタスク 3（AI エージェント側の需要検証）は未着手のため、
+実装フェーズを実際に開くかどうかはタスク 3 の結果を待って判断する。
 
 **契約への影響**: なし。capability 由来の検証結果は既存 effect 検証と同じ経路で報告し、
 新しい verdict 分類や別名 alias は追加しない。

@@ -9,10 +9,10 @@
 
 | 調査項目 | 影響範囲 | opt-in 判定基準（`grant` 未使用の既存 `.mm` が現行セマンティクスのまま通る） |
 |---|---|---|
-| 1. 新 AST ノードの要否 | 新規 `Item` / `Expr` / `HirExpr` / `Rvalue` の追加のみ。既存ノードの意味は不変 | ✅ 充足（ただし字句解析はコンテキスト依存キーワードで導入すること） |
+| 1. 新 AST ノードの要否 | 新規 `Item` / `Expr` / `HirExpr` / `Rvalue` の追加と、constraint を保持する capability 専用の型フィールド追加。既存ノードの意味は不変 | ✅ 充足（ただし字句解析はコンテキスト依存キーワードで導入すること） |
 | 2. 型システム拡張 | 新しい型コンストラクタ `cap<E>` と constraint implication による subtyping | ✅ 充足（`cap` 型を持たないプログラムには新規則が発火しない） |
 | 3. Z3 エンコーディング | 既存 `check_constant_constraint()` / `parse_constraint_to_z3_string()` の再利用 | ✅ 充足（static capability に限る場合。value-dependent constraint は対象外） |
-| 4. ランタイム表現の要否 | 静的解決できる範囲では compile-time に完全消去可能 | ✅ 充足（capability を struct フィールド / 配列 / 戻り値に載せない範囲） |
+| 4. ランタイム表現の要否 | 静的解決できる範囲では compile-time に完全消去可能（ABI レベルのパラメータ消去パスが必要） | ✅ 充足（capability を struct フィールド / 配列 / 戻り値に載せない範囲） |
 
 **総合結論: 肯定的 — 実装フェーズに進める。** ただし「最小サブセット」を厳密に切ることが条件で、
 下記 §6 に挙げる 3 つの拡張（value-dependent constraint、capability の data structure への格納、
@@ -71,11 +71,28 @@ atom main()
 | `hir.rs` | `HirExpr::Grant`、および `HirEffectUsage` に「どの capability 変数由来か」を持たせる任意フィールド | `HirEffectSet` の構造自体は不変 |
 | `mir.rs` | `Rvalue::Grant { effect, constraint }` | `Rvalue::Perform` と同格。move 解析の対象になる（§2） |
 
-capability 型そのものは `TypeRef` で表現でき、新しい型ノードは不要である。`TypeRef` は
-すでに `effect_set: Option<Vec<String>>` を持ち、`atom_ref(i64) -> i64 with [FileWrite]` の
-エフェクト情報を運んでいる。`cap: FileCap` は `TypeRef { name: "FileCap", type_args: [], effect_set: Some(vec!["SafeFileRead"]) }`
-として表せるため、capability パラメータは既存の「効果付き関数型パラメータ」とまったく同じ形で
-署名に現れる。これが §3 の containment 保存の鍵になる。
+capability 型は `TypeRef` に**そのままは載らない**。`TypeRef` はすでに
+`effect_set: Option<Vec<String>>` を持ち `atom_ref(i64) -> i64 with [FileWrite]` の
+エフェクト情報を運んでいるので、`cap: FileCap` の effect 部分 `E` は
+`TypeRef { name: "FileCap", type_args: [], effect_set: Some(vec!["SafeFileRead"]) }`
+で表現でき、この点だけを見れば capability パラメータは既存の「効果付き関数型パラメータ」と
+同じ形で署名に現れる（これが §3 の containment 保存の鍵になる）。
+
+しかし `effect_set` は effect 名の列でしかなく、**constraint `C` を保持できない**。
+`FileCap` のような名前付き宣言なら `ModuleEnv` 側の `CapabilityDef` を名前で引けば `C` を復元できるが、
+無名の `grant E where C` と narrowing 後の capability には引くべき宣言が存在せず、
+`C` が失われる。`C` が失われると §2.1 の subtyping（`C1 ⟹ C2`）も
+§3.1 の perform 地点での制約検証も成立しない。したがって追加が必要なのは
+**`TypeRef` に載る effect 名ではなく、constraint を持つ capability 専用の型表現**である:
+
+| 層 | 追加内容 |
+|---|---|
+| `mumei-core/src/ast.rs` | `TypeRef` に `capability: Option<CapabilityType>`（`effect: String` / `constraint: Option<String>`）を追加。既存の構築箇所は `None` のままで意味不変 |
+| `hir.rs` / `mir.rs` | 同じ `CapabilityType` を local / パラメータの型情報として伝播させる（`HirAtom` のパラメータ型と `LocalDecl` に持たせる） |
+
+`grant` の結果型と narrowing の結果型はこの構造体に直接書き込まれるため、
+宣言名に依存せず AST → HIR → MIR を通して `C` が生存する。既存 `.mm` は
+`capability` フィールドが常に `None` になるだけで、型表現の意味は変わらない。
 
 ### 1.2 影響範囲の実測
 
@@ -145,7 +162,7 @@ C1 ⟹ C2                        E1 = E2 または is_subeffect(E1, E2)
 ### 2.2 linearity との相互作用 — revocation の実装候補としての move 追跡
 
 「渡した capability は呼び出し元で使えない」= capability をアフィン値として扱う、という要件は、
-**既存の move 解析にほぼ無改造で載る**。
+**既存の move 解析の骨格に載るが、呼び出し地点の所有権移動だけは新規実装が要る**。
 
 - `mir.rs` の `movability_from_type()` は、`i64` / `f64` / `bool` と一部の refined type を `Copy`、
   **それ以外の未知の型名をすべて `Move`** として分類する。したがって `cap: FileCap` の local は
@@ -153,8 +170,14 @@ C1 ⟹ C2                        E1 = E2 または is_subeffect(E1, E2)
 - `mir_analysis/move_analysis.rs` の前方データフローは、`Move` local の `Use` を消費として扱い、
   消費後の使用を use-after-move、二重消費を double-move として報告する。
   分岐 join では `MirLinearityState::merge()` が「片方の経路でのみ消費された」局面を
-  `MergeConflict` として検出する。これは capability の条件付き委譲（`if c { f(cap) } else { g() }` の後に
-  `cap` を使う）をそのまま検出できることを意味する。
+  `MergeConflict` として検出する。
+- **ただし委譲そのものは現状では消費にならない**。`process_statement_for_moves()` が
+  `consume()` を呼ぶのは `Rvalue::Use(Operand::Place(..))` の場合だけで、`Rvalue::Call { args, .. }` の
+  アームは各引数の local に対して `check_alive()` しか行わない。つまり `f(cap)` は `cap` を生かしたままにする。
+  Stage 4 では呼び出し地点の所有権移動（callee のパラメータ mode ないし capability 型に基づいて
+  引数 local を `consume()` する）を新たに実装する必要があり、委譲後の再使用・同一 capability の
+  重複引数・分岐 join（`if c { f(cap) } else { g() }` の後に `cap` を使う）に対するテストを伴う。
+  分岐 join の `MergeConflict` 判定自体は既存のままで足りる。
 - `LinearityCtx`（`verification/module_env.rs`）は Plan 19 以降 move 検出の主経路ではなく、
   Z3 レベルの borrow / consume 追跡として残っている。したがって revocation の一次実装は
   MIR 側に置くのが正しく、`LinearityCtx` は「借用中の capability は consume できない」という
@@ -256,9 +279,23 @@ effect ハンドラのディスパッチテーブルも effect 記述子オブ�
 - capability 型パラメータ（宣言型で `E` が確定）
 - 上記の narrowing（`grant cap where C'` は `E` を変えず `C` を狭めるだけ）
 
-この範囲では capability 値はランタイム表現を持たず、`Rvalue::Grant` は codegen で消える
-（値を生成しない）。constraint は §3 の検証で消費され、実行時には残らない。
-**現行の zero runtime overhead は完全に維持される。**
+この範囲では capability 値はランタイム表現を持たず、constraint は §3 の検証で消費され、
+実行時には残らない。**現行の zero runtime overhead は維持できる。**
+
+ただし「`Rvalue::Grant` を codegen で捨てる」だけでは足りない。`mumei-emit-llvm/src/codegen/driver.rs`
+の `compile_atom_into_module()` は `atom.params` を 1 対 1 で LLVM のパラメータ型に写像し
+（`resolve_param_type()`）、entry で `function.get_nth_param(i)` を束縛する。capability パラメータを
+そのまま残せば消去できない値が ABI に現れ、逆に `grant` 側だけを消すと引数に渡す値がなくなる。
+Stage 2 には **ABI レベルの消去パス**が必要である:
+
+- 関数定義・宣言のパラメータ列から capability パラメータを取り除き、残りのパラメータの索引を詰め直す。
+- 直接呼び出し（`HirExpr::Call`）の実引数列から対応する引数を同じ規則で取り除く。
+- `atom_ref` 経由の間接呼び出しを capability パラメータについてはサポート対象外とする
+  （capability を関数値の引数型に含めない。§4.3 の制限と同じ理由）。
+
+この消去は「型レベルの抽象を単相化で落とす」既存のエフェクト多相の処理と同種であり、
+新しいランタイム機構は不要だが、Stage 2 の作業項目・テスト（消去後の LLVM IR が
+capability 導入前と一致すること）として明示的に含める必要がある。
 
 ### 4.3 消去できなくなるケース
 
@@ -293,9 +330,9 @@ codegen 経路（`__effect_*` 直接呼び出し）も生成物も現状と同�
 | Stage | 内容 | 完了条件 |
 |---|---|---|
 | Stage 1 | `capability` 型宣言（コンテキスト依存キーワード）+ capability 型パラメータのみ。`grant` なし | 既存 effect と等価な検証結果になること。`.mm` 回帰ゼロ |
-| Stage 2 | `grant E where C` 式と静的 capability 束縛。codegen は消去のみ | `grant` を含む新規テストが通り、既存 codegen 出力がバイト単位で不変 |
+| Stage 2 | `grant E where C` 式と静的 capability 束縛。codegen は消去のみ（§4.2 の ABI 消去パス: 定義・宣言・直接呼び出しから capability パラメータと実引数を除去）を含む | `grant` を含む新規テストが通り、消去後の LLVM IR が capability 抜き版と一致し、既存 codegen 出力が不変 |
 | Stage 3 | narrowing（`grant cap where C'`）と `C1 ⟹ C2` の Z3 判定 | narrowing の受理 / 拒否が Z3 で判定でき、`Unknown` 時の安全側動作が定義されている |
-| Stage 4 | move ベースの revocation（アフィン capability） | use-after-move / double-move が capability に対して報告される |
+| Stage 4 | move ベースの revocation（アフィン capability）。`Rvalue::Call` の引数に対する所有権移動を新規実装（§2.2） | 委譲後の再使用 / 重複引数 / 分岐 join に対して use-after-move / double-move / `MergeConflict` が報告される |
 
 非対象（本調査の前提を壊すため、必要になった時点で改めて調査する）:
 value-dependent constraint、capability の data structure への格納、
@@ -309,18 +346,28 @@ value-dependent constraint、capability の data structure への格納、
 「`grant` を使わない既存 `.mm` が現行セマンティクスのまま通る」が充足され、
 破壊的変更が不可避である証拠は見つからなかった。決め手は次の 3 点である:
 
-1. capability パラメータは `TypeRef.effect_set` を持つパラメータとして表現でき、
+1. capability パラメータの effect 部分は `TypeRef.effect_set` を持つパラメータとして表現でき、
    effect containment / propagation の不等式を**書き換えずに**再利用できる（§3.2）。
+   constraint は `effect_set` に載らないため capability 専用の型フィールドを追加するが、
+   既存 `.mm` では常に `None` であり型表現の意味は変わらない（§1.1）。
 2. capability の constraint は既存の文字列制約断片と同一で、新しい Z3 sort も
    新しい制約言語も不要（§3.1）。
-3. `movability_from_type()` が未知の型名を `Move` に分類するため、
-   アフィンな capability（move による失効）は MIR move 解析にほぼ無改造で載る（§2.2）。
+3. `movability_from_type()` が未知の型名を `Move` に分類するため、アフィンな capability は
+   MIR move 解析の骨格にそのまま載る。追加実装は呼び出し地点の所有権移動に限られる（§2.2）。
+
+新規実装が必要と判明した箇所は 2 つ（Stage 4 の呼び出し地点 move、Stage 2 の ABI 消去パス）で、
+いずれも既存の意味論を書き換えずに追加できるため、判定は肯定のままである。
 
 一方で、Section 3 の "Disadvantages" が挙げる「ランタイム表現が必要」「破壊的変更」は、
 最小サブセット（静的 capability・閉じた constraint・データ構造に載せない）に限れば**回避できる**ことが
 本調査で確認できた。逆に、この境界を越える機能（§6 非対象）を初回から取り込むと、
 zero runtime overhead と Z3 の決定可能断片の両方を失うため、その場合は
 Option A（parameterized effects + Z3）継続が正しい判断となる。
+
+なお本調査が答えたのは Priority 15 のタスク 1（非破壊な設計調査）とタスク 2（互換性判定）であり、
+タスク 3（AI エージェント側で capability delegation の需要が実在するかの検証）は未着手である。
+実装フェーズを実際に開くかどうかはタスク 3 の結果を待って判断する。本調査の「肯定的」は
+**技術的に着手可能である**という判定であって、着手すべきという需要判断ではない。
 
 したがって `docs/CAPABILITY_SECURITY.md` §4 の Recommendation は現時点で撤回しない。
 Option A は既定パスのままとし、Stage 1〜4 が opt-in 拡張として上積みされる、という位置づけとする。
