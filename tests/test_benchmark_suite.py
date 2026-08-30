@@ -7,6 +7,7 @@ Lean escalation measurement when the mumei-lean bridge is unavailable.
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
 from pathlib import Path
 
@@ -470,6 +471,28 @@ def test_an_unverifiable_summary_is_a_verdict(monkeypatch, tmp_path):
     result = module._verify_file("mumei", source, "PASS")
     assert result["verify_status"] == "MEASURED"
     assert result["actual"] == "FAIL"
+
+
+def test_verdict_detection_covers_every_cli_summary_line():
+    """`VERDICT_SUMMARY_RE` matches presentation text, so pin it to the source.
+
+    If `src/commands/verify.rs` gains or rewords a summary line, a completed
+    verification run would silently be reclassified as no-verdict; this fails
+    instead.
+    """
+    module = _load_module()
+    source = (REPO_ROOT / "src" / "commands" / "verify.rs").read_text(
+        encoding="utf-8"
+    )
+    summaries = [
+        literal
+        for literal in re.findall(r'"((?:\\n)?[✅❌⚠️🗡️][^"]*)"', source)
+        if "Verification" in literal or "verify summary" in literal
+    ]
+    assert len(summaries) == 5, summaries
+    for literal in summaries:
+        rendered = literal.replace("\\n", "\n").replace("{}", "0")
+        assert module.VERDICT_SUMMARY_RE.search(rendered), literal
 
 
 def test_a_timed_out_verify_is_not_a_counterexample_catch(monkeypatch, tmp_path):

@@ -2302,7 +2302,7 @@ python benchmarks/evaluation_suite.py --repair-cert-dir ../mumei-agent/artifacts
 
 ## P28: ベンチマーク verdict とインフラ失敗の分離（`no_verdict` 計上） — ✅ Implemented
 
-**ステータス: ✅ Implemented**（測定 2026-08-30、`PYTHONPATH=. pytest tests/` 184/184 passed（`tests/test_benchmark_suite.py` に 5 件・`tests/test_evaluation_suite.py` に 2 件を新規追加）、`cargo tree --edges no-dev | grep -i opentelemetry` は空 = 既定ビルドに OTel 依存なし）— `mumei verify` は「プログラムを棄却した」場合と「判定に到達しなかった」場合（timeout・入力が読めない・フラグ拒否・crash）の両方で終了コード 1 を返すため、`benchmarks/run_benchmarks.py` が非ゼロ終了を一律 `FAIL` と読むと、タイムアウトやプロセス異常が `expected: FAIL` タスクの反例検出として数えられ、counterexample catch rate が実態より良く出る。判定の有無を出力から見分けて分離する。
+**ステータス: ✅ Implemented**（測定 2026-08-30、`PYTHONPATH=. pytest tests/` 185/185 passed（`tests/test_benchmark_suite.py` に 6 件・`tests/test_evaluation_suite.py` に 2 件を新規追加）、`cargo tree --edges no-dev | grep -i opentelemetry` は空 = 既定ビルドに OTel 依存なし）— `mumei verify` は「プログラムを棄却した」場合と「判定に到達しなかった」場合（timeout・入力が読めない・フラグ拒否・crash）の両方で終了コード 1 を返すため、`benchmarks/run_benchmarks.py` が非ゼロ終了を一律 `FAIL` と読むと、タイムアウトやプロセス異常が `expected: FAIL` タスクの反例検出として数えられ、counterexample catch rate が実態より良く出る。判定の有無を出力から見分けて分離する。
 
 ### 構成
 
