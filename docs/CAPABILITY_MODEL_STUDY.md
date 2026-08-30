@@ -356,7 +356,7 @@ codegen 経路（`__effect_*` 直接呼び出し）も生成物も現状と同�
 
 | Stage | 内容 | 完了条件 | 状態 |
 |---|---|---|---|
-| Stage 1 | `capability` 型宣言（コンテキスト依存キーワード）+ capability 型パラメータのみ。`grant` なし。`is_fn_type()` ゲート 3 箇所（`effects.rs` / `executor.rs` / `dataflow_inference.rs`）の拡張を含む | 既存 effect と等価な検証結果になること。`.mm` 回帰ゼロ | ✅ 実装済み（2026-08-30、`docs/ROADMAP.md` P28） |
+| Stage 1 | `capability` 型宣言（コンテキスト依存キーワード）+ capability 型パラメータのみ。`grant` なし。`is_fn_type()` ゲート 3 箇所（`effects.rs` / `executor.rs` / `dataflow_inference.rs`）の拡張を含む | 既存 effect と等価な検証結果になること。`.mm` 回帰ゼロ | ✅ 実装済み（2026-08-30、`docs/ROADMAP.md` P29） |
 | Stage 2 | `grant E where C` 式と静的 capability 束縛。codegen は消去のみ（§4.2 の ABI 消去パス: 定義・宣言・直接呼び出しから capability パラメータと実引数を除去）を含む | `grant` を含む新規テストが通り、消去後の LLVM IR が capability 抜き版と一致し、既存 codegen 出力が不変 | 未着手（タスク 3 の肯定が前提） |
 | Stage 3 | narrowing（`grant cap where C'`）と `C1 ⟹ C2` の Z3 判定 | narrowing の受理 / 拒否が Z3 で判定でき、`Unknown` 時の安全側動作が定義されている | 未着手 |
 | Stage 4 | move ベースの revocation（アフィン capability）。`Rvalue::Call` の引数に対する所有権移動を新規実装（§2.2） | 委譲後の再使用 / 重複引数 / 分岐 join に対して use-after-move / double-move / `MergeConflict` が報告される | 未着手 |
