@@ -144,8 +144,9 @@ Fetch behaviour:
   `package_version` is a hard error. Without strict imports the package is still
   cached, but a certificate that fails verification is discarded so it is not
   recorded as provenance.
-- A plaintext `http://` registry (other than loopback) is warned about: it lets a
-  network attacker replace the package and its certificate together.
+- A plaintext `http://` registry is rejected unless it is loopback (local fixtures)
+  or `MUMEI_REGISTRY_ALLOW_PLAINTEXT=1` is set: over plaintext an attacker can
+  replace the package and its certificate together.
 - Atom-level verdicts are unchanged — they are still produced by
   `verify_import_certificate` on the cached package.
 

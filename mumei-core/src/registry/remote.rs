@@ -221,7 +221,7 @@ fn fetch_into_staging(
         .map_err(|e| format!("remote registry: cannot build HTTP client: {}", e))?;
 
     let base = base_url.trim_end_matches('/');
-    warn_if_insecure(base);
+    check_transport(base)?;
     let index_url = format!("{}/packages/{}/index.json", base, name);
     let Some(index_body) = fetch_text(&client, &index_url)? else {
         return Ok(None);
@@ -462,10 +462,12 @@ fn fetch_text(client: &reqwest::blocking::Client, url: &str) -> Result<Option<St
 }
 
 /// Over plaintext HTTP the index, package and certificate can all be replaced
-/// together, so the certificate chain proves nothing about the origin.
-fn warn_if_insecure(base: &str) {
+/// together, so the certificate chain proves nothing about the origin. Only
+/// loopback registries (local fixtures, mirrors under test) are allowed unless
+/// `MUMEI_REGISTRY_ALLOW_PLAINTEXT=1` is set explicitly.
+fn check_transport(base: &str) -> Result<(), String> {
     let Some(rest) = base.strip_prefix("http://") else {
-        return;
+        return Ok(());
     };
     let host = rest
         .split('/')
@@ -478,12 +480,16 @@ fn warn_if_insecure(base: &str) {
         .next()
         .unwrap_or("");
     let loopback = host == "localhost" || host == "127.0.0.1" || host == "[::1]" || host == "::1";
-    if !loopback {
-        eprintln!(
-            "  ⚠️  Registry {} uses plaintext HTTP: a network attacker can replace the package and its certificate together. Use https://.",
-            base
-        );
+    let opted_in = std::env::var("MUMEI_REGISTRY_ALLOW_PLAINTEXT")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if loopback || opted_in {
+        return Ok(());
     }
+    Err(format!(
+        "remote registry: {} uses plaintext HTTP, so a network attacker can replace the package and its certificate together. Use https:// (or set MUMEI_REGISTRY_ALLOW_PLAINTEXT=1 for a trusted network).",
+        base
+    ))
 }
 
 fn is_valid_package_name(name: &str) -> bool {
@@ -529,6 +535,15 @@ fn sanitize_relative_path(rel: &str) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plaintext_registries_are_rejected_unless_loopback() {
+        assert!(check_transport("https://registry.example.com").is_ok());
+        assert!(check_transport("http://127.0.0.1:8123").is_ok());
+        assert!(check_transport("http://localhost:8123").is_ok());
+        let err = check_transport("http://registry.example.com").expect_err("plaintext rejected");
+        assert!(err.contains("plaintext HTTP"), "{}", err);
+    }
 
     #[test]
     fn sanitize_rejects_parent_and_absolute_paths() {
