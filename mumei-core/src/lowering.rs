@@ -35,9 +35,25 @@ pub fn lower(type_name: &str) -> LoweredType {
     }
 }
 
+/// Extract `T` from a declared `chan<T>` type name.
+pub fn chan_payload_type(type_name: &str) -> Option<String> {
+    let inner = type_name
+        .trim()
+        .strip_prefix("chan")?
+        .trim_start()
+        .strip_prefix('<')?
+        .strip_suffix('>')?
+        .trim();
+    if inner.is_empty() {
+        None
+    } else {
+        Some(inner.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{lower, LoweredType};
+    use super::{chan_payload_type, lower, LoweredType};
 
     #[test]
     fn test_lower_exact_tokens() {
@@ -70,6 +86,17 @@ mod tests {
             lower("[[i64]]"),
             LoweredType::Array(Box::new(LoweredType::Array(Box::new(LoweredType::I64))))
         );
+    }
+
+    #[test]
+    fn test_chan_payload_type() {
+        assert_eq!(chan_payload_type("chan<f64>"), Some("f64".to_string()));
+        assert_eq!(chan_payload_type("chan <Str>"), Some("Str".to_string()));
+        assert_eq!(chan_payload_type("chan<[i64]>"), Some("[i64]".to_string()));
+        assert_eq!(chan_payload_type("chan<>"), None);
+        assert_eq!(chan_payload_type("chan"), None);
+        assert_eq!(chan_payload_type("i64"), None);
+        assert_eq!(chan_payload_type("channel<i64>"), None);
     }
 
     #[test]

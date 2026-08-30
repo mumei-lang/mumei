@@ -199,8 +199,10 @@ child, alongside the existing `cancelled ⇒ resource_released`. Under
 | Runtime scheduler | ✅ Implemented (Plan 21: pthread-backed; one OS thread per `task`; channel rendezvous via single-slot mutex/condvar in `mumei_runtime.c`) |
 | Task cancellation | ✅ Implemented (`task_group:any` winners atomically cancel remaining children; blocked channels are woken via runtime broadcasts) |
 | Concurrent capture ownership (`task_group:all` / `:any`) | ✅ Implemented (Phase 1h-2: concurrent double move, move racing a sibling read, unsynchronised shared writes, parent use after a child's move, and cancellation-dependent reads are hard errors) |
-| Non-i64 captures in ownership checks | ✅ Implemented (Phase 1h-2 derives movability from the declared type, so array / struct / `f64` / pointer captures are checked; codegen still marshals only scalar and aggregate-by-value captures — array *element storage* capture in task bodies remains a codegen follow-up in `mumei-emit-llvm/src/codegen/task_runtime.rs`) |
-| Channel types | ✅ Implemented (Plan 21: i64 handles + runtime mutex/condvar; full polymorphic `chan<T>` payload-marshalling is a follow-up) |
+| Non-i64 captures in ownership checks | ✅ Implemented (Phase 1h-2 derives movability from the declared type, so array / struct / `f64` / pointer captures are checked) |
+| Array *element storage* capture in task bodies | ✅ Implemented (P25: a captured array's fat pointer `(len, data)` is stored into the pthread args struct and reloaded inside the wrapper, so `arr[i]` inside a `task` indexes the parent's element storage with its bounds check. See [`emit_task_spawn_only`](../mumei-emit-llvm/src/codegen/task_runtime.rs).) |
+| Channel types | ✅ Implemented (Plan 21: i64 handles + runtime mutex/condvar; P25: polymorphic `chan<T>` payloads — see below) |
+| Polymorphic `chan<T>` payload marshalling | ✅ Implemented (P25: the runtime slot stays `int64_t`; `send` bit-preserves the payload into it and `recv` restores the declared `T` — `bitcast` for `f64`, `ptrtoint` / `inttoptr` for `Str` / pointer-backed values. Remaining follow-up: aggregates passed by value have no bit-preserving i64 encoding and keep the pre-P25 zero placeholder, and joining a task whose body result is not i64 still coerces to i64.) |
 | `task_group:any` (atomic completion flag) | ✅ Implemented (first child to complete wins via `__mumei_task_group_complete`; remaining children are cancelled, woken, and joined for cleanup) |
 
 ## Safety Guarantees

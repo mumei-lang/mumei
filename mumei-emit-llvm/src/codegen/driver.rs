@@ -1,3 +1,4 @@
+use crate::codegen::expr_emit::chan_payload_key;
 use crate::codegen::lowering::{declare_extern_functions, resolve_param_type, resolve_return_type};
 use crate::codegen::stmt_emit::compile_hir_stmt;
 use inkwell::context::Context;
@@ -60,6 +61,11 @@ pub fn compile_atom_into_module<'ctx>(
             let base = module_env.resolve_base_type(type_name);
             if module_env.get_struct(&base).is_some() {
                 var_types.insert(param.name.clone(), base);
+            }
+            // P25: remember a channel parameter's declared payload type so
+            // `recv` can restore it from the runtime's i64 slot.
+            if let Some(payload) = mumei_core::lowering::chan_payload_type(type_name) {
+                var_types.insert(chan_payload_key(&param.name), payload);
             }
         }
         // Fat Pointer 配列パラメータの場合、len と data_ptr を分解して保持

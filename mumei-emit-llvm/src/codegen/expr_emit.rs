@@ -21,6 +21,25 @@ use mumei_core::parser::{JoinSemantics, Op};
 use mumei_core::verification::{ModuleEnv, MumeiError, MumeiResult};
 use std::collections::HashMap;
 
+/// P25 — key under which a `chan<T>` binding records its declared payload
+/// type inside `var_types`. `<` can never appear in a Mumei identifier, so
+/// these entries never collide with a variable's struct type entry.
+pub(crate) fn chan_payload_key(var: &str) -> String {
+    format!("<chan>{}", var)
+}
+
+/// Declared payload type of the channel `expr` denotes, when the channel is a
+/// binding introduced with a `chan<T>` type.
+pub(crate) fn chan_payload_type_name(
+    expr: &HirExpr,
+    var_types: &HashMap<String, String>,
+) -> Option<String> {
+    match expr {
+        HirExpr::Variable(name) => var_types.get(&chan_payload_key(name)).cloned(),
+        _ => None,
+    }
+}
+
 pub(crate) fn infer_struct_type_name(
     expr: &HirExpr,
     var_types: &HashMap<String, String>,
@@ -689,7 +708,7 @@ pub(crate) fn compile_hir_expr<'a>(
         // pthread, join it, and return the joined i64 result. See
         // `compile_task_spawn` for layout / capture details.
         HirExpr::Task { body, .. } => compile_task_spawn(
-            context, builder, module, function, body, variables, var_types, module_env,
+            context, builder, module, function, body, variables, var_types, array_ptrs, module_env,
         ),
         HirExpr::TaskGroup {
             children,
@@ -741,7 +760,7 @@ pub(crate) fn compile_hir_expr<'a>(
                 };
                 pending.push(emit_task_spawn_only(
                     context, builder, module, function, task_body, variables, var_types,
-                    module_env, any_ctx,
+                    array_ptrs, module_env, any_ctx,
                 )?);
             }
             if let Some(any_ctx) = any_ctx {
@@ -976,10 +995,13 @@ pub(crate) fn compile_hir_expr<'a>(
             } else {
                 context.i64_type().const_int(0, false)
             };
-            let val_i64 = if val.is_int_value() {
-                val.into_int_value()
-            } else {
-                context.i64_type().const_int(0, false)
+            // P25 — marshal the payload into the runtime's i64 slot without
+            // losing bits: f64 is bitcast, Str / struct pointers go through
+            // `ptrtoint`. Aggregates passed by value have no bit-preserving
+            // i64 encoding and keep the pre-P25 zero placeholder.
+            let val_i64 = match bitpreserve_cast(builder, val, context.i64_type().into()) {
+                Ok(cast) => cast.into_int_value(),
+                Err(_) => context.i64_type().const_int(0, false),
             };
             let send_fn = module.get_function("__mumei_chan_send").unwrap_or_else(|| {
                 let i64_type = context.i64_type();
@@ -1024,10 +1046,22 @@ pub(crate) fn compile_hir_expr<'a>(
                 )
             });
             let call = llvm!(builder.build_call(recv_fn, &[chan_i64.into()], "chan_recv_call"));
-            Ok(call
+            let raw = call
                 .try_as_basic_value()
                 .left()
-                .unwrap_or(context.i64_type().const_int(0, false).into()))
+                .unwrap_or(context.i64_type().const_int(0, false).into());
+            // P25 — restore the payload's declared type from the runtime's i64
+            // slot (`chan<f64>` bitcasts back to double, `chan<Str>` goes
+            // through `inttoptr`). Channels whose payload type is unknown, or
+            // whose payload has no bit-preserving i64 encoding, keep the raw
+            // i64 the runtime returned.
+            let payload_ty = chan_payload_type_name(channel, var_types)
+                .map(|name| resolve_param_type(context, Some(name.as_str()), module_env))
+                .filter(|ty| *ty != context.i64_type().into());
+            match payload_ty {
+                Some(ty) => Ok(bitpreserve_cast(builder, raw, ty).unwrap_or(raw)),
+                None => Ok(raw),
+            }
         }
 
         // Plan 14: Enum variant construction — build tagged union struct

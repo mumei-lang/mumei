@@ -75,3 +75,41 @@ body: {
         task { send(ch, 42); 42 }
     }
 }
+
+// --- P25: polymorphic `chan<T>` payload marshalling ---
+//
+// The runtime channel slot stays `int64_t`, so a non-i64 payload is
+// bit-preserved into it by codegen: `chan<f64>` emits a `bitcast`
+// pair around the send/recv calls, and `chan<Str>` a
+// `ptrtoint` / `inttoptr` pair. Before P25 the send arm collapsed
+// every non-int value to `i64 0` and `recv` always yielded a raw
+// i64, so both payloads were lost.
+trusted atom chan_f64_round_trip(ch: chan<f64>, x: f64) -> f64
+requires: true;
+ensures: true;
+body: {
+    send(ch, x);
+    recv(ch)
+}
+
+trusted atom chan_str_round_trip(ch: chan<Str>, s: Str) -> Str
+requires: true;
+ensures: true;
+body: {
+    send(ch, s);
+    recv(ch)
+}
+
+// --- P25: array element storage captured by a task body ---
+//
+// `arr` is a fat pointer `(len, data)`. Both halves are stored into
+// the pthread args struct and reloaded inside the wrapper, so the
+// task body indexes the *parent's* element storage (bounds check
+// included). Before P25 the task body was compiled with an empty
+// array map, so `arr[i]` inside a task had no backing storage.
+trusted atom task_sums_captured_array(arr: [i64]) -> i64
+requires: true;
+ensures: true;
+body: {
+    task { arr[0] + arr[1] }
+}
