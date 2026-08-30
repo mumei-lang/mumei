@@ -588,6 +588,11 @@ pub(crate) fn verify_inner(
                                 save_effect_polymorphism_report(
                                     output_dir,
                                     &atom.name,
+                                    if type_ref.is_capability_type() {
+                                        "capability"
+                                    } else {
+                                        "function"
+                                    },
                                     &param.name,
                                     effect_set,
                                     &caller_effect_names,

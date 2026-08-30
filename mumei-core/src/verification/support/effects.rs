@@ -686,6 +686,7 @@ pub(crate) fn save_effect_propagation_report(
 pub(crate) fn save_effect_polymorphism_report(
     output_dir: &Path,
     atom_name: &str,
+    param_kind: &str,
     param_name: &str,
     param_effect_set: &[String],
     declared_effects: &[String],
@@ -740,9 +741,15 @@ pub(crate) fn save_effect_polymorphism_report(
             ]
         },
         "reason": format!(
-            "Effect polymorphism violation: atom '{}' accepts function parameter '{}' with effect {:?}, \
+            "Effect polymorphism violation: atom '{}' accepts {} parameter '{}' with effect {:?}, \
              but '{}' only declares effects {:?}. Missing leaf effects: {:?}.",
-            atom_name, param_name, param_effect_set, atom_name, declared_effects, missing_effects
+            atom_name,
+            param_kind,
+            param_name,
+            param_effect_set,
+            atom_name,
+            declared_effects,
+            missing_effects
         )
     });
     report["structured_feedback"] = json!(
