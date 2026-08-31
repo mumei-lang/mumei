@@ -262,11 +262,17 @@ source ~/.mumei/env    # apply environment variables
 
 Z3 target version is **5.1.0**. Upstream names each prebuilt archive after the
 image it was built on (`z3-5.1.0-x64-glibc-2.39`, `z3-5.1.0-arm64-osx-13.3`),
-and those Linux archives need glibc 2.39 (x86_64) / 2.38 (aarch64). On older
-hosts (Ubuntu 22.04, RHEL 9, Debian 12) `mumei setup` reports the mismatch and
-installs Z3 4.14.1 instead, which ships glibc 2.35 / 2.34 archives. To run 5.1.0
-there, build Z3 from source and point `Z3_SYS_Z3_HEADER` / `Z3_SYS_Z3_LIB_DIR`
-at it; the `z3` 0.12 / `z3-sys` 0.8 bindings work unchanged against both.
+and their `libz3.so` imports symbols up to `GLIBC_2.38` on both architectures.
+On older hosts (Ubuntu 22.04, RHEL 9, Debian 12) `mumei setup` reports the
+mismatch and installs Z3 4.14.1 instead, whose archives only need `GLIBC_2.34`;
+hosts older than that get an error pointing at the system package instead of an
+unusable binary. To run 5.1.0 on an old host, build Z3 from source and point
+`Z3_SYS_Z3_HEADER` / `Z3_SYS_Z3_LIB_DIR` at it; the `z3` 0.12 / `z3-sys` 0.8
+bindings work unchanged against both.
+
+Note that the generated `~/.mumei/env` points `Z3_SYS_Z3_LIB_DIR` at
+`<toolchain>/bin`: upstream archives ship `libz3.so` / `libz3.a` next to the
+`z3` executable and contain no `lib/` directory.
 
 ---
 

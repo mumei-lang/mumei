@@ -14,9 +14,15 @@
   minimum glibc are pinned per release in `Z3Build`. This also fixes the Linux
   aarch64 URL, which pointed at a `glibc-2.35` archive that upstream never
   published for 4.13.4 (`arm64` builds ship as `glibc-2.34`).
-- **glibc fallback**: the 5.1.0 Linux archives require glibc 2.39 (x86_64) /
-  2.38 (aarch64), so `mumei setup` detects the host glibc and installs Z3 4.14.1
-  on older distros instead of downloading an unusable binary.
+- **glibc fallback**: the 5.1.0 Linux archives import symbols up to
+  `GLIBC_2.38`, so `mumei setup` detects the host glibc and installs Z3 4.14.1
+  (`GLIBC_2.34`) on older distros instead of downloading an unusable binary.
+  Hosts below even that floor, and hosts where the libc cannot be identified,
+  no longer get a silently broken install.
+- **`Z3_SYS_Z3_LIB_DIR` fix**: the generated `~/.mumei/env` pointed at
+  `<toolchain>/lib`, which upstream archives do not contain — `libz3.so` and
+  `libz3.a` sit in `bin/`. Linking against the `mumei setup` toolchain could
+  not have worked.
 - **Bindings unchanged**: `z3` 0.12 / `z3-sys` 0.8 build and pass the full
   `mumei-core` suite against libz3 5.1.0; the only C API removal in 5.x is
   unused by Mumei, so no crate upgrade (and no `Context` API migration) is
