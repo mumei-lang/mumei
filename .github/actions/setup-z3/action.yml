@@ -13,8 +13,10 @@ runs:
         extract_dir="$RUNNER_TEMP/mumei-z3-4.14.1"
         rm -rf "$extract_dir"
         mkdir -p "$extract_dir"
+        archive_sha256="76f797c849ae1487ce08840321d3334720434e0eb1a23e1bd755c3818ffb7265"
         curl --fail --silent --show-error --location --retry 3 \
           --output "$archive_path" "$archive_url"
+        echo "$archive_sha256  $archive_path" | sha256sum --check --strict
         unzip -q "$archive_path" -d "$extract_dir"
         z3_dir="$extract_dir/z3-4.14.1-x64-glibc-2.35"
         test -x "$z3_dir/bin/z3"
