@@ -65,7 +65,7 @@ A proof certificate (`.proof-cert.json`) is a JSON file containing cryptographic
 |---|---|---|
 | `file` | `String` | Source file path relative to project root |
 | `generated_at` | `String` | ISO 8601 timestamp of certificate generation |
-| `z3_version` | `String` | Z3 solver version used for verification |
+| `z3_version` | `String` | Version of the libz3 linked into the mumei binary that discharged the obligations |
 | `atoms` | `Vec<AtomCertificate>` | Per-atom verification records |
 | `package_name` | `Option<String>` | Package name from `mumei.toml` (if available) |
 | `package_version` | `Option<String>` | Package version from `mumei.toml` (if available) |

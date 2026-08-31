@@ -25,21 +25,11 @@ pub fn compute_atom_content_hash(name: &str, requires: &str, ensures: &str, body
     format!("{:x}", hasher.finalize())
 }
 
-/// Get Z3 version string by running `z3 --version`.
+/// Version of the libz3 linked into this binary — the solver that discharges
+/// the obligations recorded in a certificate.
 pub fn get_z3_version() -> String {
-    std::process::Command::new("z3")
-        .arg("--version")
-        .output()
-        .ok()
-        .and_then(|o| {
-            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            if s.is_empty() {
-                None
-            } else {
-                Some(s)
-            }
-        })
-        .unwrap_or_else(|| "unknown".to_string())
+    let (major, minor, build, _) = crate::verification::linked_z3_version();
+    format!("{major}.{minor}.{build}")
 }
 
 fn self_correction_metadata_from_env(atom_name: &str) -> Option<SelfCorrectionMetadata> {
