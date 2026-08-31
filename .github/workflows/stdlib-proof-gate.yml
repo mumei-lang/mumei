@@ -56,6 +56,8 @@ jobs:
           sudo apt-get install -y llvm-17-dev libclang-17-dev libpolly-17-dev
           echo "LLVM_SYS_170_PREFIX=/usr/lib/llvm-17" >> "$GITHUB_ENV"
           echo "LIBCLANG_PATH=/usr/lib/llvm-17/lib" >> "$GITHUB_ENV"
+      - name: Set up modern Z3
+        uses: ./.github/actions/setup-z3
       - name: Install Python dependencies
         run: python3 -m pip install --quiet pytest pyyaml
       - name: Build mumei (release)

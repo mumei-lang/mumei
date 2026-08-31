@@ -55,6 +55,9 @@ jobs:
           echo "LLVM_SYS_170_PREFIX=/usr/lib/llvm-17" >> "$GITHUB_ENV"
           echo "LIBCLANG_PATH=/usr/lib/llvm-17/lib" >> "$GITHUB_ENV"
 
+      - name: Set up modern Z3
+        uses: ./.github/actions/setup-z3
+
       - name: Cache cargo
         uses: actions/cache@v4
         with:
