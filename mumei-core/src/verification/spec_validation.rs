@@ -97,6 +97,28 @@ pub const DEFAULT_SPEC_VALIDATION_TIMEOUT_MS: u64 = 5000;
 // Z3's soft timeout gets first chance; interrupt is fallback for goals that never reach a decision point.
 const SOLVER_INTERRUPT_GRACE_MS: u64 = 500;
 
+/// Lowest linked libz3 that honours `ContextHandle::interrupt()`, which is what makes
+/// `--solver-timeout` a hard bound on spec-health checks.
+pub const MIN_HARD_TIMEOUT_Z3_VERSION: (u32, u32) = (4, 14);
+
+/// Return the linked libz3 version as `(major, minor, build, revision)`.
+pub fn linked_z3_version() -> (u32, u32, u32, u32) {
+    let mut major = 0;
+    let mut minor = 0;
+    let mut build = 0;
+    let mut revision = 0;
+    unsafe {
+        z3_sys::Z3_get_version(&mut major, &mut minor, &mut build, &mut revision);
+    }
+    (major, minor, build, revision)
+}
+
+/// Whether the linked libz3 reliably enforces the interrupt-backed deadline.
+pub fn solver_timeout_is_hard() -> bool {
+    let (major, minor, _, _) = linked_z3_version();
+    (major, minor) >= MIN_HARD_TIMEOUT_Z3_VERSION
+}
+
 pub fn check_spec_satisfiability(
     atom: &Atom,
     module_env: &ModuleEnv,
@@ -1051,14 +1073,8 @@ atom passthrough_clean(x: i64) -> i64
         // Z3 versions below 4.14 ignore the interrupt used by this regression.
         const HARD_NONLINEAR_CHECK_COUNT: usize = 6;
         const HARD_NONLINEAR_REGRESSION_BOUND_SECS: u64 = 5;
-        let mut major = 0;
-        let mut minor = 0;
-        let mut build = 0;
-        let mut revision = 0;
-        unsafe {
-            z3_sys::Z3_get_version(&mut major, &mut minor, &mut build, &mut revision);
-        }
-        if (major, minor) < (4, 14) {
+        let (major, minor, build, revision) = linked_z3_version();
+        if !solver_timeout_is_hard() {
             eprintln!(
                 "skipping hard nonlinear timeout regression on Z3 {major}.{minor}.{build}.{revision}: \
                  Z3 < 4.14 ignores ContextHandle::interrupt"

@@ -61,6 +61,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y llvm-17-dev libclang-17-dev libpolly-17-dev
 
+      - name: Set up modern Z3
+        uses: ./.github/actions/setup-z3
+
       - name: Cache cargo
         uses: actions/cache@v4
         with:
