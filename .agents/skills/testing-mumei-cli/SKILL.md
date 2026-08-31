@@ -808,9 +808,10 @@ fresh box it is usually absent — then just `rm -rf ~/.mumei` at the end).
 
 ### Sandbox runs with `$HOME` instead of touching the real toolchain
 
-There is **no** `MUMEI_HOME` env var. `manifest::mumei_home()` is
-`dirs::home_dir()/.mumei`, and `dirs::home_dir()` honours `$HOME`, so each
-adversarial case can get its own throwaway home:
+`mumei setup` ignores `MUMEI_HOME` (only `scripts/install.sh` honours it).
+`manifest::mumei_home()` is `dirs::home_dir()/.mumei`, and
+`dirs::home_dir()` honours `$HOME`, so each adversarial case can get its own
+throwaway home:
 
 ```bash
 mkdir -p /tmp/mumei-home-case/.mumei/toolchains
@@ -850,10 +851,9 @@ bash -c '. ~/.mumei/env
   for p in "$Z3_SYS_Z3_HEADER" "$Z3_SYS_Z3_LIB_DIR" "$Z3_SYS_Z3_LIB_DIR/libz3.so"; do
     [ -e "$p" ] && echo "EXISTS  $p" || echo "MISSING $p"; done'
 ```
-The script appends to `$CPATH`/`$LDFLAGS` etc. Since #524 every such export uses
-`${VAR:-}`, so sourcing under `set -u` must succeed; if it dies with
-`CPATH: parameter not set` on a current branch, that is a product regression
-(on builds predating #524 it is expected).
+On branches containing #524, every append-style export uses `${VAR:-}`, so
+sourcing under `set -u` must succeed; on builds predating #524, the env file is
+not `set -u` safe.
 
 ### Prove the loader actually picks the toolchain libz3
 
@@ -932,9 +932,14 @@ chmod +x /tmp/mfb-nonet/curl
   re-downloaded per case. A fabricated `llvm-18.1.8/bin/llc` shell stub
   (`exit 1` vs. `echo` a version) is the way to test the LLVM-unusable branch.
 
-### Exit-code and env-file contract after #524
+### Exit-code and env-file contract (only on branches containing #524; not yet in `develop`)
 
-Since #524 (`z3_install_is_usable`, `InstallationStatus`) the exit code is
+**Scope:** On builds without #524, the old behavior applies: setup exits 0 even
+when Z3/LLVM are unusable, partial trees are accepted as "already installed",
+and the env file is not `set -u` safe. First check whether the branch under test
+contains #524, for example with `git log --oneline develop..HEAD -- src/setup.rs`
+or by grepping `src/setup.rs` for `z3_install_is_usable`. On branches containing
+#524 (`z3_install_is_usable`, `InstallationStatus`), the exit code is
 meaningful, so assert on it as well as on the lines:
 
 - Usable bundled Z3 + runnable `llc` → exit 0, `🎉 Setup complete!`.
