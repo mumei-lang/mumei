@@ -366,8 +366,15 @@ fn install_z3(
             println!("  ✅ Z3 {}: already installed", build.version);
             return Ok(());
         }
-        fs::remove_dir_all(z3_dir)
-            .map_err(|e| SetupError::Io(format!("Failed to remove {}: {}", z3_dir.display(), e)))?;
+        if let Err(e) = fs::remove_dir_all(z3_dir) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                return Err(SetupError::Io(format!(
+                    "Failed to remove {}: {}",
+                    z3_dir.display(),
+                    e
+                )));
+            }
+        }
     }
 
     println!("  📦 Downloading Z3 {}...", build.version);
@@ -415,7 +422,7 @@ fn install_z3(
 
     let rename_result = fs::rename(&extracted, z3_dir);
     if let Err(e) = rename_result {
-        if e.kind() != std::io::ErrorKind::AlreadyExists || !z3_install_is_usable(z3_dir) {
+        if !z3_install_is_usable(z3_dir) {
             cleanup_staging(&staging_dir, &archive_path);
             return Err(SetupError::Io(format!(
                 "Failed to move {} -> {}: {}",
@@ -450,13 +457,19 @@ fn install_llvm(
     force: bool,
 ) -> Result<(), SetupError> {
     if llvm_dir.exists() {
-        if !force {
+        if !force && llvm_install_is_usable(llvm_dir) {
             println!("  ✅ LLVM {}: already installed", LLVM_VERSION);
             return Ok(());
         }
-        fs::remove_dir_all(llvm_dir).map_err(|e| {
-            SetupError::Io(format!("Failed to remove {}: {}", llvm_dir.display(), e))
-        })?;
+        if let Err(e) = fs::remove_dir_all(llvm_dir) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                return Err(SetupError::Io(format!(
+                    "Failed to remove {}: {}",
+                    llvm_dir.display(),
+                    e
+                )));
+            }
+        }
     }
 
     println!("  📦 Downloading LLVM {}...", LLVM_VERSION);
@@ -501,7 +514,7 @@ fn install_llvm(
     }
 
     if let Err(e) = fs::rename(&extracted, llvm_dir) {
-        if e.kind() != std::io::ErrorKind::AlreadyExists {
+        if !llvm_install_is_usable(llvm_dir) {
             cleanup_staging(&staging_dir, &archive_path);
             return Err(SetupError::Io(format!(
                 "Failed to move {} -> {}: {}",
@@ -684,6 +697,11 @@ fn z3_install_is_usable(z3_dir: &Path) -> bool {
         && z3_dir.join("include").join("z3.h").is_file()
         && z3_dir.join("bin").join(lib_name).is_file()
         && command_is_usable(&z3_dir.join("bin").join("z3"))
+}
+
+fn llvm_install_is_usable(llvm_dir: &Path) -> bool {
+    let llc = llvm_dir.join("bin").join("llc");
+    llc.is_file() && command_is_usable(&llc)
 }
 
 fn command_is_usable(bin: &Path) -> bool {
@@ -960,6 +978,64 @@ mod tests {
         permissions.set_mode(0o755);
         fs::set_permissions(dir.join("bin").join("z3"), permissions).unwrap();
         assert!(!z3_install_is_usable(&dir));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn partial_llvm_install_is_not_usable() {
+        let dir = std::env::temp_dir().join(format!(
+            "mumei-setup-test-{}-missing-llc",
+            std::process::id()
+        ));
+        fs::remove_dir_all(&dir).ok();
+        fs::create_dir_all(dir.join("bin")).unwrap();
+        assert!(!llvm_install_is_usable(&dir));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn llvm_install_with_failing_binary_is_not_usable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "mumei-setup-test-{}-failing-llc",
+            std::process::id()
+        ));
+        fs::remove_dir_all(&dir).ok();
+        fs::create_dir_all(dir.join("bin")).unwrap();
+        fs::write(dir.join("bin").join("llc"), b"#!/bin/sh\nexit 1\n").unwrap();
+        let mut permissions = fs::metadata(dir.join("bin").join("llc"))
+            .unwrap()
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(dir.join("bin").join("llc"), permissions).unwrap();
+        assert!(!llvm_install_is_usable(&dir));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn llvm_install_with_working_binary_is_usable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "mumei-setup-test-{}-working-llc",
+            std::process::id()
+        ));
+        fs::remove_dir_all(&dir).ok();
+        fs::create_dir_all(dir.join("bin")).unwrap();
+        fs::write(
+            dir.join("bin").join("llc"),
+            b"#!/bin/sh\necho 'LLVM version 18.1.8'\n",
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(dir.join("bin").join("llc"))
+            .unwrap()
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(dir.join("bin").join("llc"), permissions).unwrap();
+        assert!(llvm_install_is_usable(&dir));
         fs::remove_dir_all(&dir).ok();
     }
 }
