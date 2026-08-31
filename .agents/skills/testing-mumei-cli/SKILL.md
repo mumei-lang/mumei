@@ -889,7 +889,8 @@ says should work.
 
 ### Known rough edges (verify whether still present; may be pre-existing)
 
-- Fixed in 0.6.16+, still worth asserting: the "already installed" check tests
+- Fixed by #520 (after the 0.6.16 tag), still worth asserting: the
+  "already installed" check tests
   for `bin/z3`, and `verify_installation` checks exit status and non-empty
   stdout — a binary that dies with `GLIBC_2.38 not found` must print
   `⚠️  ... `--version` failed` with the loader error, never a blank `✅`.
