@@ -808,18 +808,20 @@ fresh box it is usually absent — then just `rm -rf ~/.mumei` at the end).
 
 ### Sandbox runs with `$HOME` instead of touching the real toolchain
 
-There is **no** `MUMEI_HOME` env var. `manifest::mumei_home()` is
-`dirs::home_dir()/.mumei`, and `dirs::home_dir()` honours `$HOME`, so each
-adversarial case can get its own throwaway home:
+`mumei setup` ignores `MUMEI_HOME` (only `scripts/install.sh` honours it):
+`manifest::mumei_home()` is `dirs::home_dir()/.mumei`, and `dirs::home_dir()`
+honours `$HOME`, so each adversarial case can get its own throwaway home:
 
 ```bash
-mkdir -p /tmp/mumei-home-case/.mumei/toolchains
-# symlink the already-downloaded LLVM so the ~700MB download is skipped
-ln -s ~/.mumei/toolchains/llvm-18.1.8 /tmp/mumei-home-case/.mumei/toolchains/llvm-18.1.8
-HOME=/tmp/mumei-home-case ./target/debug/mumei setup
+mkdir -p /home/$USER/mumei-home-case/.mumei/toolchains
+# hardlink-copy the already-downloaded LLVM so the ~700MB download is skipped
+cp -al ~/.mumei/toolchains/llvm-18.1.8 /home/$USER/mumei-home-case/.mumei/toolchains/
+HOME=/home/$USER/mumei-home-case ./target/debug/mumei setup
 ```
-Do one real-`$HOME` run first so a real LLVM dir exists to symlink; otherwise
-every sandbox case re-downloads hundreds of MB.
+Do one real-`$HOME` run first so a real LLVM dir exists to copy; otherwise
+every sandbox case re-downloads hundreds of MB. Use `cp -al`, never a symlinked
+directory — the installer may `remove_dir_all` the tree, and see the hardlink
+rationale below.
 
 ### Forcing any libc verdict by shadowing `ldd` on PATH
 
@@ -850,10 +852,10 @@ bash -c '. ~/.mumei/env
   for p in "$Z3_SYS_Z3_HEADER" "$Z3_SYS_Z3_LIB_DIR" "$Z3_SYS_Z3_LIB_DIR/libz3.so"; do
     [ -e "$p" ] && echo "EXISTS  $p" || echo "MISSING $p"; done'
 ```
-The script appends to `$CPATH`/`$LDFLAGS` etc. Since #524 every such export uses
-`${VAR:-}`, so sourcing under `set -u` must succeed; if it dies with
-`CPATH: parameter not set` on a current branch, that is a product regression
-(on builds predating #524 it is expected).
+The script appends to `$CPATH`/`$LDFLAGS` etc. On branches containing #524 every
+such export uses `${VAR:-}`, so sourcing under `set -u` must succeed; on builds
+without #524 (including `develop` until it merges) sourcing dies with
+`CPATH: parameter not set`, which is expected there.
 
 ### Prove the loader actually picks the toolchain libz3
 
@@ -938,10 +940,16 @@ chmod +x /tmp/mfb-nonet/curl
   is the way to test the LLVM-unusable branch; an `llvm-18.1.8/bin/` with any
   other file but no `llc` covers the "partial install" branch.
 
-### Exit-code and env-file contract after #524
+### Exit-code and env-file contract (only on branches containing #524)
 
-Since #524 (`z3_install_is_usable`, `InstallationStatus`) the exit code is
-meaningful, so assert on it as well as on the lines:
+**Scope:** #524 is not merged into `develop` yet. Without it the old behavior
+applies — setup exits 0 even when Z3/LLVM are unusable, partial trees are
+accepted as `already installed`, and the env file is not `set -u` safe. Check
+which side the branch under test is on first, e.g. by grepping `src/setup.rs`
+for `z3_install_is_usable`, or `git log --oneline develop..HEAD -- src/setup.rs`.
+
+On branches containing #524 (`z3_install_is_usable`, `InstallationStatus`) the
+exit code is meaningful, so assert on it as well as on the lines:
 
 - Usable bundled Z3 + runnable `llc` → exit 0, `🎉 Setup complete!`.
 - No bundled Z3 but working system `z3` on PATH → still exit 0, plus
@@ -998,12 +1006,14 @@ PATH harness dirs under `/tmp` may vanish between sessions (tmpfs / reboot);
 keep them next to the sandbox homes on disk (e.g. `/home/<user>/mst/mfb-net`)
 and re-create them at the start of every run.
 
-The `cargo-test` pre-commit hook is scoped to
-`cargo test --workspace --lib --bins`, which excludes `tests/` integration
-tests — including the flaky `escalation_candidate_diagnostic_carries_reason` in
-`tests/test_verify_json_diagnostics.rs` that used to hang the hook. That exact
-command does complete locally; `cargo test --bin mumei setup::` remains the
-focused installer-unit-test command.
+The checked-in `cargo-test` pre-commit hook on `develop` still runs plain
+`cargo test`, which includes `tests/test_verify_json_diagnostics.rs` and can
+hang there on `escalation_candidate_diagnostic_carries_reason` (nonlinear goal
+vs. Z3's soft `timeout`). #524 scopes the hook to
+`cargo test --workspace --lib --bins`, which excludes `tests/` integration tests
+and completes; read `.pre-commit-config.yaml` on the branch under test rather
+than assuming either scope. `cargo test --bin mumei setup::` remains the focused
+installer-unit-test command.
 
 ### Regression: `verify` must be unaffected by installer changes
 
