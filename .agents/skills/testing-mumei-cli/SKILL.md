@@ -794,3 +794,115 @@ Fixtures: `tests/test_capability_stage1.mm` (3 atoms, all must verify) and
   `Codegen Error: No such file or directory` when `<dir>` does not exist **and**
   verification was served from cache (`Verification: Skipped (unchanged, cached)`).
   Pre-existing on `origin/develop`; `mkdir -p` the output dir before building.
+
+## Toolchain installer (`mumei setup`) end-to-end testing
+
+Use this flow when changes touch `src/setup.rs` (Z3/LLVM version pins, `Z3Build`
+archive suffixes, `select_z3_build`, `detect_host_glibc`/`parse_glibc_version`,
+`generate_env_script`, `verify_installation`) or the `$z3Version` pin in
+`.github/workflows/release.yml`.
+
+`mumei setup` writes the **real** `~/.mumei`, which also holds toolchains other
+workflows use. Check whether it exists first and restore it afterwards (on a
+fresh box it is usually absent — then just `rm -rf ~/.mumei` at the end).
+
+### Sandbox runs with `$HOME` instead of touching the real toolchain
+
+`manifest::mumei_home()` is `dirs::home_dir()/.mumei`, and `dirs::home_dir()`
+honours `$HOME`, so each adversarial case can get its own throwaway home:
+
+```bash
+mkdir -p /tmp/mumei-home-case/.mumei/toolchains
+# symlink the already-downloaded LLVM so the ~700MB download is skipped
+ln -s ~/.mumei/toolchains/llvm-18.1.8 /tmp/mumei-home-case/.mumei/toolchains/llvm-18.1.8
+HOME=/tmp/mumei-home-case ./target/debug/mumei setup
+```
+Do one real-`$HOME` run first so a real LLVM dir exists to symlink; otherwise
+every sandbox case re-downloads hundreds of MB.
+
+### Forcing any libc verdict by shadowing `ldd` on PATH
+
+`detect_host_glibc()` shells out to `Cmd::new("ldd").arg("--version")`, resolved
+through PATH, so a stub script is the cheapest way to reach branches this host
+can't reach naturally:
+
+```bash
+mkdir -p /tmp/fakebin && printf '#!/bin/sh\necho "ldd (GNU libc) 2.17"\n' > /tmp/fakebin/ldd
+chmod +x /tmp/fakebin/ldd
+HOME=/tmp/mumei-home-old PATH=/tmp/fakebin:$PATH ./target/debug/mumei setup
+```
+Cases worth covering: musl-style output (`musl libc (x86_64)`) → undetectable
+libc branch; a version below every archive floor (2.17) → host rejected, and
+assert **no** `z3-*` dir is created and the generated env exports no
+`Z3_SYS_Z3_HEADER`/`Z3_SYS_Z3_LIB_DIR`/`CPATH`/`LD_LIBRARY_PATH`; and a *lying*
+high version (2.40 on an older host) → forces the newest archive, which then
+fails to exec.
+
+### Assert env-script paths exist, don't just eyeball them
+
+Upstream Z3 ZIPs ship `libz3.{so,dylib,a}` in **`bin/`**, not `lib/` — true for
+4.13.4, 4.14.1 and 5.1.0 alike — so any `<z3>/lib` in the generated env is a
+dead path. Source the script and stat everything:
+
+```bash
+bash -c '. ~/.mumei/env
+  for p in "$Z3_SYS_Z3_HEADER" "$Z3_SYS_Z3_LIB_DIR" "$Z3_SYS_Z3_LIB_DIR/libz3.so"; do
+    [ -e "$p" ] && echo "EXISTS  $p" || echo "MISSING $p"; done'
+```
+Note the script appends to `$CPATH`/`$LDFLAGS` etc., so a harness using
+`set -u` dies with `CPATH: unbound variable` — that is the harness's fault, not
+a product bug.
+
+### Prove the loader actually picks the toolchain libz3
+
+Distro Z3 and toolchain Z3 differ in version, which makes a decisive probe:
+
+```bash
+cat > /tmp/probe_z3.py <<'PY'
+import ctypes
+lib = ctypes.CDLL("libz3.so")
+lib.Z3_get_full_version.restype = ctypes.c_char_p
+print("version:", lib.Z3_get_full_version().decode())
+print("resolved:", [l.split()[-1] for l in open("/proc/self/maps") if "libz3" in l][0])
+PY
+env -u LD_LIBRARY_PATH python3 /tmp/probe_z3.py     # expect the system libz3
+bash -c '. ~/.mumei/env; python3 /tmp/probe_z3.py'  # expect the toolchain libz3
+```
+Running only the second half proves nothing — without the unset-baseline you
+cannot tell a working loader export from a coincidence.
+
+### Validating archive-name pins without installing anything
+
+Every `(version, arch, suffix)` combination the code can emit should be
+HEAD-checked, **plus a deliberately wrong suffix as a negative control** (GitHub
+returns 404 for missing assets, so a control proves the 200s mean something):
+
+```bash
+curl -sIL -o /dev/null -w '%{http_code}\n' \
+  https://github.com/Z3Prover/z3/releases/download/z3-5.1.0/z3-5.1.0-x64-glibc-2.39.zip
+```
+Archive **names** are build-image names and are not the real floor: verify the
+actual requirement with `objdump -T <libz3.so> | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1`
+(5.1.0's x64 archive is named `glibc-2.39` but only imports up to `GLIBC_2.38`).
+Check `GLIBCXX_`/`CXXABI_` too when a host fails to load a lib that glibc alone
+says should work.
+
+### Known rough edges (verify whether still present; may be pre-existing)
+
+- Fixed in 0.6.16+, still worth asserting: the "already installed" check tests
+  for `bin/z3`, and `verify_installation` checks exit status and non-empty
+  stdout — a binary that dies with `GLIBC_2.38 not found` must print
+  `⚠️  ... `--version` failed` with the loader error, never a blank `✅`.
+- A rejected host / failed Z3 install still exits 0 with `🎉 Setup complete!`;
+  assert on the specific `❌ Z3:` / `⚠️  Z3: not installed` lines, not exit code.
+
+### Regression: `verify` must be unaffected by installer changes
+
+`setup.rs` is not on the verification path, but prove it rather than assume:
+run all `std/*.mm` + `examples/*.mm` through both the branch binary and a
+`git worktree` build of the base, clearing `.mumei`/`.mumei_cache`/
+`.mumei_build_cache` (repo root **and** `std/`, `examples/`) before every single
+file, then diff the two `<file> exit=<code>` tables. On 0.6.16 twelve files fail
+identically on both sides — including `examples/libc_demo.mm` with exit **101**
+(a panic, not a verification failure) — so "some files fail" is expected; only a
+*difference* between the tables is a regression.
