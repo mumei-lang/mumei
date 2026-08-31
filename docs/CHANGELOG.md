@@ -2,6 +2,42 @@
 
 ---
 
+### 2026-08-30: Z3 toolchain 4.13.4 → 5.1.0
+
+- **Z3 5.1.0**: `mumei setup` and the Windows release job now install Z3 5.1.0,
+  which brings the rewritten monadic regex solver plus soundness fixes in
+  strings, quantified arrays, and bit-vectors — including cases that previously
+  returned a spurious `unknown`.
+- **Release-specific archive names**: upstream names each prebuilt archive after
+  its build image and changes the suffix every release, so `src/setup.rs` no
+  longer hard-codes `osx-13.7.1` / `glibc-2.35`; the OS, glibc suffixes, and
+  minimum glibc are pinned per release in `Z3Build`. This also fixes the Linux
+  aarch64 URL, which pointed at a `glibc-2.35` archive that upstream never
+  published for 4.13.4 (`arm64` builds ship as `glibc-2.34`).
+- **glibc fallback**: the 5.1.0 Linux archives import symbols up to
+  `GLIBC_2.38`, so `mumei setup` detects the host glibc and installs Z3 4.14.1
+  (`GLIBC_2.34`) on older distros instead of downloading an unusable binary.
+  Hosts below even that floor, and hosts where the libc cannot be identified,
+  no longer get a silently broken install.
+- **`Z3_SYS_Z3_LIB_DIR` fix**: the generated `~/.mumei/env` pointed at
+  `<toolchain>/lib`, which upstream archives do not contain — `libz3.so` and
+  `libz3.a` sit in `bin/`. Linking against the `mumei setup` toolchain could
+  not have worked. The env script now also exports a loader search path
+  (`LD_LIBRARY_PATH` / `DYLD_FALLBACK_LIBRARY_PATH`), since `z3-sys` links
+  libz3 dynamically, and omits every Z3 export when no bundled build is usable
+  instead of shadowing the system install with dead paths.
+- **Install verification**: `verify_installation` reported `✅` for any binary
+  that merely spawned, so a prebuilt `z3`/`llc` that dies on a missing shared
+  library printed a blank version as success; it now checks the exit status and
+  surfaces the loader error. The "already installed" short-circuit checks for
+  `bin/z3` rather than the directory, so a truncated toolchain re-installs.
+- **Bindings unchanged**: `z3` 0.12 / `z3-sys` 0.8 build and pass the full
+  `mumei-core` suite against libz3 5.1.0; the only C API removal in 5.x is
+  unused by Mumei, so no crate upgrade (and no `Context` API migration) is
+  needed.
+
+---
+
 ### 2026-08-30: v0.6.16 release version bump
 
 - **Workspace and member crate versions**: bumped versions from `0.6.12` to
