@@ -21,7 +21,7 @@
     },
     "z3_version": {
       "type": "string",
-      "description": "Z3 solver version, or 'unknown' if unavailable."
+      "description": "Version of the libz3 linked into the mumei binary that discharged the obligations, e.g. \"4.12.1\"."
     },
     "file": {
       "type": "string",

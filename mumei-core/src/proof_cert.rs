@@ -127,6 +127,21 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_get_z3_version_reports_linked_library() {
+        let (major, minor, build, _) = verification::linked_z3_version();
+        let version = get_z3_version();
+
+        assert_eq!(version, format!("{major}.{minor}.{build}"));
+        let components: Vec<&str> = version.split('.').collect();
+        assert_eq!(components.len(), 3);
+        assert!(components.iter().all(
+            |component| !component.is_empty() && component.chars().all(|c| c.is_ascii_digit())
+        ));
+        assert_ne!(version, "unknown");
+        assert!(!version.starts_with("Z3 version "));
+    }
+
     /// P5-A: generate_certificate produces valid JSON with proof_hash, dependencies, effects, requires, ensures
     #[test]
     fn test_generate_certificate_extended_fields() {
