@@ -1,0 +1,33 @@
+name: Set up Z3 4.14.1
+description: Install the upstream Z3 4.14.1 Linux x64 glibc toolchain (x86_64 runners only)
+
+runs:
+  using: composite
+  steps:
+    - name: Download and configure Z3 4.14.1
+      shell: bash
+      run: |
+        set -euo pipefail
+        archive_url="https://github.com/Z3Prover/z3/releases/download/z3-4.14.1/z3-4.14.1-x64-glibc-2.35.zip"
+        archive_path="$RUNNER_TEMP/z3-4.14.1-x64-glibc-2.35.zip"
+        extract_dir="$RUNNER_TEMP/mumei-z3-4.14.1"
+        rm -rf "$extract_dir"
+        mkdir -p "$extract_dir"
+        archive_sha256="76f797c849ae1487ce08840321d3334720434e0eb1a23e1bd755c3818ffb7265"
+        curl --fail --silent --show-error --location --retry 3 \
+          --output "$archive_path" "$archive_url"
+        echo "$archive_sha256  $archive_path" | sha256sum --check --strict
+        unzip -q "$archive_path" -d "$extract_dir"
+        z3_dir="$extract_dir/z3-4.14.1-x64-glibc-2.35"
+        test -x "$z3_dir/bin/z3"
+        test -f "$z3_dir/bin/libz3.so"
+        test -f "$z3_dir/include/z3.h"
+        library_path="$z3_dir/bin"
+        if [ -n "${LD_LIBRARY_PATH:-}" ]; then
+          library_path="$library_path:$LD_LIBRARY_PATH"
+        fi
+        {
+          echo "Z3_SYS_Z3_HEADER=$z3_dir/include/z3.h"
+          echo "Z3_SYS_Z3_LIB_DIR=$z3_dir/bin"
+          echo "LD_LIBRARY_PATH=$library_path"
+        } >> "$GITHUB_ENV"

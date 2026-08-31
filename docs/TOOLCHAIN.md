@@ -81,7 +81,10 @@ mumei verify --task-id ci-shard-17 --solver-timeout 30000 --cache-scope module s
 ```
 
 - `--task-id` writes the logical task ID into verification reports and proof-certificate solver metadata.
-- `--solver-timeout` overrides `[proof].timeout_ms` for the current verification run.
+- `--solver-timeout` overrides `[proof].timeout_ms` for the current verification run. It is a hard
+  bound on spec-health checks only when the linked libz3 is 4.14 or newer, because older versions
+  ignore the solver interrupt used to enforce it; `mumei verify` warns once on stderr when the
+  linked library is older. See `docs/SPEC_HEALTH_TIMEOUT_STUDY.md`.
 - `--cache-scope module` keeps `.mumei/cache/verification_cache.json` beside the input module directory; `global` shares the cache from the current workspace root.
 
 ---
@@ -178,7 +181,7 @@ Published package structure:
 │           └── .mumei/cache/verification_cache.json  ← proof artifact
 ├── registry.json                     ← package index
 └── toolchains/
-    ├── z3-4.13.4/
+    ├── z3-5.1.0/
     └── llvm-17.1.8/
 ```
 
@@ -260,6 +263,23 @@ mumei setup --force    # re-download even if installed
 source ~/.mumei/env    # apply environment variables
 ```
 
+Z3 target version is **5.1.0**. Upstream names each prebuilt archive after the
+image it was built on (`z3-5.1.0-x64-glibc-2.39`, `z3-5.1.0-arm64-osx-13.3`),
+and their `libz3.so` imports symbols up to `GLIBC_2.38` on both architectures.
+On older hosts (Ubuntu 22.04, RHEL 9, Debian 12) `mumei setup` reports the
+mismatch and installs Z3 4.14.1 instead, whose archives only need `GLIBC_2.34`;
+hosts older than that get an error pointing at the system package instead of an
+unusable binary. To run 5.1.0 on an old host, build Z3 from source and point
+`Z3_SYS_Z3_HEADER` / `Z3_SYS_Z3_LIB_DIR` at it; the `z3` 0.12 / `z3-sys` 0.8
+bindings work unchanged against both.
+
+Note that the generated `~/.mumei/env` points `Z3_SYS_Z3_LIB_DIR`,
+`LIBRARY_PATH` and the loader search path (`LD_LIBRARY_PATH`, or
+`DYLD_FALLBACK_LIBRARY_PATH` on macOS) at `<toolchain>/bin`: upstream archives
+ship `libz3.so` / `libz3.a` next to the `z3` executable and contain no `lib/`
+directory. When no prebuilt archive is usable, the env script omits the Z3
+exports entirely so the system installation stays in effect.
+
 ---
 
 ## MCP parallel verification and cache isolation (P8-F)
@@ -307,12 +327,12 @@ Inspects all tools with multi-path std library search (cwd → exe dir → `MUME
 ```
 🔍 Mumei Inspect: checking development environment...
   Mumei compiler: v0.2.0
-  ✅ Z3: Z3 version 4.13.4
+  ✅ Z3: Z3 version 5.1.0
   ✅ LLVM: LLVM version 18.1.8
   ✅ Rust: rustc 1.82.0
   ✅ std library: 7/7 modules found (std)
   ✅ mumei.toml: my_project v0.1.0
-  ✅ ~/.mumei/toolchains: llvm-17.1.8, z3-4.13.4
+  ✅ ~/.mumei/toolchains: llvm-17.1.8, z3-5.1.0
 ✅ Inspect: 7 ok — all tools available
 ```
 

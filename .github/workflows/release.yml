@@ -307,7 +307,7 @@ jobs:
           echo "LIBCLANG_PATH=$llvmDir\bin" >> $env:GITHUB_ENV
           echo "PATH=$llvmDir\bin;$env:PATH" >> $env:GITHUB_ENV
           # Install Z3 pre-built release (faster than vcpkg source build)
-          $z3Version = "4.13.4"
+          $z3Version = "5.1.0"
           $z3Archive = "z3-$z3Version-x64-win"
           $z3Url = "https://github.com/Z3Prover/z3/releases/download/z3-$z3Version/$z3Archive.zip"
           $z3Dir = "$env:RUNNER_TEMP\z3"

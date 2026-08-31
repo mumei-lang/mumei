@@ -8,10 +8,14 @@ use super::translator::{
 };
 use super::types::Env;
 use super::SpecContradiction;
-use super::{parse_expression, Atom, Bool, Config, Dynamic, HashMap, Int, SatResult, Solver};
+use super::{
+    parse_expression, Atom, Bool, Config, Context, Dynamic, HashMap, Int, SatResult, Solver,
+};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::sync::{Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpecValidationResult {
@@ -90,12 +94,70 @@ pub fn calculate_traceability_hash(atom: &Atom) -> String {
 /// Default per-solver-call budget for spec validation when the caller does not
 /// supply one.
 pub const DEFAULT_SPEC_VALIDATION_TIMEOUT_MS: u64 = 5000;
+// Z3's soft timeout gets first chance; interrupt is fallback for goals that never reach a decision point.
+const SOLVER_INTERRUPT_GRACE_MS: u64 = 500;
+
+/// Lowest linked libz3 that honours `ContextHandle::interrupt()`, which is what makes
+/// `--solver-timeout` a hard bound on spec-health checks.
+pub const MIN_HARD_TIMEOUT_Z3_VERSION: (u32, u32) = (4, 14);
+
+/// Return the linked libz3 version as `(major, minor, build, revision)`.
+pub fn linked_z3_version() -> (u32, u32, u32, u32) {
+    let mut major = 0;
+    let mut minor = 0;
+    let mut build = 0;
+    let mut revision = 0;
+    unsafe {
+        z3_sys::Z3_get_version(&mut major, &mut minor, &mut build, &mut revision);
+    }
+    (major, minor, build, revision)
+}
+
+/// Whether the linked libz3 reliably enforces the interrupt-backed deadline.
+pub fn solver_timeout_is_hard() -> bool {
+    let (major, minor, _, _) = linked_z3_version();
+    (major, minor) >= MIN_HARD_TIMEOUT_Z3_VERSION
+}
 
 pub fn check_spec_satisfiability(
     atom: &Atom,
     module_env: &ModuleEnv,
 ) -> Result<SpecValidationResult, SpecContradiction> {
     check_spec_satisfiability_with_property_based(atom, module_env, None, false)
+}
+
+fn check_with_deadline(solver: &Solver<'_>, ctx: &Context, timeout_ms: u64) -> SatResult {
+    let handle = ctx.handle();
+    let done = Mutex::new(false);
+    let wake = Condvar::new();
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let deadline = Instant::now()
+                + Duration::from_millis(timeout_ms.saturating_add(SOLVER_INTERRUPT_GRACE_MS));
+            let mut done_guard = done.lock().expect("solver watchdog mutex poisoned");
+            while !*done_guard {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    drop(done_guard);
+                    handle.interrupt();
+                    return;
+                }
+                let (guard, wait_result) = wake
+                    .wait_timeout_while(done_guard, remaining, |finished| !*finished)
+                    .expect("solver watchdog condvar poisoned");
+                done_guard = guard;
+                if wait_result.timed_out() && !*done_guard {
+                    drop(done_guard);
+                    handle.interrupt();
+                    return;
+                }
+            }
+        });
+        let result = solver.check();
+        *done.lock().expect("solver watchdog mutex poisoned") = true;
+        wake.notify_one();
+        result
+    })
 }
 
 pub fn check_spec_satisfiability_with_property_based(
@@ -149,7 +211,7 @@ pub fn check_spec_satisfiability_with_timeout(
             }
         };
 
-    if solver.check() == SatResult::Unsat {
+    if check_with_deadline(&solver, &ctx, timeout_ms) == SatResult::Unsat {
         return Err(SpecContradiction::new(
             &atom.name,
             "requires_unsat",
@@ -211,7 +273,7 @@ pub fn check_spec_satisfiability_with_timeout(
                 push_skip_warning(&mut diagnostics, warning);
             }
         }
-        if local_solver.check() == SatResult::Unsat {
+        if check_with_deadline(&local_solver, &ctx, timeout_ms) == SatResult::Unsat {
             return Err(SpecContradiction::new(
                 &atom.name,
                 "ensures_unsat",
@@ -250,7 +312,7 @@ pub fn check_spec_satisfiability_with_timeout(
                 push_skip_warning(&mut diagnostics, warning);
             }
         }
-        if combined_solver.check() == SatResult::Unsat {
+        if check_with_deadline(&combined_solver, &ctx, timeout_ms) == SatResult::Unsat {
             let mut constraints = Vec::with_capacity(ensure_clauses.len() + 1);
             constraints.push(atom.requires.clone());
             constraints.extend(ensure_clauses.clone());
@@ -300,7 +362,7 @@ pub fn check_spec_satisfiability_with_timeout(
                 continue;
             }
             implication_checks += 1;
-            if local_solver.check() == SatResult::Unsat {
+            if check_with_deadline(&local_solver, &ctx, timeout_ms) == SatResult::Unsat {
                 diagnostics.push(format!(
                     "ensures clause {} implies clause {} under requires",
                     left_index + 1,
@@ -617,7 +679,7 @@ fn check_standalone_refinements(
                 )
             },
         )?;
-        if solver.check() == SatResult::Unsat {
+        if check_with_deadline(&solver, &ctx, timeout_ms) == SatResult::Unsat {
             return Err(SpecContradiction::new(
                 &atom.name,
                 "refinement_unsat",
@@ -963,5 +1025,87 @@ atom passthrough_clean(x: i64) -> i64
         assert_eq!(result.status, "satisfiable");
         assert!(result.checked_requires);
         assert_eq!(result.checked_ensures, 1);
+    }
+
+    #[test]
+    fn interrupted_solver_context_remains_usable() {
+        use z3::ast::Ast;
+
+        let cfg = Config::new();
+        let ctx = Context::new(&cfg);
+        let solver = Solver::new(&ctx);
+        let a = Int::new_const(&ctx, "interrupt_a");
+        let b = Int::new_const(&ctx, "interrupt_b");
+        let c = Int::new_const(&ctx, "interrupt_c");
+        let n = Int::new_const(&ctx, "interrupt_n");
+        let result = Int::new_const(&ctx, "interrupt_result");
+        let lhs = &a * &a * &a + &b * &b * &b * &c;
+        let rhs = &c * &c * &c * &a * &b + &n * &n * &n * &a;
+        solver.assert(&a.gt(&Int::from_i64(&ctx, 0)));
+        solver.assert(&b.gt(&Int::from_i64(&ctx, 0)));
+        solver.assert(&c.gt(&Int::from_i64(&ctx, 0)));
+        solver.assert(&n.gt(&Int::from_i64(&ctx, 2)));
+        solver.assert(&n.lt(&Int::from_i64(&ctx, 10)));
+        solver.assert(&result.ge(&Int::from_i64(&ctx, 0)));
+        solver.assert(&lhs._eq(&rhs).not());
+        solver.assert(&a.gt(&Int::from_i64(&ctx, 1)));
+        solver.assert(&b.gt(&Int::from_i64(&ctx, 1)));
+        solver.assert(&(&a * &b)._eq(&Int::from_i64(&ctx, 2_305_843_009_213_693_951)));
+
+        assert_eq!(
+            check_with_deadline(&solver, &ctx, 1),
+            SatResult::Unknown,
+            "hard nonlinear check should be interrupted"
+        );
+
+        let recovery_solver = Solver::new(&ctx);
+        recovery_solver.assert(&Int::from_i64(&ctx, 0)._eq(&Int::from_i64(&ctx, 1)));
+        assert_eq!(
+            check_with_deadline(&recovery_solver, &ctx, 1000),
+            SatResult::Unsat,
+            "the context should remain usable after an interrupt"
+        );
+    }
+
+    #[test]
+    fn hard_nonlinear_spec_validation_respects_timeout() {
+        // Guards the pre-#523 escalation_candidate_diagnostic_carries_reason hang;
+        // Z3 versions below 4.14 ignore the interrupt used by this regression.
+        const HARD_NONLINEAR_CHECK_COUNT: usize = 6;
+        const HARD_NONLINEAR_REGRESSION_BOUND_SECS: u64 = 5;
+        let (major, minor, build, revision) = linked_z3_version();
+        if !solver_timeout_is_hard() {
+            eprintln!(
+                "skipping hard nonlinear timeout regression on Z3 {major}.{minor}.{build}.{revision}: \
+                 Z3 < 4.14 ignores ContextHandle::interrupt"
+            );
+            return;
+        }
+
+        let atom = parse_atom(
+            r#"
+atom hard_nonlinear(a: i64, b: i64, c: i64, n: i64) -> i64
+  requires: a > 0 && b > 0 && c > 0 && n > 2 && n < 10;
+  ensures: result >= 0 && a * a * a + b * b * b * c != c * c * c * a * b + n * n * n * a;
+  body: a + b + c;
+"#,
+        );
+        let started = Instant::now();
+        let result =
+            check_spec_satisfiability_with_timeout(&atom, &ModuleEnv::new(), None, false, 1);
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < Duration::from_secs(HARD_NONLINEAR_REGRESSION_BOUND_SECS),
+            "hard nonlinear spec validation exceeded the timeout bound for the \
+             pre-#523 escalation_candidate_diagnostic_carries_reason hang: {:?} \
+             (observed across {HARD_NONLINEAR_CHECK_COUNT} sequential checks; bound: {}s)",
+            elapsed,
+            HARD_NONLINEAR_REGRESSION_BOUND_SECS
+        );
+        assert!(
+            result.is_ok(),
+            "an interrupted nonlinear check should not report a contradiction: {result:?}"
+        );
     }
 }

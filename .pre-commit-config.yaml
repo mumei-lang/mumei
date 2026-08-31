@@ -22,8 +22,8 @@ repos:
         types: [rust]
         pass_filenames: false
       - id: cargo-test
-        name: cargo test (parser)
-        entry: cargo test
+        name: cargo test (lib + bins)
+        entry: cargo test --workspace --lib --bins
         language: system
         types: [rust]
         pass_filenames: false

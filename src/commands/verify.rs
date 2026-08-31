@@ -12,6 +12,9 @@ use mumei_core::{
 };
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
+use std::sync::Once;
+
+static LINKED_Z3_WARNING: Once = Once::new();
 
 pub(crate) fn cmd_verify_command(command: Command) {
     // Attach parent OTel context from TRACEPARENT/TRACESTATE env vars so that
@@ -58,6 +61,16 @@ pub(crate) fn cmd_verify_command(command: Command) {
     else {
         unreachable!("cmd_verify_command called with non-verify command");
     };
+    if !verification::solver_timeout_is_hard() {
+        LINKED_Z3_WARNING.call_once(|| {
+            let (major, minor, build, _) = verification::linked_z3_version();
+            eprintln!(
+                "⚠️  linked Z3 {major}.{minor}.{build} ignores solver interrupts: \
+                 --solver-timeout is not a hard bound for spec-health checks \
+                 (needs Z3 >= 4.14). See docs/SPEC_HEALTH_TIMEOUT_STUDY.md"
+            );
+        });
+    }
     let allow_lean_verified = allow_lean_verified || escalate_lean;
     let no_emit_escalation_metrics = no_emit.iter().any(|target| target == "escalation-metrics");
     if let Some(other) = no_emit
