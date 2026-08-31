@@ -2,6 +2,17 @@
 
 ---
 
+### 2026-08-31: v0.6.18 release version bump
+
+- **Workspace and member crate versions**: bumped versions from `0.6.17` to
+  `0.6.18` so `mumei --version`, `mumei inspect`, and proof-certificate
+  `mumei_version` match the release tag before tagging.
+- **Install references**: synced the README and README_JA pinned install
+  examples on `v0.6.18`, along with the Homebrew formula template and
+  `install.sh` help examples.
+
+---
+
 ### 2026-08-30: v0.6.17 release version bump
 
 - **Workspace and member crate versions**: bumped versions from `0.6.16` to
