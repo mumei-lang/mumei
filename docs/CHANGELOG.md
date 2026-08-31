@@ -2,6 +2,17 @@
 
 ---
 
+### 2026-08-30: v0.6.17 release version bump
+
+- **Workspace and member crate versions**: bumped versions from `0.6.16` to
+  `0.6.17` so `mumei --version`, `mumei inspect`, and proof-certificate
+  `mumei_version` match the release tag before tagging.
+- **Install references**: synced the README and README_JA pinned install
+  examples on `v0.6.17`, along with the Homebrew formula template and
+  `install.sh` help examples.
+
+---
+
 ### 2026-08-30: Z3 toolchain 4.13.4 → 5.1.0
 
 - **Z3 5.1.0**: `mumei setup` and the Windows release job now install Z3 5.1.0,

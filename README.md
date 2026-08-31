@@ -87,7 +87,7 @@ With `cargo build --features otel` and `OTEL_ENABLED=true`, `mumei verify` expor
 ```bash
 curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash
 brew install mumei-lang/mumei/mumei
-curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash -s -- --version v0.6.16
+curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash -s -- --version v0.6.17
 ```
 
 See [Releases](https://github.com/mumei-lang/mumei/releases) for older versions. No Rust toolchain is required; OS/arch is detected automatically.

@@ -1,6 +1,6 @@
 [package]
 name = "mumei-emit-json"
-version = "0.6.16"
+version = "0.6.17"
 edition = "2021"
 description = "Verified JSON metadata emitter for the Mumei compiler"
 license = "Apache-2.0"
