@@ -270,9 +270,12 @@ unusable binary. To run 5.1.0 on an old host, build Z3 from source and point
 `Z3_SYS_Z3_HEADER` / `Z3_SYS_Z3_LIB_DIR` at it; the `z3` 0.12 / `z3-sys` 0.8
 bindings work unchanged against both.
 
-Note that the generated `~/.mumei/env` points `Z3_SYS_Z3_LIB_DIR` at
-`<toolchain>/bin`: upstream archives ship `libz3.so` / `libz3.a` next to the
-`z3` executable and contain no `lib/` directory.
+Note that the generated `~/.mumei/env` points `Z3_SYS_Z3_LIB_DIR`,
+`LIBRARY_PATH` and the loader search path (`LD_LIBRARY_PATH`, or
+`DYLD_FALLBACK_LIBRARY_PATH` on macOS) at `<toolchain>/bin`: upstream archives
+ship `libz3.so` / `libz3.a` next to the `z3` executable and contain no `lib/`
+directory. When no prebuilt archive is usable, the env script omits the Z3
+exports entirely so the system installation stays in effect.
 
 ---
 

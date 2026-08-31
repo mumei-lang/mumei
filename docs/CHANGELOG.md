@@ -22,7 +22,10 @@
 - **`Z3_SYS_Z3_LIB_DIR` fix**: the generated `~/.mumei/env` pointed at
   `<toolchain>/lib`, which upstream archives do not contain — `libz3.so` and
   `libz3.a` sit in `bin/`. Linking against the `mumei setup` toolchain could
-  not have worked.
+  not have worked. The env script now also exports a loader search path
+  (`LD_LIBRARY_PATH` / `DYLD_FALLBACK_LIBRARY_PATH`), since `z3-sys` links
+  libz3 dynamically, and omits every Z3 export when no bundled build is usable
+  instead of shadowing the system install with dead paths.
 - **Bindings unchanged**: `z3` 0.12 / `z3-sys` 0.8 build and pass the full
   `mumei-core` suite against libz3 5.1.0; the only C API removal in 5.x is
   unused by Mumei, so no crate upgrade (and no `Context` API migration) is
