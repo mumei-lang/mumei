@@ -854,8 +854,8 @@ bash -c '. ~/.mumei/env
 ```
 The script appends to `$CPATH`/`$LDFLAGS` etc. On branches containing #524 every
 such export uses `${VAR:-}`, so sourcing under `set -u` must succeed; on builds
-without #524 (including `develop` until it merges) sourcing dies with
-`CPATH: parameter not set`, which is expected there.
+without #524 (which is merged into `develop`, so only older tags/branches)
+sourcing dies with `CPATH: parameter not set`, which is expected there.
 
 ### Prove the loader actually picks the toolchain libz3
 
@@ -942,11 +942,12 @@ chmod +x /tmp/mfb-nonet/curl
 
 ### Exit-code and env-file contract (only on branches containing #524)
 
-**Scope:** #524 is not merged into `develop` yet. Without it the old behavior
-applies — setup exits 0 even when Z3/LLVM are unusable, partial trees are
-accepted as `already installed`, and the env file is not `set -u` safe. Check
-which side the branch under test is on first, e.g. by grepping `src/setup.rs`
-for `z3_install_is_usable`, or `git log --oneline develop..HEAD -- src/setup.rs`.
+**Scope:** #524 is merged into `develop`, so this applies to `develop` and
+anything branched from it after the merge — but not to older tags/branches
+(e.g. 0.6.16), where setup exits 0 even when Z3/LLVM are unusable, partial trees
+are accepted as `already installed`, and the env file is not `set -u` safe.
+Check which side the build under test is on by grepping `src/setup.rs` for
+`z3_install_is_usable`.
 
 On branches containing #524 (`z3_install_is_usable`, `InstallationStatus`) the
 exit code is meaningful, so assert on it as well as on the lines:
@@ -1006,12 +1007,13 @@ PATH harness dirs under `/tmp` may vanish between sessions (tmpfs / reboot);
 keep them next to the sandbox homes on disk (e.g. `/home/<user>/mst/mfb-net`)
 and re-create them at the start of every run.
 
-The checked-in `cargo-test` pre-commit hook on `develop` still runs plain
-`cargo test`, which includes `tests/test_verify_json_diagnostics.rs` and can
-hang there on `escalation_candidate_diagnostic_carries_reason` (nonlinear goal
-vs. Z3's soft `timeout`). #524 scopes the hook to
+Since #524 the `cargo-test` pre-commit hook is scoped to
 `cargo test --workspace --lib --bins`, which excludes `tests/` integration tests
-and completes; read `.pre-commit-config.yaml` on the branch under test rather
+and completes locally. Older branches run plain `cargo test`, which includes
+`tests/test_verify_json_diagnostics.rs` and can hang on
+`escalation_candidate_diagnostic_carries_reason` (nonlinear goal vs. Z3's soft
+`timeout`; #527 bounds it, but only on Z3 >= 4.14 — a distro Z3 4.8.12 ignores
+the interrupt). Read `.pre-commit-config.yaml` on the branch under test rather
 than assuming either scope. `cargo test --bin mumei setup::` remains the focused
 installer-unit-test command.
 
