@@ -26,6 +26,11 @@
   (`LD_LIBRARY_PATH` / `DYLD_FALLBACK_LIBRARY_PATH`), since `z3-sys` links
   libz3 dynamically, and omits every Z3 export when no bundled build is usable
   instead of shadowing the system install with dead paths.
+- **Install verification**: `verify_installation` reported `✅` for any binary
+  that merely spawned, so a prebuilt `z3`/`llc` that dies on a missing shared
+  library printed a blank version as success; it now checks the exit status and
+  surfaces the loader error. The "already installed" short-circuit checks for
+  `bin/z3` rather than the directory, so a truncated toolchain re-installs.
 - **Bindings unchanged**: `z3` 0.12 / `z3-sys` 0.8 build and pass the full
   `mumei-core` suite against libz3 5.1.0; the only C API removal in 5.x is
   unused by Mumei, so no crate upgrade (and no `Context` API migration) is

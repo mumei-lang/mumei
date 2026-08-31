@@ -328,7 +328,7 @@ fn install_z3(
     force: bool,
 ) -> Result<(), SetupError> {
     if z3_dir.exists() {
-        if !force {
+        if !force && z3_dir.join("bin").join("z3").exists() {
             println!("  ✅ Z3 {}: already installed", build.version);
             return Ok(());
         }
@@ -496,13 +496,7 @@ fn verify_installation(z3_dir: Option<&Path>, llvm_dir: &Path) {
     println!("🔍 Verifying toolchain...");
 
     match z3_dir.map(|d| d.join("bin").join("z3")) {
-        Some(z3_bin) if z3_bin.exists() => match Cmd::new(&z3_bin).arg("--version").output() {
-            Ok(o) => {
-                let s = String::from_utf8_lossy(&o.stdout);
-                println!("  ✅ Z3 (toolchain): {}", s.trim());
-            }
-            Err(e) => println!("  ⚠️  Z3 (toolchain) exists but failed to run: {}", e),
-        },
+        Some(z3_bin) if z3_bin.exists() => report_version("Z3 (toolchain)", &z3_bin),
         Some(z3_bin) => {
             println!("  ⚠️  Z3 (toolchain): not found at {}", z3_bin.display());
         }
@@ -512,17 +506,38 @@ fn verify_installation(z3_dir: Option<&Path>, llvm_dir: &Path) {
     // llc は LLVM アーカイブに入っている想定
     let llc_bin = llvm_dir.join("bin").join("llc");
     if llc_bin.exists() {
-        let out = Cmd::new(&llc_bin).arg("--version").output();
-        match out {
-            Ok(o) => {
-                let s = String::from_utf8_lossy(&o.stdout);
-                let first = s.lines().next().unwrap_or("");
-                println!("  ✅ LLVM (toolchain): {}", first.trim());
-            }
-            Err(e) => println!("  ⚠️  LLVM (toolchain) exists but failed to run: {}", e),
-        }
+        report_version("LLVM (toolchain)", &llc_bin);
     } else {
         println!("  ⚠️  LLVM (toolchain): not found at {}", llc_bin.display());
+    }
+}
+
+/// A binary that spawns but exits non-zero or prints nothing is broken (e.g. a
+/// prebuilt archive whose shared library requirements the host cannot satisfy),
+/// so it must not be reported as a working install.
+fn report_version(label: &str, bin: &Path) {
+    match Cmd::new(bin).arg("--version").output() {
+        Ok(o) => {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            let version = stdout.lines().next().unwrap_or("").trim();
+            if o.status.success() && !version.is_empty() {
+                println!("  ✅ {}: {}", label, version);
+            } else {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                println!(
+                    "  ⚠️  {}: {} exists but `--version` failed ({}){}",
+                    label,
+                    bin.display(),
+                    o.status,
+                    stderr
+                        .lines()
+                        .next()
+                        .map(|l| format!(": {}", l.trim()))
+                        .unwrap_or_default()
+                );
+            }
+        }
+        Err(e) => println!("  ⚠️  {} exists but failed to run: {}", label, e),
     }
 }
 
