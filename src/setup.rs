@@ -9,8 +9,7 @@
 //! ~/.mumei/
 //! ├── toolchains/
 //! │   ├── z3-{version}/
-//! │   │   ├── bin/z3
-//! │   │   ├── lib/libz3.{so,dylib}
+//! │   │   ├── bin/z3, bin/libz3.{so,dylib,a}
 //! │   │   └── include/z3.h
 //! │   └── llvm-{version}/
 //! │       ├── bin/llc
@@ -25,8 +24,43 @@ use std::process::Command as Cmd;
 // =============================================================================
 // バージョン定数
 // =============================================================================
-const Z3_VERSION: &str = "4.13.4";
 const LLVM_VERSION: &str = "18.1.8";
+
+/// Upstream Z3 prebuilt archives are named after the image they were built on
+/// (`z3-{version}-{arch}-{osx-<ver>|glibc-<ver>}`), and the suffix changes
+/// between releases, so every field is pinned per release. The `min_glibc`
+/// values are the highest `GLIBC_` symbol version `bin/libz3.so` actually
+/// imports (`objdump -T`), which can be lower than the name of the archive.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Z3Build {
+    version: &'static str,
+    macos_suffix: &'static str,
+    linux_x64_suffix: &'static str,
+    linux_x64_min_glibc: (u32, u32),
+    linux_arm64_suffix: &'static str,
+    linux_arm64_min_glibc: (u32, u32),
+}
+
+/// Z3 5.1.0: monadic regex solver, string/quantified-array soundness fixes.
+const Z3_BUILD: Z3Build = Z3Build {
+    version: "5.1.0",
+    macos_suffix: "osx-13.3",
+    linux_x64_suffix: "glibc-2.39",
+    linux_x64_min_glibc: (2, 38),
+    linux_arm64_suffix: "glibc-2.38",
+    linux_arm64_min_glibc: (2, 38),
+};
+
+/// Last release with prebuilt archives for glibc 2.34/2.35 hosts
+/// (Ubuntu 22.04, RHEL 9, Debian 12).
+const Z3_LEGACY_BUILD: Z3Build = Z3Build {
+    version: "4.14.1",
+    macos_suffix: "osx-13.7.4",
+    linux_x64_suffix: "glibc-2.35",
+    linux_x64_min_glibc: (2, 34),
+    linux_arm64_suffix: "glibc-2.34",
+    linux_arm64_min_glibc: (2, 34),
+};
 
 // =============================================================================
 // エラー型
@@ -92,20 +126,29 @@ impl Platform {
         };
         Ok(Platform { os, arch })
     }
-    fn z3_archive_name(&self) -> String {
-        match (self.os, self.arch) {
-            (Os::MacOS, Arch::Aarch64) => format!("z3-{}-arm64-osx-13.7.1", Z3_VERSION),
-            (Os::MacOS, Arch::X86_64) => format!("z3-{}-x64-osx-13.7.1", Z3_VERSION),
-            (Os::Linux, Arch::X86_64) => format!("z3-{}-x64-glibc-2.35", Z3_VERSION),
-            (Os::Linux, Arch::Aarch64) => format!("z3-{}-arm64-glibc-2.35", Z3_VERSION),
-        }
+    fn z3_archive_name(&self, build: &Z3Build) -> String {
+        let (arch, suffix) = match (self.os, self.arch) {
+            (Os::MacOS, Arch::Aarch64) => ("arm64", build.macos_suffix),
+            (Os::MacOS, Arch::X86_64) => ("x64", build.macos_suffix),
+            (Os::Linux, Arch::X86_64) => ("x64", build.linux_x64_suffix),
+            (Os::Linux, Arch::Aarch64) => ("arm64", build.linux_arm64_suffix),
+        };
+        format!("z3-{}-{}-{}", build.version, arch, suffix)
     }
-    fn z3_download_url(&self) -> String {
-        let archive = self.z3_archive_name();
+    fn z3_download_url(&self, build: &Z3Build) -> String {
         format!(
             "https://github.com/Z3Prover/z3/releases/download/z3-{}/{}.zip",
-            Z3_VERSION, archive
+            build.version,
+            self.z3_archive_name(build)
         )
+    }
+    /// Minimum glibc the prebuilt Linux archive of `build` was linked against.
+    fn required_glibc(&self, build: &Z3Build) -> Option<(u32, u32)> {
+        match (self.os, self.arch) {
+            (Os::MacOS, _) => None,
+            (Os::Linux, Arch::X86_64) => Some(build.linux_x64_min_glibc),
+            (Os::Linux, Arch::Aarch64) => Some(build.linux_arm64_min_glibc),
+        }
     }
     fn llvm_archive_name(&self) -> String {
         match (self.os, self.arch) {
@@ -165,11 +208,26 @@ pub fn run(force: bool) {
     }
 
     // --- Z3 ---
-    let z3_dir = toolchains_dir.join(format!("z3-{}", Z3_VERSION));
-    if let Err(e) = install_z3(&platform, &toolchains_dir, &z3_dir, force) {
-        eprintln!("  ❌ Z3 install failed: {}", e);
-        eprintln!("     Fallback: install from system package manager (e.g. brew/apt) and re-run.");
-    }
+    let z3_build = match select_z3_build(&platform, detect_host_glibc()) {
+        Ok(build) => Some(build),
+        Err(e) => {
+            eprintln!("  ❌ Z3: {}", e);
+            None
+        }
+    };
+    let z3_dir = z3_build.and_then(|build| {
+        let dir = toolchains_dir.join(format!("z3-{}", build.version));
+        match install_z3(&platform, &build, &toolchains_dir, &dir, force) {
+            Ok(()) => Some(dir),
+            Err(e) => {
+                eprintln!("  ❌ Z3 install failed: {}", e);
+                eprintln!(
+                    "     Fallback: install from system package manager (e.g. brew/apt) and re-run."
+                );
+                None
+            }
+        }
+    });
 
     // --- LLVM ---
     let llvm_dir = toolchains_dir.join(format!("llvm-{}", LLVM_VERSION));
@@ -179,40 +237,113 @@ pub fn run(force: bool) {
     }
 
     // --- env スクリプト生成 ---
-    if let Err(e) = generate_env_script(&mumei_home, &z3_dir, &llvm_dir) {
+    if let Err(e) = generate_env_script(&mumei_home, z3_dir.as_deref(), &llvm_dir) {
         eprintln!("  ⚠️  Failed to generate env script: {}", e);
     }
 
     // --- 簡易検証 ---
-    verify_installation(&z3_dir, &llvm_dir);
+    verify_installation(z3_dir.as_deref(), &llvm_dir);
 
     println!();
     println!("🎉 Setup complete!");
     println!("   Run: source ~/.mumei/env");
 }
 
+/// Read the host glibc version from `ldd --version`.
+fn detect_host_glibc() -> Option<(u32, u32)> {
+    if std::env::consts::OS != "linux" {
+        return None;
+    }
+    let out = Cmd::new("ldd").arg("--version").output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    parse_glibc_version(&text)
+}
+
+fn parse_glibc_version(ldd_output: &str) -> Option<(u32, u32)> {
+    let first = ldd_output.lines().next()?;
+    let version = first.split_whitespace().last()?;
+    let (major, minor) = version.split_once('.')?;
+    let minor = minor
+        .split(|c: char| !c.is_ascii_digit())
+        .next()
+        .unwrap_or(minor);
+    Some((major.parse().ok()?, minor.parse().ok()?))
+}
+
+/// Prefer the pinned Z3 release, falling back to the legacy build when the
+/// host glibc predates the prebuilt archive's build image. Hosts older than
+/// the legacy build, and non-glibc hosts, have no usable prebuilt archive.
+fn select_z3_build(
+    platform: &Platform,
+    host_glibc: Option<(u32, u32)>,
+) -> Result<Z3Build, SetupError> {
+    let Some(required) = platform.required_glibc(&Z3_BUILD) else {
+        return Ok(Z3_BUILD);
+    };
+    let Some(host) = host_glibc else {
+        println!("  ⚠️  Could not determine the host glibc version from `ldd --version`");
+        println!(
+            "     Trying Z3 {} (oldest supported glibc). On musl hosts, install z3 from your",
+            Z3_LEGACY_BUILD.version
+        );
+        println!("     package manager instead — upstream publishes no musl archive.");
+        return Ok(Z3_LEGACY_BUILD);
+    };
+    if host >= required {
+        return Ok(Z3_BUILD);
+    }
+    let legacy_required = platform
+        .required_glibc(&Z3_LEGACY_BUILD)
+        .unwrap_or(Z3_LEGACY_BUILD.linux_x64_min_glibc);
+    if host < legacy_required {
+        return Err(SetupError::UnsupportedPlatform(format!(
+            "host glibc {}.{} is older than every prebuilt Z3 archive (Z3 {} needs {}.{}, \
+             Z3 {} needs {}.{}); install z3 from your package manager or build it from source",
+            host.0,
+            host.1,
+            Z3_BUILD.version,
+            required.0,
+            required.1,
+            Z3_LEGACY_BUILD.version,
+            legacy_required.0,
+            legacy_required.1
+        )));
+    }
+    println!(
+        "  ⚠️  Z3 {} prebuilt binaries require glibc {}.{}, host has {}.{}",
+        Z3_BUILD.version, required.0, required.1, host.0, host.1
+    );
+    println!(
+        "     Falling back to Z3 {}. Build Z3 {} from source for the newer solver.",
+        Z3_LEGACY_BUILD.version, Z3_BUILD.version
+    );
+    Ok(Z3_LEGACY_BUILD)
+}
+
 fn install_z3(
     platform: &Platform,
+    build: &Z3Build,
     toolchains_dir: &Path,
     z3_dir: &Path,
     force: bool,
 ) -> Result<(), SetupError> {
     if z3_dir.exists() {
-        if !force {
-            println!("  ✅ Z3 {}: already installed", Z3_VERSION);
+        if !force && z3_dir.join("bin").join("z3").exists() {
+            println!("  ✅ Z3 {}: already installed", build.version);
             return Ok(());
         }
         fs::remove_dir_all(z3_dir)
             .map_err(|e| SetupError::Io(format!("Failed to remove {}: {}", z3_dir.display(), e)))?;
     }
 
-    println!("  📦 Downloading Z3 {}...", Z3_VERSION);
-    println!("     URL: {}", platform.z3_download_url());
+    println!("  📦 Downloading Z3 {}...", build.version);
+    println!("     URL: {}", platform.z3_download_url(build));
 
-    let archive_path = download_with_curl(&platform.z3_download_url(), toolchains_dir, "z3.zip")?;
+    let archive_path =
+        download_with_curl(&platform.z3_download_url(build), toolchains_dir, "z3.zip")?;
     extract_zip(&archive_path, toolchains_dir)?;
 
-    let extracted = toolchains_dir.join(platform.z3_archive_name());
+    let extracted = toolchains_dir.join(platform.z3_archive_name(build));
     if !extracted.exists() {
         return Err(SetupError::Io(format!(
             "Expected extracted directory not found: {}",
@@ -230,7 +361,11 @@ fn install_z3(
     })?;
 
     let _ = fs::remove_file(&archive_path);
-    println!("  ✅ Z3 {}: installed to {}", Z3_VERSION, z3_dir.display());
+    println!(
+        "  ✅ Z3 {}: installed to {}",
+        build.version,
+        z3_dir.display()
+    );
     Ok(())
 }
 
@@ -284,40 +419,67 @@ fn install_llvm(
     Ok(())
 }
 
+/// `z3_dir` is `None` when no prebuilt archive is usable on this host; the
+/// generated script then leaves Z3 to the system installation instead of
+/// pointing at a missing toolchain.
 fn generate_env_script(
     mumei_home: &Path,
-    z3_dir: &Path,
+    z3_dir: Option<&Path>,
     llvm_dir: &Path,
 ) -> Result<(), SetupError> {
     fs::create_dir_all(mumei_home)
         .map_err(|e| SetupError::Io(format!("Failed to create {}: {}", mumei_home.display(), e)))?;
 
     let env_path = mumei_home.join("env");
-    let z3 = z3_dir.display().to_string();
+    let z3 = z3_dir.map(|d| d.display().to_string());
     let llvm = llvm_dir.display().to_string();
 
-    let mut lines = Vec::new();
-    lines.push("#!/bin/sh".to_string());
-    lines.push("# Mumei toolchain environment — generated by `mumei setup`".to_string());
-    lines.push("# Usage: source ~/.mumei/env".to_string());
-    lines.push(String::new());
-    lines.push("# Z3".to_string());
-    lines.push(format!("export Z3_SYS_Z3_HEADER=\"{}/include/z3.h\"", z3));
-    lines.push(format!("export Z3_SYS_Z3_LIB_DIR=\"{}/lib\"", z3));
-    lines.push(format!("export CPATH=\"{}/include:$CPATH\"", z3));
-    lines.push(format!("export LIBRARY_PATH=\"{}/lib:$LIBRARY_PATH\"", z3));
+    let mut lines = vec![
+        "#!/bin/sh".to_string(),
+        "# Mumei toolchain environment — generated by `mumei setup`".to_string(),
+        "# Usage: source ~/.mumei/env".to_string(),
+        String::new(),
+    ];
+    // Upstream Z3 archives ship libz3.{so,dylib,a} in `bin`, not `lib`, and
+    // z3-sys links libz3 dynamically, so the loader needs `bin` too.
+    match &z3 {
+        Some(z3) => {
+            lines.push("# Z3".to_string());
+            lines.push(format!("export Z3_SYS_Z3_HEADER=\"{}/include/z3.h\"", z3));
+            lines.push(format!("export Z3_SYS_Z3_LIB_DIR=\"{}/bin\"", z3));
+            lines.push(format!("export CPATH=\"{}/include:$CPATH\"", z3));
+            lines.push(format!("export LIBRARY_PATH=\"{}/bin:$LIBRARY_PATH\"", z3));
+            if cfg!(target_os = "macos") {
+                lines.push(format!(
+                    "export DYLD_FALLBACK_LIBRARY_PATH=\"{}/bin:$DYLD_FALLBACK_LIBRARY_PATH\"",
+                    z3
+                ));
+            } else {
+                lines.push(format!(
+                    "export LD_LIBRARY_PATH=\"{}/bin:$LD_LIBRARY_PATH\"",
+                    z3
+                ));
+            }
+        }
+        None => {
+            lines.push("# Z3: no bundled toolchain on this host — using the system install".into());
+        }
+    }
     lines.push(String::new());
     lines.push("# LLVM".to_string());
     lines.push(format!("export LLVM_SYS_170_PREFIX=\"{}\"", llvm));
     lines.push(format!("export PATH=\"{}/bin:$PATH\"", llvm));
-    lines.push(format!(
-        "export LDFLAGS=\"-L{}/lib -L{}/lib $LDFLAGS\"",
-        llvm, z3
-    ));
-    lines.push(format!(
-        "export CPPFLAGS=\"-I{}/include -I{}/include $CPPFLAGS\"",
-        llvm, z3
-    ));
+    lines.push(match &z3 {
+        Some(z3) => format!("export LDFLAGS=\"-L{}/lib -L{}/bin $LDFLAGS\"", llvm, z3),
+        None => format!("export LDFLAGS=\"-L{}/lib $LDFLAGS\"", llvm),
+    });
+    lines.push(match &z3 {
+        Some(z3) => format!(
+            "export CPPFLAGS=\"-I{}/include -I{}/include $CPPFLAGS\"",
+            llvm, z3
+        ),
+        None => format!("export CPPFLAGS=\"-I{}/include $CPPFLAGS\"", llvm),
+    });
     lines.push(String::new());
 
     let content = lines.join("\n");
@@ -329,38 +491,53 @@ fn generate_env_script(
     Ok(())
 }
 
-fn verify_installation(z3_dir: &Path, llvm_dir: &Path) {
+fn verify_installation(z3_dir: Option<&Path>, llvm_dir: &Path) {
     println!();
     println!("🔍 Verifying toolchain...");
 
-    let z3_bin = z3_dir.join("bin").join("z3");
-    if z3_bin.exists() {
-        let out = Cmd::new(&z3_bin).arg("--version").output();
-        match out {
-            Ok(o) => {
-                let s = String::from_utf8_lossy(&o.stdout);
-                println!("  ✅ Z3 (toolchain): {}", s.trim());
-            }
-            Err(e) => println!("  ⚠️  Z3 (toolchain) exists but failed to run: {}", e),
+    match z3_dir.map(|d| d.join("bin").join("z3")) {
+        Some(z3_bin) if z3_bin.exists() => report_version("Z3 (toolchain)", &z3_bin),
+        Some(z3_bin) => {
+            println!("  ⚠️  Z3 (toolchain): not found at {}", z3_bin.display());
         }
-    } else {
-        println!("  ⚠️  Z3 (toolchain): not found at {}", z3_bin.display());
+        None => println!("  ⚠️  Z3: not installed — install z3 from your package manager"),
     }
 
     // llc は LLVM アーカイブに入っている想定
     let llc_bin = llvm_dir.join("bin").join("llc");
     if llc_bin.exists() {
-        let out = Cmd::new(&llc_bin).arg("--version").output();
-        match out {
-            Ok(o) => {
-                let s = String::from_utf8_lossy(&o.stdout);
-                let first = s.lines().next().unwrap_or("");
-                println!("  ✅ LLVM (toolchain): {}", first.trim());
-            }
-            Err(e) => println!("  ⚠️  LLVM (toolchain) exists but failed to run: {}", e),
-        }
+        report_version("LLVM (toolchain)", &llc_bin);
     } else {
         println!("  ⚠️  LLVM (toolchain): not found at {}", llc_bin.display());
+    }
+}
+
+/// A binary that spawns but exits non-zero or prints nothing is broken (e.g. a
+/// prebuilt archive whose shared library requirements the host cannot satisfy),
+/// so it must not be reported as a working install.
+fn report_version(label: &str, bin: &Path) {
+    match Cmd::new(bin).arg("--version").output() {
+        Ok(o) => {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            let version = stdout.lines().next().unwrap_or("").trim();
+            if o.status.success() && !version.is_empty() {
+                println!("  ✅ {}: {}", label, version);
+            } else {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                println!(
+                    "  ⚠️  {}: {} exists but `--version` failed ({}){}",
+                    label,
+                    bin.display(),
+                    o.status,
+                    stderr
+                        .lines()
+                        .next()
+                        .map(|l| format!(": {}", l.trim()))
+                        .unwrap_or_default()
+                );
+            }
+        }
+        Err(e) => println!("  ⚠️  {} exists but failed to run: {}", label, e),
     }
 }
 
@@ -421,4 +598,135 @@ fn extract_tar_xz(archive: &Path, dest_dir: &Path) -> Result<(), SetupError> {
         )));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const LINUX_X64: Platform = Platform {
+        os: Os::Linux,
+        arch: Arch::X86_64,
+    };
+    const LINUX_ARM64: Platform = Platform {
+        os: Os::Linux,
+        arch: Arch::Aarch64,
+    };
+    const MACOS_ARM64: Platform = Platform {
+        os: Os::MacOS,
+        arch: Arch::Aarch64,
+    };
+
+    #[test]
+    fn archive_names_match_upstream_release_assets() {
+        assert_eq!(
+            LINUX_X64.z3_archive_name(&Z3_BUILD),
+            "z3-5.1.0-x64-glibc-2.39"
+        );
+        assert_eq!(
+            LINUX_ARM64.z3_archive_name(&Z3_BUILD),
+            "z3-5.1.0-arm64-glibc-2.38"
+        );
+        assert_eq!(
+            MACOS_ARM64.z3_archive_name(&Z3_BUILD),
+            "z3-5.1.0-arm64-osx-13.3"
+        );
+        assert_eq!(
+            LINUX_X64.z3_archive_name(&Z3_LEGACY_BUILD),
+            "z3-4.14.1-x64-glibc-2.35"
+        );
+        assert_eq!(
+            LINUX_ARM64.z3_archive_name(&Z3_LEGACY_BUILD),
+            "z3-4.14.1-arm64-glibc-2.34"
+        );
+    }
+
+    #[test]
+    fn download_url_points_at_the_release_tag() {
+        assert_eq!(
+            LINUX_X64.z3_download_url(&Z3_BUILD),
+            "https://github.com/Z3Prover/z3/releases/download/z3-5.1.0/z3-5.1.0-x64-glibc-2.39.zip"
+        );
+    }
+
+    #[test]
+    fn glibc_version_is_parsed_from_ldd_output() {
+        assert_eq!(
+            parse_glibc_version("ldd (Ubuntu GLIBC 2.35-0ubuntu3.8) 2.35\nCopyright\n"),
+            Some((2, 35))
+        );
+        assert_eq!(parse_glibc_version("ldd (GNU libc) 2.39\n"), Some((2, 39)));
+        assert_eq!(parse_glibc_version("musl libc (x86_64)\n"), None);
+    }
+
+    #[test]
+    fn old_glibc_hosts_fall_back_to_the_legacy_build() {
+        assert_eq!(
+            select_z3_build(&LINUX_X64, Some((2, 35))).unwrap(),
+            Z3_LEGACY_BUILD
+        );
+        assert_eq!(
+            select_z3_build(&LINUX_ARM64, Some((2, 34))).unwrap(),
+            Z3_LEGACY_BUILD
+        );
+        assert_eq!(
+            select_z3_build(&LINUX_X64, Some((2, 38))).unwrap(),
+            Z3_BUILD
+        );
+        assert_eq!(
+            select_z3_build(&LINUX_ARM64, Some((2, 38))).unwrap(),
+            Z3_BUILD
+        );
+        assert_eq!(
+            select_z3_build(&MACOS_ARM64, Some((2, 17))).unwrap(),
+            Z3_BUILD
+        );
+    }
+
+    #[test]
+    fn undetectable_libc_tries_the_oldest_supported_build() {
+        assert_eq!(select_z3_build(&LINUX_X64, None).unwrap(), Z3_LEGACY_BUILD);
+    }
+
+    #[test]
+    fn generated_env_points_at_the_directory_holding_libz3() {
+        let home = std::env::temp_dir().join(format!("mumei-env-test-{}", std::process::id()));
+        let z3 = home.join("toolchains").join("z3-5.1.0");
+        let llvm = home.join("toolchains").join("llvm-18.1.8");
+        generate_env_script(&home, Some(&z3), &llvm).unwrap();
+        let env = fs::read_to_string(home.join("env")).unwrap();
+        let z3 = z3.display().to_string();
+        assert!(env.contains(&format!("Z3_SYS_Z3_LIB_DIR=\"{}/bin\"", z3)));
+        assert!(env.contains(&format!("LIBRARY_PATH=\"{}/bin:", z3)));
+        assert!(env.contains(&format!("-L{}/bin ", z3)));
+        assert!(env.contains(&format!("Z3_SYS_Z3_HEADER=\"{}/include/z3.h\"", z3)));
+        let loader = if cfg!(target_os = "macos") {
+            "DYLD_FALLBACK_LIBRARY_PATH"
+        } else {
+            "LD_LIBRARY_PATH"
+        };
+        assert!(env.contains(&format!("{}=\"{}/bin:", loader, z3)));
+        assert!(!env.contains(&format!("{}/lib", z3)));
+        fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn env_without_a_bundled_z3_exports_no_z3_paths() {
+        let home = std::env::temp_dir().join(format!("mumei-env-none-{}", std::process::id()));
+        let llvm = home.join("toolchains").join("llvm-18.1.8");
+        generate_env_script(&home, None, &llvm).unwrap();
+        let env = fs::read_to_string(home.join("env")).unwrap();
+        assert!(!env.contains("Z3_SYS_Z3_LIB_DIR"));
+        assert!(!env.contains("Z3_SYS_Z3_HEADER"));
+        assert!(env.contains(&format!("-L{}/lib $LDFLAGS", llvm.display())));
+        fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn hosts_older_than_every_archive_are_rejected() {
+        for host in [(2, 17), (2, 33)] {
+            assert!(select_z3_build(&LINUX_X64, Some(host)).is_err());
+            assert!(select_z3_build(&LINUX_ARM64, Some(host)).is_err());
+        }
+    }
 }
