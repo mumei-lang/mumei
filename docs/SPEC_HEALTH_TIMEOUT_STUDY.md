@@ -25,12 +25,20 @@
 
 | ビルド | libz3 | 上限が効くか |
 |---|---|---|
-| 配布リリースバイナリ | `--features static-link-z3` でソースからビルドした Z3 を静的リンク（`.github/workflows/release.yml`） | ✅ 効く |
+| 配布リリースバイナリ（Linux gnu / musl） | `--features static-link-z3` でソースからビルドした Z3 を静的リンク | ✅ 効く |
+| 配布リリースバイナリ（macOS） | `brew install z3` の libz3 を動的リンク（ビルド時の formula 次第。現状 5.x） | ⚠️ 実質効くが formula 依存 |
+| 配布リリースバイナリ（Windows） | 上流プレビルド 5.1.0 を動的リンク（`libz3.dll` を同梱） | ✅ 効く |
 | `mumei setup` 済みの環境 | 4.14.1 / 5.1.0 | ✅ 効く |
 | distro libz3 にリンクした開発ビルド | Ubuntu 22.04/24.04 で 4.8.12 | ❌ 効かない |
-| 本リポジトリの CI | 各ワークフローが `apt-get install libz3-dev` | ❌ 効かない |
+| 本リポジトリの CI のうち mumei をビルドするジョブ | `verify-std` / `stdlib-proof-gate` / `ffi-contract-tests` / `generate-std-certs` / `update-metrics` / `otel-tracing` が `apt-get install libz3-dev` | ❌ 効かない |
 
-つまり**エンドユーザーの配布物は影響を受けず、露出しているのは開発ビルドと CI** である。
+`static-link-z3` を渡しているのは Linux のビルドステップだけで、macOS と Windows は新しい Z3 を
+動的リンクしている（`.github/workflows/release.yml`）。いずれの経路も 4.14 以上を引くため結論は
+変わらないが、根拠は「全ターゲットが静的リンク」ではない。CI 側も全 12 ワークフローではなく、
+cargo を走らせる上記 6 ジョブだけが露出している（`release.yml` は上記のとおり対象外、残りは
+mumei をビルドしない）。
+
+つまり**エンドユーザーの配布物は影響を受けず、露出しているのは開発ビルドと上記 CI ジョブ** である。
 これは「まずソルバ実装を変える」より「開発/CI の Z3 を新しくする」ほうが費用対効果が高い、
 という C の根拠になる。
 
@@ -123,16 +131,20 @@ std コーパス（59 モジュール / 2163 チェック、Z3 4.14.1、キャ�
 ## 3. 候補 B（最低バージョン拒否）
 
 `Z3_get_version` が 4.14 未満なら検証を実行せずエラーにする案。実装は数行だが、
-本リポジトリの CI（`verify-std` / `stdlib-proof-gate` / `ffi-contract-tests` など）は
-すべて distro の `libz3-dev` を入れているため、**先に CI 側を新しい Z3 に移さないと自分の CI が止まる**。
+§1 の 6 ジョブは distro の `libz3-dev` を入れているため、
+**先に CI 側を新しい Z3 に移さないと自分の CI が止まる**。
 distro libz3 で開発している利用者も一律に締め出す。単独では採らない。
 
 ## 4. 候補 C（推奨）
 
 1. `verify` 実行時にリンク先 libz3 が 4.14 未満なら、spec-health の `--solver-timeout` が
    硬い上限として効かないことを一度だけ警告する（#527 の限界を利用者に見える形にする）。
-2. CI と開発手順を新しい Z3 に寄せる（`--features static-link-z3`、または `mumei setup` が入れる
-   4.14.1/5.1.0 を使う）。これにより CI 上のハング露出そのものが消え、B を将来採る前提も整う。
+   実装は `solver_timeout_is_hard()` / `linked_z3_version()` と `verify` 側の一回限りの stderr 警告。
+2. §1 の 6 ジョブに `.github/actions/setup-z3` を挟み、上流プレビルド 4.14.1 に対して
+   ビルド・実行させる（`Z3_SYS_Z3_HEADER` / `Z3_SYS_Z3_LIB_DIR` / `LD_LIBRARY_PATH`）。
+   これにより CI 上のハング露出が消え、B を将来採る前提も整う。副作用として、これまで
+   バージョンゲートでスキップされていた `hard_nonlinear_spec_validation_respects_timeout` が
+   CI で初めて実際に実行される。
 3. A は §2.5 の前提条件付きの逃げ道として本ドキュメントに残す。
 
 C は挙動を変えないため、5.05x のコストも往復忠実性のリスクも負わない。
@@ -151,7 +163,7 @@ C は挙動を変えないため、5.05x のコストも往復忠実性のリス
 z3 -in -T:1 < <hanging-goal.smt2>
 
 # 忠実性比較・std コーパス（Z3 4.14.1 を preload）
-LD_PRELOAD=<toolchain>/z3-4.14.1/bin/libz3.so \
+LD_PRELOAD="$HOME/.mumei/toolchains/z3-4.14.1/bin/libz3.so" \
 cargo test -p mumei-core --lib spec_validation
 ```
 

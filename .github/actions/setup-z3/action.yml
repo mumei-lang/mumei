@@ -1,5 +1,5 @@
 name: Set up Z3 4.14.1
-description: Install the upstream Z3 4.14.1 Linux x64 glibc toolchain
+description: Install the upstream Z3 4.14.1 Linux x64 glibc toolchain (x86_64 runners only)
 
 runs:
   using: composite
@@ -20,8 +20,12 @@ runs:
         test -x "$z3_dir/bin/z3"
         test -f "$z3_dir/bin/libz3.so"
         test -f "$z3_dir/include/z3.h"
+        library_path="$z3_dir/bin"
+        if [ -n "${LD_LIBRARY_PATH:-}" ]; then
+          library_path="$library_path:$LD_LIBRARY_PATH"
+        fi
         {
           echo "Z3_SYS_Z3_HEADER=$z3_dir/include/z3.h"
           echo "Z3_SYS_Z3_LIB_DIR=$z3_dir/bin"
-          echo "LD_LIBRARY_PATH=$z3_dir/bin:${LD_LIBRARY_PATH:-}"
+          echo "LD_LIBRARY_PATH=$library_path"
         } >> "$GITHUB_ENV"

@@ -81,7 +81,10 @@ mumei verify --task-id ci-shard-17 --solver-timeout 30000 --cache-scope module s
 ```
 
 - `--task-id` writes the logical task ID into verification reports and proof-certificate solver metadata.
-- `--solver-timeout` overrides `[proof].timeout_ms` for the current verification run.
+- `--solver-timeout` overrides `[proof].timeout_ms` for the current verification run. It is a hard
+  bound on spec-health checks only when the linked libz3 is 4.14 or newer, because older versions
+  ignore the solver interrupt used to enforce it; `mumei verify` warns once on stderr when the
+  linked library is older. See `docs/SPEC_HEALTH_TIMEOUT_STUDY.md`.
 - `--cache-scope module` keeps `.mumei/cache/verification_cache.json` beside the input module directory; `global` shares the cache from the current workspace root.
 
 ---
