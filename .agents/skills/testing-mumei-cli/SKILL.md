@@ -808,8 +808,9 @@ fresh box it is usually absent — then just `rm -rf ~/.mumei` at the end).
 
 ### Sandbox runs with `$HOME` instead of touching the real toolchain
 
-`manifest::mumei_home()` is `dirs::home_dir()/.mumei`, and `dirs::home_dir()`
-honours `$HOME`, so each adversarial case can get its own throwaway home:
+There is **no** `MUMEI_HOME` env var. `manifest::mumei_home()` is
+`dirs::home_dir()/.mumei`, and `dirs::home_dir()` honours `$HOME`, so each
+adversarial case can get its own throwaway home:
 
 ```bash
 mkdir -p /tmp/mumei-home-case/.mumei/toolchains
@@ -849,9 +850,10 @@ bash -c '. ~/.mumei/env
   for p in "$Z3_SYS_Z3_HEADER" "$Z3_SYS_Z3_LIB_DIR" "$Z3_SYS_Z3_LIB_DIR/libz3.so"; do
     [ -e "$p" ] && echo "EXISTS  $p" || echo "MISSING $p"; done'
 ```
-Note the script appends to `$CPATH`/`$LDFLAGS` etc., so a harness using
-`set -u` dies with `CPATH: unbound variable` — that is the harness's fault, not
-a product bug.
+The script appends to `$CPATH`/`$LDFLAGS` etc. Since #524 every such export uses
+`${VAR:-}`, so sourcing under `set -u` must succeed; if it dies with
+`CPATH: parameter not set` on a current branch, that is a product regression
+(on builds predating #524 it is expected).
 
 ### Prove the loader actually picks the toolchain libz3
 
@@ -887,15 +889,79 @@ actual requirement with `objdump -T <libz3.so> | grep -o 'GLIBC_[0-9.]*' | sort 
 Check `GLIBCXX_`/`CXXABI_` too when a host fails to load a lib that glibc alone
 says should work.
 
-### Known rough edges (verify whether still present; may be pre-existing)
+### Host prerequisites that make a real end-to-end `setup` run possible
 
-- Fixed by #520 (after the 0.6.16 tag), still worth asserting: the
-  "already installed" check tests
-  for `bin/z3`, and `verify_installation` checks exit status and non-empty
-  stdout — a binary that dies with `GLIBC_2.38 not found` must print
-  `⚠️  ... `--version` failed` with the loader error, never a blank `✅`.
-- A rejected host / failed Z3 install still exits 0 with `🎉 Setup complete!`;
-  assert on the specific `❌ Z3:` / `⚠️  Z3: not installed` lines, not exit code.
+Real downloads are fast (Z3 ~50 MB, LLVM ~1 GB, seconds each), so prefer a real
+run over stubs — but three host details decide whether it can succeed:
+
+- Put sandbox homes on a **disk-backed** path (e.g. `/home/<user>/...`), not
+  `/tmp`: `/tmp` is often a ~4 GB tmpfs and the extracted LLVM tree overflows
+  it, producing `tar: ... Cannot write: No space left on device`.
+- A minimal `PATH` harness must include **`xz`** (and `gzip`), otherwise
+  `extract_tar_xz` dies with `tar (child): xz: Cannot exec`.
+- Upstream `clang+llvm-18.1.8-x86_64-linux-gnu-ubuntu-18.04` `bin/llc` needs
+  `libtinfo.so.5`, which Ubuntu 22.04+ does not ship (`libtinfo.so.6` is not
+  ABI-compatible — symlinking it fails with
+  `NCURSES_TINFO_5.0.19991023 not found`). Install it with
+  `sudo apt-get install -y libtinfo5` before expecting a healthy LLVM verdict.
+  Without it a *correct* installer legitimately reports LLVM unusable.
+
+### PATH harnesses to force network / system-z3 branches deterministically
+
+Build two directories of symlinks and use `env -i HOME=... PATH=...` so the run
+is hermetic:
+
+```bash
+mkdir -p /tmp/mfb-net /tmp/mfb-nonet
+for t in curl unzip tar xz gzip ldd; do
+  ln -sf $(command -v $t) /tmp/mfb-net/$t; ln -sf $(command -v $t) /tmp/mfb-nonet/$t
+done
+rm -f /tmp/mfb-nonet/curl
+printf '#!/bin/sh\necho "curl: (6) Could not resolve host" >&2\nexit 6\n' > /tmp/mfb-nonet/curl
+chmod +x /tmp/mfb-nonet/curl
+```
+
+- Neither dir contains `z3`, so `report_version("Z3 (system)", "z3")` fails →
+  the "no bundled and no system Z3" branch. Append `:/usr/bin:/bin` to get a
+  working system `z3` instead (that is how you reach "no bundle + system z3 →
+  exit 0").
+- The failing-`curl` dir is the cheap way to make an install attempt fail
+  without waiting on the network, i.e. to force `z3_dir = None`.
+- Symlink an already-downloaded `llvm-18.1.8` into each sandbox
+  `toolchains/` (`install_llvm` only checks `exists()`), so only Z3 is
+  re-downloaded per case. A fabricated `llvm-18.1.8/bin/llc` shell stub
+  (`exit 1` vs. `echo` a version) is the way to test the LLVM-unusable branch.
+
+### Exit-code and env-file contract after #524
+
+Since #524 (`z3_install_is_usable`, `InstallationStatus`) the exit code is
+meaningful, so assert on it as well as on the lines:
+
+- Usable bundled Z3 + runnable `llc` → exit 0, `🎉 Setup complete!`.
+- No bundled Z3 but working system `z3` on PATH → still exit 0, plus
+  `✅ Z3 (system): ...` and `ℹ️  Using system z3 because no bundled toolchain is
+  present`; the env file carries
+  `# Z3: no bundled toolchain on this host — using the system install` and no
+  `Z3_SYS_Z3_*`.
+- `llc --version` not runnable, or neither bundled nor system Z3 → exit **1**
+  with `❌ Setup incomplete:` and one `   - ...` line per problem.
+- A pre-existing partial (`bin/z3` only) or broken (`bin/z3` exits 1) tree must
+  never print `already installed`; it is deleted and reinstalled, and if the
+  reinstall fails no Z3 paths are exported.
+- Every append-style export uses `${VAR:-}`, so
+  `env -u CPATH -u LIBRARY_PATH -u LD_LIBRARY_PATH -u LDFLAGS -u CPPFLAGS \
+   sh -euc '. <home>/.mumei/env && echo OK'` must print `OK`. Always pair this
+  with the control `sh -euc 'echo "$CPATH"'` (must fail `parameter not set`),
+  otherwise the `OK` proves nothing.
+- Staging is per-process (`z3-{pid}.zip`, `.staging-{pid}-z3`), and a lost
+  rename race is tolerated when the destination validates. Two parallel runs
+  against one `$HOME` must both exit 0, never print `Failed to move`, and leave
+  no `.staging-*` / `*.zip` behind. Sample `ls -a toolchains/` every 0.1 s in a
+  background loop to actually capture the two distinct pid-named artifacts.
+
+A `git worktree` build of the base branch is the strongest control here: before
+#524 all of the broken fixtures above exit 0 with `🎉 Setup complete!` and the
+generated env fails under `set -u`.
 
 ### Regression: `verify` must be unaffected by installer changes
 
