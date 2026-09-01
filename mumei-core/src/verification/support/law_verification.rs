@@ -396,6 +396,9 @@ pub fn verify_impl_with_options(
                         }
                     }
 
+                    // シフト量の範囲義務は law の前提のもとで解消する。
+                    discharge_bv_shift_obligations(&vc, &solver)?;
+
                     solver.assert(&law_bool.not());
                     if solver.check() == SatResult::Sat {
                         // 反例（Counter-example）を Z3 model から取得

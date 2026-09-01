@@ -313,6 +313,149 @@ fn contract_only_shift_needs_a_bounded_amount() {
     std::fs::remove_dir_all(dir).ok();
 }
 
+/// A `forall` whose bound is a `BV(64)` parameter keeps its facts: the bound is
+/// bridged to `Int`, not replaced by a fresh unconstrained constant that would
+/// make the quantifier vacuous.
+#[test]
+fn forall_over_a_bitvector_bound_is_not_vacuous() {
+    let dir = temp_dir("forall_bound");
+    let provable = write_fixture(
+        &dir,
+        "forall_bound.mm",
+        "atom first_is_zero(n: i64) -> i64\n\
+         requires: n == 3 && len(arr) == n && forall(i, 0, n, arr[i] == 0);\n\
+         ensures: arr[0] == 0;\n\
+         body: 0;\n",
+    );
+    let false_claim = write_fixture(
+        &dir,
+        "forall_bound_false.mm",
+        "atom first_is_one(n: i64) -> i64\n\
+         requires: n == 3 && len(arr) == n && forall(i, 0, n, arr[i] == 0);\n\
+         ensures: arr[0] == 1;\n\
+         body: 0;\n",
+    );
+
+    assert_verified(
+        &run_verify(&provable, &dir, &["--bitvec-i64"]),
+        "forall fact over a BV(64) bound",
+    );
+    assert_rejected(
+        &run_verify(&false_claim, &dir, &["--bitvec-i64"]),
+        "postcondition contradicting the forall fact",
+    );
+
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// A refinement alias over `i64` keeps the active encoding, so wrapping is
+/// still visible through the alias.
+#[test]
+fn refined_i64_keeps_the_bitvector_encoding() {
+    let dir = temp_dir("refined");
+    let source = "type NonNegative = i64 where v >= 0;\n\
+        atom wraps(x: NonNegative) -> i64\n\
+        requires: x >= 9223372036854775807;\n\
+        ensures: result < 0;\n\
+        body: x + 1;\n";
+    let fixture = write_fixture(&dir, "refined.mm", source);
+
+    assert_verified(
+        &run_verify(&fixture, &dir, &["--bitvec-i64"]),
+        "wrapping increment of a refined i64 parameter",
+    );
+
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// An atom-level `invariant` is verified in its own context, which still has to
+/// discharge the shift-range obligations collected while lowering it.
+#[test]
+fn atom_invariant_shift_needs_a_bounded_amount() {
+    let dir = temp_dir("inv_shift");
+    let unguarded = write_fixture(
+        &dir,
+        "inv_shift.mm",
+        "atom inv_shift(x: i64, n: i64) -> i64\n\
+         requires: x >= 0;\n\
+         invariant: (x << n) == (x << n);\n\
+         ensures: result == x;\n\
+         body: x;\n",
+    );
+    let guarded = write_fixture(
+        &dir,
+        "inv_shift_ok.mm",
+        "atom inv_shift_ok(x: i64, n: i64) -> i64\n\
+         requires: x >= 0 && n >= 0 && n < 64;\n\
+         invariant: (x << n) == (x << n);\n\
+         ensures: result == x;\n\
+         body: x;\n",
+    );
+
+    assert_rejected(
+        &run_verify(&unguarded, &dir, &["--bitvec-i64"]),
+        "atom invariant shifting by an unbounded amount",
+    );
+    assert_verified(
+        &run_verify(&guarded, &dir, &["--bitvec-i64"]),
+        "atom invariant shifting by a bounded amount",
+    );
+
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// `mumei build` puts the effective semantic mode into the incremental cache
+/// key, so declaring `semantics: bitvec;` re-verifies an otherwise unchanged
+/// atom instead of reusing the `Int`-mode proof.
+#[test]
+fn build_cache_key_tracks_the_semantic_mode() {
+    let dir = temp_dir("build_cache");
+    let int_source = "atom inc(x: i64) -> i64\n\
+        requires: x >= 0 && x < 10;\n\
+        ensures: result == x + 1;\n\
+        body: x + 1;\n";
+    let fixture = write_fixture(&dir, "cache.mm", int_source);
+
+    let run_build = || {
+        Command::new(env!("CARGO_BIN_EXE_mumei"))
+            .arg("build")
+            .arg(&fixture)
+            .arg("--output")
+            .arg(dir.join("out"))
+            .current_dir(&dir)
+            .output()
+            .expect("failed to run mumei build")
+    };
+
+    assert_verified(&run_build(), "first build");
+    let cached = run_build();
+    assert_verified(&cached, "second build of an unchanged atom");
+    assert!(
+        String::from_utf8_lossy(&cached.stdout).contains("unchanged, cached"),
+        "an unchanged atom must hit the build cache:\n{}",
+        String::from_utf8_lossy(&cached.stdout)
+    );
+
+    write_fixture(
+        &dir,
+        "cache.mm",
+        "atom inc(x: i64) -> i64\n\
+         semantics: bitvec;\n\
+         requires: x >= 0 && x < 10;\n\
+         ensures: result == x + 1;\n\
+         body: x + 1;\n",
+    );
+    let switched = run_build();
+    assert_verified(&switched, "build after declaring `semantics: bitvec;`");
+    assert!(
+        !String::from_utf8_lossy(&switched.stdout).contains("unchanged, cached"),
+        "switching to bit-vector semantics must invalidate the build cache:\n{}",
+        String::from_utf8_lossy(&switched.stdout)
+    );
+
+    std::fs::remove_dir_all(dir).ok();
+}
+
 // ---------------------------------------------------------------------------
 // Backward compatibility gate: zero proof-certificate regressions with the
 // flag off.

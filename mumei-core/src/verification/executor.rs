@@ -1258,8 +1258,7 @@ pub(crate) fn verify_inner(
             Int::from_i64(&ctx, val)
         } else {
             let ast = parse_expression(&q.start);
-            expr_to_z3(&vc, &ast, &mut env, None)?
-                .as_int()
+            as_int_like(&expr_to_z3(&vc, &ast, &mut env, None)?)
                 .unwrap_or(Int::new_const(&ctx, q.start.as_str()))
         };
         let end = if let Ok(val) = q.end.parse::<i64>() {
@@ -1267,8 +1266,7 @@ pub(crate) fn verify_inner(
         } else {
             // Parse end as expression to support `n - 1` etc.
             let ast = parse_expression(&q.end);
-            expr_to_z3(&vc, &ast, &mut env, None)?
-                .as_int()
+            as_int_like(&expr_to_z3(&vc, &ast, &mut env, None)?)
                 .unwrap_or(Int::new_const(&ctx, q.end.as_str()))
         };
 
@@ -1303,7 +1301,7 @@ pub(crate) fn verify_inner(
                 let mut pattern_asts: Vec<Dynamic> = Vec::new();
                 for (arr_name, idx_expr) in &arr_accesses {
                     if let Ok(idx_z3) = expr_to_z3(&vc, idx_expr, &mut env, None) {
-                        if let Some(idx_int) = idx_z3.as_int() {
+                        if let Some(idx_int) = as_int_like(&idx_z3) {
                             pattern_asts
                                 .push(z3_dynamic_array(&vc, arr_name, &env).select(&idx_int));
                         }
@@ -1584,7 +1582,7 @@ pub(crate) fn verify_inner(
                         (env.get(&ref_mut_p.name), env.get(&other_p.name))
                     {
                         if let (Some(rm_int), Some(ot_int)) =
-                            (ref_mut_val.as_int(), other_val.as_int())
+                            (as_int_like(ref_mut_val), as_int_like(other_val))
                         {
                             // ref_mut_val == other_val が SAT ならエイリアシングの可能性あり
                             solver.push();

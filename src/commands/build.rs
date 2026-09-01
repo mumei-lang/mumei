@@ -41,6 +41,35 @@ fn emit_target_from_cli(emit: &str) -> emitter::EmitTarget {
     emitter::EmitTarget::from_cli(emit)
 }
 
+/// Verification config for a single atom: atoms whose contract only has a
+/// meaning under two's complement wrapping are verified with the `BV(64)`
+/// encoding, every other atom keeps the `Int` encoding.
+fn atom_verification_config(
+    atom: &parser::Atom,
+    base: &verification::VerificationConfig,
+) -> verification::VerificationConfig {
+    verification::VerificationConfig {
+        bitvec_i64: base.bitvec_i64 || verification::atom_requires_bitvector_semantics(atom),
+        ..base.clone()
+    }
+}
+
+/// Flags that change the verification outcome and therefore have to be part of
+/// the incremental-cache key, otherwise a mode switch reuses a stale proof.
+fn build_proof_flags(config: &verification::VerificationConfig) -> Vec<&'static str> {
+    let mut flags = Vec::new();
+    if config.enable_vacuity_check {
+        flags.push("enable_vacuity_check");
+    }
+    if config.ieee754_f64 {
+        flags.push("ieee754_f64");
+    }
+    if config.bitvec_i64 {
+        flags.push("bitvec_i64");
+    }
+    flags
+}
+
 pub(crate) fn cmd_build(
     input: &str,
     output: &str,
@@ -360,15 +389,13 @@ pub(crate) fn cmd_build(
                     } else if module_env.is_verified(&qualified_name) {
                         println!("  ⚖️  [2/3] Verification: Skipped (imported, contract-trusted).");
                     } else {
-                        let proof_flags = if verification_config.enable_vacuity_check {
-                            &["enable_vacuity_check"][..]
-                        } else {
-                            &[][..]
-                        };
+                        let method_config =
+                            atom_verification_config(&qualified_method, &verification_config);
+                        let proof_flags = build_proof_flags(&method_config);
                         let proof_hash = resolver::compute_proof_hash_with_flags(
                             &qualified_method,
                             &module_env,
-                            proof_flags,
+                            &proof_flags,
                         );
 
                         let cache_hit = verification_cache
@@ -383,7 +410,7 @@ pub(crate) fn cmd_build(
                                 &hir_atom,
                                 output_dir,
                                 &module_env,
-                                &verification_config,
+                                &method_config,
                             ) {
                                 Ok(_) => {
                                     println!(
@@ -553,13 +580,10 @@ pub(crate) fn cmd_build(
                     println!("  ⚖️  [2/3] Verification: Skipped (imported, contract-trusted).");
                 } else {
                     // Feature 2: Use compute_proof_hash with dependency-aware hashing
-                    let proof_flags = if verification_config.enable_vacuity_check {
-                        &["enable_vacuity_check"][..]
-                    } else {
-                        &[][..]
-                    };
+                    let atom_config = atom_verification_config(atom, &verification_config);
+                    let proof_flags = build_proof_flags(&atom_config);
                     let proof_hash =
-                        resolver::compute_proof_hash_with_flags(atom, &module_env, proof_flags);
+                        resolver::compute_proof_hash_with_flags(atom, &module_env, &proof_flags);
 
                     let cache_hit = verification_cache
                         .get(&atom.name)
@@ -569,19 +593,11 @@ pub(crate) fn cmd_build(
                         println!("  ⚖️  [2/3] Verification: Skipped (unchanged, cached) ⏩");
                         module_env.mark_verified(&atom.name);
                     } else {
-                        // Atoms whose contract only has a meaning under two's
-                        // complement wrapping are verified with the `BV(64)`
-                        // encoding; every other atom keeps the `Int` encoding.
-                        let atom_config = verification::atom_requires_bitvector_semantics(atom)
-                            .then(|| verification::VerificationConfig {
-                                bitvec_i64: true,
-                                ..verification_config.clone()
-                            });
                         match verification::verify_with_verification_config(
                             &hir_atom,
                             output_dir,
                             &module_env,
-                            atom_config.as_ref().unwrap_or(&verification_config),
+                            &atom_config,
                         ) {
                             Ok(_) => {
                                 println!(
