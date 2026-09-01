@@ -75,6 +75,97 @@ fn unsupported_exponentiation_error() -> MumeiError {
     )
 }
 
+/// Lower a binary operation whose operands are `i64` values encoded as
+/// `BV(64)` (the opt-in `--bitvec-i64` mode).
+///
+/// Arithmetic uses the bit-vector operators, so `+`, `-`, `*` wrap in two's
+/// complement exactly like machine `i64` instead of growing unboundedly as in
+/// the default `Int` encoding. Comparisons and division are the *signed*
+/// variants (`bvslt`, `bvsdiv`, …) because `i64` is signed, and `>>` is the
+/// arithmetic shift `bvashr`.
+///
+/// Shift amounts must satisfy `0 <= n < 64`; that is a precondition the
+/// contract has to establish in `requires` (Z3's `bvshl`/`bvashr` are total
+/// but their out-of-range behavior is not the language's), so when a solver is
+/// available and the amount can leave the range, verification fails with an
+/// actionable error rather than proving something about saturating shifts.
+fn bv_binary_op<'a>(
+    vc: &VCtx<'a>,
+    op: &Op,
+    l: &Dynamic<'a>,
+    r: &Dynamic<'a>,
+    solver_opt: Option<&Solver<'a>>,
+) -> MumeiResult<Dynamic<'a>> {
+    let ctx = vc.ctx;
+    let lb = as_bv_i64(l).ok_or_else(|| {
+        MumeiError::type_error("Expected an i64 (BV(64)) operand under --bitvec-i64")
+    })?;
+    let rb = as_bv_i64(r).ok_or_else(|| {
+        MumeiError::type_error("Expected an i64 (BV(64)) operand under --bitvec-i64")
+    })?;
+
+    if matches!(op, Op::Shl | Op::Shr) {
+        if let Some(solver) = solver_opt {
+            let zero = BV::from_i64(ctx, 0, I64_BITS);
+            let width = BV::from_i64(ctx, I64_BITS as i64, I64_BITS);
+            let out_of_range = Bool::or(ctx, &[&rb.bvslt(&zero), &rb.bvsge(&width)]);
+            solver.push();
+            for cond in vc.path_cond_stack.borrow().iter() {
+                solver.assert(cond);
+            }
+            solver.assert(&out_of_range);
+            let reachable = solver.check() == SatResult::Sat;
+            solver.pop(1);
+            if reachable {
+                return Err(MumeiError::verification(
+                    "Shift amount may be outside 0..64".to_string(),
+                )
+                .with_help("Add `n >= 0 && n < 64` for the shift amount to requires"));
+            }
+        }
+    }
+
+    match op {
+        Op::BitAnd => Ok(lb.bvand(&rb).into()),
+        Op::BitOr => Ok(lb.bvor(&rb).into()),
+        Op::BitXor => Ok(lb.bvxor(&rb).into()),
+        Op::Shl => Ok(lb.bvshl(&rb).into()),
+        Op::Shr => Ok(lb.bvashr(&rb).into()),
+        Op::Add => Ok(lb.bvadd(&rb).into()),
+        Op::Sub => Ok(lb.bvsub(&rb).into()),
+        Op::Mul => Ok(lb.bvmul(&rb).into()),
+        Op::Div => {
+            if let Some(solver) = solver_opt {
+                let zero = BV::from_i64(ctx, 0, I64_BITS);
+                solver.push();
+                for cond in vc.path_cond_stack.borrow().iter() {
+                    solver.assert(cond);
+                }
+                solver.assert(&rb._eq(&zero));
+                let divides_by_zero = solver.check() == SatResult::Sat;
+                solver.pop(1);
+                if divides_by_zero {
+                    return Err(MumeiError::verification(
+                        "Potential division by zero.".to_string(),
+                    )
+                    .with_help("Add a condition divisor != 0 to requires"));
+                }
+            }
+            Ok(lb.bvsdiv(&rb).into())
+        }
+        Op::Gt => Ok(lb.bvsgt(&rb).into()),
+        Op::Lt => Ok(lb.bvslt(&rb).into()),
+        Op::Ge => Ok(lb.bvsge(&rb).into()),
+        Op::Le => Ok(lb.bvsle(&rb).into()),
+        Op::Eq => Ok(lb._eq(&rb).into()),
+        Op::Neq => Ok(lb._eq(&rb).not().into()),
+        Op::Pow | Op::And | Op::Or | Op::Implies => Err(MumeiError::verification(format!(
+            "Unsupported bit-vector operator {:?}",
+            op
+        ))),
+    }
+}
+
 pub(crate) fn expr_to_z3<'a>(
     vc: &VCtx<'a>,
     expr: &Expr,
@@ -575,6 +666,7 @@ pub(crate) fn expr_to_z3<'a>(
                             result_type,
                             vc.module_env,
                             vc.ieee754_f64,
+                            vc.bitvec_i64,
                         );
 
                         // ensures を事実として solver に追加（result を呼び出し結果に束縛）
@@ -803,6 +895,33 @@ pub(crate) fn expr_to_z3<'a>(
                 return Err(unsupported_exponentiation_error());
             }
 
+            // Short-circuiting connectives: the right operand is only
+            // evaluated when the left one allows it, so it is lowered under the
+            // guard as a path condition. That makes partiality checks (division
+            // by zero) respect guards like `b == 0 || a / b == c`, exactly as
+            // the runtime semantics do.
+            if matches!(op, Op::And | Op::Or | Op::Implies) {
+                let l = expr_to_z3(vc, left, env, solver_opt)?;
+                if let Some(lb) = l.as_bool() {
+                    let guard = if matches!(op, Op::Or) {
+                        lb.not()
+                    } else {
+                        lb.clone()
+                    };
+                    vc.path_cond_stack.borrow_mut().push(guard);
+                    let r = expr_to_z3(vc, right, env, solver_opt);
+                    vc.path_cond_stack.borrow_mut().pop();
+                    let rb = r?
+                        .as_bool()
+                        .ok_or_else(|| MumeiError::type_error("Expected bool operand"))?;
+                    return Ok(match op {
+                        Op::And => Bool::and(ctx, &[&lb, &rb]).into(),
+                        Op::Or => Bool::or(ctx, &[&lb, &rb]).into(),
+                        _ => lb.implies(&rb).into(),
+                    });
+                }
+            }
+
             let l = expr_to_z3(vc, left, env, solver_opt)?;
             let r = expr_to_z3(vc, right, env, solver_opt)?;
 
@@ -821,6 +940,26 @@ pub(crate) fn expr_to_z3<'a>(
                     Op::Neq => Ok(ls._eq(&rs).not().into()),
                     _ => Err(format!("Unsupported operator {:?} for Str type", op).into()),
                 };
+            }
+
+            // Opt-in bit-vector `i64` path (`--bitvec-i64`): as soon as one
+            // operand is a `BV(64)`, the whole operation is lowered into the
+            // bit-vector theory. An `Int` operand (integer literal, array
+            // element, result of an atom encoded in `Int` mode) is bridged with
+            // `int2bv`, which is exactly the two's complement reading of the
+            // literal. Placed before the `Real`/`Float` branches so a mixed
+            // `Int`/`BV` contract never reaches `as_int()` with mismatched
+            // sorts.
+            // In bit-vector mode two `Int` operands are also lowered into the
+            // bit-vector theory: they are `i64` literals (or values bridged out
+            // of `Int`-sorted containers), so `12 & 10` and the wrapping of
+            // `9223372036854775807 + 1` must follow machine semantics too.
+            let bitwise_op = matches!(op, Op::BitAnd | Op::BitOr | Op::BitXor | Op::Shl | Op::Shr);
+            if is_bv_i64(&l)
+                || is_bv_i64(&r)
+                || (vc.bitvec_i64 && (bitwise_op || (l.as_int().is_some() && r.as_int().is_some())))
+            {
+                return bv_binary_op(vc, op, &l, &r, solver_opt);
             }
 
             if l.as_real().is_some() || r.as_real().is_some() {
@@ -906,6 +1045,9 @@ pub(crate) fn expr_to_z3<'a>(
                     Op::Div => {
                         if let Some(solver) = solver_opt {
                             solver.push();
+                            for cond in vc.path_cond_stack.borrow().iter() {
+                                solver.assert(cond);
+                            }
                             solver.assert(&ri._eq(&Int::from_i64(ctx, 0)));
                             if solver.check() == SatResult::Sat {
                                 // Extract counterexample: find which variables cause divisor == 0
@@ -970,6 +1112,18 @@ pub(crate) fn expr_to_z3<'a>(
                     Op::Le => Ok(li.le(&ri).into()),
                     Op::Eq => Ok(li._eq(&ri).into()),
                     Op::Neq => Ok(li._eq(&ri).not().into()),
+                    // Bitwise operators have no faithful meaning in the
+                    // unbounded `Int` encoding, so they are rejected instead of
+                    // being approximated.
+                    Op::BitAnd | Op::BitOr | Op::BitXor | Op::Shl | Op::Shr => {
+                        Err(MumeiError::verification(format!(
+                            "Bitwise operator {:?} requires bit-vector semantics",
+                            op
+                        ))
+                        .with_help(
+                            "Verify with --bitvec-i64 so i64 is encoded as a 64-bit bit-vector",
+                        ))
+                    }
                     _ => Err(MumeiError::verification(format!(
                         "Unsupported int operator {:?}",
                         op

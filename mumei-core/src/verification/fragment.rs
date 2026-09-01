@@ -88,8 +88,44 @@ pub fn detect_logic_fragment_tags(atom: &Atom, module_env: &ModuleEnv) -> Vec<St
     if atom_uses_finite_field_semantics(atom) {
         push_unique_tag(&mut tags, "finite_field");
     }
+    if atom_uses_bitvector_semantics(&requires_expr, &ensures_expr, &body_stmt) {
+        push_unique_tag(&mut tags, "bitvector_semantics");
+    }
 
     tags
+}
+
+/// True when this atom has to be verified with the bit-vector encoding
+/// (`i64` as `BV(64)`), i.e. the default unbounded `Int` encoding cannot give
+/// its contract its intended meaning.
+///
+/// That is the case when the atom uses a bitwise operator — the `Int` encoding
+/// rejects `&`/`|`/`^`/`<<`/`>>` rather than approximating them — or when it
+/// opts in explicitly with `semantics: bitvec;`, for contracts that depend on
+/// two's complement wrapping without naming a bitwise operator. Every other
+/// atom keeps the default `Int` encoding, so its proof certificate is
+/// unchanged.
+pub fn atom_requires_bitvector_semantics(atom: &Atom) -> bool {
+    if atom
+        .spec_metadata
+        .get("semantics")
+        .is_some_and(|value| value == "bitvec")
+    {
+        return true;
+    }
+    atom_uses_bitvector_semantics(
+        &parse_expression(&atom.requires),
+        &parse_expression(&atom.ensures),
+        &parse_body_expr(&atom.body_expr),
+    )
+}
+
+/// True when any atom of the module needs the bit-vector encoding.
+pub fn module_uses_bitvector_semantics(module_env: &ModuleEnv) -> bool {
+    module_env
+        .atoms
+        .values()
+        .any(atom_requires_bitvector_semantics)
 }
 
 pub fn detect_logic_fragment(atom: &Atom, module_env: &ModuleEnv) -> Vec<LogicFragment> {
@@ -147,6 +183,12 @@ pub fn detect_logic_fragment(atom: &Atom, module_env: &ModuleEnv) -> Vec<LogicFr
 
 /// Returns true if the atom's logic fragment tags indicate it is outside
 /// the Z3-decidable fragment and should trigger a warning.
+///
+/// `bitvector_semantics` is deliberately absent from `OUTSIDE_TAGS`: QF_BV is
+/// decidable, so a bitwise obligation that is closed under bit-vectors stays a
+/// Z3 goal. Only obligations that leave that fragment (e.g. also tagged
+/// `nonlinear_arithmetic` for ring/polynomial overflow reasoning) become Lean
+/// escalation candidates.
 pub fn is_outside_decidable_fragment(tags: &[String]) -> bool {
     const OUTSIDE_TAGS: &[&str] = &[
         "nonlinear_arithmetic",
@@ -408,6 +450,65 @@ pub(crate) fn atom_contract_text(atom: &Atom) -> String {
         parts.push(q.condition.as_str());
     }
     parts.join(" ")
+}
+
+/// True when the atom's contract or body uses a bitwise operator, i.e. its
+/// obligation only has a faithful meaning in the bit-vector theory
+/// (`--bitvec-i64`).
+///
+/// This is a *decidable* fragment (QF_BV), so the tag alone does not make the
+/// atom an escalation candidate; it is recorded so reports and the Lean bridge
+/// can tell BV obligations apart from unbounded-integer ones. An obligation
+/// that is not closed under BV — e.g. one that also needs nonlinear/ring
+/// reasoning — still carries `nonlinear_arithmetic` and stays outside the
+/// fragment.
+fn atom_uses_bitvector_semantics(requires: &Expr, ensures: &Expr, body: &Stmt) -> bool {
+    expr_has_bitwise_op(requires) || expr_has_bitwise_op(ensures) || stmt_has_bitwise_op(body)
+}
+
+fn expr_has_bitwise_op(expr: &Expr) -> bool {
+    match expr {
+        Expr::BinaryOp(left, op, right) => {
+            matches!(op, Op::BitAnd | Op::BitOr | Op::BitXor | Op::Shl | Op::Shr)
+                || expr_has_bitwise_op(left)
+                || expr_has_bitwise_op(right)
+        }
+        Expr::ArrayAccess(_, index) => expr_has_bitwise_op(index),
+        Expr::Call(_, args) => args.iter().any(expr_has_bitwise_op),
+        Expr::FieldAccess(inner, _) => expr_has_bitwise_op(inner),
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            expr_has_bitwise_op(cond)
+                || stmt_has_bitwise_op(then_branch)
+                || stmt_has_bitwise_op(else_branch)
+        }
+        _ => false,
+    }
+}
+
+fn stmt_has_bitwise_op(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Expr(expr, _) => expr_has_bitwise_op(expr),
+        Stmt::Let { value, .. } | Stmt::Assign { value, .. } => expr_has_bitwise_op(value),
+        Stmt::ArrayStore { index, value, .. } => {
+            expr_has_bitwise_op(index) || expr_has_bitwise_op(value)
+        }
+        Stmt::Block(stmts, _) => stmts.iter().any(stmt_has_bitwise_op),
+        Stmt::While {
+            cond,
+            invariant,
+            body,
+            ..
+        } => {
+            expr_has_bitwise_op(cond) || expr_has_bitwise_op(invariant) || stmt_has_bitwise_op(body)
+        }
+        Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => stmt_has_bitwise_op(body),
+        Stmt::TaskGroup { children, .. } => children.iter().any(stmt_has_bitwise_op),
+        Stmt::Cancel { .. } => false,
+    }
 }
 
 fn atom_uses_finite_field_semantics(atom: &Atom) -> bool {

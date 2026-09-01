@@ -16,10 +16,18 @@ fn binding_power(tok: &Token) -> Option<(u8, u8)> {
         Token::Or => Some((3, 4)),
         Token::And => Some((5, 6)),
         Token::Eq | Token::Neq | Token::Gt | Token::Lt | Token::Ge | Token::Le => Some((7, 8)),
-        Token::Plus | Token::Minus => Some((9, 10)),
-        Token::Star | Token::Slash => Some((11, 12)),
-        Token::StarStar => Some((13, 12)),
-        Token::Dot | Token::ColonColon => Some((15, 16)),
+        // Bitwise operators bind tighter than comparison and looser than
+        // arithmetic, following the C/Rust ordering `| < ^ < & < shift`.
+        // `Token::Bar` is only a bitwise OR in infix position; in prefix
+        // position it still opens a lambda parameter list (`|x| x + 1`).
+        Token::Bar => Some((9, 10)),
+        Token::Caret => Some((11, 12)),
+        Token::Amp => Some((13, 14)),
+        Token::Shl | Token::Shr => Some((15, 16)),
+        Token::Plus | Token::Minus => Some((17, 18)),
+        Token::Star | Token::Slash => Some((19, 20)),
+        Token::StarStar => Some((21, 20)),
+        Token::Dot | Token::ColonColon => Some((23, 24)),
         _ => None,
     }
 }
@@ -39,6 +47,11 @@ fn token_to_op(tok: &Token) -> Option<Op> {
         Token::Le => Some(Op::Le),
         Token::And => Some(Op::And),
         Token::Or => Some(Op::Or),
+        Token::Amp => Some(Op::BitAnd),
+        Token::Bar => Some(Op::BitOr),
+        Token::Caret => Some(Op::BitXor),
+        Token::Shl => Some(Op::Shl),
+        Token::Shr => Some(Op::Shr),
         Token::FatArrow => Some(Op::Implies),
         _ => None,
     }

@@ -138,6 +138,7 @@ pub(crate) fn cmd_build(
         detect_loops: false,
         suggest_cegis: false,
         ieee754_f64: false,
+        bitvec_i64: false,
         property_based_test: None,
     };
     let mut escalation_cert_results: std::collections::HashMap<String, (String, String)> =
@@ -221,6 +222,7 @@ pub(crate) fn cmd_build(
                         &module_env,
                         output_dir,
                         verification_config.ieee754_f64,
+                        verification_config.bitvec_i64,
                     ) {
                         Ok(_) => println!(
                             "    ✅ Laws verified for impl {} for {}",
@@ -567,11 +569,19 @@ pub(crate) fn cmd_build(
                         println!("  ⚖️  [2/3] Verification: Skipped (unchanged, cached) ⏩");
                         module_env.mark_verified(&atom.name);
                     } else {
+                        // Atoms whose contract only has a meaning under two's
+                        // complement wrapping are verified with the `BV(64)`
+                        // encoding; every other atom keeps the `Int` encoding.
+                        let atom_config = verification::atom_requires_bitvector_semantics(atom)
+                            .then(|| verification::VerificationConfig {
+                                bitvec_i64: true,
+                                ..verification_config.clone()
+                            });
                         match verification::verify_with_verification_config(
                             &hir_atom,
                             output_dir,
                             &module_env,
-                            &verification_config,
+                            atom_config.as_ref().unwrap_or(&verification_config),
                         ) {
                             Ok(_) => {
                                 println!(

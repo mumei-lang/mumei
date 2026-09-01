@@ -31,6 +31,7 @@ pub fn verify_with_config(
             enable_spurious_detection: true,
             enable_vacuity_check: false,
             ieee754_f64: false,
+            bitvec_i64: false,
             property_based_config: None,
             task_id: orchestration_task_id_from_env(),
             generation_id: orchestration_generation_id_from_env(),
@@ -54,6 +55,7 @@ pub fn verify_with_verification_config(
             enable_spurious_detection: config.enable_spurious_detection,
             enable_vacuity_check: config.enable_vacuity_check,
             ieee754_f64: config.ieee754_f64,
+            bitvec_i64: config.bitvec_i64,
             property_based_config: config.property_based_test.as_ref(),
             task_id: orchestration_task_id_from_env(),
             generation_id: orchestration_generation_id_from_env(),
@@ -94,6 +96,7 @@ pub fn verify(hir_atom: &HirAtom, output_dir: &Path, module_env: &ModuleEnv) -> 
             enable_spurious_detection: true,
             enable_vacuity_check: false,
             ieee754_f64: false,
+            bitvec_i64: false,
             property_based_config: None,
             task_id: orchestration_task_id_from_env(),
             generation_id: orchestration_generation_id_from_env(),
@@ -107,6 +110,7 @@ pub(crate) struct VerifyInnerOptions<'a> {
     enable_spurious_detection: bool,
     enable_vacuity_check: bool,
     ieee754_f64: bool,
+    bitvec_i64: bool,
     property_based_config: Option<&'a PropertyBasedTestConfig>,
     task_id: Option<String>,
     generation_id: Option<String>,
@@ -397,6 +401,7 @@ pub(crate) fn verify_inner(
         enable_spurious_detection,
         enable_vacuity_check,
         ieee754_f64,
+        bitvec_i64,
         property_based_config,
         task_id,
         generation_id: _generation_id,
@@ -421,6 +426,7 @@ pub(crate) fn verify_inner(
         module_env,
         property_based_config,
         ieee754_f64,
+        bitvec_i64,
         timeout_ms,
     ) {
         let diagnostic = format!("{}: {}", err.kind, err.message);
@@ -628,6 +634,7 @@ pub(crate) fn verify_inner(
             invariant_expr,
             module_env,
             ieee754_f64,
+            bitvec_i64,
         )?;
     }
     metrics.record_phase("Phase 1d: atom invariant", phase_start.elapsed());
@@ -1185,6 +1192,7 @@ pub(crate) fn verify_inner(
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
         profiler: Some(&profiler_cell),
         ieee754_f64,
+        bitvec_i64,
     };
 
     let mut env: Env = HashMap::new();
@@ -1201,6 +1209,7 @@ pub(crate) fn verify_inner(
             param.type_name.as_deref(),
             module_env,
             ieee754_f64,
+            bitvec_i64,
         );
         env.insert(param.name.clone(), var);
     }
@@ -1211,6 +1220,7 @@ pub(crate) fn verify_inner(
         atom.return_type.as_deref(),
         module_env,
         ieee754_f64,
+        bitvec_i64,
     );
 
     // Phase 1h (continued): ConflictingMerge Z3 infrastructure.

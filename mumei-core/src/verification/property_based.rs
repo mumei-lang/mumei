@@ -863,6 +863,7 @@ fn validation_ctx<'a>(
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
         profiler: None,
         ieee754_f64: false,
+        bitvec_i64: super::fragment::atom_requires_bitvector_semantics(atom),
     }
 }
 
@@ -887,6 +888,7 @@ fn seed_concrete_env<'a>(
                     param.type_name.as_deref(),
                     module_env,
                     false,
+                    false,
                 )
             });
         env.insert(param.name.clone(), value.clone());
@@ -906,6 +908,7 @@ fn seed_concrete_env<'a>(
                 "result",
                 atom.return_type.as_deref(),
                 module_env,
+                false,
                 false,
             )
         });

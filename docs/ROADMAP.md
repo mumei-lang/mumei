@@ -1087,9 +1087,11 @@ Mumei の検証層は現在、Z3 の Bool / Int / Real /（有界）Array / Stri
 一方 Z3 は Bit-Vector・正規表現・代数的データ型・非線形算術など多くの理論を備えており、Mumei はこれらのギャップを「スタブ実装」「手動オーバーフロー境界」「Int タグエンコード」「無条件 Lean エスカレーション」で回避している。
 P10 では、これらのギャップのうち投資対効果の高いものを Z3 側で直接扱えるようにし、真に難しい部分は引き続き Lean 4 へ委譲する二層構造を維持する。
 
-**P10-A: Bit-Vector Theory（`Z3_BV_SORT` / `theory_bv`）** — ★★★ 最優先
+**P10-A: Bit-Vector Theory（`Z3_BV_SORT` / `theory_bv`）** — ★★★ 最優先 — ✅ 実装完了
 
-現状のギャップ:
+**ステータス: ✅ 実装完了**（`--bitvec-i64` オプトイン + ビット演算子／`semantics: bitvec;` を含む atom の自動 BV 化。既定は従来どおり `Int` エンコードで、既存 proof certificate は無変更。運用ガイドは `docs/SPEC_GUIDE.md` の「Bit-vector `i64`」節）。
+
+現状のギャップ（実装前）:
 
 - `std/bitwise.mm` は現行パーサが `&`, `|`, `^`, `<<`, `>>` を通常算術として扱わないため、`bit_and` などが実ビット意味論ではなく境界性質の witness（常に `0` を返す等）にとどまっている。
 - Z3 は数学的整数で検証するためオーバーフローが素通りし、`std/contracts.mm` の `safe_add` / `safe_multiply` や `std/math/fixed_point.mm` は `requires` に手動の範囲制約（±4×10^18 等）を書いて回避している。

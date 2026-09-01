@@ -686,6 +686,10 @@ pub struct VerificationConfig {
     /// (`--ieee754-f64`). Default `false` keeps the exact-rational `Real`
     /// encoding, preserving decidability/speed for existing fixtures.
     pub ieee754_f64: bool,
+    /// Opt-in bit-vector encoding for `i64` verification (`--bitvec-i64`).
+    /// Default `false` keeps the unbounded `Int` encoding, so existing proof
+    /// certificates are reproduced bit-for-bit.
+    pub bitvec_i64: bool,
     pub property_based_test: Option<PropertyBasedTestConfig>,
 }
 
@@ -701,6 +705,7 @@ impl Default for VerificationConfig {
             detect_loops: false,
             suggest_cegis: false,
             ieee754_f64: false,
+            bitvec_i64: false,
             property_based_test: None,
         }
     }
@@ -870,6 +875,9 @@ pub fn build_translator_ir_metadata(atom: &Atom, module_env: &ModuleEnv) -> Tran
     if tags.iter().any(|tag| tag.contains("nonlinear")) {
         lowering_rules.push("integer_overflow_bridge".to_string());
     }
+    if tags.iter().any(|tag| tag == "bitvector_semantics") {
+        lowering_rules.push("bitvector_semantics_bridge".to_string());
+    }
     if tags
         .iter()
         .any(|tag| tag.contains("quantifier") || tag.contains("refinement"))
@@ -913,6 +921,15 @@ fn semantic_gap_notes_for_rules(lowering_rules: &[String]) -> Vec<String> {
     {
         notes.push(
             "integer_overflow_bridge: Mumei uses 2's complement wrap semantics, Lean 4 Int is unbounded. Bridge lemma required for overflow behavior."
+                .to_string(),
+        );
+    }
+    if lowering_rules
+        .iter()
+        .any(|rule| rule == "bitvector_semantics_bridge")
+    {
+        notes.push(
+            "bitvector_semantics_bridge: Mumei `i64` bit operations are verified as Z3 BV(64) under --bitvec-i64; Lean 4 Int has no bit width, so a BitVec 64 bridge is required when such a goal escalates."
                 .to_string(),
         );
     }
@@ -967,6 +984,15 @@ fn proof_trace_hints_for_rules(lowering_rules: &[String]) -> Vec<String> {
     }
     if lowering_rules
         .iter()
+        .any(|rule| rule == "bitvector_semantics_bridge")
+    {
+        hints.push(
+            "keep the goal inside QF_BV (bvand/bvor/bvxor/bvshl/bvashr with 0 <= shift < 64) so Z3 can decide it without escalation"
+                .to_string(),
+        );
+    }
+    if lowering_rules
+        .iter()
         .any(|rule| rule == "array_bounds_bridge")
     {
         hints.push("preserve i < arr.length evidence before guarded List access".to_string());
@@ -1004,6 +1030,12 @@ fn bridge_lemmas_for_rules(lowering_rules: &[String]) -> Vec<String> {
         lemmas.push("mumei_i64_overflow_bridge".to_string());
         lemmas.push("mumei_i64_add_overflow_bridge".to_string());
         lemmas.push("mumei_div_by_zero_bridge".to_string());
+    }
+    if lowering_rules
+        .iter()
+        .any(|rule| rule == "bitvector_semantics_bridge")
+    {
+        lemmas.push("mumei_bitvec_i64_bridge".to_string());
     }
     if lowering_rules
         .iter()

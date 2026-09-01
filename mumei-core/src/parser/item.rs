@@ -223,6 +223,18 @@ pub fn parse_type_ref_from_ctx(ctx: &mut super::ParseContext) -> TypeRef {
                     type_str.push('>');
                     ctx.advance();
                 }
+                // The lexer merges `>>`/`<<` into shift tokens, so nested
+                // generics such as `[]<[]<i64>>` arrive as a single token here.
+                Token::Shr => {
+                    depth -= 2;
+                    type_str.push_str(">>");
+                    ctx.advance();
+                }
+                Token::Shl => {
+                    depth += 2;
+                    type_str.push_str("<<");
+                    ctx.advance();
+                }
                 Token::Comma => {
                     type_str.push_str(", ");
                     ctx.advance();
@@ -591,6 +603,21 @@ fn collect_angle_brackets(ctx: &mut ParseContext) -> String {
                 if depth == 0 {
                     break;
                 }
+            }
+            // `>>`/`<<` are lexed as shift tokens; inside a generic argument
+            // list they close/open two nesting levels.
+            Token::Shr => {
+                depth -= 2;
+                text.push_str(">>");
+                ctx.advance();
+                if depth <= 0 {
+                    break;
+                }
+            }
+            Token::Shl => {
+                depth += 2;
+                text.push_str("<<");
+                ctx.advance();
             }
             Token::Eof => break,
             _ => {
@@ -1623,6 +1650,8 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
     let mut consumed_params: Vec<String> = Vec::new();
     let mut resources: Vec<String> = Vec::new();
     let mut max_unroll: Option<usize> = None;
+    let mut spec_metadata: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     let mut invariant: Option<String> = None;
     let mut effects: Vec<Effect> = Vec::new();
     let mut contracts: Vec<(String, Option<String>, Option<String>)> = Vec::new();
@@ -1677,6 +1706,17 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
                     }
                 }
                 ctx.expect(Token::Semicolon);
+            }
+            // `semantics: bitvec;` — verify this atom with the bit-vector
+            // encoding (`i64` as `BV(64)`) even when `--bitvec-i64` is off, for
+            // contracts whose meaning depends on two's complement wrapping but
+            // that use no bitwise operator (so it cannot be inferred).
+            Token::Semantics => {
+                ctx.advance();
+                ctx.expect(Token::Colon);
+                let value = collect_until_semicolon(ctx);
+                ctx.expect(Token::Semicolon);
+                spec_metadata.insert("semantics".to_string(), value.trim().to_string());
             }
             Token::MaxUnroll => {
                 ctx.advance();
@@ -1784,7 +1824,7 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
         where_bounds,
         params,
         trace_id: None,
-        spec_metadata: std::collections::HashMap::new(),
+        spec_metadata,
         requires: requires_cleaned,
         forall_constraints,
         ensures,

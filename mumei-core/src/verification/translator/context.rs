@@ -44,6 +44,12 @@ pub(crate) struct VCtx<'a> {
     /// and `f64` arithmetic is lowered to the FP theory (round-nearest-even).
     /// When `false` (default), `f64` uses the exact-rational `Real` encoding.
     pub(crate) ieee754_f64: bool,
+    /// Opt-in bit-vector `i64` verification (`--bitvec-i64`). When `true`,
+    /// `i64` parameters/results are encoded as Z3 `BV(64)`, so `&`/`|`/`^`/
+    /// `<<`/`>>` carry real bit semantics and `+`/`-`/`*` wrap in two's
+    /// complement. When `false` (default), `i64` uses the unbounded `Int`
+    /// encoding.
+    pub(crate) bitvec_i64: bool,
 }
 
 impl<'a> VCtx<'a> {

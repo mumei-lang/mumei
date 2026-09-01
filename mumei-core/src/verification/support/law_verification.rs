@@ -14,7 +14,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs;
 use std::path::Path;
-use z3::ast::{Array, Ast, Bool, Dynamic, Float, Int, Real, String as Z3String};
+use z3::ast::{Array, Ast, Bool, Dynamic, Float, Int, Real, String as Z3String, BV};
 use z3::{Config, Context, SatResult, Solver};
 
 // =============================================================================
@@ -244,17 +244,19 @@ pub fn verify_impl(
     module_env: &ModuleEnv,
     output_dir: &Path,
 ) -> MumeiResult<()> {
-    verify_impl_with_options(impl_def, module_env, output_dir, false)
+    verify_impl_with_options(impl_def, module_env, output_dir, false, false)
 }
 
-/// `verify_impl` の IEEE 754 モード対応版。`ieee754_f64` が true の場合、
+/// `verify_impl` のセマンティクスモード対応版。`ieee754_f64` が true の場合、
 /// f64 対象型の law 変数と式の lowering に Z3 FP 理論（Float(11,53)）を
-/// 使い、atom 契約検証と同じ f64 エンコーディングで law を検証する。
+/// 使う。`bitvec_i64` が true の場合、i64 対象型の law 変数を BV(64) として
+/// 宣言し、atom 契約検証と同じエンコーディングで law を検証する。
 pub fn verify_impl_with_options(
     impl_def: &ImplDef,
     module_env: &ModuleEnv,
     output_dir: &Path,
     ieee754_f64: bool,
+    bitvec_i64: bool,
 ) -> MumeiResult<()> {
     let trait_def = module_env.get_trait(&impl_def.trait_name).ok_or_else(|| {
         MumeiError::type_error_at(
@@ -333,6 +335,7 @@ pub fn verify_impl_with_options(
             path_cond_stack: std::cell::RefCell::new(Vec::new()),
             profiler: None,
             ieee754_f64,
+            bitvec_i64,
         };
 
         let mut env: Env = HashMap::new();
@@ -346,6 +349,7 @@ pub fn verify_impl_with_options(
                 "f64" => Real::new_const(&ctx, *var_name).into(),
                 // Plan 9: Str parameters as Z3 String Sort
                 "Str" => Z3String::new_const(&ctx, *var_name).into(),
+                "i64" if bitvec_i64 => BV::new_const(&ctx, *var_name, I64_BITS).into(),
                 _ => Int::new_const(&ctx, *var_name).into(),
             };
             env.insert(var_name.to_string(), var);

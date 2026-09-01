@@ -456,5 +456,10 @@ fn op_to_source(op: &Op) -> &'static str {
         Op::Or => "||",
         Op::Implies => "=>",
         Op::Pow => "**",
+        Op::BitAnd => "&",
+        Op::BitOr => "|",
+        Op::BitXor => "^",
+        Op::Shl => "<<",
+        Op::Shr => ">>",
     }
 }

@@ -36,6 +36,7 @@ pub(crate) fn verify_atom_invariant(
     invariant_raw: &str,
     module_env: &ModuleEnv,
     ieee754_f64: bool,
+    bitvec_i64: bool,
 ) -> MumeiResult<()> {
     let mut cfg = Config::new();
     cfg.set_timeout_msec(5000);
@@ -54,6 +55,7 @@ pub(crate) fn verify_atom_invariant(
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
         profiler: None,
         ieee754_f64,
+        bitvec_i64,
     };
 
     let mut env: Env = HashMap::new();
@@ -66,6 +68,7 @@ pub(crate) fn verify_atom_invariant(
             param.type_name.as_deref(),
             module_env,
             ieee754_f64,
+            bitvec_i64,
         );
         env.insert(param.name.clone(), var);
 
@@ -220,6 +223,11 @@ pub(crate) fn expr_to_source_string(expr: &Expr) -> String {
                 Op::Or => "||",
                 Op::Implies => "==>",
                 Op::Pow => "**",
+                Op::BitAnd => "&",
+                Op::BitOr => "|",
+                Op::BitXor => "^",
+                Op::Shl => "<<",
+                Op::Shr => ">>",
             };
             format!(
                 "({} {} {})",

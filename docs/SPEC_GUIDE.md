@@ -98,6 +98,62 @@ effect File
 
 Prefer small state sets, deterministic transitions, and explicit operation order in atom bodies.
 
+## Bit-vector `i64` (`--bitvec-i64`)
+
+By default `i64` is encoded as a Z3 `Int`: an unbounded mathematical integer. That encoding cannot express bit patterns, and it lets a contract claim things a machine never does (`x + 1 > x` always holds). `--bitvec-i64` switches the encoding to `BV(64)`, i.e. a 64-bit two's complement machine integer.
+
+The mode is off by default, so certificates of existing specifications are byte-for-byte unchanged. It turns on for a single atom in two ways, and both are per-atom — the rest of the module keeps the `Int` encoding:
+
+- the atom uses a bitwise operator (`&`, `|`, `^`, `<<`, `>>`); the `Int` encoding rejects those rather than approximating them, so the bit-vector encoding is selected automatically;
+- the atom declares `semantics: bitvec;` right after its signature, for contracts that depend on wrapping without naming a bitwise operator.
+
+`--bitvec-i64` on the command line enables the mode for every atom of the run. The semantic mode is part of the verification cache key, so results are never shared between modes.
+
+### What you can specify
+
+- **Bit patterns.** `&`, `|`, `^` are `bvand`/`bvor`/`bvxor` on all 64 bits; `<<` is `bvshl` and `>>` is the sign-propagating `bvashr`. Bit-level identities are provable, e.g. `(x ^ y) ^ y == x`, `(x & 0) == 0`, `(0 - 1) >> 63 == 0 - 1`.
+
+  ```mumei
+  atom bit_and(a: i64, b: i64)
+  requires: true;
+  ensures: result == a & b;
+  body: { a & b };
+  ```
+
+- **Bounded shifts.** Shifts are specified only for `0 <= n < 64`; state that in `requires`. An unguarded shift amount fails verification with an actionable error instead of proving a property about Z3's out-of-range behavior.
+
+  ```mumei
+  atom bit_shift_left(x: i64, n: i64)
+  requires: n >= 0 && n < 64;
+  ensures: result == x << n;
+  body: { x << n };
+  ```
+
+- **Wrapping arithmetic and overflow predicates.** `+`, `-`, `*` wrap, `/` is `bvsdiv`, and comparisons are the signed ones (`bvslt`, …). This replaces hand-written overflow margins (`a <= 4611686018427387903`, `|a| <= 2000000000`, …) with the exact machine condition:
+
+  ```mumei
+  atom safe_add(a: i64, b: i64)
+  requires: ((a + b) ^ a) & ((a + b) ^ b) >= 0;   // signs agree: no wrap
+  ensures: result == a + b;
+  body: { a + b };
+
+  atom safe_multiply(a: i64, b: i64)
+  semantics: bitvec;
+  requires: a == 0 || b == 0 || ((a * b) / a == b && (a * b) / b == a);
+  ensures: result == a * b;
+  body: { a * b };
+  ```
+
+- **Signed interpretation.** `i64` is signed everywhere: comparisons, division, `>>`, and the `Int` bridge (`bv2int` with sign) all read the bit pattern as a signed value. `0 - 1` is `0xFFFF…FF`, not a large positive number.
+
+### What you cannot specify
+
+- **Unbounded reasoning in the same atom.** Once an atom is in bit-vector mode, *all* of its `i64` arithmetic wraps. A postcondition such as `result == a + b && result >= 0` is no longer valid for arbitrary inputs — bound the inputs in `requires` or keep that atom in the default mode.
+- **Mixed `Int`/`BV` semantics.** `Int`-sorted values that meet a bit-vector operand (integer literals, array elements, results of atoms verified in `Int` mode) are bridged with `int2bv`/`bv2int` at the boundary, which is the two's complement reading of the value. Contracts that need both unbounded and wrapping semantics for the same quantity are not expressible; split them into separate atoms.
+- **Widths other than 64.** Only `i64` is encoded as a bit-vector (`BV(64)`); `f64`, `bool`, `Str` and array sorts are unchanged. There is no `i32`/`u8` bit-width modelling.
+- **Deep ring/polynomial overflow theorems.** Bit-blasting a nonlinear obligation (e.g. a general 64-bit multiplication overflow characterisation over symbolic operands) is not reliably decided in practice. Such obligations keep their `integer_overflow_bridge` semantic-gap note and are Lean escalation candidates; obligations that stay inside QF_BV remain Z3's job and are not escalated.
+- **Bitwise operators on non-`i64` values.** `&`/`|`/`^`/`<<`/`>>` on `f64` or `Str` operands are rejected; there is no implicit reinterpretation of a float's bits.
+
 ## Anti-patterns
 
 With `mumei verify --warn-fragment`, the verifier emits an `outside_decidable_fragment` warning for tags that indicate the atom is outside the Z3-stable range (`nonlinear_arithmetic`, `quantifier_alternation`, `array_without_bounds`, or `inductive_data_type`). Other tags are diagnostic metadata that should still guide prompt and spec review:

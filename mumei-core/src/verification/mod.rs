@@ -14,7 +14,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs;
 use std::path::Path;
-use z3::ast::{Array, Ast, Bool, Dynamic, Float, Int, Real, String as Z3String};
+use z3::ast::{Array, Ast, Bool, Dynamic, Float, Int, Real, String as Z3String, BV};
 use z3::{Config, Context, SatResult, Solver};
 
 pub mod executor;

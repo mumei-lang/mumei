@@ -1142,6 +1142,7 @@ fn test_constraint_budget_exceeded() {
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
         profiler: None,
         ieee754_f64: false,
+        bitvec_i64: false,
     };
 
     // Each call increments and checks
@@ -1177,6 +1178,7 @@ fn test_constraint_budget_no_limit() {
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
         profiler: None,
         ieee754_f64: false,
+        bitvec_i64: false,
     };
 
     // Should always succeed when no constraint tracking
@@ -1939,6 +1941,7 @@ fn test_subsumption_check_holds_with_requires() {
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
         profiler: None,
         ieee754_f64: false,
+        bitvec_i64: false,
     };
     let concrete = Atom {
         name: "increment".to_string(),
@@ -2008,6 +2011,7 @@ fn test_subsumption_check_fails_without_requires() {
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
         profiler: None,
         ieee754_f64: false,
+        bitvec_i64: false,
     };
     let concrete = Atom {
         name: "negate".to_string(),
@@ -2080,6 +2084,7 @@ fn test_subsumption_check_crossed_param_names() {
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
         profiler: None,
         ieee754_f64: false,
+        bitvec_i64: false,
     };
     let concrete = Atom {
         name: "compute".to_string(),
@@ -2159,6 +2164,7 @@ fn test_subsumption_check_trivial_contract_ensures_skipped() {
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
         profiler: None,
         ieee754_f64: false,
+        bitvec_i64: false,
     };
     let concrete = Atom {
         name: "something".to_string(),
@@ -2220,6 +2226,7 @@ fn test_subsumption_check_concrete_true_ensures_warns() {
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
         profiler: None,
         ieee754_f64: false,
+        bitvec_i64: false,
     };
     let concrete = Atom {
         name: "no_guarantee".to_string(),
@@ -2673,6 +2680,7 @@ fn test_expr_to_z3_true_false_are_bool() {
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
         profiler: None,
         ieee754_f64: false,
+        bitvec_i64: false,
     };
     let mut env: Env = HashMap::new();
 
@@ -2731,6 +2739,7 @@ fn test_expr_to_z3_pow_constant_folds_full_precision() {
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
         profiler: None,
         ieee754_f64: false,
+        bitvec_i64: false,
     };
     let mut env: Env = HashMap::new();
 
@@ -2782,6 +2791,7 @@ fn test_tuple_result_indexing_uses_typed_components() {
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
         profiler: None,
         ieee754_f64: false,
+        bitvec_i64: false,
     };
     let mut env: Env = HashMap::new();
     seed_tuple_result_components(
@@ -2790,6 +2800,7 @@ fn test_tuple_result_indexing_uses_typed_components() {
         "result",
         Some("(u64, bool)"),
         &module_env,
+        false,
         false,
     );
 
@@ -2932,6 +2943,7 @@ fn test_chained_comparison_normalizes_before_lowering() {
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
         profiler: None,
         ieee754_f64: false,
+        bitvec_i64: false,
     };
     let mut env: Env = HashMap::new();
 
