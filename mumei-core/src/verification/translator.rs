@@ -16,7 +16,7 @@ pub(crate) use context::{
     check_constraint_budget, profile_solver_assertion, profile_solver_check, profiler_checkpoint,
     VCtx,
 };
-pub(crate) use expr::expr_to_z3;
+pub(crate) use expr::{discharge_bv_shift_obligations, expr_to_z3};
 pub(crate) use pattern::{
     detect_enum_from_arms, format_counterexample, pattern_bind_variables, pattern_to_z3_condition,
 };
@@ -26,11 +26,11 @@ pub(crate) use temporal::{
 };
 pub(crate) use z3_types::{
     array_element_sort, array_element_sort_from_type, array_element_type_from_annotation,
-    array_element_type_name, as_bv_i64, as_int_like, coerce_array_store_value, coerce_to_float,
-    float_eq, float_from_f64, is_bv_i64, mark_string_constraints, param_z3_value, real_from_f64,
-    round_nearest_even, seed_tuple_result_components, tuple_component_types,
-    tuple_result_arity_key, tuple_result_component_key, z3_array_for_name, z3_array_for_sort,
-    z3_dynamic_array, ArrayElementSort, F64_EBITS, F64_SBITS, I64_BITS,
+    array_element_type_name, array_len_value, as_bv_i64, as_int_like, coerce_array_store_value,
+    coerce_to_float, float_eq, float_from_f64, index_in_bounds, is_bv_i64, mark_string_constraints,
+    param_z3_value, real_from_f64, round_nearest_even, seed_tuple_result_components,
+    tuple_component_types, tuple_result_arity_key, tuple_result_component_key, z3_array_for_name,
+    z3_array_for_sort, z3_dynamic_array, ArrayElementSort, F64_EBITS, F64_SBITS, I64_BITS,
     UNSUPPORTED_TUPLE_RESULT_INDEXING,
 };
 

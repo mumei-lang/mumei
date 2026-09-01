@@ -224,8 +224,8 @@ pub(crate) fn real_from_f64<'a>(ctx: &'a Context, value: f64) -> Real<'a> {
 /// Bridge a `Dynamic` to the `Int` encoding (`bv2int`, signed).
 ///
 /// Under `--bitvec-i64` an `i64` value is a `BV(64)`, but several encodings
-/// stay on the `Int` sort regardless of the mode — array indices and lengths,
-/// `[i64]` elements, and the `Real`/`Float` coercions for `f64`. This is the
+/// stay on the `Int` sort regardless of the mode — array indices, `[i64]`
+/// elements, and the `Real`/`Float` coercions for `f64`. This is the
 /// single BV → Int conversion point: it applies Z3's signed `bv2int` so the
 /// two's complement value is preserved.
 pub(crate) fn as_int_like<'a>(value: &Dynamic<'a>) -> Option<Int<'a>> {
@@ -250,6 +250,71 @@ pub(crate) fn as_bv_i64<'a>(value: &Dynamic<'a>) -> Option<BV<'a>> {
 /// True when the value is encoded as a 64-bit bit-vector.
 pub(crate) fn is_bv_i64(value: &Dynamic<'_>) -> bool {
     value.as_bv().is_some_and(|bv| bv.get_size() == I64_BITS)
+}
+
+/// Symbolic length of an array, in the sort of the active `i64` encoding.
+///
+/// Lengths follow the mode so that index comparisons (`i < len(arr)`) stay in
+/// one theory: mixing `bv2int` on the index with `int2bv` on the length makes
+/// Z3 answer `unknown` on otherwise trivial array contracts.
+pub(crate) fn array_len_symbol<'a>(
+    ctx: &'a Context,
+    len_name: &str,
+    bitvec_i64: bool,
+) -> Dynamic<'a> {
+    if bitvec_i64 {
+        BV::new_const(ctx, len_name, I64_BITS).into()
+    } else {
+        Int::new_const(ctx, len_name).into()
+    }
+}
+
+/// `value >= 0`, signed in the bit-vector encoding.
+pub(crate) fn nonneg_constraint<'a>(ctx: &'a Context, value: &Dynamic<'a>) -> Option<Bool<'a>> {
+    if let Some(bv) = value.as_bv() {
+        let zero = BV::from_i64(ctx, 0, bv.get_size());
+        return Some(bv.bvsge(&zero));
+    }
+    value.as_int().map(|i| i.ge(&Int::from_i64(ctx, 0)))
+}
+
+/// `0 <= index < len`, compared in the bit-vector encoding when the length is
+/// a `BV(64)` and in `Int` otherwise.
+pub(crate) fn index_in_bounds<'a>(
+    ctx: &'a Context,
+    index: &Dynamic<'a>,
+    len: &Dynamic<'a>,
+) -> Option<Bool<'a>> {
+    if is_bv_i64(len) {
+        let (idx, len) = (as_bv_i64(index)?, as_bv_i64(len)?);
+        let zero = BV::from_i64(ctx, 0, I64_BITS);
+        return Some(Bool::and(ctx, &[&idx.bvsge(&zero), &idx.bvslt(&len)]));
+    }
+    let (idx, len) = (as_int_like(index)?, as_int_like(len)?);
+    Some(Bool::and(
+        ctx,
+        &[&idx.ge(&Int::from_i64(ctx, 0)), &idx.lt(&len)],
+    ))
+}
+
+/// Look up (or create and constrain) the `len_<array>` symbol in `env`.
+pub(crate) fn array_len_value<'a>(
+    ctx: &'a Context,
+    env: &mut Env<'a>,
+    array: &str,
+    bitvec_i64: bool,
+    solver_opt: Option<&Solver<'a>>,
+) -> Dynamic<'a> {
+    let len_name = format!("len_{}", array);
+    if let Some(existing) = env.get(&len_name) {
+        return existing.clone();
+    }
+    let len = array_len_symbol(ctx, &len_name, bitvec_i64);
+    if let (Some(solver), Some(nonneg)) = (solver_opt, nonneg_constraint(ctx, &len)) {
+        solver.assert(&nonneg);
+    }
+    env.insert(len_name, len.clone());
+    len
 }
 
 pub(crate) fn mark_string_constraints(vc: &VCtx<'_>) {

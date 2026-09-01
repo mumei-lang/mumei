@@ -213,6 +213,106 @@ fn stdlib_bitwise_atoms_verify_with_real_bit_semantics() {
     std::fs::remove_dir_all(dir).ok();
 }
 
+/// A bitwise operator that only appears in a loop invariant still selects the
+/// bit-vector encoding for the atom.
+#[test]
+fn bitwise_in_invariant_selects_bitvector_encoding() {
+    let dir = temp_dir("invariant");
+    let source = "atom masked_loop(n: i64) -> i64\n\
+        requires: n >= 0 && n < 8;\n\
+        ensures: result >= 0;\n\
+        body: {\n\
+            let i = 0;\n\
+            while i < n\n\
+            invariant: i >= 0 && i <= n && (i & 7) == i\n\
+            decreases: n - i\n\
+            {\n\
+                i = i + 1;\n\
+            };\n\
+            i\n\
+        };\n";
+    let fixture = write_fixture(&dir, "invariant.mm", source);
+
+    assert_verified(
+        &run_verify(&fixture, &dir, &[]),
+        "atom whose only bitwise operation is in a loop invariant",
+    );
+
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// A bitwise operator confined to the condition of a `forall` extracted from
+/// `requires` also selects the bit-vector encoding.
+#[test]
+fn bitwise_in_forall_condition_selects_bitvector_encoding() {
+    let dir = temp_dir("forall");
+    let source = "atom masked_elements(n: i64) -> i64\n\
+        requires: n >= 0 && forall(i, 0, n, (arr[i] & 1) == 0);\n\
+        ensures: result == n;\n\
+        body: n;\n";
+    let fixture = write_fixture(&dir, "forall.mm", source);
+
+    assert_verified(
+        &run_verify(&fixture, &dir, &[]),
+        "atom whose only bitwise operation is in a forall condition",
+    );
+
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// Array indices stay `Int`-sorted under the global flag: an `i64` index
+/// parameter is bridged from `BV(64)` at the access boundary.
+#[test]
+fn bitvec_mode_supports_array_indexing_with_i64_index() {
+    let dir = temp_dir("array");
+    let source = "atom read_at(i: i64, n: i64) -> i64\n\
+        requires: n >= 0 && i >= 0 && i < n && len(arr) == n && arr[i] >= 0;\n\
+        ensures: result >= 0;\n\
+        body: arr[i];\n";
+    let fixture = write_fixture(&dir, "array.mm", source);
+
+    assert_verified(
+        &run_verify(&fixture, &dir, &["--bitvec-i64"]),
+        "`arr[i]` with an i64 index under --bitvec-i64",
+    );
+
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// Shift-range validation also covers shifts that only occur in contract
+/// clauses, which are lowered without a solver.
+#[test]
+fn contract_only_shift_needs_a_bounded_amount() {
+    let dir = temp_dir("clause_shift");
+    let unguarded = write_fixture(
+        &dir,
+        "clause_shift.mm",
+        "atom clause_shift(x: i64, n: i64) -> i64\n\
+         requires: (x << n) >= 0;\n\
+         ensures: result == x;\n\
+         body: x;\n",
+    );
+    let guarded = write_fixture(
+        &dir,
+        "clause_shift_ok.mm",
+        "atom clause_shift_ok(x: i64, n: i64) -> i64\n\
+         requires: n >= 0 && n < 64 && (x << n) >= 0;\n\
+         ensures: result == x;\n\
+         body: x;\n",
+    );
+
+    assert_rejected(
+        &run_verify(&unguarded, &dir, &["--bitvec-i64"]),
+        "shift in `requires` without a bound on the amount",
+    );
+    assert_verified(
+        &run_verify(&guarded, &dir, &["--bitvec-i64"]),
+        "shift in `requires` with `0 <= n < 64`",
+    );
+
+    std::fs::remove_dir_all(dir).ok();
+}
+
 // ---------------------------------------------------------------------------
 // Backward compatibility gate: zero proof-certificate regressions with the
 // flag off.

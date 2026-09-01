@@ -144,12 +144,15 @@ The mode is off by default, so certificates of existing specifications are byte-
   body: { a * b };
   ```
 
+- **Arrays.** Elements and indices keep the `Int` encoding; `len(arr)` follows the mode so that `i < len(arr)` and the bounds check stay in one theory. An `i64` index is bridged with signed `bv2int` at the access, so `arr[i]` works unchanged under the flag.
+
 - **Signed interpretation.** `i64` is signed everywhere: comparisons, division, `>>`, and the `Int` bridge (`bv2int` with sign) all read the bit pattern as a signed value. `0 - 1` is `0xFFFF…FF`, not a large positive number.
 
 ### What you cannot specify
 
 - **Unbounded reasoning in the same atom.** Once an atom is in bit-vector mode, *all* of its `i64` arithmetic wraps. A postcondition such as `result == a + b && result >= 0` is no longer valid for arbitrary inputs — bound the inputs in `requires` or keep that atom in the default mode.
 - **Mixed `Int`/`BV` semantics.** `Int`-sorted values that meet a bit-vector operand (integer literals, array elements, results of atoms verified in `Int` mode) are bridged with `int2bv`/`bv2int` at the boundary, which is the two's complement reading of the value. Contracts that need both unbounded and wrapping semantics for the same quantity are not expressible; split them into separate atoms.
+- **Wrapping of array elements.** Arithmetic on two `Int`-sorted terms (e.g. `arr[i] + arr[j]`) stays unbounded even in bit-vector mode: only literals and `BV(64)` values wrap. Copy an element into an `i64` parameter or result if you need machine semantics for it.
 - **Widths other than 64.** Only `i64` is encoded as a bit-vector (`BV(64)`); `f64`, `bool`, `Str` and array sorts are unchanged. There is no `i32`/`u8` bit-width modelling.
 - **Deep ring/polynomial overflow theorems.** Bit-blasting a nonlinear obligation (e.g. a general 64-bit multiplication overflow characterisation over symbolic operands) is not reliably decided in practice. Such obligations keep their `integer_overflow_bridge` semantic-gap note and are Lean escalation candidates; obligations that stay inside QF_BV remain Z3's job and are not escalated.
 - **Bitwise operators on non-`i64` values.** `&`/`|`/`^`/`<<`/`>>` on `f64` or `Str` operands are rejected; there is no implicit reinterpretation of a float's bits.

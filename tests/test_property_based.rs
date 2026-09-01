@@ -149,6 +149,47 @@ fn shrinking_reduces_counterexample_size_by_at_least_ninety_percent() {
     );
 }
 
+/// A bitwise atom is evaluated in the `BV(64)` encoding, so generated inputs
+/// and body results are seeded and decoded as bit-vectors instead of silently
+/// counting as passing cases.
+#[test]
+fn property_based_validation_decodes_bitvector_bodies() {
+    let module_env = ModuleEnv::new();
+    let mut atom = base_atom("masked");
+    atom.params = vec![param("x", "i64")];
+    atom.ensures = "result == x".to_string();
+    atom.body_expr = "x & 1".to_string();
+
+    let config = PropertyBasedTestConfig {
+        test_count: 32,
+        max_shrink_steps: 64,
+        seed: 7,
+        include_boundary_values: true,
+    };
+    let result = run_property_based_test(&atom, &module_env, &config);
+
+    assert_eq!(
+        result.status, "failed",
+        "diagnostics: {:?}",
+        result.diagnostics
+    );
+}
+
+/// Negative generated values survive the round trip through the two's
+/// complement encoding.
+#[test]
+fn property_based_validation_keeps_negative_values_signed_in_bitvector_mode() {
+    let module_env = ModuleEnv::new();
+    let mut atom = base_atom("identity_mask");
+    atom.params = vec![param("x", "i64")];
+    atom.ensures = "result == x & (0 - 1)".to_string();
+    atom.body_expr = "x".to_string();
+    let mut assignment = HashMap::new();
+    assignment.insert("x".to_string(), GeneratedValue::Int(-1));
+
+    assert!(check_generated_assignment(&atom, &module_env, &assignment).is_none());
+}
+
 #[test]
 fn cli_exposes_property_based_validation_flags() {
     let bin = env!("CARGO_BIN_EXE_mumei");

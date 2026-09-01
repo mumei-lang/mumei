@@ -408,6 +408,12 @@ pub(crate) fn verify_inner(
     } = options;
     let timeout_ms = orchestration_timeout_ms_from_env().unwrap_or(timeout_ms);
     let atom = &hir_atom.atom;
+    // An atom whose contract only has a meaning under two's complement wrapping
+    // is always verified with the `BV(64)` encoding, whatever entry point the
+    // caller used (`verify`, `run`, `publish`, the LSP, …): the `Int` encoding
+    // cannot lower it at all. Every other atom keeps the default encoding
+    // unless the caller asked for `--bitvec-i64`.
+    let bitvec_i64 = bitvec_i64 || atom_requires_bitvector_semantics(atom);
 
     let mut metrics = VerificationMetrics::new(&atom.name);
     metrics.task_id = task_id;
@@ -1193,6 +1199,7 @@ pub(crate) fn verify_inner(
         profiler: Some(&profiler_cell),
         ieee754_f64,
         bitvec_i64,
+        bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
     };
 
     let mut env: Env = HashMap::new();
@@ -1341,23 +1348,13 @@ pub(crate) fn verify_inner(
                 // every std atom today binds a single `arr`, but would silently
                 // mis-bind bounds once another array (e.g. `data`, `aux`) is
                 // used in a forall condition.
-                let len_name = format!("len_{}", arr_name);
-                let len_var = if let Some(existing) = env.get(&len_name) {
-                    existing
-                        .as_int()
-                        .unwrap_or_else(|| Int::new_const(&ctx, len_name.as_str()))
-                } else {
-                    let l = Int::new_const(&ctx, len_name.as_str());
-                    solver.assert(&l.ge(&Int::from_i64(&ctx, 0)));
-                    env.insert(len_name.clone(), l.clone().into());
-                    l
-                };
+                let len_var = array_len_value(&ctx, &mut env, arr_name, bitvec_i64, Some(&solver));
                 if let Ok(idx_z3) = expr_to_z3(&vc, idx_expr, &mut env, None) {
-                    if let Some(idx_int) = idx_z3.as_int() {
-                        let body = range_cond.implies(&Bool::and(
-                            &ctx,
-                            &[&idx_int.ge(&Int::from_i64(&ctx, 0)), &idx_int.lt(&len_var)],
-                        ));
+                    if let (Some(idx_int), Some(in_bounds)) = (
+                        as_int_like(&idx_z3),
+                        index_in_bounds(&ctx, &idx_z3, &len_var),
+                    ) {
+                        let body = range_cond.implies(&in_bounds);
                         let pattern_ast = z3_dynamic_array(&vc, arr_name, &env).select(&idx_int);
                         let pattern_refs: Vec<&dyn z3::ast::Ast> =
                             vec![&pattern_ast as &dyn z3::ast::Ast];
@@ -1439,12 +1436,7 @@ pub(crate) fn verify_inner(
     // 2c. 全パラメータに対して配列長シンボルを事前生成
     #[allow(clippy::map_entry)]
     for param in &atom.params {
-        let len_name = format!("len_{}", param.name);
-        if !env.contains_key(&len_name) {
-            let len_var = Int::new_const(&ctx, len_name.as_str());
-            solver.assert(&len_var.ge(&Int::from_i64(&ctx, 0)));
-            env.insert(len_name, len_var.into());
-        }
+        array_len_value(&ctx, &mut env, &param.name, bitvec_i64, Some(&solver));
     }
 
     // 2d. 線形性チェック: consumed_params + ref パラメータの Z3 シンボリック Bool 連携
@@ -1996,6 +1988,11 @@ pub(crate) fn verify_inner(
     }
 
     metrics.record_phase("Phase 5: ensures verification", phase_start.elapsed());
+
+    // Shift amounts that appeared in clauses lowered without a solver
+    // (`requires`, `ensures`, invariants) are range-checked here, against the
+    // solver that already carries the preconditions.
+    discharge_bv_shift_obligations(&vc, &solver)?;
 
     let z3_check_start = std::time::Instant::now();
     let profiler_final_check_start = profiler_checkpoint(&vc);

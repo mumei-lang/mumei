@@ -336,6 +336,7 @@ pub fn verify_impl_with_options(
             profiler: None,
             ieee754_f64,
             bitvec_i64,
+            bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         };
 
         let mut env: Env = HashMap::new();

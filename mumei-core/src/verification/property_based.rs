@@ -1,7 +1,7 @@
 use super::module_env::ModuleEnv;
 use super::translator::{
     apply_refinement_constraint, expr_to_z3, param_z3_value, stmt_to_z3, VCtx,
-    DEFAULT_CONSTRAINT_BUDGET,
+    DEFAULT_CONSTRAINT_BUDGET, I64_BITS,
 };
 use super::types::Env;
 use super::{
@@ -389,12 +389,18 @@ pub fn synthesize_input_generators(atom: &Atom, module_env: &ModuleEnv) -> Gener
     build_generators(atom, module_env, &ctx)
 }
 
+/// Diagnostic for a generated assignment that violates the contract, or
+/// `None` when it holds, is ruled out by the precondition, or cannot be
+/// evaluated concretely.
 pub fn check_generated_assignment(
     atom: &Atom,
     module_env: &ModuleEnv,
     assignment: &HashMap<String, GeneratedValue>,
 ) -> Option<String> {
-    check_assignment(atom, module_env, assignment)
+    match check_assignment(atom, module_env, assignment) {
+        CaseOutcome::Counterexample(diagnostic) => Some(diagnostic),
+        CaseOutcome::Holds | CaseOutcome::Skipped | CaseOutcome::Inconclusive(_) => None,
+    }
 }
 
 pub fn shrink_counterexample(
@@ -436,32 +442,44 @@ pub fn run_property_based_test(
         Vec::new()
     };
 
-    for assignment in boundary_cases {
-        tests_run += 1;
-        if let Some(diagnostic) = check_assignment(atom, module_env, &assignment) {
-            let (shrunk, shrink_steps) =
-                shrink_assignment(atom, module_env, &generators, assignment, config);
-            return PropertyBasedTestResult::failed(tests_run, shrink_steps, shrunk, diagnostic);
+    let mut inconclusive = Vec::new();
+
+    for assignment in boundary_cases
+        .into_iter()
+        .chain((0..config.test_count).map(|_| random_assignment(&generators, &mut rng)))
+    {
+        match check_assignment(atom, module_env, &assignment) {
+            CaseOutcome::Counterexample(diagnostic) => {
+                tests_run += 1;
+                let (shrunk, shrink_steps) =
+                    shrink_assignment(atom, module_env, &generators, assignment, config);
+                return PropertyBasedTestResult::failed(
+                    tests_run,
+                    shrink_steps,
+                    shrunk,
+                    diagnostic,
+                );
+            }
+            CaseOutcome::Holds => tests_run += 1,
+            // Neither a pass nor a failure: the precondition ruled the input
+            // out, or the body could not be evaluated concretely.
+            CaseOutcome::Skipped => {}
+            CaseOutcome::Inconclusive(diagnostic) => inconclusive.push(diagnostic),
         }
     }
 
-    for _ in 0..config.test_count {
-        tests_run += 1;
-        let assignment = random_assignment(&generators, &mut rng);
-        if let Some(diagnostic) = check_assignment(atom, module_env, &assignment) {
-            let (shrunk, shrink_steps) =
-                shrink_assignment(atom, module_env, &generators, assignment, config);
-            return PropertyBasedTestResult::failed(tests_run, shrink_steps, shrunk, diagnostic);
-        }
+    let mut diagnostics = vec![format!(
+        "property-based validation passed {} generated input(s)",
+        tests_run
+    )];
+    if !inconclusive.is_empty() {
+        diagnostics.push(format!(
+            "property-based validation skipped {} generated input(s) with an undecodable body result",
+            inconclusive.len()
+        ));
+        diagnostics.extend(inconclusive.into_iter().take(3));
     }
-
-    PropertyBasedTestResult::passed(
-        tests_run,
-        vec![format!(
-            "property-based validation passed {} generated input(s)",
-            tests_run
-        )],
-    )
+    PropertyBasedTestResult::passed(tests_run, diagnostics)
 }
 
 fn build_generators(
@@ -710,19 +728,34 @@ fn random_assignment(
         .collect()
 }
 
+/// Outcome of one generated input. `Skipped` and `Inconclusive` are kept apart
+/// from `Holds` so that a case whose body result could not be decoded is never
+/// reported as a passing test.
+enum CaseOutcome {
+    Holds,
+    Skipped,
+    Inconclusive(String),
+    Counterexample(String),
+}
+
 fn check_assignment(
     atom: &Atom,
     module_env: &ModuleEnv,
     assignment: &HashMap<String, GeneratedValue>,
-) -> Option<String> {
+) -> CaseOutcome {
     if !assignment_satisfies_preconditions(atom, module_env, assignment) {
-        return None;
+        return CaseOutcome::Skipped;
     }
-    let result = evaluate_body(atom, module_env, assignment)?;
+    let Some(result) = evaluate_body(atom, module_env, assignment) else {
+        return CaseOutcome::Inconclusive(format!(
+            "property-based validation could not evaluate the body of '{}' for inputs={:?}",
+            atom.name, assignment
+        ));
+    };
     if assignment_satisfies_ensures(atom, module_env, assignment, &result) {
-        None
+        CaseOutcome::Holds
     } else {
-        Some(format!(
+        CaseOutcome::Counterexample(format!(
             "property-based validation found counterexample for '{}': inputs={:?}, result={:?}",
             atom.name, assignment, result
         ))
@@ -787,6 +820,15 @@ fn evaluate_body(
 }
 
 fn dynamic_to_generated(value: &Dynamic<'_>, solver: &Solver<'_>) -> Option<GeneratedValue> {
+    // Under the bit-vector encoding an `i64` result is a `BV(64)`; read its
+    // model value back as the signed two's complement integer it denotes.
+    if let Some(bv_value) = value.as_bv() {
+        let model = solver.get_model()?;
+        let evaluated = model.eval(&bv_value, true)?;
+        return evaluated
+            .as_u64()
+            .map(|bits| GeneratedValue::Int(bits as i64));
+    }
     if let Some(int_value) = value.as_int() {
         let model = solver.get_model()?;
         let evaluated = model.eval(&int_value, true)?;
@@ -823,7 +865,10 @@ fn shrink_assignment(
                 let mut next = current.clone();
                 next.insert(name.clone(), candidate);
                 steps += 1;
-                if check_assignment(atom, module_env, &next).is_some() {
+                if matches!(
+                    check_assignment(atom, module_env, &next),
+                    CaseOutcome::Counterexample(_)
+                ) {
                     current = next;
                     changed = true;
                     break;
@@ -864,6 +909,7 @@ fn validation_ctx<'a>(
         profiler: None,
         ieee754_f64: false,
         bitvec_i64: super::fragment::atom_requires_bitvector_semantics(atom),
+        bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
     }
 }
 
@@ -874,13 +920,14 @@ fn seed_concrete_env<'a>(
     assignment: &HashMap<String, GeneratedValue>,
     result: Option<&GeneratedValue>,
 ) -> Env<'a> {
+    let bitvec_i64 = super::fragment::atom_requires_bitvector_semantics(atom);
     let mut env: Env<'a> = HashMap::new();
     env.insert("true".to_string(), Bool::from_bool(ctx, true).into());
     env.insert("false".to_string(), Bool::from_bool(ctx, false).into());
     for param in &atom.params {
         let value = assignment
             .get(&param.name)
-            .map(|value| value_to_dynamic(ctx, &param.name, value))
+            .map(|value| value_to_dynamic(ctx, &param.name, value, bitvec_i64))
             .unwrap_or_else(|| {
                 param_z3_value(
                     ctx,
@@ -888,7 +935,7 @@ fn seed_concrete_env<'a>(
                     param.type_name.as_deref(),
                     module_env,
                     false,
-                    false,
+                    bitvec_i64,
                 )
             });
         env.insert(param.name.clone(), value.clone());
@@ -896,12 +943,17 @@ fn seed_concrete_env<'a>(
             env.insert(format!("__z3_arr_{}", param.name), value);
             env.insert(
                 format!("len_{}", param.name),
-                Int::from_i64(ctx, values.len() as i64).into(),
+                value_to_dynamic(
+                    ctx,
+                    &param.name,
+                    &GeneratedValue::Int(values.len() as i64),
+                    bitvec_i64,
+                ),
             );
         }
     }
     let result_value = result
-        .map(|value| value_to_dynamic(ctx, "result", value))
+        .map(|value| value_to_dynamic(ctx, "result", value, bitvec_i64))
         .unwrap_or_else(|| {
             param_z3_value(
                 ctx,
@@ -909,7 +961,7 @@ fn seed_concrete_env<'a>(
                 atom.return_type.as_deref(),
                 module_env,
                 false,
-                false,
+                bitvec_i64,
             )
         });
     env.insert("result".to_string(), result_value);
@@ -920,8 +972,14 @@ fn value_to_dynamic<'a>(
     ctx: &'a super::Context,
     name: &str,
     value: &GeneratedValue,
+    bitvec_i64: bool,
 ) -> Dynamic<'a> {
     match value {
+        // Array elements and indices stay `Int`-sorted; only scalar `i64`
+        // values follow the atom's encoding.
+        GeneratedValue::Int(value) if bitvec_i64 => {
+            z3::ast::BV::from_i64(ctx, *value, I64_BITS).into()
+        }
         GeneratedValue::Int(value) => Int::from_i64(ctx, *value).into(),
         GeneratedValue::Bool(value) => Bool::from_bool(ctx, *value).into(),
         GeneratedValue::Array(values) => {

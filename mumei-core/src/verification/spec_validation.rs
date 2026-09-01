@@ -194,6 +194,10 @@ pub fn check_spec_satisfiability_with_timeout(
     } else {
         timeout_ms.min(DEFAULT_SPEC_VALIDATION_TIMEOUT_MS)
     };
+    // Callers without an explicit mode (certificate generation, tooling) still
+    // have to encode a bit-vector contract as `BV(64)`; otherwise a healthy
+    // spec is reported as unlowerable or contradictory.
+    let bitvec_i64 = bitvec_i64 || super::fragment::atom_requires_bitvector_semantics(atom);
     let mut diagnostics = Vec::new();
     let checked_refinements = check_standalone_refinements(atom, module_env, timeout_ms)?;
 
@@ -431,6 +435,7 @@ fn validation_ctx<'a>(
         profiler: None,
         ieee754_f64,
         bitvec_i64,
+        bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
     }
 }
 

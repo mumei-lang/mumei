@@ -89,6 +89,40 @@ fn unsupported_exponentiation_error() -> MumeiError {
 /// but their out-of-range behavior is not the language's), so when a solver is
 /// available and the amount can leave the range, verification fails with an
 /// actionable error rather than proving something about saturating shifts.
+fn bv_shift_out_of_range<'a>(ctx: &'a Context, amount: &BV<'a>) -> Bool<'a> {
+    let zero = BV::from_i64(ctx, 0, I64_BITS);
+    let width = BV::from_i64(ctx, I64_BITS as i64, I64_BITS);
+    Bool::or(ctx, &[&amount.bvslt(&zero), &amount.bvsge(&width)])
+}
+
+fn out_of_range_shift_error() -> MumeiError {
+    MumeiError::verification("Shift amount may be outside 0..64".to_string())
+        .with_help("Add `n >= 0 && n < 64` for the shift amount to requires")
+}
+
+/// Discharge the shift-range obligations collected while lowering clauses
+/// without a solver (`requires`, `ensures`, invariants). Called once the
+/// atom's solver holds the preconditions, so a shift amount that a `requires`
+/// bounds is accepted while an unbounded one is rejected.
+pub(crate) fn discharge_bv_shift_obligations<'a>(
+    vc: &VCtx<'a>,
+    solver: &Solver<'a>,
+) -> MumeiResult<()> {
+    let obligations: Vec<(Bool<'a>, BV<'a>)> =
+        vc.bv_shift_obligations.borrow_mut().drain(..).collect();
+    for (path_cond, amount) in obligations {
+        solver.push();
+        solver.assert(&path_cond);
+        solver.assert(&bv_shift_out_of_range(vc.ctx, &amount));
+        let reachable = solver.check() == SatResult::Sat;
+        solver.pop(1);
+        if reachable {
+            return Err(out_of_range_shift_error());
+        }
+    }
+    Ok(())
+}
+
 fn bv_binary_op<'a>(
     vc: &VCtx<'a>,
     op: &Op,
@@ -105,23 +139,26 @@ fn bv_binary_op<'a>(
     })?;
 
     if matches!(op, Op::Shl | Op::Shr) {
-        if let Some(solver) = solver_opt {
-            let zero = BV::from_i64(ctx, 0, I64_BITS);
-            let width = BV::from_i64(ctx, I64_BITS as i64, I64_BITS);
-            let out_of_range = Bool::or(ctx, &[&rb.bvslt(&zero), &rb.bvsge(&width)]);
-            solver.push();
-            for cond in vc.path_cond_stack.borrow().iter() {
-                solver.assert(cond);
+        match solver_opt {
+            Some(solver) => {
+                solver.push();
+                for cond in vc.path_cond_stack.borrow().iter() {
+                    solver.assert(cond);
+                }
+                solver.assert(&bv_shift_out_of_range(ctx, &rb));
+                let reachable = solver.check() == SatResult::Sat;
+                solver.pop(1);
+                if reachable {
+                    return Err(out_of_range_shift_error());
+                }
             }
-            solver.assert(&out_of_range);
-            let reachable = solver.check() == SatResult::Sat;
-            solver.pop(1);
-            if reachable {
-                return Err(MumeiError::verification(
-                    "Shift amount may be outside 0..64".to_string(),
-                )
-                .with_help("Add `n >= 0 && n < 64` for the shift amount to requires"));
-            }
+            // Contract clauses and invariants are lowered without a solver;
+            // remember the amount so the range is still discharged once the
+            // atom's solver carries the preconditions.
+            None => vc
+                .bv_shift_obligations
+                .borrow_mut()
+                .push((vc.path_cond_conj(), rb.clone())),
         }
     }
 
@@ -262,12 +299,14 @@ pub(crate) fn expr_to_z3<'a>(
                     };
 
                     // 第2引数: 範囲の開始
-                    let start_z3 = expr_to_z3(vc, &args[1], env, None)?.as_int().ok_or(
+                    // Quantifier bounds stay `Int`-sorted under
+                    // `--bitvec-i64`, bridging any `BV(64)` bound.
+                    let start_z3 = as_int_like(&expr_to_z3(vc, &args[1], env, None)?).ok_or(
                         MumeiError::type_error(format!("{}(): start must be integer", name)),
                     )?;
 
                     // 第3引数: 範囲の終了
-                    let end_z3 = expr_to_z3(vc, &args[2], env, None)?.as_int().ok_or(
+                    let end_z3 = as_int_like(&expr_to_z3(vc, &args[2], env, None)?).ok_or(
                         MumeiError::type_error(format!("{}(): end must be integer", name)),
                     )?;
 
@@ -320,7 +359,7 @@ pub(crate) fn expr_to_z3<'a>(
                         };
                         for (arr_name, idx_expr) in &arr_accesses {
                             if let Ok(idx_z3) = expr_to_z3(vc, idx_expr, env, None) {
-                                if let Some(idx_int) = idx_z3.as_int() {
+                                if let Some(idx_int) = as_int_like(&idx_z3) {
                                     pattern_asts
                                         .push(z3_dynamic_array(vc, arr_name, env).select(&idx_int));
                                 }
@@ -369,13 +408,13 @@ pub(crate) fn expr_to_z3<'a>(
                     } else {
                         "arr".to_string()
                     };
-                    let len_name = format!("len_{}", arr_name);
-                    let len_var = Int::new_const(ctx, len_name.as_str());
-                    if let Some(solver) = solver_opt {
-                        solver.assert(&len_var.ge(&Int::from_i64(ctx, 0)));
-                    }
-                    env.insert(len_name, len_var.clone().into());
-                    Ok(len_var.into())
+                    Ok(array_len_value(
+                        ctx,
+                        env,
+                        &arr_name,
+                        vc.bitvec_i64,
+                        solver_opt,
+                    ))
                 }
                 "sqrt" => {
                     // Z3 0.12 の Float/Real には sqrt メソッドがないため、
@@ -842,24 +881,18 @@ pub(crate) fn expr_to_z3<'a>(
                     });
                 }
             }
-            let idx = expr_to_z3(vc, index_expr, env, solver_opt)?
-                .as_int()
-                .ok_or(MumeiError::type_error("Index must be integer"))?;
+            let idx_value = expr_to_z3(vc, index_expr, env, solver_opt)?;
+            // Array indices stay `Int`-sorted even under `--bitvec-i64`, so an
+            // `i64` index lowered to `BV(64)` crosses the documented signed
+            // bit-vector/integer bridge here.
+            let idx =
+                as_int_like(&idx_value).ok_or(MumeiError::type_error("Index must be integer"))?;
 
             // 配列名に紐づく長さシンボルを使った境界チェック
             if let Some(solver) = solver_opt {
-                let len_name = format!("len_{}", name);
-                let len = if let Some(existing) = env.get(&len_name) {
-                    existing
-                        .as_int()
-                        .unwrap_or(Int::new_const(ctx, len_name.as_str()))
-                } else {
-                    let l = Int::new_const(ctx, len_name.as_str());
-                    solver.assert(&l.ge(&Int::from_i64(ctx, 0)));
-                    env.insert(len_name.clone(), l.clone().into());
-                    l
-                };
-                let safe = Bool::and(ctx, &[&idx.ge(&Int::from_i64(ctx, 0)), &idx.lt(&len)]);
+                let len = array_len_value(ctx, env, name, vc.bitvec_i64, Some(solver));
+                let safe = index_in_bounds(ctx, &idx_value, &len)
+                    .ok_or(MumeiError::type_error("Index must be integer"))?;
                 solver.push();
                 solver.assert(&safe.not());
                 if solver.check() == SatResult::Sat {
@@ -950,15 +983,17 @@ pub(crate) fn expr_to_z3<'a>(
             // literal. Placed before the `Real`/`Float` branches so a mixed
             // `Int`/`BV` contract never reaches `as_int()` with mismatched
             // sorts.
-            // In bit-vector mode two `Int` operands are also lowered into the
-            // bit-vector theory: they are `i64` literals (or values bridged out
-            // of `Int`-sorted containers), so `12 & 10` and the wrapping of
-            // `9223372036854775807 + 1` must follow machine semantics too.
+            // In bit-vector mode two `Int` literals are also lowered into the
+            // bit-vector theory, so `12 & 10` and the wrapping of
+            // `9223372036854775807 + 1` follow machine semantics too. Other
+            // `Int`-sorted terms (array elements, quantifier bounds) keep the
+            // `Int` encoding: bridging them with `int2bv` costs Z3 far more
+            // than the wrapping is worth, and they are not machine values.
             let bitwise_op = matches!(op, Op::BitAnd | Op::BitOr | Op::BitXor | Op::Shl | Op::Shr);
-            if is_bv_i64(&l)
-                || is_bv_i64(&r)
-                || (vc.bitvec_i64 && (bitwise_op || (l.as_int().is_some() && r.as_int().is_some())))
-            {
+            let both_literals = [&l, &r]
+                .iter()
+                .all(|value| value.as_int().and_then(|i| i.as_i64()).is_some());
+            if is_bv_i64(&l) || is_bv_i64(&r) || (vc.bitvec_i64 && (bitwise_op || both_literals)) {
                 return bv_binary_op(vc, op, &l, &r, solver_opt);
             }
 

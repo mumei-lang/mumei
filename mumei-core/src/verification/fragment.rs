@@ -88,7 +88,7 @@ pub fn detect_logic_fragment_tags(atom: &Atom, module_env: &ModuleEnv) -> Vec<St
     if atom_uses_finite_field_semantics(atom) {
         push_unique_tag(&mut tags, "finite_field");
     }
-    if atom_uses_bitvector_semantics(&requires_expr, &ensures_expr, &body_stmt) {
+    if atom_uses_bitvector_semantics(atom, &requires_expr, &ensures_expr, &body_stmt) {
         push_unique_tag(&mut tags, "bitvector_semantics");
     }
 
@@ -114,6 +114,7 @@ pub fn atom_requires_bitvector_semantics(atom: &Atom) -> bool {
         return true;
     }
     atom_uses_bitvector_semantics(
+        atom,
         &parse_expression(&atom.requires),
         &parse_expression(&atom.ensures),
         &parse_body_expr(&atom.body_expr),
@@ -462,8 +463,27 @@ pub(crate) fn atom_contract_text(atom: &Atom) -> String {
 /// that is not closed under BV — e.g. one that also needs nonlinear/ring
 /// reasoning — still carries `nonlinear_arithmetic` and stays outside the
 /// fragment.
-fn atom_uses_bitvector_semantics(requires: &Expr, ensures: &Expr, body: &Stmt) -> bool {
-    expr_has_bitwise_op(requires) || expr_has_bitwise_op(ensures) || stmt_has_bitwise_op(body)
+/// A bitwise operator anywhere in the contract — including the loop invariant
+/// and the bounds and condition of an extracted quantifier — decides the
+/// encoding, since all of those clauses are lowered with the same sorts.
+fn atom_uses_bitvector_semantics(
+    atom: &Atom,
+    requires: &Expr,
+    ensures: &Expr,
+    body: &Stmt,
+) -> bool {
+    expr_has_bitwise_op(requires)
+        || expr_has_bitwise_op(ensures)
+        || stmt_has_bitwise_op(body)
+        || atom
+            .invariant
+            .as_ref()
+            .is_some_and(|inv| expr_has_bitwise_op(&parse_expression(inv)))
+        || atom.forall_constraints.iter().any(|q| {
+            [&q.start, &q.end, &q.condition]
+                .iter()
+                .any(|clause| expr_has_bitwise_op(&parse_expression(clause)))
+        })
 }
 
 fn expr_has_bitwise_op(expr: &Expr) -> bool {

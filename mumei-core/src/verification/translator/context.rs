@@ -50,6 +50,12 @@ pub(crate) struct VCtx<'a> {
     /// complement. When `false` (default), `i64` uses the unbounded `Int`
     /// encoding.
     pub(crate) bitvec_i64: bool,
+    /// Shift amounts lowered while no `Solver` was available (contract clauses
+    /// and invariants are lowered with `solver_opt = None`), paired with the
+    /// path condition in force at that point. `discharge_bv_shift_obligations`
+    /// replays them against the atom's solver so that `0 <= n < 64` is enforced
+    /// for `requires`/`ensures`/invariant shifts too, not just body shifts.
+    pub(crate) bv_shift_obligations: std::cell::RefCell<Vec<(Bool<'a>, BV<'a>)>>,
 }
 
 impl<'a> VCtx<'a> {
