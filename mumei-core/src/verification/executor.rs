@@ -688,7 +688,7 @@ pub(crate) fn verify_inner(
     // Rvalue::Use, so violations are only reported for Move types.
     // Move type violations are hard errors; Copy type false positives are eliminated.
     let phase_start = std::time::Instant::now();
-    let mir_body = crate::mir::lower_hir_to_mir(hir_atom);
+    let mir_body = crate::mir::lower_hir_to_mir_with_env(hir_atom, Some(module_env));
     let move_conflict_locals: Vec<(crate::mir::Local, crate::mir::BasicBlockId)> = Vec::new();
     if mir_body.check_analysis_budget().is_ok() {
         let move_result = crate::mir_analysis::analyze_moves(&mir_body);
