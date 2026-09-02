@@ -100,6 +100,39 @@ body: {
 
 Avoid specifications that require Z3 to infer bounds from unrelated arithmetic or nested index expressions. State the exact index range near the access.
 
+### Relational verification via atom calls in `ensures`
+
+A verified atom may be called inside `requires`/`ensures`. This is the way to
+state that two implementations agree (`ensures: result == calc_v1(x);` on an
+atom whose body calls `calc_v2`). Regression fixtures:
+`tests/test_relational_equiv_ok.mm` (proof succeeds),
+`tests/test_relational_equiv_mismatch.mm` (fails with a counterexample) and
+`tests/test_relational_equiv_trusted.mm` (trusted callee, cannot be proven).
+
+How a call is encoded, in the body and in the spec alike:
+
+- every call site gets its **own fresh symbol** `call_<atom>_<n>`; there is no
+  uninterpreted function `calc_v1(x)`, so Z3 gets **no congruence**
+  (`x == y` does not by itself give `calc_v1(x) == calc_v1(y)`, and two calls
+  `calc_v1(x)` produce two unrelated symbols);
+- the only facts known about that symbol are the callee's `ensures` (with
+  `result` bound to the symbol) and, for struct results, the struct invariant;
+- the callee's `requires` is checked at the call site.
+
+Consequently a relational proof only goes through when the callee's `ensures`
+is **functional** (pins `result` to an expression over its arguments, such as
+`result == 2 * x + 1`). Both `calc_v1` and `calc_v2` must have such ensures
+for `result == calc_v1(x)` to be provable.
+
+For `trusted`/`unverified` atoms this limitation is structural: their body is
+never verified, so every call — including two calls with identical arguments —
+is a fresh symbol constrained only by the declared `ensures`. `ensures: result
+== oracle(x)` over `body: oracle(x)` is *not* provable when `oracle` is
+trusted with `ensures: result >= x`; the failure is reported as a spurious
+counterexample depending on uninterpreted symbol `oracle (trusted_atom)`. To
+relate trusted calls, strengthen the trusted `ensures` to a functional
+equation, or verify the atom instead of trusting it.
+
 ### Quantifiers
 
 Use `forall` only over bounded integer ranges or finite collections. Use `exists` when the witness is constructible from in-scope values.

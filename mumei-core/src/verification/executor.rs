@@ -357,6 +357,7 @@ fn lower_clause_with_skip<'a>(
     clause: &str,
     label: &str,
     diagnostics: &mut Vec<String>,
+    solver_opt: Option<&Solver<'a>>,
 ) -> Result<ClauseLoweringOutcome<'a>, MumeiError> {
     let clause = normalize_foreign_boolean_literals(clause);
     let trimmed = clause.trim();
@@ -364,7 +365,7 @@ fn lower_clause_with_skip<'a>(
         return Ok(ClauseLoweringOutcome::Trivial);
     }
     let clause_ast = parse_expression(trimmed);
-    let clause_z3 = match expr_to_z3(vc, &clause_ast, env, None) {
+    let clause_z3 = match expr_to_z3(vc, &clause_ast, env, solver_opt) {
         Ok(value) => value,
         Err(err) if is_unsupported_clause_error(&err) => {
             push_skip_warning(
@@ -438,6 +439,12 @@ pub(crate) fn verify_inner(
     if !atom.type_params.is_empty() {
         return Ok(());
     }
+
+    // Phase 0-units: 単位型（units of measure）の一致検査。AST 上の純粋な型検査で、
+    // Z3 エンコードや MIR には影響しない。不一致は TypeError として証明前に拒否する。
+    let phase_start = std::time::Instant::now();
+    verify_unit_consistency(atom, &hir_atom.body_stmt, module_env)?;
+    metrics.record_phase("Phase 0-units: unit consistency", phase_start.elapsed());
 
     // Phase 0a: 仕様健全性チェック（proof attempt 前の requires/ensures/refinement SAT）
     let phase_start = std::time::Instant::now();
@@ -1554,6 +1561,7 @@ pub(crate) fn verify_inner(
                 &req_clause,
                 "requires",
                 &mut diagnostics,
+                None,
             )? {
                 ClauseLoweringOutcome::Trivial | ClauseLoweringOutcome::Skipped => {}
                 ClauseLoweringOutcome::Lowered(req_bool) => {
@@ -1786,6 +1794,7 @@ pub(crate) fn verify_inner(
                 &ens_clause,
                 "ensures",
                 &mut diagnostics,
+                Some(&solver),
             )? {
                 ClauseLoweringOutcome::Trivial => {}
                 ClauseLoweringOutcome::Skipped => {
