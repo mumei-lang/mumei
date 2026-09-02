@@ -255,17 +255,33 @@ struct LowerCtx {
     current_stmts: Vec<MirStatement>,
     /// Mapping from variable name to Local index.
     var_map: std::collections::HashMap<String, Local>,
+    /// User type aliases (`type Usd = i64 ...;`) resolved to their base type,
+    /// so movability follows the underlying representation.
+    alias_bases: std::collections::HashMap<String, String>,
     next_local: usize,
     next_block: usize,
 }
 
 impl LowerCtx {
     fn new() -> Self {
+        Self::with_env(None)
+    }
+
+    fn with_env(module_env: Option<&crate::verification::ModuleEnv>) -> Self {
+        let alias_bases = module_env
+            .map(|env| {
+                env.types
+                    .keys()
+                    .map(|name| (name.clone(), resolve_alias_base(env, name)))
+                    .collect()
+            })
+            .unwrap_or_default();
         Self {
             locals: Vec::new(),
             blocks: Vec::new(),
             current_stmts: Vec::new(),
             var_map: std::collections::HashMap::new(),
+            alias_bases,
             next_local: 0,
             next_block: 0,
         }
@@ -285,7 +301,12 @@ impl LowerCtx {
     ) -> Local {
         let local = Local(self.next_local);
         self.next_local += 1;
-        let movability = movability_from_type(&ty);
+        let movability = movability_from_type(&ty.as_ref().map(|t| {
+            self.alias_bases
+                .get(t)
+                .cloned()
+                .unwrap_or_else(|| t.clone())
+        }));
         self.locals.push(LocalDecl {
             local: local.clone(),
             name: name.clone(),
@@ -427,10 +448,32 @@ impl LowerCtx {
     }
 }
 
+/// Follow `type A = B; type B = i64;` chains down to the base type name.
+fn resolve_alias_base(env: &crate::verification::ModuleEnv, name: &str) -> String {
+    let mut current = name.to_string();
+    let mut seen = std::collections::HashSet::new();
+    while let Some(refined) = env.get_type(&current) {
+        if !seen.insert(current.clone()) || refined._base_type == current {
+            break;
+        }
+        current = refined._base_type.clone();
+    }
+    current
+}
+
 /// Lower a HirAtom to MirBody.
 /// Phase 4b: basic lowering that flattens nested expressions into three-address code.
 pub fn lower_hir_to_mir(hir_atom: &HirAtom) -> MirBody {
-    let mut ctx = LowerCtx::new();
+    lower_hir_to_mir_with_env(hir_atom, None)
+}
+
+/// Like [`lower_hir_to_mir`], but resolves user type aliases through the
+/// `ModuleEnv` so an alias of a Copy base (`type Usd = i64 unit USD;`) is Copy.
+pub fn lower_hir_to_mir_with_env(
+    hir_atom: &HirAtom,
+    module_env: Option<&crate::verification::ModuleEnv>,
+) -> MirBody {
+    let mut ctx = LowerCtx::with_env(module_env);
 
     // Allocate locals for atom parameters.
     for param in &hir_atom.atom.params {
