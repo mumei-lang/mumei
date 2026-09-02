@@ -138,7 +138,12 @@ impl<'a> UnitCtx<'a> {
                     .iter()
                     .map(|a| self.infer(a))
                     .collect::<MumeiResult<Vec<Unit>>>()?;
-                let Some(callee) = self.module_env.get_atom(name) else {
+                let fqn_name = name.replace('.', "::");
+                let Some(callee) = self
+                    .module_env
+                    .get_atom(name)
+                    .or_else(|| self.module_env.get_atom(&fqn_name))
+                else {
                     return Ok(None);
                 };
                 for (param, arg_unit) in callee.params.iter().zip(arg_units.iter()) {

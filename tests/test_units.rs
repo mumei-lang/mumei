@@ -90,6 +90,42 @@ fn passing_jpy_to_usd_parameter_is_rejected() {
     assert_unit_mismatch("test_units_mismatch_call.mm", "call", "USD", "JPY");
 }
 
+/// A unit-only edit to an alias must invalidate the incremental cache, so the
+/// second run reports the mismatch instead of reusing the cached success.
+#[test]
+fn unit_change_invalidates_verification_cache() {
+    let dir = std::env::temp_dir().join(format!("mumei_units_{}_cache", std::process::id()));
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir).expect("clean stale temp dir");
+    }
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let file = dir.join("cache.mm");
+    let atom = "atom add(a: A, b: B)\n    requires: true;\n    ensures: result == a + b;\n    body: a + b;\n";
+    let run = |src: &str| {
+        std::fs::write(&file, src).expect("write fixture");
+        let out = Command::new(env!("CARGO_BIN_EXE_mumei"))
+            .arg("verify")
+            .arg("--report-dir")
+            .arg(&dir)
+            .arg(&file)
+            .current_dir(&dir)
+            .output()
+            .expect("failed to run mumei verify");
+        (out.status.success(), combined(&out))
+    };
+
+    let (ok, text) = run(&format!(
+        "type A = i64 unit USD;\ntype B = i64 unit USD;\n{atom}"
+    ));
+    assert!(ok, "same-unit program must verify\n{text}");
+    let (ok, text) = run(&format!(
+        "type A = i64 unit USD;\ntype B = i64 unit JPY;\n{atom}"
+    ));
+    std::fs::remove_dir_all(&dir).ok();
+    assert!(!ok, "unit edit must not hit the cache\n{text}");
+    assert!(text.contains("Unit mismatch"), "{text}");
+}
+
 /// Backward compatibility: refinement-only aliases and unannotated atoms are
 /// untouched by the unit checker.
 #[test]

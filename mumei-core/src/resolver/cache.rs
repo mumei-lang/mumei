@@ -280,6 +280,22 @@ pub fn compute_proof_hash_with_flags(
         }
     }
 
+    // 2b. Unit tags of every alias in the module. The unit-consistency check
+    // reads types through params, `-> T`, struct fields and callee signatures,
+    // so any unit edit must invalidate cached results.
+    let mut unit_tags: Vec<(&String, &String)> = module_env
+        .types
+        .iter()
+        .filter_map(|(name, refined)| refined.unit.as_ref().map(|u| (name, u)))
+        .collect();
+    unit_tags.sort();
+    for (name, unit) in unit_tags {
+        hasher.update(b"|type_unit:");
+        hasher.update(name.as_bytes());
+        hasher.update(b"=");
+        hasher.update(unit.as_bytes());
+    }
+
     // 3. Include callee signatures (transitive dependencies)
     let mut visited = HashSet::new();
     let mut stack = Vec::new();
