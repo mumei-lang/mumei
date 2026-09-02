@@ -449,7 +449,7 @@ impl LowerCtx {
 }
 
 /// Follow `type A = B; type B = i64;` chains down to the base type name.
-fn resolve_alias_base(env: &crate::verification::ModuleEnv, name: &str) -> String {
+pub fn resolve_alias_base(env: &crate::verification::ModuleEnv, name: &str) -> String {
     let mut current = name.to_string();
     let mut seen = std::collections::HashSet::new();
     while let Some(refined) = env.get_type(&current) {
