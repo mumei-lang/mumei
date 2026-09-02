@@ -16,12 +16,14 @@ pub(crate) fn stmt_to_z3<'a>(
         Stmt::Let { var, value, .. } => {
             let val = expr_to_z3(vc, value, env, solver_opt)?;
             env.insert(var.clone(), val.clone());
+            alias_struct_fields(env, var, &val);
             profile_solver_assertion(vc, &format!("let_{}", var), None);
             Ok(val)
         }
         Stmt::Assign { var, value, .. } => {
             let val = expr_to_z3(vc, value, env, solver_opt)?;
             env.insert(var.clone(), val.clone());
+            alias_struct_fields(env, var, &val);
             profile_solver_assertion(vc, &format!("assign_{}", var), None);
             Ok(val)
         }

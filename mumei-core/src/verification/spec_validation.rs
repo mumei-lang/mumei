@@ -3,8 +3,8 @@ use super::property_based::{
     run_property_based_test_with_mode, PropertyBasedTestConfig, PropertyBasedTestResult,
 };
 use super::translator::{
-    apply_refinement_constraint, expr_to_z3, param_z3_value, seed_tuple_result_components,
-    tuple_component_types, VCtx, DEFAULT_CONSTRAINT_BUDGET, I64_BITS,
+    apply_refinement_constraint, expr_to_z3, param_z3_value, seed_struct_fields,
+    seed_tuple_result_components, tuple_component_types, VCtx, DEFAULT_CONSTRAINT_BUDGET, I64_BITS,
     UNSUPPORTED_TUPLE_RESULT_INDEXING,
 };
 use super::types::Env;
@@ -507,6 +507,21 @@ fn seed_env<'a>(
                 bitvec_i64,
             ),
         );
+        if let Some(sdef) = param
+            .type_name
+            .as_deref()
+            .and_then(|type_name| module_env.get_struct(type_name))
+        {
+            seed_struct_fields(
+                ctx,
+                &mut env,
+                &param.name,
+                sdef,
+                module_env,
+                ieee754_f64,
+                bitvec_i64,
+            );
+        }
     }
     if tuple_component_types(atom.return_type.as_deref()).is_none() {
         env.insert(
@@ -529,6 +544,22 @@ fn seed_env<'a>(
         ieee754_f64,
         bitvec_i64,
     );
+    // 構造体を返す atom: `result.<field>` を param と対称にシンボル化する
+    if let Some(sdef) = atom
+        .return_type
+        .as_deref()
+        .and_then(|type_name| module_env.get_struct(type_name))
+    {
+        seed_struct_fields(
+            ctx,
+            &mut env,
+            "result",
+            sdef,
+            module_env,
+            ieee754_f64,
+            bitvec_i64,
+        );
+    }
     env
 }
 

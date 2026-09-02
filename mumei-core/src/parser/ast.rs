@@ -464,6 +464,12 @@ pub struct StructDef {
     pub name: String,
     pub type_params: Vec<String>,
     pub fields: Vec<StructField>,
+    /// Cross-field invariants declared as `invariant: <expr>` clauses in the
+    /// struct body. Each expression refers to fields through the `self`
+    /// binder (`self.active_tasks <= self.max_tasks`) or by bare field name.
+    /// They are assumed for struct-typed parameters, checked at every
+    /// `StructInit`, and imposed on `result` of atoms returning this struct.
+    pub invariants: Vec<String>,
     pub method_names: Vec<String>,
     /// Methods defined in `impl StructName { atom ... }` blocks
     pub methods: Vec<Atom>,

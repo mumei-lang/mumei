@@ -421,6 +421,36 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_struct_invariant() {
+        let source = "struct Scheduler {\n\
+            active_tasks: i64 where v >= 0,\n\
+            max_tasks: i64 where v > 0,\n\
+            invariant: self.active_tasks <= self.max_tasks,\n\
+            invariant_count: i64\n\
+        }";
+        let items = parse_module(source);
+        let Some(Item::StructDef(s)) = items.first() else {
+            panic!("expected struct");
+        };
+        assert_eq!(s.fields.len(), 3);
+        assert_eq!(s.fields[0].constraint.as_deref(), Some("v >= 0"));
+        assert_eq!(s.fields[2].name, "invariant_count");
+        assert_eq!(
+            s.invariants,
+            vec!["self.active_tasks <= self.max_tasks".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_parse_struct_without_invariant_has_none() {
+        let items = parse_module("struct Point { x: f64, y: f64 }");
+        let Some(Item::StructDef(s)) = items.first() else {
+            panic!("expected struct");
+        };
+        assert!(s.invariants.is_empty());
+    }
+
+    #[test]
     fn test_parse_generic_struct() {
         let source = "struct Stack<T> { data: T, size: i64 }";
         let items = parse_module(source);

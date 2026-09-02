@@ -23,6 +23,41 @@ struct Point {
     y: f64 where v >= 0.0
 }
 ```
+`where v ...` constrains a single field (`v` is that field's value).
+
+### Struct Invariants (cross-field)
+```mumei
+struct Scheduler {
+    active_tasks: i64 where v >= 0,
+    max_tasks: i64 where v > 0,
+    invariant: self.active_tasks <= self.max_tasks
+}
+```
+An `invariant: <expr>` clause in the struct body relates several fields. Inside the
+expression `self.<field>` (or the bare field name) denotes that field of the struct
+being described; several `invariant:` clauses may be declared and are conjoined.
+
+The invariant is enforced automatically, without any `requires`/`ensures` text:
+- **assumed** for every struct-typed parameter (`s: Scheduler` gives
+  `s.active_tasks <= s.max_tasks` as a hypothesis, alongside the per-field `where` constraints);
+- **checked** at every struct literal `Scheduler { ... }` under the current path condition;
+- **imposed on `result`** of every atom returning the struct, as an implicit postcondition
+  `Invariant(result)`. This also covers atoms that return a parameter, a `let` alias, a
+  conditional over struct values, or the result of another struct-returning call.
+
+```mumei
+atom spawn(s: Scheduler) -> Scheduler
+requires: s.active_tasks < s.max_tasks;
+ensures: result.active_tasks == s.active_tasks + 1;
+body: Scheduler { active_tasks: s.active_tasks + 1, max_tasks: s.max_tasks };
+```
+Dropping the `requires` makes the literal fail with
+`Struct 'Scheduler' invariant violated ... self.active_tasks <= self.max_tasks`.
+
+Invariants use the same expression subset as `requires`/`ensures` and are lowered to
+quantifier-free constraints over the flattened fields, so linear integer invariants stay
+within QF_LIA.
+
 ### Enums and Pattern Matching
 ```mumei
 enum AtmState { Idle, Authenticated, Dispensing, Error }

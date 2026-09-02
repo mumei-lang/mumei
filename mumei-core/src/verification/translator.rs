@@ -4,6 +4,7 @@ mod context;
 mod expr;
 mod pattern;
 mod stmt;
+mod struct_invariants;
 mod temporal;
 mod z3_types;
 
@@ -23,6 +24,10 @@ pub(crate) use pattern::{
     detect_enum_from_arms, format_counterexample, pattern_bind_variables, pattern_to_z3_condition,
 };
 pub(crate) use stmt::stmt_to_z3;
+pub(crate) use struct_invariants::{
+    alias_struct_fields, assume_struct_invariants, bind_struct_fields, check_struct_invariants,
+    fresh_struct_handle, seed_struct_fields, struct_field_key, struct_fields_of_value,
+};
 pub(crate) use temporal::{
     assert_temporal_effect_transition, is_temporal_witness_predicate, temporal_witness_call_to_z3,
 };

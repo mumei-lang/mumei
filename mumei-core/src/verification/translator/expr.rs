@@ -606,6 +606,8 @@ pub(crate) fn expr_to_z3<'a>(
                         for (i, param) in callee.params.iter().enumerate() {
                             if let Some(val) = arg_vals.get(i) {
                                 call_env.insert(param.name.clone(), val.clone());
+                                // 構造体引数: `<param>.<field>` が実引数のフィールドを指すようにする
+                                alias_struct_fields(&mut call_env, &param.name, val);
                             }
                         }
 
@@ -792,6 +794,34 @@ pub(crate) fn expr_to_z3<'a>(
                             vc.ieee754_f64,
                             vc.bitvec_i64,
                         );
+
+                        // 構造体を返す呼び出し: 結果のフィールドをシンボル化し、
+                        // 呼び出し先が保証する跨フィールド不変量を事実として仮定する
+                        // （呼び出し先自身の検証で Invariant(result) は義務として課される）。
+                        if let Some(sdef) = result_type.and_then(|t| vc.module_env.get_struct(t)) {
+                            let result_fields = seed_struct_fields(
+                                ctx,
+                                env,
+                                &result_name,
+                                sdef,
+                                vc.module_env,
+                                vc.ieee754_f64,
+                                vc.bitvec_i64,
+                            );
+                            bind_struct_fields(&mut call_env, &result_name, &result_fields);
+                            bind_struct_fields(&mut call_env, "result", &result_fields);
+                            if let Some(solver) = solver_opt {
+                                assume_struct_invariants(
+                                    vc,
+                                    solver,
+                                    sdef,
+                                    &result_name,
+                                    &result_fields,
+                                    &call_env,
+                                    None,
+                                )?;
+                            }
+                        }
 
                         // ensures を事実として solver に追加（result を呼び出し結果に束縛）
                         //
@@ -1296,12 +1326,19 @@ pub(crate) fn expr_to_z3<'a>(
         Expr::StructInit { type_name, fields } => {
             // 構造体の各フィールドを検証し、env に登録
             // フィールドに精緻型制約がある場合は solver で検証する
-            let mut last: Dynamic = Int::from_i64(ctx, 0).into();
+            //
+            // 構造体値そのものはハンドル（未解釈 Int 定数）で表し、各フィールドは
+            // `__struct_<handle>_<field>` に平坦化して登録する。跨フィールド不変量は
+            // 全フィールドの評価後にこの平坦化シンボルに対して検査する。
+            let sdef = vc.module_env.get_struct(type_name);
+            let handle = fresh_struct_handle(ctx, type_name);
+            let handle_name = handle.decl().name();
+            let mut field_values: Vec<(String, Dynamic)> = Vec::with_capacity(fields.len());
             for (field_name, field_expr) in fields {
                 let val = expr_to_z3(vc, field_expr, env, solver_opt)?;
                 let qualified_name = format!("__struct_{}_{}", type_name, field_name);
                 env.insert(qualified_name, val.clone());
-                last = val.clone();
+                field_values.push((field_name.clone(), val.clone()));
 
                 // フィールド制約の検証: 構造体定義から constraint を取得
                 if let Some(sdef) = vc.module_env.get_struct(type_name) {
@@ -1331,7 +1368,18 @@ pub(crate) fn expr_to_z3<'a>(
                     }
                 }
             }
-            Ok(last)
+            bind_struct_fields(env, &handle_name, &field_values);
+            if let (Some(sdef), Some(solver)) = (sdef, solver_opt) {
+                check_struct_invariants(
+                    vc,
+                    solver,
+                    sdef,
+                    &format!("'{}' literal", type_name),
+                    &field_values,
+                    env,
+                )?;
+            }
+            Ok(handle)
         }
         Expr::Match { target, arms } => {
             let target_z3 = expr_to_z3(vc, target, env, solver_opt)?;
