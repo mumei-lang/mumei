@@ -40,13 +40,6 @@ impl Ty {
             struct_name: None,
         }
     }
-
-    fn or(self, other: Ty) -> Ty {
-        Ty {
-            unit: self.unit.or(other.unit),
-            struct_name: self.struct_name.or(other.struct_name),
-        }
-    }
 }
 
 struct UnitCtx<'a> {
@@ -116,6 +109,42 @@ impl<'a> UnitCtx<'a> {
         }
     }
 
+    /// Merge the types of two branches that produce the same value (`if`/`else`,
+    /// `match` arms): units must be compatible and known struct types must agree.
+    fn join_branches(
+        &self,
+        what: &str,
+        lhs: Ty,
+        rhs: Ty,
+        src: impl FnOnce() -> String,
+    ) -> MumeiResult<Ty> {
+        if let (Some(l), Some(r)) = (&lhs.unit, &rhs.unit) {
+            if l != r {
+                return Err(self.mismatch(what, &lhs.unit, &rhs.unit, src()));
+            }
+        }
+        let struct_name = match (lhs.struct_name, rhs.struct_name) {
+            (Some(l), Some(r)) if l != r => {
+                return Err(MumeiError::type_error_at(
+                    format!(
+                        "Type mismatch in atom '{}': {} produce struct '{}' and struct '{}' in `{}`",
+                        self.atom.name,
+                        what,
+                        l,
+                        r,
+                        src()
+                    ),
+                    self.atom.span.clone(),
+                ));
+            }
+            (l, r) => l.or(r),
+        };
+        Ok(Ty {
+            unit: lhs.unit.or(rhs.unit),
+            struct_name,
+        })
+    }
+
     /// Infer the unit of `expr`, checking every `+`, `-`, comparison and call
     /// argument on the way.
     fn infer(&self, expr: &Expr) -> MumeiResult<Ty> {
@@ -171,10 +200,7 @@ impl<'a> UnitCtx<'a> {
                 self.infer(cond)?;
                 let t = self.check_stmt(then_branch)?;
                 let e = self.check_stmt(else_branch)?;
-                self.check_compatible("conditional branches", &t.unit, &e.unit, || {
-                    expr_to_source_string(expr)
-                })?;
-                Ok(t.or(e))
+                self.join_branches("conditional branches", t, e, || expr_to_source_string(expr))
             }
             Expr::Call(name, args) => {
                 let arg_units = args
@@ -241,10 +267,8 @@ impl<'a> UnitCtx<'a> {
                         self.infer(guard)?;
                     }
                     let arm_ty = self.check_stmt(&arm.body)?;
-                    self.check_compatible("match arms", &ty.unit, &arm_ty.unit, || {
-                        expr_to_source_string(expr)
-                    })?;
-                    ty = ty.or(arm_ty);
+                    ty = self
+                        .join_branches("match arms", ty, arm_ty, || expr_to_source_string(expr))?;
                 }
                 Ok(ty)
             }
