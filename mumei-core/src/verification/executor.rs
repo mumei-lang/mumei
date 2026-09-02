@@ -1244,6 +1244,23 @@ pub(crate) fn verify_inner(
         ieee754_f64,
         bitvec_i64,
     );
+    // 構造体を返す atom: param と対称に `result.<field>` のシンボルを事前生成する。
+    // body 評価後に返り値のフィールドへ束縛し、Invariant(result) を暗黙の事後条件として課す。
+    let struct_return = atom
+        .return_type
+        .as_deref()
+        .and_then(|type_name| module_env.get_struct(type_name));
+    let result_struct_fields = struct_return.map(|sdef| {
+        seed_struct_fields(
+            &ctx,
+            &mut env,
+            "result",
+            sdef,
+            module_env,
+            ieee754_f64,
+            bitvec_i64,
+        )
+    });
 
     // Phase 1h (continued): ConflictingMerge Z3 infrastructure.
     // With Phase 4c Copy/Move type distinction integrated, move violations for
@@ -1406,49 +1423,30 @@ pub(crate) fn verify_inner(
     for param in &atom.params {
         if let Some(type_name) = &param.type_name {
             if let Some(sdef) = module_env.get_struct(type_name) {
-                // 構造体の各フィールドをシンボリック変数として env に登録し、制約を適用
-                for field in &sdef.fields {
-                    let field_var_name = format!("{}_{}", param.name, field.name);
-                    let base = module_env.resolve_base_type(&field.type_name);
-                    let field_z3: Dynamic = match base.as_str() {
-                        "f64" => Float::new_const(&ctx, field_var_name.as_str(), 11, 53).into(),
-                        // Plan 9: Str fields as Z3 String Sort
-                        "Str" => Z3String::new_const(&ctx, field_var_name.as_str()).into(),
-                        // An `i64` field is a machine value like an `i64`
-                        // parameter, so in bit-vector mode it gets the `BV(64)`
-                        // encoding too: arithmetic over fields alone wraps
-                        // instead of growing unboundedly.
-                        "i64" if bitvec_i64 => {
-                            BV::new_const(&ctx, field_var_name.as_str(), I64_BITS).into()
-                        }
-                        _ => Int::new_const(&ctx, field_var_name.as_str()).into(),
-                    };
-                    env.insert(field_var_name.clone(), field_z3.clone());
-                    // qualified name も登録
-                    let qualified = format!("__struct_{}_{}", param.name, field.name);
-                    env.insert(qualified, field_z3.clone());
-
-                    // フィールド制約を solver に assert
-                    if let Some(constraint_raw) = &field.constraint {
-                        let mut local_env = env.clone();
-                        local_env.insert("v".to_string(), field_z3);
-                        let constraint_ast = crate::parser::expr::normalize_comparison_chains(
-                            parse_expression(constraint_raw),
-                        );
-                        let constraint_z3 = expr_to_z3(&vc, &constraint_ast, &mut local_env, None)?;
-                        if let Some(constraint_bool) = constraint_z3.as_bool() {
-                            let track_label =
-                                format!("track_struct_field_{}::{}", param.name, field.name);
-                            let track_bool = Bool::new_const(&ctx, track_label.as_str());
-                            solver.assert_and_track(&constraint_bool, &track_bool);
-                            profile_solver_assertion(
-                                &vc,
-                                &track_label,
-                                Some(atom.span.to_string()),
-                            );
-                        }
-                    }
-                }
+                // 構造体の各フィールドをシンボリック変数として env に登録し、制約を適用。
+                // ソートは `param_z3_value` に従う（`i64` は bit-vector モードで BV(64)、
+                // `f64` は既定 Real / `--ieee754-f64` で Float）ので、`result.<field>`
+                // や構造体リテラルのフィールド値と同じエンコーディングになる。
+                let param_fields = seed_struct_fields(
+                    &ctx,
+                    &mut env,
+                    &param.name,
+                    sdef,
+                    module_env,
+                    ieee754_f64,
+                    bitvec_i64,
+                );
+                // フィールド制約 (`where v ...`) と跨フィールド不変量 (`invariant: <expr>`)
+                // を前提として assert
+                assume_struct_contract(
+                    &vc,
+                    &solver,
+                    sdef,
+                    &param.name,
+                    &param_fields,
+                    &env,
+                    Some(atom.span.to_string()),
+                )?;
             }
         }
     }
@@ -1709,6 +1707,69 @@ pub(crate) fn verify_inner(
 
     // 4b. Taint Analysis: unverified 関数の呼び出しを検出し警告
     check_taint_propagation(atom, &hir_atom.body_stmt, &env, module_env);
+
+    // 4c. 構造体を返す atom: `result.<field>` を返り値のフィールドへ束縛し、
+    //     構造体の跨フィールド不変量を暗黙の事後条件 Invariant(result) として検証する。
+    if let (Some(sdef), Some(result_fields)) = (struct_return, &result_struct_fields) {
+        match struct_fields_of_value(&env, &body_result, sdef) {
+            Some(body_fields) => {
+                for ((_, result_sym), (_, body_val)) in result_fields.iter().zip(&body_fields) {
+                    let (lhs, rhs) = unify_branch_sorts(result_sym.clone(), body_val.clone())?;
+                    solver.assert(&lhs._eq(&rhs));
+                }
+            }
+            None if !sdef.invariants.is_empty() => {
+                return Err(MumeiError::verification_at(
+                    format!(
+                        "Cannot establish struct '{}' invariants for the result of atom '{}': the returned value is not a struct literal, parameter, local binding, call result, or conditional over those",
+                        sdef.name, atom.name
+                    ),
+                    atom.span.clone(),
+                ));
+            }
+            None => {}
+        }
+        if let Err(err) = check_struct_invariants(
+            &vc,
+            &solver,
+            sdef,
+            &format!("result of atom '{}'", atom.name),
+            result_fields,
+            &env,
+        ) {
+            let err_str = format!("{}", err);
+            let constraint_mappings = build_constraint_mappings_for_atom(atom, module_env);
+            let semantic_fb = build_semantic_feedback(
+                &constraint_mappings,
+                None,
+                atom,
+                FAILURE_POSTCONDITION_VIOLATED,
+                None,
+            );
+            save_visualizer_report(
+                output_dir,
+                "failed",
+                &atom.name,
+                "N/A",
+                "N/A",
+                &err_str,
+                None,
+                FAILURE_POSTCONDITION_VIOLATED,
+                semantic_fb.as_ref(),
+                Some(&atom.span),
+                Some(&constraint_mappings),
+                None,
+                None,
+                Some(&diagnostics),
+            );
+            return Err(MumeiError::verification_at(err_str, atom.span.clone()).with_help(
+                format!(
+                    "struct '{}' の invariant は、この型を返す atom の result に暗黙の事後条件として課されます。body の返り値が不変量を満たすか確認してください",
+                    sdef.name
+                ),
+            ));
+        }
+    }
 
     // 5. 事後条件 (ensures)
     let phase_start = std::time::Instant::now();

@@ -43,6 +43,40 @@ Lean escalation candidates:
 - nonlinear loop invariants, such as `result == i * i`
 - algebraic equalities that require ring reasoning
 
+### Struct invariants (cross-field)
+
+A struct may relate several fields with `invariant: <expr>` clauses; `self.<field>` names a field of the struct being described:
+
+```mumei
+struct Scheduler {
+    active_tasks: i64 where v >= 0,
+    max_tasks: i64 where v > 0,
+    invariant: self.active_tasks <= self.max_tasks
+}
+```
+
+The invariant is a type-level contract, so it is injected automatically:
+
+- struct-typed parameters **assume** it (together with the per-field `where v ...` constraints)
+- every struct literal `Scheduler { ... }` is **checked** against it under the current path condition
+- atoms returning the struct get an implicit postcondition `Invariant(result)`; `result.<field>` is
+  symbolized like a parameter, so returning an argument unchanged, a `let` alias, a conditional
+  over struct values, or another struct-returning call is covered as well
+
+Struct fields are flattened to scalar symbols and the invariant is lowered as a quantifier-free
+formula over them, so a linear invariant stays in QF_LIA and does not enlarge the decidable
+fragment. Keep invariants linear (`a <= b`, `count == used + free`, `3 * x < limit`); a nonlinear
+invariant (`x * y <= cap`) is an escalation candidate exactly like a nonlinear `ensures`.
+
+Write the transition's guard in `requires` so that the literal satisfies the invariant:
+
+```mumei
+atom spawn(s: Scheduler) -> Scheduler
+requires: s.active_tasks < s.max_tasks;
+ensures: result.active_tasks == s.active_tasks + 1;
+body: Scheduler { active_tasks: s.active_tasks + 1, max_tasks: s.max_tasks };
+```
+
 ### Array and sequence access
 
 Every array or sequence read/write must have an explicit bounds condition of the form `0 <= i && i < len(a)` or an equivalent bounded quantifier range. In current `.mm` examples this is usually written as `i >= 0 && i < n`, where `n` is the array length tracked by the contract. Prefer single-index reads/writes and length-preserving updates.
@@ -398,6 +432,24 @@ effect Transfer
 ```
 
 Represent protocols as finite states plus explicit transitions. Avoid temporal specs that depend on unbounded histories such as "was never authorized by an expired user"; encode those checks as separate bounded predicates or escalate them.
+
+### Struct invariant template
+
+```mumei
+struct Account {
+    balance: i64 where v >= 0,
+    reserved: i64 where v >= 0,
+    invariant: self.reserved <= self.balance
+}
+
+atom reserve(a: Account, amount: i64) -> Account
+requires: amount >= 0 && a.reserved + amount <= a.balance;
+ensures: result.reserved == a.reserved + amount && result.balance == a.balance;
+body: Account { balance: a.balance, reserved: a.reserved + amount };
+```
+
+State the relation once on the struct and let every constructor and struct-returning atom
+inherit it; `requires` only needs the guard that keeps the transition inside the invariant.
 
 ## Metrics and review cadence
 

@@ -3,7 +3,8 @@ use super::property_based::{
     run_property_based_test_with_mode, PropertyBasedTestConfig, PropertyBasedTestResult,
 };
 use super::translator::{
-    apply_refinement_constraint, expr_to_z3, param_z3_value, seed_tuple_result_components,
+    apply_refinement_constraint, assume_struct_contract, expr_to_z3, param_z3_value,
+    seed_struct_fields, seed_tuple_result_components, struct_fields_of_value,
     tuple_component_types, VCtx, DEFAULT_CONSTRAINT_BUDGET, I64_BITS,
     UNSUPPORTED_TUPLE_RESULT_INDEXING,
 };
@@ -507,6 +508,21 @@ fn seed_env<'a>(
                 bitvec_i64,
             ),
         );
+        if let Some(sdef) = param
+            .type_name
+            .as_deref()
+            .and_then(|type_name| module_env.get_struct(type_name))
+        {
+            seed_struct_fields(
+                ctx,
+                &mut env,
+                &param.name,
+                sdef,
+                module_env,
+                ieee754_f64,
+                bitvec_i64,
+            );
+        }
     }
     if tuple_component_types(atom.return_type.as_deref()).is_none() {
         env.insert(
@@ -529,6 +545,22 @@ fn seed_env<'a>(
         ieee754_f64,
         bitvec_i64,
     );
+    // 構造体を返す atom: `result.<field>` を param と対称にシンボル化する
+    if let Some(sdef) = atom
+        .return_type
+        .as_deref()
+        .and_then(|type_name| module_env.get_struct(type_name))
+    {
+        seed_struct_fields(
+            ctx,
+            &mut env,
+            "result",
+            sdef,
+            module_env,
+            ieee754_f64,
+            bitvec_i64,
+        );
+    }
     env
 }
 
@@ -607,6 +639,28 @@ fn assert_parameter_refinements<'a>(
         let Some(type_name) = param.type_name.as_deref() else {
             continue;
         };
+        if let Some(sdef) = module_env.get_struct(type_name) {
+            let fields = env
+                .get(&param.name)
+                .cloned()
+                .and_then(|handle| struct_fields_of_value(env, &handle, sdef))
+                .unwrap_or_default();
+            assume_struct_contract(vc, solver, sdef, &param.name, &fields, env, None).map_err(
+                |err| {
+                    SpecContradiction::new(
+                        &atom.name,
+                        "struct_invariant_invalid",
+                        format!(
+                            "failed to lower struct '{}' contract for parameter '{}': {}",
+                            sdef.name, param.name, err
+                        ),
+                        sdef.invariants.clone(),
+                        sdef.span.clone(),
+                    )
+                },
+            )?;
+            continue;
+        }
         let Some(refined) = module_env.get_type(type_name) else {
             continue;
         };

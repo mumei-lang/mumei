@@ -529,6 +529,47 @@ fn append_token(text: &mut String, tok: &Token) {
     }
 }
 
+/// Recognise a struct-body `invariant: <expr>` clause and return `<expr>`.
+/// Returns `None` for ordinary field declarations.
+fn struct_invariant_clause(clause: &str) -> Option<String> {
+    let rest = clause.strip_prefix("invariant")?;
+    if !rest.starts_with(|c: char| c == ':' || c.is_whitespace()) {
+        return None;
+    }
+    let rest = rest.trim_start();
+    let rest = rest.strip_prefix(':').unwrap_or(rest).trim();
+    if rest.is_empty() {
+        return None;
+    }
+    Some(rest.to_string())
+}
+
+/// Split a struct body on the commas that separate its clauses, leaving
+/// commas nested in `()`, `[]`, `{}` or string literals alone
+/// (`invariant: within(self.lo, self.hi)`). Angle brackets are not tracked
+/// because `<`/`>` are comparison operators inside invariants.
+fn split_struct_clauses(body: &str) -> Vec<&str> {
+    let mut clauses = Vec::new();
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut start = 0usize;
+    for (idx, ch) in body.char_indices() {
+        match ch {
+            '"' => in_string = !in_string,
+            _ if in_string => {}
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            ',' if depth <= 0 => {
+                clauses.push(&body[start..idx]);
+                start = idx + 1;
+            }
+            _ => {}
+        }
+    }
+    clauses.push(&body[start..]);
+    clauses
+}
+
 fn collect_until_semicolon(ctx: &mut ParseContext) -> String {
     let mut text = String::new();
     let mut depth_brace = 0i32;
@@ -893,10 +934,23 @@ pub fn parse_module_from_tokens(ctx: &mut ParseContext) -> Vec<Item> {
                 let name = ctx.expect_ident();
                 let type_params = parse_type_params_from_ctx(ctx);
                 let fields_raw = collect_braced_block(ctx);
-                let fields: Vec<StructField> = fields_raw
-                    .split(',')
+                let mut invariants: Vec<String> = Vec::new();
+                let fields: Vec<StructField> = split_struct_clauses(&fields_raw)
+                    .into_iter()
                     .map(|s| s.trim())
                     .filter(|s| !s.is_empty())
+                    .filter(|s| {
+                        // `invariant` is a keyword, so a clause that starts with it
+                        // can never be a field declaration. `invariant: <expr>`
+                        // (or `invariant <expr>`) declares a cross-field invariant.
+                        match struct_invariant_clause(s) {
+                            Some(expr) => {
+                                invariants.push(expr);
+                                false
+                            }
+                            None => true,
+                        }
+                    })
                     .map(|s| {
                         let (field_part, constraint) = if let Some(idx) = s.find("where") {
                             (s[..idx].trim(), Some(s[idx + 5..].trim().to_string()))
@@ -921,6 +975,7 @@ pub fn parse_module_from_tokens(ctx: &mut ParseContext) -> Vec<Item> {
                     name,
                     type_params,
                     fields,
+                    invariants,
                     method_names: vec![],
                     methods: vec![],
                     span: span_from_token(&start_tok),
