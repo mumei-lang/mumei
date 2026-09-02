@@ -470,6 +470,10 @@ fn write_cached_success_report(output_dir: &Path, atom: &parser::Atom, skipped_c
 }
 
 fn verify_single_atom(atom: &parser::Atom, name: &str, ctx: &mut VerifyContext<'_>) {
+    // report.json describes the most recent atom only. Atoms rejected before Z3
+    // runs (type/unit errors) write none, so a file left by a previous run or a
+    // previous atom must not be mistaken for this atom's result.
+    let _ = std::fs::remove_file(ctx.output_dir.join("report.json"));
     // An atom that uses `&`/`|`/`^`/`<<`/`>>`, or opts in with
     // `semantics: bitvec;`, is verified with the `BV(64)` encoding even without
     // `--bitvec-i64`: the `Int` encoding cannot express its contract. Every
@@ -1121,9 +1125,6 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
     if report_dir.is_some() {
         let _ = std::fs::create_dir_all(output_dir);
     }
-    // Atoms rejected before Z3 runs (type/unit errors) write no report.json, so a
-    // leftover file from a previous run must not be mistaken for this run's result.
-    let _ = std::fs::remove_file(output_dir.join("report.json"));
     let verification_config = verification::VerificationConfig {
         timeout_ms: effective_timeout_ms,
         global_max_unroll: build_cfg.max_unroll,

@@ -212,6 +212,46 @@ fn stale_report_does_not_pollute_json_on_unit_error() {
     );
 }
 
+/// A solver failure followed by a unit error: the first atom's report.json must
+/// not be presented as the module's `--json` result.
+#[test]
+fn solver_failure_then_unit_error_json_reports_both_atoms() {
+    let dir = std::env::temp_dir().join(format!("mumei_units_{}_two_failures", std::process::id()));
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir).expect("clean stale temp dir");
+    }
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let out = Command::new(env!("CARGO_BIN_EXE_mumei"))
+        .arg("verify")
+        .arg("--json")
+        .arg("--report-dir")
+        .arg(&dir)
+        .arg(fixture("test_units_solver_fail_then_mismatch.mm"))
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("failed to run mumei verify");
+    std::fs::remove_dir_all(&dir).ok();
+    assert!(!out.status.success());
+    let payload: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("--json must print valid JSON");
+    assert_eq!(payload["status"], "failed", "{payload}");
+    assert_eq!(payload["failed"], 2, "{payload}");
+    assert!(
+        payload.get("atom").is_none(),
+        "single-atom report leaked into module result: {payload}"
+    );
+    let atoms: Vec<&str> = payload["diagnostics"]
+        .as_array()
+        .expect("diagnostics array")
+        .iter()
+        .filter_map(|d| d["atom"].as_str())
+        .collect();
+    assert!(
+        atoms.contains(&"wrong_inc") && atoms.contains(&"add_mixed"),
+        "{payload}"
+    );
+}
+
 /// A unit-only edit to an alias must invalidate the incremental cache, so the
 /// second run reports the mismatch instead of reusing the cached success.
 #[test]
