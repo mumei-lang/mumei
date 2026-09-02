@@ -445,6 +445,14 @@ pub(crate) fn compile_hir_expr<'a>(
                     Op::Pow => Err(MumeiError::codegen(
                         "Unsupported int operator Pow".to_string(),
                     )),
+                    // Bit operations on the machine `i64` bit pattern, matching
+                    // the `BV(64)` semantics verified under `--bitvec-i64`.
+                    // `>>` is an arithmetic (sign-propagating) shift.
+                    Op::BitAnd => Ok(llvm!(builder.build_and(l, r, "and_tmp")).into()),
+                    Op::BitOr => Ok(llvm!(builder.build_or(l, r, "or_tmp")).into()),
+                    Op::BitXor => Ok(llvm!(builder.build_xor(l, r, "xor_tmp")).into()),
+                    Op::Shl => Ok(llvm!(builder.build_left_shift(l, r, "shl_tmp")).into()),
+                    Op::Shr => Ok(llvm!(builder.build_right_shift(l, r, true, "ashr_tmp")).into()),
                     Op::Eq | Op::Neq | Op::Lt | Op::Gt | Op::Ge | Op::Le => {
                         let pred = match op {
                             Op::Eq => IntPredicate::EQ,

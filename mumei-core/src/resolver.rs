@@ -42,8 +42,8 @@ pub(crate) use imports::{
 };
 
 pub use cache::{
-    collect_callees_from_body, compute_atom_hash, compute_contract_hash, compute_proof_hash,
-    compute_proof_hash_with_flags, invalidate_dependents, load_build_cache,
+    collect_callees_from_atom, collect_callees_from_body, compute_atom_hash, compute_contract_hash,
+    compute_proof_hash, compute_proof_hash_with_flags, invalidate_dependents, load_build_cache,
     load_verification_cache, migrate_old_cache, save_build_cache, save_verification_cache,
     VerificationCacheEntry,
 };

@@ -43,6 +43,7 @@ pub(crate) fn cmd_verify_command(command: Command) {
         property_based_test,
         warn_fragment,
         ieee754_f64,
+        bitvec_i64,
         warn_untyped_arrays,
         strict_array_types,
         property_based_test_count,
@@ -186,6 +187,7 @@ pub(crate) fn cmd_verify_command(command: Command) {
                     property_based_test,
                     warn_fragment,
                     ieee754_f64,
+                    bitvec_i64,
                     warn_untyped_arrays,
                     strict_array_types,
                     property_based_test_count,
@@ -247,6 +249,7 @@ pub(crate) fn cmd_verify_command(command: Command) {
             property_based_test,
             warn_fragment,
             ieee754_f64,
+            bitvec_i64,
             warn_untyped_arrays,
             strict_array_types,
             property_based_test_count,
@@ -368,6 +371,7 @@ pub(crate) struct VerifyOptions<'a> {
     pub(crate) property_based_test: bool,
     pub(crate) warn_fragment: bool,
     pub(crate) ieee754_f64: bool,
+    pub(crate) bitvec_i64: bool,
     pub(crate) warn_untyped_arrays: bool,
     pub(crate) strict_array_types: bool,
     pub(crate) property_based_test_count: usize,
@@ -466,6 +470,15 @@ fn write_cached_success_report(output_dir: &Path, atom: &parser::Atom, skipped_c
 }
 
 fn verify_single_atom(atom: &parser::Atom, name: &str, ctx: &mut VerifyContext<'_>) {
+    // An atom that uses `&`/`|`/`^`/`<<`/`>>`, or opts in with
+    // `semantics: bitvec;`, is verified with the `BV(64)` encoding even without
+    // `--bitvec-i64`: the `Int` encoding cannot express its contract. Every
+    // other atom keeps the default encoding, so existing certificates are
+    // unchanged. The config flag stays the whole-run opt-in; only the cache key
+    // records the effective mode.
+    let atom_effective_bitvec = ctx.verification_config.bitvec_i64
+        || verification::atom_requires_bitvector_semantics_in_module(atom, ctx.module_env);
+    let atom_verification_config = ctx.verification_config;
     let fragment_tags = verification::detect_logic_fragment_tags(atom, ctx.module_env);
     let has_finite_field_semantics = fragment_tags.iter().any(|tag| tag == "finite_field");
     let has_fragment_warning = verification::is_outside_decidable_fragment(&fragment_tags);
@@ -527,11 +540,17 @@ fn verify_single_atom(atom: &parser::Atom, name: &str, ctx: &mut VerifyContext<'
     // Proof flags that alter the verification outcome must participate in the
     // incremental-cache key, otherwise switching modes reuses a stale result.
     let mut proof_flags: Vec<&str> = Vec::new();
-    if ctx.verification_config.enable_vacuity_check {
+    if atom_verification_config.enable_vacuity_check {
         proof_flags.push("enable_vacuity_check");
     }
-    if ctx.verification_config.ieee754_f64 {
+    if atom_verification_config.ieee754_f64 {
         proof_flags.push("ieee754_f64");
+    }
+    // The BV encoding changes the semantics of the obligation, so a proof
+    // produced in Int mode must not be reused for a `--bitvec-i64` run (and
+    // vice versa).
+    if atom_effective_bitvec {
+        proof_flags.push("bitvec_i64");
     }
     let proof_hash = resolver::compute_proof_hash_with_flags(atom, ctx.module_env, &proof_flags);
 
@@ -597,7 +616,7 @@ fn verify_single_atom(atom: &parser::Atom, name: &str, ctx: &mut VerifyContext<'
         &hir_atom,
         ctx.output_dir,
         ctx.module_env,
-        ctx.verification_config,
+        atom_verification_config,
     ) {
         Ok(_) => {
             if !ctx.quiet_output {
@@ -1023,6 +1042,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
         property_based_test,
         warn_fragment,
         ieee754_f64,
+        bitvec_i64,
         warn_untyped_arrays,
         strict_array_types,
         property_based_test_count,
@@ -1110,6 +1130,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
         detect_loops,
         suggest_cegis,
         ieee754_f64,
+        bitvec_i64,
         property_based_test: property_based_config,
     };
     let input_path = Path::new(input);
@@ -1205,7 +1226,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                         }
                     }
                 }
-                let callees = resolver::collect_callees_from_body(&atom.body_expr);
+                let callees = resolver::collect_callees_from_atom(atom);
                 module_env.register_dependencies(&atom.name, callees);
             }
             Item::ImplBlock(impl_block) => {
@@ -1229,7 +1250,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                             }
                         }
                     }
-                    let callees = resolver::collect_callees_from_body(&method.body_expr);
+                    let callees = resolver::collect_callees_from_atom(method);
                     module_env.register_dependencies(&qualified_name, callees);
                 }
             }
@@ -1255,6 +1276,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                     &module_env,
                     output_dir,
                     verification_config.ieee754_f64,
+                    verification_config.bitvec_i64,
                 ) {
                     Ok(_) => {
                         if !quiet_output {

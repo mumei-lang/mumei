@@ -75,6 +75,217 @@ fn unsupported_exponentiation_error() -> MumeiError {
     )
 }
 
+/// Lower a binary operation whose operands are `i64` values encoded as
+/// `BV(64)` (the opt-in `--bitvec-i64` mode).
+///
+/// Arithmetic uses the bit-vector operators, so `+`, `-`, `*` wrap in two's
+/// complement exactly like machine `i64` instead of growing unboundedly as in
+/// the default `Int` encoding. Comparisons and division are the *signed*
+/// variants (`bvslt`, `bvsdiv`, …) because `i64` is signed, and `>>` is the
+/// arithmetic shift `bvashr`.
+///
+/// Shift amounts must satisfy `0 <= n < 64`; that is a precondition the
+/// contract has to establish in `requires` (Z3's `bvshl`/`bvashr` are total
+/// but their out-of-range behavior is not the language's), so when a solver is
+/// available and the amount can leave the range, verification fails with an
+/// actionable error rather than proving something about saturating shifts.
+fn bv_shift_out_of_range<'a>(ctx: &'a Context, amount: &BV<'a>) -> Bool<'a> {
+    let zero = BV::from_i64(ctx, 0, I64_BITS);
+    let width = BV::from_i64(ctx, I64_BITS as i64, I64_BITS);
+    Bool::or(ctx, &[&amount.bvslt(&zero), &amount.bvsge(&width)])
+}
+
+fn out_of_range_shift_error() -> MumeiError {
+    MumeiError::verification("Shift amount may be outside 0..64".to_string())
+        .with_help("Add `n >= 0 && n < 64` for the shift amount to requires")
+}
+
+fn undecided_shift_error() -> MumeiError {
+    MumeiError::verification(
+        "Z3 returned unknown while checking that the shift amount stays in 0..64".to_string(),
+    )
+    .with_help(
+        "State `n >= 0 && n < 64` for the shift amount in requires, or raise --solver-timeout",
+    )
+}
+
+/// True when the callee's contract was proved in the same `i64` encoding the
+/// caller is being verified in.
+///
+/// A callee's `ensures` may only be imported as a fact when both sides agree on
+/// the encoding: `ensures: result > x` for `x + 1` holds under the unbounded
+/// `Int` encoding, but is false at `i64::MAX` under two's complement wrapping,
+/// so importing it into a bit-vector proof would assume something the callee
+/// never proved. The mode of a callee is its own requirement (a bitwise
+/// operator, `semantics: bitvec;`, or a bit-vector callee of its own), plus the
+/// whole-run `--bitvec-i64` opt-in, under which every atom is a bit-vector
+/// atom — including the callees of a caller that would have needed the encoding
+/// anyway.
+fn callee_semantics_match_caller(vc: &VCtx<'_>, callee: &Atom) -> bool {
+    let callee_bv = vc.bitvec_i64_global
+        || crate::verification::fragment::atom_requires_bitvector_semantics_in_module(
+            callee,
+            vc.module_env,
+        );
+    callee_bv == vc.bitvec_i64
+}
+
+/// Discharge the shift-range obligations collected while lowering clauses
+/// without a solver (`requires`, `ensures`, invariants). Called once the
+/// atom's solver holds the preconditions, so a shift amount that a `requires`
+/// bounds is accepted while an unbounded one is rejected.
+pub(crate) fn discharge_bv_shift_obligations<'a>(
+    vc: &VCtx<'a>,
+    solver: &Solver<'a>,
+) -> MumeiResult<()> {
+    match shift_range_status(vc, solver) {
+        ShiftRangeStatus::Bounded => Ok(()),
+        ShiftRangeStatus::OutOfRange => Err(out_of_range_shift_error()),
+        ShiftRangeStatus::Undecided => Err(undecided_shift_error()),
+    }
+}
+
+/// Outcome of checking the collected shift amounts against `0..64`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ShiftRangeStatus {
+    /// Every amount is provably in range under the facts the solver holds.
+    Bounded,
+    /// An amount can leave the range on a reachable path.
+    OutOfRange,
+    /// The solver could not decide the range, so it is not guaranteed.
+    Undecided,
+}
+
+/// Check the collected shift amounts against `0..64` under the facts the
+/// solver already holds. Drains the obligations, like
+/// `discharge_bv_shift_obligations`, for callers whose failures are not a
+/// `MumeiError` (spec validation reports a `SpecContradiction`).
+///
+/// An `unknown` answer is not a guarantee: the shift range is a safety
+/// condition, so it is reported as undecided rather than folded into the
+/// in-range case.
+pub(crate) fn shift_range_status<'a>(vc: &VCtx<'a>, solver: &Solver<'a>) -> ShiftRangeStatus {
+    let obligations: Vec<(Bool<'a>, BV<'a>)> =
+        vc.bv_shift_obligations.borrow_mut().drain(..).collect();
+    let mut status = ShiftRangeStatus::Bounded;
+    for (path_cond, amount) in obligations {
+        solver.push();
+        solver.assert(&path_cond);
+        solver.assert(&bv_shift_out_of_range(vc.ctx, &amount));
+        let result = solver.check();
+        solver.pop(1);
+        match result {
+            SatResult::Sat => return ShiftRangeStatus::OutOfRange,
+            SatResult::Unknown => status = ShiftRangeStatus::Undecided,
+            SatResult::Unsat => {}
+        }
+    }
+    status
+}
+
+fn bv_binary_op<'a>(
+    vc: &VCtx<'a>,
+    op: &Op,
+    l: &Dynamic<'a>,
+    r: &Dynamic<'a>,
+    solver_opt: Option<&Solver<'a>>,
+) -> MumeiResult<Dynamic<'a>> {
+    let ctx = vc.ctx;
+    let lb = as_bv_i64(l).ok_or_else(|| {
+        MumeiError::type_error("Expected an i64 (BV(64)) operand under --bitvec-i64")
+    })?;
+    let rb = as_bv_i64(r).ok_or_else(|| {
+        MumeiError::type_error("Expected an i64 (BV(64)) operand under --bitvec-i64")
+    })?;
+
+    if matches!(op, Op::Shl | Op::Shr) {
+        match solver_opt {
+            Some(solver) => {
+                solver.push();
+                for cond in vc.path_cond_stack.borrow().iter() {
+                    solver.assert(cond);
+                }
+                solver.assert(&bv_shift_out_of_range(ctx, &rb));
+                let result = solver.check();
+                solver.pop(1);
+                match result {
+                    SatResult::Sat => return Err(out_of_range_shift_error()),
+                    SatResult::Unknown => return Err(undecided_shift_error()),
+                    SatResult::Unsat => {}
+                }
+            }
+            // Contract clauses and invariants are lowered without a solver;
+            // remember the amount so the range is still discharged once the
+            // atom's solver carries the preconditions.
+            None => vc
+                .bv_shift_obligations
+                .borrow_mut()
+                .push((vc.path_cond_conj(), rb.clone())),
+        }
+    }
+
+    match op {
+        Op::BitAnd => Ok(lb.bvand(&rb).into()),
+        Op::BitOr => Ok(lb.bvor(&rb).into()),
+        Op::BitXor => Ok(lb.bvxor(&rb).into()),
+        Op::Shl => Ok(lb.bvshl(&rb).into()),
+        Op::Shr => Ok(lb.bvashr(&rb).into()),
+        Op::Add => Ok(lb.bvadd(&rb).into()),
+        Op::Sub => Ok(lb.bvsub(&rb).into()),
+        Op::Mul => Ok(lb.bvmul(&rb).into()),
+        Op::Div => {
+            if let Some(solver) = solver_opt {
+                let zero = BV::from_i64(ctx, 0, I64_BITS);
+                solver.push();
+                for cond in vc.path_cond_stack.borrow().iter() {
+                    solver.assert(cond);
+                }
+                solver.assert(&rb._eq(&zero));
+                let divides_by_zero = solver.check() == SatResult::Sat;
+                solver.pop(1);
+                if divides_by_zero {
+                    return Err(MumeiError::verification(
+                        "Potential division by zero.".to_string(),
+                    )
+                    .with_help("Add a condition divisor != 0 to requires"));
+                }
+                // `bvsdiv` gives `i64::MIN / -1` the value `i64::MIN`, while
+                // the emitted `sdiv` is undefined there, so a proof about that
+                // pair would not describe the executable.
+                let min = BV::from_i64(ctx, i64::MIN, I64_BITS);
+                let minus_one = BV::from_i64(ctx, -1, I64_BITS);
+                solver.push();
+                for cond in vc.path_cond_stack.borrow().iter() {
+                    solver.assert(cond);
+                }
+                solver.assert(&Bool::and(ctx, &[&lb._eq(&min), &rb._eq(&minus_one)]));
+                let overflows = solver.check() == SatResult::Sat;
+                solver.pop(1);
+                if overflows {
+                    return Err(MumeiError::verification(
+                        "Division may overflow (i64::MIN / -1).".to_string(),
+                    )
+                    .with_help(
+                        "Add a condition ruling out the pair, e.g. `divisor != 0 - 1` \
+                         or `dividend != 0 - 9223372036854775807 - 1`, to requires",
+                    ));
+                }
+            }
+            Ok(lb.bvsdiv(&rb).into())
+        }
+        Op::Gt => Ok(lb.bvsgt(&rb).into()),
+        Op::Lt => Ok(lb.bvslt(&rb).into()),
+        Op::Ge => Ok(lb.bvsge(&rb).into()),
+        Op::Le => Ok(lb.bvsle(&rb).into()),
+        Op::Eq => Ok(lb._eq(&rb).into()),
+        Op::Neq => Ok(lb._eq(&rb).not().into()),
+        Op::Pow | Op::And | Op::Or | Op::Implies => Err(MumeiError::verification(format!(
+            "Unsupported bit-vector operator {:?}",
+            op
+        ))),
+    }
+}
+
 pub(crate) fn expr_to_z3<'a>(
     vc: &VCtx<'a>,
     expr: &Expr,
@@ -171,12 +382,14 @@ pub(crate) fn expr_to_z3<'a>(
                     };
 
                     // 第2引数: 範囲の開始
-                    let start_z3 = expr_to_z3(vc, &args[1], env, None)?.as_int().ok_or(
+                    // Quantifier bounds stay `Int`-sorted under
+                    // `--bitvec-i64`, bridging any `BV(64)` bound.
+                    let start_z3 = as_int_like(&expr_to_z3(vc, &args[1], env, None)?).ok_or(
                         MumeiError::type_error(format!("{}(): start must be integer", name)),
                     )?;
 
                     // 第3引数: 範囲の終了
-                    let end_z3 = expr_to_z3(vc, &args[2], env, None)?.as_int().ok_or(
+                    let end_z3 = as_int_like(&expr_to_z3(vc, &args[2], env, None)?).ok_or(
                         MumeiError::type_error(format!("{}(): end must be integer", name)),
                     )?;
 
@@ -227,11 +440,13 @@ pub(crate) fn expr_to_z3<'a>(
                         } else {
                             None
                         };
-                        for (arr_name, idx_expr) in &arr_accesses {
+                        for (arr_name, idx_expr) in arr_accesses.iter() {
                             if let Ok(idx_z3) = expr_to_z3(vc, idx_expr, env, None) {
                                 if let Some(idx_int) = idx_z3.as_int() {
-                                    pattern_asts
-                                        .push(z3_dynamic_array(vc, arr_name, env).select(&idx_int));
+                                    let term = z3_dynamic_array(vc, arr_name, env).select(&idx_int);
+                                    if is_admissible_trigger(&term) {
+                                        pattern_asts.push(term);
+                                    }
                                 }
                             }
                         }
@@ -278,13 +493,13 @@ pub(crate) fn expr_to_z3<'a>(
                     } else {
                         "arr".to_string()
                     };
-                    let len_name = format!("len_{}", arr_name);
-                    let len_var = Int::new_const(ctx, len_name.as_str());
-                    if let Some(solver) = solver_opt {
-                        solver.assert(&len_var.ge(&Int::from_i64(ctx, 0)));
-                    }
-                    env.insert(len_name, len_var.clone().into());
-                    Ok(len_var.into())
+                    Ok(array_len_value(
+                        ctx,
+                        env,
+                        &arr_name,
+                        vc.bitvec_i64,
+                        solver_opt,
+                    ))
                 }
                 "sqrt" => {
                     // Z3 0.12 の Float/Real には sqrt メソッドがないため、
@@ -575,6 +790,7 @@ pub(crate) fn expr_to_z3<'a>(
                             result_type,
                             vc.module_env,
                             vc.ieee754_f64,
+                            vc.bitvec_i64,
                         );
 
                         // ensures を事実として solver に追加（result を呼び出し結果に束縛）
@@ -589,7 +805,9 @@ pub(crate) fn expr_to_z3<'a>(
                         //   → call_env に result = call_increment_0 を挿入
                         //   → Z3 に call_increment_0 == n + 1 を assert
                         //   → 後続の `increment(x)` で x >= 1 だけでなく x == n + 1 が使える
-                        if callee.ensures.trim() != "true" {
+                        if callee.ensures.trim() != "true"
+                            && callee_semantics_match_caller(vc, &callee)
+                        {
                             call_env.insert("result".to_string(), result_z3.clone());
                             let ens_ast = parse_expression(&callee.ensures);
 
@@ -750,24 +968,18 @@ pub(crate) fn expr_to_z3<'a>(
                     });
                 }
             }
-            let idx = expr_to_z3(vc, index_expr, env, solver_opt)?
-                .as_int()
-                .ok_or(MumeiError::type_error("Index must be integer"))?;
+            let idx_value = expr_to_z3(vc, index_expr, env, solver_opt)?;
+            // Array indices stay `Int`-sorted even under `--bitvec-i64`, so an
+            // `i64` index lowered to `BV(64)` crosses the documented signed
+            // bit-vector/integer bridge here.
+            let idx =
+                as_int_like(&idx_value).ok_or(MumeiError::type_error("Index must be integer"))?;
 
             // 配列名に紐づく長さシンボルを使った境界チェック
             if let Some(solver) = solver_opt {
-                let len_name = format!("len_{}", name);
-                let len = if let Some(existing) = env.get(&len_name) {
-                    existing
-                        .as_int()
-                        .unwrap_or(Int::new_const(ctx, len_name.as_str()))
-                } else {
-                    let l = Int::new_const(ctx, len_name.as_str());
-                    solver.assert(&l.ge(&Int::from_i64(ctx, 0)));
-                    env.insert(len_name.clone(), l.clone().into());
-                    l
-                };
-                let safe = Bool::and(ctx, &[&idx.ge(&Int::from_i64(ctx, 0)), &idx.lt(&len)]);
+                let len = array_len_value(ctx, env, name, vc.bitvec_i64, Some(solver));
+                let safe = index_in_bounds(ctx, &idx_value, &len)
+                    .ok_or(MumeiError::type_error("Index must be integer"))?;
                 solver.push();
                 solver.assert(&safe.not());
                 if solver.check() == SatResult::Sat {
@@ -803,6 +1015,33 @@ pub(crate) fn expr_to_z3<'a>(
                 return Err(unsupported_exponentiation_error());
             }
 
+            // Short-circuiting connectives: the right operand is only
+            // evaluated when the left one allows it, so it is lowered under the
+            // guard as a path condition. That makes partiality checks (division
+            // by zero) respect guards like `b == 0 || a / b == c`, exactly as
+            // the runtime semantics do.
+            if matches!(op, Op::And | Op::Or | Op::Implies) {
+                let l = expr_to_z3(vc, left, env, solver_opt)?;
+                if let Some(lb) = l.as_bool() {
+                    let guard = if matches!(op, Op::Or) {
+                        lb.not()
+                    } else {
+                        lb.clone()
+                    };
+                    vc.path_cond_stack.borrow_mut().push(guard);
+                    let r = expr_to_z3(vc, right, env, solver_opt);
+                    vc.path_cond_stack.borrow_mut().pop();
+                    let rb = r?
+                        .as_bool()
+                        .ok_or_else(|| MumeiError::type_error("Expected bool operand"))?;
+                    return Ok(match op {
+                        Op::And => Bool::and(ctx, &[&lb, &rb]).into(),
+                        Op::Or => Bool::or(ctx, &[&lb, &rb]).into(),
+                        _ => lb.implies(&rb).into(),
+                    });
+                }
+            }
+
             let l = expr_to_z3(vc, left, env, solver_opt)?;
             let r = expr_to_z3(vc, right, env, solver_opt)?;
 
@@ -823,14 +1062,48 @@ pub(crate) fn expr_to_z3<'a>(
                 };
             }
 
+            // Opt-in bit-vector `i64` path (`--bitvec-i64`): as soon as one
+            // operand is a `BV(64)`, the whole operation is lowered into the
+            // bit-vector theory. An `Int` operand (integer literal, array
+            // element, result of an atom encoded in `Int` mode) is bridged with
+            // `int2bv`, which is exactly the two's complement reading of the
+            // literal. Placed before the `Real`/`Float` branches so a mixed
+            // `Int`/`BV` contract never reaches `as_int()` with mismatched
+            // sorts.
+            // In bit-vector mode two `Int` literals are also lowered into the
+            // bit-vector theory, so `12 & 10` and the wrapping of
+            // `9223372036854775807 + 1` follow machine semantics too. Other
+            // `Int`-sorted terms (array elements, quantifier bounds) keep the
+            // `Int` encoding: bridging them with `int2bv` costs Z3 far more
+            // than the wrapping is worth, and they are not machine values.
+            // A mixed `i64`/`f64` operation keeps the numeric promotion of the
+            // default mode instead: it is the `f64` branches below that widen
+            // the bit-vector operand (through the signed bridge), because
+            // `bvadd` has no meaning for a floating-point operand. Bitwise
+            // operators on an `f64` stay rejected there.
+            let has_fp_operand = [&l, &r]
+                .iter()
+                .any(|value| value.as_real().is_some() || value.as_float().is_some());
+            let bitwise_op = matches!(op, Op::BitAnd | Op::BitOr | Op::BitXor | Op::Shl | Op::Shr);
+            let both_literals = [&l, &r]
+                .iter()
+                .all(|value| value.as_int().and_then(|i| i.as_i64()).is_some());
+            if !has_fp_operand
+                && (is_bv_i64(&l)
+                    || is_bv_i64(&r)
+                    || (vc.bitvec_i64 && (bitwise_op || both_literals)))
+            {
+                return bv_binary_op(vc, op, &l, &r, solver_opt);
+            }
+
             if l.as_real().is_some() || r.as_real().is_some() {
                 let lr = l
                     .as_real()
-                    .or_else(|| l.as_int().map(|i| i.to_real()))
+                    .or_else(|| as_int_like(&l).map(|i| i.to_real()))
                     .unwrap_or_else(|| Real::from_real(ctx, 0, 1));
                 let rr = r
                     .as_real()
-                    .or_else(|| r.as_int().map(|i| i.to_real()))
+                    .or_else(|| as_int_like(&r).map(|i| i.to_real()))
                     .unwrap_or_else(|| Real::from_real(ctx, 0, 1));
                 match op {
                     Op::Gt => Ok(lr.gt(&rr).into()),
@@ -906,6 +1179,9 @@ pub(crate) fn expr_to_z3<'a>(
                     Op::Div => {
                         if let Some(solver) = solver_opt {
                             solver.push();
+                            for cond in vc.path_cond_stack.borrow().iter() {
+                                solver.assert(cond);
+                            }
                             solver.assert(&ri._eq(&Int::from_i64(ctx, 0)));
                             if solver.check() == SatResult::Sat {
                                 // Extract counterexample: find which variables cause divisor == 0
@@ -970,6 +1246,18 @@ pub(crate) fn expr_to_z3<'a>(
                     Op::Le => Ok(li.le(&ri).into()),
                     Op::Eq => Ok(li._eq(&ri).into()),
                     Op::Neq => Ok(li._eq(&ri).not().into()),
+                    // Bitwise operators have no faithful meaning in the
+                    // unbounded `Int` encoding, so they are rejected instead of
+                    // being approximated.
+                    Op::BitAnd | Op::BitOr | Op::BitXor | Op::Shl | Op::Shr => {
+                        Err(MumeiError::verification(format!(
+                            "Bitwise operator {:?} requires bit-vector semantics",
+                            op
+                        ))
+                        .with_help(
+                            "Verify with --bitvec-i64 so i64 is encoded as a 64-bit bit-vector",
+                        ))
+                    }
                     _ => Err(MumeiError::verification(format!(
                         "Unsupported int operator {:?}",
                         op
@@ -1001,7 +1289,7 @@ pub(crate) fn expr_to_z3<'a>(
             vc.path_cond_stack.borrow_mut().push(c.not());
             let e = stmt_to_z3(vc, else_branch, env, solver_opt);
             vc.path_cond_stack.borrow_mut().pop();
-            let e = e?;
+            let (t, e) = unify_branch_sorts(t, e?)?;
             Ok(c.ite(&t, &e))
         }
 
@@ -1179,7 +1467,10 @@ pub(crate) fn expr_to_z3<'a>(
                         let body_val = stmt_to_z3(vc, &arm.body, &mut arm_env, solver_opt)?;
                         solver.pop(1);
                         result = Some(match result {
-                            Some(else_val) => full_cond.ite(&body_val, &else_val),
+                            Some(else_val) => {
+                                let (body_val, else_val) = unify_branch_sorts(body_val, else_val)?;
+                                full_cond.ite(&body_val, &else_val)
+                            }
                             None => body_val,
                         });
                         accumulated_negations.push(full_cond.not());
@@ -1189,7 +1480,10 @@ pub(crate) fn expr_to_z3<'a>(
 
                 let body_val = stmt_to_z3(vc, &arm.body, &mut arm_env, solver_opt)?;
                 result = Some(match result {
-                    Some(else_val) => full_cond.ite(&body_val, &else_val),
+                    Some(else_val) => {
+                        let (body_val, else_val) = unify_branch_sorts(body_val, else_val)?;
+                        full_cond.ite(&body_val, &else_val)
+                    }
                     None => body_val,
                 });
                 accumulated_negations.push(full_cond.not());

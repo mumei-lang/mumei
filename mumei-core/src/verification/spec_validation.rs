@@ -1,15 +1,16 @@
 use super::module_env::ModuleEnv;
 use super::property_based::{
-    run_property_based_test, PropertyBasedTestConfig, PropertyBasedTestResult,
+    run_property_based_test_with_mode, PropertyBasedTestConfig, PropertyBasedTestResult,
 };
 use super::translator::{
     apply_refinement_constraint, expr_to_z3, param_z3_value, seed_tuple_result_components,
-    tuple_component_types, VCtx, DEFAULT_CONSTRAINT_BUDGET, UNSUPPORTED_TUPLE_RESULT_INDEXING,
+    tuple_component_types, VCtx, DEFAULT_CONSTRAINT_BUDGET, I64_BITS,
+    UNSUPPORTED_TUPLE_RESULT_INDEXING,
 };
 use super::types::Env;
 use super::SpecContradiction;
 use super::{
-    parse_expression, Atom, Bool, Config, Context, Dynamic, HashMap, Int, SatResult, Solver,
+    parse_expression, Atom, Bool, Config, Context, Dynamic, HashMap, Int, SatResult, Solver, BV,
 };
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -123,7 +124,7 @@ pub fn check_spec_satisfiability(
     atom: &Atom,
     module_env: &ModuleEnv,
 ) -> Result<SpecValidationResult, SpecContradiction> {
-    check_spec_satisfiability_with_property_based(atom, module_env, None, false)
+    check_spec_satisfiability_with_property_based(atom, module_env, None, false, false)
 }
 
 fn check_with_deadline(solver: &Solver<'_>, ctx: &Context, timeout_ms: u64) -> SatResult {
@@ -165,12 +166,14 @@ pub fn check_spec_satisfiability_with_property_based(
     module_env: &ModuleEnv,
     property_based_config: Option<&PropertyBasedTestConfig>,
     ieee754_f64: bool,
+    bitvec_i64: bool,
 ) -> Result<SpecValidationResult, SpecContradiction> {
     check_spec_satisfiability_with_timeout(
         atom,
         module_env,
         property_based_config,
         ieee754_f64,
+        bitvec_i64,
         DEFAULT_SPEC_VALIDATION_TIMEOUT_MS,
     )
 }
@@ -183,6 +186,7 @@ pub fn check_spec_satisfiability_with_timeout(
     module_env: &ModuleEnv,
     property_based_config: Option<&PropertyBasedTestConfig>,
     ieee754_f64: bool,
+    bitvec_i64: bool,
     timeout_ms: u64,
 ) -> Result<SpecValidationResult, SpecContradiction> {
     let timeout_ms = if timeout_ms == 0 {
@@ -190,15 +194,35 @@ pub fn check_spec_satisfiability_with_timeout(
     } else {
         timeout_ms.min(DEFAULT_SPEC_VALIDATION_TIMEOUT_MS)
     };
+    // Callers without an explicit mode (certificate generation, tooling) still
+    // have to encode a bit-vector contract as `BV(64)`; otherwise a healthy
+    // spec is reported as unlowerable or contradictory.
+    let bitvec_i64_global = bitvec_i64;
+    let bitvec_i64 = bitvec_i64
+        || super::fragment::atom_requires_bitvector_semantics_in_module(atom, module_env);
     let mut diagnostics = Vec::new();
-    let checked_refinements = check_standalone_refinements(atom, module_env, timeout_ms)?;
+    let checked_refinements = check_standalone_refinements(
+        atom,
+        module_env,
+        timeout_ms,
+        ieee754_f64,
+        bitvec_i64,
+        bitvec_i64_global,
+    )?;
 
     let mut cfg = Config::new();
     cfg.set_timeout_msec(timeout_ms);
     let ctx = super::Context::new(&cfg);
     let solver = Solver::new(&ctx);
-    let vc = validation_ctx(&ctx, module_env, atom, ieee754_f64);
-    let mut env = seed_env(&ctx, atom, module_env, ieee754_f64);
+    let vc = validation_ctx(
+        &ctx,
+        module_env,
+        atom,
+        ieee754_f64,
+        bitvec_i64,
+        bitvec_i64_global,
+    );
+    let mut env = seed_env(&ctx, atom, module_env, ieee754_f64, bitvec_i64);
     let mut had_clause_skips = false;
     assert_parameter_refinements(&vc, &solver, atom, module_env, &mut env)?;
     let checked_requires =
@@ -251,7 +275,7 @@ pub fn check_spec_satisfiability_with_timeout(
     let mut checked_ensures = 0usize;
     for (index, clause) in ensure_clauses.iter().enumerate() {
         let local_solver = Solver::new(&ctx);
-        let mut local_env = seed_env(&ctx, atom, module_env, ieee754_f64);
+        let mut local_env = seed_env(&ctx, atom, module_env, ieee754_f64, bitvec_i64);
         assert_parameter_refinements(&vc, &local_solver, atom, module_env, &mut local_env)?;
         if let ClauseLoweringOutcome::Skipped(warning) = assert_clause(
             &vc,
@@ -286,7 +310,7 @@ pub fn check_spec_satisfiability_with_timeout(
 
     if !ensure_clauses.is_empty() {
         let combined_solver = Solver::new(&ctx);
-        let mut combined_env = seed_env(&ctx, atom, module_env, ieee754_f64);
+        let mut combined_env = seed_env(&ctx, atom, module_env, ieee754_f64, bitvec_i64);
         assert_parameter_refinements(&vc, &combined_solver, atom, module_env, &mut combined_env)?;
         if let ClauseLoweringOutcome::Skipped(warning) = assert_clause(
             &vc,
@@ -333,7 +357,7 @@ pub fn check_spec_satisfiability_with_timeout(
                 continue;
             }
             let local_solver = Solver::new(&ctx);
-            let mut local_env = seed_env(&ctx, atom, module_env, ieee754_f64);
+            let mut local_env = seed_env(&ctx, atom, module_env, ieee754_f64, bitvec_i64);
             assert_parameter_refinements(&vc, &local_solver, atom, module_env, &mut local_env)?;
             if let ClauseLoweringOutcome::Skipped(warning) = assert_clause(
                 &vc,
@@ -372,11 +396,39 @@ pub fn check_spec_satisfiability_with_timeout(
         }
     }
 
+    // Shift amounts in the contract are lowered without a solver, so their
+    // `0 <= n < 64` range is only decidable here, where the requires clause is
+    // asserted. A spec whose shifts are unbounded is rejected by verification,
+    // and must not be reported healthy. Every clause solver above shares `vc`,
+    // so this discharges the obligations collected in all of them against the
+    // requires-only assumption the proof itself uses.
+    match super::translator::shift_range_status(&vc, &solver) {
+        super::translator::ShiftRangeStatus::Bounded => {}
+        super::translator::ShiftRangeStatus::OutOfRange => {
+            return Err(SpecContradiction::new(
+                &atom.name,
+                "shift_out_of_range",
+                "shift amount may be outside 0..64 under requires",
+                vec![atom.requires.clone(), atom.ensures.clone()],
+                atom.span.clone(),
+            ));
+        }
+        super::translator::ShiftRangeStatus::Undecided => {
+            return Err(SpecContradiction::new(
+                &atom.name,
+                "shift_range_unknown",
+                "Z3 returned unknown for the 0..64 shift range under requires",
+                vec![atom.requires.clone(), atom.ensures.clone()],
+                atom.span.clone(),
+            ));
+        }
+    }
+
     let trace_id = effective_trace_id(atom);
     let spec_metadata = effective_spec_metadata(atom);
 
     let property_based_test = property_based_config.map(|config| {
-        let result = run_property_based_test(atom, module_env, config);
+        let result = run_property_based_test_with_mode(atom, module_env, config, bitvec_i64);
         diagnostics.extend(
             result
                 .diagnostics
@@ -412,6 +464,8 @@ fn validation_ctx<'a>(
     module_env: &'a ModuleEnv,
     atom: &'a Atom,
     ieee754_f64: bool,
+    bitvec_i64: bool,
+    bitvec_i64_global: bool,
 ) -> VCtx<'a> {
     VCtx {
         ctx,
@@ -425,6 +479,9 @@ fn validation_ctx<'a>(
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
         profiler: None,
         ieee754_f64,
+        bitvec_i64,
+        bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
+        bitvec_i64_global,
     }
 }
 
@@ -433,6 +490,7 @@ fn seed_env<'a>(
     atom: &Atom,
     module_env: &ModuleEnv,
     ieee754_f64: bool,
+    bitvec_i64: bool,
 ) -> Env<'a> {
     let mut env: Env<'a> = HashMap::new();
     env.insert("true".to_string(), Bool::from_bool(ctx, true).into());
@@ -446,13 +504,20 @@ fn seed_env<'a>(
                 param.type_name.as_deref(),
                 module_env,
                 ieee754_f64,
+                bitvec_i64,
             ),
         );
     }
     if tuple_component_types(atom.return_type.as_deref()).is_none() {
         env.insert(
             "result".to_string(),
-            result_z3_value(ctx, atom.return_type.as_deref(), module_env, ieee754_f64),
+            result_z3_value(
+                ctx,
+                atom.return_type.as_deref(),
+                module_env,
+                ieee754_f64,
+                bitvec_i64,
+            ),
         );
     }
     seed_tuple_result_components(
@@ -462,18 +527,31 @@ fn seed_env<'a>(
         atom.return_type.as_deref(),
         module_env,
         ieee754_f64,
+        bitvec_i64,
     );
     env
 }
 
+/// Sort of the implicit `result` binding. Mirrors `param_z3_value`, so under
+/// `--bitvec-i64` an `i64` result is a `BV(64)` and `ensures` clauses compare
+/// bit-vector terms rather than mixing sorts.
 fn result_z3_value<'a>(
     ctx: &'a super::Context,
     return_type: Option<&str>,
     module_env: &ModuleEnv,
     ieee754_f64: bool,
+    bitvec_i64: bool,
 ) -> Dynamic<'a> {
     match return_type {
-        Some(type_name) => param_z3_value(ctx, "result", Some(type_name), module_env, ieee754_f64),
+        Some(type_name) => param_z3_value(
+            ctx,
+            "result",
+            Some(type_name),
+            module_env,
+            ieee754_f64,
+            bitvec_i64,
+        ),
+        None if bitvec_i64 => BV::new_const(ctx, "result", I64_BITS).into(),
         None => Int::new_const(ctx, "result").into(),
     }
 }
@@ -649,10 +727,17 @@ fn assert_negated_clause<'a>(
     Ok(ClauseLoweringOutcome::Applied)
 }
 
+/// Refinement predicates are lowered in the same semantic mode as the atom
+/// whose spec is being checked: a refined `i64` whose predicate only holds
+/// under two's complement wrapping (or names a bitwise operator) is
+/// unlowerable, or spuriously unsatisfiable, in the unbounded `Int` encoding.
 fn check_standalone_refinements(
     atom: &Atom,
     module_env: &ModuleEnv,
     timeout_ms: u64,
+    ieee754_f64: bool,
+    bitvec_i64: bool,
+    bitvec_i64_global: bool,
 ) -> Result<usize, SpecContradiction> {
     let mut checked = 0usize;
     for refined in module_env.types.values() {
@@ -661,7 +746,14 @@ fn check_standalone_refinements(
         cfg.set_timeout_msec(timeout_ms);
         let ctx = super::Context::new(&cfg);
         let solver = Solver::new(&ctx);
-        let vc = validation_ctx(&ctx, module_env, atom, false);
+        let vc = validation_ctx(
+            &ctx,
+            module_env,
+            atom,
+            ieee754_f64,
+            bitvec_i64,
+            bitvec_i64_global,
+        );
         let mut env: Env<'_> = HashMap::new();
         env.insert("true".to_string(), Bool::from_bool(&ctx, true).into());
         env.insert("false".to_string(), Bool::from_bool(&ctx, false).into());
@@ -1092,7 +1184,7 @@ atom hard_nonlinear(a: i64, b: i64, c: i64, n: i64) -> i64
         );
         let started = Instant::now();
         let result =
-            check_spec_satisfiability_with_timeout(&atom, &ModuleEnv::new(), None, false, 1);
+            check_spec_satisfiability_with_timeout(&atom, &ModuleEnv::new(), None, false, false, 1);
         let elapsed = started.elapsed();
 
         assert!(

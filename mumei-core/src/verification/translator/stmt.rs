@@ -31,8 +31,10 @@ pub(crate) fn stmt_to_z3<'a>(
             value,
             ..
         } => {
-            let idx = expr_to_z3(vc, index, env, solver_opt)?
-                .as_int()
+            // Indices stay `Int`-sorted under `--bitvec-i64`; bridge a `BV(64)`
+            // index through the signed bit-vector/integer conversion.
+            let idx_value = expr_to_z3(vc, index, env, solver_opt)?;
+            let idx = as_int_like(&idx_value)
                 .ok_or(MumeiError::type_error("Array index must be integer"))?;
             let val = expr_to_z3(vc, value, env, solver_opt)?;
             let stored_val = coerce_array_store_value(vc, array, val)?;
@@ -41,18 +43,9 @@ pub(crate) fn stmt_to_z3<'a>(
             // fall outside `[0, len_<name>)` is flagged as a verification
             // error with a counter-example hint.
             if let Some(solver) = solver_opt {
-                let len_name = format!("len_{}", array);
-                let len = if let Some(existing) = env.get(&len_name) {
-                    existing
-                        .as_int()
-                        .unwrap_or_else(|| Int::new_const(ctx, len_name.as_str()))
-                } else {
-                    let l = Int::new_const(ctx, len_name.as_str());
-                    solver.assert(&l.ge(&Int::from_i64(ctx, 0)));
-                    env.insert(len_name.clone(), l.clone().into());
-                    l
-                };
-                let safe = Bool::and(ctx, &[&idx.ge(&Int::from_i64(ctx, 0)), &idx.lt(&len)]);
+                let len = array_len_value(ctx, env, array, vc.bitvec_i64, Some(solver));
+                let safe = index_in_bounds(ctx, &idx_value, &len)
+                    .ok_or(MumeiError::type_error("Array index must be integer"))?;
                 solver.push();
                 solver.assert(&safe.not());
                 if solver.check() == SatResult::Sat {
@@ -137,7 +130,7 @@ pub(crate) fn stmt_to_z3<'a>(
                 // Termination Check
                 if let Some(dec_expr) = decreases {
                     let env_snapshot = env.clone();
-                    let v_before = expr_to_z3(vc, dec_expr, env, None)?.as_int().ok_or(
+                    let v_before = as_int_like(&expr_to_z3(vc, dec_expr, env, None)?).ok_or(
                         MumeiError::type_error("decreases expression must be integer"),
                     )?;
                     solver.push();
@@ -155,7 +148,7 @@ pub(crate) fn stmt_to_z3<'a>(
                     solver.assert(&inv);
                     solver.assert(&c);
                     stmt_to_z3(vc, body, env, Some(solver))?;
-                    let v_after = expr_to_z3(vc, dec_expr, env, None)?.as_int().ok_or(
+                    let v_after = as_int_like(&expr_to_z3(vc, dec_expr, env, None)?).ok_or(
                         MumeiError::type_error("decreases expression must be integer"),
                     )?;
                     solver.assert(&v_after.ge(&v_before));

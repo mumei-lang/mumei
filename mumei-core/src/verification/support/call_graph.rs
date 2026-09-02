@@ -36,6 +36,7 @@ pub(crate) fn verify_atom_invariant(
     invariant_raw: &str,
     module_env: &ModuleEnv,
     ieee754_f64: bool,
+    bitvec_i64: bool,
 ) -> MumeiResult<()> {
     let mut cfg = Config::new();
     cfg.set_timeout_msec(5000);
@@ -54,6 +55,9 @@ pub(crate) fn verify_atom_invariant(
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
         profiler: None,
         ieee754_f64,
+        bitvec_i64,
+        bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
+        bitvec_i64_global: false,
     };
 
     let mut env: Env = HashMap::new();
@@ -66,6 +70,7 @@ pub(crate) fn verify_atom_invariant(
             param.type_name.as_deref(),
             module_env,
             ieee754_f64,
+            bitvec_i64,
         );
         env.insert(param.name.clone(), var);
 
@@ -182,6 +187,18 @@ pub(crate) fn verify_atom_invariant(
         let _ = env_snapshot; // env_snapshot はスコープ終了で破棄
     }
 
+    // BV モードでシフト量の範囲義務が溜まっている場合、requires を仮定した
+    // うえで解消する。解消しないまま return すると義務が失われる。
+    solver.push();
+    if atom.requires.trim() != "true" {
+        let req_ast = parse_expression(&atom.requires);
+        if let Some(req_bool) = expr_to_z3(&vc, &req_ast, &mut env, None)?.as_bool() {
+            solver.assert(&req_bool);
+        }
+    }
+    discharge_bv_shift_obligations(&vc, &solver)?;
+    solver.pop(1);
+
     Ok(())
 }
 
@@ -220,6 +237,11 @@ pub(crate) fn expr_to_source_string(expr: &Expr) -> String {
                 Op::Or => "||",
                 Op::Implies => "==>",
                 Op::Pow => "**",
+                Op::BitAnd => "&",
+                Op::BitOr => "|",
+                Op::BitXor => "^",
+                Op::Shl => "<<",
+                Op::Shr => ">>",
             };
             format!(
                 "({} {} {})",

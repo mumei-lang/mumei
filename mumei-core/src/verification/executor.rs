@@ -31,6 +31,7 @@ pub fn verify_with_config(
             enable_spurious_detection: true,
             enable_vacuity_check: false,
             ieee754_f64: false,
+            bitvec_i64: false,
             property_based_config: None,
             task_id: orchestration_task_id_from_env(),
             generation_id: orchestration_generation_id_from_env(),
@@ -54,6 +55,7 @@ pub fn verify_with_verification_config(
             enable_spurious_detection: config.enable_spurious_detection,
             enable_vacuity_check: config.enable_vacuity_check,
             ieee754_f64: config.ieee754_f64,
+            bitvec_i64: config.bitvec_i64,
             property_based_config: config.property_based_test.as_ref(),
             task_id: orchestration_task_id_from_env(),
             generation_id: orchestration_generation_id_from_env(),
@@ -94,6 +96,7 @@ pub fn verify(hir_atom: &HirAtom, output_dir: &Path, module_env: &ModuleEnv) -> 
             enable_spurious_detection: true,
             enable_vacuity_check: false,
             ieee754_f64: false,
+            bitvec_i64: false,
             property_based_config: None,
             task_id: orchestration_task_id_from_env(),
             generation_id: orchestration_generation_id_from_env(),
@@ -107,6 +110,7 @@ pub(crate) struct VerifyInnerOptions<'a> {
     enable_spurious_detection: bool,
     enable_vacuity_check: bool,
     ieee754_f64: bool,
+    bitvec_i64: bool,
     property_based_config: Option<&'a PropertyBasedTestConfig>,
     task_id: Option<String>,
     generation_id: Option<String>,
@@ -397,12 +401,33 @@ pub(crate) fn verify_inner(
         enable_spurious_detection,
         enable_vacuity_check,
         ieee754_f64,
+        bitvec_i64,
         property_based_config,
         task_id,
         generation_id: _generation_id,
     } = options;
     let timeout_ms = orchestration_timeout_ms_from_env().unwrap_or(timeout_ms);
     let atom = &hir_atom.atom;
+    if let Some(value) = unsupported_semantics_value(atom) {
+        return Err(MumeiError::verification_at(
+            format!(
+                "atom '{}' declares an unknown semantics mode '{}'",
+                atom.name, value
+            ),
+            atom.span.clone(),
+        )
+        .with_help(format!(
+            "supported values: {}",
+            SUPPORTED_SEMANTICS.join(", ")
+        )));
+    }
+    // An atom whose contract only has a meaning under two's complement wrapping
+    // is always verified with the `BV(64)` encoding, whatever entry point the
+    // caller used (`verify`, `run`, `publish`, the LSP, …): the `Int` encoding
+    // cannot lower it at all. Every other atom keeps the default encoding
+    // unless the caller asked for `--bitvec-i64`.
+    let bitvec_i64_global = bitvec_i64;
+    let bitvec_i64 = bitvec_i64 || atom_requires_bitvector_semantics_in_module(atom, module_env);
 
     let mut metrics = VerificationMetrics::new(&atom.name);
     metrics.task_id = task_id;
@@ -421,6 +446,7 @@ pub(crate) fn verify_inner(
         module_env,
         property_based_config,
         ieee754_f64,
+        bitvec_i64_global,
         timeout_ms,
     ) {
         let diagnostic = format!("{}: {}", err.kind, err.message);
@@ -628,6 +654,7 @@ pub(crate) fn verify_inner(
             invariant_expr,
             module_env,
             ieee754_f64,
+            bitvec_i64,
         )?;
     }
     metrics.record_phase("Phase 1d: atom invariant", phase_start.elapsed());
@@ -1185,6 +1212,9 @@ pub(crate) fn verify_inner(
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
         profiler: Some(&profiler_cell),
         ieee754_f64,
+        bitvec_i64,
+        bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
+        bitvec_i64_global,
     };
 
     let mut env: Env = HashMap::new();
@@ -1201,6 +1231,7 @@ pub(crate) fn verify_inner(
             param.type_name.as_deref(),
             module_env,
             ieee754_f64,
+            bitvec_i64,
         );
         env.insert(param.name.clone(), var);
     }
@@ -1211,6 +1242,7 @@ pub(crate) fn verify_inner(
         atom.return_type.as_deref(),
         module_env,
         ieee754_f64,
+        bitvec_i64,
     );
 
     // Phase 1h (continued): ConflictingMerge Z3 infrastructure.
@@ -1241,8 +1273,7 @@ pub(crate) fn verify_inner(
             Int::from_i64(&ctx, val)
         } else {
             let ast = parse_expression(&q.start);
-            expr_to_z3(&vc, &ast, &mut env, None)?
-                .as_int()
+            as_int_like(&expr_to_z3(&vc, &ast, &mut env, None)?)
                 .unwrap_or(Int::new_const(&ctx, q.start.as_str()))
         };
         let end = if let Ok(val) = q.end.parse::<i64>() {
@@ -1250,8 +1281,7 @@ pub(crate) fn verify_inner(
         } else {
             // Parse end as expression to support `n - 1` etc.
             let ast = parse_expression(&q.end);
-            expr_to_z3(&vc, &ast, &mut env, None)?
-                .as_int()
+            as_int_like(&expr_to_z3(&vc, &ast, &mut env, None)?)
                 .unwrap_or(Int::new_const(&ctx, q.end.as_str()))
         };
 
@@ -1286,7 +1316,7 @@ pub(crate) fn verify_inner(
                 let mut pattern_asts: Vec<Dynamic> = Vec::new();
                 for (arr_name, idx_expr) in &arr_accesses {
                     if let Ok(idx_z3) = expr_to_z3(&vc, idx_expr, &mut env, None) {
-                        if let Some(idx_int) = idx_z3.as_int() {
+                        if let Some(idx_int) = as_int_like(&idx_z3) {
                             pattern_asts
                                 .push(z3_dynamic_array(&vc, arr_name, &env).select(&idx_int));
                         }
@@ -1331,23 +1361,13 @@ pub(crate) fn verify_inner(
                 // every std atom today binds a single `arr`, but would silently
                 // mis-bind bounds once another array (e.g. `data`, `aux`) is
                 // used in a forall condition.
-                let len_name = format!("len_{}", arr_name);
-                let len_var = if let Some(existing) = env.get(&len_name) {
-                    existing
-                        .as_int()
-                        .unwrap_or_else(|| Int::new_const(&ctx, len_name.as_str()))
-                } else {
-                    let l = Int::new_const(&ctx, len_name.as_str());
-                    solver.assert(&l.ge(&Int::from_i64(&ctx, 0)));
-                    env.insert(len_name.clone(), l.clone().into());
-                    l
-                };
+                let len_var = array_len_value(&ctx, &mut env, arr_name, bitvec_i64, Some(&solver));
                 if let Ok(idx_z3) = expr_to_z3(&vc, idx_expr, &mut env, None) {
-                    if let Some(idx_int) = idx_z3.as_int() {
-                        let body = range_cond.implies(&Bool::and(
-                            &ctx,
-                            &[&idx_int.ge(&Int::from_i64(&ctx, 0)), &idx_int.lt(&len_var)],
-                        ));
+                    if let (Some(idx_int), Some(in_bounds)) = (
+                        as_int_like(&idx_z3),
+                        index_in_bounds(&ctx, &idx_z3, &len_var),
+                    ) {
+                        let body = range_cond.implies(&in_bounds);
                         let pattern_ast = z3_dynamic_array(&vc, arr_name, &env).select(&idx_int);
                         let pattern_refs: Vec<&dyn z3::ast::Ast> =
                             vec![&pattern_ast as &dyn z3::ast::Ast];
@@ -1394,6 +1414,13 @@ pub(crate) fn verify_inner(
                         "f64" => Float::new_const(&ctx, field_var_name.as_str(), 11, 53).into(),
                         // Plan 9: Str fields as Z3 String Sort
                         "Str" => Z3String::new_const(&ctx, field_var_name.as_str()).into(),
+                        // An `i64` field is a machine value like an `i64`
+                        // parameter, so in bit-vector mode it gets the `BV(64)`
+                        // encoding too: arithmetic over fields alone wraps
+                        // instead of growing unboundedly.
+                        "i64" if bitvec_i64 => {
+                            BV::new_const(&ctx, field_var_name.as_str(), I64_BITS).into()
+                        }
                         _ => Int::new_const(&ctx, field_var_name.as_str()).into(),
                     };
                     env.insert(field_var_name.clone(), field_z3.clone());
@@ -1429,12 +1456,7 @@ pub(crate) fn verify_inner(
     // 2c. 全パラメータに対して配列長シンボルを事前生成
     #[allow(clippy::map_entry)]
     for param in &atom.params {
-        let len_name = format!("len_{}", param.name);
-        if !env.contains_key(&len_name) {
-            let len_var = Int::new_const(&ctx, len_name.as_str());
-            solver.assert(&len_var.ge(&Int::from_i64(&ctx, 0)));
-            env.insert(len_name, len_var.into());
-        }
+        array_len_value(&ctx, &mut env, &param.name, bitvec_i64, Some(&solver));
     }
 
     // 2d. 線形性チェック: consumed_params + ref パラメータの Z3 シンボリック Bool 連携
@@ -1582,7 +1604,7 @@ pub(crate) fn verify_inner(
                         (env.get(&ref_mut_p.name), env.get(&other_p.name))
                     {
                         if let (Some(rm_int), Some(ot_int)) =
-                            (ref_mut_val.as_int(), other_val.as_int())
+                            (as_int_like(ref_mut_val), as_int_like(other_val))
                         {
                             // ref_mut_val == other_val が SAT ならエイリアシングの可能性あり
                             solver.push();
@@ -1882,7 +1904,14 @@ pub(crate) fn verify_inner(
                     if ensures_check == SatResult::Unknown {
                         solver.pop(1);
                         let property_based_help = property_based_config
-                            .map(|config| run_property_based_test(atom, module_env, config))
+                            .map(|config| {
+                                run_property_based_test_with_mode(
+                                    atom,
+                                    module_env,
+                                    config,
+                                    bitvec_i64_global,
+                                )
+                            })
                             .and_then(property_based_help);
                         metrics.record_phase(
                             "Phase 5: ensures verification (unknown)",
@@ -1987,6 +2016,11 @@ pub(crate) fn verify_inner(
 
     metrics.record_phase("Phase 5: ensures verification", phase_start.elapsed());
 
+    // Shift amounts that appeared in clauses lowered without a solver
+    // (`requires`, `ensures`, invariants) are range-checked here, against the
+    // solver that already carries the preconditions.
+    discharge_bv_shift_obligations(&vc, &solver)?;
+
     let z3_check_start = std::time::Instant::now();
     let profiler_final_check_start = profiler_checkpoint(&vc);
     let final_check = solver.check();
@@ -2065,7 +2099,9 @@ pub(crate) fn verify_inner(
             let _ = std::fs::write(&heatmap_path, heatmap_json);
         }
         let property_based_help = property_based_config
-            .map(|config| run_property_based_test(atom, module_env, config))
+            .map(|config| {
+                run_property_based_test_with_mode(atom, module_env, config, bitvec_i64_global)
+            })
             .and_then(property_based_help);
         let heatmap_hint = format!(
             "Z3 resource heatmap: {} constraints consumed {} rlimit units. Top consumers: {}",

@@ -153,6 +153,9 @@ impl<'a> Lexer<'a> {
                 if self.peek() == Some('=') {
                     self.advance();
                     Token::Ge
+                } else if self.peek() == Some('>') {
+                    self.advance();
+                    Token::Shr
                 } else {
                     Token::Gt
                 }
@@ -162,6 +165,9 @@ impl<'a> Lexer<'a> {
                 if self.peek() == Some('=') {
                     self.advance();
                     Token::Le
+                } else if self.peek() == Some('<') {
+                    self.advance();
+                    Token::Shl
                 } else {
                     Token::Lt
                 }
@@ -172,10 +178,11 @@ impl<'a> Lexer<'a> {
                     self.advance();
                     Token::And
                 } else {
-                    // Single & not used in mumei, treat as unknown ident
-                    Token::Ident("&".to_string())
+                    Token::Amp
                 }
             }
+
+            '^' => Token::Caret,
 
             '|' => {
                 if self.peek() == Some('|') {
@@ -294,6 +301,7 @@ impl<'a> Lexer<'a> {
             "task_group" => Token::TaskGroup,
             "task" => Token::Task,
             "max_unroll" => Token::MaxUnroll,
+            "semantics" => Token::Semantics,
             "let" => Token::Let,
             "if" => Token::If,
             "else" => Token::Else,

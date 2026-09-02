@@ -1,3 +1,4 @@
+use crate::parser::ast::Atom;
 use crate::verification::ModuleEnv;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -426,6 +427,27 @@ pub fn collect_callees_from_body(body_expr: &str) -> HashSet<String> {
             }
         } else {
             i += 1;
+        }
+    }
+    callees
+}
+
+/// Collect callee names from every clause of an atom.
+///
+/// A callee is a cache dependency wherever it appears, not only in the body:
+/// an atom whose `requires`/`ensures`/`invariant` or quantifier bounds call
+/// another atom imports that atom's contract — and its semantic mode — into
+/// its own proof, so a change there has to invalidate the cached proof.
+pub fn collect_callees_from_atom(atom: &Atom) -> HashSet<String> {
+    let mut callees = collect_callees_from_body(&atom.body_expr);
+    callees.extend(collect_callees_from_body(&atom.requires));
+    callees.extend(collect_callees_from_body(&atom.ensures));
+    if let Some(invariant) = atom.invariant.as_deref() {
+        callees.extend(collect_callees_from_body(invariant));
+    }
+    for quantifier in &atom.forall_constraints {
+        for clause in [&quantifier.start, &quantifier.end, &quantifier.condition] {
+            callees.extend(collect_callees_from_body(clause));
         }
     }
     callees

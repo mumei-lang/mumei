@@ -44,6 +44,23 @@ pub(crate) struct VCtx<'a> {
     /// and `f64` arithmetic is lowered to the FP theory (round-nearest-even).
     /// When `false` (default), `f64` uses the exact-rational `Real` encoding.
     pub(crate) ieee754_f64: bool,
+    /// Opt-in bit-vector `i64` verification (`--bitvec-i64`). When `true`,
+    /// `i64` parameters/results are encoded as Z3 `BV(64)`, so `&`/`|`/`^`/
+    /// `<<`/`>>` carry real bit semantics and `+`/`-`/`*` wrap in two's
+    /// complement. When `false` (default), `i64` uses the unbounded `Int`
+    /// encoding.
+    pub(crate) bitvec_i64: bool,
+    /// Whether `bitvec_i64` comes from the whole-run opt-in rather than from
+    /// this atom's own contract. Under the global opt-in every atom — callees
+    /// included — is verified in the bit-vector encoding, which is what decides
+    /// whether a callee's `ensures` may be imported at a call site.
+    pub(crate) bitvec_i64_global: bool,
+    /// Shift amounts lowered while no `Solver` was available (contract clauses
+    /// and invariants are lowered with `solver_opt = None`), paired with the
+    /// path condition in force at that point. `discharge_bv_shift_obligations`
+    /// replays them against the atom's solver so that `0 <= n < 64` is enforced
+    /// for `requires`/`ensures`/invariant shifts too, not just body shifts.
+    pub(crate) bv_shift_obligations: std::cell::RefCell<Vec<(Bool<'a>, BV<'a>)>>,
 }
 
 impl<'a> VCtx<'a> {

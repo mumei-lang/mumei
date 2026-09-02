@@ -41,6 +41,32 @@ fn emit_target_from_cli(emit: &str) -> emitter::EmitTarget {
     emitter::EmitTarget::from_cli(emit)
 }
 
+/// Flags that change the verification outcome and therefore have to be part of
+/// the incremental-cache key, otherwise a mode switch reuses a stale proof.
+///
+/// The bit-vector flag records the mode the atom is *effectively* verified in:
+/// an atom whose contract only has a meaning under two's complement wrapping
+/// gets the `BV(64)` encoding even without `--bitvec-i64`.
+fn build_proof_flags(
+    atom: &parser::Atom,
+    module_env: &verification::ModuleEnv,
+    config: &verification::VerificationConfig,
+) -> Vec<&'static str> {
+    let mut flags = Vec::new();
+    if config.enable_vacuity_check {
+        flags.push("enable_vacuity_check");
+    }
+    if config.ieee754_f64 {
+        flags.push("ieee754_f64");
+    }
+    if config.bitvec_i64
+        || verification::atom_requires_bitvector_semantics_in_module(atom, module_env)
+    {
+        flags.push("bitvec_i64");
+    }
+    flags
+}
+
 pub(crate) fn cmd_build(
     input: &str,
     output: &str,
@@ -100,13 +126,13 @@ pub(crate) fn cmd_build(
     for item in &items {
         match item {
             Item::Atom(atom) => {
-                let callees = resolver::collect_callees_from_body(&atom.body_expr);
+                let callees = resolver::collect_callees_from_atom(atom);
                 module_env.register_dependencies(&atom.name, callees);
             }
             Item::ImplBlock(impl_block) => {
                 for method in &impl_block.methods {
                     let qualified_name = format!("{}::{}", impl_block.struct_name, method.name);
-                    let callees = resolver::collect_callees_from_body(&method.body_expr);
+                    let callees = resolver::collect_callees_from_atom(method);
                     module_env.register_dependencies(&qualified_name, callees);
                 }
             }
@@ -138,6 +164,7 @@ pub(crate) fn cmd_build(
         detect_loops: false,
         suggest_cegis: false,
         ieee754_f64: false,
+        bitvec_i64: false,
         property_based_test: None,
     };
     let mut escalation_cert_results: std::collections::HashMap<String, (String, String)> =
@@ -221,6 +248,7 @@ pub(crate) fn cmd_build(
                         &module_env,
                         output_dir,
                         verification_config.ieee754_f64,
+                        verification_config.bitvec_i64,
                     ) {
                         Ok(_) => println!(
                             "    ✅ Laws verified for impl {} for {}",
@@ -358,15 +386,12 @@ pub(crate) fn cmd_build(
                     } else if module_env.is_verified(&qualified_name) {
                         println!("  ⚖️  [2/3] Verification: Skipped (imported, contract-trusted).");
                     } else {
-                        let proof_flags = if verification_config.enable_vacuity_check {
-                            &["enable_vacuity_check"][..]
-                        } else {
-                            &[][..]
-                        };
+                        let proof_flags =
+                            build_proof_flags(&qualified_method, &module_env, &verification_config);
                         let proof_hash = resolver::compute_proof_hash_with_flags(
                             &qualified_method,
                             &module_env,
-                            proof_flags,
+                            &proof_flags,
                         );
 
                         let cache_hit = verification_cache
@@ -551,13 +576,9 @@ pub(crate) fn cmd_build(
                     println!("  ⚖️  [2/3] Verification: Skipped (imported, contract-trusted).");
                 } else {
                     // Feature 2: Use compute_proof_hash with dependency-aware hashing
-                    let proof_flags = if verification_config.enable_vacuity_check {
-                        &["enable_vacuity_check"][..]
-                    } else {
-                        &[][..]
-                    };
+                    let proof_flags = build_proof_flags(atom, &module_env, &verification_config);
                     let proof_hash =
-                        resolver::compute_proof_hash_with_flags(atom, &module_env, proof_flags);
+                        resolver::compute_proof_hash_with_flags(atom, &module_env, &proof_flags);
 
                     let cache_hit = verification_cache
                         .get(&atom.name)

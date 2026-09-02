@@ -109,6 +109,13 @@ pub(crate) enum Command {
         /// `0.1 + 0.2 != 0.3` holds. Default off (keeps `Real` semantics).
         #[arg(long)]
         ieee754_f64: bool,
+        /// Opt-in bit-vector verification for `i64`: encode `i64` as Z3
+        /// `BV(64)` so `&`, `|`, `^`, `<<`, `>>` have real bit semantics and
+        /// `+`, `-`, `*` wrap in two's complement like machine arithmetic,
+        /// instead of the default unbounded `Int` encoding. Default off
+        /// (keeps `Int` semantics and existing proof certificates).
+        #[arg(long)]
+        bitvec_i64: bool,
         /// Emit `untyped_array_access` warnings when an array is accessed as
         /// `arr[i]` without an explicit `[i64]`/`[f64]`/`[bool]` element-type
         /// annotation (which silently falls back to `i64`). Warning-only; does

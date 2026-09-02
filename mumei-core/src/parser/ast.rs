@@ -59,6 +59,17 @@ pub enum Op {
     And,
     Or,
     Implies,
+    /// Bitwise AND (`&`). Verified with real bit semantics only under
+    /// `--bitvec-i64`; see `docs/SPEC_GUIDE.md`.
+    BitAnd,
+    /// Bitwise OR (`|`).
+    BitOr,
+    /// Bitwise XOR (`^`).
+    BitXor,
+    /// Left shift (`<<`). Requires `0 <= n < 64`.
+    Shl,
+    /// Arithmetic (sign-propagating) right shift (`>>`). Requires `0 <= n < 64`.
+    Shr,
 }
 
 // =============================================================================
