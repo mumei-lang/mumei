@@ -227,6 +227,24 @@ impl ModuleEnv {
         self.types.get(name)
     }
 
+    /// Unit tag of `name`, inherited through alias chains: `type Money = Usd;`
+    /// carries `Usd`'s unit unless it declares its own. `None` for unitless or
+    /// unknown types.
+    pub fn unit_of_type(&self, name: &str) -> Option<&String> {
+        let mut current = name;
+        let mut seen = std::collections::HashSet::new();
+        while let Some(refined) = self.types.get(current) {
+            if refined.unit.is_some() {
+                return refined.unit.as_ref();
+            }
+            if !seen.insert(current) || refined._base_type == current {
+                break;
+            }
+            current = refined._base_type.as_str();
+        }
+        None
+    }
+
     pub fn get_struct(&self, name: &str) -> Option<&StructDef> {
         self.structs.get(name)
     }

@@ -256,7 +256,90 @@ pub(crate) fn expr_to_source_string(expr: &Expr) -> String {
         }
         Expr::FieldAccess(e, field) => format!("{}.{}", expr_to_source_string(e), field),
         Expr::ArrayAccess(name, idx) => format!("{}[{}]", name, expr_to_source_string(idx)),
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => format!(
+            "if {} {} else {}",
+            expr_to_source_string(cond),
+            stmt_to_source_string(then_branch),
+            stmt_to_source_string(else_branch)
+        ),
+        Expr::StructInit { type_name, fields } => {
+            let fields_str: Vec<String> = fields
+                .iter()
+                .map(|(name, value)| format!("{}: {}", name, expr_to_source_string(value)))
+                .collect();
+            format!("{} {{ {} }}", type_name, fields_str.join(", "))
+        }
+        Expr::Match { target, arms } => {
+            let arms_str: Vec<String> = arms
+                .iter()
+                .map(|arm| {
+                    let guard = arm
+                        .guard
+                        .as_ref()
+                        .map(|g| format!(" if {}", expr_to_source_string(g)))
+                        .unwrap_or_default();
+                    format!(
+                        "{}{} => {}",
+                        pattern_to_source_string(&arm.pattern),
+                        guard,
+                        stmt_to_source_string(&arm.body)
+                    )
+                })
+                .collect();
+            format!(
+                "match {} {{ {} }}",
+                expr_to_source_string(target),
+                arms_str.join(", ")
+            )
+        }
         _ => format!("{:?}", expr),
+    }
+}
+
+fn pattern_to_source_string(pattern: &Pattern) -> String {
+    match pattern {
+        Pattern::Wildcard => "_".to_string(),
+        Pattern::Literal(n) => n.to_string(),
+        Pattern::Variable(v) => v.clone(),
+        Pattern::Variant {
+            variant_name,
+            fields,
+        } => {
+            if fields.is_empty() {
+                variant_name.clone()
+            } else {
+                let fields_str: Vec<String> = fields.iter().map(pattern_to_source_string).collect();
+                format!("{}({})", variant_name, fields_str.join(", "))
+            }
+        }
+    }
+}
+
+/// Stmt を簡易的にソース文字列に復元する（診断メッセージ用）。
+fn stmt_to_source_string(stmt: &Stmt) -> String {
+    match stmt {
+        Stmt::Expr(e, _) => format!("{{ {} }}", expr_to_source_string(e)),
+        Stmt::Let { var, value, .. } => {
+            format!("{{ let {} = {}; }}", var, expr_to_source_string(value))
+        }
+        Stmt::Block(stmts, _) => {
+            let parts: Vec<String> = stmts
+                .iter()
+                .map(|s| match s {
+                    Stmt::Expr(e, _) => expr_to_source_string(e),
+                    Stmt::Let { var, value, .. } => {
+                        format!("let {} = {};", var, expr_to_source_string(value))
+                    }
+                    other => stmt_to_source_string(other),
+                })
+                .collect();
+            format!("{{ {} }}", parts.join(" "))
+        }
+        _ => "{ ... }".to_string(),
     }
 }
 

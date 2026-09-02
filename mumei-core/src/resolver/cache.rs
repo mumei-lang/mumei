@@ -280,18 +280,26 @@ pub fn compute_proof_hash_with_flags(
         }
     }
 
-    // 2b. Unit tags of every alias in the module. The unit-consistency check
-    // reads types through params, `-> T`, struct fields and callee signatures,
-    // so any unit edit must invalidate cached results.
-    let mut unit_tags: Vec<(&String, &String)> = module_env
+    // 2b. Unit tag and base type of every alias in the module. The
+    // unit-consistency check reads types through params, `-> T`, struct fields,
+    // callee signatures and alias chains, so any unit or alias-base edit must
+    // invalidate cached results.
+    // Unitless aliases are left out so hashes of unit-free modules are unchanged.
+    let mut unit_tags: Vec<(&String, &String, &String)> = module_env
         .types
         .iter()
-        .filter_map(|(name, refined)| refined.unit.as_ref().map(|u| (name, u)))
+        .filter_map(|(name, refined)| {
+            module_env
+                .unit_of_type(name)
+                .map(|u| (name, &refined._base_type, u))
+        })
         .collect();
     unit_tags.sort();
-    for (name, unit) in unit_tags {
+    for (name, base, unit) in unit_tags {
         hasher.update(b"|type_unit:");
         hasher.update(name.as_bytes());
+        hasher.update(b":");
+        hasher.update(base.as_bytes());
         hasher.update(b"=");
         hasher.update(unit.as_bytes());
     }

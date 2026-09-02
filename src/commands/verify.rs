@@ -664,6 +664,7 @@ fn verify_single_atom(atom: &parser::Atom, name: &str, ctx: &mut VerifyContext<'
         }
         Err(e) => {
             let error_text = format!("{e}");
+            let is_type_error = matches!(e, verification::MumeiError::TypeError { .. });
             let counterexample_model = counterexample_model_from_error(&e);
             let counterexample_value = if let verification::MumeiError::VerificationError {
                 counterexample: Some(counterexample),
@@ -681,7 +682,7 @@ fn verify_single_atom(atom: &parser::Atom, name: &str, ctx: &mut VerifyContext<'
                 eprintln!("{:?}", miette::Report::new(e));
             }
             let is_unverifiable = verification::is_unverifiable_error_message(&error_text);
-            let z3_result = if is_unverifiable {
+            let z3_result = if is_unverifiable || is_type_error {
                 "skipped".to_string()
             } else {
                 verification::z3_result_from_error_message(&error_text)
@@ -1120,6 +1121,9 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
     if report_dir.is_some() {
         let _ = std::fs::create_dir_all(output_dir);
     }
+    // Atoms rejected before Z3 runs (type/unit errors) write no report.json, so a
+    // leftover file from a previous run must not be mistaken for this run's result.
+    let _ = std::fs::remove_file(output_dir.join("report.json"));
     let verification_config = verification::VerificationConfig {
         timeout_ms: effective_timeout_ms,
         global_max_unroll: build_cfg.max_unroll,

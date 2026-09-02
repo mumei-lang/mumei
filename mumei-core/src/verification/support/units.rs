@@ -51,9 +51,7 @@ struct UnitCtx<'a> {
 
 impl<'a> UnitCtx<'a> {
     fn unit_of_type(&self, type_name: &str) -> Unit {
-        self.module_env
-            .get_type(type_name)
-            .and_then(|refined| refined.unit.clone())
+        self.module_env.unit_of_type(type_name).cloned()
     }
 
     /// Type information for a value declared with type `type_name`.

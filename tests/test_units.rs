@@ -149,7 +149,67 @@ fn mixed_struct_branches_are_rejected_in_either_order() {
             text.contains("'A'") && text.contains("'B'"),
             "{name}: both struct names expected\n{text}"
         );
+        assert!(
+            text.contains("if c { A { amt: u } } else { B { amt: j } }")
+                || text.contains("if c { B { amt: j } } else { A { amt: u } }"),
+            "{name}: branch expression must be rendered as source\n{text}"
+        );
     }
+}
+
+/// `type Money = Usd;` inherits `USD` through the alias chain.
+#[test]
+fn alias_chain_inherits_unit() {
+    let out = run_verify(&fixture("test_units_alias_chain_ok.mm"), "alias_ok");
+    let text = combined(&out);
+    assert!(out.status.success(), "{text}");
+    assert_unit_mismatch(
+        "test_units_alias_chain_mismatch.mm",
+        "alias_bad",
+        "USD",
+        "JPY",
+    );
+}
+
+/// A unit error is reported before Z3 runs, so no report.json is written; a
+/// stale report.json from an earlier run must not leak into `--json` output.
+#[test]
+fn stale_report_does_not_pollute_json_on_unit_error() {
+    let dir = std::env::temp_dir().join(format!("mumei_units_{}_stale", std::process::id()));
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir).expect("clean stale temp dir");
+    }
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    std::fs::write(
+        dir.join("report.json"),
+        r#"{"status":"success","atom":"stale_atom"}"#,
+    )
+    .expect("write stale report");
+    let out = Command::new(env!("CARGO_BIN_EXE_mumei"))
+        .arg("verify")
+        .arg("--json")
+        .arg("--report-dir")
+        .arg(&dir)
+        .arg(fixture("test_units_mismatch_add.mm"))
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("failed to run mumei verify");
+    std::fs::remove_dir_all(&dir).ok();
+    assert!(!out.status.success());
+    let payload: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("--json must print valid JSON");
+    assert_eq!(payload["status"], "failed", "{payload}");
+    assert!(
+        payload.get("atom").is_none(),
+        "stale atom leaked: {payload}"
+    );
+    let tags = &payload["diagnostics"][0]["tags"];
+    assert!(
+        tags.as_array().is_some_and(
+            |t| t.iter().any(|x| x == "z3_skipped") && !t.iter().any(|x| x == "z3_sat")
+        ),
+        "type error must not be tagged z3_sat: {payload}"
+    );
 }
 
 /// A unit-only edit to an alias must invalidate the incremental cache, so the
@@ -183,8 +243,19 @@ fn unit_change_invalidates_verification_cache() {
     let (ok, text) = run(&format!(
         "type A = i64 unit USD;\ntype B = i64 unit JPY;\n{atom}"
     ));
-    std::fs::remove_dir_all(&dir).ok();
     assert!(!ok, "unit edit must not hit the cache\n{text}");
+    assert!(text.contains("Unit mismatch"), "{text}");
+
+    // Re-pointing an alias chain (B = A -> B = J) must also invalidate.
+    let (ok, text) = run(&format!(
+        "type A = i64 unit USD;\ntype J = i64 unit JPY;\ntype B = A;\n{atom}"
+    ));
+    assert!(ok, "alias-of-alias with same unit must verify\n{text}");
+    let (ok, text) = run(&format!(
+        "type A = i64 unit USD;\ntype J = i64 unit JPY;\ntype B = J;\n{atom}"
+    ));
+    std::fs::remove_dir_all(&dir).ok();
+    assert!(!ok, "alias base edit must not hit the cache\n{text}");
     assert!(text.contains("Unit mismatch"), "{text}");
 }
 
