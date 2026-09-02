@@ -46,10 +46,12 @@ fn emit_target_from_cli(emit: &str) -> emitter::EmitTarget {
 /// encoding, every other atom keeps the `Int` encoding.
 fn atom_verification_config(
     atom: &parser::Atom,
+    module_env: &verification::ModuleEnv,
     base: &verification::VerificationConfig,
 ) -> verification::VerificationConfig {
     verification::VerificationConfig {
-        bitvec_i64: base.bitvec_i64 || verification::atom_requires_bitvector_semantics(atom),
+        bitvec_i64: base.bitvec_i64
+            || verification::atom_requires_bitvector_semantics_in_module(atom, module_env),
         ..base.clone()
     }
 }
@@ -389,8 +391,11 @@ pub(crate) fn cmd_build(
                     } else if module_env.is_verified(&qualified_name) {
                         println!("  ⚖️  [2/3] Verification: Skipped (imported, contract-trusted).");
                     } else {
-                        let method_config =
-                            atom_verification_config(&qualified_method, &verification_config);
+                        let method_config = atom_verification_config(
+                            &qualified_method,
+                            &module_env,
+                            &verification_config,
+                        );
                         let proof_flags = build_proof_flags(&method_config);
                         let proof_hash = resolver::compute_proof_hash_with_flags(
                             &qualified_method,
@@ -580,7 +585,8 @@ pub(crate) fn cmd_build(
                     println!("  ⚖️  [2/3] Verification: Skipped (imported, contract-trusted).");
                 } else {
                     // Feature 2: Use compute_proof_hash with dependency-aware hashing
-                    let atom_config = atom_verification_config(atom, &verification_config);
+                    let atom_config =
+                        atom_verification_config(atom, &module_env, &verification_config);
                     let proof_flags = build_proof_flags(&atom_config);
                     let proof_hash =
                         resolver::compute_proof_hash_with_flags(atom, &module_env, &proof_flags);

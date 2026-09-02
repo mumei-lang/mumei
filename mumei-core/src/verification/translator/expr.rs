@@ -100,6 +100,33 @@ fn out_of_range_shift_error() -> MumeiError {
         .with_help("Add `n >= 0 && n < 64` for the shift amount to requires")
 }
 
+/// True when the callee's contract was proved in the same `i64` encoding the
+/// caller is being verified in.
+///
+/// A callee's `ensures` may only be imported as a fact when both sides agree on
+/// the encoding: `ensures: result > x` for `x + 1` holds under the unbounded
+/// `Int` encoding, but is false at `i64::MAX` under two's complement wrapping,
+/// so importing it into a bit-vector proof would assume something the callee
+/// never proved. The mode of a callee is its own requirement (a bitwise
+/// operator, `semantics: bitvec;`, or a bit-vector callee of its own), plus
+/// `--bitvec-i64` when it applies to the whole module — which is the case
+/// exactly when the caller is in bit-vector mode without needing it itself.
+fn callee_semantics_match_caller(vc: &VCtx<'_>, callee: &Atom) -> bool {
+    let caller_needs_bv = vc.current_atom.is_some_and(|atom| {
+        crate::verification::fragment::atom_requires_bitvector_semantics_in_module(
+            atom,
+            vc.module_env,
+        )
+    });
+    let global_bv = vc.bitvec_i64 && !caller_needs_bv;
+    let callee_bv = global_bv
+        || crate::verification::fragment::atom_requires_bitvector_semantics_in_module(
+            callee,
+            vc.module_env,
+        );
+    callee_bv == vc.bitvec_i64
+}
+
 /// Discharge the shift-range obligations collected while lowering clauses
 /// without a solver (`requires`, `ensures`, invariants). Called once the
 /// atom's solver holds the preconditions, so a shift amount that a `requires`
@@ -357,9 +384,13 @@ pub(crate) fn expr_to_z3<'a>(
                         } else {
                             None
                         };
-                        for (arr_name, idx_expr) in &arr_accesses {
+                        // Under the bit-vector encoding an index is bridged with
+                        // signed `bv2int`, which Z3 expands into an `ite` and
+                        // then refuses as a trigger, so such quantifiers stay
+                        // untriggered.
+                        for (arr_name, idx_expr) in arr_accesses.iter().filter(|_| !vc.bitvec_i64) {
                             if let Ok(idx_z3) = expr_to_z3(vc, idx_expr, env, None) {
-                                if let Some(idx_int) = as_int_like(&idx_z3) {
+                                if let Some(idx_int) = idx_z3.as_int() {
                                     pattern_asts
                                         .push(z3_dynamic_array(vc, arr_name, env).select(&idx_int));
                                 }
@@ -720,7 +751,9 @@ pub(crate) fn expr_to_z3<'a>(
                         //   → call_env に result = call_increment_0 を挿入
                         //   → Z3 に call_increment_0 == n + 1 を assert
                         //   → 後続の `increment(x)` で x >= 1 だけでなく x == n + 1 が使える
-                        if callee.ensures.trim() != "true" {
+                        if callee.ensures.trim() != "true"
+                            && callee_semantics_match_caller(vc, &callee)
+                        {
                             call_env.insert("result".to_string(), result_z3.clone());
                             let ens_ast = parse_expression(&callee.ensures);
 
@@ -1190,7 +1223,7 @@ pub(crate) fn expr_to_z3<'a>(
             vc.path_cond_stack.borrow_mut().push(c.not());
             let e = stmt_to_z3(vc, else_branch, env, solver_opt);
             vc.path_cond_stack.borrow_mut().pop();
-            let e = e?;
+            let (t, e) = unify_branch_sorts(t, e?);
             Ok(c.ite(&t, &e))
         }
 
@@ -1368,7 +1401,10 @@ pub(crate) fn expr_to_z3<'a>(
                         let body_val = stmt_to_z3(vc, &arm.body, &mut arm_env, solver_opt)?;
                         solver.pop(1);
                         result = Some(match result {
-                            Some(else_val) => full_cond.ite(&body_val, &else_val),
+                            Some(else_val) => {
+                                let (body_val, else_val) = unify_branch_sorts(body_val, else_val);
+                                full_cond.ite(&body_val, &else_val)
+                            }
                             None => body_val,
                         });
                         accumulated_negations.push(full_cond.not());
@@ -1378,7 +1414,10 @@ pub(crate) fn expr_to_z3<'a>(
 
                 let body_val = stmt_to_z3(vc, &arm.body, &mut arm_env, solver_opt)?;
                 result = Some(match result {
-                    Some(else_val) => full_cond.ite(&body_val, &else_val),
+                    Some(else_val) => {
+                        let (body_val, else_val) = unify_branch_sorts(body_val, else_val);
+                        full_cond.ite(&body_val, &else_val)
+                    }
                     None => body_val,
                 });
                 accumulated_negations.push(full_cond.not());

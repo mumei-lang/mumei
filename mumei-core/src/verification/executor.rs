@@ -413,7 +413,7 @@ pub(crate) fn verify_inner(
     // caller used (`verify`, `run`, `publish`, the LSP, …): the `Int` encoding
     // cannot lower it at all. Every other atom keeps the default encoding
     // unless the caller asked for `--bitvec-i64`.
-    let bitvec_i64 = bitvec_i64 || atom_requires_bitvector_semantics(atom);
+    let bitvec_i64 = bitvec_i64 || atom_requires_bitvector_semantics_in_module(atom, module_env);
 
     let mut metrics = VerificationMetrics::new(&atom.name);
     metrics.task_id = task_id;

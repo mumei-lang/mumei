@@ -908,7 +908,7 @@ fn validation_ctx<'a>(
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
         profiler: None,
         ieee754_f64: false,
-        bitvec_i64: super::fragment::atom_requires_bitvector_semantics(atom),
+        bitvec_i64: super::fragment::atom_requires_bitvector_semantics_in_module(atom, module_env),
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
     }
 }
@@ -920,7 +920,7 @@ fn seed_concrete_env<'a>(
     assignment: &HashMap<String, GeneratedValue>,
     result: Option<&GeneratedValue>,
 ) -> Env<'a> {
-    let bitvec_i64 = super::fragment::atom_requires_bitvector_semantics(atom);
+    let bitvec_i64 = super::fragment::atom_requires_bitvector_semantics_in_module(atom, module_env);
     let mut env: Env<'a> = HashMap::new();
     env.insert("true".to_string(), Bool::from_bool(ctx, true).into());
     env.insert("false".to_string(), Bool::from_bool(ctx, false).into());

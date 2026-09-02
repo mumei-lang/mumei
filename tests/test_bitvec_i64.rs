@@ -313,6 +313,85 @@ fn contract_only_shift_needs_a_bounded_amount() {
     std::fs::remove_dir_all(dir).ok();
 }
 
+/// A bit-vector caller must not import the `ensures` of a callee that was
+/// proved in the `Int` encoding: `result > x` for `x + 1` is true for unbounded
+/// integers and false at `i64::MAX` under wrapping. The same call chain without
+/// a mode boundary keeps using the callee's contract.
+#[test]
+fn callee_contract_is_not_imported_across_a_mode_boundary() {
+    let dir = temp_dir("boundary");
+    let callee = "atom bump(x: i64) -> i64\n\
+                  requires: true;\n\
+                  ensures: result > x;\n\
+                  body: x + 1;\n\n";
+    let crossing = write_fixture(
+        &dir,
+        "crossing.mm",
+        &format!(
+            "{callee}atom bump_bits(x: i64) -> i64\n\
+             requires: true;\n\
+             ensures: result > (x | 0);\n\
+             body: bump(x | 0);\n"
+        ),
+    );
+    let same_mode = write_fixture(
+        &dir,
+        "same_mode.mm",
+        &format!(
+            "{callee}atom bump_twice(x: i64) -> i64\n\
+             requires: true;\n\
+             ensures: result > x;\n\
+             body: bump(x);\n"
+        ),
+    );
+
+    assert_rejected(
+        &run_verify(&crossing, &dir, &[]),
+        "an `Int`-mode `ensures` assumed by a bit-vector caller",
+    );
+    assert_verified(
+        &run_verify(&same_mode, &dir, &[]),
+        "a call chain that stays in the `Int` encoding",
+    );
+
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// Branches of an `if`/`match` may mix a `BV(64)` value with an integer
+/// literal; both sides are bridged to one sort instead of building an `ite`
+/// over mixed sorts.
+#[test]
+fn bitvec_branches_accept_a_literal_arm() {
+    let dir = temp_dir("branches");
+    let auto = write_fixture(
+        &dir,
+        "branches.mm",
+        "atom masked_or_five(x: i64) -> i64\n\
+         requires: x >= 0;\n\
+         ensures: result >= 0;\n\
+         body: { if (x & 1) == 0 { x & 1 } else { 5 } };\n",
+    );
+    let flagged = write_fixture(
+        &dir,
+        "branches_flag.mm",
+        "atom pos_or_five(x: i64) -> i64\n\
+         requires: x >= 0;\n\
+         ensures: result >= 0;\n\
+         body: { if x >= 0 { x } else { 5 } };\n",
+    );
+
+    assert_verified(
+        &run_verify(&auto, &dir, &[]),
+        "bit-vector branch against a literal branch",
+    );
+    assert_verified(
+        &run_verify(&flagged, &dir, &["--bitvec-i64"]),
+        "bit-vector branch against a literal branch under --bitvec-i64",
+    );
+
+    std::fs::remove_dir_all(dir).ok();
+}
+
 /// A `forall` whose bound is a `BV(64)` parameter keeps its facts: the bound is
 /// bridged to `Int`, not replaced by a fresh unconstrained constant that would
 /// make the quantifier vacuous.

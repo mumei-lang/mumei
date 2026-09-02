@@ -476,7 +476,7 @@ fn verify_single_atom(atom: &parser::Atom, name: &str, ctx: &mut VerifyContext<'
     // other atom keeps the default encoding, so existing certificates are
     // unchanged.
     let atom_config = (!ctx.verification_config.bitvec_i64
-        && verification::atom_requires_bitvector_semantics(atom))
+        && verification::atom_requires_bitvector_semantics_in_module(atom, ctx.module_env))
     .then(|| verification::VerificationConfig {
         bitvec_i64: true,
         ..ctx.verification_config.clone()

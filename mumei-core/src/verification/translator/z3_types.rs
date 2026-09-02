@@ -247,6 +247,28 @@ pub(crate) fn as_bv_i64<'a>(value: &Dynamic<'a>) -> Option<BV<'a>> {
     value.as_int().map(|i| BV::from_int(&i, I64_BITS))
 }
 
+/// Put the two branches of an `ite` into a common sort.
+///
+/// A branch may be `BV(64)` while the other one is an `Int` (a literal, an
+/// array element, the result of an atom verified in `Int` mode); Z3 rejects an
+/// `ite` over mixed sorts, so the `Int` side is bridged to `BV(64)`.
+pub(crate) fn unify_branch_sorts<'a>(
+    then_value: Dynamic<'a>,
+    else_value: Dynamic<'a>,
+) -> (Dynamic<'a>, Dynamic<'a>) {
+    match (is_bv_i64(&then_value), is_bv_i64(&else_value)) {
+        (true, false) => match as_bv_i64(&else_value) {
+            Some(bv) => (then_value, bv.into()),
+            None => (then_value, else_value),
+        },
+        (false, true) => match as_bv_i64(&then_value) {
+            Some(bv) => (bv.into(), else_value),
+            None => (then_value, else_value),
+        },
+        _ => (then_value, else_value),
+    }
+}
+
 /// True when the value is encoded as a 64-bit bit-vector.
 pub(crate) fn is_bv_i64(value: &Dynamic<'_>) -> bool {
     value.as_bv().is_some_and(|bv| bv.get_size() == I64_BITS)

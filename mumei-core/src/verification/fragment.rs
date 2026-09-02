@@ -121,6 +121,42 @@ pub fn atom_requires_bitvector_semantics(atom: &Atom) -> bool {
     )
 }
 
+/// True when this atom, or one of the atoms it transitively calls, has to be
+/// verified with the bit-vector encoding.
+///
+/// A caller imports its callees' `ensures` as facts, so the callee's semantic
+/// mode has to hold in the caller's proof: an atom that calls a bit-vector atom
+/// is verified in bit-vector mode too, rather than lowering a bitwise `ensures`
+/// in the `Int` encoding that cannot express it.
+pub fn atom_requires_bitvector_semantics_in_module(atom: &Atom, module_env: &ModuleEnv) -> bool {
+    let mut pending = vec![atom.name.clone()];
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    if atom_requires_bitvector_semantics(atom) {
+        return true;
+    }
+
+    while let Some(current) = pending.pop() {
+        if !seen.insert(current.clone()) {
+            continue;
+        }
+        let Some(current_atom) = module_env.atoms.get(&current) else {
+            continue;
+        };
+        if current != atom.name && atom_requires_bitvector_semantics(current_atom) {
+            return true;
+        }
+        let mut callees =
+            super::support::collect_callees_stmt(&parse_body_expr(&current_atom.body_expr));
+        callees.extend(super::support::collect_callees_expr(&parse_expression(
+            &current_atom.ensures,
+        )));
+        pending.extend(callees);
+    }
+
+    false
+}
+
 /// True when any atom of the module needs the bit-vector encoding.
 pub fn module_uses_bitvector_semantics(module_env: &ModuleEnv) -> bool {
     module_env
