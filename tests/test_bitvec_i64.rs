@@ -643,23 +643,35 @@ fn bitvec_mode_is_part_of_the_verification_cache_key() {
     std::fs::remove_dir_all(dir).ok();
 }
 
-/// A branch whose sort cannot be bridged (an `f64` against an `i64`) is a type
-/// error, not a Z3 `ite` over mixed sorts — which answers with a null AST and
-/// aborts the process.
+/// Branches of different sorts reach Z3 as one `ite`, which aborts the process
+/// on a sort mismatch. A numeric branch is widened to the `f64` branch;
+/// anything else is a type error.
 #[test]
-fn mismatched_branch_sorts_are_reported_as_a_type_error() {
+fn branches_of_different_sorts_never_abort() {
     let dir = temp_dir("sorts");
-    let fixture = write_fixture(
+    let widened = write_fixture(
         &dir,
-        "sorts.mm",
+        "widened.mm",
         "atom float_arm(x: i64) -> f64\n\
-         requires: true;\n\
+         requires: x > 0;\n\
          ensures: result >= 0.0;\n\
          body: { if x > 0 { x } else { 1.5 } };\n",
     );
+    let unrelated = write_fixture(
+        &dir,
+        "unrelated.mm",
+        "atom bool_arm(x: i64) -> i64\n\
+         requires: true;\n\
+         ensures: result >= 0;\n\
+         body: { if x > 0 { x } else { true } };\n",
+    );
 
     for extra in [&[][..], &["--bitvec-i64"][..]] {
-        let output = run_verify(&fixture, &dir, extra);
+        assert_verified(
+            &run_verify(&widened, &dir, extra),
+            "an integer branch widened to the `f64` branch",
+        );
+        let output = run_verify(&unrelated, &dir, extra);
         assert_rejected(&output, "branches of unrelated sorts");
         assert_ne!(
             output.status.code(),

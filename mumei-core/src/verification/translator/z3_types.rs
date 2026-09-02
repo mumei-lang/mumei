@@ -284,6 +284,7 @@ pub(crate) fn unify_branch_sorts<'a>(
         },
         _ => (then_value, else_value),
     };
+    let unified = unify_numeric_branch_sorts(unified);
     if unified.0.get_sort() != unified.1.get_sort() {
         return Err(MumeiError::type_error(format!(
             "branches of a conditional must have the same type, got {} and {}",
@@ -292,6 +293,40 @@ pub(crate) fn unify_branch_sorts<'a>(
         )));
     }
     Ok(unified)
+}
+
+/// Widen an integer branch to the `f64` sort of the other branch.
+///
+/// An atom returning `f64` may still yield an `i64` in one branch (`if c { x }
+/// else { 1.5 }`), which is the same widening applied to a mixed `f64`
+/// subexpression.
+fn unify_numeric_branch_sorts<'a>(
+    (then_value, else_value): (Dynamic<'a>, Dynamic<'a>),
+) -> (Dynamic<'a>, Dynamic<'a>) {
+    let ctx = then_value.get_ctx();
+    let widen = |value: &Dynamic<'a>, target: &Dynamic<'a>| -> Option<Dynamic<'a>> {
+        if target.as_float().is_some() {
+            let rne = round_nearest_even(ctx);
+            return coerce_to_float(ctx, value, &rne).map(Into::into);
+        }
+        if target.as_real().is_some() {
+            return as_int_like(value).map(|i| i.to_real().into());
+        }
+        None
+    };
+    let then_is_int = as_int_like(&then_value).is_some() && then_value.as_real().is_none();
+    let else_is_int = as_int_like(&else_value).is_some() && else_value.as_real().is_none();
+    match (then_is_int, else_is_int) {
+        (true, false) => match widen(&then_value, &else_value) {
+            Some(widened) => (widened, else_value),
+            None => (then_value, else_value),
+        },
+        (false, true) => match widen(&else_value, &then_value) {
+            Some(widened) => (then_value, widened),
+            None => (then_value, else_value),
+        },
+        _ => (then_value, else_value),
+    }
 }
 
 /// True when a term is usable as an E-matching trigger.
