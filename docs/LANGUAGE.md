@@ -44,6 +44,8 @@ Scope of the check (current subset):
 - Struct fields typed with a unit alias carry that unit: `p.usd` has unit `USD` whether `p`
   is a parameter, `result`, a `let`-bound struct literal, the result of a struct-returning
   call, or a nested field (`q.price.usd`). Struct literals check each field's value.
+- Aliases of unit-tagged aliases inherit the unit: with `type Money = Usd;` a `Money`
+  value has unit `USD` (the chain is followed until a `unit` tag is found).
 - Array elements are unitless in this subset (no unit-tagged array element type exists yet).
 - `*`, `/`, `^` do **not** compose units (no `Meter/Second`); scaling a unit value by a
   unitless value keeps the unit, any other product is treated as unitless.

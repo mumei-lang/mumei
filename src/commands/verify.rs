@@ -470,6 +470,10 @@ fn write_cached_success_report(output_dir: &Path, atom: &parser::Atom, skipped_c
 }
 
 fn verify_single_atom(atom: &parser::Atom, name: &str, ctx: &mut VerifyContext<'_>) {
+    // report.json describes the most recent atom only. Atoms rejected before Z3
+    // runs (type/unit errors) write none, so a file left by a previous run or a
+    // previous atom must not be mistaken for this atom's result.
+    let _ = std::fs::remove_file(ctx.output_dir.join("report.json"));
     // An atom that uses `&`/`|`/`^`/`<<`/`>>`, or opts in with
     // `semantics: bitvec;`, is verified with the `BV(64)` encoding even without
     // `--bitvec-i64`: the `Int` encoding cannot express its contract. Every
@@ -664,6 +668,7 @@ fn verify_single_atom(atom: &parser::Atom, name: &str, ctx: &mut VerifyContext<'
         }
         Err(e) => {
             let error_text = format!("{e}");
+            let is_type_error = matches!(e, verification::MumeiError::TypeError { .. });
             let counterexample_model = counterexample_model_from_error(&e);
             let counterexample_value = if let verification::MumeiError::VerificationError {
                 counterexample: Some(counterexample),
@@ -681,7 +686,7 @@ fn verify_single_atom(atom: &parser::Atom, name: &str, ctx: &mut VerifyContext<'
                 eprintln!("{:?}", miette::Report::new(e));
             }
             let is_unverifiable = verification::is_unverifiable_error_message(&error_text);
-            let z3_result = if is_unverifiable {
+            let z3_result = if is_unverifiable || is_type_error {
                 "skipped".to_string()
             } else {
                 verification::z3_result_from_error_message(&error_text)
