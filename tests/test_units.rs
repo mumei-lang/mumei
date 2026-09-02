@@ -90,6 +90,68 @@ fn passing_jpy_to_usd_parameter_is_rejected() {
     assert_unit_mismatch("test_units_mismatch_call.mm", "call", "USD", "JPY");
 }
 
+/// Struct field units are tracked through `let`-bound structs, struct-returning
+/// calls and nested field access, not only through parameters/`result`.
+#[test]
+fn struct_field_units_track_through_bindings_and_calls() {
+    let out = run_verify(&fixture("test_units_struct_ok.mm"), "struct_ok");
+    let text = combined(&out);
+    assert!(out.status.success(), "{text}");
+    assert!(!text.contains("Unit mismatch"), "{text}");
+}
+
+#[test]
+fn let_bound_struct_field_mismatch_is_rejected() {
+    assert_unit_mismatch(
+        "test_units_struct_mismatch_let.mm",
+        "struct_let",
+        "JPY",
+        "USD",
+    );
+}
+
+#[test]
+fn call_result_struct_field_mismatch_is_rejected() {
+    assert_unit_mismatch(
+        "test_units_struct_mismatch_call.mm",
+        "struct_call",
+        "JPY",
+        "USD",
+    );
+}
+
+#[test]
+fn nested_struct_field_mismatch_is_rejected() {
+    assert_unit_mismatch(
+        "test_units_struct_mismatch_nested.mm",
+        "struct_nested",
+        "JPY",
+        "USD",
+    );
+}
+
+/// Branches yielding different struct types must not silently adopt the first
+/// branch's type; both branch orders are rejected before any field is checked.
+#[test]
+fn mixed_struct_branches_are_rejected_in_either_order() {
+    for (name, tag) in [
+        ("test_units_struct_mismatch_branch_ab.mm", "branch_ab"),
+        ("test_units_struct_mismatch_branch_ba.mm", "branch_ba"),
+    ] {
+        let out = run_verify(&fixture(name), tag);
+        let text = combined(&out);
+        assert!(!out.status.success(), "{name} must be rejected\n{text}");
+        assert!(
+            text.contains("Type mismatch") && text.contains("conditional branches"),
+            "{name}: expected struct branch mismatch\n{text}"
+        );
+        assert!(
+            text.contains("'A'") && text.contains("'B'"),
+            "{name}: both struct names expected\n{text}"
+        );
+    }
+}
+
 /// A unit-only edit to an alias must invalidate the incremental cache, so the
 /// second run reports the mismatch instead of reusing the cached success.
 #[test]
