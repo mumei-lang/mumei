@@ -65,6 +65,53 @@ fn invariant_violating_literal_fails() {
     );
 }
 
+/// `requires` contradicting a parameter's struct invariant is a spec
+/// contradiction, not a vacuous proof.
+#[test]
+fn requires_contradicting_invariant_is_unsat() {
+    let out = run_verify(
+        &fixture("test_struct_invariant_requires_unsat.mm"),
+        "requires_unsat",
+    );
+    assert!(
+        !out.status.success(),
+        "contradictory requires must not verify"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("requires_unsat"),
+        "failure must be reported as requires_unsat\nstderr:\n{stderr}"
+    );
+}
+
+/// A bitwise struct invariant selects BV(64) for parameter assumptions,
+/// literal checks and the implicit result postcondition.
+#[test]
+fn bitwise_invariant_selects_bitvector_semantics() {
+    let out = run_verify(&fixture("test_struct_invariant_bitvec.mm"), "bitvec");
+    assert!(
+        out.status.success(),
+        "bitwise invariant fixture must verify\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Commas inside an invariant (call arguments) do not split it into fields.
+#[test]
+fn invariant_with_call_arguments_verifies() {
+    let out = run_verify(
+        &fixture("test_struct_invariant_call_in_invariant.mm"),
+        "call_in_invariant",
+    );
+    assert!(
+        out.status.success(),
+        "invariant with a call must verify\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 /// Existing struct fixtures (per-field `where v ...` constraints, impl
 /// blocks, field access) keep verifying unchanged.
 #[test]

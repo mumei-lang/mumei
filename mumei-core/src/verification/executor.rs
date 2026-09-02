@@ -1436,30 +1436,9 @@ pub(crate) fn verify_inner(
                     ieee754_f64,
                     bitvec_i64,
                 );
-                for (field, (_, field_z3)) in sdef.fields.iter().zip(&param_fields) {
-                    // フィールド制約を solver に assert
-                    if let Some(constraint_raw) = &field.constraint {
-                        let mut local_env = env.clone();
-                        local_env.insert("v".to_string(), field_z3.clone());
-                        let constraint_ast = crate::parser::expr::normalize_comparison_chains(
-                            parse_expression(constraint_raw),
-                        );
-                        let constraint_z3 = expr_to_z3(&vc, &constraint_ast, &mut local_env, None)?;
-                        if let Some(constraint_bool) = constraint_z3.as_bool() {
-                            let track_label =
-                                format!("track_struct_field_{}::{}", param.name, field.name);
-                            let track_bool = Bool::new_const(&ctx, track_label.as_str());
-                            solver.assert_and_track(&constraint_bool, &track_bool);
-                            profile_solver_assertion(
-                                &vc,
-                                &track_label,
-                                Some(atom.span.to_string()),
-                            );
-                        }
-                    }
-                }
-                // 跨フィールド不変量（`invariant: <expr>`）も前提として assert
-                assume_struct_invariants(
+                // フィールド制約 (`where v ...`) と跨フィールド不変量 (`invariant: <expr>`)
+                // を前提として assert
+                assume_struct_contract(
                     &vc,
                     &solver,
                     sdef,

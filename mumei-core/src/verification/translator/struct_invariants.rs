@@ -155,7 +155,17 @@ pub(crate) fn alias_struct_fields<'a>(env: &mut Env<'a>, alias: &str, value: &Dy
     {
         return;
     }
-    if let Some(fields) = project_struct_fields(env, value) {
+    let fields = project_struct_fields(env, value);
+    let stale_prefix = format!("{STRUCT_FIELD_PREFIX}{alias}_");
+    let stale: Vec<String> = env
+        .keys()
+        .filter_map(|key| key.strip_prefix(stale_prefix.as_str()).map(str::to_string))
+        .collect();
+    for field in stale {
+        env.remove(&struct_field_key(alias, &field));
+        env.remove(&format!("{alias}_{field}"));
+    }
+    if let Some(fields) = fields {
         bind_struct_fields(env, alias, &fields);
     }
 }
@@ -163,13 +173,15 @@ pub(crate) fn alias_struct_fields<'a>(env: &mut Env<'a>, alias: &str, value: &Dy
 /// Lower a struct invariant against the given field values.
 ///
 /// Inside the expression `self.<field>` (and a bare `<field>`) denotes the
-/// field value; every other name resolves through `env`.
+/// field value; every other name resolves through `env`. Calls inside the
+/// invariant are lowered against `solver_opt` so their contracts are usable.
 pub(crate) fn lower_struct_invariant<'a>(
     vc: &VCtx<'a>,
     sdef: &StructDef,
     invariant_raw: &str,
     fields: &[(String, Dynamic<'a>)],
     env: &Env<'a>,
+    solver_opt: Option<&Solver<'a>>,
 ) -> MumeiResult<Bool<'a>> {
     let mut local_env = env.clone();
     bind_struct_fields(&mut local_env, "self", fields);
@@ -177,13 +189,42 @@ pub(crate) fn lower_struct_invariant<'a>(
         local_env.insert(field.clone(), value.clone());
     }
     let ast = normalize_comparison_chains(parse_expression(invariant_raw));
-    let lowered = expr_to_z3(vc, &ast, &mut local_env, None)?;
+    let lowered = expr_to_z3(vc, &ast, &mut local_env, solver_opt)?;
     lowered.as_bool().ok_or_else(|| {
         MumeiError::type_error(format!(
             "Struct '{}' invariant must be a boolean expression: {}",
             sdef.name, invariant_raw
         ))
     })
+}
+
+/// Assume the whole struct contract of `sdef` for the field values of
+/// `binding`: the per-field `where v ...` refinements, then every invariant.
+pub(crate) fn assume_struct_contract<'a>(
+    vc: &VCtx<'a>,
+    solver: &Solver<'a>,
+    sdef: &StructDef,
+    binding: &str,
+    fields: &[(String, Dynamic<'a>)],
+    env: &Env<'a>,
+    span: Option<String>,
+) -> MumeiResult<()> {
+    for (field, (_, field_z3)) in sdef.fields.iter().zip(fields) {
+        let Some(constraint_raw) = &field.constraint else {
+            continue;
+        };
+        let mut local_env = env.clone();
+        local_env.insert("v".to_string(), field_z3.clone());
+        let ast = normalize_comparison_chains(parse_expression(constraint_raw));
+        let constraint = expr_to_z3(vc, &ast, &mut local_env, None)?;
+        if let Some(constraint) = constraint.as_bool() {
+            let track_label = format!("track_struct_field_{}::{}", binding, field.name);
+            let track_bool = Bool::new_const(vc.ctx, track_label.as_str());
+            solver.assert_and_track(&constraint, &track_bool);
+            profile_solver_assertion(vc, &track_label, span.clone());
+        }
+    }
+    assume_struct_invariants(vc, solver, sdef, binding, fields, env, span)
 }
 
 /// Assume every invariant of `sdef` for the field values of `binding`.
@@ -197,7 +238,7 @@ pub(crate) fn assume_struct_invariants<'a>(
     span: Option<String>,
 ) -> MumeiResult<()> {
     for (index, invariant_raw) in sdef.invariants.iter().enumerate() {
-        let invariant = lower_struct_invariant(vc, sdef, invariant_raw, fields, env)?;
+        let invariant = lower_struct_invariant(vc, sdef, invariant_raw, fields, env, Some(solver))?;
         let track_label = format!("track_struct_invariant_{}::{}", binding, index);
         let track_bool = Bool::new_const(vc.ctx, track_label.as_str());
         solver.assert_and_track(&invariant, &track_bool);
@@ -217,7 +258,7 @@ pub(crate) fn check_struct_invariants<'a>(
     env: &Env<'a>,
 ) -> MumeiResult<()> {
     for invariant_raw in &sdef.invariants {
-        let invariant = lower_struct_invariant(vc, sdef, invariant_raw, fields, env)?;
+        let invariant = lower_struct_invariant(vc, sdef, invariant_raw, fields, env, Some(solver))?;
         solver.push();
         solver.assert(&vc.path_cond_conj());
         solver.assert(&invariant.not());

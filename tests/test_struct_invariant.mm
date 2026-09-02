@@ -63,3 +63,21 @@ atom scheduler_free_slots(s: Scheduler) -> i64
 requires: true;
 ensures: result >= 0;
 body: s.max_tasks - s.active_tasks;
+
+// Higher-order forwarding: `call(atom_ref(...))` of a struct-returning atom
+// yields a struct value whose invariant is assumed like an ordinary call.
+atom scheduler_fresh_ref(max_tasks: i64) -> Scheduler
+requires: max_tasks > 0;
+ensures: result.active_tasks <= result.max_tasks;
+body: call(atom_ref(scheduler_new), max_tasks);
+
+// Rebinding an alias replaces its field projections; the stale ones from
+// the first struct must not leak into the result.
+atom scheduler_rebind(s: Scheduler) -> Scheduler
+requires: s.active_tasks > 0;
+ensures: result.active_tasks == s.active_tasks - 1;
+body: {
+    let cur = Scheduler { active_tasks: s.active_tasks, max_tasks: s.max_tasks };
+    let cur = Scheduler { active_tasks: s.active_tasks - 1, max_tasks: s.max_tasks };
+    cur
+};

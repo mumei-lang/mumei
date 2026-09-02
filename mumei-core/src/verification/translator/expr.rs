@@ -810,7 +810,9 @@ pub(crate) fn expr_to_z3<'a>(
                             );
                             bind_struct_fields(&mut call_env, &result_name, &result_fields);
                             bind_struct_fields(&mut call_env, "result", &result_fields);
-                            if let Some(solver) = solver_opt {
+                            if let (Some(solver), true) =
+                                (solver_opt, callee_semantics_match_caller(vc, &callee))
+                            {
                                 assume_struct_invariants(
                                     vc,
                                     solver,
@@ -1946,6 +1948,7 @@ pub(crate) fn expr_to_z3<'a>(
                     for (i, param) in callee_atom.params.iter().enumerate() {
                         if let Some(arg_val) = arg_vals.get(i) {
                             call_env.insert(param.name.clone(), arg_val.clone());
+                            alias_struct_fields(&mut call_env, &param.name, arg_val);
                         }
                     }
 
@@ -1978,7 +1981,44 @@ pub(crate) fn expr_to_z3<'a>(
                     let call_id =
                         CALL_REF_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     let result_name = format!("call_ref_{}_{}", callee_name, call_id);
-                    let result_z3: Dynamic = Int::new_const(ctx, result_name.as_str()).into();
+                    let result_type = callee_atom.return_type.as_deref();
+                    let result_z3: Dynamic = param_z3_value(
+                        ctx,
+                        result_name.as_str(),
+                        result_type,
+                        vc.module_env,
+                        vc.ieee754_f64,
+                        vc.bitvec_i64,
+                    );
+
+                    // 構造体を返す参照呼び出し: 通常呼び出しと同様に結果のフィールドを
+                    // シンボル化し、呼び出し先が保証する不変量を仮定する。
+                    if let Some(sdef) = result_type.and_then(|t| vc.module_env.get_struct(t)) {
+                        let result_fields = seed_struct_fields(
+                            ctx,
+                            env,
+                            &result_name,
+                            sdef,
+                            vc.module_env,
+                            vc.ieee754_f64,
+                            vc.bitvec_i64,
+                        );
+                        bind_struct_fields(&mut call_env, &result_name, &result_fields);
+                        bind_struct_fields(&mut call_env, "result", &result_fields);
+                        if let (Some(solver), true) =
+                            (solver_opt, callee_semantics_match_caller(vc, &callee_atom))
+                        {
+                            assume_struct_invariants(
+                                vc,
+                                solver,
+                                sdef,
+                                &result_name,
+                                &result_fields,
+                                &call_env,
+                                None,
+                            )?;
+                        }
+                    }
 
                     if callee_atom.ensures.trim() != "true" {
                         call_env.insert("result".to_string(), result_z3.clone());

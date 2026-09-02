@@ -44,6 +44,13 @@ pub fn detect_logic_fragment_tags(atom: &Atom, module_env: &ModuleEnv) -> Vec<St
             push_unique_tag(&mut tags, "nonlinear_arithmetic");
         }
     }
+    for invariant in atom_struct_invariants(atom, module_env) {
+        if expr_has_nonlinear_arithmetic(&parse_expression(&invariant))
+            || text_has_nonlinear_arithmetic_marker(&invariant)
+        {
+            push_unique_tag(&mut tags, "nonlinear_arithmetic");
+        }
+    }
 
     if stmt_has_while(&body_stmt) {
         push_unique_tag(&mut tags, "recursive_invariant");
@@ -88,7 +95,11 @@ pub fn detect_logic_fragment_tags(atom: &Atom, module_env: &ModuleEnv) -> Vec<St
     if atom_uses_finite_field_semantics(atom) {
         push_unique_tag(&mut tags, "finite_field");
     }
-    if atom_uses_bitvector_semantics(atom, &requires_expr, &ensures_expr, &body_stmt) {
+    if atom_uses_bitvector_semantics(atom, &requires_expr, &ensures_expr, &body_stmt)
+        || atom_struct_invariants(atom, module_env)
+            .iter()
+            .any(|invariant| expr_has_bitwise_op(&parse_expression(invariant)))
+    {
         push_unique_tag(&mut tags, "bitvector_semantics");
     }
 
@@ -164,10 +175,54 @@ pub fn atom_requires_bitvector_semantics_in_module(atom: &Atom, module_env: &Mod
         if current != atom.name && atom_requires_bitvector_semantics(current_atom) {
             return true;
         }
+        if atom_struct_invariants(current_atom, module_env)
+            .iter()
+            .any(|invariant| expr_has_bitwise_op(&parse_expression(invariant)))
+        {
+            return true;
+        }
         pending.extend(atom_callees(current_atom));
     }
 
     false
+}
+
+/// Every cross-field struct invariant this atom's verification context lowers:
+/// the invariants of struct-typed parameters (assumed), of the struct return
+/// type (imposed on `result`) and of every struct literal in the body
+/// (checked). Like the atom's own clauses they are lowered with the atom's
+/// sorts, so they take part in fragment classification and mode detection.
+pub(crate) fn atom_struct_invariants(atom: &Atom, module_env: &ModuleEnv) -> Vec<String> {
+    let mut struct_names: Vec<&str> = atom
+        .params
+        .iter()
+        .filter_map(|param| param.type_name.as_deref())
+        .chain(atom.return_type.as_deref())
+        .filter(|type_name| module_env.structs.contains_key(*type_name))
+        .collect();
+    for name in module_env.structs.keys() {
+        if body_has_struct_literal(&atom.body_expr, name) {
+            struct_names.push(name.as_str());
+        }
+    }
+    struct_names.sort_unstable();
+    struct_names.dedup();
+    struct_names
+        .into_iter()
+        .filter_map(|name| module_env.structs.get(name))
+        .flat_map(|sdef| sdef.invariants.iter().cloned())
+        .collect()
+}
+
+fn body_has_struct_literal(body: &str, struct_name: &str) -> bool {
+    body.match_indices(struct_name).any(|(start, _)| {
+        let preceded_by_ident = body[..start]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_');
+        let rest = body[start + struct_name.len()..].trim_start();
+        !preceded_by_ident && rest.starts_with('{')
+    })
 }
 
 /// Every atom called from a clause that the atom's verification context

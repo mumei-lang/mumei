@@ -442,6 +442,29 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_struct_invariant_with_commas() {
+        let source = "struct Range {\n\
+            lo: i64,\n\
+            hi: i64,\n\
+            invariant: within(self.lo, self.hi) && forall(i, 0, 2, self.lo <= self.hi),\n\
+            width: i64 where v >= 0\n\
+        }";
+        let items = parse_module(source);
+        let Some(Item::StructDef(s)) = items.first() else {
+            panic!("expected struct");
+        };
+        assert_eq!(
+            s.fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
+            vec!["lo", "hi", "width"]
+        );
+        assert_eq!(s.fields[2].constraint.as_deref(), Some("v >= 0"));
+        assert_eq!(
+            s.invariants,
+            vec!["within(self.lo, self.hi) && forall(i, 0, 2, self.lo <= self.hi)".to_string()]
+        );
+    }
+
+    #[test]
     fn test_parse_struct_without_invariant_has_none() {
         let items = parse_module("struct Point { x: f64, y: f64 }");
         let Some(Item::StructDef(s)) = items.first() else {
