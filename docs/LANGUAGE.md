@@ -41,6 +41,10 @@ Scope of the check (current subset):
 - `+` and `-`: both operands must have the same unit; the result keeps it.
 - Comparisons (`==`, `!=`, `<`, `<=`, `>`, `>=`): both operands must have the same unit.
 - Call arguments, `let`/assignment targets, `-> Type` results and `ensures`/`requires` are checked with the same rule.
+- Struct fields typed with a unit alias carry that unit: `p.usd` has unit `USD` whether `p`
+  is a parameter, `result`, a `let`-bound struct literal, the result of a struct-returning
+  call, or a nested field (`q.price.usd`). Struct literals check each field's value.
+- Array elements are unitless in this subset (no unit-tagged array element type exists yet).
 - `*`, `/`, `^` do **not** compose units (no `Meter/Second`); scaling a unit value by a
   unitless value keeps the unit, any other product is treated as unitless.
 - A unitless value (literal, plain `i64`/`f64`, result of an atom without a unit-tagged

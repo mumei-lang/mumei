@@ -90,6 +90,46 @@ fn passing_jpy_to_usd_parameter_is_rejected() {
     assert_unit_mismatch("test_units_mismatch_call.mm", "call", "USD", "JPY");
 }
 
+/// Struct field units are tracked through `let`-bound structs, struct-returning
+/// calls and nested field access, not only through parameters/`result`.
+#[test]
+fn struct_field_units_track_through_bindings_and_calls() {
+    let out = run_verify(&fixture("test_units_struct_ok.mm"), "struct_ok");
+    let text = combined(&out);
+    assert!(out.status.success(), "{text}");
+    assert!(!text.contains("Unit mismatch"), "{text}");
+}
+
+#[test]
+fn let_bound_struct_field_mismatch_is_rejected() {
+    assert_unit_mismatch(
+        "test_units_struct_mismatch_let.mm",
+        "struct_let",
+        "JPY",
+        "USD",
+    );
+}
+
+#[test]
+fn call_result_struct_field_mismatch_is_rejected() {
+    assert_unit_mismatch(
+        "test_units_struct_mismatch_call.mm",
+        "struct_call",
+        "JPY",
+        "USD",
+    );
+}
+
+#[test]
+fn nested_struct_field_mismatch_is_rejected() {
+    assert_unit_mismatch(
+        "test_units_struct_mismatch_nested.mm",
+        "struct_nested",
+        "JPY",
+        "USD",
+    );
+}
+
 /// A unit-only edit to an alias must invalidate the incremental cache, so the
 /// second run reports the mismatch instead of reusing the cached success.
 #[test]

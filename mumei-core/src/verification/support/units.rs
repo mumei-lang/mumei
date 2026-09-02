@@ -25,11 +25,35 @@ use std::collections::HashMap;
 /// Unit tag attached to a value, or `None` when the value is unit-free.
 type Unit = Option<String>;
 
+/// What the unit checker knows about a value: its unit tag and, for struct
+/// values, the struct type so that field accesses can be resolved.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct Ty {
+    unit: Unit,
+    struct_name: Option<String>,
+}
+
+impl Ty {
+    fn unit(unit: Unit) -> Self {
+        Ty {
+            unit,
+            struct_name: None,
+        }
+    }
+
+    fn or(self, other: Ty) -> Ty {
+        Ty {
+            unit: self.unit.or(other.unit),
+            struct_name: self.struct_name.or(other.struct_name),
+        }
+    }
+}
+
 struct UnitCtx<'a> {
     atom: &'a Atom,
     module_env: &'a ModuleEnv,
-    /// Variable name -> unit tag. Only unit-tagged bindings are recorded.
-    vars: HashMap<String, String>,
+    /// Variable name -> known type information (unit tag and/or struct type).
+    vars: HashMap<String, Ty>,
 }
 
 impl<'a> UnitCtx<'a> {
@@ -37,6 +61,25 @@ impl<'a> UnitCtx<'a> {
         self.module_env
             .get_type(type_name)
             .and_then(|refined| refined.unit.clone())
+    }
+
+    /// Type information for a value declared with type `type_name`.
+    fn ty_of_type(&self, type_name: &str) -> Ty {
+        Ty {
+            unit: self.unit_of_type(type_name),
+            struct_name: self
+                .module_env
+                .get_struct(type_name)
+                .map(|_| type_name.to_string()),
+        }
+    }
+
+    fn field_ty(&self, struct_name: &str, field: &str) -> Ty {
+        self.module_env
+            .get_struct(struct_name)
+            .and_then(|s| s.fields.iter().find(|f| f.name == field))
+            .map(|f| self.ty_of_type(&f.type_name))
+            .unwrap_or_default()
     }
 
     fn mismatch(&self, what: &str, lhs: &Unit, rhs: &Unit, expr_src: String) -> MumeiError {
@@ -75,18 +118,18 @@ impl<'a> UnitCtx<'a> {
 
     /// Infer the unit of `expr`, checking every `+`, `-`, comparison and call
     /// argument on the way.
-    fn infer(&self, expr: &Expr) -> MumeiResult<Unit> {
+    fn infer(&self, expr: &Expr) -> MumeiResult<Ty> {
         match expr {
-            Expr::Number(_) | Expr::Float(_) | Expr::StringLit(_) => Ok(None),
-            Expr::Variable(name) => Ok(self.vars.get(name).cloned()),
+            Expr::Number(_) | Expr::Float(_) | Expr::StringLit(_) => Ok(Ty::default()),
+            Expr::Variable(name) => Ok(self.vars.get(name).cloned().unwrap_or_default()),
             Expr::ArrayAccess(_, idx) => {
                 self.infer(idx)?;
-                Ok(None)
+                Ok(Ty::default())
             }
             Expr::BinaryOp(lhs, op, rhs) => {
-                let l = self.infer(lhs)?;
-                let r = self.infer(rhs)?;
-                match op {
+                let l = self.infer(lhs)?.unit;
+                let r = self.infer(rhs)?.unit;
+                Ok(Ty::unit(match op {
                     Op::Add | Op::Sub => {
                         self.check_compatible(
                             if *op == Op::Add {
@@ -98,18 +141,18 @@ impl<'a> UnitCtx<'a> {
                             &r,
                             || expr_to_source_string(expr),
                         )?;
-                        Ok(l.or(r))
+                        l.or(r)
                     }
                     Op::Eq | Op::Neq | Op::Gt | Op::Lt | Op::Ge | Op::Le => {
                         self.check_compatible("comparison", &l, &r, || {
                             expr_to_source_string(expr)
                         })?;
-                        Ok(None)
+                        None
                     }
-                    Op::Mul | Op::Div | Op::Pow => Ok(match (l, r) {
+                    Op::Mul | Op::Div | Op::Pow => match (l, r) {
                         (Some(u), None) | (None, Some(u)) => Some(u),
                         _ => None,
-                    }),
+                    },
                     Op::And
                     | Op::Or
                     | Op::Implies
@@ -117,8 +160,8 @@ impl<'a> UnitCtx<'a> {
                     | Op::BitOr
                     | Op::BitXor
                     | Op::Shl
-                    | Op::Shr => Ok(None),
-                }
+                    | Op::Shr => None,
+                }))
             }
             Expr::IfThenElse {
                 cond,
@@ -128,7 +171,7 @@ impl<'a> UnitCtx<'a> {
                 self.infer(cond)?;
                 let t = self.check_stmt(then_branch)?;
                 let e = self.check_stmt(else_branch)?;
-                self.check_compatible("conditional branches", &t, &e, || {
+                self.check_compatible("conditional branches", &t.unit, &e.unit, || {
                     expr_to_source_string(expr)
                 })?;
                 Ok(t.or(e))
@@ -136,7 +179,7 @@ impl<'a> UnitCtx<'a> {
             Expr::Call(name, args) => {
                 let arg_units = args
                     .iter()
-                    .map(|a| self.infer(a))
+                    .map(|a| self.infer(a).map(|t| t.unit))
                     .collect::<MumeiResult<Vec<Unit>>>()?;
                 let fqn_name = name.replace('.', "::");
                 let Some(callee) = self
@@ -144,7 +187,7 @@ impl<'a> UnitCtx<'a> {
                     .get_atom(name)
                     .or_else(|| self.module_env.get_atom(&fqn_name))
                 else {
-                    return Ok(None);
+                    return Ok(Ty::default());
                 };
                 for (param, arg_unit) in callee.params.iter().zip(arg_units.iter()) {
                     let param_unit = param
@@ -161,12 +204,13 @@ impl<'a> UnitCtx<'a> {
                 Ok(callee
                     .return_type
                     .as_deref()
-                    .and_then(|t| self.unit_of_type(t)))
+                    .map(|t| self.ty_of_type(t))
+                    .unwrap_or_default())
             }
             Expr::StructInit { type_name, fields } => {
                 let sdef = self.module_env.get_struct(type_name);
                 for (field_name, value) in fields {
-                    let value_unit = self.infer(value)?;
+                    let value_unit = self.infer(value)?.unit;
                     let field_unit = sdef
                         .and_then(|s| s.fields.iter().find(|f| &f.name == field_name))
                         .and_then(|f| self.unit_of_type(&f.type_name));
@@ -177,41 +221,32 @@ impl<'a> UnitCtx<'a> {
                         || expr_to_source_string(expr),
                     )?;
                 }
-                Ok(None)
+                Ok(Ty {
+                    unit: None,
+                    struct_name: Some(type_name.clone()),
+                })
             }
             Expr::FieldAccess(target, field) => {
-                self.infer(target)?;
-                let Expr::Variable(var) = target.as_ref() else {
-                    return Ok(None);
-                };
-                let struct_name = if var == "result" {
-                    self.atom.return_type.clone()
-                } else {
-                    self.atom
-                        .params
-                        .iter()
-                        .find(|p| &p.name == var)
-                        .and_then(|p| p.type_name.clone())
-                };
-                Ok(struct_name
-                    .and_then(|s| self.module_env.get_struct(&s).cloned())
-                    .and_then(|s| s.fields.iter().find(|f| &f.name == field).cloned())
-                    .and_then(|f| self.unit_of_type(&f.type_name)))
+                let target_ty = self.infer(target)?;
+                Ok(target_ty
+                    .struct_name
+                    .map(|s| self.field_ty(&s, field))
+                    .unwrap_or_default())
             }
             Expr::Match { target, arms } => {
                 self.infer(target)?;
-                let mut unit: Unit = None;
+                let mut ty = Ty::default();
                 for arm in arms {
                     if let Some(guard) = &arm.guard {
                         self.infer(guard)?;
                     }
-                    let arm_unit = self.check_stmt(&arm.body)?;
-                    self.check_compatible("match arms", &unit, &arm_unit, || {
+                    let arm_ty = self.check_stmt(&arm.body)?;
+                    self.check_compatible("match arms", &ty.unit, &arm_ty.unit, || {
                         expr_to_source_string(expr)
                     })?;
-                    unit = unit.or(arm_unit);
+                    ty = ty.or(arm_ty);
                 }
-                Ok(unit)
+                Ok(ty)
             }
             Expr::Async { body } => self.check_stmt(body),
             Expr::Await { expr } => self.infer(expr),
@@ -220,23 +255,23 @@ impl<'a> UnitCtx<'a> {
                 for a in args {
                     self.infer(a)?;
                 }
-                Ok(None)
+                Ok(Ty::default())
             }
             Expr::Perform { args, .. } => {
                 for a in args {
                     self.infer(a)?;
                 }
-                Ok(None)
+                Ok(Ty::default())
             }
-            Expr::Lambda { .. } | Expr::AtomRef { .. } => Ok(None),
+            Expr::Lambda { .. } | Expr::AtomRef { .. } => Ok(Ty::default()),
             Expr::ChanSend { channel, value } => {
                 self.infer(channel)?;
                 self.infer(value)?;
-                Ok(None)
+                Ok(Ty::default())
             }
             Expr::ChanRecv { channel } => {
                 self.infer(channel)?;
-                Ok(None)
+                Ok(Ty::default())
             }
         }
     }
@@ -245,7 +280,7 @@ impl<'a> UnitCtx<'a> {
     /// expression of a block, or the value of a bare expression statement).
     /// `let` bindings are recorded so later uses carry the inferred unit; the
     /// binding is scoped to the enclosing block.
-    fn check_stmt(&self, stmt: &Stmt) -> MumeiResult<Unit> {
+    fn check_stmt(&self, stmt: &Stmt) -> MumeiResult<Ty> {
         let mut scoped = UnitCtx {
             atom: self.atom,
             module_env: self.module_env,
@@ -254,38 +289,35 @@ impl<'a> UnitCtx<'a> {
         scoped.check_stmt_in_scope(stmt)
     }
 
-    fn check_stmt_in_scope(&mut self, stmt: &Stmt) -> MumeiResult<Unit> {
+    fn check_stmt_in_scope(&mut self, stmt: &Stmt) -> MumeiResult<Ty> {
         match stmt {
             Stmt::Let { var, value, .. } => {
-                let unit = self.infer(value)?;
-                match unit {
-                    Some(u) => {
-                        self.vars.insert(var.clone(), u);
-                    }
-                    None => {
-                        self.vars.remove(var);
-                    }
+                let ty = self.infer(value)?;
+                if ty == Ty::default() {
+                    self.vars.remove(var);
+                } else {
+                    self.vars.insert(var.clone(), ty);
                 }
-                Ok(None)
+                Ok(Ty::default())
             }
             Stmt::Assign { var, value, span } => {
-                let value_unit = self.infer(value)?;
-                let var_unit = self.vars.get(var).cloned();
+                let value_unit = self.infer(value)?.unit;
+                let var_unit = self.vars.get(var).and_then(|t| t.unit.clone());
                 self.check_compatible(
                     &format!("assignment to '{}'", var),
                     &var_unit,
                     &value_unit,
                     || format!("{} = {} (at {})", var, expr_to_source_string(value), span),
                 )?;
-                Ok(None)
+                Ok(Ty::default())
             }
             Stmt::ArrayStore { index, value, .. } => {
                 self.infer(index)?;
                 self.infer(value)?;
-                Ok(None)
+                Ok(Ty::default())
             }
             Stmt::Block(stmts, _) => {
-                let mut last: Unit = None;
+                let mut last = Ty::default();
                 for s in stmts {
                     last = self.check_stmt_in_scope(s)?;
                 }
@@ -304,19 +336,19 @@ impl<'a> UnitCtx<'a> {
                     self.infer(d)?;
                 }
                 self.check_stmt_in_scope(body)?;
-                Ok(None)
+                Ok(Ty::default())
             }
             Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => {
                 self.check_stmt_in_scope(body)?;
-                Ok(None)
+                Ok(Ty::default())
             }
             Stmt::TaskGroup { children, .. } => {
                 for c in children {
                     self.check_stmt_in_scope(c)?;
                 }
-                Ok(None)
+                Ok(Ty::default())
             }
-            Stmt::Cancel { .. } => Ok(None),
+            Stmt::Cancel { .. } => Ok(Ty::default()),
             Stmt::Expr(expr, _) => self.infer(expr),
         }
     }
@@ -348,21 +380,22 @@ pub fn verify_unit_consistency(
         vars: HashMap::new(),
     };
     for param in &atom.params {
-        if let Some(unit) = param.type_name.as_deref().and_then(|t| ctx.unit_of_type(t)) {
-            ctx.vars.insert(param.name.clone(), unit);
+        if let Some(ty) = param.type_name.as_deref().map(|t| ctx.ty_of_type(t)) {
+            ctx.vars.insert(param.name.clone(), ty);
         }
     }
-    let result_unit = atom
+    let result_ty = atom
         .return_type
         .as_deref()
-        .and_then(|t| ctx.unit_of_type(t));
+        .map(|t| ctx.ty_of_type(t))
+        .unwrap_or_default();
 
     if !is_trivial_clause(&atom.requires) {
         ctx.infer(&parse_expression(&atom.requires))?;
     }
 
-    let body_unit = ctx.check_stmt(body_stmt)?;
-    ctx.check_compatible("returned value", &result_unit, &body_unit, || {
+    let body_ty = ctx.check_stmt(body_stmt)?;
+    ctx.check_compatible("returned value", &result_ty.unit, &body_ty.unit, || {
         format!(
             "body of '{}' (declared return type {})",
             atom.name,
@@ -370,9 +403,7 @@ pub fn verify_unit_consistency(
         )
     })?;
 
-    if let Some(unit) = result_unit {
-        ctx.vars.insert("result".to_string(), unit);
-    }
+    ctx.vars.insert("result".to_string(), result_ty);
     if !is_trivial_clause(&atom.ensures) {
         ctx.infer(&parse_expression(&atom.ensures))?;
     }
