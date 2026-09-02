@@ -259,7 +259,15 @@ pub(crate) fn as_bv_i64<'a>(value: &Dynamic<'a>) -> Option<BV<'a>> {
     if let Some(bv) = value.as_bv() {
         return (bv.get_size() == I64_BITS).then_some(bv);
     }
-    value.as_int().map(|i| BV::from_int(&i, I64_BITS))
+    let int = value.as_int()?;
+    // A literal becomes a bit-vector numeral directly: Z3's `int2bv` of a
+    // non-numeral term is expensive (it bit-blasts the integer encoding), and
+    // an `int2bv` wrapper around a constant is enough to push a trivial goal
+    // like `(x & 1) == 1` into `unknown`.
+    match int.as_i64() {
+        Some(literal) => Some(BV::from_i64(int.get_ctx(), literal, I64_BITS)),
+        None => Some(BV::from_int(&int, I64_BITS)),
+    }
 }
 
 /// Put the two branches of an `ite` into a common sort.

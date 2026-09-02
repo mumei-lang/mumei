@@ -911,3 +911,189 @@ fn nested_generic_closers_do_not_underflow() {
 
     std::fs::remove_dir_all(dir).ok();
 }
+
+/// A misspelled semantic mode must be an error: silently keeping the default
+/// `Int` encoding would certify unbounded arithmetic for an atom whose author
+/// asked for wrapping semantics.
+#[test]
+fn unknown_semantics_mode_is_rejected() {
+    let dir = temp_dir("semantics_typo");
+    let fixture = write_fixture(
+        &dir,
+        "typo.mm",
+        "atom wrap_typo(x: i64) -> i64\n\
+         semantics: bitvector;\n\
+         requires: true;\n\
+         ensures: result == x;\n\
+         body: x;\n",
+    );
+
+    let output = run_verify(&fixture, &dir, &[]);
+    assert_rejected(&output, "an unknown `semantics:` value");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        text.contains("semantics"),
+        "the error must name the offending clause\n{text}"
+    );
+
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// `i64` struct fields are machine values too, so in bit-vector mode field-only
+/// arithmetic wraps: a postcondition that only holds over unbounded integers
+/// must not be provable.
+#[test]
+fn struct_i64_fields_wrap_in_bitvec_mode() {
+    let dir = temp_dir("struct_fields");
+    let fixture = write_fixture(
+        &dir,
+        "fields.mm",
+        "struct Pairi { a: i64, b: i64 }\n\n\
+         atom sum_fields(p: Pairi) -> i64\n\
+         requires: p.b >= 0;\n\
+         ensures: result >= p.a;\n\
+         body: p.a + p.b;\n",
+    );
+
+    assert_verified(
+        &run_verify(&fixture, &dir, &[]),
+        "`result >= p.a` over unbounded `Int` fields",
+    );
+    assert_rejected(
+        &run_verify(&fixture, &dir, &["--bitvec-i64"]),
+        "`result >= p.a` for wrapping field arithmetic",
+    );
+
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// Mixing an `i64` with an `f64` keeps the numeric promotion of the default
+/// mode: the bit-vector operand is widened through the signed bridge instead
+/// of the operation being rejected because `bvadd` has no floating-point
+/// operand. Obligations that need Z3 to relate the bridged term back to the
+/// bit-vector operand are a mixed-theory goal and may come back `unknown`
+/// (see `docs/SPEC_GUIDE.md`); the promotion itself must hold.
+#[test]
+fn mixed_i64_and_f64_still_verifies_in_bitvec_mode() {
+    let dir = temp_dir("mixed_numeric");
+    let fixture = write_fixture(
+        &dir,
+        "mixed.mm",
+        "atom scale(n: i64, f: f64) -> f64\n\
+         requires: n > 0 && f > 0.0;\n\
+         ensures: result == n + f;\n\
+         body: n + f;\n",
+    );
+
+    assert_verified(
+        &run_verify(&fixture, &dir, &["--bitvec-i64"]),
+        "a mixed `i64`/`f64` sum under --bitvec-i64",
+    );
+    // Under `--ieee754-f64` the same contract is an FP obligation (`fp.eq`
+    // does not hold for `NaN`), so the interesting property is that adding
+    // `--bitvec-i64` does not change the outcome.
+    let fp_only = run_verify(&fixture, &dir, &["--ieee754-f64"]);
+    let fp_and_bv = run_verify(&fixture, &dir, &["--bitvec-i64", "--ieee754-f64"]);
+    assert_eq!(
+        fp_only.status.code(),
+        fp_and_bv.status.code(),
+        "--bitvec-i64 must not change a mixed `i64`/`f64` contract under --ieee754-f64\n\
+         --ieee754-f64:\n{}\n--bitvec-i64 --ieee754-f64:\n{}",
+        String::from_utf8_lossy(&fp_only.stdout),
+        String::from_utf8_lossy(&fp_and_bv.stdout)
+    );
+
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// The standalone satisfiability check of a refinement predicate runs in the
+/// mode the atom is verified in: `v + 1 < v` has no unbounded integer solution
+/// but holds at `i64::MAX` for a wrapping one, so the predicate is a
+/// contradiction in the default mode and inhabited under `--bitvec-i64`.
+#[test]
+fn standalone_refinement_uses_the_active_mode() {
+    let dir = temp_dir("standalone_refine");
+    let fixture = write_fixture(
+        &dir,
+        "refine_wrap.mm",
+        "type WrapHigh = i64 where v + 1 < v;\n\
+         atom uses_wrap(x: WrapHigh) -> i64\n\
+         requires: true;\n\
+         ensures: result == x;\n\
+         body: x;\n",
+    );
+
+    assert_verified(
+        &run_verify(&fixture, &dir, &["--bitvec-i64"]),
+        "a refinement predicate that only two's complement wrapping inhabits",
+    );
+    assert_rejected(
+        &run_verify(&fixture, &dir, &[]),
+        "the same predicate over unbounded integers",
+    );
+
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// A callee named only in a contract clause is a proof dependency: changing
+/// its `ensures` — or its semantic mode — has to invalidate the cached proof
+/// of every atom that imports it, even when no body calls it.
+#[test]
+fn contract_only_callee_invalidates_the_build_cache() {
+    let dir = temp_dir("contract_dep");
+    let write = |ensures: &str, body: &str| {
+        write_fixture(
+            &dir,
+            "dep.mm",
+            &format!(
+                "atom helper(x: i64) -> i64\n\
+                 requires: x >= 0;\n\
+                 ensures: {ensures};\n\
+                 body: {body};\n\n\
+                 atom user(x: i64) -> i64\n\
+                 requires: x >= 0 && helper(x) >= 0;\n\
+                 ensures: result == x;\n\
+                 body: x;\n"
+            ),
+        )
+    };
+    let fixture = write("result >= 0", "x");
+
+    let run_build = || {
+        Command::new(env!("CARGO_BIN_EXE_mumei"))
+            .arg("build")
+            .arg(&fixture)
+            .arg("--output")
+            .arg(dir.join("out"))
+            .current_dir(&dir)
+            .output()
+            .expect("failed to run mumei build")
+    };
+
+    assert_verified(&run_build(), "first build");
+    let cached = run_build();
+    assert_verified(&cached, "second build of an unchanged module");
+    assert_eq!(
+        String::from_utf8_lossy(&cached.stdout)
+            .matches("unchanged, cached")
+            .count(),
+        2,
+        "both atoms must hit the cache when nothing changed:\n{}",
+        String::from_utf8_lossy(&cached.stdout)
+    );
+
+    write("result >= 1", "x + 1");
+    let changed = run_build();
+    assert_verified(&changed, "build after the contract-only callee changed");
+    assert!(
+        !String::from_utf8_lossy(&changed.stdout).contains("unchanged, cached"),
+        "a caller whose only dependency is in `requires` must be re-verified:\n{}",
+        String::from_utf8_lossy(&changed.stdout)
+    );
+
+    std::fs::remove_dir_all(dir).ok();
+}

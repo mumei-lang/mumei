@@ -95,6 +95,24 @@ pub fn detect_logic_fragment_tags(atom: &Atom, module_env: &ModuleEnv) -> Vec<St
     tags
 }
 
+/// The values `semantics:` accepts. `bitvec` is the only semantic mode an atom
+/// can opt into today; the default (no `semantics:` clause) is the unbounded
+/// `Int` encoding.
+pub const SUPPORTED_SEMANTICS: [&str; 1] = ["bitvec"];
+
+/// The `semantics:` value of this atom when it is not one the verifier knows.
+///
+/// An unrecognized value must not be ignored: silently verifying `semantics:
+/// bitvector;` in the default mode would certify unbounded arithmetic for an
+/// atom whose author asked for wrapping semantics, so a typo is an error
+/// instead of a downgrade.
+pub fn unsupported_semantics_value(atom: &Atom) -> Option<&str> {
+    atom.spec_metadata
+        .get("semantics")
+        .map(String::as_str)
+        .filter(|value| !SUPPORTED_SEMANTICS.contains(value))
+}
+
 /// True when this atom has to be verified with the bit-vector encoding
 /// (`i64` as `BV(64)`), i.e. the default unbounded `Int` encoding cannot give
 /// its contract its intended meaning.

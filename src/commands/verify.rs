@@ -1226,7 +1226,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                         }
                     }
                 }
-                let callees = resolver::collect_callees_from_body(&atom.body_expr);
+                let callees = resolver::collect_callees_from_atom(atom);
                 module_env.register_dependencies(&atom.name, callees);
             }
             Item::ImplBlock(impl_block) => {
@@ -1250,7 +1250,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                             }
                         }
                     }
-                    let callees = resolver::collect_callees_from_body(&method.body_expr);
+                    let callees = resolver::collect_callees_from_atom(method);
                     module_env.register_dependencies(&qualified_name, callees);
                 }
             }

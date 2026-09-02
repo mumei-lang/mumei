@@ -201,7 +201,14 @@ pub fn check_spec_satisfiability_with_timeout(
     let bitvec_i64 = bitvec_i64
         || super::fragment::atom_requires_bitvector_semantics_in_module(atom, module_env);
     let mut diagnostics = Vec::new();
-    let checked_refinements = check_standalone_refinements(atom, module_env, timeout_ms)?;
+    let checked_refinements = check_standalone_refinements(
+        atom,
+        module_env,
+        timeout_ms,
+        ieee754_f64,
+        bitvec_i64,
+        bitvec_i64_global,
+    )?;
 
     let mut cfg = Config::new();
     cfg.set_timeout_msec(timeout_ms);
@@ -395,14 +402,26 @@ pub fn check_spec_satisfiability_with_timeout(
     // and must not be reported healthy. Every clause solver above shares `vc`,
     // so this discharges the obligations collected in all of them against the
     // requires-only assumption the proof itself uses.
-    if super::translator::has_reachable_out_of_range_shift(&vc, &solver) {
-        return Err(SpecContradiction::new(
-            &atom.name,
-            "shift_out_of_range",
-            "shift amount may be outside 0..64 under requires",
-            vec![atom.requires.clone(), atom.ensures.clone()],
-            atom.span.clone(),
-        ));
+    match super::translator::shift_range_status(&vc, &solver) {
+        super::translator::ShiftRangeStatus::Bounded => {}
+        super::translator::ShiftRangeStatus::OutOfRange => {
+            return Err(SpecContradiction::new(
+                &atom.name,
+                "shift_out_of_range",
+                "shift amount may be outside 0..64 under requires",
+                vec![atom.requires.clone(), atom.ensures.clone()],
+                atom.span.clone(),
+            ));
+        }
+        super::translator::ShiftRangeStatus::Undecided => {
+            return Err(SpecContradiction::new(
+                &atom.name,
+                "shift_range_unknown",
+                "Z3 returned unknown for the 0..64 shift range under requires",
+                vec![atom.requires.clone(), atom.ensures.clone()],
+                atom.span.clone(),
+            ));
+        }
     }
 
     let trace_id = effective_trace_id(atom);
@@ -708,10 +727,17 @@ fn assert_negated_clause<'a>(
     Ok(ClauseLoweringOutcome::Applied)
 }
 
+/// Refinement predicates are lowered in the same semantic mode as the atom
+/// whose spec is being checked: a refined `i64` whose predicate only holds
+/// under two's complement wrapping (or names a bitwise operator) is
+/// unlowerable, or spuriously unsatisfiable, in the unbounded `Int` encoding.
 fn check_standalone_refinements(
     atom: &Atom,
     module_env: &ModuleEnv,
     timeout_ms: u64,
+    ieee754_f64: bool,
+    bitvec_i64: bool,
+    bitvec_i64_global: bool,
 ) -> Result<usize, SpecContradiction> {
     let mut checked = 0usize;
     for refined in module_env.types.values() {
@@ -720,7 +746,14 @@ fn check_standalone_refinements(
         cfg.set_timeout_msec(timeout_ms);
         let ctx = super::Context::new(&cfg);
         let solver = Solver::new(&ctx);
-        let vc = validation_ctx(&ctx, module_env, atom, false, false, false);
+        let vc = validation_ctx(
+            &ctx,
+            module_env,
+            atom,
+            ieee754_f64,
+            bitvec_i64,
+            bitvec_i64_global,
+        );
         let mut env: Env<'_> = HashMap::new();
         env.insert("true".to_string(), Bool::from_bool(&ctx, true).into());
         env.insert("false".to_string(), Bool::from_bool(&ctx, false).into());

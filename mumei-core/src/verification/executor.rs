@@ -408,6 +408,19 @@ pub(crate) fn verify_inner(
     } = options;
     let timeout_ms = orchestration_timeout_ms_from_env().unwrap_or(timeout_ms);
     let atom = &hir_atom.atom;
+    if let Some(value) = unsupported_semantics_value(atom) {
+        return Err(MumeiError::verification_at(
+            format!(
+                "atom '{}' declares an unknown semantics mode '{}'",
+                atom.name, value
+            ),
+            atom.span.clone(),
+        )
+        .with_help(format!(
+            "supported values: {}",
+            SUPPORTED_SEMANTICS.join(", ")
+        )));
+    }
     // An atom whose contract only has a meaning under two's complement wrapping
     // is always verified with the `BV(64)` encoding, whatever entry point the
     // caller used (`verify`, `run`, `publish`, the LSP, …): the `Int` encoding
@@ -1401,6 +1414,13 @@ pub(crate) fn verify_inner(
                         "f64" => Float::new_const(&ctx, field_var_name.as_str(), 11, 53).into(),
                         // Plan 9: Str fields as Z3 String Sort
                         "Str" => Z3String::new_const(&ctx, field_var_name.as_str()).into(),
+                        // An `i64` field is a machine value like an `i64`
+                        // parameter, so in bit-vector mode it gets the `BV(64)`
+                        // encoding too: arithmetic over fields alone wraps
+                        // instead of growing unboundedly.
+                        "i64" if bitvec_i64 => {
+                            BV::new_const(&ctx, field_var_name.as_str(), I64_BITS).into()
+                        }
                         _ => Int::new_const(&ctx, field_var_name.as_str()).into(),
                     };
                     env.insert(field_var_name.clone(), field_z3.clone());

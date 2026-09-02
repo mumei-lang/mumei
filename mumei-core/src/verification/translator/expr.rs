@@ -100,6 +100,15 @@ fn out_of_range_shift_error() -> MumeiError {
         .with_help("Add `n >= 0 && n < 64` for the shift amount to requires")
 }
 
+fn undecided_shift_error() -> MumeiError {
+    MumeiError::verification(
+        "Z3 returned unknown while checking that the shift amount stays in 0..64".to_string(),
+    )
+    .with_help(
+        "State `n >= 0 && n < 64` for the shift amount in requires, or raise --solver-timeout",
+    )
+}
+
 /// True when the callee's contract was proved in the same `i64` encoding the
 /// caller is being verified in.
 ///
@@ -129,30 +138,49 @@ pub(crate) fn discharge_bv_shift_obligations<'a>(
     vc: &VCtx<'a>,
     solver: &Solver<'a>,
 ) -> MumeiResult<()> {
-    if has_reachable_out_of_range_shift(vc, solver) {
-        return Err(out_of_range_shift_error());
+    match shift_range_status(vc, solver) {
+        ShiftRangeStatus::Bounded => Ok(()),
+        ShiftRangeStatus::OutOfRange => Err(out_of_range_shift_error()),
+        ShiftRangeStatus::Undecided => Err(undecided_shift_error()),
     }
-    Ok(())
 }
 
-/// True when one of the collected shift amounts can leave `0..64` under the
-/// facts the solver already holds. Drains the obligations, like
+/// Outcome of checking the collected shift amounts against `0..64`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ShiftRangeStatus {
+    /// Every amount is provably in range under the facts the solver holds.
+    Bounded,
+    /// An amount can leave the range on a reachable path.
+    OutOfRange,
+    /// The solver could not decide the range, so it is not guaranteed.
+    Undecided,
+}
+
+/// Check the collected shift amounts against `0..64` under the facts the
+/// solver already holds. Drains the obligations, like
 /// `discharge_bv_shift_obligations`, for callers whose failures are not a
 /// `MumeiError` (spec validation reports a `SpecContradiction`).
-pub(crate) fn has_reachable_out_of_range_shift<'a>(vc: &VCtx<'a>, solver: &Solver<'a>) -> bool {
+///
+/// An `unknown` answer is not a guarantee: the shift range is a safety
+/// condition, so it is reported as undecided rather than folded into the
+/// in-range case.
+pub(crate) fn shift_range_status<'a>(vc: &VCtx<'a>, solver: &Solver<'a>) -> ShiftRangeStatus {
     let obligations: Vec<(Bool<'a>, BV<'a>)> =
         vc.bv_shift_obligations.borrow_mut().drain(..).collect();
+    let mut status = ShiftRangeStatus::Bounded;
     for (path_cond, amount) in obligations {
         solver.push();
         solver.assert(&path_cond);
         solver.assert(&bv_shift_out_of_range(vc.ctx, &amount));
-        let reachable = solver.check() == SatResult::Sat;
+        let result = solver.check();
         solver.pop(1);
-        if reachable {
-            return true;
+        match result {
+            SatResult::Sat => return ShiftRangeStatus::OutOfRange,
+            SatResult::Unknown => status = ShiftRangeStatus::Undecided,
+            SatResult::Unsat => {}
         }
     }
-    false
+    status
 }
 
 fn bv_binary_op<'a>(
@@ -178,10 +206,12 @@ fn bv_binary_op<'a>(
                     solver.assert(cond);
                 }
                 solver.assert(&bv_shift_out_of_range(ctx, &rb));
-                let reachable = solver.check() == SatResult::Sat;
+                let result = solver.check();
                 solver.pop(1);
-                if reachable {
-                    return Err(out_of_range_shift_error());
+                match result {
+                    SatResult::Sat => return Err(out_of_range_shift_error()),
+                    SatResult::Unknown => return Err(undecided_shift_error()),
+                    SatResult::Unsat => {}
                 }
             }
             // Contract clauses and invariants are lowered without a solver;
@@ -1046,22 +1076,34 @@ pub(crate) fn expr_to_z3<'a>(
             // `Int`-sorted terms (array elements, quantifier bounds) keep the
             // `Int` encoding: bridging them with `int2bv` costs Z3 far more
             // than the wrapping is worth, and they are not machine values.
+            // A mixed `i64`/`f64` operation keeps the numeric promotion of the
+            // default mode instead: it is the `f64` branches below that widen
+            // the bit-vector operand (through the signed bridge), because
+            // `bvadd` has no meaning for a floating-point operand. Bitwise
+            // operators on an `f64` stay rejected there.
+            let has_fp_operand = [&l, &r]
+                .iter()
+                .any(|value| value.as_real().is_some() || value.as_float().is_some());
             let bitwise_op = matches!(op, Op::BitAnd | Op::BitOr | Op::BitXor | Op::Shl | Op::Shr);
             let both_literals = [&l, &r]
                 .iter()
                 .all(|value| value.as_int().and_then(|i| i.as_i64()).is_some());
-            if is_bv_i64(&l) || is_bv_i64(&r) || (vc.bitvec_i64 && (bitwise_op || both_literals)) {
+            if !has_fp_operand
+                && (is_bv_i64(&l)
+                    || is_bv_i64(&r)
+                    || (vc.bitvec_i64 && (bitwise_op || both_literals)))
+            {
                 return bv_binary_op(vc, op, &l, &r, solver_opt);
             }
 
             if l.as_real().is_some() || r.as_real().is_some() {
                 let lr = l
                     .as_real()
-                    .or_else(|| l.as_int().map(|i| i.to_real()))
+                    .or_else(|| as_int_like(&l).map(|i| i.to_real()))
                     .unwrap_or_else(|| Real::from_real(ctx, 0, 1));
                 let rr = r
                     .as_real()
-                    .or_else(|| r.as_int().map(|i| i.to_real()))
+                    .or_else(|| as_int_like(&r).map(|i| i.to_real()))
                     .unwrap_or_else(|| Real::from_real(ctx, 0, 1));
                 match op {
                     Op::Gt => Ok(lr.gt(&rr).into()),
