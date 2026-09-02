@@ -384,12 +384,20 @@ pub struct Quantifier {
     pub condition: String,
 }
 
+/// `type Name = <base> [unit <Unit>] [where <predicate>];`
+///
+/// A refined type may carry a unit-of-measure tag (`unit USD`). The unit is a
+/// pure type-level label: it never changes the value's Z3 sort or runtime
+/// representation, and is only consulted by the unit-consistency check on
+/// `+`, `-` and comparisons (see `verification::support::units`).
 #[derive(Debug, Clone)]
 pub struct RefinedType {
     pub name: String,
     pub _base_type: String,
     pub operand: String,
     pub predicate_raw: String,
+    /// Unit-of-measure tag (e.g. `USD`, `Meter`). `None` for unitless types.
+    pub unit: Option<String>,
     pub span: Span,
 }
 

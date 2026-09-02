@@ -5,6 +5,7 @@ mod effects;
 mod law_verification;
 mod resource_safety;
 mod task_ownership;
+mod units;
 
 pub(crate) use law_verification::{
     contains_method_call, replace_word, split_args, substitute_method_calls,
@@ -35,6 +36,8 @@ pub(crate) use task_ownership::{
     analyze_task_ownership, verify_task_ownership, TaskOwnershipViolation,
     TaskOwnershipViolationKind,
 };
+
+pub use units::verify_unit_consistency;
 
 pub use dataflow_inference::{
     build_data_flow_trace, infer_contracts_json, infer_effects_json, DataFlowTrace, ExecutionStep,

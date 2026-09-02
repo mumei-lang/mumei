@@ -16,6 +16,36 @@ type Nat = i64 where v >= 0;
 type Pos = f64 where v > 0.0;
 type NonZero = i64 where v != 0;
 ```
+### Units of Measure
+A type alias may carry a unit-of-measure tag with `unit <Name>`. Units are a
+second axis orthogonal to refinements: they never change the value's runtime
+representation or its Z3 sort (`i64` stays `Int`, `f64` stays `Real`), and
+they have zero runtime cost. They only feed a compile-time consistency check.
+```mumei
+type Usd = i64 unit USD;
+type Jpy = i64 unit JPY;
+type Meter = f64 unit Meter;
+type NonNegUsd = i64 unit USD where v >= 0;   // unit + refinement
+
+atom add_usd(a: Usd, b: Usd) -> Usd
+requires: true;
+ensures: result == a + b;
+body: a + b;
+
+atom add_mixed(a: Usd, b: Jpy)
+requires: true;
+ensures: true;
+body: a + b;      // compile-time error: Unit mismatch ... 'USD' with 'JPY'
+```
+Scope of the check (current subset):
+- `+` and `-`: both operands must have the same unit; the result keeps it.
+- Comparisons (`==`, `!=`, `<`, `<=`, `>`, `>=`): both operands must have the same unit.
+- Call arguments, `let`/assignment targets, `-> Type` results and `ensures`/`requires` are checked with the same rule.
+- `*`, `/`, `^` do **not** compose units (no `Meter/Second`); scaling a unit value by a
+  unitless value keeps the unit, any other product is treated as unitless.
+- A unitless value (literal, plain `i64`/`f64`, result of an atom without a unit-tagged
+  return type) is compatible with any unit, so existing programs without `unit`
+  annotations are unaffected.
 ### Structs with Field Constraints
 ```mumei
 struct Point {

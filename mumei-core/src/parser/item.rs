@@ -915,16 +915,30 @@ pub fn parse_module_from_tokens(ctx: &mut ParseContext) -> Vec<Item> {
                 }
 
                 let base_type = ctx.expect_ident();
-                ctx.expect(Token::Where);
-                let predicate_raw = collect_until_semicolon(ctx);
+                // Contextual keyword: `unit` directly after the base type tags
+                // the alias with a unit of measure (`type Usd = i64 unit USD;`).
+                let unit = if matches!(ctx.peek(), Token::Ident(kw) if kw == "unit") {
+                    ctx.advance();
+                    Some(ctx.expect_ident())
+                } else {
+                    None
+                };
+                let (predicate_raw, operand) = if ctx.peek() == &Token::Where {
+                    ctx.advance();
+                    let predicate_raw = collect_until_semicolon(ctx);
+                    let tokens = super::lexer::legacy_tokenize(&predicate_raw);
+                    let operand = tokens.first().cloned().unwrap_or_else(|| "v".to_string());
+                    (predicate_raw, operand)
+                } else {
+                    ("true".to_string(), "v".to_string())
+                };
                 ctx.expect(Token::Semicolon);
-                let tokens = super::lexer::legacy_tokenize(&predicate_raw);
-                let operand = tokens.first().cloned().unwrap_or_else(|| "v".to_string());
                 items.push(Item::TypeDef(RefinedType {
                     name,
                     _base_type: base_type,
                     operand,
                     predicate_raw,
+                    unit,
                     span: span_from_token(&start_tok),
                 }));
             }

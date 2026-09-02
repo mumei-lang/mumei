@@ -52,6 +52,7 @@ fn refined(name: &str, base_type: &str, operand: &str, predicate: &str) -> Refin
         _base_type: base_type.to_string(),
         operand: operand.to_string(),
         predicate_raw: predicate.to_string(),
+        unit: None,
         span: Span::default(),
     }
 }

@@ -907,6 +907,39 @@ atom write_log(msg: i64)
             .collect();
         assert_eq!(types.len(), 1);
         assert_eq!(types[0].name, "Nat");
+        assert_eq!(types[0].unit, None);
+    }
+
+    #[test]
+    fn test_parse_type_def_with_unit() {
+        let source = r#"
+type Usd = i64 unit USD;
+type NonNegUsd = i64 unit USD where v >= 0;
+type Nat = i64 where v >= 0;
+"#;
+        let items = parse_module(source);
+        let types: Vec<_> = items
+            .iter()
+            .filter_map(|i| match i {
+                Item::TypeDef(t) => Some(t),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(types.len(), 3);
+
+        assert_eq!(types[0].name, "Usd");
+        assert_eq!(types[0]._base_type, "i64");
+        assert_eq!(types[0].unit.as_deref(), Some("USD"));
+        assert_eq!(types[0].operand, "v");
+        assert_eq!(types[0].predicate_raw, "true");
+
+        assert_eq!(types[1].name, "NonNegUsd");
+        assert_eq!(types[1].unit.as_deref(), Some("USD"));
+        assert_eq!(types[1].operand, "v");
+        assert!(types[1].predicate_raw.contains(">= 0"));
+
+        assert_eq!(types[2].unit, None);
+        assert!(types[2].predicate_raw.contains(">= 0"));
     }
 
     #[test]
