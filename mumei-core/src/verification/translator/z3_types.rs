@@ -231,7 +231,22 @@ pub(crate) fn real_from_f64<'a>(ctx: &'a Context, value: f64) -> Real<'a> {
 pub(crate) fn as_int_like<'a>(value: &Dynamic<'a>) -> Option<Int<'a>> {
     value
         .as_int()
-        .or_else(|| value.as_bv().map(|bv| bv.to_int(true)))
+        .or_else(|| value.as_bv().map(|bv| bv_to_int_signed(&bv)))
+}
+
+/// Signed `bv2int`, without an `ite`.
+///
+/// Z3's signed `bv2int` branches on the sign bit, and a term holding an `ite`
+/// is rejected as an E-matching trigger — which loses quantifier
+/// instantiation on every array contract bridged this way. Flipping the sign
+/// bit and reading the result as unsigned yields the signed value biased by
+/// `2^63`, so subtracting the bias gives the same integer out of a term Z3 can
+/// still match on.
+pub(crate) fn bv_to_int_signed<'a>(bv: &BV<'a>) -> Int<'a> {
+    let ctx = bv.get_ctx();
+    let sign_bit = BV::from_u64(ctx, 1u64 << (I64_BITS - 1), I64_BITS);
+    let bias = Int::from_u64(ctx, 1u64 << (I64_BITS - 1));
+    Int::sub(ctx, &[&bv.bvxor(&sign_bit).to_int(false), &bias])
 }
 
 /// Bridge a `Dynamic` to the `BV(64)` encoding (`int2bv`).
@@ -251,12 +266,14 @@ pub(crate) fn as_bv_i64<'a>(value: &Dynamic<'a>) -> Option<BV<'a>> {
 ///
 /// A branch may be `BV(64)` while the other one is an `Int` (a literal, an
 /// array element, the result of an atom verified in `Int` mode); Z3 rejects an
-/// `ite` over mixed sorts, so the `Int` side is bridged to `BV(64)`.
+/// `ite` over mixed sorts, so the `Int` side is bridged to `BV(64)`. Branches
+/// that stay in unrelated sorts are reported as a type error, since Z3 answers
+/// such an `ite` with a null AST.
 pub(crate) fn unify_branch_sorts<'a>(
     then_value: Dynamic<'a>,
     else_value: Dynamic<'a>,
-) -> (Dynamic<'a>, Dynamic<'a>) {
-    match (is_bv_i64(&then_value), is_bv_i64(&else_value)) {
+) -> MumeiResult<(Dynamic<'a>, Dynamic<'a>)> {
+    let unified = match (is_bv_i64(&then_value), is_bv_i64(&else_value)) {
         (true, false) => match as_bv_i64(&else_value) {
             Some(bv) => (then_value, bv.into()),
             None => (then_value, else_value),
@@ -266,7 +283,27 @@ pub(crate) fn unify_branch_sorts<'a>(
             None => (then_value, else_value),
         },
         _ => (then_value, else_value),
+    };
+    if unified.0.get_sort() != unified.1.get_sort() {
+        return Err(MumeiError::type_error(format!(
+            "branches of a conditional must have the same type, got {} and {}",
+            unified.0.get_sort(),
+            unified.1.get_sort()
+        )));
     }
+    Ok(unified)
+}
+
+/// True when a term is usable as an E-matching trigger.
+///
+/// Z3 refuses a pattern containing an `ite` — which is what the signed
+/// `bv2int` bridge of an `i64` index or element expands into — and answers with
+/// a null AST that the `z3` crate turns into a panic.
+pub(crate) fn is_admissible_trigger(term: &Dynamic<'_>) -> bool {
+    if term.kind() == z3::AstKind::App && term.decl().kind() == z3::DeclKind::ITE {
+        return false;
+    }
+    term.children().iter().all(is_admissible_trigger)
 }
 
 /// True when the value is encoded as a 64-bit bit-vector.

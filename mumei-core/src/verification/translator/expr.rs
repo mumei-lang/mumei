@@ -384,15 +384,13 @@ pub(crate) fn expr_to_z3<'a>(
                         } else {
                             None
                         };
-                        // Under the bit-vector encoding an index is bridged with
-                        // signed `bv2int`, which Z3 expands into an `ite` and
-                        // then refuses as a trigger, so such quantifiers stay
-                        // untriggered.
-                        for (arr_name, idx_expr) in arr_accesses.iter().filter(|_| !vc.bitvec_i64) {
+                        for (arr_name, idx_expr) in arr_accesses.iter() {
                             if let Ok(idx_z3) = expr_to_z3(vc, idx_expr, env, None) {
                                 if let Some(idx_int) = idx_z3.as_int() {
-                                    pattern_asts
-                                        .push(z3_dynamic_array(vc, arr_name, env).select(&idx_int));
+                                    let term = z3_dynamic_array(vc, arr_name, env).select(&idx_int);
+                                    if is_admissible_trigger(&term) {
+                                        pattern_asts.push(term);
+                                    }
                                 }
                             }
                         }
@@ -1223,7 +1221,7 @@ pub(crate) fn expr_to_z3<'a>(
             vc.path_cond_stack.borrow_mut().push(c.not());
             let e = stmt_to_z3(vc, else_branch, env, solver_opt);
             vc.path_cond_stack.borrow_mut().pop();
-            let (t, e) = unify_branch_sorts(t, e?);
+            let (t, e) = unify_branch_sorts(t, e?)?;
             Ok(c.ite(&t, &e))
         }
 
@@ -1402,7 +1400,7 @@ pub(crate) fn expr_to_z3<'a>(
                         solver.pop(1);
                         result = Some(match result {
                             Some(else_val) => {
-                                let (body_val, else_val) = unify_branch_sorts(body_val, else_val);
+                                let (body_val, else_val) = unify_branch_sorts(body_val, else_val)?;
                                 full_cond.ite(&body_val, &else_val)
                             }
                             None => body_val,
@@ -1415,7 +1413,7 @@ pub(crate) fn expr_to_z3<'a>(
                 let body_val = stmt_to_z3(vc, &arm.body, &mut arm_env, solver_opt)?;
                 result = Some(match result {
                     Some(else_val) => {
-                        let (body_val, else_val) = unify_branch_sorts(body_val, else_val);
+                        let (body_val, else_val) = unify_branch_sorts(body_val, else_val)?;
                         full_cond.ite(&body_val, &else_val)
                     }
                     None => body_val,

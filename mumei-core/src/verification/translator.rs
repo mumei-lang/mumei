@@ -27,11 +27,12 @@ pub(crate) use temporal::{
 pub(crate) use z3_types::{
     array_element_sort, array_element_sort_from_type, array_element_type_from_annotation,
     array_element_type_name, array_len_value, as_bv_i64, as_int_like, coerce_array_store_value,
-    coerce_to_float, float_eq, float_from_f64, index_in_bounds, is_bv_i64, mark_string_constraints,
-    param_z3_value, real_from_f64, round_nearest_even, seed_tuple_result_components,
-    tuple_component_types, tuple_result_arity_key, tuple_result_component_key, unify_branch_sorts,
-    z3_array_for_name, z3_array_for_sort, z3_dynamic_array, ArrayElementSort, F64_EBITS, F64_SBITS,
-    I64_BITS, UNSUPPORTED_TUPLE_RESULT_INDEXING,
+    coerce_to_float, float_eq, float_from_f64, index_in_bounds, is_admissible_trigger, is_bv_i64,
+    mark_string_constraints, param_z3_value, real_from_f64, round_nearest_even,
+    seed_tuple_result_components, tuple_component_types, tuple_result_arity_key,
+    tuple_result_component_key, unify_branch_sorts, z3_array_for_name, z3_array_for_sort,
+    z3_dynamic_array, ArrayElementSort, F64_EBITS, F64_SBITS, I64_BITS,
+    UNSUPPORTED_TUPLE_RESULT_INDEXING,
 };
 
 #[cfg(test)]

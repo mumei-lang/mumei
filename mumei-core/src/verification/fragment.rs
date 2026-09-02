@@ -541,6 +541,17 @@ fn expr_has_bitwise_op(expr: &Expr) -> bool {
                 || stmt_has_bitwise_op(then_branch)
                 || stmt_has_bitwise_op(else_branch)
         }
+        Expr::Match { target, arms } => {
+            expr_has_bitwise_op(target) || arms.iter().any(|arm| stmt_has_bitwise_op(&arm.body))
+        }
+        Expr::Async { body } | Expr::Lambda { body, .. } => stmt_has_bitwise_op(body),
+        Expr::Await { expr } => expr_has_bitwise_op(expr),
+        Expr::CallRef { args, .. } | Expr::Perform { args, .. } => {
+            args.iter().any(expr_has_bitwise_op)
+        }
+        Expr::StructInit { fields, .. } => {
+            fields.iter().any(|(_, value)| expr_has_bitwise_op(value))
+        }
         _ => false,
     }
 }

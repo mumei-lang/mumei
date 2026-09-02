@@ -642,3 +642,66 @@ fn bitvec_mode_is_part_of_the_verification_cache_key() {
 
     std::fs::remove_dir_all(dir).ok();
 }
+
+/// A branch whose sort cannot be bridged (an `f64` against an `i64`) is a type
+/// error, not a Z3 `ite` over mixed sorts — which answers with a null AST and
+/// aborts the process.
+#[test]
+fn mismatched_branch_sorts_are_reported_as_a_type_error() {
+    let dir = temp_dir("sorts");
+    let fixture = write_fixture(
+        &dir,
+        "sorts.mm",
+        "atom float_arm(x: i64) -> f64\n\
+         requires: true;\n\
+         ensures: result >= 0.0;\n\
+         body: { if x > 0 { x } else { 1.5 } };\n",
+    );
+
+    for extra in [&[][..], &["--bitvec-i64"][..]] {
+        let output = run_verify(&fixture, &dir, extra);
+        assert_rejected(&output, "branches of unrelated sorts");
+        assert_ne!(
+            output.status.code(),
+            Some(101),
+            "verification must not abort:\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// Bit-vector mode is selected for a bitwise operator anywhere in the body,
+/// including inside a `match` scrutinee or arm.
+#[test]
+fn bitwise_operators_inside_a_match_select_bitvec_mode() {
+    let dir = temp_dir("match");
+    let scrutinee = write_fixture(
+        &dir,
+        "match_target.mm",
+        "atom match_target(x: i64) -> i64\n\
+         requires: true;\n\
+         ensures: result >= 0;\n\
+         body: { match (x & 1) { 0 => 2, _ => 5 } };\n",
+    );
+    let arm = write_fixture(
+        &dir,
+        "match_arm.mm",
+        "atom match_arm(x: i64) -> i64\n\
+         requires: true;\n\
+         ensures: result >= 0;\n\
+         body: { match x { 0 => 2, _ => (x & 1) } };\n",
+    );
+
+    assert_verified(
+        &run_verify(&scrutinee, &dir, &[]),
+        "a bitwise operator in a `match` scrutinee",
+    );
+    assert_verified(
+        &run_verify(&arm, &dir, &[]),
+        "a bitwise operator in a `match` arm",
+    );
+
+    std::fs::remove_dir_all(dir).ok();
+}
