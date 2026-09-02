@@ -397,7 +397,7 @@ pub fn check_generated_assignment(
     module_env: &ModuleEnv,
     assignment: &HashMap<String, GeneratedValue>,
 ) -> Option<String> {
-    match check_assignment(atom, module_env, assignment) {
+    match check_assignment(atom, module_env, assignment, false) {
         CaseOutcome::Counterexample(diagnostic) => Some(diagnostic),
         CaseOutcome::Holds | CaseOutcome::Skipped | CaseOutcome::Inconclusive(_) => None,
     }
@@ -410,13 +410,28 @@ pub fn shrink_counterexample(
     initial: HashMap<String, GeneratedValue>,
     config: &PropertyBasedTestConfig,
 ) -> (HashMap<String, GeneratedValue>, usize) {
-    shrink_assignment(atom, module_env, generators, initial, config)
+    shrink_assignment(atom, module_env, generators, initial, config, false)
 }
 
 pub fn run_property_based_test(
     atom: &Atom,
     module_env: &ModuleEnv,
     config: &PropertyBasedTestConfig,
+) -> PropertyBasedTestResult {
+    run_property_based_test_with_mode(atom, module_env, config, false)
+}
+
+/// `run_property_based_test`, with the whole-run `--bitvec-i64` opt-in of the
+/// enclosing verification.
+///
+/// Generated inputs, the body evaluation and the `ensures` check have to use
+/// the encoding the proof uses, or a wrapping `i64` body is tested against
+/// unbounded `Int` arithmetic and the two disagree on the same atom.
+pub fn run_property_based_test_with_mode(
+    atom: &Atom,
+    module_env: &ModuleEnv,
+    config: &PropertyBasedTestConfig,
+    bitvec_i64: bool,
 ) -> PropertyBasedTestResult {
     if !atom.type_params.is_empty() {
         return PropertyBasedTestResult::passed(
@@ -448,11 +463,17 @@ pub fn run_property_based_test(
         .into_iter()
         .chain((0..config.test_count).map(|_| random_assignment(&generators, &mut rng)))
     {
-        match check_assignment(atom, module_env, &assignment) {
+        match check_assignment(atom, module_env, &assignment, bitvec_i64) {
             CaseOutcome::Counterexample(diagnostic) => {
                 tests_run += 1;
-                let (shrunk, shrink_steps) =
-                    shrink_assignment(atom, module_env, &generators, assignment, config);
+                let (shrunk, shrink_steps) = shrink_assignment(
+                    atom,
+                    module_env,
+                    &generators,
+                    assignment,
+                    config,
+                    bitvec_i64,
+                );
                 return PropertyBasedTestResult::failed(
                     tests_run,
                     shrink_steps,
@@ -742,17 +763,18 @@ fn check_assignment(
     atom: &Atom,
     module_env: &ModuleEnv,
     assignment: &HashMap<String, GeneratedValue>,
+    bitvec_i64: bool,
 ) -> CaseOutcome {
-    if !assignment_satisfies_preconditions(atom, module_env, assignment) {
+    if !assignment_satisfies_preconditions(atom, module_env, assignment, bitvec_i64) {
         return CaseOutcome::Skipped;
     }
-    let Some(result) = evaluate_body(atom, module_env, assignment) else {
+    let Some(result) = evaluate_body(atom, module_env, assignment, bitvec_i64) else {
         return CaseOutcome::Inconclusive(format!(
             "property-based validation could not evaluate the body of '{}' for inputs={:?}",
             atom.name, assignment
         ));
     };
-    if assignment_satisfies_ensures(atom, module_env, assignment, &result) {
+    if assignment_satisfies_ensures(atom, module_env, assignment, &result, bitvec_i64) {
         CaseOutcome::Holds
     } else {
         CaseOutcome::Counterexample(format!(
@@ -766,13 +788,14 @@ fn assignment_satisfies_preconditions(
     atom: &Atom,
     module_env: &ModuleEnv,
     assignment: &HashMap<String, GeneratedValue>,
+    bitvec_i64: bool,
 ) -> bool {
     let mut cfg = Config::new();
     cfg.set_timeout_msec(1000);
     let ctx = super::Context::new(&cfg);
     let solver = Solver::new(&ctx);
-    let vc = validation_ctx(&ctx, module_env, atom);
-    let mut env = seed_concrete_env(&ctx, atom, module_env, assignment, None);
+    let vc = validation_ctx(&ctx, module_env, atom, bitvec_i64);
+    let mut env = seed_concrete_env(&ctx, atom, module_env, assignment, None, bitvec_i64);
     if assert_parameter_refinements(&vc, &solver, atom, module_env, &mut env).is_err() {
         return false;
     }
@@ -787,13 +810,14 @@ fn assignment_satisfies_ensures(
     module_env: &ModuleEnv,
     assignment: &HashMap<String, GeneratedValue>,
     result: &GeneratedValue,
+    bitvec_i64: bool,
 ) -> bool {
     let mut cfg = Config::new();
     cfg.set_timeout_msec(1000);
     let ctx = super::Context::new(&cfg);
     let solver = Solver::new(&ctx);
-    let vc = validation_ctx(&ctx, module_env, atom);
-    let mut env = seed_concrete_env(&ctx, atom, module_env, assignment, Some(result));
+    let vc = validation_ctx(&ctx, module_env, atom, bitvec_i64);
+    let mut env = seed_concrete_env(&ctx, atom, module_env, assignment, Some(result), bitvec_i64);
     if assert_clause(&vc, &solver, &mut env, &atom.ensures).is_err() {
         return true;
     }
@@ -804,13 +828,14 @@ fn evaluate_body(
     atom: &Atom,
     module_env: &ModuleEnv,
     assignment: &HashMap<String, GeneratedValue>,
+    bitvec_i64: bool,
 ) -> Option<GeneratedValue> {
     let mut cfg = Config::new();
     cfg.set_timeout_msec(1000);
     let ctx = super::Context::new(&cfg);
     let solver = Solver::new(&ctx);
-    let vc = validation_ctx(&ctx, module_env, atom);
-    let mut env = seed_concrete_env(&ctx, atom, module_env, assignment, None);
+    let vc = validation_ctx(&ctx, module_env, atom, bitvec_i64);
+    let mut env = seed_concrete_env(&ctx, atom, module_env, assignment, None, bitvec_i64);
     let body = parse_body_expr(&atom.body_expr);
     let value = stmt_to_z3(&vc, &body, &mut env, Some(&solver)).ok()?;
     if !matches!(solver.check(), SatResult::Sat) {
@@ -848,6 +873,7 @@ fn shrink_assignment(
     generators: &GeneratedInputs,
     initial: HashMap<String, GeneratedValue>,
     config: &PropertyBasedTestConfig,
+    bitvec_i64: bool,
 ) -> (HashMap<String, GeneratedValue>, usize) {
     let mut current = initial;
     let mut steps = 0usize;
@@ -866,7 +892,7 @@ fn shrink_assignment(
                 next.insert(name.clone(), candidate);
                 steps += 1;
                 if matches!(
-                    check_assignment(atom, module_env, &next),
+                    check_assignment(atom, module_env, &next, bitvec_i64),
                     CaseOutcome::Counterexample(_)
                 ) {
                     current = next;
@@ -895,6 +921,7 @@ fn validation_ctx<'a>(
     ctx: &'a super::Context,
     module_env: &'a ModuleEnv,
     atom: &'a Atom,
+    bitvec_i64: bool,
 ) -> VCtx<'a> {
     VCtx {
         ctx,
@@ -908,8 +935,10 @@ fn validation_ctx<'a>(
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
         profiler: None,
         ieee754_f64: false,
-        bitvec_i64: super::fragment::atom_requires_bitvector_semantics_in_module(atom, module_env),
+        bitvec_i64: bitvec_i64
+            || super::fragment::atom_requires_bitvector_semantics_in_module(atom, module_env),
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
+        bitvec_i64_global: bitvec_i64,
     }
 }
 
@@ -919,8 +948,10 @@ fn seed_concrete_env<'a>(
     module_env: &ModuleEnv,
     assignment: &HashMap<String, GeneratedValue>,
     result: Option<&GeneratedValue>,
+    bitvec_i64: bool,
 ) -> Env<'a> {
-    let bitvec_i64 = super::fragment::atom_requires_bitvector_semantics_in_module(atom, module_env);
+    let bitvec_i64 = bitvec_i64
+        || super::fragment::atom_requires_bitvector_semantics_in_module(atom, module_env);
     let mut env: Env<'a> = HashMap::new();
     env.insert("true".to_string(), Bool::from_bool(ctx, true).into());
     env.insert("false".to_string(), Bool::from_bool(ctx, false).into());

@@ -60,6 +60,34 @@ impl ParseContext {
         tok
     }
 
+    /// Split the `>>` token at the cursor into two `>` tokens.
+    ///
+    /// The lexer merges `>>` into a shift token, so a generic argument list
+    /// closes two nesting levels at once. When only one level is open the
+    /// second `>` belongs to the surrounding grammar (and is a syntax error
+    /// there), so it is put back into the stream instead of being swallowed.
+    pub fn split_shr(&mut self) {
+        if self.peek() != &Token::Shr {
+            return;
+        }
+        let (line, col) = (self.tokens[self.pos].line, self.tokens[self.pos].col);
+        let first = SpannedToken {
+            token: Token::Gt,
+            line,
+            col,
+            len: 1,
+        };
+        let second = SpannedToken {
+            token: Token::Gt,
+            line,
+            col: col + 1,
+            len: 1,
+        };
+        self.tokens
+            .splice(self.pos..=self.pos, [first, second])
+            .for_each(drop);
+    }
+
     pub fn expect(&mut self, expected: Token) {
         if self.peek() == &expected {
             self.advance();

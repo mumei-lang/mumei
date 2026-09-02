@@ -226,9 +226,18 @@ pub fn parse_type_ref_from_ctx(ctx: &mut super::ParseContext) -> TypeRef {
                 // The lexer merges `>>`/`<<` into shift tokens, so nested
                 // generics such as `[]<[]<i64>>` arrive as a single token here.
                 Token::Shr => {
-                    depth -= 2;
-                    type_str.push_str(">>");
-                    ctx.advance();
+                    if depth >= 2 {
+                        ctx.advance();
+                        depth -= 2;
+                        type_str.push_str(">>");
+                    } else {
+                        // Only one level is open: the surplus `>` is put back
+                        // so the surrounding grammar rejects it.
+                        ctx.split_shr();
+                        ctx.advance();
+                        depth = 0;
+                        type_str.push('>');
+                    }
                 }
                 Token::Shl => {
                     depth += 2;
@@ -605,12 +614,21 @@ fn collect_angle_brackets(ctx: &mut ParseContext) -> String {
                 }
             }
             // `>>`/`<<` are lexed as shift tokens; inside a generic argument
-            // list they close/open two nesting levels.
+            // list they close/open two nesting levels. With a single level
+            // open the second closer is surplus and is put back into the
+            // stream so the surrounding grammar rejects it.
             Token::Shr => {
-                depth -= 2;
-                text.push_str(">>");
-                ctx.advance();
-                if depth <= 0 {
+                if depth >= 2 {
+                    ctx.advance();
+                    depth -= 2;
+                    text.push_str(">>");
+                } else {
+                    ctx.split_shr();
+                    ctx.advance();
+                    depth = 0;
+                    text.push('>');
+                }
+                if depth == 0 {
                     break;
                 }
             }

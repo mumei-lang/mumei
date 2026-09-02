@@ -474,14 +474,11 @@ fn verify_single_atom(atom: &parser::Atom, name: &str, ctx: &mut VerifyContext<'
     // `semantics: bitvec;`, is verified with the `BV(64)` encoding even without
     // `--bitvec-i64`: the `Int` encoding cannot express its contract. Every
     // other atom keeps the default encoding, so existing certificates are
-    // unchanged.
-    let atom_config = (!ctx.verification_config.bitvec_i64
-        && verification::atom_requires_bitvector_semantics_in_module(atom, ctx.module_env))
-    .then(|| verification::VerificationConfig {
-        bitvec_i64: true,
-        ..ctx.verification_config.clone()
-    });
-    let atom_verification_config = atom_config.as_ref().unwrap_or(ctx.verification_config);
+    // unchanged. The config flag stays the whole-run opt-in; only the cache key
+    // records the effective mode.
+    let atom_effective_bitvec = ctx.verification_config.bitvec_i64
+        || verification::atom_requires_bitvector_semantics_in_module(atom, ctx.module_env);
+    let atom_verification_config = ctx.verification_config;
     let fragment_tags = verification::detect_logic_fragment_tags(atom, ctx.module_env);
     let has_finite_field_semantics = fragment_tags.iter().any(|tag| tag == "finite_field");
     let has_fragment_warning = verification::is_outside_decidable_fragment(&fragment_tags);
@@ -552,7 +549,7 @@ fn verify_single_atom(atom: &parser::Atom, name: &str, ctx: &mut VerifyContext<'
     // The BV encoding changes the semantics of the obligation, so a proof
     // produced in Int mode must not be reused for a `--bitvec-i64` run (and
     // vice versa).
-    if atom_verification_config.bitvec_i64 {
+    if atom_effective_bitvec {
         proof_flags.push("bitvec_i64");
     }
     let proof_hash = resolver::compute_proof_hash_with_flags(atom, ctx.module_env, &proof_flags);

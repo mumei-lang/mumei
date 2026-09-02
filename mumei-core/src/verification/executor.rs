@@ -413,6 +413,7 @@ pub(crate) fn verify_inner(
     // caller used (`verify`, `run`, `publish`, the LSP, …): the `Int` encoding
     // cannot lower it at all. Every other atom keeps the default encoding
     // unless the caller asked for `--bitvec-i64`.
+    let bitvec_i64_global = bitvec_i64;
     let bitvec_i64 = bitvec_i64 || atom_requires_bitvector_semantics_in_module(atom, module_env);
 
     let mut metrics = VerificationMetrics::new(&atom.name);
@@ -432,7 +433,7 @@ pub(crate) fn verify_inner(
         module_env,
         property_based_config,
         ieee754_f64,
-        bitvec_i64,
+        bitvec_i64_global,
         timeout_ms,
     ) {
         let diagnostic = format!("{}: {}", err.kind, err.message);
@@ -1200,6 +1201,7 @@ pub(crate) fn verify_inner(
         ieee754_f64,
         bitvec_i64,
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
+        bitvec_i64_global,
     };
 
     let mut env: Env = HashMap::new();
@@ -1882,7 +1884,14 @@ pub(crate) fn verify_inner(
                     if ensures_check == SatResult::Unknown {
                         solver.pop(1);
                         let property_based_help = property_based_config
-                            .map(|config| run_property_based_test(atom, module_env, config))
+                            .map(|config| {
+                                run_property_based_test_with_mode(
+                                    atom,
+                                    module_env,
+                                    config,
+                                    bitvec_i64_global,
+                                )
+                            })
                             .and_then(property_based_help);
                         metrics.record_phase(
                             "Phase 5: ensures verification (unknown)",
@@ -2070,7 +2079,9 @@ pub(crate) fn verify_inner(
             let _ = std::fs::write(&heatmap_path, heatmap_json);
         }
         let property_based_help = property_based_config
-            .map(|config| run_property_based_test(atom, module_env, config))
+            .map(|config| {
+                run_property_based_test_with_mode(atom, module_env, config, bitvec_i64_global)
+            })
             .and_then(property_based_help);
         let heatmap_hint = format!(
             "Z3 resource heatmap: {} constraints consumed {} rlimit units. Top consumers: {}",

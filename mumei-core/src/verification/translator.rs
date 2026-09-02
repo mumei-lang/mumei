@@ -16,7 +16,9 @@ pub(crate) use context::{
     check_constraint_budget, profile_solver_assertion, profile_solver_check, profiler_checkpoint,
     VCtx,
 };
-pub(crate) use expr::{discharge_bv_shift_obligations, expr_to_z3};
+pub(crate) use expr::{
+    discharge_bv_shift_obligations, expr_to_z3, has_reachable_out_of_range_shift,
+};
 pub(crate) use pattern::{
     detect_enum_from_arms, format_counterexample, pattern_bind_variables, pattern_to_z3_condition,
 };

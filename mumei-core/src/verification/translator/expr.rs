@@ -108,18 +108,12 @@ fn out_of_range_shift_error() -> MumeiError {
 /// `Int` encoding, but is false at `i64::MAX` under two's complement wrapping,
 /// so importing it into a bit-vector proof would assume something the callee
 /// never proved. The mode of a callee is its own requirement (a bitwise
-/// operator, `semantics: bitvec;`, or a bit-vector callee of its own), plus
-/// `--bitvec-i64` when it applies to the whole module — which is the case
-/// exactly when the caller is in bit-vector mode without needing it itself.
+/// operator, `semantics: bitvec;`, or a bit-vector callee of its own), plus the
+/// whole-run `--bitvec-i64` opt-in, under which every atom is a bit-vector
+/// atom — including the callees of a caller that would have needed the encoding
+/// anyway.
 fn callee_semantics_match_caller(vc: &VCtx<'_>, callee: &Atom) -> bool {
-    let caller_needs_bv = vc.current_atom.is_some_and(|atom| {
-        crate::verification::fragment::atom_requires_bitvector_semantics_in_module(
-            atom,
-            vc.module_env,
-        )
-    });
-    let global_bv = vc.bitvec_i64 && !caller_needs_bv;
-    let callee_bv = global_bv
+    let callee_bv = vc.bitvec_i64_global
         || crate::verification::fragment::atom_requires_bitvector_semantics_in_module(
             callee,
             vc.module_env,
@@ -135,6 +129,17 @@ pub(crate) fn discharge_bv_shift_obligations<'a>(
     vc: &VCtx<'a>,
     solver: &Solver<'a>,
 ) -> MumeiResult<()> {
+    if has_reachable_out_of_range_shift(vc, solver) {
+        return Err(out_of_range_shift_error());
+    }
+    Ok(())
+}
+
+/// True when one of the collected shift amounts can leave `0..64` under the
+/// facts the solver already holds. Drains the obligations, like
+/// `discharge_bv_shift_obligations`, for callers whose failures are not a
+/// `MumeiError` (spec validation reports a `SpecContradiction`).
+pub(crate) fn has_reachable_out_of_range_shift<'a>(vc: &VCtx<'a>, solver: &Solver<'a>) -> bool {
     let obligations: Vec<(Bool<'a>, BV<'a>)> =
         vc.bv_shift_obligations.borrow_mut().drain(..).collect();
     for (path_cond, amount) in obligations {
@@ -144,10 +149,10 @@ pub(crate) fn discharge_bv_shift_obligations<'a>(
         let reachable = solver.check() == SatResult::Sat;
         solver.pop(1);
         if reachable {
-            return Err(out_of_range_shift_error());
+            return true;
         }
     }
-    Ok(())
+    false
 }
 
 fn bv_binary_op<'a>(
@@ -213,6 +218,27 @@ fn bv_binary_op<'a>(
                         "Potential division by zero.".to_string(),
                     )
                     .with_help("Add a condition divisor != 0 to requires"));
+                }
+                // `bvsdiv` gives `i64::MIN / -1` the value `i64::MIN`, while
+                // the emitted `sdiv` is undefined there, so a proof about that
+                // pair would not describe the executable.
+                let min = BV::from_i64(ctx, i64::MIN, I64_BITS);
+                let minus_one = BV::from_i64(ctx, -1, I64_BITS);
+                solver.push();
+                for cond in vc.path_cond_stack.borrow().iter() {
+                    solver.assert(cond);
+                }
+                solver.assert(&Bool::and(ctx, &[&lb._eq(&min), &rb._eq(&minus_one)]));
+                let overflows = solver.check() == SatResult::Sat;
+                solver.pop(1);
+                if overflows {
+                    return Err(MumeiError::verification(
+                        "Division may overflow (i64::MIN / -1).".to_string(),
+                    )
+                    .with_help(
+                        "Add a condition ruling out the pair, e.g. `divisor != 0 - 1` \
+                         or `dividend != 0 - 9223372036854775807 - 1`, to requires",
+                    ));
                 }
             }
             Ok(lb.bvsdiv(&rb).into())

@@ -151,6 +151,7 @@ fn verify_mutated_body(
         ieee754_f64: false,
         bitvec_i64,
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
+        bitvec_i64_global: false,
     };
     let mut env: Env = HashMap::new();
 

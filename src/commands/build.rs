@@ -41,24 +41,17 @@ fn emit_target_from_cli(emit: &str) -> emitter::EmitTarget {
     emitter::EmitTarget::from_cli(emit)
 }
 
-/// Verification config for a single atom: atoms whose contract only has a
-/// meaning under two's complement wrapping are verified with the `BV(64)`
-/// encoding, every other atom keeps the `Int` encoding.
-fn atom_verification_config(
-    atom: &parser::Atom,
-    module_env: &verification::ModuleEnv,
-    base: &verification::VerificationConfig,
-) -> verification::VerificationConfig {
-    verification::VerificationConfig {
-        bitvec_i64: base.bitvec_i64
-            || verification::atom_requires_bitvector_semantics_in_module(atom, module_env),
-        ..base.clone()
-    }
-}
-
 /// Flags that change the verification outcome and therefore have to be part of
 /// the incremental-cache key, otherwise a mode switch reuses a stale proof.
-fn build_proof_flags(config: &verification::VerificationConfig) -> Vec<&'static str> {
+///
+/// The bit-vector flag records the mode the atom is *effectively* verified in:
+/// an atom whose contract only has a meaning under two's complement wrapping
+/// gets the `BV(64)` encoding even without `--bitvec-i64`.
+fn build_proof_flags(
+    atom: &parser::Atom,
+    module_env: &verification::ModuleEnv,
+    config: &verification::VerificationConfig,
+) -> Vec<&'static str> {
     let mut flags = Vec::new();
     if config.enable_vacuity_check {
         flags.push("enable_vacuity_check");
@@ -66,7 +59,9 @@ fn build_proof_flags(config: &verification::VerificationConfig) -> Vec<&'static 
     if config.ieee754_f64 {
         flags.push("ieee754_f64");
     }
-    if config.bitvec_i64 {
+    if config.bitvec_i64
+        || verification::atom_requires_bitvector_semantics_in_module(atom, module_env)
+    {
         flags.push("bitvec_i64");
     }
     flags
@@ -391,12 +386,8 @@ pub(crate) fn cmd_build(
                     } else if module_env.is_verified(&qualified_name) {
                         println!("  ⚖️  [2/3] Verification: Skipped (imported, contract-trusted).");
                     } else {
-                        let method_config = atom_verification_config(
-                            &qualified_method,
-                            &module_env,
-                            &verification_config,
-                        );
-                        let proof_flags = build_proof_flags(&method_config);
+                        let proof_flags =
+                            build_proof_flags(&qualified_method, &module_env, &verification_config);
                         let proof_hash = resolver::compute_proof_hash_with_flags(
                             &qualified_method,
                             &module_env,
@@ -415,7 +406,7 @@ pub(crate) fn cmd_build(
                                 &hir_atom,
                                 output_dir,
                                 &module_env,
-                                &method_config,
+                                &verification_config,
                             ) {
                                 Ok(_) => {
                                     println!(
@@ -585,9 +576,7 @@ pub(crate) fn cmd_build(
                     println!("  ⚖️  [2/3] Verification: Skipped (imported, contract-trusted).");
                 } else {
                     // Feature 2: Use compute_proof_hash with dependency-aware hashing
-                    let atom_config =
-                        atom_verification_config(atom, &module_env, &verification_config);
-                    let proof_flags = build_proof_flags(&atom_config);
+                    let proof_flags = build_proof_flags(atom, &module_env, &verification_config);
                     let proof_hash =
                         resolver::compute_proof_hash_with_flags(atom, &module_env, &proof_flags);
 
@@ -603,7 +592,7 @@ pub(crate) fn cmd_build(
                             &hir_atom,
                             output_dir,
                             &module_env,
-                            &atom_config,
+                            &verification_config,
                         ) {
                             Ok(_) => {
                                 println!(

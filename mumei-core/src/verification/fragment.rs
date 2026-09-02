@@ -146,15 +146,44 @@ pub fn atom_requires_bitvector_semantics_in_module(atom: &Atom, module_env: &Mod
         if current != atom.name && atom_requires_bitvector_semantics(current_atom) {
             return true;
         }
-        let mut callees =
-            super::support::collect_callees_stmt(&parse_body_expr(&current_atom.body_expr));
-        callees.extend(super::support::collect_callees_expr(&parse_expression(
-            &current_atom.ensures,
-        )));
-        pending.extend(callees);
+        pending.extend(atom_callees(current_atom));
     }
 
     false
+}
+
+/// Every atom called from a clause that the atom's verification context
+/// lowers: `requires`, `ensures`, the body, the atom invariant and the bounds
+/// and condition of an extracted quantifier. All of those are lowered with the
+/// same sorts, so a call to a bit-vector atom in any of them decides the
+/// encoding.
+fn atom_callees(atom: &Atom) -> Vec<String> {
+    let mut callees = super::support::collect_callees_stmt(&parse_body_expr(&atom.body_expr));
+    for clause in [&atom.requires, &atom.ensures] {
+        callees.extend(super::support::collect_callees_expr(&parse_expression(
+            clause,
+        )));
+    }
+    if let Some(invariant) = atom.invariant.as_ref() {
+        callees.extend(super::support::collect_callees_expr(&parse_expression(
+            invariant,
+        )));
+    }
+    for quantifier in &atom.forall_constraints {
+        for clause in [&quantifier.start, &quantifier.end, &quantifier.condition] {
+            callees.extend(super::support::collect_callees_expr(&parse_expression(
+                clause,
+            )));
+        }
+    }
+    callees
+}
+
+/// True when a lowered expression source uses a bitwise operator, so it has to
+/// be verified with the bit-vector encoding. Used for trait laws, whose text
+/// only exists after the method bodies are substituted into them.
+pub fn expression_requires_bitvector_semantics(source: &str) -> bool {
+    expr_has_bitwise_op(&parse_expression(source))
 }
 
 /// True when any atom of the module needs the bit-vector encoding.

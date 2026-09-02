@@ -322,6 +322,11 @@ pub fn verify_impl_with_options(
         // "add(a, b)" → "(a + b)", "add(b, a)" → "(b + a)" に展開
         let substituted = substitute_method_calls(law_expr, &method_body_map, &method_param_names);
 
+        // 置換後の law がビット演算子を含む場合、`--bitvec-i64` が無くても
+        // BV エンコーディングで検証する（atom 契約検証と同じ自動判定）。
+        let bitvec_i64 = bitvec_i64
+            || crate::verification::fragment::expression_requires_bitvector_semantics(&substituted);
+
         // シンボリック変数で law を検証
         let vc = VCtx {
             ctx: &ctx,
@@ -337,6 +342,7 @@ pub fn verify_impl_with_options(
             ieee754_f64,
             bitvec_i64,
             bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
+            bitvec_i64_global: bitvec_i64,
         };
 
         let mut env: Env = HashMap::new();

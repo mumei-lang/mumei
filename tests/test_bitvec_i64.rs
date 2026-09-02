@@ -717,3 +717,197 @@ fn bitwise_operators_inside_a_match_select_bitvec_mode() {
 
     std::fs::remove_dir_all(dir).ok();
 }
+
+/// `i64::MIN / -1` has no two's complement result, and the emitted LLVM
+/// `sdiv` leaves it undefined, so bit-vector verification rejects the pair
+/// instead of proving Z3's wrapped `bvsdiv` answer.
+#[test]
+fn bitvec_division_rejects_the_overflowing_pair() {
+    let dir = temp_dir("sdiv");
+    let unguarded = write_fixture(
+        &dir,
+        "sdiv.mm",
+        "atom sdiv(x: i64, y: i64) -> i64\n\
+         requires: y != 0;\n\
+         ensures: result == x / y;\n\
+         body: x / y;\n",
+    );
+    let guarded = write_fixture(
+        &dir,
+        "sdiv_ok.mm",
+        "atom sdiv_ok(x: i64, y: i64) -> i64\n\
+         requires: y != 0 && (y != 0 - 1 || x != (0 - 9223372036854775807) - 1);\n\
+         ensures: result == x / y;\n\
+         body: x / y;\n",
+    );
+
+    assert_rejected(
+        &run_verify(&unguarded, &dir, &["--bitvec-i64"]),
+        "a division that may be `i64::MIN / -1`",
+    );
+    assert_verified(
+        &run_verify(&guarded, &dir, &["--bitvec-i64"]),
+        "a division that rules out `i64::MIN / -1`",
+    );
+    // The unbounded `Int` encoding has no such boundary, so default mode is
+    // unaffected.
+    assert_verified(
+        &run_verify(&unguarded, &dir, &[]),
+        "the same division in the default encoding",
+    );
+
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// Under the whole-run opt-in a caller is verified with the bit-vector
+/// encoding even when nothing in it uses a bitwise operator, and it still
+/// imports the `ensures` of its callees — which are verified in the same mode.
+#[test]
+fn global_flag_keeps_callee_contracts_available() {
+    let dir = temp_dir("global_call");
+    let fixture = write_fixture(
+        &dir,
+        "global_call.mm",
+        "atom bump(x: i64) -> i64\n\
+         requires: x >= 0 && x < 100;\n\
+         ensures: result == x + 1;\n\
+         body: x + 1;\n\n\
+         atom bump_user(x: i64) -> i64\n\
+         requires: x >= 0 && x < 100;\n\
+         ensures: result == x + 1;\n\
+         body: bump(x);\n",
+    );
+
+    assert_verified(
+        &run_verify(&fixture, &dir, &["--bitvec-i64"]),
+        "a call whose callee is verified in the same globally selected mode",
+    );
+
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// Bit-vector mode is inherited from a callee that is only mentioned in
+/// `requires`: that clause is lowered with the same sorts as the rest of the
+/// contract, so the callee's bitwise `ensures` has to be expressible.
+#[test]
+fn bitvec_callee_in_requires_selects_bitvec_mode() {
+    let dir = temp_dir("requires_callee");
+    let fixture = write_fixture(
+        &dir,
+        "requires_callee.mm",
+        "atom low_bit(x: i64) -> i64\n\
+         requires: true;\n\
+         ensures: result == (x & 1);\n\
+         body: x & 1;\n\n\
+         atom even_only(x: i64) -> i64\n\
+         requires: low_bit(x) == 0;\n\
+         ensures: result == x;\n\
+         body: x;\n",
+    );
+
+    assert_verified(
+        &run_verify(&fixture, &dir, &[]),
+        "a caller whose only bit-vector dependency is in `requires`",
+    );
+
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// A trait law is verified in the encoding its substituted body needs: an
+/// `impl` whose method body uses a bitwise operator selects bit-vector mode
+/// without the flag, so `mumei build` — which has no `--bitvec-i64` — can
+/// verify it.
+#[test]
+fn trait_law_with_a_bitwise_body_selects_bitvec_mode() {
+    let dir = temp_dir("law");
+    let holds = write_fixture(
+        &dir,
+        "law.mm",
+        "trait Masker {\n\
+        \x20   fn mask(a: Self, b: Self) -> Self;\n\
+        \x20   law idempotent_mask: mask(a, a) == a;\n\
+         }\n\n\
+         impl Masker for i64 {\n\
+        \x20   fn mask(a: i64, b: i64) -> i64 {\n\
+        \x20       a & b\n\
+        \x20   }\n\
+         }\n",
+    );
+    let fails = write_fixture(
+        &dir,
+        "law_bad.mm",
+        "trait Zeroer {\n\
+        \x20   fn mask2(a: Self, b: Self) -> Self;\n\
+        \x20   law zero_mask: mask2(a, a) == 0;\n\
+         }\n\n\
+         impl Zeroer for i64 {\n\
+        \x20   fn mask2(a: i64, b: i64) -> i64 {\n\
+        \x20       a & b\n\
+        \x20   }\n\
+         }\n",
+    );
+
+    assert_verified(
+        &run_verify(&holds, &dir, &[]),
+        "a law whose substituted body uses a bitwise operator",
+    );
+    assert_rejected(
+        &run_verify(&fails, &dir, &[]),
+        "a law that is false under real bit semantics",
+    );
+
+    let bin = env!("CARGO_BIN_EXE_mumei");
+    let build = Command::new(bin)
+        .arg("build")
+        .arg(&holds)
+        .current_dir(&dir)
+        .output()
+        .expect("failed to run mumei build");
+    assert_verified(&build, "the same law through `mumei build`");
+
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// The lexer merges `>>` into a shift token, so a generic argument list has to
+/// close two nesting levels with it. A surplus closer must not push the
+/// nesting depth below zero and swallow the rest of the item.
+#[test]
+fn nested_generic_closers_do_not_underflow() {
+    let dir = temp_dir("closers");
+    let nested = write_fixture(
+        &dir,
+        "nested.mm",
+        "struct Wrap<T> {\n\
+        \x20   value: T\n\
+         }\n\n\
+         atom nested(p: Wrap<Wrap<i64>>) -> i64\n\
+         requires: true;\n\
+         ensures: result == 0;\n\
+         body: 0;\n",
+    );
+    let stray = write_fixture(
+        &dir,
+        "stray.mm",
+        "struct Wrap<T> {\n\
+        \x20   value: T\n\
+         }\n\n\
+         atom stray(p: Wrap<i64>>) -> i64\n\
+         requires: true;\n\
+         ensures: result == 0;\n\
+         body: 0;\n",
+    );
+
+    assert_verified(
+        &run_verify(&nested, &dir, &[]),
+        "a doubly nested generic type argument",
+    );
+    let output = run_verify(&stray, &dir, &[]);
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("stray"),
+        "a surplus generic closer must not swallow the atom that follows it\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    std::fs::remove_dir_all(dir).ok();
+}

@@ -50,6 +50,11 @@ pub(crate) struct VCtx<'a> {
     /// complement. When `false` (default), `i64` uses the unbounded `Int`
     /// encoding.
     pub(crate) bitvec_i64: bool,
+    /// Whether `bitvec_i64` comes from the whole-run opt-in rather than from
+    /// this atom's own contract. Under the global opt-in every atom — callees
+    /// included — is verified in the bit-vector encoding, which is what decides
+    /// whether a callee's `ensures` may be imported at a call site.
+    pub(crate) bitvec_i64_global: bool,
     /// Shift amounts lowered while no `Solver` was available (contract clauses
     /// and invariants are lowered with `solver_opt = None`), paired with the
     /// path condition in force at that point. `discharge_bv_shift_obligations`

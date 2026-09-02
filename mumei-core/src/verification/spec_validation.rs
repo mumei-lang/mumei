@@ -1,6 +1,6 @@
 use super::module_env::ModuleEnv;
 use super::property_based::{
-    run_property_based_test, PropertyBasedTestConfig, PropertyBasedTestResult,
+    run_property_based_test_with_mode, PropertyBasedTestConfig, PropertyBasedTestResult,
 };
 use super::translator::{
     apply_refinement_constraint, expr_to_z3, param_z3_value, seed_tuple_result_components,
@@ -197,6 +197,7 @@ pub fn check_spec_satisfiability_with_timeout(
     // Callers without an explicit mode (certificate generation, tooling) still
     // have to encode a bit-vector contract as `BV(64)`; otherwise a healthy
     // spec is reported as unlowerable or contradictory.
+    let bitvec_i64_global = bitvec_i64;
     let bitvec_i64 = bitvec_i64
         || super::fragment::atom_requires_bitvector_semantics_in_module(atom, module_env);
     let mut diagnostics = Vec::new();
@@ -206,7 +207,14 @@ pub fn check_spec_satisfiability_with_timeout(
     cfg.set_timeout_msec(timeout_ms);
     let ctx = super::Context::new(&cfg);
     let solver = Solver::new(&ctx);
-    let vc = validation_ctx(&ctx, module_env, atom, ieee754_f64, bitvec_i64);
+    let vc = validation_ctx(
+        &ctx,
+        module_env,
+        atom,
+        ieee754_f64,
+        bitvec_i64,
+        bitvec_i64_global,
+    );
     let mut env = seed_env(&ctx, atom, module_env, ieee754_f64, bitvec_i64);
     let mut had_clause_skips = false;
     assert_parameter_refinements(&vc, &solver, atom, module_env, &mut env)?;
@@ -381,11 +389,27 @@ pub fn check_spec_satisfiability_with_timeout(
         }
     }
 
+    // Shift amounts in the contract are lowered without a solver, so their
+    // `0 <= n < 64` range is only decidable here, where the requires clause is
+    // asserted. A spec whose shifts are unbounded is rejected by verification,
+    // and must not be reported healthy. Every clause solver above shares `vc`,
+    // so this discharges the obligations collected in all of them against the
+    // requires-only assumption the proof itself uses.
+    if super::translator::has_reachable_out_of_range_shift(&vc, &solver) {
+        return Err(SpecContradiction::new(
+            &atom.name,
+            "shift_out_of_range",
+            "shift amount may be outside 0..64 under requires",
+            vec![atom.requires.clone(), atom.ensures.clone()],
+            atom.span.clone(),
+        ));
+    }
+
     let trace_id = effective_trace_id(atom);
     let spec_metadata = effective_spec_metadata(atom);
 
     let property_based_test = property_based_config.map(|config| {
-        let result = run_property_based_test(atom, module_env, config);
+        let result = run_property_based_test_with_mode(atom, module_env, config, bitvec_i64);
         diagnostics.extend(
             result
                 .diagnostics
@@ -422,6 +446,7 @@ fn validation_ctx<'a>(
     atom: &'a Atom,
     ieee754_f64: bool,
     bitvec_i64: bool,
+    bitvec_i64_global: bool,
 ) -> VCtx<'a> {
     VCtx {
         ctx,
@@ -437,6 +462,7 @@ fn validation_ctx<'a>(
         ieee754_f64,
         bitvec_i64,
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
+        bitvec_i64_global,
     }
 }
 
@@ -694,7 +720,7 @@ fn check_standalone_refinements(
         cfg.set_timeout_msec(timeout_ms);
         let ctx = super::Context::new(&cfg);
         let solver = Solver::new(&ctx);
-        let vc = validation_ctx(&ctx, module_env, atom, false, false);
+        let vc = validation_ctx(&ctx, module_env, atom, false, false, false);
         let mut env: Env<'_> = HashMap::new();
         env.insert("true".to_string(), Bool::from_bool(&ctx, true).into());
         env.insert("false".to_string(), Bool::from_bool(&ctx, false).into());
