@@ -14,9 +14,12 @@
 //     winner is restored through a single result type);
 //   * an atom body whose result struct differs from the declared return type.
 //
-// Only expressions whose struct type is syntactically evident (struct literals,
-// variables bound to one, calls returning one, `recv` from a typed channel) are
-// checked; anything else is left to the existing structural pipeline.
+// Struct types are inferred where they are syntactically evident: struct
+// literals, variables bound to one, calls returning one, `recv` from a typed
+// channel, field reads of a known struct, and `if` / `match` whose branches
+// all agree. Struct literal fields and reassignments are checked against the
+// declared field / binding type; anything else is left to the structural
+// pipeline.
 // =============================================================================
 
 use super::super::module_env::ModuleEnv;
@@ -67,6 +70,17 @@ impl<'a> NominalChecker<'a> {
         })
     }
 
+    /// Declared type name of `field` on struct `key`.
+    fn field_type(&self, key: &str, field: &str) -> Option<&'a str> {
+        self.module_env
+            .structs
+            .get(key)?
+            .fields
+            .iter()
+            .find(|f| f.name == field)
+            .map(|f| f.type_name.as_str())
+    }
+
     /// Struct type of `expr` when it is syntactically evident.
     fn struct_type_of(&self, expr: &Expr) -> Option<String> {
         match expr {
@@ -81,8 +95,39 @@ impl<'a> NominalChecker<'a> {
                 .and_then(|a| a.return_type.as_deref())
                 .and_then(|t| self.struct_key(t)),
             Expr::ChanRecv { channel } => self.chan_payload_struct(channel).map(|(_, key)| key),
+            Expr::FieldAccess(base, field) => {
+                let base_key = self.struct_type_of(base)?;
+                let ty = self.field_type(&base_key, field)?;
+                self.struct_key(ty)
+            }
+            Expr::IfThenElse {
+                then_branch,
+                else_branch,
+                ..
+            } => self.join_struct_types([then_branch.as_ref(), else_branch.as_ref()]),
+            Expr::Match { arms, .. } => {
+                self.join_struct_types(arms.iter().map(|arm| arm.body.as_ref()))
+            }
             _ => None,
         }
+    }
+
+    /// Common struct type of every branch, or `None` when any branch is
+    /// unknown or the branches disagree.
+    fn join_struct_types<'s>(
+        &self,
+        branches: impl IntoIterator<Item = &'s Stmt>,
+    ) -> Option<String> {
+        let mut joined: Option<String> = None;
+        for branch in branches {
+            let ty = tail_expr(branch).and_then(|e| self.struct_type_of(e))?;
+            match &joined {
+                Some(first) if *first != ty => return None,
+                Some(_) => {}
+                None => joined = Some(ty),
+            }
+        }
+        joined
     }
 
     /// `(declared payload type, struct key)` of a channel expression declared
@@ -125,8 +170,7 @@ impl<'a> NominalChecker<'a> {
                 else_branch,
             } => {
                 self.expr(cond, span)?;
-                self.stmt(then_branch)?;
-                self.stmt(else_branch)
+                self.branches_agree("if", [then_branch.as_ref(), else_branch.as_ref()], span)
             }
             Expr::Call(name, args) => {
                 for arg in args {
@@ -158,9 +202,28 @@ impl<'a> NominalChecker<'a> {
                 }
                 Ok(())
             }
-            Expr::StructInit { fields, .. } => {
-                for (_, value) in fields {
+            Expr::StructInit { type_name, fields } => {
+                let key = self.struct_key(type_name);
+                for (field, value) in fields {
                     self.expr(value, span)?;
+                    let Some(expected) = key
+                        .as_deref()
+                        .and_then(|k| self.field_type(k, field))
+                        .and_then(|t| self.struct_key(t))
+                    else {
+                        continue;
+                    };
+                    if let Some(actual) = self.struct_type_of(value) {
+                        if actual != expected {
+                            return Err(self.mismatch(
+                                format!(
+                                    "field '{}' of struct '{}' expects struct '{}' but got struct '{}'",
+                                    field, type_name, expected, actual
+                                ),
+                                span,
+                            ));
+                        }
+                    }
                 }
                 Ok(())
             }
@@ -171,11 +234,10 @@ impl<'a> NominalChecker<'a> {
                     if let Some(guard) = &arm.guard {
                         self.expr(guard, span)?;
                     }
-                    self.stmt(&arm.body)?;
                 }
-                Ok(())
+                self.branches_agree("match", arms.iter().map(|arm| arm.body.as_ref()), span)
             }
-            Expr::Async { body } | Expr::Lambda { body, .. } => self.stmt(body),
+            Expr::Async { body } | Expr::Lambda { body, .. } => self.scoped(|c| c.stmt(body)),
             Expr::Await { expr } => self.expr(expr, span),
             Expr::CallRef { callee, args } => {
                 self.expr(callee, span)?;
@@ -210,6 +272,58 @@ impl<'a> NominalChecker<'a> {
         }
     }
 
+    /// Check every branch of a branching expression in its own scope and
+    /// reject the expression when the branches yield different structs.
+    fn branches_agree<'s>(
+        &mut self,
+        what: &str,
+        branches: impl IntoIterator<Item = &'s Stmt>,
+        span: &Span,
+    ) -> MumeiResult<()> {
+        let mut first: Option<String> = None;
+        for branch in branches {
+            let Some(ty) = self.stmt_result_type(branch)? else {
+                continue;
+            };
+            match &first {
+                Some(f) if *f != ty => {
+                    return Err(self.mismatch(
+                        format!("{} branches yield struct '{}' and struct '{}'", what, f, ty),
+                        span,
+                    ));
+                }
+                Some(_) => {}
+                None => first = Some(ty),
+            }
+        }
+        Ok(())
+    }
+
+    /// Run `f` in a nested lexical scope: bindings it introduces do not leak
+    /// into the enclosing scope.
+    fn scoped<T>(&mut self, f: impl FnOnce(&mut Self) -> MumeiResult<T>) -> MumeiResult<T> {
+        let saved = self.types.clone();
+        let result = f(self);
+        self.types = saved;
+        result
+    }
+
+    /// Check `stmt` in its own scope and return the struct type it evaluates
+    /// to, seen from inside that scope (so local bindings are visible).
+    fn stmt_result_type(&mut self, stmt: &Stmt) -> MumeiResult<Option<String>> {
+        self.scoped(|c| {
+            match stmt {
+                Stmt::Block(stmts, _) => {
+                    for s in stmts {
+                        c.stmt(s)?;
+                    }
+                }
+                other => c.stmt(other)?,
+            }
+            Ok(tail_expr(stmt).and_then(|e| c.struct_type_of(e)))
+        })
+    }
+
     fn stmt(&mut self, stmt: &Stmt) -> MumeiResult<()> {
         match stmt {
             Stmt::Let { var, value, span } => {
@@ -218,19 +332,41 @@ impl<'a> NominalChecker<'a> {
                 self.types.insert(var.clone(), ty);
                 Ok(())
             }
-            Stmt::Assign { value, span, .. } => self.expr(value, span),
+            Stmt::Assign { var, value, span } => {
+                self.expr(value, span)?;
+                let declared = self
+                    .types
+                    .get(var)
+                    .and_then(|t| t.as_deref())
+                    .and_then(|t| self.struct_key(t));
+                let actual = self.struct_type_of(value);
+                match (declared, actual) {
+                    (Some(expected), Some(actual)) if expected != actual => Err(self.mismatch(
+                        format!(
+                            "'{}' is bound to struct '{}' but is assigned struct '{}'",
+                            var, expected, actual
+                        ),
+                        span,
+                    )),
+                    (None, actual) => {
+                        self.types.insert(var.clone(), actual);
+                        Ok(())
+                    }
+                    _ => Ok(()),
+                }
+            }
             Stmt::ArrayStore {
                 index, value, span, ..
             } => {
                 self.expr(index, span)?;
                 self.expr(value, span)
             }
-            Stmt::Block(stmts, _) => {
+            Stmt::Block(stmts, _) => self.scoped(|c| {
                 for s in stmts {
-                    self.stmt(s)?;
+                    c.stmt(s)?;
                 }
                 Ok(())
-            }
+            }),
             Stmt::While {
                 cond,
                 invariant,
@@ -243,21 +379,19 @@ impl<'a> NominalChecker<'a> {
                 if let Some(d) = decreases {
                     self.expr(d, span)?;
                 }
-                self.stmt(body)
+                self.scoped(|c| c.stmt(body))
             }
-            Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => self.stmt(body),
+            Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => self.scoped(|c| c.stmt(body)),
             Stmt::TaskGroup {
                 children,
                 join_semantics,
                 span,
             } => {
+                let mut winner: Option<String> = None;
                 for child in children {
-                    self.stmt(child)?;
-                }
-                if *join_semantics == JoinSemantics::Any {
-                    let mut winner: Option<String> = None;
-                    for child in children {
-                        let Some(ty) = tail_expr(child).and_then(|e| self.struct_type_of(e)) else {
+                    let ty = self.stmt_result_type(child)?;
+                    if *join_semantics == JoinSemantics::Any {
+                        let Some(ty) = ty else {
                             continue;
                         };
                         match &winner {
@@ -309,13 +443,12 @@ pub(crate) fn verify_nominal_struct_types(
         module_env,
         types,
     };
-    checker.stmt(body_stmt)?;
+    let actual = checker.stmt_result_type(body_stmt)?;
 
     let declared = atom
         .return_type
         .as_deref()
         .and_then(|t| checker.struct_key(t));
-    let actual = tail_expr(body_stmt).and_then(|e| checker.struct_type_of(e));
     if let (Some(expected), Some(actual)) = (declared, actual) {
         if expected != actual {
             return Err(checker.mismatch(
@@ -478,5 +611,108 @@ body: {{ let v = recv(ch); usep(v) }};
         let errors = check(&src);
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert!(errors[0].contains("expects struct 'Pair' but got struct 'Point'"));
+    }
+
+    #[test]
+    fn nested_struct_field_of_another_nominal_type_is_rejected() {
+        let src = format!(
+            "{STRUCTS}
+struct Wrap {{ p: Point }}
+
+trusted atom main() -> Wrap
+requires: true;
+ensures: true;
+body: {{ Wrap {{ p: Pair {{ a: 1, b: 2 }} }} }};
+"
+        );
+        let errors = check(&src);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0]
+            .contains("field 'p' of struct 'Wrap' expects struct 'Point' but got struct 'Pair'"));
+    }
+
+    #[test]
+    fn field_access_yields_the_declared_field_struct() {
+        let src = format!(
+            "{STRUCTS}
+struct Wrap {{ q: Pair }}
+
+trusted atom getx(p: Point) -> i64
+requires: true;
+ensures: true;
+body: {{ p.x }};
+
+trusted atom main(w: Wrap) -> i64
+requires: true;
+ensures: true;
+body: {{ getx(w.q) }};
+"
+        );
+        let errors = check(&src);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("expects struct 'Point' but got struct 'Pair'"));
+    }
+
+    #[test]
+    fn reassigning_a_same_layout_struct_of_another_type_is_rejected() {
+        let src = format!(
+            "{STRUCTS}
+trusted atom main() -> Point
+requires: true;
+ensures: true;
+body: {{ let p = Point {{ x: 1, y: 2 }}; p = Pair {{ a: 3, b: 4 }}; p }};
+"
+        );
+        let errors = check(&src);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("'p' is bound to struct 'Point' but is assigned struct 'Pair'"));
+    }
+
+    #[test]
+    fn if_branches_with_different_structs_are_rejected() {
+        let src = format!(
+            "{STRUCTS}
+trusted atom main(c: i64) -> Point
+requires: true;
+ensures: true;
+body: {{ if c > 0 {{ Point {{ x: 1, y: 2 }} }} else {{ let q = Pair {{ a: 3, b: 4 }}; q }} }};
+"
+        );
+        let errors = check(&src);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("if branches yield struct 'Point' and struct 'Pair'"));
+    }
+
+    #[test]
+    fn local_bindings_in_a_branch_do_not_leak() {
+        let src = format!(
+            "{STRUCTS}
+trusted atom getx(p: Point) -> i64
+requires: true;
+ensures: true;
+body: {{ p.x }};
+
+trusted atom main(c: i64, p: Point) -> i64
+requires: true;
+ensures: true;
+body: {{ if c > 0 {{ let p = Pair {{ a: 1, b: 2 }}; p.a }} else {{ 0 }}; getx(p) }};
+"
+        );
+        assert!(check(&src).is_empty(), "{:?}", check(&src));
+    }
+
+    #[test]
+    fn locally_bound_struct_is_checked_against_the_return_type() {
+        let src = format!(
+            "{STRUCTS}
+trusted atom main() -> Point
+requires: true;
+ensures: true;
+body: {{ let q = Pair {{ a: 1, b: 2 }}; q }};
+"
+        );
+        let errors = check(&src);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("body yields struct 'Pair' but the atom returns struct 'Point'"));
     }
 }

@@ -304,6 +304,30 @@ pub fn compute_proof_hash_with_flags(
         hasher.update(unit.as_bytes());
     }
 
+    // 2c. Nominal signature data read by the nominal struct check: the atom's own
+    // parameter / return types, every struct's field types, and (below) callee
+    // parameter / return types. Editing any of these must invalidate the cache.
+    for p in &atom.params {
+        hasher.update(b"|param_type:");
+        hasher.update(p.name.as_bytes());
+        hasher.update(b"=");
+        hasher.update(p.type_name.as_deref().unwrap_or("").as_bytes());
+    }
+    hasher.update(b"|return_type:");
+    hasher.update(atom.return_type.as_deref().unwrap_or("").as_bytes());
+    let mut struct_names: Vec<&String> = module_env.structs.keys().collect();
+    struct_names.sort();
+    for name in struct_names {
+        hasher.update(b"|struct:");
+        hasher.update(name.as_bytes());
+        for f in &module_env.structs[name].fields {
+            hasher.update(b",");
+            hasher.update(f.name.as_bytes());
+            hasher.update(b":");
+            hasher.update(f.type_name.as_bytes());
+        }
+    }
+
     // 3. Include callee signatures (transitive dependencies)
     let mut visited = HashSet::new();
     let mut stack = Vec::new();
@@ -329,6 +353,12 @@ pub fn compute_proof_hash_with_flags(
             hasher.update(callee_atom.requires.as_bytes());
             hasher.update(b":");
             hasher.update(callee_atom.ensures.as_bytes());
+            for p in &callee_atom.params {
+                hasher.update(b",param_type:");
+                hasher.update(p.type_name.as_deref().unwrap_or("").as_bytes());
+            }
+            hasher.update(b",return_type:");
+            hasher.update(callee_atom.return_type.as_deref().unwrap_or("").as_bytes());
         }
         // Walk further dependencies
         if let Some(further_callees) = module_env.dependency_graph.get(&callee_name) {
@@ -577,5 +607,62 @@ pub(crate) fn load_cache(cache_path: &Path) -> VerificationCache {
 pub(crate) fn save_cache(cache_path: &Path, cache: &VerificationCache) {
     if let Ok(json) = serde_json::to_string_pretty(cache) {
         let _ = fs::write(cache_path, json);
+    }
+}
+
+#[cfg(test)]
+mod nominal_hash_tests {
+    use super::*;
+    use crate::parser::{parse_module, Item};
+
+    fn env_and_hash(source: &str) -> String {
+        let items = parse_module(source);
+        let mut module_env = ModuleEnv::default();
+        for item in &items {
+            match item {
+                Item::Atom(atom) => {
+                    module_env.atoms.insert(atom.name.clone(), atom.clone());
+                }
+                Item::StructDef(s) => {
+                    module_env.structs.insert(s.name.clone(), s.clone());
+                }
+                _ => {}
+            }
+        }
+        module_env
+            .dependency_graph
+            .entry("main".to_string())
+            .or_default()
+            .insert("getx".to_string());
+        let main = module_env.atoms.get("main").unwrap().clone();
+        compute_proof_hash(&main, &module_env)
+    }
+
+    const MAIN: &str = r#"
+trusted atom main() -> i64
+requires: true;
+ensures: true;
+body: { getx(Pair { a: 1, b: 2 }) };
+"#;
+
+    #[test]
+    fn callee_param_type_change_invalidates_the_proof_hash() {
+        let structs = "struct Point { x: i64, y: i64 }\nstruct Pair { a: i64, b: i64 }\n";
+        let before = env_and_hash(&format!(
+            "{structs}\ntrusted atom getx(p: Pair) -> i64\nrequires: true;\nensures: true;\nbody: {{ p.a }};\n{MAIN}"
+        ));
+        let after = env_and_hash(&format!(
+            "{structs}\ntrusted atom getx(p: Point) -> i64\nrequires: true;\nensures: true;\nbody: {{ p.x }};\n{MAIN}"
+        ));
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn struct_field_type_change_invalidates_the_proof_hash() {
+        let getx =
+            "trusted atom getx(p: Pair) -> i64\nrequires: true;\nensures: true;\nbody: { p.a };\n";
+        let before = env_and_hash(&format!("struct Pair {{ a: i64, b: i64 }}\n{getx}{MAIN}"));
+        let after = env_and_hash(&format!("struct Pair {{ a: f64, b: i64 }}\n{getx}{MAIN}"));
+        assert_ne!(before, after);
     }
 }
