@@ -1,7 +1,7 @@
 use crate::codegen::lowering::{
-    array_struct_type, bitpreserve_cast, box_payload_to_i64, declare_chan_send_owned,
-    enum_llvm_type, payload_needs_box, release_boxed_payload, resolve_param_type,
-    resolve_return_type, unbox_payload_from_i64,
+    bitpreserve_cast, box_payload_to_i64, declare_chan_send_owned, enum_llvm_type,
+    payload_needs_box, release_boxed_payload, resolve_param_type, resolve_return_type,
+    unbox_payload_from_i64,
 };
 use crate::codegen::pattern_emit::{
     bind_pattern_variables, compile_pattern_test, find_field_index, find_field_index_by_name,
@@ -56,12 +56,8 @@ fn coerce_to_chan_payload<'a>(
 /// storage; a variable expression only materialises the length, so there is no
 /// by-value array to box. Reject them rather than transport a length that
 /// `recv` would dereference as a box address.
-fn reject_array_chan_payload(
-    context: &Context,
-    payload_ty: BasicTypeEnum<'_>,
-    op: &str,
-) -> MumeiResult<()> {
-    if payload_ty == array_struct_type(context).into() {
+fn reject_array_chan_payload(payload_ty_name: &str, op: &str) -> MumeiResult<()> {
+    if payload_ty_name.trim().starts_with('[') {
         return Err(MumeiError::codegen(format!(
             "channel {op} of an array payload is not supported: arrays are fat pointers into \
              the owner's storage and have no by-value channel encoding"
@@ -1103,11 +1099,10 @@ pub(crate) fn compile_hir_expr<'a>(
             // `ptrtoint`. Aggregates passed by value are copied into a heap
             // box whose address travels through the slot; `recv` loads and
             // frees it, so the box has exactly one owner at any time.
-            let payload = match chan_payload_type_name(channel, var_types)
-                .map(|name| resolve_param_type(context, Some(name.as_str()), module_env))
-            {
-                Some(payload_ty) => {
-                    reject_array_chan_payload(context, payload_ty, "send")?;
+            let payload = match chan_payload_type_name(channel, var_types) {
+                Some(name) => {
+                    reject_array_chan_payload(&name, "send")?;
+                    let payload_ty = resolve_param_type(context, Some(name.as_str()), module_env);
                     let coerced = coerce_to_chan_payload(builder, val, payload_ty)?;
                     if payload_needs_box(payload_ty) && coerced.get_type() != payload_ty {
                         return Err(mumei_core::verification::MumeiError::codegen(format!(
@@ -1212,12 +1207,13 @@ pub(crate) fn compile_hir_expr<'a>(
             // through `inttoptr`, aggregates are loaded from their heap box
             // and the box is freed). Channels whose payload type is unknown
             // keep the raw i64 the runtime returned.
-            let payload_ty = chan_payload_type_name(channel, var_types)
+            let payload_name = chan_payload_type_name(channel, var_types);
+            if let Some(name) = &payload_name {
+                reject_array_chan_payload(name, "recv")?;
+            }
+            let payload_ty = payload_name
                 .map(|name| resolve_param_type(context, Some(name.as_str()), module_env))
                 .filter(|ty| *ty != context.i64_type().into());
-            if let Some(ty) = payload_ty {
-                reject_array_chan_payload(context, ty, "recv")?;
-            }
             match payload_ty {
                 Some(ty) => {
                     Ok(

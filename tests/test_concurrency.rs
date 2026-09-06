@@ -1301,3 +1301,31 @@ body: { 0 };
         "an array fat pointer has no by-value channel encoding and must be rejected at codegen\n{combined}"
     );
 }
+
+#[test]
+fn chan_send_accepts_a_struct_whose_layout_matches_the_array_fat_pointer() {
+    assert_fixture_exits_with_7(
+        "chan_label_struct_payload",
+        r#"
+extern "C" {
+    fn strcmp(a: Str, b: Str) -> i64
+        requires: true; ensures: true;
+}
+struct Label { id: i64, text: Str }
+
+trusted atom relay(ch: chan<Label>, p: Label) -> Label
+requires: true;
+ensures: true;
+body: { send(ch, p); recv(ch) };
+
+trusted atom main()
+requires: true;
+ensures: true;
+body: {
+    let p = relay(0, Label { id: 17, text: "struct-text" });
+    if p.id == 17 { if strcmp(p.text, "struct-text") == 0 { 7 } else { 0 } } else { 0 }
+};
+"#,
+        "a `{ i64, Str }` struct shares the array fat-pointer LLVM layout but is a by-value struct payload; the array guard must key on the declared type name",
+    );
+}

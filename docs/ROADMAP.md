@@ -2150,7 +2150,7 @@ MUMEI_REGISTRY_URL=https://registry.example.com mumei add my_lib
 
 ## P25: concurrency codegen follow-up（polymorphic `chan<T>` payload / task body の配列要素キャプチャ） — ✅ Implemented
 
-**ステータス: ✅ Implemented**（測定 2026-08-30、`cargo test --test test_concurrency` 25/25 passed。follow-up 2 件は 2026-09-06 に解消し 33/33 passed（下記 Follow-up 節）、`cargo test --test test_run` 8/8 passed、`cargo test -p mumei-core lowering` 通過、`cargo tree --edges no-dev | grep -i opentelemetry` は空 = 既定ビルドに OTel 依存なし）— `docs/CONCURRENCY.md` Implementation Status 表に残っていた codegen follow-up 2 件（polymorphic `chan<T>` payload marshalling、task body 内の配列要素ストレージ capture）を解消する。構文 / 型 / Z3 検証 / 基本 codegen は Plan 8 / Plan 21 のままで、runtime（`runtime/mumei_runtime.c`）は無変更。
+**ステータス: ✅ Implemented**（測定 2026-08-30、`cargo test --test test_concurrency` 25/25 passed。follow-up 2 件は 2026-09-06 に解消し 34/34 passed（下記 Follow-up 節）、`cargo test --test test_run` 8/8 passed、`cargo test -p mumei-core lowering` 通過、`cargo tree --edges no-dev | grep -i opentelemetry` は空 = 既定ビルドに OTel 依存なし）— `docs/CONCURRENCY.md` Implementation Status 表に残っていた codegen follow-up 2 件（polymorphic `chan<T>` payload marshalling、task body 内の配列要素ストレージ capture）を解消する。構文 / 型 / Z3 検証 / 基本 codegen は Plan 8 / Plan 21 のままで、runtime（`runtime/mumei_runtime.c`）は無変更。
 
 ### 構成
 
@@ -2201,13 +2201,13 @@ body: {
 - `cargo test -p mumei-core lowering`: `chan_payload_type()` の解析（`chan<f64>` / `chan <Str>` / `chan<[i64]>` / 不正形）。
 - **ゼロコスト検証（P15 / P23 / P24 と同一）**: `cargo tree --edges no-dev | grep -i opentelemetry` が空であること。
 
-### Follow-up（測定 2026-09-06、`cargo test --test test_concurrency` 33/33 passed、`cargo test --test test_run` 通過、`cargo test -p mumei-core lowering` 通過、`cargo tree --edges no-dev | grep -i opentelemetry` は空）
+### Follow-up（測定 2026-09-06、`cargo test --test test_concurrency` 34/34 passed、`cargo test --test test_run` 通過、`cargo test -p mumei-core lowering` 通過、`cargo tree --edges no-dev | grep -i opentelemetry` は空）
 
 旧残課題 2 件を解消した。runtime helper のシグネチャは i64 固定のまま。`runtime/mumei_runtime.c` には `__mumei_chan_send_owned(i64, i64) -> i64`（`__mumei_chan_send` と同じ本体で、スロットへ格納できたか / cancel で捨てたかを返す）を追加し、`__mumei_chan_send` はそれに委譲する。
 
 - **値渡し aggregate payload の `send` / `recv`**（`mumei-emit-llvm/src/codegen/lowering.rs` の `box_payload_to_i64` / `unbox_payload_from_i64`、`expr_emit.rs`）: LLVM の struct / array / vector 値はビット保存できる i64 表現を持たないため、`send` は値を `malloc` した box にコピーして box アドレスを `ptrtoint` で i64 スロットへ載せる（`chan<Str>` / ポインタ搬送と同じ経路）。`recv` は `inttoptr` → 宣言型で `load` → `free` を 1 回だけ行う。box の所有者は常に 1 つ（send 前は送信側、チャネル滞留中はチャネル、recv 後は受信側）で、Phase 1h-2 の所有権検証（`task_ownership.rs`）は型ベースの movability 判定のまま無変更。従来の codegen 診断による拒否は解除した。`recv(ch)` の struct 型推論を追加し、受信側で `p.x` が解決できる。cancel との整合: boxed `send` は `__mumei_chan_send_owned` を呼び、runtime が cancel で値を捨てた場合は送信側が自分の box を `free` する。boxed `recv` は cancel で起こされるとスロット 0 を受け取るので、null を load せずゼロ初期化 aggregate を返す（`payload_unbox_load` / `payload_unbox_join` 分岐）。配列 payload（`chan<[i64]>`）は fat pointer で by-value 表現がないため codegen 診断で拒否する。制約: box は shallow copy であり、ポインタを含む aggregate はポインタ値のみ搬送する。プロセス終了時にチャネルに滞留したままのメッセージはチャネルが所有し、exit で回収される。
 - **非 i64 task join 結果**（`mumei-emit-llvm/src/codegen/task_runtime.rs`）: wrapper は body 結果を `i64 0` へ潰す代わりに `send` と同じ `box_payload_to_i64` で結果スロットへ格納し（`f64` は `bitcast`、ポインタは `ptrtoint`、aggregate は heap box）、`PendingTask` が body の LLVM 型を保持して `join` で `unbox_payload_from_i64` により復元する。`task_group:any` は親が勝者のスロットだけを消費するため、敗者の child は wrapper 内で自身の boxed 結果を `free`（`release_boxed_payload`）し、leak / 二重解放を起こさない。`task_group:all` / `:any` の結果型推論（struct）は `infer_struct_type_name` の `Task` / `TaskGroup` arm が tail 式から決める。
-- **回帰テスト**（`tests/test_concurrency.rs`、旧「aggregate 拒否」ケースを置換して 9 件追加、計 33 件）: struct 値渡し `send` の `.ll` に `malloc` / `ptrtoint` / `inttoptr` / aggregate `load` / `free` が現れること、struct を `send` → `recv` してフィールドが `mumei run` の終了コードで一致すること、`task { f64 }` / `task { struct }` の join 結果が復元されること、`task_group:all` の f64 結果と `task_group:any` の struct 結果が復元されること、`task_group:any` の敗者が `recv(chan<Point>)` 中に cancel されても null を load せず勝者の結果が返ること、full なチャネルで `send(chan<Point>)` 中に cancel された敗者が自分の box を解放すること（`.ll` に `__mumei_chan_send_owned` + `free`）、`chan<[i64]>` の `send` が診断で拒否されること。既存ケースは無変更で通過。
+- **回帰テスト**（`tests/test_concurrency.rs`、旧「aggregate 拒否」ケースを置換して 10 件追加、計 34 件）: struct 値渡し `send` の `.ll` に `malloc` / `ptrtoint` / `inttoptr` / aggregate `load` / `free` が現れること、struct を `send` → `recv` してフィールドが `mumei run` の終了コードで一致すること、`task { f64 }` / `task { struct }` の join 結果が復元されること、`task_group:all` の f64 結果と `task_group:any` の struct 結果が復元されること、`task_group:any` の敗者が `recv(chan<Point>)` 中に cancel されても null を load せず勝者の結果が返ること、full なチャネルで `send(chan<Point>)` 中に cancel された敗者が自分の box を解放すること（`.ll` に `__mumei_chan_send_owned` + `free`）、`chan<[i64]>` の `send` が診断で拒否され、同じ LLVM レイアウト（`{ i64, Str }`）の struct は受理されること（判定は宣言型名で行う）。既存ケースは無変更で通過。
 
 ---
 
