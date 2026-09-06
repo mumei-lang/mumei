@@ -446,6 +446,15 @@ pub(crate) fn verify_inner(
     verify_unit_consistency(atom, &hir_atom.body_stmt, module_env)?;
     metrics.record_phase("Phase 0-units: unit consistency", phase_start.elapsed());
 
+    // Phase 0-nominal: 構造体の名前的型検査。parser 以降は struct を構造的に扱う
+    // ため、同レイアウトの別名 struct はここで区別する。trusted atom も対象。
+    let phase_start = std::time::Instant::now();
+    verify_nominal_struct_types(atom, &hir_atom.body_stmt, module_env)?;
+    metrics.record_phase(
+        "Phase 0-nominal: nominal struct types",
+        phase_start.elapsed(),
+    );
+
     // Phase 0a: 仕様健全性チェック（proof attempt 前の requires/ensures/refinement SAT）
     let phase_start = std::time::Instant::now();
     if let Err(err) = check_spec_satisfiability_with_timeout(
