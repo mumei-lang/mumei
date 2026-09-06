@@ -888,6 +888,13 @@ pub(crate) fn compile_hir_expr<'a>(
                     .filter(|ty| pending.iter().all(|p| p.result_type() == *ty));
                 match shared_ty {
                     Some(ty) => unbox_payload_from_i64(context, builder, module, result, ty),
+                    None if pending.iter().any(|p| payload_needs_box(p.result_type())) => {
+                        Err(mumei_core::verification::MumeiError::codegen(
+                            "task_group:any children must share one result type when any child \
+                             returns an aggregate: the winner's box could not be restored or freed"
+                                .to_string(),
+                        ))
+                    }
                     None => Ok(result.into()),
                 }
             } else {
@@ -1104,7 +1111,9 @@ pub(crate) fn compile_hir_expr<'a>(
                     reject_array_chan_payload(&name, "send")?;
                     let payload_ty = resolve_param_type(context, Some(name.as_str()), module_env);
                     let coerced = coerce_to_chan_payload(builder, val, payload_ty)?;
-                    if payload_needs_box(payload_ty) && coerced.get_type() != payload_ty {
+                    if (payload_needs_box(payload_ty) || payload_needs_box(coerced.get_type()))
+                        && coerced.get_type() != payload_ty
+                    {
                         return Err(mumei_core::verification::MumeiError::codegen(format!(
                             "channel payload of type {} does not match the declared payload type {}",
                             coerced.get_type(),

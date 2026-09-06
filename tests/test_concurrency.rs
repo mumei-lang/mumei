@@ -1329,3 +1329,72 @@ body: {
         "a `{ i64, Str }` struct shares the array fat-pointer LLVM layout but is a by-value struct payload; the array guard must key on the declared type name",
     );
 }
+
+fn assert_fixture_is_rejected(name: &str, source: &str, diagnostic: &str, what: &str) {
+    let bin = env!("CARGO_BIN_EXE_mumei");
+    let fixture = write_fixture(name, source);
+    let output = Command::new(bin)
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run {what} fixture: {err}"));
+    std::fs::remove_dir_all(fixture.parent().unwrap()).expect("remove concurrency fixture dir");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !output.status.success() && combined.contains(diagnostic),
+        "{what}\n{combined}"
+    );
+}
+
+#[test]
+fn chan_send_rejects_an_aggregate_through_a_scalar_channel() {
+    assert_fixture_is_rejected(
+        "chan_struct_into_scalar_rejected",
+        r#"
+struct Point { x: i64, y: i64 }
+
+trusted atom relay(ch: chan<i64>, p: Point) -> i64
+requires: true;
+ensures: true;
+body: { send(ch, p); recv(ch) };
+
+trusted atom main()
+requires: true;
+ensures: true;
+body: { relay(0, Point { x: 1, y: 2 }) };
+"#,
+        "does not match the declared payload type",
+        "a struct sent through `chan<i64>` would be boxed and its address read back as data without ever being freed; codegen must reject the mismatch",
+    );
+}
+
+#[test]
+fn task_group_any_rejects_mixed_result_types_when_a_child_returns_an_aggregate() {
+    assert_fixture_is_rejected(
+        "task_group_any_mixed_struct_rejected",
+        r#"
+struct Point { x: i64, y: i64 }
+
+trusted atom pick() -> i64
+requires: true;
+ensures: true;
+body: {
+    task_group:any {
+        task { Point { x: 3, y: 7 } };
+        task { 42 }
+    }
+};
+
+trusted atom main()
+requires: true;
+ensures: true;
+body: { pick() };
+"#,
+        "task_group:any children must share one result type",
+        "a `task_group:any` mixing a struct child with an i64 child cannot restore or free an aggregate winner and must be rejected",
+    );
+}
