@@ -1159,3 +1159,145 @@ body: {
         "task_group:any must unbox the winner's struct result exactly once (losers release their own)",
     );
 }
+
+#[test]
+fn task_group_any_cancelled_struct_recv_yields_a_zeroed_value_instead_of_dereferencing_null() {
+    assert_fixture_exits_with_7(
+        "task_group_any_cancelled_struct_recv",
+        r#"
+extern "C" {
+    fn usleep(usec: i64) -> i64
+        requires: true;
+        ensures: true;
+}
+
+struct Point { x: i64, y: i64 }
+
+trusted atom wait_point(ch: chan<Point>) -> Point
+requires: true;
+ensures: true;
+body: { recv(ch) };
+
+trusted atom make() -> Point
+requires: true;
+ensures: true;
+body: {
+    task_group:any {
+        task { usleep(100000); Point { x: 3, y: 7 } };
+        task { wait_point(0) }
+    }
+};
+
+trusted atom main()
+requires: true;
+ensures: true;
+body: {
+    let p = make();
+    if p.x == 3 { p.y } else { 0 }
+};
+"#,
+        "a `recv` on a `chan<Struct>` woken by task-group cancellation returns no box (slot 0) and must not load from address 0",
+    );
+}
+
+#[test]
+fn task_group_any_cancelled_struct_send_frees_its_dropped_box() {
+    let ir = emit_atom_ir(
+        "chan_struct_send_owned_ir",
+        r#"
+struct Point { x: i64, y: i64 }
+
+trusted atom push(ch: chan<Point>, p: Point) -> i64
+requires: true;
+ensures: true;
+body: {
+    send(ch, p);
+    0
+};
+"#,
+        "push",
+    );
+    assert!(
+        ir.contains("call i64 @__mumei_chan_send_owned")
+            && ir.contains("call void @free(ptr %payload_release_ptr)"),
+        "a boxed `send` must use the ownership-reporting runtime send and free the box when the runtime dropped it\n{ir}"
+    );
+
+    assert_fixture_exits_with_7(
+        "task_group_any_cancelled_struct_send",
+        r#"
+extern "C" {
+    fn usleep(usec: i64) -> i64
+        requires: true;
+        ensures: true;
+}
+
+struct Point { x: i64, y: i64 }
+
+trusted atom push_twice(ch: chan<Point>) -> Point
+requires: true;
+ensures: true;
+body: {
+    send(ch, Point { x: 1, y: 2 });
+    send(ch, Point { x: 3, y: 4 });
+    Point { x: 9, y: 9 }
+};
+
+trusted atom make() -> Point
+requires: true;
+ensures: true;
+body: {
+    task_group:any {
+        task { usleep(100000); Point { x: 3, y: 7 } };
+        task { push_twice(0) }
+    }
+};
+
+trusted atom main()
+requires: true;
+ensures: true;
+body: {
+    let p = make();
+    if p.x == 3 { p.y } else { 0 }
+};
+"#,
+        "a boxed `send` blocked on a full channel and then cancelled must free its box and let the winner's result through",
+    );
+}
+
+#[test]
+fn chan_send_rejects_an_array_payload() {
+    let bin = env!("CARGO_BIN_EXE_mumei");
+    let fixture = write_fixture(
+        "chan_array_payload_rejected",
+        r#"
+trusted atom relay(ch: chan<[i64]>, a: [i64]) -> i64
+requires: true;
+ensures: true;
+body: {
+    send(ch, a);
+    0
+};
+
+trusted atom main()
+requires: true;
+ensures: true;
+body: { 0 };
+"#,
+    );
+    let output = Command::new(bin)
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("run chan<[i64]> fixture");
+    std::fs::remove_dir_all(fixture.parent().unwrap()).expect("remove concurrency fixture dir");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !output.status.success() && combined.contains("channel send of an array payload is not supported"),
+        "an array fat pointer has no by-value channel encoding and must be rejected at codegen\n{combined}"
+    );
+}

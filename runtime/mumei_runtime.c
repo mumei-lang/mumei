@@ -10,6 +10,7 @@
  * call into:
  *
  *   void __mumei_chan_send(int64_t chan_id, int64_t value);
+ *   int64_t __mumei_chan_send_owned(int64_t chan_id, int64_t value);
  *   int64_t __mumei_chan_recv(int64_t chan_id);
  *
  * Channels are identified by a small integer handle (i64). The front
@@ -261,7 +262,14 @@ static mumei_chan_t *mumei_chan_get(int64_t chan_id) {
     return ch;
 }
 
-void __mumei_chan_send(int64_t chan_id, int64_t value) {
+/*
+ * Send that reports whether the value was enqueued. Returns 1 when the
+ * slot was filled and 0 when the send was dropped because the current
+ * task group was cancelled. The front-end uses this for payloads whose
+ * i64 slot carries ownership of a heap box (by-value aggregates), so the
+ * sender can free a box the runtime never handed to a receiver.
+ */
+int64_t __mumei_chan_send_owned(int64_t chan_id, int64_t value) {
     mumei_chan_t *ch = mumei_chan_get(chan_id);
     int cancelled = 0;
     pthread_mutex_lock(&ch->mu);
@@ -288,6 +296,11 @@ void __mumei_chan_send(int64_t chan_id, int64_t value) {
         pthread_cond_broadcast(&ch->cv);
     }
     pthread_cleanup_pop(1);
+    return cancelled ? 0 : 1;
+}
+
+void __mumei_chan_send(int64_t chan_id, int64_t value) {
+    (void)__mumei_chan_send_owned(chan_id, value);
 }
 
 int64_t __mumei_chan_recv(int64_t chan_id) {

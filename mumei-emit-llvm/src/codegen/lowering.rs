@@ -2,7 +2,7 @@ use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Module;
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
-use inkwell::values::BasicValueEnum;
+use inkwell::values::{BasicValueEnum, FunctionValue};
 use inkwell::AddressSpace;
 use mumei_core::lowering::{lower, LoweredType};
 use mumei_core::verification::{ModuleEnv, MumeiError};
@@ -275,12 +275,60 @@ pub(crate) fn unbox_payload_from_i64<'a>(
     if !payload_needs_box(target_ty) {
         return bitpreserve_cast(builder, slot.into(), target_ty);
     }
+    // A zero slot means the runtime handed back no box (a `recv` woken by
+    // task-group cancellation), so yield a zeroed aggregate instead of
+    // dereferencing null.
+    let function = builder
+        .get_insert_block()
+        .and_then(|bb| bb.get_parent())
+        .ok_or_else(|| {
+            mumei_core::verification::MumeiError::codegen(
+                "payload unbox outside of a function".to_string(),
+            )
+        })?;
+    let load_bb = context.append_basic_block(function, "payload_unbox_load");
+    let join_bb = context.append_basic_block(function, "payload_unbox_join");
+    let empty_bb = builder.get_insert_block().unwrap();
+    let is_null = llvm!(builder.build_int_compare(
+        inkwell::IntPredicate::EQ,
+        slot,
+        context.i64_type().const_zero(),
+        "payload_unbox_is_null"
+    ));
+    llvm!(builder.build_conditional_branch(is_null, join_bb, load_bb));
+
+    builder.position_at_end(load_bb);
     let ptr_type = context.ptr_type(AddressSpace::default());
     let box_ptr = llvm!(builder.build_int_to_ptr(slot, ptr_type, "payload_unbox_ptr"));
     let value = llvm!(builder.build_load(target_ty, box_ptr, "payload_unbox"));
     let free_fn = declare_free(context, module);
     llvm!(builder.build_call(free_fn, &[box_ptr.into()], "payload_unbox_free"));
-    Ok(value)
+    llvm!(builder.build_unconditional_branch(join_bb));
+
+    builder.position_at_end(join_bb);
+    let phi = llvm!(builder.build_phi(target_ty, "payload_unbox_value"));
+    phi.add_incoming(&[(&target_ty.const_zero(), empty_bb), (&value, load_bb)]);
+    Ok(phi.as_basic_value())
+}
+
+/// Declare `__mumei_chan_send_owned(chan_id: i64, value: i64) -> i64`, the
+/// runtime send that reports whether the value was actually enqueued (`1`) or
+/// dropped because the current task group was cancelled (`0`). Used for boxed
+/// payloads so a dropped box can be freed by the sender.
+pub(crate) fn declare_chan_send_owned<'a>(
+    context: &'a Context,
+    module: &Module<'a>,
+) -> FunctionValue<'a> {
+    module
+        .get_function("__mumei_chan_send_owned")
+        .unwrap_or_else(|| {
+            let i64_type = context.i64_type();
+            module.add_function(
+                "__mumei_chan_send_owned",
+                i64_type.fn_type(&[i64_type.into(), i64_type.into()], false),
+                Some(inkwell::module::Linkage::External),
+            )
+        })
 }
 
 /// Release a boxed payload that will never be unboxed (e.g. the result of a

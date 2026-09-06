@@ -1,6 +1,7 @@
 use crate::codegen::lowering::{
-    bitpreserve_cast, box_payload_to_i64, enum_llvm_type, resolve_param_type, resolve_return_type,
-    unbox_payload_from_i64,
+    array_struct_type, bitpreserve_cast, box_payload_to_i64, declare_chan_send_owned,
+    enum_llvm_type, payload_needs_box, release_boxed_payload, resolve_param_type,
+    resolve_return_type, unbox_payload_from_i64,
 };
 use crate::codegen::pattern_emit::{
     bind_pattern_variables, compile_pattern_test, find_field_index, find_field_index_by_name,
@@ -49,6 +50,24 @@ fn coerce_to_chan_payload<'a>(
         }
         _ => Ok(val),
     }
+}
+
+/// Array payloads are fat pointers `(len, data)` into the owner's element
+/// storage; a variable expression only materialises the length, so there is no
+/// by-value array to box. Reject them rather than transport a length that
+/// `recv` would dereference as a box address.
+fn reject_array_chan_payload(
+    context: &Context,
+    payload_ty: BasicTypeEnum<'_>,
+    op: &str,
+) -> MumeiResult<()> {
+    if payload_ty == array_struct_type(context).into() {
+        return Err(MumeiError::codegen(format!(
+            "channel {op} of an array payload is not supported: arrays are fat pointers into \
+             the owner's storage and have no by-value channel encoding"
+        )));
+    }
+    Ok(())
 }
 
 /// Declared payload type of the channel `expr` denotes, when the channel is a
@@ -110,6 +129,11 @@ pub(crate) fn infer_struct_type_name(
         }
         // P25: a joined `task` carries its body's tail value.
         HirExpr::Task { body, .. } => infer_stmt_struct_type_name(body, var_types, module_env),
+        // P25: a joined `task_group` carries a child's tail value (all children
+        // share one result type, so the first that resolves decides).
+        HirExpr::TaskGroup { children, .. } => children
+            .iter()
+            .find_map(|child| infer_stmt_struct_type_name(child, var_types, module_env)),
         _ => None,
     }
 }
@@ -1082,7 +1106,18 @@ pub(crate) fn compile_hir_expr<'a>(
             let payload = match chan_payload_type_name(channel, var_types)
                 .map(|name| resolve_param_type(context, Some(name.as_str()), module_env))
             {
-                Some(payload_ty) => coerce_to_chan_payload(builder, val, payload_ty)?,
+                Some(payload_ty) => {
+                    reject_array_chan_payload(context, payload_ty, "send")?;
+                    let coerced = coerce_to_chan_payload(builder, val, payload_ty)?;
+                    if payload_needs_box(payload_ty) && coerced.get_type() != payload_ty {
+                        return Err(mumei_core::verification::MumeiError::codegen(format!(
+                            "channel payload of type {} does not match the declared payload type {}",
+                            coerced.get_type(),
+                            payload_ty
+                        )));
+                    }
+                    coerced
+                }
                 None => val,
             };
             let val_i64 = box_payload_to_i64(context, builder, module, payload).map_err(|e| {
@@ -1092,22 +1127,55 @@ pub(crate) fn compile_hir_expr<'a>(
                     e
                 ))
             })?;
-            let send_fn = module.get_function("__mumei_chan_send").unwrap_or_else(|| {
-                let i64_type = context.i64_type();
-                let fn_type = context
-                    .void_type()
-                    .fn_type(&[i64_type.into(), i64_type.into()], false);
-                module.add_function(
-                    "__mumei_chan_send",
-                    fn_type,
-                    Some(inkwell::module::Linkage::External),
-                )
-            });
-            llvm!(builder.build_call(
-                send_fn,
-                &[chan_i64.into(), val_i64.into()],
-                "chan_send_call"
-            ));
+            if payload_needs_box(payload.get_type()) {
+                // The slot carries ownership of a heap box: if the runtime drops
+                // the send (task-group cancellation) nobody will `recv` it, so
+                // the sender frees it.
+                let send_fn = declare_chan_send_owned(context, module);
+                let sent = llvm!(builder.build_call(
+                    send_fn,
+                    &[chan_i64.into(), val_i64.into()],
+                    "chan_send_owned_call"
+                ))
+                .try_as_basic_value()
+                .left()
+                .ok_or_else(|| {
+                    mumei_core::verification::MumeiError::codegen(
+                        "__mumei_chan_send_owned returned void".to_string(),
+                    )
+                })?
+                .into_int_value();
+                let dropped = llvm!(builder.build_int_compare(
+                    inkwell::IntPredicate::EQ,
+                    sent,
+                    context.i64_type().const_zero(),
+                    "chan_send_dropped"
+                ));
+                let release_bb = context.append_basic_block(*function, "chan_send_release");
+                let cont_bb = context.append_basic_block(*function, "chan_send_cont");
+                llvm!(builder.build_conditional_branch(dropped, release_bb, cont_bb));
+                builder.position_at_end(release_bb);
+                release_boxed_payload(context, builder, module, val_i64, payload.get_type())?;
+                llvm!(builder.build_unconditional_branch(cont_bb));
+                builder.position_at_end(cont_bb);
+            } else {
+                let send_fn = module.get_function("__mumei_chan_send").unwrap_or_else(|| {
+                    let i64_type = context.i64_type();
+                    let fn_type = context
+                        .void_type()
+                        .fn_type(&[i64_type.into(), i64_type.into()], false);
+                    module.add_function(
+                        "__mumei_chan_send",
+                        fn_type,
+                        Some(inkwell::module::Linkage::External),
+                    )
+                });
+                llvm!(builder.build_call(
+                    send_fn,
+                    &[chan_i64.into(), val_i64.into()],
+                    "chan_send_call"
+                ));
+            }
             Ok(context.i64_type().const_int(0, false).into())
         }
 
@@ -1147,6 +1215,9 @@ pub(crate) fn compile_hir_expr<'a>(
             let payload_ty = chan_payload_type_name(channel, var_types)
                 .map(|name| resolve_param_type(context, Some(name.as_str()), module_env))
                 .filter(|ty| *ty != context.i64_type().into());
+            if let Some(ty) = payload_ty {
+                reject_array_chan_payload(context, ty, "recv")?;
+            }
             match payload_ty {
                 Some(ty) => {
                     Ok(
