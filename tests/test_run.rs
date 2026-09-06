@@ -365,7 +365,9 @@ body: {
 "#,
     );
 
-    let output = Command::new(bin)
+    let output = Command::new("timeout")
+        .arg("20s")
+        .arg(bin)
         .arg("run")
         .arg(&fixture)
         .current_dir(manifest_dir)
@@ -415,7 +417,9 @@ body: {
 "#,
     );
 
-    let output = Command::new(bin)
+    let output = Command::new("timeout")
+        .arg("20s")
+        .arg(bin)
         .arg("run")
         .arg(&fixture)
         .current_dir(manifest_dir)

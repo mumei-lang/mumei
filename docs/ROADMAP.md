@@ -2150,7 +2150,7 @@ MUMEI_REGISTRY_URL=https://registry.example.com mumei add my_lib
 
 ## P25: concurrency codegen follow-up（polymorphic `chan<T>` payload / task body の配列要素キャプチャ） — ✅ Implemented
 
-**ステータス: ✅ Implemented**（測定 2026-08-30、`cargo test --test test_concurrency` 25/25 passed。follow-up 2 件は 2026-09-06 に解消し 37/37 passed（下記 Follow-up 節）、`cargo test --test test_run` 8/8 passed、`cargo test -p mumei-core lowering` 通過、`cargo tree --edges no-dev | grep -i opentelemetry` は空 = 既定ビルドに OTel 依存なし）— `docs/CONCURRENCY.md` Implementation Status 表に残っていた codegen follow-up 2 件（polymorphic `chan<T>` payload marshalling、task body 内の配列要素ストレージ capture）を解消する。構文 / 型 / Z3 検証 / 基本 codegen は Plan 8 / Plan 21 のままで、runtime（`runtime/mumei_runtime.c`）は無変更。
+**ステータス: ✅ Implemented**（測定 2026-08-30、`cargo test --test test_concurrency` 25/25 passed。follow-up 2 件は 2026-09-06 に解消し、Phase 0-nominal と E2E 追加を含めて `cargo test --test test_concurrency` 39/39 passed（下記 Follow-up 節）、`cargo test --test test_run` 10/10 passed、`cargo test -p mumei-core lowering` 通過、`cargo tree --edges no-dev | grep -i opentelemetry` は空 = 既定ビルドに OTel 依存なし）— `docs/CONCURRENCY.md` Implementation Status 表に残っていた codegen follow-up 2 件（polymorphic `chan<T>` payload marshalling、task body 内の配列要素ストレージ capture）を解消する。構文 / 型 / Z3 検証 / 基本 codegen は Plan 8 / Plan 21 のままで、runtime（`runtime/mumei_runtime.c`）は無変更。
 
 ### 構成
 
@@ -2196,12 +2196,12 @@ body: {
 
 ### CI 回帰ゲート
 
-- `cargo test --test test_run`（8 件、うち P25 で 3 件追加）: struct パラメータのフィールドを読む atom が `mumei run` で期待どおりの終了コードを返すこと、struct を返す atom の結果から呼び出し側がフィールドを読めること、文字列リテラルを含むプログラムが PIE としてリンクできること。
+- `cargo test --test test_run`（10 件、うち P25 で 3 件、Follow-up で 2 件追加）: struct パラメータのフィールドを読む atom が `mumei run` で期待どおりの終了コードを返すこと、struct を返す atom の結果から呼び出し側がフィールドを読めること、文字列リテラルを含むプログラムが PIE としてリンクできること。
 - `cargo test --test test_concurrency`（24 件、うち P25 で 6 件追加）: `chan<f64>` の send/recv が実行時に payload を保持すること（`mumei run` の終了コードで確認）、`chan<f64>` へ i64 payload を send しても同じ数値として届くこと、`chan<f64>` の `.ll` に `bitcast` 対が現れ `i64 0` 定数に潰れていないこと、`chan<Str>` の `.ll` に `ptrtoint` / `inttoptr` 対が現れ atom が `ptr` を返すこと、task wrapper が capture した配列の `(len, data)` を args struct 経由で load して親の要素ストレージを GEP すること。既存の struct capture / `task_group:all` / `:any` / Phase 1h-2 所有権検証は無変更で通過する。
 - `cargo test -p mumei-core lowering`: `chan_payload_type()` の解析（`chan<f64>` / `chan <Str>` / `chan<[i64]>` / 不正形）。
 - **ゼロコスト検証（P15 / P23 / P24 と同一）**: `cargo tree --edges no-dev | grep -i opentelemetry` が空であること。
 
-### Follow-up（測定 2026-09-06、`cargo test --test test_concurrency` 37/37 passed、`cargo test --test test_run` 通過、`cargo test -p mumei-core lowering` 通過、`cargo tree --edges no-dev | grep -i opentelemetry` は空）
+### Follow-up（測定 2026-09-06、`cargo test --test test_concurrency` 37/37 passed → Phase 0-nominal 追加後 39/39、`cargo test --test test_run` 10/10 passed、`cargo test -p mumei-core lowering` 通過、`cargo tree --edges no-dev | grep -i opentelemetry` は空）
 
 旧残課題 2 件を解消した。runtime helper のシグネチャは i64 固定のまま。`runtime/mumei_runtime.c` には `__mumei_chan_send_owned(i64, i64) -> i64`（`__mumei_chan_send` と同じ本体で、スロットへ格納できたか / cancel で捨てたかを返す）を追加し、`__mumei_chan_send` はそれに委譲する。同じく `__mumei_payload_box_alloc_failed(i64)`（`noreturn`）を追加し、boxed payload の `malloc` が NULL を返した場合は null へ store せずこの helper（`[mumei runtime] fatal: ...` + `abort()`、既存 runtime の fatal パスと同じ形式）へ分岐する。
 
