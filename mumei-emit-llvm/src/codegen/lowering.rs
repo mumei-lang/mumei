@@ -1,7 +1,7 @@
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Module;
-use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum};
+use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
 use inkwell::values::BasicValueEnum;
 use inkwell::AddressSpace;
 use mumei_core::lowering::{lower, LoweredType};
@@ -190,6 +190,116 @@ pub(crate) fn bitpreserve_cast<'a>(
             target_ty
         ))),
     }
+}
+
+fn declare_malloc<'a>(
+    context: &'a Context,
+    module: &Module<'a>,
+) -> inkwell::values::FunctionValue<'a> {
+    module.get_function("malloc").unwrap_or_else(|| {
+        let ptr_type = context.ptr_type(AddressSpace::default());
+        let fn_type = ptr_type.fn_type(&[context.i64_type().into()], false);
+        module.add_function("malloc", fn_type, Some(inkwell::module::Linkage::External))
+    })
+}
+
+fn declare_free<'a>(
+    context: &'a Context,
+    module: &Module<'a>,
+) -> inkwell::values::FunctionValue<'a> {
+    module.get_function("free").unwrap_or_else(|| {
+        let ptr_type = context.ptr_type(AddressSpace::default());
+        let fn_type = context.void_type().fn_type(&[ptr_type.into()], false);
+        module.add_function("free", fn_type, Some(inkwell::module::Linkage::External))
+    })
+}
+
+/// Whether a value of `ty` has to be boxed to fit the runtime's i64 slot.
+/// Scalars and pointers are bit-preserved in place by `bitpreserve_cast`;
+/// aggregates (struct values, enum tagged unions, array fat pointers) do not
+/// fit and are transported by address instead.
+pub(crate) fn payload_needs_box(ty: BasicTypeEnum<'_>) -> bool {
+    matches!(
+        ty,
+        BasicTypeEnum::StructType(_) | BasicTypeEnum::ArrayType(_) | BasicTypeEnum::VectorType(_)
+    )
+}
+
+/// Encode `value` into a runtime i64 slot without losing bits. Scalars and
+/// pointers go through `bitpreserve_cast`; aggregates are copied into a fresh
+/// `malloc` allocation whose address is stored as `ptrtoint`. Ownership of the
+/// allocation moves with the slot: exactly one `unbox_payload_from_i64` on the
+/// receiving side loads the value back and frees it.
+pub(crate) fn box_payload_to_i64<'a>(
+    context: &'a Context,
+    builder: &Builder<'a>,
+    module: &Module<'a>,
+    value: BasicValueEnum<'a>,
+) -> mumei_core::verification::MumeiResult<inkwell::values::IntValue<'a>> {
+    let i64_type = context.i64_type();
+    if !payload_needs_box(value.get_type()) {
+        return Ok(bitpreserve_cast(builder, value, i64_type.into())?.into_int_value());
+    }
+    let size = value.get_type().size_of().ok_or_else(|| {
+        MumeiError::codegen(format!(
+            "payload of type {} has no static size and cannot be boxed",
+            value.get_type()
+        ))
+    })?;
+    let size_i64 =
+        llvm!(builder.build_int_z_extend_or_bit_cast(size, i64_type, "payload_box_size"));
+    let malloc_fn = declare_malloc(context, module);
+    let box_ptr = llvm!(builder.build_call(malloc_fn, &[size_i64.into()], "payload_box"))
+        .try_as_basic_value()
+        .left()
+        .ok_or_else(|| MumeiError::codegen("malloc returned void".to_string()))?
+        .into_pointer_value();
+    llvm!(builder.build_store(box_ptr, value));
+    Ok(llvm!(builder.build_ptr_to_int(
+        box_ptr,
+        i64_type,
+        "payload_box_addr"
+    )))
+}
+
+/// Inverse of `box_payload_to_i64`: restore a value of `target_ty` from a
+/// runtime i64 slot. Aggregates are loaded from the boxed address and the
+/// allocation is released, completing the ownership transfer.
+pub(crate) fn unbox_payload_from_i64<'a>(
+    context: &'a Context,
+    builder: &Builder<'a>,
+    module: &Module<'a>,
+    slot: inkwell::values::IntValue<'a>,
+    target_ty: BasicTypeEnum<'a>,
+) -> mumei_core::verification::MumeiResult<BasicValueEnum<'a>> {
+    if !payload_needs_box(target_ty) {
+        return bitpreserve_cast(builder, slot.into(), target_ty);
+    }
+    let ptr_type = context.ptr_type(AddressSpace::default());
+    let box_ptr = llvm!(builder.build_int_to_ptr(slot, ptr_type, "payload_unbox_ptr"));
+    let value = llvm!(builder.build_load(target_ty, box_ptr, "payload_unbox"));
+    let free_fn = declare_free(context, module);
+    llvm!(builder.build_call(free_fn, &[box_ptr.into()], "payload_unbox_free"));
+    Ok(value)
+}
+
+/// Release a boxed payload that will never be unboxed (e.g. the result of a
+/// `task_group:any` child that lost the race). No-op for unboxed types.
+pub(crate) fn release_boxed_payload<'a>(
+    context: &'a Context,
+    builder: &Builder<'a>,
+    module: &Module<'a>,
+    slot: inkwell::values::IntValue<'a>,
+    ty: BasicTypeEnum<'a>,
+) -> mumei_core::verification::MumeiResult<()> {
+    if !payload_needs_box(ty) {
+        return Ok(());
+    }
+    let ptr_type = context.ptr_type(AddressSpace::default());
+    let box_ptr = llvm!(builder.build_int_to_ptr(slot, ptr_type, "payload_release_ptr"));
+    let free_fn = declare_free(context, module);
+    llvm!(builder.build_call(free_fn, &[box_ptr.into()], "payload_release_free"));
+    Ok(())
 }
 
 /// LLVM struct type for a user-defined struct, laid out in declaration order.

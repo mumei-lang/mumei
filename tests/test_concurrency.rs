@@ -973,11 +973,65 @@ body: {
     );
 }
 
-#[test]
-fn chan_send_rejects_a_by_value_aggregate_payload() {
+fn assert_fixture_exits_with_7(name: &str, source: &str, what: &str) {
     let bin = env!("CARGO_BIN_EXE_mumei");
-    let fixture = write_fixture(
-        "chan_aggregate_payload",
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let fixture = write_fixture(name, source);
+    let output = Command::new("timeout")
+        .arg("20s")
+        .arg(bin)
+        .arg("run")
+        .arg(&fixture)
+        .current_dir(manifest_dir)
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run {what} fixture: {err}"));
+    std::fs::remove_dir_all(fixture.parent().unwrap()).expect("remove concurrency fixture dir");
+    assert_eq!(
+        output.status.code(),
+        Some(7),
+        "{what}\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn chan_send_boxes_a_by_value_aggregate_payload_and_recv_unboxes_it() {
+    let ir = emit_atom_ir(
+        "chan_aggregate_ir",
+        r#"
+struct Point { x: i64, y: i64 }
+
+trusted atom relay(ch: chan<Point>, p: Point) -> Point
+requires: true;
+ensures: true;
+body: {
+    send(ch, p);
+    recv(ch)
+};
+"#,
+        "relay",
+    );
+    assert!(
+        ir.contains("call ptr @malloc") && ir.contains("payload_box_addr = ptrtoint ptr"),
+        "`send` must copy a by-value struct into a heap box and send its address\n{ir}"
+    );
+    assert!(
+        ir.contains("payload_unbox_ptr = inttoptr i64")
+            && ir.contains("load { i64, i64 }, ptr %payload_unbox_ptr")
+            && ir.contains("call void @free(ptr %payload_unbox_ptr)"),
+        "`recv` must load the struct back from the box and free it exactly once\n{ir}"
+    );
+    assert!(
+        ir.contains("define { i64, i64 } @relay"),
+        "`recv` on a `chan<Point>` must be typed as the declared struct\n{ir}"
+    );
+}
+
+#[test]
+fn chan_struct_payload_round_trips_by_value_through_send_and_recv() {
+    assert_fixture_exits_with_7(
+        "chan_struct_round_trip",
         r#"
 struct Point { x: i64, y: i64 }
 
@@ -986,24 +1040,122 @@ requires: true;
 ensures: true;
 body: {
     send(ch, p);
-    0
+    let q = recv(ch);
+    q.y
+};
+
+trusted atom main()
+requires: true;
+ensures: true;
+body: {
+    relay(0, Point { x: 3, y: 7 })
 };
 "#,
+        "a struct sent by value must arrive with every field intact",
     );
-    let dir = fixture.parent().unwrap().to_path_buf();
-    let output = Command::new(bin)
-        .arg("build")
-        .arg(&fixture)
-        .arg("--emit")
-        .arg("llvm-ir")
-        .current_dir(&dir)
-        .output()
-        .expect("failed to build the aggregate payload fixture");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("cannot be sent") || stderr.contains("cannot be sent"),
-        "an aggregate payload must be reported rather than silently sent as zero\nstdout:\n{stdout}\nstderr:\n{stderr}"
+}
+
+#[test]
+fn task_join_restores_an_f64_body_result() {
+    assert_fixture_exits_with_7(
+        "task_join_f64",
+        r#"
+trusted atom half_more() -> f64
+requires: true;
+ensures: true;
+body: {
+    task { 2.5 }
+};
+
+trusted atom main()
+requires: true;
+ensures: true;
+body: {
+    let r = half_more();
+    if r == 2.5 { 7 } else { 0 }
+};
+"#,
+        "joining a task whose body yields f64 must restore the double, not an i64 zero",
     );
-    std::fs::remove_dir_all(&dir).expect("remove concurrency fixture dir");
+}
+
+#[test]
+fn task_join_restores_a_struct_body_result() {
+    assert_fixture_exits_with_7(
+        "task_join_struct",
+        r#"
+struct Point { x: i64, y: i64 }
+
+trusted atom make() -> Point
+requires: true;
+ensures: true;
+body: {
+    task { Point { x: 3, y: 7 } }
+};
+
+trusted atom main()
+requires: true;
+ensures: true;
+body: {
+    let p = make();
+    p.y
+};
+"#,
+        "joining a task whose body yields a struct must restore the whole aggregate",
+    );
+}
+
+#[test]
+fn task_group_all_join_restores_the_last_child_f64_result() {
+    assert_fixture_exits_with_7(
+        "task_group_all_join_f64",
+        r#"
+trusted atom last() -> f64
+requires: true;
+ensures: true;
+body: {
+    task_group {
+        task { 1.5 };
+        task { 2.5 }
+    }
+};
+
+trusted atom main()
+requires: true;
+ensures: true;
+body: {
+    if last() == 2.5 { 7 } else { 0 }
+};
+"#,
+        "task_group:all must hand back the last child's f64 result bit-for-bit",
+    );
+}
+
+#[test]
+fn task_group_any_join_restores_a_struct_winner_result() {
+    assert_fixture_exits_with_7(
+        "task_group_any_join_struct",
+        r#"
+struct Point { x: i64, y: i64 }
+
+trusted atom make() -> Point
+requires: true;
+ensures: true;
+body: {
+    task_group:any {
+        task { Point { x: 1, y: 7 } };
+        task { Point { x: 2, y: 7 } }
+    }
+};
+
+trusted atom main()
+requires: true;
+ensures: true;
+body: {
+    let p = make();
+    p.y
+};
+"#,
+        "task_group:any must unbox the winner's struct result exactly once (losers release their own)",
+    );
 }

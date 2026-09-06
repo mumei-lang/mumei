@@ -1,13 +1,14 @@
 use crate::codegen::lowering::{
-    bitpreserve_cast, enum_llvm_type, resolve_param_type, resolve_return_type,
+    bitpreserve_cast, box_payload_to_i64, enum_llvm_type, resolve_param_type, resolve_return_type,
+    unbox_payload_from_i64,
 };
 use crate::codegen::pattern_emit::{
     bind_pattern_variables, compile_pattern_test, find_field_index, find_field_index_by_name,
 };
 use crate::codegen::stmt_emit::compile_hir_stmt;
 use crate::codegen::task_runtime::{
-    compile_task_spawn, declare_task_group_any_externs, emit_task_join_only, emit_task_spawn_only,
-    static_next_task_group_id, PendingTask, TaskGroupAnyContext,
+    compile_task_spawn, declare_task_group_any_externs, emit_task_join_only, emit_task_join_raw,
+    emit_task_spawn_only, static_next_task_group_id, PendingTask, TaskGroupAnyContext,
 };
 use inkwell::builder::Builder;
 use inkwell::context::Context;
@@ -96,6 +97,32 @@ pub(crate) fn infer_struct_type_name(
             } else {
                 None
             }
+        }
+        // P25: `recv` on a `chan<Struct>` yields the declared payload type.
+        HirExpr::ChanRecv { channel } => {
+            let payload = chan_payload_type_name(channel, var_types)?;
+            let base = module_env.resolve_base_type(&payload);
+            if module_env.get_struct(&base).is_some() {
+                Some(base)
+            } else {
+                None
+            }
+        }
+        // P25: a joined `task` carries its body's tail value.
+        HirExpr::Task { body, .. } => infer_stmt_struct_type_name(body, var_types, module_env),
+        _ => None,
+    }
+}
+
+fn infer_stmt_struct_type_name(
+    stmt: &HirStmt,
+    var_types: &HashMap<String, String>,
+    module_env: &ModuleEnv,
+) -> Option<String> {
+    match stmt {
+        HirStmt::Expr(e) => infer_struct_type_name(e, var_types, module_env),
+        HirStmt::Block { tail_expr, .. } => {
+            infer_struct_type_name(tail_expr.as_deref()?, var_types, module_env)
         }
         _ => None,
     }
@@ -821,15 +848,28 @@ pub(crate) fn compile_hir_expr<'a>(
                     &[i64_type.const_int(any_ctx.group_id, false).into()],
                     "task_group_cancel_call",
                 ));
+                // Losers already released their boxed results inside the
+                // wrapper; only the winner's slot (mirrored into the group
+                // result) is still owned, so join raw and unbox once below.
                 for p in &pending {
-                    let _ = emit_task_join_only(context, builder, module, p)?;
+                    let _ = emit_task_join_raw(context, builder, module, p)?;
                 }
                 let result = llvm!(builder.build_load(
                     i64_type,
                     any_ctx.result_ptr,
                     "task_group_any_result"
-                ));
-                Ok(result)
+                ))
+                .into_int_value();
+                // P25 — restore the winner's type when every child agrees on
+                // it; mixed result types keep the raw i64.
+                let shared_ty = pending
+                    .first()
+                    .map(|p| p.result_type())
+                    .filter(|ty| pending.iter().all(|p| p.result_type() == *ty));
+                match shared_ty {
+                    Some(ty) => unbox_payload_from_i64(context, builder, module, result, ty),
+                    None => Ok(result.into()),
+                }
             } else {
                 let mut last_val: BasicValueEnum = context.i64_type().const_int(0, false).into();
                 for p in &pending {
@@ -1036,25 +1076,22 @@ pub(crate) fn compile_hir_expr<'a>(
             };
             // P25 — marshal the payload into the runtime's i64 slot without
             // losing bits: f64 is bitcast, Str / struct pointers go through
-            // `ptrtoint`. Aggregates passed by value have no bit-preserving
-            // i64 encoding, so they are rejected rather than transported as a
-            // zero placeholder that reads back as plausible data.
+            // `ptrtoint`. Aggregates passed by value are copied into a heap
+            // box whose address travels through the slot; `recv` loads and
+            // frees it, so the box has exactly one owner at any time.
             let payload = match chan_payload_type_name(channel, var_types)
                 .map(|name| resolve_param_type(context, Some(name.as_str()), module_env))
             {
                 Some(payload_ty) => coerce_to_chan_payload(builder, val, payload_ty)?,
                 None => val,
             };
-            let val_i64 = bitpreserve_cast(builder, payload, context.i64_type().into())
-                .map_err(|_| {
-                    mumei_core::verification::MumeiError::codegen(format!(
-                        "channel payload of type {} cannot be sent: the runtime carries payloads \
-                         in a single i64 slot, which has no bit-preserving encoding for \
-                         by-value aggregates",
-                        payload.get_type()
-                    ))
-                })?
-                .into_int_value();
+            let val_i64 = box_payload_to_i64(context, builder, module, payload).map_err(|e| {
+                mumei_core::verification::MumeiError::codegen(format!(
+                    "channel payload of type {} cannot be sent: {}",
+                    payload.get_type(),
+                    e
+                ))
+            })?;
             let send_fn = module.get_function("__mumei_chan_send").unwrap_or_else(|| {
                 let i64_type = context.i64_type();
                 let fn_type = context
@@ -1104,14 +1141,19 @@ pub(crate) fn compile_hir_expr<'a>(
                 .unwrap_or(context.i64_type().const_int(0, false).into());
             // P25 — restore the payload's declared type from the runtime's i64
             // slot (`chan<f64>` bitcasts back to double, `chan<Str>` goes
-            // through `inttoptr`). Channels whose payload type is unknown, or
-            // whose payload has no bit-preserving i64 encoding, keep the raw
-            // i64 the runtime returned.
+            // through `inttoptr`, aggregates are loaded from their heap box
+            // and the box is freed). Channels whose payload type is unknown
+            // keep the raw i64 the runtime returned.
             let payload_ty = chan_payload_type_name(channel, var_types)
                 .map(|name| resolve_param_type(context, Some(name.as_str()), module_env))
                 .filter(|ty| *ty != context.i64_type().into());
             match payload_ty {
-                Some(ty) => Ok(bitpreserve_cast(builder, raw, ty).unwrap_or(raw)),
+                Some(ty) => {
+                    Ok(
+                        unbox_payload_from_i64(context, builder, module, raw.into_int_value(), ty)
+                            .unwrap_or(raw),
+                    )
+                }
                 None => Ok(raw),
             }
         }
