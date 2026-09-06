@@ -214,6 +214,35 @@ fn declare_free<'a>(
     })
 }
 
+/// Declare `__mumei_payload_box_alloc_failed(size: i64)`, the runtime's
+/// fatal path (message + `abort`) for a boxed payload whose `malloc` returned
+/// null.
+fn declare_payload_box_alloc_failed<'a>(
+    context: &'a Context,
+    module: &Module<'a>,
+) -> inkwell::values::FunctionValue<'a> {
+    module
+        .get_function("__mumei_payload_box_alloc_failed")
+        .unwrap_or_else(|| {
+            let fn_type = context
+                .void_type()
+                .fn_type(&[context.i64_type().into()], false);
+            let f = module.add_function(
+                "__mumei_payload_box_alloc_failed",
+                fn_type,
+                Some(inkwell::module::Linkage::External),
+            );
+            f.add_attribute(
+                inkwell::attributes::AttributeLoc::Function,
+                context.create_enum_attribute(
+                    inkwell::attributes::Attribute::get_named_enum_kind_id("noreturn"),
+                    0,
+                ),
+            );
+            f
+        })
+}
+
 /// Whether a value of `ty` has to be boxed to fit the runtime's i64 slot.
 /// Scalars and pointers are bit-preserved in place by `bitpreserve_cast`;
 /// aggregates (struct values, enum tagged unions, array fat pointers) do not
@@ -254,6 +283,22 @@ pub(crate) fn box_payload_to_i64<'a>(
         .left()
         .ok_or_else(|| MumeiError::codegen("malloc returned void".to_string()))?
         .into_pointer_value();
+
+    let function = builder
+        .get_insert_block()
+        .and_then(|bb| bb.get_parent())
+        .ok_or_else(|| MumeiError::codegen("payload box outside of a function".to_string()))?;
+    let fail_bb = context.append_basic_block(function, "payload_box_alloc_failed");
+    let store_bb = context.append_basic_block(function, "payload_box_store");
+    let is_null = llvm!(builder.build_is_null(box_ptr, "payload_box_is_null"));
+    llvm!(builder.build_conditional_branch(is_null, fail_bb, store_bb));
+
+    builder.position_at_end(fail_bb);
+    let fail_fn = declare_payload_box_alloc_failed(context, module);
+    llvm!(builder.build_call(fail_fn, &[size_i64.into()], ""));
+    llvm!(builder.build_unreachable());
+
+    builder.position_at_end(store_bb);
     llvm!(builder.build_store(box_ptr, value));
     Ok(llvm!(builder.build_ptr_to_int(
         box_ptr,
