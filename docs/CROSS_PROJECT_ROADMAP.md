@@ -1959,7 +1959,13 @@ capability model は Stage 1 のみが opt-in 拡張として上積みされて�
 - ✅ **配列要素 capture**: task wrapper が args struct から `(len, data)` を load し、task body が親の要素ストレージを GEP する。
 - ✅ **回帰なし**: `cargo test --test test_concurrency` 25/25 passed（既存の struct capture / `task_group:all` / `:any` / Phase 1h-2 所有権検証を含む）。`cargo tree --edges no-dev` に opentelemetry は現れない。
 
-**残課題**: 値渡し aggregate の payload（ビット保存できる i64 表現がない）と、非 i64 の task join 結果（既存の i64 coerce）。
+**Follow-up（測定 2026-09-06）**: 旧残課題 2 件を解消した（mumei `docs/ROADMAP.md` P25「Follow-up」節）。
+- ✅ **値渡し aggregate の payload**: `send` は struct 値を `malloc` した box にコピーし、box アドレスを `ptrtoint` で i64 スロットへ載せる。`recv` は `inttoptr` → 宣言型で `load` → `free` を 1 回だけ行う（box の所有者は常に 1 つ）。cancel で捨てられた `send` は `__mumei_chan_send_owned` の戻り値で送信側が自分の box を解放する。
+- ✅ **非 i64 の task join 結果**: wrapper が body 結果を `send` と同じビット保存変換（`f64` は `bitcast`、aggregate は heap box）で i64 結果スロットへ格納し、`PendingTask` が body の LLVM 型を保持して `join` で復元する。`task_group:any` の敗者は wrapper 内で自身の box を解放する。
+- ✅ **runtime 無変更**: `__mumei_chan_send` / `__mumei_chan_recv` / task group helper のシグネチャは i64 固定のまま。
+- ✅ **回帰ゲート**: `cargo test --test test_concurrency` 39/39 passed（struct 値渡し往復、`task { f64 }` / `task { struct }` join、`task_group:all` f64 / `:any` struct 復元、cancel 経路の box 解放、`chan<[i64]>` 拒否、Phase 0-nominal の同レイアウト struct 拒否を含む）、`cargo test --test test_run` 10/10 passed（`chan<Point>` 往復と非 i64 join の E2E 2 件を追加）、`cargo test -p mumei-core lowering` 通過、`tests/test_concurrency_runtime.mm` に `chan<Point>` 往復 / `task { f64 }` / `task { Point }` fixture を追加、`cargo tree --edges no-dev | grep -i opentelemetry` は空。
+
+**残る制約**: box は shallow copy であり、ポインタを含む aggregate はポインタ値のみ搬送する。配列 payload（`chan<[i64]>`）は fat pointer で by-value 表現がないため codegen 診断で拒否する。
 
 **関連ファイル**:
 - `mumei-emit-llvm/src/codegen/expr_emit.rs` / `task_runtime.rs` / `driver.rs` / `stmt_emit.rs`

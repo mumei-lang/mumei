@@ -113,3 +113,43 @@ ensures: true;
 body: {
     task { arr[0] + arr[1] }
 }
+
+// --- P25 follow-up: by-value aggregate payload over `chan<Point>` ---
+//
+// A struct has no bit-preserving i64 encoding, so `send` copies it
+// into a `malloc`ed box and transports the box address through the
+// runtime's `int64_t` slot (`ptrtoint`); `recv` does `inttoptr`,
+// loads the aggregate, and `free`s the box exactly once. The runtime
+// helpers keep their i64 signatures. Before the follow-up this was
+// rejected with a codegen diagnostic.
+struct Point { x: i64, y: i64 }
+
+trusted atom chan_point_round_trip(ch: chan<Point>, p: Point) -> i64
+requires: true;
+ensures: true;
+body: {
+    send(ch, p);
+    let q = recv(ch);
+    q.x + q.y
+}
+
+// --- P25 follow-up: non-i64 task join results ---
+//
+// The pthread result slot stays `i64`, but the wrapper stores the
+// body result with the same bit-preserving encoding as `send`
+// (`bitcast` for f64, heap box for aggregates) and `join` restores
+// the body's LLVM type. Before the follow-up any non-int body result
+// was coerced to `i64 0`.
+trusted atom task_join_f64() -> f64
+requires: true;
+ensures: true;
+body: {
+    task { 2.5 }
+}
+
+trusted atom task_join_point() -> Point
+requires: true;
+ensures: true;
+body: {
+    task { Point { x: 3, y: 4 } }
+}

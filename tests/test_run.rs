@@ -337,3 +337,98 @@ body: {
 
     std::fs::remove_dir_all(fixture.parent().unwrap()).expect("remove run fixture dir");
 }
+
+#[test]
+fn run_command_round_trips_a_struct_payload_through_a_channel() {
+    let bin = env!("CARGO_BIN_EXE_mumei");
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let fixture = write_fixture(
+        "chan_struct_payload",
+        r#"
+struct Point { x: i64, y: i64 }
+
+trusted atom relay(ch: chan<Point>, p: Point) -> i64
+requires: true;
+ensures: true;
+body: {
+    send(ch, p);
+    let q = recv(ch);
+    q.x + q.y
+};
+
+trusted atom main()
+requires: true;
+ensures: true;
+body: {
+    relay(0, Point { x: 3, y: 4 })
+};
+"#,
+    );
+
+    let output = Command::new(bin)
+        .arg("run")
+        .arg(&fixture)
+        .current_dir(manifest_dir)
+        .output()
+        .unwrap_or_else(|err| {
+            panic!("failed to run mumei run with a struct channel payload: {err}")
+        });
+
+    assert_eq!(
+        output.status.code(),
+        Some(7),
+        "a struct sent by value through `chan<Point>` must arrive with every field intact\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    std::fs::remove_dir_all(fixture.parent().unwrap()).expect("remove run fixture dir");
+}
+
+#[test]
+fn run_command_joins_non_i64_task_results() {
+    let bin = env!("CARGO_BIN_EXE_mumei");
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let fixture = write_fixture(
+        "task_join_non_i64",
+        r#"
+struct Point { x: i64, y: i64 }
+
+trusted atom half_more() -> f64
+requires: true;
+ensures: true;
+body: { task { 2.5 } };
+
+trusted atom make_point() -> Point
+requires: true;
+ensures: true;
+body: { task { Point { x: 3, y: 4 } } };
+
+trusted atom main()
+requires: true;
+ensures: true;
+body: {
+    let r = half_more();
+    let p = make_point();
+    if r == 2.5 { p.x + p.y } else { 0 }
+};
+"#,
+    );
+
+    let output = Command::new(bin)
+        .arg("run")
+        .arg(&fixture)
+        .current_dir(manifest_dir)
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run mumei run with non-i64 task joins: {err}"));
+
+    assert_eq!(
+        output.status.code(),
+        Some(7),
+        "joining `task {{ f64 }}` and `task {{ Point }}` must restore both results instead of an i64 zero\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    std::fs::remove_dir_all(fixture.parent().unwrap()).expect("remove run fixture dir");
+}
