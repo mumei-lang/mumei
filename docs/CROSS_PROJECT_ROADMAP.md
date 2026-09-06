@@ -927,6 +927,7 @@ audit / migration / self-healing / MCP の 1 コマンド導線を提供する�
 | ✅ | Priority 23 / P27: 6 軸定量評価スイート（paper §7 の評価軸を制御タスク群で測定） | mumei + papers | Implemented (測定 2026-08-30。`PYTHONPATH=. pytest tests/` 177/177 passed（`tests/test_evaluation_suite.py` 23 件を新規追加）。`benchmarks/evaluation_suite.py` が既存 6 カテゴリ 46 ファイル / 105 atom を制御タスク群として `PAPER_DRAFT.md` §7 の 6 軸を 1 回の run で測定する: proof success rate 100.00%（46/46）、counterexample quality 100.00%（20/20）、trust surface アプリ trusted atom 0 / FFI 境界 0 / Lean escalation 候補 6、user burden 2.4667 clauses/atom・spec/impl token 比 1.8902、runtime artifact utility 93.27%（97/104 emission）、repair convergence は agent 修復データ非投入のため `SKIP`。既存 `run_benchmarks.py` / `scale_trust_surface.py` の測定をそのまま再利用し、新規 verdict 語彙は追加せず欠測は `SKIP` に決定論的縮退。artifact は `benchmarks/evaluation/evaluation_suite.json`（`mumei.evaluation_suite/v1`）と `docs/EVALUATION_SUITE.md`。`cargo tree --edges no-dev` に opentelemetry は現れない) |
 | ✅ | Priority 24 / P28: ベンチマーク verdict とインフラ失敗の分離 | mumei | Implemented (測定 2026-08-30。`PYTHONPATH=. pytest tests/` 185/185 passed（回帰テスト 8 件を新規追加）。`mumei verify` は棄却と判定未到達（timeout / 入力不可読 / crash）の双方で終了コード 1 を返すため、`run_benchmarks.py` が verdict サマリ行（`✅` / `❌` / unverifiable の `⚠️`）の有無で両者を見分け、判定に到達しなかった run を `verify_status` = `TIMEOUT` / `FAIL` かつ `actual` = `SKIP` として counterexample catch rate から構造的に除外し、`no_verdict_files` / `no_verdict_statuses` として markdown・forge feedback・`evaluation_suite.json` に明示する。既存 6 カテゴリ 46 ファイルは全件 `MEASURED` / `no_verdict_files` 0 のため P27 の測定値は不変。新規 verdict 語彙は追加せず `MEASURED` / `TIMEOUT` / `FAIL` / `SKIP` の既存語彙のみ) |
 | 🔧 | Priority 25: 意味モデル移行と AI 主体 Lean 証明生成 — 実行計画 | mumei-agent + mumei-lean + mumei + papers | Proposed（Track A: 外部コード安全性のデータフロー層 / Track B: AI 主体 Lean 証明生成 / Track C: コンパイラ側補助。Wave 1〜5 の対応順序は本書「Priority 25」節） |
+| 🔧 | Priority 26: mumei コンパイラ側残課題バックログの整理と対応順序 | mumei + mumei-agent + papers | Proposed（群 1: 独立・小規模 R-1〜R-6 随時 / 群 2: Priority 25 Wave 連動 R-7〜R-10 / 群 3: 需要待ち R-11〜R-18。詳細は本書「Priority 26」節） |
 | ⏸️ | SI-4: no_std Ecosystem | mumei | Deferred |
 
 ## vStd: Verified Standard Library Expansion
@@ -2125,6 +2126,78 @@ Z3 unknown ──> known witness / tactic ladder（決定論、既存） ──>
 - mumei-lean: `scripts/expr_translator.py` / `scripts/ingest_cert.py` / `scripts/bridge.py` / `scripts/export_cert.py` / `scripts/tactic_search.py` / `docs/LEAN_TRANSLATOR_SPEC.md` §8 / §10 / §12 / `docs/ARCHITECTURE.md` / `docs/ROADMAP.md`
 - mumei: `mumei-core/src/verification/types.rs` / `mumei-core/src/proof_cert/` / `docs/PROOF_CERTIFICATE.md` / `benchmarks/evaluation_suite.py` / `docs/ROADMAP.md` P10-D / P30
 - papers: `PAPER_DRAFT.md` §8 Known limitations #2
+
+---
+
+## Priority 26: mumei コンパイラ側残課題バックログの整理と対応順序（🔧 Proposed）
+
+**Repository**: `mumei-lang/mumei`（主） / `mumei-lang/mumei-agent`（P27 repair convergence の certificate 供給、Layer B 言語拡張） / `mumei-lang/papers`（P27 TikZ 図）
+
+**目的**: Priority 16〜24 の「✅ Implemented」節の末尾に個別に残された **残課題** と、`docs/ROADMAP.md` で Implementation Plan まで書かれたまま未着手の P10-B / P10-C / P10-D を、1 つのバックログとして棚卸しし、着手条件と順序を決める。Priority 25（Track A/B/C）の実行と競合しないよう、Priority 25 と共有するファイル（`fragment.rs` / `executor.rs` / evaluation suite）に触る項目は Priority 25 の該当 Wave に従属させる。
+
+**判断基準**: 各項目を次の 3 群に分ける。
+- **群 1（独立・小規模、随時着手可）**: 単一 repo・単一 crate に閉じ、契約語彙・`translator_version` / `bridge_lemma_hash` に触らないもの。1 PR で完結する。
+- **群 2（Priority 25 と連動）**: Lean escalation の母数や evaluation suite の測定値を動かすため、Priority 25 の Wave に位置を固定するもの。
+- **群 3（需要待ち / Deferred 維持）**: 着手トリガが外部に依存するもの。トリガを明記して保留を継続する。
+
+### 群 1: 独立・小規模（随時着手可、推奨順に記載）
+
+| # | 由来 | タスク | 内容 | 完了条件 / 回帰ゲート |
+|---|---|---|---|---|
+| R-1 | P28 残課題 | `mumei verify` の終了コード分離 | 棄却（counterexample あり）とインフラ失敗（timeout / 入力不可読 / crash）に別々の終了コードを割り当て、`run_benchmarks.py` の verdict サマリ行照合（`✅` / `❌` / `⚠️`）を終了コード判定へ置換する。既存の `1` を棄却に残し、インフラ失敗へ新コードを割り当てて後方互換を保つ | `tests/test_verify_cert_strict.rs` 系 CLI テストに終了コード表を追加。`run_benchmarks.py` の `no_verdict_files` / `no_verdict_statuses` が出力照合なしで同一値。`docs/CLI_GUIDE.md` 相当に終了コード表を追記 |
+| R-2 | P18 残課題 | エディタの全 pending atom 表示 | `src/lsp.rs` の Lean escalation 診断を「1 ファイルにつき最初の未決 atom のみ」から certificate 記載の全未決 atom へ拡張（`lean_verified` 側は既に全件） | `cargo test --test test_lsp_lean_escalation` に複数 pending ケース追加。`editors/vscode` の ghost text は語彙不変 |
+| R-3 | P26 残課題 | Proof Graph の import / prelude atom の `verification_status` | 当該 run で未検証の import 済み / prelude atom の `null` を、sibling `*.proof.json` / `*.proof-cert.json` があれば参照して埋める（無ければ `null` 維持）。`edges[].is_consistent` は「未検査」を `null` で区別できるよう三値化を検討（`true` の意味変更はしない） | `cargo test -p mumei-core proof_graph` / `tests/test_proof_graph_lib.py`。verdict 語彙の追加なし |
+| R-4 | P26 残課題 | Proof Graph の `--escalate-lean` E2E | mumei-lean bridge を要する `lean_verified` 昇格 → proof graph 反映を、mumei-lean 側 fixture（`MUMEI_LEAN_SKIP_LIVE=1` の決定論経路）で回帰固定する | `tests/test_proof_graph_export.rs` または Python 側テストに fixture ベースの 1 ケース追加 |
+| R-5 | P25 残課題 | 非 i64 task join 結果の codegen | task body の結果が `f64` / `Str` / ポインタの場合の join 経路を、`send` / `recv` と同じ `bitpreserve_cast` へ揃える。値渡し aggregate（struct）は引き続き codegen 診断で拒否（R-9 参照） | `cargo test --test test_concurrency` に join 型別ケース追加。runtime helper シグネチャは i64 固定のまま |
+| R-6 | P-Deferred-C | stdin（`-`）入力 | `src/main.rs` の `load_source` を拡張し `-` で stdin から読み込む。パイプライン用途（`mumei-agent` からの一時ファイルレス呼び出し）が出た時点で着手 | `tests/test_cli*.rs` に stdin ケース 1 件 |
+
+順序の根拠: R-1 は benchmark harness の脆さ（出力文字列照合）を除く基盤修正で、以降のすべての測定（Priority 25 B-7 を含む）の信頼性に効くため最初に置く。R-2 / R-3 / R-4 は UX の完成度で、他に影響しない。R-5 は codegen だが既存経路の再利用で閉じる。R-6 は需要発生時。
+
+### 群 2: Priority 25 と連動（Wave 位置を固定）
+
+| # | 由来 | タスク | 内容 | Priority 25 上の位置 |
+|---|---|---|---|---|
+| R-7 | P27 残課題 | repair convergence の `MEASURED` 化 | mumei-agent の自己修復 run（`heal` / `proliferate`）が生成した certificate を `benchmarks/evaluation_suite.py` に投入する経路を固定し、コミット済み測定を `SKIP` から `MEASURED` へ。counterexample タスク（`expected: FAIL`）の runtime artifact utility も測定範囲へ含める | **B-7 と同一 PR 群**（Wave 4）。AI 経路 on/off の測定と同時に repair convergence を初回測定する。paper §9 Future Work #1 の TikZ 図差し替えは papers 側で同時に行う |
+| R-8 | P10-D | 有界低次数非線形算術（`nlsat` / `grobner`） | `fragment.rs` の `nonlinear_arithmetic` タグを「Lean 確定」から「nlsat 先行試行」へ再分類し、`executor.rs` に nlsat 実行経路と unknown / timeout 時の Lean 降格理由記録を追加（`docs/ROADMAP.md` P10-D の Implementation Plan どおり） | **= C-2**（Wave 5、B-7 測定確定後）。Lean 送りの母数を動かすため測定前には入れない |
+| R-9 | P25 残課題 | 値渡し aggregate payload の codegen | struct を値で `send` / task 結果に載せる経路。i64 ビット保存では表現できず runtime helper のシグネチャ変更（ポインタ + サイズ、または boxed payload）を要する | Priority 25 とは非依存だが、runtime ABI 変更は SI-4 no_std / P7-C Wasm の前提と重なるため、**R-5 完了後に ABI 案を `docs/CONCURRENCY.md` に起票してから**着手 |
+| R-10 | P30 残課題 | body semantics 依存の非算術 `unknown_obligation` | 残る obligation の goal 形状分類と、ladder 末尾追記 / bridge lemma 追加（hash lockstep）/ AI 証明生成への振り分け | **= C-1**（Wave 1）。bridge lemma 追加が必要と判明した形状は別 Priority として起票 |
+
+### 群 3: 需要待ち / Deferred 維持（トリガを明記）
+
+| # | 由来 | タスク | 着手トリガ |
+|---|---|---|---|
+| R-11 | P10-B | Regular Expression Theory（`Z3_RE_SORT` / RegLan） | `regex_semantics` タグで Lean へ送られる義務が std / benchmark / dogfood に実際に出現し、Priority 25 B-1（translator 拡張の regex 項目）でも lowering できないと判明したとき。それまでは `prefix_of` / `suffix_of` / `contains` 近似 + Lean 委譲を維持 |
+| R-12 | P10-C | Finite Non-recursive ADT（`Z3_DATATYPE_SORT`） | ペイロード付き enum の `match` 網羅性 / セレクタ型安全性の違反が Int タグ経路で検出漏れ・偽陽性として報告されたとき、または vStd forge task が payload 付き variant を要求したとき |
+| R-13 | P17 残課題 | 同期プリミティブで保護された共有可変状態の干渉推論 | `std/concurrency` 系 atom または mumei-demo シナリオで lock / unlock を伴う共有状態が必要になったとき。Priority 25 Track A の A-6「リソース取得 / 解放対応」の設計（外部コード側）が先に固まるので、その語彙を流用する |
+| R-14 | Multi-Stage IR Phase 4 | borrow checking / lifetime analysis | 設計未着手。`LinearityCtx` の move / drop 解析で std / demo が回っている間は着手しない。参照型（`&T`）を言語に導入する判断が先 |
+| R-15 | P19 / P29 残課題 | Capability Stage 2〜4 / per-receiver capability 解決 | Priority 15 の需要トリガ T1〜T4（`docs/CAPABILITY_DEMAND_STUDY.md`）。結論は否定的のため保留継続 |
+| R-16 | mumei-agent Layer B | C / C++ / Java / JavaScript の Layer B（strict Z3 verification） | dogfood corpus に当該言語の実 OSS を追加する判断がされたとき。Priority 25 Track A の `DataflowFacts` が言語非依存に設計されていれば、tree-sitter grammar 追加 + 言語別 `semantic_safety` 述語で足りる想定のため、**A-5 完了後** に再評価 |
+| R-17 | mumei-agent P-Deferred-B | `extract_spec_from_code` の Ruby / Swift / Kotlin 等 | 未対応言語でも LLM extractor が `unknown` として扱えるため、ユーザー要求が出るまで保留 |
+| R-18 | P7-C / SI-4 | Wasm target / no_std | 既存どおり Deferred。R-9 の runtime ABI 起票がこれらの前提整理を兼ねる |
+
+### 推奨着手順（Priority 25 と合わせた全体像）
+
+```
+随時（群 1）:      R-1 → R-2 → R-3 → R-4 → R-5 → (R-6 需要時)
+Wave 1（P25）:    A-1, A-2, B-0, B-1, C-1(=R-10)
+Wave 2（P25）:    A-3, A-4, A-5, B-2, B-3
+Wave 3（P25）:    B-4, B-5, A-6
+Wave 4（P25）:    B-6, B-7 + R-7（同一 PR 群）
+Wave 5（P25）:    C-2(=R-8), A-6 残り
+その後:           R-9（ABI 起票後）, 群 3 はトリガ発生時に個別起票
+```
+
+### スコープ外
+
+- 新規 verdict 語彙・別名 alias の追加、`translator_version` / `bridge_lemma_hash` の変更（必要なら別 Priority）。
+- units of measure の追加機能（直近 PR 群で実装済みの範囲を維持。残課題が出た時点で `docs/ROADMAP.md` に個別起票）。
+- V1-A〜V1-D 節（本書 1459〜1604 行付近）に残る「未実装」記述は実装済み後の古い記述であり、本 Priority では docs 整理の対象に含めない（別途 docs-sync で扱う）。
+
+### 関連ファイル
+
+- mumei: `src/main.rs` / `src/cli.rs` / `src/lsp.rs` / `mumei-core/src/proof_graph.rs` / `visualizer/proof_graph_lib.py` / `mumei-emit-llvm/`（concurrency codegen） / `mumei-core/src/verification/fragment.rs` / `mumei-core/src/verification/executor.rs` / `benchmarks/run_benchmarks.py` / `benchmarks/evaluation_suite.py` / `docs/ROADMAP.md`（P10-B/C/D、P17、P18、P25〜P30、P-Deferred-C）/ `docs/CONCURRENCY.md`
+- mumei-agent: `docs/ROADMAP.md`（Layer B 対応言語、P-Deferred-B）、self-healing certificate 出力（R-7）
+- papers: `PAPER_DRAFT.md` §9 Future Work #1
 
 ---
 
