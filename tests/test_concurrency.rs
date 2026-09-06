@@ -1029,6 +1029,44 @@ body: {
 }
 
 #[test]
+fn boxed_payload_allocation_failure_aborts_through_the_runtime_instead_of_storing_to_null() {
+    let ir = emit_atom_ir(
+        "chan_aggregate_alloc_failed_ir",
+        r#"
+struct Point { x: i64, y: i64 }
+
+trusted atom relay(ch: chan<Point>, p: Point) -> Point
+requires: true;
+ensures: true;
+body: {
+    send(ch, p);
+    recv(ch)
+};
+"#,
+        "relay",
+    );
+    assert!(
+        ir.contains("payload_box_is_null = icmp eq ptr %payload_box, null")
+            && ir.contains("br i1 %payload_box_is_null, label %payload_box_alloc_failed")
+            && ir.contains("call void @__mumei_payload_box_alloc_failed(i64 ")
+            && ir.contains("unreachable")
+            && ir.contains("declare void @__mumei_payload_box_alloc_failed(i64) #0")
+            && ir.contains("attributes #0 = { noreturn }"),
+        "a null `malloc` result must branch to the runtime's fatal helper before the aggregate is stored\n{ir}"
+    );
+    let store_idx = ir
+        .find("store { i64, i64 } %")
+        .expect("boxed send must store the aggregate");
+    let branch_idx = ir
+        .find("br i1 %payload_box_is_null")
+        .expect("boxed send must guard the allocation");
+    assert!(
+        branch_idx < store_idx,
+        "the null guard must dominate the store into the box\n{ir}"
+    );
+}
+
+#[test]
 fn chan_struct_payload_round_trips_by_value_through_send_and_recv() {
     assert_fixture_exits_with_7(
         "chan_struct_round_trip",

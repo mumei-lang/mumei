@@ -12,6 +12,7 @@
  *   void __mumei_chan_send(int64_t chan_id, int64_t value);
  *   int64_t __mumei_chan_send_owned(int64_t chan_id, int64_t value);
  *   int64_t __mumei_chan_recv(int64_t chan_id);
+ *   void __mumei_payload_box_alloc_failed(int64_t size);  // noreturn
  *
  * Channels are identified by a small integer handle (i64). The front
  * end currently lowers `chan<T>` literals to `0` (the default
@@ -301,6 +302,16 @@ int64_t __mumei_chan_send_owned(int64_t chan_id, int64_t value) {
 
 void __mumei_chan_send(int64_t chan_id, int64_t value) {
     (void)__mumei_chan_send_owned(chan_id, value);
+}
+
+/* Called by codegen when `malloc` for a boxed aggregate payload (channel
+ * message or task result) returns NULL. */
+void __mumei_payload_box_alloc_failed(int64_t size) {
+    fprintf(stderr,
+            "[mumei runtime] fatal: failed to allocate %lld bytes for a boxed "
+            "payload\n",
+            (long long)size);
+    abort();
 }
 
 int64_t __mumei_chan_recv(int64_t chan_id) {
