@@ -1436,3 +1436,54 @@ body: { pick() };
         "a `task_group:any` mixing a struct child with an i64 child cannot restore or free an aggregate winner and must be rejected",
     );
 }
+
+#[test]
+fn chan_send_rejects_a_same_layout_struct_of_another_nominal_type() {
+    assert_fixture_is_rejected(
+        "chan_same_layout_struct_rejected",
+        r#"
+struct Point { x: i64, y: i64 }
+struct Pair { a: i64, b: i64 }
+
+trusted atom relay(ch: chan<Point>, q: Pair) -> Point
+requires: true;
+ensures: true;
+body: { send(ch, q); recv(ch) };
+
+trusted atom main()
+requires: true;
+ensures: true;
+body: { let p = relay(0, Pair { a: 1, b: 2 }); p.x };
+"#,
+        "send on 'chan<Point>' expects struct 'Point' but got struct 'Pair'",
+        "`Point` and `Pair` share one LLVM layout, so only the nominal type checker can tell a `Pair` sent on `chan<Point>` apart",
+    );
+}
+
+#[test]
+fn task_group_any_rejects_same_layout_structs_of_different_nominal_types() {
+    assert_fixture_is_rejected(
+        "task_group_any_same_layout_struct_rejected",
+        r#"
+struct Point { x: i64, y: i64 }
+struct Pair { a: i64, b: i64 }
+
+trusted atom pick() -> Point
+requires: true;
+ensures: true;
+body: {
+    task_group:any {
+        task { Point { x: 3, y: 7 } };
+        task { Pair { a: 1, b: 2 } }
+    }
+};
+
+trusted atom main()
+requires: true;
+ensures: true;
+body: { let p = pick(); p.x };
+"#,
+        "task_group:any children yield struct 'Point' and struct 'Pair'",
+        "a `task_group:any` mixing two same-layout structs must be rejected nominally even though codegen sees one LLVM type",
+    );
+}
