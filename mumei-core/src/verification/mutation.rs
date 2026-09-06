@@ -52,6 +52,11 @@ fn flip_binary_op(op: &Op) -> Op {
         Op::And => Op::Or,
         Op::Or => Op::And,
         Op::Implies => Op::And,
+        Op::BitAnd => Op::BitOr,
+        Op::BitOr => Op::BitAnd,
+        Op::BitXor => Op::BitAnd,
+        Op::Shl => Op::Shr,
+        Op::Shr => Op::Shl,
     }
 }
 

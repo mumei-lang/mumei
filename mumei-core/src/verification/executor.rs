@@ -31,6 +31,7 @@ pub fn verify_with_config(
             enable_spurious_detection: true,
             enable_vacuity_check: false,
             ieee754_f64: false,
+            bitvec_i64: false,
             property_based_config: None,
             task_id: orchestration_task_id_from_env(),
             generation_id: orchestration_generation_id_from_env(),
@@ -54,6 +55,7 @@ pub fn verify_with_verification_config(
             enable_spurious_detection: config.enable_spurious_detection,
             enable_vacuity_check: config.enable_vacuity_check,
             ieee754_f64: config.ieee754_f64,
+            bitvec_i64: config.bitvec_i64,
             property_based_config: config.property_based_test.as_ref(),
             task_id: orchestration_task_id_from_env(),
             generation_id: orchestration_generation_id_from_env(),
@@ -94,6 +96,7 @@ pub fn verify(hir_atom: &HirAtom, output_dir: &Path, module_env: &ModuleEnv) -> 
             enable_spurious_detection: true,
             enable_vacuity_check: false,
             ieee754_f64: false,
+            bitvec_i64: false,
             property_based_config: None,
             task_id: orchestration_task_id_from_env(),
             generation_id: orchestration_generation_id_from_env(),
@@ -107,6 +110,7 @@ pub(crate) struct VerifyInnerOptions<'a> {
     enable_spurious_detection: bool,
     enable_vacuity_check: bool,
     ieee754_f64: bool,
+    bitvec_i64: bool,
     property_based_config: Option<&'a PropertyBasedTestConfig>,
     task_id: Option<String>,
     generation_id: Option<String>,
@@ -353,6 +357,7 @@ fn lower_clause_with_skip<'a>(
     clause: &str,
     label: &str,
     diagnostics: &mut Vec<String>,
+    solver_opt: Option<&Solver<'a>>,
 ) -> Result<ClauseLoweringOutcome<'a>, MumeiError> {
     let clause = normalize_foreign_boolean_literals(clause);
     let trimmed = clause.trim();
@@ -360,7 +365,7 @@ fn lower_clause_with_skip<'a>(
         return Ok(ClauseLoweringOutcome::Trivial);
     }
     let clause_ast = parse_expression(trimmed);
-    let clause_z3 = match expr_to_z3(vc, &clause_ast, env, None) {
+    let clause_z3 = match expr_to_z3(vc, &clause_ast, env, solver_opt) {
         Ok(value) => value,
         Err(err) if is_unsupported_clause_error(&err) => {
             push_skip_warning(
@@ -397,12 +402,33 @@ pub(crate) fn verify_inner(
         enable_spurious_detection,
         enable_vacuity_check,
         ieee754_f64,
+        bitvec_i64,
         property_based_config,
         task_id,
         generation_id: _generation_id,
     } = options;
     let timeout_ms = orchestration_timeout_ms_from_env().unwrap_or(timeout_ms);
     let atom = &hir_atom.atom;
+    if let Some(value) = unsupported_semantics_value(atom) {
+        return Err(MumeiError::verification_at(
+            format!(
+                "atom '{}' declares an unknown semantics mode '{}'",
+                atom.name, value
+            ),
+            atom.span.clone(),
+        )
+        .with_help(format!(
+            "supported values: {}",
+            SUPPORTED_SEMANTICS.join(", ")
+        )));
+    }
+    // An atom whose contract only has a meaning under two's complement wrapping
+    // is always verified with the `BV(64)` encoding, whatever entry point the
+    // caller used (`verify`, `run`, `publish`, the LSP, …): the `Int` encoding
+    // cannot lower it at all. Every other atom keeps the default encoding
+    // unless the caller asked for `--bitvec-i64`.
+    let bitvec_i64_global = bitvec_i64;
+    let bitvec_i64 = bitvec_i64 || atom_requires_bitvector_semantics_in_module(atom, module_env);
 
     let mut metrics = VerificationMetrics::new(&atom.name);
     metrics.task_id = task_id;
@@ -414,6 +440,21 @@ pub(crate) fn verify_inner(
         return Ok(());
     }
 
+    // Phase 0-units: 単位型（units of measure）の一致検査。AST 上の純粋な型検査で、
+    // Z3 エンコードや MIR には影響しない。不一致は TypeError として証明前に拒否する。
+    let phase_start = std::time::Instant::now();
+    verify_unit_consistency(atom, &hir_atom.body_stmt, module_env)?;
+    metrics.record_phase("Phase 0-units: unit consistency", phase_start.elapsed());
+
+    // Phase 0-nominal: 構造体の名前的型検査。parser 以降は struct を構造的に扱う
+    // ため、同レイアウトの別名 struct はここで区別する。trusted atom も対象。
+    let phase_start = std::time::Instant::now();
+    verify_nominal_struct_types(atom, &hir_atom.body_stmt, module_env)?;
+    metrics.record_phase(
+        "Phase 0-nominal: nominal struct types",
+        phase_start.elapsed(),
+    );
+
     // Phase 0a: 仕様健全性チェック（proof attempt 前の requires/ensures/refinement SAT）
     let phase_start = std::time::Instant::now();
     if let Err(err) = check_spec_satisfiability_with_timeout(
@@ -421,6 +462,7 @@ pub(crate) fn verify_inner(
         module_env,
         property_based_config,
         ieee754_f64,
+        bitvec_i64_global,
         timeout_ms,
     ) {
         let diagnostic = format!("{}: {}", err.kind, err.message);
@@ -628,6 +670,7 @@ pub(crate) fn verify_inner(
             invariant_expr,
             module_env,
             ieee754_f64,
+            bitvec_i64,
         )?;
     }
     metrics.record_phase("Phase 1d: atom invariant", phase_start.elapsed());
@@ -654,7 +697,7 @@ pub(crate) fn verify_inner(
     // Rvalue::Use, so violations are only reported for Move types.
     // Move type violations are hard errors; Copy type false positives are eliminated.
     let phase_start = std::time::Instant::now();
-    let mir_body = crate::mir::lower_hir_to_mir(hir_atom);
+    let mir_body = crate::mir::lower_hir_to_mir_with_env(hir_atom, Some(module_env));
     let move_conflict_locals: Vec<(crate::mir::Local, crate::mir::BasicBlockId)> = Vec::new();
     if mir_body.check_analysis_budget().is_ok() {
         let move_result = crate::mir_analysis::analyze_moves(&mir_body);
@@ -1185,6 +1228,9 @@ pub(crate) fn verify_inner(
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
         profiler: Some(&profiler_cell),
         ieee754_f64,
+        bitvec_i64,
+        bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
+        bitvec_i64_global,
     };
 
     let mut env: Env = HashMap::new();
@@ -1201,6 +1247,7 @@ pub(crate) fn verify_inner(
             param.type_name.as_deref(),
             module_env,
             ieee754_f64,
+            bitvec_i64,
         );
         env.insert(param.name.clone(), var);
     }
@@ -1211,7 +1258,25 @@ pub(crate) fn verify_inner(
         atom.return_type.as_deref(),
         module_env,
         ieee754_f64,
+        bitvec_i64,
     );
+    // 構造体を返す atom: param と対称に `result.<field>` のシンボルを事前生成する。
+    // body 評価後に返り値のフィールドへ束縛し、Invariant(result) を暗黙の事後条件として課す。
+    let struct_return = atom
+        .return_type
+        .as_deref()
+        .and_then(|type_name| module_env.get_struct(type_name));
+    let result_struct_fields = struct_return.map(|sdef| {
+        seed_struct_fields(
+            &ctx,
+            &mut env,
+            "result",
+            sdef,
+            module_env,
+            ieee754_f64,
+            bitvec_i64,
+        )
+    });
 
     // Phase 1h (continued): ConflictingMerge Z3 infrastructure.
     // With Phase 4c Copy/Move type distinction integrated, move violations for
@@ -1241,8 +1306,7 @@ pub(crate) fn verify_inner(
             Int::from_i64(&ctx, val)
         } else {
             let ast = parse_expression(&q.start);
-            expr_to_z3(&vc, &ast, &mut env, None)?
-                .as_int()
+            as_int_like(&expr_to_z3(&vc, &ast, &mut env, None)?)
                 .unwrap_or(Int::new_const(&ctx, q.start.as_str()))
         };
         let end = if let Ok(val) = q.end.parse::<i64>() {
@@ -1250,8 +1314,7 @@ pub(crate) fn verify_inner(
         } else {
             // Parse end as expression to support `n - 1` etc.
             let ast = parse_expression(&q.end);
-            expr_to_z3(&vc, &ast, &mut env, None)?
-                .as_int()
+            as_int_like(&expr_to_z3(&vc, &ast, &mut env, None)?)
                 .unwrap_or(Int::new_const(&ctx, q.end.as_str()))
         };
 
@@ -1286,7 +1349,7 @@ pub(crate) fn verify_inner(
                 let mut pattern_asts: Vec<Dynamic> = Vec::new();
                 for (arr_name, idx_expr) in &arr_accesses {
                     if let Ok(idx_z3) = expr_to_z3(&vc, idx_expr, &mut env, None) {
-                        if let Some(idx_int) = idx_z3.as_int() {
+                        if let Some(idx_int) = as_int_like(&idx_z3) {
                             pattern_asts
                                 .push(z3_dynamic_array(&vc, arr_name, &env).select(&idx_int));
                         }
@@ -1331,23 +1394,13 @@ pub(crate) fn verify_inner(
                 // every std atom today binds a single `arr`, but would silently
                 // mis-bind bounds once another array (e.g. `data`, `aux`) is
                 // used in a forall condition.
-                let len_name = format!("len_{}", arr_name);
-                let len_var = if let Some(existing) = env.get(&len_name) {
-                    existing
-                        .as_int()
-                        .unwrap_or_else(|| Int::new_const(&ctx, len_name.as_str()))
-                } else {
-                    let l = Int::new_const(&ctx, len_name.as_str());
-                    solver.assert(&l.ge(&Int::from_i64(&ctx, 0)));
-                    env.insert(len_name.clone(), l.clone().into());
-                    l
-                };
+                let len_var = array_len_value(&ctx, &mut env, arr_name, bitvec_i64, Some(&solver));
                 if let Ok(idx_z3) = expr_to_z3(&vc, idx_expr, &mut env, None) {
-                    if let Some(idx_int) = idx_z3.as_int() {
-                        let body = range_cond.implies(&Bool::and(
-                            &ctx,
-                            &[&idx_int.ge(&Int::from_i64(&ctx, 0)), &idx_int.lt(&len_var)],
-                        ));
+                    if let (Some(idx_int), Some(in_bounds)) = (
+                        as_int_like(&idx_z3),
+                        index_in_bounds(&ctx, &idx_z3, &len_var),
+                    ) {
+                        let body = range_cond.implies(&in_bounds);
                         let pattern_ast = z3_dynamic_array(&vc, arr_name, &env).select(&idx_int);
                         let pattern_refs: Vec<&dyn z3::ast::Ast> =
                             vec![&pattern_ast as &dyn z3::ast::Ast];
@@ -1386,42 +1439,30 @@ pub(crate) fn verify_inner(
     for param in &atom.params {
         if let Some(type_name) = &param.type_name {
             if let Some(sdef) = module_env.get_struct(type_name) {
-                // 構造体の各フィールドをシンボリック変数として env に登録し、制約を適用
-                for field in &sdef.fields {
-                    let field_var_name = format!("{}_{}", param.name, field.name);
-                    let base = module_env.resolve_base_type(&field.type_name);
-                    let field_z3: Dynamic = match base.as_str() {
-                        "f64" => Float::new_const(&ctx, field_var_name.as_str(), 11, 53).into(),
-                        // Plan 9: Str fields as Z3 String Sort
-                        "Str" => Z3String::new_const(&ctx, field_var_name.as_str()).into(),
-                        _ => Int::new_const(&ctx, field_var_name.as_str()).into(),
-                    };
-                    env.insert(field_var_name.clone(), field_z3.clone());
-                    // qualified name も登録
-                    let qualified = format!("__struct_{}_{}", param.name, field.name);
-                    env.insert(qualified, field_z3.clone());
-
-                    // フィールド制約を solver に assert
-                    if let Some(constraint_raw) = &field.constraint {
-                        let mut local_env = env.clone();
-                        local_env.insert("v".to_string(), field_z3);
-                        let constraint_ast = crate::parser::expr::normalize_comparison_chains(
-                            parse_expression(constraint_raw),
-                        );
-                        let constraint_z3 = expr_to_z3(&vc, &constraint_ast, &mut local_env, None)?;
-                        if let Some(constraint_bool) = constraint_z3.as_bool() {
-                            let track_label =
-                                format!("track_struct_field_{}::{}", param.name, field.name);
-                            let track_bool = Bool::new_const(&ctx, track_label.as_str());
-                            solver.assert_and_track(&constraint_bool, &track_bool);
-                            profile_solver_assertion(
-                                &vc,
-                                &track_label,
-                                Some(atom.span.to_string()),
-                            );
-                        }
-                    }
-                }
+                // 構造体の各フィールドをシンボリック変数として env に登録し、制約を適用。
+                // ソートは `param_z3_value` に従う（`i64` は bit-vector モードで BV(64)、
+                // `f64` は既定 Real / `--ieee754-f64` で Float）ので、`result.<field>`
+                // や構造体リテラルのフィールド値と同じエンコーディングになる。
+                let param_fields = seed_struct_fields(
+                    &ctx,
+                    &mut env,
+                    &param.name,
+                    sdef,
+                    module_env,
+                    ieee754_f64,
+                    bitvec_i64,
+                );
+                // フィールド制約 (`where v ...`) と跨フィールド不変量 (`invariant: <expr>`)
+                // を前提として assert
+                assume_struct_contract(
+                    &vc,
+                    &solver,
+                    sdef,
+                    &param.name,
+                    &param_fields,
+                    &env,
+                    Some(atom.span.to_string()),
+                )?;
             }
         }
     }
@@ -1429,12 +1470,7 @@ pub(crate) fn verify_inner(
     // 2c. 全パラメータに対して配列長シンボルを事前生成
     #[allow(clippy::map_entry)]
     for param in &atom.params {
-        let len_name = format!("len_{}", param.name);
-        if !env.contains_key(&len_name) {
-            let len_var = Int::new_const(&ctx, len_name.as_str());
-            solver.assert(&len_var.ge(&Int::from_i64(&ctx, 0)));
-            env.insert(len_name, len_var.into());
-        }
+        array_len_value(&ctx, &mut env, &param.name, bitvec_i64, Some(&solver));
     }
 
     // 2d. 線形性チェック: consumed_params + ref パラメータの Z3 シンボリック Bool 連携
@@ -1534,6 +1570,7 @@ pub(crate) fn verify_inner(
                 &req_clause,
                 "requires",
                 &mut diagnostics,
+                None,
             )? {
                 ClauseLoweringOutcome::Trivial | ClauseLoweringOutcome::Skipped => {}
                 ClauseLoweringOutcome::Lowered(req_bool) => {
@@ -1582,7 +1619,7 @@ pub(crate) fn verify_inner(
                         (env.get(&ref_mut_p.name), env.get(&other_p.name))
                     {
                         if let (Some(rm_int), Some(ot_int)) =
-                            (ref_mut_val.as_int(), other_val.as_int())
+                            (as_int_like(ref_mut_val), as_int_like(other_val))
                         {
                             // ref_mut_val == other_val が SAT ならエイリアシングの可能性あり
                             solver.push();
@@ -1688,6 +1725,69 @@ pub(crate) fn verify_inner(
     // 4b. Taint Analysis: unverified 関数の呼び出しを検出し警告
     check_taint_propagation(atom, &hir_atom.body_stmt, &env, module_env);
 
+    // 4c. 構造体を返す atom: `result.<field>` を返り値のフィールドへ束縛し、
+    //     構造体の跨フィールド不変量を暗黙の事後条件 Invariant(result) として検証する。
+    if let (Some(sdef), Some(result_fields)) = (struct_return, &result_struct_fields) {
+        match struct_fields_of_value(&env, &body_result, sdef) {
+            Some(body_fields) => {
+                for ((_, result_sym), (_, body_val)) in result_fields.iter().zip(&body_fields) {
+                    let (lhs, rhs) = unify_branch_sorts(result_sym.clone(), body_val.clone())?;
+                    solver.assert(&lhs._eq(&rhs));
+                }
+            }
+            None if !sdef.invariants.is_empty() => {
+                return Err(MumeiError::verification_at(
+                    format!(
+                        "Cannot establish struct '{}' invariants for the result of atom '{}': the returned value is not a struct literal, parameter, local binding, call result, or conditional over those",
+                        sdef.name, atom.name
+                    ),
+                    atom.span.clone(),
+                ));
+            }
+            None => {}
+        }
+        if let Err(err) = check_struct_invariants(
+            &vc,
+            &solver,
+            sdef,
+            &format!("result of atom '{}'", atom.name),
+            result_fields,
+            &env,
+        ) {
+            let err_str = format!("{}", err);
+            let constraint_mappings = build_constraint_mappings_for_atom(atom, module_env);
+            let semantic_fb = build_semantic_feedback(
+                &constraint_mappings,
+                None,
+                atom,
+                FAILURE_POSTCONDITION_VIOLATED,
+                None,
+            );
+            save_visualizer_report(
+                output_dir,
+                "failed",
+                &atom.name,
+                "N/A",
+                "N/A",
+                &err_str,
+                None,
+                FAILURE_POSTCONDITION_VIOLATED,
+                semantic_fb.as_ref(),
+                Some(&atom.span),
+                Some(&constraint_mappings),
+                None,
+                None,
+                Some(&diagnostics),
+            );
+            return Err(MumeiError::verification_at(err_str, atom.span.clone()).with_help(
+                format!(
+                    "struct '{}' の invariant は、この型を返す atom の result に暗黙の事後条件として課されます。body の返り値が不変量を満たすか確認してください",
+                    sdef.name
+                ),
+            ));
+        }
+    }
+
     // 5. 事後条件 (ensures)
     let phase_start = std::time::Instant::now();
     let mut skipped_ensures = false;
@@ -1703,6 +1803,7 @@ pub(crate) fn verify_inner(
                 &ens_clause,
                 "ensures",
                 &mut diagnostics,
+                Some(&solver),
             )? {
                 ClauseLoweringOutcome::Trivial => {}
                 ClauseLoweringOutcome::Skipped => {
@@ -1882,7 +1983,14 @@ pub(crate) fn verify_inner(
                     if ensures_check == SatResult::Unknown {
                         solver.pop(1);
                         let property_based_help = property_based_config
-                            .map(|config| run_property_based_test(atom, module_env, config))
+                            .map(|config| {
+                                run_property_based_test_with_mode(
+                                    atom,
+                                    module_env,
+                                    config,
+                                    bitvec_i64_global,
+                                )
+                            })
                             .and_then(property_based_help);
                         metrics.record_phase(
                             "Phase 5: ensures verification (unknown)",
@@ -1987,6 +2095,11 @@ pub(crate) fn verify_inner(
 
     metrics.record_phase("Phase 5: ensures verification", phase_start.elapsed());
 
+    // Shift amounts that appeared in clauses lowered without a solver
+    // (`requires`, `ensures`, invariants) are range-checked here, against the
+    // solver that already carries the preconditions.
+    discharge_bv_shift_obligations(&vc, &solver)?;
+
     let z3_check_start = std::time::Instant::now();
     let profiler_final_check_start = profiler_checkpoint(&vc);
     let final_check = solver.check();
@@ -2065,7 +2178,9 @@ pub(crate) fn verify_inner(
             let _ = std::fs::write(&heatmap_path, heatmap_json);
         }
         let property_based_help = property_based_config
-            .map(|config| run_property_based_test(atom, module_env, config))
+            .map(|config| {
+                run_property_based_test_with_mode(atom, module_env, config, bitvec_i64_global)
+            })
             .and_then(property_based_help);
         let heatmap_hint = format!(
             "Z3 resource heatmap: {} constraints consumed {} rlimit units. Top consumers: {}",

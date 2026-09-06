@@ -43,6 +43,40 @@ Lean escalation candidates:
 - nonlinear loop invariants, such as `result == i * i`
 - algebraic equalities that require ring reasoning
 
+### Struct invariants (cross-field)
+
+A struct may relate several fields with `invariant: <expr>` clauses; `self.<field>` names a field of the struct being described:
+
+```mumei
+struct Scheduler {
+    active_tasks: i64 where v >= 0,
+    max_tasks: i64 where v > 0,
+    invariant: self.active_tasks <= self.max_tasks
+}
+```
+
+The invariant is a type-level contract, so it is injected automatically:
+
+- struct-typed parameters **assume** it (together with the per-field `where v ...` constraints)
+- every struct literal `Scheduler { ... }` is **checked** against it under the current path condition
+- atoms returning the struct get an implicit postcondition `Invariant(result)`; `result.<field>` is
+  symbolized like a parameter, so returning an argument unchanged, a `let` alias, a conditional
+  over struct values, or another struct-returning call is covered as well
+
+Struct fields are flattened to scalar symbols and the invariant is lowered as a quantifier-free
+formula over them, so a linear invariant stays in QF_LIA and does not enlarge the decidable
+fragment. Keep invariants linear (`a <= b`, `count == used + free`, `3 * x < limit`); a nonlinear
+invariant (`x * y <= cap`) is an escalation candidate exactly like a nonlinear `ensures`.
+
+Write the transition's guard in `requires` so that the literal satisfies the invariant:
+
+```mumei
+atom spawn(s: Scheduler) -> Scheduler
+requires: s.active_tasks < s.max_tasks;
+ensures: result.active_tasks == s.active_tasks + 1;
+body: Scheduler { active_tasks: s.active_tasks + 1, max_tasks: s.max_tasks };
+```
+
 ### Array and sequence access
 
 Every array or sequence read/write must have an explicit bounds condition of the form `0 <= i && i < len(a)` or an equivalent bounded quantifier range. In current `.mm` examples this is usually written as `i >= 0 && i < n`, where `n` is the array length tracked by the contract. Prefer single-index reads/writes and length-preserving updates.
@@ -65,6 +99,39 @@ body: {
 ```
 
 Avoid specifications that require Z3 to infer bounds from unrelated arithmetic or nested index expressions. State the exact index range near the access.
+
+### Relational verification via atom calls in `ensures`
+
+A verified atom may be called inside `requires`/`ensures`. This is the way to
+state that two implementations agree (`ensures: result == calc_v1(x);` on an
+atom whose body calls `calc_v2`). Regression fixtures:
+`tests/test_relational_equiv_ok.mm` (proof succeeds),
+`tests/test_relational_equiv_mismatch.mm` (fails with a counterexample) and
+`tests/test_relational_equiv_trusted.mm` (trusted callee, cannot be proven).
+
+How a call is encoded, in the body and in the spec alike:
+
+- every call site gets its **own fresh symbol** `call_<atom>_<n>`; there is no
+  uninterpreted function `calc_v1(x)`, so Z3 gets **no congruence**
+  (`x == y` does not by itself give `calc_v1(x) == calc_v1(y)`, and two calls
+  `calc_v1(x)` produce two unrelated symbols);
+- the only facts known about that symbol are the callee's `ensures` (with
+  `result` bound to the symbol) and, for struct results, the struct invariant;
+- the callee's `requires` is checked at the call site.
+
+Consequently a relational proof only goes through when the callee's `ensures`
+is **functional** (pins `result` to an expression over its arguments, such as
+`result == 2 * x + 1`). Both `calc_v1` and `calc_v2` must have such ensures
+for `result == calc_v1(x)` to be provable.
+
+For `trusted`/`unverified` atoms this limitation is structural: their body is
+never verified, so every call — including two calls with identical arguments —
+is a fresh symbol constrained only by the declared `ensures`. `ensures: result
+== oracle(x)` over `body: oracle(x)` is *not* provable when `oracle` is
+trusted with `ensures: result >= x`; the failure is reported as a spurious
+counterexample depending on uninterpreted symbol `oracle (trusted_atom)`. To
+relate trusted calls, strengthen the trusted `ensures` to a functional
+equation, or verify the atom instead of trusting it.
 
 ### Quantifiers
 
@@ -97,6 +164,68 @@ effect File
 ```
 
 Prefer small state sets, deterministic transitions, and explicit operation order in atom bodies.
+
+## Bit-vector `i64` (`--bitvec-i64`)
+
+By default `i64` is encoded as a Z3 `Int`: an unbounded mathematical integer. That encoding cannot express bit patterns, and it lets a contract claim things a machine never does (`x + 1 > x` always holds). `--bitvec-i64` switches the encoding to `BV(64)`, i.e. a 64-bit two's complement machine integer.
+
+The mode is off by default, so certificates of existing specifications are byte-for-byte unchanged. It turns on for a single atom in two ways, and both are per-atom — the rest of the module keeps the `Int` encoding:
+
+- the atom uses a bitwise operator (`&`, `|`, `^`, `<<`, `>>`); the `Int` encoding rejects those rather than approximating them, so the bit-vector encoding is selected automatically;
+- the atom declares `semantics: bitvec;` right after its signature, for contracts that depend on wrapping without naming a bitwise operator;
+- the atom calls (transitively) such an atom: a caller assumes its callees' `ensures`, so it is verified in the same encoding as those contracts.
+
+`--bitvec-i64` on the command line enables the mode for every atom of the run. The semantic mode is part of the verification cache key, so results are never shared between modes.
+
+### What you can specify
+
+- **Bit patterns.** `&`, `|`, `^` are `bvand`/`bvor`/`bvxor` on all 64 bits; `<<` is `bvshl` and `>>` is the sign-propagating `bvashr`. Bit-level identities are provable, e.g. `(x ^ y) ^ y == x`, `(x & 0) == 0`, `(0 - 1) >> 63 == 0 - 1`.
+
+  ```mumei
+  atom bit_and(a: i64, b: i64)
+  requires: true;
+  ensures: result == a & b;
+  body: { a & b };
+  ```
+
+- **Bounded shifts.** Shifts are specified only for `0 <= n < 64`; state that in `requires`. An unguarded shift amount fails verification with an actionable error instead of proving a property about Z3's out-of-range behavior.
+
+  ```mumei
+  atom bit_shift_left(x: i64, n: i64)
+  requires: n >= 0 && n < 64;
+  ensures: result == x << n;
+  body: { x << n };
+  ```
+
+- **Wrapping arithmetic and overflow predicates.** `+`, `-`, `*` wrap, `/` is `bvsdiv`, and comparisons are the signed ones (`bvslt`, …). This replaces hand-written overflow margins (`a <= 4611686018427387903`, `|a| <= 2000000000`, …) with the exact machine condition:
+
+  ```mumei
+  atom safe_add(a: i64, b: i64)
+  requires: ((a + b) ^ a) & ((a + b) ^ b) >= 0;   // signs agree: no wrap
+  ensures: result == a + b;
+  body: { a + b };
+
+  atom safe_multiply(a: i64, b: i64)
+  semantics: bitvec;
+  requires: a == 0 || b == 0 || ((a * b) / a == b && (a * b) / b == a);
+  ensures: result == a * b;
+  body: { a * b };
+  ```
+
+- **Arrays.** Elements and indices keep the `Int` encoding; `len(arr)` follows the mode so that `i < len(arr)` and the bounds check stay in one theory. An `i64` index is bridged with signed `bv2int` at the access, so `arr[i]` works unchanged under the flag.
+
+- **Signed interpretation.** `i64` is signed everywhere: comparisons, division, `>>`, and the `Int` bridge (an unsigned `bv2int` of the sign-flipped value, minus `2^63`, so that the bridged term stays usable as an E-matching trigger) all read the bit pattern as a signed value. `0 - 1` is `0xFFFF…FF`, not a large positive number.
+
+### What you cannot specify
+
+- **Unbounded reasoning in the same atom.** Once an atom is in bit-vector mode, *all* of its `i64` arithmetic wraps. A postcondition such as `result == a + b && result >= 0` is no longer valid for arbitrary inputs — bound the inputs in `requires` or keep that atom in the default mode.
+- **Mixed `Int`/`BV` semantics.** `Int`-sorted values that meet a bit-vector operand (integer literals, array elements, results of atoms verified in `Int` mode) are bridged with `int2bv`/`bv2int` at the boundary, which is the two's complement reading of the value. Contracts that need both unbounded and wrapping semantics for the same quantity are not expressible; split them into separate atoms.
+- **Wrapping of array elements.** Arithmetic on two `Int`-sorted terms (e.g. `arr[i] + arr[j]`) stays unbounded even in bit-vector mode: only literals and `BV(64)` values wrap. Copy an element into an `i64` parameter or result if you need machine semantics for it.
+- **Postconditions of a callee across a mode boundary.** A bit-vector atom may call an atom verified in the `Int` encoding, but that callee's `ensures` is not imported as a fact — `ensures: result > x` for `x + 1` holds for unbounded integers and fails at `i64::MAX` under wrapping. Its `requires` is still checked at the call. Give the callee `semantics: bitvec;` (or bound its inputs and re-state the needed fact in the caller) when the caller's proof depends on its postcondition.
+- **Array-heavy quantified specifications under the global flag.** An `arr[i]` access mixes the `Int` array theory with the bit-vector encoding of the index, and quantified array contracts (sortedness, store chains, `forall` over a range) then reason across both theories. Z3 frequently answers `unknown` or exhausts its per-atom timeout on such atoms in bit-vector mode, even where the `Int` encoding proves them instantly. Verify array modules in the default encoding and mark only the bit-manipulating atoms with `semantics: bitvec;` instead of running `--bitvec-i64` over a whole array-heavy module.
+- **Widths other than 64.** Only `i64` is encoded as a bit-vector (`BV(64)`); `f64`, `bool`, `Str` and array sorts are unchanged. There is no `i32`/`u8` bit-width modelling.
+- **Deep ring/polynomial overflow theorems.** Bit-blasting a nonlinear obligation (e.g. a general 64-bit multiplication overflow characterisation over symbolic operands) is not reliably decided in practice. Such obligations keep their `integer_overflow_bridge` semantic-gap note and are Lean escalation candidates; obligations that stay inside QF_BV remain Z3's job and are not escalated.
+- **Bitwise operators on non-`i64` values.** `&`/`|`/`^`/`<<`/`>>` on `f64` or `Str` operands are rejected; there is no implicit reinterpretation of a float's bits.
 
 ## Anti-patterns
 
@@ -336,6 +465,24 @@ effect Transfer
 ```
 
 Represent protocols as finite states plus explicit transitions. Avoid temporal specs that depend on unbounded histories such as "was never authorized by an expired user"; encode those checks as separate bounded predicates or escalate them.
+
+### Struct invariant template
+
+```mumei
+struct Account {
+    balance: i64 where v >= 0,
+    reserved: i64 where v >= 0,
+    invariant: self.reserved <= self.balance
+}
+
+atom reserve(a: Account, amount: i64) -> Account
+requires: amount >= 0 && a.reserved + amount <= a.balance;
+ensures: result.reserved == a.reserved + amount && result.balance == a.balance;
+body: Account { balance: a.balance, reserved: a.reserved + amount };
+```
+
+State the relation once on the struct and let every constructor and struct-returning atom
+inherit it; `requires` only needs the guard that keeps the transition inside the invariant.
 
 ## Metrics and review cadence
 

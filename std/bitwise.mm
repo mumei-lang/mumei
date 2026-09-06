@@ -1,41 +1,42 @@
 // =============================================================
 // std/bitwise — verified bitwise primitives
 // =============================================================
-// Z3 の整数理論で扱いやすい基本性質を保証するビット演算ヘルパー。
-// 現行パーサは単一の &, |, ^, <<, >> を通常の算術演算として扱わないため、
-// 各 atom は対応する境界性質の検証済み witness を返す。
+// 各 atom は Z3 の Bit-Vector 理論で実ビット意味論として検証される。
+// 検証は `mumei verify std/bitwise.mm --bitvec-i64` で行う必要がある
+// （`--bitvec-i64` は i64 を BV(64) として符号化する）。
+// witness による誤魔化しはなく、ensures は演算の定義そのものである。
 
 atom bit_and(a: i64, b: i64)
-    requires: a >= 0 && b >= 0;
-    ensures: result >= 0 && result <= a && result <= b;
+    ensures: result == a & b;
     body: {
-        0
+        a & b
     };
 
 atom bit_or(a: i64, b: i64)
-    requires: a >= 0 && b >= 0;
-    ensures: result >= a && result >= b;
+    ensures: result == a | b;
     body: {
-        if a >= b { a } else { b }
+        a | b
     };
 
 atom bit_xor(a: i64, b: i64)
-    requires: a >= 0 && b >= 0;
-    ensures: result >= 0;
+    ensures: result == a ^ b;
     body: {
-        0
+        a ^ b
     };
 
+// シフト量は 0 <= n < 64 が前提（BV のシフトは全域関数だが、
+// 範囲外シフトは言語の意味論ではないため requires で除外する）。
 atom bit_shift_left(x: i64, n: i64)
-    requires: x >= 0 && x <= 1000000 && n >= 0 && n <= 30;
-    ensures: result >= 0 && result >= x;
+    requires: n >= 0 && n < 64;
+    ensures: result == x << n;
     body: {
-        x
+        x << n
     };
 
+// `>>` は算術シフト（符号を伝播する bvashr）。
 atom bit_shift_right(x: i64, n: i64)
-    requires: x >= 0 && n >= 0 && n <= 62;
-    ensures: result >= 0 && result <= x;
+    requires: n >= 0 && n < 64;
+    ensures: result == x >> n;
     body: {
-        0
+        x >> n
     };

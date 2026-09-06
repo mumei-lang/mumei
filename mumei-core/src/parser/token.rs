@@ -39,6 +39,9 @@ pub enum Token {
     Invariant,
     Decreases,
     MaxUnroll,
+    /// `semantics:` clause selecting the verification encoding of an atom
+    /// (currently only `bitvec`).
+    Semantics,
     Effects,
     Resources,
     For,
@@ -86,6 +89,10 @@ pub enum Token {
     Le,         // <=
     And,        // &&
     Or,         // ||
+    Amp,        // & (bitwise AND)
+    Caret,      // ^ (bitwise XOR)
+    Shl,        // << (left shift)
+    Shr,        // >> (right shift)
     Arrow,      // ->
     FatArrow,   // =>
     Pipe,       // |>
@@ -156,6 +163,7 @@ impl std::fmt::Display for Token {
             Token::Invariant => write!(f, "invariant"),
             Token::Decreases => write!(f, "decreases"),
             Token::MaxUnroll => write!(f, "max_unroll"),
+            Token::Semantics => write!(f, "semantics"),
             Token::Effects => write!(f, "effects"),
             Token::Resources => write!(f, "resources"),
             Token::For => write!(f, "for"),
@@ -196,6 +204,10 @@ impl std::fmt::Display for Token {
             Token::Le => write!(f, "<="),
             Token::And => write!(f, "&&"),
             Token::Or => write!(f, "||"),
+            Token::Amp => write!(f, "&"),
+            Token::Caret => write!(f, "^"),
+            Token::Shl => write!(f, "<<"),
+            Token::Shr => write!(f, ">>"),
             Token::Arrow => write!(f, "->"),
             Token::FatArrow => write!(f, "=>"),
             Token::Pipe => write!(f, "|>"),

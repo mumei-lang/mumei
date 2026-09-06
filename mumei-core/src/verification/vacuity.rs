@@ -136,6 +136,7 @@ fn verify_mutated_body(
     let allowed_effects = module_env.resolve_effect_set_from_effects(&atom.effects);
     let effect_ctx_cell = std::cell::RefCell::new(EffectCtx::new(allowed_effects));
     let constraint_count_cell = std::cell::Cell::new(0usize);
+    let bitvec_i64 = super::fragment::atom_requires_bitvector_semantics_in_module(atom, module_env);
     let vc = VCtx {
         ctx: &ctx,
         module_env,
@@ -148,6 +149,9 @@ fn verify_mutated_body(
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
         profiler: None,
         ieee754_f64: false,
+        bitvec_i64,
+        bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
+        bitvec_i64_global: false,
     };
     let mut env: Env = HashMap::new();
 
@@ -160,6 +164,7 @@ fn verify_mutated_body(
                 param.type_name.as_deref(),
                 module_env,
                 false,
+                bitvec_i64,
             ),
         );
     }
@@ -226,6 +231,11 @@ fn flip_binary_op(op: &Op) -> Op {
         Op::And => Op::Or,
         Op::Or => Op::And,
         Op::Implies => Op::And,
+        Op::BitAnd => Op::BitOr,
+        Op::BitOr => Op::BitAnd,
+        Op::BitXor => Op::BitAnd,
+        Op::Shl => Op::Shr,
+        Op::Shr => Op::Shl,
     }
 }
 

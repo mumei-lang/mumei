@@ -223,6 +223,27 @@ pub fn parse_type_ref_from_ctx(ctx: &mut super::ParseContext) -> TypeRef {
                     type_str.push('>');
                     ctx.advance();
                 }
+                // The lexer merges `>>`/`<<` into shift tokens, so nested
+                // generics such as `[]<[]<i64>>` arrive as a single token here.
+                Token::Shr => {
+                    if depth >= 2 {
+                        ctx.advance();
+                        depth -= 2;
+                        type_str.push_str(">>");
+                    } else {
+                        // Only one level is open: the surplus `>` is put back
+                        // so the surrounding grammar rejects it.
+                        ctx.split_shr();
+                        ctx.advance();
+                        depth = 0;
+                        type_str.push('>');
+                    }
+                }
+                Token::Shl => {
+                    depth += 2;
+                    type_str.push_str("<<");
+                    ctx.advance();
+                }
                 Token::Comma => {
                     type_str.push_str(", ");
                     ctx.advance();
@@ -508,6 +529,47 @@ fn append_token(text: &mut String, tok: &Token) {
     }
 }
 
+/// Recognise a struct-body `invariant: <expr>` clause and return `<expr>`.
+/// Returns `None` for ordinary field declarations.
+fn struct_invariant_clause(clause: &str) -> Option<String> {
+    let rest = clause.strip_prefix("invariant")?;
+    if !rest.starts_with(|c: char| c == ':' || c.is_whitespace()) {
+        return None;
+    }
+    let rest = rest.trim_start();
+    let rest = rest.strip_prefix(':').unwrap_or(rest).trim();
+    if rest.is_empty() {
+        return None;
+    }
+    Some(rest.to_string())
+}
+
+/// Split a struct body on the commas that separate its clauses, leaving
+/// commas nested in `()`, `[]`, `{}` or string literals alone
+/// (`invariant: within(self.lo, self.hi)`). Angle brackets are not tracked
+/// because `<`/`>` are comparison operators inside invariants.
+fn split_struct_clauses(body: &str) -> Vec<&str> {
+    let mut clauses = Vec::new();
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut start = 0usize;
+    for (idx, ch) in body.char_indices() {
+        match ch {
+            '"' => in_string = !in_string,
+            _ if in_string => {}
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            ',' if depth <= 0 => {
+                clauses.push(&body[start..idx]);
+                start = idx + 1;
+            }
+            _ => {}
+        }
+    }
+    clauses.push(&body[start..]);
+    clauses
+}
+
 fn collect_until_semicolon(ctx: &mut ParseContext) -> String {
     let mut text = String::new();
     let mut depth_brace = 0i32;
@@ -591,6 +653,30 @@ fn collect_angle_brackets(ctx: &mut ParseContext) -> String {
                 if depth == 0 {
                     break;
                 }
+            }
+            // `>>`/`<<` are lexed as shift tokens; inside a generic argument
+            // list they close/open two nesting levels. With a single level
+            // open the second closer is surplus and is put back into the
+            // stream so the surrounding grammar rejects it.
+            Token::Shr => {
+                if depth >= 2 {
+                    ctx.advance();
+                    depth -= 2;
+                    text.push_str(">>");
+                } else {
+                    ctx.split_shr();
+                    ctx.advance();
+                    depth = 0;
+                    text.push('>');
+                }
+                if depth == 0 {
+                    break;
+                }
+            }
+            Token::Shl => {
+                depth += 2;
+                text.push_str("<<");
+                ctx.advance();
             }
             Token::Eof => break,
             _ => {
@@ -829,16 +915,30 @@ pub fn parse_module_from_tokens(ctx: &mut ParseContext) -> Vec<Item> {
                 }
 
                 let base_type = ctx.expect_ident();
-                ctx.expect(Token::Where);
-                let predicate_raw = collect_until_semicolon(ctx);
+                // Contextual keyword: `unit` directly after the base type tags
+                // the alias with a unit of measure (`type Usd = i64 unit USD;`).
+                let unit = if matches!(ctx.peek(), Token::Ident(kw) if kw == "unit") {
+                    ctx.advance();
+                    Some(ctx.expect_ident())
+                } else {
+                    None
+                };
+                let (predicate_raw, operand) = if ctx.peek() == &Token::Where {
+                    ctx.advance();
+                    let predicate_raw = collect_until_semicolon(ctx);
+                    let tokens = super::lexer::legacy_tokenize(&predicate_raw);
+                    let operand = tokens.first().cloned().unwrap_or_else(|| "v".to_string());
+                    (predicate_raw, operand)
+                } else {
+                    ("true".to_string(), "v".to_string())
+                };
                 ctx.expect(Token::Semicolon);
-                let tokens = super::lexer::legacy_tokenize(&predicate_raw);
-                let operand = tokens.first().cloned().unwrap_or_else(|| "v".to_string());
                 items.push(Item::TypeDef(RefinedType {
                     name,
                     _base_type: base_type,
                     operand,
                     predicate_raw,
+                    unit,
                     span: span_from_token(&start_tok),
                 }));
             }
@@ -848,10 +948,23 @@ pub fn parse_module_from_tokens(ctx: &mut ParseContext) -> Vec<Item> {
                 let name = ctx.expect_ident();
                 let type_params = parse_type_params_from_ctx(ctx);
                 let fields_raw = collect_braced_block(ctx);
-                let fields: Vec<StructField> = fields_raw
-                    .split(',')
+                let mut invariants: Vec<String> = Vec::new();
+                let fields: Vec<StructField> = split_struct_clauses(&fields_raw)
+                    .into_iter()
                     .map(|s| s.trim())
                     .filter(|s| !s.is_empty())
+                    .filter(|s| {
+                        // `invariant` is a keyword, so a clause that starts with it
+                        // can never be a field declaration. `invariant: <expr>`
+                        // (or `invariant <expr>`) declares a cross-field invariant.
+                        match struct_invariant_clause(s) {
+                            Some(expr) => {
+                                invariants.push(expr);
+                                false
+                            }
+                            None => true,
+                        }
+                    })
                     .map(|s| {
                         let (field_part, constraint) = if let Some(idx) = s.find("where") {
                             (s[..idx].trim(), Some(s[idx + 5..].trim().to_string()))
@@ -876,6 +989,7 @@ pub fn parse_module_from_tokens(ctx: &mut ParseContext) -> Vec<Item> {
                     name,
                     type_params,
                     fields,
+                    invariants,
                     method_names: vec![],
                     methods: vec![],
                     span: span_from_token(&start_tok),
@@ -1623,6 +1737,8 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
     let mut consumed_params: Vec<String> = Vec::new();
     let mut resources: Vec<String> = Vec::new();
     let mut max_unroll: Option<usize> = None;
+    let mut spec_metadata: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     let mut invariant: Option<String> = None;
     let mut effects: Vec<Effect> = Vec::new();
     let mut contracts: Vec<(String, Option<String>, Option<String>)> = Vec::new();
@@ -1677,6 +1793,17 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
                     }
                 }
                 ctx.expect(Token::Semicolon);
+            }
+            // `semantics: bitvec;` — verify this atom with the bit-vector
+            // encoding (`i64` as `BV(64)`) even when `--bitvec-i64` is off, for
+            // contracts whose meaning depends on two's complement wrapping but
+            // that use no bitwise operator (so it cannot be inferred).
+            Token::Semantics => {
+                ctx.advance();
+                ctx.expect(Token::Colon);
+                let value = collect_until_semicolon(ctx);
+                ctx.expect(Token::Semicolon);
+                spec_metadata.insert("semantics".to_string(), value.trim().to_string());
             }
             Token::MaxUnroll => {
                 ctx.advance();
@@ -1784,7 +1911,7 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
         where_bounds,
         params,
         trace_id: None,
-        spec_metadata: std::collections::HashMap::new(),
+        spec_metadata,
         requires: requires_cleaned,
         forall_constraints,
         ensures,

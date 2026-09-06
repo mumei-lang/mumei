@@ -27,7 +27,7 @@
 
 use super::super::module_env::ModuleEnv;
 use super::super::types::{MumeiError, MumeiResult};
-use crate::mir::{movability_from_type, Movability};
+use crate::mir::{movability_from_type, resolve_alias_base, Movability};
 use crate::parser::{Atom, Expr, JoinSemantics, Span, Stmt};
 use std::collections::{HashMap, HashSet};
 
@@ -560,7 +560,10 @@ pub(crate) fn analyze_task_ownership(
         let ty = if param.is_ref || param.is_ref_mut {
             Some("i64".to_string())
         } else {
-            param.type_name.clone()
+            param
+                .type_name
+                .as_deref()
+                .map(|t| resolve_alias_base(module_env, t))
         };
         types.insert(param.name.clone(), ty);
     }
@@ -619,6 +622,51 @@ consume buf;
 ensures: result >= 0;
 body: len(buf);
 "#;
+
+    #[test]
+    fn copy_alias_consumed_by_siblings_is_allowed() {
+        let source = r#"
+type Usd = i64 unit USD;
+type Money = Usd;
+
+atom spend(amount: Money)
+requires: amount >= 0;
+consume amount;
+ensures: result >= 0;
+body: amount;
+
+atom pay_twice(amount: Money)
+requires: amount >= 0;
+ensures: result >= 0;
+body: {
+    task_group:all {
+        task { spend(amount) };
+        task { spend(amount) }
+    }
+};
+"#;
+        let items = parse_module(source);
+        let mut module_env = ModuleEnv::default();
+        for item in &items {
+            match item {
+                Item::Atom(atom) => {
+                    module_env.atoms.insert(atom.name.clone(), atom.clone());
+                }
+                Item::TypeDef(t) => {
+                    module_env.types.insert(t.name.clone(), t.clone());
+                }
+                _ => {}
+            }
+        }
+        let mut violations = Vec::new();
+        for item in &items {
+            if let Item::Atom(atom) = item {
+                let hir = lower_atom_to_hir(atom);
+                violations.extend(analyze_task_ownership(atom, &hir.body_stmt, &module_env));
+            }
+        }
+        assert!(violations.is_empty(), "{violations:?}");
+    }
 
     #[test]
     fn shared_reads_across_siblings_are_allowed() {

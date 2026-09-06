@@ -60,6 +60,34 @@ impl ParseContext {
         tok
     }
 
+    /// Split the `>>` token at the cursor into two `>` tokens.
+    ///
+    /// The lexer merges `>>` into a shift token, so a generic argument list
+    /// closes two nesting levels at once. When only one level is open the
+    /// second `>` belongs to the surrounding grammar (and is a syntax error
+    /// there), so it is put back into the stream instead of being swallowed.
+    pub fn split_shr(&mut self) {
+        if self.peek() != &Token::Shr {
+            return;
+        }
+        let (line, col) = (self.tokens[self.pos].line, self.tokens[self.pos].col);
+        let first = SpannedToken {
+            token: Token::Gt,
+            line,
+            col,
+            len: 1,
+        };
+        let second = SpannedToken {
+            token: Token::Gt,
+            line,
+            col: col + 1,
+            len: 1,
+        };
+        self.tokens
+            .splice(self.pos..=self.pos, [first, second])
+            .for_each(drop);
+    }
+
     pub fn expect(&mut self, expected: Token) {
         if self.peek() == &expected {
             self.advance();
@@ -223,6 +251,123 @@ mod tests {
         assert_eq!(tuple.tuple_element_types().unwrap().len(), 2);
     }
 
+    /// Root operator of an expression, for precedence assertions.
+    fn root_op(source: &str) -> Op {
+        match parse_expression(source) {
+            Expr::BinaryOp(_, op, _) => op,
+            other => panic!("expected a binary expression, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_bitwise_operators() {
+        assert_eq!(root_op("a & b"), Op::BitAnd);
+        assert_eq!(root_op("a | b"), Op::BitOr);
+        assert_eq!(root_op("a ^ b"), Op::BitXor);
+        assert_eq!(root_op("x << n"), Op::Shl);
+        assert_eq!(root_op("x >> n"), Op::Shr);
+    }
+
+    #[test]
+    fn test_parse_logical_operators_are_not_bitwise() {
+        assert_eq!(root_op("a && b"), Op::And);
+        assert_eq!(root_op("a || b"), Op::Or);
+    }
+
+    #[test]
+    fn test_parse_bitwise_precedence() {
+        // `&` binds tighter than `^`, which binds tighter than `|`,
+        // and shifts bind tighter than all three but looser than `+`.
+        assert_eq!(root_op("a | b ^ c & d"), Op::BitOr);
+        assert_eq!(root_op("a ^ b & c"), Op::BitXor);
+        assert_eq!(root_op("a & b << c"), Op::BitAnd);
+        assert_eq!(root_op("a << b + c"), Op::Shl);
+        // Comparisons are looser than bitwise operators, so `a & b == 0`
+        // parses as `(a & b) == 0`.
+        let cmp = parse_expression("a & b == 0");
+        match cmp {
+            Expr::BinaryOp(lhs, Op::Eq, _) => {
+                assert!(matches!(*lhs, Expr::BinaryOp(_, Op::BitAnd, _)));
+            }
+            other => panic!("expected `(a & b) == 0`, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_lambda_still_uses_bar() {
+        // Prefix `|` keeps introducing a lambda even though infix `|` is now
+        // bitwise OR.
+        let expr = parse_expression("map(xs, |x| x + 1)");
+        match expr {
+            Expr::Call(name, args) => {
+                assert_eq!(name, "map");
+                assert_eq!(args.len(), 2);
+                assert!(matches!(args[1], Expr::Lambda { .. }));
+            }
+            other => panic!("expected a call with a lambda argument, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_lexer_keeps_pipeline_and_bitwise_tokens_distinct() {
+        let mut lexer = lexer::Lexer::new("a |> f | b || c & d && e ^ g << h >> i");
+        let tokens: Vec<_> = lexer.tokenize().into_iter().map(|t| t.token).collect();
+        assert_eq!(
+            tokens
+                .iter()
+                .filter(|t| matches!(
+                    t,
+                    token::Token::Pipe
+                        | token::Token::Bar
+                        | token::Token::Or
+                        | token::Token::Amp
+                        | token::Token::And
+                        | token::Token::Caret
+                        | token::Token::Shl
+                        | token::Token::Shr
+                ))
+                .count(),
+            8,
+            "unexpected tokenization: {tokens:?}"
+        );
+        assert_eq!(tokens[1], token::Token::Pipe);
+        assert_eq!(tokens[3], token::Token::Bar);
+        assert_eq!(tokens[5], token::Token::Or);
+        assert_eq!(tokens[7], token::Token::Amp);
+        assert_eq!(tokens[9], token::Token::And);
+        assert_eq!(tokens[11], token::Token::Caret);
+        assert_eq!(tokens[13], token::Token::Shl);
+        assert_eq!(tokens[15], token::Token::Shr);
+    }
+
+    #[test]
+    fn test_parse_effect_alias_bar_is_not_bitwise() {
+        let items = parse_module("effect IoLike = Read | Write;\n");
+        let alias = items
+            .iter()
+            .find_map(|item| match item {
+                Item::EffectDef(def) if def.name == "IoLike" => Some(def),
+                _ => None,
+            })
+            .expect("effect alias must still parse as an effect definition");
+        assert_eq!(alias.includes, vec!["Read", "Write"]);
+    }
+
+    #[test]
+    fn test_parse_atom_semantics_metadata() {
+        let atom = parse_atom(
+            "atom wrapping(a: i64, b: i64) -> i64\n\
+             semantics: bitvec;\n\
+             requires: true;\n\
+             ensures: result == a + b;\n\
+             body: a + b;",
+        );
+        assert_eq!(
+            atom.spec_metadata.get("semantics").map(String::as_str),
+            Some("bitvec")
+        );
+    }
+
     #[test]
     fn test_parse_type_ref_nested() {
         let tr = parse_type_ref("Map<String, List<i64>>");
@@ -273,6 +418,59 @@ mod tests {
         assert_eq!(structs.len(), 1);
         assert_eq!(structs[0].name, "Point");
         assert_eq!(structs[0].fields.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_struct_invariant() {
+        let source = "struct Scheduler {\n\
+            active_tasks: i64 where v >= 0,\n\
+            max_tasks: i64 where v > 0,\n\
+            invariant: self.active_tasks <= self.max_tasks,\n\
+            invariant_count: i64\n\
+        }";
+        let items = parse_module(source);
+        let Some(Item::StructDef(s)) = items.first() else {
+            panic!("expected struct");
+        };
+        assert_eq!(s.fields.len(), 3);
+        assert_eq!(s.fields[0].constraint.as_deref(), Some("v >= 0"));
+        assert_eq!(s.fields[2].name, "invariant_count");
+        assert_eq!(
+            s.invariants,
+            vec!["self.active_tasks <= self.max_tasks".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_parse_struct_invariant_with_commas() {
+        let source = "struct Range {\n\
+            lo: i64,\n\
+            hi: i64,\n\
+            invariant: within(self.lo, self.hi) && forall(i, 0, 2, self.lo <= self.hi),\n\
+            width: i64 where v >= 0\n\
+        }";
+        let items = parse_module(source);
+        let Some(Item::StructDef(s)) = items.first() else {
+            panic!("expected struct");
+        };
+        assert_eq!(
+            s.fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
+            vec!["lo", "hi", "width"]
+        );
+        assert_eq!(s.fields[2].constraint.as_deref(), Some("v >= 0"));
+        assert_eq!(
+            s.invariants,
+            vec!["within(self.lo, self.hi) && forall(i, 0, 2, self.lo <= self.hi)".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_parse_struct_without_invariant_has_none() {
+        let items = parse_module("struct Point { x: f64, y: f64 }");
+        let Some(Item::StructDef(s)) = items.first() else {
+            panic!("expected struct");
+        };
+        assert!(s.invariants.is_empty());
     }
 
     #[test]
@@ -709,6 +907,39 @@ atom write_log(msg: i64)
             .collect();
         assert_eq!(types.len(), 1);
         assert_eq!(types[0].name, "Nat");
+        assert_eq!(types[0].unit, None);
+    }
+
+    #[test]
+    fn test_parse_type_def_with_unit() {
+        let source = r#"
+type Usd = i64 unit USD;
+type NonNegUsd = i64 unit USD where v >= 0;
+type Nat = i64 where v >= 0;
+"#;
+        let items = parse_module(source);
+        let types: Vec<_> = items
+            .iter()
+            .filter_map(|i| match i {
+                Item::TypeDef(t) => Some(t),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(types.len(), 3);
+
+        assert_eq!(types[0].name, "Usd");
+        assert_eq!(types[0]._base_type, "i64");
+        assert_eq!(types[0].unit.as_deref(), Some("USD"));
+        assert_eq!(types[0].operand, "v");
+        assert_eq!(types[0].predicate_raw, "true");
+
+        assert_eq!(types[1].name, "NonNegUsd");
+        assert_eq!(types[1].unit.as_deref(), Some("USD"));
+        assert_eq!(types[1].operand, "v");
+        assert!(types[1].predicate_raw.contains(">= 0"));
+
+        assert_eq!(types[2].unit, None);
+        assert!(types[2].predicate_raw.contains(">= 0"));
     }
 
     #[test]

@@ -386,6 +386,11 @@ pub(crate) fn repl_infer_expr_type_name(
             | parser::Op::And
             | parser::Op::Or
             | parser::Op::Implies => Some("bool".to_string()),
+            parser::Op::BitAnd
+            | parser::Op::BitOr
+            | parser::Op::BitXor
+            | parser::Op::Shl
+            | parser::Op::Shr => Some("i64".to_string()),
             parser::Op::Add
             | parser::Op::Sub
             | parser::Op::Mul

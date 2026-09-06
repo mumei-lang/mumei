@@ -1,3 +1,4 @@
+use crate::parser::ast::Atom;
 use crate::verification::ModuleEnv;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -262,6 +263,10 @@ pub fn compute_proof_hash_with_flags(
         hasher.update(b"|max_unroll:");
         hasher.update(max.to_string().as_bytes());
     }
+    if let Some(sem) = atom.spec_metadata.get("semantics") {
+        hasher.update(b"|semantics:");
+        hasher.update(sem.as_bytes());
+    }
     for flag in flags {
         hasher.update(b"|verify_flag:");
         hasher.update(flag.as_bytes());
@@ -276,6 +281,68 @@ pub fn compute_proof_hash_with_flags(
                 hasher.update(b"=");
                 hasher.update(refined.predicate_raw.as_bytes());
             }
+        }
+    }
+
+    // 2b. Unit tag and base type of every alias in the module. The
+    // unit-consistency check reads types through params, `-> T`, struct fields,
+    // callee signatures and alias chains, so any unit or alias-base edit must
+    // invalidate cached results.
+    // Unitless aliases are left out so hashes of unit-free modules are unchanged.
+    let mut unit_tags: Vec<(&String, &String, &String)> = module_env
+        .types
+        .iter()
+        .filter_map(|(name, refined)| {
+            module_env
+                .unit_of_type(name)
+                .map(|u| (name, &refined._base_type, u))
+        })
+        .collect();
+    unit_tags.sort();
+    for (name, base, unit) in unit_tags {
+        hasher.update(b"|type_unit:");
+        hasher.update(name.as_bytes());
+        hasher.update(b":");
+        hasher.update(base.as_bytes());
+        hasher.update(b"=");
+        hasher.update(unit.as_bytes());
+    }
+
+    // 2c. Nominal signature data read by the nominal struct check: the atom's own
+    // parameter / return types, every struct's field types, and (below) callee
+    // parameter / return types. Editing any of these must invalidate the cache.
+    for p in &atom.params {
+        hasher.update(b"|param_type:");
+        hasher.update(p.name.as_bytes());
+        hasher.update(b"=");
+        hasher.update(p.type_name.as_deref().unwrap_or("").as_bytes());
+    }
+    hasher.update(b"|return_type:");
+    hasher.update(atom.return_type.as_deref().unwrap_or("").as_bytes());
+    let mut struct_names: Vec<&String> = module_env.structs.keys().collect();
+    struct_names.sort();
+    for name in struct_names {
+        hasher.update(b"|struct:");
+        hasher.update(name.as_bytes());
+        for f in &module_env.structs[name].fields {
+            hasher.update(b",");
+            hasher.update(f.name.as_bytes());
+            hasher.update(b":");
+            hasher.update(f.type_name.as_bytes());
+            if let Some(constraint) = &f.constraint {
+                hasher.update(b"|field_constraint:");
+                hasher.update(name.as_bytes());
+                hasher.update(b".");
+                hasher.update(f.name.as_bytes());
+                hasher.update(b"=");
+                hasher.update(constraint.as_bytes());
+            }
+        }
+        for invariant in &module_env.structs[name].invariants {
+            hasher.update(b"|struct_invariant:");
+            hasher.update(name.as_bytes());
+            hasher.update(b"=");
+            hasher.update(invariant.as_bytes());
         }
     }
 
@@ -304,6 +371,20 @@ pub fn compute_proof_hash_with_flags(
             hasher.update(callee_atom.requires.as_bytes());
             hasher.update(b":");
             hasher.update(callee_atom.ensures.as_bytes());
+            for p in &callee_atom.params {
+                hasher.update(b",param_type:");
+                hasher.update(p.type_name.as_deref().unwrap_or("").as_bytes());
+            }
+            hasher.update(b",return_type:");
+            hasher.update(callee_atom.return_type.as_deref().unwrap_or("").as_bytes());
+            hasher.update(b",semantics:");
+            hasher.update(
+                if crate::verification::fragment::atom_requires_bitvector_semantics(callee_atom) {
+                    b"bitvec".as_slice()
+                } else {
+                    b"default".as_slice()
+                },
+            );
         }
         // Walk further dependencies
         if let Some(further_callees) = module_env.dependency_graph.get(&callee_name) {
@@ -431,6 +512,27 @@ pub fn collect_callees_from_body(body_expr: &str) -> HashSet<String> {
     callees
 }
 
+/// Collect callee names from every clause of an atom.
+///
+/// A callee is a cache dependency wherever it appears, not only in the body:
+/// an atom whose `requires`/`ensures`/`invariant` or quantifier bounds call
+/// another atom imports that atom's contract — and its semantic mode — into
+/// its own proof, so a change there has to invalidate the cached proof.
+pub fn collect_callees_from_atom(atom: &Atom) -> HashSet<String> {
+    let mut callees = collect_callees_from_body(&atom.body_expr);
+    callees.extend(collect_callees_from_body(&atom.requires));
+    callees.extend(collect_callees_from_body(&atom.ensures));
+    if let Some(invariant) = atom.invariant.as_deref() {
+        callees.extend(collect_callees_from_body(invariant));
+    }
+    for quantifier in &atom.forall_constraints {
+        for clause in [&quantifier.start, &quantifier.end, &quantifier.condition] {
+            callees.extend(collect_callees_from_body(clause));
+        }
+    }
+    callees
+}
+
 /// Load the enhanced verification cache from `.mumei/cache/verification_cache.json`.
 pub fn load_verification_cache(base_dir: &Path) -> HashMap<String, VerificationCacheEntry> {
     let cache_path = base_dir
@@ -531,5 +633,93 @@ pub(crate) fn load_cache(cache_path: &Path) -> VerificationCache {
 pub(crate) fn save_cache(cache_path: &Path, cache: &VerificationCache) {
     if let Ok(json) = serde_json::to_string_pretty(cache) {
         let _ = fs::write(cache_path, json);
+    }
+}
+
+#[cfg(test)]
+mod nominal_hash_tests {
+    use super::*;
+    use crate::parser::{parse_module, Item};
+
+    fn env_and_hash(source: &str) -> String {
+        let items = parse_module(source);
+        let mut module_env = ModuleEnv::default();
+        for item in &items {
+            match item {
+                Item::Atom(atom) => {
+                    module_env.atoms.insert(atom.name.clone(), atom.clone());
+                }
+                Item::StructDef(s) => {
+                    module_env.structs.insert(s.name.clone(), s.clone());
+                }
+                _ => {}
+            }
+        }
+        module_env
+            .dependency_graph
+            .entry("main".to_string())
+            .or_default()
+            .insert("getx".to_string());
+        let main = module_env.atoms.get("main").unwrap().clone();
+        compute_proof_hash(&main, &module_env)
+    }
+
+    const MAIN: &str = r#"
+trusted atom main() -> i64
+requires: true;
+ensures: true;
+body: { getx(Pair { a: 1, b: 2 }) };
+"#;
+
+    #[test]
+    fn callee_param_type_change_invalidates_the_proof_hash() {
+        let structs = "struct Point { x: i64, y: i64 }\nstruct Pair { a: i64, b: i64 }\n";
+        let before = env_and_hash(&format!(
+            "{structs}\ntrusted atom getx(p: Pair) -> i64\nrequires: true;\nensures: true;\nbody: {{ p.a }};\n{MAIN}"
+        ));
+        let after = env_and_hash(&format!(
+            "{structs}\ntrusted atom getx(p: Point) -> i64\nrequires: true;\nensures: true;\nbody: {{ p.x }};\n{MAIN}"
+        ));
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn struct_field_type_change_invalidates_the_proof_hash() {
+        let getx =
+            "trusted atom getx(p: Pair) -> i64\nrequires: true;\nensures: true;\nbody: { p.a };\n";
+        let before = env_and_hash(&format!("struct Pair {{ a: i64, b: i64 }}\n{getx}{MAIN}"));
+        let after = env_and_hash(&format!("struct Pair {{ a: f64, b: i64 }}\n{getx}{MAIN}"));
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn callee_semantics_change_invalidates_the_proof_hash() {
+        let getx_default =
+            "trusted atom getx(p: Pair) -> i64\nrequires: true;\nensures: true;\nbody: { p.a };\n";
+        let getx_bitvec = "trusted atom getx(p: Pair) -> i64\n\
+semantics: bitvec;\n\
+requires: true;\n\
+ensures: true;\n\
+body: { p.a };\n";
+        let parsed = parse_module(getx_bitvec);
+        let callee = parsed
+            .iter()
+            .find_map(|item| match item {
+                Item::Atom(atom) if atom.name == "getx" => Some(atom),
+                _ => None,
+            })
+            .expect("parse bit-vector callee");
+        assert_eq!(
+            callee.spec_metadata.get("semantics").map(String::as_str),
+            Some("bitvec")
+        );
+
+        let before = env_and_hash(&format!(
+            "struct Pair {{ a: i64, b: i64 }}\n{getx_default}{MAIN}"
+        ));
+        let after = env_and_hash(&format!(
+            "struct Pair {{ a: i64, b: i64 }}\n{getx_bitvec}{MAIN}"
+        ));
+        assert_ne!(before, after);
     }
 }

@@ -42,8 +42,8 @@ pub(crate) use imports::{
 };
 
 pub use cache::{
-    collect_callees_from_body, compute_atom_hash, compute_contract_hash, compute_proof_hash,
-    compute_proof_hash_with_flags, invalidate_dependents, load_build_cache,
+    collect_callees_from_atom, collect_callees_from_body, compute_atom_hash, compute_contract_hash,
+    compute_proof_hash, compute_proof_hash_with_flags, invalidate_dependents, load_build_cache,
     load_verification_cache, migrate_old_cache, save_build_cache, save_verification_cache,
     VerificationCacheEntry,
 };
@@ -288,6 +288,67 @@ atom add(x: i64, y: i64) -> i64
                 assert_eq!(hash1, hash2, "same atom should produce same proof hash");
             }
         }
+    }
+
+    #[test]
+    fn test_proof_hash_includes_struct_constraints_invariants_and_semantics() {
+        let hash_for = |source: &str, atom_name: &str| {
+            let items = parser::parse_module(source);
+            let mut module_env = ModuleEnv::new();
+            register_imported_items(&items, None, &mut module_env);
+            let atom = module_env
+                .get_atom(atom_name)
+                .unwrap_or_else(|| panic!("atom {atom_name}"));
+            compute_proof_hash(atom, &module_env)
+        };
+
+        let struct_source = |constraint: &str, invariant: &str| {
+            format!(
+                "struct Quote {{\n\
+                 value: i64 where {constraint},\n\
+                 invariant: {invariant}\n\
+                 }}\n\
+                 atom read(q: Quote) -> i64\n\
+                 requires: true;\n\
+                 ensures: result == q.value;\n\
+                 body: q.value;"
+            )
+        };
+        let identical = struct_source("v >= 0", "self.value >= 0");
+        assert_eq!(
+            hash_for(&identical, "read"),
+            hash_for(&identical, "read"),
+            "identical modules should have identical proof hashes"
+        );
+        assert_ne!(
+            hash_for(&identical, "read"),
+            hash_for(&struct_source("v > 0", "self.value >= 0"), "read"),
+            "struct field constraint changes must invalidate proof hashes"
+        );
+        assert_ne!(
+            hash_for(&identical, "read"),
+            hash_for(&struct_source("v >= 0", "self.value > 0"), "read"),
+            "struct invariant changes must invalidate proof hashes"
+        );
+
+        let default_semantics = r#"
+atom add(x: i64) -> i64
+requires: true;
+ensures: result == x + 1;
+body: x + 1;
+"#;
+        let bitvector_semantics = r#"
+atom add(x: i64) -> i64
+semantics: bitvec;
+requires: true;
+ensures: result == x + 1;
+body: x + 1;
+"#;
+        assert_ne!(
+            hash_for(default_semantics, "add"),
+            hash_for(bitvector_semantics, "add"),
+            "atom semantics metadata changes must invalidate proof hashes"
+        );
     }
 
     #[test]

@@ -59,6 +59,17 @@ pub enum Op {
     And,
     Or,
     Implies,
+    /// Bitwise AND (`&`). Verified with real bit semantics only under
+    /// `--bitvec-i64`; see `docs/SPEC_GUIDE.md`.
+    BitAnd,
+    /// Bitwise OR (`|`).
+    BitOr,
+    /// Bitwise XOR (`^`).
+    BitXor,
+    /// Left shift (`<<`). Requires `0 <= n < 64`.
+    Shl,
+    /// Arithmetic (sign-propagating) right shift (`>>`). Requires `0 <= n < 64`.
+    Shr,
 }
 
 // =============================================================================
@@ -373,12 +384,20 @@ pub struct Quantifier {
     pub condition: String,
 }
 
+/// `type Name = <base> [unit <Unit>] [where <predicate>];`
+///
+/// A refined type may carry a unit-of-measure tag (`unit USD`). The unit is a
+/// pure type-level label: it never changes the value's Z3 sort or runtime
+/// representation, and is only consulted by the unit-consistency check on
+/// `+`, `-` and comparisons (see `verification::support::units`).
 #[derive(Debug, Clone)]
 pub struct RefinedType {
     pub name: String,
     pub _base_type: String,
     pub operand: String,
     pub predicate_raw: String,
+    /// Unit-of-measure tag (e.g. `USD`, `Meter`). `None` for unitless types.
+    pub unit: Option<String>,
     pub span: Span,
 }
 
@@ -453,6 +472,12 @@ pub struct StructDef {
     pub name: String,
     pub type_params: Vec<String>,
     pub fields: Vec<StructField>,
+    /// Cross-field invariants declared as `invariant: <expr>` clauses in the
+    /// struct body. Each expression refers to fields through the `self`
+    /// binder (`self.active_tasks <= self.max_tasks`) or by bare field name.
+    /// They are assumed for struct-typed parameters, checked at every
+    /// `StructInit`, and imposed on `result` of atoms returning this struct.
+    pub invariants: Vec<String>,
     pub method_names: Vec<String>,
     /// Methods defined in `impl StructName { atom ... }` blocks
     pub methods: Vec<Atom>,

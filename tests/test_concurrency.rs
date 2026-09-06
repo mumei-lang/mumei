@@ -973,11 +973,103 @@ body: {
     );
 }
 
-#[test]
-fn chan_send_rejects_a_by_value_aggregate_payload() {
+fn assert_fixture_exits_with_7(name: &str, source: &str, what: &str) {
     let bin = env!("CARGO_BIN_EXE_mumei");
-    let fixture = write_fixture(
-        "chan_aggregate_payload",
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let fixture = write_fixture(name, source);
+    let output = Command::new("timeout")
+        .arg("20s")
+        .arg(bin)
+        .arg("run")
+        .arg(&fixture)
+        .current_dir(manifest_dir)
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run {what} fixture: {err}"));
+    std::fs::remove_dir_all(fixture.parent().unwrap()).expect("remove concurrency fixture dir");
+    assert_eq!(
+        output.status.code(),
+        Some(7),
+        "{what}\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn chan_send_boxes_a_by_value_aggregate_payload_and_recv_unboxes_it() {
+    let ir = emit_atom_ir(
+        "chan_aggregate_ir",
+        r#"
+struct Point { x: i64, y: i64 }
+
+trusted atom relay(ch: chan<Point>, p: Point) -> Point
+requires: true;
+ensures: true;
+body: {
+    send(ch, p);
+    recv(ch)
+};
+"#,
+        "relay",
+    );
+    assert!(
+        ir.contains("call ptr @malloc") && ir.contains("payload_box_addr = ptrtoint ptr"),
+        "`send` must copy a by-value struct into a heap box and send its address\n{ir}"
+    );
+    assert!(
+        ir.contains("payload_unbox_ptr = inttoptr i64")
+            && ir.contains("load { i64, i64 }, ptr %payload_unbox_ptr")
+            && ir.contains("call void @free(ptr %payload_unbox_ptr)"),
+        "`recv` must load the struct back from the box and free it exactly once\n{ir}"
+    );
+    assert!(
+        ir.contains("define { i64, i64 } @relay"),
+        "`recv` on a `chan<Point>` must be typed as the declared struct\n{ir}"
+    );
+}
+
+#[test]
+fn boxed_payload_allocation_failure_aborts_through_the_runtime_instead_of_storing_to_null() {
+    let ir = emit_atom_ir(
+        "chan_aggregate_alloc_failed_ir",
+        r#"
+struct Point { x: i64, y: i64 }
+
+trusted atom relay(ch: chan<Point>, p: Point) -> Point
+requires: true;
+ensures: true;
+body: {
+    send(ch, p);
+    recv(ch)
+};
+"#,
+        "relay",
+    );
+    assert!(
+        ir.contains("payload_box_is_null = icmp eq ptr %payload_box, null")
+            && ir.contains("br i1 %payload_box_is_null, label %payload_box_alloc_failed")
+            && ir.contains("call void @__mumei_payload_box_alloc_failed(i64 ")
+            && ir.contains("unreachable")
+            && ir.contains("declare void @__mumei_payload_box_alloc_failed(i64) #0")
+            && ir.contains("attributes #0 = { noreturn }"),
+        "a null `malloc` result must branch to the runtime's fatal helper before the aggregate is stored\n{ir}"
+    );
+    let store_idx = ir
+        .find("store { i64, i64 } %")
+        .expect("boxed send must store the aggregate");
+    let branch_idx = ir
+        .find("br i1 %payload_box_is_null")
+        .expect("boxed send must guard the allocation");
+    assert!(
+        branch_idx < store_idx,
+        "the null guard must dominate the store into the box\n{ir}"
+    );
+}
+
+#[test]
+fn chan_struct_payload_round_trips_by_value_through_send_and_recv() {
+    assert_fixture_exits_with_7(
+        "chan_struct_round_trip",
         r#"
 struct Point { x: i64, y: i64 }
 
@@ -986,24 +1078,412 @@ requires: true;
 ensures: true;
 body: {
     send(ch, p);
+    let q = recv(ch);
+    q.y
+};
+
+trusted atom main()
+requires: true;
+ensures: true;
+body: {
+    relay(0, Point { x: 3, y: 7 })
+};
+"#,
+        "a struct sent by value must arrive with every field intact",
+    );
+}
+
+#[test]
+fn task_join_restores_an_f64_body_result() {
+    assert_fixture_exits_with_7(
+        "task_join_f64",
+        r#"
+trusted atom half_more() -> f64
+requires: true;
+ensures: true;
+body: {
+    task { 2.5 }
+};
+
+trusted atom main()
+requires: true;
+ensures: true;
+body: {
+    let r = half_more();
+    if r == 2.5 { 7 } else { 0 }
+};
+"#,
+        "joining a task whose body yields f64 must restore the double, not an i64 zero",
+    );
+}
+
+#[test]
+fn task_join_restores_a_struct_body_result() {
+    assert_fixture_exits_with_7(
+        "task_join_struct",
+        r#"
+struct Point { x: i64, y: i64 }
+
+trusted atom make() -> Point
+requires: true;
+ensures: true;
+body: {
+    task { Point { x: 3, y: 7 } }
+};
+
+trusted atom main()
+requires: true;
+ensures: true;
+body: {
+    let p = make();
+    p.y
+};
+"#,
+        "joining a task whose body yields a struct must restore the whole aggregate",
+    );
+}
+
+#[test]
+fn task_group_all_join_restores_the_last_child_f64_result() {
+    assert_fixture_exits_with_7(
+        "task_group_all_join_f64",
+        r#"
+trusted atom last() -> f64
+requires: true;
+ensures: true;
+body: {
+    task_group {
+        task { 1.5 };
+        task { 2.5 }
+    }
+};
+
+trusted atom main()
+requires: true;
+ensures: true;
+body: {
+    if last() == 2.5 { 7 } else { 0 }
+};
+"#,
+        "task_group:all must hand back the last child's f64 result bit-for-bit",
+    );
+}
+
+#[test]
+fn task_group_any_join_restores_a_struct_winner_result() {
+    assert_fixture_exits_with_7(
+        "task_group_any_join_struct",
+        r#"
+struct Point { x: i64, y: i64 }
+
+trusted atom make() -> Point
+requires: true;
+ensures: true;
+body: {
+    task_group:any {
+        task { Point { x: 1, y: 7 } };
+        task { Point { x: 2, y: 7 } }
+    }
+};
+
+trusted atom main()
+requires: true;
+ensures: true;
+body: {
+    let p = make();
+    p.y
+};
+"#,
+        "task_group:any must unbox the winner's struct result exactly once (losers release their own)",
+    );
+}
+
+#[test]
+fn task_group_any_cancelled_struct_recv_yields_a_zeroed_value_instead_of_dereferencing_null() {
+    assert_fixture_exits_with_7(
+        "task_group_any_cancelled_struct_recv",
+        r#"
+extern "C" {
+    fn usleep(usec: i64) -> i64
+        requires: true;
+        ensures: true;
+}
+
+struct Point { x: i64, y: i64 }
+
+trusted atom wait_point(ch: chan<Point>) -> Point
+requires: true;
+ensures: true;
+body: { recv(ch) };
+
+trusted atom make() -> Point
+requires: true;
+ensures: true;
+body: {
+    task_group:any {
+        task { usleep(100000); Point { x: 3, y: 7 } };
+        task { wait_point(0) }
+    }
+};
+
+trusted atom main()
+requires: true;
+ensures: true;
+body: {
+    let p = make();
+    if p.x == 3 { p.y } else { 0 }
+};
+"#,
+        "a `recv` on a `chan<Struct>` woken by task-group cancellation returns no box (slot 0) and must not load from address 0",
+    );
+}
+
+#[test]
+fn task_group_any_cancelled_struct_send_frees_its_dropped_box() {
+    let ir = emit_atom_ir(
+        "chan_struct_send_owned_ir",
+        r#"
+struct Point { x: i64, y: i64 }
+
+trusted atom push(ch: chan<Point>, p: Point) -> i64
+requires: true;
+ensures: true;
+body: {
+    send(ch, p);
     0
 };
 "#,
+        "push",
     );
-    let dir = fixture.parent().unwrap().to_path_buf();
-    let output = Command::new(bin)
-        .arg("build")
-        .arg(&fixture)
-        .arg("--emit")
-        .arg("llvm-ir")
-        .current_dir(&dir)
-        .output()
-        .expect("failed to build the aggregate payload fixture");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("cannot be sent") || stderr.contains("cannot be sent"),
-        "an aggregate payload must be reported rather than silently sent as zero\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        ir.contains("call i64 @__mumei_chan_send_owned")
+            && ir.contains("call void @free(ptr %payload_release_ptr)"),
+        "a boxed `send` must use the ownership-reporting runtime send and free the box when the runtime dropped it\n{ir}"
     );
-    std::fs::remove_dir_all(&dir).expect("remove concurrency fixture dir");
+
+    assert_fixture_exits_with_7(
+        "task_group_any_cancelled_struct_send",
+        r#"
+extern "C" {
+    fn usleep(usec: i64) -> i64
+        requires: true;
+        ensures: true;
+}
+
+struct Point { x: i64, y: i64 }
+
+trusted atom push_twice(ch: chan<Point>) -> Point
+requires: true;
+ensures: true;
+body: {
+    send(ch, Point { x: 1, y: 2 });
+    send(ch, Point { x: 3, y: 4 });
+    Point { x: 9, y: 9 }
+};
+
+trusted atom make() -> Point
+requires: true;
+ensures: true;
+body: {
+    task_group:any {
+        task { usleep(100000); Point { x: 3, y: 7 } };
+        task { push_twice(0) }
+    }
+};
+
+trusted atom main()
+requires: true;
+ensures: true;
+body: {
+    let p = make();
+    if p.x == 3 { p.y } else { 0 }
+};
+"#,
+        "a boxed `send` blocked on a full channel and then cancelled must free its box and let the winner's result through",
+    );
+}
+
+#[test]
+fn chan_send_rejects_an_array_payload() {
+    let bin = env!("CARGO_BIN_EXE_mumei");
+    let fixture = write_fixture(
+        "chan_array_payload_rejected",
+        r#"
+trusted atom relay(ch: chan<[i64]>, a: [i64]) -> i64
+requires: true;
+ensures: true;
+body: {
+    send(ch, a);
+    0
+};
+
+trusted atom main()
+requires: true;
+ensures: true;
+body: { 0 };
+"#,
+    );
+    let output = Command::new(bin)
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("run chan<[i64]> fixture");
+    std::fs::remove_dir_all(fixture.parent().unwrap()).expect("remove concurrency fixture dir");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !output.status.success() && combined.contains("channel send of an array payload is not supported"),
+        "an array fat pointer has no by-value channel encoding and must be rejected at codegen\n{combined}"
+    );
+}
+
+#[test]
+fn chan_send_accepts_a_struct_whose_layout_matches_the_array_fat_pointer() {
+    assert_fixture_exits_with_7(
+        "chan_label_struct_payload",
+        r#"
+extern "C" {
+    fn strcmp(a: Str, b: Str) -> i64
+        requires: true; ensures: true;
+}
+struct Label { id: i64, text: Str }
+
+trusted atom relay(ch: chan<Label>, p: Label) -> Label
+requires: true;
+ensures: true;
+body: { send(ch, p); recv(ch) };
+
+trusted atom main()
+requires: true;
+ensures: true;
+body: {
+    let p = relay(0, Label { id: 17, text: "struct-text" });
+    if p.id == 17 { if strcmp(p.text, "struct-text") == 0 { 7 } else { 0 } } else { 0 }
+};
+"#,
+        "a `{ i64, Str }` struct shares the array fat-pointer LLVM layout but is a by-value struct payload; the array guard must key on the declared type name",
+    );
+}
+
+fn assert_fixture_is_rejected(name: &str, source: &str, diagnostic: &str, what: &str) {
+    let bin = env!("CARGO_BIN_EXE_mumei");
+    let fixture = write_fixture(name, source);
+    let output = Command::new(bin)
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run {what} fixture: {err}"));
+    std::fs::remove_dir_all(fixture.parent().unwrap()).expect("remove concurrency fixture dir");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !output.status.success() && combined.contains(diagnostic),
+        "{what}\n{combined}"
+    );
+}
+
+#[test]
+fn chan_send_rejects_an_aggregate_through_a_scalar_channel() {
+    assert_fixture_is_rejected(
+        "chan_struct_into_scalar_rejected",
+        r#"
+struct Point { x: i64, y: i64 }
+
+trusted atom relay(ch: chan<i64>, p: Point) -> i64
+requires: true;
+ensures: true;
+body: { send(ch, p); recv(ch) };
+
+trusted atom main()
+requires: true;
+ensures: true;
+body: { relay(0, Point { x: 1, y: 2 }) };
+"#,
+        "does not match the declared payload type",
+        "a struct sent through `chan<i64>` would be boxed and its address read back as data without ever being freed; codegen must reject the mismatch",
+    );
+}
+
+#[test]
+fn task_group_any_rejects_mixed_result_types_when_a_child_returns_an_aggregate() {
+    assert_fixture_is_rejected(
+        "task_group_any_mixed_struct_rejected",
+        r#"
+struct Point { x: i64, y: i64 }
+
+trusted atom pick() -> i64
+requires: true;
+ensures: true;
+body: {
+    task_group:any {
+        task { Point { x: 3, y: 7 } };
+        task { 42 }
+    }
+};
+
+trusted atom main()
+requires: true;
+ensures: true;
+body: { pick() };
+"#,
+        "task_group:any children must share one result type",
+        "a `task_group:any` mixing a struct child with an i64 child cannot restore or free an aggregate winner and must be rejected",
+    );
+}
+
+#[test]
+fn chan_send_rejects_a_same_layout_struct_of_another_nominal_type() {
+    assert_fixture_is_rejected(
+        "chan_same_layout_struct_rejected",
+        r#"
+struct Point { x: i64, y: i64 }
+struct Pair { a: i64, b: i64 }
+
+trusted atom relay(ch: chan<Point>, q: Pair) -> Point
+requires: true;
+ensures: true;
+body: { send(ch, q); recv(ch) };
+
+trusted atom main()
+requires: true;
+ensures: true;
+body: { let p = relay(0, Pair { a: 1, b: 2 }); p.x };
+"#,
+        "send on 'chan<Point>' expects struct 'Point' but got struct 'Pair'",
+        "`Point` and `Pair` share one LLVM layout, so only the nominal type checker can tell a `Pair` sent on `chan<Point>` apart",
+    );
+}
+
+#[test]
+fn task_group_any_rejects_same_layout_structs_of_different_nominal_types() {
+    assert_fixture_is_rejected(
+        "task_group_any_same_layout_struct_rejected",
+        r#"
+struct Point { x: i64, y: i64 }
+struct Pair { a: i64, b: i64 }
+
+trusted atom pick() -> Point
+requires: true;
+ensures: true;
+body: {
+    task_group:any {
+        task { Point { x: 3, y: 7 } };
+        task { Pair { a: 1, b: 2 } }
+    }
+};
+
+trusted atom main()
+requires: true;
+ensures: true;
+body: { let p = pick(); p.x };
+"#,
+        "task_group:any children yield struct 'Point' and struct 'Pair'",
+        "a `task_group:any` mixing two same-layout structs must be rejected nominally even though codegen sees one LLVM type",
+    );
 }

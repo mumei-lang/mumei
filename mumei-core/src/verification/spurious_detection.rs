@@ -446,6 +446,18 @@ fn eval_binary(left: EvalValue, op: &Op, right: EvalValue) -> Result<EvalValue, 
                 Op::And => Ok(EvalValue::Bool(left != 0 && right != 0)),
                 Op::Or => Ok(EvalValue::Bool(left != 0 || right != 0)),
                 Op::Implies => Ok(EvalValue::Bool(left == 0 || right != 0)),
+                // Bit semantics on the two's complement `i64` bit pattern,
+                // matching the `BV(64)` encoding used under `--bitvec-i64`.
+                Op::BitAnd => Ok(EvalValue::Int(left & right)),
+                Op::BitOr => Ok(EvalValue::Int(left | right)),
+                Op::BitXor => Ok(EvalValue::Int(left ^ right)),
+                Op::Shl if (0..64).contains(&right) => {
+                    Ok(EvalValue::Int(((left as u64) << right) as i64))
+                }
+                Op::Shr if (0..64).contains(&right) => Ok(EvalValue::Int(left >> right)),
+                Op::Shl | Op::Shr => {
+                    Err("shift amount outside 0..64 during counterexample replay".to_string())
+                }
             }
         }
         (EvalValue::Bool(left), EvalValue::Bool(right)) => {
@@ -484,6 +496,9 @@ fn eval_binary(left: EvalValue, op: &Op, right: EvalValue) -> Result<EvalValue, 
                     Op::And => Ok(EvalValue::Bool(l != 0.0 && r != 0.0)),
                     Op::Or => Ok(EvalValue::Bool(l != 0.0 || r != 0.0)),
                     Op::Implies => Ok(EvalValue::Bool(l == 0.0 || r != 0.0)),
+                    Op::BitAnd | Op::BitOr | Op::BitXor | Op::Shl | Op::Shr => Err(
+                        "bitwise operator applied to f64 during counterexample replay".to_string(),
+                    ),
                 };
             }
             let left_bool = value_as_bool(&left);

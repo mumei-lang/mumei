@@ -82,6 +82,8 @@ pub struct StructReport {
     pub name: String,
     pub type_params: Vec<String>,
     pub fields: Vec<FieldReport>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub invariants: Vec<String>,
 }
 
 /// Report for a struct field.
@@ -252,5 +254,6 @@ fn struct_to_report(struct_def: &StructDef) -> StructReport {
                 type_name: f.type_name.clone(),
             })
             .collect(),
+        invariants: struct_def.invariants.clone(),
     }
 }

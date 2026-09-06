@@ -300,6 +300,16 @@ fn trace_eval_binary(left: TraceValue, op: &Op, right: TraceValue) -> Option<Tra
             Op::And => Some(TraceValue::Bool(left != 0 && right != 0)),
             Op::Or => Some(TraceValue::Bool(left != 0 || right != 0)),
             Op::Implies => Some(TraceValue::Bool(left == 0 || right != 0)),
+            // Bit semantics on the two's complement `i64` bit pattern,
+            // matching the `BV(64)` encoding used under `--bitvec-i64`.
+            Op::BitAnd => Some(TraceValue::Int(left & right)),
+            Op::BitOr => Some(TraceValue::Int(left | right)),
+            Op::BitXor => Some(TraceValue::Int(left ^ right)),
+            Op::Shl if (0..64).contains(&right) => {
+                Some(TraceValue::Int(((left as u64) << right) as i64))
+            }
+            Op::Shr if (0..64).contains(&right) => Some(TraceValue::Int(left >> right)),
+            Op::Shl | Op::Shr => None,
         },
         (TraceValue::Bool(left), TraceValue::Bool(right)) => match op {
             Op::Eq => Some(TraceValue::Bool(left == right)),
@@ -396,6 +406,11 @@ fn trace_op_symbol(op: &Op) -> &'static str {
         Op::Or => "||",
         Op::Implies => "==>",
         Op::Pow => "**",
+        Op::BitAnd => "&",
+        Op::BitOr => "|",
+        Op::BitXor => "^",
+        Op::Shl => "<<",
+        Op::Shr => ">>",
     }
 }
 

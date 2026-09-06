@@ -1,7 +1,9 @@
+use crate::codegen::lowering::{box_payload_to_i64, release_boxed_payload, unbox_payload_from_i64};
 use crate::codegen::stmt_emit::compile_hir_stmt;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Module;
+use inkwell::types::BasicTypeEnum;
 use inkwell::values::{BasicValueEnum, FunctionValue};
 use inkwell::AddressSpace;
 use inkwell::IntPredicate;
@@ -238,6 +240,16 @@ pub(crate) struct PendingTask<'a> {
     thread_ptr: inkwell::values::PointerValue<'a>,
     /// Field index of the trailing `i64 result` slot inside `args_struct_type`.
     result_idx: u32,
+    /// LLVM type of the body's tail value. The slot always holds an i64 that
+    /// `box_payload_to_i64` produced from a value of this type; the join
+    /// restores it with `unbox_payload_from_i64`.
+    result_ty: BasicTypeEnum<'a>,
+}
+
+impl<'a> PendingTask<'a> {
+    pub(crate) fn result_type(&self) -> BasicTypeEnum<'a> {
+        self.result_ty
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -486,13 +498,11 @@ pub(crate) fn emit_task_spawn_only<'a>(
         module_env,
     )?;
 
-    // Coerce body result to i64 (most task bodies already produce i64;
-    // f64/struct/pointer results are not yet plumbed through join).
-    let body_i64 = if body_result.is_int_value() {
-        body_result.into_int_value()
-    } else {
-        i64_type.const_int(0, false)
-    };
+    // P25 — encode the body result into the i64 slot without losing bits:
+    // f64 is bitcast, pointers go through `ptrtoint`, aggregates are boxed
+    // on the heap. `emit_task_join_only` restores the declared type.
+    let result_ty = body_result.get_type();
+    let body_i64 = box_payload_to_i64(context, builder, module, body_result)?;
 
     // Store result into the trailing slot of the args struct.
     let result_ptr =
@@ -518,8 +528,9 @@ pub(crate) fn emit_task_spawn_only<'a>(
             "task_group_complete_won",
         ));
         let cancel_block = context.append_basic_block(wrapper_fn, "task_group_complete_cancel");
+        let lost_block = context.append_basic_block(wrapper_fn, "task_group_complete_lost");
         let leave_block = context.append_basic_block(wrapper_fn, "task_group_complete_leave");
-        llvm!(builder.build_conditional_branch(won_group, cancel_block, leave_block));
+        llvm!(builder.build_conditional_branch(won_group, cancel_block, lost_block));
 
         builder.position_at_end(cancel_block);
         llvm!(builder.build_call(
@@ -527,6 +538,12 @@ pub(crate) fn emit_task_spawn_only<'a>(
             &[group_id.into()],
             "task_group_winner_cancel_call",
         ));
+        llvm!(builder.build_unconditional_branch(leave_block));
+
+        // A losing child's boxed result is never unboxed by the parent (only
+        // the winner's value reaches `group_result`), so release it here.
+        builder.position_at_end(lost_block);
+        release_boxed_payload(context, builder, module, body_i64, result_ty)?;
         llvm!(builder.build_unconditional_branch(leave_block));
 
         builder.position_at_end(leave_block);
@@ -637,14 +654,19 @@ pub(crate) fn emit_task_spawn_only<'a>(
         args_ptr,
         thread_ptr,
         result_idx,
+        result_ty,
     })
 }
-pub(crate) fn emit_task_join_only<'a>(
+
+/// Join `pending` and return the raw i64 slot, leaving any boxed result
+/// untouched. `task_group:any` uses this: the winner's value is read from
+/// the shared group result instead, and losers release their own boxes.
+pub(crate) fn emit_task_join_raw<'a>(
     context: &'a Context,
     builder: &Builder<'a>,
     module: &Module<'a>,
     pending: &PendingTask<'a>,
-) -> MumeiResult<BasicValueEnum<'a>> {
+) -> MumeiResult<inkwell::values::IntValue<'a>> {
     let i64_type = context.i64_type();
     let ptr_type = context.ptr_type(AddressSpace::default());
     let (_create_fn, join_fn) = declare_pthread_externs(context, module);
@@ -661,7 +683,18 @@ pub(crate) fn emit_task_join_only<'a>(
         "task_result_load_ptr",
     ));
     let result = llvm!(builder.build_load(i64_type, final_result_ptr, "task_result"));
-    Ok(result)
+    Ok(result.into_int_value())
+}
+
+/// Join `pending` and restore the body's tail value from the i64 slot.
+pub(crate) fn emit_task_join_only<'a>(
+    context: &'a Context,
+    builder: &Builder<'a>,
+    module: &Module<'a>,
+    pending: &PendingTask<'a>,
+) -> MumeiResult<BasicValueEnum<'a>> {
+    let raw = emit_task_join_raw(context, builder, module, pending)?;
+    unbox_payload_from_i64(context, builder, module, raw, pending.result_ty)
 }
 
 /// Plan 21 — concurrency runtime: spawn + immediately join a single

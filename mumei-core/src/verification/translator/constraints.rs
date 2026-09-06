@@ -29,6 +29,10 @@ pub(crate) fn apply_refinement_constraint<'a>(
         }
         // Plan 9-7: Str base type uses Z3 String Sort for refinement constraints
         "Str" => Z3String::new_const(ctx, var_name).into(),
+        // A refined `i64` keeps the encoding of the run, so a refinement alias
+        // does not silently return an overflow-sensitive parameter to the
+        // unbounded `Int` encoding.
+        "i64" if vc.bitvec_i64 => BV::new_const(ctx, var_name, I64_BITS).into(),
         _ => Int::new_const(ctx, var_name).into(),
     };
 

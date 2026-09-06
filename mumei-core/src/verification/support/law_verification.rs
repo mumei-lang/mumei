@@ -14,7 +14,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs;
 use std::path::Path;
-use z3::ast::{Array, Ast, Bool, Dynamic, Float, Int, Real, String as Z3String};
+use z3::ast::{Array, Ast, Bool, Dynamic, Float, Int, Real, String as Z3String, BV};
 use z3::{Config, Context, SatResult, Solver};
 
 // =============================================================================
@@ -244,17 +244,19 @@ pub fn verify_impl(
     module_env: &ModuleEnv,
     output_dir: &Path,
 ) -> MumeiResult<()> {
-    verify_impl_with_options(impl_def, module_env, output_dir, false)
+    verify_impl_with_options(impl_def, module_env, output_dir, false, false)
 }
 
-/// `verify_impl` の IEEE 754 モード対応版。`ieee754_f64` が true の場合、
+/// `verify_impl` のセマンティクスモード対応版。`ieee754_f64` が true の場合、
 /// f64 対象型の law 変数と式の lowering に Z3 FP 理論（Float(11,53)）を
-/// 使い、atom 契約検証と同じ f64 エンコーディングで law を検証する。
+/// 使う。`bitvec_i64` が true の場合、i64 対象型の law 変数を BV(64) として
+/// 宣言し、atom 契約検証と同じエンコーディングで law を検証する。
 pub fn verify_impl_with_options(
     impl_def: &ImplDef,
     module_env: &ModuleEnv,
     output_dir: &Path,
     ieee754_f64: bool,
+    bitvec_i64: bool,
 ) -> MumeiResult<()> {
     let trait_def = module_env.get_trait(&impl_def.trait_name).ok_or_else(|| {
         MumeiError::type_error_at(
@@ -320,6 +322,11 @@ pub fn verify_impl_with_options(
         // "add(a, b)" → "(a + b)", "add(b, a)" → "(b + a)" に展開
         let substituted = substitute_method_calls(law_expr, &method_body_map, &method_param_names);
 
+        // 置換後の law がビット演算子を含む場合、`--bitvec-i64` が無くても
+        // BV エンコーディングで検証する（atom 契約検証と同じ自動判定）。
+        let bitvec_i64 = bitvec_i64
+            || crate::verification::fragment::expression_requires_bitvector_semantics(&substituted);
+
         // シンボリック変数で law を検証
         let vc = VCtx {
             ctx: &ctx,
@@ -333,6 +340,9 @@ pub fn verify_impl_with_options(
             path_cond_stack: std::cell::RefCell::new(Vec::new()),
             profiler: None,
             ieee754_f64,
+            bitvec_i64,
+            bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
+            bitvec_i64_global: bitvec_i64,
         };
 
         let mut env: Env = HashMap::new();
@@ -346,6 +356,7 @@ pub fn verify_impl_with_options(
                 "f64" => Real::new_const(&ctx, *var_name).into(),
                 // Plan 9: Str parameters as Z3 String Sort
                 "Str" => Z3String::new_const(&ctx, *var_name).into(),
+                "i64" if bitvec_i64 => BV::new_const(&ctx, *var_name, I64_BITS).into(),
                 _ => Int::new_const(&ctx, *var_name).into(),
             };
             env.insert(var_name.to_string(), var);
@@ -390,6 +401,9 @@ pub fn verify_impl_with_options(
                             }
                         }
                     }
+
+                    // シフト量の範囲義務は law の前提のもとで解消する。
+                    discharge_bv_shift_obligations(&vc, &solver)?;
 
                     solver.assert(&law_bool.not());
                     if solver.check() == SatResult::Sat {

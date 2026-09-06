@@ -36,6 +36,7 @@ pub(crate) fn seed_tuple_result_components<'a>(
     return_type: Option<&str>,
     module_env: &ModuleEnv,
     ieee754_f64: bool,
+    bitvec_i64: bool,
 ) {
     let Some(components) = tuple_component_types(return_type) else {
         return;
@@ -48,10 +49,23 @@ pub(crate) fn seed_tuple_result_components<'a>(
         let key = tuple_result_component_key(binding, index);
         env.insert(
             key.clone(),
-            param_z3_value(ctx, &key, Some(component_type), module_env, ieee754_f64),
+            param_z3_value(
+                ctx,
+                &key,
+                Some(component_type),
+                module_env,
+                ieee754_f64,
+                bitvec_i64,
+            ),
         );
     }
 }
+
+/// Bit width of the `BV` sort used for `i64` under the opt-in `--bitvec-i64`
+/// mode. Machine `i64` is 64 bits wide and two's complement, so `BV(64)` with
+/// the signed comparison / division operators models it exactly (including
+/// wraparound on `+`, `-`, `*`).
+pub(crate) const I64_BITS: u32 = 64;
 
 /// Number of exponent / significand bits for IEEE 754 binary64 (`f64`).
 ///
@@ -120,7 +134,7 @@ pub(crate) fn coerce_to_float<'a>(
     }
     let real = value
         .as_real()
-        .or_else(|| value.as_int().map(|i| i.to_real()))?;
+        .or_else(|| as_int_like(value).map(|i| i.to_real()))?;
     let raw = raw_z3_context(ctx);
     let sort = unsafe { z3_sys::Z3_mk_fpa_sort_double(raw) };
     let ast =
@@ -207,6 +221,204 @@ pub(crate) fn real_from_f64<'a>(ctx: &'a Context, value: f64) -> Real<'a> {
     }
 }
 
+/// Bridge a `Dynamic` to the `Int` encoding (`bv2int`, signed).
+///
+/// Under `--bitvec-i64` an `i64` value is a `BV(64)`, but several encodings
+/// stay on the `Int` sort regardless of the mode — array indices, `[i64]`
+/// elements, and the `Real`/`Float` coercions for `f64`. This is the
+/// single BV → Int conversion point: it applies Z3's signed `bv2int` so the
+/// two's complement value is preserved.
+pub(crate) fn as_int_like<'a>(value: &Dynamic<'a>) -> Option<Int<'a>> {
+    value
+        .as_int()
+        .or_else(|| value.as_bv().map(|bv| bv_to_int_signed(&bv)))
+}
+
+/// Signed `bv2int`, without an `ite`.
+///
+/// Z3's signed `bv2int` branches on the sign bit, and a term holding an `ite`
+/// is rejected as an E-matching trigger — which loses quantifier
+/// instantiation on every array contract bridged this way. Flipping the sign
+/// bit and reading the result as unsigned yields the signed value biased by
+/// `2^63`, so subtracting the bias gives the same integer out of a term Z3 can
+/// still match on.
+pub(crate) fn bv_to_int_signed<'a>(bv: &BV<'a>) -> Int<'a> {
+    let ctx = bv.get_ctx();
+    let sign_bit = BV::from_u64(ctx, 1u64 << (I64_BITS - 1), I64_BITS);
+    let bias = Int::from_u64(ctx, 1u64 << (I64_BITS - 1));
+    Int::sub(ctx, &[&bv.bvxor(&sign_bit).to_int(false), &bias])
+}
+
+/// Bridge a `Dynamic` to the `BV(64)` encoding (`int2bv`).
+///
+/// This is the Int → BV conversion point, used when a contract mixes an `Int`
+/// term (an integer literal, an array element, a call result of an atom
+/// verified in `Int` mode) with a `BV(64)` term. Wider/narrower bit-vectors
+/// are rejected rather than silently resized.
+pub(crate) fn as_bv_i64<'a>(value: &Dynamic<'a>) -> Option<BV<'a>> {
+    if let Some(bv) = value.as_bv() {
+        return (bv.get_size() == I64_BITS).then_some(bv);
+    }
+    let int = value.as_int()?;
+    // A literal becomes a bit-vector numeral directly: Z3's `int2bv` of a
+    // non-numeral term is expensive (it bit-blasts the integer encoding), and
+    // an `int2bv` wrapper around a constant is enough to push a trivial goal
+    // like `(x & 1) == 1` into `unknown`.
+    match int.as_i64() {
+        Some(literal) => Some(BV::from_i64(int.get_ctx(), literal, I64_BITS)),
+        None => Some(BV::from_int(&int, I64_BITS)),
+    }
+}
+
+/// Put the two branches of an `ite` into a common sort.
+///
+/// A branch may be `BV(64)` while the other one is an `Int` (a literal, an
+/// array element, the result of an atom verified in `Int` mode); Z3 rejects an
+/// `ite` over mixed sorts, so the `Int` side is bridged to `BV(64)`. Branches
+/// that stay in unrelated sorts are reported as a type error, since Z3 answers
+/// such an `ite` with a null AST.
+pub(crate) fn unify_branch_sorts<'a>(
+    then_value: Dynamic<'a>,
+    else_value: Dynamic<'a>,
+) -> MumeiResult<(Dynamic<'a>, Dynamic<'a>)> {
+    let unified = match (is_bv_i64(&then_value), is_bv_i64(&else_value)) {
+        (true, false) => match as_bv_i64(&else_value) {
+            Some(bv) => (then_value, bv.into()),
+            None => (then_value, else_value),
+        },
+        (false, true) => match as_bv_i64(&then_value) {
+            Some(bv) => (bv.into(), else_value),
+            None => (then_value, else_value),
+        },
+        _ => (then_value, else_value),
+    };
+    let unified = unify_numeric_branch_sorts(unified);
+    if unified.0.get_sort() != unified.1.get_sort() {
+        return Err(MumeiError::type_error(format!(
+            "branches of a conditional must have the same type, got {} and {}",
+            unified.0.get_sort(),
+            unified.1.get_sort()
+        )));
+    }
+    Ok(unified)
+}
+
+/// Widen an integer branch to the `f64` sort of the other branch.
+///
+/// An atom returning `f64` may still yield an `i64` in one branch (`if c { x }
+/// else { 1.5 }`), which is the same widening applied to a mixed `f64`
+/// subexpression.
+fn unify_numeric_branch_sorts<'a>(
+    (then_value, else_value): (Dynamic<'a>, Dynamic<'a>),
+) -> (Dynamic<'a>, Dynamic<'a>) {
+    let ctx = then_value.get_ctx();
+    let widen = |value: &Dynamic<'a>, target: &Dynamic<'a>| -> Option<Dynamic<'a>> {
+        if target.as_float().is_some() {
+            let rne = round_nearest_even(ctx);
+            return coerce_to_float(ctx, value, &rne).map(Into::into);
+        }
+        if target.as_real().is_some() {
+            return as_int_like(value).map(|i| i.to_real().into());
+        }
+        None
+    };
+    let then_is_int = as_int_like(&then_value).is_some() && then_value.as_real().is_none();
+    let else_is_int = as_int_like(&else_value).is_some() && else_value.as_real().is_none();
+    match (then_is_int, else_is_int) {
+        (true, false) => match widen(&then_value, &else_value) {
+            Some(widened) => (widened, else_value),
+            None => (then_value, else_value),
+        },
+        (false, true) => match widen(&else_value, &then_value) {
+            Some(widened) => (then_value, widened),
+            None => (then_value, else_value),
+        },
+        _ => (then_value, else_value),
+    }
+}
+
+/// True when a term is usable as an E-matching trigger.
+///
+/// Z3 refuses a pattern containing an `ite` — which is what the signed
+/// `bv2int` bridge of an `i64` index or element expands into — and answers with
+/// a null AST that the `z3` crate turns into a panic.
+pub(crate) fn is_admissible_trigger(term: &Dynamic<'_>) -> bool {
+    if term.kind() == z3::AstKind::App && term.decl().kind() == z3::DeclKind::ITE {
+        return false;
+    }
+    term.children().iter().all(is_admissible_trigger)
+}
+
+/// True when the value is encoded as a 64-bit bit-vector.
+pub(crate) fn is_bv_i64(value: &Dynamic<'_>) -> bool {
+    value.as_bv().is_some_and(|bv| bv.get_size() == I64_BITS)
+}
+
+/// Symbolic length of an array, in the sort of the active `i64` encoding.
+///
+/// Lengths follow the mode so that index comparisons (`i < len(arr)`) stay in
+/// one theory: mixing `bv2int` on the index with `int2bv` on the length makes
+/// Z3 answer `unknown` on otherwise trivial array contracts.
+pub(crate) fn array_len_symbol<'a>(
+    ctx: &'a Context,
+    len_name: &str,
+    bitvec_i64: bool,
+) -> Dynamic<'a> {
+    if bitvec_i64 {
+        BV::new_const(ctx, len_name, I64_BITS).into()
+    } else {
+        Int::new_const(ctx, len_name).into()
+    }
+}
+
+/// `value >= 0`, signed in the bit-vector encoding.
+pub(crate) fn nonneg_constraint<'a>(ctx: &'a Context, value: &Dynamic<'a>) -> Option<Bool<'a>> {
+    if let Some(bv) = value.as_bv() {
+        let zero = BV::from_i64(ctx, 0, bv.get_size());
+        return Some(bv.bvsge(&zero));
+    }
+    value.as_int().map(|i| i.ge(&Int::from_i64(ctx, 0)))
+}
+
+/// `0 <= index < len`, compared in the bit-vector encoding when the length is
+/// a `BV(64)` and in `Int` otherwise.
+pub(crate) fn index_in_bounds<'a>(
+    ctx: &'a Context,
+    index: &Dynamic<'a>,
+    len: &Dynamic<'a>,
+) -> Option<Bool<'a>> {
+    if is_bv_i64(len) {
+        let (idx, len) = (as_bv_i64(index)?, as_bv_i64(len)?);
+        let zero = BV::from_i64(ctx, 0, I64_BITS);
+        return Some(Bool::and(ctx, &[&idx.bvsge(&zero), &idx.bvslt(&len)]));
+    }
+    let (idx, len) = (as_int_like(index)?, as_int_like(len)?);
+    Some(Bool::and(
+        ctx,
+        &[&idx.ge(&Int::from_i64(ctx, 0)), &idx.lt(&len)],
+    ))
+}
+
+/// Look up (or create and constrain) the `len_<array>` symbol in `env`.
+pub(crate) fn array_len_value<'a>(
+    ctx: &'a Context,
+    env: &mut Env<'a>,
+    array: &str,
+    bitvec_i64: bool,
+    solver_opt: Option<&Solver<'a>>,
+) -> Dynamic<'a> {
+    let len_name = format!("len_{}", array);
+    if let Some(existing) = env.get(&len_name) {
+        return existing.clone();
+    }
+    let len = array_len_symbol(ctx, &len_name, bitvec_i64);
+    if let (Some(solver), Some(nonneg)) = (solver_opt, nonneg_constraint(ctx, &len)) {
+        solver.assert(&nonneg);
+    }
+    env.insert(len_name, len.clone());
+    len
+}
+
 pub(crate) fn mark_string_constraints(vc: &VCtx<'_>) {
     if let Some(cell) = vc.has_string_constraints {
         cell.set(true);
@@ -253,13 +465,12 @@ pub(crate) fn coerce_array_store_value<'a>(
     value: Dynamic<'a>,
 ) -> DynResult<'a> {
     match array_element_sort(array, vc) {
-        ArrayElementSort::Int => value
-            .as_int()
+        ArrayElementSort::Int => as_int_like(&value)
             .map(Into::into)
             .ok_or_else(|| MumeiError::type_error("Array store value must be integer")),
         ArrayElementSort::Real => value
             .as_real()
-            .or_else(|| value.as_int().map(|i| i.to_real()))
+            .or_else(|| as_int_like(&value).map(|i| i.to_real()))
             .map(Into::into)
             .ok_or_else(|| MumeiError::type_error("Array store value must be real")),
         ArrayElementSort::Float => {
@@ -281,6 +492,7 @@ pub(crate) fn param_z3_value<'a>(
     type_name: Option<&str>,
     module_env: &ModuleEnv,
     ieee754_f64: bool,
+    bitvec_i64: bool,
 ) -> Dynamic<'a> {
     let base = type_name
         .map(|t| module_env.resolve_base_type(t))
@@ -314,6 +526,11 @@ pub(crate) fn param_z3_value<'a>(
             LoweredType::F64 => Real::new_const(ctx, name).into(),
             LoweredType::Str => Z3String::new_const(ctx, name).into(),
             LoweredType::Bool => Bool::new_const(ctx, name).into(),
+            // Under the opt-in `--bitvec-i64` mode `i64` is declared as a
+            // 64-bit bit-vector, so bitwise operators have real bit semantics
+            // and `+`/`-`/`*` wrap like machine arithmetic. See
+            // `docs/SPEC_GUIDE.md` § "Bit-Vector Mode".
+            LoweredType::I64 if bitvec_i64 => BV::new_const(ctx, name, I64_BITS).into(),
             _ => Int::new_const(ctx, name).into(),
         }
     }

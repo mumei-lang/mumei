@@ -3,8 +3,10 @@ mod call_graph;
 mod dataflow_inference;
 mod effects;
 mod law_verification;
+mod nominal_types;
 mod resource_safety;
 mod task_ownership;
+mod units;
 
 pub(crate) use law_verification::{
     contains_method_call, replace_word, split_args, substitute_method_calls,
@@ -31,10 +33,14 @@ pub(crate) use call_graph::{
     expr_mentions_var, expr_to_source_string, verify_atom_invariant, verify_call_graph_cycles,
 };
 
+pub(crate) use nominal_types::verify_nominal_struct_types;
+
 pub(crate) use task_ownership::{
     analyze_task_ownership, verify_task_ownership, TaskOwnershipViolation,
     TaskOwnershipViolationKind,
 };
+
+pub use units::verify_unit_consistency;
 
 pub use dataflow_inference::{
     build_data_flow_trace, infer_contracts_json, infer_effects_json, DataFlowTrace, ExecutionStep,
