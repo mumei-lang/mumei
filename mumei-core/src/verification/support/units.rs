@@ -311,6 +311,13 @@ impl<'a> UnitCtx<'a> {
         scoped.check_stmt_in_scope(stmt)
     }
 
+    fn check_scoped(&mut self, stmt: &Stmt) -> MumeiResult<Ty> {
+        let saved = self.vars.clone();
+        let result = self.check_stmt_in_scope(stmt);
+        self.vars = saved;
+        result
+    }
+
     fn check_stmt_in_scope(&mut self, stmt: &Stmt) -> MumeiResult<Ty> {
         match stmt {
             Stmt::Let { var, value, .. } => {
@@ -339,11 +346,16 @@ impl<'a> UnitCtx<'a> {
                 Ok(Ty::default())
             }
             Stmt::Block(stmts, _) => {
+                let saved = self.vars.clone();
                 let mut last = Ty::default();
-                for s in stmts {
-                    last = self.check_stmt_in_scope(s)?;
-                }
-                Ok(last)
+                let result = (|| {
+                    for s in stmts {
+                        last = self.check_stmt_in_scope(s)?;
+                    }
+                    Ok(last)
+                })();
+                self.vars = saved;
+                result
             }
             Stmt::While {
                 cond,
@@ -357,16 +369,16 @@ impl<'a> UnitCtx<'a> {
                 if let Some(d) = decreases {
                     self.infer(d)?;
                 }
-                self.check_stmt_in_scope(body)?;
+                self.check_scoped(body)?;
                 Ok(Ty::default())
             }
             Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => {
-                self.check_stmt_in_scope(body)?;
+                self.check_scoped(body)?;
                 Ok(Ty::default())
             }
             Stmt::TaskGroup { children, .. } => {
                 for c in children {
-                    self.check_stmt_in_scope(c)?;
+                    self.check_scoped(c)?;
                 }
                 Ok(Ty::default())
             }

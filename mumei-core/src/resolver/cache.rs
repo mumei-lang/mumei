@@ -263,6 +263,10 @@ pub fn compute_proof_hash_with_flags(
         hasher.update(b"|max_unroll:");
         hasher.update(max.to_string().as_bytes());
     }
+    if let Some(sem) = atom.spec_metadata.get("semantics") {
+        hasher.update(b"|semantics:");
+        hasher.update(sem.as_bytes());
+    }
     for flag in flags {
         hasher.update(b"|verify_flag:");
         hasher.update(flag.as_bytes());
@@ -325,6 +329,20 @@ pub fn compute_proof_hash_with_flags(
             hasher.update(f.name.as_bytes());
             hasher.update(b":");
             hasher.update(f.type_name.as_bytes());
+            if let Some(constraint) = &f.constraint {
+                hasher.update(b"|field_constraint:");
+                hasher.update(name.as_bytes());
+                hasher.update(b".");
+                hasher.update(f.name.as_bytes());
+                hasher.update(b"=");
+                hasher.update(constraint.as_bytes());
+            }
+        }
+        for invariant in &module_env.structs[name].invariants {
+            hasher.update(b"|struct_invariant:");
+            hasher.update(name.as_bytes());
+            hasher.update(b"=");
+            hasher.update(invariant.as_bytes());
         }
     }
 
@@ -359,6 +377,14 @@ pub fn compute_proof_hash_with_flags(
             }
             hasher.update(b",return_type:");
             hasher.update(callee_atom.return_type.as_deref().unwrap_or("").as_bytes());
+            hasher.update(b",semantics:");
+            hasher.update(
+                if crate::verification::fragment::atom_requires_bitvector_semantics(callee_atom) {
+                    b"bitvec".as_slice()
+                } else {
+                    b"default".as_slice()
+                },
+            );
         }
         // Walk further dependencies
         if let Some(further_callees) = module_env.dependency_graph.get(&callee_name) {
@@ -663,6 +689,37 @@ body: { getx(Pair { a: 1, b: 2 }) };
             "trusted atom getx(p: Pair) -> i64\nrequires: true;\nensures: true;\nbody: { p.a };\n";
         let before = env_and_hash(&format!("struct Pair {{ a: i64, b: i64 }}\n{getx}{MAIN}"));
         let after = env_and_hash(&format!("struct Pair {{ a: f64, b: i64 }}\n{getx}{MAIN}"));
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn callee_semantics_change_invalidates_the_proof_hash() {
+        let getx_default =
+            "trusted atom getx(p: Pair) -> i64\nrequires: true;\nensures: true;\nbody: { p.a };\n";
+        let getx_bitvec = "trusted atom getx(p: Pair) -> i64\n\
+semantics: bitvec;\n\
+requires: true;\n\
+ensures: true;\n\
+body: { p.a };\n";
+        let parsed = parse_module(getx_bitvec);
+        let callee = parsed
+            .iter()
+            .find_map(|item| match item {
+                Item::Atom(atom) if atom.name == "getx" => Some(atom),
+                _ => None,
+            })
+            .expect("parse bit-vector callee");
+        assert_eq!(
+            callee.spec_metadata.get("semantics").map(String::as_str),
+            Some("bitvec")
+        );
+
+        let before = env_and_hash(&format!(
+            "struct Pair {{ a: i64, b: i64 }}\n{getx_default}{MAIN}"
+        ));
+        let after = env_and_hash(&format!(
+            "struct Pair {{ a: i64, b: i64 }}\n{getx_bitvec}{MAIN}"
+        ));
         assert_ne!(before, after);
     }
 }
