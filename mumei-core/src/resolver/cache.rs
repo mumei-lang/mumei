@@ -263,6 +263,10 @@ pub fn compute_proof_hash_with_flags(
         hasher.update(b"|max_unroll:");
         hasher.update(max.to_string().as_bytes());
     }
+    if let Some(sem) = atom.spec_metadata.get("semantics") {
+        hasher.update(b"|semantics:");
+        hasher.update(sem.as_bytes());
+    }
     for flag in flags {
         hasher.update(b"|verify_flag:");
         hasher.update(flag.as_bytes());
@@ -325,6 +329,20 @@ pub fn compute_proof_hash_with_flags(
             hasher.update(f.name.as_bytes());
             hasher.update(b":");
             hasher.update(f.type_name.as_bytes());
+            if let Some(constraint) = &f.constraint {
+                hasher.update(b"|field_constraint:");
+                hasher.update(name.as_bytes());
+                hasher.update(b".");
+                hasher.update(f.name.as_bytes());
+                hasher.update(b"=");
+                hasher.update(constraint.as_bytes());
+            }
+        }
+        for invariant in &module_env.structs[name].invariants {
+            hasher.update(b"|struct_invariant:");
+            hasher.update(name.as_bytes());
+            hasher.update(b"=");
+            hasher.update(invariant.as_bytes());
         }
     }
 

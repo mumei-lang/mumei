@@ -56,6 +56,16 @@ fn matching_units_verify() {
     );
 }
 
+#[test]
+fn nested_block_unit_shadow_does_not_leak() {
+    let out = run_verify(&fixture("test_units_block_scope_ok.mm"), "block_scope");
+    let text = combined(&out);
+    assert!(
+        !text.contains("Unit mismatch"),
+        "nested block shadow must not leak its unit\n{text}"
+    );
+}
+
 fn assert_unit_mismatch(name: &str, tag: &str, lhs: &str, rhs: &str) {
     let out = run_verify(&fixture(name), tag);
     let text = combined(&out);
