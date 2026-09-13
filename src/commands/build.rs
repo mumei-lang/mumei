@@ -67,6 +67,26 @@ fn build_proof_flags(
     flags
 }
 
+/// Remove every artifact this build has already written, then exit 1.
+///
+/// A source file is accepted or rejected as a whole: an atom rejected after
+/// earlier atoms compiled must not leave their LLVM IR / headers / verified
+/// JSON on disk as if the build had succeeded.
+fn abort_build(written_artifacts: &[std::path::PathBuf]) -> ! {
+    for path in written_artifacts {
+        if let Err(e) = fs::remove_file(path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                eprintln!(
+                    "  ⚠️  Failed to remove partial artifact '{}': {}",
+                    path.display(),
+                    e
+                );
+            }
+        }
+    }
+    std::process::exit(1);
+}
+
 pub(crate) fn cmd_build(
     input: &str,
     output: &str,
@@ -171,6 +191,9 @@ pub(crate) fn cmd_build(
         std::collections::HashMap::new();
 
     let mut atom_count = 0;
+    // Artifacts written so far; removed again if a later item is rejected so a
+    // failed build never leaves partial output behind.
+    let mut written_artifacts: Vec<std::path::PathBuf> = Vec::new();
     // Extern functions are emitted as trusted atoms by the runtime monitor; an
     // atom declared in the file already covers that name, and the same extern
     // block may be reachable more than once.
@@ -258,7 +281,7 @@ pub(crate) fn cmd_build(
                             let resolved = resolve_source_for_span(&source, &impl_def.span);
                             let e = e.with_source(&resolved, &impl_def.span);
                             eprintln!("{:?}", miette::Report::new(e));
-                            std::process::exit(1);
+                            abort_build(&written_artifacts);
                         }
                     }
                 }
@@ -312,8 +335,9 @@ pub(crate) fn cmd_build(
                                             artifact.name.display(),
                                             e
                                         );
-                                        std::process::exit(1);
+                                        abort_build(&written_artifacts);
                                     }
+                                    written_artifacts.push(artifact.name.clone());
                                 }
                                 println!(
                                     "  ⚙️  Tempering: Done. Compiled extern '{}' to {}.",
@@ -325,7 +349,7 @@ pub(crate) fn cmd_build(
                                 let resolved = resolve_source_for_span(&source, &ext_fn.span);
                                 let e = e.with_source(&resolved, &ext_fn.span);
                                 eprintln!("{:?}", miette::Report::new(e));
-                                std::process::exit(1);
+                                abort_build(&written_artifacts);
                             }
                         }
                     }
@@ -477,7 +501,7 @@ pub(crate) fn cmd_build(
                                         );
                                         continue;
                                     }
-                                    std::process::exit(1);
+                                    abort_build(&written_artifacts);
                                 }
                             }
                         }
@@ -513,9 +537,12 @@ pub(crate) fn cmd_build(
                                             artifact.name.display(),
                                             e
                                         );
-                                        std::process::exit(1);
+                                        abort_build(&written_artifacts);
                                     }
                                 }
+                                // LlvmIr `Source` artifacts are already on disk (written by
+                                // the emitter itself), so track every artifact path.
+                                written_artifacts.push(artifact.name.clone());
                             }
                             if !matches!(emit_target, emitter::EmitTarget::DecidableMetrics) {
                                 let target_desc = emit_target.label();
@@ -529,7 +556,7 @@ pub(crate) fn cmd_build(
                             let resolved = resolve_source_for_span(&source, &method.span);
                             let e = e.with_source(&resolved, &method.span);
                             eprintln!("{:?}", miette::Report::new(e));
-                            std::process::exit(1);
+                            abort_build(&written_artifacts);
                         }
                     }
                 }
@@ -662,7 +689,7 @@ pub(crate) fn cmd_build(
                                     );
                                     continue;
                                 }
-                                std::process::exit(1);
+                                abort_build(&written_artifacts);
                             }
                         }
                     }
@@ -696,9 +723,10 @@ pub(crate) fn cmd_build(
                                         artifact.name.display(),
                                         e
                                     );
-                                    std::process::exit(1);
+                                    abort_build(&written_artifacts);
                                 }
                             }
+                            written_artifacts.push(artifact.name.clone());
                         }
                         if !matches!(emit_target, emitter::EmitTarget::DecidableMetrics) {
                             let target_desc = emit_target.label();
@@ -712,7 +740,7 @@ pub(crate) fn cmd_build(
                         let resolved = resolve_source_for_span(&source, &atom.span);
                         let e = e.with_source(&resolved, &atom.span);
                         eprintln!("{:?}", miette::Report::new(e));
-                        std::process::exit(1);
+                        abort_build(&written_artifacts);
                     }
                 }
             }
