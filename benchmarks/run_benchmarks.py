@@ -139,6 +139,7 @@ LEAN_VERIFY_TIMEOUT_S = 300
 # crash) and must not be credited as a caught counterexample.
 EXIT_VERIFIED = 0
 EXIT_REJECTED = 1
+EXIT_USAGE_ERROR = 2
 EXIT_INCONCLUSIVE = 3
 EXIT_INPUT_ERROR = 4
 EXIT_INTERNAL_ERROR = 5

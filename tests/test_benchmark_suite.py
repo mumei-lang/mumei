@@ -524,6 +524,7 @@ def test_exit_code_table_matches_the_cli_source():
     assert set(cli_codes) == {
         "EXIT_VERIFIED",
         "EXIT_REJECTED",
+        "EXIT_USAGE_ERROR",
         "EXIT_INCONCLUSIVE",
         "EXIT_INPUT_ERROR",
         "EXIT_INTERNAL_ERROR",
