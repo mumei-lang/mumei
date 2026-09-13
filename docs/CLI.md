@@ -61,9 +61,15 @@ outcome directly: `exit_code` is the process exit code from the table above,
 (rejected) / `unverifiable` / `inconclusive` / `input_error` / `internal_error`
 in agreement with `exit_code` (a run whose only open items are Lean escalation
 candidates or an infrastructure error reports the aggregate summary rather than
-the single atom's `report.json`). Runs that stop before any atom is checked —
-unreadable or unparseable input, a failed `--cross-spec-file` load, Z3
-unavailable — still print one summary payload with zero counts and the reason
-under `diagnostics`, so stdout is a single JSON document for every single-file
-outcome. A directory run with `--json` prints one payload per file followed by
-the text summary; parse it line-oriented or verify files individually.
+the single atom's `report.json`). A single-file run whose atoms all verified
+prints the last atom's `report.json` instead of the summary; its `status` is the
+per-atom `success` and it carries `exit_code: 0`. Runs that stop before any
+atom is checked — unreadable input, an unresolved import, a failed
+`--cross-spec-files` load, Z3 unavailable — still print one summary payload
+with zero counts and the reason under `diagnostics`, so stdout is a single
+JSON document for every single-file run that gets past argument parsing.
+Usage errors (`2`) are reported by the argument parser on stderr and print no
+JSON. `--emit loss-vector` / `--emit structured-feedback` print the emitted
+artifact to stdout as a second JSON document ahead of the summary. A directory
+run with `--json` prints one payload per file followed by the text summary;
+parse it line-oriented or verify files individually.
