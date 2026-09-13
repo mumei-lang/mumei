@@ -43,6 +43,7 @@ import argparse
 import datetime
 import importlib.util
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -486,6 +487,7 @@ def measure_runtime_artifacts(
                 text=True,
                 timeout=LEAN_VERIFY_TIMEOUT_S,
                 cwd=str(work_dir),
+                env={**os.environ, "MUMEI_LEAN_PATH": str(lean_bridge)},
             )
         verdict_ok = proc.returncode == (
             EXIT_VERIFIED if expected == "PASS" else EXIT_REJECTED

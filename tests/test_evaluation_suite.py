@@ -435,6 +435,7 @@ def test_runtime_artifact_proof_cert_escalates_an_inconclusive_verify(
     source = tmp_path / "ff.mm"
     source.write_text("atom a { ensures: true; }", encoding="utf-8")
     calls: list[list[str]] = []
+    envs: list[dict | None] = []
 
     class _Proc:
         def __init__(self, code: int) -> None:
@@ -443,6 +444,7 @@ def test_runtime_artifact_proof_cert_escalates_an_inconclusive_verify(
 
     def _run(cmd, **kwargs):
         calls.append(cmd)
+        envs.append(kwargs.get("env"))
         if cmd[1] == "build":
             return _Proc(1)
         out = Path(cmd[cmd.index("--output") + 1])
@@ -454,8 +456,10 @@ def test_runtime_artifact_proof_cert_escalates_an_inconclusive_verify(
     with_bridge = suite.measure_runtime_artifacts(
         "mumei", source, tmp_path, expected="PASS", lean_bridge=Path("bridge.py")
     )
-    escalated = [c for c in calls if "--escalate-lean" in c]
+    escalated = [(c, e) for c, e in zip(calls, envs) if "--escalate-lean" in c]
     assert len(escalated) == 1
+    # the CLI resolves the bridge from its cwd (a temp dir), so it must be told
+    assert escalated[0][1]["MUMEI_LEAN_PATH"] == "bridge.py"
     assert with_bridge["targets"]["proof-cert"] == {
         "emitted": True,
         "artifacts": 1,
