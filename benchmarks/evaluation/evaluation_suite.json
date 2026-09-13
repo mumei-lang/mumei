@@ -31,7 +31,7 @@
           "status": "MEASURED"
         },
         "proof_success_rate": {
-          "avg_solver_time_s": 0.183,
+          "avg_solver_time_s": 0.029,
           "files": 9,
           "lean_discharge_rate": 1.0,
           "matched_files": 9,
@@ -337,7 +337,7 @@
             "lean_verified_delta": 0,
             "off": {
               "files": 1,
-              "lean_solver_time_s": 7.932,
+              "lean_solver_time_s": 6.498,
               "lean_verified_atoms": 4,
               "manual_lemma_reason_remaining": 0,
               "status": "MEASURED"
@@ -352,6 +352,7 @@
               "lean_solver_time_s": 8.326,
               "lean_verified_atoms": 4,
               "manual_lemma_reason_remaining": 0,
+              "missing_files": [],
               "status": "MEASURED"
             }
           },
@@ -537,7 +538,7 @@
           "status": "MEASURED"
         },
         "proof_success_rate": {
-          "avg_solver_time_s": 0.073,
+          "avg_solver_time_s": 0.029,
           "files": 15,
           "lean_discharge_rate": null,
           "matched_files": 15,
@@ -569,11 +570,11 @@
         "runtime_artifact_utility": {
           "attempted_emissions": 20,
           "counterexample": {
-            "as_expected_emissions": 40,
-            "as_expected_rate": 1.0,
+            "as_expected_emissions": 28,
+            "as_expected_rate": 0.7,
             "attempted_emissions": 40,
             "files": 10,
-            "leaked_build_artifacts": 0,
+            "leaked_build_artifacts": 12,
             "refutation_certificates": 10
           },
           "emission_success_rate": 1.0,
@@ -747,19 +748,19 @@
               }
             },
             {
-              "as_expected_targets": 4,
+              "as_expected_targets": 1,
               "emitted_targets": 1,
               "expected": "FAIL",
               "file": "task_concurrent_double_move_fail.mm",
               "targets": {
                 "c-header": {
                   "artifacts": 1,
-                  "as_expected": true,
+                  "as_expected": false,
                   "emitted": false
                 },
                 "llvm-ir": {
                   "artifacts": 1,
-                  "as_expected": true,
+                  "as_expected": false,
                   "emitted": false
                 },
                 "proof-cert": {
@@ -769,7 +770,7 @@
                 },
                 "verified-json": {
                   "artifacts": 1,
-                  "as_expected": true,
+                  "as_expected": false,
                   "emitted": false
                 }
               }
@@ -831,19 +832,19 @@
               }
             },
             {
-              "as_expected_targets": 4,
+              "as_expected_targets": 1,
               "emitted_targets": 1,
               "expected": "FAIL",
               "file": "task_move_while_sibling_reads_fail.mm",
               "targets": {
                 "c-header": {
                   "artifacts": 1,
-                  "as_expected": true,
+                  "as_expected": false,
                   "emitted": false
                 },
                 "llvm-ir": {
                   "artifacts": 1,
-                  "as_expected": true,
+                  "as_expected": false,
                   "emitted": false
                 },
                 "proof-cert": {
@@ -853,7 +854,7 @@
                 },
                 "verified-json": {
                   "artifacts": 1,
-                  "as_expected": true,
+                  "as_expected": false,
                   "emitted": false
                 }
               }
@@ -915,19 +916,19 @@
               }
             },
             {
-              "as_expected_targets": 4,
+              "as_expected_targets": 1,
               "emitted_targets": 1,
               "expected": "FAIL",
               "file": "task_struct_capture_double_move_fail.mm",
               "targets": {
                 "c-header": {
                   "artifacts": 1,
-                  "as_expected": true,
+                  "as_expected": false,
                   "emitted": false
                 },
                 "llvm-ir": {
                   "artifacts": 1,
-                  "as_expected": true,
+                  "as_expected": false,
                   "emitted": false
                 },
                 "proof-cert": {
@@ -937,25 +938,25 @@
                 },
                 "verified-json": {
                   "artifacts": 1,
-                  "as_expected": true,
+                  "as_expected": false,
                   "emitted": false
                 }
               }
             },
             {
-              "as_expected_targets": 4,
+              "as_expected_targets": 1,
               "emitted_targets": 1,
               "expected": "FAIL",
               "file": "task_use_after_concurrent_move_fail.mm",
               "targets": {
                 "c-header": {
                   "artifacts": 1,
-                  "as_expected": true,
+                  "as_expected": false,
                   "emitted": false
                 },
                 "llvm-ir": {
                   "artifacts": 1,
-                  "as_expected": true,
+                  "as_expected": false,
                   "emitted": false
                 },
                 "proof-cert": {
@@ -965,7 +966,7 @@
                 },
                 "verified-json": {
                   "artifacts": 1,
-                  "as_expected": true,
+                  "as_expected": false,
                   "emitted": false
                 }
               }
@@ -1306,7 +1307,7 @@
           "status": "SKIP"
         },
         "proof_success_rate": {
-          "avg_solver_time_s": 0.061,
+          "avg_solver_time_s": 0.008,
           "files": 3,
           "lean_discharge_rate": null,
           "matched_files": 3,
@@ -1530,7 +1531,7 @@
           "status": "MEASURED"
         },
         "proof_success_rate": {
-          "avg_solver_time_s": 0.108,
+          "avg_solver_time_s": 0.025,
           "files": 10,
           "lean_discharge_rate": 1.0,
           "matched_files": 10,
@@ -1865,7 +1866,7 @@
             "lean_verified_delta": 0,
             "off": {
               "files": 1,
-              "lean_solver_time_s": 8.152,
+              "lean_solver_time_s": 6.602,
               "lean_verified_atoms": 2,
               "manual_lemma_reason_remaining": 0,
               "status": "MEASURED"
@@ -1880,6 +1881,7 @@
               "lean_solver_time_s": 6.579,
               "lean_verified_atoms": 2,
               "manual_lemma_reason_remaining": 0,
+              "missing_files": [],
               "status": "MEASURED"
             }
           },
@@ -2081,7 +2083,7 @@
           "status": "MEASURED"
         },
         "proof_success_rate": {
-          "avg_solver_time_s": 0.067,
+          "avg_solver_time_s": 0.021,
           "files": 6,
           "lean_discharge_rate": null,
           "matched_files": 6,
@@ -2447,7 +2449,7 @@
           "status": "SKIP"
         },
         "proof_success_rate": {
-          "avg_solver_time_s": 0.072,
+          "avg_solver_time_s": 0.008,
           "files": 3,
           "lean_discharge_rate": null,
           "matched_files": 3,
@@ -2670,7 +2672,7 @@
     "total_trusted": 0,
     "trusted_ratio": 0.0
   },
-  "timestamp": "2026-09-13 11:29 UTC",
+  "timestamp": "2026-09-13 14:29 UTC",
   "totals": {
     "counterexample_quality": {
       "counterexample_catch_rate": 1.0,
@@ -2697,11 +2699,11 @@
     "runtime_artifact_utility": {
       "attempted_emissions": 104,
       "counterexample": {
-        "as_expected_emissions": 80,
-        "as_expected_rate": 1.0,
+        "as_expected_emissions": 68,
+        "as_expected_rate": 0.85,
         "attempted_emissions": 80,
         "files": 20,
-        "leaked_build_artifacts": 0,
+        "leaked_build_artifacts": 12,
         "refutation_certificates": 20
       },
       "emission_success_rate": 0.9327,
@@ -2716,7 +2718,7 @@
         "lean_verified_delta": 0,
         "off": {
           "files": 2,
-          "lean_solver_time_s": 16.084,
+          "lean_solver_time_s": 13.1,
           "lean_verified_atoms": 6,
           "manual_lemma_reason_remaining": 0,
           "status": "MEASURED"
@@ -2729,7 +2731,9 @@
           "lean_verified_atoms": 6,
           "manual_lemma_reason_remaining": 0,
           "status": "MEASURED"
-        }
+        },
+        "paired_categories": 2,
+        "unpaired_categories": 4
       },
       "lean_escalation_candidates": 6,
       "lean_verified_atoms": 6,

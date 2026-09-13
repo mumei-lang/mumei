@@ -196,7 +196,7 @@ proof certificates), never a substituted value.
 
 ---
 
-## Evaluation Suite Run — 2026-09-13 11:29 UTC
+## Evaluation Suite Run — 2026-09-13 14:29 UTC
 
 `budget_policy_fingerprint`: `SKIP`. An axis reports `SKIP` when
 its input is absent (no `mumei` binary, or no agent repair data in the
@@ -218,7 +218,7 @@ proof certificates), never a substituted value.
 | counterexample quality | MEASURED | 100.00% (20/20 caught, 0 without a verdict) |
 | trust surface | MEASURED | 0 trusted / 105 atoms, 0 FFI declarations, 6 Lean escalation candidates, 6 lean_verified (AI off; AI on: 6 lean_verified, +0 delta, 0 ai_proof_used, 0 manual_lemma_reason left) |
 | user burden | MEASURED | 2.4667 clauses/atom, 1.8902 spec/impl tokens |
-| runtime artifact utility | MEASURED | 93.27% (97/104 emissions) |
+| runtime artifact utility | MEASURED | 93.27% (97/104 emissions, expected-PASS tasks; counterexample tasks: 85.00% as expected (68/80), 12 leaked build artifacts, 20/20 refutation certificates) |
 
 ### Per-Category Results
 
@@ -255,12 +255,28 @@ proof certificates), never a substituted value.
 
 ### Artifact Emission Gaps
 
-| Category | File | Target |
-|----------|------|--------|
-| arithmetic | `finite_field_modular.mm` | `llvm-ir` |
-| arithmetic | `finite_field_modular.mm` | `c-header` |
-| arithmetic | `finite_field_modular.mm` | `verified-json` |
-| domain_compliance | `modular_commitment.mm` | `llvm-ir` |
-| domain_compliance | `modular_commitment.mm` | `c-header` |
-| domain_compliance | `modular_commitment.mm` | `verified-json` |
-| domain_compliance | `regtech_exhaustiveness.mm` | `llvm-ir` |
+`missing`: an expected-PASS task yielded no artifact. `leaked`: a
+counterexample task left a non-empty build artifact behind despite the
+rejected verdict.
+
+| Category | File | Target | Gap |
+|----------|------|--------|-----|
+| arithmetic | `finite_field_modular.mm` | `llvm-ir` | missing |
+| arithmetic | `finite_field_modular.mm` | `c-header` | missing |
+| arithmetic | `finite_field_modular.mm` | `verified-json` | missing |
+| concurrency | `task_concurrent_double_move_fail.mm` | `llvm-ir` | leaked |
+| concurrency | `task_concurrent_double_move_fail.mm` | `c-header` | leaked |
+| concurrency | `task_concurrent_double_move_fail.mm` | `verified-json` | leaked |
+| concurrency | `task_move_while_sibling_reads_fail.mm` | `llvm-ir` | leaked |
+| concurrency | `task_move_while_sibling_reads_fail.mm` | `c-header` | leaked |
+| concurrency | `task_move_while_sibling_reads_fail.mm` | `verified-json` | leaked |
+| concurrency | `task_struct_capture_double_move_fail.mm` | `llvm-ir` | leaked |
+| concurrency | `task_struct_capture_double_move_fail.mm` | `c-header` | leaked |
+| concurrency | `task_struct_capture_double_move_fail.mm` | `verified-json` | leaked |
+| concurrency | `task_use_after_concurrent_move_fail.mm` | `llvm-ir` | leaked |
+| concurrency | `task_use_after_concurrent_move_fail.mm` | `c-header` | leaked |
+| concurrency | `task_use_after_concurrent_move_fail.mm` | `verified-json` | leaked |
+| domain_compliance | `modular_commitment.mm` | `llvm-ir` | missing |
+| domain_compliance | `modular_commitment.mm` | `c-header` | missing |
+| domain_compliance | `modular_commitment.mm` | `verified-json` | missing |
+| domain_compliance | `regtech_exhaustiveness.mm` | `llvm-ir` | missing |
