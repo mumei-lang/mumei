@@ -1667,6 +1667,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
         let backfilled = proof_graph::backfill_verification_status_from_sibling_certificates(
             &module_env,
             &cross_spec_result,
+            allow_lean_verified,
             &mut statuses,
         );
         if backfilled > 0 && !quiet_output {

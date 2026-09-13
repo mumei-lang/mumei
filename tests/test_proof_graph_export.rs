@@ -439,9 +439,14 @@ impl EscalationProject {
 
     /// `mumei verify --emit proof-graph` on the consumer; returns the graph.
     fn consumer_graph(&self) -> (Value, String) {
+        self.consumer_graph_with(&["--allow-lean-verified"])
+    }
+
+    fn consumer_graph_with(&self, extra_args: &[&str]) -> (Value, String) {
         let report = self.dir.join("report");
         let output = Command::new(env!("CARGO_BIN_EXE_mumei"))
             .arg("verify")
+            .args(extra_args)
             .arg("--solver-timeout")
             .arg("50")
             .arg("--report-dir")
@@ -484,6 +489,20 @@ fn a_fresh_lean_verified_sibling_certificate_backfills_imported_atoms() {
     );
     let cert = project.lib_cert();
     assert_eq!(cert["atoms"][0]["z3_check_result"], "lean_verified");
+
+    // Without the Lean opt-in the consumer's proof graph leaves the
+    // lean_verified import null: the same policy `verify_import_certificate`
+    // applies to trusting the import.
+    let (graph, log) = project.consumer_graph_with(&[]);
+    assert!(
+        !log.contains("took verification_status from a fresh sibling certificate"),
+        "{log}"
+    );
+    assert_eq!(node(&graph, "fermat3")["verification_status"], Value::Null);
+    assert_eq!(
+        node(&graph, "lib::fermat3")["verification_status"],
+        Value::Null
+    );
 
     let (graph, log) = project.consumer_graph();
     assert!(
