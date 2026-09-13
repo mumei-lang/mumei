@@ -44,12 +44,22 @@ pub fn detect_logic_fragment_tags(atom: &Atom, module_env: &ModuleEnv) -> Vec<St
             push_unique_tag(&mut tags, "nonlinear_arithmetic");
         }
     }
+    let mut struct_invariant_nonlinear = false;
     for invariant in atom_struct_invariants(atom, module_env) {
         if expr_has_nonlinear_arithmetic(&parse_expression(&invariant))
             || text_has_nonlinear_arithmetic_marker(&invariant)
         {
             push_unique_tag(&mut tags, "nonlinear_arithmetic");
+            struct_invariant_nonlinear = true;
         }
+    }
+    if tags.iter().any(|tag| tag == "nonlinear_arithmetic")
+        && atom.invariant.is_none()
+        && !struct_invariant_nonlinear
+        && atom.forall_constraints.is_empty()
+        && bounded_low_degree_nonlinear_profile(atom).is_some()
+    {
+        push_unique_tag(&mut tags, BOUNDED_NONLINEAR_TAG);
     }
 
     if stmt_has_while(&body_stmt) {
@@ -336,7 +346,282 @@ pub fn is_outside_decidable_fragment(tags: &[String]) -> bool {
         "inductive_data_type",
         "finite_field",
     ];
-    tags.iter().any(|tag| OUTSIDE_TAGS.contains(&tag.as_str()))
+    let nlsat_first = is_nlsat_first_candidate(tags);
+    tags.iter().any(|tag| {
+        OUTSIDE_TAGS.contains(&tag.as_str()) && !(nlsat_first && tag == "nonlinear_arithmetic")
+    })
+}
+
+/// Secondary tag recorded next to `nonlinear_arithmetic` when the obligation
+/// is a bounded, low-degree polynomial (P10-D / C-2). Such atoms are tried by
+/// Z3 with `nlsat` first and only demoted to Lean on `unknown` / timeout.
+pub const BOUNDED_NONLINEAR_TAG: &str = "bounded_nonlinear_arithmetic";
+
+/// Maximum total degree of any product term (`x * y` is 2, `x * x * x` is 3).
+pub const NLSAT_FIRST_MAX_DEGREE: usize = 2;
+/// Maximum number of distinct variables occurring in nonlinear terms.
+pub const NLSAT_FIRST_MAX_VARIABLES: usize = 3;
+
+/// Summary of the nonlinear terms of an atom that qualify for nlsat-first.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BoundedNonlinearProfile {
+    pub max_degree: usize,
+    pub variables: Vec<String>,
+}
+
+/// True when the tags mark a bounded low-degree nonlinear obligation that is
+/// tried by Z3 (`nlsat`) before any Lean escalation.
+pub fn is_nlsat_first_candidate(tags: &[String]) -> bool {
+    tags.iter().any(|tag| tag == BOUNDED_NONLINEAR_TAG)
+        && tags.iter().any(|tag| tag == "nonlinear_arithmetic")
+        && !tags.iter().any(|tag| tag == "finite_field")
+}
+
+#[derive(Default, Clone, Copy)]
+struct VarBounds {
+    lower: Option<i64>,
+    upper: Option<i64>,
+}
+
+impl VarBounds {
+    fn is_closed(&self) -> bool {
+        self.lower.is_some() && self.upper.is_some()
+    }
+
+    fn excludes_zero(&self) -> bool {
+        self.is_closed() && (self.lower.unwrap_or(0) > 0 || self.upper.unwrap_or(0) < 0)
+    }
+}
+
+fn collect_requires_bounds(expr: &Expr, bounds: &mut HashMap<String, VarBounds>) {
+    match expr {
+        Expr::BinaryOp(left, Op::And, right) => {
+            collect_requires_bounds(left, bounds);
+            collect_requires_bounds(right, bounds);
+        }
+        Expr::BinaryOp(left, op, right) => {
+            let (var, literal, flipped) = match (left.as_ref(), right.as_ref()) {
+                (Expr::Variable(v), Expr::Number(n)) => (v, *n, false),
+                (Expr::Number(n), Expr::Variable(v)) => (v, *n, true),
+                _ => return,
+            };
+            let entry = bounds.entry(var.clone()).or_default();
+            // Normalize to `var <op> literal`.
+            let op = if flipped {
+                match op {
+                    Op::Gt => Op::Lt,
+                    Op::Lt => Op::Gt,
+                    Op::Ge => Op::Le,
+                    Op::Le => Op::Ge,
+                    other => other.clone(),
+                }
+            } else {
+                op.clone()
+            };
+            match op {
+                Op::Ge => entry.lower = Some(entry.lower.map_or(literal, |l| l.max(literal))),
+                Op::Gt => {
+                    let lit = literal.saturating_add(1);
+                    entry.lower = Some(entry.lower.map_or(lit, |l| l.max(lit)));
+                }
+                Op::Le => entry.upper = Some(entry.upper.map_or(literal, |u| u.min(literal))),
+                Op::Lt => {
+                    let lit = literal.saturating_sub(1);
+                    entry.upper = Some(entry.upper.map_or(lit, |u| u.min(lit)));
+                }
+                Op::Eq => {
+                    entry.lower = Some(literal);
+                    entry.upper = Some(literal);
+                }
+                _ => {}
+            }
+        }
+        _ => {}
+    }
+}
+
+#[derive(Default)]
+struct PolyShape {
+    degree: usize,
+    variables: Vec<String>,
+    divisors: Vec<String>,
+}
+
+fn poly_shape(expr: &Expr) -> Option<PolyShape> {
+    match expr {
+        Expr::Number(_) | Expr::Float(_) => Some(PolyShape::default()),
+        Expr::Variable(name) => Some(PolyShape {
+            degree: 1,
+            variables: vec![name.clone()],
+            divisors: Vec::new(),
+        }),
+        Expr::BinaryOp(left, Op::Add, right) | Expr::BinaryOp(left, Op::Sub, right) => {
+            let (l, r) = (poly_shape(left)?, poly_shape(right)?);
+            Some(merge_shapes(l, r, false))
+        }
+        Expr::BinaryOp(left, Op::Mul, right) => {
+            let (l, r) = (poly_shape(left)?, poly_shape(right)?);
+            Some(merge_shapes(l, r, true))
+        }
+        Expr::BinaryOp(left, Op::Div, right) => {
+            let l = poly_shape(left)?;
+            match right.as_ref() {
+                Expr::Number(_) => Some(l),
+                Expr::Variable(name) => {
+                    let mut shape = merge_shapes(
+                        l,
+                        PolyShape {
+                            degree: 1,
+                            variables: vec![name.clone()],
+                            divisors: Vec::new(),
+                        },
+                        true,
+                    );
+                    shape.divisors.push(name.clone());
+                    Some(shape)
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn merge_shapes(l: PolyShape, r: PolyShape, product: bool) -> PolyShape {
+    let mut variables = l.variables;
+    for v in r.variables {
+        if !variables.contains(&v) {
+            variables.push(v);
+        }
+    }
+    let mut divisors = l.divisors;
+    divisors.extend(r.divisors);
+    PolyShape {
+        degree: if product {
+            l.degree + r.degree
+        } else {
+            l.degree.max(r.degree)
+        },
+        variables,
+        divisors,
+    }
+}
+
+/// Collect every nonlinear product/division term. Returns `false` when a
+/// term is not a plain polynomial over variables and literals.
+fn collect_nonlinear_terms_expr(expr: &Expr, terms: &mut Vec<PolyShape>) -> bool {
+    match expr {
+        Expr::BinaryOp(_, Op::Pow, _) => false,
+        Expr::BinaryOp(_, Op::Mul, _) | Expr::BinaryOp(_, Op::Div, _) => match poly_shape(expr) {
+            Some(shape) => {
+                if shape.degree >= 2 || !shape.divisors.is_empty() {
+                    terms.push(shape);
+                }
+                true
+            }
+            None => false,
+        },
+        Expr::BinaryOp(left, _, right) => {
+            collect_nonlinear_terms_expr(left, terms) && collect_nonlinear_terms_expr(right, terms)
+        }
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            collect_nonlinear_terms_expr(cond, terms)
+                && collect_nonlinear_terms_stmt(then_branch, terms)
+                && collect_nonlinear_terms_stmt(else_branch, terms)
+        }
+        Expr::Call(_, args) => args
+            .iter()
+            .all(|arg| collect_nonlinear_terms_expr(arg, terms)),
+        Expr::Number(_) | Expr::Float(_) | Expr::StringLit(_) | Expr::Variable(_) => true,
+        other => !expr_has_nonlinear_arithmetic(other),
+    }
+}
+
+fn collect_nonlinear_terms_stmt(stmt: &Stmt, terms: &mut Vec<PolyShape>) -> bool {
+    match stmt {
+        Stmt::Let { value, .. } | Stmt::Assign { value, .. } => {
+            collect_nonlinear_terms_expr(value, terms)
+        }
+        Stmt::Expr(value, _) => collect_nonlinear_terms_expr(value, terms),
+        Stmt::Block(stmts, _) => stmts
+            .iter()
+            .all(|stmt| collect_nonlinear_terms_stmt(stmt, terms)),
+        other => !stmt_has_nonlinear_arithmetic(other),
+    }
+}
+
+/// Decide whether an atom's nonlinear arithmetic is a *bounded low-degree*
+/// obligation that Z3 should try first with `nlsat` (P10-D step 1).
+///
+/// Conservative acceptance criteria — every one must hold:
+/// - only `*` and `/` over variables/literals (no `**`, `%`, `pow`/`mod`/`exp`,
+///   no finite-field helpers, no loop invariant);
+/// - every product term has total degree `<= NLSAT_FIRST_MAX_DEGREE`;
+/// - at most `NLSAT_FIRST_MAX_VARIABLES` distinct variables occur in nonlinear terms;
+/// - each such variable has both a literal lower and upper bound in `requires`
+///   (`v >= c && v <= d`, `c < v`, `v == c`, ...), and every symbolic divisor's
+///   bounds exclude zero.
+///
+/// Returns `None` when the atom is not nonlinear at all or fails any criterion;
+/// those atoms keep the unconditional Lean escalation path.
+pub fn bounded_low_degree_nonlinear_profile(atom: &Atom) -> Option<BoundedNonlinearProfile> {
+    let contract_text = atom_contract_text(atom);
+    if text_has_nonlinear_arithmetic_marker(&contract_text)
+        || atom_uses_finite_field_semantics(atom)
+    {
+        return None;
+    }
+    let requires_expr = parse_expression(&atom.requires);
+    let ensures_expr = parse_expression(&atom.ensures);
+    let body_stmt = parse_body_expr(&atom.body_expr);
+
+    let mut terms = Vec::new();
+    if !collect_nonlinear_terms_expr(&requires_expr, &mut terms)
+        || !collect_nonlinear_terms_expr(&ensures_expr, &mut terms)
+        || !collect_nonlinear_terms_stmt(&body_stmt, &mut terms)
+    {
+        return None;
+    }
+    if terms.is_empty() {
+        return None;
+    }
+
+    let mut bounds = HashMap::new();
+    collect_requires_bounds(&requires_expr, &mut bounds);
+
+    let mut profile = BoundedNonlinearProfile::default();
+    for term in &terms {
+        if term.degree > NLSAT_FIRST_MAX_DEGREE {
+            return None;
+        }
+        profile.max_degree = profile.max_degree.max(term.degree);
+        for var in &term.variables {
+            if !profile.variables.contains(var) {
+                profile.variables.push(var.clone());
+            }
+        }
+        for divisor in &term.divisors {
+            if !bounds.get(divisor).is_some_and(VarBounds::excludes_zero) {
+                return None;
+            }
+        }
+    }
+    if profile.variables.len() > NLSAT_FIRST_MAX_VARIABLES {
+        return None;
+    }
+    if profile
+        .variables
+        .iter()
+        .any(|var| !bounds.get(var).is_some_and(VarBounds::is_closed))
+    {
+        return None;
+    }
+    profile.variables.sort();
+    Some(profile)
 }
 
 pub fn outside_decidable_fragment_diagnostic(

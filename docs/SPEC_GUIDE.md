@@ -43,6 +43,25 @@ Lean escalation candidates:
 - nonlinear loop invariants, such as `result == i * i`
 - algebraic equalities that require ring reasoning
 
+#### Bounded low-degree nonlinear arithmetic (nlsat first)
+
+A `nonlinear_arithmetic` atom is tried by Z3's nonlinear real/integer engine (`nlsat` + Groebner) before it becomes a Lean escalation candidate when every one of the following holds. Outside this window the atom keeps the unconditional Lean escalation behaviour described above.
+
+- total degree of every monomial is at most 2 (`x * y`, `x * x`, `x / y`; no cubes)
+- at most 3 distinct variables take part in nonlinear terms
+- every such variable has a literal lower **and** upper bound in `requires` (`x >= 0 && x <= 1000`)
+- a symbolic divisor has a closed bound that excludes zero (`d >= 1 && d <= 64`)
+- no `%`, exponentiation, finite-field (`ff_*`) semantics, or nonlinear loop invariants
+
+```mumei
+atom bounded_product(a: i64, b: i64) -> i64
+requires: a >= 0 && a <= 1000 && b >= 0 && b <= 1000;
+ensures: result >= 0 && result <= 1000000;
+body: a * b;
+```
+
+Z3 `sat` / `unsat` is final; only `unknown` / timeout demotes the atom to Lean, and the proof certificate keeps the nlsat reason in the failing atom's message (the `escalation_reason` stays `nonlinear_arithmetic` / `z3_timeout`).
+
 ### Struct invariants (cross-field)
 
 A struct may relate several fields with `invariant: <expr>` clauses; `self.<field>` names a field of the struct being described:
@@ -233,7 +252,7 @@ With `mumei verify --warn-fragment`, the verifier emits an `outside_decidable_fr
 
 | Fragment tag | Typical pattern | Recommended response |
 |---|---|---|
-| `nonlinear_arithmetic` | `x * y`, symbolic `/`, `%`, polynomial invariant | Rewrite to linear bounds or escalate to Lean |
+| `nonlinear_arithmetic` | `x * y`, symbolic `/`, `%`, polynomial invariant | Bound every variable (literal lower and upper) to stay in the nlsat-first window, otherwise rewrite to linear bounds or escalate to Lean |
 | `array_without_bounds` | `arr[i]` without `i >= 0 && i < n` | Add explicit bounds in `requires`, `ensures`, or quantifier range |
 | `quantifier_alternation` | Mixed `forall` and `exists` obligations | Split the spec or provide a constructible witness |
 | `trigger_sensitive_quantifier` | Quantifier over array access or nested quantifier | Bound the range tightly and simplify the body |

@@ -335,6 +335,51 @@ pub(crate) fn configure_array_quantifier_params(ctx: &Context, solver: &Solver) 
     solver.set_params(&params);
 }
 
+/// P10-D / C-2: nlsat-first tuning for bounded low-degree nonlinear atoms
+/// (see `fragment::bounded_low_degree_nonlinear_profile`).
+///
+/// The smt arithmetic solver only falls back to the bounded `nlsat` check
+/// after `arith.nl.delay` (default 500) final-check rounds of incremental
+/// linearization. For obligations we already know are small polynomials over
+/// bounded variables we invoke `nlsat` immediately and keep Groebner-basis
+/// lemmas enabled, so Z3 decides `sat`/`unsat` inside the normal timeout and
+/// only a genuine `unknown`/timeout demotes the atom to Lean. All names are
+/// recognized `smt.arith.nl.*` module parameters (unrecognized solver params
+/// would silently drop assertions in z3-rs 0.12, see
+/// `configure_array_quantifier_params`).
+pub(crate) fn configure_nlsat_first_params(ctx: &Context, solver: &Solver) {
+    let mut params = z3::Params::new(ctx);
+    params.set_bool("arith.nl", true);
+    params.set_bool("arith.nl.nra", true);
+    params.set_bool("arith.nl.grobner", true);
+    params.set_u32("arith.nl.delay", 0);
+    solver.set_params(&params);
+}
+
+/// Human-readable demotion notice for an nlsat-first atom whose Z3 check ended
+/// `unknown`. The wording keeps the existing `z3_result_from_error_message`
+/// classes: a solver timeout/cancel maps to `timeout` (→ `z3_timeout`),
+/// anything else to `unknown` (→ `nonlinear_arithmetic`).
+pub(crate) fn nlsat_first_unknown_message(solver: &Solver, phase: &str) -> String {
+    let reason = solver.get_reason_unknown().unwrap_or_default();
+    let lowered = reason.to_ascii_lowercase();
+    if lowered.contains("timeout") || lowered.contains("canceled") || lowered.contains("cancelled")
+    {
+        format!(
+            "Z3 nlsat timeout {phase} (bounded low-degree nonlinear arithmetic tried with nlsat first; demoted to Lean escalation, reason: {reason})."
+        )
+    } else {
+        format!(
+            "Z3 returned unknown {phase} (bounded low-degree nonlinear arithmetic tried with nlsat first; demoted to Lean escalation{}).",
+            if reason.is_empty() {
+                String::new()
+            } else {
+                format!(", reason: {reason}")
+            }
+        )
+    }
+}
+
 enum ClauseLoweringOutcome<'a> {
     Trivial,
     Skipped,
@@ -1203,6 +1248,10 @@ pub(crate) fn verify_inner(
     if has_array_forall {
         configure_array_quantifier_params(&ctx, &solver);
     }
+    let nlsat_first = is_nlsat_first_candidate(&detect_logic_fragment_tags(atom, module_env));
+    if nlsat_first {
+        configure_nlsat_first_params(&ctx, &solver);
+    }
 
     // linearity_ctx is wrapped in RefCell so expr_to_z3/stmt_to_z3 can mutate it
     // without requiring signature changes to every recursive call site.
@@ -1998,10 +2047,12 @@ pub(crate) fn verify_inner(
                         );
                         metrics.total_constraints = constraint_count_cell.get();
                         metrics.print_summary();
-                        let mut err = MumeiError::verification_at(
-                            "Z3 returned unknown while checking the postcondition.",
-                            atom.span.clone(),
-                        );
+                        let message = if nlsat_first {
+                            nlsat_first_unknown_message(&solver, "while checking the postcondition")
+                        } else {
+                            "Z3 returned unknown while checking the postcondition.".to_string()
+                        };
+                        let mut err = MumeiError::verification_at(message, atom.span.clone());
                         if let Some(help) = property_based_help {
                             err = err.with_help(help);
                         }
@@ -2195,10 +2246,12 @@ pub(crate) fn verify_inner(
             z3_check_start.elapsed(),
         );
         metrics.print_summary();
-        let mut err = MumeiError::verification_at(
-            "Z3 returned unknown during the final consistency check.",
-            atom.span.clone(),
-        );
+        let message = if nlsat_first {
+            nlsat_first_unknown_message(&solver, "during the final consistency check")
+        } else {
+            "Z3 returned unknown during the final consistency check.".to_string()
+        };
+        let mut err = MumeiError::verification_at(message, atom.span.clone());
         if let Some(help) = property_based_help {
             err = err.with_help(help);
         }

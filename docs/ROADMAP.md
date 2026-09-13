@@ -1201,9 +1201,11 @@ Lean 委譲境界: 再帰 ADT は `mumei-core/src/verification/fragment.rs` で 
 - ペイロード付きバリアントのフィールド型安全性違反の検出率: 100%
 - 再帰 ADT の `inductive_data_type` タグ付け精度: 100%
 
-**P10-D: Bounded Low-degree Nonlinear Arithmetic（`nlsat` / `grobner`）** — ★
+**P10-D: Bounded Low-degree Nonlinear Arithmetic（`nlsat` / `grobner`）** — ★ ✅ Implemented（2026-09-13、= `docs/CROSS_PROJECT_ROADMAP.md` C-2 / Priority 26 R-8、Wave 5）
 
-現状のギャップ: `x * y` や記号的除算は `mumei-core/src/verification/fragment.rs` の `expr_has_nonlinear_arithmetic` により一律 `nonlinear_arithmetic` タグが付き、無条件で Lean escalation 候補になる。ただし `std/math/safe_mul.mm` のように明示境界があれば Z3 でも `result == a * b` を検証できている。
+実装（2026-09-13）: `fragment.rs` は `nonlinear_arithmetic` タグを保持したまま、有界・低次数の atom にのみ内部マーカー `bounded_nonlinear_arithmetic` を追加し（`NLSAT_FIRST_MAX_DEGREE = 2` / `NLSAT_FIRST_MAX_VARIABLES = 3`、全非線形変数が `requires` に literal の上下限を持つこと、記号除数は 0 を除外する閉区間を持つこと、`%` / べき / finite-field / ループ不変量は対象外）、`is_outside_decidable_fragment` はこの窓内の atom を無条件 escalation 候補から外す。`executor.rs` は窓内の atom に `arith.nl` / `arith.nl.nra` / `arith.nl.grobner` / `arith.nl.delay = 0` を設定し、Z3 の `sat` / `unsat` はそこで確定、`unknown` / timeout のみ（Lean escalation only for Z3 `unknown` / timeout; `sat` / `unsat` は Z3 で確定）従来の `nonlinear_arithmetic` / `z3_timeout` escalation reason で Lean に降格し、降格理由（nlsat 先行試行済み + Z3 の `reason_unknown`）を失敗メッセージとして certificate に残す。母数が動く範囲は「上記 5 条件をすべて満たす atom」のみで、窓外の atom（片側境界・3 次以上・4 変数以上・`%`・finite-field）は従来どおり無条件 Lean 候補（fixture: `tests/fixtures/nlsat_first/`、回帰: `cargo test --test test_decidable_fragment`、`mumei-core` `nlsat_first_*` 4 件）。母数の実測（`std/` + `benchmarks/` の `nonlinear_arithmetic` タグ付き 27 atom）: 窓内 **9 atom**（benchmark 7: `bounded_mul` / `fp_percentage` / `square_is_nonnegative` / `square_of_successor` / `product_of_nonnegatives` / `share_price_is_bounded` / `infusion_rate_is_bounded`、std 2: `gcd.mm::lcm_from_gcd` / `pow_nat.mm::pow_nat`）はすべて Z3 `unsat` で確定し escalation reason なし、窓外 18 atom（`cube_on_small_nonneg` 3 次、`safe_div` / `safe_mod` / `hash_bucket` などの `%` / 片側境界、`ff_pow_square_expands` finite-field）は従来どおり `nonlinear_arithmetic` escalation reason を保持。B-7 再測定への影響: benchmark 105 atom の escalation 候補は 6 → 6（すべて finite-field、窓外）で不変、`lean_verified_delta` 0 も不変（`docs/EVALUATION_SUITE.md` 2026-09-13 16:29 UTC）。仕様ガイド: `docs/SPEC_GUIDE.md` §Bounded low-degree nonlinear arithmetic。
+
+現状のギャップ（実装前）: `x * y` や記号的除算は `mumei-core/src/verification/fragment.rs` の `expr_has_nonlinear_arithmetic` により一律 `nonlinear_arithmetic` タグが付き、無条件で Lean escalation 候補になる。ただし `std/math/safe_mul.mm` のように明示境界があれば Z3 でも `result == a * b` を検証できている。
 
 Lean 委譲境界: 多項式不変量・リング等式など真のリング推論は引き続き Lean 4 が担当する。
 
@@ -2447,7 +2449,34 @@ bridge lemma catalog（`docs/LEAN_TRANSLATOR_SPEC.md` §10）には一切追加�
 - `benchmarks/run_benchmarks.py` の `lean_solver_time_s` チャネルは回帰なし（arithmetic 平均 8.848s / domain_compliance 平均 8.839s、SKIP 挙動は不変、`benchmarks/arithmetic/finite_field_modular.mm` は 4 escalated / 4 lean_verified / tactic search 2）。
 - stdlib atom 数は 344 → 345（`std/algebra/finite_field.mm` が 2 → 3）で、`docs/STDLIB_METRICS.md` と `scripts/std_proof_baseline.json` を同一 diff で更新済み。
 
-**残課題**: benchmark 側に残る `unknown_obligation`（body semantics 依存の非算術 obligation）は未カバーのまま。次弾で bridge lemma 追加が必要な形状に着手する場合は、`bridge_lemma_hash` の lockstep 更新（pinned doc 4 本 + `scripts/export_cert.py` + mumei-agent `_SOLIDITY_GUARD_TRACE_BRIDGE_LEMMA_HASH`）が必須。
+### C-1（= Priority 26 R-10）残余 `unknown_obligation` の棚卸し（2026-09-13）
+
+benchmark 105 atom の proof certificate（`benchmarks/evaluation_suite.py` B-7 再測定と同一の cert）に対し、mumei-lean `expr_translator.translate_contract` / `translate_body` を全 atom に適用して body semantics の翻訳ギャップ（`is_partial` / `unsupported_reasons`）を走査した。escalation 対象になり得るのは Z3 `unsat` の 37 atom で、`sat`（counterexample 課題、13 atom）は反例確定のため Lean へ送られず対象外（Lean escalation only for Z3 `unknown`）。現行 benchmark で実際に escalation されているのは finite-field 6 atom のみ（すべて `lean_verified`）であり、下表は将来これらの atom が Z3 `unknown` に落ちた場合、または B-4 が対象義務を選ぶ際の入力一覧である。**本棚卸しでは `bridge_lemma_hash` / `translator_version` を一切動かさない。**
+
+| 群 | goal 形状 | 件数 | 代表 atom | 翻訳ギャップ | 振り分け先 |
+|---|---|---|---|---|---|
+| 1. ladder 末尾追記 / 翻訳前処理で届く（hash 不変） | `perform Effect.op; …; <pure tail>` — effect 文列の後に純算術の tail 式 | 19 | `domain_compliance/defi_invariants.mm::cei_compliant_withdraw`、`state_machine/order_lifecycle.mm::full_fulfillment`、`state_machine/session_auth.mm::full_session_cycle` | `body: unknown_token`（`perform` / `;`） | **B-1**: `perform` 文を translator の body 前処理で除去し tail 式を `translate_body` に渡す（obligation class は `arithmetic_obligation` のまま、新 bridge lemma 不要） |
+| 1. 同上 | `let x = e; …; <pure tail>` — 純 let 列 | 2 | `concurrency/linear_ownership.mm::move_once` / `read_before_move` | `body: unknown_token`（`;`） | **B-1**: let 列を tail への代入展開として lowering（既存 `_parse_let_binding_scope` の拡張） |
+| 1. 同上 | ネスト `if … else { if … }` tail | 1 | `arithmetic/saturating.mm::clamp_to_range` | `body: unsupported_syntax`（`_if_else_tail_is_supported` が単段のみ） | **B-1**: else 側ネストを許容 + ladder 末尾に `split_ifs <;> omega` 相当の候補を追記 |
+| 1. 同上 | 構造体射影 `p.x` を requires / body に含む | 1 | `concurrency/task_struct_capture_double_move_fail.mm::take_point` | `requires` / `body: unknown_token`（`.`） | **B-1**: 射影を Int binder（`p_x`）へ名前変換して lowering（新 lemma 不要） |
+| 2. bridge lemma 追加が必要（hash lockstep） | `task_group: all { task {…}; … }`（最終 task の値が result）/ `task_group: any { … }`（いずれかの task の値が result）、ネストを含む | 11 | `concurrency/task_group_all.mm::join_all_last_result` / `nested_task_groups`、`concurrency/task_group_any_winner.mm::race_two_replicas`、`concurrency/task_ownership.mm::per_task_local_writes` | `body: unknown_token`（`task_group:` / `task`） | **別 Priority（P31）へ起票**: `all` = 最終 task 値、`any` = 候補値の選言、という並行意味論の bridge lemma（新 obligation class）が必要で、`bridge_lemma_hash` の lockstep 更新を伴う |
+| 3. AI 証明生成へ回す | `while … invariant: … decreases: … { … }; <tail>` ループ不変量（配列和 / カウンタ） | 3 | `svcomp_style/loop_invariant.mm::sum_array`、`domain_compliance/regtech_exhaustiveness.mm::all_transactions_within_limit`、`domain_compliance/rtgs_balance_conservation.mm::queue_total_is_nonnegative` | `body: statement_block_requires_manual_lemma, unknown_token`、tags `recursive_invariant` / `trigger_sensitive_quantifier` | **B-4**: 帰納法による不変量証明は定型 lowering では届かないため、`lean_fallback_strategy` = AI 証明生成の対象義務とする（`ai_proof_attempts` / `ai_proof_used` で計測） |
+
+- 群 1（23 atom）は B-1（mumei-lean translator 拡張）の対象義務入力。いずれも既存 8 obligation class の範囲内で `arithmetic_obligation` に落ちるため hash 不変（Lean escalation only for Z3 `unknown`; `unsat` 確定 atom を Lean に送る変更ではなく、translator が body を lowering できる範囲を広げる入力）。
+- 群 2（11 atom）は P31 として起票（下記）。本プランでは実装しない。
+- 群 3（3 atom）は B-4（mumei-agent AI 証明生成）の対象義務入力。
+- 走査対象外: Z3 `sat` の 13 atom（`take_buffer` / `take_point` の `unsupported_call` を含む）は counterexample 課題であり escalation 母数に入らない。
+
+---
+
+## P31: task_group 並行意味論の bridge lemma 追加（C-1 群 2、hash lockstep）— 📝 Planned
+
+**ステータス: 📝 Planned（本プラン = Wave 5 では着手しない）**。P30 の C-1 棚卸しで「bridge lemma 追加が必要」と判明した唯一の形状群（`task_group: all` / `task_group: any`、benchmark 11 atom）を扱う。
+
+- **意味論**: `task_group: all { task { e₁ }; …; task { eₙ } }` の result は `eₙ`、`task_group: any { … }` の result は `e₁ ∨ … ∨ eₙ` のいずれか（選言）。ensures は result に対する区間 / 等式制約なので、`all` は最終 task 値への書き換え補題、`any` は各分岐がすべて ensures を満たすことを要求する選言除去補題として bridge lemma 化する。
+- **契約定数への影響**: 新 obligation class（例: `concurrency_obligation`）と bridge lemma を `docs/LEAN_TRANSLATOR_SPEC.md` §10 catalog に追加するため、`bridge_lemma_hash` の lockstep 更新（pinned doc 4 本 + mumei-lean `scripts/export_cert.py` + mumei-agent `_SOLIDITY_GUARD_TRACE_BRIDGE_LEMMA_HASH`）が必須。`translator_version` を動かすかは IR schema 変更の有無で判断する。契約語彙（`harness_contract` / `intent_fidelity` / `artifact_paths` / `budget_policy_fingerprint` / `lean_verified` / 8 固定 audit キー / `verification_status` / `contradiction_type` / `ai_proof_used` / `ai_proof_attempts` / `lean_fallback_strategy`）に新規 alias は導入しない。
+- **前提**: B-1 群 1（`perform` / let 列の前処理）が先に入ること。`task` 内部の `let acc = n; acc = acc + 1; acc` などは群 1 の lowering を再利用する。
+- **回帰ゲート**: 既存 8 obligation class の bridge lemma 集合と ladder prefix 不変、`tests/test_contract_vocabulary.py`（3 リポジトリ）green、`scripts/check_proof_bundle_drift.py` pass。
 
 ---
 

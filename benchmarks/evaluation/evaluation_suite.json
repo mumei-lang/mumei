@@ -31,7 +31,7 @@
           "status": "MEASURED"
         },
         "proof_success_rate": {
-          "avg_solver_time_s": 0.202,
+          "avg_solver_time_s": 0.174,
           "files": 9,
           "lean_discharge_rate": 1.0,
           "matched_files": 9,
@@ -337,7 +337,7 @@
             "lean_verified_delta": 0,
             "off": {
               "files": 1,
-              "lean_solver_time_s": 9.411,
+              "lean_solver_time_s": 7.912,
               "lean_verified_atoms": 4,
               "manual_lemma_reason_remaining": 0,
               "status": "MEASURED",
@@ -350,7 +350,7 @@
                 "finite_field_modular.mm"
               ],
               "files": 1,
-              "lean_solver_time_s": 9.218,
+              "lean_solver_time_s": 5.793,
               "lean_verified_atoms": 4,
               "manual_lemma_reason_remaining": 0,
               "missing_files": [],
@@ -540,7 +540,7 @@
           "status": "MEASURED"
         },
         "proof_success_rate": {
-          "avg_solver_time_s": 0.096,
+          "avg_solver_time_s": 0.078,
           "files": 15,
           "lean_discharge_rate": null,
           "matched_files": 15,
@@ -1310,7 +1310,7 @@
           "status": "SKIP"
         },
         "proof_success_rate": {
-          "avg_solver_time_s": 0.073,
+          "avg_solver_time_s": 0.059,
           "files": 3,
           "lean_discharge_rate": null,
           "matched_files": 3,
@@ -1535,7 +1535,7 @@
           "status": "MEASURED"
         },
         "proof_success_rate": {
-          "avg_solver_time_s": 0.132,
+          "avg_solver_time_s": 0.106,
           "files": 10,
           "lean_discharge_rate": 1.0,
           "matched_files": 10,
@@ -1870,7 +1870,7 @@
             "lean_verified_delta": 0,
             "off": {
               "files": 1,
-              "lean_solver_time_s": 10.106,
+              "lean_solver_time_s": 7.982,
               "lean_verified_atoms": 2,
               "manual_lemma_reason_remaining": 0,
               "status": "MEASURED",
@@ -1883,7 +1883,7 @@
                 "modular_commitment.mm"
               ],
               "files": 1,
-              "lean_solver_time_s": 7.002,
+              "lean_solver_time_s": 5.915,
               "lean_verified_atoms": 2,
               "manual_lemma_reason_remaining": 0,
               "missing_files": [],
@@ -2089,7 +2089,7 @@
           "status": "MEASURED"
         },
         "proof_success_rate": {
-          "avg_solver_time_s": 0.085,
+          "avg_solver_time_s": 0.066,
           "files": 6,
           "lean_discharge_rate": null,
           "matched_files": 6,
@@ -2456,7 +2456,7 @@
           "status": "SKIP"
         },
         "proof_success_rate": {
-          "avg_solver_time_s": 0.057,
+          "avg_solver_time_s": 0.046,
           "files": 3,
           "lean_discharge_rate": null,
           "matched_files": 3,
@@ -2680,7 +2680,7 @@
     "total_trusted": 0,
     "trusted_ratio": 0.0
   },
-  "timestamp": "2026-09-13 15:52 UTC",
+  "timestamp": "2026-09-13 16:29 UTC",
   "totals": {
     "counterexample_quality": {
       "counterexample_catch_rate": 1.0,
@@ -2726,7 +2726,7 @@
         "lean_verified_delta": 0,
         "off": {
           "files": 2,
-          "lean_solver_time_s": 19.517,
+          "lean_solver_time_s": 15.894,
           "lean_verified_atoms": 6,
           "manual_lemma_reason_remaining": 0,
           "status": "MEASURED"
@@ -2735,7 +2735,7 @@
           "ai_proof_attempts": 0,
           "ai_proof_used_atoms": 0,
           "files": 2,
-          "lean_solver_time_s": 16.22,
+          "lean_solver_time_s": 11.708,
           "lean_verified_atoms": 6,
           "manual_lemma_reason_remaining": 0,
           "status": "MEASURED"
