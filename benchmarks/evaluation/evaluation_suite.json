@@ -31,7 +31,7 @@
           "status": "MEASURED"
         },
         "proof_success_rate": {
-          "avg_solver_time_s": 0.176,
+          "avg_solver_time_s": 0.202,
           "files": 9,
           "lean_discharge_rate": 1.0,
           "matched_files": 9,
@@ -337,7 +337,7 @@
             "lean_verified_delta": 0,
             "off": {
               "files": 1,
-              "lean_solver_time_s": 6.692,
+              "lean_solver_time_s": 9.411,
               "lean_verified_atoms": 4,
               "manual_lemma_reason_remaining": 0,
               "status": "MEASURED",
@@ -350,7 +350,7 @@
                 "finite_field_modular.mm"
               ],
               "files": 1,
-              "lean_solver_time_s": 8.326,
+              "lean_solver_time_s": 9.218,
               "lean_verified_atoms": 4,
               "manual_lemma_reason_remaining": 0,
               "missing_files": [],
@@ -540,7 +540,7 @@
           "status": "MEASURED"
         },
         "proof_success_rate": {
-          "avg_solver_time_s": 0.084,
+          "avg_solver_time_s": 0.096,
           "files": 15,
           "lean_discharge_rate": null,
           "matched_files": 15,
@@ -572,11 +572,11 @@
         "runtime_artifact_utility": {
           "attempted_emissions": 20,
           "counterexample": {
-            "as_expected_emissions": 28,
-            "as_expected_rate": 0.7,
+            "as_expected_emissions": 40,
+            "as_expected_rate": 1.0,
             "attempted_emissions": 40,
             "files": 10,
-            "leaked_build_artifacts": 12,
+            "leaked_build_artifacts": 0,
             "refutation_certificates": 10
           },
           "emission_success_rate": 1.0,
@@ -750,19 +750,19 @@
               }
             },
             {
-              "as_expected_targets": 1,
+              "as_expected_targets": 4,
               "emitted_targets": 1,
               "expected": "FAIL",
               "file": "task_concurrent_double_move_fail.mm",
               "targets": {
                 "c-header": {
-                  "artifacts": 1,
-                  "as_expected": false,
+                  "artifacts": 0,
+                  "as_expected": true,
                   "emitted": false
                 },
                 "llvm-ir": {
-                  "artifacts": 1,
-                  "as_expected": false,
+                  "artifacts": 0,
+                  "as_expected": true,
                   "emitted": false
                 },
                 "proof-cert": {
@@ -771,8 +771,8 @@
                   "emitted": true
                 },
                 "verified-json": {
-                  "artifacts": 1,
-                  "as_expected": false,
+                  "artifacts": 0,
+                  "as_expected": true,
                   "emitted": false
                 }
               }
@@ -834,19 +834,19 @@
               }
             },
             {
-              "as_expected_targets": 1,
+              "as_expected_targets": 4,
               "emitted_targets": 1,
               "expected": "FAIL",
               "file": "task_move_while_sibling_reads_fail.mm",
               "targets": {
                 "c-header": {
-                  "artifacts": 1,
-                  "as_expected": false,
+                  "artifacts": 0,
+                  "as_expected": true,
                   "emitted": false
                 },
                 "llvm-ir": {
-                  "artifacts": 1,
-                  "as_expected": false,
+                  "artifacts": 0,
+                  "as_expected": true,
                   "emitted": false
                 },
                 "proof-cert": {
@@ -855,8 +855,8 @@
                   "emitted": true
                 },
                 "verified-json": {
-                  "artifacts": 1,
-                  "as_expected": false,
+                  "artifacts": 0,
+                  "as_expected": true,
                   "emitted": false
                 }
               }
@@ -918,19 +918,19 @@
               }
             },
             {
-              "as_expected_targets": 1,
+              "as_expected_targets": 4,
               "emitted_targets": 1,
               "expected": "FAIL",
               "file": "task_struct_capture_double_move_fail.mm",
               "targets": {
                 "c-header": {
-                  "artifacts": 1,
-                  "as_expected": false,
+                  "artifacts": 0,
+                  "as_expected": true,
                   "emitted": false
                 },
                 "llvm-ir": {
-                  "artifacts": 1,
-                  "as_expected": false,
+                  "artifacts": 0,
+                  "as_expected": true,
                   "emitted": false
                 },
                 "proof-cert": {
@@ -939,26 +939,26 @@
                   "emitted": true
                 },
                 "verified-json": {
-                  "artifacts": 1,
-                  "as_expected": false,
+                  "artifacts": 0,
+                  "as_expected": true,
                   "emitted": false
                 }
               }
             },
             {
-              "as_expected_targets": 1,
+              "as_expected_targets": 4,
               "emitted_targets": 1,
               "expected": "FAIL",
               "file": "task_use_after_concurrent_move_fail.mm",
               "targets": {
                 "c-header": {
-                  "artifacts": 1,
-                  "as_expected": false,
+                  "artifacts": 0,
+                  "as_expected": true,
                   "emitted": false
                 },
                 "llvm-ir": {
-                  "artifacts": 1,
-                  "as_expected": false,
+                  "artifacts": 0,
+                  "as_expected": true,
                   "emitted": false
                 },
                 "proof-cert": {
@@ -967,8 +967,8 @@
                   "emitted": true
                 },
                 "verified-json": {
-                  "artifacts": 1,
-                  "as_expected": false,
+                  "artifacts": 0,
+                  "as_expected": true,
                   "emitted": false
                 }
               }
@@ -1310,7 +1310,7 @@
           "status": "SKIP"
         },
         "proof_success_rate": {
-          "avg_solver_time_s": 0.069,
+          "avg_solver_time_s": 0.073,
           "files": 3,
           "lean_discharge_rate": null,
           "matched_files": 3,
@@ -1535,7 +1535,7 @@
           "status": "MEASURED"
         },
         "proof_success_rate": {
-          "avg_solver_time_s": 0.116,
+          "avg_solver_time_s": 0.132,
           "files": 10,
           "lean_discharge_rate": 1.0,
           "matched_files": 10,
@@ -1870,7 +1870,7 @@
             "lean_verified_delta": 0,
             "off": {
               "files": 1,
-              "lean_solver_time_s": 6.743,
+              "lean_solver_time_s": 10.106,
               "lean_verified_atoms": 2,
               "manual_lemma_reason_remaining": 0,
               "status": "MEASURED",
@@ -1883,7 +1883,7 @@
                 "modular_commitment.mm"
               ],
               "files": 1,
-              "lean_solver_time_s": 6.579,
+              "lean_solver_time_s": 7.002,
               "lean_verified_atoms": 2,
               "manual_lemma_reason_remaining": 0,
               "missing_files": [],
@@ -2089,7 +2089,7 @@
           "status": "MEASURED"
         },
         "proof_success_rate": {
-          "avg_solver_time_s": 0.067,
+          "avg_solver_time_s": 0.085,
           "files": 6,
           "lean_discharge_rate": null,
           "matched_files": 6,
@@ -2456,7 +2456,7 @@
           "status": "SKIP"
         },
         "proof_success_rate": {
-          "avg_solver_time_s": 0.05,
+          "avg_solver_time_s": 0.057,
           "files": 3,
           "lean_discharge_rate": null,
           "matched_files": 3,
@@ -2680,7 +2680,7 @@
     "total_trusted": 0,
     "trusted_ratio": 0.0
   },
-  "timestamp": "2026-09-13 15:01 UTC",
+  "timestamp": "2026-09-13 15:52 UTC",
   "totals": {
     "counterexample_quality": {
       "counterexample_catch_rate": 1.0,
@@ -2707,11 +2707,11 @@
     "runtime_artifact_utility": {
       "attempted_emissions": 104,
       "counterexample": {
-        "as_expected_emissions": 68,
-        "as_expected_rate": 0.85,
+        "as_expected_emissions": 80,
+        "as_expected_rate": 1.0,
         "attempted_emissions": 80,
         "files": 20,
-        "leaked_build_artifacts": 12,
+        "leaked_build_artifacts": 0,
         "refutation_certificates": 20
       },
       "emission_success_rate": 0.9327,
@@ -2726,7 +2726,7 @@
         "lean_verified_delta": 0,
         "off": {
           "files": 2,
-          "lean_solver_time_s": 13.435,
+          "lean_solver_time_s": 19.517,
           "lean_verified_atoms": 6,
           "manual_lemma_reason_remaining": 0,
           "status": "MEASURED"
@@ -2735,7 +2735,7 @@
           "ai_proof_attempts": 0,
           "ai_proof_used_atoms": 0,
           "files": 2,
-          "lean_solver_time_s": 14.905,
+          "lean_solver_time_s": 16.22,
           "lean_verified_atoms": 6,
           "manual_lemma_reason_remaining": 0,
           "status": "MEASURED"

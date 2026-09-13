@@ -427,6 +427,48 @@ def test_runtime_artifact_leak_counts_partial_output_of_rejected_build(suite):
     assert suite._as_expected("FAIL", "proof-cert", partial["targets"]["proof-cert"]) is True
 
 
+def test_runtime_artifact_proof_cert_escalates_an_inconclusive_verify(
+    suite, monkeypatch, tmp_path
+):
+    """`verify --proof-cert` exit 3 is not a verdict: with a bridge the
+    `--escalate-lean` re-run decides, without one no certificate is credited."""
+    source = tmp_path / "ff.mm"
+    source.write_text("atom a { ensures: true; }", encoding="utf-8")
+    calls: list[list[str]] = []
+
+    class _Proc:
+        def __init__(self, code: int) -> None:
+            self.returncode = code
+            self.stdout = self.stderr = ""
+
+    def _run(cmd, **kwargs):
+        calls.append(cmd)
+        if cmd[1] == "build":
+            return _Proc(1)
+        out = Path(cmd[cmd.index("--output") + 1])
+        out.write_text("{}", encoding="utf-8")
+        return _Proc(suite.EXIT_VERIFIED if "--escalate-lean" in cmd else suite.EXIT_INCONCLUSIVE)
+
+    monkeypatch.setattr(suite.subprocess, "run", _run)
+
+    with_bridge = suite.measure_runtime_artifacts(
+        "mumei", source, tmp_path, expected="PASS", lean_bridge=Path("bridge.py")
+    )
+    escalated = [c for c in calls if "--escalate-lean" in c]
+    assert len(escalated) == 1
+    assert with_bridge["targets"]["proof-cert"] == {
+        "emitted": True,
+        "artifacts": 1,
+        "as_expected": True,
+    }
+
+    calls.clear()
+    alone = suite.measure_runtime_artifacts("mumei", source, tmp_path, expected="PASS")
+    assert not [c for c in calls if "--escalate-lean" in c]
+    assert alone["targets"]["proof-cert"]["emitted"] is False
+    assert alone["targets"]["proof-cert"]["artifacts"] == 0
+
+
 # ---------------------------------------------------------------------------
 # B-7: AI Lean proof path on/off
 # ---------------------------------------------------------------------------
