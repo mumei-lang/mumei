@@ -226,3 +226,63 @@ fn lsp_reports_lean_verified_atoms_from_a_sibling_certificate() {
         "{escalation}"
     );
 }
+
+#[test]
+fn lsp_reports_every_pending_escalation_recorded_in_the_sibling_certificate() {
+    let dir = unique_temp_dir("mumei-lsp-lean-pending-all");
+    // Two undecided atoms: in-process verification stops at the first one, so
+    // the second pending escalation can only come from the certificate.
+    let source = concat!(
+        "atom symbolic_pow_a(x: i64, y: i64) -> i64\n  requires: x >= 0;\n  ensures: result == x**y && result == x;\n  body: x;\n\n",
+        "atom symbolic_pow_b(x: i64, y: i64) -> i64\n  requires: x >= 1;\n  ensures: result == x**y && result == x;\n  body: x;\n",
+    );
+    let source_path = dir.join("pending_all.mm");
+    let cert_path = dir.join("pending_all.proof.json");
+    std::fs::write(&source_path, source).expect("write source");
+
+    let generated = Command::new(env!("CARGO_BIN_EXE_mumei"))
+        .arg("verify")
+        .arg("--proof-cert")
+        .arg("--output")
+        .arg(&cert_path)
+        .arg(&source_path)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("run mumei verify --proof-cert");
+    assert!(
+        cert_path.exists(),
+        "certificate was not written (status {:?}):\n{}",
+        generated.status.code(),
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let raw = std::fs::read_to_string(&cert_path).expect("read certificate");
+    let cert: Value = serde_json::from_str(&raw).expect("parse certificate");
+    let candidates: Vec<&str> = cert["atoms"]
+        .as_array()
+        .expect("atoms")
+        .iter()
+        .filter(|a| a.get("escalation_reason").and_then(Value::as_str).is_some())
+        .filter_map(|a| a["name"].as_str())
+        .collect();
+    assert_eq!(
+        candidates,
+        vec!["symbolic_pow_a", "symbolic_pow_b"],
+        "fixture must record an escalation reason for both atoms: {cert:#}"
+    );
+
+    let diagnostics = did_open_diagnostics(&source_path, source);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let mut pending: Vec<&str> = diagnostics
+        .iter()
+        .filter_map(lean_escalation)
+        .filter(|e| e.get("status").and_then(Value::as_str) == Some("pending"))
+        .filter_map(|e| e.get("atom").and_then(Value::as_str))
+        .collect();
+    pending.sort_unstable();
+    assert_eq!(
+        pending,
+        vec!["symbolic_pow_a", "symbolic_pow_b"],
+        "every pending atom must be reported exactly once: {diagnostics:#?}"
+    );
+}

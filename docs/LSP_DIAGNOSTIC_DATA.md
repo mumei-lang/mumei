@@ -42,6 +42,13 @@ already contains `Counter-example:`.  A pending escalation is also reflected
 in the message suffix:
 `Lean escalation: pending (z3 <class>, reason <reason>)`.
 
+In-process verification stops at the first failing atom.  When a sibling
+`<file>.proof.json` certificate exists, every other atom it records with an
+`escalation_reason` and a `z3_check_result` other than `lean_verified` also
+receives a severity `1` `mumei-z3` diagnostic with the same `lean_escalation`
+payload plus `"certificate": "<path>"`, so all pending escalations in the file
+are shown, each exactly once.
+
 ## `mumei-lean` data
 
 Each Lean-verified atom produces a severity `3` diagnostic with:

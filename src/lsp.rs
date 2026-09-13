@@ -297,6 +297,7 @@ fn diagnose(uri: &str, source: &str) -> Vec<serde_json::Value> {
 
     // Phase 2: Z3 検証 diagnostics（file:// URI の場合のみ実行）
     if let Some(path) = path.as_deref() {
+        let mut live_pending_atom: Option<String> = None;
         if let Err(failure) = verify_source_for_lsp(path, source) {
             let LspVerifyFailure {
                 error: e,
@@ -332,6 +333,7 @@ fn diagnose(uri: &str, source: &str) -> Vec<serde_json::Value> {
             // what tells the reader if a red squiggle is terminal or waiting
             // on the Lean fidelity check.
             let escalation_data = escalation.as_ref().map(|classification| {
+                live_pending_atom = failed_atom.clone();
                 let reason = classification
                     .escalation_reason
                     .as_ref()
@@ -398,7 +400,13 @@ fn diagnose(uri: &str, source: &str) -> Vec<serde_json::Value> {
             }
             diagnostics.push(diag);
         }
-        append_lean_verified_diagnostics(path, source, &items, &mut diagnostics);
+        append_certificate_lean_escalation_diagnostics(
+            path,
+            source,
+            &items,
+            live_pending_atom.as_deref(),
+            &mut diagnostics,
+        );
     }
 
     append_intent_drift_diagnostics(source, &items, &mut diagnostics);
@@ -1312,14 +1320,18 @@ fn is_item_start(line: &str) -> bool {
         || trimmed.starts_with("import ")
 }
 
-/// Report atoms that a sibling proof certificate records as discharged by
-/// mumei-lean. Without this the editor shows nothing for an atom Z3 returned
-/// `unknown` for, so a reader cannot tell a still-open escalation from one the
-/// Lean bridge already closed.
-fn append_lean_verified_diagnostics(
+/// Report the Lean escalation state a sibling proof certificate records for
+/// every atom in the file: `lean_verified` atoms the bridge already closed, and
+/// `escalation_candidate` atoms still waiting on mumei-lean. The in-process
+/// verification above stops at the first failing atom, so without the
+/// certificate the editor would show at most one pending escalation per file.
+/// `live_pending_atom` is the atom that failure already reported, which is
+/// skipped here so it is not shown twice.
+fn append_certificate_lean_escalation_diagnostics(
     path: &Path,
     source: &str,
     items: &[parser::Item],
+    live_pending_atom: Option<&str>,
     diagnostics: &mut Vec<serde_json::Value>,
 ) {
     let cert_path = path.with_extension("proof.json");
@@ -1347,12 +1359,41 @@ fn append_lean_verified_diagnostics(
     }
 
     for atom_cert in &cert.atoms {
-        if atom_cert.z3_check_result != "lean_verified" {
-            continue;
-        }
         let Some((_, atom)) = atoms.iter().find(|(name, _)| name == &atom_cert.name) else {
             continue;
         };
+        // Same membership rule as the escalation bundle: an atom is pending
+        // while it carries an escalation reason and Lean has not closed it.
+        if atom_cert.z3_check_result != "lean_verified" {
+            let Some(reason) = atom_cert.escalation_reason.as_ref() else {
+                continue;
+            };
+            if live_pending_atom == Some(atom_cert.name.as_str()) {
+                continue;
+            }
+            let reason = reason.as_str();
+            diagnostics.push(serde_json::json!({
+                "range": atom_name_range(source, atom),
+                "severity": 1,
+                "source": "mumei-z3",
+                "message": format!(
+                    "Lean escalation: pending (z3 {}, reason {}; certificate {})",
+                    atom_cert.z3_result_class,
+                    reason,
+                    cert_path.display()
+                ),
+                "data": {
+                    "lean_escalation": {
+                        "status": "pending",
+                        "atom": atom_cert.name,
+                        "z3_result_class": atom_cert.z3_result_class,
+                        "escalation_reason": reason,
+                        "certificate": cert_path.to_string_lossy(),
+                    }
+                }
+            }));
+            continue;
+        }
         diagnostics.push(serde_json::json!({
             "range": atom_name_range(source, atom),
             "severity": 3,
