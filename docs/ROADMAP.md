@@ -2334,7 +2334,7 @@ python benchmarks/evaluation_suite.py --repair-cert-dir ../mumei-agent/artifacts
 - `PYTHONPATH=. pytest tests/`（177 件）: 既存 154 件は無変更で通過する（`tests/test_benchmark_suite.py` 16 件を含む）。
 - **ゼロコスト検証（P15 / P23〜P26 と同一）**: `cargo tree --edges no-dev | grep -i opentelemetry` が空であること。本スイートは Rust を触らない測定層のみ。
 
-**残課題**: repair convergence は mumei-agent 側の自己修復 run が生成した certificate を渡したときにのみ `MEASURED` になる（本リポジトリにコミット済みの測定は `SKIP`）。runtime artifact utility は `expected: PASS` タスクのみを対象とするため、counterexample タスクの emitter 挙動は測定範囲外。paper §9 Future Work #1 前半の TikZ 図差し替えは本スイートのスコープ外で未着手のまま。
+**残課題（2026-09-13 解消、Priority 25 Wave 4 B-7 / R-7）**: コミット済み `evaluation_suite.json` の repair convergence は mumei-agent `scripts/measure_repair_convergence.py`（`heal --proof-cert-out` が `MUMEI_SELF_CORRECTION_METADATA` 経由で `self_correction_summary` 付き certificate を書く）を counterexample 20 ファイルに実行した certificate を `--repair-cert-dir` で投入し `MEASURED`（24 atom、収束 10 = 41.67%、平均 1.3333 attempts、53,078 tokens、ローカル Ollama `qwen2.5-coder:3b`、max 3 retries）。runtime artifact utility は `expected: FAIL` タスクを `counterexample` ブロックとして別集計し（build target 3 種は非出力・`proof-cert` は refutation certificate 出力が期待値。68/80 = 85.00% as expected、refutation certificate 20/20、leak 12: concurrency の multi-atom 4 ファイルで先行 atom の成果物が reject 後も残る。leak は非空成果物の有無で判定）、`expected: PASS` 側の 97/104 は不変。trust surface には `--ai-proof-cert-dir`（mumei-agent `scripts/measure_lean_ai_proof.py --ai-proof on` の certificate）による AI 経路 on/off 測定 `lean_ai_proof` を追加（off 6 / on 6 `lean_verified`、増分 +0、`ai_proof_used` 0、`manual_lemma_reason` 残 0）。paper §8 Known limitation #2 / §9 Future Work #1 は papers 側で同時更新。再測定手順は `docs/CROSS_PROJECT_ROADMAP.md` Priority 25 B-7 / Priority 26 R-7 行を正とする。
 
 ---
 

@@ -26,6 +26,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -273,6 +274,8 @@ def _verify_file(
         "lean_status": "SKIP",
         "lean_verified_atoms": 0,
         "tactic_search_adopted": 0,
+        "manual_lemma_reason_remaining": None,
+        "atom_content_hashes": None,
     }
     if result["escalation_candidates"] and lean_bridge is not None:
         lean = _measure_lean_escalation(binary, path)
@@ -280,6 +283,8 @@ def _verify_file(
         result["lean_status"] = lean["lean_status"]
         result["lean_verified_atoms"] = lean["lean_verified_atoms"]
         result["tactic_search_adopted"] = lean["tactic_search_adopted"]
+        result["manual_lemma_reason_remaining"] = lean["manual_lemma_reason_remaining"]
+        result["atom_content_hashes"] = lean["atom_content_hashes"]
     return result
 
 
@@ -304,37 +309,114 @@ def _measure_lean_escalation(binary: str, path: Path) -> dict:
     the report separates "Lean was invoked" from "Lean closed the goal".
     """
     start = time.monotonic()
-    try:
-        proc = subprocess.run(
-            [binary, "verify", "--proof-cert", "--escalate-lean", str(path)],
-            capture_output=True,
-            text=True,
-            timeout=LEAN_VERIFY_TIMEOUT_S,
-            cwd=str(REPO_ROOT),
-        )
-        elapsed = time.monotonic() - start
-        status = "MEASURED" if proc.returncode == 0 else "FAIL"
-        output = proc.stdout + proc.stderr
-    except subprocess.TimeoutExpired:
-        return {
-            "lean_solver_time_s": float(LEAN_VERIFY_TIMEOUT_S),
-            "lean_status": "TIMEOUT",
-            "lean_verified_atoms": 0,
-            "tactic_search_adopted": 0,
-        }
-    except FileNotFoundError:
-        return {
-            "lean_solver_time_s": None,
-            "lean_status": "SKIP",
-            "lean_verified_atoms": 0,
-            "tactic_search_adopted": 0,
-        }
+    with tempfile.TemporaryDirectory(prefix="mumei-bench-lean-") as tmpdir:
+        cert_path = Path(tmpdir) / f"{path.stem}.proof-cert.json"
+        try:
+            proc = subprocess.run(
+                [
+                    binary,
+                    "verify",
+                    "--proof-cert",
+                    "--escalate-lean",
+                    "--output",
+                    str(cert_path),
+                    str(path),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=LEAN_VERIFY_TIMEOUT_S,
+                cwd=str(REPO_ROOT),
+            )
+            elapsed = time.monotonic() - start
+            status = "MEASURED" if proc.returncode == 0 else "FAIL"
+            output = proc.stdout + proc.stderr
+        except subprocess.TimeoutExpired:
+            return {
+                "lean_solver_time_s": float(LEAN_VERIFY_TIMEOUT_S),
+                "lean_status": "TIMEOUT",
+                "lean_verified_atoms": 0,
+                "tactic_search_adopted": 0,
+                "manual_lemma_reason_remaining": None,
+                "atom_content_hashes": None,
+            }
+        except FileNotFoundError:
+            return {
+                "lean_solver_time_s": None,
+                "lean_status": "SKIP",
+                "lean_verified_atoms": 0,
+                "tactic_search_adopted": 0,
+                "manual_lemma_reason_remaining": None,
+                "atom_content_hashes": None,
+            }
+        cert = _load_json(cert_path)
+        remaining = manual_lemma_reason_remaining(cert)
     return {
         "lean_solver_time_s": round(elapsed, 3),
         "lean_status": status,
         "lean_verified_atoms": _lean_verified_count(output),
         "tactic_search_adopted": _tactic_search_adopted_count(output),
+        "manual_lemma_reason_remaining": remaining,
+        "atom_content_hashes": atom_content_hashes(cert),
     }
+
+
+def atom_content_hashes(cert: dict | None) -> dict[str, str] | None:
+    """``{atom name: content_hash}`` of a proof certificate, or ``None``.
+
+    Two certificates for the same file are only comparable when these agree:
+    the atom set is the escalation denominator and ``content_hash`` binds each
+    atom to the source it was verified against.
+    """
+    if not isinstance(cert, dict) or not isinstance(cert.get("atoms"), list):
+        return None
+    hashes: dict[str, str] = {}
+    for atom in cert["atoms"]:
+        if not isinstance(atom, dict):
+            continue
+        name = atom.get("name")
+        content_hash = atom.get("content_hash")
+        if isinstance(name, str) and isinstance(content_hash, str):
+            hashes[name] = content_hash
+    return hashes
+
+
+def _load_json(path: Path) -> dict | None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _atom_manual_lemma_reason(atom: dict) -> str | None:
+    reason = atom.get("manual_lemma_reason")
+    if reason is None:
+        translator_ir = atom.get("translator_ir")
+        if isinstance(translator_ir, dict):
+            reason = translator_ir.get("manual_lemma_reason")
+    return reason if isinstance(reason, str) and reason else None
+
+
+def manual_lemma_reason_remaining(cert: dict | None) -> int | None:
+    """Count escalated atoms still tagged with a ``manual_lemma_reason``.
+
+    An atom that the Lean bridge closed (``z3_check_result == lean_verified``)
+    no longer needs a hand-written lemma even if the translator flagged one, so
+    only atoms that stay short of ``lean_verified`` are counted. ``None`` means
+    the certificate could not be read.
+    """
+    if cert is None:
+        return None
+    atoms = cert.get("atoms")
+    if not isinstance(atoms, list):
+        return None
+    return sum(
+        1
+        for atom in atoms
+        if isinstance(atom, dict)
+        and atom.get("z3_check_result") != "lean_verified"
+        and _atom_manual_lemma_reason(atom) is not None
+    )
 
 
 def run_category_benchmarks(
@@ -363,6 +445,8 @@ def run_category_benchmarks(
                 "lean_status": "SKIP",
                 "lean_verified_atoms": 0,
                 "tactic_search_adopted": 0,
+                "manual_lemma_reason_remaining": None,
+                "atom_content_hashes": None,
             }
         results.append({
             "file": mm_file.name,
@@ -381,6 +465,8 @@ def run_category_benchmarks(
             "lean_status": verify["lean_status"],
             "lean_verified_atoms": verify["lean_verified_atoms"],
             "tactic_search_adopted": verify["tactic_search_adopted"],
+            "manual_lemma_reason_remaining": verify.get("manual_lemma_reason_remaining"),
+            "atom_content_hashes": verify.get("atom_content_hashes"),
         })
     total_atoms = sum(r["atoms"] for r in results)
     total_trusted = sum(r["trusted"] for r in results)
@@ -400,6 +486,11 @@ def run_category_benchmarks(
         r["escalation_candidates"] for r in results if r["lean_solver_time_s"] is not None
     )
     lean_verified_atoms = sum(r["lean_verified_atoms"] for r in results)
+    manual_remaining = [
+        r["manual_lemma_reason_remaining"]
+        for r in results
+        if r["manual_lemma_reason_remaining"] is not None
+    ]
     return {
         "category": category,
         "files": len(results),
@@ -423,6 +514,9 @@ def run_category_benchmarks(
         "lean_discharge_rate": round(lean_verified_atoms / escalated_atoms, 4)
         if escalated_atoms else None,
         "tactic_search_adopted": sum(r["tactic_search_adopted"] for r in results),
+        "manual_lemma_reason_remaining": sum(manual_remaining)
+        if lean_times and len(manual_remaining) == len(lean_times)
+        else None,
         "avg_lean_solver_time_s": round(sum(lean_times) / len(lean_times), 3)
         if lean_times else None,
         "avg_solver_time_s": round(
@@ -641,6 +735,10 @@ def _fmt_lean_time(seconds: float | None) -> str:
     return "SKIP" if seconds is None else f"{seconds:.3f}s"
 
 
+def _fmt_optional_count(value: int | None) -> str:
+    return "SKIP" if value is None else str(value)
+
+
 def _fmt_no_verdict(cat: dict) -> str:
     count = cat["no_verdict_files"]
     if not count:
@@ -698,10 +796,10 @@ def format_report(
         lines.append(f"#### {cat['category']}")
         lines.append("")
         lines.append(
-            "| File | Atoms | Trusted | Expected | Actual | Match | Verify Status | Solver Time | Lean Solver Time | Escalated | lean_verified | Tactic Search |"
+            "| File | Atoms | Trusted | Expected | Actual | Match | Verify Status | Solver Time | Lean Solver Time | Escalated | lean_verified | Tactic Search | Manual Lemma Left |"
         )
         lines.append(
-            "|------|-------|---------|----------|--------|-------|---------------|-------------|------------------|-----------|---------------|---------------|"
+            "|------|-------|---------|----------|--------|-------|---------------|-------------|------------------|-----------|---------------|---------------|-------------------|"
         )
         for d in cat["details"]:
             lines.append(
@@ -710,7 +808,8 @@ def format_report(
                 f"| {d['verify_status']} "
                 f"| {d['solver_time_s']:.3f}s | {_fmt_lean_time(d['lean_solver_time_s'])} "
                 f"| {d['escalation_candidates']} | {d['lean_verified_atoms']} "
-                f"| {d['tactic_search_adopted']} |"
+                f"| {d['tactic_search_adopted']} "
+                f"| {_fmt_optional_count(d.get('manual_lemma_reason_remaining'))} |"
             )
         lines.append("")
     lines.append("</details>")

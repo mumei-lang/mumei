@@ -43,9 +43,15 @@ def test_axes_match_paper_evaluation_dimensions(suite):
     )
 
 
-def test_status_vocabulary_is_reused_not_extended(suite):
+def test_status_vocabulary_is_the_three_fixed_axis_statuses(suite):
+    # MEASURED / SKIP are the run_benchmarks statuses; INCOMPLETE is the
+    # suite-level partial-coverage status. Any further status is a schema change.
     assert suite.STATUS_MEASURED == "MEASURED"
     assert suite.STATUS_SKIP == "SKIP"
+    assert suite.STATUS_INCOMPLETE == "INCOMPLETE"
+    assert {
+        name for name in dir(suite) if name.startswith("STATUS_")
+    } == {"STATUS_MEASURED", "STATUS_SKIP", "STATUS_INCOMPLETE"}
     assert suite.SCHEMA == "mumei.evaluation_suite/v1"
 
 
@@ -368,6 +374,341 @@ def test_runtime_artifact_skips_without_measurements(suite):
     assert suite.aggregate_runtime_artifacts([])["status"] == "SKIP"
 
 
+def test_expected_fail_tasks_demand_only_the_refutation_certificate(suite):
+    assert suite._expected_emission("PASS", "llvm-ir") is True
+    assert suite._expected_emission("PASS", "proof-cert") is True
+    assert suite._expected_emission("FAIL", "proof-cert") is True
+    for target in suite.BUILD_EMIT_TARGETS:
+        assert suite._expected_emission("FAIL", target) is False
+
+
+def test_runtime_artifact_counterexample_tasks_measured_separately(suite):
+    all_on = {t: True for t in suite.ARTIFACT_TARGETS}
+    ok = _artifact_file("ok.mm", all_on)
+    ok["expected"] = "PASS"
+    refused = _artifact_file(
+        "bad_fail.mm",
+        {"llvm-ir": False, "c-header": False, "verified-json": False, "proof-cert": True},
+    )
+    refused["expected"] = "FAIL"
+    leaked = _artifact_file(
+        "leak_fail.mm",
+        {"llvm-ir": True, "c-header": False, "verified-json": False, "proof-cert": False},
+    )
+    leaked["expected"] = "FAIL"
+
+    artifacts = suite.aggregate_runtime_artifacts([ok, refused, leaked])
+    # the P27 PASS-side figures are unaffected by counterexample tasks
+    assert artifacts["attempted_emissions"] == 4
+    assert artifacts["successful_emissions"] == 4
+    assert artifacts["emission_success_rate"] == 1.0
+    ce = artifacts["counterexample"]
+    assert ce["files"] == 2
+    assert ce["attempted_emissions"] == 8
+    assert ce["as_expected_emissions"] == 4 + 2
+    assert ce["as_expected_rate"] == 0.75
+    assert ce["leaked_build_artifacts"] == 1
+    assert ce["refutation_certificates"] == 1
+
+
+def test_runtime_artifact_leak_counts_partial_output_of_rejected_build(suite):
+    # a rejected build (exit 1) that still left a non-empty artifact behind is a leak
+    partial = _artifact_file(
+        "partial_fail.mm",
+        {"llvm-ir": False, "c-header": False, "verified-json": False, "proof-cert": True},
+    )
+    partial["expected"] = "FAIL"
+    partial["targets"]["llvm-ir"]["artifacts"] = 1
+
+    ce = suite.aggregate_runtime_artifacts([partial])["counterexample"]
+    assert ce["leaked_build_artifacts"] == 1
+    assert ce["as_expected_emissions"] == 3
+    assert suite._as_expected("FAIL", "llvm-ir", partial["targets"]["llvm-ir"]) is False
+    assert suite._as_expected("FAIL", "proof-cert", partial["targets"]["proof-cert"]) is True
+
+
+# ---------------------------------------------------------------------------
+# B-7: AI Lean proof path on/off
+# ---------------------------------------------------------------------------
+
+
+def _ai_cert(file: str, atoms: list[dict]) -> dict:
+    return {"file": file, "atoms": atoms}
+
+
+def _lean_atom(name: str, result: str, *, ai_used: bool = False, attempts: int | None = None,
+               reason: str | None = None, solver_s: float = 1.0) -> dict:
+    meta: dict = {"lean_solver_time_s": solver_s, "ai_proof_used": ai_used}
+    if attempts is not None:
+        meta["ai_proof_attempts"] = attempts
+    atom: dict = {"name": name, "z3_check_result": result, "lean_metadata": meta}
+    if reason:
+        atom["manual_lemma_reason"] = reason
+    return atom
+
+
+def test_load_ai_proof_certificates_keys_by_category_and_file(suite, tmp_path):
+    cert_dir = tmp_path / "on"
+    (cert_dir / "arithmetic").mkdir(parents=True)
+    (cert_dir / "arithmetic" / "a.proof.json").write_text(
+        json.dumps(_ai_cert("benchmarks/arithmetic/a.mm", [])), encoding="utf-8"
+    )
+    (cert_dir / "run.json").write_text(json.dumps({"schema": "x", "files": []}), encoding="utf-8")
+    (cert_dir / "broken.json").write_text("{", encoding="utf-8")
+    assert list(suite.load_ai_proof_certificates(cert_dir)) == ["arithmetic/a.mm"]
+    assert suite.load_ai_proof_certificates(None) == {}
+
+
+def test_load_ai_proof_certificates_honours_run_manifest_allow_list(suite, tmp_path):
+    cert_dir = tmp_path / "on"
+    (cert_dir / "arithmetic").mkdir(parents=True)
+    listed = cert_dir / "arithmetic" / "a.proof.json"
+    listed.write_text(json.dumps(_ai_cert("benchmarks/arithmetic/a.mm", [])), encoding="utf-8")
+    # stale certificate-shaped JSON sitting next to the measured run
+    (cert_dir / "arithmetic" / "stale.proof.json").write_text(
+        json.dumps(_ai_cert("benchmarks/arithmetic/stale.mm", [])), encoding="utf-8"
+    )
+    manifest = {
+        "schema": suite.AI_PROOF_RUN_MANIFEST_SCHEMA,
+        "ai_proof": "on",
+        "files": [{"file": "arithmetic/a.mm", "certificate": str(listed)}],
+    }
+    (cert_dir / "run.json").write_text(json.dumps(manifest), encoding="utf-8")
+    assert list(suite.load_ai_proof_certificates(cert_dir)) == ["arithmetic/a.mm"]
+
+    # relative certificate paths resolve against the manifest directory
+    manifest["files"][0]["certificate"] = "arithmetic/a.proof.json"
+    (cert_dir / "run.json").write_text(json.dumps(manifest), encoding="utf-8")
+    assert list(suite.load_ai_proof_certificates(cert_dir)) == ["arithmetic/a.mm"]
+
+    # an AI-off manifest vouches for nothing: no certificate is an AI-on one
+    manifest["ai_proof"] = "off"
+    (cert_dir / "run.json").write_text(json.dumps(manifest), encoding="utf-8")
+    assert suite.load_ai_proof_certificates(cert_dir) == {}
+
+
+def test_summarize_ai_proof_certificate_reads_bridge_provenance_only(suite):
+    harness = suite.load_run_benchmarks()
+    cert = _ai_cert(
+        "benchmarks/arithmetic/a.mm",
+        [
+            _lean_atom("p", "lean_verified", ai_used=True, attempts=2, reason="nonlinear"),
+            _lean_atom("q", "lean_verified", ai_used=False, solver_s=2.5),
+            # a rejected/unknown atom never counts as AI-used even if flagged
+            _lean_atom("r", "unknown", ai_used=True, attempts=3, reason="nonlinear"),
+        ],
+    )
+    summary = suite.summarize_ai_proof_certificate(cert, harness)
+    assert summary["lean_verified_atoms"] == 2
+    assert summary["ai_proof_used_atoms"] == 1
+    assert summary["ai_proof_attempts"] == 5
+    assert summary["manual_lemma_reason_remaining"] == 1
+    assert summary["lean_solver_time_s"] == 2.5
+
+
+def _category_result(details: list[dict]) -> dict:
+    return {"details": details}
+
+
+def _detail(
+    file: str,
+    candidates: int,
+    verified: int,
+    solver_s: float | None,
+    left: int | None,
+    *,
+    lean_status: str | None = None,
+    hashes: dict[str, str] | None = None,
+) -> dict:
+    if lean_status is None:
+        lean_status = "MEASURED" if solver_s is not None else "SKIP"
+    return {
+        "file": file,
+        "escalation_candidates": candidates,
+        "lean_verified_atoms": verified,
+        "lean_solver_time_s": solver_s,
+        "lean_status": lean_status,
+        "manual_lemma_reason_remaining": left,
+        "atom_content_hashes": hashes,
+    }
+
+
+def test_aggregate_lean_ai_proof_reports_delta_between_off_and_on(suite):
+    harness = suite.load_run_benchmarks()
+    result = _category_result(
+        [
+            _detail("plain.mm", 0, 0, None, None),
+            _detail("hard.mm", 2, 1, 4.0, 1),
+        ]
+    )
+    certs = {
+        "arithmetic/hard.mm": _ai_cert(
+            "benchmarks/arithmetic/hard.mm",
+            [
+                _lean_atom("a", "lean_verified"),
+                _lean_atom("b", "lean_verified", ai_used=True, attempts=2, reason="nonlinear"),
+            ],
+        )
+    }
+    block = suite.aggregate_lean_ai_proof("arithmetic", result, certs, harness)
+    assert block["off"] == {
+        "status": "MEASURED",
+        "unmeasured_files": [],
+        "files": 1,
+        "lean_verified_atoms": 1,
+        "manual_lemma_reason_remaining": 1,
+        "lean_solver_time_s": 4.0,
+    }
+    assert block["on"]["status"] == "MEASURED"
+    assert block["on"]["lean_verified_atoms"] == 2
+    assert block["on"]["ai_proof_used_atoms"] == 1
+    assert block["on"]["ai_proof_attempts"] == 2
+    assert block["on"]["manual_lemma_reason_remaining"] == 0
+    assert block["on"]["file_names"] == ["hard.mm"]
+    assert block["lean_verified_delta"] == 1
+
+
+def test_aggregate_lean_ai_proof_skips_without_binary_or_certificates(suite):
+    harness = suite.load_run_benchmarks()
+    result = _category_result([_detail("hard.mm", 2, 0, None, None)])
+    block = suite.aggregate_lean_ai_proof("arithmetic", result, {}, harness, binary_available=False)
+    assert block == {"off": {"status": "SKIP"}, "on": {"status": "SKIP", "files": 0}, "lean_verified_delta": None}
+    # candidates present but no Lean sample (bridge unavailable) is not a measurement
+    block = suite.aggregate_lean_ai_proof("arithmetic", result, {}, harness)
+    assert block["off"]["status"] == "SKIP"
+    assert block["lean_verified_delta"] is None
+
+
+def test_aggregate_lean_ai_proof_partial_coverage_is_incomplete_without_delta(suite):
+    harness = suite.load_run_benchmarks()
+    result = _category_result(
+        [
+            _detail("a.mm", 2, 2, 3.0, 0),
+            _detail("b.mm", 2, 2, 3.0, 0),
+        ]
+    )
+    certs = {
+        "arithmetic/a.mm": _ai_cert(
+            "benchmarks/arithmetic/a.mm",
+            [_lean_atom("x", "lean_verified"), _lean_atom("y", "lean_verified")],
+        )
+    }
+    block = suite.aggregate_lean_ai_proof("arithmetic", result, certs, harness)
+    assert block["off"]["lean_verified_atoms"] == 4
+    assert block["on"]["status"] == suite.STATUS_INCOMPLETE
+    assert block["on"]["files"] == 1
+    assert block["on"]["missing_files"] == ["b.mm"]
+    assert block["lean_verified_delta"] is None
+    # an incomplete category contributes to neither side of the suite totals
+    totals = suite._lean_ai_proof_totals([block])
+    assert totals["off"] == {"status": "SKIP"}
+    assert totals["on"] == {"status": "SKIP"}
+    assert totals["lean_verified_delta"] is None
+    assert totals["unpaired_categories"] == 1
+    assert suite.STATUS_INCOMPLETE in suite._fmt_lean_ai_on(block)
+
+
+def test_aggregate_lean_ai_proof_failed_or_timed_out_off_run_has_no_delta(suite):
+    harness = suite.load_run_benchmarks()
+    certs = {
+        "arithmetic/a.mm": _ai_cert(
+            "benchmarks/arithmetic/a.mm",
+            [_lean_atom("x", "lean_verified"), _lean_atom("y", "lean_verified")],
+        ),
+        "arithmetic/b.mm": _ai_cert("benchmarks/arithmetic/b.mm", [_lean_atom("z", "lean_verified")]),
+    }
+    for status in ("TIMEOUT", "FAIL"):
+        result = _category_result(
+            [
+                _detail("a.mm", 2, 0, 300.0, None, lean_status=status),
+                _detail("b.mm", 1, 1, 2.0, 0),
+            ]
+        )
+        block = suite.aggregate_lean_ai_proof("arithmetic", result, certs, harness)
+        assert block["off"]["status"] == suite.STATUS_INCOMPLETE
+        assert block["off"]["unmeasured_files"] == [["a.mm", status]]
+        assert block["on"]["status"] == "MEASURED"
+        assert block["lean_verified_delta"] is None
+        assert suite._lean_ai_proof_totals([block])["lean_verified_delta"] is None
+
+
+def test_aggregate_lean_ai_proof_stale_on_certificate_is_incomplete(suite):
+    harness = suite.load_run_benchmarks()
+    on_atoms = [_lean_atom("x", "lean_verified"), _lean_atom("y", "lean_verified")]
+    for i, atom in enumerate(on_atoms):
+        atom["content_hash"] = f"h{i}"
+    certs = {"arithmetic/a.mm": _ai_cert("benchmarks/arithmetic/a.mm", on_atoms)}
+
+    same = _detail("a.mm", 2, 2, 3.0, 0, hashes={"x": "h0", "y": "h1"})
+    block = suite.aggregate_lean_ai_proof("arithmetic", _category_result([same]), certs, harness)
+    assert block["on"]["status"] == "MEASURED"
+    assert block["on"]["stale_files"] == []
+    assert block["lean_verified_delta"] == 0
+
+    # source changed since the on run: one atom left, other content
+    changed = _detail("a.mm", 1, 1, 3.0, 0, hashes={"x": "h9"})
+    block = suite.aggregate_lean_ai_proof("arithmetic", _category_result([changed]), certs, harness)
+    assert block["on"]["status"] == suite.STATUS_INCOMPLETE
+    assert block["on"]["stale_files"] == ["a.mm"]
+    assert block["lean_verified_delta"] is None
+
+
+def test_load_self_correction_summaries_honours_repair_run_manifest(suite, tmp_path):
+    cert_dir = tmp_path / "repair"
+    (cert_dir / "arithmetic").mkdir(parents=True)
+    summary = {"total_atoms": 1, "converged_atoms": 1, "average_repair_attempts": 1.0, "total_token_cost": 5}
+    listed = cert_dir / "arithmetic" / "a.proof.json"
+    listed.write_text(
+        json.dumps({"file": "benchmarks/arithmetic/a.mm", "self_correction_summary": summary}),
+        encoding="utf-8",
+    )
+    (cert_dir / "arithmetic" / "old.proof.json").write_text(
+        json.dumps({"file": "benchmarks/arithmetic/old.mm", "self_correction_summary": summary}),
+        encoding="utf-8",
+    )
+    # no manifest: every certificate is taken (legacy behaviour)
+    assert set(suite.load_self_correction_summaries(cert_dir)) >= {"arithmetic/a.mm", "arithmetic/old.mm"}
+    manifest = {
+        "schema": suite.REPAIR_RUN_MANIFEST_SCHEMA,
+        "files": [{"file": "arithmetic/a.mm", "certificate": str(listed)}],
+    }
+    (cert_dir / "run.json").write_text(json.dumps(manifest), encoding="utf-8")
+    loaded = suite.load_self_correction_summaries(cert_dir)
+    assert "arithmetic/a.mm" in loaded
+    assert "arithmetic/old.mm" not in loaded
+
+
+def test_lean_ai_proof_totals_roll_up_measured_categories_only(suite):
+    blocks = [
+        {
+            "off": {"status": "MEASURED", "files": 1, "lean_verified_atoms": 4,
+                    "manual_lemma_reason_remaining": 0, "lean_solver_time_s": 9.0},
+            "on": {"status": "MEASURED", "files": 1, "lean_verified_atoms": 4, "ai_proof_used_atoms": 0,
+                   "ai_proof_attempts": 0, "manual_lemma_reason_remaining": 0, "lean_solver_time_s": 7.0},
+            "lean_verified_delta": 0,
+        },
+        {"off": {"status": "SKIP"}, "on": {"status": "SKIP", "files": 0}, "lean_verified_delta": None},
+    ]
+    totals = suite._lean_ai_proof_totals(blocks)
+    assert totals["off"]["lean_verified_atoms"] == 4
+    assert totals["on"]["lean_solver_time_s"] == 7.0
+    assert totals["lean_verified_delta"] == 0
+    assert totals["paired_categories"] == 1
+    assert suite._lean_ai_proof_totals([blocks[1]])["off"] == {"status": "SKIP"}
+    # off MEASURED but on SKIP: the off side is excluded from the paired totals too,
+    # so a suite delta never compares totals over different category sets
+    half = {
+        "off": {"status": "MEASURED", "files": 1, "lean_verified_atoms": 9,
+                "manual_lemma_reason_remaining": 0, "lean_solver_time_s": 1.0},
+        "on": {"status": "SKIP", "files": 0},
+        "lean_verified_delta": None,
+    }
+    totals = suite._lean_ai_proof_totals([blocks[0], half])
+    assert totals["off"]["lean_verified_atoms"] == 4
+    assert totals["lean_verified_delta"] == 0
+    assert totals["unpaired_categories"] == 1
+
+
 # ---------------------------------------------------------------------------
 # Suite integration
 # ---------------------------------------------------------------------------
@@ -533,6 +874,39 @@ def test_committed_artifacts_match_the_schema():
     assert [c["category"] for c in payload["categories"]] == sorted(
         c["category"] for c in payload["categories"]
     )
+    # Measured agent-backed axes must name the LLM that produced their
+    # certificates; SKIP axes carry no provenance.
+    agent_runs = payload["agent_runs"]
+    assert set(agent_runs) == {"repair_convergence", "lean_ai_proof"}
+    if payload["totals"]["repair_convergence"]["status"] == "MEASURED":
+        assert agent_runs["repair_convergence"]["llm_model"]
+    lean_ai = payload["totals"]["trust_surface"].get("lean_ai_proof") or {}
+    if (lean_ai.get("on") or {}).get("status") == "MEASURED":
+        assert agent_runs["lean_ai_proof"]["llm_model"]
+
+
+def test_load_agent_run_manifest_keeps_only_provenance_keys(tmp_path):
+    suite_module = load_suite()
+    assert suite_module.load_agent_run_manifest(None) is None
+    assert suite_module.load_agent_run_manifest(tmp_path) is None
+    (tmp_path / "run.json").write_text(
+        json.dumps({
+            "schema": "mumei-agent.repair_convergence_run/v1",
+            "llm_model": "qwen2.5-coder:3b",
+            "llm_base_url": "http://localhost:11434/v1",
+            "mumei_bin": "/home/someone/mumei",
+            "max_retries": 3,
+            "files": [{"file": "a.mm"}],
+        }),
+        encoding="utf-8",
+    )
+    assert suite_module.load_agent_run_manifest(tmp_path) == {
+        "schema": "mumei-agent.repair_convergence_run/v1",
+        "llm_model": "qwen2.5-coder:3b",
+        "max_retries": 3,
+    }
+    (tmp_path / "run.json").write_text("not json", encoding="utf-8")
+    assert suite_module.load_agent_run_manifest(tmp_path) is None
 
 
 def test_committed_artifact_static_axes_are_not_stale():
