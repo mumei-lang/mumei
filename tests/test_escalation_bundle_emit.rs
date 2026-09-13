@@ -45,9 +45,12 @@ fn verify_emit_escalation_bundle_writes_unknown_candidates() {
         .output()
         .unwrap_or_else(|err| panic!("failed to run mumei verify: {err}"));
 
-    assert!(
-        output.status.success(),
-        "verify should emit an escalation bundle\nstdout:\n{}\nstderr:\n{}",
+    // The candidate stays `unknown`, so the run is inconclusive (exit 3), not
+    // verified; the bundle must still be written.
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "an undischarged unknown candidate is inconclusive\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -243,9 +246,12 @@ Path(args.lean_cert_out).write_text(json.dumps(payload))
         .output()
         .unwrap_or_else(|err| panic!("failed to run mumei verify --escalate-lean: {err}"));
 
-    assert!(
-        output.status.success(),
-        "stale Lean metadata should not crash verification\nstdout:\n{}\nstderr:\n{}",
+    // Rejected stale metadata leaves the candidate open: inconclusive (3),
+    // neither verified (0) nor an internal error (5).
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "stale Lean metadata should leave the run inconclusive, not crash it\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );

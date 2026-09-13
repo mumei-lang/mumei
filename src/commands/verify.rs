@@ -16,6 +16,137 @@ use std::sync::Once;
 
 static LINKED_Z3_WARNING: Once = Once::new();
 
+/// Process exit codes of `mumei verify` (see docs/CLI.md "Exit codes").
+///
+/// `1` keeps its historical meaning — the verifier *rejected* the program —
+/// so callers that only distinguish `0` / `1` are unaffected. Runs that never
+/// reached a verdict about the obligations use the codes above `2` (which
+/// clap uses for usage errors) so a benchmark or CI harness can tell a caught
+/// counterexample from a solver timeout, an unreadable input, or a crash
+/// without parsing the summary text.
+pub(crate) const EXIT_VERIFIED: i32 = 0;
+pub(crate) const EXIT_REJECTED: i32 = 1;
+/// Same code clap uses for argument errors; `--emit` / `--no-emit` take free
+/// strings and are validated here, so a bad value must not look like a verdict.
+pub(crate) const EXIT_USAGE_ERROR: i32 = 2;
+pub(crate) const EXIT_INCONCLUSIVE: i32 = 3;
+pub(crate) const EXIT_INPUT_ERROR: i32 = 4;
+pub(crate) const EXIT_INTERNAL_ERROR: i32 = 5;
+
+/// Outcome of verifying one input, ordered by severity for directory runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum VerifyOutcome {
+    /// Every obligation was discharged (or delegated to an accepted certificate).
+    Verified,
+    /// No counterexample, but at least one obligation ended `unknown` /
+    /// timed out, so nothing can be claimed either way.
+    Inconclusive,
+    /// Z3 found a counterexample or a contract/type violation was reported.
+    Rejected,
+    /// The input could not be read, parsed, or resolved.
+    InputError,
+    /// The verifier itself failed: a panic, or an artifact / bridge step
+    /// that could not be completed.
+    InternalError,
+}
+
+impl VerifyOutcome {
+    pub(crate) fn exit_code(self) -> i32 {
+        match self {
+            Self::Verified => EXIT_VERIFIED,
+            Self::Rejected => EXIT_REJECTED,
+            Self::Inconclusive => EXIT_INCONCLUSIVE,
+            Self::InputError => EXIT_INPUT_ERROR,
+            Self::InternalError => EXIT_INTERNAL_ERROR,
+        }
+    }
+
+    pub(crate) fn is_failure(self) -> bool {
+        self != Self::Verified
+    }
+
+    /// `status` value the `--json` summary payload uses for this outcome.
+    pub(crate) fn json_status(self) -> &'static str {
+        match self {
+            Self::Verified => "passed",
+            Self::Rejected => "failed",
+            Self::Inconclusive => "inconclusive",
+            Self::InputError => "input_error",
+            Self::InternalError => "internal_error",
+        }
+    }
+
+    /// Exit code for a whole-directory run: a single input error or crash
+    /// dominates, otherwise a rejection dominates an inconclusive result.
+    pub(crate) fn combine(self, other: Self) -> Self {
+        self.max(other)
+    }
+
+    /// `failed` counts every atom reported as failed in the summary;
+    /// `solver_inconclusive` is the subset of those whose Z3 result was
+    /// `unknown` / `timeout` / `resource_limit` rather than a counterexample.
+    /// `open_escalations` counts Lean escalation candidates Z3 left `unknown`
+    /// that the bridge did not discharge as `lean_verified`; an open
+    /// obligation is not a verdict either way.
+    fn from_counts(
+        failed: usize,
+        solver_inconclusive: usize,
+        unverifiable: usize,
+        open_escalations: usize,
+        infra_errors: usize,
+    ) -> Self {
+        if infra_errors > 0 {
+            Self::InternalError
+        } else if failed > solver_inconclusive {
+            Self::Rejected
+        } else if failed > 0 || unverifiable > 0 || open_escalations > 0 {
+            Self::Inconclusive
+        } else {
+            Self::Verified
+        }
+    }
+}
+
+/// An outcome decided before any atom was checked (Z3 unavailable, unreadable
+/// input, cross-spec load failure). With `--json` the summary payload is still
+/// written to stdout so callers always receive one JSON document whose
+/// `status` / `exit_code` match the process exit code; the human-readable
+/// reason has already gone to stderr and is repeated under `diagnostics`.
+fn early_outcome(outcome: VerifyOutcome, message: &str, json_output: bool) -> VerifyOutcome {
+    if json_output {
+        let diagnostic = verification::Diagnostic {
+            code: outcome.json_status().to_string(),
+            severity: "error".to_string(),
+            atom: String::new(),
+            message: message.to_string(),
+            tags: Vec::new(),
+            escalation_reason: None,
+        };
+        let payload = serde_json::json!({
+            "status": outcome.json_status(),
+            "verified": 0,
+            "failed": 0,
+            "unverifiable": 0,
+            "skipped": 0,
+            "skipped_clauses": 0,
+            "escalation_candidates": 0,
+            "infra_errors": usize::from(outcome == VerifyOutcome::InternalError),
+            "exit_code": outcome.exit_code(),
+            "diagnostics": [diagnostic],
+            "warnings": [],
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&payload).unwrap_or_default()
+        );
+    }
+    outcome
+}
+
+fn is_solver_inconclusive(z3_result: &str) -> bool {
+    matches!(z3_result, "unknown" | "timeout" | "resource_limit")
+}
+
 pub(crate) fn cmd_verify_command(command: Command) {
     // Attach parent OTel context from TRACEPARENT/TRACESTATE env vars so that
     // all spans created within this command are children of the caller's trace.
@@ -82,7 +213,7 @@ pub(crate) fn cmd_verify_command(command: Command) {
             "Unsupported verify --no-emit target '{}'. Supported values: escalation-metrics",
             other
         );
-        std::process::exit(1);
+        std::process::exit(EXIT_USAGE_ERROR);
     }
     let emit_escalation_bundle = matches!(emit.as_deref(), Some("escalation-bundle"));
     let emit_escalation_metrics =
@@ -107,7 +238,7 @@ pub(crate) fn cmd_verify_command(command: Command) {
                     "Unsupported verify --emit target '{}'. Supported values: escalation-bundle, escalation-metrics, decidable-metrics, reconstruction-loss, loss-vector, structured-feedback, human-review-queue, proof-graph",
                     other
                 );
-            std::process::exit(1);
+            std::process::exit(EXIT_USAGE_ERROR);
         }
     }
     let harness_contract = resolve_harness_contract(harness_contract);
@@ -136,7 +267,7 @@ pub(crate) fn cmd_verify_command(command: Command) {
         files.sort();
         if files.is_empty() {
             eprintln!("❌ No .mm files found in '{}'", input);
-            std::process::exit(1);
+            std::process::exit(EXIT_INPUT_ERROR);
         }
         println!(
             "🗡️  Mumei verify: verifying {} file(s) in '{}'...",
@@ -145,6 +276,7 @@ pub(crate) fn cmd_verify_command(command: Command) {
         );
         let mut total_ok = 0usize;
         let mut total_fail = 0usize;
+        let mut worst = VerifyOutcome::Verified;
         for (position, file) in files.iter().enumerate() {
             let file_str = file.to_string_lossy().to_string();
             // One graph describes the whole directory, so it is written once,
@@ -160,7 +292,7 @@ pub(crate) fn cmd_verify_command(command: Command) {
                         .map(|other| other.to_string_lossy().to_string()),
                 );
             }
-            let has_failure = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let outcome = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 cmd_verify(VerifyOptions {
                     input: &file_str,
                     task_id: task_id.as_deref(),
@@ -203,13 +335,14 @@ pub(crate) fn cmd_verify_command(command: Command) {
                     suggest_cegis,
                 })
             })) {
-                Ok(has_failure) => has_failure,
+                Ok(outcome) => outcome,
                 Err(_) => {
-                    eprintln!("  ❌ '{}': parse error (panic)", file_str);
-                    true
+                    eprintln!("  ❌ '{}': internal error (panic)", file_str);
+                    VerifyOutcome::InternalError
                 }
             };
-            if has_failure {
+            worst = worst.combine(outcome);
+            if outcome.is_failure() {
                 total_fail += 1;
             } else {
                 total_ok += 1;
@@ -219,51 +352,59 @@ pub(crate) fn cmd_verify_command(command: Command) {
             "\n🗡️  Directory verify summary: {} passed, {} failed",
             total_ok, total_fail
         );
-        if total_fail > 0 {
-            std::process::exit(1);
+        if worst.is_failure() {
+            std::process::exit(worst.exit_code());
         }
     } else {
-        let has_failure = cmd_verify(VerifyOptions {
-            input: &input,
-            task_id: task_id.as_deref(),
-            solver_timeout,
-            cache_scope: &cache_scope,
-            generate_proof_cert: proof_cert,
-            escalate_lean,
-            emit_escalation_bundle,
-            emit_escalation_metrics,
-            emit_decidable_metrics,
-            emit_reconstruction_loss,
-            emit_loss_vector,
-            emit_structured_feedback,
-            emit_human_review_queue,
-            emit_proof_graph,
-            cert_output: output.as_deref(),
-            report_dir: report_dir.as_deref(),
-            json_output: json,
-            strict_imports,
-            allow_lean_verified,
-            enable_cross_spec_verification: enable_cross_spec,
-            cross_spec_files: &cross_spec_files,
-            enable_spurious_detection: enable_spurious,
-            property_based_test,
-            warn_fragment,
-            ieee754_f64,
-            bitvec_i64,
-            warn_untyped_arrays,
-            strict_array_types,
-            property_based_test_count,
-            property_based_test_seed,
-            property_based_test_max_shrink_steps,
-            harness_contract,
-            intent_fidelity,
-            artifact_paths,
-            budget_policy_fingerprint,
-            emit_contract_manifest,
-            enable_vacuity_check,
-            detect_loops,
-            suggest_cegis,
-        });
+        let outcome = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            cmd_verify(VerifyOptions {
+                input: &input,
+                task_id: task_id.as_deref(),
+                solver_timeout,
+                cache_scope: &cache_scope,
+                generate_proof_cert: proof_cert,
+                escalate_lean,
+                emit_escalation_bundle,
+                emit_escalation_metrics,
+                emit_decidable_metrics,
+                emit_reconstruction_loss,
+                emit_loss_vector,
+                emit_structured_feedback,
+                emit_human_review_queue,
+                emit_proof_graph,
+                cert_output: output.as_deref(),
+                report_dir: report_dir.as_deref(),
+                json_output: json,
+                strict_imports,
+                allow_lean_verified,
+                enable_cross_spec_verification: enable_cross_spec,
+                cross_spec_files: &cross_spec_files,
+                enable_spurious_detection: enable_spurious,
+                property_based_test,
+                warn_fragment,
+                ieee754_f64,
+                bitvec_i64,
+                warn_untyped_arrays,
+                strict_array_types,
+                property_based_test_count,
+                property_based_test_seed,
+                property_based_test_max_shrink_steps,
+                harness_contract,
+                intent_fidelity,
+                artifact_paths,
+                budget_policy_fingerprint,
+                emit_contract_manifest,
+                enable_vacuity_check,
+                detect_loops,
+                suggest_cegis,
+            })
+        })) {
+            Ok(outcome) => outcome,
+            Err(_) => {
+                eprintln!("  ❌ '{}': internal error (panic)", input);
+                VerifyOutcome::InternalError
+            }
+        };
         // --detect-spec-drift: compare old cert with newly generated cert
         if let Some(ref old_cert_path) = detect_spec_drift {
             let old_cert_file = std::fs::read_to_string(old_cert_path);
@@ -339,8 +480,8 @@ pub(crate) fn cmd_verify_command(command: Command) {
                 }
             }
         }
-        if has_failure {
-            std::process::exit(1);
+        if outcome.is_failure() {
+            std::process::exit(outcome.exit_code());
         }
     }
 }
@@ -410,6 +551,7 @@ struct VerifyContext<'a> {
     verified: &'a mut usize,
     failed: &'a mut usize,
     unverifiable: &'a mut usize,
+    solver_inconclusive: &'a mut usize,
     skipped: &'a mut usize,
     skipped_clauses: &'a mut usize,
     escalated: &'a mut usize,
@@ -732,6 +874,9 @@ fn verify_single_atom(atom: &parser::Atom, name: &str, ctx: &mut VerifyContext<'
                 "escalation_candidate"
             } else {
                 *ctx.failed += 1;
+                if is_solver_inconclusive(&z3_result) {
+                    *ctx.solver_inconclusive += 1;
+                }
                 "failed"
             };
             if ctx.enable_spurious_detection && z3_result == "sat" {
@@ -1020,7 +1165,7 @@ fn run_lean_bridge(
     Ok((lean_cert_path, lean_bundle))
 }
 
-pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
+pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
     let VerifyOptions {
         input,
         task_id,
@@ -1068,7 +1213,10 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
     let structured_feedback_stdout = emit_structured_feedback && cert_output.is_none();
     let loss_vector_stdout = emit_loss_vector && cert_output.is_none();
     let quiet_output = json_output || structured_feedback_stdout || loss_vector_stdout;
-    check_z3_available();
+    if let Err(message) = z3_availability() {
+        eprintln!("{message}");
+        return early_outcome(VerifyOutcome::InternalError, &message, json_output);
+    }
     let manifest_config = manifest::find_and_load();
     let (build_cfg, proof_cfg) = if let Some((_, ref m)) = manifest_config {
         (m.build.clone(), m.proof.clone())
@@ -1104,10 +1252,10 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
             Ok(result) => result,
             Err(e) => {
                 eprintln!("  ❌ {e}");
-                return true;
+                return early_outcome(VerifyOutcome::InputError, &e, json_output);
             }
         };
-    load_cross_spec_files(
+    if let Err(e) = load_cross_spec_files(
         cross_spec_files,
         strict_imports,
         allow_lean_verified,
@@ -1115,7 +1263,10 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
         &mut module_env,
         &mut imports,
         !quiet_output,
-    );
+    ) {
+        eprintln!("  ❌ {e}");
+        return early_outcome(VerifyOutcome::InputError, &e, json_output);
+    }
 
     let output_dir = match report_dir {
         Some(dir) => Path::new(dir),
@@ -1156,6 +1307,8 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
     let mut verified = 0;
     let mut failed = 0;
     let mut unverifiable = 0;
+    let mut solver_inconclusive = 0;
+    let mut infra_errors = 0;
     let mut skipped = 0;
     let mut skipped_clauses = 0;
     let mut escalated = 0;
@@ -1204,7 +1357,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                 if !quiet_output {
                     eprintln!("  ⚠️  Failed to write contract manifest: {}", e);
                 }
-                failed += 1;
+                infra_errors += 1;
             }
         }
     }
@@ -1290,6 +1443,13 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                         verified += 1;
                     }
                     Err(e) => {
+                        // Same classification as the atom path: a law Z3 could
+                        // neither prove nor refute is inconclusive, not a rejection.
+                        if verification::z3_result_from_error_message(&e.to_string())
+                            .is_some_and(is_solver_inconclusive)
+                        {
+                            solver_inconclusive += 1;
+                        }
                         if !quiet_output {
                             let resolved = resolve_source_for_span(&source, &impl_def.span);
                             let e = e.with_source(&resolved, &impl_def.span);
@@ -1323,6 +1483,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                     verified: &mut verified,
                     failed: &mut failed,
                     unverifiable: &mut unverifiable,
+                    solver_inconclusive: &mut solver_inconclusive,
                     skipped: &mut skipped,
                     skipped_clauses: &mut skipped_clauses,
                     escalated: &mut escalated,
@@ -1357,6 +1518,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                         verified: &mut verified,
                         failed: &mut failed,
                         unverifiable: &mut unverifiable,
+                        solver_inconclusive: &mut solver_inconclusive,
                         skipped: &mut skipped,
                         skipped_clauses: &mut skipped_clauses,
                         escalated: &mut escalated,
@@ -1384,7 +1546,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
             Ok(()) => {}
             Err(err) => {
                 eprintln!("❌ {err}");
-                failed += 1;
+                infra_errors += 1;
             }
         }
     }
@@ -1398,7 +1560,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
             Ok(()) => {}
             Err(err) => {
                 eprintln!("❌ {err}");
-                failed += 1;
+                infra_errors += 1;
             }
         }
     }
@@ -1452,7 +1614,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                 if !quiet_output {
                     eprintln!("  ⚠️  Failed to write cross-spec report: {}", e);
                 }
-                failed += 1;
+                infra_errors += 1;
             }
         }
     }
@@ -1534,6 +1696,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                         if !quiet_output {
                             eprintln!("  ⚠️  Failed to write escalation bundle: {}", e);
                         }
+                        infra_errors += 1;
                     }
                 }
             }
@@ -1568,7 +1731,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                             if !quiet_output {
                                 eprintln!("  ⚠️  Lean escalation bridge failed: {}", e);
                             }
-                            failed += 1;
+                            infra_errors += 1;
                         }
                     }
                 }
@@ -1596,6 +1759,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                         if !quiet_output {
                             eprintln!("  ⚠️  Failed to write escalation metrics: {}", e);
                         }
+                        infra_errors += 1;
                     }
                 }
             }
@@ -1615,6 +1779,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                     if !quiet_output {
                         eprintln!("  ⚠️  Failed to write proof certificate: {}", e);
                     }
+                    infra_errors += 1;
                 }
             }
         }
@@ -1635,6 +1800,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                     if !quiet_output {
                         eprintln!("  ⚠️  Failed to write human review queue: {}", e);
                     }
+                    infra_errors += 1;
                 }
             }
         }
@@ -1684,7 +1850,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
             !quiet_output,
         ) {
             eprintln!("  ⚠️  Failed to write proof graph: {}", err);
-            failed += 1;
+            infra_errors += 1;
         }
     }
 
@@ -1703,7 +1869,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                 if let Some(output) = cert_output {
                     if let Err(err) = std::fs::write(output, &serialized) {
                         eprintln!("❌ Failed to write structured feedback: {err}");
-                        failed += 1;
+                        infra_errors += 1;
                     } else if !quiet_output {
                         println!("  🧾 Structured feedback written to: {output}");
                     }
@@ -1713,7 +1879,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
             }
             Err(err) => {
                 eprintln!("❌ Failed to serialize structured feedback: {err}");
-                failed += 1;
+                infra_errors += 1;
             }
         }
     }
@@ -1725,7 +1891,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                 if let Some(output) = cert_output {
                     if let Err(err) = std::fs::write(output, &serialized) {
                         eprintln!("❌ Failed to write loss vector: {err}");
-                        failed += 1;
+                        infra_errors += 1;
                     } else if !quiet_output {
                         println!("  🧭 Loss vector written to: {output}");
                     }
@@ -1735,12 +1901,30 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
             }
             Err(err) => {
                 eprintln!("❌ Failed to serialize loss vector: {err}");
-                failed += 1;
+                infra_errors += 1;
             }
         }
     }
 
     // Proposal B: --json outputs report.json content to stdout
+    // Candidates promoted from a Z3 `unsat` (outside the decidable fragment,
+    // or a contract-trusted import) already carry a verdict; only candidates
+    // Z3 left `unknown` and Lean did not discharge are still open.
+    let open_escalations = cert_results
+        .iter()
+        .filter(|(name, (z3_result, status))| {
+            matches!(status.as_str(), "escalation_candidate" | "unknown")
+                && is_solver_inconclusive(z3_result)
+                && !lean_verified_atoms.iter().any(|a| a == *name)
+        })
+        .count();
+    let outcome = VerifyOutcome::from_counts(
+        failed,
+        solver_inconclusive,
+        unverifiable,
+        open_escalations,
+        infra_errors,
+    );
     if json_output {
         let report_path = output_dir.join("report.json");
         // When the module contains a mix of passing and failing/unverifiable atoms,
@@ -1748,6 +1932,11 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
         // case would hide failures and report a spurious success. Fall back to the
         // summary payload so the JSON status matches the exit code.
         let mixed_results = (failed > 0 || unverifiable > 0) && (verified > 0 || skipped > 0);
+        // report.json describes a single atom's own result; it cannot express an
+        // outcome decided elsewhere (open Lean candidates, infrastructure errors),
+        // so those runs always report the aggregate summary instead.
+        let outcome_beyond_atom_results = infra_errors > 0
+            || (outcome == VerifyOutcome::Inconclusive && failed == 0 && unverifiable == 0);
         // `diagnostics` carries advisory warnings; failure diagnostics carry the
         // reason each atom was rejected. Both surface under `diagnostics`, while
         // `warnings` stays advisory-only.
@@ -1755,14 +1944,11 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
             .iter()
             .chain(failure_diagnostics.iter())
             .collect();
-        if !report_path.exists() || mixed_results {
+        if !report_path.exists() || mixed_results || outcome_beyond_atom_results {
             // No report.json produced, or the module has mixed results — emit a summary JSON status
-            let status = if failed > 0 {
-                "failed"
-            } else if unverifiable > 0 {
-                "unverifiable"
-            } else {
-                "passed"
+            let status = match outcome {
+                VerifyOutcome::Inconclusive if failed == 0 && unverifiable > 0 => "unverifiable",
+                other => other.json_status(),
             };
             let mut payload = serde_json::json!({
                 "status": status,
@@ -1772,6 +1958,8 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                 "skipped": skipped,
                 "skipped_clauses": skipped_clauses,
                 "escalation_candidates": escalated,
+                "infra_errors": infra_errors,
+                "exit_code": outcome.exit_code(),
                 "diagnostics": &merged_diagnostics,
                 "warnings": &diagnostics,
             });
@@ -1802,6 +1990,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                             &loop_suggestions,
                         );
                         payload["skipped_clauses"] = serde_json::json!(skipped_clauses);
+                        payload["exit_code"] = serde_json::json!(outcome.exit_code());
                         if skipped_clauses > 0 {
                             payload["partial"] = serde_json::json!(true);
                         }
@@ -1817,13 +2006,13 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                 },
                 Err(e) => {
                     eprintln!("Failed to read report.json: {}", e);
-                    return true;
+                    return VerifyOutcome::InternalError;
                 }
             }
         }
-        return failed > 0 || unverifiable > 0;
+        return outcome;
     } else if structured_feedback_stdout || loss_vector_stdout {
-        return failed > 0 || unverifiable > 0;
+        return outcome;
     } else {
         println!();
         if failed > 0 {
@@ -1831,16 +2020,17 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                 "❌ Verification: {} passed, {} failed, {} unverifiable, {} skipped (cached), {} Lean escalation candidate(s)",
                 verified, failed, unverifiable, skipped, escalated
             );
-            return true;
-        }
-        if unverifiable > 0 {
+        } else if unverifiable > 0 {
             eprintln!(
                 "⚠️  Verification: {} passed, {} unverifiable, {} skipped (cached), {} Lean escalation candidate(s)",
                 verified, unverifiable, skipped, escalated
             );
-            return true;
-        }
-        if skipped > 0 {
+        } else if open_escalations > 0 {
+            eprintln!(
+                "⚠️  Verification inconclusive: {} passed, {} skipped (cached), {} of {} Lean escalation candidate(s) still open (exit {})",
+                verified, skipped, open_escalations, escalated, EXIT_INCONCLUSIVE
+            );
+        } else if skipped > 0 {
             println!(
                 "✅ Verification passed: {} verified, {} skipped (unchanged), {} Lean escalation candidate(s) ⚡",
                 verified, skipped, escalated
@@ -1851,8 +2041,14 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
                 verified, escalated
             );
         }
+        if infra_errors > 0 {
+            eprintln!(
+                "  internal error: {} artifact/bridge step(s) could not be completed (exit {})",
+                infra_errors, EXIT_INTERNAL_ERROR
+            );
+        }
     }
-    false
+    outcome
 }
 
 pub(crate) fn save_decidable_fragment_metrics(

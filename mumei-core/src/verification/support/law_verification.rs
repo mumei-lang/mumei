@@ -406,7 +406,19 @@ pub fn verify_impl_with_options(
                     discharge_bv_shift_obligations(&vc, &solver)?;
 
                     solver.assert(&law_bool.not());
-                    if solver.check() == SatResult::Sat {
+                    let law_check = solver.check();
+                    if law_check == SatResult::Unknown {
+                        solver.pop(1);
+                        return Err(MumeiError::verification_at(
+                            format!(
+                                "impl {} for {}: law '{}' (defined in trait at {}): Z3 returned unknown (solver timeout or resource limit); the law is neither proven nor refuted\n  Law: {}\n  Expanded: {}",
+                                impl_def.trait_name, impl_def.target_type,
+                                law_name, trait_def.span, law_expr, substituted
+                            ),
+                            impl_def.span.clone(),
+                        ));
+                    }
+                    if law_check == SatResult::Sat {
                         // 反例（Counter-example）を Z3 model から取得
                         let counterexample = if let Some(model) = solver.get_model() {
                             let var_names = ["a", "b", "c", "x", "y", "z"];
