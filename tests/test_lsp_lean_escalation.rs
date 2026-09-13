@@ -271,7 +271,6 @@ fn lsp_reports_every_pending_escalation_recorded_in_the_sibling_certificate() {
     );
 
     let diagnostics = did_open_diagnostics(&source_path, source);
-    let _ = std::fs::remove_dir_all(&dir);
 
     let mut pending: Vec<&str> = diagnostics
         .iter()
@@ -284,5 +283,27 @@ fn lsp_reports_every_pending_escalation_recorded_in_the_sibling_certificate() {
         pending,
         vec!["symbolic_pow_a", "symbolic_pow_b"],
         "every pending atom must be reported exactly once: {diagnostics:#?}"
+    );
+
+    // Editing the second atom into a trivially verified contract without
+    // regenerating the certificate must drop its (now stale) pending entry.
+    let edited = source.replace(
+        "requires: x >= 1;\n  ensures: result == x**y && result == x;",
+        "requires: x >= 1;\n  ensures: result == x;",
+    );
+    assert_ne!(edited, source);
+    let diagnostics = did_open_diagnostics(&source_path, &edited);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let pending: Vec<&str> = diagnostics
+        .iter()
+        .filter_map(lean_escalation)
+        .filter(|e| e.get("status").and_then(Value::as_str) == Some("pending"))
+        .filter_map(|e| e.get("atom").and_then(Value::as_str))
+        .collect();
+    assert_eq!(
+        pending,
+        vec!["symbolic_pow_a"],
+        "a certificate entry whose content_hash no longer matches must not be reported: {diagnostics:#?}"
     );
 }

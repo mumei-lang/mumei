@@ -298,7 +298,9 @@ fn diagnose(uri: &str, source: &str) -> Vec<serde_json::Value> {
     // Phase 2: Z3 検証 diagnostics（file:// URI の場合のみ実行）
     if let Some(path) = path.as_deref() {
         let mut live_pending_atom: Option<String> = None;
-        if let Err(failure) = verify_source_for_lsp(path, source) {
+        let live_result = verify_source_for_lsp(path, source);
+        let live_verified_all = live_result.is_ok();
+        if let Err(failure) = live_result {
             let LspVerifyFailure {
                 error: e,
                 atom: failed_atom,
@@ -405,6 +407,7 @@ fn diagnose(uri: &str, source: &str) -> Vec<serde_json::Value> {
             source,
             &items,
             live_pending_atom.as_deref(),
+            live_verified_all,
             &mut diagnostics,
         );
     }
@@ -1326,12 +1329,15 @@ fn is_item_start(line: &str) -> bool {
 /// verification above stops at the first failing atom, so without the
 /// certificate the editor would show at most one pending escalation per file.
 /// `live_pending_atom` is the atom that failure already reported, which is
-/// skipped here so it is not shown twice.
+/// skipped here so it is not shown twice. When the in-process run verified
+/// the whole buffer (`live_verified_all`), nothing is pending any more and
+/// only the `lean_verified` entries are reported.
 fn append_certificate_lean_escalation_diagnostics(
     path: &Path,
     source: &str,
     items: &[parser::Item],
     live_pending_atom: Option<&str>,
+    live_verified_all: bool,
     diagnostics: &mut Vec<serde_json::Value>,
 ) {
     let cert_path = path.with_extension("proof.json");
@@ -1359,16 +1365,27 @@ fn append_certificate_lean_escalation_diagnostics(
     }
 
     for atom_cert in &cert.atoms {
-        let Some((_, atom)) = atoms.iter().find(|(name, _)| name == &atom_cert.name) else {
+        let Some((name, atom)) = atoms.iter().find(|(name, _)| name == &atom_cert.name) else {
             continue;
         };
+        // The certificate describes the source at generation time; an entry
+        // whose atom has since been edited says nothing about the buffer.
+        let current_hash = proof_cert::compute_atom_content_hash(
+            name,
+            &atom.requires,
+            &atom.ensures,
+            &atom.body_expr,
+        );
+        if current_hash != atom_cert.content_hash {
+            continue;
+        }
         // Same membership rule as the escalation bundle: an atom is pending
         // while it carries an escalation reason and Lean has not closed it.
         if atom_cert.z3_check_result != "lean_verified" {
             let Some(reason) = atom_cert.escalation_reason.as_ref() else {
                 continue;
             };
-            if live_pending_atom == Some(atom_cert.name.as_str()) {
+            if live_verified_all || live_pending_atom == Some(atom_cert.name.as_str()) {
                 continue;
             }
             let reason = reason.as_str();
