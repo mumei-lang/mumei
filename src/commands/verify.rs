@@ -1166,7 +1166,10 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
     let structured_feedback_stdout = emit_structured_feedback && cert_output.is_none();
     let loss_vector_stdout = emit_loss_vector && cert_output.is_none();
     let quiet_output = json_output || structured_feedback_stdout || loss_vector_stdout;
-    check_z3_available();
+    if let Err(message) = z3_availability() {
+        eprintln!("{message}");
+        return VerifyOutcome::InternalError;
+    }
     let manifest_config = manifest::find_and_load();
     let (build_cfg, proof_cfg) = if let Some((_, ref m)) = manifest_config {
         (m.build.clone(), m.proof.clone())
@@ -1393,6 +1396,13 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
                         verified += 1;
                     }
                     Err(e) => {
+                        // Same classification as the atom path: a law Z3 could
+                        // neither prove nor refute is inconclusive, not a rejection.
+                        if verification::z3_result_from_error_message(&e.to_string())
+                            .is_some_and(is_solver_inconclusive)
+                        {
+                            solver_inconclusive += 1;
+                        }
                         if !quiet_output {
                             let resolved = resolve_source_for_span(&source, &impl_def.span);
                             let e = e.with_source(&resolved, &impl_def.span);
@@ -1863,6 +1873,11 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
         // case would hide failures and report a spurious success. Fall back to the
         // summary payload so the JSON status matches the exit code.
         let mixed_results = (failed > 0 || unverifiable > 0) && (verified > 0 || skipped > 0);
+        // report.json describes a single atom's own result; it cannot express an
+        // outcome decided elsewhere (open Lean candidates, infrastructure errors),
+        // so those runs always report the aggregate summary instead.
+        let outcome_beyond_atom_results = infra_errors > 0
+            || (outcome == VerifyOutcome::Inconclusive && failed == 0 && unverifiable == 0);
         // `diagnostics` carries advisory warnings; failure diagnostics carry the
         // reason each atom was rejected. Both surface under `diagnostics`, while
         // `warnings` stays advisory-only.
@@ -1870,14 +1885,15 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
             .iter()
             .chain(failure_diagnostics.iter())
             .collect();
-        if !report_path.exists() || mixed_results {
+        if !report_path.exists() || mixed_results || outcome_beyond_atom_results {
             // No report.json produced, or the module has mixed results — emit a summary JSON status
-            let status = if failed > 0 {
-                "failed"
-            } else if unverifiable > 0 {
-                "unverifiable"
-            } else {
-                "passed"
+            let status = match outcome {
+                VerifyOutcome::Verified => "passed",
+                VerifyOutcome::Rejected => "failed",
+                VerifyOutcome::Inconclusive if failed == 0 && unverifiable > 0 => "unverifiable",
+                VerifyOutcome::Inconclusive => "inconclusive",
+                VerifyOutcome::InputError => "input_error",
+                VerifyOutcome::InternalError => "internal_error",
             };
             let mut payload = serde_json::json!({
                 "status": status,
@@ -1887,6 +1903,8 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
                 "skipped": skipped,
                 "skipped_clauses": skipped_clauses,
                 "escalation_candidates": escalated,
+                "infra_errors": infra_errors,
+                "exit_code": outcome.exit_code(),
                 "diagnostics": &merged_diagnostics,
                 "warnings": &diagnostics,
             });
@@ -1917,6 +1935,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
                             &loop_suggestions,
                         );
                         payload["skipped_clauses"] = serde_json::json!(skipped_clauses);
+                        payload["exit_code"] = serde_json::json!(outcome.exit_code());
                         if skipped_clauses > 0 {
                             payload["partial"] = serde_json::json!(true);
                         }

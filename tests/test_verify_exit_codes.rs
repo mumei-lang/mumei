@@ -245,3 +245,77 @@ fn artifact_write_failure_is_an_internal_error() {
         EXIT_INTERNAL_ERROR,
     );
 }
+
+const LAW_UNKNOWN_SRC: &str = r#"
+trait Cubic {
+    fn f(a: Self, b: Self, c: Self) -> bool;
+    law fermat: f(x, y, z) == true;
+}
+
+impl Cubic for i64 {
+    fn f(a: i64, b: i64, c: i64) -> bool { a <= 0 || b <= 0 || c <= 0 || a * a * a + b * b * b != c * c * c }
+}
+
+atom inc(x: Int) -> Int {
+  ensures: result == x + 1;
+  body: { x + 1 }
+}
+"#;
+
+#[test]
+fn trait_law_solver_unknown_is_inconclusive_not_verified() {
+    let dir = temp_dir("law_unknown");
+    write(&dir, "law.mm", LAW_UNKNOWN_SRC);
+    let output = verify(&dir, &["law.mm"]);
+    assert_exit(&output, EXIT_INCONCLUSIVE);
+    assert!(
+        combined_output(&output).contains("Z3 returned unknown"),
+        "law failure must be reported as an unknown, not a counterexample"
+    );
+}
+
+#[test]
+fn missing_z3_is_an_internal_error_not_a_rejection() {
+    let dir = temp_dir("missing_z3");
+    write(&dir, "ok.mm", VERIFIED_SRC);
+    let output = Command::new(env!("CARGO_BIN_EXE_mumei"))
+        .arg("verify")
+        .arg("ok.mm")
+        .env("PATH", dir.as_os_str())
+        .current_dir(&dir)
+        .output()
+        .expect("run mumei verify without z3 on PATH");
+    assert_exit(&output, EXIT_INTERNAL_ERROR);
+    assert!(combined_output(&output).contains("Z3 solver not found"));
+}
+
+#[test]
+fn json_payload_reports_the_exit_code_it_returns() {
+    let dir = temp_dir("json_outcome");
+    write(&dir, "law.mm", LAW_UNKNOWN_SRC);
+    let output = verify(&dir, &["--json", "law.mm"]);
+    assert_exit(&output, EXIT_INCONCLUSIVE);
+    let payload: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("--json prints a JSON payload");
+    assert_eq!(payload["exit_code"], serde_json::json!(EXIT_INCONCLUSIVE));
+    assert_eq!(payload["status"], serde_json::json!("inconclusive"));
+
+    write(&dir, "ok.mm", VERIFIED_SRC);
+    write(&dir, "blocker", "");
+    let output = verify(
+        &dir,
+        &[
+            "--json",
+            "--proof-cert",
+            "--output",
+            "blocker/cert.json",
+            "ok.mm",
+        ],
+    );
+    assert_exit(&output, EXIT_INTERNAL_ERROR);
+    let payload: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("--json prints a JSON payload");
+    assert_eq!(payload["status"], serde_json::json!("internal_error"));
+    assert_eq!(payload["exit_code"], serde_json::json!(EXIT_INTERNAL_ERROR));
+    assert_eq!(payload["infra_errors"], serde_json::json!(1));
+}

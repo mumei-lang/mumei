@@ -55,5 +55,10 @@ keep working.
 For a directory run the process exit code is the most severe per-file outcome
 (`5` > `4` > `1` > `3` > `0`); the per-file summary still lists each file's
 own result. Rejected obligations are still counted in the `failed` field of the
-printed summary and of `--json` output; only the exit code distinguishes a
-counterexample from an inconclusive solver result.
+printed summary and of `--json` output. The `--json` payload also carries the
+outcome directly: `exit_code` is the process exit code from the table above,
+`infra_errors` counts internal failures, and `status` is `passed` / `failed`
+(rejected) / `unverifiable` / `inconclusive` / `internal_error` in agreement
+with `exit_code` (a run whose only open items are Lean escalation candidates
+or an infrastructure error reports the aggregate summary rather than the
+single atom's `report.json`).
