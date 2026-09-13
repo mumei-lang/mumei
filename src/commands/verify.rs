@@ -65,6 +65,17 @@ impl VerifyOutcome {
         self != Self::Verified
     }
 
+    /// `status` value the `--json` summary payload uses for this outcome.
+    pub(crate) fn json_status(self) -> &'static str {
+        match self {
+            Self::Verified => "passed",
+            Self::Rejected => "failed",
+            Self::Inconclusive => "inconclusive",
+            Self::InputError => "input_error",
+            Self::InternalError => "internal_error",
+        }
+    }
+
     /// Exit code for a whole-directory run: a single input error or crash
     /// dominates, otherwise a rejection dominates an inconclusive result.
     pub(crate) fn combine(self, other: Self) -> Self {
@@ -94,6 +105,42 @@ impl VerifyOutcome {
             Self::Verified
         }
     }
+}
+
+/// An outcome decided before any atom was checked (Z3 unavailable, unreadable
+/// input, cross-spec load failure). With `--json` the summary payload is still
+/// written to stdout so callers always receive one JSON document whose
+/// `status` / `exit_code` match the process exit code; the human-readable
+/// reason has already gone to stderr and is repeated under `diagnostics`.
+fn early_outcome(outcome: VerifyOutcome, message: &str, json_output: bool) -> VerifyOutcome {
+    if json_output {
+        let diagnostic = verification::Diagnostic {
+            code: outcome.json_status().to_string(),
+            severity: "error".to_string(),
+            atom: String::new(),
+            message: message.to_string(),
+            tags: Vec::new(),
+            escalation_reason: None,
+        };
+        let payload = serde_json::json!({
+            "status": outcome.json_status(),
+            "verified": 0,
+            "failed": 0,
+            "unverifiable": 0,
+            "skipped": 0,
+            "skipped_clauses": 0,
+            "escalation_candidates": 0,
+            "infra_errors": usize::from(outcome == VerifyOutcome::InternalError),
+            "exit_code": outcome.exit_code(),
+            "diagnostics": [diagnostic],
+            "warnings": [],
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&payload).unwrap_or_default()
+        );
+    }
+    outcome
 }
 
 fn is_solver_inconclusive(z3_result: &str) -> bool {
@@ -1168,7 +1215,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
     let quiet_output = json_output || structured_feedback_stdout || loss_vector_stdout;
     if let Err(message) = z3_availability() {
         eprintln!("{message}");
-        return VerifyOutcome::InternalError;
+        return early_outcome(VerifyOutcome::InternalError, &message, json_output);
     }
     let manifest_config = manifest::find_and_load();
     let (build_cfg, proof_cfg) = if let Some((_, ref m)) = manifest_config {
@@ -1205,7 +1252,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
             Ok(result) => result,
             Err(e) => {
                 eprintln!("  ❌ {e}");
-                return VerifyOutcome::InputError;
+                return early_outcome(VerifyOutcome::InputError, &e, json_output);
             }
         };
     if let Err(e) = load_cross_spec_files(
@@ -1218,7 +1265,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
         !quiet_output,
     ) {
         eprintln!("  ❌ {e}");
-        return VerifyOutcome::InputError;
+        return early_outcome(VerifyOutcome::InputError, &e, json_output);
     }
 
     let output_dir = match report_dir {
@@ -1888,12 +1935,8 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
         if !report_path.exists() || mixed_results || outcome_beyond_atom_results {
             // No report.json produced, or the module has mixed results — emit a summary JSON status
             let status = match outcome {
-                VerifyOutcome::Verified => "passed",
-                VerifyOutcome::Rejected => "failed",
                 VerifyOutcome::Inconclusive if failed == 0 && unverifiable > 0 => "unverifiable",
-                VerifyOutcome::Inconclusive => "inconclusive",
-                VerifyOutcome::InputError => "input_error",
-                VerifyOutcome::InternalError => "internal_error",
+                other => other.json_status(),
             };
             let mut payload = serde_json::json!({
                 "status": status,

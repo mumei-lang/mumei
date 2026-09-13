@@ -326,3 +326,6 @@ jobs:
             /tmp/verify-std/base_failures.txt
             /tmp/verify-std/new_failures.txt
             /tmp/verify-std/fixed_modules.txt
+            /tmp/verify-std/head_inconclusive.txt
+            /tmp/verify-std/base_inconclusive.txt
+            /tmp/verify-std/new_inconclusive.txt

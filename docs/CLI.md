@@ -58,7 +58,12 @@ own result. Rejected obligations are still counted in the `failed` field of the
 printed summary and of `--json` output. The `--json` payload also carries the
 outcome directly: `exit_code` is the process exit code from the table above,
 `infra_errors` counts internal failures, and `status` is `passed` / `failed`
-(rejected) / `unverifiable` / `inconclusive` / `internal_error` in agreement
-with `exit_code` (a run whose only open items are Lean escalation candidates
-or an infrastructure error reports the aggregate summary rather than the
-single atom's `report.json`).
+(rejected) / `unverifiable` / `inconclusive` / `input_error` / `internal_error`
+in agreement with `exit_code` (a run whose only open items are Lean escalation
+candidates or an infrastructure error reports the aggregate summary rather than
+the single atom's `report.json`). Runs that stop before any atom is checked —
+unreadable or unparseable input, a failed `--cross-spec-file` load, Z3
+unavailable — still print one summary payload with zero counts and the reason
+under `diagnostics`, so stdout is a single JSON document for every single-file
+outcome. A directory run with `--json` prints one payload per file followed by
+the text summary; parse it line-oriented or verify files individually.

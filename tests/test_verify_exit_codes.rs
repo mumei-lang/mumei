@@ -319,3 +319,17 @@ fn json_payload_reports_the_exit_code_it_returns() {
     assert_eq!(payload["exit_code"], serde_json::json!(EXIT_INTERNAL_ERROR));
     assert_eq!(payload["infra_errors"], serde_json::json!(1));
 }
+
+#[test]
+fn json_input_error_still_emits_a_summary_payload() {
+    let dir = temp_dir("json_missing");
+    let output = verify(&dir, &["--json", "does_not_exist.mm"]);
+    assert_exit(&output, EXIT_INPUT_ERROR);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let payload: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout is one JSON document");
+    assert_eq!(payload["status"], serde_json::json!("input_error"));
+    assert_eq!(payload["exit_code"], serde_json::json!(EXIT_INPUT_ERROR));
+    assert_eq!(payload["verified"], serde_json::json!(0));
+    assert!(payload["diagnostics"][0]["message"].is_string());
+}
