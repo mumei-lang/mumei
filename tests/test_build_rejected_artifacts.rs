@@ -95,29 +95,49 @@ fn rejected_later_atom_removes_earlier_atom_artifacts() {
 }
 
 #[test]
-fn rejected_build_keeps_artifacts_from_previous_invocations() {
-    let dir = fixture_dir("preexisting");
-    let stale = dir.join("out_take_buffer.ll");
-    std::fs::write(&stale, "; stale artifact from an earlier build\n").expect("write stale");
-    // A file whose name does not belong to this build must never be touched.
-    let unrelated = dir.join("out_unrelated.txt");
-    std::fs::write(&unrelated, "keep me").expect("write unrelated");
+fn rejected_build_restores_artifacts_from_previous_invocations() {
+    for emit in ["llvm-ir", "c-header", "verified-json"] {
+        let dir = fixture_dir(&format!("preexisting_{emit}"));
+        // Output of an earlier, successful build that shares its path with an
+        // artifact this build overwrites before the later atom is rejected.
+        let ext = match emit {
+            "llvm-ir" => "ll",
+            "c-header" => "h",
+            _ => "json",
+        };
+        let previous = dir.join(format!("out_take_buffer.{ext}"));
+        let previous_content = "previous successful build output\n";
+        std::fs::write(&previous, previous_content).expect("write previous");
+        // A file whose name does not belong to this build must never be touched.
+        let unrelated = dir.join("out_unrelated.txt");
+        std::fs::write(&unrelated, "keep me").expect("write unrelated");
 
-    let output = build(&dir, MULTI_ATOM_FAIL, "llvm-ir");
-    assert!(!output.status.success());
-    // The stale `.ll` shares its path with an artifact this build produced and
-    // was overwritten during the run, so it is removed with the rest of the
-    // rejected output; unrelated files are left alone.
-    assert!(
-        !stale.exists(),
-        "rejected build must not leave out_take_buffer.ll"
-    );
-    assert_eq!(
-        std::fs::read_to_string(&unrelated).unwrap(),
-        "keep me",
-        "unrelated file must be untouched"
-    );
-    std::fs::remove_dir_all(&dir).expect("remove fixture dir");
+        let output = build(&dir, MULTI_ATOM_FAIL, emit);
+        assert!(
+            !output.status.success(),
+            "--emit {emit} unexpectedly succeeded"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&previous).unwrap(),
+            previous_content,
+            "--emit {emit}: rejected build must restore the previous artifact\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            std::fs::read_to_string(&unrelated).unwrap(),
+            "keep me",
+            "unrelated file must be untouched"
+        );
+        assert_eq!(
+            out_artifacts(&dir),
+            vec![
+                previous.file_name().unwrap().to_string_lossy().into_owned(),
+                "out_unrelated.txt".to_string()
+            ],
+            "--emit {emit}: only pre-existing files may remain"
+        );
+        std::fs::remove_dir_all(&dir).expect("remove fixture dir");
+    }
 }
 
 #[test]
