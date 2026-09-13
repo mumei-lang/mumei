@@ -2273,7 +2273,7 @@ streamlit run visualizer/app.py -- --report-dir reports
 - `PYTHONPATH=. pytest tests/`（153 件、うち `tests/test_proof_graph_lib.py` 12 件を P26 で追加）: JSON → ノード / エッジ変換、両端点欠落エッジの除去、未知 health のグレーアウト、DOT の選択強調と不一致エッジ、ノード詳細（契約 / 依存 / 違反解決）、範囲外 index の無視、集計、`proof_graph.json` 以外のドキュメントの拒否。`visualize_std_graph` / `analyze_contract_conflicts` の既存テストは無変更で通過する。
 - **ゼロコスト検証（P15 / P23 / P24 / P25 と同一）**: `cargo tree --edges no-dev | grep -i opentelemetry` が空であること。proof graph は検証後の成果物変換のみで、証明済み pure atom の実行時経路には触れない。
 
-**残課題**: `st.graphviz_chart` はノードのクリックイベントを返さないため、選択はサイドバーの atom セレクタと依存先 / 依存元ボタンで行う（クリック相当の遷移は可能だがグラフ上の直接クリックではない）。`verification_status` は当該 run で検証された atom のみに付き、import 済み / prelude atom は `null`（黄 / 緑判定は trust boundary のみに基づく）。`--escalate-lean` による `lean_verified` 昇格は mumei-lean bridge の実行環境を要するため、回帰テストは `proof_graph_statuses()` の単体経路のみで、bridge を含む end-to-end テストは未追加。`edges[].is_consistent` は「不一致が検出されていない」の意味で、cross-spec が検査しなかったペアも `true` になる（検査済みの証明ではない）。
+**残課題**: `st.graphviz_chart` はノードのクリックイベントを返さないため、選択はサイドバーの atom セレクタと依存先 / 依存元ボタンで行う（クリック相当の遷移は可能だがグラフ上の直接クリックではない）。`verification_status` は当該 run で検証された atom に付き、import 済み / prelude atom は sibling certificate（`<src>.proof.json` 等）が鮮度ゲート（`content_hash` 一致、`lean_verified` は `translator_version` / `bridge_lemma_hash` が現行値）を通る場合のみ `verified` に補完され、それ以外は `null`（黄 / 緑判定は trust boundary のみに基づく）（R-3, ✅ Implemented）。`--escalate-lean` → `lean_verified` 昇格 → proof graph 反映の end-to-end は `tests/test_proof_graph_export.rs` で決定論 bridge stub により回帰固定（R-4, ✅ Implemented; 実 `lake build` を伴う経路は mumei-lean 側に委ねる）。`edges[].is_consistent` は「不一致が検出されていない」の意味で、cross-spec が検査しなかったペアも `true` になる（検査済みの証明ではない）。
 
 ---
 

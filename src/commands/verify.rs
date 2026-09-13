@@ -1658,12 +1658,23 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> bool {
     }
 
     if let Some(cross_spec_result) = proof_graph_cross_spec {
-        let statuses = proof_graph_statuses(
+        let mut statuses = proof_graph_statuses(
             &cert_results,
             &diagnostics,
             &failure_diagnostics,
             &lean_verified_atoms,
         );
+        let backfilled = proof_graph::backfill_verification_status_from_sibling_certificates(
+            &module_env,
+            &cross_spec_result,
+            &mut statuses,
+        );
+        if backfilled > 0 && !quiet_output {
+            println!(
+                "  🕸️  {} imported atom(s) took verification_status from a fresh sibling certificate",
+                backfilled
+            );
+        }
         if let Err(err) = save_proof_graph_report(
             &module_env,
             &cross_spec_result,

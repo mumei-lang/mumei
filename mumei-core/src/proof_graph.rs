@@ -12,10 +12,13 @@
 //! (a trust boundary carries the contract), `red` (verification failed).
 
 use crate::cross_spec::{atom_source_file, CrossSpecResult};
+use crate::parser::Atom;
+use crate::proof_cert;
 use crate::trust_boundary::{classify_trust_boundaries, TrustBoundaryKind};
 use crate::verification::ModuleEnv;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 
 /// Schema version of `proof_graph.json`.
 pub const PROOF_GRAPH_VERSION: &str = "1.0";
@@ -205,6 +208,103 @@ pub fn build_proof_graph(
     }
 }
 
+/// Certificate files that may sit next to an atom's source file, in lookup
+/// order: the per-file certificate `mumei verify --proof-cert` writes, then the
+/// module-directory certificates `verify_import_certificate` accepts.
+fn sibling_certificate_paths(source_file: &Path) -> Vec<PathBuf> {
+    let mut paths = vec![
+        source_file.with_extension("proof.json"),
+        source_file.with_extension("proof-cert.json"),
+    ];
+    if let Some(dir) = source_file.parent() {
+        paths.push(dir.join(".proof-cert.json"));
+        paths.push(dir.join("proof_certificate.json"));
+    }
+    paths
+}
+
+/// Fill in `verification_status` for atoms the current run did not verify
+/// (imported / prelude atoms) from a sibling proof certificate, when one
+/// exists and passes the same freshness gate imports use
+/// ([`proof_cert::verify_certificate`]): the certificate's `content_hash`
+/// must equal the hash of the atom as currently loaded, and a
+/// `lean_verified` atom is only accepted when its `translator_version` /
+/// `bridge_lemma_hash` (atom and Lean result metadata) match the current
+/// bridge. Only a fresh `proven` result is copied, as `verified`; every other
+/// outcome — no certificate, stale hash, stale translator, unparseable file,
+/// or a certificate that never decided the atom — leaves the status `null`.
+///
+/// Atoms already present in `verification_status` are never overwritten.
+pub fn backfill_verification_status_from_sibling_certificates(
+    module_env: &ModuleEnv,
+    cross_spec: &CrossSpecResult,
+    verification_status: &mut BTreeMap<String, String>,
+) -> usize {
+    let mut certificates: BTreeMap<PathBuf, Option<proof_cert::ProofCertificate>> = BTreeMap::new();
+    let mut backfilled = 0;
+
+    for dependency_node in &cross_spec.dependency_graph {
+        if verification_status.contains_key(&dependency_node.atom_name) {
+            continue;
+        }
+        let Some(atom) = module_env.atoms.get(&dependency_node.atom_name) else {
+            continue;
+        };
+        let source_file = atom_source_file(atom);
+        if source_file == unknown_file() {
+            continue;
+        }
+        let source_file = PathBuf::from(source_file);
+        // An `alias::name` node registered by an import is the same definition
+        // as `name`; certificates record the unqualified name.
+        let certified_atom = match atom.name.rsplit_once("::") {
+            Some((_, unqualified)) if unqualified != atom.name => Atom {
+                name: unqualified.to_string(),
+                ..atom.clone()
+            },
+            _ => atom.clone(),
+        };
+
+        for cert_path in sibling_certificate_paths(&source_file) {
+            let cert = certificates
+                .entry(cert_path.clone())
+                .or_insert_with(|| load_fresh_sibling_certificate(&cert_path));
+            let Some(cert) = cert else {
+                continue;
+            };
+            if !cert
+                .atoms
+                .iter()
+                .any(|entry| entry.name == certified_atom.name)
+            {
+                continue;
+            }
+            let results = proof_cert::verify_certificate(cert, &[&certified_atom], true);
+            let proven = results
+                .iter()
+                .any(|(name, status)| name == &certified_atom.name && status == "proven");
+            if proven {
+                verification_status
+                    .insert(dependency_node.atom_name.clone(), "verified".to_string());
+                backfilled += 1;
+            }
+            // The first certificate that lists the atom decides; a stale entry
+            // is not papered over by another file further down the list.
+            break;
+        }
+    }
+    backfilled
+}
+
+/// Load a sibling certificate only if it exists, parses, and carries current
+/// Lean translator metadata; anything else is treated as "no certificate".
+fn load_fresh_sibling_certificate(path: &Path) -> Option<proof_cert::ProofCertificate> {
+    if !path.is_file() {
+        return None;
+    }
+    proof_cert::load_certificate(path).ok()
+}
+
 /// Edges follow `dependency_graph[]`, so the interactive graph and the static
 /// Mermaid rendering agree on which pairs exist; the consistency verdict is
 /// looked up from `contract_consistency[]` when the pair was checked.
@@ -266,7 +366,7 @@ mod tests {
         ContractConsistencyResult, CrossSpecSummary, CrossSpecVerifier, DependencyNode,
     };
     use crate::parser::ast::Span;
-    use crate::parser::{Atom, TrustLevel};
+    use crate::parser::TrustLevel;
     use std::collections::HashMap;
 
     fn atom(name: &str, requires: &str, ensures: &str, file: &str) -> Atom {
@@ -535,5 +635,203 @@ mod tests {
         let json = serde_json::to_string(&graph).expect("serialize proof graph");
         let restored: ProofGraph = serde_json::from_str(&json).expect("deserialize proof graph");
         assert_eq!(restored, graph);
+    }
+
+    // ---- sibling-certificate backfill (R-3) ----
+
+    fn sibling_fixture(prefix: &str, body: &str) -> (PathBuf, PathBuf, ModuleEnv) {
+        let dir = std::env::temp_dir().join(format!(
+            "{prefix}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("create fixture dir");
+        let source_file = dir.join("lib.mm");
+        std::fs::write(&source_file, "").expect("write source");
+        let mut imported = atom("lib_inc", "true", "true", source_file.to_str().unwrap());
+        imported.body_expr = body.to_string();
+        let env = module_env_with(vec![imported]);
+        (dir, source_file, env)
+    }
+
+    fn sibling_certificate(
+        source_file: &Path,
+        env: &ModuleEnv,
+        z3_check_result: &str,
+        status: &str,
+    ) -> proof_cert::ProofCertificate {
+        let atom_refs: Vec<&Atom> = env.atoms.values().collect();
+        let mut results = HashMap::new();
+        results.insert(
+            "lib_inc".to_string(),
+            (z3_check_result.to_string(), status.to_string()),
+        );
+        proof_cert::generate_certificate(
+            source_file.to_str().unwrap(),
+            &atom_refs,
+            &results,
+            env,
+            None,
+            None,
+            None,
+        )
+    }
+
+    fn backfilled(env: &ModuleEnv) -> (usize, BTreeMap<String, String>) {
+        let mut statuses = BTreeMap::new();
+        let count = backfill_verification_status_from_sibling_certificates(
+            env,
+            &cross_spec_of(env),
+            &mut statuses,
+        );
+        (count, statuses)
+    }
+
+    #[test]
+    fn a_fresh_unsat_sibling_certificate_backfills_verified() {
+        let (dir, source_file, env) = sibling_fixture("mumei-pg-fresh", "x + 1");
+        let cert = sibling_certificate(&source_file, &env, "unsat", "verified");
+        proof_cert::save_certificate(&cert, &source_file.with_extension("proof.json"))
+            .expect("write cert");
+
+        let (count, statuses) = backfilled(&env);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(count, 1);
+        assert_eq!(
+            statuses.get("lib_inc").map(String::as_str),
+            Some("verified")
+        );
+    }
+
+    #[test]
+    fn a_changed_atom_keeps_a_null_status() {
+        let (dir, source_file, mut env) = sibling_fixture("mumei-pg-changed", "x + 1");
+        let cert = sibling_certificate(&source_file, &env, "unsat", "verified");
+        proof_cert::save_certificate(&cert, &source_file.with_extension("proof.json"))
+            .expect("write cert");
+        // The source moved on after the certificate was written.
+        env.atoms.get_mut("lib_inc").unwrap().body_expr = "x + 2".to_string();
+
+        let (count, statuses) = backfilled(&env);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(count, 0);
+        assert!(statuses.is_empty(), "{statuses:?}");
+    }
+
+    #[test]
+    fn an_undecided_or_refuted_sibling_entry_is_not_promoted() {
+        for (z3, status) in [("unknown", "escalation_candidate"), ("sat", "failed")] {
+            let (dir, source_file, env) = sibling_fixture("mumei-pg-undecided", "x + 1");
+            let cert = sibling_certificate(&source_file, &env, z3, status);
+            proof_cert::save_certificate(&cert, &source_file.with_extension("proof.json"))
+                .expect("write cert");
+
+            let (count, statuses) = backfilled(&env);
+            let _ = std::fs::remove_dir_all(&dir);
+
+            assert_eq!(count, 0, "{z3}/{status}");
+            assert!(statuses.is_empty(), "{z3}/{status}: {statuses:?}");
+        }
+    }
+
+    #[test]
+    fn lean_verified_needs_current_translator_and_bridge_metadata() {
+        use crate::proof_cert::LeanResultMetadata;
+        use crate::verification::{LEAN_BRIDGE_LEMMA_HASH, LEAN_TRANSLATOR_VERSION};
+
+        let current = || LeanResultMetadata {
+            status: "lean_verified".to_string(),
+            theorem_name: "lib_inc_correct".to_string(),
+            translator_version: LEAN_TRANSLATOR_VERSION.to_string(),
+            bridge_lemma_hash: LEAN_BRIDGE_LEMMA_HASH.to_string(),
+            proof_path: "Generated/Lib.lean".to_string(),
+            diagnostics: vec![],
+            ..Default::default()
+        };
+
+        // Fresh Lean result → verified.
+        let (dir, source_file, env) = sibling_fixture("mumei-pg-lean-fresh", "x + 1");
+        let mut cert = sibling_certificate(&source_file, &env, "lean_verified", "verified");
+        cert.atoms[0].lean_result_metadata = Some(current());
+        proof_cert::save_certificate(&cert, &source_file.with_extension("proof.json"))
+            .expect("write cert");
+        let (count, statuses) = backfilled(&env);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(count, 1);
+        assert_eq!(
+            statuses.get("lib_inc").map(String::as_str),
+            Some("verified")
+        );
+
+        // Stale bridge lemma hash on the atom → the whole certificate is
+        // rejected by the same translator gate imports use → null.
+        let (dir, source_file, env) = sibling_fixture("mumei-pg-lean-stale-atom", "x + 1");
+        let mut cert = sibling_certificate(&source_file, &env, "lean_verified", "verified");
+        cert.atoms[0].lean_result_metadata = Some(current());
+        cert.atoms[0].bridge_lemma_hash = "old-bridge-hash".to_string();
+        proof_cert::save_certificate(&cert, &source_file.with_extension("proof.json"))
+            .expect("write cert");
+        let (count, statuses) = backfilled(&env);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(count, 0);
+        assert!(statuses.is_empty(), "{statuses:?}");
+
+        // Stale translator in the Lean result metadata → null.
+        let (dir, source_file, env) = sibling_fixture("mumei-pg-lean-stale-meta", "x + 1");
+        let mut cert = sibling_certificate(&source_file, &env, "lean_verified", "verified");
+        let mut stale = current();
+        stale.translator_version = "mumei-lean-translator-ir-v0".to_string();
+        cert.atoms[0].lean_result_metadata = Some(stale);
+        proof_cert::save_certificate(&cert, &source_file.with_extension("proof.json"))
+            .expect("write cert");
+        let (count, statuses) = backfilled(&env);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(count, 0);
+        assert!(statuses.is_empty(), "{statuses:?}");
+
+        // No Lean result metadata at all → null.
+        let (dir, source_file, env) = sibling_fixture("mumei-pg-lean-no-meta", "x + 1");
+        let cert = sibling_certificate(&source_file, &env, "lean_verified", "verified");
+        proof_cert::save_certificate(&cert, &source_file.with_extension("proof.json"))
+            .expect("write cert");
+        let (count, statuses) = backfilled(&env);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(count, 0);
+        assert!(statuses.is_empty(), "{statuses:?}");
+    }
+
+    #[test]
+    fn the_current_run_is_never_overwritten_and_missing_files_stay_null() {
+        let (dir, source_file, env) = sibling_fixture("mumei-pg-keep", "x + 1");
+        let cert = sibling_certificate(&source_file, &env, "unsat", "verified");
+        proof_cert::save_certificate(&cert, &source_file.with_extension("proof.json"))
+            .expect("write cert");
+        let mut statuses = status(&[("lib_inc", "failed")]);
+        let count = backfill_verification_status_from_sibling_certificates(
+            &env,
+            &cross_spec_of(&env),
+            &mut statuses,
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(count, 0);
+        assert_eq!(statuses.get("lib_inc").map(String::as_str), Some("failed"));
+
+        // No certificate on disk, and a corrupt one, both leave null.
+        let (dir, source_file, env) = sibling_fixture("mumei-pg-none", "x + 1");
+        assert_eq!(backfilled(&env).0, 0);
+        std::fs::write(source_file.with_extension("proof.json"), "{ not json").expect("write");
+        let (count, statuses) = backfilled(&env);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(count, 0);
+        assert!(statuses.is_empty());
+
+        // An atom with no source attribution is skipped.
+        let env = module_env_with(vec![atom("orphan", "true", "true", "")]);
+        assert_eq!(backfilled(&env).0, 0);
     }
 }
