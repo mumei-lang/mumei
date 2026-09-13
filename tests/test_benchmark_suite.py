@@ -482,6 +482,86 @@ def test_an_inconclusive_exit_is_not_a_verdict(monkeypatch, tmp_path):
     assert result["ok"] is None
 
 
+def _lean_measurement(exit_code: int | None, status: str = "MEASURED") -> dict:
+    return {
+        "exit_code": exit_code,
+        "lean_solver_time_s": 6.5 if exit_code is not None else None,
+        "lean_status": status,
+        "lean_verified_atoms": 4 if exit_code == 0 else 0,
+        "tactic_search_adopted": 0,
+        "manual_lemma_reason_remaining": 0,
+        "atom_content_hashes": None,
+    }
+
+
+def test_inconclusive_z3_run_takes_its_verdict_from_the_lean_escalation(
+    monkeypatch, tmp_path
+):
+    """`mumei verify` exits 3 and prints the open candidate count on stderr;
+    with a bridge the `--escalate-lean` run decides PASS/FAIL for the file."""
+    module = _load_module()
+    source = tmp_path / "x.mm"
+    source.write_text("atom a { ensures: true; }", encoding="utf-8")
+    inconclusive = _verify_output(
+        module.EXIT_INCONCLUSIVE,
+        "",
+        "⚠️  Verification inconclusive: 0 passed, 0 skipped (cached), "
+        "4 of 4 Lean escalation candidate(s) still open (exit 3)\n",
+    )
+    monkeypatch.setattr(module.subprocess, "run", lambda *a, **k: inconclusive)
+
+    # Lean discharges every candidate: the file is a verified PASS.
+    monkeypatch.setattr(
+        module, "_measure_lean_escalation", lambda *a, **k: _lean_measurement(0)
+    )
+    result = module._verify_file("mumei", source, "PASS", lean_bridge=Path("bridge.py"))
+    assert result["escalation_candidates"] == 4
+    assert result["exit_code"] == module.EXIT_VERIFIED
+    assert result["verify_status"] == "MEASURED"
+    assert result["actual"] == "PASS"
+    assert result["matched"] is True
+    assert result["lean_status"] == "MEASURED"
+    assert result["lean_verified_atoms"] == 4
+    assert result["lean_solver_time_s"] == 6.5
+
+    # Lean rejects: a genuine FAIL verdict.
+    monkeypatch.setattr(
+        module,
+        "_measure_lean_escalation",
+        lambda *a, **k: _lean_measurement(module.EXIT_REJECTED, "FAIL"),
+    )
+    rejected = module._verify_file("mumei", source, "FAIL", lean_bridge=Path("bridge.py"))
+    assert rejected["exit_code"] == module.EXIT_REJECTED
+    assert rejected["actual"] == "FAIL"
+    assert rejected["matched"] is True
+
+    # Lean timed out: still no verdict, and the inconclusive exit code stays.
+    monkeypatch.setattr(
+        module,
+        "_measure_lean_escalation",
+        lambda *a, **k: _lean_measurement(None, "TIMEOUT"),
+    )
+    pending = module._verify_file("mumei", source, "PASS", lean_bridge=Path("bridge.py"))
+    assert pending["exit_code"] == module.EXIT_INCONCLUSIVE
+    assert pending["verify_status"] == "FAIL"
+    assert pending["actual"] == "SKIP"
+    assert pending["lean_status"] == "TIMEOUT"
+
+    # Without a bridge nothing is escalated and the run stays inconclusive.
+    monkeypatch.setattr(
+        module,
+        "_measure_lean_escalation",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("bridge must not be invoked without lean_bridge")
+        ),
+    )
+    alone = module._verify_file("mumei", source, "PASS")
+    assert alone["escalation_candidates"] == 4
+    assert alone["exit_code"] == module.EXIT_INCONCLUSIVE
+    assert alone["actual"] == "SKIP"
+    assert alone["lean_status"] == "SKIP"
+
+
 def test_verdict_detection_ignores_summary_text(monkeypatch, tmp_path):
     """Verdicts come from the exit code alone, never from the printed summary."""
     module = _load_module()

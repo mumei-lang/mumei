@@ -43,6 +43,7 @@ import argparse
 import datetime
 import importlib.util
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -84,10 +85,12 @@ PROOF_BUNDLE_TARGET = "proof-cert"
 ARTIFACT_TARGETS = BUILD_EMIT_TARGETS + (PROOF_BUNDLE_TARGET,)
 
 BUILD_TIMEOUT_S = 120
+LEAN_VERIFY_TIMEOUT_S = 300
 
 #: ``mumei verify`` verdict exit codes (R-1), mirrored from ``run_benchmarks``.
 EXIT_VERIFIED = 0
 EXIT_REJECTED = 1
+EXIT_INCONCLUSIVE = 3
 
 #: ``z3_check_result`` value written by the mumei-lean bridge when Lean closed
 #: an obligation (the only value that upgrades an ``unknown`` atom).
@@ -410,7 +413,12 @@ def _as_expected(expected: str, target: str, record: dict) -> bool:
 
 
 def measure_runtime_artifacts(
-    binary: str, source: Path, work_dir: Path, *, expected: str = "PASS"
+    binary: str,
+    source: Path,
+    work_dir: Path,
+    *,
+    expected: str = "PASS",
+    lean_bridge: Path | None = None,
 ) -> dict:
     """Emit every artifact target for one task and record which ones succeeded.
 
@@ -419,6 +427,13 @@ def measure_runtime_artifacts(
     (``as_expected``, see :func:`_expected_emission`), so counterexample tasks
     contribute a measurable "refused to build, still certified" signal instead
     of being dropped from the axis.
+
+    The proof-certificate target follows the harness verdict rule: a plain
+    ``mumei verify --proof-cert`` that exits ``EXIT_INCONCLUSIVE`` (Z3 left
+    Lean escalation candidates open) is re-run with ``--escalate-lean`` when
+    ``lean_bridge`` is available, and that run's exit code decides whether the
+    certificate counts as emitted.  Without a bridge the inconclusive run is
+    not a verdict and no certificate is credited.
     """
     targets: dict[str, dict] = {}
     for target in BUILD_EMIT_TARGETS:
@@ -456,6 +471,24 @@ def measure_runtime_artifacts(
             timeout=BUILD_TIMEOUT_S,
             cwd=str(work_dir),
         )
+        if proc.returncode == EXIT_INCONCLUSIVE and lean_bridge is not None:
+            cert_path.unlink(missing_ok=True)
+            proc = subprocess.run(
+                [
+                    binary,
+                    "verify",
+                    str(source),
+                    "--proof-cert",
+                    "--escalate-lean",
+                    "--output",
+                    str(cert_path),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=LEAN_VERIFY_TIMEOUT_S,
+                cwd=str(work_dir),
+                env={**os.environ, "MUMEI_LEAN_PATH": str(lean_bridge)},
+            )
         verdict_ok = proc.returncode == (
             EXIT_VERIFIED if expected == "PASS" else EXIT_REJECTED
         )
@@ -862,7 +895,11 @@ def evaluate_category(
             artifacts = aggregate_runtime_artifacts(
                 [
                     measure_runtime_artifacts(
-                        binary, p, work_dir, expected=harness._expected_outcome(p)
+                        binary,
+                        p,
+                        work_dir,
+                        expected=harness._expected_outcome(p),
+                        lean_bridge=lean_bridge,
                     )
                     for p in sources
                 ]

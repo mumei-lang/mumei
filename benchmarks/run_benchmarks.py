@@ -232,7 +232,7 @@ def _verify_file(
     escalation measurement is skipped without spawning any extra process.
     """
     start = time.monotonic()
-    stdout = ""
+    output = ""
     verify_status = "MEASURED"
     exit_code: int | None = None
     try:
@@ -244,7 +244,9 @@ def _verify_file(
             cwd=str(REPO_ROOT),
         )
         elapsed = time.monotonic() - start
-        stdout = proc.stdout
+        # The summary line (and with it the escalation candidate count) goes to
+        # stdout on a verdict and to stderr when the run is inconclusive.
+        output = proc.stdout + proc.stderr
         exit_code = proc.returncode
         verify_status, ok = classify_exit_code(proc.returncode)
         ok = bool(ok)
@@ -256,6 +258,19 @@ def _verify_file(
         elapsed = 0.0
         ok = False
         verify_status = "SKIP"
+
+    escalation_candidates = _escalation_candidate_count(output)
+    lean = None
+    if escalation_candidates and lean_bridge is not None:
+        lean = _measure_lean_escalation(binary, path)
+        # ``EXIT_INCONCLUSIVE`` only says Z3 left obligations open; the Lean
+        # escalation run is the verdict for such a file, so its exit code
+        # replaces the inconclusive one (a Lean timeout or crash stays a
+        # no-verdict run).
+        if exit_code == EXIT_INCONCLUSIVE and lean["exit_code"] is not None:
+            exit_code = lean["exit_code"]
+            verify_status, ok = classify_exit_code(exit_code)
+            ok = bool(ok)
 
     # A run that produced no verdict says nothing about the program, so it is
     # reported as ``SKIP`` rather than being folded into the FAIL bucket where it
@@ -269,7 +284,7 @@ def _verify_file(
         "matched": actual == expected,
         "verify_status": verify_status,
         "exit_code": exit_code,
-        "escalation_candidates": _escalation_candidate_count(stdout),
+        "escalation_candidates": escalation_candidates,
         "lean_solver_time_s": None,
         "lean_status": "SKIP",
         "lean_verified_atoms": 0,
@@ -277,8 +292,7 @@ def _verify_file(
         "manual_lemma_reason_remaining": None,
         "atom_content_hashes": None,
     }
-    if result["escalation_candidates"] and lean_bridge is not None:
-        lean = _measure_lean_escalation(binary, path)
+    if lean is not None:
         result["lean_solver_time_s"] = lean["lean_solver_time_s"]
         result["lean_status"] = lean["lean_status"]
         result["lean_verified_atoms"] = lean["lean_verified_atoms"]
@@ -332,6 +346,7 @@ def _measure_lean_escalation(binary: str, path: Path) -> dict:
             output = proc.stdout + proc.stderr
         except subprocess.TimeoutExpired:
             return {
+                "exit_code": None,
                 "lean_solver_time_s": float(LEAN_VERIFY_TIMEOUT_S),
                 "lean_status": "TIMEOUT",
                 "lean_verified_atoms": 0,
@@ -341,6 +356,7 @@ def _measure_lean_escalation(binary: str, path: Path) -> dict:
             }
         except FileNotFoundError:
             return {
+                "exit_code": None,
                 "lean_solver_time_s": None,
                 "lean_status": "SKIP",
                 "lean_verified_atoms": 0,
@@ -351,6 +367,7 @@ def _measure_lean_escalation(binary: str, path: Path) -> dict:
         cert = _load_json(cert_path)
         remaining = manual_lemma_reason_remaining(cert)
     return {
+        "exit_code": proc.returncode,
         "lean_solver_time_s": round(elapsed, 3),
         "lean_status": status,
         "lean_verified_atoms": _lean_verified_count(output),

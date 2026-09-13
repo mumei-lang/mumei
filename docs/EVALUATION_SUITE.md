@@ -280,3 +280,78 @@ rejected verdict.
 | domain_compliance | `modular_commitment.mm` | `c-header` | missing |
 | domain_compliance | `modular_commitment.mm` | `verified-json` | missing |
 | domain_compliance | `regtech_exhaustiveness.mm` | `llvm-ir` | missing |
+
+---
+
+## Evaluation Suite Run — 2026-09-13 15:52 UTC
+
+`budget_policy_fingerprint`: `SKIP`. An axis reports `SKIP` when
+its input is absent (no `mumei` binary, or no agent repair data in the
+proof certificates), never a substituted value.
+
+### Agent Run Provenance
+
+| Axis | LLM | Attempt budget | Manifest schema |
+|------|-----|----------------|-----------------|
+| repair convergence | `qwen2.5-coder:3b` | 3 | `mumei-agent.repair_convergence_run/v1` |
+| trust surface `lean_ai_proof.on` | `qwen2.5-coder:3b` | 3 | `mumei-agent.lean_ai_proof_run/v1` |
+
+### Axis Summary (PAPER_DRAFT.md §7)
+
+| Axis | Status | Result |
+|------|--------|--------|
+| proof success rate | MEASURED | 100.00% (46/46 files, 0 without a verdict) |
+| repair convergence | MEASURED | 41.67% (10/24 atoms), 1.3333 avg repair attempts |
+| counterexample quality | MEASURED | 100.00% (20/20 caught, 0 without a verdict) |
+| trust surface | MEASURED | 0 trusted / 105 atoms, 0 FFI declarations, 6 Lean escalation candidates, 6 lean_verified (AI off; AI on: 6 lean_verified, +0 delta, 0 ai_proof_used, 0 manual_lemma_reason left) |
+| user burden | MEASURED | 2.4667 clauses/atom, 1.8902 spec/impl tokens |
+| runtime artifact utility | MEASURED | 93.27% (97/104 emissions, expected-PASS tasks; counterexample tasks: 100.00% as expected (80/80), 0 leaked build artifacts, 20/20 refutation certificates) |
+
+### Per-Category Results
+
+| Category | Files | Success Rate | Counterexample Catch | Trusted / Atoms | Clauses/Atom | Spec/Impl Tokens | Artifact Emission | Repair Convergence |
+|----------|-------|--------------|----------------------|-----------------|--------------|------------------|-------------------|--------------------|
+| arithmetic | 9 | 100.00% | 100.00% | 0 / 27 | 2.0000 | 3.5354 | 87.50% (21/24) | 66.67% |
+| concurrency | 15 | 100.00% | 100.00% | 0 / 33 | 2.0000 | 0.8939 | 100.00% (20/20) | 7.14% |
+| dafny_puzzles | 3 | 100.00% | SKIP | 0 / 3 | 2.0000 | 1.6970 | 100.00% (12/12) | SKIP |
+| domain_compliance | 10 | 100.00% | 100.00% | 0 / 25 | 2.8000 | 2.3838 | 83.33% (20/24) | 100.00% |
+| state_machine | 6 | 100.00% | 100.00% | 0 / 14 | 4.0000 | 1.7844 | 100.00% (12/12) | 100.00% |
+| svcomp_style | 3 | 100.00% | SKIP | 0 / 3 | 2.3333 | 2.3600 | 100.00% (12/12) | SKIP |
+
+### User Burden by Clause Kind
+
+| Category | requires | ensures | invariant | effect_pre | effect_post | Spec Tokens | Impl Tokens |
+|----------|---------:|--------:|----------:|-----------:|------------:|------------:|------------:|
+| arithmetic | 27 | 27 | 0 | 0 | 0 | 799 | 226 |
+| concurrency | 33 | 33 | 0 | 0 | 0 | 497 | 556 |
+| dafny_puzzles | 3 | 3 | 0 | 0 | 0 | 56 | 33 |
+| domain_compliance | 25 | 25 | 2 | 9 | 9 | 882 | 370 |
+| state_machine | 14 | 14 | 0 | 14 | 14 | 298 | 167 |
+| svcomp_style | 3 | 3 | 1 | 0 | 0 | 118 | 50 |
+
+### Runtime Artifact Utility by Target
+
+| Category | `llvm-ir` | `c-header` | `verified-json` | `proof-cert` | Files |
+|----------|------|------|------|------|------|
+| arithmetic | 5 | 5 | 5 | 6 | 9 |
+| concurrency | 5 | 5 | 5 | 5 | 15 |
+| dafny_puzzles | 3 | 3 | 3 | 3 | 3 |
+| domain_compliance | 4 | 5 | 5 | 6 | 10 |
+| state_machine | 3 | 3 | 3 | 3 | 6 |
+| svcomp_style | 3 | 3 | 3 | 3 | 3 |
+
+### Artifact Emission Gaps
+
+`missing`: an expected-PASS task yielded no artifact. `leaked`: a
+counterexample task left a non-empty build artifact behind despite the
+rejected verdict.
+
+| Category | File | Target | Gap |
+|----------|------|--------|-----|
+| arithmetic | `finite_field_modular.mm` | `llvm-ir` | missing |
+| arithmetic | `finite_field_modular.mm` | `c-header` | missing |
+| arithmetic | `finite_field_modular.mm` | `verified-json` | missing |
+| domain_compliance | `modular_commitment.mm` | `llvm-ir` | missing |
+| domain_compliance | `modular_commitment.mm` | `c-header` | missing |
+| domain_compliance | `modular_commitment.mm` | `verified-json` | missing |
+| domain_compliance | `regtech_exhaustiveness.mm` | `llvm-ir` | missing |
