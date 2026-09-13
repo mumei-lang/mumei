@@ -20,6 +20,13 @@ name: Verify Standard Library
 #   4. `comm -23 head_failures.txt base_failures.txt` yields the newly
 #      failing modules; if non-empty, fail the job.
 #
+# Exit code 3 (inconclusive: Z3 unknown / open Lean escalation
+# candidates) is not a verdict (see docs/CLI.md). It is recorded separately:
+# a module inconclusive on both base and head is pre-existing Lean-bridge
+# work, while a module verified on base and inconclusive on head lost a
+# proof and blocks like a new failure (once the base compiler itself
+# reports exit 3; older base compilers only get a warning).
+#
 # This matches the "don't regress already-green proofs" contract that
 # SI-5 Autonomous Proliferation promises: pre-existing red modules
 # stay red without blocking iteration, while any new red module the
@@ -88,14 +95,20 @@ jobs:
         run: |
           mkdir -p /tmp/verify-std
           : > /tmp/verify-std/head_failures.txt
+          : > /tmp/verify-std/head_inconclusive.txt
           set +e
           TOTAL=0
           FAILED=0
           while IFS= read -r f; do
             TOTAL=$((TOTAL + 1))
             echo "::group::[head] Verifying $f"
-            if ./target/release/mumei verify "$f"; then
+            ./target/release/mumei verify "$f"
+            rc=$?
+            if [ "$rc" = "0" ]; then
               echo "OK: $f"
+            elif [ "$rc" = "3" ]; then
+              echo "INCONCLUSIVE (Lean escalation pending, not a verdict): $f"
+              echo "$f" >> /tmp/verify-std/head_inconclusive.txt
             else
               echo "::warning file=$f::Verification failed on PR head"
               echo "$f" >> /tmp/verify-std/head_failures.txt
@@ -185,14 +198,37 @@ jobs:
           LIBCLANG_PATH: /usr/lib/llvm-17/lib
         run: |
           : > /tmp/verify-std/base_failures.txt
+          : > /tmp/verify-std/base_inconclusive.txt
+          # A base compiler that predates exit code 3 reports inconclusive
+          # results as 0 or 1, so "verified on base, inconclusive on head"
+          # cannot be told apart from an exit-code semantics change there.
+          # Probe with an obligation Z3 cannot decide before trusting the diff.
+          cat > /tmp/verify-std/probe_unknown.mm <<'MM'
+          atom fermat3(x: i64, y: i64, z: i64) -> i64
+          requires: x > 0 && y > 0 && z > 0;
+          ensures: x * x * x + y * y * y != z * z * z;
+          body: { 0 };
+          MM
           set +e
+          ./target/release/mumei verify --solver-timeout 50 /tmp/verify-std/probe_unknown.mm > /dev/null 2>&1
+          if [ "$?" = "3" ]; then
+            echo "BASE_REPORTS_INCONCLUSIVE=true" >> "$GITHUB_ENV"
+          else
+            echo "Base compiler does not report exit code 3; verified -> inconclusive transitions will warn, not block."
+            echo "BASE_REPORTS_INCONCLUSIVE=false" >> "$GITHUB_ENV"
+          fi
           TOTAL=0
           FAILED=0
           while IFS= read -r f; do
             TOTAL=$((TOTAL + 1))
             echo "::group::[base] Verifying $f"
-            if ./target/release/mumei verify "$f"; then
+            ./target/release/mumei verify "$f"
+            rc=$?
+            if [ "$rc" = "0" ]; then
               echo "OK: $f"
+            elif [ "$rc" = "3" ]; then
+              echo "INCONCLUSIVE (Lean escalation pending, not a verdict): $f"
+              echo "$f" >> /tmp/verify-std/base_inconclusive.txt
             else
               echo "$f" >> /tmp/verify-std/base_failures.txt
               FAILED=$((FAILED + 1))
@@ -201,6 +237,7 @@ jobs:
           done < <(find std -type f -name '*.mm' | sort)
           set -e
           sort -u -o /tmp/verify-std/base_failures.txt /tmp/verify-std/base_failures.txt
+          sort -u -o /tmp/verify-std/base_inconclusive.txt /tmp/verify-std/base_inconclusive.txt
           echo "[base] $((TOTAL - FAILED))/$TOTAL verified"
 
       - name: Copy head failures as base (workflow_dispatch)
@@ -209,12 +246,41 @@ jobs:
           # When there is no base ref (workflow_dispatch), baseline == head
           # so the diff is always empty.
           cp /tmp/verify-std/head_failures.txt /tmp/verify-std/base_failures.txt
+          cp /tmp/verify-std/head_inconclusive.txt /tmp/verify-std/base_inconclusive.txt
+          echo "BASE_REPORTS_INCONCLUSIVE=true" >> "$GITHUB_ENV"
 
       - name: Compute regression diff
         id: regression
         run: |
           mkdir -p /tmp/verify-std
           touch /tmp/verify-std/head_failures.txt /tmp/verify-std/base_failures.txt
+          touch /tmp/verify-std/head_inconclusive.txt /tmp/verify-std/base_inconclusive.txt
+          # Verified on base, inconclusive on head: an obligation stopped being
+          # discharged. Modules already failing or inconclusive on base are not new.
+          sort -u /tmp/verify-std/base_failures.txt /tmp/verify-std/base_inconclusive.txt \
+            > /tmp/verify-std/base_not_verified.txt
+          comm -23 /tmp/verify-std/head_inconclusive.txt /tmp/verify-std/base_not_verified.txt \
+            > /tmp/verify-std/new_inconclusive.txt || true
+          NEW_INCONCLUSIVE=$(wc -l < /tmp/verify-std/new_inconclusive.txt | tr -d ' ')
+          if [ "$NEW_INCONCLUSIVE" != "0" ]; then
+            if [ "${BASE_REPORTS_INCONCLUSIVE}" = "true" ]; then
+              echo "--- Verified on base, inconclusive on head (blocking) ---"
+              while IFS= read -r f; do
+                [ -z "$f" ] && continue
+                echo "::error file=$f::This PR leaves a previously verified std module inconclusive (exit 3)"
+                echo "  $f"
+              done < /tmp/verify-std/new_inconclusive.txt
+              cat /tmp/verify-std/new_inconclusive.txt >> /tmp/verify-std/head_failures.txt
+              sort -u -o /tmp/verify-std/head_failures.txt /tmp/verify-std/head_failures.txt
+            else
+              echo "--- Inconclusive on head; base compiler cannot report exit 3 (warning) ---"
+              while IFS= read -r f; do
+                [ -z "$f" ] && continue
+                echo "::warning file=$f::Inconclusive on head; base compiler predates exit code 3, so this is not diffed"
+                echo "  $f"
+              done < /tmp/verify-std/new_inconclusive.txt
+            fi
+          fi
           # New failures = on head but not on base.
           comm -23 /tmp/verify-std/head_failures.txt /tmp/verify-std/base_failures.txt \
             > /tmp/verify-std/new_failures.txt || true
@@ -260,3 +326,6 @@ jobs:
             /tmp/verify-std/base_failures.txt
             /tmp/verify-std/new_failures.txt
             /tmp/verify-std/fixed_modules.txt
+            /tmp/verify-std/head_inconclusive.txt
+            /tmp/verify-std/base_inconclusive.txt
+            /tmp/verify-std/new_inconclusive.txt
