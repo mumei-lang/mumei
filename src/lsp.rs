@@ -16,7 +16,7 @@ use crate::agent;
 use mumei_core::parser;
 use mumei_core::proof_cert;
 use mumei_core::verification;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -297,7 +297,12 @@ fn diagnose(uri: &str, source: &str) -> Vec<serde_json::Value> {
 
     // Phase 2: Z3 検証 diagnostics（file:// URI の場合のみ実行）
     if let Some(path) = path.as_deref() {
-        if let Err(failure) = verify_source_for_lsp(path, source) {
+        let mut live_pending_atom: Option<String> = None;
+        let LspLiveVerification {
+            settled: live_settled,
+            failure: live_failure,
+        } = verify_source_for_lsp(path, source);
+        if let Some(failure) = live_failure {
             let LspVerifyFailure {
                 error: e,
                 atom: failed_atom,
@@ -332,6 +337,7 @@ fn diagnose(uri: &str, source: &str) -> Vec<serde_json::Value> {
             // what tells the reader if a red squiggle is terminal or waiting
             // on the Lean fidelity check.
             let escalation_data = escalation.as_ref().map(|classification| {
+                live_pending_atom = failed_atom.clone();
                 let reason = classification
                     .escalation_reason
                     .as_ref()
@@ -398,7 +404,14 @@ fn diagnose(uri: &str, source: &str) -> Vec<serde_json::Value> {
             }
             diagnostics.push(diag);
         }
-        append_lean_verified_diagnostics(path, source, &items, &mut diagnostics);
+        append_certificate_lean_escalation_diagnostics(
+            path,
+            source,
+            &items,
+            live_pending_atom.as_deref(),
+            &live_settled,
+            &mut diagnostics,
+        );
     }
 
     append_intent_drift_diagnostics(source, &items, &mut diagnostics);
@@ -872,6 +885,22 @@ struct LspVerifyFailure {
     escalation: Option<verification::LeanEscalationClassification>,
 }
 
+/// Outcome of the in-process verification pass over a buffer.
+struct LspLiveVerification {
+    /// Atoms Z3 proved in this run whose classification does not route them
+    /// to mumei-lean: nothing about them is pending, whatever a sibling
+    /// certificate recorded. An atom Z3 proved but that still escalates
+    /// (outside the decidable fragment, `trusted`) is deliberately absent.
+    settled: BTreeSet<String>,
+    /// The first failing atom, if any; verification stops there.
+    failure: Option<LspVerifyFailure>,
+}
+
+fn settled_without_lean(atom: &parser::Atom, module_env: &verification::ModuleEnv) -> bool {
+    !verification::classify_atom_for_lean_escalation(atom, module_env, "unsat", "verified")
+        .should_escalate
+}
+
 fn classify_lsp_failure(
     atom: &parser::Atom,
     module_env: &verification::ModuleEnv,
@@ -902,10 +931,14 @@ fn classify_lsp_failure(
 
 /// ソースコードを in-process でパース → Z3 検証し、最初のエラーを返す。
 /// mumei.toml を上方探索してプロジェクトルートを決定し、依存パッケージも解決する。
-fn verify_source_for_lsp(path: &std::path::Path, source: &str) -> Result<(), LspVerifyFailure> {
+fn verify_source_for_lsp(path: &std::path::Path, source: &str) -> LspLiveVerification {
+    let mut live = LspLiveVerification {
+        settled: BTreeSet::new(),
+        failure: None,
+    };
     let items = parser::parse_module(source);
     if items.is_empty() {
-        return Ok(());
+        return live;
     }
 
     let mut module_env = verification::ModuleEnv::new();
@@ -961,9 +994,13 @@ fn verify_source_for_lsp(path: &std::path::Path, source: &str) -> Result<(), Lsp
                 if let Err(e) =
                     verification::verify_with_config(&hir_atom, output_dir, &module_env, 5000, 3)
                 {
-                    return Err(classify_lsp_failure(atom, &module_env, e));
+                    live.failure = Some(classify_lsp_failure(atom, &module_env, e));
+                    return live;
                 }
                 module_env.mark_verified(&atom.name);
+                if settled_without_lean(atom, &module_env) {
+                    live.settled.insert(atom.name.clone());
+                }
             }
             parser::Item::ImplBlock(ib) => {
                 for method in &ib.methods {
@@ -981,16 +1018,21 @@ fn verify_source_for_lsp(path: &std::path::Path, source: &str) -> Result<(), Lsp
                         5000,
                         3,
                     ) {
-                        return Err(classify_lsp_failure(&qualified_method, &module_env, e));
+                        live.failure =
+                            Some(classify_lsp_failure(&qualified_method, &module_env, e));
+                        return live;
                     }
                     module_env.mark_verified(&qualified_name);
+                    if settled_without_lean(&qualified_method, &module_env) {
+                        live.settled.insert(qualified_name);
+                    }
                 }
             }
             _ => {}
         }
     }
 
-    Ok(())
+    live
 }
 
 /// Feature 3f: Extract related diagnostic information from MumeiError for LSP relatedInformation.
@@ -1312,14 +1354,23 @@ fn is_item_start(line: &str) -> bool {
         || trimmed.starts_with("import ")
 }
 
-/// Report atoms that a sibling proof certificate records as discharged by
-/// mumei-lean. Without this the editor shows nothing for an atom Z3 returned
-/// `unknown` for, so a reader cannot tell a still-open escalation from one the
-/// Lean bridge already closed.
-fn append_lean_verified_diagnostics(
+/// Report the Lean escalation state a sibling proof certificate records for
+/// every atom in the file: `lean_verified` atoms the bridge already closed, and
+/// `escalation_candidate` atoms still waiting on mumei-lean. The in-process
+/// verification above stops at the first failing atom, so without the
+/// certificate the editor would show at most one pending escalation per file.
+/// `live_pending_atom` is the atom that failure already reported, which is
+/// skipped here so it is not shown twice. `live_settled` are the atoms the
+/// in-process run proved *and* classified as not needing mumei-lean; their
+/// certificate entries are stale and skipped. A live `unsat` alone is not
+/// enough: an atom outside the decidable fragment or marked `trusted` still
+/// escalates after Z3 proves it, so its pending entry stays visible.
+fn append_certificate_lean_escalation_diagnostics(
     path: &Path,
     source: &str,
     items: &[parser::Item],
+    live_pending_atom: Option<&str>,
+    live_settled: &BTreeSet<String>,
     diagnostics: &mut Vec<serde_json::Value>,
 ) {
     let cert_path = path.with_extension("proof.json");
@@ -1347,12 +1398,54 @@ fn append_lean_verified_diagnostics(
     }
 
     for atom_cert in &cert.atoms {
-        if atom_cert.z3_check_result != "lean_verified" {
-            continue;
-        }
-        let Some((_, atom)) = atoms.iter().find(|(name, _)| name == &atom_cert.name) else {
+        let Some((name, atom)) = atoms.iter().find(|(name, _)| name == &atom_cert.name) else {
             continue;
         };
+        // The certificate describes the source at generation time; an entry
+        // whose atom has since been edited says nothing about the buffer.
+        let current_hash = proof_cert::compute_atom_content_hash(
+            name,
+            &atom.requires,
+            &atom.ensures,
+            &atom.body_expr,
+        );
+        if current_hash != atom_cert.content_hash {
+            continue;
+        }
+        // Same membership rule as the escalation bundle: an atom is pending
+        // while it carries an escalation reason and Lean has not closed it.
+        if atom_cert.z3_check_result != "lean_verified" {
+            let Some(reason) = atom_cert.escalation_reason.as_ref() else {
+                continue;
+            };
+            if live_settled.contains(&atom_cert.name)
+                || live_pending_atom == Some(atom_cert.name.as_str())
+            {
+                continue;
+            }
+            let reason = reason.as_str();
+            diagnostics.push(serde_json::json!({
+                "range": atom_name_range(source, atom),
+                "severity": 1,
+                "source": "mumei-z3",
+                "message": format!(
+                    "Lean escalation: pending (z3 {}, reason {}; certificate {})",
+                    atom_cert.z3_result_class,
+                    reason,
+                    cert_path.display()
+                ),
+                "data": {
+                    "lean_escalation": {
+                        "status": "pending",
+                        "atom": atom_cert.name,
+                        "z3_result_class": atom_cert.z3_result_class,
+                        "escalation_reason": reason,
+                        "certificate": cert_path.to_string_lossy(),
+                    }
+                }
+            }));
+            continue;
+        }
         diagnostics.push(serde_json::json!({
             "range": atom_name_range(source, atom),
             "severity": 3,

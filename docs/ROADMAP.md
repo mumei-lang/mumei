@@ -1818,8 +1818,11 @@ python3 scripts/check_contract_vocabulary.py
 (cd editors/vscode && npm run compile)
 ```
 
-**残課題**: エディタは 1 ファイルにつき最初の未決 atom のみ pending 表示する
-（`lean_verified` は certificate 記載分すべて表示）。全 atom 分の pending 表示は follow-up。
+**後続（R-2, ✅ Implemented）**: in-process 検証は最初の失敗 atom で停止するため、sibling
+`<file>.proof.json` に `escalation_reason` を持ち `lean_verified` でない atom すべてに
+同形の `data.lean_escalation = { status: "pending", ... , certificate }` 診断を追加し、
+1 ファイルの全 pending atom を各 1 回ずつ表示する（`lean_verified` 側は従来どおり全件）。
+回帰: `cargo test --test test_lsp_lean_escalation`（複数 pending ケース）。
 
 ---
 
