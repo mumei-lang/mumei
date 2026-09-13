@@ -81,6 +81,14 @@ ARTIFACT_TARGETS = BUILD_EMIT_TARGETS + (PROOF_BUNDLE_TARGET,)
 
 BUILD_TIMEOUT_S = 120
 
+#: ``mumei verify`` verdict exit codes (R-1), mirrored from ``run_benchmarks``.
+EXIT_VERIFIED = 0
+EXIT_REJECTED = 1
+
+#: ``z3_check_result`` value written by the mumei-lean bridge when Lean closed
+#: an obligation (the only value that upgrades an ``unknown`` atom).
+LEAN_VERIFIED = "lean_verified"
+
 SPEC_CLAUSE_KINDS = ("requires", "ensures", "invariant", "effect_pre", "effect_post")
 SPEC_CLAUSE_RE = re.compile(
     r"^\s*(" + "|".join(SPEC_CLAUSE_KINDS) + r"):",
@@ -270,6 +278,36 @@ def load_self_correction_summaries(cert_dir: Path | None) -> dict[str, dict]:
     return summaries
 
 
+AGENT_RUN_MANIFEST = "run.json"
+AGENT_RUN_MANIFEST_KEYS = (
+    "schema",
+    "llm_model",
+    "max_retries",
+    "lean_ai_proof_max_attempts",
+)
+
+
+def load_agent_run_manifest(cert_dir: Path | None) -> dict | None:
+    """Read the provenance manifest mumei-agent writes next to its certificates.
+
+    Only the model / retry-budget keys are copied so the committed artifact
+    records *which* LLM produced the repair or AI-proof certificates without
+    leaking local paths or endpoints. Absent manifest -> ``None``.
+    """
+    if cert_dir is None:
+        return None
+    manifest_path = cert_dir / AGENT_RUN_MANIFEST
+    if not manifest_path.is_file():
+        return None
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    if not isinstance(manifest, dict):
+        return None
+    return {key: manifest[key] for key in AGENT_RUN_MANIFEST_KEYS if key in manifest}
+
+
 def _lookup_repair_summary(key: str, summaries: dict[str, dict]) -> dict | None:
     """Resolve a ``<category>/<file>`` key, falling back to the bare name."""
     if key in summaries:
@@ -331,12 +369,30 @@ def _emitted_artifacts(work_dir: Path, prefix: str) -> list[str]:
     )
 
 
-def measure_runtime_artifacts(binary: str, source: Path, work_dir: Path) -> dict:
+def _expected_emission(expected: str, target: str) -> bool:
+    """Whether an emitter is *supposed* to hand out ``target`` for a task.
+
+    A verified (`expected: PASS`) task must yield every artifact.  A
+    counterexample (`expected: FAIL`) task must yield **no** executable artifact
+    -- the build gate is the runtime utility here -- while the proof bundle is
+    still expected, because the certificate is what carries the refutation
+    (``verification_status`` / ``contradiction_type``) to downstream tools.
+    """
+    if expected == "PASS":
+        return True
+    return target == PROOF_BUNDLE_TARGET
+
+
+def measure_runtime_artifacts(
+    binary: str, source: Path, work_dir: Path, *, expected: str = "PASS"
+) -> dict:
     """Emit every artifact target for one task and record which ones succeeded.
 
-    Only `expected: PASS` tasks are emitted: a counterexample case is *supposed*
-    to fail verification, so its inability to produce an artifact is the
-    expected outcome rather than an artifact-utility signal.
+    ``expected`` is the task's declared outcome.  Each target records whether
+    an artifact was ``emitted`` and whether that matches what the task demands
+    (``as_expected``, see :func:`_expected_emission`), so counterexample tasks
+    contribute a measurable "refused to build, still certified" signal instead
+    of being dropped from the axis.
     """
     targets: dict[str, dict] = {}
     for target in BUILD_EMIT_TARGETS:
@@ -374,7 +430,10 @@ def measure_runtime_artifacts(binary: str, source: Path, work_dir: Path) -> dict
             timeout=BUILD_TIMEOUT_S,
             cwd=str(work_dir),
         )
-        emitted = proc.returncode == 0 and cert_path.is_file() and cert_path.stat().st_size > 0
+        verdict_ok = proc.returncode == (
+            EXIT_VERIFIED if expected == "PASS" else EXIT_REJECTED
+        )
+        emitted = verdict_ok and cert_path.is_file() and cert_path.stat().st_size > 0
         targets[PROOF_BUNDLE_TARGET] = {
             "emitted": emitted,
             "artifacts": 1 if emitted else 0,
@@ -382,10 +441,15 @@ def measure_runtime_artifacts(binary: str, source: Path, work_dir: Path) -> dict
     except (subprocess.TimeoutExpired, FileNotFoundError):
         targets[PROOF_BUNDLE_TARGET] = {"emitted": False, "artifacts": 0}
 
+    for target, record in targets.items():
+        record["as_expected"] = record["emitted"] == _expected_emission(expected, target)
+
     return {
         "file": source.name,
+        "expected": expected,
         "targets": targets,
         "emitted_targets": sum(1 for t in targets.values() if t["emitted"]),
+        "as_expected_targets": sum(1 for t in targets.values() if t["as_expected"]),
     }
 
 
@@ -393,12 +457,30 @@ def aggregate_runtime_artifacts(files: list[dict]) -> dict:
     """Aggregate emitter success over a category."""
     if not files:
         return {"status": STATUS_SKIP, "files": []}
-    attempted = len(files) * len(ARTIFACT_TARGETS)
-    emitted = sum(f["emitted_targets"] for f in files)
+    pass_files = [f for f in files if f.get("expected", "PASS") == "PASS"]
+    fail_files = [f for f in files if f.get("expected") == "FAIL"]
+    attempted = len(pass_files) * len(ARTIFACT_TARGETS)
+    emitted = sum(f["emitted_targets"] for f in pass_files)
     per_target = {
-        target: sum(1 for f in files if f["targets"][target]["emitted"])
+        target: sum(1 for f in pass_files if f["targets"][target]["emitted"])
         for target in ARTIFACT_TARGETS
     }
+    ce_attempted = len(fail_files) * len(ARTIFACT_TARGETS)
+    ce_as_expected = sum(
+        1
+        for f in fail_files
+        for target in ARTIFACT_TARGETS
+        if f["targets"][target]["emitted"] == _expected_emission("FAIL", target)
+    )
+    ce_leaked = sum(
+        1
+        for f in fail_files
+        for target in BUILD_EMIT_TARGETS
+        if f["targets"][target]["emitted"]
+    )
+    ce_certified = sum(
+        1 for f in fail_files if f["targets"][PROOF_BUNDLE_TARGET]["emitted"]
+    )
     return {
         "status": STATUS_MEASURED,
         "measured_files": len(files),
@@ -406,6 +488,16 @@ def aggregate_runtime_artifacts(files: list[dict]) -> dict:
         "successful_emissions": emitted,
         "emission_success_rate": round(emitted / attempted, 4) if attempted else 0.0,
         "per_target_success": per_target,
+        "counterexample": {
+            "files": len(fail_files),
+            "attempted_emissions": ce_attempted,
+            "as_expected_emissions": ce_as_expected,
+            "as_expected_rate": round(ce_as_expected / ce_attempted, 4)
+            if ce_attempted
+            else None,
+            "leaked_build_artifacts": ce_leaked,
+            "refutation_certificates": ce_certified,
+        },
         "files": files,
     }
 
@@ -415,11 +507,145 @@ def aggregate_runtime_artifacts(files: list[dict]) -> dict:
 # --------------------------------------------------------------------------
 
 
+def load_ai_proof_certificates(cert_dir: Path | None) -> dict[str, dict]:
+    """Index proof certificates produced with the AI Lean proof path *on*.
+
+    These are the certificates mumei-agent writes after running the mumei-lean
+    bridge with ``--enable-lean-ai-proof`` (``scripts/measure_lean_ai_proof.py``
+    in mumei-agent), keyed by ``<category>/<file>.mm`` exactly like the repair
+    certificates. The suite's own harness run is the AI-*off* measurement, so
+    the two sides share the escalation-candidate denominator.
+    """
+    if cert_dir is None or not cert_dir.is_dir():
+        return {}
+    certs: dict[str, dict] = {}
+    for cert_path in sorted(cert_dir.rglob("*.json")):
+        try:
+            cert = json.loads(cert_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if not isinstance(cert, dict) or not isinstance(cert.get("atoms"), list):
+            continue
+        source = cert.get("file")
+        if not isinstance(source, str):
+            continue
+        path = Path(source)
+        if path.parent.name:
+            certs[f"{path.parent.name}/{path.name}"] = cert
+    return certs
+
+
+def _lean_metadata(atom: dict) -> dict:
+    for key in ("lean_metadata", "lean_result_metadata"):
+        value = atom.get(key)
+        if isinstance(value, dict):
+            return value
+    return {}
+
+
+def summarize_ai_proof_certificate(cert: dict, harness) -> dict:
+    """Per-file Lean figures read out of an AI-on proof certificate.
+
+    ``ai_proof_used`` / ``ai_proof_attempts`` are the provenance keys the
+    mumei-lean bridge writes into ``lean_metadata``; nothing is inferred from
+    logs on this side.
+    """
+    atoms = [a for a in cert.get("atoms", []) if isinstance(a, dict)]
+    solver_times = [
+        float(_lean_metadata(a)["lean_solver_time_s"])
+        for a in atoms
+        if isinstance(_lean_metadata(a).get("lean_solver_time_s"), (int, float))
+    ]
+    return {
+        "lean_verified_atoms": sum(
+            1 for a in atoms if a.get("z3_check_result") == LEAN_VERIFIED
+        ),
+        "ai_proof_used_atoms": sum(
+            1
+            for a in atoms
+            if _lean_metadata(a).get("ai_proof_used") is True
+            and a.get("z3_check_result") == LEAN_VERIFIED
+        ),
+        "ai_proof_attempts": sum(
+            int(_lean_metadata(a).get("ai_proof_attempts") or 0) for a in atoms
+        ),
+        "manual_lemma_reason_remaining": harness.manual_lemma_reason_remaining(cert),
+        "lean_solver_time_s": round(max(solver_times), 3) if solver_times else None,
+    }
+
+
+def aggregate_lean_ai_proof(
+    category: str,
+    category_result: dict,
+    ai_proof_certs: dict[str, dict],
+    harness,
+    *,
+    binary_available: bool = True,
+) -> dict:
+    """B-7: AI Lean proof path on/off over the category's escalation candidates.
+
+    ``off`` is the harness's own ``--escalate-lean`` measurement (tactic ladder
+    + known witnesses only). ``on`` is read from the certificates in
+    ``--ai-proof-cert-dir`` for the same files; it is ``SKIP`` when none were
+    supplied. ``lean_verified_delta`` is the number of atoms the AI path closed
+    on top of the off path.
+    """
+    candidates = [
+        d for d in category_result["details"] if d["escalation_candidates"]
+    ]
+    if not binary_available:
+        off: dict = {"status": STATUS_SKIP}
+    else:
+        off_times = [
+            d["lean_solver_time_s"] for d in candidates
+            if d["lean_solver_time_s"] is not None
+        ]
+        off = {
+            "status": STATUS_MEASURED if off_times else STATUS_SKIP,
+            "files": len(candidates),
+            "lean_verified_atoms": sum(d["lean_verified_atoms"] for d in candidates),
+            "manual_lemma_reason_remaining": _optional_sum(
+                d.get("manual_lemma_reason_remaining") for d in candidates
+            ),
+            "lean_solver_time_s": round(sum(off_times), 3) if off_times else None,
+        }
+    matched = [
+        (d["file"], ai_proof_certs[f"{category}/{d['file']}"])
+        for d in candidates
+        if f"{category}/{d['file']}" in ai_proof_certs
+    ]
+    if not matched:
+        on: dict = {"status": STATUS_SKIP, "files": 0}
+    else:
+        per_file = [summarize_ai_proof_certificate(c, harness) for _, c in matched]
+        on_times = [
+            s["lean_solver_time_s"] for s in per_file
+            if s["lean_solver_time_s"] is not None
+        ]
+        on = {
+            "status": STATUS_MEASURED,
+            "files": len(matched),
+            "lean_verified_atoms": sum(s["lean_verified_atoms"] for s in per_file),
+            "ai_proof_used_atoms": sum(s["ai_proof_used_atoms"] for s in per_file),
+            "ai_proof_attempts": sum(s["ai_proof_attempts"] for s in per_file),
+            "manual_lemma_reason_remaining": _optional_sum(
+                s["manual_lemma_reason_remaining"] for s in per_file
+            ),
+            "lean_solver_time_s": round(sum(on_times), 3) if on_times else None,
+            "file_names": sorted(name for name, _ in matched),
+        }
+    delta = None
+    if off["status"] == STATUS_MEASURED and on["status"] == STATUS_MEASURED:
+        delta = on["lean_verified_atoms"] - off["lean_verified_atoms"]
+    return {"off": off, "on": on, "lean_verified_delta": delta}
+
+
 def aggregate_trust_surface(
     category_result: dict,
     sources: list[Path],
     *,
     binary_available: bool = True,
+    lean_ai_proof: dict | None = None,
 ) -> dict:
     """Trust surface of a category: trusted atoms, FFI boundary, Lean escalation.
 
@@ -455,6 +681,12 @@ def aggregate_trust_surface(
         "lean_verified_atoms": category_result["lean_verified_atoms"]
         if binary_available
         else None,
+        "manual_lemma_reason_remaining": category_result.get(
+            "manual_lemma_reason_remaining"
+        )
+        if binary_available
+        else None,
+        "lean_ai_proof": lean_ai_proof,
     }
 
 
@@ -472,6 +704,7 @@ def evaluate_category(
     lean_bridge: Path | None,
     repair_summaries: dict[str, dict],
     measure_artifacts: bool,
+    ai_proof_certs: dict[str, dict] | None = None,
 ) -> dict:
     """Measure all six axes for one controlled task category."""
     sources = sorted(dir_path.glob("*.mm"))
@@ -510,15 +743,28 @@ def evaluate_category(
         [f"{category}/{p.name}" for p in sources], repair_summaries
     )
     trust = aggregate_trust_surface(
-        result, sources, binary_available=bool(binary)
+        result,
+        sources,
+        binary_available=bool(binary),
+        lean_ai_proof=aggregate_lean_ai_proof(
+            category,
+            result,
+            ai_proof_certs or {},
+            harness,
+            binary_available=bool(binary),
+        ),
     )
 
     if binary and measure_artifacts:
-        pass_sources = [p for p in sources if harness._expected_outcome(p) == "PASS"]
         work_dir = Path(tempfile.mkdtemp(prefix=f"mumei-eval-{category}-"))
         try:
             artifacts = aggregate_runtime_artifacts(
-                [measure_runtime_artifacts(binary, p, work_dir) for p in pass_sources]
+                [
+                    measure_runtime_artifacts(
+                        binary, p, work_dir, expected=harness._expected_outcome(p)
+                    )
+                    for p in sources
+                ]
             )
         finally:
             shutil.rmtree(work_dir, ignore_errors=True)
@@ -545,6 +791,36 @@ def _optional_sum(values) -> int | None:
     if any(value is None for value in collected):
         return None
     return sum(collected)
+
+
+def _lean_ai_proof_totals(blocks: list[dict]) -> dict:
+    """Roll the per-category B-7 on/off blocks up to suite level."""
+
+    def side(name: str, keys: tuple[str, ...]) -> dict:
+        measured = [b[name] for b in blocks if b[name]["status"] == STATUS_MEASURED]
+        if not measured:
+            return {"status": STATUS_SKIP}
+        total: dict = {"status": STATUS_MEASURED, "files": sum(m["files"] for m in measured)}
+        for key in keys:
+            total[key] = _optional_sum(m.get(key) for m in measured)
+        times = [m["lean_solver_time_s"] for m in measured if m["lean_solver_time_s"] is not None]
+        total["lean_solver_time_s"] = round(sum(times), 3) if times else None
+        return total
+
+    off = side("off", ("lean_verified_atoms", "manual_lemma_reason_remaining"))
+    on = side(
+        "on",
+        (
+            "lean_verified_atoms",
+            "ai_proof_used_atoms",
+            "ai_proof_attempts",
+            "manual_lemma_reason_remaining",
+        ),
+    )
+    delta = None
+    if off["status"] == STATUS_MEASURED and on["status"] == STATUS_MEASURED:
+        delta = on["lean_verified_atoms"] - off["lean_verified_atoms"]
+    return {"off": off, "on": on, "lean_verified_delta": delta}
 
 
 def _axis_totals(categories: list[dict]) -> dict:
@@ -579,6 +855,8 @@ def _axis_totals(categories: list[dict]) -> dict:
     )
     emissions = sum(a["attempted_emissions"] for a in artifacts)
     emitted = sum(a["successful_emissions"] for a in artifacts)
+    ce_emissions = sum(a["counterexample"]["attempted_emissions"] for a in artifacts)
+    ce_as_expected = sum(a["counterexample"]["as_expected_emissions"] for a in artifacts)
 
     return {
         "proof_success_rate": {
@@ -617,6 +895,17 @@ def _axis_totals(categories: list[dict]) -> dict:
             "lean_escalation_candidates": _optional_sum(
                 a["lean_escalation_candidates"] for a in trust
             ),
+            "lean_verified_atoms": _optional_sum(
+                a["lean_verified_atoms"] for a in trust
+            ),
+            "manual_lemma_reason_remaining": _optional_sum(
+                a.get("manual_lemma_reason_remaining")
+                for a in trust
+                if a["lean_escalation_candidates"]
+            ),
+            "lean_ai_proof": _lean_ai_proof_totals(
+                [a["lean_ai_proof"] for a in trust if a.get("lean_ai_proof")]
+            ),
         },
         "user_burden": {
             "status": STATUS_MEASURED if burden else STATUS_SKIP,
@@ -632,6 +921,18 @@ def _axis_totals(categories: list[dict]) -> dict:
             "attempted_emissions": emissions,
             "successful_emissions": emitted,
             "emission_success_rate": rate(emitted, emissions),
+            "counterexample": {
+                "files": sum(a["counterexample"]["files"] for a in artifacts),
+                "attempted_emissions": ce_emissions,
+                "as_expected_emissions": ce_as_expected,
+                "as_expected_rate": rate(ce_as_expected, ce_emissions),
+                "leaked_build_artifacts": sum(
+                    a["counterexample"]["leaked_build_artifacts"] for a in artifacts
+                ),
+                "refutation_certificates": sum(
+                    a["counterexample"]["refutation_certificates"] for a in artifacts
+                ),
+            },
         },
     }
 
@@ -642,12 +943,15 @@ def build_evaluation(
     stdlib_metrics: dict,
     *,
     budget_policy_fingerprint: str | None = None,
+    agent_runs: dict[str, dict | None] | None = None,
 ) -> dict:
     """Assemble the ``mumei.evaluation_suite/v1`` document."""
     return {
         "schema": SCHEMA,
         "timestamp": timestamp,
         "budget_policy_fingerprint": budget_policy_fingerprint,
+        "agent_runs": agent_runs
+        or {"repair_convergence": None, "lean_ai_proof": None},
         "axes": list(AXES),
         "stdlib": stdlib_metrics,
         "totals": _axis_totals(categories),
@@ -663,8 +967,48 @@ def _fmt_number(value: float | None) -> str:
     return STATUS_SKIP if value is None else f"{value:.4f}"
 
 
+def _format_agent_runs(agent_runs: dict) -> list[str]:
+    """Render the LLM provenance of agent-backed axes (empty when none)."""
+    rows = []
+    for axis, label in (
+        ("repair_convergence", "repair convergence"),
+        ("lean_ai_proof", "trust surface `lean_ai_proof.on`"),
+    ):
+        run = agent_runs.get(axis)
+        if not run:
+            continue
+        budget = run.get("max_retries", run.get("lean_ai_proof_max_attempts"))
+        rows.append(
+            f"| {label} | `{run.get('llm_model', STATUS_SKIP)}` | "
+            f"{_fmt_count(budget)} | `{run.get('schema', STATUS_SKIP)}` |"
+        )
+    if not rows:
+        return []
+    return [
+        "### Agent Run Provenance",
+        "",
+        "| Axis | LLM | Attempt budget | Manifest schema |",
+        "|------|-----|----------------|-----------------|",
+        *rows,
+        "",
+    ]
+
+
 def _fmt_count(value: int | None) -> str:
     return STATUS_SKIP if value is None else str(value)
+
+
+def _fmt_lean_ai_on(block: dict | None) -> str:
+    if not block or block["on"]["status"] != STATUS_MEASURED:
+        return STATUS_SKIP
+    on = block["on"]
+    delta = block["lean_verified_delta"]
+    return (
+        f"{_fmt_count(on['lean_verified_atoms'])} lean_verified, "
+        f"{'SKIP' if delta is None else f'{delta:+d}'} delta, "
+        f"{_fmt_count(on['ai_proof_used_atoms'])} ai_proof_used, "
+        f"{_fmt_count(on['manual_lemma_reason_remaining'])} manual_lemma_reason left"
+    )
 
 
 def format_report(evaluation: dict) -> str:
@@ -682,6 +1026,7 @@ def format_report(evaluation: dict) -> str:
         "its input is absent (no `mumei` binary, or no agent repair data in the",
         "proof certificates), never a substituted value.",
         "",
+        *_format_agent_runs(evaluation.get("agent_runs") or {}),
         "### Axis Summary (PAPER_DRAFT.md §7)",
         "",
         "| Axis | Status | Result |",
@@ -721,7 +1066,9 @@ def format_report(evaluation: dict) -> str:
             f"/ {totals['trust_surface']['atoms']} atoms, "
             f"{totals['trust_surface']['ffi_boundary_declarations']} FFI declarations, "
             f"{_fmt_count(totals['trust_surface']['lean_escalation_candidates'])} "
-            "Lean escalation candidates",
+            "Lean escalation candidates, "
+            f"{_fmt_count(totals['trust_surface'].get('lean_verified_atoms'))} lean_verified "
+            f"(AI off; AI on: {_fmt_lean_ai_on(totals['trust_surface'].get('lean_ai_proof'))})",
         )
         + " |",
         f"| user burden | {totals['user_burden']['status']} | "
@@ -817,7 +1164,9 @@ def format_report(evaluation: dict) -> str:
         for category in evaluation["categories"]
         for entry in category["axes"]["runtime_artifact_utility"].get("files", [])
         for target in ARTIFACT_TARGETS
-        if not entry["targets"][target]["emitted"]
+        if not entry["targets"][target].get(
+            "as_expected", entry["targets"][target]["emitted"]
+        )
     ]
     if gaps:
         lines.extend([
@@ -880,6 +1229,15 @@ def main(argv: list[str] | None = None) -> int:
             "(mumei-agent repair runs); without it repair convergence is SKIP"
         ),
     )
+    parser.add_argument(
+        "--ai-proof-cert-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Directory of proof certificates produced with the mumei-agent AI "
+            "Lean proof path enabled (B-7 'on' side); without it the on side is SKIP"
+        ),
+    )
     parser.add_argument("--budget-policy-fingerprint", default=None)
     parser.add_argument(
         "--no-lean",
@@ -907,6 +1265,12 @@ def main(argv: list[str] | None = None) -> int:
             "no self_correction_summary found; repair convergence will be SKIP",
             file=sys.stderr,
         )
+    ai_proof_certs = load_ai_proof_certificates(args.ai_proof_cert_dir)
+    if not ai_proof_certs:
+        print(
+            "no AI-on proof certificates found; lean_ai_proof.on will be SKIP",
+            file=sys.stderr,
+        )
 
     timestamp = datetime.datetime.now(datetime.timezone.utc).strftime(
         "%Y-%m-%d %H:%M UTC"
@@ -920,6 +1284,7 @@ def main(argv: list[str] | None = None) -> int:
             lean_bridge=lean_bridge,
             repair_summaries=repair_summaries,
             measure_artifacts=not args.no_artifacts,
+            ai_proof_certs=ai_proof_certs,
         )
         for name, dir_path in sorted(harness.CATEGORIES.items())
         if dir_path.is_dir()
@@ -929,6 +1294,10 @@ def main(argv: list[str] | None = None) -> int:
         categories,
         harness.collect_stdlib_metrics(),
         budget_policy_fingerprint=args.budget_policy_fingerprint,
+        agent_runs={
+            "repair_convergence": load_agent_run_manifest(args.repair_cert_dir),
+            "lean_ai_proof": load_agent_run_manifest(args.ai_proof_cert_dir),
+        },
     )
 
     args.json.parent.mkdir(parents=True, exist_ok=True)

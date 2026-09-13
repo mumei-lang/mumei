@@ -1,4 +1,16 @@
 {
+  "agent_runs": {
+    "lean_ai_proof": {
+      "lean_ai_proof_max_attempts": 3,
+      "llm_model": "qwen2.5-coder:3b",
+      "schema": "mumei-agent.lean_ai_proof_run/v1"
+    },
+    "repair_convergence": {
+      "llm_model": "qwen2.5-coder:3b",
+      "max_retries": 3,
+      "schema": "mumei-agent.repair_convergence_run/v1"
+    }
+  },
   "axes": [
     "proof_success_rate",
     "repair_convergence",
@@ -19,156 +31,294 @@
           "status": "MEASURED"
         },
         "proof_success_rate": {
-          "avg_solver_time_s": 0.023,
+          "avg_solver_time_s": 0.183,
           "files": 9,
-          "lean_discharge_rate": null,
+          "lean_discharge_rate": 1.0,
           "matched_files": 9,
           "no_verdict_files": 0,
           "status": "MEASURED",
           "success_rate": 1.0
         },
         "repair_convergence": {
-          "files_with_repair_data": 0,
-          "status": "SKIP"
+          "average_repair_attempts": 2.3333,
+          "converged_atoms": 2,
+          "convergence_rate": 0.6667,
+          "files": [
+            "arithmetic/abs_min_int_fail.mm",
+            "arithmetic/off_by_one_index_fail.mm",
+            "arithmetic/unbounded_add_overflow_fail.mm"
+          ],
+          "files_with_repair_data": 3,
+          "status": "MEASURED",
+          "total_atoms": 3,
+          "total_token_cost": 19338
         },
         "runtime_artifact_utility": {
           "attempted_emissions": 24,
+          "counterexample": {
+            "as_expected_emissions": 12,
+            "as_expected_rate": 1.0,
+            "attempted_emissions": 12,
+            "files": 3,
+            "leaked_build_artifacts": 0,
+            "refutation_certificates": 3
+          },
           "emission_success_rate": 0.875,
           "files": [
             {
+              "as_expected_targets": 4,
+              "emitted_targets": 1,
+              "expected": "FAIL",
+              "file": "abs_min_int_fail.mm",
+              "targets": {
+                "c-header": {
+                  "artifacts": 0,
+                  "as_expected": true,
+                  "emitted": false
+                },
+                "llvm-ir": {
+                  "artifacts": 0,
+                  "as_expected": true,
+                  "emitted": false
+                },
+                "proof-cert": {
+                  "artifacts": 1,
+                  "as_expected": true,
+                  "emitted": true
+                },
+                "verified-json": {
+                  "artifacts": 0,
+                  "as_expected": true,
+                  "emitted": false
+                }
+              }
+            },
+            {
+              "as_expected_targets": 4,
               "emitted_targets": 4,
+              "expected": "PASS",
               "file": "bounded_arithmetic.mm",
               "targets": {
                 "c-header": {
                   "artifacts": 4,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "llvm-ir": {
                   "artifacts": 4,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "proof-cert": {
                   "artifacts": 1,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "verified-json": {
                   "artifacts": 4,
+                  "as_expected": true,
                   "emitted": true
                 }
               }
             },
             {
+              "as_expected_targets": 1,
               "emitted_targets": 1,
+              "expected": "PASS",
               "file": "finite_field_modular.mm",
               "targets": {
                 "c-header": {
                   "artifacts": 0,
+                  "as_expected": false,
                   "emitted": false
                 },
                 "llvm-ir": {
                   "artifacts": 0,
+                  "as_expected": false,
                   "emitted": false
                 },
                 "proof-cert": {
                   "artifacts": 1,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "verified-json": {
                   "artifacts": 0,
+                  "as_expected": false,
                   "emitted": false
                 }
               }
             },
             {
+              "as_expected_targets": 4,
               "emitted_targets": 4,
+              "expected": "PASS",
               "file": "fixed_point_scaling.mm",
               "targets": {
                 "c-header": {
                   "artifacts": 5,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "llvm-ir": {
                   "artifacts": 5,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "proof-cert": {
                   "artifacts": 1,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "verified-json": {
                   "artifacts": 5,
+                  "as_expected": true,
                   "emitted": true
                 }
               }
             },
             {
+              "as_expected_targets": 4,
               "emitted_targets": 4,
+              "expected": "PASS",
               "file": "nonlinear_polynomial.mm",
               "targets": {
                 "c-header": {
                   "artifacts": 4,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "llvm-ir": {
                   "artifacts": 4,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "proof-cert": {
                   "artifacts": 1,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "verified-json": {
                   "artifacts": 4,
+                  "as_expected": true,
                   "emitted": true
                 }
               }
             },
             {
+              "as_expected_targets": 4,
+              "emitted_targets": 1,
+              "expected": "FAIL",
+              "file": "off_by_one_index_fail.mm",
+              "targets": {
+                "c-header": {
+                  "artifacts": 0,
+                  "as_expected": true,
+                  "emitted": false
+                },
+                "llvm-ir": {
+                  "artifacts": 0,
+                  "as_expected": true,
+                  "emitted": false
+                },
+                "proof-cert": {
+                  "artifacts": 1,
+                  "as_expected": true,
+                  "emitted": true
+                },
+                "verified-json": {
+                  "artifacts": 0,
+                  "as_expected": true,
+                  "emitted": false
+                }
+              }
+            },
+            {
+              "as_expected_targets": 4,
               "emitted_targets": 4,
+              "expected": "PASS",
               "file": "overflow_boundary.mm",
               "targets": {
                 "c-header": {
                   "artifacts": 4,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "llvm-ir": {
                   "artifacts": 4,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "proof-cert": {
                   "artifacts": 1,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "verified-json": {
                   "artifacts": 4,
+                  "as_expected": true,
                   "emitted": true
                 }
               }
             },
             {
+              "as_expected_targets": 4,
               "emitted_targets": 4,
+              "expected": "PASS",
               "file": "saturating.mm",
               "targets": {
                 "c-header": {
                   "artifacts": 3,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "llvm-ir": {
                   "artifacts": 3,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "proof-cert": {
                   "artifacts": 1,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "verified-json": {
                   "artifacts": 3,
+                  "as_expected": true,
                   "emitted": true
+                }
+              }
+            },
+            {
+              "as_expected_targets": 4,
+              "emitted_targets": 1,
+              "expected": "FAIL",
+              "file": "unbounded_add_overflow_fail.mm",
+              "targets": {
+                "c-header": {
+                  "artifacts": 0,
+                  "as_expected": true,
+                  "emitted": false
+                },
+                "llvm-ir": {
+                  "artifacts": 0,
+                  "as_expected": true,
+                  "emitted": false
+                },
+                "proof-cert": {
+                  "artifacts": 1,
+                  "as_expected": true,
+                  "emitted": true
+                },
+                "verified-json": {
+                  "artifacts": 0,
+                  "as_expected": true,
+                  "emitted": false
                 }
               }
             }
           ],
-          "measured_files": 6,
+          "measured_files": 9,
           "per_target_success": {
             "c-header": 5,
             "llvm-ir": 5,
@@ -183,8 +333,31 @@
           "atoms": 27,
           "ffi_boundary_declarations": 0,
           "ffi_extern_blocks": 0,
+          "lean_ai_proof": {
+            "lean_verified_delta": 0,
+            "off": {
+              "files": 1,
+              "lean_solver_time_s": 7.932,
+              "lean_verified_atoms": 4,
+              "manual_lemma_reason_remaining": 0,
+              "status": "MEASURED"
+            },
+            "on": {
+              "ai_proof_attempts": 0,
+              "ai_proof_used_atoms": 0,
+              "file_names": [
+                "finite_field_modular.mm"
+              ],
+              "files": 1,
+              "lean_solver_time_s": 8.326,
+              "lean_verified_atoms": 4,
+              "manual_lemma_reason_remaining": 0,
+              "status": "MEASURED"
+            }
+          },
           "lean_escalation_candidates": 4,
-          "lean_verified_atoms": 0,
+          "lean_verified_atoms": 4,
+          "manual_lemma_reason_remaining": 0,
           "status": "MEASURED",
           "trusted_ratio": 0.0
         },
@@ -364,7 +537,7 @@
           "status": "MEASURED"
         },
         "proof_success_rate": {
-          "avg_solver_time_s": 0.031,
+          "avg_solver_time_s": 0.073,
           "files": 15,
           "lean_discharge_rate": null,
           "matched_files": 15,
@@ -373,125 +546,460 @@
           "success_rate": 1.0
         },
         "repair_convergence": {
-          "files_with_repair_data": 0,
-          "status": "SKIP"
+          "average_repair_attempts": 1.2857,
+          "converged_atoms": 1,
+          "convergence_rate": 0.0714,
+          "files": [
+            "concurrency/double_move_fail.mm",
+            "concurrency/exclusive_resource_reuse_fail.mm",
+            "concurrency/lock_order_inversion_fail.mm",
+            "concurrency/task_cancel_dependent_read_fail.mm",
+            "concurrency/task_concurrent_double_move_fail.mm",
+            "concurrency/task_move_while_sibling_reads_fail.mm",
+            "concurrency/task_shared_write_race_fail.mm",
+            "concurrency/task_struct_capture_double_move_fail.mm",
+            "concurrency/task_use_after_concurrent_move_fail.mm",
+            "concurrency/use_after_move_fail.mm"
+          ],
+          "files_with_repair_data": 10,
+          "status": "MEASURED",
+          "total_atoms": 14,
+          "total_token_cost": 20531
         },
         "runtime_artifact_utility": {
           "attempted_emissions": 20,
+          "counterexample": {
+            "as_expected_emissions": 40,
+            "as_expected_rate": 1.0,
+            "attempted_emissions": 40,
+            "files": 10,
+            "leaked_build_artifacts": 0,
+            "refutation_certificates": 10
+          },
           "emission_success_rate": 1.0,
           "files": [
             {
+              "as_expected_targets": 4,
+              "emitted_targets": 1,
+              "expected": "FAIL",
+              "file": "double_move_fail.mm",
+              "targets": {
+                "c-header": {
+                  "artifacts": 0,
+                  "as_expected": true,
+                  "emitted": false
+                },
+                "llvm-ir": {
+                  "artifacts": 0,
+                  "as_expected": true,
+                  "emitted": false
+                },
+                "proof-cert": {
+                  "artifacts": 1,
+                  "as_expected": true,
+                  "emitted": true
+                },
+                "verified-json": {
+                  "artifacts": 0,
+                  "as_expected": true,
+                  "emitted": false
+                }
+              }
+            },
+            {
+              "as_expected_targets": 4,
+              "emitted_targets": 1,
+              "expected": "FAIL",
+              "file": "exclusive_resource_reuse_fail.mm",
+              "targets": {
+                "c-header": {
+                  "artifacts": 0,
+                  "as_expected": true,
+                  "emitted": false
+                },
+                "llvm-ir": {
+                  "artifacts": 0,
+                  "as_expected": true,
+                  "emitted": false
+                },
+                "proof-cert": {
+                  "artifacts": 1,
+                  "as_expected": true,
+                  "emitted": true
+                },
+                "verified-json": {
+                  "artifacts": 0,
+                  "as_expected": true,
+                  "emitted": false
+                }
+              }
+            },
+            {
+              "as_expected_targets": 4,
               "emitted_targets": 4,
+              "expected": "PASS",
               "file": "linear_ownership.mm",
               "targets": {
                 "c-header": {
                   "artifacts": 4,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "llvm-ir": {
                   "artifacts": 4,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "proof-cert": {
                   "artifacts": 1,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "verified-json": {
                   "artifacts": 4,
+                  "as_expected": true,
                   "emitted": true
                 }
               }
             },
             {
+              "as_expected_targets": 4,
+              "emitted_targets": 1,
+              "expected": "FAIL",
+              "file": "lock_order_inversion_fail.mm",
+              "targets": {
+                "c-header": {
+                  "artifacts": 0,
+                  "as_expected": true,
+                  "emitted": false
+                },
+                "llvm-ir": {
+                  "artifacts": 0,
+                  "as_expected": true,
+                  "emitted": false
+                },
+                "proof-cert": {
+                  "artifacts": 1,
+                  "as_expected": true,
+                  "emitted": true
+                },
+                "verified-json": {
+                  "artifacts": 0,
+                  "as_expected": true,
+                  "emitted": false
+                }
+              }
+            },
+            {
+              "as_expected_targets": 4,
               "emitted_targets": 4,
+              "expected": "PASS",
               "file": "resource_ordering.mm",
               "targets": {
                 "c-header": {
                   "artifacts": 3,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "llvm-ir": {
                   "artifacts": 3,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "proof-cert": {
                   "artifacts": 1,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "verified-json": {
                   "artifacts": 3,
+                  "as_expected": true,
                   "emitted": true
                 }
               }
             },
             {
+              "as_expected_targets": 4,
+              "emitted_targets": 1,
+              "expected": "FAIL",
+              "file": "task_cancel_dependent_read_fail.mm",
+              "targets": {
+                "c-header": {
+                  "artifacts": 0,
+                  "as_expected": true,
+                  "emitted": false
+                },
+                "llvm-ir": {
+                  "artifacts": 0,
+                  "as_expected": true,
+                  "emitted": false
+                },
+                "proof-cert": {
+                  "artifacts": 1,
+                  "as_expected": true,
+                  "emitted": true
+                },
+                "verified-json": {
+                  "artifacts": 0,
+                  "as_expected": true,
+                  "emitted": false
+                }
+              }
+            },
+            {
+              "as_expected_targets": 4,
+              "emitted_targets": 1,
+              "expected": "FAIL",
+              "file": "task_concurrent_double_move_fail.mm",
+              "targets": {
+                "c-header": {
+                  "artifacts": 1,
+                  "as_expected": true,
+                  "emitted": false
+                },
+                "llvm-ir": {
+                  "artifacts": 1,
+                  "as_expected": true,
+                  "emitted": false
+                },
+                "proof-cert": {
+                  "artifacts": 1,
+                  "as_expected": true,
+                  "emitted": true
+                },
+                "verified-json": {
+                  "artifacts": 1,
+                  "as_expected": true,
+                  "emitted": false
+                }
+              }
+            },
+            {
+              "as_expected_targets": 4,
               "emitted_targets": 4,
+              "expected": "PASS",
               "file": "task_group_all.mm",
               "targets": {
                 "c-header": {
                   "artifacts": 4,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "llvm-ir": {
                   "artifacts": 4,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "proof-cert": {
                   "artifacts": 1,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "verified-json": {
                   "artifacts": 4,
+                  "as_expected": true,
                   "emitted": true
                 }
               }
             },
             {
+              "as_expected_targets": 4,
               "emitted_targets": 4,
+              "expected": "PASS",
               "file": "task_group_any_winner.mm",
               "targets": {
                 "c-header": {
                   "artifacts": 3,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "llvm-ir": {
                   "artifacts": 3,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "proof-cert": {
                   "artifacts": 1,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "verified-json": {
                   "artifacts": 3,
+                  "as_expected": true,
                   "emitted": true
                 }
               }
             },
             {
+              "as_expected_targets": 4,
+              "emitted_targets": 1,
+              "expected": "FAIL",
+              "file": "task_move_while_sibling_reads_fail.mm",
+              "targets": {
+                "c-header": {
+                  "artifacts": 1,
+                  "as_expected": true,
+                  "emitted": false
+                },
+                "llvm-ir": {
+                  "artifacts": 1,
+                  "as_expected": true,
+                  "emitted": false
+                },
+                "proof-cert": {
+                  "artifacts": 1,
+                  "as_expected": true,
+                  "emitted": true
+                },
+                "verified-json": {
+                  "artifacts": 1,
+                  "as_expected": true,
+                  "emitted": false
+                }
+              }
+            },
+            {
+              "as_expected_targets": 4,
               "emitted_targets": 4,
+              "expected": "PASS",
               "file": "task_ownership.mm",
               "targets": {
                 "c-header": {
                   "artifacts": 5,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "llvm-ir": {
                   "artifacts": 5,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "proof-cert": {
                   "artifacts": 1,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "verified-json": {
                   "artifacts": 5,
+                  "as_expected": true,
                   "emitted": true
+                }
+              }
+            },
+            {
+              "as_expected_targets": 4,
+              "emitted_targets": 1,
+              "expected": "FAIL",
+              "file": "task_shared_write_race_fail.mm",
+              "targets": {
+                "c-header": {
+                  "artifacts": 0,
+                  "as_expected": true,
+                  "emitted": false
+                },
+                "llvm-ir": {
+                  "artifacts": 0,
+                  "as_expected": true,
+                  "emitted": false
+                },
+                "proof-cert": {
+                  "artifacts": 1,
+                  "as_expected": true,
+                  "emitted": true
+                },
+                "verified-json": {
+                  "artifacts": 0,
+                  "as_expected": true,
+                  "emitted": false
+                }
+              }
+            },
+            {
+              "as_expected_targets": 4,
+              "emitted_targets": 1,
+              "expected": "FAIL",
+              "file": "task_struct_capture_double_move_fail.mm",
+              "targets": {
+                "c-header": {
+                  "artifacts": 1,
+                  "as_expected": true,
+                  "emitted": false
+                },
+                "llvm-ir": {
+                  "artifacts": 1,
+                  "as_expected": true,
+                  "emitted": false
+                },
+                "proof-cert": {
+                  "artifacts": 1,
+                  "as_expected": true,
+                  "emitted": true
+                },
+                "verified-json": {
+                  "artifacts": 1,
+                  "as_expected": true,
+                  "emitted": false
+                }
+              }
+            },
+            {
+              "as_expected_targets": 4,
+              "emitted_targets": 1,
+              "expected": "FAIL",
+              "file": "task_use_after_concurrent_move_fail.mm",
+              "targets": {
+                "c-header": {
+                  "artifacts": 1,
+                  "as_expected": true,
+                  "emitted": false
+                },
+                "llvm-ir": {
+                  "artifacts": 1,
+                  "as_expected": true,
+                  "emitted": false
+                },
+                "proof-cert": {
+                  "artifacts": 1,
+                  "as_expected": true,
+                  "emitted": true
+                },
+                "verified-json": {
+                  "artifacts": 1,
+                  "as_expected": true,
+                  "emitted": false
+                }
+              }
+            },
+            {
+              "as_expected_targets": 4,
+              "emitted_targets": 1,
+              "expected": "FAIL",
+              "file": "use_after_move_fail.mm",
+              "targets": {
+                "c-header": {
+                  "artifacts": 0,
+                  "as_expected": true,
+                  "emitted": false
+                },
+                "llvm-ir": {
+                  "artifacts": 0,
+                  "as_expected": true,
+                  "emitted": false
+                },
+                "proof-cert": {
+                  "artifacts": 1,
+                  "as_expected": true,
+                  "emitted": true
+                },
+                "verified-json": {
+                  "artifacts": 0,
+                  "as_expected": true,
+                  "emitted": false
                 }
               }
             }
           ],
-          "measured_files": 5,
+          "measured_files": 15,
           "per_target_success": {
             "c-header": 5,
             "llvm-ir": 5,
@@ -506,8 +1014,23 @@
           "atoms": 33,
           "ffi_boundary_declarations": 0,
           "ffi_extern_blocks": 0,
+          "lean_ai_proof": {
+            "lean_verified_delta": null,
+            "off": {
+              "files": 0,
+              "lean_solver_time_s": null,
+              "lean_verified_atoms": 0,
+              "manual_lemma_reason_remaining": 0,
+              "status": "SKIP"
+            },
+            "on": {
+              "files": 0,
+              "status": "SKIP"
+            }
+          },
           "lean_escalation_candidates": 0,
           "lean_verified_atoms": 0,
+          "manual_lemma_reason_remaining": null,
           "status": "MEASURED",
           "trusted_ratio": 0.0
         },
@@ -783,7 +1306,7 @@
           "status": "SKIP"
         },
         "proof_success_rate": {
-          "avg_solver_time_s": 0.008,
+          "avg_solver_time_s": 0.061,
           "files": 3,
           "lean_discharge_rate": null,
           "matched_files": 3,
@@ -797,70 +1320,96 @@
         },
         "runtime_artifact_utility": {
           "attempted_emissions": 12,
+          "counterexample": {
+            "as_expected_emissions": 0,
+            "as_expected_rate": null,
+            "attempted_emissions": 0,
+            "files": 0,
+            "leaked_build_artifacts": 0,
+            "refutation_certificates": 0
+          },
           "emission_success_rate": 1.0,
           "files": [
             {
+              "as_expected_targets": 4,
               "emitted_targets": 4,
+              "expected": "PASS",
               "file": "absolute_value.mm",
               "targets": {
                 "c-header": {
                   "artifacts": 1,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "llvm-ir": {
                   "artifacts": 1,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "proof-cert": {
                   "artifacts": 1,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "verified-json": {
                   "artifacts": 1,
+                  "as_expected": true,
                   "emitted": true
                 }
               }
             },
             {
+              "as_expected_targets": 4,
               "emitted_targets": 4,
+              "expected": "PASS",
               "file": "max.mm",
               "targets": {
                 "c-header": {
                   "artifacts": 1,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "llvm-ir": {
                   "artifacts": 1,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "proof-cert": {
                   "artifacts": 1,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "verified-json": {
                   "artifacts": 1,
+                  "as_expected": true,
                   "emitted": true
                 }
               }
             },
             {
+              "as_expected_targets": 4,
               "emitted_targets": 4,
+              "expected": "PASS",
               "file": "swap.mm",
               "targets": {
                 "c-header": {
                   "artifacts": 1,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "llvm-ir": {
                   "artifacts": 1,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "proof-cert": {
                   "artifacts": 1,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "verified-json": {
                   "artifacts": 1,
+                  "as_expected": true,
                   "emitted": true
                 }
               }
@@ -881,8 +1430,23 @@
           "atoms": 3,
           "ffi_boundary_declarations": 0,
           "ffi_extern_blocks": 0,
+          "lean_ai_proof": {
+            "lean_verified_delta": null,
+            "off": {
+              "files": 0,
+              "lean_solver_time_s": null,
+              "lean_verified_atoms": 0,
+              "manual_lemma_reason_remaining": 0,
+              "status": "SKIP"
+            },
+            "on": {
+              "files": 0,
+              "status": "SKIP"
+            }
+          },
           "lean_escalation_candidates": 0,
           "lean_verified_atoms": 0,
+          "manual_lemma_reason_remaining": null,
           "status": "MEASURED",
           "trusted_ratio": 0.0
         },
@@ -966,156 +1530,323 @@
           "status": "MEASURED"
         },
         "proof_success_rate": {
-          "avg_solver_time_s": 0.024,
+          "avg_solver_time_s": 0.108,
           "files": 10,
-          "lean_discharge_rate": null,
+          "lean_discharge_rate": 1.0,
           "matched_files": 10,
           "no_verdict_files": 0,
           "status": "MEASURED",
           "success_rate": 1.0
         },
         "repair_convergence": {
-          "files_with_repair_data": 0,
-          "status": "SKIP"
+          "average_repair_attempts": 1.0,
+          "converged_atoms": 4,
+          "convergence_rate": 1.0,
+          "files": [
+            "domain_compliance/defi_reentrancy_fail.mm",
+            "domain_compliance/medical_overdose_fail.mm",
+            "domain_compliance/regtech_missing_pep_arm_fail.mm",
+            "domain_compliance/rtgs_balance_break_fail.mm"
+          ],
+          "files_with_repair_data": 4,
+          "status": "MEASURED",
+          "total_atoms": 4,
+          "total_token_cost": 8455
         },
         "runtime_artifact_utility": {
           "attempted_emissions": 24,
+          "counterexample": {
+            "as_expected_emissions": 16,
+            "as_expected_rate": 1.0,
+            "attempted_emissions": 16,
+            "files": 4,
+            "leaked_build_artifacts": 0,
+            "refutation_certificates": 4
+          },
           "emission_success_rate": 0.8333,
           "files": [
             {
+              "as_expected_targets": 4,
               "emitted_targets": 4,
+              "expected": "PASS",
               "file": "defi_invariants.mm",
               "targets": {
                 "c-header": {
                   "artifacts": 4,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "llvm-ir": {
                   "artifacts": 4,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "proof-cert": {
                   "artifacts": 1,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "verified-json": {
                   "artifacts": 4,
+                  "as_expected": true,
                   "emitted": true
                 }
               }
             },
             {
+              "as_expected_targets": 4,
+              "emitted_targets": 1,
+              "expected": "FAIL",
+              "file": "defi_reentrancy_fail.mm",
+              "targets": {
+                "c-header": {
+                  "artifacts": 0,
+                  "as_expected": true,
+                  "emitted": false
+                },
+                "llvm-ir": {
+                  "artifacts": 0,
+                  "as_expected": true,
+                  "emitted": false
+                },
+                "proof-cert": {
+                  "artifacts": 1,
+                  "as_expected": true,
+                  "emitted": true
+                },
+                "verified-json": {
+                  "artifacts": 0,
+                  "as_expected": true,
+                  "emitted": false
+                }
+              }
+            },
+            {
+              "as_expected_targets": 4,
               "emitted_targets": 4,
+              "expected": "PASS",
               "file": "medical_dosage.mm",
               "targets": {
                 "c-header": {
                   "artifacts": 4,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "llvm-ir": {
                   "artifacts": 4,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "proof-cert": {
                   "artifacts": 1,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "verified-json": {
                   "artifacts": 4,
+                  "as_expected": true,
                   "emitted": true
                 }
               }
             },
             {
+              "as_expected_targets": 4,
               "emitted_targets": 1,
+              "expected": "FAIL",
+              "file": "medical_overdose_fail.mm",
+              "targets": {
+                "c-header": {
+                  "artifacts": 0,
+                  "as_expected": true,
+                  "emitted": false
+                },
+                "llvm-ir": {
+                  "artifacts": 0,
+                  "as_expected": true,
+                  "emitted": false
+                },
+                "proof-cert": {
+                  "artifacts": 1,
+                  "as_expected": true,
+                  "emitted": true
+                },
+                "verified-json": {
+                  "artifacts": 0,
+                  "as_expected": true,
+                  "emitted": false
+                }
+              }
+            },
+            {
+              "as_expected_targets": 1,
+              "emitted_targets": 1,
+              "expected": "PASS",
               "file": "modular_commitment.mm",
               "targets": {
                 "c-header": {
                   "artifacts": 0,
+                  "as_expected": false,
                   "emitted": false
                 },
                 "llvm-ir": {
                   "artifacts": 0,
+                  "as_expected": false,
                   "emitted": false
                 },
                 "proof-cert": {
                   "artifacts": 1,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "verified-json": {
                   "artifacts": 0,
+                  "as_expected": false,
                   "emitted": false
                 }
               }
             },
             {
+              "as_expected_targets": 4,
               "emitted_targets": 4,
+              "expected": "PASS",
               "file": "ownership_protocol.mm",
               "targets": {
                 "c-header": {
                   "artifacts": 3,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "llvm-ir": {
                   "artifacts": 3,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "proof-cert": {
                   "artifacts": 1,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "verified-json": {
                   "artifacts": 3,
+                  "as_expected": true,
                   "emitted": true
                 }
               }
             },
             {
+              "as_expected_targets": 3,
               "emitted_targets": 3,
+              "expected": "PASS",
               "file": "regtech_exhaustiveness.mm",
               "targets": {
                 "c-header": {
                   "artifacts": 4,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "llvm-ir": {
                   "artifacts": 0,
+                  "as_expected": false,
                   "emitted": false
                 },
                 "proof-cert": {
                   "artifacts": 1,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "verified-json": {
                   "artifacts": 4,
+                  "as_expected": true,
                   "emitted": true
                 }
               }
             },
             {
+              "as_expected_targets": 4,
+              "emitted_targets": 1,
+              "expected": "FAIL",
+              "file": "regtech_missing_pep_arm_fail.mm",
+              "targets": {
+                "c-header": {
+                  "artifacts": 0,
+                  "as_expected": true,
+                  "emitted": false
+                },
+                "llvm-ir": {
+                  "artifacts": 0,
+                  "as_expected": true,
+                  "emitted": false
+                },
+                "proof-cert": {
+                  "artifacts": 1,
+                  "as_expected": true,
+                  "emitted": true
+                },
+                "verified-json": {
+                  "artifacts": 0,
+                  "as_expected": true,
+                  "emitted": false
+                }
+              }
+            },
+            {
+              "as_expected_targets": 4,
+              "emitted_targets": 1,
+              "expected": "FAIL",
+              "file": "rtgs_balance_break_fail.mm",
+              "targets": {
+                "c-header": {
+                  "artifacts": 0,
+                  "as_expected": true,
+                  "emitted": false
+                },
+                "llvm-ir": {
+                  "artifacts": 0,
+                  "as_expected": true,
+                  "emitted": false
+                },
+                "proof-cert": {
+                  "artifacts": 1,
+                  "as_expected": true,
+                  "emitted": true
+                },
+                "verified-json": {
+                  "artifacts": 0,
+                  "as_expected": true,
+                  "emitted": false
+                }
+              }
+            },
+            {
+              "as_expected_targets": 4,
               "emitted_targets": 4,
+              "expected": "PASS",
               "file": "rtgs_balance_conservation.mm",
               "targets": {
                 "c-header": {
                   "artifacts": 4,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "llvm-ir": {
                   "artifacts": 4,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "proof-cert": {
                   "artifacts": 1,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "verified-json": {
                   "artifacts": 4,
+                  "as_expected": true,
                   "emitted": true
                 }
               }
             }
           ],
-          "measured_files": 6,
+          "measured_files": 10,
           "per_target_success": {
             "c-header": 5,
             "llvm-ir": 4,
@@ -1130,8 +1861,31 @@
           "atoms": 25,
           "ffi_boundary_declarations": 0,
           "ffi_extern_blocks": 0,
+          "lean_ai_proof": {
+            "lean_verified_delta": 0,
+            "off": {
+              "files": 1,
+              "lean_solver_time_s": 8.152,
+              "lean_verified_atoms": 2,
+              "manual_lemma_reason_remaining": 0,
+              "status": "MEASURED"
+            },
+            "on": {
+              "ai_proof_attempts": 0,
+              "ai_proof_used_atoms": 0,
+              "file_names": [
+                "modular_commitment.mm"
+              ],
+              "files": 1,
+              "lean_solver_time_s": 6.579,
+              "lean_verified_atoms": 2,
+              "manual_lemma_reason_remaining": 0,
+              "status": "MEASURED"
+            }
+          },
           "lean_escalation_candidates": 2,
-          "lean_verified_atoms": 0,
+          "lean_verified_atoms": 2,
+          "manual_lemma_reason_remaining": 0,
           "status": "MEASURED",
           "trusted_ratio": 0.0
         },
@@ -1327,7 +2081,7 @@
           "status": "MEASURED"
         },
         "proof_success_rate": {
-          "avg_solver_time_s": 0.021,
+          "avg_solver_time_s": 0.067,
           "files": 6,
           "lean_discharge_rate": null,
           "matched_files": 6,
@@ -1336,81 +2090,201 @@
           "success_rate": 1.0
         },
         "repair_convergence": {
-          "files_with_repair_data": 0,
-          "status": "SKIP"
+          "average_repair_attempts": 1.0,
+          "converged_atoms": 3,
+          "convergence_rate": 1.0,
+          "files": [
+            "state_machine/skip_ship_fail.mm",
+            "state_machine/transfer_without_accept_fail.mm",
+            "state_machine/unauthenticated_read_fail.mm"
+          ],
+          "files_with_repair_data": 3,
+          "status": "MEASURED",
+          "total_atoms": 3,
+          "total_token_cost": 4754
         },
         "runtime_artifact_utility": {
           "attempted_emissions": 12,
+          "counterexample": {
+            "as_expected_emissions": 12,
+            "as_expected_rate": 1.0,
+            "attempted_emissions": 12,
+            "files": 3,
+            "leaked_build_artifacts": 0,
+            "refutation_certificates": 3
+          },
           "emission_success_rate": 1.0,
           "files": [
             {
+              "as_expected_targets": 4,
               "emitted_targets": 4,
+              "expected": "PASS",
               "file": "escrow_transfer.mm",
               "targets": {
                 "c-header": {
                   "artifacts": 3,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "llvm-ir": {
                   "artifacts": 3,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "proof-cert": {
                   "artifacts": 1,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "verified-json": {
                   "artifacts": 3,
+                  "as_expected": true,
                   "emitted": true
                 }
               }
             },
             {
+              "as_expected_targets": 4,
               "emitted_targets": 4,
+              "expected": "PASS",
               "file": "order_lifecycle.mm",
               "targets": {
                 "c-header": {
                   "artifacts": 4,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "llvm-ir": {
                   "artifacts": 4,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "proof-cert": {
                   "artifacts": 1,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "verified-json": {
                   "artifacts": 4,
+                  "as_expected": true,
                   "emitted": true
                 }
               }
             },
             {
+              "as_expected_targets": 4,
               "emitted_targets": 4,
+              "expected": "PASS",
               "file": "session_auth.mm",
               "targets": {
                 "c-header": {
                   "artifacts": 4,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "llvm-ir": {
                   "artifacts": 4,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "proof-cert": {
                   "artifacts": 1,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "verified-json": {
                   "artifacts": 4,
+                  "as_expected": true,
                   "emitted": true
+                }
+              }
+            },
+            {
+              "as_expected_targets": 4,
+              "emitted_targets": 1,
+              "expected": "FAIL",
+              "file": "skip_ship_fail.mm",
+              "targets": {
+                "c-header": {
+                  "artifacts": 0,
+                  "as_expected": true,
+                  "emitted": false
+                },
+                "llvm-ir": {
+                  "artifacts": 0,
+                  "as_expected": true,
+                  "emitted": false
+                },
+                "proof-cert": {
+                  "artifacts": 1,
+                  "as_expected": true,
+                  "emitted": true
+                },
+                "verified-json": {
+                  "artifacts": 0,
+                  "as_expected": true,
+                  "emitted": false
+                }
+              }
+            },
+            {
+              "as_expected_targets": 4,
+              "emitted_targets": 1,
+              "expected": "FAIL",
+              "file": "transfer_without_accept_fail.mm",
+              "targets": {
+                "c-header": {
+                  "artifacts": 0,
+                  "as_expected": true,
+                  "emitted": false
+                },
+                "llvm-ir": {
+                  "artifacts": 0,
+                  "as_expected": true,
+                  "emitted": false
+                },
+                "proof-cert": {
+                  "artifacts": 1,
+                  "as_expected": true,
+                  "emitted": true
+                },
+                "verified-json": {
+                  "artifacts": 0,
+                  "as_expected": true,
+                  "emitted": false
+                }
+              }
+            },
+            {
+              "as_expected_targets": 4,
+              "emitted_targets": 1,
+              "expected": "FAIL",
+              "file": "unauthenticated_read_fail.mm",
+              "targets": {
+                "c-header": {
+                  "artifacts": 0,
+                  "as_expected": true,
+                  "emitted": false
+                },
+                "llvm-ir": {
+                  "artifacts": 0,
+                  "as_expected": true,
+                  "emitted": false
+                },
+                "proof-cert": {
+                  "artifacts": 1,
+                  "as_expected": true,
+                  "emitted": true
+                },
+                "verified-json": {
+                  "artifacts": 0,
+                  "as_expected": true,
+                  "emitted": false
                 }
               }
             }
           ],
-          "measured_files": 3,
+          "measured_files": 6,
           "per_target_success": {
             "c-header": 3,
             "llvm-ir": 3,
@@ -1425,8 +2299,23 @@
           "atoms": 14,
           "ffi_boundary_declarations": 0,
           "ffi_extern_blocks": 0,
+          "lean_ai_proof": {
+            "lean_verified_delta": null,
+            "off": {
+              "files": 0,
+              "lean_solver_time_s": null,
+              "lean_verified_atoms": 0,
+              "manual_lemma_reason_remaining": 0,
+              "status": "SKIP"
+            },
+            "on": {
+              "files": 0,
+              "status": "SKIP"
+            }
+          },
           "lean_escalation_candidates": 0,
           "lean_verified_atoms": 0,
+          "manual_lemma_reason_remaining": null,
           "status": "MEASURED",
           "trusted_ratio": 0.0
         },
@@ -1558,7 +2447,7 @@
           "status": "SKIP"
         },
         "proof_success_rate": {
-          "avg_solver_time_s": 0.008,
+          "avg_solver_time_s": 0.072,
           "files": 3,
           "lean_discharge_rate": null,
           "matched_files": 3,
@@ -1572,70 +2461,96 @@
         },
         "runtime_artifact_utility": {
           "attempted_emissions": 12,
+          "counterexample": {
+            "as_expected_emissions": 0,
+            "as_expected_rate": null,
+            "attempted_emissions": 0,
+            "files": 0,
+            "leaked_build_artifacts": 0,
+            "refutation_certificates": 0
+          },
           "emission_success_rate": 1.0,
           "files": [
             {
+              "as_expected_targets": 4,
               "emitted_targets": 4,
+              "expected": "PASS",
               "file": "array_bounds.mm",
               "targets": {
                 "c-header": {
                   "artifacts": 1,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "llvm-ir": {
                   "artifacts": 1,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "proof-cert": {
                   "artifacts": 1,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "verified-json": {
                   "artifacts": 1,
+                  "as_expected": true,
                   "emitted": true
                 }
               }
             },
             {
+              "as_expected_targets": 4,
               "emitted_targets": 4,
+              "expected": "PASS",
               "file": "integer_overflow.mm",
               "targets": {
                 "c-header": {
                   "artifacts": 1,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "llvm-ir": {
                   "artifacts": 1,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "proof-cert": {
                   "artifacts": 1,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "verified-json": {
                   "artifacts": 1,
+                  "as_expected": true,
                   "emitted": true
                 }
               }
             },
             {
+              "as_expected_targets": 4,
               "emitted_targets": 4,
+              "expected": "PASS",
               "file": "loop_invariant.mm",
               "targets": {
                 "c-header": {
                   "artifacts": 1,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "llvm-ir": {
                   "artifacts": 1,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "proof-cert": {
                   "artifacts": 1,
+                  "as_expected": true,
                   "emitted": true
                 },
                 "verified-json": {
                   "artifacts": 1,
+                  "as_expected": true,
                   "emitted": true
                 }
               }
@@ -1656,8 +2571,23 @@
           "atoms": 3,
           "ffi_boundary_declarations": 0,
           "ffi_extern_blocks": 0,
+          "lean_ai_proof": {
+            "lean_verified_delta": null,
+            "off": {
+              "files": 0,
+              "lean_solver_time_s": null,
+              "lean_verified_atoms": 0,
+              "manual_lemma_reason_remaining": 0,
+              "status": "SKIP"
+            },
+            "on": {
+              "files": 0,
+              "status": "SKIP"
+            }
+          },
           "lean_escalation_candidates": 0,
           "lean_verified_atoms": 0,
+          "manual_lemma_reason_remaining": null,
           "status": "MEASURED",
           "trusted_ratio": 0.0
         },
@@ -1735,12 +2665,12 @@
   "schema": "mumei.evaluation_suite/v1",
   "stdlib": {
     "modules": 59,
-    "proven": 344,
-    "total_atoms": 344,
+    "proven": 345,
+    "total_atoms": 345,
     "total_trusted": 0,
     "trusted_ratio": 0.0
   },
-  "timestamp": "2026-08-30 06:27 UTC",
+  "timestamp": "2026-09-13 11:29 UTC",
   "totals": {
     "counterexample_quality": {
       "counterexample_catch_rate": 1.0,
@@ -1757,15 +2687,23 @@
       "success_rate": 1.0
     },
     "repair_convergence": {
-      "average_repair_attempts": null,
-      "converged_atoms": 0,
-      "convergence_rate": null,
-      "status": "SKIP",
-      "total_atoms": 0,
-      "total_token_cost": 0
+      "average_repair_attempts": 1.3333,
+      "converged_atoms": 10,
+      "convergence_rate": 0.4167,
+      "status": "MEASURED",
+      "total_atoms": 24,
+      "total_token_cost": 53078
     },
     "runtime_artifact_utility": {
       "attempted_emissions": 104,
+      "counterexample": {
+        "as_expected_emissions": 80,
+        "as_expected_rate": 1.0,
+        "attempted_emissions": 80,
+        "files": 20,
+        "leaked_build_artifacts": 0,
+        "refutation_certificates": 20
+      },
       "emission_success_rate": 0.9327,
       "status": "MEASURED",
       "successful_emissions": 97
@@ -1774,7 +2712,28 @@
       "application_trusted_atoms": 0,
       "atoms": 105,
       "ffi_boundary_declarations": 0,
+      "lean_ai_proof": {
+        "lean_verified_delta": 0,
+        "off": {
+          "files": 2,
+          "lean_solver_time_s": 16.084,
+          "lean_verified_atoms": 6,
+          "manual_lemma_reason_remaining": 0,
+          "status": "MEASURED"
+        },
+        "on": {
+          "ai_proof_attempts": 0,
+          "ai_proof_used_atoms": 0,
+          "files": 2,
+          "lean_solver_time_s": 14.905,
+          "lean_verified_atoms": 6,
+          "manual_lemma_reason_remaining": 0,
+          "status": "MEASURED"
+        }
+      },
       "lean_escalation_candidates": 6,
+      "lean_verified_atoms": 6,
+      "manual_lemma_reason_remaining": 0,
       "status": "MEASURED"
     },
     "user_burden": {
