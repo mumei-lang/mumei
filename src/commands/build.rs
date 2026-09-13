@@ -67,6 +67,55 @@ fn build_proof_flags(
     flags
 }
 
+/// Artifacts touched by the current `mumei build` invocation.
+///
+/// A source file is accepted or rejected as a whole: an atom rejected after
+/// earlier atoms compiled must not leave their LLVM IR / headers / verified
+/// JSON on disk as if the build had succeeded. Every destination is claimed
+/// *before* it is written, remembering what was there, so aborting can put a
+/// previous build's output back and delete only files this build created.
+#[derive(Default)]
+struct ArtifactJournal {
+    entries: Vec<(std::path::PathBuf, Option<Vec<u8>>)>,
+}
+
+impl ArtifactJournal {
+    /// Record `path` as a destination of this build (snapshotting any prior
+    /// content). Idempotent per path.
+    fn claim(&mut self, path: &Path) {
+        if self.entries.iter().any(|(p, _)| p == path) {
+            return;
+        }
+        self.entries.push((path.to_path_buf(), fs::read(path).ok()));
+    }
+
+    fn write(&mut self, path: &Path, data: &[u8]) -> std::io::Result<()> {
+        self.claim(path);
+        fs::write(path, data)
+    }
+
+    /// Undo everything this build wrote, then exit 1.
+    fn abort(&self) -> ! {
+        for (path, prior) in self.entries.iter().rev() {
+            let result = match prior {
+                Some(bytes) => fs::write(path, bytes),
+                None => match fs::remove_file(path) {
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                    other => other,
+                },
+            };
+            if let Err(e) = result {
+                eprintln!(
+                    "  \u{26a0}\u{fe0f}  Failed to roll back partial artifact '{}': {}",
+                    path.display(),
+                    e
+                );
+            }
+        }
+        std::process::exit(1);
+    }
+}
+
 pub(crate) fn cmd_build(
     input: &str,
     output: &str,
@@ -171,6 +220,7 @@ pub(crate) fn cmd_build(
         std::collections::HashMap::new();
 
     let mut atom_count = 0;
+    let mut artifacts_journal = ArtifactJournal::default();
     // Extern functions are emitted as trusted atoms by the runtime monitor; an
     // atom declared in the file already covers that name, and the same extern
     // block may be reachable more than once.
@@ -258,7 +308,7 @@ pub(crate) fn cmd_build(
                             let resolved = resolve_source_for_span(&source, &impl_def.span);
                             let e = e.with_source(&resolved, &impl_def.span);
                             eprintln!("{:?}", miette::Report::new(e));
-                            std::process::exit(1);
+                            artifacts_journal.abort();
                         }
                     }
                 }
@@ -296,6 +346,9 @@ pub(crate) fn cmd_build(
                         let hir_atom = lower_atom_to_hir_with_env(&atom, Some(&module_env));
                         let atom_output_path =
                             output_dir.join(format!("{}_{}", file_stem, atom.name));
+                        if matches!(emit_target, emitter::EmitTarget::LlvmIr) {
+                            artifacts_journal.claim(&atom_output_path.with_extension("ll"));
+                        }
                         match dispatch_emit(
                             emit_target,
                             external_emitter.as_deref(),
@@ -306,14 +359,17 @@ pub(crate) fn cmd_build(
                         ) {
                             Ok(artifacts) => {
                                 for artifact in &artifacts {
-                                    if let Err(e) = std::fs::write(&artifact.name, &artifact.data) {
+                                    if let Err(e) =
+                                        artifacts_journal.write(&artifact.name, &artifact.data)
+                                    {
                                         eprintln!(
                                             "Failed to write artifact '{}': {}",
                                             artifact.name.display(),
                                             e
                                         );
-                                        std::process::exit(1);
+                                        artifacts_journal.abort();
                                     }
+                                    artifacts_journal.claim(&artifact.name);
                                 }
                                 println!(
                                     "  ⚙️  Tempering: Done. Compiled extern '{}' to {}.",
@@ -325,7 +381,7 @@ pub(crate) fn cmd_build(
                                 let resolved = resolve_source_for_span(&source, &ext_fn.span);
                                 let e = e.with_source(&resolved, &ext_fn.span);
                                 eprintln!("{:?}", miette::Report::new(e));
-                                std::process::exit(1);
+                                artifacts_journal.abort();
                             }
                         }
                     }
@@ -477,7 +533,7 @@ pub(crate) fn cmd_build(
                                         );
                                         continue;
                                     }
-                                    std::process::exit(1);
+                                    artifacts_journal.abort();
                                 }
                             }
                         }
@@ -486,6 +542,9 @@ pub(crate) fn cmd_build(
                     let safe_name = qualified_name.replace("::", "__");
                     let atom_output_path = output_dir.join(format!("{}_{}", file_stem, safe_name));
                     let extern_blocks = collect_extern_blocks(&module_env);
+                    if matches!(emit_target, emitter::EmitTarget::LlvmIr) {
+                        artifacts_journal.claim(&atom_output_path.with_extension("ll"));
+                    }
                     match dispatch_emit(
                         emit_target,
                         external_emitter.as_deref(),
@@ -507,15 +566,18 @@ pub(crate) fn cmd_build(
                                     _ => true,
                                 };
                                 if should_write {
-                                    if let Err(e) = std::fs::write(&artifact.name, &artifact.data) {
+                                    if let Err(e) =
+                                        artifacts_journal.write(&artifact.name, &artifact.data)
+                                    {
                                         eprintln!(
                                             "Failed to write artifact '{}': {}",
                                             artifact.name.display(),
                                             e
                                         );
-                                        std::process::exit(1);
+                                        artifacts_journal.abort();
                                     }
                                 }
+                                artifacts_journal.claim(&artifact.name);
                             }
                             if !matches!(emit_target, emitter::EmitTarget::DecidableMetrics) {
                                 let target_desc = emit_target.label();
@@ -529,7 +591,7 @@ pub(crate) fn cmd_build(
                             let resolved = resolve_source_for_span(&source, &method.span);
                             let e = e.with_source(&resolved, &method.span);
                             eprintln!("{:?}", miette::Report::new(e));
-                            std::process::exit(1);
+                            artifacts_journal.abort();
                         }
                     }
                 }
@@ -662,7 +724,7 @@ pub(crate) fn cmd_build(
                                     );
                                     continue;
                                 }
-                                std::process::exit(1);
+                                artifacts_journal.abort();
                             }
                         }
                     }
@@ -672,6 +734,9 @@ pub(crate) fn cmd_build(
                 // 各 Atom ごとにターゲット形式のファイルを生成
                 let atom_output_path = output_dir.join(format!("{}_{}", file_stem, atom.name));
                 let extern_blocks = collect_extern_blocks(&module_env);
+                if matches!(emit_target, emitter::EmitTarget::LlvmIr) {
+                    artifacts_journal.claim(&atom_output_path.with_extension("ll"));
+                }
                 match dispatch_emit(
                     emit_target,
                     external_emitter.as_deref(),
@@ -690,15 +755,18 @@ pub(crate) fn cmd_build(
                                 _ => true,
                             };
                             if should_write {
-                                if let Err(e) = std::fs::write(&artifact.name, &artifact.data) {
+                                if let Err(e) =
+                                    artifacts_journal.write(&artifact.name, &artifact.data)
+                                {
                                     eprintln!(
                                         "Failed to write artifact '{}': {}",
                                         artifact.name.display(),
                                         e
                                     );
-                                    std::process::exit(1);
+                                    artifacts_journal.abort();
                                 }
                             }
+                            artifacts_journal.claim(&artifact.name);
                         }
                         if !matches!(emit_target, emitter::EmitTarget::DecidableMetrics) {
                             let target_desc = emit_target.label();
@@ -712,7 +780,7 @@ pub(crate) fn cmd_build(
                         let resolved = resolve_source_for_span(&source, &atom.span);
                         let e = e.with_source(&resolved, &atom.span);
                         eprintln!("{:?}", miette::Report::new(e));
-                        std::process::exit(1);
+                        artifacts_journal.abort();
                     }
                 }
             }
@@ -917,12 +985,12 @@ pub(crate) fn cmd_build(
                             violation.kind, violation.message, violation.suggested_fix
                         );
                     }
-                    std::process::exit(1);
+                    artifacts_journal.abort();
                 }
             }
             Err(e) => {
                 eprintln!("  ⚠️  Failed to write cross-spec report: {}", e);
-                std::process::exit(1);
+                artifacts_journal.abort();
             }
         }
     }
