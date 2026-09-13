@@ -210,17 +210,56 @@ pub fn build_proof_graph(
 
 /// Certificate files that may sit next to an atom's source file, in lookup
 /// order: the per-file certificate `mumei verify --proof-cert` writes, then the
-/// module-directory certificates `verify_import_certificate` accepts.
+/// module-directory certificates `verify_import_certificate` accepts. A
+/// package entry file (`<pkg>/src/main.mm`, the layout the dependency
+/// resolver selects first) also gets the package-root certificates that
+/// `mumei publish` writes one directory above `src`.
 fn sibling_certificate_paths(source_file: &Path) -> Vec<PathBuf> {
     let mut paths = vec![
         source_file.with_extension("proof.json"),
         source_file.with_extension("proof-cert.json"),
     ];
+    let mut dirs: Vec<&Path> = Vec::new();
     if let Some(dir) = source_file.parent() {
+        dirs.push(dir);
+        let is_package_entry = source_file.file_name().and_then(|f| f.to_str()) == Some("main.mm")
+            && dir.file_name().and_then(|f| f.to_str()) == Some("src");
+        if is_package_entry {
+            if let Some(pkg_dir) = dir.parent() {
+                dirs.push(pkg_dir);
+            }
+        }
+    }
+    for dir in dirs {
         paths.push(dir.join(".proof-cert.json"));
         paths.push(dir.join("proof_certificate.json"));
     }
     paths
+}
+
+/// Names under which a dependency-graph node may appear in a certificate.
+/// Import registration prefixes nodes with the import alias (`alias::name`,
+/// `alias::Struct::method`), while certificates record `name` for atoms and
+/// `Struct::method` for implementation methods; the alias is stripped one
+/// segment at a time so both shapes are found without guessing which
+/// segments are the alias. The unmodified name comes first.
+fn certificate_name_candidates(name: &str) -> Vec<String> {
+    let mut candidates = vec![name.to_string()];
+    let mut rest = name;
+    while let Some((_, tail)) = rest.split_once("::") {
+        candidates.push(tail.to_string());
+        rest = tail;
+    }
+    candidates
+}
+
+/// What a candidate certificate path turned out to be.
+enum SiblingCertificate {
+    Missing,
+    /// The file exists but does not parse, or its Lean translator metadata
+    /// is not current.
+    Invalid,
+    Valid(Box<proof_cert::ProofCertificate>),
 }
 
 /// Fill in `verification_status` for atoms the current run did not verify
@@ -240,7 +279,7 @@ pub fn backfill_verification_status_from_sibling_certificates(
     cross_spec: &CrossSpecResult,
     verification_status: &mut BTreeMap<String, String>,
 ) -> usize {
-    let mut certificates: BTreeMap<PathBuf, Option<proof_cert::ProofCertificate>> = BTreeMap::new();
+    let mut certificates: BTreeMap<PathBuf, SiblingCertificate> = BTreeMap::new();
     let mut backfilled = 0;
 
     for dependency_node in &cross_spec.dependency_graph {
@@ -255,30 +294,30 @@ pub fn backfill_verification_status_from_sibling_certificates(
             continue;
         }
         let source_file = PathBuf::from(source_file);
-        // An `alias::name` node registered by an import is the same definition
-        // as `name`; certificates record the unqualified name.
-        let certified_atom = match atom.name.rsplit_once("::") {
-            Some((_, unqualified)) if unqualified != atom.name => Atom {
-                name: unqualified.to_string(),
-                ..atom.clone()
-            },
-            _ => atom.clone(),
-        };
+        let name_candidates = certificate_name_candidates(&atom.name);
 
         for cert_path in sibling_certificate_paths(&source_file) {
             let cert = certificates
                 .entry(cert_path.clone())
                 .or_insert_with(|| load_fresh_sibling_certificate(&cert_path));
-            let Some(cert) = cert else {
+            let cert = match cert {
+                SiblingCertificate::Missing => continue,
+                // Same policy as `verify_import_certificate`: a certificate
+                // that exists but cannot be trusted is not papered over by
+                // a lower-priority file.
+                SiblingCertificate::Invalid => break,
+                SiblingCertificate::Valid(cert) => cert,
+            };
+            let Some(certified_name) = name_candidates
+                .iter()
+                .find(|candidate| cert.atoms.iter().any(|entry| &entry.name == *candidate))
+            else {
                 continue;
             };
-            if !cert
-                .atoms
-                .iter()
-                .any(|entry| entry.name == certified_atom.name)
-            {
-                continue;
-            }
+            let certified_atom = Atom {
+                name: certified_name.clone(),
+                ..atom.clone()
+            };
             let results = proof_cert::verify_certificate(cert, &[&certified_atom], true);
             let proven = results
                 .iter()
@@ -296,13 +335,14 @@ pub fn backfill_verification_status_from_sibling_certificates(
     backfilled
 }
 
-/// Load a sibling certificate only if it exists, parses, and carries current
-/// Lean translator metadata; anything else is treated as "no certificate".
-fn load_fresh_sibling_certificate(path: &Path) -> Option<proof_cert::ProofCertificate> {
+fn load_fresh_sibling_certificate(path: &Path) -> SiblingCertificate {
     if !path.is_file() {
-        return None;
+        return SiblingCertificate::Missing;
     }
-    proof_cert::load_certificate(path).ok()
+    match proof_cert::load_certificate(path) {
+        Ok(cert) => SiblingCertificate::Valid(Box::new(cert)),
+        Err(_) => SiblingCertificate::Invalid,
+    }
 }
 
 /// Edges follow `dependency_graph[]`, so the interactive graph and the static
@@ -803,6 +843,93 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(count, 0);
         assert!(statuses.is_empty(), "{statuses:?}");
+    }
+
+    #[test]
+    fn a_corrupt_higher_priority_certificate_stops_the_lookup() {
+        let (dir, source_file, env) = sibling_fixture("mumei-pg-corrupt-first", "x + 1");
+        let cert = sibling_certificate(&source_file, &env, "unsat", "verified");
+        std::fs::write(source_file.with_extension("proof.json"), "{ not json").expect("write");
+        proof_cert::save_certificate(&cert, &source_file.with_extension("proof-cert.json"))
+            .expect("write cert");
+
+        let (count, statuses) = backfilled(&env);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(count, 0);
+        assert!(statuses.is_empty(), "{statuses:?}");
+    }
+
+    #[test]
+    fn a_package_entry_file_finds_the_package_root_certificate() {
+        let (dir, _, _) = sibling_fixture("mumei-pg-pkg-root", "x + 1");
+        let src_dir = dir.join("pkg").join("src");
+        std::fs::create_dir_all(&src_dir).expect("create src");
+        let entry = src_dir.join("main.mm");
+        std::fs::write(&entry, "").expect("write entry");
+        let mut imported = atom("lib_inc", "true", "true", entry.to_str().unwrap());
+        imported.body_expr = "x + 1".to_string();
+        let env = module_env_with(vec![imported]);
+        let cert = sibling_certificate(&entry, &env, "unsat", "verified");
+        proof_cert::save_certificate(&cert, &dir.join("pkg").join("proof_certificate.json"))
+            .expect("write cert");
+
+        let (count, statuses) = backfilled(&env);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(count, 1);
+        assert_eq!(
+            statuses.get("lib_inc").map(String::as_str),
+            Some("verified")
+        );
+    }
+
+    #[test]
+    fn aliased_atoms_and_qualified_methods_match_their_certificate_names() {
+        assert_eq!(
+            certificate_name_candidates("collections::Stack::push"),
+            vec!["collections::Stack::push", "Stack::push", "push"]
+        );
+
+        let (dir, source_file, _) = sibling_fixture("mumei-pg-method", "x + 1");
+        // The certificate names the method `Stack::push` (as `mumei verify`
+        // does); the graph registers it both plain and under an import alias.
+        let mut certified = atom("Stack::push", "true", "true", source_file.to_str().unwrap());
+        certified.body_expr = "x + 1".to_string();
+        let cert_env = module_env_with(vec![certified.clone()]);
+        let atom_refs: Vec<&Atom> = cert_env.atoms.values().collect();
+        let mut results = HashMap::new();
+        results.insert(
+            "Stack::push".to_string(),
+            ("unsat".to_string(), "verified".to_string()),
+        );
+        let cert = proof_cert::generate_certificate(
+            source_file.to_str().unwrap(),
+            &atom_refs,
+            &results,
+            &cert_env,
+            None,
+            None,
+            None,
+        );
+        proof_cert::save_certificate(&cert, &source_file.with_extension("proof.json"))
+            .expect("write cert");
+
+        let mut aliased = certified.clone();
+        aliased.name = "collections::Stack::push".to_string();
+        let env = module_env_with(vec![certified, aliased]);
+        let (count, statuses) = backfilled(&env);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(count, 2, "{statuses:?}");
+        assert_eq!(
+            statuses.get("Stack::push").map(String::as_str),
+            Some("verified")
+        );
+        assert_eq!(
+            statuses.get("collections::Stack::push").map(String::as_str),
+            Some("verified")
+        );
     }
 
     #[test]
