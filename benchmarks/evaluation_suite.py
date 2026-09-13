@@ -255,12 +255,22 @@ def load_self_correction_summaries(cert_dir: Path | None) -> dict[str, dict]:
     Proof certificates carry the summary only when the mumei-agent
     self-correction loop produced the atoms, so a plain local `mumei verify`
     run yields nothing here and the axis degrades to ``SKIP``.
+
+    When the directory carries the repair-run manifest (``run.json`` with
+    ``schema`` ``mumei-agent.repair_convergence_run/v1``) only the certificates
+    it lists are indexed, so leftovers from an earlier run in a reused directory
+    cannot be attributed to the run recorded under ``agent_runs``.
     """
     if cert_dir is None or not cert_dir.is_dir():
+        return {}
+    allowed = _manifest_certificate_files(cert_dir, REPAIR_RUN_MANIFEST_SCHEMA)
+    if allowed is not None and not allowed:
         return {}
     summaries: dict[str, dict] = {}
     ambiguous: set[str] = set()
     for cert_path in sorted(cert_dir.rglob("*.json")):
+        if allowed is not None and cert_path.resolve() not in allowed:
+            continue
         try:
             cert = json.loads(cert_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
@@ -283,6 +293,7 @@ def load_self_correction_summaries(cert_dir: Path | None) -> dict[str, dict]:
 
 
 AGENT_RUN_MANIFEST = "run.json"
+REPAIR_RUN_MANIFEST_SCHEMA = "mumei-agent.repair_convergence_run/v1"
 AGENT_RUN_MANIFEST_KEYS = (
     "schema",
     "llm_model",
@@ -525,10 +536,10 @@ def aggregate_runtime_artifacts(files: list[dict]) -> dict:
 AI_PROOF_RUN_MANIFEST_SCHEMA = "mumei-agent.lean_ai_proof_run/v1"
 
 
-def _ai_proof_manifest_files(cert_dir: Path) -> set[Path] | None:
-    """Certificate paths the AI-proof run manifest vouches for.
+def _manifest_certificate_files(cert_dir: Path, schema: str) -> set[Path] | None:
+    """Certificate paths a mumei-agent run manifest of ``schema`` vouches for.
 
-    ``None`` when there is no (recognised) manifest; an empty set when the
+    ``None`` when there is no manifest of that schema; an empty set when the
     manifest is an AI-*off* run or lists no certificates. Relative certificate
     paths resolve against the manifest's directory.
     """
@@ -539,9 +550,9 @@ def _ai_proof_manifest_files(cert_dir: Path) -> set[Path] | None:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return None
-    if not isinstance(manifest, dict) or manifest.get("schema") != AI_PROOF_RUN_MANIFEST_SCHEMA:
+    if not isinstance(manifest, dict) or manifest.get("schema") != schema:
         return None
-    if manifest.get("ai_proof") != "on":
+    if manifest.get("ai_proof", "on") != "on":
         return set()
     files = manifest.get("files")
     if not isinstance(files, list):
@@ -554,6 +565,10 @@ def _ai_proof_manifest_files(cert_dir: Path) -> set[Path] | None:
         if isinstance(cert, str) and cert:
             allowed.add((cert_dir / cert).resolve())
     return allowed
+
+
+def _ai_proof_manifest_files(cert_dir: Path) -> set[Path] | None:
+    return _manifest_certificate_files(cert_dir, AI_PROOF_RUN_MANIFEST_SCHEMA)
 
 
 def load_ai_proof_certificates(cert_dir: Path | None) -> dict[str, dict]:
@@ -662,8 +677,20 @@ def aggregate_lean_ai_proof(
             d["lean_solver_time_s"] for d in candidates
             if d["lean_solver_time_s"] is not None
         ]
+        unmeasured = sorted(
+            (d["file"], d.get("lean_status", STATUS_SKIP))
+            for d in candidates
+            if d.get("lean_status") != STATUS_MEASURED
+        )
+        if not off_times:
+            off_status = STATUS_SKIP
+        elif unmeasured:
+            off_status = STATUS_INCOMPLETE
+        else:
+            off_status = STATUS_MEASURED
         off = {
-            "status": STATUS_MEASURED if off_times else STATUS_SKIP,
+            "status": off_status,
+            "unmeasured_files": [list(pair) for pair in unmeasured],
             "files": len(candidates),
             "lean_verified_atoms": sum(d["lean_verified_atoms"] for d in candidates),
             "manual_lemma_reason_remaining": _optional_sum(
@@ -679,6 +706,13 @@ def aggregate_lean_ai_proof(
     missing = sorted(
         d["file"] for d in candidates if f"{category}/{d['file']}" not in ai_proof_certs
     )
+    off_hashes = {d["file"]: d.get("atom_content_hashes") for d in candidates}
+    stale = sorted(
+        name
+        for name, cert in matched
+        if off_hashes.get(name) is not None
+        and harness.atom_content_hashes(cert) != off_hashes[name]
+    )
     if not matched:
         on: dict = {"status": STATUS_SKIP, "files": 0}
     else:
@@ -688,9 +722,10 @@ def aggregate_lean_ai_proof(
             if s["lean_solver_time_s"] is not None
         ]
         on = {
-            "status": STATUS_MEASURED if not missing else STATUS_INCOMPLETE,
+            "status": STATUS_INCOMPLETE if missing or stale else STATUS_MEASURED,
             "files": len(matched),
             "missing_files": missing,
+            "stale_files": stale,
             "lean_verified_atoms": sum(s["lean_verified_atoms"] for s in per_file),
             "ai_proof_used_atoms": sum(s["ai_proof_used_atoms"] for s in per_file),
             "ai_proof_attempts": sum(s["ai_proof_attempts"] for s in per_file),
@@ -1095,9 +1130,16 @@ def _fmt_lean_ai_on(block: dict | None) -> str:
         return STATUS_SKIP
     on = block["on"]
     if on["status"] == STATUS_INCOMPLETE:
+        stale = on.get("stale_files", [])
+        stale_note = f", {len(stale)} stale" if stale else ""
         return (
             f"{STATUS_INCOMPLETE} ({on['files']} of "
-            f"{on['files'] + len(on['missing_files'])} candidate files covered, no delta)"
+            f"{on['files'] + len(on['missing_files'])} candidate files covered{stale_note}, no delta)"
+        )
+    if block["off"]["status"] == STATUS_INCOMPLETE:
+        return (
+            f"{_fmt_count(on['lean_verified_atoms'])} lean_verified, no delta "
+            f"(off run {STATUS_INCOMPLETE}: {len(block['off']['unmeasured_files'])} candidate files not MEASURED)"
         )
     delta = block["lean_verified_delta"]
     return (

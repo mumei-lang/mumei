@@ -196,7 +196,7 @@ proof certificates), never a substituted value.
 
 ---
 
-## Evaluation Suite Run — 2026-09-13 14:29 UTC
+## Evaluation Suite Run — 2026-09-13 15:01 UTC
 
 `budget_policy_fingerprint`: `SKIP`. An axis reports `SKIP` when
 its input is absent (no `mumei` binary, or no agent repair data in the

@@ -275,6 +275,7 @@ def _verify_file(
         "lean_verified_atoms": 0,
         "tactic_search_adopted": 0,
         "manual_lemma_reason_remaining": None,
+        "atom_content_hashes": None,
     }
     if result["escalation_candidates"] and lean_bridge is not None:
         lean = _measure_lean_escalation(binary, path)
@@ -283,6 +284,7 @@ def _verify_file(
         result["lean_verified_atoms"] = lean["lean_verified_atoms"]
         result["tactic_search_adopted"] = lean["tactic_search_adopted"]
         result["manual_lemma_reason_remaining"] = lean["manual_lemma_reason_remaining"]
+        result["atom_content_hashes"] = lean["atom_content_hashes"]
     return result
 
 
@@ -335,6 +337,7 @@ def _measure_lean_escalation(binary: str, path: Path) -> dict:
                 "lean_verified_atoms": 0,
                 "tactic_search_adopted": 0,
                 "manual_lemma_reason_remaining": None,
+                "atom_content_hashes": None,
             }
         except FileNotFoundError:
             return {
@@ -343,15 +346,38 @@ def _measure_lean_escalation(binary: str, path: Path) -> dict:
                 "lean_verified_atoms": 0,
                 "tactic_search_adopted": 0,
                 "manual_lemma_reason_remaining": None,
+                "atom_content_hashes": None,
             }
-        remaining = manual_lemma_reason_remaining(_load_json(cert_path))
+        cert = _load_json(cert_path)
+        remaining = manual_lemma_reason_remaining(cert)
     return {
         "lean_solver_time_s": round(elapsed, 3),
         "lean_status": status,
         "lean_verified_atoms": _lean_verified_count(output),
         "tactic_search_adopted": _tactic_search_adopted_count(output),
         "manual_lemma_reason_remaining": remaining,
+        "atom_content_hashes": atom_content_hashes(cert),
     }
+
+
+def atom_content_hashes(cert: dict | None) -> dict[str, str] | None:
+    """``{atom name: content_hash}`` of a proof certificate, or ``None``.
+
+    Two certificates for the same file are only comparable when these agree:
+    the atom set is the escalation denominator and ``content_hash`` binds each
+    atom to the source it was verified against.
+    """
+    if not isinstance(cert, dict) or not isinstance(cert.get("atoms"), list):
+        return None
+    hashes: dict[str, str] = {}
+    for atom in cert["atoms"]:
+        if not isinstance(atom, dict):
+            continue
+        name = atom.get("name")
+        content_hash = atom.get("content_hash")
+        if isinstance(name, str) and isinstance(content_hash, str):
+            hashes[name] = content_hash
+    return hashes
 
 
 def _load_json(path: Path) -> dict | None:
@@ -420,6 +446,7 @@ def run_category_benchmarks(
                 "lean_verified_atoms": 0,
                 "tactic_search_adopted": 0,
                 "manual_lemma_reason_remaining": None,
+                "atom_content_hashes": None,
             }
         results.append({
             "file": mm_file.name,
@@ -439,6 +466,7 @@ def run_category_benchmarks(
             "lean_verified_atoms": verify["lean_verified_atoms"],
             "tactic_search_adopted": verify["tactic_search_adopted"],
             "manual_lemma_reason_remaining": verify.get("manual_lemma_reason_remaining"),
+            "atom_content_hashes": verify.get("atom_content_hashes"),
         })
     total_atoms = sum(r["atoms"] for r in results)
     total_trusted = sum(r["trusted"] for r in results)
