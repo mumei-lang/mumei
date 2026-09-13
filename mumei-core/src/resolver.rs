@@ -53,7 +53,7 @@ pub use dependencies::{
 };
 pub use imports::{
     resolve_imports, resolve_imports_with_full_options, resolve_imports_with_options,
-    resolve_prelude,
+    resolve_prelude, IMPORT_ALIAS_METADATA_KEY,
 };
 pub use metrics::{emit_escalation_bundle, LeanEscalationMetrics};
 #[cfg(test)]

@@ -288,7 +288,7 @@ verification health used by `visualize_std_graph`.
 | `nodes[].trust_boundaries` | `array` | P23 trust boundaries the atom crosses |
 | `nodes[].trust_boundaries[].kind` | `string` | `trusted_atom`, `extern_ffi` or `effect_pre_override` |
 | `nodes[].trust_boundaries[].rationale` | `string` | Why the boundary exists |
-| `nodes[].verification_status` | `string \| null` | Per-atom status from this run, `null` when the atom was not verified here |
+| `nodes[].verification_status` | `string \| null` | Per-atom status from this run; an imported / prelude atom takes `verified` from a fresh sibling proof certificate (matching `content_hash`, current Lean translator metadata), otherwise `null` |
 | `nodes[].health` | `string` | `green` (proven, no boundary), `yellow` (trust boundary), `red` (failed / unverifiable) |
 | `nodes[].session_protocol_violations` | `array[number]` | Indices into the top-level `session_protocol_violations[]` |
 | `edges` | `array` | One entry per `dependency_graph[].dependencies` pair |
