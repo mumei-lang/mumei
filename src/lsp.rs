@@ -16,7 +16,7 @@ use crate::agent;
 use mumei_core::parser;
 use mumei_core::proof_cert;
 use mumei_core::verification;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -298,9 +298,11 @@ fn diagnose(uri: &str, source: &str) -> Vec<serde_json::Value> {
     // Phase 2: Z3 検証 diagnostics（file:// URI の場合のみ実行）
     if let Some(path) = path.as_deref() {
         let mut live_pending_atom: Option<String> = None;
-        let live_result = verify_source_for_lsp(path, source);
-        let live_verified_all = live_result.is_ok();
-        if let Err(failure) = live_result {
+        let LspLiveVerification {
+            settled: live_settled,
+            failure: live_failure,
+        } = verify_source_for_lsp(path, source);
+        if let Some(failure) = live_failure {
             let LspVerifyFailure {
                 error: e,
                 atom: failed_atom,
@@ -407,7 +409,7 @@ fn diagnose(uri: &str, source: &str) -> Vec<serde_json::Value> {
             source,
             &items,
             live_pending_atom.as_deref(),
-            live_verified_all,
+            &live_settled,
             &mut diagnostics,
         );
     }
@@ -883,6 +885,22 @@ struct LspVerifyFailure {
     escalation: Option<verification::LeanEscalationClassification>,
 }
 
+/// Outcome of the in-process verification pass over a buffer.
+struct LspLiveVerification {
+    /// Atoms Z3 proved in this run whose classification does not route them
+    /// to mumei-lean: nothing about them is pending, whatever a sibling
+    /// certificate recorded. An atom Z3 proved but that still escalates
+    /// (outside the decidable fragment, `trusted`) is deliberately absent.
+    settled: BTreeSet<String>,
+    /// The first failing atom, if any; verification stops there.
+    failure: Option<LspVerifyFailure>,
+}
+
+fn settled_without_lean(atom: &parser::Atom, module_env: &verification::ModuleEnv) -> bool {
+    !verification::classify_atom_for_lean_escalation(atom, module_env, "unsat", "verified")
+        .should_escalate
+}
+
 fn classify_lsp_failure(
     atom: &parser::Atom,
     module_env: &verification::ModuleEnv,
@@ -913,10 +931,14 @@ fn classify_lsp_failure(
 
 /// ソースコードを in-process でパース → Z3 検証し、最初のエラーを返す。
 /// mumei.toml を上方探索してプロジェクトルートを決定し、依存パッケージも解決する。
-fn verify_source_for_lsp(path: &std::path::Path, source: &str) -> Result<(), LspVerifyFailure> {
+fn verify_source_for_lsp(path: &std::path::Path, source: &str) -> LspLiveVerification {
+    let mut live = LspLiveVerification {
+        settled: BTreeSet::new(),
+        failure: None,
+    };
     let items = parser::parse_module(source);
     if items.is_empty() {
-        return Ok(());
+        return live;
     }
 
     let mut module_env = verification::ModuleEnv::new();
@@ -972,9 +994,13 @@ fn verify_source_for_lsp(path: &std::path::Path, source: &str) -> Result<(), Lsp
                 if let Err(e) =
                     verification::verify_with_config(&hir_atom, output_dir, &module_env, 5000, 3)
                 {
-                    return Err(classify_lsp_failure(atom, &module_env, e));
+                    live.failure = Some(classify_lsp_failure(atom, &module_env, e));
+                    return live;
                 }
                 module_env.mark_verified(&atom.name);
+                if settled_without_lean(atom, &module_env) {
+                    live.settled.insert(atom.name.clone());
+                }
             }
             parser::Item::ImplBlock(ib) => {
                 for method in &ib.methods {
@@ -992,16 +1018,21 @@ fn verify_source_for_lsp(path: &std::path::Path, source: &str) -> Result<(), Lsp
                         5000,
                         3,
                     ) {
-                        return Err(classify_lsp_failure(&qualified_method, &module_env, e));
+                        live.failure =
+                            Some(classify_lsp_failure(&qualified_method, &module_env, e));
+                        return live;
                     }
                     module_env.mark_verified(&qualified_name);
+                    if settled_without_lean(&qualified_method, &module_env) {
+                        live.settled.insert(qualified_name);
+                    }
                 }
             }
             _ => {}
         }
     }
 
-    Ok(())
+    live
 }
 
 /// Feature 3f: Extract related diagnostic information from MumeiError for LSP relatedInformation.
@@ -1329,15 +1360,17 @@ fn is_item_start(line: &str) -> bool {
 /// verification above stops at the first failing atom, so without the
 /// certificate the editor would show at most one pending escalation per file.
 /// `live_pending_atom` is the atom that failure already reported, which is
-/// skipped here so it is not shown twice. When the in-process run verified
-/// the whole buffer (`live_verified_all`), nothing is pending any more and
-/// only the `lean_verified` entries are reported.
+/// skipped here so it is not shown twice. `live_settled` are the atoms the
+/// in-process run proved *and* classified as not needing mumei-lean; their
+/// certificate entries are stale and skipped. A live `unsat` alone is not
+/// enough: an atom outside the decidable fragment or marked `trusted` still
+/// escalates after Z3 proves it, so its pending entry stays visible.
 fn append_certificate_lean_escalation_diagnostics(
     path: &Path,
     source: &str,
     items: &[parser::Item],
     live_pending_atom: Option<&str>,
-    live_verified_all: bool,
+    live_settled: &BTreeSet<String>,
     diagnostics: &mut Vec<serde_json::Value>,
 ) {
     let cert_path = path.with_extension("proof.json");
@@ -1385,7 +1418,9 @@ fn append_certificate_lean_escalation_diagnostics(
             let Some(reason) = atom_cert.escalation_reason.as_ref() else {
                 continue;
             };
-            if live_verified_all || live_pending_atom == Some(atom_cert.name.as_str()) {
+            if live_settled.contains(&atom_cert.name)
+                || live_pending_atom == Some(atom_cert.name.as_str())
+            {
                 continue;
             }
             let reason = reason.as_str();

@@ -307,3 +307,68 @@ fn lsp_reports_every_pending_escalation_recorded_in_the_sibling_certificate() {
         "a certificate entry whose content_hash no longer matches must not be reported: {diagnostics:#?}"
     );
 }
+
+#[test]
+fn live_z3_proof_does_not_hide_a_pending_escalation_that_still_requires_lean() {
+    let dir = unique_temp_dir("mumei-lsp-lean-pending-after-unsat");
+    // `square` is proven by Z3 but lies outside the decidable fragment, so the
+    // escalation policy still routes it to mumei-lean; `linear` does not.
+    let source = concat!(
+        "atom square(x: i64) -> i64\n  requires: x >= 0 && x < 1000;\n  ensures: result == x * x;\n  body: x * x;\n\n",
+        "atom linear(x: i64) -> i64\n  requires: x >= 0;\n  ensures: result == x + 1;\n  body: x + 1;\n",
+    );
+    let source_path = dir.join("pending_after_unsat.mm");
+    let cert_path = dir.join("pending_after_unsat.proof.json");
+    std::fs::write(&source_path, source).expect("write source");
+
+    let generated = Command::new(env!("CARGO_BIN_EXE_mumei"))
+        .arg("verify")
+        .arg("--proof-cert")
+        .arg("--output")
+        .arg(&cert_path)
+        .arg(&source_path)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("run mumei verify --proof-cert");
+    assert!(
+        cert_path.exists(),
+        "certificate was not written (status {:?}):\n{}",
+        generated.status.code(),
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let raw = std::fs::read_to_string(&cert_path).expect("read certificate");
+    let cert: Value = serde_json::from_str(&raw).expect("parse certificate");
+    let square = cert["atoms"]
+        .as_array()
+        .expect("atoms")
+        .iter()
+        .find(|a| a["name"].as_str() == Some("square"))
+        .expect("square entry");
+    assert_eq!(
+        square["z3_check_result"].as_str(),
+        Some("unsat"),
+        "fixture must be proven by Z3: {cert:#}"
+    );
+    assert!(
+        square
+            .get("escalation_reason")
+            .and_then(Value::as_str)
+            .is_some(),
+        "fixture must still carry an escalation reason: {cert:#}"
+    );
+
+    let diagnostics = did_open_diagnostics(&source_path, source);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let pending: Vec<&str> = diagnostics
+        .iter()
+        .filter_map(lean_escalation)
+        .filter(|e| e.get("status").and_then(Value::as_str) == Some("pending"))
+        .filter_map(|e| e.get("atom").and_then(Value::as_str))
+        .collect();
+    assert_eq!(
+        pending,
+        vec!["square"],
+        "a live Z3 proof must not suppress an escalation the policy still requires: {diagnostics:#?}"
+    );
+}
