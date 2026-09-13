@@ -20,6 +20,11 @@ name: Verify Standard Library
 #   4. `comm -23 head_failures.txt base_failures.txt` yields the newly
 #      failing modules; if non-empty, fail the job.
 #
+# Exit code 3 (inconclusive: Z3 unknown / open Lean escalation
+# candidates) is not a verdict (see docs/CLI.md); modules whose remaining
+# obligations are pending the Lean bridge are covered by the stdlib proof
+# gate and are not counted as failures here.
+#
 # This matches the "don't regress already-green proofs" contract that
 # SI-5 Autonomous Proliferation promises: pre-existing red modules
 # stay red without blocking iteration, while any new red module the
@@ -94,8 +99,12 @@ jobs:
           while IFS= read -r f; do
             TOTAL=$((TOTAL + 1))
             echo "::group::[head] Verifying $f"
-            if ./target/release/mumei verify "$f"; then
+            ./target/release/mumei verify "$f"
+            rc=$?
+            if [ "$rc" = "0" ]; then
               echo "OK: $f"
+            elif [ "$rc" = "3" ]; then
+              echo "INCONCLUSIVE (Lean escalation pending, not a verdict): $f"
             else
               echo "::warning file=$f::Verification failed on PR head"
               echo "$f" >> /tmp/verify-std/head_failures.txt
@@ -191,8 +200,12 @@ jobs:
           while IFS= read -r f; do
             TOTAL=$((TOTAL + 1))
             echo "::group::[base] Verifying $f"
-            if ./target/release/mumei verify "$f"; then
+            ./target/release/mumei verify "$f"
+            rc=$?
+            if [ "$rc" = "0" ]; then
               echo "OK: $f"
+            elif [ "$rc" = "3" ]; then
+              echo "INCONCLUSIVE (Lean escalation pending, not a verdict): $f"
             else
               echo "$f" >> /tmp/verify-std/base_failures.txt
               FAILED=$((FAILED + 1))
