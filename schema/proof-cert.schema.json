@@ -9,7 +9,7 @@
   "properties": {
     "version": {
       "type": "string",
-      "description": "Certificate format version."
+      "description": "Certificate format version. \"1.0\": atom content_hash is the legacy SHA-256 over name/requires/ensures/body. \"1.1\": atom content_hash is content-hash v2 (name, type params and bounds, params, return type, requires, forall constraints, ensures, invariant, body, consumed params, resources, async, trust level, max_unroll, effects, effect pre/post, spec_metadata). Any other value is unsupported: mumei reports every atom as changed and trusts nothing."
     },
     "timestamp": {
       "type": "string",
@@ -81,7 +81,7 @@
         "z3_check_result": { "$ref": "#/$defs/z3CheckResult" },
         "content_hash": {
           "type": "string",
-          "description": "SHA-256 of the atom's source text (name + requires + ensures + body)."
+          "description": "SHA-256 over the atom's proof-relevant source. Algorithm is selected by the top-level `version`: 1.0 = name + requires + ensures + body; 1.1 = full signature and spec metadata (content-hash v2). Opaque to consumers other than mumei; compare only for equality."
         },
         "status": { "$ref": "#/$defs/verificationStatus" },
         "spec_validation_result": {

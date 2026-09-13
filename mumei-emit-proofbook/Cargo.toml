@@ -8,4 +8,3 @@ repository = "https://github.com/mumei-lang/mumei"
 
 [dependencies]
 mumei-core = { path = "../mumei-core" }
-sha2 = "0.10"
