@@ -299,7 +299,7 @@ pub(crate) fn load_cross_spec_files(
     module_env: &mut verification::ModuleEnv,
     imports: &mut Vec<ImportDecl>,
     verbose: bool,
-) {
+) -> Result<(), String> {
     for file in cross_spec_files {
         if verbose {
             println!(
@@ -308,11 +308,12 @@ pub(crate) fn load_cross_spec_files(
             );
         }
         let (mut extra_items, extra_env, mut extra_imports, _source) =
-            load_and_prepare_with_full_options(file, strict_imports, allow_lean_verified);
+            try_load_and_prepare_with_full_options(file, strict_imports, allow_lean_verified)?;
         items.append(&mut extra_items);
         imports.append(&mut extra_imports);
         merge_module_env(module_env, extra_env);
     }
+    Ok(())
 }
 
 pub(crate) fn merge_module_env(

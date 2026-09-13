@@ -10,8 +10,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const EXIT_VERIFIED: i32 = 0;
 const EXIT_REJECTED: i32 = 1;
+const EXIT_USAGE_ERROR: i32 = 2;
 const EXIT_INCONCLUSIVE: i32 = 3;
 const EXIT_INPUT_ERROR: i32 = 4;
+const EXIT_INTERNAL_ERROR: i32 = 5;
 
 const VERIFIED_SRC: &str = r#"
 atom inc(x: Int) -> Int {
@@ -151,4 +153,95 @@ fn directory_run_reports_the_most_severe_outcome() {
     write(&rejected, "bad.mm", REJECTED_SRC);
     write(&rejected, "unknown.mm", UNKNOWN_SRC);
     assert_exit(&verify(&dir, &["rejected"]), EXIT_REJECTED);
+}
+
+#[test]
+fn unsupported_emit_targets_are_usage_errors_not_verdicts() {
+    let dir = temp_dir("bad_emit");
+    write(&dir, "ok.mm", VERIFIED_SRC);
+    assert_exit(
+        &verify(&dir, &["--emit", "not-a-target", "ok.mm"]),
+        EXIT_USAGE_ERROR,
+    );
+    assert_exit(
+        &verify(&dir, &["--no-emit", "not-a-target", "ok.mm"]),
+        EXIT_USAGE_ERROR,
+    );
+}
+
+#[test]
+fn unreadable_cross_spec_file_is_an_input_error() {
+    let dir = temp_dir("cross_spec_missing");
+    write(&dir, "ok.mm", VERIFIED_SRC);
+    assert_exit(
+        &verify(&dir, &["--cross-spec-files", "does_not_exist.mm", "ok.mm"]),
+        EXIT_INPUT_ERROR,
+    );
+}
+
+/// A stub `mumei-lean` bridge that echoes the bundle back unchanged, i.e.
+/// discharges nothing. Mirrors the shape used in test_escalation_bundle_emit.
+fn write_noop_bridge(dir: &Path) -> PathBuf {
+    let bridge_repo = dir.join("mumei-lean");
+    let scripts = bridge_repo.join("scripts");
+    std::fs::create_dir_all(&scripts).expect("create stub bridge dir");
+    std::fs::write(
+        scripts.join("bridge.py"),
+        r#"
+import argparse, json
+from pathlib import Path
+p = argparse.ArgumentParser()
+p.add_argument("--escalation-bundle", required=True)
+p.add_argument("--lean-cert-out", required=True)
+p.add_argument("--out-dir")
+a = p.parse_args()
+payload = json.loads(Path(a.escalation_bundle).read_text())
+payload["lean_cert_schema_version"] = "1.0-lean"
+Path(a.lean_cert_out).write_text(json.dumps(payload))
+"#,
+    )
+    .expect("write stub bridge");
+    bridge_repo
+}
+
+#[test]
+fn undischarged_lean_escalation_candidate_is_inconclusive() {
+    let dir = temp_dir("open_escalation");
+    let bridge_repo = write_noop_bridge(&dir);
+    write(&dir, "unknown.mm", UNKNOWN_SRC);
+    let output = Command::new(env!("CARGO_BIN_EXE_mumei"))
+        .arg("verify")
+        .arg("--solver-timeout")
+        .arg("50")
+        .arg("--escalate-lean")
+        .arg("--proof-cert")
+        .arg("--output")
+        .arg("unknown.proof.json")
+        .arg("unknown.mm")
+        .env("MUMEI_LEAN_PATH", &bridge_repo)
+        .current_dir(&dir)
+        .output()
+        .expect("run mumei verify --escalate-lean");
+    assert_exit(&output, EXIT_INCONCLUSIVE);
+    let combined = combined_output(&output);
+    assert!(
+        combined.contains("still open"),
+        "summary should say the Lean candidate is still open:\n{combined}"
+    );
+}
+
+#[test]
+fn artifact_write_failure_is_an_internal_error() {
+    let dir = temp_dir("artifact_failure");
+    write(&dir, "ok.mm", VERIFIED_SRC);
+    // `--output` points at a path whose parent is a regular file, so the
+    // certificate cannot be written even though the program verified.
+    write(&dir, "blocker", "");
+    assert_exit(
+        &verify(
+            &dir,
+            &["--proof-cert", "--output", "blocker/cert.json", "ok.mm"],
+        ),
+        EXIT_INTERNAL_ERROR,
+    );
 }

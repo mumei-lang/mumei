@@ -26,6 +26,9 @@ static LINKED_Z3_WARNING: Once = Once::new();
 /// without parsing the summary text.
 pub(crate) const EXIT_VERIFIED: i32 = 0;
 pub(crate) const EXIT_REJECTED: i32 = 1;
+/// Same code clap uses for argument errors; `--emit` / `--no-emit` take free
+/// strings and are validated here, so a bad value must not look like a verdict.
+pub(crate) const EXIT_USAGE_ERROR: i32 = 2;
 pub(crate) const EXIT_INCONCLUSIVE: i32 = 3;
 pub(crate) const EXIT_INPUT_ERROR: i32 = 4;
 pub(crate) const EXIT_INTERNAL_ERROR: i32 = 5;
@@ -71,17 +74,21 @@ impl VerifyOutcome {
     /// `failed` counts every atom reported as failed in the summary;
     /// `solver_inconclusive` is the subset of those whose Z3 result was
     /// `unknown` / `timeout` / `resource_limit` rather than a counterexample.
+    /// `open_escalations` counts Lean escalation candidates Z3 left `unknown`
+    /// that the bridge did not discharge as `lean_verified`; an open
+    /// obligation is not a verdict either way.
     fn from_counts(
         failed: usize,
         solver_inconclusive: usize,
         unverifiable: usize,
+        open_escalations: usize,
         infra_errors: usize,
     ) -> Self {
         if infra_errors > 0 {
             Self::InternalError
         } else if failed > solver_inconclusive {
             Self::Rejected
-        } else if failed > 0 || unverifiable > 0 {
+        } else if failed > 0 || unverifiable > 0 || open_escalations > 0 {
             Self::Inconclusive
         } else {
             Self::Verified
@@ -159,7 +166,7 @@ pub(crate) fn cmd_verify_command(command: Command) {
             "Unsupported verify --no-emit target '{}'. Supported values: escalation-metrics",
             other
         );
-        std::process::exit(1);
+        std::process::exit(EXIT_USAGE_ERROR);
     }
     let emit_escalation_bundle = matches!(emit.as_deref(), Some("escalation-bundle"));
     let emit_escalation_metrics =
@@ -184,7 +191,7 @@ pub(crate) fn cmd_verify_command(command: Command) {
                     "Unsupported verify --emit target '{}'. Supported values: escalation-bundle, escalation-metrics, decidable-metrics, reconstruction-loss, loss-vector, structured-feedback, human-review-queue, proof-graph",
                     other
                 );
-            std::process::exit(1);
+            std::process::exit(EXIT_USAGE_ERROR);
         }
     }
     let harness_contract = resolve_harness_contract(harness_contract);
@@ -1198,7 +1205,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
                 return VerifyOutcome::InputError;
             }
         };
-    load_cross_spec_files(
+    if let Err(e) = load_cross_spec_files(
         cross_spec_files,
         strict_imports,
         allow_lean_verified,
@@ -1206,7 +1213,10 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
         &mut module_env,
         &mut imports,
         !quiet_output,
-    );
+    ) {
+        eprintln!("  ❌ {e}");
+        return VerifyOutcome::InputError;
+    }
 
     let output_dir = match report_dir {
         Some(dir) => Path::new(dir),
@@ -1629,6 +1639,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
                         if !quiet_output {
                             eprintln!("  ⚠️  Failed to write escalation bundle: {}", e);
                         }
+                        infra_errors += 1;
                     }
                 }
             }
@@ -1691,6 +1702,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
                         if !quiet_output {
                             eprintln!("  ⚠️  Failed to write escalation metrics: {}", e);
                         }
+                        infra_errors += 1;
                     }
                 }
             }
@@ -1710,6 +1722,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
                     if !quiet_output {
                         eprintln!("  ⚠️  Failed to write proof certificate: {}", e);
                     }
+                    infra_errors += 1;
                 }
             }
         }
@@ -1730,6 +1743,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
                     if !quiet_output {
                         eprintln!("  ⚠️  Failed to write human review queue: {}", e);
                     }
+                    infra_errors += 1;
                 }
             }
         }
@@ -1824,8 +1838,24 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
     }
 
     // Proposal B: --json outputs report.json content to stdout
-    let outcome =
-        VerifyOutcome::from_counts(failed, solver_inconclusive, unverifiable, infra_errors);
+    // Candidates promoted from a Z3 `unsat` (outside the decidable fragment,
+    // or a contract-trusted import) already carry a verdict; only candidates
+    // Z3 left `unknown` and Lean did not discharge are still open.
+    let open_escalations = cert_results
+        .iter()
+        .filter(|(name, (z3_result, status))| {
+            matches!(status.as_str(), "escalation_candidate" | "unknown")
+                && is_solver_inconclusive(z3_result)
+                && !lean_verified_atoms.iter().any(|a| a == *name)
+        })
+        .count();
+    let outcome = VerifyOutcome::from_counts(
+        failed,
+        solver_inconclusive,
+        unverifiable,
+        open_escalations,
+        infra_errors,
+    );
     if json_output {
         let report_path = output_dir.join("report.json");
         // When the module contains a mix of passing and failing/unverifiable atoms,
@@ -1920,6 +1950,11 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
             eprintln!(
                 "⚠️  Verification: {} passed, {} unverifiable, {} skipped (cached), {} Lean escalation candidate(s)",
                 verified, unverifiable, skipped, escalated
+            );
+        } else if open_escalations > 0 {
+            eprintln!(
+                "⚠️  Verification inconclusive: {} passed, {} skipped (cached), {} of {} Lean escalation candidate(s) still open (exit {})",
+                verified, skipped, open_escalations, escalated, EXIT_INCONCLUSIVE
             );
         } else if skipped > 0 {
             println!(
