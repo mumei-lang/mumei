@@ -1402,14 +1402,14 @@ fn append_certificate_lean_escalation_diagnostics(
             continue;
         };
         // The certificate describes the source at generation time; an entry
-        // whose atom has since been edited says nothing about the buffer.
-        let current_hash = proof_cert::compute_atom_content_hash(
-            name,
-            &atom.requires,
-            &atom.ensures,
-            &atom.body_expr,
-        );
-        if current_hash != atom_cert.content_hash {
+        // whose atom has since been edited says nothing about the buffer. The
+        // hash is computed the way the certifying run did: for the
+        // certificate's own version, over the qualified atom.
+        let mut qualified = (*atom).clone();
+        qualified.name = name.clone();
+        let current_hash =
+            proof_cert::compute_atom_content_hash_for_version(&cert.version, &qualified);
+        if current_hash.as_deref() != Some(atom_cert.content_hash.as_str()) {
             continue;
         }
         // Same membership rule as the escalation bundle: an atom is pending
