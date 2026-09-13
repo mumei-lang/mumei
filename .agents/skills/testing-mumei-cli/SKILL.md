@@ -641,11 +641,12 @@ Machine-readable surfacing:
 
 ### Exit-code/JSON contract testing
 
-- Check the branch's `docs/CLI.md` and `VerifyOutcome` before assuming every
-  nonzero code means rejection. On branches with the R-1 exit-code contract,
-  `verify` uses 0 verified, 1 rejected, 2 usage, 3 inconclusive/unverifiable,
-  4 input error, 5 internal error. Older examples in this skill that expect 1
-  for `unverifiable` apply to the pre-R-1 behavior.
+- `verify` exits 0 verified, 1 rejected, 2 usage, 3 inconclusive/unverifiable,
+  4 input error, 5 internal error (`VerifyOutcome` in `src/commands/verify.rs`,
+  table in `docs/CLI.md`; `benchmarks/run_benchmarks.py::classify_exit_code`
+  derives verdicts from the exit code alone). Do not assume every nonzero code
+  means rejection. Older examples in this skill that expect 1 for
+  `unverifiable` predate this contract.
 - Parse the **entire stdout** with `json.loads`, and compare its `exit_code`
   against the actual process return code. Do not extract the first JSON-looking
   substring: combinations such as `--json --emit loss-vector` or
