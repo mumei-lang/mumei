@@ -323,3 +323,326 @@ fn proof_graph_is_not_emitted_without_the_emit_target() {
         "proof_graph.json must stay opt-in"
     );
 }
+
+// ---- R-3 / R-4: sibling-certificate backfill through `--escalate-lean` ----
+
+/// A library atom Z3 cannot decide (nonlinear), so it only becomes `verified`
+/// through the Lean bridge.
+const NONLINEAR_LIB: &str = r#"
+atom fermat3(x: i64, y: i64, z: i64) -> i64
+requires: x > 0 && y > 0 && z > 0;
+ensures: x * x * x + y * y * y != z * z * z;
+body: { 0 };
+"#;
+
+const CONSUMER: &str = r#"
+import "lib" as lib;
+
+atom consumer(x: i64) -> i64
+requires: x > 0;
+ensures: true;
+body: { lib::fermat3(x, x, x) };
+"#;
+
+/// Deterministic stand-in for `mumei-lean/scripts/bridge.py`: it answers with
+/// the `1.0-lean` certificate schema the real bridge writes, marking every
+/// candidate `lean_verified` and echoing the translator metadata the bundle
+/// carried. `translator_version` / `bridge_lemma_hash` can be overridden to
+/// simulate a certificate written by an older toolchain.
+fn write_stub_bridge(repo: &std::path::Path, translator_override: Option<(&str, &str)>) {
+    let scripts = repo.join("scripts");
+    std::fs::create_dir_all(&scripts).expect("create stub bridge dir");
+    let (translator, bridge_hash) = translator_override
+        .map(|(t, h)| (format!("{t:?}"), format!("{h:?}")))
+        .unwrap_or_else(|| {
+            (
+                "c.get(\"translator_version\", \"\")".to_string(),
+                "c.get(\"bridge_lemma_hash\", \"\")".to_string(),
+            )
+        });
+    std::fs::write(
+        scripts.join("bridge.py"),
+        format!(
+            r#"
+import argparse, json
+from pathlib import Path
+p = argparse.ArgumentParser()
+p.add_argument("--escalation-bundle", required=True)
+p.add_argument("--lean-cert-out", required=True)
+p.add_argument("--out-dir")
+a = p.parse_args()
+payload = json.loads(Path(a.escalation_bundle).read_text())
+for c in payload.get("candidates", []):
+    c["z3_check_result"] = "lean_verified"
+    c["status"] = "verified"
+    c["translator_version"] = {translator}
+    c["bridge_lemma_hash"] = {bridge_hash}
+    c["lean_metadata"] = {{
+        "status": "lean_verified",
+        "theorem_name": c["name"] + "_correct",
+        "translator_version": {translator},
+        "bridge_lemma_hash": {bridge_hash},
+        "proof_path": "generated/Generated/Lib.lean",
+        "diagnostics": [],
+    }}
+payload["lean_cert_schema_version"] = "1.0-lean"
+Path(a.lean_cert_out).parent.mkdir(parents=True, exist_ok=True)
+Path(a.lean_cert_out).write_text(json.dumps(payload))
+"#
+        ),
+    )
+    .expect("write stub bridge");
+}
+
+struct EscalationProject {
+    dir: PathBuf,
+    bridge_repo: PathBuf,
+}
+
+fn escalation_project(tag: &str) -> EscalationProject {
+    let dir = report_dir(tag);
+    std::fs::create_dir_all(&dir).expect("create project dir");
+    std::fs::write(dir.join("lib.mm"), NONLINEAR_LIB).expect("write lib.mm");
+    std::fs::write(dir.join("main.mm"), CONSUMER).expect("write main.mm");
+    let bridge_repo = dir.join("mumei-lean");
+    EscalationProject { dir, bridge_repo }
+}
+
+impl EscalationProject {
+    /// `mumei verify --escalate-lean --proof-cert` on the library, writing the
+    /// sibling certificate `lib.proof.json` next to `lib.mm`.
+    fn certify_lib(&self) -> String {
+        let output = Command::new(env!("CARGO_BIN_EXE_mumei"))
+            .arg("verify")
+            .arg("--solver-timeout")
+            .arg("50")
+            .arg("--escalate-lean")
+            .arg("--proof-cert")
+            .arg("--output")
+            .arg(self.dir.join("lib.proof.json"))
+            .arg("lib.mm")
+            .env("MUMEI_LEAN_PATH", &self.bridge_repo)
+            .current_dir(&self.dir)
+            .output()
+            .expect("run mumei verify --escalate-lean");
+        let log = format!(
+            "stdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            output.status.success(),
+            "library certification failed\n{log}"
+        );
+        log
+    }
+
+    /// `mumei verify --emit proof-graph` on the consumer; returns the graph.
+    fn consumer_graph(&self) -> (Value, String) {
+        self.consumer_graph_with(&["--allow-lean-verified"])
+    }
+
+    fn consumer_graph_with(&self, extra_args: &[&str]) -> (Value, String) {
+        let report = self.dir.join("report");
+        let output = Command::new(env!("CARGO_BIN_EXE_mumei"))
+            .arg("verify")
+            .args(extra_args)
+            .arg("--solver-timeout")
+            .arg("50")
+            .arg("--report-dir")
+            .arg(&report)
+            .arg("--emit")
+            .arg("proof-graph")
+            .arg("main.mm")
+            .current_dir(&self.dir)
+            .output()
+            .expect("run mumei verify --emit proof-graph");
+        let log = format!(
+            "stdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let graph = std::fs::read_to_string(report.join("proof_graph.json"))
+            .unwrap_or_else(|err| panic!("read proof_graph.json: {err}\n{log}"));
+        (
+            serde_json::from_str(&graph).expect("valid proof_graph.json"),
+            log,
+        )
+    }
+
+    fn lib_cert(&self) -> Value {
+        serde_json::from_str(
+            &std::fs::read_to_string(self.dir.join("lib.proof.json")).expect("read lib cert"),
+        )
+        .expect("parse lib cert")
+    }
+}
+
+#[test]
+fn a_fresh_lean_verified_sibling_certificate_backfills_imported_atoms() {
+    let project = escalation_project("escalate_lean_fresh");
+    write_stub_bridge(&project.bridge_repo, None);
+    let cert_log = project.certify_lib();
+    assert!(
+        cert_log.contains("lean_verified: fermat3"),
+        "the bridge must promote the nonlinear atom\n{cert_log}"
+    );
+    let cert = project.lib_cert();
+    assert_eq!(cert["atoms"][0]["z3_check_result"], "lean_verified");
+
+    // Without the Lean opt-in the consumer's proof graph leaves the
+    // lean_verified import null: the same policy `verify_import_certificate`
+    // applies to trusting the import.
+    let (graph, log) = project.consumer_graph_with(&[]);
+    assert!(
+        !log.contains("took verification_status from a fresh sibling certificate"),
+        "{log}"
+    );
+    assert_eq!(node(&graph, "fermat3")["verification_status"], Value::Null);
+    assert_eq!(
+        node(&graph, "lib::fermat3")["verification_status"],
+        Value::Null
+    );
+
+    let (graph, log) = project.consumer_graph();
+    assert!(
+        log.contains("took verification_status from a fresh sibling certificate"),
+        "{log}"
+    );
+    assert_eq!(node(&graph, "consumer")["verification_status"], "verified");
+    assert_eq!(node(&graph, "fermat3")["verification_status"], "verified");
+    assert_eq!(
+        node(&graph, "lib::fermat3")["verification_status"],
+        "verified",
+        "the import alias is the same definition"
+    );
+    assert_eq!(node(&graph, "fermat3")["health"], "green");
+
+    std::fs::remove_dir_all(&project.dir).expect("remove project dir");
+}
+
+#[test]
+fn an_edited_library_atom_leaves_the_imported_status_null() {
+    let project = escalation_project("escalate_lean_stale_hash");
+    write_stub_bridge(&project.bridge_repo, None);
+    project.certify_lib();
+
+    // The library moved on after the certificate was written: the
+    // `content_hash` no longer matches, so the stale proof is not reused.
+    std::fs::write(
+        project.dir.join("lib.mm"),
+        NONLINEAR_LIB.replace("body: { 0 };", "body: { 1 };"),
+    )
+    .expect("edit lib.mm");
+
+    let (graph, log) = project.consumer_graph();
+    assert!(
+        !log.contains("took verification_status from a fresh sibling certificate"),
+        "{log}"
+    );
+    assert_eq!(node(&graph, "fermat3")["verification_status"], Value::Null);
+    assert_eq!(
+        node(&graph, "lib::fermat3")["verification_status"],
+        Value::Null
+    );
+
+    std::fs::remove_dir_all(&project.dir).expect("remove project dir");
+}
+
+#[test]
+fn a_lean_certificate_from_an_older_translator_is_not_reused() {
+    let project = escalation_project("escalate_lean_stale_translator");
+    write_stub_bridge(
+        &project.bridge_repo,
+        Some((
+            "mumei-lean-translator-ir-v1",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        )),
+    );
+    // The stale metadata is rejected already at bridge-application time, so
+    // the library certificate records the atom as still escalated ...
+    let output = Command::new(env!("CARGO_BIN_EXE_mumei"))
+        .arg("verify")
+        .arg("--solver-timeout")
+        .arg("50")
+        .arg("--escalate-lean")
+        .arg("--proof-cert")
+        .arg("--output")
+        .arg(project.dir.join("lib.proof.json"))
+        .arg("lib.mm")
+        .env("MUMEI_LEAN_PATH", &project.bridge_repo)
+        .current_dir(&project.dir)
+        .output()
+        .expect("run mumei verify --escalate-lean");
+    assert!(project.dir.join("lib.proof.json").exists());
+    let cert = project.lib_cert();
+    assert_ne!(
+        cert["atoms"][0]["z3_check_result"],
+        "lean_verified",
+        "stale bridge output must not promote\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // ... and even a hand-edited certificate claiming `lean_verified` with an
+    // old translator is refused by the proof-graph freshness gate.
+    let mut forged = cert;
+    let atom = &mut forged["atoms"][0];
+    atom["z3_check_result"] = Value::from("lean_verified");
+    atom["status"] = Value::from("verified");
+    atom["translator_version"] = Value::from("mumei-lean-translator-ir-v1");
+    atom["lean_result_metadata"] = serde_json::json!({
+        "status": "lean_verified",
+        "theorem_name": "fermat3_correct",
+        "translator_version": "mumei-lean-translator-ir-v1",
+        "bridge_lemma_hash": atom["bridge_lemma_hash"],
+        "proof_path": "generated/Generated/Lib.lean",
+        "diagnostics": [],
+    });
+    std::fs::write(
+        project.dir.join("lib.proof.json"),
+        serde_json::to_string_pretty(&forged).unwrap(),
+    )
+    .expect("write forged cert");
+
+    let (graph, _) = project.consumer_graph();
+    assert_eq!(node(&graph, "fermat3")["verification_status"], Value::Null);
+    assert_eq!(
+        node(&graph, "lib::fermat3")["verification_status"],
+        Value::Null
+    );
+
+    std::fs::remove_dir_all(&project.dir).expect("remove project dir");
+}
+
+#[test]
+fn a_certificate_that_never_decided_the_atom_leaves_the_status_null() {
+    let project = escalation_project("escalate_lean_undecided");
+    // No bridge repo at all: escalation is attempted and fails, so the
+    // certificate records the atom as undecided rather than verified.
+    let output = Command::new(env!("CARGO_BIN_EXE_mumei"))
+        .arg("verify")
+        .arg("--solver-timeout")
+        .arg("50")
+        .arg("--proof-cert")
+        .arg("--output")
+        .arg(project.dir.join("lib.proof.json"))
+        .arg("lib.mm")
+        .current_dir(&project.dir)
+        .output()
+        .expect("run mumei verify --proof-cert");
+    assert!(
+        project.dir.join("lib.proof.json").exists(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let cert = project.lib_cert();
+    assert_ne!(cert["atoms"][0]["z3_check_result"], "unsat");
+    assert_ne!(cert["atoms"][0]["z3_check_result"], "lean_verified");
+
+    let (graph, _) = project.consumer_graph();
+    assert_eq!(node(&graph, "fermat3")["verification_status"], Value::Null);
+
+    std::fs::remove_dir_all(&project.dir).expect("remove project dir");
+}
