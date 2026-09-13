@@ -2,7 +2,6 @@ use mumei_core::emitter::{Artifact, ArtifactKind, Emitter};
 use mumei_core::hir::HirAtom;
 use mumei_core::parser::ExternBlock;
 use mumei_core::verification::{ModuleEnv, MumeiResult};
-use sha2::{Digest, Sha256};
 use std::path::Path;
 
 pub struct ProofBookEmitter;
@@ -31,8 +30,7 @@ impl Emitter for ProofBookEmitter {
             "| **Mumei Version** | `{}` |\n",
             env!("CARGO_PKG_VERSION")
         ));
-        let content_hash =
-            compute_content_hash(&atom.name, &atom.requires, &atom.ensures, &atom.body_expr);
+        let content_hash = mumei_core::proof_cert::compute_atom_content_hash_v2(atom);
         md.push_str(&format!(
             "| **Content Hash** | `{}` |\n",
             &content_hash[..16]
@@ -147,18 +145,6 @@ impl Emitter for ProofBookEmitter {
             kind: ArtifactKind::Source,
         }])
     }
-}
-
-fn compute_content_hash(name: &str, requires: &str, ensures: &str, body: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(name.as_bytes());
-    hasher.update(b"\n---requires---\n");
-    hasher.update(requires.as_bytes());
-    hasher.update(b"\n---ensures---\n");
-    hasher.update(ensures.as_bytes());
-    hasher.update(b"\n---body---\n");
-    hasher.update(body.as_bytes());
-    format!("{:x}", hasher.finalize())
 }
 
 #[cfg(test)]
@@ -490,17 +476,25 @@ mod tests {
 
     #[test]
     fn test_content_hash_matches_proof_cert() {
-        let hash = compute_content_hash("test_atom", "x > 0", "result > 0", "x + 1");
-        // Same algorithm as mumei-core/src/proof_cert.rs compute_atom_content_hash
-        let mut hasher = Sha256::new();
-        hasher.update(b"test_atom");
-        hasher.update(b"\n---requires---\n");
-        hasher.update(b"x > 0");
-        hasher.update(b"\n---ensures---\n");
-        hasher.update(b"result > 0");
-        hasher.update(b"\n---body---\n");
-        hasher.update(b"x + 1");
-        let expected = format!("{:x}", hasher.finalize());
-        assert_eq!(hash, expected);
+        let hir = make_hir_atom(
+            "hash_test",
+            vec![make_param("x", Some("i64"))],
+            "x > 0",
+            "result > 0",
+            "x + 1",
+            TrustLevel::Verified,
+            vec![],
+            HashMap::new(),
+            HashMap::new(),
+            vec![],
+            false,
+            None,
+        );
+        let expected = mumei_core::proof_cert::compute_atom_content_hash_v2(&hir.atom);
+        let artifacts = ProofBookEmitter
+            .emit(&hir, Path::new("/tmp/hash_test"), &ModuleEnv::new(), &[])
+            .unwrap();
+        let md = String::from_utf8(artifacts[0].data.clone()).unwrap();
+        assert!(md.contains(&format!("| **Content Hash** | `{}` |", &expected[..16])));
     }
 }

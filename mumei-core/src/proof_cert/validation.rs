@@ -1,4 +1,4 @@
-use super::generation::compute_atom_content_hash;
+use super::generation::compute_atom_content_hash_for_version;
 use super::models::{AtomCertificate, ProofCertificate};
 use super::status;
 use crate::verification;
@@ -93,7 +93,10 @@ pub(crate) fn parse_unsat_core_labels(z3_result: &str) -> Option<Vec<String>> {
 /// Returns a list of (atom_name, status) where status is:
 /// - "proven" if content_hash matches and z3_check_result was "unsat"
 ///   (or `"lean_verified"` when `allow_lean_verified` is enabled — see below).
-/// - "changed" if content_hash differs (re-verification needed)
+/// - "changed" if content_hash differs (re-verification needed). The hash is
+///   recomputed with the algorithm the certificate's `version` declares
+///   (`"1.0"` legacy name/requires/ensures/body, `"1.1"` full signature and
+///   spec metadata), so older certificates stay verifiable until regenerated.
 /// - "unproven" if z3_check_result was not "unsat"
 ///
 /// `allow_lean_verified` controls how `z3_check_result == "lean_verified"`
@@ -114,7 +117,7 @@ pub fn verify_certificate(
         .map(|a| {
             (
                 a.name.clone(),
-                compute_atom_content_hash(&a.name, &a.requires, &a.ensures, &a.body_expr),
+                compute_atom_content_hash_for_version(&cert.version, a),
             )
         })
         .collect();

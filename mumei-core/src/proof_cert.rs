@@ -23,8 +23,10 @@ pub use bundle_io::{
 
 pub use generation::{
     artifact_paths_from_env, budget_policy_fingerprint_from_env, compute_atom_content_hash,
-    compute_sha256, generate_certificate, generate_certificate_with_reconstruction_losses,
-    get_z3_version, harness_contract_from_env, intent_fidelity_from_env,
+    compute_atom_content_hash_for_version, compute_atom_content_hash_v2, compute_sha256,
+    generate_certificate, generate_certificate_with_reconstruction_losses, get_z3_version,
+    harness_contract_from_env, intent_fidelity_from_env, CERTIFICATE_VERSION,
+    LEGACY_CERTIFICATE_VERSION,
 };
 
 pub use models::{
@@ -545,6 +547,228 @@ mod tests {
         let status2 = verify_certificate(&cert, &modified_atoms, false);
         assert_eq!(status2.len(), 1);
         assert_eq!(status2[0], ("add".to_string(), "changed".to_string()));
+    }
+
+    fn unsat_results(name: &str) -> HashMap<String, (String, String)> {
+        let mut results = HashMap::new();
+        results.insert(
+            name.to_string(),
+            ("unsat".to_string(), "verified".to_string()),
+        );
+        results
+    }
+
+    /// content_hash v2: certificates are written as `version: "1.1"` and the
+    /// hash is the full-atom hash, not the legacy four-field hash.
+    #[test]
+    fn test_generate_certificate_writes_v2_content_hash() {
+        let atom = make_test_atom("add", "x > 0", "result > 0", "x + 1");
+        let atoms: Vec<&parser::Atom> = vec![&atom];
+        let cert = generate_certificate(
+            "test.mm",
+            &atoms,
+            &unsat_results("add"),
+            &ModuleEnv::new(),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(cert.version, CERTIFICATE_VERSION);
+        assert_eq!(
+            cert.atoms[0].content_hash,
+            compute_atom_content_hash_v2(&atom)
+        );
+        assert_ne!(
+            cert.atoms[0].content_hash,
+            compute_atom_content_hash("add", "x > 0", "result > 0", "x + 1")
+        );
+        assert_eq!(cert.atoms[0].content_hash.len(), 64);
+        // Deterministic across calls / map iteration order.
+        assert_eq!(
+            compute_atom_content_hash_v2(&atom),
+            compute_atom_content_hash_v2(&atom.clone())
+        );
+    }
+
+    /// content_hash v2 changes whenever a proof-relevant field outside
+    /// name/requires/ensures/body changes (the gap flagged on mumei#555).
+    #[test]
+    fn test_content_hash_v2_covers_signature_and_spec_metadata() {
+        let base = make_test_atom("f", "x > 0", "result > 0", "x + 1");
+        let base_hash = compute_atom_content_hash_v2(&base);
+        let mut variants: Vec<(&str, parser::Atom)> = Vec::new();
+
+        let mut a = base.clone();
+        a.params.push(parser::Param {
+            name: "x".to_string(),
+            type_name: Some("i64".to_string()),
+            type_ref: None,
+            is_ref: false,
+            is_ref_mut: false,
+            fn_contract_requires: None,
+            fn_contract_ensures: None,
+        });
+        let mut b = a.clone();
+        b.params[0].type_name = Some("u8".to_string());
+        variants.push(("param added", a.clone()));
+        variants.push(("param type changed", b));
+        let mut c = a.clone();
+        c.params[0].is_ref_mut = true;
+        variants.push(("param &mut", c));
+
+        let mut v = base.clone();
+        v.return_type = Some("i64".to_string());
+        variants.push(("return type", v));
+        let mut v = base.clone();
+        v.spec_metadata
+            .insert("semantics".to_string(), "bitvec".to_string());
+        variants.push(("semantics: bitvec", v));
+        let mut v = base.clone();
+        v.type_params.push("T".to_string());
+        variants.push(("type param", v));
+        let mut v = base.clone();
+        v.where_bounds.push(parser::ast::TypeParamBound {
+            param: "T".to_string(),
+            bounds: vec!["Ord".to_string()],
+        });
+        variants.push(("where bound", v));
+        let mut v = base.clone();
+        v.effects.push(parser::Effect {
+            name: "IO".to_string(),
+            params: vec![],
+            span: base.span.clone(),
+            negated: false,
+        });
+        variants.push(("effect", v));
+        let mut v = base.clone();
+        v.invariant = Some("x < 10".to_string());
+        variants.push(("invariant", v));
+        let mut v = base.clone();
+        v.resources.push("File".to_string());
+        variants.push(("resource", v));
+        let mut v = base.clone();
+        v.consumed_params.push("x".to_string());
+        variants.push(("consume", v));
+        let mut v = base.clone();
+        v.effect_pre
+            .insert("Account".to_string(), "Open".to_string());
+        variants.push(("effect_pre", v));
+        let mut v = base.clone();
+        v.effect_post
+            .insert("Account".to_string(), "Closed".to_string());
+        variants.push(("effect_post", v));
+        let mut v = base.clone();
+        v.is_async = true;
+        variants.push(("async", v));
+        let mut v = base.clone();
+        v.trust_level = parser::ast::TrustLevel::Trusted;
+        variants.push(("trust level", v));
+        let mut v = base.clone();
+        v.max_unroll = Some(8);
+        variants.push(("max_unroll", v));
+        let mut v = base.clone();
+        v.forall_constraints.push(parser::ast::Quantifier {
+            q_type: parser::ast::QuantifierType::ForAll,
+            var: "i".to_string(),
+            start: "0".to_string(),
+            end: "n".to_string(),
+            condition: "a[i] > 0".to_string(),
+        });
+        variants.push(("forall constraint", v));
+
+        let mut seen = std::collections::HashSet::new();
+        seen.insert(base_hash.clone());
+        for (label, atom) in &variants {
+            let hash = compute_atom_content_hash_v2(atom);
+            assert_ne!(hash, base_hash, "{label} must change the v2 hash");
+            assert!(seen.insert(hash), "{label} collides with another variant");
+            // The legacy hash is blind to all of these.
+            assert_eq!(
+                compute_atom_content_hash(
+                    &atom.name,
+                    &atom.requires,
+                    &atom.ensures,
+                    &atom.body_expr
+                ),
+                compute_atom_content_hash(
+                    &base.name,
+                    &base.requires,
+                    &base.ensures,
+                    &base.body_expr
+                ),
+                "{label} is a v2-only field"
+            );
+        }
+
+        // Span (location) is not proof-relevant and must not affect the hash.
+        let mut moved = base.clone();
+        moved.span.line += 10;
+        assert_eq!(compute_atom_content_hash_v2(&moved), base_hash);
+        // Neither do the resolver's load-attribution keys: the certifying run
+        // and an importing run annotate the same atom differently.
+        let mut imported = base.clone();
+        imported
+            .spec_metadata
+            .insert("source_file".to_string(), "lib/other.mm".to_string());
+        imported.spec_metadata.insert(
+            crate::resolver::IMPORT_ALIAS_METADATA_KEY.to_string(),
+            "collections".to_string(),
+        );
+        assert_eq!(compute_atom_content_hash_v2(&imported), base_hash);
+    }
+
+    /// A `version: "1.0"` certificate is still verified with the legacy hash
+    /// (compatibility period), and a `1.1` certificate with the v2 hash; the
+    /// v2 certificate rejects the signature-only change that 1.0 misses.
+    #[test]
+    fn test_verify_certificate_dispatches_hash_on_version() {
+        let atom = make_test_atom("add", "x > 0", "result > 0", "x + 1");
+        let atoms: Vec<&parser::Atom> = vec![&atom];
+        let mut retyped = atom.clone();
+        retyped
+            .spec_metadata
+            .insert("semantics".to_string(), "bitvec".to_string());
+        let retyped_atoms: Vec<&parser::Atom> = vec![&retyped];
+
+        let v2 = generate_certificate(
+            "test.mm",
+            &atoms,
+            &unsat_results("add"),
+            &ModuleEnv::new(),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(verify_certificate(&v2, &atoms, false)[0].1, "proven");
+        assert_eq!(
+            verify_certificate(&v2, &retyped_atoms, false)[0].1,
+            "changed"
+        );
+
+        let mut legacy = v2.clone();
+        legacy.version = LEGACY_CERTIFICATE_VERSION.to_string();
+        legacy.atoms[0].content_hash =
+            compute_atom_content_hash("add", "x > 0", "result > 0", "x + 1");
+        assert_eq!(verify_certificate(&legacy, &atoms, false)[0].1, "proven");
+        // Known blind spot of the legacy hash, accepted only for 1.0 certificates.
+        assert_eq!(
+            verify_certificate(&legacy, &retyped_atoms, false)[0].1,
+            "proven"
+        );
+        let changed_body = make_test_atom("add", "x > 0", "result > 0", "x + 2");
+        assert_eq!(
+            verify_certificate(&legacy, &[&changed_body], false)[0].1,
+            "changed"
+        );
+
+        // A 1.0 certificate carrying a v2 hash (or vice versa) is `changed`,
+        // never silently `proven`.
+        let mut mislabelled = v2.clone();
+        mislabelled.version = LEGACY_CERTIFICATE_VERSION.to_string();
+        assert_eq!(
+            verify_certificate(&mislabelled, &atoms, false)[0].1,
+            "changed"
+        );
     }
 
     /// PR 2: `lean_verified` is rejected by default and accepted with the

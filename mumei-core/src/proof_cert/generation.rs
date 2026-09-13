@@ -13,6 +13,16 @@ use crate::verification::{self, ModuleEnv};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
+/// Certificate format version written by this compiler. `"1.0"` certificates
+/// carry the legacy `content_hash` ([`compute_atom_content_hash`]); `"1.1"`
+/// certificates carry [`compute_atom_content_hash_v2`], which also covers the
+/// atom's signature and spec metadata. [`super::verify_certificate`] selects
+/// the hash function from the certificate's `version`, so `1.0` certificates
+/// keep verifying until they are regenerated.
+pub const CERTIFICATE_VERSION: &str = "1.1";
+pub const LEGACY_CERTIFICATE_VERSION: &str = "1.0";
+
+/// Legacy (`version: "1.0"`) content hash: name, `requires`, `ensures`, body.
 pub fn compute_atom_content_hash(name: &str, requires: &str, ensures: &str, body: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(name.as_bytes());
@@ -23,6 +33,159 @@ pub fn compute_atom_content_hash(name: &str, requires: &str, ensures: &str, body
     hasher.update(b"\n---body---\n");
     hasher.update(body.as_bytes());
     format!("{:x}", hasher.finalize())
+}
+
+fn hash_section(hasher: &mut Sha256, label: &str, value: &str) {
+    hasher.update(b"\n---");
+    hasher.update(label.as_bytes());
+    hasher.update(b"---\n");
+    hasher.update(value.as_bytes());
+}
+
+fn hash_sorted_map(hasher: &mut Sha256, label: &str, map: &HashMap<String, String>) {
+    let mut entries: Vec<(&String, &String)> = map.iter().collect();
+    entries.sort();
+    for (key, value) in entries {
+        hash_section(hasher, label, &format!("{key}={value}"));
+    }
+}
+
+/// `spec_metadata` keys the resolver / pipeline attach to describe *where* an
+/// atom was loaded from rather than *what* it proves. They differ between the
+/// certifying run and an importing run of the same source, so they are
+/// excluded from the content hash.
+pub const CONTENT_HASH_EXCLUDED_METADATA_KEYS: &[&str] =
+    &["source_file", crate::resolver::IMPORT_ALIAS_METADATA_KEY];
+
+fn hash_spec_metadata(hasher: &mut Sha256, map: &HashMap<String, String>) {
+    let proof_relevant: HashMap<String, String> = map
+        .iter()
+        .filter(|(key, _)| !CONTENT_HASH_EXCLUDED_METADATA_KEYS.contains(&key.as_str()))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    hash_sorted_map(hasher, "spec_metadata", &proof_relevant);
+}
+
+/// `version: "1.1"` content hash. Covers everything the verifier reads from
+/// the atom itself, so a certificate is `changed` whenever the obligations it
+/// vouches for could differ: name, type parameters and bounds, each parameter
+/// (name, type, `&` / `&mut`, HOF contract), return type, `requires`,
+/// `forall` constraints, `ensures`, `invariant`, body, consumed parameters,
+/// resources, `async`, trust level, `max_unroll`, effects (with negation and
+/// parameters), effect pre / post states and `spec_metadata` (which carries
+/// `semantics: bitvec`). Maps are hashed in key order. Excluded: the `span`
+/// and the load-attribution keys in [`CONTENT_HASH_EXCLUDED_METADATA_KEYS`].
+pub fn compute_atom_content_hash_v2(atom: &crate::parser::Atom) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"mumei-content-hash-v2\n");
+    hasher.update(atom.name.as_bytes());
+    for tp in &atom.type_params {
+        hash_section(&mut hasher, "type_param", tp);
+    }
+    for bound in &atom.where_bounds {
+        hash_section(
+            &mut hasher,
+            "where",
+            &format!("{}:{}", bound.param, bound.bounds.join("+")),
+        );
+    }
+    for p in &atom.params {
+        let mut param = format!("{}:{}", p.name, p.type_name.as_deref().unwrap_or(""));
+        if p.is_ref {
+            param.push_str("|ref");
+        }
+        if p.is_ref_mut {
+            param.push_str("|ref_mut");
+        }
+        if let Some(req) = &p.fn_contract_requires {
+            param.push_str("|fn_requires=");
+            param.push_str(req);
+        }
+        if let Some(ens) = &p.fn_contract_ensures {
+            param.push_str("|fn_ensures=");
+            param.push_str(ens);
+        }
+        hash_section(&mut hasher, "param", &param);
+    }
+    hash_section(
+        &mut hasher,
+        "return_type",
+        atom.return_type.as_deref().unwrap_or(""),
+    );
+    hash_section(&mut hasher, "requires", &atom.requires);
+    for q in &atom.forall_constraints {
+        hash_section(
+            &mut hasher,
+            "quantifier",
+            &format!(
+                "{:?}|{}|{}|{}|{}",
+                q.q_type, q.var, q.start, q.end, q.condition
+            ),
+        );
+    }
+    hash_section(&mut hasher, "ensures", &atom.ensures);
+    hash_section(
+        &mut hasher,
+        "invariant",
+        atom.invariant.as_deref().unwrap_or(""),
+    );
+    hash_section(&mut hasher, "body", &atom.body_expr);
+    for cp in &atom.consumed_params {
+        hash_section(&mut hasher, "consume", cp);
+    }
+    for r in &atom.resources {
+        hash_section(&mut hasher, "resource", r);
+    }
+    hash_section(&mut hasher, "async", if atom.is_async { "1" } else { "0" });
+    hash_section(&mut hasher, "trust", &format!("{:?}", atom.trust_level));
+    hash_section(
+        &mut hasher,
+        "max_unroll",
+        &atom.max_unroll.map(|n| n.to_string()).unwrap_or_default(),
+    );
+    for effect in &atom.effects {
+        let params: Vec<String> = effect
+            .params
+            .iter()
+            .map(|ep| {
+                format!(
+                    "{}{}{}",
+                    ep.value,
+                    ep.refinement
+                        .as_deref()
+                        .map(|r| format!(" where {r}"))
+                        .unwrap_or_default(),
+                    if ep.is_constant { "#const" } else { "" }
+                )
+            })
+            .collect();
+        hash_section(
+            &mut hasher,
+            "effect",
+            &format!(
+                "{}{}({})",
+                if effect.negated { "!" } else { "" },
+                effect.name,
+                params.join(",")
+            ),
+        );
+    }
+    hash_sorted_map(&mut hasher, "effect_pre", &atom.effect_pre);
+    hash_sorted_map(&mut hasher, "effect_post", &atom.effect_post);
+    hash_spec_metadata(&mut hasher, &atom.spec_metadata);
+    format!("{:x}", hasher.finalize())
+}
+
+/// Content hash an atom must have to match a certificate of `cert_version`.
+pub fn compute_atom_content_hash_for_version(
+    cert_version: &str,
+    atom: &crate::parser::Atom,
+) -> String {
+    if cert_version == LEGACY_CERTIFICATE_VERSION {
+        compute_atom_content_hash(&atom.name, &atom.requires, &atom.ensures, &atom.body_expr)
+    } else {
+        compute_atom_content_hash_v2(atom)
+    }
 }
 
 /// Version of the libz3 linked into this binary — the solver that discharges
@@ -93,12 +256,7 @@ pub fn generate_certificate_with_reconstruction_losses(
     let atom_certs: Vec<AtomCertificate> = atoms
         .iter()
         .map(|atom| {
-            let content_hash = compute_atom_content_hash(
-                &atom.name,
-                &atom.requires,
-                &atom.ensures,
-                &atom.body_expr,
-            );
+            let content_hash = compute_atom_content_hash_v2(atom);
             let (z3_result, status) = verification_results
                 .get(&atom.name)
                 .cloned()
@@ -227,7 +385,7 @@ pub fn generate_certificate_with_reconstruction_losses(
     });
 
     let mut cert = ProofCertificate {
-        version: "1.0".to_string(),
+        version: CERTIFICATE_VERSION.to_string(),
         timestamp: now,
         mumei_version: env!("CARGO_PKG_VERSION").to_string(),
         z3_version: get_z3_version(),
