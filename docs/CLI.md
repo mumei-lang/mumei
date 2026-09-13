@@ -26,3 +26,50 @@ mumei run src/main.mm --emit llvm-ir -o dist/app
 7. executes the resulting binary and returns its exit code
 
 `atom main()` must be present and take no parameters. Its integer or floating-point result is converted to the process exit code. Runtime support includes channel helpers, named resource mutex lookup, and default effect-handler stubs for compiled `perform Effect.operation(...)` calls.
+
+## `mumei verify`
+
+```bash
+mumei verify src/main.mm
+mumei verify src/            # every .mm file under the directory
+mumei verify src/main.mm --json --proof-cert
+```
+
+### Exit codes
+
+Only `0` and `1` are verdicts about the program. Every other code means the
+verifier never judged the obligations, so a CI or benchmark harness should
+treat it as "no verdict" rather than as a caught counterexample. `1` keeps its
+historical meaning (rejection), so callers that only distinguish `0` / `1`
+keep working.
+
+| Code | Meaning | Typical cause |
+|---|---|---|
+| `0` | Verified | every obligation discharged (or delegated to an accepted certificate) |
+| `1` | Rejected | Z3 counterexample, contract / type / session-protocol violation, strict array-type violation |
+| `2` | Usage error | invalid command-line arguments (reported by the argument parser), including unsupported `--emit` / `--no-emit` targets |
+| `3` | Inconclusive | no counterexample, but an obligation ended `unknown` / `timeout` / `resource_limit`, was reported `unverifiable` (unsupported Z3 clause), or is a `--escalate-lean` candidate Z3 left `unknown` that the Lean bridge did not discharge |
+| `4` | Input error | the input file, a `--cross-spec-files` entry, or the directory could not be read, parsed, or resolved (missing file, unresolved import, empty directory) |
+| `5` | Internal error | the verifier panicked, or an artifact / certificate / Lean-bridge step could not be completed |
+
+For a directory run the process exit code is the most severe per-file outcome
+(`5` > `4` > `1` > `3` > `0`); the per-file summary still lists each file's
+own result. Rejected obligations are still counted in the `failed` field of the
+printed summary and of `--json` output. The `--json` payload also carries the
+outcome directly: `exit_code` is the process exit code from the table above,
+`infra_errors` counts internal failures, and `status` is `passed` / `failed`
+(rejected) / `unverifiable` / `inconclusive` / `input_error` / `internal_error`
+in agreement with `exit_code` (a run whose only open items are Lean escalation
+candidates or an infrastructure error reports the aggregate summary rather than
+the single atom's `report.json`). A single-file run whose atoms all verified
+prints the last atom's `report.json` instead of the summary; its `status` is the
+per-atom `success` and it carries `exit_code: 0`. Runs that stop before any
+atom is checked — unreadable input, an unresolved import, a failed
+`--cross-spec-files` load, Z3 unavailable — still print one summary payload
+with zero counts and the reason under `diagnostics`, so stdout is a single
+JSON document for every single-file run that gets past argument parsing.
+Usage errors (`2`) are reported by the argument parser on stderr and print no
+JSON. `--emit loss-vector` / `--emit structured-feedback` print the emitted
+artifact to stdout as a second JSON document ahead of the summary. A directory
+run with `--json` prints one payload per file followed by the text summary;
+parse it line-oriented or verify files individually.
