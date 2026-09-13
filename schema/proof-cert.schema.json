@@ -9,7 +9,7 @@
   "properties": {
     "version": {
       "type": "string",
-      "description": "Certificate format version. \"1.0\": atom content_hash is the legacy SHA-256 over name/requires/ensures/body. \"1.1\": atom content_hash is content-hash v2 (name, type params and bounds, params, return type, requires, forall constraints, ensures, invariant, body, consumed params, resources, async, trust level, max_unroll, effects, effect pre/post, spec_metadata)."
+      "description": "Certificate format version. \"1.0\": atom content_hash is the legacy SHA-256 over name/requires/ensures/body. \"1.1\": atom content_hash is content-hash v2 (name, type params and bounds, params, return type, requires, forall constraints, ensures, invariant, body, consumed params, resources, async, trust level, max_unroll, effects, effect pre/post, spec_metadata). Any other value is unsupported: mumei reports every atom as changed and trusts nothing."
     },
     "timestamp": {
       "type": "string",
