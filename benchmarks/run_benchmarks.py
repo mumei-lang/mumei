@@ -132,16 +132,35 @@ TACTIC_SEARCH_ADOPTED_RE = re.compile(
 )
 LEAN_VERIFY_TIMEOUT_S = 300
 
-# `mumei verify` exits non-zero both when it rejects a program and when it never
-# reached a verdict (unreadable input, rejected flag, crash), so a non-zero exit
-# alone cannot be read as "the verifier rejected this program". Only a run that
-# printed one of the verdict summaries produced a verdict; an ``unverifiable``
-# summary is a verdict about the obligations, not a failure to reach one.
-VERDICT_SUMMARY_RE = re.compile(
-    r"(?m)^\s*(?:\u2705 Verification passed|\u274c Verification:|"
-    r"\u26a0\ufe0f?\s+Verification:|"
-    r"\U0001f5e1\ufe0f\s+Directory verify summary:)"
-)
+# Exit codes of `mumei verify` (pinned to the ``EXIT_*`` constants in
+# ``src/commands/verify.rs`` and documented in ``docs/CLI.md``). Only ``0`` and
+# ``1`` are verdicts about the program; every other code means the verifier
+# never judged the obligations (solver timeout / unknown, unreadable input,
+# crash) and must not be credited as a caught counterexample.
+EXIT_VERIFIED = 0
+EXIT_REJECTED = 1
+EXIT_INCONCLUSIVE = 3
+EXIT_INPUT_ERROR = 4
+EXIT_INTERNAL_ERROR = 5
+
+VERDICT_EXIT_CODES = {EXIT_VERIFIED, EXIT_REJECTED}
+
+
+def classify_exit_code(returncode: int) -> tuple[str, bool | None]:
+    """Map a ``mumei verify`` exit code to ``(verify_status, ok)``.
+
+    ``verify_status`` keeps the existing vocabulary: ``MEASURED`` for the two
+    verdict codes and ``FAIL`` for every run that ended without a verdict
+    (inconclusive solver, unreadable input, internal error, or any other code
+    such as a usage error, a Rust panic's ``101`` or a signal). ``ok`` is
+    ``True``/``False`` only for verdicts and ``None`` otherwise; the raw code is
+    kept in the per-file ``exit_code`` field so the reason stays diagnosable.
+    """
+    if returncode == EXIT_VERIFIED:
+        return "MEASURED", True
+    if returncode == EXIT_REJECTED:
+        return "MEASURED", False
+    return "FAIL", None
 
 
 def _find_mumei_binary() -> str | None:
@@ -213,6 +232,7 @@ def _verify_file(
     start = time.monotonic()
     stdout = ""
     verify_status = "MEASURED"
+    exit_code: int | None = None
     try:
         proc = subprocess.run(
             [binary, "verify", str(path)],
@@ -222,10 +242,10 @@ def _verify_file(
             cwd=str(REPO_ROOT),
         )
         elapsed = time.monotonic() - start
-        ok = proc.returncode == 0
         stdout = proc.stdout
-        if not VERDICT_SUMMARY_RE.search(proc.stdout + proc.stderr):
-            verify_status = "FAIL"
+        exit_code = proc.returncode
+        verify_status, ok = classify_exit_code(proc.returncode)
+        ok = bool(ok)
     except subprocess.TimeoutExpired:
         elapsed = float(timeout)
         ok = False
@@ -246,6 +266,7 @@ def _verify_file(
         "expected": expected,
         "matched": actual == expected,
         "verify_status": verify_status,
+        "exit_code": exit_code,
         "escalation_candidates": _escalation_candidate_count(stdout),
         "lean_solver_time_s": None,
         "lean_status": "SKIP",
@@ -335,6 +356,7 @@ def run_category_benchmarks(
                 "expected": expected,
                 "matched": False,
                 "verify_status": "SKIP",
+                "exit_code": None,
                 "escalation_candidates": 0,
                 "lean_solver_time_s": None,
                 "lean_status": "SKIP",
@@ -351,6 +373,7 @@ def run_category_benchmarks(
             "actual": verify["actual"],
             "matched": verify["matched"],
             "verify_status": verify["verify_status"],
+            "exit_code": verify.get("exit_code"),
             "solver_time_s": verify["elapsed_s"],
             "escalation_candidates": verify["escalation_candidates"],
             "lean_solver_time_s": verify["lean_solver_time_s"],

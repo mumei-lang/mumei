@@ -440,21 +440,28 @@ def test_a_rejected_program_is_a_verdict_but_a_crashed_run_is_not(monkeypatch, t
     assert rejected["actual"] == "FAIL"
     assert rejected["matched"] is True
 
-    # Same exit code, no verdict printed: the verifier never judged the program,
-    # so an `expected: FAIL` task must not be credited with catching its bug.
-    monkeypatch.setattr(
-        module.subprocess,
-        "run",
-        lambda *a, **k: _verify_output(1, "", "❌ Could not read 'x_fail.mm'\n"),
-    )
-    crashed = module._verify_file("mumei", source, "FAIL")
-    assert crashed["verify_status"] == "FAIL"
-    assert crashed["actual"] == "SKIP"
-    assert crashed["matched"] is False
-    assert crashed["ok"] is None
+    # Unreadable input / crash exit codes: the verifier never judged the
+    # program, so an `expected: FAIL` task must not be credited with catching
+    # its bug — even though a rejection summary happens to be in the output.
+    for code in [module.EXIT_INPUT_ERROR, module.EXIT_INTERNAL_ERROR, 2, 101, -11]:
+        monkeypatch.setattr(
+            module.subprocess,
+            "run",
+            lambda *a, _code=code, **k: _verify_output(
+                _code,
+                "❌ Verification: 0 passed, 1 failed, 0 unverifiable, 0 skipped (cached)\n",
+                "❌ Could not read 'x_fail.mm'\n",
+            ),
+        )
+        crashed = module._verify_file("mumei", source, "FAIL")
+        assert crashed["verify_status"] == "FAIL", code
+        assert crashed["exit_code"] == code
+        assert crashed["actual"] == "SKIP"
+        assert crashed["matched"] is False
+        assert crashed["ok"] is None
 
 
-def test_an_unverifiable_summary_is_a_verdict(monkeypatch, tmp_path):
+def test_an_inconclusive_exit_is_not_a_verdict(monkeypatch, tmp_path):
     module = _load_module()
     source = tmp_path / "x.mm"
     source.write_text("atom a { ensures: true; }", encoding="utf-8")
@@ -463,36 +470,68 @@ def test_an_unverifiable_summary_is_a_verdict(monkeypatch, tmp_path):
         module.subprocess,
         "run",
         lambda *a, **k: _verify_output(
-            1,
+            module.EXIT_INCONCLUSIVE,
             "⚠️  Verification: 0 passed, 1 unverifiable, 0 skipped (cached), "
             "0 Lean escalation candidate(s)\n",
         ),
     )
     result = module._verify_file("mumei", source, "PASS")
-    assert result["verify_status"] == "MEASURED"
-    assert result["actual"] == "FAIL"
+    assert result["verify_status"] == "FAIL"
+    assert result["exit_code"] == module.EXIT_INCONCLUSIVE
+    assert result["actual"] == "SKIP"
+    assert result["ok"] is None
 
 
-def test_verdict_detection_covers_every_cli_summary_line():
-    """`VERDICT_SUMMARY_RE` matches presentation text, so pin it to the source.
+def test_verdict_detection_ignores_summary_text(monkeypatch, tmp_path):
+    """Verdicts come from the exit code alone, never from the printed summary."""
+    module = _load_module()
+    source = tmp_path / "x.mm"
+    source.write_text("atom a { ensures: true; }", encoding="utf-8")
 
-    If `src/commands/verify.rs` gains or rewords a summary line, a completed
-    verification run would silently be reclassified as no-verdict; this fails
-    instead.
-    """
+    monkeypatch.setattr(
+        module.subprocess, "run", lambda *a, **k: _verify_output(module.EXIT_VERIFIED)
+    )
+    passed = module._verify_file("mumei", source, "PASS")
+    assert passed["verify_status"] == "MEASURED"
+    assert passed["actual"] == "PASS"
+    assert passed["ok"] is True
+
+    monkeypatch.setattr(
+        module.subprocess, "run", lambda *a, **k: _verify_output(module.EXIT_REJECTED)
+    )
+    rejected = module._verify_file("mumei", source, "PASS")
+    assert rejected["verify_status"] == "MEASURED"
+    assert rejected["actual"] == "FAIL"
+    assert rejected["ok"] is False
+
+
+def test_exit_code_table_matches_the_cli_source():
+    """Pin the harness's exit-code table to the `EXIT_*` constants in verify.rs."""
     module = _load_module()
     source = (REPO_ROOT / "src" / "commands" / "verify.rs").read_text(
         encoding="utf-8"
     )
-    summaries = [
-        literal
-        for literal in re.findall(r'"((?:\\n)?[✅❌⚠️🗡️][^"]*)"', source)
-        if "Verification" in literal or "verify summary" in literal
-    ]
-    assert len(summaries) == 5, summaries
-    for literal in summaries:
-        rendered = literal.replace("\\n", "\n").replace("{}", "0")
-        assert module.VERDICT_SUMMARY_RE.search(rendered), literal
+    cli_codes = {
+        name: int(value)
+        for name, value in re.findall(
+            r"pub\(crate\) const (EXIT_[A-Z_]+): i32 = (\d+);", source
+        )
+    }
+    harness_codes = {
+        name: getattr(module, name) for name in cli_codes
+    }
+    assert cli_codes == harness_codes
+    assert set(cli_codes) == {
+        "EXIT_VERIFIED",
+        "EXIT_REJECTED",
+        "EXIT_INCONCLUSIVE",
+        "EXIT_INPUT_ERROR",
+        "EXIT_INTERNAL_ERROR",
+    }
+    # docs/CLI.md must list every code so callers don't need to read the source.
+    cli_doc = (REPO_ROOT / "docs" / "CLI.md").read_text(encoding="utf-8")
+    for value in cli_codes.values():
+        assert re.search(rf"(?m)^\|\s*`{value}`\s*\|", cli_doc), value
 
 
 def test_a_timed_out_verify_is_not_a_counterexample_catch(monkeypatch, tmp_path):

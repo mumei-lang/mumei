@@ -26,3 +26,34 @@ mumei run src/main.mm --emit llvm-ir -o dist/app
 7. executes the resulting binary and returns its exit code
 
 `atom main()` must be present and take no parameters. Its integer or floating-point result is converted to the process exit code. Runtime support includes channel helpers, named resource mutex lookup, and default effect-handler stubs for compiled `perform Effect.operation(...)` calls.
+
+## `mumei verify`
+
+```bash
+mumei verify src/main.mm
+mumei verify src/            # every .mm file under the directory
+mumei verify src/main.mm --json --proof-cert
+```
+
+### Exit codes
+
+Only `0` and `1` are verdicts about the program. Every other code means the
+verifier never judged the obligations, so a CI or benchmark harness should
+treat it as "no verdict" rather than as a caught counterexample. `1` keeps its
+historical meaning (rejection), so callers that only distinguish `0` / `1`
+keep working.
+
+| Code | Meaning | Typical cause |
+|---|---|---|
+| `0` | Verified | every obligation discharged (or delegated to an accepted certificate) |
+| `1` | Rejected | Z3 counterexample, contract / type / session-protocol violation, strict array-type violation |
+| `2` | Usage error | invalid command-line arguments (reported by the argument parser) |
+| `3` | Inconclusive | no counterexample, but an obligation ended `unknown` / `timeout` / `resource_limit`, or was reported `unverifiable` (unsupported Z3 clause) |
+| `4` | Input error | the input file or directory could not be read, parsed, or resolved (missing file, unresolved import, empty directory) |
+| `5` | Internal error | the verifier panicked, or an artifact / certificate / Lean-bridge step could not be completed |
+
+For a directory run the process exit code is the most severe per-file outcome
+(`5` > `4` > `1` > `3` > `0`); the per-file summary still lists each file's
+own result. Rejected obligations are still counted in the `failed` field of the
+printed summary and of `--json` output; only the exit code distinguishes a
+counterexample from an inconclusive solver result.
