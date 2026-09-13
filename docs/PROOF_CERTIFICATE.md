@@ -169,7 +169,7 @@ CLI values take precedence over environment values. `--intent-fidelity` accepts 
 | Field | Type | Description |
 |---|---|---|
 | `name` | `String` | Atom name |
-| `content_hash` | `String` | SHA-256 hash of the atom's proof-relevant source. Algorithm selected by top-level `version`: `"1.0"` = name + `requires` + `ensures` + body (legacy); `"1.1"` = content-hash v2 — additionally type params / `where` bounds, every parameter (name, type, `&`/`&mut`, HOF contract), return type, `forall` constraints, `invariant`, consumed params, resources, `async`, trust level, `max_unroll`, effects, effect pre/post and `spec_metadata` (e.g. `semantics: bitvec`). Consumers (mumei-lean, mumei-agent) treat it as opaque and copy it verbatim |
+| `content_hash` | `String` | SHA-256 hash of the atom's proof-relevant source. Algorithm selected by top-level `version`: `"1.0"` = name + `requires` + `ensures` + body (legacy); `"1.1"` = content-hash v2 — additionally type params / `where` bounds, every parameter (name, type, `&`/`&mut`, HOF contract), return type, `forall` constraints, `invariant`, consumed params, resources, `async`, trust level, `max_unroll`, effects, effect pre/post and `spec_metadata` (e.g. `semantics: bitvec`). Excluded because they are not proof obligations: `span`, `trace_id`, and the load-attribution keys `spec_metadata.source_file` / `spec_metadata.import_alias`. Consumers (mumei-lean, mumei-agent) treat it as opaque and copy it verbatim |
 | `status` | `String` | Verification result: `"proven"`, `"failed"`, or `"skipped"` |
 | `proof_hash` | `String` | Dependency-aware hash from `compute_proof_hash()` — includes transitive callee signatures |
 | `dependencies` | `Vec<String>` | Direct callee atom names from `ModuleEnv.dependency_graph` |
@@ -340,7 +340,7 @@ mumei verify-cert path/to/.proof-cert.json
 
 1. Load the certificate file
 2. Find the corresponding source file (from `cert.file`)
-3. Re-parse the source and compute current content hashes with the algorithm the certificate's `version` declares (`"1.0"` legacy four-field hash, `"1.1"` content-hash v2) — existing `1.0` certificates keep verifying until regenerated, but only v2 certificates detect signature-only / `semantics`-only edits
+3. Re-parse the source and compute current content hashes with the algorithm the certificate's `version` declares (`"1.0"` legacy four-field hash, `"1.1"` content-hash v2) — existing `1.0` certificates keep verifying until regenerated, but only v2 certificates detect signature-only / `semantics`-only edits. Any other `version` is unsupported: every atom is reported `changed` and nothing is trusted
 4. Compare each atom's stored `content_hash` against the current hash
 5. Report per-atom status:
    - **proven**: content hash matches — atom unchanged since last verification

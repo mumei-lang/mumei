@@ -43,7 +43,10 @@ fn hash_section(hasher: &mut Sha256, label: &str, value: &str) {
 }
 
 fn hash_sorted_map(hasher: &mut Sha256, label: &str, map: &HashMap<String, String>) {
-    let mut entries: Vec<(&String, &String)> = map.iter().collect();
+    hash_sorted_entries(hasher, label, map.iter().collect());
+}
+
+fn hash_sorted_entries(hasher: &mut Sha256, label: &str, mut entries: Vec<(&String, &String)>) {
     entries.sort();
     for (key, value) in entries {
         hash_section(hasher, label, &format!("{key}={value}"));
@@ -58,12 +61,11 @@ pub const CONTENT_HASH_EXCLUDED_METADATA_KEYS: &[&str] =
     &["source_file", crate::resolver::IMPORT_ALIAS_METADATA_KEY];
 
 fn hash_spec_metadata(hasher: &mut Sha256, map: &HashMap<String, String>) {
-    let proof_relevant: HashMap<String, String> = map
+    let proof_relevant: Vec<(&String, &String)> = map
         .iter()
         .filter(|(key, _)| !CONTENT_HASH_EXCLUDED_METADATA_KEYS.contains(&key.as_str()))
-        .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    hash_sorted_map(hasher, "spec_metadata", &proof_relevant);
+    hash_sorted_entries(hasher, "spec_metadata", proof_relevant);
 }
 
 /// `version: "1.1"` content hash. Covers everything the verifier reads from
@@ -177,14 +179,23 @@ pub fn compute_atom_content_hash_v2(atom: &crate::parser::Atom) -> String {
 }
 
 /// Content hash an atom must have to match a certificate of `cert_version`.
+/// `None` when the version is not one this build knows how to hash; such a
+/// certificate can never be `proven`.
 pub fn compute_atom_content_hash_for_version(
     cert_version: &str,
     atom: &crate::parser::Atom,
-) -> String {
+) -> Option<String> {
     if cert_version == LEGACY_CERTIFICATE_VERSION {
-        compute_atom_content_hash(&atom.name, &atom.requires, &atom.ensures, &atom.body_expr)
+        Some(compute_atom_content_hash(
+            &atom.name,
+            &atom.requires,
+            &atom.ensures,
+            &atom.body_expr,
+        ))
+    } else if cert_version == CERTIFICATE_VERSION {
+        Some(compute_atom_content_hash_v2(atom))
     } else {
-        compute_atom_content_hash_v2(atom)
+        None
     }
 }
 

@@ -769,6 +769,19 @@ mod tests {
             verify_certificate(&mislabelled, &atoms, false)[0].1,
             "changed"
         );
+
+        // A version this build cannot hash is never `proven`, even when the
+        // stored hash happens to equal the current v2 hash.
+        for unknown in ["1.2", "2.0", "", "1.1-lean"] {
+            let mut future = v2.clone();
+            future.version = unknown.to_string();
+            assert_eq!(compute_atom_content_hash_for_version(unknown, &atom), None);
+            assert_eq!(
+                verify_certificate(&future, &atoms, false)[0].1,
+                "changed",
+                "version {unknown:?}"
+            );
+        }
     }
 
     /// PR 2: `lean_verified` is rejected by default and accepted with the

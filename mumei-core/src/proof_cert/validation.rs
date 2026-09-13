@@ -97,6 +97,7 @@ pub(crate) fn parse_unsat_core_labels(z3_result: &str) -> Option<Vec<String>> {
 ///   recomputed with the algorithm the certificate's `version` declares
 ///   (`"1.0"` legacy name/requires/ensures/body, `"1.1"` full signature and
 ///   spec metadata), so older certificates stay verifiable until regenerated.
+///   A `version` this build does not know marks every atom "changed".
 /// - "unproven" if z3_check_result was not "unsat"
 ///
 /// `allow_lean_verified` controls how `z3_check_result == "lean_verified"`
@@ -112,7 +113,7 @@ pub fn verify_certificate(
     atoms: &[&crate::parser::Atom],
     allow_lean_verified: bool,
 ) -> Vec<(String, String)> {
-    let current_hashes: HashMap<String, String> = atoms
+    let current_hashes: HashMap<String, Option<String>> = atoms
         .iter()
         .map(|a| {
             (
@@ -126,7 +127,7 @@ pub fn verify_certificate(
         .iter()
         .map(|ac| {
             let status = if let Some(current_hash) = current_hashes.get(&ac.name) {
-                if current_hash != &ac.content_hash {
+                if current_hash.as_deref() != Some(ac.content_hash.as_str()) {
                     "changed".to_string()
                 } else if ac.z3_check_result == status::Z3_UNSAT {
                     "proven".to_string()
