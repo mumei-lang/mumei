@@ -2361,7 +2361,7 @@ python benchmarks/evaluation_suite.py --repair-cert-dir ../mumei-agent/artifacts
 | `benchmarks/evaluation_suite.py` | proof / counterexample 軸への `no_verdict_files` の通し |
 | `tests/test_benchmark_suite.py` | 回帰ゲート（棄却と crash の分離、timeout が catch にならないこと、catch rate からの除外、`No Verdict` 描画） |
 
-**残課題**: 判定の有無は CLI 出力の照合で見分けている。`mumei verify` が棄却とインフラ失敗に別々の終了コードを返すようになれば、出力照合は不要になる。
+**後続（R-1, ✅ Implemented）**: `mumei verify` が棄却 `1` とは別に inconclusive `3` / input error `4` / internal error `5` を返すようになり、`run_benchmarks.py` の verdict 判定は `VERDICT_SUMMARY_RE` の出力照合から終了コード判定に置き換えた（`verify_status` 語彙は不変、per-file に `exit_code` を追加）。終了コード表は `docs/CLI.md` を参照。
 
 ---
 

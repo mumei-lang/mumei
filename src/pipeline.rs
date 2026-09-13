@@ -38,19 +38,35 @@ pub(crate) fn read_source_file<P: AsRef<Path>>(path: P) -> Result<String, String
 
 /// Z3 が利用可能かチェックし、なければ親切なメッセージで終了する
 pub(crate) fn check_z3_available() {
-    use std::process::Command as Cmd;
-    if Cmd::new("z3").arg("--version").output().is_err() {
-        eprintln!("❌ Error: Z3 solver not found.");
-        eprintln!();
-        eprintln!("   Mumei requires Z3 for formal verification.");
-        eprintln!("   Install it with one of:");
-        eprintln!("     macOS:  brew install z3");
-        eprintln!("     Ubuntu: sudo apt-get install libz3-dev");
-        eprintln!("     Auto:   mumei setup");
-        eprintln!();
-        eprintln!("   After installing, run `mumei inspect` to verify.");
+    if let Err(message) = z3_availability() {
+        eprintln!("{message}");
         std::process::exit(1);
     }
+}
+
+/// Preflight for the external `z3` executable. Returns the installation
+/// hint as the error so callers with their own exit-code contract
+/// (`mumei verify`) can report a missing solver without exiting here.
+pub(crate) fn z3_availability() -> Result<(), String> {
+    use std::process::Command as Cmd;
+    if Cmd::new("z3").arg("--version").output().is_err() {
+        let mut message = String::new();
+        use std::fmt::Write as _;
+        let _ = writeln!(message, "❌ Error: Z3 solver not found.");
+        let _ = writeln!(message);
+        let _ = writeln!(message, "   Mumei requires Z3 for formal verification.");
+        let _ = writeln!(message, "   Install it with one of:");
+        let _ = writeln!(message, "     macOS:  brew install z3");
+        let _ = writeln!(message, "     Ubuntu: sudo apt-get install libz3-dev");
+        let _ = writeln!(message, "     Auto:   mumei setup");
+        let _ = writeln!(message);
+        let _ = write!(
+            message,
+            "   After installing, run `mumei inspect` to verify."
+        );
+        return Err(message);
+    }
+    Ok(())
 }
 
 /// parse → resolve → monomorphize → ModuleEnv に全定義を登録
@@ -299,7 +315,7 @@ pub(crate) fn load_cross_spec_files(
     module_env: &mut verification::ModuleEnv,
     imports: &mut Vec<ImportDecl>,
     verbose: bool,
-) {
+) -> Result<(), String> {
     for file in cross_spec_files {
         if verbose {
             println!(
@@ -308,11 +324,12 @@ pub(crate) fn load_cross_spec_files(
             );
         }
         let (mut extra_items, extra_env, mut extra_imports, _source) =
-            load_and_prepare_with_full_options(file, strict_imports, allow_lean_verified);
+            try_load_and_prepare_with_full_options(file, strict_imports, allow_lean_verified)?;
         items.append(&mut extra_items);
         imports.append(&mut extra_imports);
         merge_module_env(module_env, extra_env);
     }
+    Ok(())
 }
 
 pub(crate) fn merge_module_env(
