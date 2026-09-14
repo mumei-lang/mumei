@@ -72,6 +72,22 @@ fn did_open_diagnostics(source_path: &Path, source: &str) -> Vec<Value> {
     diagnostics
 }
 
+/// Rewrite a certificate atom as discharged by mumei-lean: `lean_verified`
+/// plus the Lean result metadata that `verify_certificate` requires before
+/// it accepts the entry as proven.
+fn mark_lean_verified(atom: &mut Value, theorem_name: &str) {
+    atom["z3_check_result"] = Value::String("lean_verified".to_string());
+    atom["z3_result_class"] = Value::String("unknown".to_string());
+    atom["lean_result_metadata"] = serde_json::json!({
+        "status": "lean_verified",
+        "theorem_name": theorem_name,
+        "translator_version": mumei_core::verification::LEAN_TRANSLATOR_VERSION,
+        "bridge_lemma_hash": mumei_core::verification::LEAN_BRIDGE_LEMMA_HASH,
+        "proof_path": format!("proofs/{theorem_name}.lean"),
+        "diagnostics": [],
+    });
+}
+
 fn lean_escalation(diagnostic: &Value) -> Option<&Value> {
     diagnostic.pointer("/data/lean_escalation")
 }
@@ -153,8 +169,7 @@ fn lean_verified_method_does_not_match_a_top_level_atom_with_the_same_short_name
         .iter_mut()
         .find(|atom| atom.get("name").and_then(Value::as_str) == Some("Gauge::read"))
         .expect("qualified method entry in the certificate");
-    method["z3_check_result"] = Value::String("lean_verified".to_string());
-    method["z3_result_class"] = Value::String("unknown".to_string());
+    mark_lean_verified(method, "Gauge_read_spec");
     std::fs::write(&cert_path, cert.to_string()).expect("write patched certificate");
 
     let diagnostics = did_open_diagnostics(&source_path, source);
@@ -202,8 +217,7 @@ fn lsp_reports_lean_verified_atoms_from_a_sibling_certificate() {
     // records when Z3 returned `unknown` and Lean closed the obligation.
     let raw = std::fs::read_to_string(&cert_path).expect("read certificate");
     let mut cert: Value = serde_json::from_str(&raw).expect("parse certificate");
-    cert["atoms"][0]["z3_check_result"] = Value::String("lean_verified".to_string());
-    cert["atoms"][0]["z3_result_class"] = Value::String("unknown".to_string());
+    mark_lean_verified(&mut cert["atoms"][0], "clamp_low_spec");
     std::fs::write(&cert_path, cert.to_string()).expect("write patched certificate");
 
     let diagnostics = did_open_diagnostics(&source_path, source);
@@ -225,6 +239,100 @@ fn lsp_reports_lean_verified_atoms_from_a_sibling_certificate() {
         Some("clamp_low"),
         "{escalation}"
     );
+}
+
+/// `lean_verified` without acceptable Lean result metadata is what
+/// `verify_certificate` calls `stale_translator`; the LSP must not surface it
+/// as a completed proof.
+#[test]
+fn lean_verified_without_current_lean_metadata_is_reported_as_stale_not_verified() {
+    let dir = unique_temp_dir("mumei-lsp-lean-stale");
+    let source =
+        "atom clamp_low(x: i64) -> i64\n  requires: x >= 0;\n  ensures: result >= 0;\n  body: x;\n";
+    let source_path = dir.join("stale.mm");
+    let cert_path = dir.join("stale.proof.json");
+    std::fs::write(&source_path, source).expect("write source");
+
+    let generated = Command::new(env!("CARGO_BIN_EXE_mumei"))
+        .arg("verify")
+        .arg("--proof-cert")
+        .arg("--output")
+        .arg(&cert_path)
+        .arg(&source_path)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("run mumei verify --proof-cert");
+    assert!(generated.status.success());
+    let raw = std::fs::read_to_string(&cert_path).expect("read certificate");
+    let pristine: Value = serde_json::from_str(&raw).expect("parse certificate");
+
+    // (label, certificate, surfaced_as_stale): entries whose atom-level
+    // translator/bridge identifiers are current but whose Lean result record
+    // is unacceptable surface as `stale_translator`; a mismatched identifier
+    // inside the result record fails certificate loading outright, so no
+    // certificate diagnostic is produced at all.
+    let mut variants: Vec<(&str, Value, bool)> = Vec::new();
+
+    let mut missing = pristine.clone();
+    missing["atoms"][0]["z3_check_result"] = Value::String("lean_verified".to_string());
+    missing["atoms"][0]["z3_result_class"] = Value::String("unknown".to_string());
+    variants.push(("missing lean_result_metadata", missing, true));
+
+    let mut wrong_status = pristine.clone();
+    mark_lean_verified(&mut wrong_status["atoms"][0], "clamp_low_spec");
+    wrong_status["atoms"][0]["lean_result_metadata"]["status"] =
+        Value::String("lean_failed".to_string());
+    variants.push(("non-verified Lean status", wrong_status, true));
+
+    let mut empty_theorem = pristine.clone();
+    mark_lean_verified(&mut empty_theorem["atoms"][0], "");
+    variants.push(("empty theorem_name", empty_theorem, true));
+
+    let mut stale_bridge = pristine.clone();
+    mark_lean_verified(&mut stale_bridge["atoms"][0], "clamp_low_spec");
+    stale_bridge["atoms"][0]["lean_result_metadata"]["bridge_lemma_hash"] =
+        Value::String("0".repeat(64));
+    variants.push(("stale metadata bridge_lemma_hash", stale_bridge, false));
+
+    let mut stale_translator = pristine.clone();
+    mark_lean_verified(&mut stale_translator["atoms"][0], "clamp_low_spec");
+    stale_translator["atoms"][0]["lean_result_metadata"]["translator_version"] =
+        Value::String("mumei-lean-translator-ir-v1".to_string());
+    variants.push(("stale metadata translator_version", stale_translator, false));
+
+    for (label, cert, surfaced_as_stale) in variants {
+        std::fs::write(&cert_path, cert.to_string()).expect("write patched certificate");
+        let diagnostics = did_open_diagnostics(&source_path, source);
+        let lean: Vec<&Value> = diagnostics
+            .iter()
+            .filter(|d| d.get("source").and_then(Value::as_str) == Some("mumei-lean"))
+            .collect();
+        if surfaced_as_stale {
+            assert_eq!(lean.len(), 1, "{label}: {diagnostics:#?}");
+            assert_eq!(
+                lean[0].get("severity").and_then(Value::as_u64),
+                Some(2),
+                "{label}: {:#?}",
+                lean[0]
+            );
+            let escalation = lean_escalation(lean[0]).expect("lean_escalation payload");
+            assert_eq!(
+                escalation.get("status").and_then(Value::as_str),
+                Some("stale_translator"),
+                "{label}: {escalation}"
+            );
+        } else {
+            assert!(lean.is_empty(), "{label}: {diagnostics:#?}");
+        }
+        assert!(
+            !diagnostics.iter().any(|d| lean_escalation(d)
+                .and_then(|e| e.get("status"))
+                .and_then(Value::as_str)
+                == Some("lean_verified")),
+            "{label}: stale entry surfaced as lean_verified: {diagnostics:#?}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

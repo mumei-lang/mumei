@@ -41,9 +41,10 @@ pub use models::{
 pub use review::{generate_escalation_bundle, generate_human_review_queue};
 
 pub use validation::{
-    check_certificate_hash, get_required_lowering_rules, refresh_certificate_integrity,
-    validate_certificate_translator_versions, validate_translator_version,
-    validate_translator_version_with_semantics, verify_certificate, CertificateHashCheck,
+    check_certificate_hash, get_required_lowering_rules, lean_certificate_metadata_is_current,
+    refresh_certificate_integrity, validate_certificate_translator_versions,
+    validate_translator_version, validate_translator_version_with_semantics, verify_certificate,
+    CertificateHashCheck,
 };
 
 #[cfg(test)]
