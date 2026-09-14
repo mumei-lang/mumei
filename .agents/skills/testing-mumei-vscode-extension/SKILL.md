@@ -1,6 +1,6 @@
 ---
 name: testing-mumei-vscode-extension
-description: Test the Mumei VS Code extension release flow end-to-end. Use when validating editors/vscode packaging, .mm activation, LSP completion/definition, TextMate grammar, or language-configuration changes.
+description: Test the Mumei VS Code extension release flow and LSP diagnostics end-to-end. Use when validating editors/vscode packaging, .mm activation, LSP completion/definition or certificate diagnostics, TextMate grammar, or language-configuration changes.
 ---
 
 # Testing Mumei VS Code Extension
@@ -78,6 +78,40 @@ Concrete assertions:
 - Request completion at an untyped indentation/call-site position in the atom body. Completion labels should include `atom`, `requires`, `ensures`, `increment`, and `double_increment`.
 - The `increment` completion should have VS Code API kind `CompletionItemKind.Function` and detail text containing `atom increment`, `requires: n >= 0`, and `ensures: result >= 1`; this distinguishes LSP completion from editor word suggestions.
 - Request definition on the typed `increment(x)` identifier. It should resolve to the same test file at zero-based line `2` / one-based line `3`, where `atom increment(n: Nat)` is declared.
+
+## Direct stdio certificate diagnostics
+
+For server-only changes in `src/lsp.rs`, test the actual `target/debug/mumei lsp`
+subprocess without installing VS Code. No secrets are required. Use
+`tests/test_lsp_lean_escalation.rs` as the fixture and protocol reference.
+
+- Generate a real sibling certificate with `mumei verify --proof-cert --output
+  /tmp/fixture.proof.json /tmp/fixture.mm`; keep its original copy before patching
+  certificate statuses to represent bridge results.
+- Send a JSON-RPC `textDocument/didOpen` notification containing `uri` (an absolute
+  `file://` URI), `languageId: "mumei"`, `version: 1`, and `text`. Frame UTF-8 bytes
+  as `Content-Length: <byte count>\r\n\r\n<body>`. Close stdin and collect stdout
+  and stderr with a timeout; parse response frames by byte length.
+- Always assert a `textDocument/publishDiagnostics` notification for the exact
+  URI, including negative checks. An empty/missing server response must not
+  count as a successful absence of diagnostics.
+- Certificate-derived diagnostics include `data.lean_escalation.certificate`.
+  Check this field to distinguish them from live verification diagnostics.
+  A `lean_verified` entry should produce source `mumei-lean`, severity `3`.
+- Pending entries need an `escalation_reason` and a non-`lean_verified` result.
+  Live-settled linear atoms suppress pending certificate entries. Use the
+  reference's nonlinear `square` fixture (`requires: x >= 0 && x < 1000;`,
+  `ensures: result == x * x;`, `body: x * x;`) to test certificate-derived pending
+  diagnostics without relying on a live failure. Removing the sibling
+  certificate should remove that diagnostic.
+- Test edited buffer text independently of disk contents to catch accidental
+  hashing of disk instead of the LSP buffer. Restore the buffer afterward as
+  a positive control.
+- For legacy compatibility tests, derive hash format and supported versions
+  from `mumei-core/src/proof_cert/generation.rs`; do not simply relabel the
+  certificate version while keeping a hash produced by a different algorithm.
+- Preserve raw protocol frames, stderr, parsed diagnostics, and expected/actual
+  assertions as shell-only evidence. Do not record an idle desktop.
 
 ## Grammar and language-configuration assertions
 
