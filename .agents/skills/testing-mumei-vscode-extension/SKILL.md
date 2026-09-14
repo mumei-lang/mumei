@@ -99,11 +99,17 @@ subprocess without installing VS Code. No secrets are required. Use
   Check this field to distinguish them from live verification diagnostics.
   A `lean_verified` entry should produce source `mumei-lean`, severity `3`.
 - Pending entries need an `escalation_reason` and a non-`lean_verified` result.
-  Live-settled linear atoms suppress pending certificate entries. Use the
-  reference's nonlinear `square` fixture (`requires: x >= 0 && x < 1000;`,
-  `ensures: result == x * x;`, `body: x * x;`) to test certificate-derived pending
-  diagnostics without relying on a live failure. Removing the sibling
-  certificate should remove that diagnostic.
+  Live-settled atoms suppress pending certificate entries, and bounded
+  low-degree nonlinear atoms (every nonlinear variable with literal bounds,
+  degree <= 2) are now nlsat-first and usually settle live. Use a fixture that
+  stays outside that window, such as the reference's `symbolic_pow`
+  (`requires: x >= 0;`, `ensures: result == x**y && result == x;`, `body: x;`),
+  to test certificate-derived pending diagnostics without relying on a live
+  failure. Removing the sibling certificate should remove that diagnostic.
+  A `lean_verified` entry is only reported as verified (severity `3`) when its
+  `lean_result_metadata` is current (status `lean_verified`, non-empty
+  `theorem_name`, current `translator_version` / `bridge_lemma_hash`);
+  otherwise it surfaces as `stale_translator` (severity `2`).
 - Test edited buffer text independently of disk contents to catch accidental
   hashing of disk instead of the LSP buffer. Restore the buffer afterward as
   a positive control.
