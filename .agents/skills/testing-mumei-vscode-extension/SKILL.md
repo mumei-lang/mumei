@@ -1,6 +1,6 @@
 ---
 name: testing-mumei-vscode-extension
-description: Test the Mumei VS Code extension release flow and LSP diagnostics end-to-end. Use when validating editors/vscode packaging, .mm activation, LSP completion/definition or certificate diagnostics, TextMate grammar, or language-configuration changes.
+description: Test the Mumei VS Code extension release flow and LSP diagnostics and LSP diagnostics end-to-end. Use when validating editors/vscode packaging, .mm activation, LSP completion/definition or certificate diagnostics or certificate diagnostics, TextMate grammar, or language-configuration changes.
 ---
 
 # Testing Mumei VS Code Extension
@@ -118,6 +118,42 @@ subprocess without installing VS Code. No secrets are required. Use
   certificate version while keeping a hash produced by a different algorithm.
 - Preserve raw protocol frames, stderr, parsed diagnostics, and expected/actual
   assertions as shell-only evidence. Do not record an idle desktop.
+
+## Direct stdio certificate diagnostics
+
+No secrets or VS Code installation are needed for server-only checks. Rebuild
+`target/debug/mumei` with the LLVM environment above and follow the current
+fixtures in `tests/test_lsp_lean_escalation.rs`.
+
+- Generate a real sibling certificate with `mumei verify --proof-cert --output
+  /tmp/fixture.proof.json /tmp/fixture.mm`; retain its original before patching
+  metadata to model Lean bridge output.
+- Launch `mumei lsp`, send `textDocument/didOpen` with an absolute file URI and
+  buffer text using `Content-Length: <UTF-8 byte count>\r\n\r\n<body>`, then close
+  stdin. Parse framed responses and require a `publishDiagnostics` notification
+  for the exact URI even in negative cases. Missing output is not an empty
+  diagnostic list.
+- A `lean_verified` certificate atom needs current atom-level translator/bridge
+  identifiers plus `lean_result_metadata` (or the `lean_metadata` fallback).
+  Use `mark_lean_verified` in the current reference test for the metadata shape
+  and current constants, rather than hardcoding version/hash values.
+- Missing/null result metadata, failed result status, or an empty theorem name
+  should produce severity 2 `mumei-lean` / `stale_translator`, never a
+  `lean_verified` status. Identifier mismatches may reject the whole certificate
+  during loading instead, producing no certificate diagnostic.
+- Distinguish certificate-derived diagnostics via
+  `data.lean_escalation.certificate`. Pending entries for live-settled atoms are
+  suppressed. For nonlinear pending fixtures, use the current reference's
+  one-sided `requires: x >= 0`, `ensures: result == x * x`, `body: x * x`;
+  adding an upper bound can make the atom a bounded-nonlinear candidate that no
+  longer needs Lean escalation. Assert the generated escalation reason before
+  trying to test pending diagnostics. Remove the sibling as a negative control.
+- Legacy certificate tests need both the legacy content hash and current Lean
+  metadata to produce verified diagnostics. Derive hash format from
+  `mumei-core/src/proof_cert/generation.rs`.
+- Preserve raw requests/responses, stderr, patched certificates, and explicit
+  expected/actual assertions. Do not record an idle desktop for shell-only
+  protocol testing.
 
 ## Grammar and language-configuration assertions
 
