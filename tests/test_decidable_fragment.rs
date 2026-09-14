@@ -564,3 +564,200 @@ body: x * y;
 
     std::fs::remove_dir_all(temp_dir).expect("remove escalation temp dir");
 }
+
+// ---------------------------------------------------------------------------
+// P10-D / C-2: bounded low-degree nonlinear arithmetic is routed to nlsat-first
+// instead of unconditional Lean escalation.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn bounded_low_degree_nonlinear_is_nlsat_first_and_not_outside_fragment() {
+    use mumei_core::verification::{
+        bounded_low_degree_nonlinear_profile, is_nlsat_first_candidate, BOUNDED_NONLINEAR_TAG,
+        NLSAT_FIRST_MAX_DEGREE, NLSAT_FIRST_MAX_VARIABLES,
+    };
+    let module_env = ModuleEnv::new();
+
+    let mut atom = base_atom("bounded_mul");
+    atom.params = vec![param("a", "i64"), param("b", "i64")];
+    atom.requires = "a >= 0 && a <= 1000 && b >= 0 && b <= 1000".to_string();
+    atom.ensures = "result >= 0 && result <= 1000000".to_string();
+    atom.body_expr = "a * b".to_string();
+
+    let tags = assert_detected_tag(&atom, &module_env, "nonlinear_arithmetic");
+    assert!(
+        tags.iter().any(|tag| tag == BOUNDED_NONLINEAR_TAG),
+        "{tags:?}"
+    );
+    assert!(is_nlsat_first_candidate(&tags));
+    assert!(!is_outside_decidable_fragment(&tags));
+    assert!(outside_decidable_fragment_warning(&atom, &module_env).is_none());
+
+    let profile = bounded_low_degree_nonlinear_profile(&atom).expect("bounded profile");
+    assert_eq!(profile.max_degree, 2);
+    assert!(profile.max_degree <= NLSAT_FIRST_MAX_DEGREE);
+    assert!(profile.variables.len() <= NLSAT_FIRST_MAX_VARIABLES);
+    assert_eq!(profile.variables, vec!["a".to_string(), "b".to_string()]);
+}
+
+#[test]
+fn unbounded_nonlinear_stays_on_lean_escalation_path() {
+    use mumei_core::verification::{bounded_low_degree_nonlinear_profile, BOUNDED_NONLINEAR_TAG};
+    let module_env = ModuleEnv::new();
+
+    // One-sided bound only: not closed on both sides.
+    let mut atom = base_atom("half_bounded_mul");
+    atom.params = vec![param("a", "i64"), param("b", "i64")];
+    atom.requires = "a >= 0 && b >= 0".to_string();
+    atom.ensures = "result >= 0".to_string();
+    atom.body_expr = "a * b".to_string();
+    assert!(bounded_low_degree_nonlinear_profile(&atom).is_none());
+    let tags = assert_detected_tag(&atom, &module_env, "nonlinear_arithmetic");
+    assert!(!tags.iter().any(|tag| tag == BOUNDED_NONLINEAR_TAG));
+    assert_outside_tag(&atom, &module_env, "nonlinear_arithmetic");
+}
+
+#[test]
+fn high_degree_or_too_many_variables_stay_on_lean_escalation_path() {
+    use mumei_core::verification::bounded_low_degree_nonlinear_profile;
+    let module_env = ModuleEnv::new();
+
+    // Degree 3 exceeds NLSAT_FIRST_MAX_DEGREE even though x is bounded.
+    let mut cube = base_atom("cube");
+    cube.params = vec![param("x", "i64")];
+    cube.requires = "x >= 0 && x <= 20".to_string();
+    cube.ensures = "result >= 0".to_string();
+    cube.body_expr = "x * x * x".to_string();
+    assert!(bounded_low_degree_nonlinear_profile(&cube).is_none());
+    assert_outside_tag(&cube, &module_env, "nonlinear_arithmetic");
+
+    // Four distinct bounded variables exceed NLSAT_FIRST_MAX_VARIABLES.
+    let mut many = base_atom("many_vars");
+    many.params = vec![
+        param("a", "i64"),
+        param("b", "i64"),
+        param("c", "i64"),
+        param("d", "i64"),
+    ];
+    many.requires =
+        "a >= 0 && a <= 10 && b >= 0 && b <= 10 && c >= 0 && c <= 10 && d >= 0 && d <= 10"
+            .to_string();
+    many.ensures = "result >= 0".to_string();
+    many.body_expr = "a * b + c * d".to_string();
+    assert!(bounded_low_degree_nonlinear_profile(&many).is_none());
+    assert_outside_tag(&many, &module_env, "nonlinear_arithmetic");
+}
+
+#[test]
+fn symbolic_divisor_requires_zero_excluding_bounds_for_nlsat_first() {
+    use mumei_core::verification::bounded_low_degree_nonlinear_profile;
+    let module_env = ModuleEnv::new();
+
+    let mut ok = base_atom("bounded_div");
+    ok.params = vec![param("a", "i64"), param("b", "i64")];
+    ok.requires = "a >= 0 && a <= 1000 && b >= 1 && b <= 1000".to_string();
+    ok.ensures = "result >= 0".to_string();
+    ok.body_expr = "a / b".to_string();
+    assert!(bounded_low_degree_nonlinear_profile(&ok).is_some());
+    assert!(!is_outside_decidable_fragment(&detect_logic_fragment_tags(
+        &ok,
+        &module_env
+    )));
+
+    // Divisor bounds include zero → stays on the Lean path.
+    let mut zero = base_atom("div_zero_in_range");
+    zero.params = vec![param("a", "i64"), param("b", "i64")];
+    zero.requires = "a >= 0 && a <= 1000 && b >= 0 && b <= 1000 && b != 0".to_string();
+    zero.ensures = "result >= 0".to_string();
+    zero.body_expr = "a / b".to_string();
+    assert!(bounded_low_degree_nonlinear_profile(&zero).is_none());
+    assert_outside_tag(&zero, &module_env, "nonlinear_arithmetic");
+}
+
+#[test]
+fn finite_field_and_modulo_are_never_nlsat_first() {
+    use mumei_core::verification::{
+        bounded_low_degree_nonlinear_profile, is_nlsat_first_candidate,
+    };
+    let module_env = ModuleEnv::new();
+
+    let mut modulo = base_atom("bounded_mod");
+    modulo.params = vec![param("a", "i64"), param("b", "i64")];
+    modulo.requires = "a >= 0 && a <= 1000 && b >= 1 && b <= 1000".to_string();
+    modulo.ensures = "result >= 0".to_string();
+    modulo.body_expr = "a % b".to_string();
+    assert!(bounded_low_degree_nonlinear_profile(&modulo).is_none());
+    assert!(!is_nlsat_first_candidate(&detect_logic_fragment_tags(
+        &modulo,
+        &module_env
+    )));
+
+    let mut ff = base_atom("ff_bounded");
+    ff.params = vec![param("a", "i64"), param("b", "i64")];
+    ff.requires = "a >= 0 && a <= 6 && b >= 0 && b <= 6".to_string();
+    ff.ensures = "ff_eq(result, ff_mul(a, b))".to_string();
+    ff.body_expr = "a * b".to_string();
+    assert!(bounded_low_degree_nonlinear_profile(&ff).is_none());
+    let tags = detect_logic_fragment_tags(&ff, &module_env);
+    assert!(!is_nlsat_first_candidate(&tags));
+    assert!(is_outside_decidable_fragment(&tags));
+}
+
+fn run_escalation_bundle(fixture: &std::path::Path, tag: &str) -> serde_json::Value {
+    let bin = env!("CARGO_BIN_EXE_mumei");
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let temp_dir =
+        std::env::temp_dir().join(format!("mumei_nlsat_first_{}_{}", std::process::id(), tag));
+    if temp_dir.exists() {
+        std::fs::remove_dir_all(&temp_dir).expect("clean stale nlsat temp dir");
+    }
+    std::fs::create_dir_all(&temp_dir).expect("create nlsat temp dir");
+    let bundle_path = temp_dir.join("bundle.json");
+    let output = Command::new(bin)
+        .arg("verify")
+        .arg("--escalate-lean")
+        .arg("--emit")
+        .arg("escalation-bundle")
+        .arg("--output")
+        .arg(&bundle_path)
+        .arg(fixture)
+        .current_dir(manifest_dir)
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run mumei verify --escalate-lean: {err}"));
+    assert!(
+        output.status.success(),
+        "verify --escalate-lean should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let bundle: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&bundle_path).expect("read escalation bundle"),
+    )
+    .expect("parse escalation bundle");
+    std::fs::remove_dir_all(temp_dir).expect("remove nlsat temp dir");
+    bundle
+}
+
+#[test]
+fn nlsat_first_fixture_is_decided_by_z3_and_not_escalated() {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/nlsat_first/bounded_low_degree_decided.mm");
+    let bundle = run_escalation_bundle(&fixture, "decided");
+    assert_eq!(
+        bundle["summary"]["candidate_count"], 0,
+        "bounded low-degree nonlinear atoms must be decided by nlsat, got {bundle}"
+    );
+}
+
+#[test]
+fn nlsat_first_fixture_outside_window_keeps_lean_escalation() {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/nlsat_first/nonlinear_lean_demotion.mm");
+    let bundle = run_escalation_bundle(&fixture, "demotion");
+    assert_eq!(bundle["summary"]["candidate_count"], 3, "{bundle}");
+    for candidate in bundle["candidates"].as_array().expect("candidates array") {
+        assert_eq!(candidate["escalation_reason"], "nonlinear_arithmetic");
+        assert_eq!(candidate["logic_fragment_tag"], "nonlinear_arithmetic");
+        assert_eq!(candidate["status"], "escalation_candidate");
+    }
+}

@@ -311,10 +311,11 @@ fn lsp_reports_every_pending_escalation_recorded_in_the_sibling_certificate() {
 #[test]
 fn live_z3_proof_does_not_hide_a_pending_escalation_that_still_requires_lean() {
     let dir = unique_temp_dir("mumei-lsp-lean-pending-after-unsat");
-    // `square` is proven by Z3 but lies outside the decidable fragment, so the
+    // `square` is proven by Z3 but lies outside the decidable fragment (its
+    // only bound is one-sided, so it is not an nlsat-first candidate), so the
     // escalation policy still routes it to mumei-lean; `linear` does not.
     let source = concat!(
-        "atom square(x: i64) -> i64\n  requires: x >= 0 && x < 1000;\n  ensures: result == x * x;\n  body: x * x;\n\n",
+        "atom square(x: i64) -> i64\n  requires: x >= 0;\n  ensures: result == x * x;\n  body: x * x;\n\n",
         "atom linear(x: i64) -> i64\n  requires: x >= 0;\n  ensures: result == x + 1;\n  body: x + 1;\n",
     );
     let source_path = dir.join("pending_after_unsat.mm");

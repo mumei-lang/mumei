@@ -3039,3 +3039,110 @@ fn test_forall_arr_transfers_between_requires_and_ensures() {
     );
     solver.pop(1);
 }
+
+// ---------------------------------------------------------------------------
+// P10-D / C-2: nlsat-first execution path for bounded low-degree nonlinear atoms.
+// ---------------------------------------------------------------------------
+
+fn nlsat_env(atom: &Atom) -> ModuleEnv {
+    let mut module_env = ModuleEnv::new();
+    register_builtin_traits(&mut module_env);
+    module_env.register_atom(atom);
+    module_env
+}
+
+#[test]
+fn nlsat_first_decides_bounded_low_degree_product() {
+    let atom = test_atom(
+        "nlsat_bounded_mul",
+        vec![test_param("a", Some("i64")), test_param("b", Some("i64"))],
+        "a >= 0 && a <= 1000 && b >= 0 && b <= 1000",
+        "result >= 0 && result <= 1000000",
+        "a * b",
+        Some("i64"),
+    );
+    let module_env = nlsat_env(&atom);
+    assert!(is_nlsat_first_candidate(&detect_logic_fragment_tags(
+        &atom,
+        &module_env
+    )));
+    let hir = lower_atom_to_hir_with_env(&atom, Some(&module_env));
+    verify(&hir, Path::new("."), &module_env).unwrap();
+}
+
+#[test]
+fn nlsat_first_still_refutes_false_bounded_postcondition() {
+    // Guards against the z3-rs 0.12 failure mode where an unrecognized solver
+    // param silently drops assertions: x = 0 must remain a counterexample.
+    let atom = test_atom(
+        "nlsat_bounded_square_positive",
+        vec![test_param("x", Some("i64"))],
+        "x >= 0 && x <= 100",
+        "result >= 1",
+        "x * x",
+        Some("i64"),
+    );
+    let module_env = nlsat_env(&atom);
+    assert!(is_nlsat_first_candidate(&detect_logic_fragment_tags(
+        &atom,
+        &module_env
+    )));
+    let hir = lower_atom_to_hir_with_env(&atom, Some(&module_env));
+    let err = verify(&hir, Path::new("."), &module_env).unwrap_err();
+    let text = err.to_string();
+    assert!(
+        z3_result_from_error_message(&text).is_none()
+            || z3_result_from_error_message(&text) == Some("sat"),
+        "expected a sat/counterexample failure, got: {text}"
+    );
+    assert!(
+        !text.contains("nlsat first"),
+        "unexpected demotion notice: {text}"
+    );
+}
+
+#[test]
+fn nlsat_first_unknown_message_maps_to_existing_z3_result_classes() {
+    let cfg = Config::new();
+    let ctx = Context::new(&cfg);
+    let solver = Solver::new(&ctx);
+    // Fresh solver has no unknown reason; wording must still classify as `unknown`.
+    let message =
+        super::executor::nlsat_first_unknown_message(&solver, "during the final consistency check");
+    assert_eq!(z3_result_from_error_message(&message), Some("unknown"));
+    assert!(message.contains("demoted to Lean escalation"));
+
+    let timeout_message = "Z3 nlsat timeout during the final consistency check (bounded low-degree nonlinear arithmetic tried with nlsat first; demoted to Lean escalation, reason: timeout).";
+    assert_eq!(
+        z3_result_from_error_message(timeout_message),
+        Some("timeout")
+    );
+}
+
+#[test]
+fn nlsat_first_unknown_demotes_to_lean_with_nonlinear_reason() {
+    // Bounded, degree ≤ 2, ≤ 3 variables → nlsat-first candidate; if Z3 answers
+    // unknown the classification must fall back to the Lean escalation reason.
+    let atom = test_atom(
+        "nlsat_demoted",
+        vec![test_param("a", Some("i64")), test_param("b", Some("i64"))],
+        "a >= 0 && a <= 1000 && b >= 0 && b <= 1000",
+        "result >= 0",
+        "a * b",
+        Some("i64"),
+    );
+    let module_env = nlsat_env(&atom);
+    let unknown = classify_atom_for_lean_escalation(&atom, &module_env, "unknown", "failed");
+    assert!(unknown.should_escalate);
+    assert_eq!(
+        unknown.escalation_reason,
+        Some(EscalationReason::NonlinearArithmetic)
+    );
+    let timeout = classify_atom_for_lean_escalation(&atom, &module_env, "timeout", "failed");
+    assert!(timeout.should_escalate);
+    assert_eq!(timeout.escalation_reason, Some(EscalationReason::Z3Timeout));
+    // A decided (unsat) nlsat-first atom is final: no escalation candidate.
+    let decided = classify_atom_for_lean_escalation(&atom, &module_env, "unsat", "verified");
+    assert!(!decided.should_escalate);
+    assert_eq!(decided.escalation_reason, None);
+}
