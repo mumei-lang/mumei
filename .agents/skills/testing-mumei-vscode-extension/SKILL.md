@@ -82,42 +82,46 @@ Concrete assertions:
 ## Direct stdio certificate diagnostics
 
 For server-only changes in `src/lsp.rs`, test the actual `target/debug/mumei lsp`
-subprocess without installing VS Code. No secrets are required. Use
-`tests/test_lsp_lean_escalation.rs` as the fixture and protocol reference.
+subprocess without installing VS Code. No secrets are required. Rebuild with the
+LLVM environment above and use `tests/test_lsp_lean_escalation.rs` as the fixture
+and protocol reference.
 
 - Generate a real sibling certificate with `mumei verify --proof-cert --output
-  /tmp/fixture.proof.json /tmp/fixture.mm`; keep its original copy before patching
-  certificate statuses to represent bridge results.
-- Send a JSON-RPC `textDocument/didOpen` notification containing `uri` (an absolute
-  `file://` URI), `languageId: "mumei"`, `version: 1`, and `text`. Frame UTF-8 bytes
-  as `Content-Length: <byte count>\r\n\r\n<body>`. Close stdin and collect stdout
-  and stderr with a timeout; parse response frames by byte length.
-- Always assert a `textDocument/publishDiagnostics` notification for the exact
-  URI, including negative checks. An empty/missing server response must not
-  count as a successful absence of diagnostics.
-- Certificate-derived diagnostics include `data.lean_escalation.certificate`.
-  Check this field to distinguish them from live verification diagnostics.
-  A `lean_verified` entry should produce source `mumei-lean`, severity `3`.
-- Pending entries need an `escalation_reason` and a non-`lean_verified` result.
-  Live-settled atoms suppress pending certificate entries, and bounded
-  low-degree nonlinear atoms (every nonlinear variable with literal bounds,
-  degree <= 2) are now nlsat-first and usually settle live. Use a fixture that
-  stays outside that window, such as the reference's `symbolic_pow`
-  (`requires: x >= 0;`, `ensures: result == x**y && result == x;`, `body: x;`),
-  to test certificate-derived pending diagnostics without relying on a live
-  failure. Removing the sibling certificate should remove that diagnostic.
-  A `lean_verified` entry is only reported as verified (severity `3`) when its
-  `lean_result_metadata` is current (status `lean_verified`, non-empty
-  `theorem_name`, current `translator_version` / `bridge_lemma_hash`);
-  otherwise it surfaces as `stale_translator` (severity `2`).
+  /tmp/fixture.proof.json /tmp/fixture.mm`; retain its original before patching
+  metadata to model Lean bridge output.
+- Launch `mumei lsp`, send `textDocument/didOpen` with `uri` (an absolute
+  `file://` URI), `languageId: "mumei"`, `version: 1`, and the buffer text.
+  Frame UTF-8 bytes as `Content-Length: <byte count>\r\n\r\n<body>`, then close
+  stdin. Parse framed responses and require a `publishDiagnostics` notification
+  for the exact URI even in negative cases. Missing output is not an empty
+  diagnostic list.
+- A `lean_verified` certificate atom needs current atom-level translator/bridge
+  identifiers plus `lean_result_metadata` (or the `lean_metadata` fallback).
+  Use `mark_lean_verified` in the reference test for the metadata shape and
+  current constants, rather than hardcoding version/hash values.
+- Missing/null result metadata, failed result status, or an empty theorem name
+  should produce severity 2 `mumei-lean` / `stale_translator`, never a
+  `lean_verified` status. Identifier mismatches may reject the whole certificate
+  during loading instead, producing no certificate diagnostic.
+- Distinguish certificate-derived diagnostics via
+  `data.lean_escalation.certificate`. Pending entries for live-settled atoms are
+  suppressed, and bounded low-degree nonlinear atoms are now nlsat-first and
+  usually settle live. For nonlinear pending fixtures, use the current
+  reference's one-sided `requires: x >= 0`, `ensures: result == x * x`,
+  `body: x * x`; adding an upper bound puts the atom inside the
+  bounded-nonlinear window so it no longer needs Lean escalation. Assert the
+  generated `escalation_reason` before testing pending diagnostics. Remove the
+  sibling certificate as a negative control.
 - Test edited buffer text independently of disk contents to catch accidental
   hashing of disk instead of the LSP buffer. Restore the buffer afterward as
   a positive control.
-- For legacy compatibility tests, derive hash format and supported versions
-  from `mumei-core/src/proof_cert/generation.rs`; do not simply relabel the
-  certificate version while keeping a hash produced by a different algorithm.
-- Preserve raw protocol frames, stderr, parsed diagnostics, and expected/actual
-  assertions as shell-only evidence. Do not record an idle desktop.
+- Legacy certificate tests need both the legacy content hash and current Lean
+  metadata to produce verified diagnostics. Derive hash format and supported
+  versions from `mumei-core/src/proof_cert/generation.rs`; do not simply relabel
+  the certificate version while keeping a hash produced by a different algorithm.
+- Preserve raw requests/responses, stderr, patched certificates, and explicit
+  expected/actual assertions. Do not record an idle desktop for shell-only
+  protocol testing.
 
 ## Grammar and language-configuration assertions
 
