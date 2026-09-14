@@ -1446,6 +1446,29 @@ fn append_certificate_lean_escalation_diagnostics(
             }));
             continue;
         }
+        // Same acceptance rule as `verify_certificate`: a `lean_verified`
+        // entry counts only when its Lean result metadata is current;
+        // otherwise it is `stale_translator` and must not read as proven.
+        if !proof_cert::lean_certificate_metadata_is_current(atom_cert) {
+            diagnostics.push(serde_json::json!({
+                "range": atom_name_range(source, atom),
+                "severity": 2,
+                "source": "mumei-lean",
+                "message": format!(
+                    "Lean escalation: stale_translator (certificate {} records lean_verified without current Lean result metadata; re-run mumei-lean)",
+                    cert_path.display()
+                ),
+                "data": {
+                    "lean_escalation": {
+                        "status": "stale_translator",
+                        "atom": atom_cert.name,
+                        "z3_result_class": atom_cert.z3_result_class,
+                        "certificate": cert_path.to_string_lossy(),
+                    }
+                }
+            }));
+            continue;
+        }
         diagnostics.push(serde_json::json!({
             "range": atom_name_range(source, atom),
             "severity": 3,

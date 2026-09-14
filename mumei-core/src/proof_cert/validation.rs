@@ -165,7 +165,11 @@ pub(crate) fn manual_lemma_reason_for_atom(
     }
 }
 
-fn lean_certificate_metadata_is_current(atom: &AtomCertificate) -> bool {
+/// Whether a `lean_verified` entry is backed by a Lean result this build
+/// accepts: current translator/bridge identifiers on the atom and a verified
+/// result record with a theorem name and the same identifiers. This is the
+/// predicate behind `verify_certificate`'s `proven` vs `stale_translator`.
+pub fn lean_certificate_metadata_is_current(atom: &AtomCertificate) -> bool {
     if atom.translator_version != verification::LEAN_TRANSLATOR_VERSION
         || atom.bridge_lemma_hash != verification::LEAN_BRIDGE_LEMMA_HASH
     {
