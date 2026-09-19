@@ -12,6 +12,7 @@ pub(crate) fn pattern_to_z3_condition<'a>(
     env: &mut Env<'a>,
     vc: &VCtx<'a>,
     solver_opt: Option<&Solver<'a>>,
+    decl_hint: Option<&str>,
 ) -> MumeiResult<Bool<'a>> {
     match pattern {
         Pattern::Wildcard | Pattern::Variable(_) => Ok(Bool::from_bool(ctx, true)),
@@ -63,6 +64,7 @@ pub(crate) fn pattern_to_z3_condition<'a>(
                             env,
                             vc,
                             solver_opt,
+                            None,
                         )?;
                         field_conditions.push(field_cond);
                     }
@@ -70,7 +72,9 @@ pub(crate) fn pattern_to_z3_condition<'a>(
                     return Ok(Bool::and(ctx, &cond_refs));
                 }
             }
-            if let Some(enum_def) = datatype::resolve_variant_owner(vc, target, variant_name)? {
+            if let Some(enum_def) =
+                datatype::resolve_variant_owner(vc, target, variant_name, decl_hint)?
+            {
                 let variant_idx = enum_def
                     .variants
                     .iter()
@@ -86,9 +90,11 @@ pub(crate) fn pattern_to_z3_condition<'a>(
                 let mut field_conditions: Vec<Bool> = vec![tag_match];
 
                 for (i, field_pattern) in fields.iter().enumerate() {
-                    // Projector シンボル: __proj_{VariantName}_{i}
-                    // 同一バリアントの同一フィールドは常に同じシンボルを共有
-                    let proj_name = format!("__proj_{}_{}", variant_name, i);
+                    // Projector シンボル: __proj_{Enum}_{Variant}_{i}
+                    // enum 名を含めることで variant 名の enum 間衝突
+                    // （prelude List vs user IntList の Cons 等）でも一意になり、
+                    // `match t` した束縛 tail も名前から宣言型を復元できる。
+                    let proj_name = format!("__proj_{}_{}_{}", enum_def.name, variant_name, i);
                     let field_sym: Dynamic = if i < variant_def.fields.len() {
                         let field_type = &variant_def.fields[i];
                         // 再帰的 ADT: フィールド型が自身の Enum なら tag として Int を使用
@@ -119,6 +125,19 @@ pub(crate) fn pattern_to_z3_condition<'a>(
                         }
                     }
 
+                    // フィールドの宣言型を次段の hint として渡す
+                    // （再帰 `Self` フィールド → 自身の enum 名）
+                    let field_hint: Option<String> = if i < variant_def.fields.len() {
+                        let ft = &variant_def.fields[i];
+                        let resolved = if *ft == enum_def.name {
+                            enum_def.name.clone()
+                        } else {
+                            vc.module_env.resolve_base_type(ft)
+                        };
+                        vc.module_env.get_enum(&resolved).map(|_| resolved)
+                    } else {
+                        None
+                    };
                     // 再帰的にフィールドパターンの条件を生成
                     let field_cond = pattern_to_z3_condition(
                         ctx,
@@ -127,6 +146,7 @@ pub(crate) fn pattern_to_z3_condition<'a>(
                         env,
                         vc,
                         solver_opt,
+                        field_hint.as_deref(),
                     )?;
                     field_conditions.push(field_cond);
                 }
@@ -158,6 +178,7 @@ pub(crate) fn pattern_bind_variables<'a>(
     target: &Dynamic<'a>,
     env: &mut Env<'a>,
     vc: &VCtx<'a>,
+    decl_hint: Option<&str>,
 ) {
     let module_env = vc.module_env;
     match pattern {
@@ -191,7 +212,14 @@ pub(crate) fn pattern_bind_variables<'a>(
                                     env.insert(fname.clone(), field_sym.clone());
                                 }
                                 Pattern::Variant { .. } => {
-                                    pattern_bind_variables(ctx, field_pattern, &field_sym, env, vc);
+                                    pattern_bind_variables(
+                                        ctx,
+                                        field_pattern,
+                                        &field_sym,
+                                        env,
+                                        vc,
+                                        None,
+                                    );
                                 }
                                 _ => {}
                             }
@@ -200,12 +228,14 @@ pub(crate) fn pattern_bind_variables<'a>(
                     return;
                 }
             }
-            if let Ok(Some(enum_def)) = datatype::resolve_variant_owner(vc, target, variant_name) {
+            if let Ok(Some(enum_def)) =
+                datatype::resolve_variant_owner(vc, target, variant_name, decl_hint)
+            {
                 if let Some(variant_def) =
                     enum_def.variants.iter().find(|v| v.name == *variant_name)
                 {
                     for (i, field_pattern) in fields.iter().enumerate() {
-                        let proj_name = format!("__proj_{}_{}", variant_name, i);
+                        let proj_name = format!("__proj_{}_{}_{}", enum_def.name, variant_name, i);
                         let field_sym: Dynamic = if i < variant_def.fields.len() {
                             let field_type = &variant_def.fields[i];
                             let base = if *field_type == enum_def.name {
@@ -228,8 +258,25 @@ pub(crate) fn pattern_bind_variables<'a>(
                                 env.insert(fname.clone(), field_sym.clone());
                             }
                             Pattern::Variant { .. } => {
-                                // ネストした Variant: 再帰的にバインド
-                                pattern_bind_variables(ctx, field_pattern, &field_sym, env, vc);
+                                // ネストした Variant: フィールドの宣言型
+                                // （再帰 `Self` → 自身の enum 名）を hint に
+                                let field_hint: Option<String> =
+                                    variant_def.fields.get(i).and_then(|ft| {
+                                        let resolved = if *ft == enum_def.name {
+                                            enum_def.name.clone()
+                                        } else {
+                                            module_env.resolve_base_type(ft)
+                                        };
+                                        module_env.get_enum(&resolved).map(|_| resolved)
+                                    });
+                                pattern_bind_variables(
+                                    ctx,
+                                    field_pattern,
+                                    &field_sym,
+                                    env,
+                                    vc,
+                                    field_hint.as_deref(),
+                                );
                             }
                             _ => {}
                         }
@@ -249,10 +296,13 @@ pub(crate) fn detect_enum_from_arms<'a>(
     arms: &[MatchArm],
     vc: &VCtx<'a>,
     target: &Dynamic<'a>,
+    decl_hint: Option<&str>,
 ) -> Option<&'a EnumDef> {
     for arm in arms {
         if let Pattern::Variant { variant_name, .. } = &arm.pattern {
-            if let Ok(Some(enum_def)) = datatype::resolve_variant_owner(vc, target, variant_name) {
+            if let Ok(Some(enum_def)) =
+                datatype::resolve_variant_owner(vc, target, variant_name, decl_hint)
+            {
                 return Some(enum_def);
             }
         }
@@ -267,9 +317,10 @@ pub(crate) fn format_counterexample<'a>(
     target: &Dynamic<'a>,
     arms: &[MatchArm],
     vc: &VCtx<'a>,
+    decl_hint: Option<&str>,
 ) -> String {
     // アームから Enum 定義を特定（ドメイン制約と同じロジック）
-    let enum_ctx = detect_enum_from_arms(arms, vc, target);
+    let enum_ctx = detect_enum_from_arms(arms, vc, target, decl_hint);
     let module_env = vc.module_env;
 
     // ターゲット変数の具体的な値を取得
@@ -286,7 +337,8 @@ pub(crate) fn format_counterexample<'a>(
                         // フィールド値も model から取得を試みる
                         let mut field_vals = Vec::new();
                         for (i, field_type) in variant.fields.iter().enumerate() {
-                            let _field_sym_name = format!("__proj_{}_{}", variant.name, i);
+                            let _field_sym_name =
+                                format!("__proj_{}_{}_{}", edef.name, variant.name, i);
                             // model 内のシンボルを探す（存在すれば具体値を表示）
                             let field_str = format!("{}=?", field_type);
                             field_vals.push(field_str);

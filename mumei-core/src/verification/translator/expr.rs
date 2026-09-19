@@ -1640,6 +1640,25 @@ pub(crate) fn expr_to_z3<'a>(
         Expr::Match { target, arms } => {
             let target_z3 = expr_to_z3(vc, target, env, solver_opt)?;
 
+            // Declared enum type of the scrutinee, when it's a bare
+            // parameter/`result` variable — disambiguates Variant arms
+            // whose names collide across enums (prelude List vs user
+            // `enum IntList`). The const-name lookup inside
+            // `resolve_variant_owner` covers let-aliases; `result` is
+            // rebound to the evaluated body value, so only the Expr knows.
+            let decl_hint: Option<String> = vc.current_atom.and_then(|atom| {
+                let ty = match target.as_ref() {
+                    Expr::Variable(v) if v == "result" => atom.return_type.as_deref()?,
+                    Expr::Variable(v) => atom
+                        .params
+                        .iter()
+                        .find(|p| p.name == *v)
+                        .and_then(|p| p.type_name.as_deref())?,
+                    _ => return None,
+                };
+                Some(crate::verification::support::datatype::type_name_base(ty).to_string())
+            });
+
             // ========================================================
             // Enum ドメイン制約の自動注入
             // ========================================================
@@ -1648,7 +1667,9 @@ pub(crate) fn expr_to_z3<'a>(
             // これにより Z3 が「これら以外のバリアントは存在しない」ことを知り、
             // 網羅性チェックの信頼性が 100% になる。
             if let Some(solver) = solver_opt {
-                if let Some(enum_def) = detect_enum_from_arms(arms, vc, &target_z3) {
+                if let Some(enum_def) =
+                    detect_enum_from_arms(arms, vc, &target_z3, decl_hint.as_deref())
+                {
                     let n = enum_def.variants.len() as i64;
                     if let Some(tag_int) = target_z3.as_int() {
                         // tag ∈ [0, n_variants)
@@ -1673,6 +1694,7 @@ pub(crate) fn expr_to_z3<'a>(
                         env,
                         vc,
                         solver_opt,
+                        decl_hint.as_deref(),
                     )?;
                     // ガード条件がある場合は AND で結合
                     let full_cond = if let Some(guard) = &arm.guard {
@@ -1702,7 +1724,13 @@ pub(crate) fn expr_to_z3<'a>(
                     if solver.check() == SatResult::Sat {
                         let counterexample = if let Some(model) = solver.get_model() {
                             // ターゲット変数の具体的な値を取得
-                            format_counterexample(&model, &target_z3, arms, vc)
+                            format_counterexample(
+                                &model,
+                                &target_z3,
+                                arms,
+                                vc,
+                                decl_hint.as_deref(),
+                            )
                         } else {
                             "unknown value".to_string()
                         };
@@ -1743,7 +1771,14 @@ pub(crate) fn expr_to_z3<'a>(
                 // B. ネストパターンの再帰解体:
                 //    pattern_bind_variables が再帰的にパターンを分解し、
                 //    バインド変数を arm_env に登録する。
-                pattern_bind_variables(ctx, &arm.pattern, &target_z3, &mut arm_env, vc);
+                pattern_bind_variables(
+                    ctx,
+                    &arm.pattern,
+                    &target_z3,
+                    &mut arm_env,
+                    vc,
+                    decl_hint.as_deref(),
+                );
 
                 let arm_cond = pattern_to_z3_condition(
                     ctx,
@@ -1752,6 +1787,7 @@ pub(crate) fn expr_to_z3<'a>(
                     &mut arm_env,
                     vc,
                     solver_opt,
+                    decl_hint.as_deref(),
                 )?;
                 let full_cond = if let Some(guard) = &arm.guard {
                     let guard_z3 = expr_to_z3(vc, guard, &mut arm_env, None)?

@@ -252,24 +252,47 @@ pub(crate) fn variant_owners<'m>(
     owners
 }
 
+/// `Option<i64>`/`[Color]` → base type name (`Option`, `Color`).
+pub(crate) fn type_name_base(ty: &str) -> &str {
+    let base = ty
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(ty);
+    base.split('<').next().unwrap_or(base).trim()
+}
+
 /// The enum a `match` target was declared as, when the target is a bare
-/// parameter constant — `match l` on `l: IntList` yields `Some("IntList")`.
+/// parameter or `result` constant — `match l` on `l: IntList` (or
+/// `match result` on `-> IntList`) yields `Some("IntList")`.
 fn target_param_enum_name(vc: &VCtx, target: &Dynamic) -> Option<String> {
     let sym = target.as_int()?.decl().name();
+    // `__proj_{Enum}_{Variant}_{i}` — projector consts carry their enum
+    // name, so `match t` on a bound tail (`Cons(h, t)`) resolves the same
+    // enum the outer arm used. Enum/variant names may themselves contain
+    // `_`, so take the longest prefix that is a known enum.
+    if let Some(rest) = sym.strip_prefix("__proj_") {
+        if let Some((head, _idx)) = rest.rsplit_once('_') {
+            let mut best: Option<usize> = None;
+            for (pos, _) in head.match_indices('_') {
+                if vc.module_env.get_enum(&head[..pos]).is_some() {
+                    best = Some(pos);
+                }
+            }
+            if let Some(pos) = best {
+                return Some(head[..pos].to_string());
+            }
+        }
+    }
     let atom = vc.current_atom?;
-    atom.params
-        .iter()
-        .find(|p| p.name == sym)
-        .and_then(|p| p.type_name.as_deref())
-        .map(|ty| {
-            // Strip generic arguments (`Option<i64>` → `Option`) and the
-            // array wrapper (`[Color]` → `Color`).
-            let base = ty
-                .strip_prefix('[')
-                .and_then(|s| s.strip_suffix(']'))
-                .unwrap_or(ty);
-            base.split('<').next().unwrap_or(base).trim().to_string()
-        })
+    let declared = if sym == "result" {
+        atom.return_type.as_deref()
+    } else {
+        atom.params
+            .iter()
+            .find(|p| p.name == sym)
+            .and_then(|p| p.type_name.as_deref())
+    };
+    declared.map(|ty| type_name_base(ty).to_string())
 }
 
 /// Signature a `Variant` pattern encodes on the Int-tag path: the variant's
@@ -311,7 +334,9 @@ fn int_tag_sig(
 /// prelude always contributes `Option`/`Result`/`List`), which owner it
 /// returns, and therefore which tag index a `Cons` arm encodes, flips
 /// between processes. Resolution order:
-/// 1. the enum named by the match target's declared parameter type;
+/// 1. the enum named by `decl_hint` (the scrutinee expression's declared
+///    type — e.g. `match result` on `-> IntList`) or by the match target's
+///    own declared parameter type (`match l` on `l: IntList`);
 /// 2. the sole owner, or any owner when every owner assigns the variant
 ///    the same tag index and payload types;
 /// 3. otherwise the match cannot be encoded soundly — an error.
@@ -319,12 +344,17 @@ pub(crate) fn resolve_variant_owner<'a>(
     vc: &VCtx<'a>,
     target: &Dynamic<'a>,
     variant_name: &str,
+    decl_hint: Option<&str>,
 ) -> MumeiResult<Option<&'a EnumDef>> {
     let owners = variant_owners(vc.module_env, variant_name);
     if owners.is_empty() {
         return Ok(None);
     }
-    if let Some(decl) = target_param_enum_name(vc, target) {
+    let declared = decl_hint
+        .map(str::to_string)
+        .into_iter()
+        .chain(target_param_enum_name(vc, target));
+    for decl in declared {
         if let Some(decl_enum) = vc.module_env.get_enum(&decl) {
             return if owners.iter().any(|o| o.name == decl_enum.name) {
                 Ok(Some(decl_enum))
