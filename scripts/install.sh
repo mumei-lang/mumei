@@ -178,7 +178,9 @@ download() {
 # (src/setup.rs の MUMEI_SETUP_EXPECTED_SHA256 と同じ契約)。
 verify_checksum() {
     local file="$1"
-    local expected="${MUMEI_INSTALL_EXPECTED_SHA256:-}"
+    # setup.rs trims and compares case-insensitively; do the same here.
+    local expected
+    expected="$(printf '%s' "${MUMEI_INSTALL_EXPECTED_SHA256:-}" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
     [ -z "$expected" ] && return 0
     local actual
     if command -v sha256sum &>/dev/null; then
