@@ -83,3 +83,47 @@ atom always() -> i64
         "if true must take the then arm returning 42:\n{ir}"
     );
 }
+
+// `&&` / `||` were unrepresentable in codegen ("Unsupported int operator").
+// They lower to real short-circuit control flow: the RHS compiles into a
+// dedicated `logic.rhs` block guarded by the LHS truth value, so
+// `i >= 0 && arr[i] > 0` never runs the array bounds check when i < 0.
+#[test]
+fn logical_and_short_circuits_rhs() {
+    let ir = emit_atom_ir(
+        "logic_and",
+        r#"
+atom sc(arr: [i64], i: i64) -> i64
+    requires: i >= 0 && i < len(arr);
+    ensures: true;
+    body: {
+        if i >= 0 && arr[i] > 0 { 1 } else { 0 }
+    }
+
+atom either(a: i64, b: i64) -> i64
+    requires: true;
+    ensures: true;
+    body: {
+        if a > 0 || b > 0 { 1 } else { 0 }
+    }
+"#,
+        "sc",
+    );
+    assert!(
+        ir.contains("br i1 %logic_lhs, label %logic.rhs, label %logic.merge"),
+        "and must branch on the LHS before evaluating the RHS:\n{ir}"
+    );
+    // The bounds check must live inside logic.rhs — never reached on the
+    // short-circuit path.
+    let rhs_pos = ir.find("logic.rhs:").unwrap();
+    let merge_pos = ir.find("logic.merge:").unwrap();
+    let bounds_pos = ir.find("%bounds_check").unwrap();
+    assert!(
+        rhs_pos < bounds_pos && bounds_pos < merge_pos,
+        "bounds check must be inside the RHS block:\n{ir}"
+    );
+    assert!(
+        ir.contains("phi i1 [ false, %entry ]"),
+        "short-circuit and yields false without the RHS:\n{ir}"
+    );
+}
