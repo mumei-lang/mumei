@@ -137,10 +137,32 @@ pub(crate) fn uses_rust_ffi(extern_blocks: &[parser::ExternBlock]) -> bool {
         .any(|block| block.language == "Rust" && !block.functions.is_empty())
 }
 
-pub(crate) fn generate_rust_ffi_staticlib(
-    crate_dir: &Path,
-    output_dir: &Path,
-) -> Result<PathBuf, String> {
+/// The C runtime and Rust FFI sources are embedded at compile time so an
+/// installed `mumei` binary does not depend on the source tree being
+/// present at ``CARGO_MANIFEST_DIR``.
+pub(crate) const MUMEI_RUNTIME_C: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/runtime/mumei_runtime.c"
+));
+
+const FFI_JSON_RS: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/mumei-core/src/ffi/json.rs"
+));
+const FFI_HTTP_RS: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/mumei-core/src/ffi/http.rs"
+));
+const FFI_HTTP_SERVER_RS: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/mumei-core/src/ffi/http_server.rs"
+));
+const FFI_FILE_RS: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/mumei-core/src/ffi/file.rs"
+));
+
+pub(crate) fn generate_rust_ffi_staticlib(output_dir: &Path) -> Result<PathBuf, String> {
     let ffi_lib_dir = output_dir.join("mumei_ffi_staticlib");
     if ffi_lib_dir.exists() {
         std::fs::remove_dir_all(&ffi_lib_dir).map_err(|err| {
@@ -157,7 +179,6 @@ pub(crate) fn generate_rust_ffi_staticlib(
         )
     })?;
 
-    let core_dir = crate_dir.join("mumei-core");
     let cargo_toml = "[package]\nname = \"mumei-ffi-staticlib\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\nname = \"mumei_ffi_staticlib\"\ncrate-type = [\"staticlib\"]\n\n[dependencies]\nlazy_static = \"1.4\"\nserde_json = \"1.0\"\nreqwest = { version = \"0.12\", default-features = false, features = [\"blocking\", \"json\", \"rustls-tls\"] }\n";
     std::fs::write(ffi_lib_dir.join("Cargo.toml"), cargo_toml).map_err(|err| {
         format!(
@@ -165,15 +186,24 @@ pub(crate) fn generate_rust_ffi_staticlib(
             ffi_lib_dir.display()
         )
     })?;
+    for (name, source) in [
+        ("json", FFI_JSON_RS),
+        ("http", FFI_HTTP_RS),
+        ("http_server", FFI_HTTP_SERVER_RS),
+        ("file", FFI_FILE_RS),
+    ] {
+        std::fs::write(ffi_lib_dir.join("src").join(format!("{name}.rs")), source).map_err(
+            |err| {
+                format!(
+                    "failed to write FFI source '{name}.rs' in '{}': {err}",
+                    ffi_lib_dir.display()
+                )
+            },
+        )?;
+    }
     std::fs::write(
         ffi_lib_dir.join("src/lib.rs"),
-        format!(
-            "mod json {{ include!({:?}); }}\nmod http {{ include!({:?}); }}\nmod http_server {{ include!({:?}); }}\nmod file {{ include!({:?}); }}\n",
-            core_dir.join("src/ffi/json.rs"),
-            core_dir.join("src/ffi/http.rs"),
-            core_dir.join("src/ffi/http_server.rs"),
-            core_dir.join("src/ffi/file.rs"),
-        ),
+        "mod json;\nmod http;\nmod http_server;\nmod file;\n",
     )
     .map_err(|err| {
         format!(

@@ -18,7 +18,7 @@ type FileCap = capability SafeFileRead(path: Str) where starts_with(path, "/tmp/
 
 // capability parameter version: `cap: FileCap` contributes SafeFileRead
 atom read_via_capability(cap: FileCap, user_id: Str)
-    effects: [SafeFileRead(path)]
+    effects: [SafeFileRead(path)];
     requires: not_contains(user_id, "..") && not_contains(user_id, "/") && not_contains(user_id, "\0");
     ensures: result >= 0;
     body: {
@@ -29,7 +29,7 @@ atom read_via_capability(cap: FileCap, user_id: Str)
 
 // equivalent effect-parameter version: same verdict as read_via_capability
 atom read_via_effect(user_id: Str)
-    effects: [SafeFileRead(path)]
+    effects: [SafeFileRead(path)];
     requires: not_contains(user_id, "..") && not_contains(user_id, "/") && not_contains(user_id, "\0");
     ensures: result >= 0;
     body: {

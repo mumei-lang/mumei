@@ -119,21 +119,35 @@ def _parse_params(raw: str) -> list[Param]:
     return params
 
 
+ITEM_BOUNDARY_RE = re.compile(
+    r"^(?:(?:trusted|unverified|async)\s+)?"
+    r"(?:atom|type|effect|import|resource|struct|enum|trait|law|extern|fn)\b",
+    re.MULTILINE,
+)
+
+
 def _extract_clause(text: str, start: int, clause_name: str) -> str:
-    """Extract a clause value terminated by `;` from *text* starting at *start*."""
+    """Extract a clause value terminated by `;` from *text* starting at *start*.
+
+    The search is bounded to the end of the current top-level declaration —
+    without that bound a missing `requires:` would silently pick up the NEXT
+    atom's clause and misattribute it.
+    """
+    boundary = ITEM_BOUNDARY_RE.search(text, start + 1)
+    end = boundary.start() if boundary is not None else len(text)
     # Find the clause keyword followed by ':'
     pattern = re.compile(
         rf"^\s*{clause_name}\s*:\s*",
         re.MULTILINE,
     )
-    m = pattern.search(text, start)
+    m = pattern.search(text, start, end)
     if m is None:
         return "true"
     value_start = m.end()
     # Clause value runs until the first `;` that is not inside braces
     depth = 0
     i = value_start
-    while i < len(text):
+    while i < end:
         ch = text[i]
         if ch == "{":
             depth += 1
@@ -142,7 +156,7 @@ def _extract_clause(text: str, start: int, clause_name: str) -> str:
         elif ch == ";" and depth == 0:
             return text[value_start:i].strip()
         i += 1
-    return text[value_start:].strip().rstrip(";")
+    return text[value_start:end].strip().rstrip(";")
 
 
 def _atom_ffi_fn(module: str, atom_name: str) -> str:
@@ -247,9 +261,8 @@ def _translate_requires_to_strategy(atom: TrustedAtom) -> list[str]:
                 req,
             )
             if sw_match:
-                prefix = sw_match.group(1)
                 lines.append(
-                    f'            suffix in "[a-zA-Z0-9._/\\\\-]{{0,64}}",',
+                    f'            {p.name}_suffix in "[a-zA-Z0-9._/\\\\-]{{0,64}}",',
                 )
             else:
                 lines.append(
@@ -520,7 +533,7 @@ def _generate_str_prep(atom: TrustedAtom) -> list[str]:
             if sw_match:
                 prefix = sw_match.group(1)
                 lines.append(
-                    f'    let {p.name}_raw = format!("{prefix}{{}}", suffix);'
+                    f'    let {p.name}_raw = format!("{prefix}{{}}", {p.name}_suffix);'
                 )
                 lines.append(
                     f"    let {p.name}_c = std::ffi::CString::new({p.name}_raw).unwrap();"

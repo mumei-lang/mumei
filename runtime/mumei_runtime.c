@@ -318,6 +318,10 @@ int64_t __mumei_chan_recv(int64_t chan_id) {
     mumei_chan_t *ch = mumei_chan_get(chan_id);
     int64_t v = 0;
     int cancelled = 0;
+    /* NOTE: on cancellation this returns 0, which a caller cannot
+     * distinguish from a legitimately-received 0 — cancellation-aware
+     * consumers must check __mumei_task_group_should_cancel_current()
+     * after a recv that matters. */
     pthread_mutex_lock(&ch->mu);
     pthread_cleanup_push(mumei_unlock_mutex_cleanup, &ch->mu);
     while (!ch->ready) {
@@ -336,6 +340,12 @@ int64_t __mumei_chan_recv(int64_t chan_id) {
         pthread_cond_broadcast(&ch->cv);
     }
     pthread_cleanup_pop(1);
+    if (cancelled) {
+        fprintf(stderr,
+                "[mumei runtime] warning: chan_recv on channel %lld "
+                "cancelled before a value arrived; returning 0\n",
+                (long long)chan_id);
+    }
     return v;
 }
 
@@ -366,6 +376,14 @@ static pthread_mutex_t g_named_resource_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t *mumei_named_resource_get(const char *name) {
     if (name == NULL || name[0] == '\0') {
         fprintf(stderr, "[mumei runtime] fatal: empty resource name\n");
+        abort();
+    }
+    /* A name that does not fit must not be truncated — two distinct long
+     * names with a common 127-char prefix would otherwise share one mutex. */
+    if (strlen(name) >= MUMEI_MAX_NAMED_RESOURCE_NAME) {
+        fprintf(stderr,
+                "[mumei runtime] fatal: resource name exceeds %d bytes\n",
+                MUMEI_MAX_NAMED_RESOURCE_NAME - 1);
         abort();
     }
 

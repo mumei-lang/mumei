@@ -425,6 +425,41 @@ pub fn check_spec_satisfiability_with_timeout(
         }
     }
 
+    // Divisions lowered in contract clauses without a solver carry the
+    // same deferred-safety contract as shifts: `divisor != 0` and the
+    // `i64::MIN / -1` pair are only decidable here, where the requires
+    // clause is asserted.
+    match super::translator::div_safety_status(&vc, &solver) {
+        super::translator::DivSafetyStatus::Safe => {}
+        super::translator::DivSafetyStatus::DivisionByZero => {
+            return Err(SpecContradiction::new(
+                &atom.name,
+                "division_by_zero",
+                "divisor may be zero under requires",
+                vec![atom.requires.clone(), atom.ensures.clone()],
+                atom.span.clone(),
+            ));
+        }
+        super::translator::DivSafetyStatus::Overflow => {
+            return Err(SpecContradiction::new(
+                &atom.name,
+                "division_overflow",
+                "division may hit i64::MIN / -1 under requires",
+                vec![atom.requires.clone(), atom.ensures.clone()],
+                atom.span.clone(),
+            ));
+        }
+        super::translator::DivSafetyStatus::Undecided => {
+            return Err(SpecContradiction::new(
+                &atom.name,
+                "division_safety_unknown",
+                "Z3 returned unknown for division safety under requires",
+                vec![atom.requires.clone(), atom.ensures.clone()],
+                atom.span.clone(),
+            ));
+        }
+    }
+
     let trace_id = effective_trace_id(atom);
     let spec_metadata = effective_spec_metadata(atom);
 
@@ -482,6 +517,8 @@ fn validation_ctx<'a>(
         ieee754_f64,
         bitvec_i64,
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
+        bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        clause_context: std::cell::RefCell::new(Vec::new()),
         bitvec_i64_global,
     }
 }
@@ -703,6 +740,7 @@ fn assert_clause<'a>(
         return Ok(ClauseLoweringOutcome::Applied);
     }
     let clause_ast = parse_expression(trimmed);
+    let marks = super::translator::obligation_marks(vc);
     let clause_z3 = match expr_to_z3(vc, &clause_ast, env, None) {
         Ok(value) => value,
         Err(err) if is_unsupported_clause_error(&err) => {
@@ -729,7 +767,20 @@ fn assert_clause<'a>(
             atom.span.clone(),
         ));
     };
+    // The clause's shifts/divisions are only evaluated where the clause
+    // itself and the clauses already asserted hold, so their bounds
+    // (`result <= 62`) may discharge range obligations recorded while
+    // lowering this one. Only allocate the domain AST when this lowering
+    // actually recorded obligations — building it unconditionally perturbs
+    // the shared context's AST table and can flip borderline nlsat queries.
+    if super::translator::has_new_obligations(vc, marks) {
+        let mut domain = vc.clause_context.borrow().clone();
+        domain.push(clause_bool.clone());
+        let domain_bool = Bool::and(vc.ctx, &domain.iter().collect::<Vec<_>>());
+        super::translator::rebind_deferred_obligations(vc, marks, &domain_bool);
+    }
     solver.assert(&clause_bool);
+    vc.clause_context.borrow_mut().push(clause_bool);
     Ok(ClauseLoweringOutcome::Applied)
 }
 
@@ -748,6 +799,7 @@ fn assert_negated_clause<'a>(
         return Ok(ClauseLoweringOutcome::Applied);
     }
     let clause_ast = parse_expression(trimmed);
+    let marks = super::translator::obligation_marks(vc);
     let clause_z3 = match expr_to_z3(vc, &clause_ast, env, None) {
         Ok(value) => value,
         Err(err) if is_unsupported_clause_error(&err) => {
@@ -777,6 +829,12 @@ fn assert_negated_clause<'a>(
             atom.span.clone(),
         ));
     };
+    if super::translator::has_new_obligations(vc, marks) {
+        let mut domain = vc.clause_context.borrow().clone();
+        domain.push(clause_bool.clone());
+        let domain_bool = Bool::and(vc.ctx, &domain.iter().collect::<Vec<_>>());
+        super::translator::rebind_deferred_obligations(vc, marks, &domain_bool);
+    }
     solver.assert(&clause_bool.not());
     Ok(ClauseLoweringOutcome::Applied)
 }

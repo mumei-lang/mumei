@@ -168,6 +168,12 @@ def build_bundle(certs_dir: Path, mumei_version: str) -> dict:
                 file=sys.stderr,
             )
             continue
+        if not isinstance(cert, dict):
+            print(
+                f"warning: {cert_path} is not a certificate object, skipping",
+                file=sys.stderr,
+            )
+            continue
         key = _module_key(cert_path, certs_dir)
         modules[key] = cert
         artifact_paths.append(_artifact_path(cert_path, certs_dir))

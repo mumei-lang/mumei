@@ -31,7 +31,7 @@ Source: `mcp_server.py` in the mumei repository.
 | `execute_mm` | `source_code: str, output_name: str = "katana", command: str = "build"` |  |
 | `get_inferred_effects` | `source_code: str` |  |
 | `get_allowed_effects` | `project_dir: str = "."` |  |
-| `set_allowed_effects` | `allowed: "list[str] \| None" = None, denied: "list[str] \| None" = None` |  |
+| `set_allowed_effects` | `allowed: "list[str] \| None" = None, denied: "list[str] \| None" = None, project_dir: str = "."` |  |
 | `list_std_catalog` |  |  |
 | `visualize_std_graph` | `format: str = "mermaid"` |  |
 | `visualize_proof_graph` | `source_code: str, format: str = "json"` |  |
@@ -60,7 +60,7 @@ Source: `/home/ubuntu/repos/mumei-agent/agent/mcp_server.py`.
 | `approve_review` | `atom_name: str, reviewer: str, notes: str` |  |
 | `escalate_to_lean` | `atom_name: str` |  |
 | `reject_review` | `atom_name: str, reviewer: str, notes: str` |  |
-| `get_agent_status` |  |  |
+| `get_agent_status` | `ctx: Context \| None = None` |  |
 | `send_latent_message` | `message: str, context: str = "{}", verify: bool = True` |  |
 | `send_latent_message_batch` | `messages: str, verify: bool = False` |  |
 | `async_send_latent_message` | `message: str, context: str = "{}", verify: bool = True` |  |

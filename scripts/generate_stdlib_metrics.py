@@ -240,7 +240,9 @@ def _render_scale_trust_surface(surface: dict) -> list[str]:
             f"{ts.get('application_trusted_atoms', 0)} | "
             f"{ts.get('ffi_boundary_declarations', 0)} | "
             f"{ts.get('z3_unknown_to_lean_escalation_atoms', 0)} | "
-            f"{case.get('z3_solver_seconds', 0.0):.3f} |",
+            # verify_wall_seconds replaced the misnamed z3_solver_seconds key;
+            # fall back for reports generated before the rename.
+            f"{case.get('verify_wall_seconds', case.get('z3_solver_seconds', 0.0)):.3f} |",
         )
     lines.extend(
         [
@@ -250,7 +252,7 @@ def _render_scale_trust_surface(surface: dict) -> list[str]:
             f"{totals.get('application_trusted_atoms', 0)} | "
             f"{totals.get('ffi_boundary_declarations', 0)} | "
             f"{totals.get('z3_unknown_to_lean_escalation_atoms', 0)} | "
-            f"{totals.get('z3_solver_seconds', 0.0):.2f} |",
+            f"{totals.get('verify_wall_seconds', totals.get('z3_solver_seconds', 0.0)):.2f} |",
             "",
             f"> `std/` trusted atoms stay at {std.get('std_trusted_atoms', 0)} of the "
             f"{std.get('std_atoms', 0)} atoms present in the pinned scale run while the "

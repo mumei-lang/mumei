@@ -205,7 +205,9 @@ pub(crate) fn cmd_doc(input: &str, output_dir: &str, format: &str) {
             // Both stream to stdout (for piping) and write to <out>/docs.json
             // so the same invocation works for CLI scripting and static hosting.
             println!("{}", payload);
-            let _ = fs::write(out_path.join("docs.json"), payload);
+            if let Err(e) = fs::write(out_path.join("docs.json"), &payload) {
+                eprintln!("  ⚠️  Failed to write docs.json: {}", e);
+            }
         }
         _ => {
             eprintln!(
@@ -405,8 +407,27 @@ pub(crate) fn highlight_mumei_code(code: &str) -> String {
     out
 }
 
+/// Unique output stems per module — modules from different directories can
+/// share a file stem, and writing `<stem>.html`/`.md` for each would silently
+/// overwrite earlier pages. Collisions get a `-2`, `-3`, … suffix in order.
+pub(crate) fn doc_output_stems(docs: &[ModuleDoc]) -> Vec<String> {
+    let mut used: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    docs.iter()
+        .map(|doc| {
+            let count = used.entry(doc.name.clone()).or_insert(0);
+            *count += 1;
+            if *count == 1 {
+                doc.name.clone()
+            } else {
+                format!("{}-{}", doc.name, count)
+            }
+        })
+        .collect()
+}
+
 /// HTML ドキュメントを生成
 pub(crate) fn generate_html_docs(docs: &[ModuleDoc], out_dir: &Path) {
+    let stems = doc_output_stems(docs);
     // index.html
     let mut index = String::from(
         r#"<!DOCTYPE html>
@@ -459,10 +480,10 @@ a:hover { text-decoration: underline; }
 "#,
     );
 
-    for doc in docs {
+    for (doc, stem) in docs.iter().zip(&stems) {
         index.push_str(&format!(
             "<li><a href=\"{}.html\">{}</a> — {}</li>\n",
-            html_escape(&doc.name),
+            html_escape(stem),
             html_escape(&doc.name),
             html_escape(&doc.file_path)
         ));
@@ -483,10 +504,16 @@ document.getElementById('search').addEventListener('input', function (e) {
 </html>
 "#,
     );
-    let _ = fs::write(out_dir.join("index.html"), &index);
+    if let Err(e) = fs::write(out_dir.join("index.html"), &index) {
+        eprintln!(
+            "  ⚠️  Failed to write {}: {}",
+            out_dir.join("index.html").display(),
+            e
+        );
+    }
 
     // 各モジュールのページ
-    for doc in docs {
+    for (doc, stem) in docs.iter().zip(&stems) {
         let mut page = format!(
             r#"<!DOCTYPE html>
 <html lang="en">
@@ -670,13 +697,17 @@ a:hover {{ text-decoration: underline; }}
         }
 
         page.push_str("</div>\n</body>\n</html>\n");
-        let _ = fs::write(out_dir.join(format!("{}.html", doc.name)), &page);
+        let path = out_dir.join(format!("{}.html", stem));
+        if let Err(e) = fs::write(&path, &page) {
+            eprintln!("  ⚠️  Failed to write {}: {}", path.display(), e);
+        }
     }
 }
 
 /// Markdown ドキュメントを生成
 pub(crate) fn generate_markdown_docs(docs: &[ModuleDoc], out_dir: &Path) {
-    for doc in docs {
+    let stems = doc_output_stems(docs);
+    for (doc, stem) in docs.iter().zip(&stems) {
         let mut md = format!("# {}\n\nSource: `{}`\n\n", doc.name, doc.file_path);
 
         if !doc.atoms.is_empty() {
@@ -771,7 +802,10 @@ pub(crate) fn generate_markdown_docs(docs: &[ModuleDoc], out_dir: &Path) {
             }
         }
 
-        let _ = fs::write(out_dir.join(format!("{}.md", doc.name)), &md);
+        let path = out_dir.join(format!("{}.md", stem));
+        if let Err(e) = fs::write(&path, &md) {
+            eprintln!("  ⚠️  Failed to write {}: {}", path.display(), e);
+        }
     }
 }
 

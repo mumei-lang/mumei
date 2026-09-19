@@ -9,7 +9,7 @@ effect SecureHttpPost(url: Str) where starts_with(url, "https://");
 
 // Test 1: Valid literal HTTPS URL for GET
 atom test_https_get()
-    effects: [SecureHttpGet(url)]
+    effects: [SecureHttpGet(url)];
     requires: true;
     ensures: result >= 0;
     body: {
@@ -19,7 +19,7 @@ atom test_https_get()
 
 // Test 2: Valid literal HTTPS URL for POST
 atom test_https_post()
-    effects: [SecureHttpPost(url)]
+    effects: [SecureHttpPost(url)];
     requires: true;
     ensures: result >= 0;
     body: {
@@ -29,7 +29,7 @@ atom test_https_post()
 
 // Test 3: Variable URL with requires constraint
 atom test_variable_url(api_url: Str)
-    effects: [SecureHttpGet(url)]
+    effects: [SecureHttpGet(url)];
     requires: starts_with(api_url, "https://");
     ensures: result >= 0;
     body: {

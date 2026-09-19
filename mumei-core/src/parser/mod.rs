@@ -34,11 +34,23 @@ use token::{SpannedToken, Token};
 pub struct ParseContext {
     tokens: Vec<SpannedToken>,
     pos: usize,
+    expect_failures: Vec<String>,
 }
 
 impl ParseContext {
     pub fn new(tokens: Vec<SpannedToken>) -> Self {
-        ParseContext { tokens, pos: 0 }
+        ParseContext {
+            tokens,
+            pos: 0,
+            expect_failures: Vec::new(),
+        }
+    }
+
+    /// Diagnostics recorded by `expect` calls whose token was missing.
+    /// Callers that want fail-closed parsing (e.g. `mumei check`) read
+    /// these after parsing instead of losing the information.
+    pub fn expect_failures(&self) -> &[String] {
+        &self.expect_failures
     }
 
     pub fn peek(&self) -> &Token {
@@ -91,8 +103,20 @@ impl ParseContext {
     pub fn expect(&mut self, expected: Token) {
         if self.peek() == &expected {
             self.advance();
+        } else {
+            // Tolerant by design (the parser recovers and continues), but
+            // record the miss so callers can elect to treat malformed
+            // input as an error instead of silently accepting it.
+            let (found, line, col) = match self.tokens.get(self.pos) {
+                Some(tok) => (format!("{}", tok.token), tok.line, tok.col),
+                None => ("<eof>".to_string(), 0, 0),
+            };
+            if self.expect_failures.len() < 100 {
+                self.expect_failures.push(format!(
+                    "expected {expected}, found {found} at {line}:{col}"
+                ));
+            }
         }
-        // Silently skip if not matching (backward compat with old parser behavior)
     }
 
     pub fn tokens_ref(&self) -> &[SpannedToken] {
@@ -140,6 +164,13 @@ impl ParseContext {
 /// Parse a full module source into a list of Items.
 pub fn parse_module(source: &str) -> Vec<Item> {
     item::parse_module_from_source(source)
+}
+
+/// Strict variant of `parse_module`: returns the accumulated `expect`
+/// diagnostics as `Err` when any token the grammar required was missing,
+/// so a syntactically malformed `.mm` file cannot report success.
+pub fn parse_module_checked(source: &str) -> Result<Vec<Item>, Vec<String>> {
+    item::parse_module_from_source_checked(source)
 }
 
 /// Parse a pure expression (for requires/ensures/conditions).

@@ -660,13 +660,26 @@ pub(crate) fn repl_brace_balance(input: &str) -> i32 {
     let mut balance = 0;
     let mut in_string = false;
     let mut escaped = false;
+    let mut in_line_comment = false;
+    let mut prev = '\0';
     for ch in input.chars() {
+        if in_line_comment {
+            if ch == '\n' {
+                in_line_comment = false;
+            }
+            prev = ch;
+            continue;
+        }
         if in_string {
             if ch == '"' && !escaped {
                 in_string = false;
             }
             escaped = ch == '\\' && !escaped;
+            prev = ch;
             continue;
+        }
+        if ch == '/' && prev == '/' {
+            in_line_comment = true;
         }
         match ch {
             '"' => in_string = true,
@@ -674,6 +687,7 @@ pub(crate) fn repl_brace_balance(input: &str) -> i32 {
             '}' => balance -= 1,
             _ => {}
         }
+        prev = ch;
     }
     balance
 }

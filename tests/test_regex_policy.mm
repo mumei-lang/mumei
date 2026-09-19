@@ -8,7 +8,7 @@ effect RegexSafeFileRead(path: Str) where matches(path, "^/tmp/[a-z]+/.*");
 
 // Test 1: Valid literal path matching regex
 atom test_valid_path()
-    effects: [RegexSafeFileRead(path)]
+    effects: [RegexSafeFileRead(path)];
     requires: true;
     ensures: result >= 0;
     body: {
@@ -18,7 +18,7 @@ atom test_valid_path()
 
 // Test 2: Another valid literal path
 atom test_valid_nested_path()
-    effects: [RegexSafeFileRead(path)]
+    effects: [RegexSafeFileRead(path)];
     requires: true;
     ensures: result >= 0;
     body: {

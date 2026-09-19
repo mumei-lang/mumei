@@ -158,7 +158,10 @@ pub(crate) fn cmd_publish(proof_only: bool, allow_lean_verified: bool) {
     if !proof_only {
         // src/ ディレクトリを再帰コピー
         if Path::new("src").exists() {
-            copy_dir_recursive(Path::new("src"), &pkg_dir.join("src"));
+            if let Err(e) = copy_dir_recursive(Path::new("src"), &pkg_dir.join("src")) {
+                eprintln!("  ❌ Failed to copy src/ into package dir: {}", e);
+                std::process::exit(1);
+            }
         }
         // ルートの .mm ファイルもコピー
         if let Ok(entries) = fs::read_dir(".") {

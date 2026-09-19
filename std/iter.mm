@@ -1,5 +1,5 @@
-# std/iter.mm
-# Collection iteration common interface module
+// std/iter.mm
+// Collection iteration common interface module
 
 import "std/prelude" as prelude;
 import "std/contracts" as contracts;

@@ -275,7 +275,9 @@ fn trait_law_solver_unknown_is_inconclusive_not_verified() {
 }
 
 #[test]
-fn missing_z3_is_an_internal_error_not_a_rejection() {
+fn missing_z3_cli_still_verifies_via_linked_libz3() {
+    // Verification talks to the linked libz3, not a `z3` executable, so an
+    // empty PATH must not be treated as "solver not found".
     let dir = temp_dir("missing_z3");
     write(&dir, "ok.mm", VERIFIED_SRC);
     let output = Command::new(env!("CARGO_BIN_EXE_mumei"))
@@ -285,8 +287,8 @@ fn missing_z3_is_an_internal_error_not_a_rejection() {
         .current_dir(&dir)
         .output()
         .expect("run mumei verify without z3 on PATH");
-    assert_exit(&output, EXIT_INTERNAL_ERROR);
-    assert!(combined_output(&output).contains("Z3 solver not found"));
+    assert_exit(&output, EXIT_VERIFIED);
+    assert!(!combined_output(&output).contains("Z3 solver not found"));
 }
 
 #[test]

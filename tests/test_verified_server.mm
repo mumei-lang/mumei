@@ -22,7 +22,7 @@ effect HttpServer
 
 // --- Test 1: Safe file serving with constrained path ---
 atom test_serve_safe(req_path: Str)
-    effects: [SafeFileRead(path)]
+    effects: [SafeFileRead(path)];
     requires: not_contains(req_path, "..") && not_contains(req_path, "\0");
     ensures: result >= 0;
     body: {
@@ -33,7 +33,7 @@ atom test_serve_safe(req_path: Str)
 
 // --- Test 2: Server bind operation ---
 atom test_server_bind(addr: Str)
-    effects: [HttpServer]
+    effects: [HttpServer];
     requires: true;
     ensures: result >= 0;
     body: {
@@ -44,7 +44,7 @@ atom test_server_bind(addr: Str)
 // --- Test 3: Combined path safety and server effects ---
 // Exercises the full lifecycle: bind → listen → accept → read file → respond
 atom test_combined(req_path: Str)
-    effects: [SafeFileRead(path), HttpServer]
+    effects: [SafeFileRead(path), HttpServer];
     requires: not_contains(req_path, "..") && not_contains(req_path, "\0");
     ensures: result >= 0;
     body: {

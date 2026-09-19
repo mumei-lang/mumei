@@ -938,6 +938,8 @@ fn validation_ctx<'a>(
         bitvec_i64: bitvec_i64
             || super::fragment::atom_requires_bitvector_semantics_in_module(atom, module_env),
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
+        bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        clause_context: std::cell::RefCell::new(Vec::new()),
         bitvec_i64_global: bitvec_i64,
     }
 }

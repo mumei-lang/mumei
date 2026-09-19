@@ -61,6 +61,17 @@ pub(crate) struct VCtx<'a> {
     /// replays them against the atom's solver so that `0 <= n < 64` is enforced
     /// for `requires`/`ensures`/invariant shifts too, not just body shifts.
     pub(crate) bv_shift_obligations: std::cell::RefCell<Vec<(Bool<'a>, BV<'a>)>>,
+    /// `(dividend, divisor)` pairs lowered without a solver, like shift
+    /// amounts above, so `divisor != 0` and `!(i64::MIN / -1)` are enforced
+    /// for contract divisions too, not just body divisions.
+    /// `discharge_bv_div_obligations` replays them under each entry's path
+    /// condition.
+    pub(crate) bv_div_obligations: std::cell::RefCell<Vec<(Bool<'a>, BV<'a>, BV<'a>)>>,
+    /// Clause booleans asserted so far during spec validation, in source
+    /// order. Deferred obligations are conditioned on the clauses already in
+    /// scope so a bound in one conjunct (`result <= 62`) discharges a shift
+    /// in a later one (`n >> result`).
+    pub(crate) clause_context: std::cell::RefCell<Vec<Bool<'a>>>,
 }
 
 impl<'a> VCtx<'a> {

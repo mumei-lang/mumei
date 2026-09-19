@@ -16,6 +16,14 @@ pub(crate) fn pattern_to_z3_condition<'a>(
     match pattern {
         Pattern::Wildcard | Pattern::Variable(_) => Ok(Bool::from_bool(ctx, true)),
         Pattern::Literal(n) => {
+            // Compare in the target's own sort: under `--bitvec-i64` (or any
+            // contract that forces BV encoding, e.g. bitwise ops) `as_int()`
+            // fails and an unconstrained `__match_target` would silently make
+            // every literal arm unreachable.
+            if let Some(target_bv) = target.as_bv() {
+                let lit = BV::from_i64(ctx, *n, target_bv.get_size());
+                return Ok(target_bv._eq(&lit));
+            }
             let target_int = target
                 .as_int()
                 .unwrap_or(Int::new_const(ctx, "__match_target"));

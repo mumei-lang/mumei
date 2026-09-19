@@ -731,8 +731,21 @@ fn cleanup_staging(staging_dir: &Path, archive_path: &Path) {
 
 fn download_with_curl(url: &str, dest_dir: &Path, filename: &str) -> Result<PathBuf, SetupError> {
     let dest = dest_dir.join(filename);
+    // `--proto '=https'` refuses plaintext or downgraded connections and
+    // `--max-redirs` keeps a hostile/misconfigured redirect chain from
+    // sending the fetch somewhere unexpected. `-f` already fails on HTTP
+    // errors; a zero-byte result would slip past it, so also check size.
     let status = Cmd::new("curl")
-        .args(["-fSL", "--progress-bar", "-o"])
+        .args([
+            "-fSL",
+            "--proto",
+            "=https",
+            "--tlsv1.2",
+            "--max-redirs",
+            "5",
+            "--progress-bar",
+            "-o",
+        ])
         .arg(&dest)
         .arg(url)
         .status()
@@ -745,7 +758,59 @@ fn download_with_curl(url: &str, dest_dir: &Path, filename: &str) -> Result<Path
         )));
     }
 
+    match fs::metadata(&dest) {
+        Ok(meta) if meta.len() > 0 => {}
+        _ => {
+            let _ = fs::remove_file(&dest);
+            return Err(SetupError::Command(format!(
+                "download produced an empty file: {}",
+                dest.display()
+            )));
+        }
+    }
+
+    // Optional integrity pin: when the caller supplies the expected
+    // SHA-256 via MUMEI_SETUP_EXPECTED_SHA256, verify before returning.
+    if let Ok(expected) = std::env::var("MUMEI_SETUP_EXPECTED_SHA256") {
+        verify_sha256(&dest, expected.trim())?;
+    }
+
     Ok(dest)
+}
+
+fn verify_sha256(path: &Path, expected: &str) -> Result<(), SetupError> {
+    // macOS has `shasum -a 256` rather than GNU `sha256sum`; try both.
+    let output = Cmd::new("sha256sum")
+        .arg(path)
+        .output()
+        .or_else(|_| Cmd::new("shasum").args(["-a", "256"]).arg(path).output())
+        .map_err(|e| {
+            SetupError::Command(format!(
+                "Failed to run sha256sum/shasum (needed for MUMEI_SETUP_EXPECTED_SHA256): {}",
+                e
+            ))
+        })?;
+    if !output.status.success() {
+        return Err(SetupError::Command(format!(
+            "sha256sum/shasum failed with exit code: {:?}",
+            output.status.code()
+        )));
+    }
+    let actual = String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_lowercase();
+    if actual != expected.to_lowercase() {
+        let _ = fs::remove_file(path);
+        return Err(SetupError::Command(format!(
+            "SHA-256 mismatch for {}: expected {}, got {}",
+            path.display(),
+            expected,
+            actual
+        )));
+    }
+    Ok(())
 }
 
 fn extract_zip(archive: &Path, dest_dir: &Path) -> Result<(), SetupError> {

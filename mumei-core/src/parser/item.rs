@@ -2210,6 +2210,23 @@ pub fn parse_module_from_source(source: &str) -> Vec<Item> {
     parse_module_from_tokens(&mut ctx)
 }
 
+/// Fail-closed variant of `parse_module_from_source`: returns the items
+/// plus surfaces any tokens the grammar expected but did not find, so
+/// callers like `mumei check` can reject malformed input instead of
+/// silently reporting success.
+pub fn parse_module_from_source_checked(source: &str) -> Result<Vec<Item>, Vec<String>> {
+    let mut lexer = super::lexer::Lexer::new(source);
+    let tokens = lexer.tokenize();
+    let mut ctx = ParseContext::new(tokens);
+    let items = parse_module_from_tokens(&mut ctx);
+    let failures = ctx.expect_failures();
+    if failures.is_empty() {
+        Ok(items)
+    } else {
+        Err(failures.to_vec())
+    }
+}
+
 pub fn parse_atom_from_source(source: &str) -> Atom {
     let mut lexer = super::lexer::Lexer::new(source);
     let tokens = lexer.tokenize();
