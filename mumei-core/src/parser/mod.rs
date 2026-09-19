@@ -1016,6 +1016,29 @@ atom find_positive(n: i64)
     }
 
     #[test]
+    fn test_forall_constraints_split_on_top_level_commas() {
+        // Bound expressions may contain commas inside parens — the four
+        // fields must split only at depth-0 commas.
+        let source = r#"
+atom m(n: i64)
+    requires: forall(i, min(0, n), max(n, 0), i >= 0);
+    ensures: result >= 0;
+    body: 0;
+"#;
+        let items = parse_module(source);
+        let atoms: Vec<_> = items
+            .iter()
+            .filter_map(|i| if let Item::Atom(a) = i { Some(a) } else { None })
+            .collect();
+        assert_eq!(atoms.len(), 1);
+        let q = &atoms[0].forall_constraints[0];
+        assert_eq!(q.var, "i");
+        assert_eq!(q.start, "min(0, n)");
+        assert_eq!(q.end, "max(n, 0)");
+        assert_eq!(q.condition, "i >= 0");
+    }
+
+    #[test]
     fn test_parse_atom_with_consume() {
         let source = r#"
 atom take(x: i64)

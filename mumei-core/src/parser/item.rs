@@ -2157,7 +2157,23 @@ fn extract_quantifiers(requires: &str) -> Vec<Quantifier> {
                 }
             }
             let inner = &requires[abs_pos..end_pos];
-            let parts: Vec<&str> = inner.splitn(4, ',').collect();
+            // Split on top-level commas only — bound expressions like
+            // `min(0, n)` contain commas inside parens.
+            let mut parts: Vec<&str> = Vec::new();
+            let mut last = 0;
+            let mut inner_depth = 0;
+            for (i, c) in inner.char_indices() {
+                match c {
+                    '(' => inner_depth += 1,
+                    ')' => inner_depth -= 1,
+                    ',' if inner_depth == 0 && parts.len() < 3 => {
+                        parts.push(&inner[last..i]);
+                        last = i + 1;
+                    }
+                    _ => {}
+                }
+            }
+            parts.push(&inner[last..]);
             if parts.len() >= 4 {
                 quantifiers.push(Quantifier {
                     q_type: q_type.clone(),
