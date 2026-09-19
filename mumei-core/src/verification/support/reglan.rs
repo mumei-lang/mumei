@@ -320,8 +320,10 @@ impl<'a, 'ctx> Parser<'a, 'ctx> {
             '^' | '$' => None, // anchors inside the body are unsupported
             // Bare quantifiers without an operand are a parse error in Rust
             // regex ("repetition operator missing expression") — reject
-            // rather than silently treating them as literal characters.
-            '*' | '+' | '?' => None,
+            // rather than silently treating them as literal characters. `{`
+            // is also a bare-quantifier error at atom position (only `}` is a
+            // legal literal outside a class).
+            '*' | '+' | '?' | '{' => None,
             c => Some(self.literal(&c.to_string())),
         }
     }
