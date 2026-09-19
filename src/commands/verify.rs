@@ -418,12 +418,10 @@ pub(crate) fn cmd_verify_command(command: Command) {
                             let new_cert_path = if let Some(ref out) = output {
                                 PathBuf::from(out)
                             } else {
-                                let stem = Path::new(&input)
-                                    .file_stem()
-                                    .unwrap_or_default()
-                                    .to_string_lossy()
-                                    .to_string();
-                                PathBuf::from(format!("{}.proof.json", stem))
+                                // Consistent with the LSP and escalation
+                                // bundle paths: the default cert lives
+                                // beside the source file, not in cwd.
+                                Path::new(&input).with_extension("proof.json")
                             };
                             if let Ok(new_json) = std::fs::read_to_string(&new_cert_path) {
                                 if let Ok(new_cert) =
@@ -1017,7 +1015,10 @@ fn resolve_mumei_lean_bridge() -> Result<(PathBuf, PathBuf), String> {
         candidates.push(current_dir.join("mumei-lean"));
     }
     candidates.push(PathBuf::from("../mumei-lean"));
-    candidates.push(PathBuf::from("/home/ubuntu/repos/mumei-lean"));
+    // Sibling checkout under ~/repos (the common multi-repo layout).
+    if let Some(home) = dirs::home_dir() {
+        candidates.push(home.join("repos").join("mumei-lean"));
+    }
 
     for repo_dir in candidates {
         let script = repo_dir.join("scripts").join("bridge.py");
@@ -1668,8 +1669,9 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
         let cert_path = if let Some(output) = cert_output {
             std::path::PathBuf::from(output)
         } else {
-            let stem = Path::new(input).file_stem().unwrap_or_default();
-            Path::new(".").join(format!("{}.proof.json", stem.to_string_lossy()))
+            // Default: `<input>.proof.json` beside the source file, the
+            // same convention the LSP uses when it reads certificates.
+            Path::new(input).with_extension("proof.json")
         };
 
         if escalate_lean || emit_escalation_bundle || emit_escalation_metrics {

@@ -44,25 +44,26 @@ pub(crate) fn check_z3_available() {
     }
 }
 
-/// Preflight for the external `z3` executable. Returns the installation
-/// hint as the error so callers with their own exit-code contract
-/// (`mumei verify`) can report a missing solver without exiting here.
+/// Preflight for the Z3 solver. Mumei links libz3 directly and never
+/// invokes a `z3` executable, so this probes the linked library via FFI
+/// rather than looking for a `z3` binary on PATH. Returns the
+/// installation hint as the error so callers with their own exit-code
+/// contract (`mumei verify`) can report a missing solver without
+/// exiting here.
 pub(crate) fn z3_availability() -> Result<(), String> {
-    use std::process::Command as Cmd;
-    if Cmd::new("z3").arg("--version").output().is_err() {
+    let (major, minor, build, _) = verification::linked_z3_version();
+    if (major, minor, build) == (0, 0, 0) {
         let mut message = String::new();
         use std::fmt::Write as _;
-        let _ = writeln!(message, "❌ Error: Z3 solver not found.");
+        let _ = writeln!(message, "❌ Error: Z3 solver is not usable.");
         let _ = writeln!(message);
-        let _ = writeln!(message, "   Mumei requires Z3 for formal verification.");
-        let _ = writeln!(message, "   Install it with one of:");
-        let _ = writeln!(message, "     macOS:  brew install z3");
-        let _ = writeln!(message, "     Ubuntu: sudo apt-get install libz3-dev");
-        let _ = writeln!(message, "     Auto:   mumei setup");
-        let _ = writeln!(message);
-        let _ = write!(
+        let _ = writeln!(
             message,
-            "   After installing, run `mumei inspect` to verify."
+            "   Mumei requires a linked Z3 library for formal verification."
+        );
+        let _ = writeln!(
+            message,
+            "   Rebuild with libz3 available, or run `mumei setup`."
         );
         return Err(message);
     }
@@ -116,7 +117,13 @@ pub(crate) fn try_load_and_prepare_with_full_options(
 ) -> Result<(Vec<Item>, verification::ModuleEnv, Vec<ImportDecl>, String), String> {
     let source =
         read_source_file(input).map_err(|e| format!("Could not read '{}': {}", input, e))?;
-    let items = parser::parse_module(&source);
+    let items = parser::parse_module_checked(&source).map_err(|failures| {
+        format!(
+            "Syntax error(s) in '{}':\n  {}",
+            input,
+            failures.join("\n  ")
+        )
+    })?;
 
     let mut module_env = verification::ModuleEnv::new();
     verification::register_builtin_traits(&mut module_env);
@@ -390,17 +397,17 @@ pub(crate) fn collect_mm_files(dir: &Path) -> Vec<std::path::PathBuf> {
     result
 }
 
-pub(crate) fn copy_dir_recursive(src: &Path, dst: &Path) {
-    let _ = fs::create_dir_all(dst);
-    if let Ok(entries) = fs::read_dir(src) {
-        for entry in entries.flatten() {
-            let src_path = entry.path();
-            let dst_path = dst.join(entry.file_name());
-            if src_path.is_dir() {
-                copy_dir_recursive(&src_path, &dst_path);
-            } else {
-                let _ = fs::copy(&src_path, &dst_path);
-            }
+pub(crate) fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if src_path.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else {
+            fs::copy(&src_path, &dst_path)?;
         }
     }
+    Ok(())
 }

@@ -53,15 +53,31 @@ fn find_clang() -> Result<PathBuf, String> {
         return Ok(path);
     }
 
-    // 4. Check ~/.mumei/toolchains/ (use clang.exe on Windows)
+    // 4. Check ~/.mumei/toolchains/llvm-*/bin/clang — the layout
+    // `mumei setup` actually installs (versioned dirs, not toolchains/bin).
     if let Some(home) = dirs::home_dir() {
         #[cfg(windows)]
         let clang_name = "clang.exe";
         #[cfg(not(windows))]
         let clang_name = "clang";
-        let clang = home.join(".mumei/toolchains/bin").join(clang_name);
-        if clang.exists() {
-            return Ok(clang);
+        let toolchains = home.join(".mumei/toolchains");
+        if let Ok(entries) = std::fs::read_dir(&toolchains) {
+            let mut candidates: Vec<PathBuf> = entries
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.file_name()
+                        .and_then(|n| n.to_str())
+                        .map(|n| n.starts_with("llvm-"))
+                        .unwrap_or(false)
+                })
+                .map(|p| p.join("bin").join(clang_name))
+                .filter(|p| p.exists())
+                .collect();
+            candidates.sort();
+            if let Some(clang) = candidates.into_iter().next() {
+                return Ok(clang);
+            }
         }
     }
 
@@ -89,6 +105,35 @@ fn find_c_linker() -> Result<PathBuf, String> {
             }
         }
     }
+}
+
+/// Locate the libz3 directory inside `~/.mumei/toolchains/z3-*/` (`bin` on
+/// Windows-style archives, `lib` as a fallback) provisioned by `mumei setup`.
+#[cfg(not(windows))]
+fn find_bundled_z3_lib_dir() -> Option<PathBuf> {
+    let home = dirs::home_dir()?;
+    let toolchains = home.join(".mumei/toolchains");
+    let mut dirs: Vec<PathBuf> = std::fs::read_dir(&toolchains)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.starts_with("z3-"))
+                .unwrap_or(false)
+        })
+        .collect();
+    dirs.sort();
+    for dir in dirs {
+        for sub in ["bin", "lib"] {
+            let candidate = dir.join(sub);
+            if candidate.join("libz3.so").exists() || candidate.join("libz3.dylib").exists() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
 }
 
 /// Link one or more LLVM/object/runtime inputs into a native binary.
@@ -122,6 +167,14 @@ pub fn link_to_binary(
         cmd.arg("-lm");
         cmd.arg("-lpthread");
         cmd.arg("-ldl");
+        // `mumei setup` installs libz3 under ~/.mumei/toolchains/z3-*/bin,
+        // which is not on the default linker path — add -L/-rpath so the
+        // unconditional -lz3 resolves for setup-provisioned toolchains.
+        if let Some(dir) = find_bundled_z3_lib_dir() {
+            let dir = dir.to_string_lossy().to_string();
+            cmd.arg(format!("-L{}", dir));
+            cmd.arg(format!("-Wl,-rpath,{}", dir));
+        }
         cmd.arg("-lz3");
     }
 

@@ -76,10 +76,21 @@ echo ""
 mkdir -p dist
 rm -f dist/katana* # 古い成果物を削除
 
-if ! $MUMEI build sword_test.mm -o dist/katana; then
-    echo "⚠️ sword_test.mm full build has known float precision debt; continuing with focused suites."
-    echo "   (scale: Pos > 0.0 => x * 2.0 > 0.0)"
+BUILD_LOG=$(mktemp)
+if ! $MUMEI build sword_test.mm -o dist/katana >"$BUILD_LOG" 2>&1; then
+    # Only the known float-precision debt on `scale` is tolerated — any other
+    # failure (crash, input error, unrelated regression) must stop the script.
+    if grep -q "scale" "$BUILD_LOG"; then
+        echo "⚠️ sword_test.mm full build has known float precision debt; continuing with focused suites."
+        echo "   (scale: Pos > 0.0 => x * 2.0 > 0.0)"
+    else
+        echo "❌ Error: sword_test.mm build failed unexpectedly:"
+        cat "$BUILD_LOG"
+        rm -f "$BUILD_LOG"
+        exit 1
+    fi
 fi
+rm -f "$BUILD_LOG"
 
 if ! $MUMEI verify std/container/sorted_map.mm >/dev/null; then
     echo "❌ Error: Mumei verification failed on std/container/sorted_map.mm"

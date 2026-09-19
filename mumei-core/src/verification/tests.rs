@@ -1144,6 +1144,8 @@ fn test_constraint_budget_exceeded() {
         ieee754_f64: false,
         bitvec_i64: false,
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
+        bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        clause_context: std::cell::RefCell::new(Vec::new()),
         bitvec_i64_global: false,
     };
 
@@ -1182,6 +1184,8 @@ fn test_constraint_budget_no_limit() {
         ieee754_f64: false,
         bitvec_i64: false,
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
+        bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        clause_context: std::cell::RefCell::new(Vec::new()),
         bitvec_i64_global: false,
     };
 
@@ -1947,6 +1951,8 @@ fn test_subsumption_check_holds_with_requires() {
         ieee754_f64: false,
         bitvec_i64: false,
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
+        bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        clause_context: std::cell::RefCell::new(Vec::new()),
         bitvec_i64_global: false,
     };
     let concrete = Atom {
@@ -2019,6 +2025,8 @@ fn test_subsumption_check_fails_without_requires() {
         ieee754_f64: false,
         bitvec_i64: false,
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
+        bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        clause_context: std::cell::RefCell::new(Vec::new()),
         bitvec_i64_global: false,
     };
     let concrete = Atom {
@@ -2094,6 +2102,8 @@ fn test_subsumption_check_crossed_param_names() {
         ieee754_f64: false,
         bitvec_i64: false,
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
+        bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        clause_context: std::cell::RefCell::new(Vec::new()),
         bitvec_i64_global: false,
     };
     let concrete = Atom {
@@ -2176,6 +2186,8 @@ fn test_subsumption_check_trivial_contract_ensures_skipped() {
         ieee754_f64: false,
         bitvec_i64: false,
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
+        bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        clause_context: std::cell::RefCell::new(Vec::new()),
         bitvec_i64_global: false,
     };
     let concrete = Atom {
@@ -2240,6 +2252,8 @@ fn test_subsumption_check_concrete_true_ensures_warns() {
         ieee754_f64: false,
         bitvec_i64: false,
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
+        bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        clause_context: std::cell::RefCell::new(Vec::new()),
         bitvec_i64_global: false,
     };
     let concrete = Atom {
@@ -2696,6 +2710,8 @@ fn test_expr_to_z3_true_false_are_bool() {
         ieee754_f64: false,
         bitvec_i64: false,
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
+        bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        clause_context: std::cell::RefCell::new(Vec::new()),
         bitvec_i64_global: false,
     };
     let mut env: Env = HashMap::new();
@@ -2757,6 +2773,8 @@ fn test_expr_to_z3_pow_constant_folds_full_precision() {
         ieee754_f64: false,
         bitvec_i64: false,
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
+        bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        clause_context: std::cell::RefCell::new(Vec::new()),
         bitvec_i64_global: false,
     };
     let mut env: Env = HashMap::new();
@@ -2811,6 +2829,8 @@ fn test_tuple_result_indexing_uses_typed_components() {
         ieee754_f64: false,
         bitvec_i64: false,
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
+        bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        clause_context: std::cell::RefCell::new(Vec::new()),
         bitvec_i64_global: false,
     };
     let mut env: Env = HashMap::new();
@@ -2965,6 +2985,8 @@ fn test_chained_comparison_normalizes_before_lowering() {
         ieee754_f64: false,
         bitvec_i64: false,
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
+        bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        clause_context: std::cell::RefCell::new(Vec::new()),
         bitvec_i64_global: false,
     };
     let mut env: Env = HashMap::new();

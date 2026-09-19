@@ -1098,6 +1098,8 @@ fn build_related_information(
 }
 
 /// Convert a byte offset within `source` to a 0-indexed (line, character) pair.
+/// `character` is in UTF-16 code units, as required by the LSP spec —
+/// astral-plane characters (e.g. emoji) count as 2, not 1.
 /// Falls back to (0, 0) when the source is empty or the offset is out of range.
 fn byte_offset_to_line_col(source: &str, byte_offset: usize) -> (usize, usize) {
     let mut line: usize = 0;
@@ -1110,10 +1112,31 @@ fn byte_offset_to_line_col(source: &str, byte_offset: usize) -> (usize, usize) {
             line += 1;
             col = 0;
         } else {
-            col += 1;
+            col += ch.len_utf16();
         }
     }
     (line, col)
+}
+
+/// Convert an LSP `character` (UTF-16 code units) to a `chars()` index
+/// within `line`. Returns `None` when the position lands mid-surrogate
+/// pair or past the line end.
+fn utf16_col_to_char_idx(line: &str, character: usize) -> Option<usize> {
+    let mut utf16_col = 0;
+    for (char_idx, ch) in line.chars().enumerate() {
+        if utf16_col == character {
+            return Some(char_idx);
+        }
+        if utf16_col > character {
+            return None;
+        }
+        utf16_col += ch.len_utf16();
+    }
+    if utf16_col == character {
+        Some(line.chars().count())
+    } else {
+        None
+    }
 }
 
 /// Hover 用: 指定行付近の atom を探し、requires/ensures を markdown で返す
@@ -1683,6 +1706,12 @@ fn extract_word_at(source: &str, line: usize, character: usize) -> String {
         None => return String::new(),
     };
     let chars: Vec<char> = target_line.chars().collect();
+    // LSP `character` is a UTF-16 offset, not a char index — convert it
+    // so positions after astral-plane characters don't drift.
+    let character = match utf16_col_to_char_idx(target_line, character) {
+        Some(idx) => idx,
+        None => return String::new(),
+    };
     if character >= chars.len() {
         return String::new();
     }
@@ -1767,6 +1796,15 @@ fn read_message(reader: &mut impl BufRead) -> Result<String, String> {
             content_length = len_str
                 .parse::<usize>()
                 .map_err(|e| format!("Invalid Content-Length: {}", e))?;
+            // A malicious or corrupt peer can claim a multi-GB length and
+            // make the server allocate it blindly.
+            const MAX_LSP_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
+            if content_length > MAX_LSP_MESSAGE_BYTES {
+                return Err(format!(
+                    "Content-Length {} exceeds limit of {} bytes",
+                    content_length, MAX_LSP_MESSAGE_BYTES
+                ));
+            }
         }
         // Content-Type 等は無視
     }

@@ -270,6 +270,79 @@ pub(crate) fn as_bv_i64<'a>(value: &Dynamic<'a>) -> Option<BV<'a>> {
     }
 }
 
+/// `ite(c, t, e)` over two `Dynamic`s of the same sort. Returns `None` when
+/// the sorts differ or are not a sort an `ite` can merge here.
+fn dynamic_ite<'a>(c: &Bool<'a>, t: &Dynamic<'a>, e: &Dynamic<'a>) -> Option<Dynamic<'a>> {
+    if t.get_sort() != e.get_sort() {
+        return None;
+    }
+    match t.get_sort().kind() {
+        z3::SortKind::Int => Some(c.ite(&t.as_int()?, &e.as_int()?).into()),
+        z3::SortKind::Bool => Some(c.ite(&t.as_bool()?, &e.as_bool()?).into()),
+        z3::SortKind::Real => Some(c.ite(&t.as_real()?, &e.as_real()?).into()),
+        z3::SortKind::BV => Some(c.ite(&t.as_bv()?, &e.as_bv()?).into()),
+        z3::SortKind::Array => Some(c.ite(&t.as_array()?, &e.as_array()?).into()),
+        z3::SortKind::FloatingPoint => Some(c.ite(&t.as_float()?, &e.as_float()?).into()),
+        z3::SortKind::Datatype => Some(c.ite(&t.as_datatype()?, &e.as_datatype()?).into()),
+        _ => None,
+    }
+}
+
+/// Merge the variable environments produced by running an `if`'s then/else
+/// branches in isolation: every variable becomes `ite(cond, then_val,
+/// else_val)`. Keys only present on one side (declared inside one branch)
+/// keep that side's value, matching the previous env-leak behavior. Values of
+/// sorts `dynamic_ite` cannot merge keep the else-branch value — the same
+/// last-write-wins order the shared-env execution had.
+pub(crate) fn merge_branch_envs<'a>(
+    env: &mut Env<'a>,
+    then_env: Env<'a>,
+    else_env: Env<'a>,
+    c: &Bool<'a>,
+) {
+    let mut merged: Env<'a> = HashMap::new();
+    for (key, then_val) in then_env.iter() {
+        let merged_val = match else_env.get(key) {
+            Some(else_val) => {
+                dynamic_ite(c, then_val, else_val).unwrap_or_else(|| else_val.clone())
+            }
+            None => then_val.clone(),
+        };
+        merged.insert(key.clone(), merged_val);
+    }
+    for (key, else_val) in else_env.iter() {
+        if !then_env.contains_key(key) {
+            merged.insert(key.clone(), else_val.clone());
+        }
+    }
+    *env = merged;
+}
+
+/// Fold one match arm's writes to pre-existing variables into the
+/// accumulated post-match env: `acc[k] = ite(cond, arm[k], acc[k])`.
+/// Bindings introduced by the pattern (not present in `base_env`) stay
+/// arm-local and are not merged. Values `dynamic_ite` cannot merge keep the
+/// accumulated value — the previous behavior of dropping arm-side writes.
+pub(crate) fn merge_arm_env_into<'a>(
+    merged: &mut Option<Env<'a>>,
+    arm_env: &Env<'a>,
+    base_env: &Env<'a>,
+    cond: &Bool<'a>,
+) {
+    let acc = merged.get_or_insert_with(|| base_env.clone());
+    for (key, base_val) in base_env.iter() {
+        let arm_val = arm_env
+            .get(key)
+            .cloned()
+            .unwrap_or_else(|| base_val.clone());
+        if let Some(acc_val) = acc.get(key) {
+            if let Some(m) = dynamic_ite(cond, &arm_val, acc_val) {
+                acc.insert(key.clone(), m);
+            }
+        }
+    }
+}
+
 /// Put the two branches of an `ite` into a common sort.
 ///
 /// A branch may be `BV(64)` while the other one is an `Int` (a literal, an

@@ -5,6 +5,141 @@ use super::*;
 use crate::lowering::{lower, LoweredType};
 use serde_json::json;
 
+/// Collect the env names a statement can overwrite: `Assign` targets plus the
+/// `__z3_arr_<name>` keys `ArrayStore` writes. Used to havoc loop-carried
+/// variables before induction checks.
+fn collect_assigned_vars(stmt: &Stmt, out: &mut std::collections::HashSet<String>) {
+    match stmt {
+        Stmt::Assign { var, value, .. } => {
+            out.insert(var.clone());
+            collect_expr_assigned_vars(value, out);
+        }
+        Stmt::ArrayStore {
+            array,
+            index,
+            value,
+            ..
+        } => {
+            out.insert(format!("__z3_arr_{}", array));
+            collect_expr_assigned_vars(index, out);
+            collect_expr_assigned_vars(value, out);
+        }
+        Stmt::Block(stmts, _) => {
+            for s in stmts {
+                collect_assigned_vars(s, out);
+            }
+        }
+        Stmt::While {
+            cond,
+            invariant,
+            decreases,
+            body,
+            ..
+        } => {
+            collect_assigned_vars(body, out);
+            collect_expr_assigned_vars(cond, out);
+            collect_expr_assigned_vars(invariant, out);
+            if let Some(d) = decreases {
+                collect_expr_assigned_vars(d, out);
+            }
+        }
+        Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => {
+            collect_assigned_vars(body, out);
+        }
+        Stmt::TaskGroup { children, .. } => {
+            for c in children {
+                collect_assigned_vars(c, out);
+            }
+        }
+        Stmt::Expr(expr, _) => collect_expr_assigned_vars(expr, out),
+        Stmt::Let { value, .. } => collect_expr_assigned_vars(value, out),
+        _ => {}
+    }
+}
+
+/// Recursive companion of `collect_assigned_vars` over expressions that embed
+/// statement bodies (`if`, `match`, `async`, lambdas).
+fn collect_expr_assigned_vars(expr: &Expr, out: &mut std::collections::HashSet<String>) {
+    match expr {
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            collect_expr_assigned_vars(cond, out);
+            collect_assigned_vars(then_branch, out);
+            collect_assigned_vars(else_branch, out);
+        }
+        Expr::Match { target, arms } => {
+            collect_expr_assigned_vars(target, out);
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    collect_expr_assigned_vars(guard, out);
+                }
+                collect_assigned_vars(&arm.body, out);
+            }
+        }
+        Expr::Async { body } | Expr::Lambda { body, .. } => collect_assigned_vars(body, out),
+        Expr::Await { expr } | Expr::FieldAccess(expr, _) | Expr::ChanRecv { channel: expr } => {
+            collect_expr_assigned_vars(expr, out);
+        }
+        Expr::ArrayAccess(_, index) => collect_expr_assigned_vars(index, out),
+        Expr::BinaryOp(l, _, r) => {
+            collect_expr_assigned_vars(l, out);
+            collect_expr_assigned_vars(r, out);
+        }
+        Expr::Call(_, args) | Expr::Perform { args, .. } => {
+            for a in args {
+                collect_expr_assigned_vars(a, out);
+            }
+        }
+        Expr::CallRef { callee, args } => {
+            collect_expr_assigned_vars(callee, out);
+            for a in args {
+                collect_expr_assigned_vars(a, out);
+            }
+        }
+        Expr::StructInit { fields, .. } => {
+            for (_, v) in fields {
+                collect_expr_assigned_vars(v, out);
+            }
+        }
+        Expr::ChanSend { channel, value } => {
+            collect_expr_assigned_vars(channel, out);
+            collect_expr_assigned_vars(value, out);
+        }
+        _ => {}
+    }
+}
+
+/// Rebind each name in `vars` to a fresh unconstrained constant of its
+/// existing sort.
+fn havoc_vars<'a>(vc: &VCtx<'a>, env: &mut Env<'a>, vars: &std::collections::HashSet<String>) {
+    static HAVOC_UID: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let ctx = vc.ctx;
+    for name in vars {
+        if let Some(old) = env.get(name) {
+            let uid = HAVOC_UID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let fresh_name = format!("__havoc_{}_{}", name, uid);
+            let fresh: Dynamic = match old.get_sort().kind() {
+                z3::SortKind::Int => Int::fresh_const(ctx, &fresh_name).into(),
+                z3::SortKind::Bool => Bool::fresh_const(ctx, &fresh_name).into(),
+                z3::SortKind::Real => Real::fresh_const(ctx, &fresh_name).into(),
+                z3::SortKind::BV => {
+                    let width = old.as_bv().map(|b| b.get_size()).unwrap_or(64);
+                    BV::fresh_const(ctx, &fresh_name, width).into()
+                }
+                // z3 0.12's `Sort::array_domain/range` returns sorts tied to
+                // the local borrow, so a fresh array const cannot outlive it
+                // here — keep the entry binding (the same conservative
+                // treatment the pre-havoc code had for every variable).
+                _ => old.clone(),
+            };
+            env.insert(name.clone(), fresh);
+        }
+    }
+}
+
 pub(crate) fn stmt_to_z3<'a>(
     vc: &VCtx<'a>,
     stmt: &Stmt,
@@ -87,9 +222,19 @@ pub(crate) fn stmt_to_z3<'a>(
         } => {
             // Loop Invariant 検証ロジック
             if let Some(solver) = solver_opt {
+                // Vars the body assigns that were bound before the loop —
+                // they are havoced so induction is checked from *any* state
+                // satisfying the invariant, not only the concrete entry
+                // state, which would mask violations on later iterations.
+                let mut modified = std::collections::HashSet::new();
+                collect_assigned_vars(body, &mut modified);
+                modified.retain(|name| env.contains_key(name));
+
+                let marks = obligation_marks(vc);
                 let inv = expr_to_z3(vc, invariant, env, None)?
                     .as_bool()
                     .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
+                rebind_deferred_obligations(vc, marks, &inv);
 
                 // Base case — conjoin path conditions from any enclosing
                 // `if/else` branches so that loop bodies inside e.g. the
@@ -104,19 +249,29 @@ pub(crate) fn stmt_to_z3<'a>(
                 }
                 solver.pop(1);
 
-                // Inductive step
-                let c = expr_to_z3(vc, cond, env, None)?
-                    .as_bool()
-                    .ok_or(MumeiError::type_error("While condition must be boolean"))?;
-
+                // Inductive step — on a havoced env: the invariant must be
+                // preserved from ANY state satisfying it, not just the
+                // concrete loop-entry bindings.
                 {
                     let env_snapshot = env.clone();
+                    let mut step_env = env.clone();
+                    havoc_vars(vc, &mut step_env, &modified);
+                    let marks = obligation_marks(vc);
+                    let inv_h = expr_to_z3(vc, invariant, &mut step_env, None)?
+                        .as_bool()
+                        .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
+                    rebind_deferred_obligations(vc, marks, &inv_h);
+                    let marks = obligation_marks(vc);
+                    let c_h = expr_to_z3(vc, cond, &mut step_env, None)?
+                        .as_bool()
+                        .ok_or(MumeiError::type_error("While condition must be boolean"))?;
+                    rebind_deferred_obligations(vc, marks, &inv_h);
                     solver.push();
-                    solver.assert(&inv);
-                    solver.assert(&c);
-                    stmt_to_z3(vc, body, env, Some(solver))?;
+                    solver.assert(&inv_h);
+                    solver.assert(&c_h);
+                    stmt_to_z3(vc, body, &mut step_env, Some(solver))?;
 
-                    let inv_after = expr_to_z3(vc, invariant, env, None)?
+                    let inv_after = expr_to_z3(vc, invariant, &mut step_env, None)?
                         .as_bool()
                         .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
 
@@ -129,30 +284,47 @@ pub(crate) fn stmt_to_z3<'a>(
                     *env = env_snapshot;
                 }
 
-                // Termination Check
+                // Termination Check — again under havoced pre-state.
                 if let Some(dec_expr) = decreases {
                     let env_snapshot = env.clone();
-                    let v_before = as_int_like(&expr_to_z3(vc, dec_expr, env, None)?).ok_or(
-                        MumeiError::type_error("decreases expression must be integer"),
-                    )?;
+                    let mut term_env = env.clone();
+                    havoc_vars(vc, &mut term_env, &modified);
+                    let marks = obligation_marks(vc);
+                    let inv_h = expr_to_z3(vc, invariant, &mut term_env, None)?
+                        .as_bool()
+                        .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
+                    rebind_deferred_obligations(vc, marks, &inv_h);
+                    let marks = obligation_marks(vc);
+                    let c_h = expr_to_z3(vc, cond, &mut term_env, None)?
+                        .as_bool()
+                        .ok_or(MumeiError::type_error("While condition must be boolean"))?;
+                    rebind_deferred_obligations(vc, marks, &inv_h);
+                    let marks = obligation_marks(vc);
+                    let v_before = as_int_like(&expr_to_z3(vc, dec_expr, &mut term_env, None)?)
+                        .ok_or(MumeiError::type_error(
+                            "decreases expression must be integer",
+                        ))?;
+                    rebind_deferred_obligations(vc, marks, &inv_h);
                     solver.push();
-                    solver.assert(&inv);
-                    solver.assert(&c);
+                    solver.assert(&inv_h);
+                    solver.assert(&c_h);
                     solver.assert(&v_before.lt(&Int::from_i64(ctx, 0)));
                     if solver.check() == SatResult::Sat {
                         solver.pop(1);
+                        *env = env_snapshot;
                         return Err(MumeiError::verification(
                             "Termination check failed: decreases expression may be negative",
                         ));
                     }
                     solver.pop(1);
                     solver.push();
-                    solver.assert(&inv);
-                    solver.assert(&c);
-                    stmt_to_z3(vc, body, env, Some(solver))?;
-                    let v_after = as_int_like(&expr_to_z3(vc, dec_expr, env, None)?).ok_or(
-                        MumeiError::type_error("decreases expression must be integer"),
-                    )?;
+                    solver.assert(&inv_h);
+                    solver.assert(&c_h);
+                    stmt_to_z3(vc, body, &mut term_env, Some(solver))?;
+                    let v_after = as_int_like(&expr_to_z3(vc, dec_expr, &mut term_env, None)?)
+                        .ok_or(MumeiError::type_error(
+                            "decreases expression must be integer",
+                        ))?;
                     solver.assert(&v_after.ge(&v_before));
                     if solver.check() == SatResult::Sat {
                         solver.pop(1);
@@ -164,6 +336,27 @@ pub(crate) fn stmt_to_z3<'a>(
                     solver.pop(1);
                     *env = env_snapshot;
                 }
+
+                // Post-loop state: havoc the loop-carried vars once more and
+                // assert `invariant ∧ ¬cond` so downstream statements and the
+                // `ensures` check see exit facts (previously env kept
+                // pre-loop bindings and no exit facts reached the solver).
+                let mut post_env = env.clone();
+                havoc_vars(vc, &mut post_env, &modified);
+                let marks = obligation_marks(vc);
+                let inv_post = expr_to_z3(vc, invariant, &mut post_env, None)?
+                    .as_bool()
+                    .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
+                rebind_deferred_obligations(vc, marks, &inv_post);
+                let marks = obligation_marks(vc);
+                let c_not_post = expr_to_z3(vc, cond, &mut post_env, None)?
+                    .as_bool()
+                    .ok_or(MumeiError::type_error("While condition must be boolean"))?
+                    .not();
+                rebind_deferred_obligations(vc, marks, &inv_post);
+                solver.assert(&Bool::and(ctx, &[&inv_post, &c_not_post]));
+                *env = post_env;
+                return Ok(Bool::and(ctx, &[&inv_post, &c_not_post]).into());
             }
 
             let inv = expr_to_z3(vc, invariant, env, None)?

@@ -342,6 +342,8 @@ pub fn verify_impl_with_options(
             ieee754_f64,
             bitvec_i64,
             bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
+            bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+            clause_context: std::cell::RefCell::new(Vec::new()),
             bitvec_i64_global: bitvec_i64,
         };
 
@@ -404,6 +406,7 @@ pub fn verify_impl_with_options(
 
                     // シフト量の範囲義務は law の前提のもとで解消する。
                     discharge_bv_shift_obligations(&vc, &solver)?;
+                    discharge_bv_div_obligations(&vc, &solver)?;
 
                     solver.assert(&law_bool.not());
                     let law_check = solver.check();

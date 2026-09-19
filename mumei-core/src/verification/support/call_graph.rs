@@ -57,6 +57,8 @@ pub(crate) fn verify_atom_invariant(
         ieee754_f64,
         bitvec_i64,
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
+        bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        clause_context: std::cell::RefCell::new(Vec::new()),
         bitvec_i64_global: false,
     };
 
@@ -197,6 +199,7 @@ pub(crate) fn verify_atom_invariant(
         }
     }
     discharge_bv_shift_obligations(&vc, &solver)?;
+    discharge_bv_div_obligations(&vc, &solver)?;
     solver.pop(1);
 
     Ok(())

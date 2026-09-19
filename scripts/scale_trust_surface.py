@@ -39,7 +39,8 @@ ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 ATOM_RE = re.compile(r"^\s*(?:trusted\s+|async\s+)?atom\s+\w+")
 TRUSTED_ATOM_RE = re.compile(r"^\s*trusted\s+atom\s+\w+")
 EXTERN_BLOCK_RE = re.compile(r"^\s*extern\s+\"")
-VERIFIED_RE = re.compile(r"(\d+) item\(s\) verified")
+# Matches both "N item(s) verified, ..." and "N verified, M skipped" variants
+VERIFIED_RE = re.compile(r"(\d+) (?:item\(s\) )?verified")
 ESCALATION_RE = re.compile(r"(\d+) Lean escalation candidate\(s\)")
 
 
@@ -147,7 +148,7 @@ def measure_case(
             if escalation_match
             else 0,
         },
-        "z3_solver_seconds": solver_seconds,
+        "verify_wall_seconds": solver_seconds,
         "budget_policy_fingerprint": cert.get("budget_policy_fingerprint"),
         "lean_verified": bool(cert.get("lean_verified", False)),
     }
@@ -206,7 +207,7 @@ def main(argv: list[str] | None = None) -> int:
                 int(case["trust_surface"]["z3_unknown_to_lean_escalation_atoms"])
                 for case in cases
             ),
-            "z3_solver_seconds": round(sum(float(case["z3_solver_seconds"]) for case in cases), 3),
+            "verify_wall_seconds": round(sum(float(case["verify_wall_seconds"]) for case in cases), 3),
             "verify_cert_strict_passed": sum(1 for case in cases if case["verify_cert_strict"]),
         },
     }

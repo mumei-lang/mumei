@@ -183,6 +183,116 @@ pub(crate) fn shift_range_status<'a>(vc: &VCtx<'a>, solver: &Solver<'a>) -> Shif
     status
 }
 
+/// Outcome of checking deferred `(dividend, divisor)` pairs for division
+/// safety (`divisor != 0` and `!(i64::MIN / -1)`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DivSafetyStatus {
+    /// Every deferred division is provably safe under the solver's facts.
+    Safe,
+    /// A reachable path allows a zero divisor.
+    DivisionByZero,
+    /// A reachable path allows `i64::MIN / -1` (UB in the emitted `sdiv`).
+    Overflow,
+    /// The solver could not decide safety, so it is not guaranteed.
+    Undecided,
+}
+
+/// Check deferred division obligations under the facts the solver already
+/// holds, mirroring `shift_range_status`. An `unknown` answer is not a
+/// guarantee: reported as `Undecided` rather than folded into `Safe`.
+pub(crate) fn div_safety_status<'a>(vc: &VCtx<'a>, solver: &Solver<'a>) -> DivSafetyStatus {
+    let obligations: Vec<(Bool<'a>, BV<'a>, BV<'a>)> =
+        vc.bv_div_obligations.borrow_mut().drain(..).collect();
+    let ctx = vc.ctx;
+    let zero = BV::from_i64(ctx, 0, I64_BITS);
+    let min = BV::from_i64(ctx, i64::MIN, I64_BITS);
+    let minus_one = BV::from_i64(ctx, -1, I64_BITS);
+    let mut status = DivSafetyStatus::Safe;
+    for (path_cond, lb, rb) in obligations {
+        solver.push();
+        solver.assert(&path_cond);
+        solver.assert(&rb._eq(&zero));
+        let divides_by_zero = solver.check();
+        solver.pop(1);
+        match divides_by_zero {
+            SatResult::Sat => return DivSafetyStatus::DivisionByZero,
+            SatResult::Unknown => status = DivSafetyStatus::Undecided,
+            SatResult::Unsat => {}
+        }
+        solver.push();
+        solver.assert(&path_cond);
+        solver.assert(&Bool::and(ctx, &[&lb._eq(&min), &rb._eq(&minus_one)]));
+        let overflows = solver.check();
+        solver.pop(1);
+        match overflows {
+            SatResult::Sat => return DivSafetyStatus::Overflow,
+            SatResult::Unknown => status = DivSafetyStatus::Undecided,
+            SatResult::Unsat => {}
+        }
+    }
+    status
+}
+
+/// Discharge the deferred division-safety obligations recorded while
+/// lowering contract clauses without a solver.
+/// Snapshot of deferred shift/division obligation queue lengths, used by
+/// [`rebind_deferred_obligations`] to scope a rebind to one lowering.
+pub(crate) fn obligation_marks(vc: &VCtx<'_>) -> (usize, usize) {
+    (
+        vc.bv_shift_obligations.borrow().len(),
+        vc.bv_div_obligations.borrow().len(),
+    )
+}
+
+/// True when at least one deferred obligation was recorded since `marks`.
+pub(crate) fn has_new_obligations(vc: &VCtx<'_>, marks: (usize, usize)) -> bool {
+    vc.bv_shift_obligations.borrow().len() > marks.0
+        || vc.bv_div_obligations.borrow().len() > marks.1
+}
+
+/// Conjoin `extra` into the path condition of deferred shift/division
+/// obligations recorded since `marks`. Expressions like a loop invariant or
+/// an `ensures` clause are only ever evaluated in states where that clause
+/// itself holds, so their deferred checks may assume it — otherwise
+/// `r <= 62 && (n >> r) == v` could never discharge `n >> r`'s range
+/// obligation, since `r`'s bound lives inside the same clause.
+pub(crate) fn rebind_deferred_obligations<'a>(
+    vc: &VCtx<'a>,
+    marks: (usize, usize),
+    extra: &Bool<'a>,
+) {
+    for (pc, _) in vc.bv_shift_obligations.borrow_mut()[marks.0..].iter_mut() {
+        *pc = Bool::and(vc.ctx, &[pc, extra]);
+    }
+    for (pc, _, _) in vc.bv_div_obligations.borrow_mut()[marks.1..].iter_mut() {
+        *pc = Bool::and(vc.ctx, &[pc, extra]);
+    }
+}
+
+pub(crate) fn discharge_bv_div_obligations<'a>(
+    vc: &VCtx<'a>,
+    solver: &Solver<'a>,
+) -> MumeiResult<()> {
+    match div_safety_status(vc, solver) {
+        DivSafetyStatus::Safe => Ok(()),
+        DivSafetyStatus::DivisionByZero => Err(MumeiError::verification(
+            "Potential division by zero.".to_string(),
+        )
+        .with_help("Add a condition divisor != 0 to requires")),
+        DivSafetyStatus::Overflow => Err(MumeiError::verification(
+            "Division may overflow (i64::MIN / -1).".to_string(),
+        )
+        .with_help(
+            "Add a condition ruling out the pair, e.g. `divisor != 0 - 1` \
+             or `dividend != 0 - 9223372036854775807 - 1`, to requires",
+        )),
+        DivSafetyStatus::Undecided => Err(MumeiError::verification(
+            "Z3 could not decide division safety (divisor != 0, no overflow).".to_string(),
+        )
+        .with_help("Strengthen requires so the divisor is provably nonzero")),
+    }
+}
+
 fn bv_binary_op<'a>(
     vc: &VCtx<'a>,
     op: &Op,
@@ -270,6 +380,16 @@ fn bv_binary_op<'a>(
                          or `dividend != 0 - 9223372036854775807 - 1`, to requires",
                     ));
                 }
+            } else {
+                // Contract clauses are lowered without a solver; defer the
+                // division-safety checks like the shift-range obligations
+                // above so `divisor != 0` and the MIN/-1 pair are still
+                // discharged under the atom's preconditions.
+                vc.bv_div_obligations.borrow_mut().push((
+                    vc.path_cond_conj(),
+                    lb.clone(),
+                    rb.clone(),
+                ));
             }
             Ok(lb.bvsdiv(&rb).into())
         }
@@ -1315,13 +1435,21 @@ pub(crate) fn expr_to_z3<'a>(
             // merge_sort(mid)` ensures-asserts (`left == mid`) live for the
             // outer postcondition check.
             vc.path_cond_stack.borrow_mut().push(c.clone());
-            let t = stmt_to_z3(vc, then_branch, env, solver_opt);
+            let mut then_env = env.clone();
+            let t = stmt_to_z3(vc, then_branch, &mut then_env, solver_opt);
             vc.path_cond_stack.borrow_mut().pop();
             let t = t?;
             vc.path_cond_stack.borrow_mut().push(c.not());
-            let e = stmt_to_z3(vc, else_branch, env, solver_opt);
+            let mut else_env = env.clone();
+            let e = stmt_to_z3(vc, else_branch, &mut else_env, solver_opt);
             vc.path_cond_stack.borrow_mut().pop();
             let (t, e) = unify_branch_sorts(t, e?)?;
+            // Branches ran on isolated env copies — merge their writes with
+            // `ite(c, then, else)` per variable. Running both on the shared
+            // env would apply every assignment unconditionally (the else
+            // branch would even see the then-branch's writes), which is
+            // unsound.
+            merge_branch_envs(env, then_env, else_env, &c);
             Ok(c.ite(&t, &e))
         }
 
@@ -1478,6 +1606,10 @@ pub(crate) fn expr_to_z3<'a>(
             //    env/solver に追加し、デフォルトアーム内の検証精度を向上させる。
             let mut accumulated_negations: Vec<Bool> = Vec::new();
             let mut result: Option<Dynamic> = None;
+            // Assignments to pre-existing vars inside arm bodies must fold
+            // back under each arm's condition — previously they were dropped
+            // with the per-arm env clone, so post-match code saw stale values.
+            let mut merged_arm_env: Option<Env> = None;
 
             for arm in arms.iter().rev() {
                 let mut arm_env = env.clone();
@@ -1516,6 +1648,7 @@ pub(crate) fn expr_to_z3<'a>(
                         solver.assert(&prior_negation);
                         let body_val = stmt_to_z3(vc, &arm.body, &mut arm_env, solver_opt)?;
                         solver.pop(1);
+                        merge_arm_env_into(&mut merged_arm_env, &arm_env, env, &full_cond);
                         result = Some(match result {
                             Some(else_val) => {
                                 let (body_val, else_val) = unify_branch_sorts(body_val, else_val)?;
@@ -1529,6 +1662,7 @@ pub(crate) fn expr_to_z3<'a>(
                 }
 
                 let body_val = stmt_to_z3(vc, &arm.body, &mut arm_env, solver_opt)?;
+                merge_arm_env_into(&mut merged_arm_env, &arm_env, env, &full_cond);
                 result = Some(match result {
                     Some(else_val) => {
                         let (body_val, else_val) = unify_branch_sorts(body_val, else_val)?;
@@ -1537,6 +1671,10 @@ pub(crate) fn expr_to_z3<'a>(
                     None => body_val,
                 });
                 accumulated_negations.push(full_cond.not());
+            }
+
+            if let Some(merged_env) = merged_arm_env {
+                *env = merged_env;
             }
 
             result.ok_or_else(|| MumeiError::verification("Match expression has no arms"))

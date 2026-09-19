@@ -809,7 +809,11 @@ pub(crate) fn cmd_build(
             "  🔗 Linking {} atom(s) to native binary...",
             hir_atoms.len()
         );
-        let runtime_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("runtime/mumei_runtime.c");
+        let runtime_path = output_dir.join(format!("{}_mumei_runtime.c", file_stem));
+        if let Err(e) = fs::write(&runtime_path, MUMEI_RUNTIME_C) {
+            eprintln!("❌ Failed to stage runtime library: {}", e);
+            std::process::exit(1);
+        }
         let runtime_stubs_path = output_dir.join(format!("{}_runtime_stubs.c", file_stem));
         if let Err(e) = write_effect_and_resource_runtime_stubs(&module_env, &runtime_stubs_path) {
             eprintln!("❌ Runtime stub generation failed: {}", e);
@@ -817,7 +821,7 @@ pub(crate) fn cmd_build(
         }
         let mut link_inputs = vec![object_path.clone(), runtime_stubs_path.clone()];
         let rust_ffi_lib = if uses_rust_ffi(&extern_blocks) {
-            match generate_rust_ffi_staticlib(Path::new(env!("CARGO_MANIFEST_DIR")), output_dir) {
+            match generate_rust_ffi_staticlib(output_dir) {
                 Ok(path) => Some(path),
                 Err(e) => {
                     eprintln!("❌ Rust FFI runtime build failed: {}", e);
@@ -837,6 +841,7 @@ pub(crate) fn cmd_build(
         println!("  ✅ Binary written to: {}", binary_output.display());
         // Clean up intermediate files
         let _ = fs::remove_file(&object_path);
+        let _ = fs::remove_file(&runtime_path);
         let _ = fs::remove_file(&runtime_stubs_path);
     }
 

@@ -37,10 +37,18 @@ pub const SKIPPED: &str = "skipped";
 pub const TRUSTED: &str = "trusted";
 /// `status`: atom pending escalation to the Lean bridge.
 pub const ESCALATION_CANDIDATE: &str = "escalation_candidate";
+/// `status`: solver returned unknown; the atom awaits Lean escalation.
+pub const UNKNOWN: &str = "unknown";
 
 /// All accepted `status` values, in schema order.
-pub const VERIFICATION_STATUSES: [&str; 5] =
-    [VERIFIED, FAILED, SKIPPED, TRUSTED, ESCALATION_CANDIDATE];
+pub const VERIFICATION_STATUSES: [&str; 6] = [
+    VERIFIED,
+    FAILED,
+    SKIPPED,
+    TRUSTED,
+    ESCALATION_CANDIDATE,
+    UNKNOWN,
+];
 
 /// `LeanResultMetadata.status`: the Lean bridge discharged the obligation.
 ///

@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import tempfile
 import threading
@@ -100,11 +101,12 @@ SPEC_GUIDELINE_SUMMARY: dict[str, Any] = {
 }
 
 # Module-level session state for effect boundary overrides
-_session_effects: dict = {
-    "allowed": [],
-    "denied": [],
-    "source": "default",  # "default" | "mumei.toml" | "session_override"
-}
+# Timeout for `cargo run`/`mumei` subprocess invocations (seconds).
+_MUMEI_SUBPROCESS_TIMEOUT_S = 300
+
+# Effect-boundary overrides keyed by resolved project root, so overrides
+# set for one project cannot leak into another session's project_dir.
+_session_effects: dict[str, dict] = {}
 
 
 @mcp.tool()
@@ -188,6 +190,16 @@ def _attach_harness_metadata(payload: dict[str, Any]) -> dict[str, Any]:
     for key, value in metadata.items():
         payload.setdefault(key, value)
     return payload
+
+
+def _safe_output_name(name: str) -> str:
+    """`output_name` becomes a path component under the per-request temp
+    dir and a `glob` pattern; keep it to a single safe filename so a
+    crafted name cannot escape the sandbox or widen the glob."""
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", name)
+    if safe in {"", ".", ".."} or safe.startswith("."):
+        safe = f"out_{safe.lstrip('.')}"
+    return safe or "out"
 
 
 @contextmanager
@@ -383,6 +395,22 @@ def _compute_mcp_solver_config_fingerprint(
         separators=(",", ":"),
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _worker_preexec(memory_limit_mb: int):
+    """Run the worker in its own process group (so `os.killpg` can reap
+    `cargo run` + `mumei` + `z3` together on timeout) and apply the
+    memory limit. Windows has neither — return None there."""
+    if os.name != "posix":
+        return None
+    limiter = _limit_worker_memory(memory_limit_mb)
+
+    def _fn():
+        os.setsid()
+        if limiter is not None:
+            limiter()
+
+    return _fn
 
 
 def _limit_worker_memory(memory_limit_mb: int):
@@ -819,7 +847,7 @@ def forge_blade(
     # 1. Create fully isolated temp directory per request
     with _temp_source_input(source_code) as (tmp_path, source_path):
         # 2. Run compiler (output to temp directory)
-        output_base = tmp_path / output_name
+        output_base = tmp_path / _safe_output_name(output_name)
 
         result = subprocess.run(
             ["cargo", "run", "--", "build", str(source_path), "-o", str(output_base)],
@@ -827,6 +855,7 @@ def forge_blade(
             capture_output=True,
             text=True,
             env=_traceability_env(trace_payload),
+            timeout=_MUMEI_SUBPROCESS_TIMEOUT_S,
         )
 
         response_parts = [_format_traceability_feedback(trace_payload)]
@@ -871,14 +900,24 @@ def forge_blade(
         if result.returncode == 0:
             response_parts.insert(0, f"Forge succeeded: '{output_name}'")
             # Collect generated per-atom LLVM IR artifacts (e.g. katana_increment.ll)
-            for ll_file in sorted(tmp_path.glob(f"{output_name}*.ll")):
+            for ll_file in sorted(tmp_path.glob(f"{_safe_output_name(output_name)}*.ll")):
                 content = ll_file.read_text(encoding="utf-8")
                 response_parts.append(f"\n### Generated: {ll_file.name}\n```llvm\n{content}\n```")
 
             return "\n".join(response_parts)
         else:
-            # On failure: return evidence (report) and error log together
-            response_parts.insert(0, f"Forge failed: logical flaw detected.")
+            # On failure: return evidence (report) and error log together.
+            # A missing report.json means the failure was infrastructural
+            # (cargo/mumei crashed or timed out), not a logic defect.
+            report_file = tmp_path / "report.json"
+            if report_file.exists():
+                response_parts.insert(0, "Forge failed: logical flaw detected.")
+            else:
+                response_parts.insert(
+                    0,
+                    "Forge failed: verification could not complete "
+                    "(tooling error, not a defect in the .mm source).",
+                )
             if result.stderr:
                 response_parts.append(f"\n### Error Details\n{result.stderr}")
 
@@ -912,6 +951,7 @@ def validate_logic(
             capture_output=True,
             text=True,
             env=_traceability_env(trace_payload),
+            timeout=_MUMEI_SUBPROCESS_TIMEOUT_S,
         )
 
         response_parts = [_format_traceability_feedback(trace_payload)]
@@ -970,9 +1010,18 @@ def validate_logic(
             response_parts.insert(
                 0, "Verification passed: no logical flaws detected."
             )
-        else:
+        elif report_file.exists():
             response_parts.insert(
                 0, "Verification failed: logical flaw detected."
+            )
+        else:
+            # Non-zero exit without a report means the run itself failed
+            # (missing toolchain, cargo error, timeout) — reporting it as a
+            # "logical flaw" misleads the agent into editing correct code.
+            response_parts.insert(
+                0,
+                "Verification could not complete: tooling error "
+                "(see stderr; no report was produced).",
             )
             if result.stderr:
                 response_parts.append(
@@ -1005,6 +1054,7 @@ def get_structured_feedback(source_code: str) -> str:
             cwd=REPO_ROOT,
             capture_output=True,
             text=True,
+            timeout=_MUMEI_SUBPROCESS_TIMEOUT_S,
         )
 
         if output_path.exists():
@@ -1052,6 +1102,7 @@ def analyze_contract_conflicts(source_code: str) -> str:
             capture_output=True,
             text=True,
             env=os.environ.copy(),
+            timeout=_MUMEI_SUBPROCESS_TIMEOUT_S,
         )
 
         cross_spec_path = tmp_path / "cross_spec.json"
@@ -1304,6 +1355,19 @@ def verify_with_orchestration(
                 ensure_ascii=False,
                 indent=2,
             )
+        if resumed_task.status == "running":
+            # Already occupying a worker — spawning a second process for
+            # the same task would double-spend the worker pool.
+            return json.dumps(
+                {
+                    "status": "running",
+                    "task_id": resumed_task.task_id,
+                    "cache_key": resumed_task.cache_key,
+                    "worker_id": resumed_task.worker_id,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
 
     if enable_cache:
         cached_result = _task_registry.get_cached_result(cache_key)
@@ -1391,18 +1455,21 @@ def verify_with_orchestration(
                 stderr=subprocess.PIPE,
                 text=True,
                 env=env,
-                preexec_fn=_limit_worker_memory(_z3_worker_pool.memory_limit_mb),
+                preexec_fn=_worker_preexec(_z3_worker_pool.memory_limit_mb),
             )
             worker.process = process
             try:
                 stdout, stderr = process.communicate(timeout=timeout_ms / 1000)
             except subprocess.TimeoutExpired:
                 _z3_worker_pool.cancel_task(active_task_id)
+                # Kill the whole process group (`cargo run` reaps neither
+                # `mumei` nor `z3` on its own termination), not just the
+                # wrapper, so solver work cannot outlive the request.
                 try:
-                    stdout, stderr = process.communicate(timeout=5)
-                except subprocess.TimeoutExpired:
+                    os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                except (ProcessLookupError, PermissionError, AttributeError):
                     process.kill()
-                    stdout, stderr = process.communicate()
+                stdout, stderr = process.communicate()
                 reason = f"timeout after {timeout_ms}ms"
                 _task_registry.cancel_task(active_task_id, reason)
                 result_payload = {
@@ -1481,7 +1548,7 @@ def execute_mm(
 
     with _temp_source_input(source_code) as (tmp_path, source_path):
 
-        output_base = tmp_path / output_name
+        output_base = tmp_path / _safe_output_name(output_name)
 
         # Validate command against allowlist
         allowed_commands = {"build", "verify", "check"}
@@ -1509,15 +1576,9 @@ def execute_mm(
 
         # For "build", report.json is written to tmp_path (via -o).
         # For "verify", report.json is written to tmp_path (via --report-dir).
-        # For "check", report.json is still written to cwd (no --report-dir yet).
+        # "check" writes no report at all; do not pick up a stale
+        # REPO_ROOT/report.json left by an earlier unrelated run.
         report_file = tmp_path / "report.json"
-        if not report_file.exists() and command == "check":
-            cwd_report = REPO_ROOT / "report.json"
-            if cwd_report.exists():
-                try:
-                    shutil.move(str(cwd_report), str(report_file))
-                except OSError:
-                    pass
         if report_file.exists():
             report_data = report_file.read_text(encoding="utf-8")
             response_parts.append(
@@ -1545,7 +1606,7 @@ def execute_mm(
         if result.returncode == 0:
             response_parts.insert(0, f"{command} succeeded: '{output_name}'")
             # Collect generated per-atom LLVM IR artifacts (e.g. katana_increment.ll)
-            for ll_file in sorted(tmp_path.glob(f"{output_name}*.ll")):
+            for ll_file in sorted(tmp_path.glob(f"{_safe_output_name(output_name)}*.ll")):
                 content = ll_file.read_text(encoding="utf-8")
                 response_parts.append(
                     f"\n### Generated: {ll_file.name}"
@@ -1621,9 +1682,15 @@ def get_allowed_effects(project_dir: str = ".") -> str:
     """
     root_dir = Path(project_dir).absolute()
 
-    # Check session override first
-    if _session_effects["source"] == "session_override":
-        effects = _session_effects
+    # Check session override for this project root first; a single
+    # registered override also applies to other roots so the common
+    # single-project flow keeps working (two+ overrides are only honored
+    # for their own root to prevent cross-project leakage).
+    override = _session_effects.get(str(root_dir))
+    if override is None and len(_session_effects) == 1:
+        override = next(iter(_session_effects.values()))
+    if override is not None:
+        effects = override
     else:
         # Read from mumei.toml
         toml_path = root_dir / "mumei.toml"
@@ -1671,7 +1738,9 @@ def get_allowed_effects(project_dir: str = ".") -> str:
 
 @mcp.tool()
 def set_allowed_effects(
-    allowed: "list[str] | None" = None, denied: "list[str] | None" = None
+    allowed: "list[str] | None" = None,
+    denied: "list[str] | None" = None,
+    project_dir: str = ".",
 ) -> str:
     """
     Override the effect boundary for the current MCP session.
@@ -1682,7 +1751,7 @@ def set_allowed_effects(
 
     To reset to mumei.toml defaults, call with empty lists.
     """
-    global _session_effects
+    root_dir = Path(project_dir).absolute()
 
     if allowed is None:
         allowed = []
@@ -1690,10 +1759,10 @@ def set_allowed_effects(
         denied = []
 
     if not allowed and not denied:
-        _session_effects = {"allowed": [], "denied": [], "source": "default"}
+        _session_effects.pop(str(root_dir), None)
         return "Effect boundary reset to project defaults (mumei.toml or unrestricted)."
 
-    _session_effects = {
+    _session_effects[str(root_dir)] = {
         "allowed": allowed,
         "denied": denied,
         "source": "session_override",
@@ -2295,6 +2364,7 @@ def visualize_proof_graph(source_code: str, format: str = "json") -> str:
             capture_output=True,
             text=True,
             env=os.environ.copy(),
+            timeout=_MUMEI_SUBPROCESS_TIMEOUT_S,
         )
 
         graph_path = tmp_path / PROOF_GRAPH_FILENAME

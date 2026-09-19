@@ -1279,6 +1279,8 @@ pub(crate) fn verify_inner(
         ieee754_f64,
         bitvec_i64,
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
+        bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        clause_context: std::cell::RefCell::new(Vec::new()),
         bitvec_i64_global,
     };
 
@@ -2150,6 +2152,7 @@ pub(crate) fn verify_inner(
     // (`requires`, `ensures`, invariants) are range-checked here, against the
     // solver that already carries the preconditions.
     discharge_bv_shift_obligations(&vc, &solver)?;
+    discharge_bv_div_obligations(&vc, &solver)?;
 
     let z3_check_start = std::time::Instant::now();
     let profiler_final_check_start = profiler_checkpoint(&vc);
