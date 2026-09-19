@@ -32,6 +32,7 @@ EXPECTED_VERIFICATION_STATUSES = [
     "skipped",
     "trusted",
     "escalation_candidate",
+    "unknown",
 ]
 
 
@@ -85,3 +86,25 @@ def test_escalation_candidate_atom_is_accepted():
     atom["z3_check_result"] = "unknown"
     atom["status"] = "escalation_candidate"
     jsonschema.validate(instance, schema)
+
+
+def test_forall_constraints_atom_is_accepted():
+    """`forall_constraints` (forall/exists records) is the structured form
+    of quantified `requires` conjuncts — the serialized shape must
+    validate so consumers can restore the hypotheses."""
+    schema = _load_schema()
+    fixture = _fixture_paths()[0]
+    instance = json.loads(fixture.read_text(encoding="utf-8"))
+    instance["atoms"][0]["forall_constraints"] = [
+        {
+            "q_type": "forall",
+            "var": "i",
+            "start": "0",
+            "end": "n",
+            "condition": "arr[i] >= 0",
+        }
+    ]
+    jsonschema.validate(instance, schema)
+    instance["atoms"][0]["forall_constraints"][0]["q_type"] = "bogus"
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(instance, schema)

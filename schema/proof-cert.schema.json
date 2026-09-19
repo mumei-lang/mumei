@@ -99,6 +99,22 @@
         },
         "requires": { "type": "string" },
         "ensures": { "type": "string" },
+        "forall_constraints": {
+          "type": "array",
+          "description": "Quantifier (forall/exists) constraints extracted from requires at parse time; requires renders each quantified conjunct as true, so the structured form is the only place the hypotheses survive. Lean-side consumers restore them (e.g. elementwise non-negativity a loop step VC needs).",
+          "items": {
+            "type": "object",
+            "required": ["q_type", "var", "start", "end", "condition"],
+            "properties": {
+              "q_type": { "enum": ["forall", "exists"] },
+              "var": { "type": "string" },
+              "start": { "type": "string" },
+              "end": { "type": "string" },
+              "condition": { "type": "string" }
+            },
+            "additionalProperties": true
+          }
+        },
         "body_expr": { "type": "string" },
         "body_summary": { "type": "string" },
         "z3_result_class": {

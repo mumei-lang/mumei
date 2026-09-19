@@ -55,6 +55,23 @@ pub struct ProofCertificate {
     pub budget_policy_fingerprint: Option<String>,
 }
 
+/// A single `forall`/`exists` quantifier constraint as serialized into an
+/// atom certificate (mirror of `parser::Quantifier` with the type rendered
+/// as a string for a stable wire format).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct QuantifierConstraint {
+    /// `"forall"` or `"exists"`.
+    pub q_type: String,
+    /// Bound variable name.
+    pub var: String,
+    /// Range lower bound expression (inclusive).
+    pub start: String,
+    /// Range upper bound expression (exclusive).
+    pub end: String,
+    /// Body condition expression.
+    pub condition: String,
+}
+
 /// Per-atom verification certificate.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AtomCertificate {
@@ -86,6 +103,13 @@ pub struct AtomCertificate {
     /// Postcondition contract text (P5-A)
     #[serde(default)]
     pub ensures: String,
+    /// Quantifier (`forall`/`exists`) constraints extracted from `requires`
+    /// at parse time — `requires` renders each quantified conjunct as `true`,
+    /// so the structured form is the only place the hypotheses survive.
+    /// Lean-side consumers restore them (e.g. elementwise non-negativity a
+    /// loop step verification condition needs).
+    #[serde(default)]
+    pub forall_constraints: Vec<QuantifierConstraint>,
     /// Source body expression used by Lean body-semantics lowering.
     #[serde(default)]
     pub body_expr: String,

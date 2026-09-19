@@ -176,6 +176,7 @@ CLI values take precedence over environment values. `--intent-fidelity` accepts 
 | `effects` | `Vec<String>` | Declared effect names |
 | `requires` | `String` | Precondition contract text |
 | `ensures` | `String` | Postcondition contract text |
+| `forall_constraints` | `Vec<QuantifierConstraint>` | Quantifier (`forall`/`exists`) constraints extracted from `requires` at parse time — `requires` renders each quantified conjunct as `true`, so this structured form (`{q_type, var, start, end, condition}`) is the only place the hypotheses survive. Lean-side consumers restore them (e.g. elementwise non-negativity a loop step verification condition needs). |
 | `z3_result_class` | `String` | Normalized solver class used for Lean routing; only `unknown` is a Lean candidate, and `sat` / `unsat` classes are not candidates. |
 | `escalation_reason` | `Option<String>` | Reason a Z3-`unknown` obligation is routed to Lean |
 | `logic_fragment_tags` | `Vec<String>` | Detected fragments such as arrays, quantifiers, strings, non-linear arithmetic, or temporal effects |
