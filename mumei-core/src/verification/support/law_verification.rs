@@ -345,6 +345,7 @@ pub fn verify_impl_with_options(
             bv_div_obligations: std::cell::RefCell::new(Vec::new()),
             clause_context: std::cell::RefCell::new(Vec::new()),
             enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
+            local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
             bitvec_i64_global: bitvec_i64,
         };
 

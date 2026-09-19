@@ -20,7 +20,7 @@ use z3::ast::{Ast, Bool, Datatype, Dynamic};
 use z3::{Context, DatatypeAccessor, DatatypeSort, Sort};
 
 use crate::lowering::{lower, LoweredType};
-use crate::parser::ast::EnumDef;
+use crate::parser::ast::{EnumDef, Expr, Stmt};
 use crate::verification::module_env::ModuleEnv;
 use crate::verification::translator::{VCtx, F64_EBITS, F64_SBITS};
 use crate::verification::types::{MumeiError, MumeiResult};
@@ -295,6 +295,12 @@ fn target_param_enum_name(vc: &VCtx, target: &Dynamic) -> Option<String> {
     if let Some(ty) = declared {
         return Some(type_name_base(ty).to_string());
     }
+    // `let`-bound enum values record their inferred declared type in
+    // `local_enum_types` — `match e` after `let e = Mine::Cons(1)` resolves
+    // the same owner a declared parameter type would.
+    if let Some(local) = vc.local_enum_types.borrow().get(sym.as_str()) {
+        return Some(local.clone());
+    }
     // Struct-field projections are seeded as `<binding>_<field>` consts
     // (e.g. `match th.t` on `th: Thermo` yields `th_t`), so the match
     // target's declared enum type is recoverable by walking the struct
@@ -425,6 +431,90 @@ pub(crate) fn resolve_variant_owner<'a>(
             .collect::<Vec<_>>()
             .join(", ")
     )))
+}
+
+/// Declared enum type of an expression whose value is being bound
+/// (`let e = …` / `e = …`), inferred statically from the AST: qualified
+/// constructor calls `E::V(..)` and unit constructors `E::V`, variables
+/// already recorded in `local_enum_types` (or declared enum parameters),
+/// `if`/nested blocks whose arms agree, `match` whose arm bodies agree, and
+/// calls to atoms declared to return an enum. Lets `match e` on a `let`-
+/// bound enum resolve variant owners the same way `match m` on `m: Mine`
+/// does — without this the owner set is ambiguous across prelude enums.
+pub(crate) fn infer_expr_enum_name(vc: &VCtx, expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Variable(v) => vc
+            .local_enum_types
+            .borrow()
+            .get(v.as_str())
+            .cloned()
+            .or_else(|| {
+                vc.current_atom
+                    .and_then(|atom| {
+                        atom.params
+                            .iter()
+                            .find(|p| p.name == *v)
+                            .and_then(|p| p.type_name.as_deref())
+                    })
+                    .map(|t| type_name_base(t).to_string())
+                    .filter(|t| vc.module_env.get_enum(t).is_some())
+            }),
+        Expr::Call(name, _) => {
+            if let Some((enum_name, variant)) = name.split_once("::") {
+                vc.module_env
+                    .get_enum(enum_name)
+                    .filter(|e| e.variants.iter().any(|v| v.name == variant))
+                    .map(|e| e.name.clone())
+            } else {
+                vc.module_env
+                    .get_atom(name)
+                    .and_then(|a| a.return_type.as_deref())
+                    .map(|t| type_name_base(t).to_string())
+                    .filter(|t| vc.module_env.get_enum(t).is_some())
+            }
+        }
+        Expr::FieldAccess(inner, field) => match inner.as_ref() {
+            // `E.V` unit constructor or `value.field` — only the qualified
+            // unit-constructor form names an enum.
+            Expr::Variable(base) => vc
+                .module_env
+                .get_enum(base)
+                .filter(|e| e.variants.iter().any(|v| v.name == *field))
+                .map(|e| e.name.clone()),
+            _ => None,
+        },
+        Expr::IfThenElse {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            let t = infer_stmt_enum_name(vc, then_branch);
+            let e = infer_stmt_enum_name(vc, else_branch);
+            if t.is_some() && t == e {
+                t
+            } else {
+                None
+            }
+        }
+        Expr::Match { arms, .. } => {
+            let mut names = arms
+                .iter()
+                .filter_map(|arm| infer_stmt_enum_name(vc, &arm.body));
+            let first = names.next()?;
+            names.all(|n| n == first).then_some(first)
+        }
+        _ => None,
+    }
+}
+
+/// The enum type produced by a statement when it ends in a value expression
+/// (`Stmt::Expr`) or a block whose tail does.
+fn infer_stmt_enum_name(vc: &VCtx, stmt: &Stmt) -> Option<String> {
+    match stmt {
+        Stmt::Expr(e, _) => infer_expr_enum_name(vc, e),
+        Stmt::Block(stmts, _) => stmts.last().and_then(|s| infer_stmt_enum_name(vc, s)),
+        _ => None,
+    }
 }
 
 /// `resolve_variant_owner` minus the declared-parameter-type preference,

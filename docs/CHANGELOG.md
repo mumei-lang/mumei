@@ -1,3 +1,25 @@
+### 2026-09-19: `match` on `let`-bound enum values resolves the declared type
+
+- **Verify** (`mumei-core`): a `let`/`assign` binding now records the inferred
+  declared enum type of its value in `VCtx.local_enum_types` —
+  `infer_expr_enum_name` resolves `E::V(..)`/`E::V` constructors, enum-typed
+  variables and params, `if`/block tails whose branches agree, `match`
+  expressions whose arms agree, and calls to atoms declared to return an
+  enum. `match e` after `let e = IntList::Nil` resolves `Cons`/`Nil` to
+  `IntList` deterministically instead of failing "Ambiguous enum variant"
+  against the prelude `List` (whose `Cons` has a different tag). Rebinding
+  to a value with no inferable enum type clears the entry.
+- **Codegen** (`mumei-emit-llvm`): `HirStmt::Let` accepts an inferred type
+  that resolves to an enum (not only a struct), and `infer_struct_type_name`
+  types `if`/`else` expressions whose branches agree — `let e = if c {
+  Mine::Cons(1) } else { Mine::Nil }; match e` now emits the match instead
+  of erroring ambiguously.
+- Tests: `test_datatype_enum.mm` gains `let_bound_ctor_match` (recursive
+  `IntList` let-bound through `Nil`, matched against colliding prelude
+  variants).
+
+---
+
 ### 2026-09-19: enum parameters bind whole values; `==`/`!=` on enums is deep equality
 
 - **Enum parameters were masquerading as fat-pointer arrays** (`driver.rs`):

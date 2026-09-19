@@ -78,6 +78,12 @@ pub(crate) struct VCtx<'a> {
     /// same enum, so the first build is reused.
     pub(crate) enum_sorts:
         std::cell::RefCell<crate::verification::support::datatype::EnumSortCache<'a>>,
+    /// Declared enum type inferred for `let`/`assign`-bound variables
+    /// (`let e = Mine::Cons(1)` records `e -> Mine`), so a `match e` on a
+    /// local binding resolves variant owners the same way a declared
+    /// parameter type does. Entries are removed when the variable is
+    /// reassigned to a value with no inferable enum type.
+    pub(crate) local_enum_types: std::cell::RefCell<std::collections::HashMap<String, String>>,
 }
 
 impl<'a> VCtx<'a> {

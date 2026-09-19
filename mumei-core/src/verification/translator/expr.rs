@@ -1649,18 +1649,29 @@ pub(crate) fn expr_to_z3<'a>(
             // `enum IntList`). The const-name lookup inside
             // `resolve_variant_owner` covers let-aliases; `result` is
             // rebound to the evaluated body value, so only the Expr knows.
-            let decl_hint: Option<String> = vc.current_atom.and_then(|atom| {
-                let ty = match target.as_ref() {
-                    Expr::Variable(v) if v == "result" => atom.return_type.as_deref()?,
-                    Expr::Variable(v) => atom
-                        .params
-                        .iter()
-                        .find(|p| p.name == *v)
-                        .and_then(|p| p.type_name.as_deref())?,
-                    _ => return None,
-                };
-                Some(crate::verification::support::datatype::type_name_base(ty).to_string())
-            });
+            let decl_hint: Option<String> = match target.as_ref() {
+                Expr::Variable(v) => {
+                    let ty: Option<String> = if v == "result" {
+                        vc.current_atom.and_then(|atom| atom.return_type.clone())
+                    } else {
+                        vc.current_atom
+                            .and_then(|atom| {
+                                atom.params
+                                    .iter()
+                                    .find(|p| p.name == *v)
+                                    .and_then(|p| p.type_name.clone())
+                            })
+                            // `let`-bound enum values carry their inferred
+                            // declared type — `let e = Mine::Cons(1); match e`
+                            // resolves the same owner a parameter type would.
+                            .or_else(|| vc.local_enum_types.borrow().get(v).cloned())
+                    };
+                    ty.map(|t| {
+                        crate::verification::support::datatype::type_name_base(&t).to_string()
+                    })
+                }
+                _ => None,
+            };
 
             // ========================================================
             // Enum ドメイン制約の自動注入
