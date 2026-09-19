@@ -1,3 +1,31 @@
+### 2026-09-19: enum parameters bind whole values; `==`/`!=` on enums is deep equality
+
+- **Enum parameters were masquerading as fat-pointer arrays** (`driver.rs`):
+  an atom parameter declared with an enum type used to be split as `{ ptr, len }`,
+  binding only field 0 (the tag) in `variables`. Three latent bugs followed:
+  `match m { Cons(v) => v }` bound `v` to `0` instead of the payload (the
+  verifier proved the payload-selector semantics — a silent verify/codegen
+  divergence), `a == b` compared the tag alone, and forwarding the parameter
+  to a callee passed `i64` where `{ i64, … }` was expected. Parameters now
+  check the declared enum too and bind the whole tagged-union struct.
+- **Deep equality for same-enum operands** (`expr_emit.rs` BinaryOp): `==`/`!=`
+  between two values of the same enum type emit a tag compare AND-ed with a
+  per-payload-slot compare (`icmp`/`fcmp oeq`/`mumei_str_eq` for int, float,
+  and `Str` slots), `zext`ed to `i64` — matching the verifier's deep datatype
+  equality (P10-C). `undef` slots of unit variants are skipped (`and` with
+  `undef` would poison the conjunction). Different enum types or struct
+  operands still fail with a clean codegen error.
+- **`len()` on a non-array binding is now a clean codegen error** instead of a
+  silently emitted `i64 0`: `len(m)` on an enum/struct/`Str` value, or
+  `len(a)` on a `let`-bound array literal, previously compiled to
+  `ret i64 0` — wrong code. Verified before fix that real array parameters
+  (fat pointers) keep working.
+- Tests: `test_codegen_enum_resolution` gains deep-equality,
+  struct-still-errors, payload-binding, and `len`-error cases; SPEC_GUIDE's
+  tagged-union section documents the semantics and the fixed parameter bugs.
+
+---
+
 ### 2026-09-19: docs-sync — V1-A〜V1-D sections rewritten to implementation reality
 
 - `CROSS_PROJECT_ROADMAP.md`: the "現状のギャップ / 追加すべき機能 / 実装ファイル"

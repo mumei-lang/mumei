@@ -71,14 +71,20 @@ pub fn compile_atom_into_module<'ctx>(
             }
         }
         // Fat Pointer 配列パラメータの場合、len と data_ptr を分解して保持。
-        // ユーザー定義 struct も LLVM では struct 値なので、宣言型で区別する
-        // （struct はそのまま束縛してフィールドアクセスを可能にする）。
+        // ユーザー定義 struct / enum も LLVM では struct 値なので、宣言型で
+        // 区別する（struct/enum はそのまま束縛 — enum は tag+slot 全体が
+        // match の payload 抽出・ctor 等価性・callee 受け渡しに必要）。
         let declares_struct = param
             .type_name
             .as_deref()
             .map(|name| module_env.resolve_base_type(name))
             .is_some_and(|base| module_env.get_struct(&base).is_some());
-        if val.is_struct_value() && !declares_struct {
+        let declares_enum = param
+            .type_name
+            .as_deref()
+            .map(|name| super::expr_emit::resolve_named_type(module_env, name))
+            .is_some_and(|base| module_env.get_enum(&base).is_some());
+        if val.is_struct_value() && !declares_struct && !declares_enum {
             let struct_val = val.into_struct_value();
             let len_val =
                 llvm!(builder.build_extract_value(struct_val, 0, &format!("{}_len", param.name)));

@@ -270,12 +270,78 @@ atom both(n: i64) -> i64
     );
 }
 
-// Binary operators on aggregate values used to panic inside inkwell's
-// into_int_value — they now fail with a clean codegen error instead.
+// An enum-typed parameter binds the whole tagged-union value (not just the
+// tag): `match` extracts the real payload slot, and the full struct is
+// forwarded when the parameter is passed to a callee. Before this, enum
+// params were split like fat-pointer arrays, so payload bindings read `0`
+// and callee forwarding passed the bare tag.
 #[test]
-fn equality_on_enum_values_errors_cleanly() {
-    let bin = env!("CARGO_BIN_EXE_mumei");
-    let fixture = write_fixture(
+fn enum_param_match_binds_payload_and_forwards_struct() {
+    let ir = emit_atom_ir(
+        "enum_param",
+        r#"
+enum Mine { Cons(i64), Nil }
+
+atom payload_val(m: Mine) -> i64
+    requires: true;
+    ensures: true;
+    body: {
+        match m {
+            Mine::Cons(v) => v
+            Mine::Nil => 0
+        }
+    }
+
+atom fwd(m: Mine) -> i64
+    requires: true;
+    ensures: true;
+    body: {
+        payload_val(m)
+    }
+"#,
+        "payload_val",
+    );
+    assert!(
+        ir.contains("%variant_payload_0 = extractvalue { i64, i64 } %0, 1"),
+        "Cons payload binding must extract the real slot, not 0:\n{ir}"
+    );
+    let fwd_ir = emit_atom_ir(
+        "enum_param_fwd",
+        r#"
+enum Mine { Cons(i64), Nil }
+
+atom payload_val(m: Mine) -> i64
+    requires: true;
+    ensures: true;
+    body: {
+        match m {
+            Mine::Cons(v) => v
+            Mine::Nil => 0
+        }
+    }
+
+atom fwd(m: Mine) -> i64
+    requires: true;
+    ensures: true;
+    body: {
+        payload_val(m)
+    }
+"#,
+        "fwd",
+    );
+    assert!(
+        fwd_ir.contains("call i64 @payload_val({ i64, i64 } %0)"),
+        "enum param must forward the whole struct to the callee:\n{fwd_ir}"
+    );
+}
+
+// Enum values compare deeply — tag plus every payload slot — matching the
+// verifier's datatype equality. `m == Mine::Nil` reduces to a tag compare
+// (the unit variant's undef payload slots are skipped), and `a == b`
+// between enum-typed parameters compares tag and payload, not just the tag.
+#[test]
+fn enum_equality_compares_tag_and_payload() {
+    let ir = emit_atom_ir(
         "enum_eq",
         r#"
 enum Mine { Cons(i64), Nil }
@@ -285,6 +351,38 @@ atom eq_ctor(m: Mine) -> i64
     ensures: true;
     body: {
         if m == Mine::Nil { 1 } else { 0 }
+    }
+
+atom eq_params(a: Mine, b: Mine) -> i64
+    requires: true;
+    ensures: true;
+    body: {
+        if a == b { 1 } else { 0 }
+    }
+"#,
+        "eq_params",
+    );
+    assert!(
+        ir.contains("enum_eq_int") && ir.matches("extractvalue").count() >= 4,
+        "param equality must compare tag AND payload slots:\n{ir}"
+    );
+}
+
+// Aggregate operands that are not enum values still fail cleanly rather
+// than panic inside inkwell's into_int_value.
+#[test]
+fn equality_on_non_enum_aggregates_errors_cleanly() {
+    let bin = env!("CARGO_BIN_EXE_mumei");
+    let fixture = write_fixture(
+        "struct_eq",
+        r#"
+struct P { x: i64, y: i64 }
+
+atom eq_s(a: P, b: P) -> i64
+    requires: true;
+    ensures: true;
+    body: {
+        if a == b { 1 } else { 0 }
     }
 "#,
     );
@@ -304,7 +402,7 @@ atom eq_ctor(m: Mine) -> i64
     );
     assert!(
         !output.status.success() && combined.contains("unsupported on struct/enum values"),
-        "enum equality must be a clean codegen error, not a panic:\n{combined}"
+        "struct equality must be a clean codegen error, not a panic:\n{combined}"
     );
     std::fs::remove_dir_all(&dir).expect("remove fixture dir");
 }
@@ -348,6 +446,45 @@ atom mk() -> i64
     assert!(
         !output.status.success() && combined.contains("recursive"),
         "recursive enum ctor must fail with a clean codegen error:\n{combined}"
+    );
+    std::fs::remove_dir_all(&dir).expect("remove fixture dir");
+}
+
+// `len(x)` on a value that is not a tracked array parameter used to emit
+// `const 0` — silently wrong. It now fails with a clean codegen error.
+#[test]
+fn len_on_non_array_errors_cleanly() {
+    let bin = env!("CARGO_BIN_EXE_mumei");
+    let fixture = write_fixture(
+        "len_enum",
+        r#"
+enum Mine { Cons(i64), Nil }
+
+atom bad_len(m: Mine) -> i64
+    requires: true;
+    ensures: true;
+    body: {
+        len(m)
+    }
+"#,
+    );
+    let dir = fixture.parent().unwrap().to_path_buf();
+    let output = Command::new(bin)
+        .arg("build")
+        .arg(&fixture)
+        .arg("--emit")
+        .arg("llvm-ir")
+        .current_dir(&dir)
+        .output()
+        .expect("run build");
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !output.status.success() && combined.contains("is not an array"),
+        "len() on an enum value must be a clean codegen error:\n{combined}"
     );
     std::fs::remove_dir_all(&dir).expect("remove fixture dir");
 }
