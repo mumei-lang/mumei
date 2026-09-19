@@ -1327,6 +1327,52 @@ fn test_z3_string_parse_constraint_starts_with() {
 }
 
 #[test]
+fn test_z3_string_parse_constraint_matches_reglan() {
+    // P10-B: matches() compiles the literal pattern to Z3 RegLan
+    // (str.in_re). A satisfiable/unsatisfiable check on the emitted
+    // constraint must agree with Rust regex::is_match.
+    let cfg = z3::Config::new();
+    let ctx = z3::Context::new(&cfg);
+    let solver = z3::Solver::new(&ctx);
+    let param = Z3String::new_const(&ctx, "path");
+
+    let constraint =
+        parse_constraint_to_z3_string(&ctx, "matches(path, \"^/tmp/[a-z]+/.*\")", &param)
+            .expect("compilable pattern should lower to str.in_re");
+    solver.assert(&constraint);
+
+    // A string that satisfies the pattern exists …
+    solver.assert(&param._eq(&Z3String::from_str(&ctx, "/tmp/data/file.txt").unwrap()));
+    assert_eq!(solver.check(), z3::SatResult::Sat);
+
+    // … and a non-matching string violates it (substring semantics).
+    solver.push();
+    solver.assert(&param._eq(&Z3String::from_str(&ctx, "/etc/passwd").unwrap()));
+    assert_eq!(solver.check(), z3::SatResult::Unsat);
+    solver.pop(1);
+
+    // `.*needle.*` is in-fragment too — every literal/metachar compiles.
+    let approx = parse_constraint_to_z3_string(&ctx, "matches(path, \".*needle.*\")", &param);
+    assert!(approx.is_some(), "substring pattern compiles to str.in_re");
+
+    // Uncompilable constructs fall through to the legacy approximation arms,
+    // which only fire on `^….*` / `.*…$` / `.*….*` shapes with a literal
+    // core — a lookahead or interior anchor reaches no arm → None
+    // (constraint unenforceable at the Z3 level, constant path still
+    // Rust-checked).
+    let unsupported = parse_constraint_to_z3_string(&ctx, "matches(path, \"a(?=b)\")", &param);
+    assert!(
+        unsupported.is_none(),
+        "lookahead stays outside the fragment"
+    );
+    let interior = parse_constraint_to_z3_string(&ctx, "matches(path, \"^a$b\")", &param);
+    assert!(
+        interior.is_none(),
+        "interior anchor: no arm, no compile → None"
+    );
+}
+
+#[test]
 fn test_z3_string_constraint_satisfiability() {
     // Test that Z3 String Sort constraints are satisfiable/unsatisfiable as expected
     let cfg = z3::Config::new();
