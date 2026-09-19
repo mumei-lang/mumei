@@ -42,7 +42,13 @@
   `resolve_variant_owner` resolves via the match target's declared type,
   accepts the unambiguous case, and fails closed when owners disagree;
   `detect_enum_from_arms`, counterexample decoding, bare-variant ctor
-  errors, and fragment classification follow the same rule.
+  errors, and fragment classification follow the same rule. Declared-type
+  hints reach `match result` (the executor rebinds `result` to the body
+  value, so the const name is lost — the hint comes from the scrutinee
+  expression), bound recursive tails (`__proj_{Enum}_{Variant}_{i}`
+  projector names carry the enum), and struct-field targets (`match th.t`
+  resolves `th_t` against `th: Thermo`'s field type, including nested
+  struct paths).
 - **Tests**: `tests/test_datatype_enum{,_negative}.mm` + CLI harness (7 atoms
   incl. Str/f64/bool payload selectors, requires-side ctor equality, and a
   recursive-enum Int-tag pin); `test_enum_variant_resolution{,_negative}.mm`

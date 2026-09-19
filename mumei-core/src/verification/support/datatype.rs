@@ -292,7 +292,48 @@ fn target_param_enum_name(vc: &VCtx, target: &Dynamic) -> Option<String> {
             .find(|p| p.name == sym)
             .and_then(|p| p.type_name.as_deref())
     };
-    declared.map(|ty| type_name_base(ty).to_string())
+    if let Some(ty) = declared {
+        return Some(type_name_base(ty).to_string());
+    }
+    // Struct-field projections are seeded as `<binding>_<field>` consts
+    // (e.g. `match th.t` on `th: Thermo` yields `th_t`), so the match
+    // target's declared enum type is recoverable by walking the struct
+    // definition. Field names may themselves contain `_` (and fields may be
+    // nested structs), so try each split position: the first prefix that is
+    // a struct-typed parameter whose remaining path resolves wins.
+    for (pos, _) in sym.match_indices('_') {
+        let (binding, path) = sym.split_at(pos);
+        let path = &path[1..];
+        let Some(param) = atom.params.iter().find(|p| p.name == binding) else {
+            continue;
+        };
+        let Some(struct_name) = param.type_name.as_deref().map(type_name_base) else {
+            continue;
+        };
+        if let Some(field_ty) = field_type_at_path(vc.module_env, struct_name, path) {
+            return Some(type_name_base(&field_ty).to_string());
+        }
+    }
+    None
+}
+
+/// Resolve a `_`-joined field path (`point_x` on `point: Point` → `Point`'s
+/// field `x`) inside `struct_name`. Returns the terminal field's type name.
+fn field_type_at_path(module_env: &ModuleEnv, struct_name: &str, path: &str) -> Option<String> {
+    let sdef = module_env.get_struct(struct_name)?;
+    for field in &sdef.fields {
+        if path == field.name {
+            return Some(field.type_name.clone());
+        }
+        if let Some(rest) = path.strip_prefix(&format!("{}_", field.name)) {
+            if let Some(nested) =
+                field_type_at_path(module_env, type_name_base(&field.type_name), rest)
+            {
+                return Some(nested);
+            }
+        }
+    }
+    None
 }
 
 /// Signature a `Variant` pattern encodes on the Int-tag path: the variant's
