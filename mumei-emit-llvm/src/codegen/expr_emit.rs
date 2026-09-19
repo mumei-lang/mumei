@@ -354,6 +354,14 @@ pub(crate) fn compile_hir_expr<'a>(
                         if let Some((len_val, _)) = array_ptrs.get(arr_name.as_str()) {
                             return Ok(*len_val);
                         }
+                        // A bound non-array value (enum, struct, local array
+                        // literal, Str) has no tracked length — silently
+                        // returning 0 would generate wrong code.
+                        if variables.contains_key(arr_name.as_str()) {
+                            return Err(MumeiError::codegen(format!(
+                                "len() is only supported on array parameters; '{arr_name}' is not an array"
+                            )));
+                        }
                     }
                 }
                 Ok(context.i64_type().const_int(0, false).into())

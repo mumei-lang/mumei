@@ -449,3 +449,42 @@ atom mk() -> i64
     );
     std::fs::remove_dir_all(&dir).expect("remove fixture dir");
 }
+
+// `len(x)` on a value that is not a tracked array parameter used to emit
+// `const 0` — silently wrong. It now fails with a clean codegen error.
+#[test]
+fn len_on_non_array_errors_cleanly() {
+    let bin = env!("CARGO_BIN_EXE_mumei");
+    let fixture = write_fixture(
+        "len_enum",
+        r#"
+enum Mine { Cons(i64), Nil }
+
+atom bad_len(m: Mine) -> i64
+    requires: true;
+    ensures: true;
+    body: {
+        len(m)
+    }
+"#,
+    );
+    let dir = fixture.parent().unwrap().to_path_buf();
+    let output = Command::new(bin)
+        .arg("build")
+        .arg(&fixture)
+        .arg("--emit")
+        .arg("llvm-ir")
+        .current_dir(&dir)
+        .output()
+        .expect("run build");
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !output.status.success() && combined.contains("is not an array"),
+        "len() on an enum value must be a clean codegen error:\n{combined}"
+    );
+    std::fs::remove_dir_all(&dir).expect("remove fixture dir");
+}
