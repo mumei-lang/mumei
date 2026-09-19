@@ -1648,7 +1648,7 @@ pub(crate) fn expr_to_z3<'a>(
             // これにより Z3 が「これら以外のバリアントは存在しない」ことを知り、
             // 網羅性チェックの信頼性が 100% になる。
             if let Some(solver) = solver_opt {
-                if let Some(enum_def) = detect_enum_from_arms(arms, vc.module_env) {
+                if let Some(enum_def) = detect_enum_from_arms(arms, vc, &target_z3) {
                     let n = enum_def.variants.len() as i64;
                     if let Some(tag_int) = target_z3.as_int() {
                         // tag ∈ [0, n_variants)
@@ -1702,7 +1702,7 @@ pub(crate) fn expr_to_z3<'a>(
                     if solver.check() == SatResult::Sat {
                         let counterexample = if let Some(model) = solver.get_model() {
                             // ターゲット変数の具体的な値を取得
-                            format_counterexample(&model, &target_z3, arms, vc.module_env)
+                            format_counterexample(&model, &target_z3, arms, vc)
                         } else {
                             "unknown value".to_string()
                         };

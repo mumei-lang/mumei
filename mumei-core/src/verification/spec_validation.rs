@@ -976,7 +976,7 @@ fn traceability_coverage(
 mod tests {
     use super::*;
     use crate::parser::parse_atom;
-    use z3::ast::{Dynamic, Int, BV};
+    use z3::ast::Int;
 
     #[test]
     fn contradictory_requires_are_rejected() {

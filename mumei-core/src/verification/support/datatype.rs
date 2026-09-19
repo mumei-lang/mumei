@@ -154,12 +154,7 @@ pub(crate) fn enum_ctor_apply<'a>(
         // Bare `Variant` is ambiguous when several enums declare it —
         // `enums` is a HashMap, so first-found order would make the choice
         // (and thus the datatype sort) non-deterministic across runs.
-        let owners: Vec<&EnumDef> = vc
-            .module_env
-            .enums
-            .values()
-            .filter(|e| e.variants.iter().any(|v| v.name == variant_name))
-            .collect();
+        let owners = variant_owners(vc.module_env, variant_name);
         if owners.len() > 1 {
             return Err(MumeiError::verification(format!(
                 "Ambiguous enum variant '{variant_name}': declared by {} — qualify it (e.g. '{}::{variant_name}')",
@@ -240,6 +235,146 @@ pub(crate) fn variant_selector_apply<'a>(
     // fresh projector const).
     let accessor = sort.variants[variant_idx].accessors.get(field_idx)?;
     Some(accessor.apply(&[&dt]))
+}
+
+/// All enums declaring `variant_name`, sorted by name — `module_env.enums`
+/// is a `HashMap`, so iteration order is not stable between processes.
+pub(crate) fn variant_owners<'m>(
+    module_env: &'m ModuleEnv,
+    variant_name: &str,
+) -> Vec<&'m EnumDef> {
+    let mut owners: Vec<_> = module_env
+        .enums
+        .values()
+        .filter(|e| e.variants.iter().any(|v| v.name == variant_name))
+        .collect();
+    owners.sort_by(|a, b| a.name.cmp(&b.name));
+    owners
+}
+
+/// The enum a `match` target was declared as, when the target is a bare
+/// parameter constant — `match l` on `l: IntList` yields `Some("IntList")`.
+fn target_param_enum_name(vc: &VCtx, target: &Dynamic) -> Option<String> {
+    let sym = target.as_int()?.decl().name();
+    let atom = vc.current_atom?;
+    atom.params
+        .iter()
+        .find(|p| p.name == sym)
+        .and_then(|p| p.type_name.as_deref())
+        .map(|ty| {
+            // Strip generic arguments (`Option<i64>` → `Option`) and the
+            // array wrapper (`[Color]` → `Color`).
+            let base = ty
+                .strip_prefix('[')
+                .and_then(|s| s.strip_suffix(']'))
+                .unwrap_or(ty);
+            base.split('<').next().unwrap_or(base).trim().to_string()
+        })
+}
+
+/// Signature a `Variant` pattern encodes on the Int-tag path: the variant's
+/// tag index plus its payload field types (recursive `Self` fields project
+/// as `i64` tags). When several enums declare the same variant name and the
+/// signatures agree, the encoding does not depend on which enum is picked.
+fn int_tag_sig(
+    module_env: &ModuleEnv,
+    enum_def: &EnumDef,
+    variant_name: &str,
+) -> Option<(usize, Vec<String>)> {
+    enum_def
+        .variants
+        .iter()
+        .position(|v| v.name == variant_name)
+        .map(|i| {
+            (
+                i,
+                enum_def.variants[i]
+                    .fields
+                    .iter()
+                    .map(|f| {
+                        if *f == enum_def.name {
+                            "i64".to_string()
+                        } else {
+                            module_env.resolve_base_type(f)
+                        }
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        })
+}
+
+/// Resolves the enum that owns `variant_name` for a `Variant` pattern on an
+/// Int-tag `match` target.
+///
+/// `find_enum_by_variant` picks the first owner it meets in `enums` (a
+/// `HashMap`) — when several enums declare the same variant name (the
+/// prelude always contributes `Option`/`Result`/`List`), which owner it
+/// returns, and therefore which tag index a `Cons` arm encodes, flips
+/// between processes. Resolution order:
+/// 1. the enum named by the match target's declared parameter type;
+/// 2. the sole owner, or any owner when every owner assigns the variant
+///    the same tag index and payload types;
+/// 3. otherwise the match cannot be encoded soundly — an error.
+pub(crate) fn resolve_variant_owner<'a>(
+    vc: &VCtx<'a>,
+    target: &Dynamic<'a>,
+    variant_name: &str,
+) -> MumeiResult<Option<&'a EnumDef>> {
+    let owners = variant_owners(vc.module_env, variant_name);
+    if owners.is_empty() {
+        return Ok(None);
+    }
+    if let Some(decl) = target_param_enum_name(vc, target) {
+        if let Some(decl_enum) = vc.module_env.get_enum(&decl) {
+            return if owners.iter().any(|o| o.name == decl_enum.name) {
+                Ok(Some(decl_enum))
+            } else {
+                Err(MumeiError::verification(format!(
+                    "Enum '{}' has no variant named '{variant_name}'",
+                    decl_enum.name
+                )))
+            };
+        }
+    }
+    if owners.len() == 1 {
+        return Ok(Some(owners[0]));
+    }
+    let first = int_tag_sig(vc.module_env, owners[0], variant_name);
+    if owners
+        .iter()
+        .all(|e| int_tag_sig(vc.module_env, e, variant_name) == first)
+    {
+        return Ok(Some(owners[0]));
+    }
+    Err(MumeiError::verification(format!(
+        "Ambiguous enum variant '{variant_name}' in match: declared by {} with conflicting tags — rename the variants or give the match target a declared enum type",
+        owners
+            .iter()
+            .map(|e| e.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )))
+}
+
+/// `resolve_variant_owner` minus the declared-parameter-type preference,
+/// for callers with no verification context (fragment classification):
+/// returns the deterministic owner — sole owner, or any owner when all
+/// signatures agree — and `None` when the pick would be arbitrary (the
+/// verifier may still resolve it via the match target's declared type, or
+/// fail closed).
+pub(crate) fn resolve_variant_owner_deterministic<'m>(
+    module_env: &'m ModuleEnv,
+    variant_name: &str,
+) -> Option<&'m EnumDef> {
+    let owners = variant_owners(module_env, variant_name);
+    if owners.len() == 1 {
+        return Some(owners[0]);
+    }
+    let first = int_tag_sig(module_env, *owners.first()?, variant_name);
+    owners
+        .iter()
+        .all(|e| int_tag_sig(module_env, e, variant_name) == first)
+        .then_some(owners[0])
 }
 
 /// `param_z3_value`, but enum-typed names lower to real `Datatype` constants

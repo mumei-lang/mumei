@@ -31,6 +31,38 @@ fn datatype_enum_match_verifies() {
 }
 
 #[test]
+fn enum_variant_resolution_is_deterministic_via_declared_type() {
+    // IntList's `Cons = 0` collides with the prelude `List`'s `Cons = 1`;
+    // `l: IntList` must resolve IntList's tags on every run.
+    for _ in 0..3 {
+        let output = mumei_verify("tests/test_enum_variant_resolution.mm");
+        let combined = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            output.status.success() && combined.contains("Verification passed"),
+            "declared-type resolution should be deterministic:\n{combined}"
+        );
+    }
+}
+
+#[test]
+fn ambiguous_variant_match_fails_closed() {
+    let output = mumei_verify("tests/test_enum_variant_resolution_negative.mm");
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !output.status.success() && combined.contains("Ambiguous enum variant"),
+        "unresolvable variant collision must fail closed:\n{combined}"
+    );
+}
+
+#[test]
 fn datatype_enum_missing_arm_fails_with_ctor_name() {
     let output = mumei_verify("tests/test_datatype_enum_negative.mm");
     assert!(

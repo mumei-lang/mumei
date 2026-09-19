@@ -1735,15 +1735,22 @@ pub(crate) fn expr_has_inductive_shape(expr: &Expr, module_env: &ModuleEnv) -> b
         // P10-C: a `match` whose arms resolve to a finite, non-recursive enum
         // is verified natively on the Z3 datatype encoding — it is inductive
         // only when a nested subexpression is. Scalar `match`es and recursive
-        // enums keep the historic `inductive_data_type` tag.
+        // enums keep the historic `inductive_data_type` tag. The owner enum
+        // is resolved the deterministic way (`enums` is a HashMap — the
+        // first-found `find_enum_by_variant` pick was not stable across
+        // runs); when several enums declare the variant with conflicting
+        // tags and no declared type can disambiguate, the match fails
+        // closed at verify time and keeps the tag here too.
         Expr::Match { target, arms } => {
             let on_finite_adt = arms.iter().any(|arm| {
                 matches!(&arm.pattern, crate::parser::ast::Pattern::Variant { variant_name, .. }
-                if module_env
-                    .find_enum_by_variant(variant_name)
-                    .is_some_and(|e| {
-                        crate::verification::support::datatype::is_finite_adt(e, module_env)
-                    }))
+                if crate::verification::support::datatype::resolve_variant_owner_deterministic(
+                    module_env,
+                    variant_name,
+                )
+                .is_some_and(|e| {
+                    crate::verification::support::datatype::is_finite_adt(e, module_env)
+                }))
             });
             !on_finite_adt
                 || expr_has_inductive_shape(target, module_env)

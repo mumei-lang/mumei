@@ -237,6 +237,8 @@ For the Int-tag enums above, `Enum::Variant` in a contract still resolves — to
 
 A bare variant name (`Ok`, `Red`) is ambiguous when several enums declare it — note the auto-loaded prelude contributes `Option`/`Result`/`List`, so `Ok`/`Err`/`Some`/`None`/`Nil`/`Cons` are always ambiguous without a qualifier. Write `R2::Ok` instead of bare `Ok`; comparing two different enum types (`r == R1::Ok` on `r: R2`) is a spec-lowering error, not a `false` clause.
 
+The same ambiguity applies to `match` arms: a `Variant` pattern resolves its tag against the match target's **declared enum type** (`match l` on `l: IntList` uses `IntList`'s indices), so `enum IntList { Cons(i64, Self), Nil }` keeps `Cons = 0` even though the prelude `List` numbers it `1`. When the target's type cannot be determined (e.g. `match x + 1`) and the owners disagree on indices or arity, verification fails closed with an ambiguity error rather than picking an enum at random.
+
 ## Bit-vector `i64` (`--bitvec-i64`)
 
 By default `i64` is encoded as a Z3 `Int`: an unbounded mathematical integer. That encoding cannot express bit patterns, and it lets a contract claim things a machine never does (`x + 1 > x` always holds). `--bitvec-i64` switches the encoding to `BV(64)`, i.e. a 64-bit two's complement machine integer.

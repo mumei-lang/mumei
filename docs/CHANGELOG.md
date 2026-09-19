@@ -29,6 +29,25 @@
 - **Tests**: `tests/test_datatype_enum{,_negative}.mm` + CLI harness (7 atoms
   incl. Str/f64/bool payload selectors, requires-side ctor equality, and a
   recursive-enum Int-tag pin); 6 fragment-classification unit tests.
+- **Review hardening (self-review rounds 1–6)**: empty enums keep the
+  Int-tag path (`DatatypeBuilder` panics on zero variants);
+  `variant_selector_apply` indexes accessors safely; ctor misuse (arity
+  mismatch, non-finite ctor, unknown variant on a known enum) is a hard
+  `spec_lowering_failed` instead of a silently-skipped clause; non-finite
+  `E::V` resolves to the tag index; comparing two different enum sorts is a
+  spec error. **Variant-owner resolution is now deterministic** —
+  `module_env.enums` is a `HashMap`, so a bare `Cons` pattern previously
+  picked its tag index from whichever of `IntList`/prelude `List` came first
+  in the hash order (same file verifying or failing per process).
+  `resolve_variant_owner` resolves via the match target's declared type,
+  accepts the unambiguous case, and fails closed when owners disagree;
+  `detect_enum_from_arms`, counterexample decoding, bare-variant ctor
+  errors, and fragment classification follow the same rule.
+- **Tests**: `tests/test_datatype_enum{,_negative}.mm` + CLI harness (7 atoms
+  incl. Str/f64/bool payload selectors, requires-side ctor equality, and a
+  recursive-enum Int-tag pin); `test_enum_variant_resolution{,_negative}.mm`
+  pins declared-type disambiguation and the fail-closed ambiguity error;
+  6 fragment-classification unit tests.
 - **Docs**: `SPEC_GUIDE.md` gains "Finite enums and tagged unions";
   `ROADMAP.md` marks P10-C complete.
 

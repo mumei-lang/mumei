@@ -70,7 +70,7 @@ pub(crate) fn pattern_to_z3_condition<'a>(
                     return Ok(Bool::and(ctx, &cond_refs));
                 }
             }
-            if let Some(enum_def) = vc.module_env.find_enum_by_variant(variant_name) {
+            if let Some(enum_def) = datatype::resolve_variant_owner(vc, target, variant_name)? {
                 let variant_idx = enum_def
                     .variants
                     .iter()
@@ -200,7 +200,7 @@ pub(crate) fn pattern_bind_variables<'a>(
                     return;
                 }
             }
-            if let Some(enum_def) = module_env.find_enum_by_variant(variant_name) {
+            if let Ok(Some(enum_def)) = datatype::resolve_variant_owner(vc, target, variant_name) {
                 if let Some(variant_def) =
                     enum_def.variants.iter().find(|v| v.name == *variant_name)
                 {
@@ -242,14 +242,17 @@ pub(crate) fn pattern_bind_variables<'a>(
 }
 
 /// アームの Variant パターンから対応する EnumDef を検出する。
-/// 最初に見つかった Variant パターンの所属 Enum を返す。
+/// 最初に解決できた Variant パターンの所属 Enum を返す。複数の Enum が
+/// 同名 Variant を持つ場合は match target の宣言型で決定する
+/// （`resolve_variant_owner` — HashMap の先見つけ順に依存しない）。
 pub(crate) fn detect_enum_from_arms<'a>(
     arms: &[MatchArm],
-    module_env: &'a ModuleEnv,
+    vc: &VCtx<'a>,
+    target: &Dynamic<'a>,
 ) -> Option<&'a EnumDef> {
     for arm in arms {
         if let Pattern::Variant { variant_name, .. } = &arm.pattern {
-            if let Some(enum_def) = module_env.find_enum_by_variant(variant_name) {
+            if let Ok(Some(enum_def)) = datatype::resolve_variant_owner(vc, target, variant_name) {
                 return Some(enum_def);
             }
         }
@@ -259,14 +262,15 @@ pub(crate) fn detect_enum_from_arms<'a>(
 
 /// Z3 Model から反例の文字列表現を生成する。
 /// Enum ドメイン制約が注入されている場合、tag 値からバリアント名+フィールド値を表示する。
-pub(crate) fn format_counterexample(
+pub(crate) fn format_counterexample<'a>(
     model: &z3::Model,
-    target: &Dynamic,
+    target: &Dynamic<'a>,
     arms: &[MatchArm],
-    module_env: &ModuleEnv,
+    vc: &VCtx<'a>,
 ) -> String {
     // アームから Enum 定義を特定（ドメイン制約と同じロジック）
-    let enum_ctx = detect_enum_from_arms(arms, module_env);
+    let enum_ctx = detect_enum_from_arms(arms, vc, target);
+    let module_env = vc.module_env;
 
     // ターゲット変数の具体的な値を取得
     if let Some(target_val) = model.eval(target, true) {
