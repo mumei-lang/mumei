@@ -342,6 +342,9 @@ impl<'a, 'ctx> Parser<'a, 'ctx> {
             'n' => Some(self.literal("\n")),
             'r' => Some(self.literal("\r")),
             't' => Some(self.literal("\t")),
+            'f' => Some(self.literal("\u{c}")),
+            'v' => Some(self.literal("\u{b}")),
+            'a' => Some(self.literal("\u{7}")),
             'x' => {
                 let hi = self.bump()?;
                 let lo = self.bump()?;
@@ -469,6 +472,19 @@ impl<'a, 'ctx> Parser<'a, 'ctx> {
             'n' => Some(ClassChar::Single('\n')),
             'r' => Some(ClassChar::Single('\r')),
             't' => Some(ClassChar::Single('\t')),
+            'f' => Some(ClassChar::Single('\u{c}')),
+            'v' => Some(ClassChar::Single('\u{b}')),
+            'a' => Some(ClassChar::Single('\u{7}')),
+            'x' => {
+                let hi = self.bump()?;
+                let lo = self.bump()?;
+                let code = u32::from_str_radix(&format!("{hi}{lo}"), 16).ok()?;
+                let ch = char::from_u32(code)?;
+                if ch == '\0' {
+                    return None; // NUL cannot be embedded in a Z3 literal
+                }
+                Some(ClassChar::Single(ch))
+            }
             '.' | '*' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|' | '^' | '$' | '\\'
             | '/' | '-' => Some(ClassChar::Single(c)),
             _ => None,
@@ -604,6 +620,17 @@ mod tests {
             // stacked quantifiers compose like Rust's
             ("a**", ""),
             ("a**", "xyz"),
+            // control-char escapes and in-class escapes
+            ("\\f", "\u{c}"),
+            ("\\v", "\u{b}"),
+            ("\\a", "\u{7}"),
+            ("a\\fb", "a\u{c}b"),
+            ("[\\x41]", "A"),
+            ("[\\x41]", "B"),
+            ("[\\-]", "-"),
+            ("[\\]]", "]"),
+            ("\\.", "."),
+            ("\\.", "x"),
         ];
         for (pattern, input) in cases {
             assert_eq!(
