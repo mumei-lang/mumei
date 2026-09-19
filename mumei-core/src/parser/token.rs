@@ -125,6 +125,16 @@ impl Token {
     pub fn same_kind(&self, other: &Token) -> bool {
         std::mem::discriminant(self) == std::mem::discriminant(other)
     }
+
+    /// `true` when the token reads as a word — `Ident` or an alphabetic
+    /// keyword — i.e. something that could be mistaken for a clause
+    /// keyword (`inputs:`) at grammar positions that expect one.
+    pub fn is_word_like(&self) -> bool {
+        format!("{}", self)
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_alphabetic())
+    }
 }
 
 impl std::fmt::Display for Token {

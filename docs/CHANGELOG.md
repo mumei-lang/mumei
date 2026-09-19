@@ -32,6 +32,26 @@
 
 ---
 
+### 2026-09-19: parser — unknown atom-clause keywords are a checked-parse error
+
+- **`mumei-core/src/parser/item.rs`**: the atom clause loop's catch-all
+  silently skipped unrecognized tokens, so a malformed atom written as
+  `atom name\n  inputs: x: i64\n  requires: true; …` parsed with zero
+  params and the `inputs:`/`x:` lines dropped — the atom then **verified
+  vacuously** (even `ensures: result >= 999` passed). The loop now records
+  a `syntax_failure` for any word-like token followed by `:` that isn't a
+  known clause keyword, so `parse_module_from_source_checked`
+  (`verify`/`check`/`build` via `pipeline.rs`) rejects the file with
+  `unknown atom clause keyword 'inputs:'` while the tolerant `parse_module`
+  path (LSP) still recovers.
+- **`mumei-core/src/parser/mod.rs`**: `ParseContext::syntax_failure` —
+  non-`expect` syntax errors join `expect_failures`; `Token::is_word_like`
+  covers `Ident` and alphabetic keyword tokens.
+- Tests: `unknown_atom_clause_keyword_is_a_checked_parse_error` +
+  `known_atom_clauses_do_not_fail_checked_parse`.
+
+---
+
 ### 2026-09-18: P10-C — finite enums verify on native Z3 datatype sorts
 
 - **`mumei-core/src/verification/support/datatype.rs` (new)**: a finite,
