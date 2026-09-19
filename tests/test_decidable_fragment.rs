@@ -220,6 +220,48 @@ fn detects_regex_semantics() {
     assert!(outside_decidable_fragment_warning(&atom, &module_env).is_none());
 }
 
+// P10-B: literal patterns inside the supported RegLan fragment are decided by
+// Z3 directly — the `regex_semantics` tag (and the manual-lemma reason it
+// feeds) must not fire for compilable `matches`/`match_regex`/`re_match` calls.
+#[test]
+fn compilable_regex_builtins_do_not_trigger_regex_semantics() {
+    let module_env = ModuleEnv::new();
+    for call in [
+        "matches(s, \"^/tmp/[a-z]+/.*\")",
+        "match_regex(s, \"^user_[0-9]+$\")",
+        "re_match(s, \"abc|def\")",
+        "matches(s, \"\\\\d+\\\\.\\\\d+\")",
+    ] {
+        let mut atom = base_atom("regex_decidable");
+        atom.params = vec![param("s", "Str")];
+        atom.requires = call.to_string();
+
+        let tags = detect_logic_fragment_tags(&atom, &module_env);
+        assert!(
+            !tags.iter().any(|tag| tag == "regex_semantics"),
+            "expected no regex_semantics tag for {call:?}, got {tags:?}"
+        );
+    }
+}
+
+// Uncompilable constructs (lookarounds, backreferences, ...) still keep the
+// `regex_semantics` tag so the atom stays delegated to Lean 4.
+#[test]
+fn uncompilable_regex_patterns_keep_regex_semantics_tag() {
+    let module_env = ModuleEnv::new();
+    for call in [
+        "matches(s, \"a(?=b)\")",
+        "match_regex(s, \"(a)b\\\\1\")",
+        "re_match(s, \"^a$|(?i)b\")",
+    ] {
+        let mut atom = base_atom("regex_undelegatable");
+        atom.params = vec![param("s", "Str")];
+        atom.requires = call.to_string();
+
+        assert_detected_tag(&atom, &module_env, "regex_semantics");
+    }
+}
+
 #[test]
 fn detects_trigger_sensitive_quantifier_with_array_access() {
     let module_env = ModuleEnv::new();

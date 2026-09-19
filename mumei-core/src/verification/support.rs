@@ -4,6 +4,7 @@ mod dataflow_inference;
 mod effects;
 mod law_verification;
 mod nominal_types;
+pub(crate) mod reglan;
 mod resource_safety;
 mod task_ownership;
 mod units;

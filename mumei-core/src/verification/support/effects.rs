@@ -282,16 +282,20 @@ pub(crate) fn parse_constraint_to_z3_string<'ctx>(
         }
     }
 
-    // Plan 10: matches(param, "regex_pattern") → approximate via prefix/suffix/contains
-    // The z3 crate v0.12 does not expose str.in_re / re.from_str API directly.
-    // We approximate common regex patterns using Z3 String prefix/suffix/contains:
+    // Plan 10/P10-B: matches(param, "regex_pattern") → native Z3 RegLan
+    // (str.in_re) via `reglan::compile_search`; the approximation arms below
+    // remain as fallback for patterns outside the supported fragment.
     //   - "^prefix.*"  → starts_with
     //   - ".*suffix$"  → ends_with
     //   - ".*substr.*" → contains
-    // For patterns that cannot be approximated, we return None (constraint not enforceable
-    // at Z3 level; constant checking via Rust regex crate handles the rest).
+    // For patterns that can neither be compiled nor approximated, we return
+    // None (constraint not enforceable at Z3 level; constant checking via
+    // Rust regex crate handles the rest).
     if trimmed.starts_with("matches(") {
         if let Some(pattern) = extract_string_arg(trimmed) {
+            if let Some(re) = super::reglan::compile_search(ctx, &pattern) {
+                return Some(param_z3.regex_matches(&re));
+            }
             // Try to approximate the regex pattern with Z3 String constraints
             let stripped = pattern.as_str();
             // Helper: check if a literal fragment contains regex metacharacters

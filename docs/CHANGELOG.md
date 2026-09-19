@@ -2,6 +2,37 @@
 
 ---
 
+### 2026-09-19: P10-B — regex contracts compile to Z3 RegLan (`str.in_re`)
+
+- **`mumei-core/src/verification/support/reglan.rs` (new)**: a mini-compiler
+  lowers the Rust `regex` syntax used by `matches` / `match_regex` /
+  `re_match` literal patterns to native Z3 `Regexp` expressions. Substring
+  (`is_match`) semantics are reconstructed as `Σ*·re·Σ*` with the `Σ*` elided
+  on `^`-/`$`-anchored ends. Supported fragment: literals, concat, `|`, `()`,
+  `*`/`+`/`?` (lazy included), `{n}`/`{n,}`/`{n,m}` (bounds ≤ 64), `[…]` /
+  `[^…]` classes, `\d \w \s` (and `\D \W \S` complements), `\n \r \t`,
+  `\xHH`, escaped metacharacters, `.` (any ASCII char except `\n`), and
+  outermost anchors. `re.range` bounds above U+007F collapse in Z3 — range
+  bounds past the ASCII plane are rejected as unsupported instead.
+- **`effects.rs` where-clauses**: `matches(param, "pat")` now compiles to
+  `param.in_re re` first; the previous prefix/suffix/contains approximations
+  remain as a fallback for patterns outside the fragment.
+- **`translator/expr.rs`**: `matches`/`match_regex`/`re_match` calls in
+  atom contracts lower to `str.regex_matches(...)`. Non-literal patterns and
+  uncompilable constructs are hard verification errors — a silently dropped
+  `ensures` clause could otherwise report `verified` unchecked (偽陰性).
+- **Fragment tagging** (`fragment.rs`, `proof_cert/validation.rs`):
+  compilable `matches(`/`match_regex(`/`re_match(` calls no longer produce
+  the `regex_semantics` tag or the `regex_semantics_require_manual_lemma`
+  reason — both are kept only for patterns outside the decidable fragment
+  (lookarounds, backreferences, inline flags, interior anchors, `\b`, …).
+  `detects_regex_semantics` fixture coverage retained via `regex_match`.
+- **Docs**: `docs/SPEC_GUIDE.md` gained a "String and regular-expression
+  constraints" section describing the decidable fragment and the Lean
+  delegation boundary; `docs/ROADMAP.md` marks P10-B complete.
+
+---
+
 ### 2026-09-06: v0.6.19 release version bump
 
 - **Workspace and member crate versions**: bumped versions from `0.6.18` to
