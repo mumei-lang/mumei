@@ -67,7 +67,15 @@ pub(crate) fn compile_search<'ctx>(ctx: &'ctx Context, pattern: &str) -> Option<
     let chars: Vec<char> = pattern.chars().collect();
     let (mut lo, mut hi) = (0usize, chars.len());
     let anchored_start = chars.first() == Some(&'^');
-    let anchored_end = hi > lo && chars[hi - 1] == '$';
+    // A trailing `$` is an anchor only when it is not escaped — count the
+    // backslashes immediately before it (`a\$` = literal "a$").
+    let trailing_backslashes = chars[..hi]
+        .iter()
+        .rev()
+        .skip(1)
+        .take_while(|c| **c == '\\')
+        .count();
+    let anchored_end = hi > lo && chars[hi - 1] == '$' && trailing_backslashes % 2 == 0;
     if anchored_start {
         lo = 1;
     }
@@ -83,6 +91,9 @@ pub(crate) fn compile_search<'ctx>(ctx: &'ctx Context, pattern: &str) -> Option<
     seq.push(body);
     if !anchored_end {
         seq.push(Regexp::full(ctx));
+    }
+    if seq.len() == 1 {
+        return seq.into_iter().next();
     }
     let refs: Vec<&Regexp> = seq.iter().collect();
     Some(Regexp::concat(ctx, &refs))
@@ -196,19 +207,19 @@ impl<'a, 'ctx> Parser<'a, 'ctx> {
                     re = re.r#loop(0, 1);
                 }
                 Some('{') => {
-                    let save = self.pos;
                     self.bump();
                     let (lo, hi) = match self.repeat_bounds() {
-                        RepeatBounds::LiteralBrace => {
-                            // Rust regex treats a `{` that does not start a
-                            // valid `{n[,m]}` as a literal — rewind so the
-                            // postfix loop ends and `atom()` reads it.
-                            self.pos = save;
-                            break;
-                        }
+                        // Rust regex rejects malformed `{…}` (bare `{`,
+                        // whitespace bounds, reversed ranges) — reject rather
+                        // than reinterpret as a literal (fail-closed).
                         RepeatBounds::Invalid => return None,
                         RepeatBounds::Bounds(lo, hi) => (lo, hi),
                     };
+                    // `{n,m}?` is the lazy counted form — same language as
+                    // `{n,m}` under `is_match`, so consume (don't apply) `?`.
+                    if self.peek() == Some('?') {
+                        self.bump();
+                    }
                     if hi != u32::MAX && hi > MAX_LOOP_BOUND {
                         return None;
                     }
@@ -255,7 +266,7 @@ impl<'a, 'ctx> Parser<'a, 'ctx> {
             }
         }
         let Ok(lo) = lo_str.parse::<u32>() else {
-            return RepeatBounds::LiteralBrace;
+            return RepeatBounds::Invalid;
         };
         match self.peek() {
             Some('}') => {
@@ -274,7 +285,7 @@ impl<'a, 'ctx> Parser<'a, 'ctx> {
                     }
                 }
                 if self.bump() != Some('}') {
-                    return RepeatBounds::LiteralBrace;
+                    return RepeatBounds::Invalid;
                 }
                 if hi_str.is_empty() {
                     RepeatBounds::Bounds(lo, u32::MAX)
@@ -289,7 +300,7 @@ impl<'a, 'ctx> Parser<'a, 'ctx> {
                     RepeatBounds::Bounds(lo, hi)
                 }
             }
-            _ => RepeatBounds::LiteralBrace,
+            _ => RepeatBounds::Invalid,
         }
     }
 
@@ -466,10 +477,8 @@ impl<'a, 'ctx> Parser<'a, 'ctx> {
 enum RepeatBounds {
     /// `{n}` / `{n,m}` / `{n,}` parsed cleanly; `u32::MAX` = unbounded.
     Bounds(u32, u32),
-    /// Not a valid `{…}` spec — the `{` is a literal character (Rust
-    /// regex compatibility).
-    LiteralBrace,
-    /// Syntactically a `{n,m}` but `m < n` — Rust regex rejects this.
+    /// Not a valid `{…}` spec — Rust regex rejects bare/malformed braces
+    /// (`a{`, `a{1,` — an unclosed `{` is a parse error, not a literal).
     Invalid,
 }
 
@@ -497,6 +506,9 @@ fn class_char_union<'ctx>(ctx: &'ctx Context, which: char) -> Regexp<'ctx> {
         .iter()
         .map(|(lo, hi)| Regexp::range(ctx, lo, hi))
         .collect();
+    if members.len() == 1 {
+        return members.into_iter().next().unwrap();
+    }
     let refs: Vec<&Regexp> = members.iter().collect();
     Regexp::union(ctx, &refs)
 }
@@ -576,6 +588,20 @@ mod tests {
             ("^$", "a"),
             ("", "anything"),
             ("^a+$", "aaa"),
+            // lazy counted repetition: `a{2,3}?` must NOT become optional
+            ("a{2,3}?", "aa"),
+            ("a{2,3}?", "b"),
+            ("a{2,3}?", "xax"),
+            // escaped trailing `$` is a literal, not an anchor
+            ("a\\$", "a$"),
+            ("a\\$", "a"),
+            ("a\\$", "xa$y"),
+            // `a\\$` = literal "a\" at end (escaped backslash + real anchor)
+            ("a\\\\$", "a\\"),
+            ("a\\\\$", "a\\x"),
+            // stacked quantifiers compose like Rust's
+            ("a**", ""),
+            ("a**", "xyz"),
         ];
         for (pattern, input) in cases {
             assert_eq!(
@@ -597,6 +623,9 @@ mod tests {
             "a$b",        // interior anchor
             "a{200,300}", // above MAX_LOOP_BOUND
             "a{3,2}",     // inverted bounds
+            "a{",         // bare `{` is a parse error in Rust regex
+            "a{1,",       // unclosed count — ditto
+            "a{ 2}",      // whitespace bounds (Rust accepts; keep fail-closed)
             "(",          // unbalanced
             "[",          // unbalanced class
             "a\\Q",       // unknown escape
