@@ -472,7 +472,7 @@ pub(crate) fn expr_to_z3<'a>(
             // finite ADT (e.g. `Red` for `enum Color { Red, Green, Blue }`)
             // constructs the datatype value.
             if name.chars().next().is_some_and(|c| c.is_uppercase()) {
-                if let Some(value) = datatype::enum_ctor_apply(vc, name, &[]) {
+                if let Some(value) = datatype::enum_ctor_apply(vc, name, &[])? {
                     return Ok(value);
                 }
             }
@@ -1145,7 +1145,7 @@ pub(crate) fn expr_to_z3<'a>(
                             for arg in args {
                                 ctor_args.push(expr_to_z3(vc, arg, env, solver_opt)?);
                             }
-                            if let Some(value) = datatype::enum_ctor_apply(vc, name, &ctor_args) {
+                            if let Some(value) = datatype::enum_ctor_apply(vc, name, &ctor_args)? {
                                 return Ok(value);
                             }
                             // A resolved enum+variant whose construction still
@@ -1153,31 +1153,21 @@ pub(crate) fn expr_to_z3<'a>(
                             // finite ADT) must not degrade to the
                             // clause-skipping "Unknown function" path — that
                             // would silently drop the contract clause.
-                            // Qualified `E::V` where `E` is a known enum but
-                            // `V` is not one of its variants (typo) is also a
-                            // hard error rather than a skipped clause.
-                            if let Some((qual, variant)) = name.split_once("::") {
-                                if let Some(ed) = vc.module_env.get_enum(qual) {
-                                    if !ed.variants.iter().any(|v| v.name == variant) {
-                                        return Err(MumeiError::verification(format!(
-                                            "Enum '{qual}' has no variant named '{variant}'"
-                                        )));
-                                    }
-                                }
-                            }
-                            let variant = name.rsplit("::").next().unwrap_or(name);
-                            if let Some(ed) = vc.module_env.find_enum_by_variant(variant) {
-                                let qualified_ok = name
-                                    .split_once("::")
-                                    .map(|(qual, _)| qual == ed.name)
-                                    .unwrap_or(true);
-                                let expected = ed
-                                    .variants
-                                    .iter()
-                                    .find(|v| v.name == variant)
-                                    .map(|v| v.fields.len());
-                                if qualified_ok {
-                                    if let Some(arity) = expected {
+                            // Resolve `E` directly for qualified `E::V` (the
+                            // prelude's generic `Option`/`Result`/`List`
+                            // variants can shadow a user enum in a
+                            // name-only scan); bare `V` resolved unambiguously
+                            // already inside `enum_ctor_apply`.
+                            let owner = if let Some((qual, _)) = name.split_once("::") {
+                                vc.module_env.get_enum(qual)
+                            } else {
+                                vc.module_env.find_enum_by_variant(name)
+                            };
+                            if let Some(ed) = owner {
+                                let variant = name.rsplit("::").next().unwrap_or(name);
+                                match ed.variants.iter().find(|v| v.name == variant) {
+                                    Some(vdef) => {
+                                        let arity = vdef.fields.len();
                                         if arity == args.len() {
                                             return Err(MumeiError::verification(format!(
                                                 "Enum constructor '{name}' is not constructible in specs: enum '{}' is not a finite ADT (recursive, generic, empty, or non-scalar payload — it keeps the Int-tag encoding; use the tag literal or a `match` discriminant)",
@@ -1189,6 +1179,16 @@ pub(crate) fn expr_to_z3<'a>(
                                             args.len()
                                         )));
                                     }
+                                    None if name.contains("::") => {
+                                        // `E` is a known enum but `V` is not
+                                        // one of its variants — a typo must
+                                        // not be silently dropped.
+                                        return Err(MumeiError::verification(format!(
+                                            "Enum '{}' has no variant named '{variant}'",
+                                            ed.name
+                                        )));
+                                    }
+                                    None => {}
                                 }
                             }
                         }
@@ -1425,9 +1425,10 @@ pub(crate) fn expr_to_z3<'a>(
                             eq.into()
                         });
                     }
-                    // P10-C: finite-ADT equality. Both operands must carry the
-                    // *same* datatype sort; mixed-sort comparisons keep the
-                    // legacy "Expected int" failure.
+                    // P10-C: finite-ADT equality requires the *same* datatype
+                    // sort — comparing two different enums is a hard error
+                    // (next arm), not a sort mismatch the solver would
+                    // interpret.
                     Op::Eq | Op::Neq
                         if l.as_datatype().is_some()
                             && r.as_datatype().is_some()
@@ -1439,6 +1440,11 @@ pub(crate) fn expr_to_z3<'a>(
                         } else {
                             eq.into()
                         });
+                    }
+                    Op::Eq | Op::Neq if l.as_datatype().is_some() && r.as_datatype().is_some() => {
+                        return Err(MumeiError::verification(
+                            "Cannot compare enum values of different types".to_string(),
+                        ));
                     }
                     _ => {}
                 }
@@ -2453,7 +2459,7 @@ pub(crate) fn expr_to_z3<'a>(
                     && datatype::is_finite_adt(vc.module_env.get_enum(name).unwrap(), vc.module_env)
                 {
                     if let Some(value) =
-                        datatype::enum_ctor_apply(vc, &format!("{}::{}", name, field_name), &[])
+                        datatype::enum_ctor_apply(vc, &format!("{}::{}", name, field_name), &[])?
                     {
                         return Ok(value);
                     }
@@ -2468,6 +2474,12 @@ pub(crate) fn expr_to_z3<'a>(
                         if let Some(idx) = ed.variants.iter().position(|v| v.name == *field_name) {
                             return Ok(Int::from_i64(ctx, idx as i64).into());
                         }
+                        // `E` names a known enum but `V` is not one of its
+                        // variants — a typo'd variant must not degrade to a
+                        // fresh const (vacuous comparison).
+                        return Err(MumeiError::verification(format!(
+                            "Enum '{name}' has no variant named '{field_name}'"
+                        )));
                     }
                 }
             }

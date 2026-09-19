@@ -23,6 +23,7 @@ use crate::lowering::{lower, LoweredType};
 use crate::parser::ast::EnumDef;
 use crate::verification::module_env::ModuleEnv;
 use crate::verification::translator::{VCtx, F64_EBITS, F64_SBITS};
+use crate::verification::types::{MumeiError, MumeiResult};
 
 /// `true` when `enum_def` is finite + non-recursive + scalar-payload only —
 /// the fragment that maps onto a Z3 `DatatypeSort`.
@@ -142,26 +143,54 @@ pub(crate) fn enum_ctor_apply<'a>(
     vc: &VCtx<'a>,
     ctor_path: &str,
     args: &[Dynamic<'a>],
-) -> Option<Dynamic<'a>> {
+) -> MumeiResult<Option<Dynamic<'a>>> {
     let variant_name = ctor_path.rsplit("::").next().unwrap_or(ctor_path);
-    let enum_def = vc.module_env.find_enum_by_variant(variant_name)?;
-    // A qualified `Enum::Variant` must name the enum it resolved against;
-    // bare `Variant(...)` is accepted as-is.
-    if let Some((qual, _)) = ctor_path.split_once("::") {
-        if qual != enum_def.name {
-            return None;
+    let enum_def = if let Some((qual, _)) = ctor_path.split_once("::") {
+        // Qualified `E::V` resolves `E` directly — `find_enum_by_variant`
+        // would non-deterministically pick a *different* enum declaring a
+        // same-named variant (`enums` is a HashMap).
+        vc.module_env.get_enum(qual)
+    } else {
+        // Bare `Variant` is ambiguous when several enums declare it —
+        // `enums` is a HashMap, so first-found order would make the choice
+        // (and thus the datatype sort) non-deterministic across runs.
+        let owners: Vec<&EnumDef> = vc
+            .module_env
+            .enums
+            .values()
+            .filter(|e| e.variants.iter().any(|v| v.name == variant_name))
+            .collect();
+        if owners.len() > 1 {
+            return Err(MumeiError::verification(format!(
+                "Ambiguous enum variant '{variant_name}': declared by {} — qualify it (e.g. '{}::{variant_name}')",
+                owners
+                    .iter()
+                    .map(|e| e.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                owners[0].name
+            )));
         }
-    }
-    let idx = enum_def
+        owners.into_iter().next()
+    };
+    let Some(enum_def) = enum_def else {
+        return Ok(None);
+    };
+    let Some(idx) = enum_def
         .variants
         .iter()
-        .position(|v| v.name == variant_name)?;
-    let sort = enum_datatype_sort(vc, enum_def)?;
+        .position(|v| v.name == variant_name)
+    else {
+        return Ok(None);
+    };
+    let Some(sort) = enum_datatype_sort(vc, enum_def) else {
+        return Ok(None);
+    };
     if enum_def.variants[idx].fields.len() != args.len() {
-        return None;
+        return Ok(None);
     }
     let arg_refs: Vec<&dyn Ast> = args.iter().map(|d| d as &dyn Ast).collect();
-    Some(sort.variants[idx].constructor.apply(&arg_refs))
+    Ok(Some(sort.variants[idx].constructor.apply(&arg_refs)))
 }
 
 /// Tester predicate `is-<Variant>(target)` for a `Datatype`-sorted match
@@ -206,7 +235,11 @@ pub(crate) fn variant_selector_apply<'a>(
     target: &Dynamic<'a>,
 ) -> Option<Dynamic<'a>> {
     let dt = target.as_datatype()?;
-    Some(sort.variants[variant_idx].accessors[field_idx].apply(&[&dt]))
+    // `field_idx` comes from the user's pattern, which may name more payload
+    // slots than the variant declares — index safely (caller falls back to a
+    // fresh projector const).
+    let accessor = sort.variants[variant_idx].accessors.get(field_idx)?;
+    Some(accessor.apply(&[&dt]))
 }
 
 /// `param_z3_value`, but enum-typed names lower to real `Datatype` constants
