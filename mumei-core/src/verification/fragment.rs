@@ -1169,10 +1169,87 @@ pub(crate) fn atom_has_regex_semantics(
 
 pub(crate) fn text_has_regex_semantics(text: &str) -> bool {
     let normalized = text.to_ascii_lowercase();
-    normalized.contains("regex")
-        || normalized.contains("regexp")
-        || normalized.contains("match_regex(")
-        || normalized.contains("re_match(")
+    // P10-B: `matches(` / `match_regex(` / `re_match(` calls whose literal
+    // pattern compiles to Z3 RegLan stay decidable — mask each such call so
+    // the word triggers below do not tag it ("match_regex" itself contains
+    // "regex"). Unparseable or uncompilable patterns keep the tag.
+    let mut masked = normalized.clone().into_bytes();
+    for name in ["matches(", "match_regex(", "re_match("] {
+        let mut search_from = 0usize;
+        while let Some(rel) = normalized[search_from..].find(name) {
+            let start = search_from + rel;
+            // Word boundary: `more_match(` must not be read as `re_match(`.
+            if start > 0
+                && (normalized.as_bytes()[start - 1].is_ascii_alphanumeric()
+                    || normalized.as_bytes()[start - 1] == b'_')
+            {
+                search_from = start + name.len();
+                continue;
+            }
+            let open = start + name.len() - 1; // byte index of '('
+            match regex_call_span(&normalized, open) {
+                Some((close, Some(pattern)))
+                    if crate::verification::support::reglan::supported(&pattern) =>
+                {
+                    for b in &mut masked[start..=close] {
+                        *b = b' ';
+                    }
+                    search_from = close + 1;
+                }
+                _ => return true,
+            }
+        }
+    }
+    let masked = String::from_utf8_lossy(&masked);
+    masked.contains("regex") || masked.contains("regexp")
+}
+
+/// `matches` / `match_regex` / `re_match` lower to Z3 RegLan when their
+/// pattern is a supported literal.
+fn is_regex_builtin_name(name: &str) -> bool {
+    matches!(name, "matches" | "match_regex" | "re_match")
+}
+
+/// Byte offsets of a `name(...)` call's closing `)` plus its last quoted
+/// string literal (the regex pattern), tracking paren depth and skipping
+/// quoted spans. `open` is the index of the call's `(`.
+fn regex_call_span(text: &str, open: usize) -> Option<(usize, Option<String>)> {
+    let bytes = text.as_bytes();
+    let mut depth = 0usize;
+    let mut i = open;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => {
+                // Skip the quoted span (honoring \" escapes).
+                i += 1;
+                while i < bytes.len() {
+                    match bytes[i] {
+                        b'\\' => i += 1,
+                        b'"' => break,
+                        _ => {}
+                    }
+                    i += 1;
+                }
+            }
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    let inner = &text[open + 1..i];
+                    // The pattern is the last quoted literal inside the call.
+                    if let Some(endq) = inner.rfind('"') {
+                        if let Some(startq) = inner[..endq].rfind('"') {
+                            return Some((i, Some(inner[startq + 1..endq].to_string())));
+                        }
+                    }
+                    return Some((i, None));
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
 }
 
 pub(crate) fn atom_has_unbounded_array_access(
@@ -1572,7 +1649,20 @@ pub(crate) fn stmt_has_nonlinear_arithmetic(stmt: &Stmt) -> bool {
 pub(crate) fn expr_has_regex_semantics(expr: &Expr) -> bool {
     match expr {
         Expr::Call(name, args) => {
-            text_has_regex_semantics(name) || args.iter().any(expr_has_regex_semantics)
+            // P10-B: a regex builtin call is decidable when its pattern is a
+            // literal inside the supported RegLan fragment; anything else
+            // keeps the `regex_semantics` tag for Lean delegation.
+            let own_call = if is_regex_builtin_name(name) {
+                match args.get(1) {
+                    Some(Expr::StringLit(pattern)) => {
+                        !crate::verification::support::reglan::supported(pattern)
+                    }
+                    _ => true,
+                }
+            } else {
+                text_has_regex_semantics(name)
+            };
+            own_call || args.iter().any(expr_has_regex_semantics)
         }
         Expr::BinaryOp(left, _, right) => {
             expr_has_regex_semantics(left) || expr_has_regex_semantics(right)

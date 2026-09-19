@@ -661,6 +661,53 @@ pub(crate) fn expr_to_z3<'a>(
                 // =============================================================
                 // These are parsed as Expr::Call by the parser but need special
                 // handling in Z3 to produce Bool constraints on Z3 String Sort.
+                // =============================================================
+                // P10-B: regex membership builtins → Z3 RegLan (str.in_re)
+                // `matches(s, "pat")` / `match_regex` / `re_match` lower to
+                // `s ∈ Σ*·re·Σ*` (Rust `is_match` substring semantics).
+                // Patterns outside the supported fragment are a verification
+                // error rather than a silently-dropped constraint: dropping a
+                // requires clause only weakens the assumptions, but dropping
+                // an ensures clause would report `verified` without checking
+                // the postcondition (偽陰性).
+                // =============================================================
+                "matches" | "match_regex" | "re_match" => {
+                    if args.len() != 2 {
+                        return Err(MumeiError::verification(format!(
+                            "{}() requires exactly 2 arguments: (string_var, \"regex\")",
+                            name
+                        )));
+                    }
+                    let str_val = expr_to_z3(vc, &args[0], env, solver_opt)?;
+                    let Some(str_z3) = str_val.as_string() else {
+                        // Non-string operand: mirror the permissive fallback of
+                        // the other string builtins (type checking is out of
+                        // scope here).
+                        return Ok(Bool::from_bool(ctx, true).into());
+                    };
+                    let crate::parser::Expr::StringLit(pattern) = &args[1] else {
+                        return Err(MumeiError::verification(format!(
+                            "{}(): regex pattern must be a string literal",
+                            name
+                        )));
+                    };
+                    let Some(re) =
+                        crate::verification::support::reglan::compile_search(ctx, pattern)
+                    else {
+                        return Err(MumeiError::verification(format!(
+                            "{}(): regex pattern {:?} uses constructs outside the \
+                             supported fragment (literals, '.', '*', '+', '?', \
+                             '{{n,m}}', '[…]'/'[^…]', '|', '()' groups, outer '^'/'$' \
+                             anchors, and \\d/\\w/\\s (ASCII-only), \\n/\\r/\\t/\
+                             \\f/\\v/\\a, \\xHH escapes). Zero-width assertions, \
+                             backreferences, lookarounds, Unicode escapes, and \
+                             interior anchors must be delegated to Lean 4.",
+                            name, pattern
+                        )));
+                    };
+                    mark_string_constraints(vc);
+                    Ok(str_z3.regex_matches(&re).into())
+                }
                 "starts_with" | "ends_with" | "contains" | "not_contains" => {
                     if args.len() != 2 {
                         return Err(MumeiError::verification(format!(

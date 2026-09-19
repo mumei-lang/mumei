@@ -1131,9 +1131,17 @@ Lean 委譲境界: `mumei-core/src/verification/types.rs` の `integer_overflow_
 - 手動オーバーフロー境界（`requires` の ±4×10^18 等）を必要とする atom 数: ≥ 80% 削減
 - `--bitvec-i64` 無効時の既存 proof certificate 回帰: 0 件
 
-**P10-B: Regular Expression Theory（`Z3_RE_SORT` / RegLan）** — ★★
+**P10-B: Regular Expression Theory（`Z3_RE_SORT` / RegLan）** — ★★ — ✅ 実装完了（2026-09-19）
 
-現状のギャップ: 正規表現制約は String Sort 上の `prefix_of` / `suffix_of` / `contains` 近似のみで表現され、`regex_semantics` タグが付いた義務は `docs/SPEC_GUIDE.md` の方針どおり Lean 4 へ回している。
+`mumei-core/src/verification/support/reglan.rs` に Rust `regex` 構文のミニコンパイラを新設し、`matches` / `match_regex` / `re_match` のリテラルパターンを Z3 `RegLan`（`str.in_re`）へ直接写像する。Rust `is_match` 部分一致意味論を `Σ*·re·Σ*` で再現（外側 `^`/`$` アンカーで該当側の `Σ*` を省略）。対応断片: リテラル・連接・`|`・`()`・`*`/`+`/`?`（lazy 含む）・`{n,m}`（≤64）・文字クラス・`[^…]`・`\d\w\s`/`\D\W\S`・`\xHH`・`.`（Z3 `re.range` は 7bit ASCII まで — 範囲上限超過は unsupported）。Lookaround・後方参照・`(?i)` フラグ・内部アンカー等は `regex_semantics` タグを維持し契約内では fail-closed の lowering error。
+
+- `verification/support/effects.rs` の `matches(` where 句と `translator/expr.rs` の新しい Call arm が `regex_matches` を emit（旧 prefix/suffix/contains 近似はフォールバックとして保持）
+- `fragment.rs` は compilable 呼び出しを word-scan からマスク（compilable でなければタグ維持）、`expr_has_regex_semantics` の Call arm が `reglan::supported` で分岐
+- `proof_cert/validation.rs` の `manual_lemma_reason` 判定も同じ fragment 判定に統一（compilable `match_regex` 名の "regex" 含有で従来常に手動 lemma 要求だった）
+- 単体: `reglan` パリティコーパス（Z3 vs Rust regex 一致）、fragment: compilable→タグ無し / uncompilable→タグ維持（tests/test_decidable_fragment.rs）
+- `docs/SPEC_GUIDE.md` に決定可能な regex 断片を明記
+
+旧ギャップ: 正規表現制約は String Sort 上の `prefix_of` / `suffix_of` / `contains` 近似のみで表現され、`regex_semantics` タグが付いた義務は `docs/SPEC_GUIDE.md` の方針どおり Lean 4 へ回していた。
 
 Lean 委譲境界: `mumei-core/src/verification/types.rs` の `string_regex_bridge` ノート（Z3 と Lean で String / regex 意味論が異なる）に従い、複雑な意味論を要する義務のみ Lean 4 に残す。
 

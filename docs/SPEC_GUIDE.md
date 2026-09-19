@@ -169,7 +169,7 @@ Keep quantifier bodies simple: linear arithmetic, a single array access pattern,
 
 ### Effects and temporal state
 
-Stateful effects should be finite state machines with explicit transitions. Keep effect preconditions local to the current state and avoid encoding unbounded histories in contracts. Path, URL, and regex constraints should be reduced to bounded string predicates or finite cases when possible; otherwise they are outside the most reliable Z3 fragment.
+Stateful effects should be finite state machines with explicit transitions. Keep effect preconditions local to the current state and avoid encoding unbounded histories in contracts. Path, URL, and regex constraints inside the RegLan fragment are decided by Z3 directly (`str.in_re`); regex constructs outside that fragment are outside the most reliable Z3 fragment.
 
 Recommended:
 
@@ -183,6 +183,26 @@ effect File
 ```
 
 Prefer small state sets, deterministic transitions, and explicit operation order in atom bodies.
+
+### String and regular-expression constraints
+
+`matches(s, "pattern")` (and the aliases `match_regex` / `re_match`) compile the literal pattern into a native Z3 regular-language expression (`str.in_re`) instead of approximating it with `prefix_of`/`suffix_of`/`contains`. The compile target follows Rust `regex::is_match` semantics — substring search — so `^`/`$` anchors only take effect at the outermost edges of the pattern.
+
+The decidable fragment covers:
+
+- literals and concatenation, alternation `|`, grouping `(...)`;
+- repetition `*` `+` `?` (including lazy `*?`/`+?`/`??`) and counted `{n}` `{n,}` `{n,m}` with bounds ≤ 64 (`{n,}` desugars to `{n}` + `*`);
+- character classes `[a-z]`, `[^...]`, and escapes `\d \w \s` (plus `\D \W \S` complements), `\n \r \t \f \v \a`, `\xHH` (also inside classes), and escaped metacharacters. Unlike Rust `regex`, the class escapes are interpreted **ASCII-only** (`\w` = `[0-9A-Za-z_]`, `\s` = `[ \t\n\r\u{b}\u{c}]`) — non-ASCII word/space characters are outside the RegLan constraint;
+- `.` matching any ASCII character except `\n` — Z3's `re.range` is limited to the 7-bit ASCII plane, so `.` and classes cannot address code points above U+007F (literal characters above U+007F still compile);
+- outer `^`/`$` anchors (`str.in_re` handles them by dropping the implicit `Σ*` wrapper at that end).
+
+Anything outside this fragment — lookarounds (`(?=`, `(?!`, `(?<`), backreferences (`\1`), inline flags (`(?i)`), interior anchors, word boundaries (`\b`), Unicode escapes (`\uXXXX`, `\u{...}`), malformed or whitespace bounds (`a{`, `a{ 2}`), and `{n,m}` with `m < n` — keeps the `regex_semantics` tag, fails closed as a spec-lowering error in contracts, and remains a Lean 4 delegation target.
+
+Recommended:
+
+```mumei
+effect RegexSafeFileRead(path: Str) where matches(path, "^/tmp/[a-z]+/.*");
+```
 
 ## Bit-vector `i64` (`--bitvec-i64`)
 
@@ -260,7 +280,7 @@ With `mumei verify --warn-fragment`, the verifier emits an `outside_decidable_fr
 | `recursive_invariant` | While loop or recursive invariant | Keep invariants linear and local, or escalate to Lean |
 | `complex_temporal_effect` | Many states/transitions or implicit history | Reduce to finite explicit transitions |
 | `nested_aliasing` | Multiple `ref mut` aliases or nested mutable scopes | Split the atom or serialize mutation through one owner |
-| `regex_semantics` | `regex_match`, `matches`, or equivalent regex constraints | Replace with prefix/contains/bounded finite cases or escalate to Lean |
+| `regex_semantics` | Regex constructs outside the RegLan fragment (lookarounds, backreferences, inline flags, interior anchors) | Rewrite into the supported fragment (see "String and regular-expression constraints"), or escalate to Lean |
 
 ### Anti-pattern examples
 

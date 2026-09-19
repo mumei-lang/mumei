@@ -158,7 +158,13 @@ pub(crate) fn manual_lemma_reason_for_atom(
             .any(|tag| tag == "inductive_data_type")
     {
         Some("inductive_or_pattern_translation_requires_manual_lemma".to_string())
-    } else if atom.requires.contains("regex") || atom.ensures.contains("regex") {
+    } else if verification::fragment::text_has_regex_semantics(&atom.requires)
+        || verification::fragment::text_has_regex_semantics(&atom.ensures)
+    {
+        // P10-B: `matches`/`match_regex`/`re_match` calls whose pattern
+        // compiles to Z3 RegLan are decided by Z3 directly and no longer
+        // require a manual Lean lemma; the tag only survives for regex
+        // constructs outside the decidable fragment.
         Some("regex_semantics_require_manual_lemma".to_string())
     } else {
         None

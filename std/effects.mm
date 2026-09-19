@@ -78,5 +78,6 @@ effect FullAccess includes: [IO, NetworkIO, Network, Log];
 // --- Regex-based Path Policy (Plan 23) ---
 // Regex-constrained effect: only /tmp/ with lowercase directory names.
 // The matches() constraint uses Rust regex for constant paths and
-// Z3 String Sort approximation for symbolic paths.
+// Z3 RegLan (str.in_re) compilation for symbolic paths — see
+// docs/SPEC_GUIDE.md "String and regular-expression constraints".
 effect RegexSafeFileRead(path: Str) where matches(path, "^/tmp/[a-z]+/.*");
