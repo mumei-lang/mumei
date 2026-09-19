@@ -34,6 +34,42 @@ pub(crate) fn pattern_to_z3_condition<'a>(
             variant_name,
             fields,
         } => {
+            // P10-C: a `Datatype`-sorted target matches by the variant's
+            // `is-<V>` tester, and payload fields project through the real
+            // selectors — so a `Str` field binds as a Z3 `String` and a field
+            // pattern like `"x"` can actually constrain it.
+            if target.as_datatype().is_some() {
+                if let Some((sort, is_v, variant_idx)) =
+                    datatype::variant_tester_condition(vc, target, variant_name)
+                {
+                    let mut field_conditions: Vec<Bool> = vec![is_v];
+                    // arity comes from the matched sort's accessors — the sort
+                    // already disambiguates same-named variants across enums.
+                    for (i, field_pattern) in fields.iter().enumerate() {
+                        let field_sym: Dynamic =
+                            datatype::variant_selector_apply(&sort, variant_idx, i, target)
+                                .unwrap_or_else(|| {
+                                    Int::new_const(
+                                        ctx,
+                                        format!("__proj_{}_{}", variant_name, i).as_str(),
+                                    )
+                                    .into()
+                                });
+                        env.insert(format!("__proj_{}_{}", variant_name, i), field_sym.clone());
+                        let field_cond = pattern_to_z3_condition(
+                            ctx,
+                            field_pattern,
+                            &field_sym,
+                            env,
+                            vc,
+                            solver_opt,
+                        )?;
+                        field_conditions.push(field_cond);
+                    }
+                    let cond_refs: Vec<&Bool> = field_conditions.iter().collect();
+                    return Ok(Bool::and(ctx, &cond_refs));
+                }
+            }
             if let Some(enum_def) = vc.module_env.find_enum_by_variant(variant_name) {
                 let variant_idx = enum_def
                     .variants
@@ -121,8 +157,9 @@ pub(crate) fn pattern_bind_variables<'a>(
     pattern: &Pattern,
     target: &Dynamic<'a>,
     env: &mut Env<'a>,
-    module_env: &ModuleEnv,
+    vc: &VCtx<'a>,
 ) {
+    let module_env = vc.module_env;
     match pattern {
         Pattern::Variable(name) => {
             env.insert(name.clone(), target.clone());
@@ -131,6 +168,38 @@ pub(crate) fn pattern_bind_variables<'a>(
             variant_name,
             fields,
         } => {
+            // P10-C: datatype targets bind fields through the variant's
+            // selectors so the bound symbol carries the payload's real sort
+            // (String/Real/Bool), not an unconstrained Int projector.
+            if target.as_datatype().is_some() {
+                if let Some((sort, _is_v, variant_idx)) =
+                    datatype::variant_tester_condition(vc, target, variant_name)
+                {
+                    {
+                        for (i, field_pattern) in fields.iter().enumerate() {
+                            if i >= sort.variants[variant_idx].accessors.len() {
+                                continue;
+                            }
+                            let Some(field_sym) =
+                                datatype::variant_selector_apply(&sort, variant_idx, i, target)
+                            else {
+                                continue;
+                            };
+                            env.insert(format!("__proj_{}_{}", variant_name, i), field_sym.clone());
+                            match field_pattern {
+                                Pattern::Variable(fname) => {
+                                    env.insert(fname.clone(), field_sym.clone());
+                                }
+                                Pattern::Variant { .. } => {
+                                    pattern_bind_variables(ctx, field_pattern, &field_sym, env, vc);
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    return;
+                }
+            }
             if let Some(enum_def) = module_env.find_enum_by_variant(variant_name) {
                 if let Some(variant_def) =
                     enum_def.variants.iter().find(|v| v.name == *variant_name)
@@ -160,13 +229,7 @@ pub(crate) fn pattern_bind_variables<'a>(
                             }
                             Pattern::Variant { .. } => {
                                 // ネストした Variant: 再帰的にバインド
-                                pattern_bind_variables(
-                                    ctx,
-                                    field_pattern,
-                                    &field_sym,
-                                    env,
-                                    module_env,
-                                );
+                                pattern_bind_variables(ctx, field_pattern, &field_sym, env, vc);
                             }
                             _ => {}
                         }

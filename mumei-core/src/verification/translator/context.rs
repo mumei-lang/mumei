@@ -72,6 +72,12 @@ pub(crate) struct VCtx<'a> {
     /// scope so a bound in one conjunct (`result <= 62`) discharges a shift
     /// in a later one (`n >> result`).
     pub(crate) clause_context: std::cell::RefCell<Vec<Bool<'a>>>,
+    /// P10-C: per-context cache of Z3 `DatatypeSort`s created for finite,
+    /// non-recursive enums. Rebuilding the same-named datatype would yield a
+    /// distinct sort and break `_eq`/`ite` between two declarations of the
+    /// same enum, so the first build is reused.
+    pub(crate) enum_sorts:
+        std::cell::RefCell<crate::verification::support::datatype::EnumSortCache<'a>>,
 }
 
 impl<'a> VCtx<'a> {

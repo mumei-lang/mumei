@@ -468,6 +468,14 @@ pub(crate) fn expr_to_z3<'a>(
             if name == "false" {
                 return Ok(Bool::from_bool(ctx, false).into());
             }
+            // P10-C: a bare uppercase identifier naming a nullary variant of a
+            // finite ADT (e.g. `Red` for `enum Color { Red, Green, Blue }`)
+            // constructs the datatype value.
+            if name.chars().next().is_some_and(|c| c.is_uppercase()) {
+                if let Some(value) = datatype::enum_ctor_apply(vc, name, &[]) {
+                    return Ok(value);
+                }
+            }
             Ok(Int::new_const(ctx, name.as_str()).into())
         }
         Expr::Call(name, args) => {
@@ -953,14 +961,8 @@ pub(crate) fn expr_to_z3<'a>(
                             .return_type
                             .as_deref()
                             .or(if has_float { Some("f64") } else { None });
-                        let result_z3: Dynamic = param_z3_value(
-                            ctx,
-                            result_name.as_str(),
-                            result_type,
-                            vc.module_env,
-                            vc.ieee754_f64,
-                            vc.bitvec_i64,
-                        );
+                        let result_z3: Dynamic =
+                            datatype::param_z3_value_for_vc(vc, result_name.as_str(), result_type);
 
                         // 構造体を返す呼び出し: 結果のフィールドをシンボル化し、
                         // 呼び出し先が保証する跨フィールド不変量を事実として仮定する
@@ -1134,6 +1136,19 @@ pub(crate) fn expr_to_z3<'a>(
 
                         Ok(result_z3)
                     } else {
+                        // P10-C: `Enum::Variant(args)` / `Variant(args)`
+                        // constructs a finite-ADT value through the Z3
+                        // datatype constructor.
+                        if name.contains("::") || vc.module_env.find_enum_by_variant(name).is_some()
+                        {
+                            let mut ctor_args = Vec::new();
+                            for arg in args {
+                                ctor_args.push(expr_to_z3(vc, arg, env, solver_opt)?);
+                            }
+                            if let Some(value) = datatype::enum_ctor_apply(vc, name, &ctor_args) {
+                                return Ok(value);
+                            }
+                        }
                         Err(MumeiError::verification(format!(
                             "Unknown function: {}",
                             name
@@ -1361,6 +1376,21 @@ pub(crate) fn expr_to_z3<'a>(
                         let lb = l.as_bool().ok_or("Expected bool for ==")?;
                         let rb = r.as_bool().ok_or("Expected bool for ==")?;
                         let eq = lb._eq(&rb);
+                        return Ok(if matches!(op, Op::Neq) {
+                            eq.not().into()
+                        } else {
+                            eq.into()
+                        });
+                    }
+                    // P10-C: finite-ADT equality. Both operands must carry the
+                    // *same* datatype sort; mixed-sort comparisons keep the
+                    // legacy "Expected int" failure.
+                    Op::Eq | Op::Neq
+                        if l.as_datatype().is_some()
+                            && r.as_datatype().is_some()
+                            && l.get_sort() == r.get_sort() =>
+                    {
+                        let eq = l._eq(&r);
                         return Ok(if matches!(op, Op::Neq) {
                             eq.not().into()
                         } else {
@@ -1664,7 +1694,7 @@ pub(crate) fn expr_to_z3<'a>(
                 // B. ネストパターンの再帰解体:
                 //    pattern_bind_variables が再帰的にパターンを分解し、
                 //    バインド変数を arm_env に登録する。
-                pattern_bind_variables(ctx, &arm.pattern, &target_z3, &mut arm_env, vc.module_env);
+                pattern_bind_variables(ctx, &arm.pattern, &target_z3, &mut arm_env, vc);
 
                 let arm_cond = pattern_to_z3_condition(
                     ctx,
@@ -2167,14 +2197,8 @@ pub(crate) fn expr_to_z3<'a>(
                         CALL_REF_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     let result_name = format!("call_ref_{}_{}", callee_name, call_id);
                     let result_type = callee_atom.return_type.as_deref();
-                    let result_z3: Dynamic = param_z3_value(
-                        ctx,
-                        result_name.as_str(),
-                        result_type,
-                        vc.module_env,
-                        vc.ieee754_f64,
-                        vc.bitvec_i64,
-                    );
+                    let result_z3: Dynamic =
+                        datatype::param_z3_value_for_vc(vc, result_name.as_str(), result_type);
 
                     // 構造体を返す参照呼び出し: 通常呼び出しと同様に結果のフィールドを
                     // シンボル化し、呼び出し先が保証する不変量を仮定する。
@@ -2373,6 +2397,23 @@ pub(crate) fn expr_to_z3<'a>(
                             "{UNSUPPORTED_TUPLE_RESULT_INDEXING} component is unavailable"
                         ))
                     });
+                }
+            }
+
+            // P10-C: `Enum::Variant` (nullary) parses as
+            // `FieldAccess(Variable("Enum"), "Variant")` — construct the
+            // datatype value. A bound variable named `Enum` wins (shadowing),
+            // and `.`-spelled accesses to an enum name are equivalent here.
+            if let Expr::Variable(name) = inner_expr.as_ref() {
+                if !env.contains_key(name)
+                    && vc.module_env.enums.contains_key(name)
+                    && datatype::is_finite_adt(vc.module_env.get_enum(name).unwrap(), vc.module_env)
+                {
+                    if let Some(value) =
+                        datatype::enum_ctor_apply(vc, &format!("{}::{}", name, field_name), &[])
+                    {
+                        return Ok(value);
+                    }
                 }
             }
 

@@ -7,8 +7,7 @@ use crate::verification::mutation::{
 };
 use crate::verification::support::EffectCtx;
 use crate::verification::translator::{
-    apply_refinement_constraint, expr_to_z3, param_z3_value, stmt_to_z3, VCtx,
-    DEFAULT_CONSTRAINT_BUDGET,
+    apply_refinement_constraint, expr_to_z3, stmt_to_z3, VCtx, DEFAULT_CONSTRAINT_BUDGET,
 };
 use crate::verification::types::Env;
 use serde::{Deserialize, Serialize};
@@ -153,6 +152,7 @@ fn verify_mutated_body(
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         bv_div_obligations: std::cell::RefCell::new(Vec::new()),
         clause_context: std::cell::RefCell::new(Vec::new()),
+        enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         bitvec_i64_global: false,
     };
     let mut env: Env = HashMap::new();
@@ -160,13 +160,10 @@ fn verify_mutated_body(
     for param in &atom.params {
         env.insert(
             param.name.clone(),
-            param_z3_value(
-                &ctx,
+            super::support::datatype::param_z3_value_for_vc(
+                &vc,
                 &param.name,
                 param.type_name.as_deref(),
-                module_env,
-                false,
-                bitvec_i64,
             ),
         );
     }
