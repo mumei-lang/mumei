@@ -2213,7 +2213,9 @@ fn strip_quantifiers(requires: &str) -> String {
     for (start, _inner_start, end_pos, _q_type) in quantifier_spans(requires) {
         result.push_str(&requires[last..start]);
         result.push_str("true");
-        last = end_pos + 1;
+        // Unclosed `forall(` scans to the end of the string — clamp so
+        // the final slice below stays in bounds.
+        last = (end_pos + 1).min(requires.len());
     }
     result.push_str(&requires[last..]);
     result

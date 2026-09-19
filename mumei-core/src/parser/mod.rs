@@ -1064,6 +1064,30 @@ atom probe(n: i64)
     }
 
     #[test]
+    fn test_forall_constraints_unclosed_paren_does_not_panic() {
+        // Malformed contract text must not crash the strip pass.
+        let source = r#"
+atom probe(n: i64)
+    requires: n >= 0 && forall(i, 0, n, arr[i] >= 0;
+    ensures: result >= 0;
+    body: 0;
+"#;
+        let items = parse_module(source);
+        let atoms: Vec<_> = items
+            .iter()
+            .filter_map(|i| if let Item::Atom(a) = i { Some(a) } else { None })
+            .collect();
+        assert_eq!(atoms.len(), 1);
+        assert_eq!(atoms[0].requires, "n >= 0 && true");
+        assert_eq!(atoms[0].forall_constraints.len(), 1);
+        // The unclosed tail is swallowed into the condition — malformed
+        // input, but it must not panic.
+        assert!(atoms[0].forall_constraints[0]
+            .condition
+            .starts_with("arr[i] >= 0"));
+    }
+
+    #[test]
     fn test_parse_atom_with_consume() {
         let source = r#"
 atom take(x: i64)
