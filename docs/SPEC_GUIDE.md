@@ -192,11 +192,11 @@ The decidable fragment covers:
 
 - literals and concatenation, alternation `|`, grouping `(...)`;
 - repetition `*` `+` `?` (including lazy `*?`/`+?`/`??`) and counted `{n}` `{n,}` `{n,m}` with bounds ≤ 64 (`{n,}` desugars to `{n}` + `*`);
-- character classes `[a-z]`, `[^...]`, and escapes `\d \w \s` (plus `\D \W \S` complements), `\n \r \t`, `\xHH`, and escaped metacharacters;
+- character classes `[a-z]`, `[^...]`, and escapes `\d \w \s` (plus `\D \W \S` complements), `\n \r \t \f \v \a`, `\xHH` (also inside classes), and escaped metacharacters. Unlike Rust `regex`, the class escapes are interpreted **ASCII-only** (`\w` = `[0-9A-Za-z_]`, `\s` = `[ \t\n\r\u{b}\u{c}]`) — non-ASCII word/space characters are outside the RegLan constraint;
 - `.` matching any ASCII character except `\n` — Z3's `re.range` is limited to the 7-bit ASCII plane, so `.` and classes cannot address code points above U+007F (literal characters above U+007F still compile);
 - outer `^`/`$` anchors (`str.in_re` handles them by dropping the implicit `Σ*` wrapper at that end).
 
-Anything outside this fragment — lookarounds (`(?=`, `(?!`, `(?<`), backreferences (`\1`), inline flags (`(?i)`), interior anchors, word boundaries (`\b`), and `{n,m}` with `m < n` — keeps the `regex_semantics` tag, fails closed as a spec-lowering error in contracts, and remains a Lean 4 delegation target.
+Anything outside this fragment — lookarounds (`(?=`, `(?!`, `(?<`), backreferences (`\1`), inline flags (`(?i)`), interior anchors, word boundaries (`\b`), Unicode escapes (`\uXXXX`, `\u{...}`), malformed or whitespace bounds (`a{`, `a{ 2}`), and `{n,m}` with `m < n` — keeps the `regex_semantics` tag, fails closed as a spec-lowering error in contracts, and remains a Lean 4 delegation target.
 
 Recommended:
 

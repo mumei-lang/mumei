@@ -698,9 +698,10 @@ pub(crate) fn expr_to_z3<'a>(
                             "{}(): regex pattern {:?} uses constructs outside the \
                              supported fragment (literals, '.', '*', '+', '?', \
                              '{{n,m}}', '[…]'/'[^…]', '|', '()' groups, outer '^'/'$' \
-                             anchors, and \\d/\\w/\\s escapes). Zero-width assertions, \
-                             backreferences, lookarounds, and interior anchors must \
-                             be delegated to Lean 4.",
+                             anchors, and \\d/\\w/\\s (ASCII-only), \\n/\\r/\\t/\
+                             \\f/\\v/\\a, \\xHH escapes). Zero-width assertions, \
+                             backreferences, lookarounds, Unicode escapes, and \
+                             interior anchors must be delegated to Lean 4.",
                             name, pattern
                         )));
                     };
