@@ -35,6 +35,9 @@ pub(crate) fn pattern_to_z3_condition<'a>(
             variant_name,
             fields,
         } => {
+            // Qualified `E::V` names resolve by the leaf after the owner
+            // check inside `resolve_variant_owner`.
+            let variant_leaf = datatype::variant_leaf(variant_name);
             // P10-C: a `Datatype`-sorted target matches by the variant's
             // `is-<V>` tester, and payload fields project through the real
             // selectors — so a `Str` field binds as a Z3 `String` and a field
@@ -52,11 +55,11 @@ pub(crate) fn pattern_to_z3_condition<'a>(
                                 .unwrap_or_else(|| {
                                     Int::new_const(
                                         ctx,
-                                        format!("__proj_{}_{}", variant_name, i).as_str(),
+                                        format!("__proj_{}_{}", variant_leaf, i).as_str(),
                                     )
                                     .into()
                                 });
-                        env.insert(format!("__proj_{}_{}", variant_name, i), field_sym.clone());
+                        env.insert(format!("__proj_{}_{}", variant_leaf, i), field_sym.clone());
                         let field_cond = pattern_to_z3_condition(
                             ctx,
                             field_pattern,
@@ -78,7 +81,7 @@ pub(crate) fn pattern_to_z3_condition<'a>(
                 let variant_idx = enum_def
                     .variants
                     .iter()
-                    .position(|v| v.name == *variant_name)
+                    .position(|v| v.name == variant_leaf)
                     .unwrap_or(0) as i64;
 
                 let tag = target
@@ -94,7 +97,7 @@ pub(crate) fn pattern_to_z3_condition<'a>(
                     // enum 名を含めることで variant 名の enum 間衝突
                     // （prelude List vs user IntList の Cons 等）でも一意になり、
                     // `match t` した束縛 tail も名前から宣言型を復元できる。
-                    let proj_name = format!("__proj_{}_{}_{}", enum_def.name, variant_name, i);
+                    let proj_name = format!("__proj_{}_{}_{}", enum_def.name, variant_leaf, i);
                     let field_sym: Dynamic = if i < variant_def.fields.len() {
                         let field_type = &variant_def.fields[i];
                         // 再帰的 ADT: フィールド型が自身の Enum なら tag として Int を使用
@@ -157,7 +160,7 @@ pub(crate) fn pattern_to_z3_condition<'a>(
                 let tag = target
                     .as_int()
                     .unwrap_or(Int::new_const(ctx, "__match_tag"));
-                let hash = variant_name
+                let hash = variant_leaf
                     .bytes()
                     .fold(0i64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as i64));
                 Ok(tag._eq(&Int::from_i64(ctx, hash)))
@@ -189,6 +192,7 @@ pub(crate) fn pattern_bind_variables<'a>(
             variant_name,
             fields,
         } => {
+            let variant_leaf = datatype::variant_leaf(variant_name);
             // P10-C: datatype targets bind fields through the variant's
             // selectors so the bound symbol carries the payload's real sort
             // (String/Real/Bool), not an unconstrained Int projector.
@@ -206,7 +210,7 @@ pub(crate) fn pattern_bind_variables<'a>(
                             else {
                                 continue;
                             };
-                            env.insert(format!("__proj_{}_{}", variant_name, i), field_sym.clone());
+                            env.insert(format!("__proj_{}_{}", variant_leaf, i), field_sym.clone());
                             match field_pattern {
                                 Pattern::Variable(fname) => {
                                     env.insert(fname.clone(), field_sym.clone());
@@ -231,11 +235,10 @@ pub(crate) fn pattern_bind_variables<'a>(
             if let Ok(Some(enum_def)) =
                 datatype::resolve_variant_owner(vc, target, variant_name, decl_hint)
             {
-                if let Some(variant_def) =
-                    enum_def.variants.iter().find(|v| v.name == *variant_name)
+                if let Some(variant_def) = enum_def.variants.iter().find(|v| v.name == variant_leaf)
                 {
                     for (i, field_pattern) in fields.iter().enumerate() {
-                        let proj_name = format!("__proj_{}_{}_{}", enum_def.name, variant_name, i);
+                        let proj_name = format!("__proj_{}_{}_{}", enum_def.name, variant_leaf, i);
                         let field_sym: Dynamic = if i < variant_def.fields.len() {
                             let field_type = &variant_def.fields[i];
                             let base = if *field_type == enum_def.name {

@@ -201,7 +201,21 @@ pub(crate) fn variant_tester_condition<'a>(
 ) -> Option<(Rc<DatatypeSort<'a>>, Bool<'a>, usize)> {
     let dt = target.as_datatype()?;
     let target_sort = dt.get_sort();
+    // Qualified `E::V` pins the enum by its qualifier — a qualifier that
+    // names a different enum yields no tester and falls through to
+    // `resolve_variant_owner`, which reports the mismatch. A qualifier that
+    // is not a known enum name resolves by the leaf, like a bare name.
+    let (qual, variant_name) = match variant_name.rsplit_once("::") {
+        Some((q, leaf)) => (Some(q), leaf),
+        None => (None, variant_name),
+    };
+    let qual_enum = qual.and_then(|q| vc.module_env.get_enum(q));
     for enum_def in vc.module_env.enums.values() {
+        if let Some(qe) = qual_enum {
+            if enum_def.name != qe.name {
+                continue;
+            }
+        }
         let Some(idx) = enum_def
             .variants
             .iter()
@@ -239,14 +253,21 @@ pub(crate) fn variant_selector_apply<'a>(
 
 /// All enums declaring `variant_name`, sorted by name — `module_env.enums`
 /// is a `HashMap`, so iteration order is not stable between processes.
+/// `E::V` → `V`; bare `V` → `V`. `EnumVariant.name` stores the leaf segment
+/// only, so qualified pattern names (`Mine::Cons`) compare by the leaf.
+pub(crate) fn variant_leaf(variant_name: &str) -> &str {
+    variant_name.rsplit("::").next().unwrap_or(variant_name)
+}
+
 pub(crate) fn variant_owners<'m>(
     module_env: &'m ModuleEnv,
     variant_name: &str,
 ) -> Vec<&'m EnumDef> {
+    let leaf = variant_leaf(variant_name);
     let mut owners: Vec<_> = module_env
         .enums
         .values()
-        .filter(|e| e.variants.iter().any(|v| v.name == variant_name))
+        .filter(|e| e.variants.iter().any(|v| v.name == leaf))
         .collect();
     owners.sort_by(|a, b| a.name.cmp(&b.name));
     owners
@@ -354,7 +375,7 @@ fn int_tag_sig(
     enum_def
         .variants
         .iter()
-        .position(|v| v.name == variant_name)
+        .position(|v| v.name == variant_leaf(variant_name))
         .map(|i| {
             (
                 i,
@@ -393,6 +414,51 @@ pub(crate) fn resolve_variant_owner<'a>(
     variant_name: &str,
     decl_hint: Option<&str>,
 ) -> MumeiResult<Option<&'a EnumDef>> {
+    // Qualified `E::V`: a qualifier naming a known enum pins the owner and
+    // must agree with the target's declared type — `match e { Other::V }`
+    // on `e: Mine` must not fall back to Mine's bare `V`. An unknown
+    // qualifier (module path etc.) resolves by the leaf name, as before.
+    if let Some((qual, leaf)) = variant_name.rsplit_once("::") {
+        if let Some(qual_enum) = vc.module_env.get_enum(qual) {
+            let declared = decl_hint
+                .map(str::to_string)
+                .into_iter()
+                .chain(target_param_enum_name(vc, target))
+                // A `Datatype`-sorted target's declared enum is the enum
+                // whose sort it carries — `target_param_enum_name` only
+                // recovers Int-sorted const names.
+                .chain(
+                    target
+                        .as_datatype()
+                        .and_then(|dt| {
+                            let tsort = dt.get_sort();
+                            vc.module_env.enums.values().find(|e| {
+                                enum_datatype_sort(vc, e).is_some_and(|s| s.sort == tsort)
+                            })
+                        })
+                        .map(|e| e.name.clone()),
+                );
+            for decl in declared {
+                if let Some(decl_enum) = vc.module_env.get_enum(&decl) {
+                    if decl_enum.name != qual_enum.name {
+                        return Err(MumeiError::verification(format!(
+                            "Match arm '{variant_name}' belongs to enum '{}' but the match target is declared as '{}'",
+                            qual_enum.name, decl_enum.name
+                        )));
+                    }
+                }
+            }
+            return if qual_enum.variants.iter().any(|v| v.name == leaf) {
+                Ok(Some(qual_enum))
+            } else {
+                Err(MumeiError::verification(format!(
+                    "Enum '{}' has no variant named '{leaf}'",
+                    qual_enum.name
+                )))
+            };
+        }
+        return resolve_variant_owner(vc, target, leaf, decl_hint);
+    }
     let owners = variant_owners(vc.module_env, variant_name);
     if owners.is_empty() {
         return Ok(None);
@@ -527,6 +593,12 @@ pub(crate) fn resolve_variant_owner_deterministic<'m>(
     module_env: &'m ModuleEnv,
     variant_name: &str,
 ) -> Option<&'m EnumDef> {
+    if let Some((qual, leaf)) = variant_name.rsplit_once("::") {
+        if let Some(qe) = module_env.get_enum(qual) {
+            return qe.variants.iter().any(|v| v.name == leaf).then_some(qe);
+        }
+        return resolve_variant_owner_deterministic(module_env, leaf);
+    }
     let owners = variant_owners(module_env, variant_name);
     if owners.len() == 1 {
         return Some(owners[0]);

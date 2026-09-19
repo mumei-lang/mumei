@@ -14,9 +14,22 @@
   types `if`/`else` expressions whose branches agree — `let e = if c {
   Mine::Cons(1) } else { Mine::Nil }; match e` now emits the match instead
   of erroring ambiguously.
+- **Branch scoping**: the inferred-type map is now scoped like the value
+  env — `if`/`else` branches run on snapshots and keep only entries both
+  branches agree on, and `while`-loop step/termination checks restore the
+  map so a loop-body `let` cannot leak a type onto outer bindings.
+- **Qualified arm patterns** (`parser` + resolvers): `match e {
+  Mine::Yes(v) => .. }` folds `E::V` into the arm's variant name; the
+  qualifier pins the owning enum and must agree with the target's declared
+  type — `match e { Other::V => .. }` on `e: Mine` fails closed with a
+  "belongs to enum" error instead of silently matching `Mine`'s `V`.
+  Previously the qualifier was silently dropped (a `Mine::Yes` arm parsed
+  as a dead `Mine` arm plus a bare `Yes` arm), and `variant_owners`
+  lookups only matched the leaf segment.
 - Tests: `test_datatype_enum.mm` gains `let_bound_ctor_match` (recursive
   `IntList` let-bound through `Nil`, matched against colliding prelude
-  variants).
+  variants), plus `test_enum_qualified_pattern{,_negative}.mm` covering
+  qualified arms on datatype, Int-tag, and let-bound targets.
 
 ---
 
