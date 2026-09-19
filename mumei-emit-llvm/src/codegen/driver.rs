@@ -58,8 +58,10 @@ pub fn compile_atom_into_module<'ctx>(
     for (i, param) in atom.params.iter().enumerate() {
         let val = function.get_nth_param(i as u32).unwrap();
         if let Some(type_name) = &param.type_name {
-            let base = module_env.resolve_base_type(type_name);
-            if module_env.get_struct(&base).is_some() {
+            let base = super::expr_emit::resolve_named_type(module_env, type_name);
+            // Struct AND enum declared types — match arms on an enum-typed
+            // parameter resolve the owning enum from this hint.
+            if module_env.get_struct(&base).is_some() || module_env.get_enum(&base).is_some() {
                 var_types.insert(param.name.clone(), base);
             }
             // P25: remember a channel parameter's declared payload type so

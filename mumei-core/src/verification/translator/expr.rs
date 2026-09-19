@@ -1161,7 +1161,10 @@ pub(crate) fn expr_to_z3<'a>(
                             let owner = if let Some((qual, _)) = name.split_once("::") {
                                 vc.module_env.get_enum(qual)
                             } else {
-                                vc.module_env.find_enum_by_variant(name)
+                                vc.module_env
+                                    .resolve_variant_owner_by_hint(name, None)
+                                    .ok()
+                                    .flatten()
                             };
                             if let Some(ed) = owner {
                                 let variant = name.rsplit("::").next().unwrap_or(name);

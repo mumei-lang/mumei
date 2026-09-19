@@ -78,6 +78,18 @@ pub(crate) fn chan_payload_type_name(
     }
 }
 
+/// Resolve a declared type name to its base name with generics stripped —
+/// `get_enum`/`get_struct` are keyed on the unparameterized name, so
+/// `Option<i64>` resolves to `Option`.
+pub(crate) fn resolve_named_type(module_env: &ModuleEnv, type_name: &str) -> String {
+    let base = module_env.resolve_base_type(type_name);
+    base.split('<')
+        .next()
+        .unwrap_or(base.as_str())
+        .trim()
+        .to_string()
+}
+
 pub(crate) fn infer_struct_type_name(
     expr: &HirExpr,
     var_types: &HashMap<String, String>,
@@ -86,7 +98,7 @@ pub(crate) fn infer_struct_type_name(
     match expr {
         HirExpr::Variable(name) => var_types.get(name).cloned(),
         HirExpr::StructInit { type_name, .. } => {
-            let base = module_env.resolve_base_type(type_name);
+            let base = resolve_named_type(module_env, type_name);
             if module_env.get_struct(&base).is_some() {
                 Some(base)
             } else {
@@ -95,12 +107,18 @@ pub(crate) fn infer_struct_type_name(
         }
         HirExpr::Call { name, .. } => {
             let ret_type = module_env.get_atom(name)?.return_type.as_ref()?;
-            let base = module_env.resolve_base_type(ret_type);
-            if module_env.get_struct(&base).is_some() {
+            let base = resolve_named_type(module_env, ret_type);
+            if module_env.get_struct(&base).is_some() || module_env.get_enum(&base).is_some() {
                 Some(base)
             } else {
                 None
             }
+        }
+        // `let s = E::V(..)` records `E` so a later `match s` resolves the
+        // owning enum deterministically (callers only consume the name as a
+        // declared-type hint; struct lookups still `get_struct`-check it).
+        HirExpr::VariantInit { enum_name, .. } => {
+            module_env.get_enum(enum_name).map(|_| enum_name.clone())
         }
         HirExpr::FieldAccess(inner, field) => {
             let inner_ty = infer_struct_type_name(inner, var_types, module_env)?;
@@ -647,6 +665,26 @@ pub(crate) fn compile_hir_expr<'a>(
                 module_env,
             )?;
 
+            // Declared enum type of the scrutinee — resolves which enum owns
+            // a colliding variant name deterministically (prelude `List` vs
+            // a user `IntList` both declaring `Cons`). A bare parameter reads
+            // its declared type from `var_types`; `x.f` walks the field's
+            // declared type via the struct def (nested `a.b.c` recurses);
+            // other targets fall back to `infer_expr_type_name` (e.g. `E::V`
+            // ctor expressions and enum-returning calls).
+            let enum_hint: Option<String> = match target.as_ref() {
+                HirExpr::Variable(name) => var_types.get(name).cloned(),
+                HirExpr::FieldAccess(inner, field) => {
+                    infer_struct_type_name(inner, var_types, module_env).and_then(|s| {
+                        module_env
+                            .get_struct(&s)
+                            .and_then(|sdef| sdef.fields.iter().find(|f| f.name == *field))
+                            .map(|f| f.type_name.clone())
+                    })
+                }
+                _ => mumei_core::hir::infer_expr_type_name(target, Some(module_env)),
+            };
+
             let merge_block = context.append_basic_block(*function, "match.merge");
             let unreachable_block = context.append_basic_block(*function, "match.unreachable");
 
@@ -678,6 +716,7 @@ pub(crate) fn compile_hir_expr<'a>(
                     target_val,
                     variables,
                     module_env,
+                    enum_hint.as_deref(),
                 )?;
 
                 let full_cond = if let Some(guard) = &arm.guard {
@@ -690,6 +729,7 @@ pub(crate) fn compile_hir_expr<'a>(
                         target_val,
                         &mut guard_vars,
                         module_env,
+                        enum_hint.as_deref(),
                     )?;
                     let guard_val = compile_hir_expr(
                         context,
@@ -728,6 +768,7 @@ pub(crate) fn compile_hir_expr<'a>(
                     target_val,
                     &mut arm_vars,
                     module_env,
+                    enum_hint.as_deref(),
                 )?;
 
                 let body_val = compile_hir_stmt(

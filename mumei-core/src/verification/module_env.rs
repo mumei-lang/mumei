@@ -265,6 +265,77 @@ impl ModuleEnv {
             .find(|e| e.variants.iter().any(|v| v.name == variant_name))
     }
 
+    /// Deterministic variant-owner resolution for contexts without a Z3
+    /// verification context (HIR lowering, LLVM codegen): `enums` is a
+    /// `HashMap`, so a name-only `find_enum_by_variant` scan picks an
+    /// arbitrary owner when several enums declare the same variant — and
+    /// the pick can differ per process.
+    ///
+    /// Resolution order:
+    /// 1. `decl_hint` naming an enum that owns the variant → that enum
+    ///    (a declared enum not owning the variant is a hard error).
+    /// 2. A sole owner, or owners that agree on the variant's tag index,
+    ///    arity, and resolved field types → that owner.
+    /// 3. Otherwise `Err` listing the conflicting owners — callers must
+    ///    fail rather than pick one at random.
+    pub fn resolve_variant_owner_by_hint(
+        &self,
+        variant_name: &str,
+        decl_hint: Option<&str>,
+    ) -> MumeiResult<Option<&EnumDef>> {
+        let mut owners: Vec<&EnumDef> = self
+            .enums
+            .values()
+            .filter(|e| e.variants.iter().any(|v| v.name == variant_name))
+            .collect();
+        owners.sort_by(|a, b| a.name.cmp(&b.name));
+        if owners.is_empty() {
+            return Ok(None);
+        }
+        if let Some(hint) = decl_hint {
+            if let Some(e) = self.get_enum(hint) {
+                return if owners.iter().any(|o| o.name == e.name) {
+                    Ok(Some(e))
+                } else {
+                    Err(MumeiError::verification(format!(
+                        "Enum '{}' has no variant named '{variant_name}'",
+                        e.name
+                    )))
+                };
+            }
+        }
+        if owners.len() == 1 {
+            return Ok(Some(owners[0]));
+        }
+        let sig = |e: &EnumDef| -> Option<(usize, Vec<String>)> {
+            let idx = e.variants.iter().position(|v| v.name == variant_name)?;
+            let field_types = e.variants[idx]
+                .fields
+                .iter()
+                .map(|f| {
+                    if *f == e.name {
+                        "i64".to_string() // recursive payload rides the tag encoding
+                    } else {
+                        self.resolve_base_type(f)
+                    }
+                })
+                .collect();
+            Some((idx, field_types))
+        };
+        let first = sig(owners[0]);
+        if owners.iter().all(|e| sig(e) == first) {
+            return Ok(Some(owners[0]));
+        }
+        Err(MumeiError::verification(format!(
+            "Ambiguous enum variant '{variant_name}': declared by {} with conflicting tags — qualify the variant or give the match target a declared enum type",
+            owners
+                .iter()
+                .map(|e| e.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )))
+    }
+
     /// 精緻型名からベース型名を解決する（例: "Nat" -> "i64", "Pos" -> "f64"）
     pub fn resolve_base_type(&self, type_name: &str) -> String {
         // Plan 9: Str is a primitive type, return as-is
@@ -762,4 +833,123 @@ pub fn register_builtin_effects(module_env: &mut ModuleEnv) {
         transitions: vec![],
         initial_state: None,
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::{EnumDef, EnumVariant};
+
+    fn variant(name: &str, fields: &[&str]) -> EnumVariant {
+        EnumVariant {
+            name: name.to_string(),
+            fields: fields.iter().map(|f| f.to_string()).collect(),
+            field_types: fields
+                .iter()
+                .map(|f| crate::parser::parse_type_ref(f))
+                .collect(),
+            is_recursive: false,
+        }
+    }
+
+    fn enum_def(name: &str, variants: Vec<EnumVariant>) -> EnumDef {
+        EnumDef {
+            name: name.to_string(),
+            type_params: vec![],
+            variants,
+            is_recursive: false,
+            span: Span::default(),
+        }
+    }
+
+    #[test]
+    fn variant_owner_hint_wins_on_colliding_names() {
+        // E1 declares Cold at index 1, E2 at index 0 — a bare `Cold` arm is
+        // meaningless without the scrutinee's declared type.
+        let mut env = ModuleEnv::new();
+        env.register_enum(&enum_def(
+            "E1",
+            vec![variant("Hot", &[]), variant("Cold", &[])],
+        ));
+        env.register_enum(&enum_def(
+            "E2",
+            vec![variant("Cold", &[]), variant("Hot", &[])],
+        ));
+
+        let owner = env
+            .resolve_variant_owner_by_hint("Cold", Some("E1"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(owner.name, "E1");
+        let owner = env
+            .resolve_variant_owner_by_hint("Cold", Some("E2"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(owner.name, "E2");
+    }
+
+    #[test]
+    fn variant_owner_conflicting_tags_without_hint_is_an_error() {
+        let mut env = ModuleEnv::new();
+        env.register_enum(&enum_def(
+            "E1",
+            vec![variant("Hot", &[]), variant("Cold", &[])],
+        ));
+        env.register_enum(&enum_def(
+            "E2",
+            vec![variant("Cold", &[]), variant("Hot", &[])],
+        ));
+
+        let err = env.resolve_variant_owner_by_hint("Cold", None).unwrap_err();
+        assert!(err.to_string().contains("Ambiguous enum variant 'Cold'"));
+    }
+
+    #[test]
+    fn variant_owner_hint_enum_lacking_variant_is_an_error() {
+        let mut env = ModuleEnv::new();
+        env.register_enum(&enum_def("E1", vec![variant("Hot", &[])]));
+        env.register_enum(&enum_def("E2", vec![variant("Cold", &[])]));
+
+        let err = env
+            .resolve_variant_owner_by_hint("Cold", Some("E1"))
+            .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Enum 'E1' has no variant named 'Cold'"));
+    }
+
+    #[test]
+    fn variant_owner_agreeing_signatures_resolve() {
+        // Same index + payload types in every owner: the Int-tag encoding is
+        // identical regardless of which enum is picked.
+        let mut env = ModuleEnv::new();
+        env.register_enum(&enum_def(
+            "R1",
+            vec![variant("Ok", &["i64"]), variant("Err", &["i64"])],
+        ));
+        env.register_enum(&enum_def(
+            "R2",
+            vec![variant("Ok", &["i64"]), variant("Err", &["i64"])],
+        ));
+
+        let owner = env.resolve_variant_owner_by_hint("Ok", None).unwrap();
+        assert!(owner.is_some());
+    }
+
+    #[test]
+    fn variant_owner_unknown_and_sole_owner() {
+        let mut env = ModuleEnv::new();
+        env.register_enum(&enum_def("Solo", vec![variant("Only", &[])]));
+        assert!(env
+            .resolve_variant_owner_by_hint("Missing", None)
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            env.resolve_variant_owner_by_hint("Only", None)
+                .unwrap()
+                .unwrap()
+                .name,
+            "Solo"
+        );
+    }
 }
