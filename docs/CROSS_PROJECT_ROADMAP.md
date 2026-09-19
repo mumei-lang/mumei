@@ -1460,76 +1460,25 @@ graph TD
 
 ### V1-A: 自然言語仕様の健全性検証
 
-**対象リポジトリ**: `mumei-lang/mumei-agent`（主）、`mumei-lang/mumei`（MCP拡張）
+**対象リポジトリ**: `mumei-lang/mumei-agent`（主）、`mumei-lang/mumei`（検証基盤）
 
-**現状のギャップ**:
-- `ambiguity_detector.py`は曖昧さを検出するが、**仕様の充足可能性・完全性・一貫性**は未検証
-- `P8-B SpecContradiction`はmumei atom内の矛盾検出だが、**自然言語テキスト段階**での検証がない
-- フィードバックが英語のみ・機械向けで、人が読みやすい形式になっていない
+**実装状況**: ✅ Implemented（旧計画の `verify-spec` / `spec_verifier.py` / MCP `verify_spec_soundness` / `check_spec_satisfiability` は下記の実装に置き換わった）
 
-**追加すべき機能**:
-
-```
-V1-A-1: 仕様充足可能性チェック
-  - requires同士の矛盾（例: "残高 >= 0 かつ 残高 < 0"）を抽出前に検出
-  - 暗黙の前提条件の欠落を警告（例: 除算があるのに分母 != 0 がない）
-  - Z3で充足可能性を事前チェックし、SpecContradictionを仕様テキスト段階に前出し
-
-V1-A-2: 仕様完全性チェック
-  - ドメインヒントに基づく必須条件の欠落検出
-  - 例: financial ドメインで "残高保存則" が ensures に含まれていない場合に警告
-  - 既存 DOMAIN_TEMPLATES を「チェックリスト」として活用
-
-V1-A-3: 人向けフィードバックレポート
-  - 日本語/英語対応の構造化フィードバック
-  - 問題箇所の引用 + 修正提案 + 重要度（error/warning/info）
-  - CLI: python -m agent verify-spec --text-file requirements.md --report report.md
-  - MCP: verify_spec_soundness(natural_language, domain_hint) → structured JSON
-```
-
-**実装ファイル**:
-- `agent/spec_verifier.py` — 新規: 仕様健全性検証エンジン
-- `agent/prompts/spec_verification.py` — 新規: 検証プロンプト
-- `agent/verify_spec.py` — 新規: CLIサブコマンド
-- `agent/mcp_server.py` — `verify_spec_soundness()` ツール追加
-- `mumei/mcp_server.py` — `check_spec_satisfiability()` ツール追加（Z3連携）
+- **V1-A-1 仕様充足可能性チェック — 実装済み**: `python -m agent audit` / `validate-spec`（`agent/cross_validation.py` の `main_validate_spec`）が抽出仕様を `mumei verify --enable-vacuity-check --proof-cert` にかけ、`SpecHealthChecker`（`agent/strategies/spec_health_strategy.py`）が矛盾（`ContradictionInfo`）・vacuity・過剰拘束（`_suggest_overconstrained_fix`）・曖昧さを分類して `spec_health_issues` 出力キーに集約する。MCP では `check_spec_health` / `check_spec_contradiction` / `validate_nl_spec` / `scan_and_fix` が同経路を公開する。
+- **V1-A-2 仕様完全性チェック — 残件**: `audit --domain-hint` はドメイン指定の抽出ヒントとして動くが、ドメインテンプレート由来の「必須条件欠落」警告（例: financial の残高保存則が ensures に無い場合の警告）は未実装。
+- **V1-A-3 人向けフィードバックレポート — 実装済み**: `audit`/`validate-spec` は構造化 JSON（`spec_health_issues` + `next_steps`）と人向けレポートを出力し、mumei-demo Phase 7 `mode_a` でも実行される。
 
 ---
 
 ### V1-B: 既存他言語コードの検証・フィードバック
 
-**対象リポジトリ**: `mumei-lang/mumei-agent`（主）、`mumei-lang/mumei`（コンパイラ拡張）
+**対象リポジトリ**: `mumei-lang/mumei-agent`（主）、`mumei-lang/mumei`（検証基盤）
 
-**現状のギャップ**:
-- `code_to_spec.py` + `extract_spec_from_code` は「コード → 仕様抽出」まで
-- 抽出した仕様をZ3で検証し、**元のコードの問題点にフィードバックを返す**部分が未実装
-- コードの行番号・関数名と検証失敗を紐付けるマッピングがない
+**実装状況**: ✅ Implemented（旧計画の `verify-code` / `code_verifier.py` は `validate-code` + `audit` に置き換わった）
 
-**追加すべき機能**:
-
-```
-V1-B-1: コード→仕様→Z3検証パイプライン
-  - code_to_spec.py で抽出した forge task spec を mumei verify にかける
-  - 検証失敗を元のコードの行番号・関数名にマッピングして返す
-  - 既存の spec_code_mapper.py を逆方向（検証結果→コード位置）に拡張
-
-V1-B-2: 言語別の検証ヒューリスティクス
-  - Rust: ownership/borrow違反パターン、unwrap()の危険箇所
-  - Python: 型アノテーション不整合、None安全性
-  - Go: goroutineリーク、エラー無視
-  - 各言語の「よくある問題」をdomain_templatesと同様に注入
-
-V1-B-3: 差分フィードバック
-  - 検証前後の比較（どの関数が問題か、どう直すか）
-  - CLI: python -m agent verify-code --code-file src/payment.rs --language rust
-  - MCP: verify_foreign_code(code_file, language, domain_hint)
-```
-
-**実装ファイル**:
-- `agent/code_verifier.py` — 新規: コード検証エンジン（code_to_spec + verify + map back）
-- `agent/verify_code.py` — 新規: CLIサブコマンド
-- `agent/mcp_server.py` — `verify_foreign_code()` ツール追加
-- `agent/prompts/code_verification.py` — 新規: 言語別検証プロンプト
+- **V1-B-1 コード→仕様→Z3検証パイプライン — 実装済み**: `python -m agent validate-code`（旧 `verify-foreign` は同サブコマンドに統合）が Python/Rust/TypeScript/Go/Solidity から契約を推定し `mumei verify` で検証、違反は `_with_source_lines` / `_infer_foreign_source_line_map`（`agent/cross_validation.py`）で元コードの行番号に紐付けて `verification_violations` に出す。MCP では `validate_code` / `validate_foreign_code` / `verify_foreign_code` が利用可能。
+- **V1-B-2 言語別の検証ヒューリスティクス — 一部実装・継続改善領域**: 5 言語の契約推定・検証は動作するが、言語別「よくある問題」パターン集（Rust ownership/unwrap、Go goroutine リーク等）の注入は限定的 — 拡充は継続課題。
+- **V1-B-3 差分フィードバック — 一部実装**: 違反箇所の列挙と `next_steps` の方向提示は実装済みだが、修正候補 diff の自動生成は未実装。
 
 ---
 
@@ -1537,35 +1486,11 @@ V1-B-3: 差分フィードバック
 
 **対象リポジトリ**: `mumei-lang/mumei-agent`（主）
 
-**現状のギャップ**:
-- `spec_code_mapper.py`は仕様とコードのマッピングを持つが、**仕様に書かれた条件がコードに実装されているか**の検証がない
-- `intent_tracker.py`はspec refinement時のdrift検出だが、**外部コードとの整合**には未対応
+**実装状況**: ✅ Implemented（計画どおりの `conformance_verifier.py` / `verify-conformance` が実装済み — MCP ツール名は `validate_spec_to_code`）
 
-**追加すべき機能**:
-
-```
-V1-C-1: 仕様→コード網羅性チェック
-  - 自然言語仕様の requires/ensures 相当の条件が、コード内に実装されているか検証
-  - 例: "残高不足はエラーにする" → コード内に balance < amount のチェックがあるか
-  - LLMによる意味的マッピング + Z3による形式的検証の2段階
-
-V1-C-2: 未実装条件の特定とフィードバック
-  - 仕様に書かれているが実装されていない条件を列挙
-  - 実装されているが仕様に書かれていない条件（隠れた仕様）を検出
-  - 修正提案（コードへの追加 or 仕様への追記）を提示
-
-V1-C-3: トレーサビリティマトリクス生成
-  - 仕様の各条件 ↔ コードの各関数/行のマッピング表を生成
-  - 人が確認しやすいMarkdown/HTML形式で出力
-  - CLI: python -m agent verify-conformance --spec req.md --code src/ --language rust
-  - MCP: verify_spec_code_conformance(spec_text, code_file, language)
-```
-
-**実装ファイル**:
-- `agent/conformance_verifier.py` — 新規: 整合性検証エンジン
-- `agent/verify_conformance.py` — 新規: CLIサブコマンド
-- `agent/mcp_server.py` — `verify_spec_code_conformance()` ツール追加
-- `agent/prompts/conformance_verification.py` — 新規
+- **V1-C-1 仕様→コード網羅性チェック — 実装済み**: `python -m agent validate-spec-to-code` / `verify-conformance`（MCP `validate_spec_to_code` / `verify_conformance`）が自然言語仕様の各条件をコード内実装にマッピングし（LLM 意味的マッピング + 抽出 atom の `mumei verify` の 2 段階）、未実装条件を `cross_validation_gaps` に列挙する。`agent/conformance_verifier.py` + `agent/verify_conformance.py`。
+- **V1-C-2 未実装条件の特定 — 実装済み**: 仕様にあるが実装されない条件・実装されるが仕様に無い条件の両方向を `cross_validation_gaps` で報告（`_with_spec_code_source_lines` で行番号紐付け）。
+- **V1-C-3 トレーサビリティマトリクス — 実装済み**: `verify-traceability`（V1-D-3 と共有）が条件↔コードの対応を `conformance` ビューで出力する。
 
 ---
 
@@ -1573,36 +1498,11 @@ V1-C-3: トレーサビリティマトリクス生成
 
 **対象リポジトリ**: `mumei-lang/mumei-agent`（主）
 
-**現状のギャップ**:
-- `code_to_spec.py`でコードから仕様を抽出できるが、**元の自然言語仕様との比較・差分検出**がない
-- 「コードが仕様を超えた実装をしている」「仕様に書かれていない副作用がある」の検出がない
+**実装状況**: ✅ Implemented
 
-**追加すべき機能**:
-
-```
-V1-D-1: コード→抽出仕様 vs 元仕様の差分検出
-  - code_to_spec.py で抽出した仕様と元の自然言語仕様を比較
-  - 仕様に書かれていない条件がコードに実装されている（仕様の不足）
-  - コードが仕様の条件を満たしていない（実装の問題）
-  - 既存 intent_tracker.py の IntentDriftResult を活用・拡張
-
-V1-D-2: 仕様ドリフトレポート
-  - 仕様とコードの乖離度スコア（0.0〜1.0）
-  - 乖離箇所の具体的な説明と修正提案
-  - 仕様側の修正案 or コード側の修正案を選択可能
-
-V1-D-3: 双方向整合性サマリ（実装済み）
-  - V1-C（仕様→コード）とV1-D（コード→仕様）を組み合わせた統合レポート
-  - CLI: python -m agent verify-traceability --code src/ --spec req.md
-  - MCP: verify_code_spec_traceability(code_file, spec_text, language)
-  - 出力: conformance / drift / cross_validation_gaps / drift_score / next_steps
-  - next_steps が唯一の human-review 入口で、recommendations 等の alias は出さない
-```
-
-**実装ファイル**:
-- `agent/traceability_verifier.py` — 実装済み: トレーサビリティ検証エンジン
-- `agent/verify_traceability.py` — 実装済み: CLIサブコマンド
-- `agent/mcp_server.py` — 実装済み: `verify_code_spec_traceability()` ツール追加
+- **V1-D-1 コード→抽出仕様 vs 元仕様の差分検出 — 実装済み**: `python -m agent validate-code-to-spec`（MCP `validate_code_to_spec`）が `code_to_spec` で抽出した契約と元の自然言語仕様を比較し、仕様不足・実装の仕様超過を `cross_validation_gaps` / `drift` に列挙する。
+- **V1-D-2 仕様ドリフトレポート — 実装済み**: 乖離度 `drift_score`（0.0〜1.0）と乖離箇所の説明を `verify-traceability` が出力し、`next_steps` で修正方向を提示する。
+- **V1-D-3 双方向整合性サマリ — 実装済み**: `python -m agent verify-traceability --code src/ --spec req.md` / MCP `verify_code_spec_traceability`（`agent/traceability_verifier.py` + `agent/verify_traceability.py`）。出力キーは `conformance` / `drift` / `cross_validation_gaps` / `drift_score` / `next_steps` で固定、`next_steps` が唯一の human-review 入口（`recommendations` 等の alias は出さない）。
 
 ---
 
@@ -2219,7 +2119,7 @@ Wave 6（P25、現在）: P31 `task_group` — `task` / `task_group:all` lowerin
 
 - 新規 verdict 語彙・別名 alias の追加、`translator_version` / `bridge_lemma_hash` の変更（必要なら別 Priority）。
 - units of measure の追加機能（直近 PR 群で実装済みの範囲を維持。残課題が出た時点で `docs/ROADMAP.md` に個別起票）。
-- V1-A〜V1-D 節（本書 1459〜1604 行付近）に残る「未実装」記述は実装済み後の古い記述であり、本 Priority では docs 整理の対象に含めない（別途 docs-sync で扱う）。
+- V1-A〜V1-D 節の「未実装」記述は 2026-09-19 の docs-sync で実装実態に改訂済み（audit / validate-spec / validate-code / validate-spec-to-code / validate-code-to-spec / verify-conformance / verify-traceability が計画済み名の実装を担う）。残件は V1-A-2 ドメイン完全性チェックと V1-B-3 修正 diff 自動生成。
 
 ### 関連ファイル
 

@@ -1,3 +1,20 @@
+### 2026-09-19: docs-sync — V1-A〜V1-D sections rewritten to implementation reality
+
+- `CROSS_PROJECT_ROADMAP.md`: the "現状のギャップ / 追加すべき機能 / 実装ファイル"
+  blocks for V1-A〜V1-D still described the planned surface (`verify-spec`,
+  `code_verifier.py`, `verify_spec_soundness`, `check_spec_satisfiability`,
+  `verify_spec_code_conformance`) as unimplemented. Rewritten to the actual
+  implementation: `audit` / `validate-spec` / `validate-code` /
+  `validate-spec-to-code` / `validate-code-to-spec` / `verify-conformance` /
+  `verify-traceability` CLIs and the `check_spec_health` /
+  `check_spec_contradiction` / `validate_nl_spec` / `validate_code` /
+  `validate_spec_to_code` / `validate_code_to_spec` / `verify_conformance` /
+  `verify_code_spec_traceability` / `verify_foreign_code` MCP tools. Remaining
+  honest gaps: V1-A-2 domain-template completeness warnings and V1-B-3 fix-diff
+  auto-generation.
+
+---
+
 # 📝 Changelog
 
 ---
