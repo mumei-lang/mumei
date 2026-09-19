@@ -1,7 +1,7 @@
 use super::models::{
     AtomCertificate, CounterexampleValidationMetadata, HarnessCertificateMetadata, IntentFidelity,
-    ProofCertificate, SelfCorrectionMetadata, SelfCorrectionSummary, SolverProcessMetadata,
-    UnusedHypothesisMetadata,
+    ProofCertificate, QuantifierConstraint, SelfCorrectionMetadata, SelfCorrectionSummary,
+    SolverProcessMetadata, UnusedHypothesisMetadata,
 };
 use super::status;
 use super::validation::{
@@ -345,6 +345,20 @@ pub fn generate_certificate_with_reconstruction_losses(
                 effects,
                 requires: atom.requires.clone(),
                 ensures: atom.ensures.clone(),
+                forall_constraints: atom
+                    .forall_constraints
+                    .iter()
+                    .map(|q| QuantifierConstraint {
+                        q_type: match q.q_type {
+                            crate::parser::QuantifierType::ForAll => "forall".to_string(),
+                            crate::parser::QuantifierType::Exists => "exists".to_string(),
+                        },
+                        var: q.var.clone(),
+                        start: q.start.clone(),
+                        end: q.end.clone(),
+                        condition: q.condition.clone(),
+                    })
+                    .collect(),
                 body_expr: atom.body_expr.clone(),
                 body_summary: atom.body_expr.clone(),
                 z3_result_class: classification.z3_result_class,

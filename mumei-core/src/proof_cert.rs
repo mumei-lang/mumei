@@ -34,8 +34,9 @@ pub use models::{
     CostSuccessMetrics, CounterexampleValidationMetadata, EscalationBundle,
     EscalationBundleSummary, EscalationCandidate, HarnessCertificateMetadata, HumanReviewEntry,
     HumanReviewPriority, HumanReviewQueue, IntentFidelity, IntentFidelityMetadata,
-    LeanResultMetadata, ProofBundle, ProofCertificate, SelfCorrectionMetadata,
-    SelfCorrectionSummary, SolverProcessMetadata, TacticSearchMetadata, UnusedHypothesisMetadata,
+    LeanResultMetadata, ProofBundle, ProofCertificate, QuantifierConstraint,
+    SelfCorrectionMetadata, SelfCorrectionSummary, SolverProcessMetadata, TacticSearchMetadata,
+    UnusedHypothesisMetadata,
 };
 
 pub use review::{generate_escalation_bundle, generate_human_review_queue};

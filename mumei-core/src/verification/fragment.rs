@@ -69,17 +69,19 @@ pub fn detect_logic_fragment_tags(atom: &Atom, module_env: &ModuleEnv) -> Vec<St
         push_unique_tag(&mut tags, "array_without_bounds");
     }
 
-    let has_forall = atom
-        .forall_constraints
-        .iter()
-        .any(|q| q.q_type == QuantifierType::ForAll)
-        || atom.requires.contains("forall(")
+    let has_forall = atom.forall_constraints.iter().any(|q| {
+        q.q_type == QuantifierType::ForAll
+            || q.condition.contains("forall(")
+            || q.start.contains("forall(")
+            || q.end.contains("forall(")
+    }) || atom.requires.contains("forall(")
         || atom.ensures.contains("forall(");
-    let has_exists = atom
-        .forall_constraints
-        .iter()
-        .any(|q| q.q_type == QuantifierType::Exists)
-        || atom.requires.contains("exists(")
+    let has_exists = atom.forall_constraints.iter().any(|q| {
+        q.q_type == QuantifierType::Exists
+            || q.condition.contains("exists(")
+            || q.start.contains("exists(")
+            || q.end.contains("exists(")
+    }) || atom.requires.contains("exists(")
         || atom.ensures.contains("exists(");
     if has_forall && has_exists {
         push_unique_tag(&mut tags, "quantifier_alternation");
@@ -1081,22 +1083,45 @@ pub(crate) fn quantifier_alternation_pattern(atom: &Atom) -> &'static str {
         {
             "forall exists"
         }
+        // Nested alternation: the inner quantifier lives inside the
+        // outer constraint's `condition` (nested matches are not
+        // extracted as separate constraints).
+        _ if atom.forall_constraints.iter().any(|q| {
+            q.q_type == QuantifierType::ForAll
+                && (q.condition.contains("exists(")
+                    || q.start.contains("exists(")
+                    || q.end.contains("exists("))
+        }) =>
+        {
+            "forall exists"
+        }
+        _ if atom.forall_constraints.iter().any(|q| {
+            q.q_type == QuantifierType::Exists
+                && (q.condition.contains("forall(")
+                    || q.start.contains("forall(")
+                    || q.end.contains("forall("))
+        }) =>
+        {
+            "exists forall"
+        }
         _ => "mixed quantifiers",
     }
 }
 
 pub(crate) fn atom_has_quantifier_alternation(atom: &Atom) -> bool {
-    let has_forall = atom
-        .forall_constraints
-        .iter()
-        .any(|q| q.q_type == QuantifierType::ForAll)
-        || atom.requires.contains("forall(")
+    let has_forall = atom.forall_constraints.iter().any(|q| {
+        q.q_type == QuantifierType::ForAll
+            || q.condition.contains("forall(")
+            || q.start.contains("forall(")
+            || q.end.contains("forall(")
+    }) || atom.requires.contains("forall(")
         || atom.ensures.contains("forall(");
-    let has_exists = atom
-        .forall_constraints
-        .iter()
-        .any(|q| q.q_type == QuantifierType::Exists)
-        || atom.requires.contains("exists(")
+    let has_exists = atom.forall_constraints.iter().any(|q| {
+        q.q_type == QuantifierType::Exists
+            || q.condition.contains("exists(")
+            || q.start.contains("exists(")
+            || q.end.contains("exists(")
+    }) || atom.requires.contains("exists(")
         || atom.ensures.contains("exists(");
     has_forall && has_exists
 }

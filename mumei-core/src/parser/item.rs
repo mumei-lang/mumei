@@ -2132,70 +2132,92 @@ fn find_next_trait_item(body: &str, start: usize) -> usize {
     body.len()
 }
 
+/// Spans of `forall(`/`exists(` quantifier expressions in `requires`,
+/// scanned left to right. A match inside an already-found quantifier's
+/// span belongs to that quantifier's condition and is skipped — e.g. in
+/// `exists(i, 0, n, forall(j, 0, m, p))` only the `exists` is extracted;
+/// hoisting the inner `forall` as a separate conjunct would free its
+/// outer bound variable and strengthen the hypothesis unsoundly.
+fn quantifier_spans(requires: &str) -> Vec<(usize, usize, usize, QuantifierType)> {
+    let mut spans = Vec::new();
+    let mut pos = 0;
+    while pos < requires.len() {
+        let forall_at = requires[pos..].find("forall(").map(|p| pos + p);
+        let exists_at = requires[pos..].find("exists(").map(|p| pos + p);
+        let (start, prefix_len, q_type) = match (forall_at, exists_at) {
+            (Some(f), Some(e)) if f <= e => (f, "forall(".len(), QuantifierType::ForAll),
+            (Some(_), Some(e)) => (e, "exists(".len(), QuantifierType::Exists),
+            (Some(f), None) => (f, "forall(".len(), QuantifierType::ForAll),
+            (None, Some(e)) => (e, "exists(".len(), QuantifierType::Exists),
+            (None, None) => break,
+        };
+        let inner_start = start + prefix_len;
+        let mut depth = 1;
+        let mut end_pos = requires.len();
+        for (i, c) in requires[inner_start..].char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end_pos = inner_start + i;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        spans.push((start, inner_start, end_pos, q_type));
+        pos = end_pos + 1;
+    }
+    spans
+}
+
 fn extract_quantifiers(requires: &str) -> Vec<Quantifier> {
     let mut quantifiers = Vec::new();
-    for (prefix, q_type) in [
-        ("forall(", QuantifierType::ForAll),
-        ("exists(", QuantifierType::Exists),
-    ] {
-        let mut search_from = 0;
-        while let Some(pos) = requires[search_from..].find(prefix) {
-            let abs_pos = search_from + pos + prefix.len();
-            let mut depth = 1;
-            let mut end_pos = abs_pos;
-            for (i, c) in requires[abs_pos..].char_indices() {
-                match c {
-                    '(' => depth += 1,
-                    ')' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            end_pos = abs_pos + i;
-                            break;
-                        }
-                    }
-                    _ => {}
+    for (_start, inner_start, end_pos, q_type) in quantifier_spans(requires) {
+        let inner = &requires[inner_start..end_pos];
+        // Split on top-level commas only — bound expressions like
+        // `min(0, n)` contain commas inside parens.
+        let mut parts: Vec<&str> = Vec::new();
+        let mut last = 0;
+        let mut inner_depth = 0;
+        for (i, c) in inner.char_indices() {
+            match c {
+                '(' => inner_depth += 1,
+                ')' => inner_depth -= 1,
+                ',' if inner_depth == 0 && parts.len() < 3 => {
+                    parts.push(&inner[last..i]);
+                    last = i + 1;
                 }
+                _ => {}
             }
-            let inner = &requires[abs_pos..end_pos];
-            let parts: Vec<&str> = inner.splitn(4, ',').collect();
-            if parts.len() >= 4 {
-                quantifiers.push(Quantifier {
-                    q_type: q_type.clone(),
-                    var: parts[0].trim().to_string(),
-                    start: parts[1].trim().to_string(),
-                    end: parts[2].trim().to_string(),
-                    condition: parts[3].trim().to_string(),
-                });
-            }
-            search_from = end_pos + 1;
+        }
+        parts.push(&inner[last..]);
+        if parts.len() >= 4 {
+            quantifiers.push(Quantifier {
+                q_type,
+                var: parts[0].trim().to_string(),
+                start: parts[1].trim().to_string(),
+                end: parts[2].trim().to_string(),
+                condition: parts[3].trim().to_string(),
+            });
         }
     }
     quantifiers
 }
 
 fn strip_quantifiers(requires: &str) -> String {
-    let mut result = requires.to_string();
-    for prefix in ["forall(", "exists("] {
-        while let Some(pos) = result.find(prefix) {
-            let after = pos + prefix.len();
-            let mut depth = 1;
-            let mut end = after;
-            for (i, c) in result[after..].char_indices() {
-                match c {
-                    '(' => depth += 1,
-                    ')' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            end = after + i + 1;
-                            break;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            result = format!("{}true{}", &result[..pos], &result[end..]);
-        }
+    let mut result = String::with_capacity(requires.len());
+    let mut last = 0;
+    for (start, _inner_start, end_pos, _q_type) in quantifier_spans(requires) {
+        result.push_str(&requires[last..start]);
+        result.push_str("true");
+        // Unclosed `forall(` scans to the end of the string — clamp so
+        // the final slice below stays in bounds.
+        last = (end_pos + 1).min(requires.len());
     }
+    result.push_str(&requires[last..]);
     result
 }
 
