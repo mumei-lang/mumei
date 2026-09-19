@@ -1185,6 +1185,7 @@ Lean 委譲境界: `mumei-core/src/verification/types.rs` の `string_regex_brid
 - 構築経路: `Shape::Named("x")`（Call `E::V`）、`Shape::Point`（FieldAccess nullary）、裸の `Point`（Variable — 束縛変数が優先）。
 - fragment.rs: 有限 ADT enum パラメータと有限 ADT 上の `match` は `inductive_data_type` を tag 付けしない（再帰 enum・generic `Option<T>`・scalar のみの match は従来どおり tag 維持）。
 - 既知制限: `let x = <ctor>; match x` は MIR move analysis のパターン束縛変数（`Local(0)` プレースホルダ）の既存制約で失敗 — P10-C 以前からの制限で、Int-tag 経路と同じ。
+- Follow-up（2026-09-19）: qualified ctor 式 `E::V(..)` / `E::V` が codegen に到達 — HIR lowering で `VariantInit` へ変換し tagged union を emit（verify は従来通り受理していたが build が `Unknown function`/`Field not found` で失敗していたギャップを解消）。再帰 enum の構築は clean codegen error、arity/不明 variant は fail-closed。同一スロットに `Str`/`f64` を混在させる enum は positional union layout の既存制約で codegen 不可。
 
 **検証**: `tests/test_datatype_enum.mm`（7 atom: enum-param match・Str/f64/bool payload selector・requires 側同値性・コンストラクタ単射性・再帰 enum の Int-tag 維持）、`tests/test_datatype_enum_negative.mm`（未被覆コンストラクタ名入り反例）、fragment.rs 単体テスト 6 件。
 

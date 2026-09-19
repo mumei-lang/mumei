@@ -90,6 +90,35 @@ pub(crate) fn resolve_named_type(module_env: &ModuleEnv, type_name: &str) -> Str
         .to_string()
 }
 
+/// Whether `enum_def` (transitively) references itself in a payload field.
+/// `enum_llvm_type` lowers field types eagerly, so constructing a recursive
+/// enum would recurse forever — construction is rejected instead (the same
+/// pre-existing limitation as enum-typed params).
+fn enum_is_recursive(module_env: &ModuleEnv, enum_def: &mumei_core::parser::EnumDef) -> bool {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut queue: Vec<String> = vec![enum_def.name.clone()];
+    while let Some(name) = queue.pop() {
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        let Some(e) = module_env.get_enum(&name) else {
+            continue;
+        };
+        for variant in &e.variants {
+            for field_ty in &variant.field_types {
+                let base = resolve_named_type(module_env, &field_ty.name);
+                if base == enum_def.name {
+                    return true;
+                }
+                if module_env.get_enum(&base).is_some() {
+                    queue.push(base);
+                }
+            }
+        }
+    }
+    false
+}
+
 pub(crate) fn infer_struct_type_name(
     expr: &HirExpr,
     var_types: &HashMap<String, String>,
@@ -121,6 +150,19 @@ pub(crate) fn infer_struct_type_name(
             module_env.get_enum(enum_name).map(|_| enum_name.clone())
         }
         HirExpr::FieldAccess(inner, field) => {
+            // `E::V` / `E.V` unit-variant construction (a FieldAccess whose
+            // qualifier is a known enum declaring `field`, not a bound
+            // variable) types as the enum — `let m = Mine::Nil` records
+            // `m: Mine` so a later `match m` resolves the owner.
+            if let HirExpr::Variable(qual) = inner.as_ref() {
+                if !var_types.contains_key(qual.as_str()) {
+                    if let Some(enum_def) = module_env.get_enum(qual) {
+                        if enum_def.variants.iter().any(|v| v.name == *field) {
+                            return Some(enum_def.name.clone());
+                        }
+                    }
+                }
+            }
             let inner_ty = infer_struct_type_name(inner, var_types, module_env)?;
             let sdef = module_env.get_struct(&inner_ty)?;
             let f = sdef.fields.iter().find(|f| f.name == *field)?;
@@ -164,6 +206,94 @@ fn infer_stmt_struct_type_name(
         }
         _ => None,
     }
+}
+
+/// Emit `E::V(..)` / `E::V` as a tagged-union struct value. Fail-closed on a
+/// recursive enum (the eager `enum_llvm_type` layout cannot represent it) and
+/// on arity/unknown-variant mismatches — verification rejects those first, so
+/// these guards are defense-in-depth for HIR built outside the verify gate.
+#[allow(clippy::too_many_arguments)]
+fn emit_enum_variant_init<'a>(
+    context: &'a Context,
+    builder: &Builder<'a>,
+    module: &Module<'a>,
+    function: &FunctionValue<'a>,
+    variables: &mut HashMap<String, BasicValueEnum<'a>>,
+    var_types: &mut HashMap<String, String>,
+    array_ptrs: &HashMap<String, (BasicValueEnum<'a>, BasicValueEnum<'a>)>,
+    module_env: &ModuleEnv,
+    enum_name: &str,
+    variant_name: &str,
+    fields: &[HirExpr],
+) -> MumeiResult<BasicValueEnum<'a>> {
+    let enum_def = module_env.get_enum(enum_name).ok_or_else(|| {
+        MumeiError::codegen(format!("Enum '{}' not found in module_env", enum_name))
+    })?;
+    if enum_is_recursive(module_env, enum_def) {
+        return Err(MumeiError::codegen(format!(
+            "enum '{}' is recursive — variant construction is unsupported in codegen",
+            enum_name
+        )));
+    }
+    let variant = enum_def
+        .variants
+        .iter()
+        .find(|v| v.name == variant_name)
+        .ok_or_else(|| {
+            MumeiError::codegen(format!(
+                "Enum '{}' has no variant named '{}'",
+                enum_name, variant_name
+            ))
+        })?;
+    if fields.len() != variant.fields.len() {
+        return Err(MumeiError::codegen(format!(
+            "Enum constructor '{}::{}' takes {} payload arg(s), got {}",
+            enum_name,
+            variant_name,
+            variant.fields.len(),
+            fields.len()
+        )));
+    }
+    let variant_idx = enum_def
+        .variants
+        .iter()
+        .position(|v| v.name == variant_name)
+        .unwrap_or(0);
+    let enum_type = enum_llvm_type(context, enum_def, Some(module_env));
+    let mut val = enum_type.get_undef();
+    // Set tag
+    val = llvm!(builder.build_insert_value(
+        val,
+        context.i64_type().const_int(variant_idx as u64, false),
+        0,
+        "tag"
+    ))
+    .into_struct_value();
+    // Set payload fields
+    for (i, field_expr) in fields.iter().enumerate() {
+        let field_val = compile_hir_expr(
+            context, builder, module, function, field_expr, variables, var_types, array_ptrs,
+            module_env,
+        )?;
+        let slot_ty = enum_type
+            .get_field_type_at_index((i + 1) as u32)
+            .ok_or_else(|| {
+                MumeiError::codegen(format!("Enum '{}' missing payload slot {}", enum_name, i))
+            })?;
+        let field_val = if field_val.get_type() != slot_ty {
+            bitpreserve_cast(builder, field_val, slot_ty)?
+        } else {
+            field_val
+        };
+        val = llvm!(builder.build_insert_value(
+            val,
+            field_val,
+            (i + 1) as u32,
+            &format!("payload_{}", i)
+        ))
+        .into_struct_value();
+    }
+    Ok(val.into())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -500,6 +630,12 @@ pub(crate) fn compile_hir_expr<'a>(
                     ))),
                 }
             } else {
+                if lhs.is_struct_value() || rhs.is_struct_value() {
+                    return Err(MumeiError::codegen(format!(
+                        "operator {:?} is unsupported on struct/enum values in codegen",
+                        op
+                    )));
+                }
                 let l = lhs.into_int_value();
                 let r = rhs.into_int_value();
                 match op {
@@ -1280,54 +1416,19 @@ pub(crate) fn compile_hir_expr<'a>(
             enum_name,
             variant_name,
             fields,
-        } => {
-            let enum_def = module_env.get_enum(enum_name).ok_or_else(|| {
-                MumeiError::codegen(format!("Enum '{}' not found in module_env", enum_name))
-            })?;
-            let variant_idx = enum_def
-                .variants
-                .iter()
-                .position(|v| v.name == *variant_name)
-                .unwrap_or(0);
-            let enum_type = enum_llvm_type(context, enum_def, Some(module_env));
-            let mut val = enum_type.get_undef();
-            // Set tag
-            val = llvm!(builder.build_insert_value(
-                val,
-                context.i64_type().const_int(variant_idx as u64, false),
-                0,
-                "tag"
-            ))
-            .into_struct_value();
-            // Set payload fields
-            for (i, field_expr) in fields.iter().enumerate() {
-                let field_val = compile_hir_expr(
-                    context, builder, module, function, field_expr, variables, var_types,
-                    array_ptrs, module_env,
-                )?;
-                let slot_ty = enum_type
-                    .get_field_type_at_index((i + 1) as u32)
-                    .ok_or_else(|| {
-                        MumeiError::codegen(format!(
-                            "Enum '{}' missing payload slot {}",
-                            enum_name, i
-                        ))
-                    })?;
-                let field_val = if field_val.get_type() != slot_ty {
-                    bitpreserve_cast(builder, field_val, slot_ty)?
-                } else {
-                    field_val
-                };
-                val = llvm!(builder.build_insert_value(
-                    val,
-                    field_val,
-                    (i + 1) as u32,
-                    &format!("payload_{}", i)
-                ))
-                .into_struct_value();
-            }
-            Ok(val.into())
-        }
+        } => emit_enum_variant_init(
+            context,
+            builder,
+            module,
+            function,
+            variables,
+            var_types,
+            array_ptrs,
+            module_env,
+            enum_name,
+            variant_name,
+            fields,
+        ),
 
         HirExpr::FieldAccess(inner_expr, field_name) => {
             if let HirExpr::Variable(var_name) = inner_expr.as_ref() {
@@ -1353,6 +1454,32 @@ pub(crate) fn compile_hir_expr<'a>(
                                 &format!("{}.{}", var_name, field_name)
                             ));
                             return Ok(extracted);
+                        }
+                    }
+                }
+                // `E::V` / `E.V` unit-variant construction — only when
+                // `var_name` is NOT a bound value (a bound variable named
+                // like an enum shadows it, matching the verifier's
+                // `env.contains_key` precedence) and `field_name` is one of
+                // the enum's declared variants.
+                if !variables.contains_key(var_name.as_str())
+                    && !var_types.contains_key(var_name.as_str())
+                {
+                    if let Some(enum_def) = module_env.get_enum(var_name) {
+                        if enum_def.variants.iter().any(|v| v.name == *field_name) {
+                            return emit_enum_variant_init(
+                                context,
+                                builder,
+                                module,
+                                function,
+                                variables,
+                                var_types,
+                                array_ptrs,
+                                module_env,
+                                var_name,
+                                field_name,
+                                &[],
+                            );
                         }
                     }
                 }

@@ -128,3 +128,226 @@ atom pick(th: Thermo) -> i64
         "Hot/Cold must use E1's indices (0/1), not E2's (1/0):\n{ir}"
     );
 }
+
+// Qualified `E::V(..)` / `E::V` constructor expressions lower to VariantInit
+// and build the tagged union in place: `Fruit::Apple(n)` inserts tag 0 plus
+// the payload, `Fruit::Cherry` (unit) inserts tag 1. Before this, both forms
+// failed codegen ("Unknown function" / "Field not found") even though verify
+// accepted them.
+#[test]
+fn qualified_variant_ctor_builds_tagged_union() {
+    let ir = emit_atom_ir(
+        "qualified_ctor",
+        r#"
+enum Fruit {
+    Apple(i64),
+    Cherry,
+}
+
+atom bake(n: i64) -> Fruit
+    requires: true;
+    ensures: true;
+    body: {
+        if n > 0 { Fruit::Apple(n) } else { Fruit::Cherry }
+    }
+"#,
+        "bake",
+    );
+    assert!(
+        ir.contains("insertvalue { i64, i64 } { i64 0") && ir.contains("i64 %0"),
+        "Apple(n) must insert tag 0 plus the param payload:\n{ir}"
+    );
+    assert!(
+        ir.contains("{ i64 1, i64 undef }") || ir.contains("{ i64 1, i64 0 }"),
+        "Cherry must produce the tag-1 constant:\n{ir}"
+    );
+    assert!(
+        ir.contains("ret { i64, i64 }"),
+        "the function must return the tagged union:\n{ir}"
+    );
+}
+
+// `Mine::Cons` collides with the prelude `List::Cons` — the qualified ctor
+// must still emit Mine's tag (0), never the colliding enum's (1).
+#[test]
+fn qualified_ctor_under_name_collision_uses_the_named_enum() {
+    let ir = emit_atom_ir(
+        "qualified_ctor_collision",
+        r#"
+enum Mine {
+    Cons(i64),
+    Nil,
+}
+
+atom mk(p: i64) -> Mine
+    requires: true;
+    ensures: true;
+    body: {
+        Mine::Cons(p)
+    }
+"#,
+        "mk",
+    );
+    assert!(
+        ir.contains("insertvalue { i64, i64 } { i64 0"),
+        "Mine::Cons must insert Mine's tag 0, not prelude List's 1:\n{ir}"
+    );
+}
+
+// `let m = Mine::Nil` binds `m: Mine` — the unit-variant FieldAccess records
+// its enum in `var_types`, so the following `match m` resolves Mine's tags
+// (Cons = 0) even though the prelude `List::Cons` collides.
+#[test]
+fn let_bound_unit_ctor_types_the_owner_for_match() {
+    let ir = emit_atom_ir(
+        "let_bound_ctor",
+        r#"
+enum Mine {
+    Cons(i64),
+    Nil,
+}
+
+atom mk_nullary() -> i64
+    requires: true;
+    ensures: true;
+    body: {
+        let m = Mine::Nil;
+        match m {
+            Cons(v) => v
+            Nil => 7
+        }
+    }
+"#,
+        "mk_nullary",
+    );
+    // The constructed tag is constant, so the tag compares fold — the Nil
+    // arm (Mine tag 1) must be the statically-selected branch returning 7.
+    assert!(
+        ir.contains("br i1 true, label %match.body_1"),
+        "Nil arm must be selected for the tag-1 constant:\n{ir}"
+    );
+    assert!(
+        ir.contains("[ 7, %match.body_1 ]"),
+        "Nil arm must contribute 7 to the match result phi:\n{ir}"
+    );
+}
+
+// A constructed enum value can flow into a `match` target and into another
+// atom's enum-typed parameter.
+#[test]
+fn ctor_value_flows_into_match_and_callee() {
+    let ir = emit_atom_ir(
+        "ctor_flow",
+        r#"
+enum Mine { Cons(i64), Nil }
+
+atom consume(m: Mine) -> i64
+    requires: true;
+    ensures: true;
+    body: {
+        match m {
+            Mine::Cons(v) => v
+            Mine::Nil => 0
+        }
+    }
+
+atom both(n: i64) -> i64
+    requires: true;
+    ensures: true;
+    body: {
+        let a = match Mine::Cons(n) {
+            Mine::Cons(v) => v
+            Mine::Nil => 0
+        };
+        consume(Mine::Cons(a))
+    }
+"#,
+        "both",
+    );
+    assert!(
+        ir.contains("call i64 @consume") && ir.contains("insertvalue { i64, i64 }"),
+        "ctor value must be passed to the callee's enum param:\n{ir}"
+    );
+}
+
+// Binary operators on aggregate values used to panic inside inkwell's
+// into_int_value — they now fail with a clean codegen error instead.
+#[test]
+fn equality_on_enum_values_errors_cleanly() {
+    let bin = env!("CARGO_BIN_EXE_mumei");
+    let fixture = write_fixture(
+        "enum_eq",
+        r#"
+enum Mine { Cons(i64), Nil }
+
+atom eq_ctor(m: Mine) -> i64
+    requires: true;
+    ensures: true;
+    body: {
+        if m == Mine::Nil { 1 } else { 0 }
+    }
+"#,
+    );
+    let dir = fixture.parent().unwrap().to_path_buf();
+    let output = Command::new(bin)
+        .arg("build")
+        .arg(&fixture)
+        .arg("--emit")
+        .arg("llvm-ir")
+        .current_dir(&dir)
+        .output()
+        .expect("run build");
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !output.status.success() && combined.contains("unsupported on struct/enum values"),
+        "enum equality must be a clean codegen error, not a panic:\n{combined}"
+    );
+    std::fs::remove_dir_all(&dir).expect("remove fixture dir");
+}
+
+// A recursive enum cannot be laid out eagerly — construction fails with a
+// clean codegen error instead of overflowing the stack in enum_llvm_type.
+#[test]
+fn recursive_enum_ctor_fails_with_codegen_error() {
+    let bin = env!("CARGO_BIN_EXE_mumei");
+    let fixture = write_fixture(
+        "recursive_ctor",
+        r#"
+enum IntList {
+    Cons(i64, IntList),
+    Nil,
+}
+
+atom mk() -> i64
+    requires: true;
+    ensures: true;
+    body: {
+        let l = IntList::Nil;
+        0
+    }
+"#,
+    );
+    let dir = fixture.parent().unwrap().to_path_buf();
+    let output = Command::new(bin)
+        .arg("build")
+        .arg(&fixture)
+        .arg("--emit")
+        .arg("llvm-ir")
+        .current_dir(&dir)
+        .output()
+        .expect("run build");
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !output.status.success() && combined.contains("recursive"),
+        "recursive enum ctor must fail with a clean codegen error:\n{combined}"
+    );
+    std::fs::remove_dir_all(&dir).expect("remove fixture dir");
+}

@@ -472,16 +472,36 @@ pub fn lower_expr_with_env(
         if let Some(env) = module_env {
             // Only convert if the name is NOT a known atom (functions take priority)
             if env.get_atom(name).is_none() {
-                // Resolve the owning enum deterministically: a sole owner or
-                // owners with identical signatures convert; a genuinely
-                // ambiguous bare name stays a Call so downstream stages fail
-                // closed instead of picking an enum per HashMap order.
-                if let Ok(Some(enum_def)) = env.resolve_variant_owner_by_hint(name, None) {
-                    return HirExpr::VariantInit {
-                        enum_name: enum_def.name.clone(),
-                        variant_name: name.clone(),
-                        fields: args.clone(),
-                    };
+                // Qualified `E::V(..)`: the qualifier must be a known enum
+                // declaring the variant — a module path (`mod::f(..)`) or
+                // method call (`obj.f(..)`) stays a Call. The `.`-spelled form
+                // is not converted here because verification rejects
+                // `E.V(..)` as an unknown function (only `::` ctor calls are
+                // spec-constructible), so converting it would let codegen
+                // accept a program the verifier refused.
+                if let Some((qual, variant)) = name.rsplit_once("::") {
+                    if let Some(enum_def) = env.get_enum(qual) {
+                        if enum_def.variants.iter().any(|v| v.name == variant) {
+                            return HirExpr::VariantInit {
+                                enum_name: enum_def.name.clone(),
+                                variant_name: variant.to_string(),
+                                fields: args.clone(),
+                            };
+                        }
+                    }
+                } else {
+                    // Bare `V(..)`: resolve the owning enum deterministically —
+                    // a sole owner or owners with identical signatures convert;
+                    // a genuinely ambiguous bare name stays a Call so
+                    // downstream stages fail closed instead of picking an enum
+                    // per HashMap order.
+                    if let Ok(Some(enum_def)) = env.resolve_variant_owner_by_hint(name, None) {
+                        return HirExpr::VariantInit {
+                            enum_name: enum_def.name.clone(),
+                            variant_name: name.clone(),
+                            fields: args.clone(),
+                        };
+                    }
                 }
             }
         }
