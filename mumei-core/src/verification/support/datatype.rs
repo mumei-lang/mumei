@@ -287,12 +287,15 @@ pub(crate) fn type_name_base(ty: &str) -> &str {
 /// `match result` on `-> IntList`) yields `Some("IntList")`.
 fn target_param_enum_name(vc: &VCtx, target: &Dynamic) -> Option<String> {
     let sym = target.as_int()?.decl().name();
-    // `__proj_{Enum}_{Variant}_{i}` — projector consts carry their enum
-    // name, so `match t` on a bound tail (`Cons(h, t)`) resolves the same
-    // enum the outer arm used. Enum/variant names may themselves contain
-    // `_`, so take the longest prefix that is a known enum.
+    // `__proj_{Enum}_{Variant}_{i}` — a bound field const's declared type
+    // is that variant's i-th field type (`Self` → the enum itself), so
+    // `match t` on a bound tail (`Cons(h, t)`) resolves the same enum the
+    // outer arm used, while `match m` on a field of a *different* enum
+    // type (`Outer::Wrap(m)`) resolves `Mine`, not `Outer`. Enum/variant
+    // names may themselves contain `_`, so take the longest prefix that is
+    // a known enum.
     if let Some(rest) = sym.strip_prefix("__proj_") {
-        if let Some((head, _idx)) = rest.rsplit_once('_') {
+        if let Some((head, idx)) = rest.rsplit_once('_') {
             let mut best: Option<usize> = None;
             for (pos, _) in head.match_indices('_') {
                 if vc.module_env.get_enum(&head[..pos]).is_some() {
@@ -300,7 +303,31 @@ fn target_param_enum_name(vc: &VCtx, target: &Dynamic) -> Option<String> {
                 }
             }
             if let Some(pos) = best {
-                return Some(head[..pos].to_string());
+                let enum_name = &head[..pos];
+                let variant_name = &head[pos + 1..];
+                // The const is a bound field — its declared type is the
+                // variant's i-th field type (`Self` → the enum itself), not
+                // the outer enum: `match m` on `Outer::Wrap(m)`'s `m`
+                // resolves `Wrap`'s field type, not `Outer`. A non-enum
+                // field means the const is not enum-typed at all.
+                if let (Some(edef), Ok(i)) =
+                    (vc.module_env.get_enum(enum_name), idx.parse::<usize>())
+                {
+                    if let Some(ft) = edef
+                        .variants
+                        .iter()
+                        .find(|v| v.name == variant_name)
+                        .and_then(|v| v.fields.get(i))
+                    {
+                        let resolved = if *ft == enum_name {
+                            enum_name.to_string()
+                        } else {
+                            vc.module_env.resolve_base_type(ft)
+                        };
+                        return vc.module_env.get_enum(&resolved).map(|e| e.name.clone());
+                    }
+                }
+                return Some(enum_name.to_string());
             }
         }
     }

@@ -117,17 +117,6 @@ pub(crate) fn pattern_to_z3_condition<'a>(
                     // env にも projector を登録（body 内で参照可能にする）
                     env.insert(proj_name.clone(), field_sym.clone());
 
-                    // 再帰フィールドの場合: ドメイン制約を追加
-                    if i < variant_def.fields.len() && variant_def.fields[i] == enum_def.name {
-                        if let Some(solver) = solver_opt {
-                            if let Some(field_int) = field_sym.as_int() {
-                                let n = enum_def.variants.len() as i64;
-                                solver.assert(&field_int.ge(&Int::from_i64(ctx, 0)));
-                                solver.assert(&field_int.lt(&Int::from_i64(ctx, n)));
-                            }
-                        }
-                    }
-
                     // フィールドの宣言型を次段の hint として渡す
                     // （再帰 `Self` フィールド → 自身の enum 名）
                     let field_hint: Option<String> = if i < variant_def.fields.len() {
@@ -141,6 +130,22 @@ pub(crate) fn pattern_to_z3_condition<'a>(
                     } else {
                         None
                     };
+
+                    // enum-typed fields are constrained to their tag domain —
+                    // a `Self` tail stays in `0..enum_def.variants.len()`, and
+                    // a field of another enum (`Outer::Wrap(m)`) stays in
+                    // `0..Mine.len()` so a nested match sees real coverage.
+                    if let Some(fenum_name) = &field_hint {
+                        if let Some(fenum) = vc.module_env.get_enum(fenum_name) {
+                            if let Some(solver) = solver_opt {
+                                if let Some(field_int) = field_sym.as_int() {
+                                    let n = fenum.variants.len() as i64;
+                                    solver.assert(&field_int.ge(&Int::from_i64(ctx, 0)));
+                                    solver.assert(&field_int.lt(&Int::from_i64(ctx, n)));
+                                }
+                            }
+                        }
+                    }
                     // 再帰的にフィールドパターンの条件を生成
                     let field_cond = pattern_to_z3_condition(
                         ctx,
