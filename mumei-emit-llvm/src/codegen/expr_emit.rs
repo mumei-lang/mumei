@@ -324,6 +324,13 @@ pub(crate) fn compile_hir_expr<'a>(
         HirExpr::Variable(name) => variables
             .get(name.as_str())
             .cloned()
+            .or_else(|| match name.as_str() {
+                // Booleans are i64 0/1 at runtime — same convention as the
+                // `zext i1` results of comparisons.
+                "true" => Some(context.i64_type().const_int(1, false).into()),
+                "false" => Some(context.i64_type().const_int(0, false).into()),
+                _ => None,
+            })
             .ok_or_else(|| MumeiError::codegen(format!("Undefined variable: {}", name))),
 
         HirExpr::Call { name, args, .. } => match name.as_str() {
@@ -505,6 +512,64 @@ pub(crate) fn compile_hir_expr<'a>(
         }
 
         HirExpr::BinaryOp(left, op, right) => {
+            // `&&` / `||` short-circuit: the RHS is only evaluated when the
+            // LHS does not decide the result (e.g. `i > 0 && arr[i] == x`
+            // must not run the bounds check on a non-positive index).
+            if matches!(op, Op::And | Op::Or) {
+                let lhs = compile_hir_expr(
+                    context, builder, module, function, left, variables, var_types, array_ptrs,
+                    module_env,
+                )?;
+                if !lhs.is_int_value() {
+                    return Err(MumeiError::codegen(format!(
+                        "operator {:?} requires integer-bool operands in codegen",
+                        op
+                    )));
+                }
+                let lhs_int = lhs.into_int_value();
+                let zero = context.i64_type().const_int(0, false);
+                let l_bool =
+                    llvm!(builder.build_int_compare(IntPredicate::NE, lhs_int, zero, "logic_lhs"));
+                let rhs_block = context.append_basic_block(*function, "logic.rhs");
+                let merge_block = context.append_basic_block(*function, "logic.merge");
+                let lhs_block = builder.get_insert_block().unwrap();
+                if matches!(op, Op::And) {
+                    llvm!(builder.build_conditional_branch(l_bool, rhs_block, merge_block));
+                } else {
+                    llvm!(builder.build_conditional_branch(l_bool, merge_block, rhs_block));
+                }
+                builder.position_at_end(rhs_block);
+                let rhs = compile_hir_expr(
+                    context, builder, module, function, right, variables, var_types, array_ptrs,
+                    module_env,
+                )?;
+                if !rhs.is_int_value() {
+                    return Err(MumeiError::codegen(format!(
+                        "operator {:?} requires integer-bool operands in codegen",
+                        op
+                    )));
+                }
+                let r_bool = llvm!(builder.build_int_compare(
+                    IntPredicate::NE,
+                    rhs.into_int_value(),
+                    zero,
+                    "logic_rhs"
+                ));
+                let rhs_end = builder.get_insert_block().unwrap();
+                llvm!(builder.build_unconditional_branch(merge_block));
+                builder.position_at_end(merge_block);
+                let phi = llvm!(builder.build_phi(context.bool_type(), "logic_result"));
+                let short_val = context
+                    .bool_type()
+                    .const_int(matches!(op, Op::Or) as u64, false);
+                phi.add_incoming(&[(&short_val, lhs_block), (&r_bool, rhs_end)]);
+                return Ok(llvm!(builder.build_int_z_extend(
+                    phi.as_basic_value().into_int_value(),
+                    context.i64_type(),
+                    "logic_ext"
+                ))
+                .into());
+            }
             let lhs = compile_hir_expr(
                 context, builder, module, function, left, variables, var_types, array_ptrs,
                 module_env,
