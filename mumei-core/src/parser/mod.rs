@@ -53,6 +53,15 @@ impl ParseContext {
         &self.expect_failures
     }
 
+    /// Record a non-`expect` syntax failure (e.g. an unrecognized clause
+    /// keyword a grammar loop skipped past) so fail-closed callers treat
+    /// the input as malformed just like a missing expected token.
+    pub fn syntax_failure(&mut self, message: String) {
+        if self.expect_failures.len() < 100 {
+            self.expect_failures.push(message);
+        }
+    }
+
     pub fn peek(&self) -> &Token {
         self.tokens
             .get(self.pos)
@@ -1968,5 +1977,44 @@ atom simple(x: i64)
         assert_eq!(atoms.len(), 1);
         assert!(atoms[0].effect_pre.is_empty());
         assert!(atoms[0].effect_post.is_empty());
+    }
+
+    #[test]
+    fn test_unknown_atom_clause_keyword_is_a_checked_parse_error() {
+        // `inputs:`/`th:` lines used to be silently skipped, leaving an
+        // atom with no params and a vacuous contract that still verified.
+        let source = r#"
+atom wrong_syntax
+    inputs: x: i64
+    requires: true;
+    ensures: result >= 999;
+    body: { x + 1 };
+"#;
+        let err = item::parse_module_from_source_checked(source)
+            .expect_err("malformed clause keywords must fail the checked parse");
+        assert!(
+            err.iter().any(|f| f.contains("inputs:")),
+            "expected an unknown-clause-keyword failure, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_known_atom_clauses_do_not_fail_checked_parse() {
+        let source = r#"
+atom fine(x: i64) -> i64
+    requires: x >= 0;
+    ensures: result >= 0;
+    invariant: x >= 0;
+    effects: [];
+    consume: ;
+    resources: ;
+    semantics: default;
+    max_unroll: 4;
+    body: { x };
+"#;
+        assert!(
+            item::parse_module_from_source_checked(source).is_ok(),
+            "every known atom clause should parse cleanly"
+        );
     }
 }

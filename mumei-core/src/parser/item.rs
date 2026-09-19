@@ -1886,6 +1886,23 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
             | Token::Effect
             | Token::RBrace
             | Token::Eof => break,
+            // An unrecognized `keyword:` line (e.g. `inputs:`) used to be
+            // skipped token-by-token, silently dropping whatever contract
+            // or body text followed — the atom then verified vacuously.
+            // Keep recovering for the LSP-style tolerant path, but record a
+            // syntax failure so `parse_module_checked` (verify/build/check)
+            // rejects the file.
+            ref tok if tok.is_word_like() && ctx.peek_at(1) == Some(&Token::Colon) => {
+                let (line, col) = ctx
+                    .tokens_ref()
+                    .get(ctx.pos())
+                    .map(|t| (t.line, t.col))
+                    .unwrap_or((0, 0));
+                ctx.syntax_failure(format!(
+                    "unknown atom clause keyword '{tok}:' at {line}:{col} — expected requires/ensures/body/invariant/effects/contract/consume/resources/semantics/max_unroll/effect_pre/effect_post"
+                ));
+                ctx.advance();
+            }
             _ => {
                 ctx.advance();
             }
