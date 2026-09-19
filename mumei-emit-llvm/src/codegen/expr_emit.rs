@@ -90,6 +90,35 @@ pub(crate) fn resolve_named_type(module_env: &ModuleEnv, type_name: &str) -> Str
         .to_string()
 }
 
+/// Whether `enum_def` (transitively) references itself in a payload field.
+/// `enum_llvm_type` lowers field types eagerly, so constructing a recursive
+/// enum would recurse forever — construction is rejected instead (the same
+/// pre-existing limitation as enum-typed params).
+fn enum_is_recursive(module_env: &ModuleEnv, enum_def: &mumei_core::parser::EnumDef) -> bool {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut queue: Vec<String> = vec![enum_def.name.clone()];
+    while let Some(name) = queue.pop() {
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        let Some(e) = module_env.get_enum(&name) else {
+            continue;
+        };
+        for variant in &e.variants {
+            for field_ty in &variant.field_types {
+                let base = resolve_named_type(module_env, &field_ty.name);
+                if base == enum_def.name {
+                    return true;
+                }
+                if module_env.get_enum(&base).is_some() {
+                    queue.push(base);
+                }
+            }
+        }
+    }
+    false
+}
+
 pub(crate) fn infer_struct_type_name(
     expr: &HirExpr,
     var_types: &HashMap<String, String>,
@@ -1284,6 +1313,31 @@ pub(crate) fn compile_hir_expr<'a>(
             let enum_def = module_env.get_enum(enum_name).ok_or_else(|| {
                 MumeiError::codegen(format!("Enum '{}' not found in module_env", enum_name))
             })?;
+            if enum_is_recursive(module_env, enum_def) {
+                return Err(MumeiError::codegen(format!(
+                    "enum '{}' is recursive — variant construction is unsupported in codegen",
+                    enum_name
+                )));
+            }
+            let variant = enum_def
+                .variants
+                .iter()
+                .find(|v| v.name == *variant_name)
+                .ok_or_else(|| {
+                    MumeiError::codegen(format!(
+                        "Enum '{}' has no variant named '{}'",
+                        enum_name, variant_name
+                    ))
+                })?;
+            if fields.len() != variant.fields.len() {
+                return Err(MumeiError::codegen(format!(
+                    "Enum constructor '{}::{}' takes {} payload arg(s), got {}",
+                    enum_name,
+                    variant_name,
+                    variant.fields.len(),
+                    fields.len()
+                )));
+            }
             let variant_idx = enum_def
                 .variants
                 .iter()

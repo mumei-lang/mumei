@@ -2,6 +2,31 @@
 
 ---
 
+### 2026-09-19: enum constructor expressions reach codegen (`E::V(..)` / `E::V`)
+
+- **HIR lowering** (`hir.rs`): qualified constructor calls lower to
+  `VariantInit`. `E::V(args)` / `E.V(args)` (Call with a qualified path)
+  convert when the qualifier is a known enum declaring the variant — a known
+  atom name still wins, and module paths (`mod::f(..)`) or method calls
+  (`obj.f(..)`) stay `Call`. A qualified unit variant (`E::V` — parsed as
+  `FieldAccess(Variable("E"), "V")`) converts the same way; a struct variable
+  named like an enum is untouched.
+- **Codegen** (`mumei-emit-llvm`): the existing `VariantInit` arm now covers
+  these programs — it builds the tagged union via tag `insertvalue` plus a
+  `bitpreserve` payload per slot. Two fail-closed guards were added on the
+  way in: constructing a recursive enum errors cleanly
+  (`enum 'IntList' is recursive`) instead of recursing forever in the eager
+  `enum_llvm_type`, and an arity/unknown-variant mismatch is an explicit
+  codegen error rather than silent `undef` payload (verification rejects both
+  before codegen is reached, so the guard is defense-in-depth).
+- **Tests**: `test_codegen_enum_resolution.rs` +3 — qualified payload/unit
+  ctors emit the owning enum's tag under a prelude `Cons` collision, and a
+  recursive ctor fails cleanly.
+- **Docs**: `SPEC_GUIDE.md` documents constructor support and its limits
+  (recursive enums, positional union payload slots, mixed `Str`/`f64` slots).
+
+---
+
 ### 2026-09-19: deterministic variant-owner resolution reaches HIR lowering and LLVM codegen
 
 - **`ModuleEnv::resolve_variant_owner_by_hint`** (`module_env.rs`): the
