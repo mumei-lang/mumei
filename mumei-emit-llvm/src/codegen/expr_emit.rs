@@ -324,6 +324,13 @@ pub(crate) fn compile_hir_expr<'a>(
         HirExpr::Variable(name) => variables
             .get(name.as_str())
             .cloned()
+            .or_else(|| match name.as_str() {
+                // Booleans are i64 0/1 at runtime — same convention as the
+                // `zext i1` results of comparisons.
+                "true" => Some(context.i64_type().const_int(1, false).into()),
+                "false" => Some(context.i64_type().const_int(0, false).into()),
+                _ => None,
+            })
             .ok_or_else(|| MumeiError::codegen(format!("Undefined variable: {}", name))),
 
         HirExpr::Call { name, args, .. } => match name.as_str() {
