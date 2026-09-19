@@ -60,7 +60,7 @@ Source: `/home/ubuntu/repos/mumei-agent/agent/mcp_server.py`.
 | `approve_review` | `atom_name: str, reviewer: str, notes: str` |  |
 | `escalate_to_lean` | `atom_name: str` |  |
 | `reject_review` | `atom_name: str, reviewer: str, notes: str` |  |
-| `get_agent_status` |  |  |
+| `get_agent_status` | `ctx: Context \| None = None` |  |
 | `send_latent_message` | `message: str, context: str = "{}", verify: bool = True` |  |
 | `send_latent_message_batch` | `messages: str, verify: bool = False` |  |
 | `async_send_latent_message` | `message: str, context: str = "{}", verify: bool = True` |  |
