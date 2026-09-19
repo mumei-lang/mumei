@@ -43,3 +43,32 @@ atom qual_let(n: i64) -> i64
       Mine::Nil => 0
     }
   }
+
+// An enum-typed field bound through a qualified outer pattern resolves
+// its own declared type — `m` is `Mine`, not `Outer`, so qualified
+// inner matches (and nested qualified field patterns) work.
+enum Outer { Wrap(Mine), Bare }
+
+atom qual_nested(o: Outer) -> i64
+  requires: true;
+  ensures: result >= 0;
+  body: {
+    match o {
+      Outer::Wrap(m) => match m {
+        Mine::Yes(v) => if v >= 0 { v } else { 0 - v }
+        Mine::Nil => 0
+      }
+      Outer::Bare => 0
+    }
+  }
+
+atom qual_nested_field(o: Outer) -> i64
+  requires: true;
+  ensures: result >= 0;
+  body: {
+    match o {
+      Outer::Wrap(Mine::Yes(v)) => if v >= 0 { v } else { 0 - v }
+      Outer::Wrap(Mine::Nil) => 0
+      Outer::Bare => 0
+    }
+  }
