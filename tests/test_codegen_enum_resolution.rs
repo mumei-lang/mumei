@@ -232,6 +232,83 @@ atom mk_nullary() -> i64
     );
 }
 
+// A constructed enum value can flow into a `match` target and into another
+// atom's enum-typed parameter.
+#[test]
+fn ctor_value_flows_into_match_and_callee() {
+    let ir = emit_atom_ir(
+        "ctor_flow",
+        r#"
+enum Mine { Cons(i64), Nil }
+
+atom consume(m: Mine) -> i64
+    requires: true;
+    ensures: true;
+    body: {
+        match m {
+            Mine::Cons(v) => v
+            Mine::Nil => 0
+        }
+    }
+
+atom both(n: i64) -> i64
+    requires: true;
+    ensures: true;
+    body: {
+        let a = match Mine::Cons(n) {
+            Mine::Cons(v) => v
+            Mine::Nil => 0
+        };
+        consume(Mine::Cons(a))
+    }
+"#,
+        "both",
+    );
+    assert!(
+        ir.contains("call i64 @consume") && ir.contains("insertvalue { i64, i64 }"),
+        "ctor value must be passed to the callee's enum param:\n{ir}"
+    );
+}
+
+// Binary operators on aggregate values used to panic inside inkwell's
+// into_int_value — they now fail with a clean codegen error instead.
+#[test]
+fn equality_on_enum_values_errors_cleanly() {
+    let bin = env!("CARGO_BIN_EXE_mumei");
+    let fixture = write_fixture(
+        "enum_eq",
+        r#"
+enum Mine { Cons(i64), Nil }
+
+atom eq_ctor(m: Mine) -> i64
+    requires: true;
+    ensures: true;
+    body: {
+        if m == Mine::Nil { 1 } else { 0 }
+    }
+"#,
+    );
+    let dir = fixture.parent().unwrap().to_path_buf();
+    let output = Command::new(bin)
+        .arg("build")
+        .arg(&fixture)
+        .arg("--emit")
+        .arg("llvm-ir")
+        .current_dir(&dir)
+        .output()
+        .expect("run build");
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !output.status.success() && combined.contains("unsupported on struct/enum values"),
+        "enum equality must be a clean codegen error, not a panic:\n{combined}"
+    );
+    std::fs::remove_dir_all(&dir).expect("remove fixture dir");
+}
+
 // A recursive enum cannot be laid out eagerly — construction fails with a
 // clean codegen error instead of overflowing the stack in enum_llvm_type.
 #[test]

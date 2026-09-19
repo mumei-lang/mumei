@@ -630,6 +630,12 @@ pub(crate) fn compile_hir_expr<'a>(
                     ))),
                 }
             } else {
+                if lhs.is_struct_value() || rhs.is_struct_value() {
+                    return Err(MumeiError::codegen(format!(
+                        "operator {:?} is unsupported on struct/enum values in codegen",
+                        op
+                    )));
+                }
                 let l = lhs.into_int_value();
                 let r = rhs.into_int_value();
                 match op {
