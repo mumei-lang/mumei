@@ -15,9 +15,14 @@
   equality (P10-C). `undef` slots of unit variants are skipped (`and` with
   `undef` would poison the conjunction). Different enum types or struct
   operands still fail with a clean codegen error.
-- Tests: `test_codegen_enum_resolution` gains deep-equality and
-  struct-still-errors cases; SPEC_GUIDE's tagged-union section documents the
-  semantics and the fixed parameter bugs.
+- **`len()` on a non-array binding is now a clean codegen error** instead of a
+  silently emitted `i64 0`: `len(m)` on an enum/struct/`Str` value, or
+  `len(a)` on a `let`-bound array literal, previously compiled to
+  `ret i64 0` — wrong code. Verified before fix that real array parameters
+  (fat pointers) keep working.
+- Tests: `test_codegen_enum_resolution` gains deep-equality,
+  struct-still-errors, payload-binding, and `len`-error cases; SPEC_GUIDE's
+  tagged-union section documents the semantics and the fixed parameter bugs.
 
 ---
 
