@@ -139,7 +139,7 @@ CLI values take precedence over environment values. `--intent-fidelity` accepts 
   "ensures": "result >= x",
   "translator_version": "mumei-lean-translator-ir-v2",
   "binder_mapping": { "x": "x", "result": "result" },
-  "bridge_lemma_hash": "ee8cd3ba96c3318b3f07445f4755619744d4e1f9a662af94f3cbce6d41ed4347",
+  "bridge_lemma_hash": "5716cfdd945d68b4a0d75d75c5ade1934cbd76e0dfe16734a8f3dd723cfdd8e9",
   "manual_lemma_reason": null,
   "retry_policy_fingerprint": "9bb6d4f2...",
   "attempt_summary": {

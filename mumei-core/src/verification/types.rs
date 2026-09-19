@@ -742,7 +742,7 @@ pub type VerificationReport = ModuleVerificationReport;
 
 pub const LEAN_TRANSLATOR_VERSION: &str = "mumei-lean-translator-ir-v2";
 pub const LEAN_BRIDGE_LEMMA_HASH: &str =
-    "ee8cd3ba96c3318b3f07445f4755619744d4e1f9a662af94f3cbce6d41ed4347";
+    "5716cfdd945d68b4a0d75d75c5ade1934cbd76e0dfe16734a8f3dd723cfdd8e9";
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 pub struct TranslatorIRProvenanceSpan {
