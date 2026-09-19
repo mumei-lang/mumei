@@ -233,6 +233,8 @@ Out of scope (these keep the Int-tag encoding and the `inductive_data_type` frag
 - a `match` with only literal/variable arms on a scalar target (conservatively still tagged),
 - `let x = <ctor>; match x` hits a pre-existing MIR move-analysis limitation on pattern-bound locals (use `match` on the constructor expression directly or on a parameter).
 
+For the Int-tag enums above, `Enum::Variant` in a contract still resolves — to the variant's tag index (`l == IntList::Nil` means `l == 0`), matching the `match` discriminant convention. Payload-carrying constructors (`IntList::Cons(x, t)`) are not constructible in specs and fail closed as a spec-lowering error, as do arity mismatches and unknown variant names on a known enum (`Shape::Foo` errors rather than silently dropping the clause).
+
 ## Bit-vector `i64` (`--bitvec-i64`)
 
 By default `i64` is encoded as a Z3 `Int`: an unbounded mathematical integer. That encoding cannot express bit patterns, and it lets a contract claim things a machine never does (`x + 1 > x` always holds). `--bitvec-i64` switches the encoding to `BV(64)`, i.e. a 64-bit two's complement machine integer.

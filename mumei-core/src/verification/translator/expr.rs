@@ -1148,6 +1148,49 @@ pub(crate) fn expr_to_z3<'a>(
                             if let Some(value) = datatype::enum_ctor_apply(vc, name, &ctor_args) {
                                 return Ok(value);
                             }
+                            // A resolved enum+variant whose construction still
+                            // failed (arity mismatch, or the enum is not a
+                            // finite ADT) must not degrade to the
+                            // clause-skipping "Unknown function" path — that
+                            // would silently drop the contract clause.
+                            // Qualified `E::V` where `E` is a known enum but
+                            // `V` is not one of its variants (typo) is also a
+                            // hard error rather than a skipped clause.
+                            if let Some((qual, variant)) = name.split_once("::") {
+                                if let Some(ed) = vc.module_env.get_enum(qual) {
+                                    if !ed.variants.iter().any(|v| v.name == variant) {
+                                        return Err(MumeiError::verification(format!(
+                                            "Enum '{qual}' has no variant named '{variant}'"
+                                        )));
+                                    }
+                                }
+                            }
+                            let variant = name.rsplit("::").next().unwrap_or(name);
+                            if let Some(ed) = vc.module_env.find_enum_by_variant(variant) {
+                                let qualified_ok = name
+                                    .split_once("::")
+                                    .map(|(qual, _)| qual == ed.name)
+                                    .unwrap_or(true);
+                                let expected = ed
+                                    .variants
+                                    .iter()
+                                    .find(|v| v.name == variant)
+                                    .map(|v| v.fields.len());
+                                if qualified_ok {
+                                    if let Some(arity) = expected {
+                                        if arity == args.len() {
+                                            return Err(MumeiError::verification(format!(
+                                                "Enum constructor '{name}' is not constructible in specs: enum '{}' is not a finite ADT (recursive, generic, empty, or non-scalar payload — it keeps the Int-tag encoding; use the tag literal or a `match` discriminant)",
+                                                ed.name
+                                            )));
+                                        }
+                                        return Err(MumeiError::verification(format!(
+                                            "Enum constructor '{name}' takes {arity} payload arg(s), got {}",
+                                            args.len()
+                                        )));
+                                    }
+                                }
+                            }
                         }
                         Err(MumeiError::verification(format!(
                             "Unknown function: {}",
@@ -2413,6 +2456,18 @@ pub(crate) fn expr_to_z3<'a>(
                         datatype::enum_ctor_apply(vc, &format!("{}::{}", name, field_name), &[])
                     {
                         return Ok(value);
+                    }
+                }
+                // Non-finite enums (recursive / generic / non-scalar payload /
+                // empty) keep the Int-tag encoding: `Enum::Variant` on them
+                // denotes the variant's tag index, so `l == IntList::Nil`
+                // means `l == 0`. Previously this fell through to a fresh
+                // unconstrained const, making the comparison vacuous.
+                if !env.contains_key(name) {
+                    if let Some(ed) = vc.module_env.get_enum(name) {
+                        if let Some(idx) = ed.variants.iter().position(|v| v.name == *field_name) {
+                            return Ok(Int::from_i64(ctx, idx as i64).into());
+                        }
                     }
                 }
             }
