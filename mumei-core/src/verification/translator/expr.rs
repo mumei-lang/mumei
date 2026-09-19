@@ -1563,15 +1563,31 @@ pub(crate) fn expr_to_z3<'a>(
             // surrounding else-guard, while still keeping `let left =
             // merge_sort(mid)` ensures-asserts (`left == mid`) live for the
             // outer postcondition check.
+            // Binding types are scoped like the value env: each branch runs
+            // on a fresh snapshot, and afterwards only entries the two
+            // branches agree on survive (an if-local `let` must not leak its
+            // inferred type onto an outer binding).
+            let types_before = vc.local_enum_types.borrow().clone();
             vc.path_cond_stack.borrow_mut().push(c.clone());
             let mut then_env = env.clone();
             let t = stmt_to_z3(vc, then_branch, &mut then_env, solver_opt);
             vc.path_cond_stack.borrow_mut().pop();
             let t = t?;
+            let then_types = vc.local_enum_types.borrow().clone();
+            *vc.local_enum_types.borrow_mut() = types_before.clone();
             vc.path_cond_stack.borrow_mut().push(c.not());
             let mut else_env = env.clone();
             let e = stmt_to_z3(vc, else_branch, &mut else_env, solver_opt);
             vc.path_cond_stack.borrow_mut().pop();
+            let else_types = vc.local_enum_types.borrow().clone();
+            let mut merged = types_before;
+            merged.retain(|k, v| then_types.get(k) == Some(v) && else_types.get(k) == Some(v));
+            for (k, v) in then_types.iter() {
+                if else_types.get(k) == Some(v) {
+                    merged.insert(k.clone(), v.clone());
+                }
+            }
+            *vc.local_enum_types.borrow_mut() = merged;
             let (t, e) = unify_branch_sorts(t, e?)?;
             // Branches ran on isolated env copies — merge their writes with
             // `ite(c, then, else)` per variable. Running both on the shared

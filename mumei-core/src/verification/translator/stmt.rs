@@ -273,6 +273,7 @@ pub(crate) fn stmt_to_z3<'a>(
                 // concrete loop-entry bindings.
                 {
                     let env_snapshot = env.clone();
+                    let types_snapshot = vc.local_enum_types.borrow().clone();
                     let mut step_env = env.clone();
                     havoc_vars(vc, &mut step_env, &modified);
                     let marks = obligation_marks(vc);
@@ -301,11 +302,13 @@ pub(crate) fn stmt_to_z3<'a>(
                     }
                     solver.pop(1);
                     *env = env_snapshot;
+                    *vc.local_enum_types.borrow_mut() = types_snapshot.clone();
                 }
 
                 // Termination Check — again under havoced pre-state.
                 if let Some(dec_expr) = decreases {
                     let env_snapshot = env.clone();
+                    let types_snapshot = vc.local_enum_types.borrow().clone();
                     let mut term_env = env.clone();
                     havoc_vars(vc, &mut term_env, &modified);
                     let marks = obligation_marks(vc);
@@ -331,6 +334,7 @@ pub(crate) fn stmt_to_z3<'a>(
                     if solver.check() == SatResult::Sat {
                         solver.pop(1);
                         *env = env_snapshot;
+                        *vc.local_enum_types.borrow_mut() = types_snapshot.clone();
                         return Err(MumeiError::verification(
                             "Termination check failed: decreases expression may be negative",
                         ));
@@ -348,12 +352,14 @@ pub(crate) fn stmt_to_z3<'a>(
                     if solver.check() == SatResult::Sat {
                         solver.pop(1);
                         *env = env_snapshot;
+                        *vc.local_enum_types.borrow_mut() = types_snapshot.clone();
                         return Err(MumeiError::verification(
                             "Termination check failed: decreases expression does not strictly decrease"
                         ));
                     }
                     solver.pop(1);
                     *env = env_snapshot;
+                    *vc.local_enum_types.borrow_mut() = types_snapshot.clone();
                 }
 
                 // Post-loop state: havoc the loop-carried vars once more and
