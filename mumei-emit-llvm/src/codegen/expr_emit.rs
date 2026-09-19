@@ -696,6 +696,98 @@ pub(crate) fn compile_hir_expr<'a>(
                 }
             } else {
                 if lhs.is_struct_value() || rhs.is_struct_value() {
+                    // Enum equality compares tag + every payload slot —
+                    // matching the verifier's deep datatype equality (P10-C).
+                    // Pointer slots are `Str` payloads → mumei_str_eq.
+                    if matches!(op, Op::Eq | Op::Neq)
+                        && lhs.is_struct_value()
+                        && rhs.is_struct_value()
+                    {
+                        let l_enum = infer_struct_type_name(left, var_types, module_env)
+                            .filter(|n| module_env.get_enum(n).is_some());
+                        let r_enum = infer_struct_type_name(right, var_types, module_env)
+                            .filter(|n| module_env.get_enum(n).is_some());
+                        if l_enum.is_some() && l_enum == r_enum && lhs.get_type() == rhs.get_type()
+                        {
+                            let ls = lhs.into_struct_value();
+                            let rs = rhs.into_struct_value();
+                            let field_count = ls.get_type().count_fields();
+                            let mut acc = context.bool_type().const_int(1, false);
+                            for idx in 0..field_count {
+                                let lf = llvm!(builder.build_extract_value(ls, idx, "enum_eq_l"));
+                                let rf = llvm!(builder.build_extract_value(rs, idx, "enum_eq_r"));
+                                // `undef` slots (unit variants store nothing
+                                // in them) carry no information — `and` with
+                                // undef would poison the whole conjunction.
+                                let is_undef = |v: BasicValueEnum| match v {
+                                    BasicValueEnum::IntValue(iv) => iv.is_undef(),
+                                    BasicValueEnum::FloatValue(fv) => fv.is_undef(),
+                                    BasicValueEnum::PointerValue(pv) => pv.is_undef(),
+                                    BasicValueEnum::StructValue(sv) => sv.is_undef(),
+                                    BasicValueEnum::ArrayValue(av) => av.is_undef(),
+                                    BasicValueEnum::VectorValue(vv) => vv.is_undef(),
+                                };
+                                if is_undef(lf) || is_undef(rf) {
+                                    continue;
+                                }
+                                let cmp: inkwell::values::IntValue = if lf.is_int_value() {
+                                    llvm!(builder.build_int_compare(
+                                        IntPredicate::EQ,
+                                        lf.into_int_value(),
+                                        rf.into_int_value(),
+                                        "enum_eq_int"
+                                    ))
+                                } else if lf.is_float_value() {
+                                    llvm!(builder.build_float_compare(
+                                        FloatPredicate::OEQ,
+                                        lf.into_float_value(),
+                                        rf.into_float_value(),
+                                        "enum_eq_float"
+                                    ))
+                                } else {
+                                    // Pointer slot → Str payload — compare
+                                    // contents via the runtime helper.
+                                    let str_eq_fn =
+                                        module.get_function("mumei_str_eq").unwrap_or_else(|| {
+                                            let ptr_t =
+                                                context.ptr_type(inkwell::AddressSpace::default());
+                                            let fn_type = context
+                                                .i64_type()
+                                                .fn_type(&[ptr_t.into(), ptr_t.into()], false);
+                                            module.add_function("mumei_str_eq", fn_type, None)
+                                        });
+                                    let res = llvm!(builder.build_call(
+                                        str_eq_fn,
+                                        &[lf.into(), rf.into()],
+                                        "enum_eq_str"
+                                    ));
+                                    let res_int = res
+                                        .try_as_basic_value()
+                                        .left()
+                                        .ok_or(MumeiError::codegen(
+                                            "str_eq returned void".to_string(),
+                                        ))?
+                                        .into_int_value();
+                                    llvm!(builder.build_int_compare(
+                                        IntPredicate::NE,
+                                        res_int,
+                                        context.i64_type().const_int(0, false),
+                                        "enum_eq_str_bool"
+                                    ))
+                                };
+                                acc = llvm!(builder.build_and(acc, cmp, "enum_eq_and"));
+                            }
+                            if matches!(op, Op::Neq) {
+                                acc = llvm!(builder.build_not(acc, "enum_neq_not"));
+                            }
+                            return Ok(llvm!(builder.build_int_z_extend(
+                                acc,
+                                context.i64_type(),
+                                "enum_eq_ext"
+                            ))
+                            .into());
+                        }
+                    }
                     return Err(MumeiError::codegen(format!(
                         "operator {:?} is unsupported on struct/enum values in codegen",
                         op
