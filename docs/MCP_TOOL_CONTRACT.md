@@ -31,7 +31,7 @@ Source: `mcp_server.py` in the mumei repository.
 | `execute_mm` | `source_code: str, output_name: str = "katana", command: str = "build"` |  |
 | `get_inferred_effects` | `source_code: str` |  |
 | `get_allowed_effects` | `project_dir: str = "."` |  |
-| `set_allowed_effects` | `allowed: "list[str] \| None" = None, denied: "list[str] \| None" = None` |  |
+| `set_allowed_effects` | `allowed: "list[str] \| None" = None, denied: "list[str] \| None" = None, project_dir: str = "."` |  |
 | `list_std_catalog` |  |  |
 | `visualize_std_graph` | `format: str = "mermaid"` |  |
 | `visualize_proof_graph` | `source_code: str, format: str = "json"` |  |
