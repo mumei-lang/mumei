@@ -2,6 +2,36 @@
 
 ---
 
+### 2026-09-19: deterministic variant-owner resolution reaches HIR lowering and LLVM codegen
+
+- **`ModuleEnv::resolve_variant_owner_by_hint`** (`module_env.rs`): the
+  verify-side deterministic resolution rule is now available without a Z3
+  context — declared-type hint wins, sole/agreeing owners resolve, truly
+  ambiguous names error listing the owners.
+- **HIR lowering** (`hir.rs`): a bare `Name(args)` call converts to
+  `VariantInit` only when the owner is unambiguous (sole owner or agreeing
+  signatures) — a colliding bare name stays a `Call` and fails closed
+  downstream instead of silently binding to a per-process HashMap pick.
+- **LLVM codegen** (`mumei-emit-llvm`): `compile_pattern_test`,
+  `bind_pattern_variables`, and the payload extractors resolve the owning
+  enum through the match target's declared type — a bare parameter via
+  `var_types` (which now records enum-typed parameters, not just structs),
+  a `th.t` field access via the struct field's declared type, and other
+  scrutinees via `infer_expr_type_name`. Nested variant field patterns
+  propagate the field's declared type (`Self` resolves to the owner).
+  Before this, `mumei build` could emit tag comparisons for a different
+  enum than the one the verifier used when variant names collided
+  (e.g. a user `enum Mine { Cons(i64), Nil }` vs the prelude `List`),
+  silently diverging compiled code from verified semantics.
+- **Tests**: `tests/test_codegen_enum_resolution.rs` pins the emitted tag
+  constants for a prelude-colliding `match` on a declared parameter and on
+  a struct field; 5 `ModuleEnv` unit tests cover hint wins, hint-misses,
+  conflicting-tag ambiguity, agreeing signatures, and sole/unknown owners.
+- **Docs**: `SPEC_GUIDE.md` "Finite enums and tagged unions" notes that
+  codegen applies the same declared-type rule when emitting tag checks.
+
+---
+
 ### 2026-09-18: P10-C — finite enums verify on native Z3 datatype sorts
 
 - **`mumei-core/src/verification/support/datatype.rs` (new)**: a finite,

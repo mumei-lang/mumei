@@ -472,7 +472,11 @@ pub fn lower_expr_with_env(
         if let Some(env) = module_env {
             // Only convert if the name is NOT a known atom (functions take priority)
             if env.get_atom(name).is_none() {
-                if let Some(enum_def) = env.find_enum_by_variant(name) {
+                // Resolve the owning enum deterministically: a sole owner or
+                // owners with identical signatures convert; a genuinely
+                // ambiguous bare name stays a Call so downstream stages fail
+                // closed instead of picking an enum per HashMap order.
+                if let Ok(Some(enum_def)) = env.resolve_variant_owner_by_hint(name, None) {
                     return HirExpr::VariantInit {
                         enum_name: enum_def.name.clone(),
                         variant_name: name.clone(),
@@ -484,6 +488,17 @@ pub fn lower_expr_with_env(
     }
 
     result
+}
+
+/// Type of a lowered expression when inferrable — `Some("IntList")` for a
+/// variable/field declared as an enum, call results via the callee's
+/// declared return type, etc. Used by codegen to resolve variant-pattern
+/// owners deterministically (the match target's declared type).
+pub fn infer_expr_type_name(
+    expr: &HirExpr,
+    module_env: Option<&crate::verification::ModuleEnv>,
+) -> Option<String> {
+    infer_hir_expr_type(expr, module_env)
 }
 
 fn infer_hir_expr_type(
