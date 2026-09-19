@@ -59,6 +59,7 @@ pub(crate) fn verify_atom_invariant(
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         bv_div_obligations: std::cell::RefCell::new(Vec::new()),
         clause_context: std::cell::RefCell::new(Vec::new()),
+        enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         bitvec_i64_global: false,
     };
 
@@ -66,13 +67,10 @@ pub(crate) fn verify_atom_invariant(
 
     // パラメータをシンボリック変数として登録
     for param in &atom.params {
-        let var = param_z3_value(
-            &ctx,
+        let var = super::datatype::param_z3_value_for_vc(
+            &vc,
             param.name.as_str(),
             param.type_name.as_deref(),
-            module_env,
-            ieee754_f64,
-            bitvec_i64,
         );
         env.insert(param.name.clone(), var);
 

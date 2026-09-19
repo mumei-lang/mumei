@@ -2,6 +2,63 @@
 
 ---
 
+### 2026-09-18: P10-C — finite enums verify on native Z3 datatype sorts
+
+- **`mumei-core/src/verification/support/datatype.rs` (new)**: a finite,
+  non-recursive, non-generic enum whose payload fields all resolve to
+  `i64`/`f64`/`Str`/`bool` lowers to a real Z3 `DatatypeSort` — variants are
+  constructors with `is-<Variant>` testers and per-field selectors of the
+  payload's true sort. Sorts are cached per context (`VCtx::enum_sorts`) so
+  every use shares one datatype declaration.
+- **Param/result seeding** (`param_z3_value_for_vc`): enum-typed params,
+  `result`, and callee return placeholders in spec_validation, vacuity,
+  call_graph, executor, and call-result seeding become `Datatype` consts.
+  Enums with recursive/generic/enum/struct/array payloads stay on the Int-tag
+  path.
+- **`match` on datatype targets** (`pattern.rs`, `expr.rs`): arm coverage is
+  the tester disjunction — `¬∨is_<V>(target)` UNSAT by the datatype
+  completeness axiom — and a missing arm reports the constructor by name
+  (`value = Blue -- no matching arm`). Field patterns bind to real selector
+  applications, so `s == Named("hi")` proves `n == "hi"` in the `Named(n)`
+  arm. `==`/`!=` between same-sort datatype operands is supported; ctor
+  expressions `E::V(args)`, `E::V`, and bare `V` construct datatype values.
+- **Fragment boundary** (`fragment.rs`): finite-ADT enum params and `match`
+  expressions on finite ADTs no longer tag `inductive_data_type` — they stay
+  in the decidable fragment. Recursive enums, generic enums, non-scalar
+  payloads, and scalar-only `match`es keep the tag (Lean 4 delegation).
+- **Tests**: `tests/test_datatype_enum{,_negative}.mm` + CLI harness (7 atoms
+  incl. Str/f64/bool payload selectors, requires-side ctor equality, and a
+  recursive-enum Int-tag pin); 6 fragment-classification unit tests.
+- **Review hardening (self-review rounds 1–6)**: empty enums keep the
+  Int-tag path (`DatatypeBuilder` panics on zero variants);
+  `variant_selector_apply` indexes accessors safely; ctor misuse (arity
+  mismatch, non-finite ctor, unknown variant on a known enum) is a hard
+  `spec_lowering_failed` instead of a silently-skipped clause; non-finite
+  `E::V` resolves to the tag index; comparing two different enum sorts is a
+  spec error. **Variant-owner resolution is now deterministic** —
+  `module_env.enums` is a `HashMap`, so a bare `Cons` pattern previously
+  picked its tag index from whichever of `IntList`/prelude `List` came first
+  in the hash order (same file verifying or failing per process).
+  `resolve_variant_owner` resolves via the match target's declared type,
+  accepts the unambiguous case, and fails closed when owners disagree;
+  `detect_enum_from_arms`, counterexample decoding, bare-variant ctor
+  errors, and fragment classification follow the same rule. Declared-type
+  hints reach `match result` (the executor rebinds `result` to the body
+  value, so the const name is lost — the hint comes from the scrutinee
+  expression), bound recursive tails (`__proj_{Enum}_{Variant}_{i}`
+  projector names carry the enum), and struct-field targets (`match th.t`
+  resolves `th_t` against `th: Thermo`'s field type, including nested
+  struct paths).
+- **Tests**: `tests/test_datatype_enum{,_negative}.mm` + CLI harness (7 atoms
+  incl. Str/f64/bool payload selectors, requires-side ctor equality, and a
+  recursive-enum Int-tag pin); `test_enum_variant_resolution{,_negative}.mm`
+  pins declared-type disambiguation and the fail-closed ambiguity error;
+  6 fragment-classification unit tests.
+- **Docs**: `SPEC_GUIDE.md` gains "Finite enums and tagged unions";
+  `ROADMAP.md` marks P10-C complete.
+
+---
+
 ### 2026-09-19: P10-B — regex contracts compile to Z3 RegLan (`str.in_re`)
 
 - **`mumei-core/src/verification/support/reglan.rs` (new)**: a mini-compiler

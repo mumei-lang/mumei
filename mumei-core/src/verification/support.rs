@@ -1,6 +1,7 @@
 #![allow(unused_imports)]
 mod call_graph;
 mod dataflow_inference;
+pub(crate) mod datatype;
 mod effects;
 mod law_verification;
 mod nominal_types;

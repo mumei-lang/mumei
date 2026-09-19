@@ -468,6 +468,14 @@ pub(crate) fn expr_to_z3<'a>(
             if name == "false" {
                 return Ok(Bool::from_bool(ctx, false).into());
             }
+            // P10-C: a bare uppercase identifier naming a nullary variant of a
+            // finite ADT (e.g. `Red` for `enum Color { Red, Green, Blue }`)
+            // constructs the datatype value.
+            if name.chars().next().is_some_and(|c| c.is_uppercase()) {
+                if let Some(value) = datatype::enum_ctor_apply(vc, name, &[])? {
+                    return Ok(value);
+                }
+            }
             Ok(Int::new_const(ctx, name.as_str()).into())
         }
         Expr::Call(name, args) => {
@@ -953,14 +961,8 @@ pub(crate) fn expr_to_z3<'a>(
                             .return_type
                             .as_deref()
                             .or(if has_float { Some("f64") } else { None });
-                        let result_z3: Dynamic = param_z3_value(
-                            ctx,
-                            result_name.as_str(),
-                            result_type,
-                            vc.module_env,
-                            vc.ieee754_f64,
-                            vc.bitvec_i64,
-                        );
+                        let result_z3: Dynamic =
+                            datatype::param_z3_value_for_vc(vc, result_name.as_str(), result_type);
 
                         // 構造体を返す呼び出し: 結果のフィールドをシンボル化し、
                         // 呼び出し先が保証する跨フィールド不変量を事実として仮定する
@@ -1134,6 +1136,62 @@ pub(crate) fn expr_to_z3<'a>(
 
                         Ok(result_z3)
                     } else {
+                        // P10-C: `Enum::Variant(args)` / `Variant(args)`
+                        // constructs a finite-ADT value through the Z3
+                        // datatype constructor.
+                        if name.contains("::") || vc.module_env.find_enum_by_variant(name).is_some()
+                        {
+                            let mut ctor_args = Vec::new();
+                            for arg in args {
+                                ctor_args.push(expr_to_z3(vc, arg, env, solver_opt)?);
+                            }
+                            if let Some(value) = datatype::enum_ctor_apply(vc, name, &ctor_args)? {
+                                return Ok(value);
+                            }
+                            // A resolved enum+variant whose construction still
+                            // failed (arity mismatch, or the enum is not a
+                            // finite ADT) must not degrade to the
+                            // clause-skipping "Unknown function" path — that
+                            // would silently drop the contract clause.
+                            // Resolve `E` directly for qualified `E::V` (the
+                            // prelude's generic `Option`/`Result`/`List`
+                            // variants can shadow a user enum in a
+                            // name-only scan); bare `V` resolved unambiguously
+                            // already inside `enum_ctor_apply`.
+                            let owner = if let Some((qual, _)) = name.split_once("::") {
+                                vc.module_env.get_enum(qual)
+                            } else {
+                                vc.module_env.find_enum_by_variant(name)
+                            };
+                            if let Some(ed) = owner {
+                                let variant = name.rsplit("::").next().unwrap_or(name);
+                                match ed.variants.iter().find(|v| v.name == variant) {
+                                    Some(vdef) => {
+                                        let arity = vdef.fields.len();
+                                        if arity == args.len() {
+                                            return Err(MumeiError::verification(format!(
+                                                "Enum constructor '{name}' is not constructible in specs: enum '{}' is not a finite ADT (recursive, generic, empty, or non-scalar payload — it keeps the Int-tag encoding; use the tag literal or a `match` discriminant)",
+                                                ed.name
+                                            )));
+                                        }
+                                        return Err(MumeiError::verification(format!(
+                                            "Enum constructor '{name}' takes {arity} payload arg(s), got {}",
+                                            args.len()
+                                        )));
+                                    }
+                                    None if name.contains("::") => {
+                                        // `E` is a known enum but `V` is not
+                                        // one of its variants — a typo must
+                                        // not be silently dropped.
+                                        return Err(MumeiError::verification(format!(
+                                            "Enum '{}' has no variant named '{variant}'",
+                                            ed.name
+                                        )));
+                                    }
+                                    None => {}
+                                }
+                            }
+                        }
                         Err(MumeiError::verification(format!(
                             "Unknown function: {}",
                             name
@@ -1367,6 +1425,27 @@ pub(crate) fn expr_to_z3<'a>(
                             eq.into()
                         });
                     }
+                    // P10-C: finite-ADT equality requires the *same* datatype
+                    // sort — comparing two different enums is a hard error
+                    // (next arm), not a sort mismatch the solver would
+                    // interpret.
+                    Op::Eq | Op::Neq
+                        if l.as_datatype().is_some()
+                            && r.as_datatype().is_some()
+                            && l.get_sort() == r.get_sort() =>
+                    {
+                        let eq = l._eq(&r);
+                        return Ok(if matches!(op, Op::Neq) {
+                            eq.not().into()
+                        } else {
+                            eq.into()
+                        });
+                    }
+                    Op::Eq | Op::Neq if l.as_datatype().is_some() && r.as_datatype().is_some() => {
+                        return Err(MumeiError::verification(
+                            "Cannot compare enum values of different types".to_string(),
+                        ));
+                    }
                     _ => {}
                 }
                 let li = l.as_int().ok_or("Expected int")?;
@@ -1561,6 +1640,25 @@ pub(crate) fn expr_to_z3<'a>(
         Expr::Match { target, arms } => {
             let target_z3 = expr_to_z3(vc, target, env, solver_opt)?;
 
+            // Declared enum type of the scrutinee, when it's a bare
+            // parameter/`result` variable — disambiguates Variant arms
+            // whose names collide across enums (prelude List vs user
+            // `enum IntList`). The const-name lookup inside
+            // `resolve_variant_owner` covers let-aliases; `result` is
+            // rebound to the evaluated body value, so only the Expr knows.
+            let decl_hint: Option<String> = vc.current_atom.and_then(|atom| {
+                let ty = match target.as_ref() {
+                    Expr::Variable(v) if v == "result" => atom.return_type.as_deref()?,
+                    Expr::Variable(v) => atom
+                        .params
+                        .iter()
+                        .find(|p| p.name == *v)
+                        .and_then(|p| p.type_name.as_deref())?,
+                    _ => return None,
+                };
+                Some(crate::verification::support::datatype::type_name_base(ty).to_string())
+            });
+
             // ========================================================
             // Enum ドメイン制約の自動注入
             // ========================================================
@@ -1569,7 +1667,9 @@ pub(crate) fn expr_to_z3<'a>(
             // これにより Z3 が「これら以外のバリアントは存在しない」ことを知り、
             // 網羅性チェックの信頼性が 100% になる。
             if let Some(solver) = solver_opt {
-                if let Some(enum_def) = detect_enum_from_arms(arms, vc.module_env) {
+                if let Some(enum_def) =
+                    detect_enum_from_arms(arms, vc, &target_z3, decl_hint.as_deref())
+                {
                     let n = enum_def.variants.len() as i64;
                     if let Some(tag_int) = target_z3.as_int() {
                         // tag ∈ [0, n_variants)
@@ -1594,6 +1694,7 @@ pub(crate) fn expr_to_z3<'a>(
                         env,
                         vc,
                         solver_opt,
+                        decl_hint.as_deref(),
                     )?;
                     // ガード条件がある場合は AND で結合
                     let full_cond = if let Some(guard) = &arm.guard {
@@ -1623,7 +1724,13 @@ pub(crate) fn expr_to_z3<'a>(
                     if solver.check() == SatResult::Sat {
                         let counterexample = if let Some(model) = solver.get_model() {
                             // ターゲット変数の具体的な値を取得
-                            format_counterexample(&model, &target_z3, arms, vc.module_env)
+                            format_counterexample(
+                                &model,
+                                &target_z3,
+                                arms,
+                                vc,
+                                decl_hint.as_deref(),
+                            )
                         } else {
                             "unknown value".to_string()
                         };
@@ -1664,7 +1771,14 @@ pub(crate) fn expr_to_z3<'a>(
                 // B. ネストパターンの再帰解体:
                 //    pattern_bind_variables が再帰的にパターンを分解し、
                 //    バインド変数を arm_env に登録する。
-                pattern_bind_variables(ctx, &arm.pattern, &target_z3, &mut arm_env, vc.module_env);
+                pattern_bind_variables(
+                    ctx,
+                    &arm.pattern,
+                    &target_z3,
+                    &mut arm_env,
+                    vc,
+                    decl_hint.as_deref(),
+                );
 
                 let arm_cond = pattern_to_z3_condition(
                     ctx,
@@ -1673,6 +1787,7 @@ pub(crate) fn expr_to_z3<'a>(
                     &mut arm_env,
                     vc,
                     solver_opt,
+                    decl_hint.as_deref(),
                 )?;
                 let full_cond = if let Some(guard) = &arm.guard {
                     let guard_z3 = expr_to_z3(vc, guard, &mut arm_env, None)?
@@ -2167,14 +2282,8 @@ pub(crate) fn expr_to_z3<'a>(
                         CALL_REF_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     let result_name = format!("call_ref_{}_{}", callee_name, call_id);
                     let result_type = callee_atom.return_type.as_deref();
-                    let result_z3: Dynamic = param_z3_value(
-                        ctx,
-                        result_name.as_str(),
-                        result_type,
-                        vc.module_env,
-                        vc.ieee754_f64,
-                        vc.bitvec_i64,
-                    );
+                    let result_z3: Dynamic =
+                        datatype::param_z3_value_for_vc(vc, result_name.as_str(), result_type);
 
                     // 構造体を返す参照呼び出し: 通常呼び出しと同様に結果のフィールドを
                     // シンボル化し、呼び出し先が保証する不変量を仮定する。
@@ -2373,6 +2482,41 @@ pub(crate) fn expr_to_z3<'a>(
                             "{UNSUPPORTED_TUPLE_RESULT_INDEXING} component is unavailable"
                         ))
                     });
+                }
+            }
+
+            // P10-C: `Enum::Variant` (nullary) parses as
+            // `FieldAccess(Variable("Enum"), "Variant")` — construct the
+            // datatype value. A bound variable named `Enum` wins (shadowing),
+            // and `.`-spelled accesses to an enum name are equivalent here.
+            if let Expr::Variable(name) = inner_expr.as_ref() {
+                if !env.contains_key(name)
+                    && vc.module_env.enums.contains_key(name)
+                    && datatype::is_finite_adt(vc.module_env.get_enum(name).unwrap(), vc.module_env)
+                {
+                    if let Some(value) =
+                        datatype::enum_ctor_apply(vc, &format!("{}::{}", name, field_name), &[])?
+                    {
+                        return Ok(value);
+                    }
+                }
+                // Non-finite enums (recursive / generic / non-scalar payload /
+                // empty) keep the Int-tag encoding: `Enum::Variant` on them
+                // denotes the variant's tag index, so `l == IntList::Nil`
+                // means `l == 0`. Previously this fell through to a fresh
+                // unconstrained const, making the comparison vacuous.
+                if !env.contains_key(name) {
+                    if let Some(ed) = vc.module_env.get_enum(name) {
+                        if let Some(idx) = ed.variants.iter().position(|v| v.name == *field_name) {
+                            return Ok(Int::from_i64(ctx, idx as i64).into());
+                        }
+                        // `E` names a known enum but `V` is not one of its
+                        // variants — a typo'd variant must not degrade to a
+                        // fresh const (vacuous comparison).
+                        return Err(MumeiError::verification(format!(
+                            "Enum '{name}' has no variant named '{field_name}'"
+                        )));
+                    }
                 }
             }
 

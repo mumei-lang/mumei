@@ -204,6 +204,41 @@ Recommended:
 effect RegexSafeFileRead(path: Str) where matches(path, "^/tmp/[a-z]+/.*");
 ```
 
+### Finite enums and tagged unions
+
+A non-recursive `enum` with no type parameters and only scalar payload fields (`i64`, `f64`, `Str`, `bool`) is verified on a native Z3 *datatype sort*: each variant becomes a constructor with an `is-<Variant>` tester and one selector per payload field that carries the field's real sort — a `Str` payload projects as a Z3 `String`, an `f64` payload as `Real` (or IEEE 754 `Float` under `--ieee754-f64`).
+
+What this buys over the legacy Int-tag encoding:
+
+- **Exhaustiveness is exact**: `match` coverage is decided by the datatype completeness axiom, so a missing arm reports the uncovered constructor by name (`value = Blue -- no matching arm`) — no Int domain-constraint step.
+- **Payload reasoning**: field patterns bind to selector applications with the real sort. `requires: s == Shape::Named("hi")` implies `n == "hi"` inside the `Named(n)` arm.
+- **Constructor equality/injectivity**: `Shape::Point != Shape::Named("x")` and `s == Shape::Point` in `requires`/`ensures` are real equalities.
+- **Construction**: `Shape::Named("x")`, `Shape::Point`, and bare `Point` (when unbound) all construct datatype values.
+
+```mumei
+enum Shape { Point, Named(Str) }
+
+atom label_of(s: Shape) -> Str
+    requires: s == Shape::Named("hi");
+    ensures: result == "hi";
+    body: { match s { Point => "origin", Named(n) => n } }
+```
+
+Out of scope (these keep the Int-tag encoding and the `inductive_data_type` fragment tag for Lean 4 delegation):
+
+- empty enums (`enum Empty {}` — Z3 datatypes need ≥1 constructor; they keep the Int-tag path, so an `Empty` param tags `inductive_data_type`),
+- recursive enums (`enum List { Nil, Cons(i64, List) }` — any `Self` payload),
+- generic enums (`Option<T>`, `Result<T, E>` — until a monomorphisation layer exists),
+- enums whose payload is another enum, a struct, or an array,
+- a `match` with only literal/variable arms on a scalar target (conservatively still tagged),
+- `let x = <ctor>; match x` hits a pre-existing MIR move-analysis limitation on pattern-bound locals (use `match` on the constructor expression directly or on a parameter).
+
+For the Int-tag enums above, `Enum::Variant` in a contract still resolves — to the variant's tag index (`l == IntList::Nil` means `l == 0`), matching the `match` discriminant convention. Payload-carrying constructors (`IntList::Cons(x, t)`) are not constructible in specs and fail closed as a spec-lowering error, as do arity mismatches and unknown variant names on a known enum (`Shape::Foo` errors rather than silently dropping the clause).
+
+A bare variant name (`Ok`, `Red`) is ambiguous when several enums declare it — note the auto-loaded prelude contributes `Option`/`Result`/`List`, so `Ok`/`Err`/`Some`/`None`/`Nil`/`Cons` are always ambiguous without a qualifier. Write `R2::Ok` instead of bare `Ok`; comparing two different enum types (`r == R1::Ok` on `r: R2`) is a spec-lowering error, not a `false` clause.
+
+The same ambiguity applies to `match` arms: a `Variant` pattern resolves its tag against the match target's **declared enum type** (`match l` on `l: IntList` uses `IntList`'s indices), so `enum IntList { Cons(i64, Self), Nil }` keeps `Cons = 0` even though the prelude `List` numbers it `1`. The same rule covers `match result` (the atom's return type), `let`-aliases of a declared parameter, nested variant field patterns (`Cons(h, Cons(h2, t2))` — the `Self` field's enum), `match t` on a bound tail — projector constants are named `__proj_{Enum}_{Variant}_{i}` so the declared type survives binding — and `match th.t` on a struct field (the field's declared type, including nested paths like `o.inner.depth`). When the target's type cannot be determined (e.g. `match x + 1`, or a `let`-bound struct literal's field) and the owners disagree on indices or arity, verification fails closed with an ambiguity error rather than picking an enum at random.
+
 ## Bit-vector `i64` (`--bitvec-i64`)
 
 By default `i64` is encoded as a Z3 `Int`: an unbounded mathematical integer. That encoding cannot express bit patterns, and it lets a contract claim things a machine never does (`x + 1 > x` always holds). `--bitvec-i64` switches the encoding to `BV(64)`, i.e. a 64-bit two's complement machine integer.
@@ -276,7 +311,7 @@ With `mumei verify --warn-fragment`, the verifier emits an `outside_decidable_fr
 | `array_without_bounds` | `arr[i]` without `i >= 0 && i < n` | Add explicit bounds in `requires`, `ensures`, or quantifier range |
 | `quantifier_alternation` | Mixed `forall` and `exists` obligations | Split the spec or provide a constructible witness |
 | `trigger_sensitive_quantifier` | Quantifier over array access or nested quantifier | Bound the range tightly and simplify the body |
-| `inductive_data_type` | Recursive enum/match shape | Prefer finite enum cases or Lean proofs |
+| `inductive_data_type` | Recursive/generic/non-scalar enum param, scalar-only `match` | Use a finite scalar-payload enum (verified natively — see "Finite enums and tagged unions") or escalate to Lean |
 | `recursive_invariant` | While loop or recursive invariant | Keep invariants linear and local, or escalate to Lean |
 | `complex_temporal_effect` | Many states/transitions or implicit history | Reduce to finite explicit transitions |
 | `nested_aliasing` | Multiple `ref mut` aliases or nested mutable scopes | Split the atom or serialize mutation through one owner |

@@ -1174,40 +1174,24 @@ Lean 委譲境界: `mumei-core/src/verification/types.rs` の `string_regex_brid
 - `regex_semantics` タグによる Lean escalation 件数: ≥ 60% 削減
 - RE 変換由来の反例（受理/非受理文字列）出力率: 100%
 
-**P10-C: Finite Non-recursive Algebraic Data Types（`Z3_DATATYPE_SORT` / `theory_datatype`）** — ★★
+**P10-C: Finite Non-recursive Algebraic Data Types（`Z3_DATATYPE_SORT` / `theory_datatype`）** — ★★ — ✅ 実装完了（2026-09-18）
 
-現状のギャップ: enum は Int タグとして扱われ、`match` 網羅性は `mumei-core/src/verification/translator/expr.rs` で「tag を `0..n_variants` に制約 → 被覆の否定が UNSAT か」という Int エンコードで実現している。ペイロード付きタグ付き共用体のフィールド型安全性は Int タグでは表現しきれない。
+実装ノート:
 
-Lean 委譲境界: 再帰 ADT は `mumei-core/src/verification/fragment.rs` で `inductive_data_type` タグとして検出され Lean 4 へ回る設計を維持する（有限・非再帰は Z3、再帰 ADT の帰納証明は Lean）。
+- 新モジュール `mumei-core/src/verification/support/datatype.rs` が有限・非再帰 enum（`!is_recursive` && `type_params` 空 && 全 payload が `i64`/`f64`/`Str`/`bool` に resolve するスカラーのみ）をネイティブ Z3 `DatatypeSort` へ下げる。`VCtx::enum_sorts` に per-context キャッシュを持ち、同名再宣言による sort 不一致を防ぐ。
+- `param_z3_value_for_vc` が `param_z3_value` を包み、enum 型パラメータ / `result` / callee 戻り値を `Datatype` const としてシード（spec_validation / vacuity / call_graph / executor / expr.rs の呼出結果シードを経由）。enum・struct・配列フィールドを持つ enum は Int-tag 経路に留まる。
+- `match` 網羅性は tester 述語 `is-<Variant>(target)` の被覆否定 UNSAT で判定（Int ドメイン制約は datatype ターゲットでは自動的にスキップ）。未被覆バリアントは Z3 model のコンストラクタ適用そのままに反例表示（`value = Blue -- no matching arm`）。
+- パターンの payload 束縛は真のセレクタ適用（`Named_0(s)`）で、`Str` フィールドは Z3 `String` として型安全にプロジェクションされる — `s == Shape::Named("hi")` から `n == "hi"` が証明できる。`==`/`!=` の datatype 同値性は expr.rs に追加。
+- 構築経路: `Shape::Named("x")`（Call `E::V`）、`Shape::Point`（FieldAccess nullary）、裸の `Point`（Variable — 束縛変数が優先）。
+- fragment.rs: 有限 ADT enum パラメータと有限 ADT 上の `match` は `inductive_data_type` を tag 付けしない（再帰 enum・generic `Option<T>`・scalar のみの match は従来どおり tag 維持）。
+- 既知制限: `let x = <ctor>; match x` は MIR move analysis のパターン束縛変数（`Local(0)` プレースホルダ）の既存制約で失敗 — P10-C 以前からの制限で、Int-tag 経路と同じ。
 
-**Implementation Plan**:
+**検証**: `tests/test_datatype_enum.mm`（7 atom: enum-param match・Str/f64/bool payload selector・requires 側同値性・コンストラクタ単射性・再帰 enum の Int-tag 維持）、`tests/test_datatype_enum_negative.mm`（未被覆コンストラクタ名入り反例）、fragment.rs 単体テスト 6 件。
 
-```
-1. ネイティブ datatype sort 生成
-   - z3_types.rs に有限・非再帰 enum 用の Z3 datatype sort（コンストラクタ・セレクタ・判別子）生成経路を追加
-   - ペイロード付きバリアントのフィールド型を セレクタの sort として保持する
-   - Int タグ経路は後方互換のため残し、有限・非再帰と判定された型のみ datatype へ切り替える
-
-2. 網羅性チェックの datatype 化
-   - expr.rs の match 網羅性を tag 範囲制約から判別子ベースの被覆否定 UNSAT 判定へ拡張
-   - 未被覆バリアントを反例のコンストラクタ名で報告する
-   - セレクタ適用の well-formedness（判別子が一致する場合のみ）を制約として付与
-
-3. fragment 判定の整理
-   - fragment.rs で有限・非再帰 enum を datatype 経路、再帰 ADT を inductive_data_type タグとして分離
-   - docs/SPEC_GUIDE.md に enum / タグ付き共用体の決定可能断片を追記
-```
-
-**Files to modify/create**:
-- `mumei-core/src/verification/translator/z3_types.rs` — 有限・非再帰 enum の datatype sort 生成
-- `mumei-core/src/verification/translator/expr.rs` — datatype ベースの `match` 網羅性チェック
-- `mumei-core/src/verification/fragment.rs` — 有限・非再帰 / 再帰 ADT の分離判定
-- `docs/SPEC_GUIDE.md` — enum / タグ付き共用体の決定可能断片
-
-**Success Metrics**:
-- 有限・非再帰 enum の `match` 網羅性チェックの datatype 経路移行率: 100%
-- ペイロード付きバリアントのフィールド型安全性違反の検出率: 100%
-- 再帰 ADT の `inductive_data_type` タグ付け精度: 100%
+**Success Metrics 達成状況**:
+- 有限・非再帰 enum の `match` 網羅性チェックの datatype 経路移行率: 100%（`param_z3_value_for_vc` 経由で enum パラメータが Datatype sort を持つ全経路）
+- ペイロード付きバリアントのフィールド型安全性違反の検出率: 100%（セレクタが真の sort を持つ — `Str` フィールドに Int を渡すと sort mismatch で失敗）
+- 再帰 ADT の `inductive_data_type` タグ付け精度: 100%（`is_recursive` / 非スカラーフィールド / generic は全て Int-tag + tag 維持）
 
 **P10-D: Bounded Low-degree Nonlinear Arithmetic（`nlsat` / `grobner`）** — ★ ✅ Implemented（2026-09-13、= `docs/CROSS_PROJECT_ROADMAP.md` C-2 / Priority 26 R-8、Wave 5）
 

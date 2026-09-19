@@ -2,17 +2,15 @@ use super::module_env::ModuleEnv;
 use super::property_based::{
     run_property_based_test_with_mode, PropertyBasedTestConfig, PropertyBasedTestResult,
 };
+use super::support::datatype::param_z3_value_for_vc;
 use super::translator::{
-    apply_refinement_constraint, assume_struct_contract, expr_to_z3, param_z3_value,
-    seed_struct_fields, seed_tuple_result_components, struct_fields_of_value,
-    tuple_component_types, VCtx, DEFAULT_CONSTRAINT_BUDGET, I64_BITS,
-    UNSUPPORTED_TUPLE_RESULT_INDEXING,
+    apply_refinement_constraint, assume_struct_contract, expr_to_z3, seed_struct_fields,
+    seed_tuple_result_components, struct_fields_of_value, tuple_component_types, VCtx,
+    DEFAULT_CONSTRAINT_BUDGET, UNSUPPORTED_TUPLE_RESULT_INDEXING,
 };
 use super::types::Env;
 use super::SpecContradiction;
-use super::{
-    parse_expression, Atom, Bool, Config, Context, Dynamic, HashMap, Int, SatResult, Solver, BV,
-};
+use super::{parse_expression, Atom, Bool, Config, Context, HashMap, SatResult, Solver};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -223,7 +221,7 @@ pub fn check_spec_satisfiability_with_timeout(
         bitvec_i64,
         bitvec_i64_global,
     );
-    let mut env = seed_env(&ctx, atom, module_env, ieee754_f64, bitvec_i64);
+    let mut env = seed_env(&vc, atom);
     let mut had_clause_skips = false;
     assert_parameter_refinements(&vc, &solver, atom, module_env, &mut env)?;
     let checked_requires =
@@ -276,7 +274,7 @@ pub fn check_spec_satisfiability_with_timeout(
     let mut checked_ensures = 0usize;
     for (index, clause) in ensure_clauses.iter().enumerate() {
         let local_solver = Solver::new(&ctx);
-        let mut local_env = seed_env(&ctx, atom, module_env, ieee754_f64, bitvec_i64);
+        let mut local_env = seed_env(&vc, atom);
         assert_parameter_refinements(&vc, &local_solver, atom, module_env, &mut local_env)?;
         if let ClauseLoweringOutcome::Skipped(warning) = assert_clause(
             &vc,
@@ -311,7 +309,7 @@ pub fn check_spec_satisfiability_with_timeout(
 
     if !ensure_clauses.is_empty() {
         let combined_solver = Solver::new(&ctx);
-        let mut combined_env = seed_env(&ctx, atom, module_env, ieee754_f64, bitvec_i64);
+        let mut combined_env = seed_env(&vc, atom);
         assert_parameter_refinements(&vc, &combined_solver, atom, module_env, &mut combined_env)?;
         if let ClauseLoweringOutcome::Skipped(warning) = assert_clause(
             &vc,
@@ -358,7 +356,7 @@ pub fn check_spec_satisfiability_with_timeout(
                 continue;
             }
             let local_solver = Solver::new(&ctx);
-            let mut local_env = seed_env(&ctx, atom, module_env, ieee754_f64, bitvec_i64);
+            let mut local_env = seed_env(&vc, atom);
             assert_parameter_refinements(&vc, &local_solver, atom, module_env, &mut local_env)?;
             if let ClauseLoweringOutcome::Skipped(warning) = assert_clause(
                 &vc,
@@ -519,31 +517,23 @@ fn validation_ctx<'a>(
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         bv_div_obligations: std::cell::RefCell::new(Vec::new()),
         clause_context: std::cell::RefCell::new(Vec::new()),
+        enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         bitvec_i64_global,
     }
 }
 
-fn seed_env<'a>(
-    ctx: &'a super::Context,
-    atom: &Atom,
-    module_env: &ModuleEnv,
-    ieee754_f64: bool,
-    bitvec_i64: bool,
-) -> Env<'a> {
+fn seed_env<'a>(vc: &VCtx<'a>, atom: &Atom) -> Env<'a> {
+    let ctx = vc.ctx;
+    let module_env = vc.module_env;
+    let ieee754_f64 = vc.ieee754_f64;
+    let bitvec_i64 = vc.bitvec_i64;
     let mut env: Env<'a> = HashMap::new();
     env.insert("true".to_string(), Bool::from_bool(ctx, true).into());
     env.insert("false".to_string(), Bool::from_bool(ctx, false).into());
     for param in &atom.params {
         env.insert(
             param.name.clone(),
-            param_z3_value(
-                ctx,
-                &param.name,
-                param.type_name.as_deref(),
-                module_env,
-                ieee754_f64,
-                bitvec_i64,
-            ),
+            param_z3_value_for_vc(vc, &param.name, param.type_name.as_deref()),
         );
         if let Some(sdef) = param
             .type_name
@@ -564,13 +554,7 @@ fn seed_env<'a>(
     if tuple_component_types(atom.return_type.as_deref()).is_none() {
         env.insert(
             "result".to_string(),
-            result_z3_value(
-                ctx,
-                atom.return_type.as_deref(),
-                module_env,
-                ieee754_f64,
-                bitvec_i64,
-            ),
+            param_z3_value_for_vc(vc, "result", atom.return_type.as_deref()),
         );
     }
     seed_tuple_result_components(
@@ -599,30 +583,6 @@ fn seed_env<'a>(
         );
     }
     env
-}
-
-/// Sort of the implicit `result` binding. Mirrors `param_z3_value`, so under
-/// `--bitvec-i64` an `i64` result is a `BV(64)` and `ensures` clauses compare
-/// bit-vector terms rather than mixing sorts.
-fn result_z3_value<'a>(
-    ctx: &'a super::Context,
-    return_type: Option<&str>,
-    module_env: &ModuleEnv,
-    ieee754_f64: bool,
-    bitvec_i64: bool,
-) -> Dynamic<'a> {
-    match return_type {
-        Some(type_name) => param_z3_value(
-            ctx,
-            "result",
-            Some(type_name),
-            module_env,
-            ieee754_f64,
-            bitvec_i64,
-        ),
-        None if bitvec_i64 => BV::new_const(ctx, "result", I64_BITS).into(),
-        None => Int::new_const(ctx, "result").into(),
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1016,6 +976,7 @@ fn traceability_coverage(
 mod tests {
     use super::*;
     use crate::parser::parse_atom;
+    use z3::ast::Int;
 
     #[test]
     fn contradictory_requires_are_rejected() {

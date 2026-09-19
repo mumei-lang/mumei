@@ -1281,6 +1281,7 @@ pub(crate) fn verify_inner(
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         bv_div_obligations: std::cell::RefCell::new(Vec::new()),
         clause_context: std::cell::RefCell::new(Vec::new()),
+        enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         bitvec_i64_global,
     };
 
@@ -1292,14 +1293,8 @@ pub(crate) fn verify_inner(
     // (concatenation, equality) to silently produce incorrect verification results.
     // This matches the treatment in verify_atom_invariant (line 3206-3218).
     for param in &atom.params {
-        let var = param_z3_value(
-            &ctx,
-            param.name.as_str(),
-            param.type_name.as_deref(),
-            module_env,
-            ieee754_f64,
-            bitvec_i64,
-        );
+        let var =
+            datatype::param_z3_value_for_vc(&vc, param.name.as_str(), param.type_name.as_deref());
         env.insert(param.name.clone(), var);
     }
     seed_tuple_result_components(

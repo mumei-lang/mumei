@@ -8,8 +8,8 @@ use super::translator::*;
 use super::types::*;
 use crate::hir::lower_atom_to_hir_with_env;
 use crate::parser::{
-    parse_module, Atom, Effect, EffectDef, EffectTransition, Expr, ImplDef, Item, Op, Param,
-    Quantifier, QuantifierType, Span, TraitDef, TraitMethod, TrustLevel,
+    parse_module, Atom, Effect, EffectDef, EffectTransition, EnumDef, EnumVariant, Expr, ImplDef,
+    Item, Op, Param, Quantifier, QuantifierType, Span, TraitDef, TraitMethod, TrustLevel,
 };
 use crate::resolver::compute_contract_hash;
 use crate::verification::{generate_contract_manifest, verify_contract_integrity};
@@ -1146,6 +1146,7 @@ fn test_constraint_budget_exceeded() {
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         bv_div_obligations: std::cell::RefCell::new(Vec::new()),
         clause_context: std::cell::RefCell::new(Vec::new()),
+        enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         bitvec_i64_global: false,
     };
 
@@ -1186,6 +1187,7 @@ fn test_constraint_budget_no_limit() {
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         bv_div_obligations: std::cell::RefCell::new(Vec::new()),
         clause_context: std::cell::RefCell::new(Vec::new()),
+        enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         bitvec_i64_global: false,
     };
 
@@ -1999,6 +2001,7 @@ fn test_subsumption_check_holds_with_requires() {
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         bv_div_obligations: std::cell::RefCell::new(Vec::new()),
         clause_context: std::cell::RefCell::new(Vec::new()),
+        enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         bitvec_i64_global: false,
     };
     let concrete = Atom {
@@ -2073,6 +2076,7 @@ fn test_subsumption_check_fails_without_requires() {
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         bv_div_obligations: std::cell::RefCell::new(Vec::new()),
         clause_context: std::cell::RefCell::new(Vec::new()),
+        enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         bitvec_i64_global: false,
     };
     let concrete = Atom {
@@ -2150,6 +2154,7 @@ fn test_subsumption_check_crossed_param_names() {
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         bv_div_obligations: std::cell::RefCell::new(Vec::new()),
         clause_context: std::cell::RefCell::new(Vec::new()),
+        enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         bitvec_i64_global: false,
     };
     let concrete = Atom {
@@ -2234,6 +2239,7 @@ fn test_subsumption_check_trivial_contract_ensures_skipped() {
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         bv_div_obligations: std::cell::RefCell::new(Vec::new()),
         clause_context: std::cell::RefCell::new(Vec::new()),
+        enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         bitvec_i64_global: false,
     };
     let concrete = Atom {
@@ -2300,6 +2306,7 @@ fn test_subsumption_check_concrete_true_ensures_warns() {
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         bv_div_obligations: std::cell::RefCell::new(Vec::new()),
         clause_context: std::cell::RefCell::new(Vec::new()),
+        enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         bitvec_i64_global: false,
     };
     let concrete = Atom {
@@ -2758,6 +2765,7 @@ fn test_expr_to_z3_true_false_are_bool() {
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         bv_div_obligations: std::cell::RefCell::new(Vec::new()),
         clause_context: std::cell::RefCell::new(Vec::new()),
+        enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         bitvec_i64_global: false,
     };
     let mut env: Env = HashMap::new();
@@ -2821,6 +2829,7 @@ fn test_expr_to_z3_pow_constant_folds_full_precision() {
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         bv_div_obligations: std::cell::RefCell::new(Vec::new()),
         clause_context: std::cell::RefCell::new(Vec::new()),
+        enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         bitvec_i64_global: false,
     };
     let mut env: Env = HashMap::new();
@@ -2877,6 +2886,7 @@ fn test_tuple_result_indexing_uses_typed_components() {
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         bv_div_obligations: std::cell::RefCell::new(Vec::new()),
         clause_context: std::cell::RefCell::new(Vec::new()),
+        enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         bitvec_i64_global: false,
     };
     let mut env: Env = HashMap::new();
@@ -3033,6 +3043,7 @@ fn test_chained_comparison_normalizes_before_lowering() {
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         bv_div_obligations: std::cell::RefCell::new(Vec::new()),
         clause_context: std::cell::RefCell::new(Vec::new()),
+        enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         bitvec_i64_global: false,
     };
     let mut env: Env = HashMap::new();
@@ -3213,4 +3224,191 @@ fn nlsat_first_unknown_demotes_to_lean_with_nonlinear_reason() {
     let decided = classify_atom_for_lean_escalation(&atom, &module_env, "unsat", "verified");
     assert!(!decided.should_escalate);
     assert_eq!(decided.escalation_reason, None);
+}
+
+// ---------------------------------------------------------------------------
+// P10-C: finite non-recursive enums → native Z3 datatype sorts
+// ---------------------------------------------------------------------------
+
+fn test_enum_def(
+    name: &str,
+    variants: &[(&str, &[&str])],
+    type_params: &[&str],
+    is_recursive: bool,
+) -> EnumDef {
+    EnumDef {
+        name: name.to_string(),
+        type_params: type_params.iter().map(|s| s.to_string()).collect(),
+        variants: variants
+            .iter()
+            .map(|(vname, fields)| EnumVariant {
+                name: vname.to_string(),
+                fields: fields.iter().map(|s| s.to_string()).collect(),
+                field_types: vec![],
+                is_recursive: false,
+            })
+            .collect(),
+        is_recursive,
+        span: Span::default(),
+    }
+}
+
+#[test]
+fn test_finite_enum_param_does_not_tag_inductive() {
+    let mut module_env = ModuleEnv::new();
+    module_env.enums.insert(
+        "Color".to_string(),
+        test_enum_def(
+            "Color",
+            &[("Red", &[]), ("Green", &[]), ("Blue", &[])],
+            &[],
+            false,
+        ),
+    );
+    let atom = test_atom(
+        "code_of",
+        vec![test_param("c", Some("Color"))],
+        "true",
+        "result >= 0",
+        "match c { Red => 0, Green => 1, Blue => 2 }",
+        Some("i64"),
+    );
+    let tags = detect_logic_fragment_tags(&atom, &module_env);
+    assert!(
+        !tags.iter().any(|tag| tag == "inductive_data_type"),
+        "finite ADT enum param should stay decidable, got tags: {tags:?}"
+    );
+}
+
+#[test]
+fn test_recursive_enum_param_keeps_inductive_tag() {
+    let mut module_env = ModuleEnv::new();
+    module_env.enums.insert(
+        "IntList".to_string(),
+        test_enum_def(
+            "IntList",
+            &[("Nil", &[]), ("Cons", &["i64", "IntList"])],
+            &[],
+            true,
+        ),
+    );
+    let atom = test_atom(
+        "head_or",
+        vec![test_param("l", Some("IntList"))],
+        "true",
+        "true",
+        "match l { Nil => 0, Cons(h, t) => h }",
+        Some("i64"),
+    );
+    let tags = detect_logic_fragment_tags(&atom, &module_env);
+    assert!(tags.iter().any(|tag| tag == "inductive_data_type"));
+}
+
+#[test]
+fn test_generic_enum_param_keeps_inductive_tag() {
+    let mut module_env = ModuleEnv::new();
+    module_env.enums.insert(
+        "Option".to_string(),
+        test_enum_def("Option", &[("Some", &["T"]), ("None", &[])], &["T"], false),
+    );
+    let atom = test_atom(
+        "unwrap_or",
+        vec![test_param("o", Some("Option"))],
+        "true",
+        "true",
+        "match o { Some(x) => x, None => 0 }",
+        Some("i64"),
+    );
+    let tags = detect_logic_fragment_tags(&atom, &module_env);
+    assert!(
+        tags.iter().any(|tag| tag == "inductive_data_type"),
+        "generic Option<T> must keep the inductive tag until monomorphisation exists"
+    );
+}
+
+#[test]
+fn test_enum_payload_field_tag() {
+    // An enum with a non-scalar payload (another enum) is not a finite ADT.
+    let mut module_env = ModuleEnv::new();
+    module_env.enums.insert(
+        "Inner".to_string(),
+        test_enum_def("Inner", &[("I", &[])], &[], false),
+    );
+    module_env.enums.insert(
+        "Outer".to_string(),
+        test_enum_def("Outer", &[("Wrap", &["Inner"])], &[], false),
+    );
+    let atom = test_atom(
+        "unwrap",
+        vec![test_param("o", Some("Outer"))],
+        "true",
+        "true",
+        "match o { Wrap(i) => 0 }",
+        Some("i64"),
+    );
+    let tags = detect_logic_fragment_tags(&atom, &module_env);
+    assert!(tags.iter().any(|tag| tag == "inductive_data_type"));
+}
+
+#[test]
+fn test_finite_adt_match_in_body_does_not_tag() {
+    // Body-only `match` on a *variable* of finite-ADT type: the arm patterns
+    // resolving to a finite enum keep the atom decidable even without an
+    // enum-typed parameter.
+    let mut module_env = ModuleEnv::new();
+    module_env.enums.insert(
+        "Level".to_string(),
+        test_enum_def("Level", &[("Low", &[]), ("High", &[])], &[], false),
+    );
+    let atom = test_atom(
+        "lvl",
+        vec![test_param("x", Some("i64"))],
+        "true",
+        "result >= 0",
+        "{ let l = Level::Low; match l { Low => 0, High => 1 } }",
+        Some("i64"),
+    );
+    let tags = detect_logic_fragment_tags(&atom, &module_env);
+    assert!(
+        !tags.iter().any(|tag| tag == "inductive_data_type"),
+        "match on a finite ADT is decidable, got tags: {tags:?}"
+    );
+}
+
+#[test]
+fn test_empty_enum_param_keeps_inductive_tag() {
+    // An empty enum cannot form a Z3 datatype (`DatatypeBuilder` requires ≥1
+    // variant); `is_finite_adt` must reject it rather than let the vacuous
+    // field check claim it — otherwise verification panics.
+    let mut module_env = ModuleEnv::new();
+    module_env
+        .enums
+        .insert("Empty".to_string(), test_enum_def("Empty", &[], &[], false));
+    let atom = test_atom(
+        "exfalso",
+        vec![test_param("e", Some("Empty"))],
+        "true",
+        "result == 0",
+        "0",
+        Some("i64"),
+    );
+    let tags = detect_logic_fragment_tags(&atom, &module_env);
+    assert!(tags.iter().any(|tag| tag == "inductive_data_type"));
+}
+
+#[test]
+fn test_scalar_match_still_tags_inductive() {
+    // Conservative: a `match` whose arms carry no Variant pattern keeps the
+    // historic `inductive_data_type` tag (Lean handles it).
+    let module_env = ModuleEnv::new();
+    let atom = test_atom(
+        "classify",
+        vec![test_param("n", Some("i64"))],
+        "true",
+        "result >= 0",
+        "match n { 0 => 0, _ => 1 }",
+        Some("i64"),
+    );
+    let tags = detect_logic_fragment_tags(&atom, &module_env);
+    assert!(tags.iter().any(|tag| tag == "inductive_data_type"));
 }
