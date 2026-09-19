@@ -2463,17 +2463,19 @@ benchmark 105 atom の proof certificate（`benchmarks/evaluation_suite.py` B-7 
 | 3. AI 証明生成へ回す | `while … invariant: … decreases: … { … }; <tail>` ループ不変量（配列和 / カウンタ） | 3 | `svcomp_style/loop_invariant.mm::sum_array`、`domain_compliance/regtech_exhaustiveness.mm::all_transactions_within_limit`、`domain_compliance/rtgs_balance_conservation.mm::queue_total_is_nonnegative` | `body: statement_block_requires_manual_lemma, unknown_token`、tags `recursive_invariant` / `trigger_sensitive_quantifier` | **B-4**: 帰納法による不変量証明は定型 lowering では届かないため、`lean_fallback_strategy` = AI 証明生成の対象義務とする（`ai_proof_attempts` / `ai_proof_used` で計測） |
 
 - 群 1（23 atom）は B-1（mumei-lean translator 拡張）の対象義務入力。いずれも既存 8 obligation class の範囲内で `arithmetic_obligation` に落ちるため hash 不変（Lean escalation only for Z3 `unknown`; `unsat` 確定 atom を Lean に送る変更ではなく、translator が body を lowering できる範囲を広げる入力）。進捗（2026-09-18）: `perform` 文列 19 atom は `perform_statement_lowering`（mumei-lean PR #121、spec §4.3）、純 `let` 列 2 atom は `let_statement_lowering`（PR #122、spec §4.4、live path 16）、ネスト `if` 1 atom は `nested_if_lowering`（spec §4.5、live path 17）、構造体射影 1 atom は `struct_projection_lowering`（spec §4.6、live path 18、`p.x` → Int バインダ `p_x` 改名）で lowering 済み。群 1 はすべて lowering 完了。
-- 群 2（11 atom）は P31 として起票（下記）。本プランでは実装しない。
+- 群 2（11 atom）は P31 として起票（下記）。進捗（2026-09-18、mumei-lean 側実装）: `task` / `task_group:all` は `task_value_lowering` / `task_group_all_lowering`（spec §4.7、live path 19: `join_all_last_result`）+ 新 `concurrency_obligation` class で lowering 済み。`task_group:any`（選言・list-membership 型の theorem 形状が必要）は引き続き partial。
 - 群 3（3 atom）は B-4（mumei-agent AI 証明生成）の対象義務入力。
 - 走査対象外: Z3 `sat` の 13 atom（`take_buffer` / `take_point` の `unsupported_call` を含む）は counterexample 課題であり escalation 母数に入らない。
 
 ---
 
-## P31: task_group 並行意味論の bridge lemma 追加（C-1 群 2、hash lockstep）— 📝 Planned
+## P31: task_group 並行意味論の bridge lemma 追加（C-1 群 2、hash lockstep）— 🚧 In Progress（`all` 完了・`any` 残）
 
-**ステータス: 📝 Planned（本プラン = Wave 5 では着手しない）**。P30 の C-1 棚卸しで「bridge lemma 追加が必要」と判明した唯一の形状群（`task_group: all` / `task_group: any`、benchmark 11 atom）を扱う。
+**ステータス: 🚧 In Progress（2026-09-18 開始）**。P30 の C-1 棚卸しで「bridge lemma 追加が必要」と判明した唯一の形状群（`task_group: all` / `task_group: any`、benchmark 11 atom）を扱う。
 
 - **意味論**: `task_group: all { task { e₁ }; …; task { eₙ } }` の result は `eₙ`、`task_group: any { … }` の result は `e₁ ∨ … ∨ eₙ` のいずれか（選言）。ensures は result に対する区間 / 等式制約なので、`all` は最終 task 値への書き換え補題、`any` は各分岐がすべて ensures を満たすことを要求する選言除去補題として bridge lemma 化する。
+- **実装済み（mumei-lean）**: `MumeiLean/Concurrency.lean` に `task_group_all_result_last` / `task_group_any_result_mem` / `task_value_result` を追加し、新 `concurrency_obligation` class を §10 catalog に登録。`bridge_lemma_hash` を `5716cfdd945d68b4a0d75d75c5ade1934cbd76e0dfe16734a8f3dd723cfdd8e9` へ lockstep 更新（`types.rs`・`verified_sample` fixture・pinned doc 群・mumei-agent 側定数を含む）。`task {…}` / `task_group:all {…}` の body lowering と `x = e` rebind segment（let 束縛名のみ）を実装、live path 19（`concurrency/task_group_all.mm::join_all_last_result`）が `lean_verified` で通る。
+- **残**: `task_group:any` の選言補題（list-membership 型 theorem 形状: `def : List Int` + `h_body : result ∈ …` + `rcases`/`subst` 証明の emit）は未対応のため partial のまま — `any` 系 atom（`race_two_replicas` 等）が live 化するのはこの次段。
 - **契約定数への影響**: 新 obligation class（例: `concurrency_obligation`）と bridge lemma を `docs/LEAN_TRANSLATOR_SPEC.md` §10 catalog に追加するため、`bridge_lemma_hash` の lockstep 更新（pinned doc 4 本 + mumei-lean `scripts/export_cert.py` + mumei-agent `_SOLIDITY_GUARD_TRACE_BRIDGE_LEMMA_HASH`）が必須。`translator_version` を動かすかは IR schema 変更の有無で判断する。契約語彙（`harness_contract` / `intent_fidelity` / `artifact_paths` / `budget_policy_fingerprint` / `lean_verified` / 8 固定 audit キー / `verification_status` / `contradiction_type` / `ai_proof_used` / `ai_proof_attempts` / `lean_fallback_strategy`）に新規 alias は導入しない。
 - **前提**: B-1 群 1（`perform` / let 列の前処理）が先に入ること。`task` 内部の `let acc = n; acc = acc + 1; acc` などは群 1 の lowering を再利用する。
 - **回帰ゲート**: 既存 8 obligation class の bridge lemma 集合と ladder prefix 不変、`tests/test_contract_vocabulary.py`（3 リポジトリ）green、`scripts/check_proof_bundle_drift.py` pass。
