@@ -372,26 +372,10 @@ pub fn lower_expr_with_env(
                 .map(|(name, expr)| (name.clone(), lower_expr_with_env(expr, module_env)))
                 .collect(),
         },
-        Expr::FieldAccess(expr, field) => {
-            let inner = lower_expr_with_env(expr, module_env);
-            // Plan 14: a qualified unit variant `E::V` / `E.V` constructs the
-            // enum value. Only when the qualifier IS a known enum declaring
-            // `field` — a struct variable named like an enum is untouched.
-            if let HirExpr::Variable(qual) = &inner {
-                if let Some(env) = module_env {
-                    if let Some(enum_def) = env.get_enum(qual) {
-                        if enum_def.variants.iter().any(|v| v.name == *field) {
-                            return HirExpr::VariantInit {
-                                enum_name: enum_def.name.clone(),
-                                variant_name: field.clone(),
-                                fields: Vec::new(),
-                            };
-                        }
-                    }
-                }
-            }
-            HirExpr::FieldAccess(Box::new(inner), field.clone())
-        }
+        Expr::FieldAccess(expr, field) => HirExpr::FieldAccess(
+            Box::new(lower_expr_with_env(expr, module_env)),
+            field.clone(),
+        ),
         Expr::Match { target, arms } => HirExpr::Match {
             target: Box::new(lower_expr_with_env(target, module_env)),
             arms: arms
@@ -488,12 +472,14 @@ pub fn lower_expr_with_env(
         if let Some(env) = module_env {
             // Only convert if the name is NOT a known atom (functions take priority)
             if env.get_atom(name).is_none() {
-                // Qualified `E::V(..)` / `E.V(..)`: the qualifier must be a
-                // known enum declaring the variant — a module path
-                // (`mod::f(..)`) or method call (`obj.f(..)`) stays a Call.
-                if let Some((qual, variant)) =
-                    name.rsplit_once("::").or_else(|| name.rsplit_once('.'))
-                {
+                // Qualified `E::V(..)`: the qualifier must be a known enum
+                // declaring the variant — a module path (`mod::f(..)`) or
+                // method call (`obj.f(..)`) stays a Call. The `.`-spelled form
+                // is not converted here because verification rejects
+                // `E.V(..)` as an unknown function (only `::` ctor calls are
+                // spec-constructible), so converting it would let codegen
+                // accept a program the verifier refused.
+                if let Some((qual, variant)) = name.rsplit_once("::") {
                     if let Some(enum_def) = env.get_enum(qual) {
                         if enum_def.variants.iter().any(|v| v.name == variant) {
                             return HirExpr::VariantInit {

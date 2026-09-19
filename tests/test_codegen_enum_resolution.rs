@@ -194,6 +194,44 @@ atom mk(p: i64) -> Mine
     );
 }
 
+// `let m = Mine::Nil` binds `m: Mine` — the unit-variant FieldAccess records
+// its enum in `var_types`, so the following `match m` resolves Mine's tags
+// (Cons = 0) even though the prelude `List::Cons` collides.
+#[test]
+fn let_bound_unit_ctor_types_the_owner_for_match() {
+    let ir = emit_atom_ir(
+        "let_bound_ctor",
+        r#"
+enum Mine {
+    Cons(i64),
+    Nil,
+}
+
+atom mk_nullary() -> i64
+    requires: true;
+    ensures: true;
+    body: {
+        let m = Mine::Nil;
+        match m {
+            Cons(v) => v
+            Nil => 7
+        }
+    }
+"#,
+        "mk_nullary",
+    );
+    // The constructed tag is constant, so the tag compares fold — the Nil
+    // arm (Mine tag 1) must be the statically-selected branch returning 7.
+    assert!(
+        ir.contains("br i1 true, label %match.body_1"),
+        "Nil arm must be selected for the tag-1 constant:\n{ir}"
+    );
+    assert!(
+        ir.contains("[ 7, %match.body_1 ]"),
+        "Nil arm must contribute 7 to the match result phi:\n{ir}"
+    );
+}
+
 // A recursive enum cannot be laid out eagerly — construction fails with a
 // clean codegen error instead of overflowing the stack in enum_llvm_type.
 #[test]
