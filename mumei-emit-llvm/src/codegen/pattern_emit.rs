@@ -30,6 +30,12 @@ fn pattern_enum<'a>(
     module_env.resolve_variant_owner_by_hint(variant_name, hint)
 }
 
+/// `E::V` → `V`; bare `V` → `V`. `EnumVariant.name` stores the leaf only,
+/// so qualified pattern names compare by the leaf segment.
+fn variant_leaf(variant_name: &str) -> &str {
+    variant_name.rsplit("::").next().unwrap_or(variant_name)
+}
+
 /// The declared type of a variant payload field — used as the enum hint
 /// for nested `Variant` field patterns (`Self` resolves to the owner).
 fn variant_field_hint(
@@ -38,6 +44,7 @@ fn variant_field_hint(
     field_idx: usize,
     module_env: &ModuleEnv,
 ) -> Option<String> {
+    let variant_name = variant_leaf(variant_name);
     let field_ty = enum_def
         .variants
         .iter()
@@ -65,6 +72,7 @@ fn variant_field_type<'a>(
     let Some(enum_def) = pattern_enum(module_env, variant_name, enum_hint)? else {
         return Ok(None);
     };
+    let variant_name = variant_leaf(variant_name);
     let variant = enum_def.variants.iter().find(|v| v.name == variant_name);
     let field_type = variant.and_then(|v| v.field_types.get(field_idx));
     Ok(field_type.map(|ft| resolve_param_type(context, Some(ft.name.as_str()), module_env)))
@@ -126,11 +134,12 @@ pub(crate) fn compile_pattern_test<'a>(
             // declared type wins, then sole/agreeing owners; a true
             // collision is a compile error rather than a per-process pick.
             let resolved_enum = pattern_enum(module_env, variant_name, enum_hint)?;
+            let variant_name = variant_leaf(variant_name);
             let tag_val = if let Some(enum_def) = resolved_enum {
                 enum_def
                     .variants
                     .iter()
-                    .position(|v| v.name == *variant_name)
+                    .position(|v| v.name == variant_name)
                     .unwrap_or(0) as u64
             } else {
                 variant_name
@@ -212,6 +221,7 @@ pub(crate) fn bind_pattern_variables<'a>(
             fields,
         } => {
             let resolved_enum = pattern_enum(module_env, variant_name, enum_hint)?;
+            let variant_name = variant_leaf(variant_name);
             for (field_idx, field_pat) in fields.iter().enumerate() {
                 let nested_hint = resolved_enum
                     .and_then(|e| variant_field_hint(e, variant_name, field_idx, module_env));

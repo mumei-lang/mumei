@@ -140,6 +140,23 @@ fn havoc_vars<'a>(vc: &VCtx<'a>, env: &mut Env<'a>, vars: &std::collections::Has
     }
 }
 
+/// Record (or clear, when the value has no inferable enum type) the
+/// inferred declared enum type of a let/assign binding in
+/// `vc.local_enum_types`, so a later `match var` resolves variant owners via
+/// the declared type rather than guessing across colliding prelude variants.
+fn record_binding_enum_type(vc: &VCtx, var: &str, value: &Expr) {
+    match crate::verification::support::datatype::infer_expr_enum_name(vc, value) {
+        Some(name) => {
+            vc.local_enum_types
+                .borrow_mut()
+                .insert(var.to_string(), name);
+        }
+        None => {
+            vc.local_enum_types.borrow_mut().remove(var);
+        }
+    }
+}
+
 pub(crate) fn stmt_to_z3<'a>(
     vc: &VCtx<'a>,
     stmt: &Stmt,
@@ -150,6 +167,7 @@ pub(crate) fn stmt_to_z3<'a>(
     match stmt {
         Stmt::Let { var, value, .. } => {
             let val = expr_to_z3(vc, value, env, solver_opt)?;
+            record_binding_enum_type(vc, var, value);
             env.insert(var.clone(), val.clone());
             alias_struct_fields(env, var, &val);
             profile_solver_assertion(vc, &format!("let_{}", var), None);
@@ -157,6 +175,7 @@ pub(crate) fn stmt_to_z3<'a>(
         }
         Stmt::Assign { var, value, .. } => {
             let val = expr_to_z3(vc, value, env, solver_opt)?;
+            record_binding_enum_type(vc, var, value);
             env.insert(var.clone(), val.clone());
             alias_struct_fields(env, var, &val);
             profile_solver_assertion(vc, &format!("assign_{}", var), None);
@@ -254,6 +273,7 @@ pub(crate) fn stmt_to_z3<'a>(
                 // concrete loop-entry bindings.
                 {
                     let env_snapshot = env.clone();
+                    let types_snapshot = vc.local_enum_types.borrow().clone();
                     let mut step_env = env.clone();
                     havoc_vars(vc, &mut step_env, &modified);
                     let marks = obligation_marks(vc);
@@ -282,11 +302,13 @@ pub(crate) fn stmt_to_z3<'a>(
                     }
                     solver.pop(1);
                     *env = env_snapshot;
+                    *vc.local_enum_types.borrow_mut() = types_snapshot.clone();
                 }
 
                 // Termination Check — again under havoced pre-state.
                 if let Some(dec_expr) = decreases {
                     let env_snapshot = env.clone();
+                    let types_snapshot = vc.local_enum_types.borrow().clone();
                     let mut term_env = env.clone();
                     havoc_vars(vc, &mut term_env, &modified);
                     let marks = obligation_marks(vc);
@@ -312,6 +334,7 @@ pub(crate) fn stmt_to_z3<'a>(
                     if solver.check() == SatResult::Sat {
                         solver.pop(1);
                         *env = env_snapshot;
+                        *vc.local_enum_types.borrow_mut() = types_snapshot.clone();
                         return Err(MumeiError::verification(
                             "Termination check failed: decreases expression may be negative",
                         ));
@@ -329,12 +352,14 @@ pub(crate) fn stmt_to_z3<'a>(
                     if solver.check() == SatResult::Sat {
                         solver.pop(1);
                         *env = env_snapshot;
+                        *vc.local_enum_types.borrow_mut() = types_snapshot.clone();
                         return Err(MumeiError::verification(
                             "Termination check failed: decreases expression does not strictly decrease"
                         ));
                     }
                     solver.pop(1);
                     *env = env_snapshot;
+                    *vc.local_enum_types.borrow_mut() = types_snapshot.clone();
                 }
 
                 // Post-loop state: havoc the loop-carried vars once more and

@@ -110,3 +110,18 @@ atom head_or(l: IntList) -> i64
         }
     }
 }
+
+// A `let`-bound enum value records its inferred declared type, so `match e`
+// resolves the owning enum deterministically — `Cons` collides with the
+// prelude `List`/`IntList` variants, so without the binding's type this used
+// to fail as an ambiguous variant name.
+atom let_bound_ctor_match() -> i64
+    requires: true;
+    ensures: result >= 0;
+    body: {
+        let e = IntList::Nil;
+        match e {
+            IntList::Cons(v, t) => v
+            IntList::Nil => 42
+        }
+    }
