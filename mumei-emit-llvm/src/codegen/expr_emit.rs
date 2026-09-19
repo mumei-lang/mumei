@@ -78,6 +78,18 @@ pub(crate) fn chan_payload_type_name(
     }
 }
 
+/// Resolve a declared type name to its base name with generics stripped —
+/// `get_enum`/`get_struct` are keyed on the unparameterized name, so
+/// `Option<i64>` resolves to `Option`.
+pub(crate) fn resolve_named_type(module_env: &ModuleEnv, type_name: &str) -> String {
+    let base = module_env.resolve_base_type(type_name);
+    base.split('<')
+        .next()
+        .unwrap_or(base.as_str())
+        .trim()
+        .to_string()
+}
+
 pub(crate) fn infer_struct_type_name(
     expr: &HirExpr,
     var_types: &HashMap<String, String>,
@@ -86,7 +98,7 @@ pub(crate) fn infer_struct_type_name(
     match expr {
         HirExpr::Variable(name) => var_types.get(name).cloned(),
         HirExpr::StructInit { type_name, .. } => {
-            let base = module_env.resolve_base_type(type_name);
+            let base = resolve_named_type(module_env, type_name);
             if module_env.get_struct(&base).is_some() {
                 Some(base)
             } else {
@@ -95,7 +107,7 @@ pub(crate) fn infer_struct_type_name(
         }
         HirExpr::Call { name, .. } => {
             let ret_type = module_env.get_atom(name)?.return_type.as_ref()?;
-            let base = module_env.resolve_base_type(ret_type);
+            let base = resolve_named_type(module_env, ret_type);
             if module_env.get_struct(&base).is_some() || module_env.get_enum(&base).is_some() {
                 Some(base)
             } else {
