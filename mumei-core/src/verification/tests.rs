@@ -3376,6 +3376,27 @@ fn test_finite_adt_match_in_body_does_not_tag() {
 }
 
 #[test]
+fn test_empty_enum_param_keeps_inductive_tag() {
+    // An empty enum cannot form a Z3 datatype (`DatatypeBuilder` requires ≥1
+    // variant); `is_finite_adt` must reject it rather than let the vacuous
+    // field check claim it — otherwise verification panics.
+    let mut module_env = ModuleEnv::new();
+    module_env
+        .enums
+        .insert("Empty".to_string(), test_enum_def("Empty", &[], &[], false));
+    let atom = test_atom(
+        "exfalso",
+        vec![test_param("e", Some("Empty"))],
+        "true",
+        "result == 0",
+        "0",
+        Some("i64"),
+    );
+    let tags = detect_logic_fragment_tags(&atom, &module_env);
+    assert!(tags.iter().any(|tag| tag == "inductive_data_type"));
+}
+
+#[test]
 fn test_scalar_match_still_tags_inductive() {
     // Conservative: a `match` whose arms carry no Variant pattern keeps the
     // historic `inductive_data_type` tag (Lean handles it).

@@ -27,7 +27,11 @@ use crate::verification::translator::{VCtx, F64_EBITS, F64_SBITS};
 /// `true` when `enum_def` is finite + non-recursive + scalar-payload only —
 /// the fragment that maps onto a Z3 `DatatypeSort`.
 pub(crate) fn is_finite_adt(enum_def: &EnumDef, module_env: &ModuleEnv) -> bool {
-    if enum_def.is_recursive || !enum_def.type_params.is_empty() {
+    // Empty enums cannot form a Z3 datatype (`DatatypeBuilder::finish`
+    // asserts at least one variant) and never have a constructible value, so
+    // they keep the Int-tag encoding — the vacuous `all()` below would
+    // otherwise claim them.
+    if enum_def.is_recursive || !enum_def.type_params.is_empty() || enum_def.variants.is_empty() {
         return false;
     }
     enum_def.variants.iter().all(|variant| {

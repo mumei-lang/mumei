@@ -226,6 +226,7 @@ atom label_of(s: Shape) -> Str
 
 Out of scope (these keep the Int-tag encoding and the `inductive_data_type` fragment tag for Lean 4 delegation):
 
+- empty enums (`enum Empty {}` — Z3 datatypes need ≥1 constructor; they keep the Int-tag path, so an `Empty` param tags `inductive_data_type`),
 - recursive enums (`enum List { Nil, Cons(i64, List) }` — any `Self` payload),
 - generic enums (`Option<T>`, `Result<T, E>` — until a monomorphisation layer exists),
 - enums whose payload is another enum, a struct, or an array,
