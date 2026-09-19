@@ -22,9 +22,15 @@
   recursing forever in the eager `enum_llvm_type`, and an arity/unknown-
   variant mismatch is an explicit codegen error rather than silent `undef`
   payload (verification rejects both before codegen is reached, so the guard
-  is defense-in-depth).
-- **Tests**: `test_codegen_enum_resolution.rs` +3 — qualified payload/unit
-  ctors emit the owning enum's tag under a prelude `Cons` collision, and a
+  is defense-in-depth). Binary operators on aggregate values (`m == Mine::Nil`)
+  are a clean codegen error instead of an inkwell `into_int_value` panic;
+  `a == b` between enum-typed parameters keeps the pre-existing tag-field
+  comparison (payloads are not compared — a documented divergence from the
+  verifier's deep datatype equality).
+- **Tests**: `test_codegen_enum_resolution.rs` +5 — qualified payload/unit
+  ctors emit the owning enum's tag under a prelude `Cons` collision, a
+  `let`-bound unit ctor types the owner for `match`, ctor values flow into
+  match targets and callee params, enum equality errors cleanly, and a
   recursive ctor fails cleanly.
 - **Docs**: `SPEC_GUIDE.md` documents constructor support and its limits
   (recursive enums, positional union payload slots, mixed `Str`/`f64` slots).
