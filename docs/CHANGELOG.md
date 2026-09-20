@@ -42,6 +42,12 @@
   argument that actually produces a tracked array may fall back to a
   fresh symbol — scalars and untracked variables are a clean type error
   (`len() expects an array or string argument; \`x\` is neither`).
+- LLVM codegen keeps pace: `len` on `Str` values emits `strlen` (locals
+  and `s + t` results alike), `len` on string/array literals
+  constant-folds, and `len` on `if`/`match`/call array values extracts
+  the fat pointer's `len` field. The old fallthrough that emitted
+  `const 0` for anything it didn't understand is gone — the verify-only
+  `len` would otherwise have compiled to wrong code.
 
  9a349ff (verify: len() resolves Str via str.len and array values structurally; scalars are type errors)
 ### 2026-09-20: `match`-arm array literals merge their lengths
