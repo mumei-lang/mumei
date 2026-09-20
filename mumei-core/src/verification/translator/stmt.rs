@@ -162,7 +162,24 @@ fn havoc_vars<'a>(vc: &VCtx<'a>, env: &mut Env<'a>, vars: &std::collections::Has
                     }
                     fresh_arr
                 }
-                _ => old.clone(),
+                // Str (Seq), Datatype, and any other sort: keep the sort but
+                // drop the value — cloning `old` would let a loop-modified
+                // `Str` prove `s == "x"` with its pre-loop value (unsound).
+                // `Dynamic` has no `fresh_const`, so mint the const through
+                // the C API at the same raw sort.
+                _ => {
+                    let raw_ctx = raw_z3_context(ctx);
+                    let c_name = std::ffi::CString::new(fresh_name.as_str())
+                        .unwrap_or_else(|_| std::ffi::CString::new("__havoc").unwrap());
+                    let ast = unsafe {
+                        z3_sys::Z3_mk_fresh_const(
+                            raw_ctx,
+                            c_name.as_ptr(),
+                            z3_sys::Z3_get_sort(raw_ctx, old.get_z3_ast()),
+                        )
+                    };
+                    unsafe { Dynamic::wrap(ctx, ast) }
+                }
             };
             env.insert(name.clone(), fresh.clone());
             // Havoc forgets the variable's value, so a lambda bound before

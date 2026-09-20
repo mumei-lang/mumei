@@ -128,6 +128,14 @@ pub(crate) struct VCtx<'a> {
     /// when both sides left the same binding in place (`Rc::ptr_eq`).
     pub(crate) local_lambdas:
         std::cell::RefCell<std::collections::HashMap<String, std::rc::Rc<LocalLambda>>>,
+    /// Len symbol minted for an array-returning call, keyed by the result
+    /// array's raw `Z3_ast` pointer. A callee's `ensures: len(result) == k`
+    /// asserts on that symbol; the map lets `let t = f(..)` bind `len_t` to
+    /// the *same* symbol so the guarantee reaches the caller instead of a
+    /// fresh unconstrained `len_t`. The stored `Dynamic` keeps the key ast
+    /// alive (Z3 refcount) so a freed pointer can never alias a new const.
+    pub(crate) call_result_lens:
+        std::cell::RefCell<std::collections::HashMap<usize, (Dynamic<'a>, Dynamic<'a>)>>,
 }
 
 impl<'a> VCtx<'a> {
