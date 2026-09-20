@@ -14,10 +14,15 @@
 - Verified on `[i64]` and `[Str]` params: stale claims (`a[0] == 7` after
   `a[0] = 9`) and last-write claims (`a[0] == 9`) both fail now; claims
   that survive a fresh-unconstrained element still prove.
+- `havoc_vars` also rebinds every `env` array sharing the havoced array's
+  backing root (`array_root_ast`), matching postcall alias handling —
+  otherwise `let b = a` + a loop write through `a` left `b[i]` reads on
+  the stale entry const (same wrong-verify through the alias).
 - Tests: `tests/test_loop_array_havoc.mm` (post-loop provable claims,
-  `len` preservation, read-then-write mix) +
+  `len` preservation, read-then-write mix, alias read) +
   `tests/test_loop_array_havoc_negative.mm` (stale `[i64]`/`[Str]` reads,
-  last-write claim) via `tests/test_loop_array_havoc.rs`.
+  last-write claim, stale reads through aliases) via
+  `tests/test_loop_array_havoc.rs`.
 
 ### 2026-09-20: `[Str]` element sort; `[[T]]` nested arrays fail closed
 

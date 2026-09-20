@@ -898,7 +898,7 @@ pub(crate) fn tail_len_expr<'a>(
 /// Walk a tracked array value to the innermost (root) array AST node — the
 /// base const that `store(store(base, …), …)` chains share. Aliases created
 /// by `let b = a` hold the same root even after either side stores.
-fn array_root_ast(arr: &z3::ast::Array) -> z3_sys::Z3_ast {
+pub(crate) fn array_root_ast(arr: &z3::ast::Array) -> z3_sys::Z3_ast {
     let mut cur: Dynamic = arr.clone().into();
     loop {
         if cur.kind() == z3::AstKind::App && cur.decl().kind() == z3::DeclKind::STORE {

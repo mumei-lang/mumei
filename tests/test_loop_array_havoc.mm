@@ -56,3 +56,21 @@ body: {
     };
     if a[0] >= -1000000 { 1 } else { 0 }
 };
+
+// Aliased reads (`b = a`) havoc with the shared backing root — a claim
+// that survives an unconstrained element still proves through the alias.
+atom post_loop_alias(a: [i64], n: i64) -> i64
+requires: len(a) >= 1 && n >= 1;
+ensures: result >= 0;
+body: {
+    let b = a;
+    let i = 0;
+    while i < n
+    invariant: i >= 0 && i <= n
+    decreases: n - i
+    {
+        a[0] = 9;
+        i = i + 1
+    };
+    if b[0] >= -1000000 { 1 } else { 0 }
+};
