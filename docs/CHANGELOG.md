@@ -1,3 +1,16 @@
+### 2026-09-20: counterexample report no longer flags translated builtins as uninterpreted
+
+- `collect_expr_symbols` (spurious-CE detection) treated every `Expr::Call`
+  to a name absent from `module_env.atoms` as an `uninterpreted_function`
+  dependency — including translator-handled builtins (`len`, `forall`,
+  `exists`, `matches`/`match_regex`/`re_match`, `sqrt`, `cast_to_int`, string
+  predicates). A clause like `requires: len(arr) == 3` made genuine
+  counterexamples get labeled "spurious — escalate to Lean" even though the
+  solver had the real model.
+- `is_translated_builtin` exempts those names, so genuine failures report as
+  counterexamples again. Regression: `tests/negative/builtin_not_spurious.mm`
+  + `tests/test_builtin_cex_label.rs`.
+
 ### 2026-09-20: `let a = arr` aliases share the tracked array (len + store history)
 
 - `Stmt::Let`/`Stmt::Assign` with a bare `Variable` value now propagate the
@@ -12,6 +25,7 @@
 - Tests: `tests/test_alias_probe.mm` (alias read/store/chain) +
   `tests/test_array_alias.rs`.
 
+||||||| parent of cf754e4 (verify: translated builtins (len/forall/matches/…) are not uninterpreted CE deps)
 ### 2026-09-20: clause-scope phantom names fail closed; unbound-check exemptions aligned
 
 - `requires` / `ensures` / `invariant` / `forall_constraints` clauses that
@@ -46,7 +60,12 @@
 - Tests: `tests/negative/clause_unbound_name.mm` +
   `tests/test_clause_unbound_name.rs`.
 
+<<<<<<< HEAD
 ||||||| parent of 43ac726 (docs(CHANGELOG): array-alias verify entry)
+||||||| parent of cf754e4 (verify: translated builtins (len/forall/matches/…) are not uninterpreted CE deps)
+=======
+||||||| parent of 1f02d7f (verify: translated builtins (len/forall/matches/…) are not uninterpreted CE deps)
+>>>>>>> cf754e4 (verify: translated builtins (len/forall/matches/…) are not uninterpreted CE deps)
 ### 2026-09-20: unbound-check follow-up — lambda params bound; bogus generic-call syntax surfaced
 
 - `HirExpr::Lambda` lowering now registers the lambda's parameters as MIR
