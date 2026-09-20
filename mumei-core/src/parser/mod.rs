@@ -198,6 +198,22 @@ pub fn parse_body_expr(input: &str) -> Stmt {
     expr::parse_block_or_stmt(&mut ctx)
 }
 
+/// Fail-closed variant of `parse_body_expr`: returns the recorded
+/// `expect`/`syntax_failure` diagnostics as `Err` so callers can reject a
+/// malformed atom body instead of running verification on a recovered AST.
+pub fn parse_body_expr_checked(input: &str) -> Result<Stmt, Vec<String>> {
+    let mut lexer = lexer::Lexer::new(input);
+    let tokens = lexer.tokenize();
+    let mut ctx = ParseContext::new(tokens);
+    let stmt = expr::parse_block_or_stmt(&mut ctx);
+    let failures = ctx.expect_failures();
+    if failures.is_empty() {
+        Ok(stmt)
+    } else {
+        Err(failures.to_vec())
+    }
+}
+
 /// Parse a single atom definition from source text.
 // NOTE: parse_atom is a public API preserved for backward compatibility and used in tests (e.g., test_parse_task_group)
 #[allow(dead_code)]

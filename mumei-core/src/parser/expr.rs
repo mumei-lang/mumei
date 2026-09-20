@@ -370,7 +370,29 @@ fn parse_prefix(ctx: &mut ParseContext) -> Expr {
                     else_branch: Box::new(else_branch),
                 }
             } else {
-                panic!("Mumei requires an 'else' branch.");
+                // `if` requires an `else` branch (it is an expression). Recover
+                // with an unbound marker as the else value instead of
+                // panicking: the recorded syntax failure fails checked callers
+                // closed, and if an unchecked caller keeps the AST, MIR
+                // lowering still rejects the unresolved marker name.
+                let found = format!("{}", ctx.peek());
+                let (line, col) = ctx
+                    .tokens_ref()
+                    .get(ctx.pos())
+                    .map(|t| (t.line, t.col))
+                    .unwrap_or((0, 0));
+                ctx.syntax_failure(format!(
+                    "if expression requires an 'else' branch, found {found} at {line}:{col}"
+                ));
+                let else_span = ctx.current_span();
+                Expr::IfThenElse {
+                    cond: Box::new(cond),
+                    then_branch: Box::new(then_branch),
+                    else_branch: Box::new(Stmt::Expr(
+                        Expr::Variable("__mumei_missing_else_branch".to_string()),
+                        else_span,
+                    )),
+                }
             }
         }
 
@@ -708,7 +730,34 @@ pub fn parse_statement(ctx: &mut ParseContext) -> Stmt {
                     span: stmt_span,
                 }
             } else {
-                panic!("Mumei loops require an 'invariant'.");
+                // Same fail-closed recovery as a missing `else`: record the
+                // failure and bind a poisoned invariant that can never verify.
+                let found = format!("{}", ctx.peek());
+                let (line, col) = ctx
+                    .tokens_ref()
+                    .get(ctx.pos())
+                    .map(|t| (t.line, t.col))
+                    .unwrap_or((0, 0));
+                ctx.syntax_failure(format!(
+                    "while loop requires an 'invariant' clause, found {found} at {line}:{col}"
+                ));
+                let decreases = if ctx.peek() == &Token::Decreases {
+                    ctx.advance();
+                    if ctx.peek() == &Token::Colon {
+                        ctx.advance();
+                    }
+                    Some(Box::new(parse_expr(ctx, 0)))
+                } else {
+                    None
+                };
+                let body = parse_block_or_stmt(ctx);
+                Stmt::While {
+                    cond: Box::new(cond),
+                    invariant: Box::new(Expr::Variable("__mumei_missing_invariant".to_string())),
+                    decreases,
+                    body: Box::new(body),
+                    span: stmt_span,
+                }
             }
         }
 
@@ -737,10 +786,11 @@ pub fn parse_statement(ctx: &mut ParseContext) -> Stmt {
                         JoinSemantics::All
                     }
                     ref tok => {
-                        panic!(
-                            "Unknown task_group join semantics '{}'. Expected 'all' or 'any'.",
-                            tok
-                        );
+                        ctx.syntax_failure(format!(
+                            "unknown task_group join semantics '{tok}' — expected 'all' or 'any'"
+                        ));
+                        ctx.advance();
+                        JoinSemantics::All
                     }
                 }
             } else {

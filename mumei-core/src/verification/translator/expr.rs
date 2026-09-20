@@ -941,6 +941,14 @@ pub(crate) fn expr_to_z3<'a>(
                                 let req_z3 = expr_to_z3(vc, &req_ast, &mut call_env, None)?;
                                 if let Some(req_bool) = req_z3.as_bool() {
                                     solver.push();
+                                    // Branch guards are assumptions on this
+                                    // path: a call under `if x >= 0` may rely
+                                    // on `x >= 0` to satisfy the callee's
+                                    // requires. Same pattern as the shift /
+                                    // div-by-zero check sites.
+                                    for cond in vc.path_cond_stack.borrow().iter() {
+                                        solver.assert(cond);
+                                    }
                                     solver.assert(&req_bool.not());
                                     if solver.check() == SatResult::Sat {
                                         // Extract counterexample: concrete argument values
@@ -1023,6 +1031,9 @@ pub(crate) fn expr_to_z3<'a>(
                                                     constraint_z3.as_bool()
                                                 {
                                                     solver.push();
+                                                    for cond in vc.path_cond_stack.borrow().iter() {
+                                                        solver.assert(cond);
+                                                    }
                                                     solver.assert(&constraint_bool.not());
                                                     if solver.check() == SatResult::Sat {
                                                         solver.pop(1);

@@ -270,8 +270,8 @@ impl std::fmt::Display for TypeRef {
 // - 実行時の型消去やオーバーヘッドがない
 
 use crate::parser::{
-    parse_body_expr, parse_type_ref, Atom, Effect, EnumDef, EnumVariant, Expr, Item, Param, Stmt,
-    StructDef, StructField,
+    parse_body_expr_checked, parse_type_ref, Atom, Effect, EnumDef, EnumVariant, Expr, Item, Param,
+    Stmt, StructDef, StructField,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -286,6 +286,9 @@ pub struct Monomorphizer {
     generic_atoms: HashMap<String, Atom>,
     /// 使用されている具体的な型インスタンス（例: "Stack<i64>"）
     instances: HashSet<String>,
+    /// atom body の構文エラー（`collect` で検出）。呼び出し元はこれが
+    /// 空でない場合に fail-closed で拒否する。
+    pub body_parse_failures: Vec<String>,
 }
 
 impl Monomorphizer {
@@ -321,9 +324,17 @@ impl Monomorphizer {
                             self.collect_from_type_ref(type_ref);
                         }
                     }
-                    // body 内の文から収集
-                    let body_stmt = parse_body_expr(&atom.body_expr);
-                    self.collect_from_stmt(&body_stmt);
+                    // body 内の文から収集。構文エラーは回復せず呼び出し元に
+                    // 伝える（panics させない fail-closed 経路）。
+                    match parse_body_expr_checked(&atom.body_expr) {
+                        Ok(body_stmt) => self.collect_from_stmt(&body_stmt),
+                        Err(failures) => {
+                            for failure in failures {
+                                self.body_parse_failures
+                                    .push(format!("atom '{}': {failure}", atom.name));
+                            }
+                        }
+                    }
                 }
                 Item::StructDef(sdef) => {
                     for field in &sdef.fields {
