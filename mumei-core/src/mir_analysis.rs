@@ -526,12 +526,14 @@ mod tests {
 
     #[test]
     fn test_move_analysis_conflicting_merge() {
-        // if/else where one branch moves x and the other doesn't
+        // if/else where one branch moves x, the other doesn't, and x is
+        // used after the merge.
         // Block 0: SwitchInt(cond) → then=1, else=2
         // Block 1: y = move x; goto 3
         // Block 2: goto 3 (x is alive here)
-        // Block 3: return 0
-        // At block 3, x is consumed from path 1 but alive from path 2 → ConflictingMerge
+        // Block 3: return x (x is live at the merge → ConflictingMerge)
+        // (An x that is dead on all paths after the merge is not a violation:
+        // see test_move_analysis_merge_unused_move.)
         let body = MirBody {
             name: "conflicting_merge".to_string(),
             locals: vec![
@@ -587,9 +589,7 @@ mod tests {
                 BasicBlock {
                     id: 3,
                     statements: vec![],
-                    terminator: Terminator::Return(Operand::Constant(
-                        crate::mir::MirConstant::Int(0),
-                    )),
+                    terminator: Terminator::Return(Operand::Place(Place::Local(Local(1)))),
                 },
             ],
             entry_block: 0,
@@ -606,6 +606,84 @@ mod tests {
         assert!(
             !cm_violations.is_empty(),
             "Should detect conflicting merge for x at join point"
+        );
+    }
+
+    #[test]
+    fn test_move_analysis_merge_unused_move() {
+        // Same CFG as above but x is never used after the merge — the
+        // divergent ownership is unobservable and must not be a violation.
+        // Block 0: SwitchInt(cond) → then=1, else=2
+        // Block 1: y = move x; goto 3
+        // Block 2: goto 3 (x is alive here)
+        // Block 3: return 0
+        let body = MirBody {
+            name: "merge_unused_move".to_string(),
+            locals: vec![
+                LocalDecl {
+                    local: Local(0),
+                    name: Some("cond".to_string()),
+                    ty: Some("Int".to_string()),
+                    movability: Movability::Copy,
+                    capability: None,
+                },
+                LocalDecl {
+                    local: Local(1),
+                    name: Some("x".to_string()),
+                    ty: Some("MyStruct".to_string()),
+                    movability: Movability::Move,
+                    capability: None,
+                },
+                LocalDecl {
+                    local: Local(2),
+                    name: Some("y".to_string()),
+                    ty: Some("MyStruct".to_string()),
+                    movability: Movability::Move,
+                    capability: None,
+                },
+            ],
+            blocks: vec![
+                BasicBlock {
+                    id: 0,
+                    statements: vec![],
+                    terminator: Terminator::SwitchInt {
+                        discr: Operand::Place(Place::Local(Local(0))),
+                        targets: vec![(1, 1)],
+                        otherwise: 2,
+                    },
+                },
+                BasicBlock {
+                    id: 1,
+                    statements: vec![MirStatement::Assign(
+                        Place::Local(Local(2)),
+                        Rvalue::Use(Operand::Place(Place::Local(Local(1)))),
+                    )],
+                    terminator: Terminator::Goto(3),
+                },
+                BasicBlock {
+                    id: 2,
+                    statements: vec![],
+                    terminator: Terminator::Goto(3),
+                },
+                BasicBlock {
+                    id: 3,
+                    statements: vec![],
+                    terminator: Terminator::Return(Operand::Constant(
+                        crate::mir::MirConstant::Int(0),
+                    )),
+                },
+            ],
+            entry_block: 0,
+        };
+
+        let result = analyze_moves(&body);
+        assert!(
+            result
+                .violations
+                .iter()
+                .all(|v| v.kind != MoveViolationKind::ConflictingMerge),
+            "moved-on-one-path but unused-after-merge must not conflict: {:?}",
+            result.violations
         );
     }
 
