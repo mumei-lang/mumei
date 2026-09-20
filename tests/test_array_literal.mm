@@ -174,3 +174,96 @@ atom if_branch_block_tail(c: bool) -> i64
     let a = if c { let t = [1, 2]; t } else { [3, 4, 5] }
     a[1]
   };
+
+// `let a = match e { … }` merges each arm's array length under its own
+// pattern condition — `len_<a>` mirrors the arm chain
+// `ite(c_A, 2, ite(c_B, 3, …))` instead of an unconstrained symbol.
+enum LitE { LitA, LitB }
+
+atom match_arm_lit_len(e: LitE) -> i64
+  requires: true;
+  ensures: result >= 0;
+  body: {
+    let a = match e {
+      LitE::LitA => [1, 2],
+      LitE::LitB => [3, 4, 5],
+    }
+    a[1]
+  };
+
+// Arm-local `let`s resolve to their literal rhs — arm slots never reach
+// the merged env, so the tail variable's own length would be lost.
+atom match_arm_local_let(e: LitE) -> i64
+  requires: true;
+  ensures: result >= 0;
+  body: {
+    let a = match e {
+      LitE::LitA => { let t = [1, 2]; t },
+      LitE::LitB => [3, 4, 5],
+    }
+    a[1]
+  };
+
+// Var tails contribute the source's tracked length under the arm cond.
+atom match_arm_var_len(a1: [i64], e: LitE) -> i64
+  requires: len(a1) >= 2;
+  ensures: result == result;
+  body: {
+    let a = match e {
+      LitE::LitA => a1,
+      LitE::LitB => [3, 4, 5],
+    }
+    a[1]
+  };
+
+// Three+ arms: the len merge folds the whole `ite` spine, not just two.
+atom match_arm_three_way(x: i64) -> i64
+  requires: true;
+  ensures: result >= 0;
+  body: {
+    let a = match x {
+      0 => [1],
+      _ => [1, 2, 3],
+    }
+    a[0]
+  };
+
+// Nested `if` inside a `match` arm tail: the length merge recurses
+// through the arm value's own ite children, so `len_<a>` is
+// `ite(c_A, ite(c, 2, 3), 2)` — `a[1]` in bounds on every path.
+enum LitF { LitP, LitQ }
+
+atom match_arm_nested_if(e: LitE, c: bool) -> i64
+  requires: true;
+  ensures: result >= 0;
+  body: {
+    let a = match e {
+      LitE::LitA => if c { [1, 2] } else { [9, 9, 9] },
+      LitE::LitB => [3, 4],
+    }
+    a[1]
+  };
+
+// And `match` nested inside a `match` arm tail likewise merges.
+atom match_arm_nested_match(e: LitE, f: LitF) -> i64
+  requires: true;
+  ensures: result >= 0;
+  body: {
+    let a = match e {
+      LitE::LitA => match f {
+        LitF::LitP => [1, 2],
+        LitF::LitQ => [3],
+      },
+      LitE::LitB => [4, 5, 6],
+    }
+    a[0]
+  };
+
+// Nested `if` in an `if` branch tail is no longer conservative either.
+atom if_branch_nested_if(c: bool, d: bool) -> i64
+  requires: true;
+  ensures: result >= 0;
+  body: {
+    let a = if c { if d { [1, 2] } else { [3] } } else { [4, 5] }
+    a[0]
+  };

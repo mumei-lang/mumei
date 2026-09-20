@@ -598,7 +598,8 @@ pub(crate) fn wire_array_slots<'a>(
         _ => "i64",
     };
     let cond_hint = arr.nth_child(0).and_then(|c| c.as_bool());
-    env.insert(format!("__z3_arr_{name}"), arr.into());
+    let arr_dyn: Dynamic = arr.into();
+    env.insert(format!("__z3_arr_{name}"), arr_dyn.clone());
     let len: Dynamic = match value {
         Some(Expr::ArrayLit(elements)) => concrete_len_value(vc.ctx, elements.len(), vc.bitvec_i64),
         Some(Expr::Variable(src)) => array_len_value(vc.ctx, env, src, vc.bitvec_i64, None),
@@ -611,13 +612,36 @@ pub(crate) fn wire_array_slots<'a>(
             // branch lengths the same way so `len_<name>` is
             // `ite(c, len_t, len_e)` instead of an unconstrained symbol:
             // `let a = if c { [1,2] } else { [3,4] }; a[1]` is in bounds on
-            // both branches.
-            let len_t = branch_array_len(vc, env, name, "then", then_branch);
-            let len_e = branch_array_len(vc, env, name, "else", else_branch);
+            // both branches. Nested `if`/`match` tails recurse through the
+            // value node's own `ite` children.
             match cond_hint {
-                Some(cond) => cond.ite(&len_t, &len_e),
+                Some(cond) => {
+                    let len_t = match arr_dyn.nth_child(1) {
+                        Some(v) => branch_tail_len(vc, env, name, "then", then_branch, &v, 0),
+                        None => {
+                            array_len_symbol(vc.ctx, &format!("len_{name}#then"), vc.bitvec_i64)
+                        }
+                    };
+                    let len_e = match arr_dyn.nth_child(2) {
+                        Some(v) => branch_tail_len(vc, env, name, "else", else_branch, &v, 0),
+                        None => {
+                            array_len_symbol(vc.ctx, &format!("len_{name}#else"), vc.bitvec_i64)
+                        }
+                    };
+                    cond.ite(&len_t, &len_e)
+                }
                 None => array_len_symbol(vc.ctx, &format!("len_{name}#if"), vc.bitvec_i64),
             }
+        }
+        Some(Expr::Match { arms, .. }) => {
+            // The Match eval folds arms in reverse, producing the chain
+            // `ite(c_1, v_1, ite(c_2, v_2, …, v_n))` — the last arm's value
+            // is the innermost else child and carries no condition of its
+            // own (exhaustiveness implies it when all earlier conds fail).
+            // Mirror the spine on lengths: `len_<name> = ite(c_1, len_1, …)`.
+            match_arm_lens(vc, env, name, "m", arms, &arr_dyn, 0).unwrap_or_else(|| {
+                array_len_symbol(vc.ctx, &format!("len_{name}#match"), vc.bitvec_i64)
+            })
         }
         _ => array_len_value(vc.ctx, env, name, vc.bitvec_i64, None),
     };
@@ -647,20 +671,171 @@ fn stmt_tail_expr(stmt: &Stmt) -> Option<&Expr> {
     }
 }
 
-/// Array length contributed by one `if` branch: concrete for a literal
-/// tail, the tracked `len_<src>` for a var tail, a fresh per-side symbol
-/// otherwise.
-fn branch_array_len<'a>(
+/// The most recent `let <name> = <rhs>` before `stmt`'s tail — match-arm
+/// `let`s stay arm-local and never reach the merged env, so resolving the
+/// arm tail's variable here recovers e.g. `A => { let t = [1,2]; t }`.
+fn stmt_let_rhs<'e>(stmt: &'e Stmt, name: &str) -> Option<&'e Expr> {
+    match stmt {
+        Stmt::Let { var, value, .. } if var == name => Some(value.as_ref()),
+        Stmt::Block(stmts, _) => stmts.iter().rev().find_map(|s| stmt_let_rhs(s, name)),
+        _ => None,
+    }
+}
+
+/// Recursion bound for tail-length computation — deep let-chains or
+/// `let x = x` cycles bail out to a fresh symbol rather than diverging.
+const TAIL_LEN_DEPTH: u32 = 16;
+
+/// Walk the `ite` spine of a folded `match` value, returning the arm
+/// conditions and per-arm value nodes, or `None` when the shape doesn't
+/// match `arms` (e.g. the fold was simplified). Only child-2 is
+/// descended, so `ite`s inside arm values can't confuse the walk.
+fn match_ite_spine<'a>(
+    arms: &[MatchArm],
+    value: &Dynamic<'a>,
+) -> Option<(Vec<Bool<'a>>, Vec<Dynamic<'a>>)> {
+    if arms.is_empty() {
+        return None;
+    }
+    let mut conds: Vec<Bool> = Vec::with_capacity(arms.len() - 1);
+    let mut vals: Vec<Dynamic> = Vec::with_capacity(arms.len());
+    let mut node = value.clone();
+    for _ in 0..arms.len() - 1 {
+        conds.push(node.nth_child(0)?.as_bool()?);
+        vals.push(node.nth_child(1)?);
+        node = node.nth_child(2)?;
+    }
+    vals.push(node);
+    Some((conds, vals))
+}
+
+/// Lengths merged across a `match`'s arms: `ite(c_1, len_1, …, len_n)`
+/// mirroring the value spine, with each arm's length computed
+/// recursively from its body and value node.
+fn match_arm_lens<'a>(
     vc: &VCtx<'a>,
     env: &mut Env<'a>,
     name: &str,
     side: &str,
-    stmt: &Stmt,
+    arms: &[MatchArm],
+    value: &Dynamic<'a>,
+    depth: u32,
+) -> Option<Dynamic<'a>> {
+    if depth >= TAIL_LEN_DEPTH {
+        return None;
+    }
+    let (conds, vals) = match_ite_spine(arms, value)?;
+    let mut lens: Vec<Dynamic> = arms
+        .iter()
+        .zip(vals.iter())
+        .enumerate()
+        .map(|(i, (arm, val))| {
+            branch_tail_len(
+                vc,
+                env,
+                name,
+                &format!("{side}{i}"),
+                &arm.body,
+                val,
+                depth + 1,
+            )
+        })
+        .collect();
+    let mut acc = lens.pop()?;
+    for (cond, len_arm) in conds.iter().zip(lens.iter()).rev() {
+        acc = cond.ite(len_arm, &acc);
+    }
+    Some(acc)
+}
+
+/// Length contributed by a branch/arm body: resolves the tail expr and
+/// delegates to `tail_len_expr`, which tracks `val_node`'s structure.
+fn branch_tail_len<'a>(
+    vc: &VCtx<'a>,
+    env: &mut Env<'a>,
+    name: &str,
+    side: &str,
+    scope: &Stmt,
+    val_node: &Dynamic<'a>,
+    depth: u32,
 ) -> Dynamic<'a> {
-    match stmt_tail_expr(stmt) {
-        Some(Expr::ArrayLit(elements)) => concrete_len_value(vc.ctx, elements.len(), vc.bitvec_i64),
-        Some(Expr::Variable(src)) => array_len_value(vc.ctx, env, src, vc.bitvec_i64, None),
-        _ => array_len_symbol(vc.ctx, &format!("len_{name}#{side}"), vc.bitvec_i64),
+    match stmt_tail_expr(scope) {
+        Some(tail) => tail_len_expr(vc, env, name, side, scope, tail, val_node, depth),
+        None => array_len_symbol(vc.ctx, &format!("len_{name}#{side}"), vc.bitvec_i64),
+    }
+}
+
+/// Array length of a tail expression. `scope` is the enclosing block —
+/// used to resolve `let`-bound tail variables whose slots never reached
+/// the env (match-arm locals). `val_node` is the Z3 value the tail
+/// evaluated to, letting nested `if`/`match` tails mirror their own
+/// `ite` conditions on lengths. Anything unresolvable gets a fresh
+/// per-side symbol (fail-closed: it only makes proofs harder, never
+/// easier).
+#[allow(clippy::too_many_arguments)]
+fn tail_len_expr<'a>(
+    vc: &VCtx<'a>,
+    env: &mut Env<'a>,
+    name: &str,
+    side: &str,
+    scope: &Stmt,
+    tail: &Expr,
+    val_node: &Dynamic<'a>,
+    depth: u32,
+) -> Dynamic<'a> {
+    let fresh = || array_len_symbol(vc.ctx, &format!("len_{name}#{side}"), vc.bitvec_i64);
+    if depth >= TAIL_LEN_DEPTH {
+        return fresh();
+    }
+    match tail {
+        Expr::ArrayLit(elements) => concrete_len_value(vc.ctx, elements.len(), vc.bitvec_i64),
+        Expr::Variable(src) => match stmt_let_rhs(scope, src) {
+            Some(rhs) => tail_len_expr(vc, env, name, side, scope, rhs, val_node, depth + 1),
+            None => array_len_value(vc.ctx, env, src, vc.bitvec_i64, None),
+        },
+        Expr::IfThenElse {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            let (Some(cond), Some(t_val), Some(e_val)) = (
+                val_node.nth_child(0).and_then(|c| c.as_bool()),
+                val_node.nth_child(1),
+                val_node.nth_child(2),
+            ) else {
+                return fresh();
+            };
+            let len_t = branch_tail_len(
+                vc,
+                env,
+                name,
+                &format!("{side}t"),
+                then_branch,
+                &t_val,
+                depth + 1,
+            );
+            let len_e = branch_tail_len(
+                vc,
+                env,
+                name,
+                &format!("{side}e"),
+                else_branch,
+                &e_val,
+                depth + 1,
+            );
+            cond.ite(&len_t, &len_e)
+        }
+        Expr::Match { arms, .. } => match_arm_lens(
+            vc,
+            env,
+            name,
+            &format!("{side}m"),
+            arms,
+            val_node,
+            depth + 1,
+        )
+        .unwrap_or_else(fresh),
+        _ => fresh(),
     }
 }
 
