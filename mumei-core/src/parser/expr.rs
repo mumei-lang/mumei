@@ -460,7 +460,15 @@ fn parse_prefix(ctx: &mut ParseContext) -> Expr {
             }
             ctx.expect(Token::RBracket);
             if elements.is_empty() {
-                panic!("empty array literal `[]` needs an element type — annotate via a non-empty literal or a typed let binding");
+                // `[]` cannot infer an element type — record a checked
+                // syntax failure (the marker variable fails closed if a
+                // caller ignores the diagnostics).
+                ctx.syntax_failure(
+                    "empty array literal `[]` needs an element type — annotate \
+                     via a non-empty literal or a typed let binding"
+                        .to_string(),
+                );
+                return Expr::Variable("__mumei_empty_array_literal".to_string());
             }
             Expr::ArrayLit(elements)
         }

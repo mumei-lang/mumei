@@ -31,8 +31,9 @@
 - **`Expr::ArrayLit`** — a `[` at expression position (prefix) now parses an
   element list instead of falling through to the catch-all that silently
   produced `Expr::Number(0)`. `[]` alone cannot infer an element type, so it
-  panics with "empty array literal `[]` needs an element type" (parser
-  convention, same as `expect`).
+  records a `syntax_failure` and emits a `__mumei_empty_array_literal`
+  marker (the checked body-parse path turns it into a clean error, and the
+  marker is unbound downstream if a caller ignores the diagnostics).
 - **Verify** — the literal lowers to a fresh `Int -> Elem` store chain. A
   `let`/`assign` binding wires the name-keyed slots
   (`__z3_arr_<var>`, `len_<var>` = concrete `n`, `local_array_elem_types`)
