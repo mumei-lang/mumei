@@ -296,7 +296,7 @@ pub(crate) fn emit_task_spawn_only<'a>(
     body: &HirStmt,
     variables: &HashMap<String, BasicValueEnum<'a>>,
     var_types: &HashMap<String, String>,
-    array_ptrs: &HashMap<String, ArrayPtr<'a>>,
+    array_ptrs: &mut HashMap<String, ArrayPtr<'a>>,
     module_env: &ModuleEnv,
     task_group_any: Option<TaskGroupAnyContext<'a>>,
 ) -> MumeiResult<PendingTask<'a>> {
@@ -500,7 +500,7 @@ pub(crate) fn emit_task_spawn_only<'a>(
         body,
         &mut inner_vars,
         &mut inner_var_types,
-        &inner_array_ptrs,
+        &mut inner_array_ptrs,
         module_env,
     )?;
 
@@ -717,7 +717,7 @@ pub(crate) fn compile_task_spawn<'a>(
     body: &HirStmt,
     variables: &HashMap<String, BasicValueEnum<'a>>,
     var_types: &HashMap<String, String>,
-    array_ptrs: &HashMap<String, ArrayPtr<'a>>,
+    array_ptrs: &mut HashMap<String, ArrayPtr<'a>>,
     module_env: &ModuleEnv,
 ) -> MumeiResult<BasicValueEnum<'a>> {
     let pending = emit_task_spawn_only(

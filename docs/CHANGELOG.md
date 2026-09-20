@@ -26,6 +26,48 @@
   `test_if_guard_requires.mm`, `test_if_missing_else_negative.mm`,
   `test_while_missing_invariant_negative.mm`,
   `test_task_group_bad_join_negative.mm`.
+### 2026-09-20: array literals `let a = [e0, e1, …]` — parse, verify, codegen
+
+- **`Expr::ArrayLit`** — a `[` at expression position (prefix) now parses an
+  element list instead of falling through to the catch-all that silently
+  produced `Expr::Number(0)`. `[]` alone cannot infer an element type, so it
+  panics with "empty array literal `[]` needs an element type" (parser
+  convention, same as `expect`).
+- **Verify** — the literal lowers to a fresh `Int -> Elem` store chain. A
+  `let`/`assign` binding wires the name-keyed slots
+  (`__z3_arr_<var>`, `len_<var>` = concrete `n`, `local_array_elem_types`)
+  via the new shared `wire_array_slots` helper — the same helper now also
+  wires **call arguments** (`head([7,8,9])` satisfies `requires: len(arr)>=1`)
+  and the **`result` tail** (`atom … -> [i64] { [1,2,3] }` answers
+  `ensures: forall(i,0,3, result[i]==i+1)`). Alias `let b = a` copies `len_a`.
+  Element sort is the *widest* across elements (Float > Real > Int; bool
+  literals must be uniformly Bool) — a first-element probe mis-sorted
+  `[1.0, 2.5, 4.0]` because Z3 numerals for whole floats report `Int`.
+  Nested `[…[…]…]` and `["x","y"]` fail closed (element sorts Array/Seq
+  unsupported — same frontier as `[Str]` array params).
+- **Codegen** — `emit_array_literal` materialises the elements into an
+  `alloca`'d `[n x elem]` with element-typed GEP stores (int→f64 widens via
+  `sitofp`), returning the `(len, elem_ty, data_ptr)` fat pointer that
+  `array_ptrs` already tracks. `let a = […]` registers `a` exactly like an
+  `[T]` parameter; `let a = arr` now aliases the fat pointer too (was
+  "Array 'a' not found as fat pointer parameter"). A `-> [T]` tail of
+  `ArrayLit`/`Variable` rebuilds the `{i64, ptr}` return aggregate.
+- **Pre-existing fix surfaced by this work** — `Token::FloatLit` Display
+  printed `1.0` as `"1"`, and `collect_brace_body` re-lexes the atom body
+  from token text, so every whole-valued float literal in a *body*
+  (`let x = 1.0`) silently became `Expr::Number(1)`. Display now emits
+  `{n:?}` so whole floats round-trip. (Clause text like `result == 1.0`
+  was already collected losslessly.)
+- Tests: `tests/test_array_literal.mm` (10 atoms: read/store/alias/f64/bool/
+  reassign/tail-forall/call-arg/symbolic/…) + `tests/test_array_literal.rs`
+  (+ `test_array_literal_negative.mm` — `a[3]` on a len-3 literal rejected).
+
+- Backlog edges noted: rebinding an array name to a scalar (`a = 5`) leaves
+  `__z3_arr_a`/`len_a` stale (same class as the `#603` alias edge — MIR has
+  no reassign typecheck yet); `StringLit` re-quoting in `collect_brace_body`
+  loses escapes (`"a\nb"`); struct-field scrutinees in `requires`/`ensures`
+  clauses still lack declared-type resolution.
+
 ### 2026-09-20: counterexample report no longer flags translated builtins as uninterpreted
 
 - `collect_expr_symbols` (spurious-CE detection) treated every `Expr::Call`

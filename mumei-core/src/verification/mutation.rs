@@ -155,6 +155,11 @@ fn mutate_constants(body: &mut MirBody, value: i64) {
                             mutate_operand_constant(arg, value);
                         }
                     }
+                    Rvalue::ArrayLit(elements) => {
+                        for element in elements {
+                            mutate_operand_constant(element, value);
+                        }
+                    }
                     Rvalue::StructInit { fields, .. } => {
                         for (_, operand) in fields {
                             mutate_operand_constant(operand, value);
@@ -202,6 +207,9 @@ fn has_int_constant_other_than(body: &MirBody, value: i64) -> bool {
                     Rvalue::Call { args, .. } | Rvalue::Perform { args, .. } => {
                         args.iter().any(|arg| operand_matches(arg, value))
                     }
+                    Rvalue::ArrayLit(elements) => elements
+                        .iter()
+                        .any(|element| operand_matches(element, value)),
                     Rvalue::StructInit { fields, .. } => fields
                         .iter()
                         .any(|(_, operand)| operand_matches(operand, value)),

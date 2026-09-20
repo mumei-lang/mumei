@@ -84,6 +84,13 @@ pub(crate) struct VCtx<'a> {
     /// parameter type does. Entries are removed when the variable is
     /// reassigned to a value with no inferable enum type.
     pub(crate) local_enum_types: std::cell::RefCell<std::collections::HashMap<String, String>>,
+    /// Element type name inferred for `let`-bound array literals
+    /// (`let a = [1.0, 2.0]` records `a -> "f64"`), so `array_element_sort`
+    /// resolves the element type for a local binding the same way a declared
+    /// `[T]` parameter type does. Removed when the variable is rebound to a
+    /// non-array value.
+    pub(crate) local_array_elem_types:
+        std::cell::RefCell<std::collections::HashMap<String, String>>,
 }
 
 impl<'a> VCtx<'a> {

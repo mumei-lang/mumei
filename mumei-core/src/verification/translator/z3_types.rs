@@ -177,6 +177,9 @@ pub(crate) fn array_element_type_from_annotation(
 }
 
 pub(crate) fn array_element_type_name(name: &str, vc: &VCtx<'_>) -> String {
+    if let Some(local_ty) = vc.local_array_elem_types.borrow().get(name) {
+        return local_ty.clone();
+    }
     vc.current_atom
         .and_then(|atom| atom.params.iter().find(|param| param.name == name))
         .and_then(|param| param.type_name.as_deref())
@@ -538,23 +541,72 @@ pub(crate) fn z3_dynamic_array<'a>(vc: &VCtx<'a>, name: &str, env: &Env<'a>) -> 
         .unwrap_or_else(|| z3_array_for_name(vc, name))
 }
 
+/// Wire a name-bound array value into the tracking slots reads and stores
+/// consult: `__z3_arr_<name>` carries the Z3 array, `len_<name>` the length
+/// (concrete for a `[e0, …]` literal, the source's `len` for a `var` alias, a
+/// fresh tracked symbol otherwise), and `local_array_elem_types` records the
+/// element type so `array_element_type_name` resolves it like a declared
+/// `[T]` parameter.
+pub(crate) fn wire_array_slots<'a>(
+    vc: &VCtx<'a>,
+    name: &str,
+    value: Option<&Expr>,
+    val: &Dynamic<'a>,
+    env: &mut Env<'a>,
+) {
+    let Some(arr) = val.as_array() else {
+        // Rebound to a non-array value — drop any stale element-type entry.
+        vc.local_array_elem_types.borrow_mut().remove(name);
+        return;
+    };
+    let elem_ty = match arr.get_sort().array_range().map(|s| s.kind()) {
+        Some(z3::SortKind::Real) | Some(z3::SortKind::FloatingPoint) => "f64",
+        Some(z3::SortKind::Bool) => "bool",
+        _ => "i64",
+    };
+    env.insert(format!("__z3_arr_{name}"), arr.into());
+    let len: Dynamic = match value {
+        Some(Expr::ArrayLit(elements)) => Int::from_i64(vc.ctx, elements.len() as i64).into(),
+        Some(Expr::Variable(src)) => array_len_value(vc.ctx, env, src, vc.bitvec_i64, None),
+        _ => array_len_value(vc.ctx, env, name, vc.bitvec_i64, None),
+    };
+    env.insert(format!("len_{name}"), len);
+    vc.local_array_elem_types
+        .borrow_mut()
+        .insert(name.to_string(), elem_ty.to_string());
+}
+
 pub(crate) fn coerce_array_store_value<'a>(
     vc: &VCtx<'a>,
     array: &str,
     value: Dynamic<'a>,
 ) -> DynResult<'a> {
-    match array_element_sort(array, vc) {
-        ArrayElementSort::Int => as_int_like(&value)
-            .map(Into::into)
-            .ok_or_else(|| MumeiError::type_error("Array store value must be integer")),
+    coerce_to_array_elem_sort(vc, array_element_sort(array, vc), &value)
+}
+
+/// Coerce `value` to the given array element sort (the name-keyed version
+/// above resolves the sort from the array's declared type; array literals
+/// carry their sort alongside the value instead).
+pub(crate) fn coerce_to_array_elem_sort<'a>(
+    vc: &VCtx<'a>,
+    sort: ArrayElementSort,
+    value: &Dynamic<'a>,
+) -> DynResult<'a> {
+    match sort {
+        ArrayElementSort::Int => as_int_like(value).map(Into::into).ok_or_else(|| {
+            MumeiError::type_error(format!(
+                "Array store value must be integer (got sort {:?})",
+                value.get_sort()
+            ))
+        }),
         ArrayElementSort::Real => value
             .as_real()
-            .or_else(|| as_int_like(&value).map(|i| i.to_real()))
+            .or_else(|| as_int_like(value).map(|i| i.to_real()))
             .map(Into::into)
             .ok_or_else(|| MumeiError::type_error("Array store value must be real")),
         ArrayElementSort::Float => {
             let rne = round_nearest_even(vc.ctx);
-            coerce_to_float(vc.ctx, &value, &rne)
+            coerce_to_float(vc.ctx, value, &rne)
                 .map(Into::into)
                 .ok_or_else(|| MumeiError::type_error("Array store value must be float"))
         }

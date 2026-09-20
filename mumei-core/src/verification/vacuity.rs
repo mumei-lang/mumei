@@ -154,6 +154,7 @@ fn verify_mutated_body(
         clause_context: std::cell::RefCell::new(Vec::new()),
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_array_elem_types: std::cell::RefCell::new(std::collections::HashMap::new()),
         bitvec_i64_global: false,
     };
     let mut env: Env = HashMap::new();
@@ -323,6 +324,9 @@ fn mutate_binary_expr(expr: &mut Expr, original_op: &Op, conditions_only: bool) 
         Expr::Call(_, args) | Expr::CallRef { args, .. } | Expr::Perform { args, .. } => args
             .iter_mut()
             .any(|arg| mutate_binary_expr(arg, original_op, conditions_only)),
+        Expr::ArrayLit(elements) => elements
+            .iter_mut()
+            .any(|element| mutate_binary_expr(element, original_op, conditions_only)),
         Expr::StructInit { fields, .. } => fields
             .iter_mut()
             .any(|(_, expr)| mutate_binary_expr(expr, original_op, conditions_only)),
@@ -404,6 +408,9 @@ fn mutate_array_access_expr(expr: &mut Expr, offset: i64) -> bool {
         Expr::Call(_, args) | Expr::CallRef { args, .. } | Expr::Perform { args, .. } => args
             .iter_mut()
             .any(|arg| mutate_array_access_expr(arg, offset)),
+        Expr::ArrayLit(elements) => elements
+            .iter_mut()
+            .any(|element| mutate_array_access_expr(element, offset)),
         Expr::StructInit { fields, .. } => fields
             .iter_mut()
             .any(|(_, expr)| mutate_array_access_expr(expr, offset)),
@@ -462,6 +469,9 @@ fn mutate_constant_expr(expr: &mut Expr, value: i64) -> bool {
         Expr::Call(_, args) | Expr::CallRef { args, .. } | Expr::Perform { args, .. } => {
             args.iter_mut().any(|arg| mutate_constant_expr(arg, value))
         }
+        Expr::ArrayLit(elements) => elements
+            .iter_mut()
+            .any(|element| mutate_constant_expr(element, value)),
         Expr::StructInit { fields, .. } => fields
             .iter_mut()
             .any(|(_, expr)| mutate_constant_expr(expr, value)),
@@ -536,6 +546,9 @@ fn mutate_hir_expr(expr: &mut HirExpr, mutation: &MutationOperator) -> bool {
             }
             _ => false,
         },
+        HirExpr::ArrayLit(elements) => elements
+            .iter_mut()
+            .any(|element| mutate_hir_expr(element, mutation)),
         HirExpr::ArrayAccess(_, idx) => {
             let changed = mutate_hir_expr(idx, mutation);
             if let MutationOperator::ArrayIndexOffset(offset) = mutation {

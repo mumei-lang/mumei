@@ -35,7 +35,7 @@ pub(crate) use call_graph::{
     expr_mentions_var, expr_to_source_string, verify_atom_invariant, verify_call_graph_cycles,
 };
 
-pub(crate) use nominal_types::verify_nominal_struct_types;
+pub(crate) use nominal_types::{tail_expr, verify_nominal_struct_types};
 
 pub(crate) use task_ownership::{
     analyze_task_ownership, verify_task_ownership, TaskOwnershipViolation,

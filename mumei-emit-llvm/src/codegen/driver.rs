@@ -1,4 +1,4 @@
-use crate::codegen::expr_emit::chan_payload_key;
+use crate::codegen::expr_emit::{chan_payload_key, emit_array_literal};
 use crate::codegen::lowering::{declare_extern_functions, resolve_param_type, resolve_return_type};
 use crate::codegen::stmt_emit::compile_hir_stmt;
 use inkwell::context::Context;
@@ -109,7 +109,7 @@ pub fn compile_atom_into_module<'ctx>(
         &hir_atom.body,
         &mut variables,
         &mut var_types,
-        &array_ptrs,
+        &mut array_ptrs,
         module_env,
     )?;
 
@@ -135,11 +135,32 @@ pub fn compile_atom_into_module<'ctx>(
             mumei_core::hir::HirStmt::Block { tail_expr, .. } => tail_expr.as_deref(),
             _ => None,
         };
+        // `[e0, …]` tail: materialise the backing store inline.
+        let lit_tail = match tail_expr {
+            Some(mumei_core::hir::HirExpr::ArrayLit(elements)) => Some(emit_array_literal(
+                context,
+                &builder,
+                module,
+                &function,
+                elements,
+                &mut variables,
+                &mut var_types,
+                &mut array_ptrs,
+                module_env,
+            )?),
+            _ => None,
+        };
         let tail_var = match tail_expr {
             Some(mumei_core::hir::HirExpr::Variable(name)) => Some(name.as_str()),
             _ => None,
         };
-        let Some(&(len_val, _, data_ptr)) = tail_var.and_then(|name| array_ptrs.get(name)) else {
+        let tail_slots = match lit_tail {
+            Some((len_val, _, data_ptr)) => Some((len_val, data_ptr)),
+            None => tail_var
+                .and_then(|name| array_ptrs.get(name))
+                .map(|&(len_val, _, data_ptr)| (len_val, data_ptr)),
+        };
+        let Some((len_val, data_ptr)) = tail_slots else {
             return Err(MumeiError::codegen(format!(
                 "array return of '{}' requires the body tail to be an array \
                  parameter or binding (got {:?})",

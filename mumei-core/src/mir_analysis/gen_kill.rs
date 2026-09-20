@@ -48,6 +48,11 @@ fn collect_rvalue_uses(rvalue: &Rvalue, set: &mut HashSet<Local>) {
                 collect_operand_locals(arg, set);
             }
         }
+        Rvalue::ArrayLit(elements) => {
+            for element in elements {
+                collect_operand_locals(element, set);
+            }
+        }
         Rvalue::Ref(place) | Rvalue::RefMut(place) => {
             collect_place_locals(place, set);
         }

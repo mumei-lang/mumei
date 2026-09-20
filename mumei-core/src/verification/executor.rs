@@ -1353,6 +1353,7 @@ pub(crate) fn verify_inner(
         clause_context: std::cell::RefCell::new(Vec::new()),
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_array_elem_types: std::cell::RefCell::new(std::collections::HashMap::new()),
         bitvec_i64_global,
     };
 
@@ -1910,6 +1911,15 @@ pub(crate) fn verify_inner(
     let mut skipped_ensures = false;
     if atom.ensures.trim() != "true" {
         if tuple_component_types(atom.return_type.as_deref()).is_none() {
+            // `[e0, …]` tail or `arr` tail: ensures clauses index `result[i]`
+            // through `__z3_arr_result`/`len_result` — wire them like a let.
+            wire_array_slots(
+                &vc,
+                "result",
+                tail_expr(&hir_atom.body_stmt),
+                &body_result,
+                &mut env,
+            );
             env.insert("result".to_string(), body_result);
         }
         for ens_clause in split_top_level_conjunctions(&atom.ensures) {

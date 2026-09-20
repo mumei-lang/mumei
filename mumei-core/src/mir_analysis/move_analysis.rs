@@ -247,6 +247,19 @@ fn process_statement_for_moves(
                         }
                     }
                 }
+                Rvalue::ArrayLit(elements) => {
+                    for op in elements {
+                        for l in collect_operand_read_locals(op) {
+                            if state.check_alive(&l).is_err() {
+                                violations.push(MoveViolation {
+                                    block_id,
+                                    local: l,
+                                    kind: MoveViolationKind::UseAfterMove,
+                                });
+                            }
+                        }
+                    }
+                }
                 Rvalue::Ref(place) | Rvalue::RefMut(place) => {
                     let mut set = HashSet::new();
                     collect_place_locals(place, &mut set);

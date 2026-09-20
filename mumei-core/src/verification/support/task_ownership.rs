@@ -164,6 +164,11 @@ impl<'a> UsageCollector<'a> {
         match expr {
             Expr::Number(_) | Expr::Float(_) | Expr::StringLit(_) | Expr::AtomRef { .. } => {}
             Expr::Variable(v) => self.record_read(v),
+            Expr::ArrayLit(elements) => {
+                for element in elements {
+                    self.expr(element);
+                }
+            }
             Expr::ArrayAccess(name, index) => {
                 self.record_read(name);
                 self.expr(index);

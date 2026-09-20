@@ -747,6 +747,11 @@ fn collect_array_access_names_in_expr(expr: &Expr, names: &mut Vec<String>) {
             names.push(name.clone());
             collect_array_access_names_in_expr(index, names);
         }
+        Expr::ArrayLit(elements) => {
+            for element in elements {
+                collect_array_access_names_in_expr(element, names);
+            }
+        }
         Expr::BinaryOp(left, _, right) => {
             collect_array_access_names_in_expr(left, names);
             collect_array_access_names_in_expr(right, names);
@@ -1344,6 +1349,11 @@ pub(crate) fn collect_array_index_names_from_expr(expr: &Expr, indexes: &mut Vec
             collect_array_index_name(index, indexes);
             collect_array_index_names_from_expr(index, indexes);
         }
+        Expr::ArrayLit(elements) => {
+            for element in elements {
+                collect_array_index_names_from_expr(element, indexes);
+            }
+        }
         Expr::BinaryOp(left, _, right) => {
             collect_array_index_names_from_expr(left, indexes);
             collect_array_index_names_from_expr(right, indexes);
@@ -1450,6 +1460,7 @@ pub(crate) fn atom_uses_temporal_effect(atom: &Atom, module_env: &ModuleEnv) -> 
 pub(crate) fn expr_has_array_access(expr: &Expr) -> bool {
     match expr {
         Expr::ArrayAccess(_, _) => true,
+        Expr::ArrayLit(elements) => elements.iter().any(expr_has_array_access),
         Expr::BinaryOp(left, _, right) => {
             expr_has_array_access(left) || expr_has_array_access(right)
         }
@@ -1528,6 +1539,7 @@ pub(crate) fn expr_has_linear_arithmetic(expr: &Expr) -> bool {
             expr_has_linear_arithmetic(left) || expr_has_linear_arithmetic(right)
         }
         Expr::ArrayAccess(_, idx) => expr_has_linear_arithmetic(idx),
+        Expr::ArrayLit(elements) => elements.iter().any(expr_has_linear_arithmetic),
         Expr::IfThenElse {
             cond,
             then_branch,
@@ -1605,6 +1617,7 @@ pub(crate) fn expr_has_nonlinear_arithmetic(expr: &Expr) -> bool {
             expr_has_nonlinear_arithmetic(left) || expr_has_nonlinear_arithmetic(right)
         }
         Expr::ArrayAccess(_, idx) => expr_has_nonlinear_arithmetic(idx),
+        Expr::ArrayLit(elements) => elements.iter().any(expr_has_nonlinear_arithmetic),
         Expr::IfThenElse {
             cond,
             then_branch,
@@ -1687,6 +1700,7 @@ pub(crate) fn expr_has_regex_semantics(expr: &Expr) -> bool {
             };
             own_call || args.iter().any(expr_has_regex_semantics)
         }
+        Expr::ArrayLit(elements) => elements.iter().any(expr_has_regex_semantics),
         Expr::BinaryOp(left, _, right) => {
             expr_has_regex_semantics(left) || expr_has_regex_semantics(right)
         }
@@ -1871,6 +1885,9 @@ pub(crate) fn expr_has_inductive_shape(
                 || expr_has_inductive_shape(right, module_env, names)
         }
         Expr::ArrayAccess(_, idx) => expr_has_inductive_shape(idx, module_env, names),
+        Expr::ArrayLit(elements) => elements
+            .iter()
+            .any(|e| expr_has_inductive_shape(e, module_env, names)),
         Expr::IfThenElse {
             cond,
             then_branch,
@@ -2004,6 +2021,7 @@ pub(crate) fn expr_contains_while(expr: &Expr) -> bool {
         Expr::Async { body } | Expr::Lambda { body, .. } => stmt_has_while(body),
         Expr::BinaryOp(left, _, right) => expr_contains_while(left) || expr_contains_while(right),
         Expr::ArrayAccess(_, idx) => expr_contains_while(idx),
+        Expr::ArrayLit(elements) => elements.iter().any(expr_contains_while),
         Expr::Call(_, args) => args.iter().any(expr_contains_while),
         Expr::StructInit { fields, .. } => fields
             .iter()

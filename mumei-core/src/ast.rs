@@ -389,6 +389,11 @@ impl Monomorphizer {
                     self.collect_from_expr(arg);
                 }
             }
+            Expr::ArrayLit(elements) => {
+                for element in elements {
+                    self.collect_from_expr(element);
+                }
+            }
             Expr::BinaryOp(l, _, r) => {
                 self.collect_from_expr(l);
                 self.collect_from_expr(r);

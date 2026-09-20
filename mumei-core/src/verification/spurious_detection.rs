@@ -339,6 +339,7 @@ fn eval_expr(
             .get(name)
             .cloned()
             .ok_or_else(|| format!("missing model value for '{}'", name)),
+        Expr::ArrayLit(_) => Err("array literal has no scalar value".to_string()),
         Expr::BinaryOp(left, op, right) => {
             let left_value = eval_expr(left, env, module_env, depth)?;
             let right_value = eval_expr(right, env, module_env, depth)?;
@@ -642,6 +643,11 @@ fn collect_expr_symbols(
             }
             for arg in args {
                 collect_expr_symbols(arg, module_env, symbols, seen);
+            }
+        }
+        Expr::ArrayLit(elements) => {
+            for element in elements {
+                collect_expr_symbols(element, module_env, symbols, seen);
             }
         }
         Expr::AtomRef { name } => {

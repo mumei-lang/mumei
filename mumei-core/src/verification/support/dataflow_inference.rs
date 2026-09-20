@@ -197,6 +197,7 @@ fn trace_eval_expr(
         Expr::Variable(name) if name == "true" => Some(TraceValue::Bool(true)),
         Expr::Variable(name) if name == "false" => Some(TraceValue::Bool(false)),
         Expr::Variable(name) => env.get(name).copied().map(TraceValue::Int),
+        Expr::ArrayLit(_) => None,
         Expr::BinaryOp(left, op, right) => {
             let left_value = trace_eval_expr(left, env, module_env, depth)?;
             let right_value = trace_eval_expr(right, env, module_env, depth)?;
