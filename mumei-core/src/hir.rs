@@ -697,7 +697,10 @@ pub fn lower_stmt_with_env(
 }
 
 /// Collect variable names bound by a pattern (recursive for nested Variant patterns).
-fn collect_pattern_bindings(pattern: &crate::parser::Pattern, bound: &mut HashSet<String>) {
+pub(crate) fn collect_pattern_bindings(
+    pattern: &crate::parser::Pattern,
+    bound: &mut HashSet<String>,
+) {
     match pattern {
         crate::parser::Pattern::Variable(name) => {
             bound.insert(name.clone());
