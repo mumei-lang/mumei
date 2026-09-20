@@ -75,3 +75,13 @@ atom param_rebind_stale(arr: [i64]) -> i64
     arr = 5
     arr[0]
   };
+
+// The merged length is per-branch precise: `a[2]` is OOB on the
+// `[3, 4]`-side even though the other branch has 3 elements.
+atom if_branch_lit_oob(c: bool) -> i64
+  requires: true;
+  ensures: result >= 0;
+  body: {
+    let a = if c { [1, 2] } else { [3, 4] }
+    a[2]
+  };

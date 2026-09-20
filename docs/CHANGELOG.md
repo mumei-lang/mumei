@@ -1,3 +1,22 @@
+### 2026-09-20: `if`-branch array literals merge their lengths
+
+- `let a = if c { [1, 2] } else { [3, 4, 5] }` already merged the array
+  contents (`ite(c, arr1, arr2)`), but `len_a` stayed an unconstrained
+  symbol — `a[1]` failed the bounds check even though it is in bounds on
+  both branches, and `len(a)` proved nothing.
+- `wire_array_slots` now reuses the ite condition (child 0 of the merged
+  array) to set `len_a = ite(c, len_t, len_e)`: literal tails contribute
+  their concrete length, a `var` tail contributes the tracked `len_<src>`
+  (including `let`-bound block tails like `if c { let t = [1,2]; t }
+  else { … }`), and anything else falls back to a fresh per-side symbol
+  (`len_<name>#then` / `#else`).
+- Bounds are per-branch precise: `a[2]` still fails closed on the short
+  branch. Nested `if` inside a branch tail keeps the conservative fresh
+  length (outer ite merges what it can).
+- Tests: `if_branch_lit_len_read` / `if_branch_lit_len_pred` /
+  `if_branch_block_tail` in `tests/test_array_literal.mm`,
+  `if_branch_lit_oob` in `tests/test_array_literal_negative.mm`.
+
 ### 2026-09-20: rebinding an array var to a scalar clears its tracked array state
 
 - `let a = [1, 2]; a = 5; a[0]` **verified** (`a[0] == 1`) even though

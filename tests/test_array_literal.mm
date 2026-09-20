@@ -148,3 +148,29 @@ atom scalar_to_array() -> i64
     x = [1, 2]
     x[0]
   };
+
+// `if`-branch literal lengths merge into `len_<a> = ite(c, 2, 3)` — `a[1]`
+// is in bounds on both branches, and `len(a)` provably lies in {2,3}.
+atom if_branch_lit_len_read(c: bool) -> i64
+  requires: true;
+  ensures: result >= 0;
+  body: {
+    let a = if c { [1, 2] } else { [3, 4, 5] }
+    a[1]
+  };
+
+atom if_branch_lit_len_pred(c: bool) -> i64
+  requires: true;
+  ensures: result >= 2 && result <= 3;
+  body: {
+    let a = if c { [1, 2] } else { [3, 4, 5] }
+    len(a)
+  };
+
+atom if_branch_block_tail(c: bool) -> i64
+  requires: true;
+  ensures: result >= 0;
+  body: {
+    let a = if c { let t = [1, 2]; t } else { [3, 4, 5] }
+    a[1]
+  };
