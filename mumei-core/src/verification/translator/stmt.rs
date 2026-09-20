@@ -157,6 +157,26 @@ fn record_binding_enum_type(vc: &VCtx, var: &str, value: &Expr) {
     }
 }
 
+/// `let a = arr` / `a = arr` where `arr` is an array name: alias the backing
+/// Z3 array const and `len_<name>` symbol so `a[i]` accesses and stores share
+/// `arr`'s constraint state instead of starting over with an unconstrained
+/// fresh array (an unconstrained `len_a` would make `a[0]` unprovably in
+/// bounds even when `forall`/store history pinned `len_arr`).
+fn alias_array_symbols<'a>(vc: &VCtx<'a>, var: &str, value: &Expr, env: &mut Env<'a>) {
+    let Expr::Variable(src) = value else {
+        return;
+    };
+    let src_arr_key = format!("__z3_arr_{src}");
+    let arr_val: Dynamic = env
+        .get(&src_arr_key)
+        .cloned()
+        .unwrap_or_else(|| z3_array_for_name(vc, src).into());
+    env.insert(format!("__z3_arr_{var}"), arr_val.clone());
+    env.insert(src_arr_key, arr_val);
+    let len = array_len_value(vc.ctx, env, src, vc.bitvec_i64, None);
+    env.insert(format!("len_{var}"), len);
+}
+
 pub(crate) fn stmt_to_z3<'a>(
     vc: &VCtx<'a>,
     stmt: &Stmt,
@@ -170,6 +190,7 @@ pub(crate) fn stmt_to_z3<'a>(
             record_binding_enum_type(vc, var, value);
             env.insert(var.clone(), val.clone());
             alias_struct_fields(env, var, &val);
+            alias_array_symbols(vc, var, value, env);
             profile_solver_assertion(vc, &format!("let_{}", var), None);
             Ok(val)
         }
@@ -178,6 +199,7 @@ pub(crate) fn stmt_to_z3<'a>(
             record_binding_enum_type(vc, var, value);
             env.insert(var.clone(), val.clone());
             alias_struct_fields(env, var, &val);
+            alias_array_symbols(vc, var, value, env);
             profile_solver_assertion(vc, &format!("assign_{}", var), None);
             Ok(val)
         }
