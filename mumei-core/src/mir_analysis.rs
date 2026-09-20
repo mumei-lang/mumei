@@ -362,6 +362,7 @@ mod tests {
                 },
             ],
             entry_block: 0,
+            unbound_names: Vec::new(),
         };
 
         let liveness = compute_liveness(&body);
@@ -449,6 +450,7 @@ mod tests {
                 terminator: Terminator::Return(Operand::Place(Place::Local(Local(0)))),
             }],
             entry_block: 0,
+            unbound_names: Vec::new(),
         };
 
         let result = analyze_moves(&body);
@@ -511,6 +513,7 @@ mod tests {
                 terminator: Terminator::Return(Operand::Place(Place::Local(Local(2)))),
             }],
             entry_block: 0,
+            unbound_names: Vec::new(),
         };
 
         let result = analyze_moves(&body);
@@ -593,6 +596,7 @@ mod tests {
                 },
             ],
             entry_block: 0,
+            unbound_names: Vec::new(),
         };
 
         let result = analyze_moves(&body);
@@ -674,6 +678,7 @@ mod tests {
                 },
             ],
             entry_block: 0,
+            unbound_names: Vec::new(),
         };
 
         let result = analyze_moves(&body);
@@ -756,6 +761,7 @@ mod tests {
                 },
             ],
             entry_block: 0,
+            unbound_names: Vec::new(),
         };
 
         let result = analyze_moves(&body);
@@ -814,6 +820,7 @@ mod tests {
                 terminator: Terminator::Return(Operand::Place(Place::Local(Local(0)))),
             }],
             entry_block: 0,
+            unbound_names: Vec::new(),
         };
 
         let result = analyze_moves(&body);
@@ -876,6 +883,7 @@ mod tests {
                 terminator: Terminator::Return(Operand::Place(Place::Local(Local(2)))),
             }],
             entry_block: 0,
+            unbound_names: Vec::new(),
         };
 
         let result = analyze_moves(&body);
@@ -923,6 +931,7 @@ mod tests {
                 terminator: Terminator::Return(Operand::Place(Place::Local(Local(0)))),
             }],
             entry_block: 0,
+            unbound_names: Vec::new(),
         };
 
         let result = analyze_moves(&body);
@@ -1208,6 +1217,7 @@ mod tests {
                 },
             ],
             entry_block: 0,
+            unbound_names: Vec::new(),
         };
 
         let result = analyze_temporal_effects(&body, &sms);
@@ -1248,6 +1258,7 @@ mod tests {
                 terminator: Terminator::Return(Operand::Constant(crate::mir::MirConstant::Int(0))),
             }],
             entry_block: 0,
+            unbound_names: Vec::new(),
         };
 
         let result = analyze_temporal_effects(&body, &sms);
@@ -1305,6 +1316,7 @@ mod tests {
                 terminator: Terminator::Return(Operand::Constant(crate::mir::MirConstant::Int(0))),
             }],
             entry_block: 0,
+            unbound_names: Vec::new(),
         };
 
         let result = analyze_temporal_effects(&body, &sms);
@@ -1395,6 +1407,7 @@ mod tests {
                 },
             ],
             entry_block: 0,
+            unbound_names: Vec::new(),
         };
 
         let result = analyze_temporal_effects(&body, &sms);
@@ -1498,6 +1511,7 @@ mod tests {
                 },
             ],
             entry_block: 0,
+            unbound_names: Vec::new(),
         };
 
         let result = analyze_temporal_effects(&body, &sms);
@@ -1588,6 +1602,7 @@ mod tests {
                 },
             ],
             entry_block: 0,
+            unbound_names: Vec::new(),
         };
 
         let result = analyze_temporal_effects(&body, &sms);
@@ -1683,6 +1698,7 @@ mod tests {
                 terminator: Terminator::Return(Operand::Constant(crate::mir::MirConstant::Int(0))),
             }],
             entry_block: 0,
+            unbound_names: Vec::new(),
         };
 
         let result = analyze_temporal_effects(&body, &sms);
@@ -1733,6 +1749,7 @@ mod tests {
                 terminator: Terminator::Return(Operand::Constant(crate::mir::MirConstant::Int(0))),
             }],
             entry_block: 0,
+            unbound_names: Vec::new(),
         };
 
         let result = analyze_temporal_effects(&body, &sms);
@@ -1837,6 +1854,7 @@ mod tests {
                 },
             ],
             entry_block: 0,
+            unbound_names: Vec::new(),
         };
 
         let result = analyze_temporal_effects(&body, &sms);
@@ -1897,6 +1915,7 @@ mod tests {
                 terminator: Terminator::Return(Operand::Constant(MirConstant::Int(0))),
             }],
             entry_block: 0,
+            unbound_names: Vec::new(),
         };
         let mut machines = HashMap::new();
         machines.insert("File".to_string(), sm);
@@ -1944,6 +1963,7 @@ mod tests {
                 terminator: Terminator::Return(Operand::Constant(MirConstant::Int(0))),
             }],
             entry_block: 0,
+            unbound_names: Vec::new(),
         };
         let mut machines = HashMap::new();
         machines.insert("File".to_string(), sm);
@@ -1992,6 +2012,7 @@ mod tests {
                 terminator: Terminator::Return(Operand::Constant(MirConstant::Int(0))),
             }],
             entry_block: 0,
+            unbound_names: Vec::new(),
         };
         let mut machines = HashMap::new();
         machines.insert("File".to_string(), sm);
@@ -2162,6 +2183,7 @@ mod tests {
                 terminator: Terminator::Return(Operand::Constant(MirConstant::Int(0))),
             }],
             entry_block: 0,
+            unbound_names: Vec::new(),
         };
         let mut machines = HashMap::new();
         machines.insert("File".to_string(), sm);
@@ -2215,6 +2237,7 @@ mod tests {
                 terminator: Terminator::Return(Operand::Constant(MirConstant::Int(0))),
             }],
             entry_block: 0,
+            unbound_names: Vec::new(),
         };
         let mut machines = HashMap::new();
         machines.insert("File".to_string(), sm);
@@ -2267,6 +2290,7 @@ mod tests {
                 terminator: Terminator::Return(Operand::Constant(MirConstant::Int(0))),
             }],
             entry_block: 0,
+            unbound_names: Vec::new(),
         };
         let mut machines = HashMap::new();
         machines.insert("File".to_string(), sm);
@@ -2337,6 +2361,7 @@ mod tests {
                 terminator: Terminator::Return(Operand::Constant(MirConstant::Int(0))),
             }],
             entry_block: 0,
+            unbound_names: Vec::new(),
         };
         let mut machines = HashMap::new();
         machines.insert("File".to_string(), sm);
@@ -2392,6 +2417,7 @@ mod tests {
                 terminator: Terminator::Return(Operand::Constant(MirConstant::Int(0))),
             }],
             entry_block: 0,
+            unbound_names: Vec::new(),
         };
         let mut machines = HashMap::new();
         machines.insert("File".to_string(), sm);
@@ -2438,6 +2464,7 @@ mod tests {
                 terminator: Terminator::Return(Operand::Constant(MirConstant::Int(0))),
             }],
             entry_block: 0,
+            unbound_names: Vec::new(),
         };
         let mut machines = HashMap::new();
         machines.insert("Ownership".to_string(), sm.clone());
@@ -2472,6 +2499,7 @@ mod tests {
                 terminator: Terminator::Return(Operand::Constant(MirConstant::Int(0))),
             }],
             entry_block: 0,
+            unbound_names: Vec::new(),
         };
         let mut machines = HashMap::new();
         machines.insert("Ownership".to_string(), sm);
