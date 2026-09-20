@@ -46,7 +46,7 @@ atom test_limit_positive(rl: i64)
     }
 
 // forall: 全取引が限度額以下
-atom test_all_compliant(n: i64, limit: i64)
+atom test_all_compliant(arr: [i64], n: i64, limit: i64)
     requires: n >= 0 && limit > 0 && forall(i, 0, n, arr[i] >= 0 && arr[i] <= limit);
     ensures: result == 1;
     body: 1

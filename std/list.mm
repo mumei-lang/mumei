@@ -455,7 +455,7 @@ body: {
 // `body: n` (恒等関数) として残す。入力がソート済みなら出力もソート済み
 // であることが Z3 で帰納的に証明可能（trusted 不要）。
 // ソート済み出力の契約保証が必要な下流ユーザはこちらを使用する。
-atom verified_insertion_sort_identity(n: i64)
+atom verified_insertion_sort_identity(arr: [i64], n: i64)
 requires: n >= 0 && forall(i, 0, n - 1, arr[i] <= arr[i + 1]);
 ensures: result == n && forall(i, 0, result - 1, arr[i] <= arr[i + 1]);
 body: n;
@@ -513,7 +513,7 @@ body: {
 // --- マージソート（identity 契約版・証明可能）---
 // 方針 B: 旧 identity 契約を `body: n` で残す。sorted-in → sorted-out が
 // Z3 で証明可能（trusted 不要）。
-atom verified_merge_sort_identity(n: i64)
+atom verified_merge_sort_identity(arr: [i64], n: i64)
 requires: n >= 0 && forall(i, 0, n - 1, arr[i] <= arr[i + 1]);
 ensures: result == n && forall(i, 0, result - 1, arr[i] <= arr[i + 1]);
 body: n;
@@ -543,7 +543,7 @@ body: {
 // --- 二分探索（ソート済み前提条件付き）---
 // Phase 4: forall in requires で配列がソート済みであることを前提とする。
 // verified_insertion_sort の ensures と組み合わせて使用する。
-atom binary_search_sorted(n: i64, target: i64)
+atom binary_search_sorted(arr: [i64], n: i64, target: i64)
 requires: n >= 0 && forall(i, 0, n - 1, arr[i] <= arr[i + 1]);
 ensures: result >= 0 - 1 && result < n;
 body: {

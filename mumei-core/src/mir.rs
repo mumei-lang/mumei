@@ -266,6 +266,12 @@ struct LowerCtx {
     /// Enum definitions keyed by enum name — used to give match pattern
     /// bindings their declared field types so Copy fields stay Copy.
     enum_defs: std::collections::HashMap<String, crate::parser::EnumDef>,
+    /// Module-level declaration names (enums, structs, atoms, type aliases,
+    /// effects). Referencing one of these names — e.g. the `Shape` in
+    /// `Shape::Point`, the effect name in `perform FileWrite.write(x)`, or an
+    /// atom name inside `atom_ref(name)` / generic-call sugar — is a type or
+    /// item reference, not an unbound variable.
+    env_names: std::collections::BTreeSet<String>,
     /// Variable names that had no binding when they were referenced —
     /// surfaced to the caller as `MirBody::unbound_names` (fail-closed).
     unbound_names: std::collections::BTreeSet<String>,
@@ -288,6 +294,19 @@ impl LowerCtx {
             })
             .unwrap_or_default();
         let enum_defs = module_env.map(|env| env.enums.clone()).unwrap_or_default();
+        let env_names = module_env
+            .map(|env| {
+                env.enums
+                    .keys()
+                    .chain(env.structs.keys())
+                    .chain(env.atoms.keys())
+                    .chain(env.types.keys())
+                    .chain(env.effects.keys())
+                    .chain(env.effect_defs.keys())
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
         Self {
             locals: Vec::new(),
             blocks: Vec::new(),
@@ -295,6 +314,7 @@ impl LowerCtx {
             var_map: std::collections::HashMap::new(),
             alias_bases,
             enum_defs,
+            env_names,
             unbound_names: std::collections::BTreeSet::new(),
             next_local: 0,
             next_block: 0,
@@ -377,7 +397,7 @@ impl LowerCtx {
             // atom's first local during ownership analysis.
             // `result` is exempt: it is the atom's implicit named return
             // binding (`result = x` in a body assigns the return value).
-            if name != "result" {
+            if name != "result" && !self.env_names.contains(name) {
                 self.unbound_names.insert(name.to_string());
             }
             let local = self.alloc_local(Some(format!("__unbound:{name}")), None);
@@ -593,8 +613,11 @@ pub fn lower_hir_to_mir_with_env(
     // Allocate locals for atom parameters.
     for param in &hir_atom.atom.params {
         let capability = param.type_ref.as_ref().and_then(|ty| ty.capability.clone());
+        // `consume x` / `ref x` params keep the keyword in `name` (parser
+        // quirk) — bind under the bare identifier so `x` resolves in the body.
+        let pname = param.name.rsplit(' ').next().unwrap_or(param.name.as_str());
         let local = ctx.alloc_local_with_capability(
-            Some(param.name.clone()),
+            Some(pname.to_string()),
             param.type_name.clone(),
             capability,
         );
@@ -623,7 +646,8 @@ pub fn infer_atom_return_type(atom: &crate::parser::Atom) -> Option<String> {
     let hir = crate::hir::lower_atom_to_hir(atom);
     let mut ctx = LowerCtx::new();
     for param in &hir.atom.params {
-        ctx.alloc_local(Some(param.name.clone()), param.type_name.clone());
+        let pname = param.name.rsplit(' ').next().unwrap_or(param.name.as_str());
+        ctx.alloc_local(Some(pname.to_string()), param.type_name.clone());
     }
     match &hir.body {
         crate::hir::HirStmt::Expr(expr) => ctx.infer_hir_ty(expr),

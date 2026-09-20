@@ -20,7 +20,7 @@ body:
     }
     0;
 
-atom nested_while_with_array_store(n: i64)
+atom nested_while_with_array_store(arr: [i64], n: i64)
 requires: n >= 0;
 ensures: result == 0;
 body:
@@ -44,7 +44,7 @@ body:
 // `forall(i, 0, n, arr[i] >= 0)` in `requires` keeps the OOB checker
 // happy by giving Z3 `len_arr >= n + 1` (same idiom as
 // `verify_insertion_sort_skeleton` in `tests/test_verified_sort.mm`).
-atom nested_while_with_array_read_init(n: i64)
+atom nested_while_with_array_read_init(arr: [i64], n: i64)
 requires: n >= 0 && forall(i, 0, n, arr[i] >= 0);
 ensures: result == 0;
 body:

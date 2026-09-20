@@ -15,7 +15,7 @@
 // trusted を外せるように len_arr >= n の forall 前提を追加。
 // MIR move 解析と path 条件伝播の修正により、要素数保存契約が
 // `trusted` 不要で証明できるようになった。
-atom verify_noop_sort(n: i64)
+atom verify_noop_sort(arr: [i64], n: i64)
 requires: n >= 0 && forall(i, 0, n, arr[i] >= 0);
 ensures: result == n;
 body: {
@@ -35,7 +35,7 @@ body: {
 // requires に付けて len_arr >= n を確保する。要素数保存契約は
 // MIR move 解析改善 + path 条件伝播 + forall パターン強化により
 // `trusted` 不要で証明できる。
-atom verify_insertion_sort_skeleton(n: i64)
+atom verify_insertion_sort_skeleton(arr: [i64], n: i64)
 requires: n >= 0 && forall(i, 0, n, arr[i] >= 0);
 ensures: result == n;
 body: {
@@ -73,7 +73,7 @@ body: {
 // 退行すると、`let key = arr[i]` が Move 扱いになり inner-while の
 // `i = i + 1` が UseAfterMove false-positive を出すため、その早期検出
 // テストとして機能する。
-atom verify_insertion_sort_full(n: i64)
+atom verify_insertion_sort_full(arr: [i64], n: i64)
 requires: n >= 0 && forall(i, 0, n, arr[i] >= 0);
 ensures: result == n;
 body: {
