@@ -19,4 +19,4 @@ atom main()
     effects: [Network];
     requires: true;
     ensures: true;
-    body: apply<i64, Network>(42, atom_ref(net_fn));
+    body: net_fn(42);
