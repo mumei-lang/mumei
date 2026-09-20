@@ -1,3 +1,22 @@
+### 2026-09-20: string literals re-escape on body re-lex (`\"`, `\\`, `\n`, `\t`)
+
+- The lexer stores DECODED string content (`\n` → real newline, `\"` →
+  real quote), but three re-serialization sites wrote it back raw:
+  `append_token` (`collect_brace_body` — the atom-body round-trip),
+  `Token::StringLit`'s `Display`, and `legacy_tokenize`'s source
+  reconstruction. Any escaped char corrupted the body: `"a\"b"` closed
+  the literal early and left `b"…` to parse as bare identifiers
+  (`unresolved variable(s) in body`), and `"a\\nb"` (backslash-n, two
+  chars) silently re-lexed as `"a<newline>b"` — a different value, so
+  e.g. comparing the two literals produced a wrong equality result with
+  no error.
+- New `escape_string_content` re-encodes `\`, `"`, newline and tab;
+  all three sites use it. Backslash-n and newline literals stay
+  distinct; embedded quotes round-trip.
+- Tests: `tests/test_string_literal_escape.mm` (quote / tab /
+  distinct-escape verified) + `tests/negative/string_literal_escape_collapse.mm`
+  (`"a\\nb" == "a\nb"` correctly fails) + `tests/test_string_literal_escape.rs`.
+
 ### 2026-09-20: quantifier binders in body `let` are scoped (unbound-check false positive)
 
 - `let ok = forall(i, 0, n, i <= n)` inside an atom body was rejected by
