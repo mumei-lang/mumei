@@ -3,17 +3,51 @@ use super::super::support::*;
 use super::super::*;
 use super::*;
 use crate::lowering::{lower, LoweredType};
-use crate::verification::translator::z3_types::array_root_ast;
+use crate::verification::translator::z3_types::{array_root_ast, atom_stores_to_array};
 use serde_json::json;
 
+/// Mark `__z3_arr_<var>` for each variable arg whose callee param the callee
+/// (transitively) stores through — the same predicate `havoc_array_args`
+/// applies at call evaluation, so loop-carried havoc matches it.
+fn mark_array_store_args(
+    module_env: &ModuleEnv,
+    callee_name: &str,
+    args: &[Expr],
+    out: &mut std::collections::HashSet<String>,
+) {
+    // Mirrors the runtime Call resolution: `mod.f` tries `mod::f` too.
+    let fqn_name = callee_name.replace('.', "::");
+    let Some(callee) = module_env
+        .get_atom(callee_name)
+        .or_else(|| module_env.get_atom(&fqn_name))
+    else {
+        return;
+    };
+    for (i, arg) in args.iter().enumerate() {
+        let (Expr::Variable(var), Some(param)) = (arg, callee.params.get(i)) else {
+            continue;
+        };
+        if atom_stores_to_array(module_env, callee, &param.name) {
+            out.insert(format!("__z3_arr_{var}"));
+        }
+    }
+}
+
 /// Collect the env names a statement can overwrite: `Assign` targets plus the
-/// `__z3_arr_<name>` keys `ArrayStore` writes. Used to havoc loop-carried
-/// variables before induction checks.
-fn collect_assigned_vars(stmt: &Stmt, out: &mut std::collections::HashSet<String>) {
+/// `__z3_arr_<name>` keys `ArrayStore` writes — and the same keys for array
+/// variables passed to a call that stores through its param (the runtime
+/// applies `havoc_array_args`, so the slot is loop-carried). Used to havoc
+/// loop-carried variables before induction checks.
+fn collect_assigned_vars(
+    env: &Env,
+    module_env: &ModuleEnv,
+    stmt: &Stmt,
+    out: &mut std::collections::HashSet<String>,
+) {
     match stmt {
         Stmt::Assign { var, value, .. } => {
             out.insert(var.clone());
-            collect_expr_assigned_vars(value, out);
+            collect_expr_assigned_vars(env, module_env, value, out, true);
         }
         Stmt::ArrayStore {
             array,
@@ -22,12 +56,12 @@ fn collect_assigned_vars(stmt: &Stmt, out: &mut std::collections::HashSet<String
             ..
         } => {
             out.insert(format!("__z3_arr_{}", array));
-            collect_expr_assigned_vars(index, out);
-            collect_expr_assigned_vars(value, out);
+            collect_expr_assigned_vars(env, module_env, index, out, true);
+            collect_expr_assigned_vars(env, module_env, value, out, true);
         }
         Stmt::Block(stmts, _) => {
             for s in stmts {
-                collect_assigned_vars(s, out);
+                collect_assigned_vars(env, module_env, s, out);
             }
         }
         Stmt::While {
@@ -37,77 +71,125 @@ fn collect_assigned_vars(stmt: &Stmt, out: &mut std::collections::HashSet<String
             body,
             ..
         } => {
-            collect_assigned_vars(body, out);
-            collect_expr_assigned_vars(cond, out);
-            collect_expr_assigned_vars(invariant, out);
+            collect_assigned_vars(env, module_env, body, out);
+            // Conditions/invariants/decreases are only *evaluated* on the
+            // havoced envs — calls inside them havoc live at eval time and
+            // don't belong in the modified set.
+            collect_expr_assigned_vars(env, module_env, cond, out, false);
+            collect_expr_assigned_vars(env, module_env, invariant, out, false);
             if let Some(d) = decreases {
-                collect_expr_assigned_vars(d, out);
+                collect_expr_assigned_vars(env, module_env, d, out, false);
             }
         }
         Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => {
-            collect_assigned_vars(body, out);
+            collect_assigned_vars(env, module_env, body, out);
         }
         Stmt::TaskGroup { children, .. } => {
             for c in children {
-                collect_assigned_vars(c, out);
+                collect_assigned_vars(env, module_env, c, out);
             }
         }
-        Stmt::Expr(expr, _) => collect_expr_assigned_vars(expr, out),
-        Stmt::Let { value, .. } => collect_expr_assigned_vars(value, out),
+        Stmt::Expr(expr, _) => collect_expr_assigned_vars(env, module_env, expr, out, true),
+        Stmt::Let { value, .. } => collect_expr_assigned_vars(env, module_env, value, out, true),
         _ => {}
     }
 }
 
 /// Recursive companion of `collect_assigned_vars` over expressions that embed
-/// statement bodies (`if`, `match`, `async`, lambdas).
-fn collect_expr_assigned_vars(expr: &Expr, out: &mut std::collections::HashSet<String>) {
+/// statement bodies (`if`, `match`, `async`, lambdas). `in_stmt_ctx` marks
+/// expressions reachable as executed code — only then do calls contribute
+/// array-store args to the modified set.
+fn collect_expr_assigned_vars(
+    env: &Env,
+    module_env: &ModuleEnv,
+    expr: &Expr,
+    out: &mut std::collections::HashSet<String>,
+    in_stmt_ctx: bool,
+) {
     match expr {
         Expr::IfThenElse {
             cond,
             then_branch,
             else_branch,
         } => {
-            collect_expr_assigned_vars(cond, out);
-            collect_assigned_vars(then_branch, out);
-            collect_assigned_vars(else_branch, out);
+            collect_expr_assigned_vars(env, module_env, cond, out, in_stmt_ctx);
+            collect_assigned_vars(env, module_env, then_branch, out);
+            collect_assigned_vars(env, module_env, else_branch, out);
         }
         Expr::Match { target, arms } => {
-            collect_expr_assigned_vars(target, out);
+            collect_expr_assigned_vars(env, module_env, target, out, in_stmt_ctx);
             for arm in arms {
                 if let Some(guard) = &arm.guard {
-                    collect_expr_assigned_vars(guard, out);
+                    collect_expr_assigned_vars(env, module_env, guard, out, in_stmt_ctx);
                 }
-                collect_assigned_vars(&arm.body, out);
+                collect_assigned_vars(env, module_env, &arm.body, out);
             }
         }
-        Expr::Async { body } | Expr::Lambda { body, .. } => collect_assigned_vars(body, out),
+        Expr::Async { body } | Expr::Lambda { body, .. } => {
+            collect_assigned_vars(env, module_env, body, out)
+        }
         Expr::Await { expr } | Expr::FieldAccess(expr, _) | Expr::ChanRecv { channel: expr } => {
-            collect_expr_assigned_vars(expr, out);
+            collect_expr_assigned_vars(env, module_env, expr, out, in_stmt_ctx);
         }
-        Expr::ArrayAccess(_, index) => collect_expr_assigned_vars(index, out),
+        Expr::ArrayAccess(_, index) => {
+            collect_expr_assigned_vars(env, module_env, index, out, in_stmt_ctx)
+        }
         Expr::BinaryOp(l, _, r) => {
-            collect_expr_assigned_vars(l, out);
-            collect_expr_assigned_vars(r, out);
+            collect_expr_assigned_vars(env, module_env, l, out, in_stmt_ctx);
+            collect_expr_assigned_vars(env, module_env, r, out, in_stmt_ctx);
         }
-        Expr::Call(_, args) | Expr::Perform { args, .. } => {
+        Expr::Call(callee_name, args) => {
             for a in args {
-                collect_expr_assigned_vars(a, out);
+                collect_expr_assigned_vars(env, module_env, a, out, in_stmt_ctx);
+            }
+            if in_stmt_ctx {
+                mark_array_store_args(module_env, callee_name, args, out);
+            }
+        }
+        Expr::Perform { args, .. } => {
+            for a in args {
+                collect_expr_assigned_vars(env, module_env, a, out, in_stmt_ctx);
             }
         }
         Expr::CallRef { callee, args } => {
-            collect_expr_assigned_vars(callee, out);
+            collect_expr_assigned_vars(env, module_env, callee, out, in_stmt_ctx);
             for a in args {
-                collect_expr_assigned_vars(a, out);
+                collect_expr_assigned_vars(env, module_env, a, out, in_stmt_ctx);
+            }
+            if in_stmt_ctx {
+                // Same resolution as the runtime `CallRef` path: `AtomRef`
+                // names the atom; a `Variable` resolves only when bound to
+                // an atom_ref (`__atom_ref_<var>` in env). A var bound inside
+                // the loop isn't in the pre-loop env yet — unresolvable
+                // callees mark every variable arg conservatively: if it truly
+                // can't resolve, the call errors at eval anyway.
+                let name = match callee.as_ref() {
+                    Expr::AtomRef { name } => Some(name.as_str()),
+                    Expr::Variable(var) if env.contains_key(&format!("__atom_ref_{var}")) => {
+                        Some(var.as_str())
+                    }
+                    _ => None,
+                };
+                match name {
+                    Some(name) => mark_array_store_args(module_env, name, args, out),
+                    None => {
+                        for arg in args {
+                            if let Expr::Variable(var) = arg {
+                                out.insert(format!("__z3_arr_{var}"));
+                            }
+                        }
+                    }
+                }
             }
         }
         Expr::StructInit { fields, .. } => {
             for (_, v) in fields {
-                collect_expr_assigned_vars(v, out);
+                collect_expr_assigned_vars(env, module_env, v, out, in_stmt_ctx);
             }
         }
         Expr::ChanSend { channel, value } => {
-            collect_expr_assigned_vars(channel, out);
-            collect_expr_assigned_vars(value, out);
+            collect_expr_assigned_vars(env, module_env, channel, out, in_stmt_ctx);
+            collect_expr_assigned_vars(env, module_env, value, out, in_stmt_ctx);
         }
         _ => {}
     }
@@ -342,7 +424,7 @@ pub(crate) fn stmt_to_z3<'a>(
                 // satisfying the invariant, not only the concrete entry
                 // state, which would mask violations on later iterations.
                 let mut modified = std::collections::HashSet::new();
-                collect_assigned_vars(body, &mut modified);
+                collect_assigned_vars(env, vc.module_env, body, &mut modified);
                 // `__z3_arr_<v>` for a param array only materializes on first
                 // access, so a loop that stores into `v` without an earlier
                 // `v[i]` read finds no slot in `env` — the retain below would

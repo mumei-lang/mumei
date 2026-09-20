@@ -20,6 +20,35 @@
   not verify) and `tests/test_call_result_len.mm` +
   `tests/negative/call_result_len.mm`.
 
+### 2026-09-20: `while` loops havoc array args of mutating calls (stale-read soundness fix)
+
+- **Soundness fix**: a `while` body that *calls* an atom storing through
+  an array param (`let t = w(a)` where `w` does `a[i] = v`) mutated the
+  caller's array at eval (`havoc_array_args` on the step env) but the
+  loop-carried `modified` set never marked `__z3_arr_<v>` — the post-loop
+  env kept the entry const, so `a[i]` read pre-loop values and stale
+  `ensures` wrong-verified (e.g. `result == 7` after `w` wrote `a[0]=0`
+  under `requires: a[0] == 7`). `collect_assigned_vars` now resolves each
+  statement-context call's callee with the *same* predicate eval applies
+  (`atom_stores_to_array` per param, `Expr::Variable` args only) and marks
+  the matching `__z3_arr_<arg>` slots. Resolution mirrors the runtime:
+  `Call` names try the FQN form (`mod.f` → `mod::f`) so explicit
+  type-arg calls (`g<i64>(a)` → `g<i64>`) hit the instantiated atom;
+  `call(f, a)` resolves `AtomRef` callees and `__atom_ref_<var>` bindings,
+  and an unresolvable callee marks every variable arg conservatively (if
+  it truly can't resolve, eval errors anyway). Calls inside
+  `cond`/`invariant`/`decreases` are not marked — they havoc live on the
+  havoced envs at eval, and marking them would over-havoc real proofs
+  (e.g. `len(a)` in an invariant).
+- Precision verified: a loop calling a *pure* callee keeps `a[0] == 7`
+  provable post-loop, and only the param the callee stores through is
+  havoced (a sibling array arg keeps its entry value).
+- Tests: `tests/test_loop_call_array_havoc.mm` (provable claims under
+  havoc, `len` preservation, pure-call precision, per-arg precision) +
+  `tests/test_loop_call_array_havoc_negative.mm` (stale `[i64]`/`[Str]`
+  reads via `Call`, `call(f, …)`, `g<i64>(…)`, and moved-alias args) via
+  `tests/test_loop_call_array_havoc.rs`.
+
 ### 2026-09-20: `while` loops havoc param arrays' post-state (stale-read soundness fix)
 
 - **Soundness fix**: a `while` body that only *writes* a param array
